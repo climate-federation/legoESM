@@ -67,20 +67,25 @@ def main():
     ax1.set_xticklabels(xlabels)
     ax1.set_ylabel("ms / barotropic solve (lower better)")
     ax1.set_title("Banded-MG vs Jacobi barotropic solve — multi-node\n"
-                  "LL192x384, Ginsburg CPU-MPI (8 ranks/node)", fontsize=9)
+                  "LL192x384, Ginsburg CPU-MPI (8 ranks/node). MG converges "
+                  "(M12->1e-6) but is wall-time NEGATIVE", fontsize=8)
     ax1.legend(fontsize=8)
     ax1.grid(True, axis="y", alpha=0.3)
 
-    ax2.plot(list(x), spd, "o-", color="#1f77b4", lw=2)
+    ax2.plot(list(x), spd, "o-", color="#d62728", lw=2)
     for i, s in zip(x, spd):
         ax2.annotate(f"{s:.2f}x", (i, s), textcoords="offset points",
                      xytext=(0, 6), ha="center", fontsize=9, fontweight="bold")
-    ax2.axhline(1.0, color="gray", ls="--", lw=1)
+    ax2.axhline(1.0, color="gray", ls="--", lw=1, label="break-even")
     ax2.set_xticks(list(x))
     ax2.set_xticklabels(xlabels)
-    ax2.set_ylabel("MG wall-time speedup vs jacobi")
-    ax2.set_title("Reduction-latency win GROWS with node count\n"
-                  "(Gloo allreduce latency x rank dominates)", fontsize=9)
+    ax2.set_ylim(0, 1.1)
+    ax2.set_ylabel("MG wall-time speedup vs jacobi (>1 = win)")
+    ax2.set_title("MG wall-time NEGATIVE on Ginsburg (<1 everywhere)\n"
+                  "zonal-line V-cycle compute >> jacobi diagonal; reductions\n"
+                  "not the bottleneck. Ratio rises with rank (0.11->0.16) but\n"
+                  "crossover is beyond Ginsburg scale", fontsize=8)
+    ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
