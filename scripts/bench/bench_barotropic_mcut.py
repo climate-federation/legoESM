@@ -70,6 +70,7 @@ def main():
                    help="if >0, time N jitted solves per preconditioner")
     p.add_argument("--jacobi-m", type=int, default=60)
     p.add_argument("--mg-m", type=int, default=12)
+    p.add_argument("--cheby-m", type=int, default=20)
     args = p.parse_args()
 
     comm = MPI.COMM_WORLD
@@ -104,6 +105,9 @@ def main():
     precs = {
         "jacobi": _select_preconditioner(
             "jacobi", inv_diag, H_u, H_v, coeff, grid_l, m_l, A_op=A_op),
+        "chebyshev": _select_preconditioner(
+            "chebyshev", inv_diag, H_u, H_v, coeff, grid_l, m_l,
+            A_op=A_op, cheby_degree=4),
         "multigrid": _select_preconditioner(
             "multigrid", inv_diag, H_u, H_v, coeff, grid_l, m_l,
             A_op=A_op, H_cell=Hc_l, layout=layout),
@@ -125,18 +129,22 @@ def main():
                 print(f"  {name:10s} M={M:3d}  rel_residual={r:.3e}  "
                       f"reductions/step={2 * M}")
 
-    # Wall-time: jitted solve ms for jacobi-M vs multigrid-M (the production
-    # path).  At MULTI-NODE the Gloo allreduce latency dominates, so the MG's
-    # 2*mg_m reductions/step beats jacobi's 2*jacobi_m and the speedup GROWS
-    # with node count — the reduction-latency-wall lever's payoff at scale.
+    # Wall-time: jitted solve ms for the candidate reduction-cutters vs jacobi.
+    # At MULTI-NODE the Gloo allreduce latency dominates the barotropic (phase
+    # split np32: barotropic 24%, 120-allreduce floor 21%).  The CHEAP cutters
+    # — single_reduce (1 allreduce/iter = M reductions, same jacobi per-iter)
+    # and chebyshev (reduction-free degree-4 inner polynomial, fewer outer M) —
+    # cut reductions WITHOUT the expensive V-cycle compute that made the banded
+    # MG wall-time-negative (job 8488551).  reductions/step: standard = 2*M,
+    # single_reduce = M.
     if args.time_solves > 0:
         import time as _time
 
-        def _timed(M_inv, M):
+        def _timed(M_inv, M, variant):
             f = jax.jit(lambda b: solve_helmholtz_implicit(
                 A_op, b, M_inv, x0, distributed=True, fixed_iters=M,
                 residual_tol=1e-30, stock_cg_tol=1e-12, stock_cg_maxiter=200,
-                pcg_variant="standard", dot_weight=w)[0])
+                pcg_variant=variant, dot_weight=w)[0])
             f(rhs_l).block_until_ready()          # compile + warmup
             comm.Barrier()
             t0 = _time.perf_counter()
@@ -145,24 +153,33 @@ def main():
             comm.Barrier()
             return (_time.perf_counter() - t0) / args.time_solves * 1000.0
 
-        t_jac = _timed(precs["jacobi"], args.jacobi_m)
-        t_mg = _timed(precs["multigrid"], args.mg_m)
+        # (label, M_inv, M, variant, reductions/step)
+        configs = [
+            ("jacobi_std", precs["jacobi"], args.jacobi_m, "standard",
+             2 * args.jacobi_m),
+            ("jacobi_singlereduce", precs["jacobi"], args.jacobi_m,
+             "single_reduce", args.jacobi_m),
+            ("chebyshev", precs["chebyshev"], args.cheby_m, "standard",
+             2 * args.cheby_m),
+            ("multigrid", precs["multigrid"], args.mg_m, "standard",
+             2 * args.mg_m),
+        ]
+        timed = [(lbl, _timed(mi, M, var), red, M)
+                 for (lbl, mi, M, var, red) in configs]
         if rank == 0:
+            base = timed[0][1]   # jacobi_std
             print(f"\n=== WALL-TIME np{n_ranks} ({n_lat}x{n_lon}) ===")
-            print(f"  jacobi    M={args.jacobi_m}: {t_jac:.3f} ms/solve "
-                  f"({2 * args.jacobi_m} reductions/step)")
-            print(f"  multigrid M={args.mg_m}: {t_mg:.3f} ms/solve "
-                  f"({2 * args.mg_m} reductions/step)")
-            print(f"  MG wall-time speedup: {t_jac / t_mg:.2f}x")
+            for lbl, t, red, M in timed:
+                print(f"  {lbl:20s} M={M:3d}: {t:8.3f} ms/solve "
+                      f"({red} reductions/step)  speedup={base / t:.2f}x")
             wt_out = args.out.replace(".csv", "_walltime.csv")
             os.makedirs(os.path.dirname(wt_out), exist_ok=True)
             with open(wt_out, "w") as f:
-                f.write("preconditioner,M,ms_per_solve,reductions_per_step,"
+                f.write("config,M,ms_per_solve,reductions_per_step,speedup,"
                         "n_ranks,n_lat,n_lon\n")
-                f.write(f"jacobi,{args.jacobi_m},{t_jac:.4f},"
-                        f"{2 * args.jacobi_m},{n_ranks},{n_lat},{n_lon}\n")
-                f.write(f"multigrid,{args.mg_m},{t_mg:.4f},"
-                        f"{2 * args.mg_m},{n_ranks},{n_lat},{n_lon}\n")
+                for lbl, t, red, M in timed:
+                    f.write(f"{lbl},{M},{t:.4f},{red},{base / t:.4f},"
+                            f"{n_ranks},{n_lat},{n_lon}\n")
             print(f"wrote {wt_out}")
 
     if rank == 0:
