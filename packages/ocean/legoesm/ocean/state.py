@@ -865,6 +865,22 @@ class LatLonCGridOceanConfig(NamedTuple):
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False
+    # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
+    # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
+    # global mass-conserving redistribute runs ONCE per outer barotropic step on
+    # the time-averaged eta, instead of EVERY substep.  clamp_and_redistribute
+    # does n_iter=3 batched allreduces/call, so this cuts the barotropic SUBCYCLE
+    # from ~3*n_substeps allreduces/step (e.g. 90 at n_substeps=30; doubled if
+    # barotropic diffusion is active) to 3 -> a halo-only subcycle = the
+    # multi-node strong-scaling lever (the implicit_cn analogue is the
+    # 120-allreduce PCG wall).  NOTE: the outer-step fix_eta_drift fixer is a
+    # SEPARATE reduction, unaffected by this flag.  BIT-IDENTICAL to the
+    # per-substep-redistribute path whenever no cell hits eta_floor (deep ocean,
+    # no wetting/drying), since both the local jnp.maximum and the redistribute
+    # are then no-ops; differs only in active wetting/drying, where per-step (not
+    # per-substep) global mass correction is the SOTA-standard approximation
+    # (loses per-substep far-field sea-level compensation).  Default False.
+    barotropic_local_subcycle_clamp: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     # When True, remove the area-mean of the net freshwater flux from the
