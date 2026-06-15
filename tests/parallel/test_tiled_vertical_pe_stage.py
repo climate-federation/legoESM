@@ -50,6 +50,56 @@ def _reassemble_cc(get_tile, kt):
          for ti in range(kt)], axis=1)
 
 
+def test_vertical_pe_compose_host_body():
+    """Composition exactness WITHOUT 24 devices: slice-once-then-chain (host)
+    must equal the global composition for every cc tile.  Runs in any lane so
+    the slice-once equivalence is covered even when np24 is skipped."""
+    kt, nl, nlev = 3, 6, 8
+    n = kt * nl
+    coord = make_hybrid_levels(nlev)
+    div_3d, field, p_s, dp_s_dt = _inputs(n, nlev, 53)
+    mf_g, tend_g, omega_g, dt_g = _global_bundle(div_3d, field, p_s, dp_s_dt, coord)
+
+    def _chain(ti, tj, which):
+        a_i, a_j = ti * nl, tj * nl
+
+        def _s2(arr):
+            return arr[:, a_i:a_i + nl, a_j:a_j + nl]
+
+        mf, dt = compute_mass_flux_hybrid(_s2(div_3d), _s2(p_s), coord)
+        if which == "mf":
+            return mf
+        if which == "dt":
+            return dt
+        if which == "tend":
+            return vertical_advection_hybrid(_s2(field), mf, _s2(p_s), coord)
+        return compute_omega_hybrid(mf, _s2(p_s), _s2(dp_s_dt), coord)
+
+    for which, g in (("mf", mf_g), ("tend", tend_g), ("omega", omega_g), ("dt", dt_g)):
+        t = _reassemble_cc(lambda ti, tj: _chain(ti, tj, which), kt)
+        np.testing.assert_array_equal(
+            t, g, err_msg=f"composed {which} host-body != global (slice-once chain)")
+
+
+def test_vertical_pe_stage_shape_guard():
+    """The stage shape guard fires (non-vacuous) on a non-cc horizontal shape."""
+    kt, nlev = 2, 8
+    n = kt * 6
+    coord = make_hybrid_levels(nlev)
+    # Build a 1-device mesh shim only enough to construct the stage closure; the
+    # guard runs in pure Python before _body, so no real devices are needed.
+    from jax.sharding import Mesh
+    if len(jax.devices()) < 6 * kt * kt:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={6 * kt * kt}")
+    dev = np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_vertical_pe_stage_2d(mesh, coord, n, kt)
+    bad = jnp.zeros((6, n + 1, n, nlev))   # wrong horizontal extent
+    p_s = jnp.zeros((6, n + 1, n))
+    with pytest.raises(ValueError, match="must be cc"):
+        stage(bad, bad, p_s, p_s)
+
+
 def test_vertical_pe_stage_np24():
     kt, nl, nlev = 2, 6, 8
     ndev = 6 * kt * kt
