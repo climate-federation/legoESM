@@ -1,0 +1,24 @@
+# legoESM experiment template — Jablonowski-Williamson baroclinic wave.
+#
+# Names the `baroclinic` idealized atmosphere matrix case via `setup:` (#388).
+# Routes (exact match) to:
+#   run_atmosphere_test_matrix.py --test =baroclinic --grid cubed_sphere
+experiment:
+  tier: tier2
+  complexity: hydrostatic
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Jablonowski-Williamson baroclinic wave: a balanced jet perturbed to grow a
+    baroclinic wave over ~10 days — the standard hydrostatic dynamical-core
+    accuracy/stability benchmark.
+  data: []
+  conservation_gates: [mass, energy]
+model:
+  name: "atmosphere-baroclinic-wave"
+  type: atmosphere_only
+setup:
+  name: baroclinic
+  grid: cubed_sphere
+output:
+  path: output/atmosphere/baroclinic_wave/

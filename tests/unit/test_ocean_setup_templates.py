@@ -83,12 +83,12 @@ class TestSetupSelectorValidation:
         self._cfg({"name": "lock_exchange", "grid": "latlon"}).validate_strict()
 
     def test_unknown_experiment_name_raises(self):
-        with pytest.raises(ValueError, match="not a known ocean experiment"):
+        with pytest.raises(ValueError, match="not a known experiment"):
             self._cfg({"name": "no_such_case", "grid": "latlon"}).validate_strict()
 
     def test_grid_not_in_matrix_set_raises(self):
         # gridless experiment (no grid_support) still rejects a non-matrix grid
-        with pytest.raises(ValueError, match="not a valid ocean matrix grid"):
+        with pytest.raises(ValueError, match="not a valid matrix grid"):
             self._cfg({"name": "barotropic_wave", "grid": "nonsense"}).validate_strict()
 
     def test_unsupported_grid_for_experiment_raises(self):

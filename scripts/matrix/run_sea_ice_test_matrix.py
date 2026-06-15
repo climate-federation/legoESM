@@ -1604,7 +1604,6 @@ def main():
         return
 
     output_base = Path(args.output)
-    output_base.mkdir(parents=True, exist_ok=True)
 
     # Filter matrix
     cases = TEST_MATRIX
@@ -1617,8 +1616,22 @@ def main():
         cases = [tc for tc in cases if tc.grid_type == args.grid]
 
     if not cases:
+        # ``--test`` is an EXACT case selector (the form emitted by a sea-ice
+        # `setup:` template via legoesm.core.setup_selector); matching nothing
+        # is a hard error rather than a silent no-op so a typo'd selector or a
+        # (case, grid) that is not instantiated fails loudly.
+        if args.test:
+            raise SystemExit(
+                f"ERROR: no sea-ice test case matches --test {args.test!r}"
+                + (f" --grid {args.grid!r}" if args.grid else "")
+                + ". Run `--list` to see valid (case, grid) pairs."
+            )
         print("No test cases match the filter. Use --list to see all cases.")
         return
+
+    # Create the output dir only AFTER confirming there is work — a typo'd
+    # --test selector must not leave an empty results directory behind.
+    output_base.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*80}")
     print(f"  Sea Ice Test Matrix  |  {len(cases)} cases  |  "

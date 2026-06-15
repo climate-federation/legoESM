@@ -49,7 +49,6 @@ The ``ocean:`` section maps directly onto the runtime NamedTuple field names
 from __future__ import annotations
 
 import copy
-import math
 import shlex
 from typing import Any, NamedTuple
 
@@ -78,8 +77,6 @@ _GRID_TYPE_TO_RUNNER = {
 # case content in its own section distinct from the ``ocean:`` physics "recipe".
 # Such a template routes to the matrix runner (the existing, sole consumer of
 # AVAILABLE_EXPERIMENTS) rather than the OMIP ``run_omip_core2.py`` path.
-_SETUP_KEYS = ("name", "grid", "quick", "resolution", "levels",
-               "dt_seconds", "duration_days")
 _OCEAN_MATRIX_RUNNER = "scripts/matrix/run_ocean_test_matrix.py"
 # Mirror of ``run_ocean_test_matrix.py``'s ``--grid`` argparse choices (minus
 # ``all``).  Kept as a small, stable local set so a ``setup.grid`` typo fails at
@@ -121,18 +118,17 @@ DEFAULT_OCEAN_CONFIG: dict = {
 }
 
 
-def _require_positive_finite(name: str, v) -> None:
-    """Raise ``ValueError`` unless *v* is a finite number > 0.
+def _ocean_matrix_spec():
+    """MatrixRunnerSpec for an ocean ``setup:`` template (#388).
 
-    Rejects bools (``True`` would otherwise coerce to 1) and ``nan``/``inf``
-    (``float('nan') <= 0`` is False, so a naive check lets them through).
-    ``None`` is accepted (means "not set / use default").
+    Ocean's case-name flag is ``--only`` with the ``=`` exact-match prefix; the
+    runner accepts every per-run override flag.  Shared with the atmosphere /
+    sea-ice adapters via :mod:`legoesm.core.setup_selector` (deferred import:
+    keep this boundary module cheap).
     """
-    if v is None:
-        return
-    if isinstance(v, bool) or not isinstance(v, (int, float)) \
-            or not math.isfinite(float(v)) or float(v) <= 0:
-        raise ValueError(f"{name} must be a finite number > 0, got {v!r}")
+    from legoesm.core.setup_selector import MatrixRunnerSpec
+    return MatrixRunnerSpec(runner_path=_OCEAN_MATRIX_RUNNER,
+                            valid_grids=_MATRIX_GRIDS)
 
 
 def _resolve_target(grid_type: str):
@@ -406,37 +402,16 @@ class OceanExperimentConfig:
         dispatching to nothing — the same dispatch discipline ``_resolve_target``
         applies to ``grid.type``.
         """
-        if not isinstance(setup, dict):
-            raise ValueError(
-                "`setup:` must be a mapping with `name:` and `grid:` "
-                f"(got {type(setup).__name__})"
-            )
-        unknown = sorted(k for k in setup if k not in _SETUP_KEYS)
-        if unknown:
-            raise ValueError(
-                f"unknown setup field(s): {unknown}. Valid: {list(_SETUP_KEYS)}"
-            )
-        name = setup.get("name")
-        grid = setup.get("grid")
+        from legoesm.core.setup_selector import validate_setup
         from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
-        if name not in AVAILABLE_EXPERIMENTS:
-            raise ValueError(
-                f"setup.name={name!r} is not a known ocean experiment. "
-                f"Valid: {sorted(AVAILABLE_EXPERIMENTS)}"
-            )
-        if not isinstance(grid, str) or not grid:
-            raise ValueError(
-                "setup.grid must be a non-empty string naming a matrix grid, "
-                f"got {grid!r}"
-            )
-        if grid not in _MATRIX_GRIDS:
-            raise ValueError(
-                f"setup.grid={grid!r} is not a valid ocean matrix grid; "
-                f"choose one of {list(_MATRIX_GRIDS)}"
-            )
-        # When the experiment declares grid_support, the grid must be a
-        # supported one (truthy).  Experiments without a grid_support dict are
-        # gated only by the matrix-grid membership above.
+        # Shape / keys / grid-set / run-control validation + registry membership
+        # via the shared selector (single source of truth, used by every
+        # component adapter).
+        validate_setup(setup, _ocean_matrix_spec(),
+                       known_names=AVAILABLE_EXPERIMENTS)
+        # Ocean-specific: the experiment's own ``grid_support`` gate — the grid
+        # must be one it actually supports, not merely a valid matrix grid.
+        name, grid = setup["name"], setup["grid"]
         support = AVAILABLE_EXPERIMENTS[name].get("grid_support")
         if support is not None and not support.get(grid, False):
             supported = sorted(g for g, ok in support.items() if ok)
@@ -444,19 +419,6 @@ class OceanExperimentConfig:
                 f"setup.grid={grid!r} is not supported by experiment "
                 f"{name!r}; supported grids: {supported}"
             )
-        # Optional per-setup run-control overrides (kept in the setup block so
-        # the DEFAULT_OCEAN_CONFIG OMIP defaults never leak onto a setup run).
-        # Reject bools explicitly (``levels: true`` would coerce to 1) and
-        # require a finite, strictly-positive value.
-        lv = setup.get("levels")
-        if lv is not None:
-            if isinstance(lv, bool) or not isinstance(lv, int) or lv <= 0:
-                raise ValueError(f"setup.levels must be a positive int, got {lv!r}")
-        for fld in ("dt_seconds", "duration_days"):
-            _require_positive_finite(f"setup.{fld}", setup.get(fld))
-        q = setup.get("quick")
-        if q is not None and not isinstance(q, bool):
-            raise ValueError(f"setup.quick must be a bool, got {q!r}")
 
     def validate_strict(self) -> None:
         """Strict-validate the resolved ocean config (raises on invalid).
@@ -492,9 +454,10 @@ class OceanExperimentConfig:
             ModelClass._validate_config(cfg)
 
         # Experiment-level (non-runtime-config) bounds on the time block.
-        _require_positive_finite("time.dt_seconds", self.get("time.dt_seconds"))
-        _require_positive_finite("time.duration_days",
-                                 self.get("time.duration_days"))
+        from legoesm.core.setup_selector import require_positive_finite
+        require_positive_finite("time.dt_seconds", self.get("time.dt_seconds"))
+        require_positive_finite("time.duration_days",
+                                self.get("time.duration_days"))
 
     def signature(self) -> str:
         """Deterministic signature of the RESOLVED runtime config.
@@ -559,28 +522,9 @@ class OceanExperimentConfig:
         """
         setup = self.get("setup")
         if setup is not None:
-            # ``=name`` selects the matrix case by EXACT match (the runner's
-            # bare ``--only name`` is a substring filter that would over-match
-            # e.g. ``baroclinic`` -> ``baroclinic_gyre*``).
-            parts = [
-                f"python {_OCEAN_MATRIX_RUNNER}",
-                f"--only {shlex.quote('=' + str(setup['name']))}",
-                f"--grid {shlex.quote(str(setup['grid']))}",
-            ]
-            if setup.get("levels") is not None:
-                parts.append(f"--levels {int(setup['levels'])}")
-            if setup.get("resolution"):
-                parts.append(f"--resolution {shlex.quote(str(setup['resolution']))}")
-            if setup.get("dt_seconds") is not None:
-                parts.append(f"--dt {float(setup['dt_seconds'])}")
-            if setup.get("duration_days") is not None:
-                parts.append(f"--days {float(setup['duration_days'])}")
-            out = self.get("output.path")
-            if out:
-                parts.append(f"--output {shlex.quote(str(out))}")
-            if setup.get("quick"):
-                parts.append("--quick")
-            return " ".join(parts)
+            from legoesm.core.setup_selector import build_matrix_command
+            return build_matrix_command(_ocean_matrix_spec(), setup,
+                                        output_path=self.get("output.path"))
 
         grid_type = self.get("grid.type", "latlon_cgrid")
         try:
