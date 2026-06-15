@@ -660,8 +660,36 @@ def _make_multigrid_preconditioner(
 
     ``H_cell`` is the cell-centred water-column depth the faces derive from
     (the hierarchy must coarsen the cell field, not the staggered faces).
+
+    SCOPE (codex review of 38fec66b): currently valid for a SINGLE-RANK,
+    GLOBAL, regular/Mercator lat-lon grid only.  The coarse levels rebuild
+    geometry with ``create_latlon_grid`` (uniform) and the transfers are
+    rank-local 2x2 — so it FAILS LOUD on (a) distributed band-MPI/SPMD (a
+    coarse 2-row aggregate straddles a rank cut => the local restriction
+    builds a different coarse problem and the M-cut claim is void) and (b)
+    tripolar grids (the north-fold connectivity is dropped by the
+    coarse-grid construction).  Halo-aware + tripolar-fold coarsening is the
+    documented follow-up (task #26).  As a PRECONDITIONER a geometry
+    mismatch (e.g. Mercator on a uniform coarse grid) only slows
+    convergence — the outer PCG's exact ``A_op`` + residual keep the answer
+    correct — so Mercator is allowed (degraded, not wrong).
     """
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.core.operators import is_distributed
+
+    if is_distributed():
+        raise ValueError(
+            "multigrid preconditioner: the geometric MG transfers are not yet "
+            "halo-aware under band MPI / lat-lon SPMD (a rank-local 2x2 "
+            "restriction straddles band cuts), so the coarse problem and the "
+            "M-cut are invalid distributed.  Use 'zonal_line' (comm-free) or "
+            "'chebyshev' under MPI; 'multigrid' is single-rank only for now.")
+    if is_tripolar(grid):
+        raise ValueError(
+            "multigrid preconditioner: coarse-grid construction "
+            "(create_latlon_grid + periodic-lon/zero-pole faces) does not "
+            "handle the tripolar north-fold connectivity.  Use 'zonal_line' "
+            "or 'chebyshev' on tripolar grids.")
 
     n_lat, n_lon = mask.shape
     levels = []   # (A_op, mask, smoother, n_lat, n_lon)

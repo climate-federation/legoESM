@@ -126,3 +126,14 @@ def test_multigrid_dispatch_wiring():
     with pytest.raises(ValueError, match="multigrid preconditioner requires"):
         _select_preconditioner("multigrid", inv_diag, H_u, H_v, coeff, grid,
                                mask, A_op=A_op, H_cell=None)
+
+
+def test_multigrid_refuses_distributed(monkeypatch):
+    """SCOPE guard (codex 38fec66b HIGH #2): the rank-local 2x2 transfers are
+    not halo-aware, so 'multigrid' must FAIL LOUD under band MPI / SPMD rather
+    than silently build a wrong coarse problem."""
+    import legoesm.core.operators as _ops
+    grid, coeff, mask, H_cell, _, _ = _setup()
+    monkeypatch.setattr(_ops, "is_distributed", lambda: True)
+    with pytest.raises(ValueError, match="not yet halo-aware under band MPI"):
+        _make_multigrid_preconditioner(H_cell, coeff, grid, mask)
