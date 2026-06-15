@@ -201,6 +201,7 @@ __param_spec__ = {
             "blend_pbl_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "pbl_smooth_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "sfc_excess_zfrac": "measurement convention: surface-layer z/h (top of the surface layer) at which w_s is evaluated for the θ_T excess parcel, not a tuned closure",
         },
         "params": {
             "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
@@ -597,6 +598,13 @@ class YSUConfig(NamedTuple):
         K-profile magnitude.  Without it the profile uses bare ``u*`` and
         the convective mixed layer is under-mixed (default 8.0, WRF-YSU
         ballpark; approximate — calibrate against a convective-BL run).
+    sfc_excess_zfrac : float
+        Surface-layer height fraction ``z/h`` (default 0.1) at which the
+        mixed-layer velocity scale ``w_s`` is evaluated for the unstable
+        surface-excess parcel temperature ``θ_T = b·(w'θ')_0/w_s`` in the
+        bulk-Richardson PBL-height diagnosis (Troen & Mahrt 1986; Hong et al.
+        2006).  A measurement-convention level (the top of the surface layer),
+        not a tuned closure.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -613,6 +621,7 @@ class YSUConfig(NamedTuple):
     blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
     countergrad_coeff: float = 6.5
     ws_conv_coeff: float = 8.0  # convective coeff in w_s = (u*³ + c·κ·w*³·z/h)^{1/3}
+    sfc_excess_zfrac: float = 0.1  # surface-layer z/h for the θ_T excess parcel
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

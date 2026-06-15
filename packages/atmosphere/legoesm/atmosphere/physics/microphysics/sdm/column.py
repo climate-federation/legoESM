@@ -36,10 +36,14 @@ flow, and the keyless dispatch forces a fixed config-seeded PRNG stream.
 
 **Documented limitations** (the faithful Lagrangian model is ``box_model.py``,
 and full coupling would need a particle-state-carrying interface):
-sedimentation/precipitation and aerosol activation/nucleation are NOT done
-here. A supersaturated *clear* cell (no ``q_c``) produces no cloud (no
-activation). Default ``dq_r/dN_*`` tendencies are zero unless
-``column_do_coalescence`` is enabled.
+sedimentation/precipitation and aerosol-Köhler activation/nucleation are NOT
+done here. In the DEFAULT condensation-only path a supersaturated *clear* cell
+(no ``q_c``) produces no cloud (no activation), and ``dq_r/dN_*`` are zero. The
+opt-in ``column_do_coalescence`` path adds a MINIMAL saturation activation
+(nucleate ``cdnc`` embryo droplets at the radius floor where a cell is
+supersaturated and cloud-free, so condensation has something to grow — see
+:func:`_sdm_reconstructed_box_microphysics`); it is still NOT aerosol-Köhler
+activation, and the embryo liquid is negligible (a small documented leak).
 """
 
 from __future__ import annotations
@@ -382,10 +386,37 @@ def _sdm_reconstructed_box_microphysics(
         dqr = (qr1 - qr0) * inv_dt
         # (codex 1) condensation donor clamp (box_step lacks the legacy clamp):
         # vapor sink ≤ available vapor, evaporation source ≤ available liquid.
-        # Move the correction into cloud water so q_v+q_c+q_r is conserved, and
+        # Move the correction into the liquid so q_v+q_c+q_r is conserved, and
         # recompute the latent heating from the clamped condensation.
+        #
+        # box_step conserves total water to machine precision, so the
+        # pre-clamp dqv+dqc+dqr ≈ 0. Clamping vapor by Δ = dqv_cl - dqv must be
+        # COMPENSATED with the OPPOSITE sign in liquid to keep the sum invariant
+        # (the earlier ``dqc += Δ`` added +2Δ of spurious total water whenever
+        # the clamp bound — codex round 1).
         dqv_cl = jnp.clip(dqv, -qv_c * inv_dt, (qc_c + qr_c) * inv_dt)
-        dqc = dqc + (dqv_cl - dqv)
+        delta = dqv_cl - dqv      # vapor change from the clamp
+        # (codex 2 round 2) Apportion the −delta liquid correction so BOTH q_c
+        # and q_r stay nonnegative over the explicit step. Putting all of −delta
+        # into q_c drove q_c negative when coalescence/condensation had already
+        # made dqc strongly negative (e.g. q_c → −0.036 at rh=1.2, dt=60). Since
+        # the clamp removes at most the available liquid (qc_c+qr_c)/dt, the
+        # total-liquid post-step is ≥ 0, so the correction can always be split
+        # between the two species to keep each ≥ 0: take from q_c first, spill
+        # the part that would underflow q_c into q_r (and vice-versa). The split
+        # is conservation-neutral (the two corrections sum to −delta).
+        dqc = dqc - delta
+        qc_post = qc_c + dqc * dt_arr
+        qr_post = qr_c + dqr * dt_arr
+        # Amount by which q_c would go negative (≥ 0); move it from q_c to q_r.
+        spill_c = jnp.maximum(-qc_post, 0.0) * inv_dt
+        dqc = dqc + spill_c
+        dqr = dqr - spill_c
+        # Symmetric guard if the correction instead underflowed q_r.
+        qr_post = qr_c + dqr * dt_arr
+        spill_r = jnp.maximum(-qr_post, 0.0) * inv_dt
+        dqr = dqr + spill_r
+        dqc = dqc - spill_r
         dqv = dqv_cl
         dT = -constants.L_v / constants.c_pd * dqv
         # (codex 2) number tendencies cannot drive the Eulerian number tracers

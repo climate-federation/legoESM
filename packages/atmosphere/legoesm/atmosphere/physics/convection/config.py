@@ -163,7 +163,6 @@ __param_spec__ = {
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "dtlcl_pos_sharpness": "numerics: sharpness of the outer positive-part on the DTLCL base",
             "epsilon_0": "entrainment: legacy constant rate, superseded by the faithful radius-based profile",
-            "pef_min": "numerics: lower clamp on the cloud-base-height precip efficiency",
             "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
             "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
             "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
@@ -181,7 +180,6 @@ __param_spec__ = {
             "entrain_const": {"units": "1", "bounds": (0.0099, 0.09), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) Eq. 5-6 radius entrainment", "shape": None},
             "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
             "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
-            "pef_max": {"units": "1", "bounds": (0.297, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Kain (2004) PEFCBH upper clamp", "shape": None},
             "rad_max_m": {"units": "m", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius upper bound", "shape": None},
             "rad_min_m": {"units": "m", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius lower bound", "shape": None},
             "rad_wkl_ref": {"units": "m/s", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius WKL ramp", "shape": None},
@@ -843,12 +841,12 @@ class KainFritschConfig(NamedTuple):
     # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
     # fraction removed per call, used only for diagnostics/documentation).
     cape_removal_fraction: float = 0.90
-    # Precipitation efficiency as a function of cloud-base height (Kain 2004
-    # / KF eta PEFCBH polynomial), used to split detrained condensate into
-    # rain vs retained cloud water.  Clamped to [pef_min, pef_max].
-    apply_precip_efficiency: bool = True
-    pef_min: float = 0.2
-    pef_max: float = 0.9
+    # NOTE: a cloud-base-height precipitation-efficiency retention scaling was
+    # removed (validator codex review-2 #1): under the ConvectionOutput
+    # contract microphysics owns precipitation, so scaling the cloud-water
+    # source down here leaked column water with no output channel to receive
+    # the precipitating fraction.  The full detrained condensate is now handed
+    # to microphysics, which applies precip efficiency via autoconversion.
 
 
 class EmanuelConfig(NamedTuple):

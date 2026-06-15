@@ -2,8 +2,11 @@
 
 Implements two cloud fraction schemes:
 
-1. **Sundqvist (1988)**: RH-based, simple and robust.
-   ``cf = clamp((RH - RH_crit) / (1 - RH_crit), 0, 1)``
+1. **Sundqvist, Berge & Kristjansson (1989)**: RH-based, simple and robust.
+   The sqrt-form ``(1 − b)² = (1 − RH)/(1 − RH_crit)``, i.e.
+   ``cf = 1 − sqrt((1 − RH)/(1 − RH_crit))`` for RH ≥ RH_crit, else 0
+   (clamped to [0, 1]).  See ``sundqvist_cloud_fraction`` for the
+   AD-safe double-``where`` implementation.
 
 2. **Xu-Randall (1996)**: RH + condensate-based, more physical.
    ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s))]``

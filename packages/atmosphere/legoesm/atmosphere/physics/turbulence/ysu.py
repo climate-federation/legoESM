@@ -31,6 +31,55 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 
 
+def _crossing_pbl_height(Ri_b, z_full, ricr, sharpness):
+    """Lowest height where the bulk Richardson number ``Ri_b`` first reaches
+    ``ricr``, by smooth first-crossing interpolation (differentiable).
+
+    Levels are top-first (index ``nlev-1`` = surface).  We scan surface-up and
+    select the FIRST pair of adjacent levels whose UPPER member reaches
+    ``ricr`` (smooth indicator), then linearly interpolate the crossing height
+    inside that pair.  When ``Ri_b`` never reaches ``ricr`` (a fully unstable /
+    unbounded column) the height defaults to the model-top level.  Robust to an
+    arbitrarily sharp inversion because the crossing is detected per-pair, not
+    by sampling a single level at ``Ri_b == ricr``.  Mirrors the
+    Holtslag-Boville ``_crossing_height`` structure.
+    """
+    ncol, nlev = Ri_b.shape
+    # Surface-first ordering.
+    Ri_s = Ri_b[:, ::-1]
+    z_s = z_full[:, ::-1]
+    Ri_lo = Ri_s[:, :-1]   # lower (closer to surface) member of each pair
+    Ri_hi = Ri_s[:, 1:]
+    z_lo = z_s[:, :-1]
+    z_hi = z_s[:, 1:]
+
+    # crossed[k] = P(Ri >= ricr at the UPPER level of pair k).
+    crossed = jax.nn.sigmoid(sharpness * (Ri_hi - ricr))
+    # Exclusive "not yet crossed below pair k".
+    not_crossed = jnp.cumprod(
+        jnp.concatenate(
+            [jnp.ones((ncol, 1), Ri_b.dtype), 1.0 - crossed[:, :-1]], axis=1,
+        ),
+        axis=1,
+    )
+    w = not_crossed * crossed  # first-crossing weight per pair
+
+    # Linear interpolation of the crossing height inside the pair.
+    dRi = Ri_hi - Ri_lo
+    frac = jnp.clip(
+        (ricr - Ri_lo) / jnp.where(jnp.abs(dRi) > 1.0e-12, dRi, 1.0e-12),
+        0.0, 1.0,
+    )
+    z_cross = z_lo + frac * (z_hi - z_lo)
+
+    # Fallback (no in-column crossing) -> model-top height.
+    z_top = z_full[:, 0]
+    fallback_w = jnp.prod(1.0 - crossed, axis=1)
+    num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top
+    den = jnp.sum(w, axis=1) + fallback_w + 1.0e-30
+    return jnp.clip(num / den, 100.0, None)
+
+
 def ysu_turbulence(
     u: jax.Array,
     v: jax.Array,
@@ -105,7 +154,17 @@ def ysu_turbulence(
     )
     ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
-    # ----- PBL height via smooth bulk-Ri -----
+    # ----- PBL height via smooth bulk-Ri (Troen-Mahrt 1986 / Hong et al. 2006)
+    # The bulk-Richardson PBL height carries an UNSTABLE surface-excess parcel
+    # temperature θ_T = b·(w'θ')_0 / w_s so a convective surface heat flux
+    # deepens the diagnosed PBL.  Without θ_T the numerator is purely the
+    # resolved θ_v gradient, so a well-mixed (neutral) column pins h_pbl at the
+    # floor REGARDLESS of surface heating — the K-profile then normalizes z by
+    # the stale h_pbl (z_norm = z/h_pbl, (1-z_norm)² suppression) and stays
+    # shallow even as w* grows (codex atm-turb-gwd finding A; Hong et al. 2006
+    # eq. for h via Ri_b with the thermal excess).  The excess needs w_s, which
+    # needs h_pbl, so we use the standard two-pass: first guess h_pbl with no
+    # excess, then refine with θ_T(h_pbl_guess).
     theta_v_sfc = theta_v[:, -1]
     z_sfc = z_full[:, -1:]
     u_sfc = u[:, -1:]
@@ -114,26 +173,59 @@ def ysu_turbulence(
     dtheta_v_bulk = theta_v - theta_v_sfc[:, None]
     # Wind shear from surface (not absolute wind)
     dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4  # coeff-ok: wind-shear floor [m^2/s^2]
-    Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
-        dtheta_v_bulk * dz_from_sfc / dV2
+
+    # Kinematic surface heat flux and the well-mixed θ_v scale (shared by both
+    # passes and the convective velocity scale below).
+    wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic (ncol,)
+    theta_bar = jnp.mean(theta_v, axis=1)  # (ncol,)
+    g_over_thbar = constants.g / jnp.clip(theta_bar, 1.0, None)
+
+    def _bulk_pbl_height(excess_theta):
+        # excess_theta : (ncol,) surface-parcel virtual-θ excess [K], >=0.
+        # h_pbl = LOWEST height where the bulk Richardson number first reaches
+        # Ri_crit, found by smooth first-crossing interpolation (surface-up).
+        # The earlier ``sigma*(1-sigma)`` centre-of-mass weighting is fragile:
+        # at a sharp capping inversion the crossing falls BETWEEN two grid
+        # levels, so EVERY level saturates the sigmoid (w~0) and the weighted
+        # mean collapses to the simple domain-mean height (codex round-2: the
+        # excess-parcel fix exposed this, yielding a 7 km PBL above a 2 km
+        # inversion).  A first-crossing interpolation is robust to an
+        # arbitrarily sharp inversion and is the standard bulk-Ri PBL diagnosis
+        # (matches the HB ``_crossing_height`` structure).
+        Ri_b = g_over_thbar[:, None] * (
+            (dtheta_v_bulk - excess_theta[:, None]) * dz_from_sfc / dV2
+        )
+        return _crossing_pbl_height(
+            Ri_b, z_full, config.Ri_crit, config.pbl_smooth_sharpness,
+        )
+
+    # Pass 1: no excess.
+    h_pbl_guess = _bulk_pbl_height(jnp.zeros_like(theta_v_sfc))
+
+    # Mixed-layer velocity scale w_s evaluated at the surface layer (z=0.1·h),
+    # the standard Troen-Mahrt level for the excess parcel.  w* from the
+    # first-guess depth; w_s = (u*³ + c·κ·w*³·0.1)^{1/3}.
+    buoy_guess = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl_guess / jnp.clip(
+        theta_bar, 1.0, None
+    )
+    w_star_guess = jnp.cbrt(jnp.maximum(buoy_guess, 1e-20))
+    w_s_sfc = jnp.cbrt(
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk
+        * w_star_guess ** 3 * config.sfc_excess_zfrac
+    )
+    # Thermal excess θ_T = b·(w'θ')_0 / w_s, only for unstable (kbfs>0).
+    excess_theta = config.countergrad_coeff * jnp.maximum(wtheta_sfc, 0.0) / jnp.clip(
+        w_s_sfc, 1e-6, None
     )
 
-    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
-    sigma_pbl = jax.nn.sigmoid(config.pbl_smooth_sharpness * (config.Ri_crit - Ri_bulk))
-    w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    # Numerator and denominator share the level axis — fuse into one
-    # stacked reduction.
-    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
-    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
-    h_pbl = jnp.clip(h_pbl, 100.0, None)
+    # Pass 2: refined PBL height with the unstable surface excess.
+    h_pbl = _bulk_pbl_height(excess_theta)
 
     # ----- Convective velocity scale w* -----
     # w* = (g · h · (w'θ')_sfc / θ_bar)^{1/3}, defined only for unstable
     # (positive surface buoyancy flux).  Used by the mixed-layer velocity
     # scale w_s (below), the PBL-top entrainment flux, and the nonlocal
-    # countergradient.
-    wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic (ncol,)
-    theta_bar = jnp.mean(theta_v, axis=1)  # (ncol,)
+    # countergradient.  Recomputed with the refined (deeper) h_pbl.
     buoyancy_flux = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl / jnp.clip(
         theta_bar, 1.0, None
     )
