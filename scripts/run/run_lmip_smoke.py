@@ -55,7 +55,8 @@ from legoesm.land.global_surface_data import interp_monthly
 from legoesm.land.soil_albedo import soil_albedo_broadband
 from legoesm.land.surface_data.land_inputs import (
     dominant_pft_index, glacier_mask, surface_data_to_land_params,
-    init_land_surface_data, fill_land_param_gaps)
+    init_land_surface_data, fill_land_param_gaps,
+    make_step_land_params_updater)
 
 U_MIN = 1.0
 
@@ -194,11 +195,16 @@ def main() -> None:
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
         z = lambda: jnp.zeros(ncol)
+        # Seed ``runoff`` as a zero array (default is ``None``); step_land returns
+        # a real array, so leaving it ``None`` makes the input/output pytree
+        # structures differ and lax.scan refuses to run.  TgC stays ``None`` for
+        # SimpleSEB and is preserved by the step.
         state = LandState(
             T_soil=Field(forcing.T_lowest, name="T_soil", units="K"),
             W_bucket=Field(jnp.full(ncol, 100.0), name="W_bucket", units="kg/m2"),
             snow_depth=Field(z(), name="snow_depth", units="kg/m2"),
             snow_age=Field(z(), name="snow_age", units="s"),
+            runoff=z(),
         )
         theta_top = jnp.full(ncol, 0.2)               # slab has no soil profile
     else:
@@ -207,74 +213,77 @@ def main() -> None:
             T_soil=jnp.broadcast_to(forcing.T_lowest[:, None], state.T_soil.shape))
         theta_top = state.theta_soil[:, 0]
 
-    # land params with the actual top-layer wetness (accurate soil-colour albedo),
-    # then reconcile with the authoritative land mask: any cell the mask calls land
-    # but the surfdata doesn't cover falls back to bare soil (finite everywhere).
-    def _build_land_params_for_doy(doy_t, theta_top_t):
-        lp = surface_data_to_land_params(gsd, config.surface_scheme, float(doy_t), theta_top_t)
-        return fill_land_param_gaps(lp, gsd)
+    # JAX-pure per-step LAI/albedo updater.  Captures the static PFT lookups,
+    # soil_color, glacier/covered masks once; per step it just recomputes LAI
+    # (from monthly climatology at the traced doy) and the soil-colour
+    # background albedo (from the evolving top-layer wetness).  This lets the
+    # entire time loop run inside a single ``lax.scan``.
+    update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
 
-    land_params = _build_land_params_for_doy(args.doy, theta_top)
+    # ----- scan body: state -> state' + diagnostics, fully JAX-traceable -----
+    is_multilayer = (args.land_mode == "multilayer")
+    dt = float(args.dt)
+    dt_days = dt / 86400.0
+    dt_hours = dt / 3600.0
+    doy_start = jnp.asarray(float(args.doy))
+    hour_start = jnp.asarray(float(args.hour))
 
-    # JIT once with (state, forcing, land_params, doy) as TRACED args so the
-    # cache stays warm across all time-loop iterations.  ``config`` / ``lat_rad``
-    # / ``args.dt`` are static closures (don't change across steps).  ``doy`` is
-    # passed as a jnp array — a Python float would be treated as a static input
-    # and retrace every step.
-    @jax.jit
-    def step_jit(state, forcing, land_params, doy):
-        return step_fn(state, forcing, config, U_MIN, args.dt,
-                       lat=lat_rad, land_params=land_params, doy=doy)
-
-    # ----- time loop: per step recompute forcing + LAI/albedo via the host-side
-    # surface_data_to_land_params (the JAX-native per-step updater is a follow-up;
-    # the host roundtrip is OK for smoke).  doy advances by dt; hour cycles mod 24.
-    diagnostics: dict[str, list] = {
-        "time_doy": [], "T_sfc": [], "shflx": [], "lhflx": [], "LAI": [], "albedo": [],
-    }
-    if args.land_mode == "multilayer":
-        diagnostics["theta_top"] = []
-        diagnostics["T_soil_top"] = []
-        diagnostics["snow_depth"] = []
-
-    dom_static = dominant_pft_index(gsd)              # static across steps
-    ncol_idx = np.arange(ncol)
-    doy_t, hour_t = float(args.doy), float(args.hour)
-    dt_days = args.dt / 86400.0
-    dt_hours = args.dt / 3600.0
-
-    print(f"stepping {args.n_steps} timestep(s) (dt={args.dt:.0f}s, "
-          f"doy_start={doy_t:.2f}) ...")
-    for step_i in range(args.n_steps):
+    def _step_body(state, step_i):
+        doy_t = doy_start + step_i.astype(doy_start.dtype) * dt_days
+        hour_t = jnp.mod(hour_start + step_i.astype(hour_start.dtype) * dt_hours, 24.0)
         forcing_t = make_global_forcing(lat_rad, lon_rad, doy_t, hour_t)
-        if args.land_mode == "multilayer":
-            theta_top_t = state.theta_soil[:, 0]
-        else:
-            theta_top_t = jnp.full(ncol, 0.2)
-        land_params_t = _build_land_params_for_doy(doy_t, theta_top_t)
+        theta_top_t = (state.theta_soil[:, 0] if is_multilayer
+                       else jnp.full(ncol, 0.2))
+        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t)
+        new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
+                                     lat=lat_rad,
+                                     land_params=land_params_t, doy=doy_t)
+        diag = (resp.T_sfc, resp.shflx, resp.lhflx, lai_diag, resp.albedo, doy_t)
+        if is_multilayer:
+            diag = diag + (new_state.theta_soil[:, 0],
+                           new_state.T_soil[:, 0],
+                           new_state.snow_depth)
+        return new_state, diag
 
-        state, resp, _ = step_jit(state, forcing_t, land_params_t, jnp.asarray(doy_t))
+    print(f"stepping {args.n_steps} timestep(s) (dt={dt:.0f}s, "
+          f"doy_start={float(args.doy):.2f}, lax.scan) ...")
+    scan_steps = jnp.arange(args.n_steps)
+    state, scan_out = jax.lax.scan(_step_body, state, scan_steps)
 
-        if step_i % args.output_every == 0 or step_i == args.n_steps - 1:
-            lai_t = np.asarray(
-                interp_monthly(gsd.lai_monthly, jnp.asarray(doy_t))
-            )[ncol_idx, dom_static]
-            diagnostics["time_doy"].append(doy_t)
-            diagnostics["T_sfc"].append(np.asarray(resp.T_sfc))
-            diagnostics["shflx"].append(np.asarray(resp.shflx))
-            diagnostics["lhflx"].append(np.asarray(resp.lhflx))
-            diagnostics["LAI"].append(lai_t)
-            diagnostics["albedo"].append(np.asarray(resp.albedo))
-            if args.land_mode == "multilayer":
-                diagnostics["theta_top"].append(np.asarray(state.theta_soil[:, 0]))
-                diagnostics["T_soil_top"].append(np.asarray(state.T_soil[:, 0]))
-                diagnostics["snow_depth"].append(np.asarray(state.snow_depth))
+    # Unpack scan outputs (each element has leading axis = n_steps).
+    if is_multilayer:
+        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr,
+         theta_top_t, T_soil_top_t, snow_depth_t) = scan_out
+    else:
+        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr) = scan_out
 
-        doy_t += dt_days
-        hour_t = (hour_t + dt_hours) % 24.0
+    # Subsample with --output-every.
+    sel = np.arange(0, args.n_steps, args.output_every)
+    if sel[-1] != args.n_steps - 1:
+        sel = np.append(sel, args.n_steps - 1)
+    diagnostics = {
+        "time_doy": [float(x) for x in np.asarray(doy_t_arr)[sel]],
+        "T_sfc":  [np.asarray(T_sfc_t[i])  for i in sel],
+        "shflx":  [np.asarray(shflx_t[i])  for i in sel],
+        "lhflx":  [np.asarray(lhflx_t[i])  for i in sel],
+        "LAI":    [np.asarray(LAI_t[i])    for i in sel],
+        "albedo": [np.asarray(alb_t[i])    for i in sel],
+    }
+    if is_multilayer:
+        diagnostics["theta_top"]   = [np.asarray(theta_top_t[i])   for i in sel]
+        diagnostics["T_soil_top"]  = [np.asarray(T_soil_top_t[i])  for i in sel]
+        diagnostics["snow_depth"]  = [np.asarray(snow_depth_t[i])  for i in sel]
 
-    # Final-step alias used by the legacy single-snapshot map output below.
-    new_state, land_params, forcing = state, land_params_t, forcing_t
+    # Use the LAST scan step's outputs for the legacy single-snapshot maps —
+    # cheaper than running an extra step and keeps n_steps=1 bit-equivalent
+    # to the prior single-step path.
+    class _LastResp:                              # minimal stand-in for the
+        T_sfc = T_sfc_t[-1]                       # response NamedTuple
+        shflx = shflx_t[-1]
+        lhflx = lhflx_t[-1]
+        albedo = alb_t[-1]
+    resp = _LastResp
+    new_state = state                              # final post-scan state
 
     # --- authoritative land-sea mask (matches ModelDriver), per column ---
     # With a mask file (sftlf / ERA5 lsm) it is the authority, exactly as
@@ -352,7 +361,8 @@ def main() -> None:
                 coords={"time": (("time",), np.asarray(diagnostics["time_doy"])),
                         "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)},
                 attrs={"n_steps": args.n_steps, "dt": args.dt,
-                       "doy_start": args.doy, "doy_end": float(doy_t),
+                       "doy_start": args.doy,
+                       "doy_end": float(np.asarray(doy_t_arr[-1])),
                        "output_every": args.output_every,
                        "grid_type": args.grid_type, "land_mode": args.land_mode,
                        "surface_scheme": args.surface_scheme},
