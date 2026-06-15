@@ -251,25 +251,59 @@ def _qcond_from_tracers(tracers, microphysics_scheme: str) -> jax.Array:
 
 def _create_scm(cfg: PhysicsConfig, ref: campaign.ReferenceProfiles, dt: float) -> SingleColumnModel:
     T0, qv0 = campaign.wing_initial_profiles(ref)
-    forcing = SCMForcing(prescribe="T_s", T_s=lambda _t: campaign.FIXED_SST_K)
+    use_split_convection = (
+        campaign._effective_scm_convection_substeps(
+            cfg.convection.scheme,
+            campaign.DEFAULT_SCM_CONVECTION_SUBSTEPS,
+        )
+        > 1
+        and cfg.convection.scheme != "none"
+    )
+    wind_profile = jnp.full(
+        (len(ref.z_m),), campaign.DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+        dtype=jnp.float64,
+    )
+    zero_wind_profile = jnp.zeros((len(ref.z_m),), dtype=jnp.float64)
+    forcing = SCMForcing(
+        prescribe="T_s",
+        T_s=lambda _t: campaign.FIXED_SST_K,
+        f_c=campaign.DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+        u_geo=lambda _t: wind_profile,
+        v_geo=lambda _t: zero_wind_profile,
+    )
     scm = SingleColumnModel.create(
-        physics_config=cfg,
+        physics_config=(
+            campaign._without_convection_config(cfg)
+            if use_split_convection
+            else cfg
+        ),
         nlev=len(ref.z_m),
         dt=dt,
         T_profile=T0,
         q_v_profile=qv0,
+        u=campaign.DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+        v=0.0,
         p_s=campaign.WING_P_SFC,
         latitude_deg=0.0,
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,
+        microphysics_substeps=campaign._effective_scm_microphysics_substeps(
+            cfg.microphysics.scheme,
+            campaign.DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+        ),
     )
     scm.sigma_coord = campaign.make_sigma_coordinate_from_reference(ref)
     campaign._preseed_column_tracers(scm, cfg.microphysics.scheme)
     return scm
 
 
-def _make_step_once(scm: SingleColumnModel, cfg: PhysicsConfig, dt: float):
+def _make_step_once(
+    scm: SingleColumnModel,
+    cfg: PhysicsConfig,
+    ref: campaign.ReferenceProfiles,
+    dt: float,
+):
     sst_col = jnp.asarray([campaign.FIXED_SST_K], dtype=jnp.float64)
     forcing_dict = {"T_sfc": sst_col}
     step_fn = scm._step_fn
@@ -278,6 +312,36 @@ def _make_step_once(scm: SingleColumnModel, cfg: PhysicsConfig, dt: float):
     sigma_coord = scm.sigma_coord
     dt_arr = jnp.asarray(dt, dtype=jnp.float64)
     microphysics_scheme = cfg.microphysics.scheme
+    effective_convection_substeps = campaign._effective_scm_convection_substeps(
+        cfg.convection.scheme,
+        campaign.DEFAULT_SCM_CONVECTION_SUBSTEPS,
+    )
+    use_split_convection = (
+        cfg.convection.scheme != "none" and effective_convection_substeps > 1
+    )
+    conv_physics_fn = None
+    if use_split_convection:
+        conv_physics_fn = campaign.make_physics(
+            campaign._convection_only_config(cfg),
+            model_type="hydrostatic",
+            dt=dt / effective_convection_substeps,
+        )
+    z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
+    z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
+    bl_mask = z_above_lowest <= campaign.DEFAULT_SCM_RCE_BL_TOP_M
+
+    def apply_surface_sst_anchor(state):
+        T_bl = jnp.asarray(campaign.FIXED_SST_K, dtype=state.T.data.dtype) - (
+            campaign.DEFAULT_SCM_RCE_BL_LAPSE_K_M
+            * z_above_lowest.astype(state.T.data.dtype)
+        )
+        T_bl = jnp.maximum(
+            T_bl,
+            jnp.asarray(campaign.DEFAULT_SCM_RCE_BL_MIN_T_K, dtype=state.T.data.dtype),
+        )
+        mask = bl_mask.reshape(1, 1, 1, -1)
+        T_data = jnp.where(mask, T_bl.reshape(1, 1, 1, -1), state.T.data)
+        return state._replace(T=state.T.replace(data=T_data))
 
     def fixed_sst_tendency(state, phys_state, _t):
         phys_state = phys_state._replace(surface_T_sfc_override=sst_col)
@@ -294,12 +358,41 @@ def _make_step_once(scm: SingleColumnModel, cfg: PhysicsConfig, dt: float):
             phys_out = phys_out._replace(surface_T_sfc_override=sst_col)
         return tend, phys_out
 
+    def apply_convection_substeps(state, phys_state):
+        if not use_split_convection:
+            return state, phys_state
+        sub_dt = dt / effective_convection_substeps
+
+        def substep(carry, _i):
+            sub_state, sub_phys = carry
+            conv_tend, conv_phys = conv_physics_fn(
+                sub_state,
+                grid,
+                sigma_coord,
+                phys_state=sub_phys,
+            )
+            if conv_phys is None:
+                conv_phys = sub_phys
+            return (
+                campaign.apply_tendencies(sub_state, conv_tend, sub_dt),
+                conv_phys,
+            ), None
+
+        (new_state, new_phys), _ = lax.scan(
+            substep,
+            (state, phys_state),
+            jnp.arange(effective_convection_substeps, dtype=jnp.int32),
+        )
+        return new_state, new_phys
+
     def step_once(carry, k):
         state, phys_state = carry
         t = k.astype(jnp.float64) * dt_arr
         new_state, new_phys = step_fn(
             state, phys_state, fixed_sst_tendency, dt, t,
         )
+        new_state, new_phys = apply_convection_substeps(new_state, new_phys)
+        new_state = apply_surface_sst_anchor(new_state)
         qv = new_state.tracers["q_v"].data[0, 0, 0]
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
@@ -324,7 +417,7 @@ def _compute_static_spinup_carry(
         return scm.state, scm.phys_state
     chunk_steps = max(1, int(chunk_steps))
     nchunks = int(math.ceil(spinup_steps / chunk_steps))
-    step_once = _make_step_once(scm, cfg, dt)
+    step_once = _make_step_once(scm, cfg, ref, dt)
 
     def masked_step(carry, k):
         return lax.cond(
@@ -374,7 +467,7 @@ def _rollout_profiles(
     cfg = _apply_trainable_params(base_cfg, params)
     scm = _create_scm(cfg, ref, dt)
     nlev = len(ref.z_m)
-    step_once = jax.checkpoint(_make_step_once(scm, cfg, dt))
+    step_once = jax.checkpoint(_make_step_once(scm, cfg, ref, dt))
 
     def masked_step(carry, k):
         zeros = (
@@ -506,6 +599,7 @@ def _run_campaign_eval(
         dt=dt,
         analysis_days=analysis_days,
         require_equilibrium=False,
+        require_realism=False,
         equil_T_tol_K=campaign.EQUIL_T_TOL_K,
         equil_qv_tol=campaign.EQUIL_QV_TOL,
         equil_qcond_tol=campaign.EQUIL_QCOND_TOL,
@@ -540,7 +634,7 @@ def _plot_profiles_before_after(
     import matplotlib.pyplot as plt
 
     z_km = ref.z_m / campaign.M_PER_KM
-    fig, axes = plt.subplots(1, 3, figsize=(12.0, 5.2), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(15.0, 5.2), sharey=False)
     panels = [
         ("T", ref.T_ref, before.T_profile, after.T_profile, "K"),
         (
@@ -558,15 +652,25 @@ def _plot_profiles_before_after(
             "g/kg",
         ),
     ]
-    for ax, (name, ref_prof, before_prof, after_prof, units) in zip(axes, panels):
+    for ax, (name, ref_prof, before_prof, after_prof, units) in zip(axes[:3], panels):
         ax.plot(ref_prof, z_km, color="#1f4e79", lw=2.0, label="CRM")
         ax.plot(before_prof, z_km, color="#d95f02", lw=1.8, label="campaign tuned")
         ax.plot(after_prof, z_km, color="#2a9d8f", lw=1.8, label="gradient trained")
         ax.set_xlabel(f"{name} [{units}]")
+        ax.set_ylim(0.0, float(np.nanmax(z_km)))
         ax.grid(alpha=0.25)
     axes[0].set_ylabel("z [km]")
-    axes[0].invert_yaxis()
     axes[0].legend(loc="best")
+    axes[3].bar(
+        [0, 1, 2],
+        [ref.precip_ref_mm_day, before.precip_mm_day, after.precip_mm_day],
+        color=["#1f4e79", "#d95f02", "#2a9d8f"],
+        width=0.65,
+    )
+    axes[3].set_xticks([0, 1, 2])
+    axes[3].set_xticklabels(["CRM", "before", "after"])
+    axes[3].set_ylabel("surface precip [mm/day]")
+    axes[3].grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(path, dpi=170)
     plt.close(fig)

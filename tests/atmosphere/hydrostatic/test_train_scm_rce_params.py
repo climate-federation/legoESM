@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from legoesm.training.scm_rce_metrics import score_profiles_jax
+from legoesm.training.scm_rce_metrics import (
+    precip_score_jax,
+    score_profiles_jax,
+    score_profiles_precip_jax,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -25,8 +29,9 @@ def test_scm_rce_metrics_zero_for_matching_profiles():
         T_ref = [200.0, 300.0]
         qv_ref = [0.001, 0.01]
         qcond_ref = [0.0, 0.001]
+        precip_ref_mm_day = 3.5
 
-    T, qv, cloud, combined = score_profiles_jax(
+    T, qv, cloud, profile_combined = score_profiles_jax(
         Ref(),
         Ref.T_ref,
         Ref.qv_ref,
@@ -36,7 +41,26 @@ def test_scm_rce_metrics_zero_for_matching_profiles():
     assert float(T) == 0.0
     assert float(qv) == 0.0
     assert float(cloud) == 0.0
+    assert float(profile_combined) == 0.0
+
+    T, qv, cloud, precip, combined = score_profiles_precip_jax(
+        Ref(),
+        Ref.T_ref,
+        Ref.qv_ref,
+        Ref.qcond_ref,
+        Ref.precip_ref_mm_day,
+        profile_floor=1.0e-12,
+    )
+    assert float(T) == 0.0
+    assert float(qv) == 0.0
+    assert float(cloud) == 0.0
+    assert float(precip) == 0.0
     assert float(combined) == 0.0
+
+
+def test_precip_score_units_and_normalization():
+    score = precip_score_jax(5.0, 3.5, normalization_mm_day=3.0)
+    assert float(score) == 0.5
 
 
 @pytest.mark.skipif(

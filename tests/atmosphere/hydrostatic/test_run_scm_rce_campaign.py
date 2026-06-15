@@ -56,6 +56,10 @@ def test_run_scm_rce_campaign_quick_outputs_ranking_and_bounded_tuning(tmp_path)
     assert rows
     assert {"kessler", "sundqvist"} <= {row["scheme"] for row in rows}
     assert any(row["status"] == "ok" for row in rows)
+    assert "precip_mm_day" in rows[0]
+    assert "crm_precip_mm_day" in rows[0]
+    assert "realism_status" in rows[0]
+    assert any(float(row["precip_mm_day"]) >= 0.0 for row in rows)
 
     tuned_path = outdir / "tuned_parameters.json"
     tuned = json.loads(tuned_path.read_text())

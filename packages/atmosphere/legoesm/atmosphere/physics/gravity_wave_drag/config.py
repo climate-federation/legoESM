@@ -420,6 +420,11 @@ class PrognosticSpectralConfig(NamedTuple):
         Sigmoid sharpness for breaking transition (default 10.0).
     tau_decay : float
         Relaxation timescale for prognostic spectrum [s] (default 86400).
+    thermal_tendency : bool
+        If True, return the diagnosed kinetic-energy-to-thermal tendency.
+        Set False for SCM realism sweeps where prognostic-spectral momentum
+        deposition is exercised but its currently unvalidated energetics must
+        not cool/heat the thermodynamic column.
     """
     n_azimuths: int = 4
     n_wavenumbers: int = 20
@@ -429,6 +434,7 @@ class PrognosticSpectralConfig(NamedTuple):
     breaking_threshold: float = 1.0
     breaking_sharpness: float = 10.0
     tau_decay: float = 86400.0
+    thermal_tendency: bool = True
 
 
 class E3SMOrographicConfig(NamedTuple):
