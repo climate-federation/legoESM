@@ -154,6 +154,16 @@ def main():
             print(f"  multigrid M={args.mg_m}: {t_mg:.3f} ms/solve "
                   f"({2 * args.mg_m} reductions/step)")
             print(f"  MG wall-time speedup: {t_jac / t_mg:.2f}x")
+            wt_out = args.out.replace(".csv", "_walltime.csv")
+            os.makedirs(os.path.dirname(wt_out), exist_ok=True)
+            with open(wt_out, "w") as f:
+                f.write("preconditioner,M,ms_per_solve,reductions_per_step,"
+                        "n_ranks,n_lat,n_lon\n")
+                f.write(f"jacobi,{args.jacobi_m},{t_jac:.4f},"
+                        f"{2 * args.jacobi_m},{n_ranks},{n_lat},{n_lon}\n")
+                f.write(f"multigrid,{args.mg_m},{t_mg:.4f},"
+                        f"{2 * args.mg_m},{n_ranks},{n_lat},{n_lon}\n")
+            print(f"wrote {wt_out}")
 
     if rank == 0:
         def m_to_target(name):
