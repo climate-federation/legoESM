@@ -55,6 +55,9 @@ PANELS = [
     ("Voronoi/MPAS halo+partition speedup", "voronoi_lever_speedup",
      "higher better (batched-halo default + METIS opt-in; vs RCB/legacy)",
      None),
+    ("Multinode STRONG efficiency (np32/np64)", "eff_strong_np",
+     "higher better (1=ideal); degrades as per-rank tile thins (Amdahl wall)",
+     None),
 ]
 
 
@@ -82,7 +85,7 @@ def main() -> None:
     xpos = {k: i for i, k in enumerate(order)}
     xlabels = [f"{d[5:]}\n{t}" for (d, t) in order]
 
-    fig, axes = plt.subplots(4, 3, figsize=(22, 16.5))
+    fig, axes = plt.subplots(4, 4, figsize=(29, 16.5))
     for ax in axes.flat[len(PANELS):]:
         ax.set_visible(False)            # hide unused grid slots
     for ax, (title, metric_pref, direction, grids) in zip(
