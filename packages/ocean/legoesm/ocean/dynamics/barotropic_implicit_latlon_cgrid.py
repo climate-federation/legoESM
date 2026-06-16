@@ -72,6 +72,8 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -125,9 +127,10 @@ def _depth_average_to_faces(
     h_k_pad = pad_ns_zero(h_k)
     h_v = jnp.minimum(h_k_pad[:-1], h_k_pad[1:])
     h_v = _zero_polar_lat_ends(h_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_row = jnp.minimum(h_k[-1:], fold_vface_row(h_k, grid))
-        h_v = jnp.concatenate([h_v[:-1], north_row], axis=0)
+        h_v = apply_north_fold(h_v, north_row, grid, north_mask=nmask)
     _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
     H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
     V_bar = _v_pair[..., 1] / H_v * v_mask
@@ -173,9 +176,10 @@ def _h_total_at_faces(
     H_total_pad = pad_ns_zero(H_total)
     H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
     H_v = _zero_polar_lat_ends(H_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_row = jnp.minimum(H_total[-1:], fold_vface_row(H_total, grid))
-        H_v = jnp.concatenate([H_v[:-1], north_row], axis=0)
+        H_v = apply_north_fold(H_v, north_row, grid, north_mask=nmask)
 
     return H_u, H_v
 
@@ -1632,11 +1636,10 @@ def barotropic_implicit_latlon_cgrid(
     h_active_pad = pad_ns_zero(h_active_3d)
     v_active_3d = h_active_pad[:-1] * h_active_pad[1:]
     v_active_3d = _zero_polar_lat_ends(v_active_3d)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_3d = h_active_3d[-1:] * h_active_3d[-1:, grid.fold.perm_T, :]
-        v_active_3d = jnp.concatenate(
-            [v_active_3d[:-1], north_3d], axis=0,
-        )
+        v_active_3d = apply_north_fold(v_active_3d, north_3d, grid, north_mask=nmask)
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])
         * u_mask[..., jnp.newaxis] * u_active_3d

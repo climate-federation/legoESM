@@ -359,11 +359,14 @@ def make_sharded_ocean_step(model, mesh):
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
 
-    # Tripole north-fold is a separate follow-up: the regular grid has the fold
-    # INACTIVE.  Fail loud rather than silently mis-folding the north band.
-    fold = getattr(model.grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
-        raise NotImplementedError("tripole north-fold: follow-up")
+    # Tripole north fold: the lat-lon C-grid operators select the fold on the
+    # north band data-dependently (``north_fold_mask`` / ``apply_north_fold`` +
+    # the ``where(north_mask)`` neumann-fill / TVD-clamp branches) under the
+    # armed SPMD backend, since the single shard_map trace cannot use the serial
+    # ``if fold_is_local`` (fold_j=-1 on every band).  The build_band_grids
+    # slicer keeps the active fold + perms on each band.  Correctness is gated by
+    # the full-step SPMD-vs-serial equivalence test on a synthetic tripole
+    # (tests/parallel/test_latlon_ocean_spmd_tripole.py).
 
     # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
     band_grids = build_band_grids(model.grid, n_dev)
