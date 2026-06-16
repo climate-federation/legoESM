@@ -141,6 +141,13 @@ def main():
                         choices=["cubed_sphere", "latlon"],
                         help="Atmosphere grid (default cubed_sphere); 'latlon' "
                              "is required for --ocean dynamic (shared grid)")
+    parser.add_argument("--couple-surface-radiation",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Feed the coupler's tile-blended (land+ocean) skin "
+                             "T/albedo back to atmosphere radiation (--ocean-ic "
+                             "woa). Default on; the slab-land skin feedback is "
+                             "stiff — turn off (--no-couple-surface-radiation) "
+                             "to trade land-radiation realism for stability.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -344,11 +351,13 @@ def main():
             overrides["land_mode"] = "slab"
             overrides["land_config"] = LandConfig()
             # With real continents the atmospheric radiative surface boundary
-            # must be the tile-blended (land+ocean) skin T / albedo, not the
-            # ocean SST everywhere: feed the coupler's f_land-weighted surface
-            # back to radiation (else land cells radiate at the dynamic-ocean
-            # SST; codex MED).
-            overrides["couple_surface_radiation"] = True
+            # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
+            # ocean SST everywhere (else land cells radiate at the dynamic-ocean
+            # SST; codex MED).  But the slab-land skin temperature is a stiff
+            # radiative feedback that can destabilise the coarse coupled run, so
+            # it is gated by --couple-surface-radiation (default on; turn off to
+            # trade land-radiation realism for stability).
+            overrides["couple_surface_radiation"] = args.couple_surface_radiation
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
