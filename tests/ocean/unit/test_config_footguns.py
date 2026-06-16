@@ -160,6 +160,85 @@ def test_validate_config_rejects_unknown_momentum_flux_scheme():
         LatLonCGridOceanModel._validate_config(bad)
 
 
+# ---------------------------------------------------------------------------
+# Footgun 4 — tracer_advection dispatch (validated only at runtime before)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_unknown_tracer_advection():
+    """An unknown tracer_advection literal must raise at construction, not
+    survive until the first step's runtime ValueError in
+    _compute_advection_flux_div (the prior behaviour — inconsistent with every
+    other scheme field, which validate on the static config at construction)."""
+    bad = LatLonCGridOceanConfig(tracer_advection="van-leer")  # typo
+    with pytest.raises(ValueError, match="tracer_advection must be one of"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_valid_tracer_advection():
+    """Every literal in the single VALID_TRACER_ADVECTION source must pass
+    validation — including "som", which is dispatched on a separate step-level
+    path and so is absent from _compute_advection_flux_div's if/elif chain."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        VALID_TRACER_ADVECTION,
+    )
+    assert "som" in VALID_TRACER_ADVECTION  # guard the step-level special case
+    for scheme in VALID_TRACER_ADVECTION:
+        cfg = LatLonCGridOceanConfig(tracer_advection=scheme)
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+def _dispatch_literals_in(func) -> frozenset:
+    """Extract every string literal that ``func`` compares ``tracer_advection``
+    against — both ``tracer_advection == "x"`` and ``tracer_advection in (...)``
+    — by walking the AST of its source. This introspects the ACTUAL dispatcher
+    rather than trusting a hand-maintained list."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    literals: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not (isinstance(node.left, ast.Name)
+                and node.left.id == "tracer_advection"):
+            continue
+        for op, comp in zip(node.ops, node.comparators):
+            if isinstance(op, ast.Eq) and isinstance(comp, ast.Constant):
+                literals.add(comp.value)
+            elif isinstance(op, ast.In) and isinstance(
+                comp, (ast.Tuple, ast.List, ast.Set)
+            ):
+                for elt in comp.elts:
+                    if isinstance(elt, ast.Constant):
+                        literals.add(elt.value)
+    return frozenset(literals)
+
+
+def test_valid_tracer_advection_matches_dispatch_branches():
+    """The single VALID_TRACER_ADVECTION source must list exactly the schemes
+    the model can dispatch: the flux-form branches in _compute_advection_flux_div
+    (introspected from its AST, not a hand-copied list) plus the step-level "som"
+    path. Drift in either direction — a new dispatch branch left out of the
+    frozenset (→ false-reject of a working config), or a frozenset entry with no
+    handler (→ silent no-op) — fails this gate."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _compute_advection_flux_div,
+    )
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        VALID_TRACER_ADVECTION,
+    )
+
+    dispatch_literals = _dispatch_literals_in(_compute_advection_flux_div)
+    # Sanity: the AST walk actually found the chain (non-vacuous guard).
+    assert "tvd" in dispatch_literals and "weno5" in dispatch_literals
+    # "som" is dispatched on a separate step-level path, not in this function.
+    assert "som" not in dispatch_literals
+    assert VALID_TRACER_ADVECTION == dispatch_literals | {"som"}
+
+
 def test_validate_config_accepts_flux_form_with_valid_scheme():
     """flux_form with a valid momentum_flux_scheme passes construction."""
     for scheme in ("upwind", "centered"):

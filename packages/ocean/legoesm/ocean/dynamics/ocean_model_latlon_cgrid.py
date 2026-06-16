@@ -900,6 +900,7 @@ class LatLonCGridOceanModel:
         # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
+            VALID_TRACER_ADVECTION,
             VALID_MOMENTUM_FLUX_SCHEME,
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
@@ -911,6 +912,17 @@ class LatLonCGridOceanModel:
                 f"momentum_advection must be one of "
                 f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
                 f"got {config.momentum_advection!r}",
+            )
+        # Fail-fast tracer-advection dispatch validation (mirror of the
+        # momentum check above). Without this a typo survived config
+        # construction and only died at the first step's runtime ValueError
+        # in _compute_advection_flux_div — inconsistent with every other
+        # scheme field, which validate at construction on the static config.
+        if config.tracer_advection not in VALID_TRACER_ADVECTION:
+            raise ValueError(
+                f"tracer_advection must be one of "
+                f"{sorted(VALID_TRACER_ADVECTION)}, "
+                f"got {config.tracer_advection!r}",
             )
         if config.momentum_flux_scheme not in VALID_MOMENTUM_FLUX_SCHEME:
             raise ValueError(

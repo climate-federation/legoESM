@@ -116,6 +116,29 @@ from legoesm.ocean.vertical import (
 VALID_MOMENTUM_ADVECTION = frozenset(
     {"vector_invariant", "weno5", "weno7", "flux_form"}
 )
+# Single source of truth for the lat-lon C-grid TRACER-advection dispatch
+# literals (config.tracer_advection). Same dispatch discipline as momentum:
+# validated at config construction (ocean_model_latlon_cgrid._validate_config)
+# so a typo fails LOUDLY at construction, not lazily at the first step. The
+# flux-form set (upwind..weno7) maps 1:1 to the if/elif branches in
+# _compute_advection_flux_div; "som" (Prather 1986 second-order-moments, #210)
+# is a valid scheme dispatched on a SEPARATE step-level path and so never
+# reaches that function's runtime-ValueError backstop.
+VALID_TRACER_ADVECTION = frozenset(
+    {
+        "upwind",
+        "centered",
+        "tvd",
+        "superbee",
+        "ppm",
+        "ppm_fct",
+        "dst3",
+        "dst3_multidim",
+        "weno5",
+        "weno7",
+        "som",
+    }
+)
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
