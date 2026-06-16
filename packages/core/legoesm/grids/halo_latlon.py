@@ -104,6 +104,20 @@ def _try_spmd_latlon_pad(data: jnp.ndarray, halo: int, negate: bool):
     return make_latlon_band_pad_body(mesh, halo=halo, negate=negate)(data)
 
 
+def _spmd_lat_mesh():
+    """Return the armed lat-band SPMD mesh, or ``None`` if the ``spmd`` backend
+    is not active (caller falls through to the mpi/local branch).  Shared by the
+    wall-pad / pole-zero SPMD routing so they key on the backend the same way as
+    :func:`_try_spmd_latlon_pad`."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or "lat" not in getattr(mesh, "axis_names", ()):
+        return None
+    return mesh
+
+
 def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar field with halo cells using pole-folding.
 
@@ -376,6 +390,13 @@ def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
     -------
     jax.Array : same shape as ``field``.
     """
+    # SPMD lat-band backend (single-controller multi-GPU): zero index 0 only on
+    # the south band, index -1 only on the north band; interior band cuts keep
+    # their cross-band gradient (the analogue of the MPI pole-touch test).
+    _spmd_mesh = _spmd_lat_mesh()
+    if _spmd_mesh is not None:
+        from legoesm.parallel.latlon_spmd import zero_polar_lat_ends_band_spmd
+        return zero_polar_lat_ends_band_spmd(field, _spmd_mesh)
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
@@ -464,6 +485,26 @@ def pad_with_pole_bc_lat(
     # works for arbitrary trailing dimensions (1D sin_lat, 2D u-face,
     # 3D u-face-with-levels, etc.).
     pad_widths = ((halo, halo),) + ((0, 0),) * (interior.ndim - 1)
+
+    # SPMD lat-band backend (single-controller multi-GPU): interior band cuts
+    # must read the NEIGHBOUR band's edge row (ppermute), not a constant wall;
+    # only the PHYSICAL pole end bands get the south/north wall constant.  The
+    # local jnp.pad below would wall EVERY band's boundary (wrong cut rows).
+    _spmd_mesh = _spmd_lat_mesh()
+    if _spmd_mesh is not None:
+        if north_fold or is_vector_u or is_vector_v:
+            # The wall band body handles the regular-grid wall BC only; the
+            # tripolar fold seam (sign-flipped permutation across the north
+            # boundary) is a follow-up.  Fail loud rather than silently wall it.
+            raise NotImplementedError(
+                "pad_with_pole_bc_lat SPMD: tripolar north fold / vector-sign "
+                "flags are a follow-up (the regular-grid wall BC is wired). "
+                "north_fold=%r is_vector_u=%r is_vector_v=%r"
+                % (north_fold, is_vector_u, is_vector_v))
+        from legoesm.parallel.latlon_spmd import make_latlon_band_wall_pad_body
+        return make_latlon_band_wall_pad_body(
+            _spmd_mesh, halo=halo,
+            south_value=south_value, north_value=north_value)(interior)
 
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
     if get_halo_backend() != "mpi":

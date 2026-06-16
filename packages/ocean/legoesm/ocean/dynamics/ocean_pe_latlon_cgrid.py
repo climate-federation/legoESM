@@ -358,14 +358,30 @@ def tvd_to_v_points(
     # (3) Historical second-neighbour edge clamps at PHYSICAL poles only
     #     (static at trace time; MPI cut ends keep the true neighbour
     #     rows delivered by the pad).
-    south_is_pole, north_is_pole = lat_ends_are_poles()
-    if south_is_pole:
-        f_south2 = f_south2.at[1].set(f_south[1])
-    if north_is_pole:
+    # Restore the historical 2nd-neighbour edge clamp at PHYSICAL poles only.
+    # Under SPMD ``lat_ends_are_poles()`` is (True, True) on every band, so the
+    # static ``if`` would clamp every band's INTERIOR cut (SPMD-blind) — select
+    # the clamp DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
+    if _spmd_pm is not None:
+        south_mask, north_mask = _spmd_pm
+        f_south2 = jnp.where(
+            south_mask, f_south2.at[1].set(f_south[1]), f_south2)
         if fold_is_local(grid):
-            f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
-            f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+            _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+        f_north2 = jnp.where(north_mask, _fn, f_north2)
+    else:
+        south_is_pole, north_is_pole = lat_ends_are_poles()
+        if south_is_pole:
+            f_south2 = f_south2.at[1].set(f_south[1])
+        if north_is_pole:
+            if fold_is_local(grid):
+                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            else:
+                f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
     delta_pos = f_north - f_south
     r_pos = grad_safe_ratio(
@@ -513,6 +529,11 @@ def neumann_fill_cgrid(
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
+    # Under SPMD the static (south/north)_is_pole are (True, True) on every band,
+    # so the per-pass Neumann edge-clamp below would fire at every band's INTERIOR
+    # cut (SPMD-blind) — select it DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     filled = f
     # Cast the mask to the FIELD dtype so the fused (field, mask) lat
@@ -550,18 +571,34 @@ def neumann_fill_cgrid(
         m_s = jnp.concatenate([m_pad[0:1], m[:-1]], axis=0)
         f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
-        if south_is_pole:
-            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
-            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-        if north_is_pole:
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            f_s = jnp.where(south_mask,
+                            jnp.concatenate([filled[0:1], f_s[1:]], axis=0), f_s)
+            m_s = jnp.where(south_mask,
+                            jnp.concatenate([m[0:1], m_s[1:]], axis=0), m_s)
             if use_fold:
-                f_n = jnp.concatenate(
+                _fn = jnp.concatenate(
                     [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
-                m_n = jnp.concatenate(
-                    [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:, fold.perm_T]], axis=0)
             else:
-                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
-                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+                _fn = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+            f_n = jnp.where(north_mask, _fn, f_n)
+            m_n = jnp.where(north_mask, _mn, m_n)
+        else:
+            if south_is_pole:
+                f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+                m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+            if north_is_pole:
+                if use_fold:
+                    f_n = jnp.concatenate(
+                        [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
+                    m_n = jnp.concatenate(
+                        [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                else:
+                    f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                    m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
         f_w = jnp.roll(filled, 1, axis=1)
         m_w = jnp.roll(m, 1, axis=1)
         f_e = jnp.roll(filled, -1, axis=1)

@@ -63,6 +63,32 @@ the largest resolution with ≥2 device points.)
 3. **spectral moist + MPI.** Spectral has no tracer storage (no moist) and no
    MPI path; both are large additions, and spectral is single-device anyway.
 
+## The np16 -> np32 (2^4 -> 2^5) MPAS cliff — root cause + fix
+
+Symptom: MPAS/icosahedral CPU strong scaling DROPS across the 16->32 rank
+boundary on one node (I5 strong f64: np16 = 33.9 ms/step, np32 = 76.0 ms —
+2.24x SLOWER at 2x ranks; weak-eff cratered 0.80 -> 0.07).
+
+Ginsburg nodes = 2 sockets x 16 cores, so np16 fills exactly one socket and
+np32 spans both — which looks like a NUMA cross-socket cliff. But codex
+adversarial review + the A/B refute pure-NUMA: the **hybrid 16r x 2c config also
+spans both sockets yet recovers to 34 ms** (2.2x). So the binding mechanism is
+not cross-socket *memory*; it is **rank count** — 32 single-threaded MPI ranks
+on one node hammer the mpi4jax/Gloo path (267.8 us sendrecv latency floor x
+per-RK-stage halo x 32 ranks, plus MPI-progress starvation when every core is a
+rank). Fewer ranks => fewer messages => the cliff disappears.
+
+Fix (shipped): run **fewer ranks x more cores/rank** per node. Measured I5
+strong f64, 32 cores/node: 32r x1c = 76 ms; 16r x2c = 34 ms (2.2x); **8r x4c =
+28.8 ms (2.64x, optimum)**; 4r x8c = 30 ms; 2r x16c = 40 ms.  Enabled by
+`run_cpu_mpi_scaling._configure_jax_cpu` becoming cpus-per-task-aware (multi-
+threaded Eigen when SLURM_CPUS_PER_TASK>1; single-thread when =1).  Scaling is
+now plotted vs CORES (n_resource), so packed and hybrid compare honestly.
+
+RECOMMENDED MPAS CPU config: `--ntasks-per-node=8 --cpus-per-task=4`
+(`numactl --localalloc` + `--distribution=block:block` give a small extra
+trim; not the primary fix). Do NOT pack 32 single-thread ranks/node.
+
 ## Measured roofline (the quantified limit)
 
 `scripts/bench/roofline_probe.py` on Ginsburg (job 8502024):

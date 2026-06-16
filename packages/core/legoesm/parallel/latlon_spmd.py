@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 from jax.sharding import PartitionSpec as P
 
 
-def _latlon_band_perms(n_dev: int):
+def latlon_band_perms(n_dev: int):
     """Static (src, dst) permutation pairs over the 1-D ``lat`` band axis.
 
     ``perm_north``: each band ``b`` receives band ``b+1``'s bottom rows as its
@@ -46,6 +46,11 @@ def _latlon_band_perms(n_dev: int):
     the north pole fold.  ``perm_south``: band ``b`` receives band ``b-1``'s top
     rows as its SOUTH ghost -> ``(s, s+1)``; the bottom band (0) gets zeros ->
     south pole fold.
+
+    PUBLIC (issue #353 SPMD step): the ocean lat-band SPMD wrapper
+    (``ocean.dynamics.sharded_ocean_step``) reuses ``perm_north`` to lift the
+    staggered-v north boundary row from band ``r+1`` (the no-private-cross-import
+    rule — promoted from ``_latlon_band_perms``).
     """
     perm_north = tuple((s, s - 1) for s in range(1, n_dev))   # send up->down
     perm_south = tuple((s, s + 1) for s in range(0, n_dev - 1))  # down->up
@@ -114,7 +119,7 @@ def make_latlon_band_pad_body(mesh, halo: int = 1, negate: bool = False):
             f"make_latlon_band_pad_body: needs a 1-D (n_lat-band) mesh; got "
             f"shape {tuple(mesh.devices.shape)}")
     axis = mesh.axis_names[0]
-    perm_north, perm_south = _latlon_band_perms(n_dev)
+    perm_north, perm_south = latlon_band_perms(n_dev)
 
     def body(tile):
         # 1. longitude periodic wrap (LOCAL — full lon circle per band).
@@ -137,6 +142,107 @@ def make_latlon_band_pad_body(mesh, halo: int = 1, negate: bool = False):
         return jnp.concatenate([south_ghost, data_lon, north_ghost], axis=0)
 
     return body
+
+
+def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
+                                   south_value: float = 0.0,
+                                   north_value: float = 0.0):
+    """Unwrapped lat-ONLY band WALL pad body for use INSIDE a shard_map over the
+    ``"lat"`` axis — the SPMD analogue of the LOCAL branch of
+    :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat`.
+
+    Returns ``body(tile)`` where ``tile`` is one band's local
+    ``(nl_lat, ...)`` block and the result is ``(nl_lat+2h, ...)`` — lat-band
+    ppermute of the edge rows at INTERIOR cuts (so the cut ghost row is the
+    neighbour band's true edge row, NOT a wall), and a CONSTANT pad
+    (``south_value`` / ``north_value``) at the PHYSICAL pole end bands
+    (``axis_index == 0`` / ``N-1``).  Unlike :func:`make_latlon_band_pad_body`
+    this pads ONLY axis 0 (lon is left untouched, matching
+    ``pad_with_pole_bc_lat``) and the pole ghost is a constant WALL, not the
+    atmospheric pole fold.  Bit-identical, per band, to the serial
+    ``pad_with_pole_bc_lat`` local pad.
+
+    Regular-grid only: ``is_vector_*`` / ``north_fold`` (tripolar fold seam)
+    are a follow-up — the SPMD ocean wrapper raises on an active fold.
+    """
+    n_dev = mesh.devices.size
+    if tuple(mesh.devices.shape) != (n_dev,):
+        raise ValueError(
+            f"make_latlon_band_wall_pad_body: needs a 1-D (n_lat-band) mesh; "
+            f"got shape {tuple(mesh.devices.shape)}")
+    axis = mesh.axis_names[0]
+    perm_north, perm_south = latlon_band_perms(n_dev)
+
+    def body(tile):
+        # lat-band ppermute of the edge rows (axis 0 = south->north; row 0 is the
+        # SOUTH edge, row -1 the NORTH edge).  No lon pad (pad_with_pole_bc_lat
+        # leaves lon untouched).
+        south_edge = tile[:halo]       # my south rows -> band below (b-1)'s N ghost
+        north_edge = tile[-halo:]      # my north rows -> band above (b+1)'s S ghost
+        north_recv = jax.lax.ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
+        south_recv = jax.lax.ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
+
+        # CONSTANT wall pad at the physical pole end bands (ppermute non-targets
+        # receive zeros from these rows, but the where below overrides them with
+        # the wall constant of the right shape).
+        b = jax.lax.axis_index(axis)
+        south_wall = jnp.full_like(south_recv, south_value)
+        north_wall = jnp.full_like(north_recv, north_value)
+        south_ghost = jnp.where(b == 0, south_wall, south_recv)
+        north_ghost = jnp.where(b == n_dev - 1, north_wall, north_recv)
+        return jnp.concatenate([south_ghost, tile, north_ghost], axis=0)
+
+    return body
+
+
+def spmd_pole_end_masks():
+    """``(south_mask, north_mask)`` TRACED scalar booleans for the active band
+    under the armed lat-band SPMD backend, or ``None`` if SPMD is not active.
+
+    The SPMD twin of the operators' static ``lat_ends_are_poles()``: under the
+    single-program SPMD ``shard_map`` there is no STATIC per-band pole answer (the
+    same compiled body runs on every band), so an operator that restores the
+    serial pole edge-clamp at PHYSICAL poles only must select it DATA-dependently
+    —  ``south_mask = (axis_index("lat") == 0)``,
+    ``north_mask = (axis_index("lat") == N-1)`` — via ``jnp.where`` rather than a
+    Python ``if`` (which under SPMD would clamp every band's INTERIOR cut, the
+    ``lat_ends_are_poles() == (True, True)`` SPMD-blind bug).  Returns ``None``
+    for the local / MPI / cube paths so the caller keeps its existing static
+    ``lat_ends_are_poles()`` branch unchanged (additive; serial/MPI byte-exact).
+
+    MUST be called INSIDE a ``shard_map`` over the ``"lat"`` axis (``axis_index``
+    is only defined there).  The masks broadcast against any array (scalar bool
+    vs array in ``jnp.where``)."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or "lat" not in tuple(getattr(mesh, "axis_names", ())):
+        return None
+    n_dev = mesh.devices.size
+    b = jax.lax.axis_index("lat")
+    return (b == 0), (b == n_dev - 1)
+
+
+def zero_polar_lat_ends_band_spmd(field, mesh):
+    """SPMD analogue of the MPI branch of
+    :func:`legoesm.grids.halo_latlon.zero_polar_lat_ends` — zero axis-0 index 0
+    ONLY on the south band (``axis_index == 0``) and index ``-1`` ONLY on the
+    north band (``axis_index == N-1``); INTERIOR band cuts are left intact (their
+    cut v-row carries the cross-band gradient).
+
+    Must be called INSIDE a shard_map over the same ``"lat"`` axis.  Mirrors the
+    MPI ``south_rank is None`` / ``north_rank is None`` pole-touch test with
+    ``jax.lax.axis_index`` (data-dependent ⇒ ``jnp.where``, both ends traced).
+    """
+    n_dev = mesh.devices.size
+    axis = mesh.axis_names[0]
+    b = jax.lax.axis_index(axis)
+    zero0 = field.at[0].set(jnp.zeros_like(field[0]))
+    out = jnp.where(b == 0, zero0, field)
+    zerom1 = out.at[-1].set(jnp.zeros_like(out[-1]))
+    out = jnp.where(b == n_dev - 1, zerom1, out)
+    return out
 
 
 def pad_halo_latlon_band_spmd(mesh, halo: int = 1, negate: bool = False):
