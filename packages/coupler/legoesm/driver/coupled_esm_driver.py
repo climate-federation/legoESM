@@ -185,12 +185,25 @@ class CoupledESMDriver:
         # Force the OMIP-validated cold-start stack (the defaults
         # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
         # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
-        # omip_rk3_coldstart_solve).
+        # omip_rk3_coldstart_solve).  C_smag_lap + smag_cfl_safety are the
+        # CFL-capped Laplacian-Smagorinsky eddy viscosity that damps the
+        # geostrophic-adjustment transient off the (rest-velocity) WOA density
+        # field — WITHOUT it the standalone ocean blows up from the WOA IC alone
+        # (max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h; the OMIP latlon
+        # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
+        # 0.125; see omip_smag_cap_stabilizer).
         ocfg = _oc._replace(
             barotropic_solver="implicit_cn",
             momentum_time_integrator="rk3",
             pgf_scheme="smc03",
             implicit_vertical_mixing=True,
+            # Additive Laplacian-Smagorinsky (the "none" lateral-friction
+            # closure); force scheme="none" so a caller-supplied om4p25/qg_leith
+            # config does not trip the model's "no additive A_h/C_smag with a
+            # closure scheme" validation (codex LOW).
+            lateral_friction_scheme="none",
+            C_smag_lap=3.0,
+            smag_cfl_safety=0.125,
         )
 
         if cfg.ocean_dt_s <= 0.0:
@@ -211,6 +224,7 @@ class CoupledESMDriver:
             from legoesm.ocean.init_woa import (
                 woa_ocean_mask, init_ocean_from_woa,
             )
+            from legoesm.ocean.init_latlon_cgrid import apply_balanced_init
             if not cfg.woa_t_path or not cfg.woa_s_path:
                 raise ValueError(
                     "ocean_ic='woa' requires woa_t_path and woa_s_path "
@@ -245,6 +259,16 @@ class CoupledESMDriver:
             self._ocean_state = base_state._replace(
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
+            )
+            # Balanced cold start (MANDATORY for WOA): the rest-velocity state
+            # leaves WOA's baroclinic PGF UNBALANCED -> a violent geostrophic
+            # adjustment that goes nonlinear (the standalone ocean blows from
+            # the WOA IC alone: max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h).
+            # apply_balanced_init seeds u/v/eta in geostrophic / level-of-no-
+            # motion balance so there is no adjustment shock (OMIP-validated
+            # cold-start; see omip_smag_cap_stabilizer / omip_rk3_coldstart).
+            self._ocean_state = apply_balanced_init(
+                self._ocean_state, self._ocean_grid, z_coord, ocfg,
             )
         elif cfg.ocean_ic == "rest":
             # Idealized aquaplanet rest state: flat bottom, ALL-OCEAN (no polar
