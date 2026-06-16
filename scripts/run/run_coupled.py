@@ -141,6 +141,15 @@ def main():
                         choices=["cubed_sphere", "latlon"],
                         help="Atmosphere grid (default cubed_sphere); 'latlon' "
                              "is required for --ocean dynamic (shared grid)")
+    parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Fourier polar filter for the lat-lon C-grid "
+                             "(default on for --grid latlon; ignored on cube). "
+                             "Truncates the high-wavenumber lon modes that "
+                             "violate the pole-cell CFL, so dt is set by the "
+                             "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
+                             "being clamped to ~5s. Without it a 2deg lat-lon "
+                             "run is ~80x more steps and infeasible.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -278,6 +287,10 @@ def main():
             # cube-only.  Cube keeps the default cdgrid.
             discretization=("latlon_cgrid" if args.grid == "latlon"
                             else "cdgrid"),
+            # Fourier polar filter (lat-lon only): lets the factory/CFL clamp dt
+            # by the equatorial CFL instead of the ~60x-smaller pole-cell dx, so
+            # a 2deg run uses dt~450s (5760 steps/30d) not dt~5.6s (460k steps).
+            use_polar_filter=(args.grid == "latlon" and args.polar_filter),
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
