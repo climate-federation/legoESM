@@ -140,12 +140,35 @@ LATLON_RECIPES = {
 # --- MPAS (Voronoi C-grid) recipes (MPASOceanConfig scheme bundles) ----------
 
 MPAS_RECIPES = {
+    # The de-facto default MPAS dycore (legoESM MPAS defaults + eos="wright") —
+    # what an MPAS scrape-path experiment runs. Identical to legoesm_linear_mpas_v1
+    # except eos. The MPAS sibling of default_wright_v1.
+    "default_wright_mpas_v1": {
+        "eos": "wright",
+        "tracer_advection": "upwind",
+        "pgf_scheme": "centered",
+        "barotropic_solver": "explicit_substep",
+        "pv_scheme": "enstrophy",
+        "implicit_vertical_mixing": True,
+    },
     # legoESM default linear-EOS MPAS dycore — the global-overturning MPAS recipe.
     "legoesm_linear_mpas_v1": {
         "eos": "linear",
         "tracer_advection": "upwind",
         "pgf_scheme": "centered",
         "barotropic_solver": "explicit_substep",
+        "pv_scheme": "enstrophy",
+        "implicit_vertical_mixing": True,
+    },
+    # DINO (Kamm et al. 2025) NEMO double-gyre approximation, MPAS — the dycore
+    # identity of dino_mpas_model_config (Wright EOS, TVD tracers, implicit-CN
+    # barotropic, enstrophy-conserving PV). The MPAS sibling of nemo_dino_v1;
+    # drift-guarded against the factory by tests/ocean/unit/test_recipes.py.
+    "nemo_dino_mpas_v1": {
+        "eos": "wright",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "centered",
+        "barotropic_solver": "implicit_cn",
         "pv_scheme": "enstrophy",
         "implicit_vertical_mixing": True,
     },

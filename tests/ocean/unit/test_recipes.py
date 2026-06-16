@@ -34,7 +34,10 @@ class TestRegistry:
         assert "veros_faithful_v1" in all_recipes
         assert "nemo_dino_v1" in all_recipes
         assert "legoesm_linear_mpas_v1" in all_recipes
-        assert list_recipes("mpas") == ["legoesm_linear_mpas_v1"]
+        assert "nemo_v1" in all_recipes
+        assert set(list_recipes("mpas")) == {
+            "default_wright_mpas_v1", "legoesm_linear_mpas_v1",
+            "nemo_dino_mpas_v1"}
 
     def test_get_recipe_returns_copy(self):
         a = get_recipe("legoesm_linear_v1")
@@ -107,6 +110,23 @@ class TestCatalogMatchesFactories:
         mc = nemo_lat_lon_model_config()
         for k, v in get_recipe("nemo_v1").items():
             assert getattr(mc, k) == v, k
+
+    def test_nemo_dino_mpas_v1_is_dino_mpas_dycore(self):
+        """Drift guard for nemo_dino_mpas_v1 == dino_mpas_model_config."""
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.ocean.experiments.dino import DINOConfig, dino_mpas_model_config
+        out = dino_mpas_model_config(create_voronoi_mesh(2), DINOConfig())
+        mc = out[0] if isinstance(out, tuple) else out
+        for k, v in get_recipe("nemo_dino_mpas_v1", "mpas").items():
+            assert getattr(mc, k) == v, k
+
+    def test_default_wright_mpas_v1_is_linear_mpas_with_wright_eos(self):
+        """default_wright_mpas_v1 == legoesm_linear_mpas_v1 but eos=wright."""
+        dw = get_recipe("default_wright_mpas_v1", "mpas")
+        lin = get_recipe("legoesm_linear_mpas_v1", "mpas")
+        assert dw["eos"] == "wright" and lin["eos"] == "linear"
+        assert {k: v for k, v in dw.items() if k != "eos"} == \
+            {k: v for k, v in lin.items() if k != "eos"}
 
 
 class TestReuse:
