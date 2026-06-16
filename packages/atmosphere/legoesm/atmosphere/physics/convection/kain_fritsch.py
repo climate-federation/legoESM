@@ -68,6 +68,8 @@ _KF_SHARPNESS_M = 200.0
 _KF_RAMP_WIDTH = 0.05
 _KF_MIN_ENTRAIN_MULTIPLIER = 0.5
 _KF_DETRAIN_BOOST = 1.5
+# KF-Eta PROF5 Gaussian-mixing quadrature constants transcribed from WRF
+# ``module_cu_kfeta.F`` ``SUBROUTINE PROF5``.
 _KF_PROF5_SQRT2P = 2.506628
 _KF_PROF5_A1 = 0.4361836
 _KF_PROF5_A2 = -0.1201676
@@ -75,6 +77,10 @@ _KF_PROF5_A3 = 0.9372980
 _KF_PROF5_P = 0.33267
 _KF_PROF5_SIGMA = 0.166666667
 _KF_PROF5_FE = 0.202765151
+_KF_PROF5_EXP_NEG_HALF_3SIGMA_SQ = -4.5
+_KF_PROF5_T1 = 0.500498
+_KF_PROF5_VERY_BUOYANT_ENV_FRACTION = 0.95
+_KF_PROF5_CRITICAL_ENV_FRACTION = 0.10
 # KF-Eta initial updraft vertical velocity and condensate loading constants
 # transcribed from WRF ``module_cu_kfeta.F``:
 #   * lines 1038-1047: DTTOT, GDT=2*g*DTTOT*500/TVEN,
@@ -99,11 +105,13 @@ _KF_CONDLOAD_RATIO_FLOOR = 1.0e-8
 #     require at least 50 hPa of depth;
 #   * line 1703: DMFFRC = 2*(1 - RHBAR), Kain (2004) Eq. 11;
 #   * lines 1737-1760: relative humidity decreases 20% per km downward.
+# The RH clip only bounds pathological supersaturation in the diagnostic mean.
 _KF_DD_START_DEPTH_PA = 150.0e2
 _KF_DD_MIN_DEPTH_PA = 50.0e2
 _KF_DD_PRESSURE_SHARPNESS_PA = 1.0e3
 _KF_DD_DMFFRC_COEFF = 2.0
 _KF_DD_RH_DECREASE_PER_M = 0.2 / 1000.0
+_KF_DD_RH_CLIP_MAX = 1.5
 
 
 class _CondloadProfile(NamedTuple):
@@ -323,10 +331,11 @@ def _kf_initial_wlcl(
     AD sees finite subgradients away from the documented cutoff.
     """
     dttot = dtlcl + dtrh
+    dttot_sqrt = jnp.maximum(dttot, jnp.asarray(_KF_DTTOT_MIN_K, dtype=dttot.dtype))
     gdt = (
         2.0
         * constants.g
-        * jnp.maximum(dttot, 0.0)
+        * dttot_sqrt
         * _KF_WLCL_BUOYANCY_DEPTH_M
         / jnp.maximum(Tv_env_at_lcl, 1.0)
     )
@@ -345,6 +354,7 @@ def _kf_condload_profile(
     M_b: jax.Array,
     wkl: jax.Array,
     wlcl: jax.Array,
+    z_lcl: jax.Array,
     config: KainFritschConfig,
 ) -> _CondloadProfile:
     """Apply the KF-Eta CONDLOAD vertical-velocity/fallout recursion.
@@ -368,15 +378,17 @@ def _kf_condload_profile(
     g = jnp.asarray(constants.g, dtype=dtype)
     dp = (p_half[:, 1:] - p_half[:, :-1]).astype(dtype)
     Tv_env = virtual_temperature(T_env, q_env)
+    B_unloaded = virtual_temperature(plume.T_u, plume.q_u) - Tv_env
     rad = _faithful_rad(wkl, config)
 
     # Surface-first arrays for the upward scan.
     qc_sf = jnp.maximum(plume.q_c_u[:, ::-1], 0.0).astype(dtype)
     M_sf = jnp.maximum(plume.M_u[:, ::-1], 0.0).astype(dtype)
-    B_sf = plume.B_u[:, ::-1].astype(dtype)
+    B_sf = B_unloaded[:, ::-1].astype(dtype)
     Tv_sf = Tv_env[:, ::-1].astype(dtype)
     z_sf = z[:, ::-1].astype(dtype)
     dp_sf = dp[:, ::-1].astype(dtype)
+    in_cloud_sf = (z_sf >= z_lcl[:, None]).astype(dtype)
 
     inputs = (
         jnp.moveaxis(qc_sf, 1, 0),
@@ -385,18 +397,19 @@ def _kf_condload_profile(
         jnp.moveaxis(Tv_sf, 1, 0),
         jnp.moveaxis(z_sf, 1, 0),
         jnp.moveaxis(dp_sf, 1, 0),
+        jnp.moveaxis(in_cloud_sf, 1, 0),
     )
     init = (
         (jnp.maximum(wlcl, _KF_WLCL_BASE_M_S) ** 2).astype(dtype),  # WTW
         jnp.zeros((ncol,), dtype=dtype),                  # retained QLIQ
         jnp.maximum(M_b, 0.0).astype(dtype),              # UPOLD
-        z_sf[:, 0],                                      # previous z
+        z_lcl.astype(dtype),                              # previous z
         jnp.ones((ncol,), dtype=dtype),                  # cumulative alive
     )
 
     def step(carry, layer_inputs):
         wtw, qliq_prev, upold_prev, z_prev, alive_prev = carry
-        qc_total, M_layer, B_layer, Tv_layer, z_layer, dp_layer = layer_inputs
+        qc_total, M_layer, B_layer, Tv_layer, z_layer, dp_layer, in_cloud = layer_inputs
         dz = jnp.maximum(z_layer - z_prev, 1.0)
 
         # Fresh condensate entering CONDLOAD.  The reference separates
@@ -477,14 +490,27 @@ def _kf_condload_profile(
         precip_flux = (qout * jnp.maximum(upold_prev, 0.0) * alive_prev).astype(dtype)
         w_u = (jnp.sqrt(jnp.maximum(wtw_new, sqrt_floor)) * alive).astype(dtype)
 
-        new_carry = (
+        new_carry_active = (
             wtw_new.astype(dtype),
             qliq_new,
             jnp.maximum(M_layer, 0.0),
             z_layer,
             alive,
         )
-        output = (qliq_new * alive, M_layer * alive, precip_flux, w_u, alive)
+        new_carry = (
+            jnp.where(in_cloud > 0.0, new_carry_active[0], wtw),
+            jnp.where(in_cloud > 0.0, new_carry_active[1], qliq_prev),
+            jnp.where(in_cloud > 0.0, new_carry_active[2], upold_prev),
+            jnp.where(in_cloud > 0.0, new_carry_active[3], z_prev),
+            jnp.where(in_cloud > 0.0, new_carry_active[4], alive_prev),
+        )
+        output = (
+            jnp.where(in_cloud > 0.0, qliq_new * alive, 0.0),
+            jnp.where(in_cloud > 0.0, M_layer * alive, 0.0),
+            jnp.where(in_cloud > 0.0, precip_flux, 0.0),
+            jnp.where(in_cloud > 0.0, w_u, 0.0),
+            jnp.where(in_cloud > 0.0, alive, 0.0),
+        )
         return new_carry, output
 
     _carry, outputs = jax.lax.scan(step, init, inputs)
@@ -527,7 +553,7 @@ def _kf_downdraft_evaporation(
     dtype = T_env.dtype
     dp = p_half[:, 1:] - p_half[:, :-1]
     qsat = saturation_mixing_ratio(T_env, p_full)
-    rh = jnp.clip(q_env / jnp.maximum(qsat, 1.0e-12), 0.0, 1.5)
+    rh = jnp.clip(q_env / jnp.maximum(qsat, 1.0e-12), 0.0, _KF_DD_RH_CLIP_MAX)
 
     p_source_top = p_lcl[:, None] - _KF_DD_START_DEPTH_PA
     in_source = jax.nn.sigmoid(
@@ -586,9 +612,9 @@ def _kf_prof5(eq: jax.Array) -> tuple[jax.Array, jax.Array]:
     eq = jnp.clip(eq, 0.0, 1.0)
     y = 6.0 * eq - 3.0
     ey = jnp.exp(-0.5 * y * y)
-    e45 = jnp.exp(jnp.asarray(-4.5, dtype=eq.dtype))
+    e45 = jnp.exp(jnp.asarray(_KF_PROF5_EXP_NEG_HALF_3SIGMA_SQ, dtype=eq.dtype))
     t2 = 1.0 / (1.0 + _KF_PROF5_P * jnp.abs(y))
-    t1 = jnp.asarray(0.500498, dtype=eq.dtype)
+    t1 = jnp.asarray(_KF_PROF5_T1, dtype=eq.dtype)
     c1 = _KF_PROF5_A1 * t1 + _KF_PROF5_A2 * t1 * t1 + _KF_PROF5_A3 * t1 * t1 * t1
     c2 = _KF_PROF5_A1 * t2 + _KF_PROF5_A2 * t2 * t2 + _KF_PROF5_A3 * t2 * t2 * t2
     sigma = jnp.asarray(_KF_PROF5_SIGMA, dtype=eq.dtype)
@@ -674,15 +700,21 @@ def _kf_buoyancy_sort_rates(
         1.0 - jnp.maximum(plume.q_c_u, 0.0)
     )
     tv95 = _kf_mixed_virtual_temperature(
-        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full, 0.95,
+        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full,
+        _KF_PROF5_VERY_BUOYANT_ENV_FRACTION,
     )
     tv10 = _kf_mixed_virtual_temperature(
-        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full, 0.10,
+        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full,
+        _KF_PROF5_CRITICAL_ENV_FRACTION,
     )
 
     colder = tv_u <= tv_env
     very_buoyant = tv95 > tv_env
-    eq = (tv_env - tv_u) * 0.10 / jnp.maximum(tv10 - tv_u, 1.0e-6)
+    eq = (
+        (tv_env - tv_u)
+        * _KF_PROF5_CRITICAL_ENV_FRACTION
+        / jnp.maximum(tv10 - tv_u, 1.0e-6)
+    )
     eq = jnp.clip(eq, 0.0, 1.0)
     ee_prof, ud_prof = _kf_prof5(eq)
     ee2 = jnp.where(colder, _KF_MIN_ENTRAIN_MULTIPLIER, jnp.where(very_buoyant, 1.0, ee_prof))
@@ -892,6 +924,7 @@ def kain_fritsch_convection(
         T_lcl_perturbed = lcl.T_lcl + dtlcl + dtrh
     else:
         # Legacy: smooth-interpolate environment T and w at the level index.
+        z_lcl_for_trigger = _interpolate_at_smooth_level(z, k_lcl_smooth)
         T_env_at_lcl = _interpolate_at_smooth_level(T, k_lcl_smooth)
         q_env_at_lcl = _interpolate_at_smooth_level(q_v, k_lcl_smooth)
         w_grid_at_lcl = _interpolate_at_smooth_level(w_grid, k_lcl_smooth)
@@ -1036,7 +1069,7 @@ def kain_fritsch_convection(
     )
 
     # -- Cloud depth — z(LCL) → z(LNB) -------------------------------------
-    z_lcl = _interpolate_at_smooth_level(z, k_lcl_smooth)
+    z_lcl = z_lcl_for_trigger
     z_lnb = _interpolate_at_smooth_level(z, k_lnb_smooth)
     cloud_depth = jnp.maximum(z_lnb - z_lcl, 0.0)
 
@@ -1055,7 +1088,7 @@ def kain_fritsch_convection(
     plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
     plume = plume._replace(M_u=plume_M_u_capped)
     condload = _kf_condload_profile(
-        T, q_v, p_full, p_half, z, plume, M_b, wkl, wlcl, config,
+        T, q_v, p_full, p_half, z, plume, M_b, wkl, wlcl, z_lcl, config,
     )
     plume = plume._replace(M_u=condload.M_u, q_c_u=condload.q_c_u)
 

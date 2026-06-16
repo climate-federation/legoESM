@@ -269,6 +269,13 @@ def test_kf_initial_wlcl_matches_kain_2004_formula_and_ad():
     assert jnp.isfinite(g)
     assert float(g) > 0.0
 
+    inactive_grad = jax.jit(jax.grad(
+        lambda x: _kf_initial_wlcl(dtlcl, jnp.asarray([x]), Tv_env)[0]
+    ))
+    for inactive_dtrh in (-0.36, -0.01):
+        g_inactive = inactive_grad(jnp.asarray(inactive_dtrh))
+        assert jnp.isfinite(g_inactive)
+
 
 def test_kf_condload_fallout_reduces_retained_cloud_and_is_ad_safe():
     """CONDLOAD keeps retained cloud finite and diagnoses fallout."""
@@ -285,15 +292,21 @@ def test_kf_condload_fallout_reduces_retained_cloud_and_is_ad_safe():
         B_u=jnp.ones_like(T),
     )
     cfg = KainFritschConfig()
+    z_lcl = z[:, 6]
     result = _kf_condload_profile(
         T, q, pf, ph, z, plume,
         M_b=jnp.asarray([0.03]),
         wkl=jnp.asarray([0.1]),
         wlcl=jnp.asarray([2.0]),
+        z_lcl=z_lcl,
         config=cfg,
     )
     assert jnp.all(jnp.isfinite(result.q_c_u))
     assert jnp.all(jnp.isfinite(result.M_u))
+    below_cloud_base = z < z_lcl[:, None]
+    assert float(jnp.max(jnp.where(below_cloud_base, result.q_c_u, 0.0))) == 0.0
+    assert float(jnp.max(jnp.where(below_cloud_base, result.M_u, 0.0))) == 0.0
+    assert float(jnp.max(jnp.where(below_cloud_base, result.precip_flux, 0.0))) == 0.0
     assert float(jnp.sum(result.q_c_u)) < float(jnp.sum(qc))
     assert float(jnp.sum(result.precip_flux)) > 0.0
 
@@ -304,6 +317,7 @@ def test_kf_condload_fallout_reduces_retained_cloud_and_is_ad_safe():
             M_b=jnp.asarray([0.03]),
             wkl=jnp.asarray([0.1]),
             wlcl=jnp.asarray([2.0]),
+            z_lcl=z_lcl,
             config=cfg,
         )
         return jnp.sum(r.q_c_u)
