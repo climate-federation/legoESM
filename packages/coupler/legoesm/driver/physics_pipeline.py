@@ -675,13 +675,34 @@ class PhysicsPipeline:
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
 
-        # Convection→microphysics coupling: detrained convective
-        # condensate is added to the cloud-water tendency. Microphysics
-        # processes the augmented bucket on the next step (operator
-        # splitting), giving proper autoconversion / sedimentation /
-        # evaporation for convective rain instead of the previous
-        # instant-fall assumption.
-        dq_c_dt = dq_c_dt + dq_c_dt_conv
+        # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
+        # schemes, ``detrains_to_cloud``) adds convective condensate to the
+        # cloud-water tendency; microphysics processes the augmented bucket on
+        # the next step (operator splitting), giving proper autoconversion /
+        # sedimentation / evaporation for convective rain.
+        #
+        # An ADJUSTMENT scheme (Betts-Miller sbm / dca / Kuo) instead produces a
+        # column-net DRYING that is convective PRECIPITATION, not lingering
+        # grid-scale cloud water.  Routing it into q_c let q_c accumulate ~100x
+        # (in-cloud LWP -> tens of kg/m2, planetary albedo ~0.85, net TOA loss
+        # ~-190 W/m2, runaway cold drift / OLR collapse) because Kessler
+        # autoconversion cannot rain out a convective-precip-rate source.  So
+        # precipitate the column-integrated convective condensate DIRECTLY: the
+        # latent heat is already in ``dT_dt_conv`` (energy-neutral) and the
+        # column water removed equals the added precip (mass-conserving).
+        if _ctr.detrains_to_cloud:
+            dq_c_dt = dq_c_dt + dq_c_dt_conv
+        else:
+            # Convective precip = the column-net VAPOUR sink of the convective
+            # tendency (mass-EXACT for every adjustment scheme: water removed
+            # from q_v == surface precip, independent of how a scheme defines
+            # its dq_c_conv_dt — sbm/dca rescale it to this, but Kuo's
+            # heating-derived condensate does not equal it exactly).
+            _dp = p_s[..., None] * (self.sigma_half[1:] - self.sigma_half[:-1])
+            precip_conv = jnp.maximum(
+                -jnp.sum(dq_v_dt_conv * _dp / constants.g, axis=-1),
+                0.0)  # (..., n, n) kg/m2/s
+            precip = precip + precip_conv
 
         # Boundary layer surface exchange (grid-agnostic: uses [..., -1] indexing).
         #
@@ -1868,8 +1889,16 @@ def build_physics_pipeline(grid, sigma, config):
     # Idealized dry/moist-adjustment tests legitimately run convection with no
     # microphysics, so this is a loud WARNING (not a hard error); a realistic
     # coupled run must enable a microphysics scheme (e.g. 'kessler') to close
-    # the water budget.
-    if config.convection != "none" and config.microphysics == "none":
+    # the water budget.  ADJUSTMENT schemes (sbm/dca/kuo, ``detrains_to_cloud=
+    # False``) are EXEMPT — they precipitate their convective drying DIRECTLY
+    # (the TOA-drift fix), so they close the budget without microphysics and
+    # never trap q_c; only TRUE-detrainment schemes (which feed q_c, whose only
+    # sink is microphysics) hit this trap.
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits as _cst,
+    )
+    if (config.convection != "none" and config.microphysics == "none"
+            and _cst(config.convection).detrains_to_cloud):
         _extra = (
             " AND cloud_scheme=%r is active, so the unbounded cloud water "
             "will also corrupt the cloud-radiation optics" % config.cloud_scheme

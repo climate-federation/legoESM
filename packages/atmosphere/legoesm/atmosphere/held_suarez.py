@@ -559,6 +559,14 @@ def held_suarez_forcing_mpas(
     )
 
 
+# NB: Held-Suarez is NOT tagged column-local.  Its Rayleigh friction is
+# column-local in the sigma branch, but the HYBRID-coordinate branch computes
+# the edge sigma from adjacent CELL pressures (p_full[c0]/p_full[c1],
+# p_s[c0]/p_s[c1]) — for an owned edge whose neighbor cell is a halo, that needs
+# fresh halo p_s.  Skipping the pre-physics halo exchange would use stale halo
+# values for owned-edge wind (codex review).  So we keep the exchange for HS.
+
+
 def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,

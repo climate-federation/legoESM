@@ -77,14 +77,52 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Pin each MPI rank to a single CPU thread
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
-        xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
-    os.environ["XLA_FLAGS"] = xla_flags
+    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
+    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
+    # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
+    # its allocated cores -- fewer ranks means fewer halo messages, the codex
+    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(_v, str(n_thr))
+    if n_thr <= 1:
+        xla_flags = os.environ.get("XLA_FLAGS", "")
+        if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
+            xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
+        os.environ["XLA_FLAGS"] = xla_flags
+
+
+def _configure_jax_gpu(precision: str) -> None:
+    """Pin THIS MPI rank to one local GPU and run JAX on cuda (route-A).
+
+    Single-node multi-GPU via mpi4jax (the SAME mpi4jax halo machinery as the
+    CPU path — make_latlon_mpi_step / cube — just on cuda devices over the
+    PCIe pair).  Must run BEFORE any JAX import.  Local rank from the launcher
+    env (OpenMPI / SLURM).  Mirrors the ocean harness ``_configure_jax_gpu``
+    (bench_ocean_mpi_scaling.py) so the atm lat-lon dycore gets a 2-GPU
+    number via the proven overlay-venv route-A (cuda jax + CUDA-built
+    mpi4jax)."""
+    local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+    if local is None:
+        # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
+        # srun); pinning on it THERE hides all but GPU 0 from a single-process
+        # multi-GPU run (the documented silent eff=0.5 bug, jobs 8454397/
+        # 8454737). Only honor it for a genuine multi-task launch (codex
+        # capstone LOW).
+        slid = os.environ.get("SLURM_LOCALID")
+        nt = os.environ.get("SLURM_NTASKS", "1")
+        if slid is not None and nt.isdigit() and int(nt) > 1:
+            local = slid
+    if local is None:
+        local = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU per rank
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    if precision == "float64":
+        os.environ["JAX_ENABLE_X64"] = "1"
+    # Two ranks share the node; do not let the allocator grab the whole GPU.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
 def _init_mpi() -> tuple[int, int]:
@@ -144,7 +182,7 @@ class ScalingReport:
 # ===========================================================================
 
 GRID_CHOICES = ("cubed-sphere", "latlon", "icosahedral", "spectral")
-PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
+PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full", "moist")
 
 # Grid/physics support matrix.  Moist tiers require tracer storage
 # that MPAS and spectral states do not have today.
@@ -158,7 +196,13 @@ _SUPPORTED_PHYSICS = {
     # benchmark dycore-only with the moist-physics label.
     "cubed-sphere": {"none", "held_suarez"},
     "latlon": {"none", "held_suarez"},
-    "icosahedral": {"none", "held_suarez"},
+    # "moist" = moisture (q_v/q_c/q_r) + Kessler warm-rain condensation,
+    # NO radiation: the moist baroclinic-wave case.  Only wired for
+    # icosahedral/MPAS, the sole multi-rank grid here — Kessler is
+    # column-local so it adds NO horizontal halo coupling beyond the
+    # dycore's tracer exchange, and the dycore already advects tracers
+    # mass-consistently (so moist scales on the same ladder as dry).
+    "icosahedral": {"none", "held_suarez", "moist"},
     "spectral": {"none", "held_suarez"},
 }
 
@@ -626,19 +670,32 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
     mesh = create_voronoi_mesh(subdivision_level=resolution)
+    # Mass fixer adds one global allreduce per step (267.8 us latency floor on
+    # Ginsburg/Gloo). LEGOESM_NO_MASS_FIX=1 disables it for a scaling ABLATION
+    # that isolates the dynamics+halo cost from the conservation allreduce
+    # (codex MPI-improve #3). Production keeps it ON (conservation).
+    _fix_mass = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     config = MPASPrimitiveEquationConfig(
         nu_del4=0.0,
         nu_del4_ps=0.0,
-        fix_mass=True,
+        fix_mass=_fix_mass,
         time_integrator="ssp_rk3",
     )
     model = MPASPrimitiveEquationModel(mesh, sigma, config)
-    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = mesh.nCells * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "icosahedral")
+    if _moist:
+        # Kessler warm-rain forcing bound to this step's dt (the dycore's
+        # operator-split physics_fn convention passes no timestep).  Column-
+        # local ⇒ no extra halo; applied once per step over dt.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_mpas
+        physics_fn = make_kessler_forcing_mpas(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
         # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
@@ -652,7 +709,11 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             scatter_state_voronoi,
             make_voronoi_mpi_step,
         )
-        layout = make_voronoi_partition_layout(mesh, rank, n_ranks)
+        # Partition method A/B (audit #3): LEGOESM_VORONOI_PARTITION =
+        # "geometric" (RCB, default) | "metis" (pymetis k-way edge-cut min).
+        _pmethod = os.environ.get("LEGOESM_VORONOI_PARTITION", "geometric")
+        layout = make_voronoi_partition_layout(mesh, rank, n_ranks,
+                                               method=_pmethod)
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(
             model, layout, sigma, config, physics_fn=physics_fn,
@@ -933,8 +994,25 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
         f"r{result.resolution}_n{result.n_ranks}_{result.precision}.json"
     )
     path = output_dir / fname
+    payload = asdict(result)
+    # Record the actual JAX backend so downstream aggregation does not have to
+    # infer CPU-vs-GPU from the output-dir name (codex review): cpu/gpu/tpu.
+    try:
+        import jax
+        payload["backend"] = jax.default_backend()
+    except Exception:
+        payload["backend"] = ""
+    # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
+    # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
+    # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    payload["cpus_per_task"] = _cpt
+    payload["n_cores"] = result.n_ranks * _cpt
+    # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
+    # with / is mislabeled as a production (mass-conserving) run (codex audit).
+    payload["fix_mass"] = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(asdict(result), f, indent=2)
+        json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
 
 
@@ -977,6 +1055,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--precision", choices=["float32", "float64"], default="float64",
         help="Floating-point precision.",
+    )
+    p.add_argument(
+        "--device", choices=["cpu", "gpu"], default="cpu",
+        help="cpu (default, CPU-MPI) or gpu (route-A: pin each rank to one "
+             "local GPU, run the SAME mpi4jax dycore on the PCIe pair). "
+             "Needs the overlay venv (cuda jax + CUDA-built mpi4jax).",
     )
     p.add_argument("--n-levels", type=int, default=26)
     p.add_argument("--n-warmup", type=int, default=5)
@@ -1032,8 +1116,24 @@ def main() -> int:
             print(json.dumps(asdict(c)))
         return 0
 
-    # --- Configure JAX for CPU ---
-    _configure_jax_cpu(args.precision)
+    # --- Configure JAX for the target device ---
+    if getattr(args, "device", "cpu") == "gpu":
+        _configure_jax_gpu(args.precision)
+        # Fail LOUD on CUDA fallback: without this, a GPU job whose CUDA init
+        # failed (or that forgot --device gpu so _configure_jax_cpu pinned
+        # JAX_PLATFORMS=cpu) silently records CPU numbers labeled as GPU
+        # (bug: the whole g1..g16 ladder ran on CPU).  Refuse to mislabel.
+        import jax as _jax
+        _bk = _jax.default_backend()
+        if _bk != "gpu":
+            raise SystemExit(
+                f"--device gpu requested but JAX default backend is {_bk!r} "
+                f"(CUDA unavailable / not bound). Refusing to record "
+                f"CPU-fallback numbers as GPU. Check CUDA_VISIBLE_DEVICES / "
+                f"the cuda jax plugin on this node."
+            )
+    else:
+        _configure_jax_cpu(args.precision)
 
     # --- A1 SPMD mode: federate processes into ONE multi-controller JAX
     # program BEFORE any other JAX use.  jax.distributed only — the

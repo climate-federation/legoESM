@@ -335,7 +335,13 @@ def barotropic_substeps_latlon_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
         ).astype(eta.dtype)
         eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
-        eta_new = _clamp_redistribute(eta_unfloored, eta_floor, mask, _area)
+        if config.barotropic_local_subcycle_clamp:
+            # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
+            # The global mass-conserving redistribute is deferred to ONCE per
+            # outer step (post-loop, on the time-averaged eta).
+            eta_new = jnp.maximum(eta_unfloored, eta_floor) * mask
+        else:
+            eta_new = _clamp_redistribute(eta_unfloored, eta_floor, mask, _area)
 
         # --- BEBT: Semi-implicit barotropic PGF (#205) ---
         # Blend new and old eta for the pressure gradient to damp fast
@@ -405,7 +411,10 @@ def barotropic_substeps_latlon_cgrid(
             eta_new = (
                 eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(eta.dtype)
             ) * mask
-            eta_new = _clamp_redistribute(eta_new, eta_floor, mask, _area)
+            if config.barotropic_local_subcycle_clamp:
+                eta_new = jnp.maximum(eta_new, eta_floor) * mask
+            else:
+                eta_new = _clamp_redistribute(eta_new, eta_floor, mask, _area)
 
         # Accumulate eta, U_bar, V_bar with cosine filter weights
         eta_sum_new = eta_sum_c + w_i * eta_new
@@ -446,6 +455,15 @@ def barotropic_substeps_latlon_cgrid(
     eta_avg = eta_sum_f / w_total
     U_bar_avg = U_sum_f / w_total
     V_bar_avg = V_sum_f / w_total
+
+    # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
+    # restore GLOBAL mass conservation with ONE redistribute call on the
+    # time-averaged eta (the returned SSH).  No-op (bit-identical to the
+    # per-substep path) when no cell hit eta_floor; this single call's 3 batched
+    # allreduces replace the subcycle's ~3*n_substeps (the outer-step
+    # fix_eta_drift fixer is separate, unaffected).
+    if config.barotropic_local_subcycle_clamp:
+        eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
     # Correct 3D velocities: preserve baroclinic structure.
     # Use time-averaged barotropic velocity for the 3D correction to ensure

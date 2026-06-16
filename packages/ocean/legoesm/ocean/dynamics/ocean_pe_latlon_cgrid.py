@@ -358,14 +358,30 @@ def tvd_to_v_points(
     # (3) Historical second-neighbour edge clamps at PHYSICAL poles only
     #     (static at trace time; MPI cut ends keep the true neighbour
     #     rows delivered by the pad).
-    south_is_pole, north_is_pole = lat_ends_are_poles()
-    if south_is_pole:
-        f_south2 = f_south2.at[1].set(f_south[1])
-    if north_is_pole:
+    # Restore the historical 2nd-neighbour edge clamp at PHYSICAL poles only.
+    # Under SPMD ``lat_ends_are_poles()`` is (True, True) on every band, so the
+    # static ``if`` would clamp every band's INTERIOR cut (SPMD-blind) — select
+    # the clamp DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
+    if _spmd_pm is not None:
+        south_mask, north_mask = _spmd_pm
+        f_south2 = jnp.where(
+            south_mask, f_south2.at[1].set(f_south[1]), f_south2)
         if fold_is_local(grid):
-            f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
-            f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+            _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+        f_north2 = jnp.where(north_mask, _fn, f_north2)
+    else:
+        south_is_pole, north_is_pole = lat_ends_are_poles()
+        if south_is_pole:
+            f_south2 = f_south2.at[1].set(f_south[1])
+        if north_is_pole:
+            if fold_is_local(grid):
+                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            else:
+                f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
     delta_pos = f_north - f_south
     r_pos = grad_safe_ratio(
@@ -513,6 +529,11 @@ def neumann_fill_cgrid(
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
+    # Under SPMD the static (south/north)_is_pole are (True, True) on every band,
+    # so the per-pass Neumann edge-clamp below would fire at every band's INTERIOR
+    # cut (SPMD-blind) — select it DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     filled = f
     # Cast the mask to the FIELD dtype so the fused (field, mask) lat
@@ -550,18 +571,34 @@ def neumann_fill_cgrid(
         m_s = jnp.concatenate([m_pad[0:1], m[:-1]], axis=0)
         f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
-        if south_is_pole:
-            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
-            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-        if north_is_pole:
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            f_s = jnp.where(south_mask,
+                            jnp.concatenate([filled[0:1], f_s[1:]], axis=0), f_s)
+            m_s = jnp.where(south_mask,
+                            jnp.concatenate([m[0:1], m_s[1:]], axis=0), m_s)
             if use_fold:
-                f_n = jnp.concatenate(
+                _fn = jnp.concatenate(
                     [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
-                m_n = jnp.concatenate(
-                    [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:, fold.perm_T]], axis=0)
             else:
-                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
-                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+                _fn = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+            f_n = jnp.where(north_mask, _fn, f_n)
+            m_n = jnp.where(north_mask, _mn, m_n)
+        else:
+            if south_is_pole:
+                f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+                m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+            if north_is_pole:
+                if use_fold:
+                    f_n = jnp.concatenate(
+                        [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
+                    m_n = jnp.concatenate(
+                        [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                else:
+                    f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                    m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
         f_w = jnp.roll(filled, 1, axis=1)
         m_w = jnp.roll(m, 1, axis=1)
         f_e = jnp.roll(filled, -1, axis=1)
@@ -1067,6 +1104,10 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
     the SAME cyclic wrap the q-point Laplacian uses), so the seam is continuous:
     ``cap_q[:, -1] == cap_q[:, 0]`` (no edge-replication discontinuity).
     """
+    # The ocean model converts EVERY grid to LatLonCGridGeometry at construction
+    # (ensure_geometry), so lat_T/area_T are always present; the regular vs
+    # tripole distinction is the scalar dlon (>0 for a regular lat-lon grid, the
+    # 0.0 sentinel for a tripole/curvilinear grid).
     lat2d = getattr(grid, "lat_T", None)
     if lat2d is None:
         lat2d = grid.lat2d
@@ -1075,6 +1116,29 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
         area_h = grid.area
     cos2 = jnp.maximum(jnp.cos(lat2d) ** 2, 0.04)            # poleward floor
     cap_h = safety * area_h * cos2 / dt                      # (n_lat, n_lon)
+    _dlon = float(getattr(grid, "dlon", 0.0) or 0.0)
+    if _dlon > 0.0:
+        # POLAR-ROW CFL CORRECTION (regular lat-lon only; dlon>0). The tuned
+        # ``area*cos^2/dt`` ceiling is deliberately ~20% above the rectangular CFL
+        # to feed the marginally-resolved WBC, but the cos^2 floor (0.04, ~78.5 deg)
+        # stops it shrinking with cos(lat) while ``dx = R*dlon*cos(lat)`` keeps
+        # shrinking, so at the SINGULAR pole it runs ~9x ABOVE the true explicit-
+        # Laplacian-diffusion bound: at lat 89.75 (½ deg, dx~243 m) the ceiling
+        # gives ``A*dt/dx^2 ~ 1.14 > 0.5`` -> the Smagorinsky viscosity self-CFL-
+        # violates and amplifies the cold-start cold blowup at lat 89.75 lev59
+        # (codex root-cause; opdiscrim: removing Smag SLOWS it, removing vert-adv
+        # does not). Tighten to the strict rectangular 2-D bound
+        # ``safety/(dt*(1/dx^2+1/dy^2))`` ONLY poleward of |lat|>89.5 deg (a no-op
+        # equatorward of it), so the mid-latitude WBC keeps the larger tuned
+        # ceiling (the strict bound STARVES the WBC -- eORCA025 blew at day 0.25,
+        # job 8126978). The tripole carries the dlon=0 sentinel, so it is excluded
+        # (no singular pole -- it uses the north fold).
+        _cosl = jnp.maximum(jnp.cos(lat2d), 1.0e-12)
+        _dx = grid.radius * _dlon * _cosl                   # zonal cell width [m]
+        _dy = grid.radius * float(grid.dlat)                 # meridional cell [m]
+        cap_strict = safety / (dt * (_dx ** -2 + _dy ** -2))
+        _polar = jnp.abs(lat2d) > jnp.deg2rad(89.5)          # singular-pole rows
+        cap_h = jnp.where(_polar, jnp.minimum(cap_h, cap_strict), cap_h)
     # Vertex ceiling: pad to (n_lat+1, n_lon+1) -- edge in lat, periodic in lon.
     cap_q = jnp.pad(cap_h, ((0, 1), (0, 0)), mode="edge")    # (n_lat+1, n_lon)
     cap_q = jnp.concatenate([cap_q, cap_q[:, :1]], axis=1)   # (n_lat+1, n_lon+1)
@@ -1132,6 +1196,33 @@ def _bc_geometry_and_density(
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
     return J, h_k, rho_prime, p_prime_filled
+
+
+def compute_frozen_geom_density(state, grid, z_coord, config):
+    """``(J, h_k, rho_prime, p_prime_filled)`` from a state's eta/T/S.
+
+    The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
+    tendencies` stages 1-3 verbatim) + :func:`_bc_geometry_and_density`.  These
+    outputs depend ONLY on eta, T, S (and static geometry), so they are
+    INVARIANT across the RK3 momentum sub-stages (which freeze eta/T/S and vary
+    only u/v) — compute once and pass as ``precomputed_geom_density`` to skip
+    the EOS + pressure-anomaly recompute in each ``_mom_pert`` call (#25).
+    Bit-identical to the inline path by construction (same derivation + same
+    pure ``_bc_geometry_and_density``); pinned by the parity gate."""
+    import jax.numpy as _jnp
+    T = state.T.data
+    S = state.S.data
+    eta = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    g_val = config.g
+    rho_0 = config.rho_0
+    min_water_col = _jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = _jnp.maximum(eta, eta_floor) * mask
+    return _bc_geometry_and_density(
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    )
 
 
 def _bc_vertical_and_depthmean_velocity(
@@ -2594,8 +2685,15 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u.dtype)
             tau_e_u_face = interp_cell_to_uface(tau_e_T)       # (n_lat, n_lon+1)
             tau_n_u_face = interp_cell_to_uface(tau_n_T)
-            tau_e_v_face = interp_to_v_points(tau_e_T, grid=grid)  # (n_lat+1, n_lon)
-            tau_n_v_face = interp_to_v_points(tau_n_T, grid=grid)
+            # Coalesce the THREE v-face interps (tau_e, tau_n, dz_0) into ONE
+            # fused lat-halo exchange: -2 sendrecv pairs/step under band MPI
+            # (codex halo-hunt #1, audit lever O4).  dz_0_T is computed here
+            # (was below) so all three ride one pad_with_pole_bc_lat_multi;
+            # interp_to_v_points_multi is value-identical to the per-field
+            # calls.  The u-face interps stay separate (lon-local, no halo).
+            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
+            tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
+                (tau_e_T, tau_n_T, dz_0_T), grid=grid)   # each (n_lat+1, n_lon)
 
             cos_a_u = getattr(grid, "cos_alpha_u", None)
             sin_a_u = getattr(grid, "sin_alpha_u", None)
@@ -2614,9 +2712,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             else:
                 tau_j_v = tau_n_v_face
 
-            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
-            dz_0_u = interp_cell_to_uface(dz_0_T)
-            dz_0_v = interp_to_v_points(dz_0_T, grid=grid)
+            dz_0_u = interp_cell_to_uface(dz_0_T)   # dz_0_T + dz_0_v fused above
             rho_0_dt = jnp.asarray(rho_0, dtype=u.dtype)
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
@@ -2932,6 +3028,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     diagnose_momentum: bool = False,
     surface_tracer_forcing_fn=None,
     vertex_mask=None,
+    momentum_only: bool = False,
+    precomputed_geom_density=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -3002,9 +3100,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
     # pressure anomaly (p_prime_filled). ---
-    J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-    )
+    # These depend only on eta/T/S (frozen across RK3 momentum sub-stages), so
+    # _mom_pert passes them precomputed to skip the EOS + pressure-anomaly
+    # recompute (#25).  Bit-identical: same pure _bc_geometry_and_density on the
+    # same frozen inputs (compute_frozen_geom_density mirrors the eta_safe
+    # derivation above).
+    if precomputed_geom_density is not None:
+        J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+    else:
+        J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
+            eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+        )
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
     # per-layer flux divergence, and perturbation velocities. ---
@@ -3141,7 +3247,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
-    dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+    if momentum_only:
+        # RK3 momentum sub-stages freeze T/S, so this tracer-diffusion
+        # tendency is recomputed identically and DISCARDED by the caller
+        # (_mom_pert reads only du_dt/dv_dt).  Skip it => bit-identical
+        # momentum (the momentum stages never read dT_dt/dS_dt), saving the
+        # laplacian/biharmonic + vertical-diffusion compute AND its lat-halos
+        # per RK sub-stage (codex halo-hunt #3).  The physics/forcing/sponge
+        # blocks below still run (they also produce momentum tendencies); their
+        # tracer additions land on this zero and are discarded by the caller.
+        dT_dt = jnp.zeros_like(T)
+        dS_dt = jnp.zeros_like(S)
+    else:
+        dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /

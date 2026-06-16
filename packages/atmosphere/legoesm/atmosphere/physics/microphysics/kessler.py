@@ -83,17 +83,32 @@ def kessler_microphysics(
     q_sat = saturation_mixing_ratio(T, p_full)
 
     # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s].
-    # The evaporation branch (negative ``condensation``) is donor-clamped
-    # against the available ``q_c`` so a subsaturated clear-air column
-    # (q_v < q_sat, q_c = 0) cannot drive ``q_c`` below zero (Codex audit
-    # cycle 2: "subsaturated clear air can create negative cloud water").
-    # Same pattern as ``_warm_rain.saturation_adjustment``.
+    # Adopts the ``_warm_rain.saturation_adjustment`` psychrometric form and
+    # EXTENDS its donor clamp to both branches:
+    #   (a) PSYCHROMETRIC correction — condensing the full ``q_v - q_sat(T_old)``
+    #       ignores the latent warming that raises ``q_sat``, over-condensing each
+    #       call; divide by ``1 + (L_v/c_pd) dq_sat/dT`` (small-error dry-air
+    #       mixing-ratio approximation, same as the shared helper).
+    #   (b) Donor-clamp BOTH branches: evaporation (negative ``condensation``) by
+    #       the available ``q_c`` (a subsaturated clear-air column cannot drive
+    #       ``q_c`` < 0 — this is the only branch ``_warm_rain`` itself clamps),
+    #       AND — the previously MISSING bound — condensation (positive) by the
+    #       available ``q_v``.  Without the positive clamp the coupled driver
+    #       floors ``q_v`` independently while keeping the full ``q_c`` increment,
+    #       so saturation adjustment created cloud water from vapour that was
+    #       floored away → ``q_c`` accumulated to physically impossible ~1 kg/kg
+    #       (opaque clouds, planetary-albedo runaway, the coupled cold drift /
+    #       OLR collapse).
+    _dt_safe = jnp.maximum(dt, 1e-10)
     excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt  # [kg/kg/s]
+    condensation = cond_frac * excess / (_dt_safe * psychrometric)  # [kg/kg/s]
     q_c_avail = jnp.clip(q_c, 0.0, None)
-    condensation = jnp.maximum(
-        condensation, -q_c_avail / jnp.maximum(dt, 1e-10),
+    q_v_avail = jnp.clip(q_v, 0.0, None)
+    condensation = jnp.clip(
+        condensation, -q_c_avail / _dt_safe, q_v_avail / _dt_safe,
     )
 
     dq_v_sat = -condensation

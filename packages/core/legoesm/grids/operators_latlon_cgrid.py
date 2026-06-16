@@ -241,8 +241,17 @@ def get_band_mpi_cut_layout():
     if get_halo_backend() != "mpi":
         return None
     topology = get_mpi_topology()
-    from legoesm.parallel.latlon_mpi import LatLonBandLayout
-    if isinstance(topology, LatLonBandLayout) and (
+    from legoesm.parallel.latlon_mpi import (
+        LatLon2DLayout, LatLonBandLayout,
+    )
+    # Band AND 2-D pencil expose the same pole-terminated lat-LINE
+    # semantics (``south_rank``/``north_rank is None`` at the physical
+    # poles), so the pole-touch test is identical.  Recognising the 2-D
+    # layout here is what makes ``lat_ends_are_poles`` /
+    # ``interp_cell_to_vface_halo`` correct on a ``proc_lat>1`` pencil rank
+    # — without it an interior lat-cut rank would clamp its band edge to a
+    # physical pole (e.g. curl_vertex's sin clamp), corrupting metrics.
+    if isinstance(topology, (LatLonBandLayout, LatLon2DLayout)) and (
         topology.south_rank is not None
         or topology.north_rank is not None
     ):
@@ -813,15 +822,27 @@ def curl_vertex_cgrid(
             south_value=-math.pi / 2.0, north_value=math.pi / 2.0,
         )
         sin_ext = jnp.sin(lat_ext_q)
-        south_is_pole_q, north_is_pole_q = lat_ends_are_poles()
-        if south_is_pole_q:
-            sin_ext = jnp.concatenate(
-                [jnp.full((1,), -1.0, dtype=sin_ext.dtype), sin_ext[1:]],
-            )
-        if north_is_pole_q:
-            sin_ext = jnp.concatenate(
-                [sin_ext[:-1], jnp.full((1,), 1.0, dtype=sin_ext.dtype)],
-            )
+        # Restore the EXACT pole sin (±1.0) at PHYSICAL poles.  Under the
+        # single-program SPMD backend ``lat_ends_are_poles()`` is (True, True) on
+        # every band, so the static ``if`` would clamp every band's INTERIOR cut
+        # (the SPMD-blind bug) — select the clamp DATA-dependently per band via
+        # ``axis_index`` there (function-scope import: core -> parallel).
+        from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+        _spmd_pm = spmd_pole_end_masks()
+        sin_ext_s = jnp.concatenate(
+            [jnp.full((1,), -1.0, dtype=sin_ext.dtype), sin_ext[1:]])
+        sin_ext_n = jnp.concatenate(
+            [sin_ext[:-1], jnp.full((1,), 1.0, dtype=sin_ext.dtype)])
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            sin_ext = jnp.where(south_mask, sin_ext_s, sin_ext)
+            sin_ext = jnp.where(north_mask, sin_ext_n, sin_ext)
+        else:
+            south_is_pole_q, north_is_pole_q = lat_ends_are_poles()
+            if south_is_pole_q:
+                sin_ext = sin_ext_s
+            if north_is_pole_q:
+                sin_ext = sin_ext_n
         A_vertex_full = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
         dy_edge = R * dlat
         _tripolar_curl = False

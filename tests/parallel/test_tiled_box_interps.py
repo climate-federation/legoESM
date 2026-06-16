@@ -135,3 +135,26 @@ def test_box_interps_shard_map_np24():
     t_co = _reassemble_corner(lambda ti, tj: co[:, ti, :, tj, :], kt, nl)
     np.testing.assert_allclose(t_co, g_co, rtol=0, atol=1e-12,
                                err_msg="P-ii center_to_corner shard_map != global")
+
+
+def test_corner_to_center_shard_map_np24_4d():
+    """4D ``(F, n+1, n+1, nlev)`` corner->cc shard_map np24 — the 3D PE dycore
+    interp (dB cc) running on np=6*kt*kt devices (vertical replicated)."""
+    kt, nl, nlev = 2, 6, 4
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    from jax.sharding import Mesh
+
+    cd, n = _cube(kt, nl)
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    rng = np.random.default_rng(534)
+    field_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    g_cc = np.asarray(interp_corner_to_center(field_d))   # (6, n, n, nlev)
+    s_cc = make_tiled_interp_corner_to_center_stage_2d(mesh, n, kt, nlev=nlev)
+    cc = np.asarray(s_cc(field_d)).reshape(6, kt, nl, kt, nl, nlev)
+    t_cc = _reassemble_cc(lambda ti, tj: cc[:, ti, :, tj, :, :], kt)
+    assert t_cc.shape == (6, n, n, nlev)
+    np.testing.assert_allclose(t_cc, g_cc, rtol=0, atol=1e-12,
+                               err_msg="P-ii corner_to_center 4D shard_map != global")

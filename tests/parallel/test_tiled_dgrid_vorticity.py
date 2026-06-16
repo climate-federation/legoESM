@@ -61,6 +61,36 @@ def test_dgrid_vorticity_host_body_tiling():
         err_msg="P-i host-body tiled dgrid_vorticity != global")
 
 
+def test_dgrid_vorticity_host_body_tiling_4d():
+    """4D ``(F, n+1, n+1, nlev)`` corner winds — the 3D PE dycore case.
+
+    The 3D ``fv3_hydrostatic_tendencies`` calls ``dgrid_vorticity`` on 4D D-grid
+    winds (the metrics stay 2D-face, broadcast over nlev in the core).  The tile
+    kernel's guard is HORIZONTAL-only (``[1:3]``) so it accepts the trailing
+    nlev; this pins that the SAME kernel tiles the 4D op bit-identically — the
+    foundation for the 3D-dycore tiling."""
+    kt, nl, nlev = 3, 6, 5
+    n = kt * nl
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cd = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(414)
+    u_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    zeta_g = np.asarray(dgrid_vorticity(u_d, v_d, cd))   # (6, n, n, nlev)
+
+    def get_tile(ti, tj):
+        return dgrid_vorticity_tile_2d(
+            u_d, v_d, cd.cosa_corner, cd.dx_edge_y, cd.dy_edge_x, cd.base.area,
+            ti * nl, tj * nl, nl)
+
+    # cc cells partition exactly; _reassemble concats axes 1/2, keeps nlev.
+    zeta_t = _reassemble(get_tile, kt, nl)
+    assert zeta_t.shape == (6, n, n, nlev)
+    np.testing.assert_allclose(
+        zeta_t, zeta_g, rtol=0, atol=1e-12,
+        err_msg="P-i 4D host-body tiled dgrid_vorticity != global")
+
+
 def test_dgrid_vorticity_shard_map_stage_np24():
     kt, nl = 2, 6
     ndev = 6 * kt * kt
@@ -82,3 +112,36 @@ def test_dgrid_vorticity_shard_map_stage_np24():
     np.testing.assert_allclose(
         zeta_t, zeta_g, rtol=0, atol=1e-12,
         err_msg="P-i shard_map tiled dgrid_vorticity != global")
+
+
+def test_dgrid_vorticity_shard_map_stage_np24_4d():
+    """4D ``(F, n+1, n+1, nlev)`` shard_map np24 stage — the 3D PE dycore op
+    running on np=6*kt*kt devices (the vertical axis is replicated, not tiled).
+    First 3D-dycore op validated bit-identity at np24."""
+    kt, nl, nlev = 2, 6, 4
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    from jax.sharding import Mesh
+
+    n = kt * nl
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cd = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(424)
+    u_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    zeta_g = np.asarray(dgrid_vorticity(u_d, v_d, cd))   # (6, n, n, nlev)
+
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_dgrid_vorticity_stage_2d(mesh, cd, n, kt, nlev=nlev)
+    zeta_s = np.asarray(stage(u_d, v_d)).reshape(6, kt, nl, kt, nl, nlev)
+
+    def get_tile(ti, tj):
+        return zeta_s[:, ti, :, tj, :, :]
+
+    zeta_t = _reassemble(get_tile, kt, nl)
+    assert zeta_t.shape == (6, n, n, nlev)
+    np.testing.assert_allclose(
+        zeta_t, zeta_g, rtol=0, atol=1e-12,
+        err_msg="P-i 4D shard_map tiled dgrid_vorticity != global")

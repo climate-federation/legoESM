@@ -129,13 +129,26 @@ def main():
     # bulk vertical mixing and deep-layer restoring (a cold deep reservoir that
     # damps SST drift), the most ocean physics the coupled slab supports today.
     parser.add_argument("--ocean", default="two_layer",
-                        choices=["fixed", "slab", "two_layer"],
-                        help="Coupled slab-ocean mode (default: two_layer — "
-                             "mixed+deep layers with vertical mixing and deep "
-                             "restoring; 'slab' = single mixed layer; 'fixed' = "
-                             "prescribed SST)")
+                        choices=["fixed", "slab", "two_layer", "dynamic"],
+                        help="Coupled ocean mode (default: two_layer slab). "
+                             "'dynamic' = the prognostic 3D LatLonCGridOceanModel "
+                             "stepped by the coupler on a SHARED lat-lon grid "
+                             "(requires --grid latlon); slab/two_layer/fixed = "
+                             "thermodynamic slab")
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
+    parser.add_argument("--grid", default="cubed_sphere",
+                        choices=["cubed_sphere", "latlon"],
+                        help="Atmosphere grid (default cubed_sphere); 'latlon' "
+                             "is required for --ocean dynamic (shared grid)")
+    parser.add_argument("--ocean-nlev", type=int, default=20,
+                        help="3D ocean vertical levels (--ocean dynamic)")
+    parser.add_argument("--ocean-dt", type=float, default=300.0,
+                        help="3D ocean SUBSTEP dt [s] (--ocean dynamic); the "
+                             "coupler substeps the ocean at this dt within each "
+                             "coupling_dt (never step the 3D ocean at 3600 s)")
+    parser.add_argument("--ocean-H-max", type=float, default=5500.0,
+                        help="Max ocean depth [m] (--ocean dynamic)")
 
     # Carbon
     parser.add_argument("--co2-init", type=float, default=415.0,
@@ -241,11 +254,18 @@ def main():
 
     atm_config = ExperimentConfig(
         grid=GridConfig(
-            grid_type="cubed_sphere",
+            grid_type=args.grid,
             resolution=args.resolution,
             nlev=args.nlev,
         ),
-        dycore=DycoreConfig(dt=args.dt, model_type="hydrostatic"),
+        dycore=DycoreConfig(
+            dt=args.dt, model_type="hydrostatic",
+            # On lat-lon, use the Arakawa-C-grid hydrostatic dycore so the atm
+            # co-locates with the C-grid 3D ocean (--ocean dynamic); cdgrid is
+            # cube-only.  Cube keeps the default cdgrid.
+            discretization=("latlon_cgrid" if args.grid == "latlon"
+                            else "cdgrid"),
+        ),
         output=OutputConfig(
             diag_days=args.diag_days,
             cmip_output=args.cmip_output,
@@ -272,19 +292,30 @@ def main():
     # ocean physics the coupled slab supports.  Every preset holds a
     # SimpleOceanConfig, so replacing it is type-safe.
     overrides = {}
-    if args.ocean == "two_layer":
+    if args.ocean == "dynamic":
+        # Prognostic 3D LatLonCGridOceanModel on the SHARED lat-lon grid.
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        if args.grid != "latlon":
+            raise SystemExit(
+                "--ocean dynamic requires --grid latlon (the 3D ocean shares "
+                "the atmosphere's lat-lon grid; cube-atm + tripole-ocean needs "
+                "the deferred cross-grid remap).")
+        overrides["ocean_mode"] = "dynamic"
+        overrides["ocean_config"] = LatLonCGridOceanConfig()
+        overrides["ocean_nlev"] = args.ocean_nlev
+        overrides["ocean_dt_s"] = args.ocean_dt
+        overrides["ocean_H_max_m"] = args.ocean_H_max
+    elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
         )
+        overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
         )
-    # Keep the decorative ocean_mode log label in sync with ocean_config.mode
-    # (mirrors _OCEAN_MODE_LABEL in coupled_config.py: fixed/slab -> "slab").
-    overrides["ocean_mode"] = (
-        "two_layer" if args.ocean == "two_layer" else "slab"
-    )
+        # ocean_mode log label (fixed/slab -> "slab").
+        overrides["ocean_mode"] = "slab"
     if args.co2_init != 415.0:
         overrides["co2_ppmv_init"] = args.co2_init
 
@@ -312,7 +343,9 @@ def main():
     logger.info(f"  Wall time: {t_run:.1f}s ({t_run/60:.1f} min)")
     logger.info(f"  Per sim-day: {t_run / max(args.days, 1):.1f}s")
 
-    sst = driver.ocean_state.T_sfc.data
+    # Final SST: slab stores T_sfc [K]; the dynamic 3D ocean stores top-level T
+    # [degC] -> convert.  Use the driver's grid-agnostic accessor.
+    sst = driver._ocean_surface_KuvC()[0]
     logger.info(f"  SST final: mean={float(sst.mean()):.1f}K, "
                 f"range=[{float(sst.min()):.1f}, {float(sst.max()):.1f}]K")
 

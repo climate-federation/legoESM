@@ -746,6 +746,19 @@ def make_sharded_step(
     # therefore EXPERIMENTAL and opt-in only; the P4 milestone
     # (tile-aware consumers + staggered-leaf ownership layout) flips
     # the default.
+    # UPDATE (2026-06-14): the tile-aware CONSUMERS now EXIST and are
+    # bit-identity-validated standalone — the full tiled production SW
+    # tendency ``make_tiled_fv3_sw_tendencies_stage_2d`` (momentum + mass-PPM,
+    # in-stage scalar/vector halos + deep-h pre-pad, staggered-leaf
+    # lower-owns-shared reassembly) passes np24 (kt=2) + np54 (kt=3)
+    # bit-identity vs the global op AND a 2-node multi-controller run
+    # (``scripts/validate/validate_tiled_fv3_sw_multinode.py``, rel=0.0).  What
+    # remains for the default-flip is WIRING that stage into THIS step (this
+    # function still calls the full-face operators); the 3D
+    # ``fv3_hydrostatic_tendencies`` tiling is in progress (dgrid_vorticity
+    # 4D-tiled).  See ``tiled_production_cdgrid.py`` +
+    # ``docs/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
+    # (np>6 anti-scales on Gloo-TCP/PCIe) — future-HW capability.
     import os as _os
     _tiled_ok = (
         _os.environ.get("LEGOESM_TILED_SPMD", "0") == "1"

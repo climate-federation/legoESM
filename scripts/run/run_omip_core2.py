@@ -545,6 +545,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
                               ) if v is not None}
+    # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
+    # config default is True). _create_setup()'s arg default is False (explicit) --
+    # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
+    # cold-start (see the same fix in build_latlon_bathy). Force it on uniformly so
+    # the tripole matches latlon/mpas; the convection block below is then redundant.
+    _ovr["implicit_vertical_mixing"] = True
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0) and/or the Fox-Kemper MLE
     # restratification.  The tripole base config ships physics=None; opting in
@@ -695,7 +701,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None, dz_ref_override=None):
+                  mle=None, dz_ref_override=None, mask_marginal_seas=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -744,6 +750,16 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("polar_filter_safety_factor",
                                polar_filter_safety_factor),
                               ) if v is not None}
+    # IMPLICIT vertical mixing of momentum + tracers (NEMO ln_zdf*, MOM6, and
+    # tripole all do this; the LatLonCGridOceanConfig default is True). The lat-lon
+    # _create_setup() arg default is False (explicit), which silently reproduces
+    # the historical explicit-diffusion path: at the NEMO 75-level grid the ~1 m
+    # surface cell makes the explicit KPP vertical-viscosity CFL A_v*dt/dz_0^2
+    # ~ O(1)>>limit, so the physics momentum tendency (`phys_u`, momentum-diag job
+    # 8487918) blows the cold-start in ~2 steps at the Kuroshio. The backward-Euler
+    # implicit solve is unconditionally stable -> force it on for the OMIP latlon
+    # path (20-level happened to stay under the explicit CFL; 75-level does not).
+    _ovr["implicit_vertical_mixing"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -776,6 +792,19 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0,
     )
     land_mask = (ocean_ll > 0.5).astype(np.float64)
+    # Mask the poorly-resolved semi-enclosed / endorheic seas BEFORE the
+    # partial-cell + model build so the derived u/v face masks stay consistent.
+    # On the regular lat-lon grid the IDW regrid reconnects basins through 1-cell
+    # straits and inflates their depth; their brackish/hypersaline WOA T/S then
+    # makes a sharp 1-cell front whose baroclinic PGF blows the cold-start at
+    # high vertical resolution (diag 8486173: the Caspian, 47.5N/48E lev6,
+    # max|u| 0.3->450 m/s in 2 steps). The same mechanism is why the cube masks
+    # them. Caveated: these basins are excluded from the open-ocean comparison.
+    if mask_marginal_seas:
+        # tgt_lat/tgt_lon are 1-D (n_lat,)/(n_lon,) for the regular grid; the
+        # box test needs 2-D fields matching land_mask (the cube passes 2-D).
+        _lon2d, _lat2d = np.meshgrid(tgt_lon, tgt_lat)   # both (n_lat, n_lon)
+        land_mask = _apply_marginal_sea_mask(land_mask, _lat2d, _lon2d)
     H_bathy = np.where(land_mask > 0.5, np.maximum(H_ll, 50.0), 0.0)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
@@ -827,6 +856,16 @@ def _apply_marginal_sea_mask(land_mask, lat_deg, lon_deg):
         (23.0, 31.0, 47.0, 57.0),    # Persian Gulf
         (53.0, 66.0, 10.0, 30.0),    # Baltic
         (51.0, 64.0, 265.0, 285.0),  # Hudson Bay
+        (34.0, 50.0, 45.0, 56.0),    # Caspian Sea (endorheic; IDW regrid
+                                     # inflates its ~6 m depth to ~184 m and the
+                                     # brackish WOA T/S makes a sharp 1-cell
+                                     # front -> a baroclinic-PGF cold-start
+                                     # blowup at 75-level, lat-lon 8486173. Box
+                                     # padded to 50N/56E: the IDW spreads the
+                                     # basin past its 47N/54E geographic edge
+                                     # (ignition at 48.5N/51E, job 8486227).)
+        (43.0, 48.0, 57.0, 62.0),    # Aral Sea (endorheic)
+        (41.0, 49.0, 268.0, 285.0),  # Great Lakes (inland; no-op if WOA-land)
     ]
     n_before = int(out.sum())
     for lat0, lat1, lon0, lon1 in boxes:
@@ -1813,6 +1852,113 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
 
 
+def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """Barotropic streamfunction (gyres) + AMOC overturning streamfunction
+    (Atlantic, lat-depth) + global MOC, at run-end for ALL simulations. Reuses
+    the tested ``diagnostics_streamfunction.{barotropic_streamfunction,
+    moc_streamfunction}`` (lat-lon C-grid: latlon/tripole). Saves a .npz of the
+    fields and PNG maps. Pure NumPy at run-end; never crashes the run.
+
+    MPAS (VoronoiMesh) has no structured lat-lon streamfunction operator here;
+    its AMOC@26N scalar is reported by ``_amoc26n_diag`` -- the field maps are
+    skipped (noted) until an unstructured-grid streamfunction is wired."""
+    if app_grid_type == "mpas" or getattr(state, "v", None) is None:
+        print("[transports] BSF/AMOC field maps skipped (no structured C-grid "
+              "v-faces on this grid); AMOC@26N scalar is in transports.txt.")
+        return
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        from legoesm.ocean.diagnostics_streamfunction import (
+            barotropic_streamfunction, moc_streamfunction,
+        )
+        u = np.asarray(state.u.data)
+        v = np.asarray(state.v.data)
+        eta = np.asarray(state.eta.data)
+        Hb = np.asarray(state.H_bathy.data)
+        mask = np.asarray(state.land_mask.data)
+        h = np.asarray(compute_layer_thickness(state.eta.data,
+                                               state.H_bathy.data, z_coord))
+        # Barotropic streamfunction (gyres), [Sv], (n_lat, n_lon).
+        bsf = np.asarray(barotropic_streamfunction(u, h, mask, grid))
+        # AMOC = Atlantic-masked overturning; also the GLOBAL MOC. moc returns
+        # (n_lat+1, nlev) [Sv] on v-faces. Atlantic band -75..15 E matches
+        # compute_amoc_from_state. Use the 2-D T-grid longitude (tripole fold),
+        # not the legacy 1-D first-row grid.lon (codex review).
+        _lon = getattr(grid, "lon_T", None)
+        if _lon is None:
+            _lon = getattr(grid, "lon2d", None)
+        if _lon is None:
+            _lon = grid.lon
+        lon2d = np.rad2deg(np.asarray(_lon))
+        _lonw = (((lon2d + 180.0) % 360.0) - 180.0)
+        lon_band = (_lonw >= -75.0) & (_lonw <= 15.0)
+        if lon_band.ndim == 1:
+            lon_band = np.broadcast_to(lon_band, mask.shape)
+        atl_mask = mask * lon_band.astype(mask.dtype)
+        amoc = np.asarray(moc_streamfunction(v, h, eta, Hb, atl_mask, grid))
+        gmoc = np.asarray(moc_streamfunction(v, h, eta, Hb, mask, grid))
+        lat2d = np.rad2deg(np.asarray(grid.lat))
+        # v-FACE latitudes (n_lat+1) for the MOC fields, not the T-row centres
+        # (codex review). From grid.lat_v if present, else T-row midpoints +
+        # extrapolated end faces.
+        _latv = getattr(grid, "lat_v", None)
+        if _latv is not None:
+            _lv2 = np.rad2deg(np.asarray(_latv))
+            lat_v = _lv2.mean(axis=-1) if _lv2.ndim > 1 else _lv2
+        else:
+            rc = lat2d.mean(axis=-1) if lat2d.ndim > 1 else lat2d   # (n_lat,)
+            mid = 0.5 * (rc[:-1] + rc[1:])
+            lat_v = np.concatenate([[2 * rc[0] - mid[0]], mid,
+                                    [2 * rc[-1] - mid[-1]]])         # (n_lat+1,)
+        lat_v = np.asarray(lat_v)[:amoc.shape[0]]
+        z_cen = (np.abs(np.asarray(z_coord.z_full_ref))
+                 if getattr(z_coord, "z_full_ref", None) is not None
+                 else np.arange(amoc.shape[1], dtype=float))
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            Path(out_dir) / "bsf_amoc.npz", bsf=bsf, amoc=amoc, gmoc=gmoc,
+            lat_v=lat_v, z_center=z_cen,
+            lat_T=lat2d, lon_T=lon2d, land_mask=mask)
+
+        def _sx(a, f):  # finite-safe extremum (avoid all-NaN RuntimeWarning)
+            return float(f(a)) if np.isfinite(a).any() else float("nan")
+        # NADW cell = positive max; AABW = negative min. Print signed extrema.
+        print(f"[transports] BSF [{_sx(bsf, np.nanmin):.1f},"
+              f"{_sx(bsf, np.nanmax):.1f}] Sv; AMOC psi "
+              f"[{_sx(amoc, np.nanmin):.1f},{_sx(amoc, np.nanmax):.1f}] Sv "
+              f"(NADW=max); global-MOC [{_sx(gmoc, np.nanmin):.1f},"
+              f"{_sx(gmoc, np.nanmax):.1f}] Sv -> bsf_amoc.npz")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            # AMOC lat-depth section (x = v-face latitude, y = depth).
+            fig, ax = plt.subplots(1, 2, figsize=(13, 4.5))
+            lv = np.linspace(-30, 30, 31)
+            c0 = ax[0].contourf(lat_v, -z_cen[:amoc.shape[1]],
+                                amoc[:lat_v.size].T, levels=lv,
+                                cmap="RdBu_r", extend="both")
+            ax[0].set_title("AMOC overturning [Sv] (Atlantic)")
+            ax[0].set_xlabel("latitude"); ax[0].set_ylabel("depth [m]")
+            plt.colorbar(c0, ax=ax[0])
+            # BSF map.
+            bsf_p = bsf[:, :lon2d.shape[-1]] if bsf.shape[-1] != lon2d.shape[-1] \
+                else bsf
+            c1 = ax[1].pcolormesh(np.where(mask > 0.5, bsf_p, np.nan),
+                                  cmap="RdBu_r", vmin=-60, vmax=60)
+            ax[1].set_title("Barotropic streamfunction [Sv]")
+            ax[1].set_xlabel("i"); ax[1].set_ylabel("j")
+            plt.colorbar(c1, ax=ax[1])
+            fig.tight_layout()
+            fig.savefig(Path(out_dir) / "bsf_amoc.png", dpi=110)
+            plt.close(fig)
+            print(f"[transports] saved {Path(out_dir) / 'bsf_amoc.png'}")
+        except Exception as pe:
+            print(f"[transports] BSF/AMOC plot skipped: {type(pe).__name__}: {pe}")
+    except Exception as e:
+        print(f"[transports] BSF/AMOC diag skipped: {type(e).__name__}: {e}")
+
+
 def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
     """ACC@Drake [Sv] from the LIVE state (h reconstructed in-run).  Reuses the
     tested compute_acc_from_state{,_mpas}: lat-lon/tripole via barotropic_stream
@@ -1902,6 +2048,44 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
         zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
         save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
+
+
+def _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d, tag=""):
+    """DEBUG: per-term momentum-tendency breakdown (which term drives a
+    cold-start blowup). Uses the lat-lon C-grid model's public
+    ``tendencies_with_diagnostics`` (closure-tested); a no-op on grids without
+    it (mpas/cube). Prints each term's global-max |tendency| + its location,
+    sorted descending so the dominant (blowup) term is first."""
+    if not hasattr(model, "tendencies_with_diagnostics"):
+        print(f"[mom-diag{tag}] no per-term diagnostics on this model", flush=True)
+        return
+    try:
+        _tend, diag = model.tendencies_with_diagnostics(
+            state, surface_forcing=sf, dt=dt)
+    except Exception as exc:                       # debug probe: never abort the run
+        print(f"[mom-diag{tag}] diagnostics failed: {exc!r}", flush=True)
+        return
+    lat = np.asarray(lat2d)
+    lon = np.asarray(lon2d)
+    rows = []
+    for name in diag._fields:
+        if not (name.endswith("_u") or name.endswith("_v")):
+            continue
+        a = np.asarray(getattr(diag, name).data)
+        aa = np.where(np.isfinite(a), np.abs(a), 0.0)
+        if aa.size == 0:
+            continue
+        idx = np.unravel_index(int(np.argmax(aa)), a.shape)
+        ii = min(int(idx[0]), lat.shape[0] - 1)
+        jj = min(int(idx[1]), lat.shape[1] - 1)
+        lev = int(idx[2]) if a.ndim >= 3 else -1
+        rows.append((float(aa.max()), name, float(lat[ii, jj]),
+                     float(lon[ii, jj]), lev))
+    print(f"[mom-diag{tag}] per-term |tendency| global-max (m/s^2), "
+          "largest first:", flush=True)
+    for mx, name, la, lo, lev in sorted(rows, reverse=True):
+        print(f"    {name:18s} {mx:.4e} @ ({la:+.1f},{lo:.0f}) lev{lev}",
+              flush=True)
 
 
 def _cli_flags_given(argv=None) -> set:
@@ -2032,6 +2216,14 @@ def main() -> int:
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
                         "sills seed the cold-start PGF blowup (caveated, like the "
                         "latlon Arctic).")
+    p.add_argument("--mask-marginal-seas", action="store_true",
+                   help="lat-lon: mask the poorly-resolved semi-enclosed / "
+                        "endorheic seas (Med/Black/Red/Gulf/Baltic/Hudson/Caspian/"
+                        "Aral/Great Lakes) to land. On the regular grid the IDW "
+                        "regrid reconnects them through 1-cell straits and inflates "
+                        "their depth; the brackish/hypersaline WOA T/S then seeds a "
+                        "sharp-front baroclinic-PGF cold-start blowup at NEMO "
+                        "75-level (the Caspian, 47.5N/48E). Caveated open-ocean run.")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -2324,6 +2516,11 @@ def main() -> int:
                         "instead of the default ~/.cache/.../core2_nyf. Set via "
                         "--config forcing.path. See issue #376.")
     p.add_argument("--diag-every-days", type=float, default=30.0)
+    p.add_argument("--diag-momentum-step", type=int, default=-1,
+                   help="DEBUG (lat-lon/tripole): at every step <= this, dump the "
+                        "per-term momentum-tendency breakdown (PGF/Coriolis/advection/"
+                        "viscosity/...) global-max + location, to pin the term driving "
+                        "a cold-start blowup. -1=off.")
     p.add_argument("--scan-block", type=int, default=0,
                    help="Issue #354: wrap the time loop in jax.lax.scan, "
                         "fusing this many steps per block (CORE-II forcing "
@@ -2634,6 +2831,7 @@ def main() -> int:
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            mask_marginal_seas=args.mask_marginal_seas,
         )
         app_grid_type = "latlon"
 
@@ -2656,6 +2854,17 @@ def main() -> int:
             )
             _yaml_cfg = ocean_adapter.to_ocean_config()
             _ovr = {k: getattr(_yaml_cfg, k) for k in _explicit}
+            # The builders force implicit_vertical_mixing=True (the root-cause
+            # fix; explicit KPP vertical viscosity is CFL-unstable at the NEMO
+            # 75-level ~1 m top cell -> cold-start blowup). A YAML override must
+            # not silently revert that to the explicit path. (codex review)
+            if _ovr.get("implicit_vertical_mixing") is False:
+                raise ValueError(
+                    "--config ocean.implicit_vertical_mixing=false is rejected: "
+                    "explicit vertical mixing is CFL-unstable at a NEMO-vertical "
+                    "(~1 m surface) grid and blows the cold-start. Remove the "
+                    "override (the OMIP builders force implicit) or use a coarse "
+                    "vertical grid where the explicit-diffusion CFL is satisfied.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config._replace(**_ovr)
             )
@@ -3129,6 +3338,7 @@ def main() -> int:
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+        _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
         _record_final_state_digest(manifest_path, state)
         _csv.close()
@@ -3211,6 +3421,12 @@ def main() -> int:
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
             sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+        # DEBUG: per-term momentum-tendency breakdown at the onset steps (pin the
+        # term driving the lat-lon 75-level cold-start blowup). sf is finalised for
+        # momentum here (freshwater below only affects salinity).
+        if args.diag_momentum_step >= 0 and step <= args.diag_momentum_step:
+            _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d,
+                                 tag=f" step{step}")
         # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
         # is delivered through the IN-CORE channel
         # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
@@ -3409,6 +3625,7 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+    _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
     _record_final_state_digest(manifest_path, state)
     _csv.close()

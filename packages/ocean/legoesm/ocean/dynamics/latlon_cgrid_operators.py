@@ -124,28 +124,23 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return padded
 
 
-def interp_u_to_vface_4pt(u: jnp.ndarray, grid) -> jnp.ndarray:
-    """Sadourny 4-point average of a u-face field onto v-faces.
-
-    ``u`` is ``(n_lat, n_lon+1, ...)`` (u-faces incl. the periodic wrap
-    column); returns ``(n_lat+1, n_lon, ...)`` at v-faces.  Interior v-faces
-    are the plain 4-point cell-corner average; the south/north boundary rows
-    come from :func:`pad_ns_vector_u` (zero at physical walls — those v-faces
-    are wall-masked downstream — and the fold (sign·perm) row on tripolar).
-
-    This is the shared helper referenced by the Matsuno Coriolis backward
-    step in ``ocean_model_latlon_cgrid.py`` (commit ``98f9b779`` switched the
-    call site to this name but its definition never landed — restored here
-    with the HISTORICAL interior-average-then-pad semantics, bit-identical to
-    the pre-``98f9b779`` step in every serial case incl. the tripolar fold).
-    TODO(MPI band partition): the intended improvement is cell-pad-FIRST so a
-    partition-cut v-face averages the neighbour rank's true u row instead of
-    the zero refill; needs the halo-exchange row plumbed in here.
-    """
-    interior = 0.25 * (
-        u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:]
-    )
-    return pad_ns_vector_u(interior, grid)
+# ``interp_u_to_vface_4pt`` is the backend-dispatched CELL-PAD-FIRST core
+# operator imported from ``legoesm.grids.operators_latlon_cgrid`` above (line ~44).
+# An older interior-average-then-``pad_ns_vector_u`` redefinition used to shadow it
+# here; it was SPMD-blind — at a lat-band partition cut it averaged only the
+# rank-LOCAL interior v-faces and then refilled the cut row from the neighbour's
+# ADJACENT interior face (one row off), so the two bands sharing a v-face disagreed
+# (eORCA025 SPMD equivalence: barotropic V_bar diverged ~8e-4 at the cut rows
+# whose ``f_v`` is non-zero — the equator cut was masked by ``f_v≈0``).  The core
+# version pads ``u`` over latitude FIRST (``pad_with_pole_bc_lat`` -> local jnp.pad
+# / MPI-or-SPMD neighbour row) THEN averages, so every band-cut v-face uses the
+# true neighbour-band u row.  It is bit-identical to the old interior-then-pad form
+# for SERIAL / full-domain + physical-boundary behavior (its docstring proves the
+# pole-wall + local tripolar-fold rows match ``pad_ns_vector_u`` exactly); at an
+# MPI/SPMD interior band cut it is DELIBERATELY different (the one-row-off stale
+# value is the bug being fixed).  De-duplicated to the single canonical operator
+# (no shadowing copy) so the barotropic solver + Matsuno Coriolis backward step
+# share the SPMD-correct interpolation.
 
 
 def pad_ns_vector_pair(
@@ -2616,6 +2611,11 @@ def neumann_fill_vertex(
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
+    # Under SPMD the static (south/north)_is_pole are (True, True) on every band,
+    # so the per-pass Neumann edge-clamp would fire at every band's INTERIOR cut
+    # (SPMD-blind) — select it DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     for _ in range(n_passes):
         # N/S neighbours.  Vertex rows are DUPLICATED at an MPI band
@@ -2647,12 +2647,23 @@ def neumann_fill_vertex(
         m_s = jnp.concatenate([m_pad[1:2], m[:-1]], axis=0)
         f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
-        if south_is_pole:
-            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
-            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-        if north_is_pole:
-            f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
-            m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            f_s = jnp.where(south_mask,
+                            jnp.concatenate([filled[0:1], f_s[1:]], axis=0), f_s)
+            m_s = jnp.where(south_mask,
+                            jnp.concatenate([m[0:1], m_s[1:]], axis=0), m_s)
+            f_n = jnp.where(north_mask,
+                            jnp.concatenate([f_n[:-1], filled[-1:]], axis=0), f_n)
+            m_n = jnp.where(north_mask,
+                            jnp.concatenate([m_n[:-1], m[-1:]], axis=0), m_n)
+        else:
+            if south_is_pole:
+                f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+                m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+            if north_is_pole:
+                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
         # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
         # Column n_lon duplicates column 0, so rolling the full array
