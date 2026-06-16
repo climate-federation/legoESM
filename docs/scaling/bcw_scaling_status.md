@@ -89,6 +89,24 @@ RECOMMENDED MPAS CPU config: `--ntasks-per-node=8 --cpus-per-task=4`
 (`numactl --localalloc` + `--distribution=block:block` give a small extra
 trim; not the primary fix). Do NOT pack 32 single-thread ranks/node.
 
+## GPU: single-device real, multi-GPU MPI blocked by the env
+
+Two GPU bugs found + handled:
+1. The GPU ladder set `env JAX_PLATFORMS=cuda` but did NOT pass `--device gpu`,
+   so `_configure_jax_cpu` pinned `JAX_PLATFORMS=cpu` — the ENTIRE g1..g32 "GPU"
+   ladder silently ran on CPU (JSON `backend=cpu`). Fixed: `--device gpu` + a
+   backend assertion that SystemExits on CUDA fallback (commit c8bd94fc3), so
+   CPU can never be recorded as GPU again. Bogus dirs purged.
+2. With the fix, SINGLE GPU works (real): 1 GPU I5 = **f32 791 SYPD (197
+   Mc/s), f64 158 SYPD (39 Mc/s)** — 8-16x the bogus CPU-fallback numbers and
+   ~2x the CPU per-device throughput. But MULTI-GPU MPI (g2+) fails with
+   "mpi4jax GPU extensions could not be imported — rebuild mpi4jax with CUDA":
+   the env's mpi4jax is CPU-only, so the GPU halo exchange cannot run. GPU
+   multi-node scaling is therefore BLOCKED until mpi4jax is rebuilt CUDA-aware
+   (infra task), or a single-process multi-GPU SPMD path (no mpi4jax) is used.
+   The GPU panel today is single-device per-resolution throughput (the real
+   per-GPU ceiling).
+
 ## Measured roofline (the quantified limit)
 
 `scripts/bench/roofline_probe.py` on Ginsburg (job 8502024):
