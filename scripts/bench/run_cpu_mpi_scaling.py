@@ -160,6 +160,11 @@ class TimingResult:
     cells_per_rank: int
     mcells_per_s: float
     scaling_efficiency: float = 1.0
+    # Lat-lon decomposition: "band" (1-D latitude band, default) or "2d"
+    # (proc_lat x proc_lon pencil).  Lets the collector/plotter separate the
+    # 2-D-pencil curve from the 1-D band laggard.  N/A for other grids ("band"
+    # is a harmless default they never key on).
+    decomposition: str = "band"
 
 
 @dataclass
@@ -375,6 +380,7 @@ def _build_amip_step(
     physics_level: str,
     dt: float | None = None,
     cs_spmd: bool = False,
+    latlon_2d: bool = False,
 ):
     """Build a step function + initial state for one benchmark case.
 
@@ -406,7 +412,7 @@ def _build_amip_step(
                                   physics_level, _cast)
     elif grid_type == "latlon":
         return _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                             physics_level, _cast)
+                             physics_level, _cast, latlon_2d=latlon_2d)
     elif grid_type == "icosahedral":
         return _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
                                   physics_level, _cast)
@@ -548,8 +554,44 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     return step_fn, state, dt, total_cells, cells_per_rank
 
 
+def _factor_2d_latlon(n_ranks, n_lat, n_lon, min_lat=2, min_lon=2):
+    """Factor ``n_ranks`` into ``(proc_lat, proc_lon)`` for the 2-D pencil,
+    MINIMISING the per-rank halo perimeter ``n_lat/proc_lat + n_lon/proc_lon``
+    (the whole point of 2-D vs the 1-D band).
+
+    Constraints: each block keeps ``>= min_lat`` latitude rows (the halo=2
+    PPM/biharmonic exchange) and ``>= min_lon`` longitude columns.  Raises if
+    no valid factorisation exists (e.g. too many ranks for the resolution),
+    rather than silently building a degenerate block.
+
+    Returns the min-perimeter pair; ties broken toward the more balanced
+    block (smaller ``|n_lat/pl - n_lon/pc|``).
+    """
+    best = None  # (perimeter, imbalance, proc_lat, proc_lon)
+    for pl in range(1, n_ranks + 1):
+        if n_ranks % pl:
+            continue
+        pc = n_ranks // pl
+        blat, blon = n_lat // pl, n_lon // pc
+        if blat < min_lat or blon < min_lon:
+            continue
+        perim = n_lat / pl + n_lon / pc
+        imbal = abs(n_lat / pl - n_lon / pc)
+        key = (perim, imbal)
+        if best is None or key < best[0]:
+            best = (key, pl, pc)
+    if best is None:
+        raise ValueError(
+            f"_factor_2d_latlon: no 2-D factorisation of n_ranks={n_ranks} "
+            f"keeps >= {min_lat} lat rows AND >= {min_lon} lon cols per block "
+            f"for n_lat={n_lat}, n_lon={n_lon}.  Reduce ranks or raise "
+            f"resolution."
+        )
+    return best[1], best[2]
+
+
 def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                   physics_level, cast_fn):
+                   physics_level, cast_fn, latlon_2d=False):
     import jax
     import jax.numpy as jnp
 
@@ -588,6 +630,36 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     total_cells = n_lat * n_lon * nlev
 
     physics_fn = _build_physics_fn(physics_level, "latlon")
+
+    if n_ranks > 1 and latlon_2d:
+        # 2-D pencil (proc_lat x proc_lon) decomposition — the SOTA fix for
+        # the 1-D band's high-rank halo-perimeter starvation.  Wall poles
+        # (regular grid; use_polar_filter already False above).  Same
+        # build shape as the band: global cell-centred -> global C-grid
+        # (serial) -> 2-D layout -> rank-local block model -> scatter ->
+        # make_latlon_2d_mpi_step (which arms the MPI halo backend + sets the
+        # rank-aware pole_v_bc + allreduced total_area itself).
+        from legoesm.parallel.latlon_mpi import (
+            make_latlon_2d_layout,
+            make_latlon_2d_mpi_step,
+            scatter_state_latlon_2d,
+            slice_latlon_grid_to_block_2d,
+        )
+        proc_lat, proc_lon = _factor_2d_latlon(n_ranks, n_lat, n_lon)
+        cgrid_global = hydrostatic_to_cgrid(state, grid)
+        layout2d = make_latlon_2d_layout(
+            rank, proc_lat, proc_lon, n_lat, n_lon,
+        )
+        block_grid = slice_latlon_grid_to_block_2d(grid, layout2d)
+        local_model = CGridLatLonPrimitiveEquationModel(
+            block_grid, sigma, config, dt=dt,
+        )
+        state = scatter_state_latlon_2d(cgrid_global, layout2d)
+        step_fn = make_latlon_2d_mpi_step(
+            local_model, layout2d, physics_fn=physics_fn,
+        )
+        cells_per_rank = layout2d.n_lat_local * layout2d.n_lon_local * nlev
+        return step_fn, state, dt, total_cells, cells_per_rank
 
     if n_ranks > 1:
         # Latitude-band MPI (mirrors the multi-rank icosahedral path):
@@ -782,6 +854,7 @@ def run_single_benchmark(
     n_timing: int,
     dt: float | None = None,
     cs_spmd: bool = False,
+    latlon_2d: bool = False,
 ) -> TimingResult:
     """Run a single benchmark case and return timing."""
     _validate_physics(grid_type, physics_level)
@@ -799,7 +872,13 @@ def run_single_benchmark(
         physics_level=physics_level,
         dt=dt,
         cs_spmd=cs_spmd,
+        latlon_2d=latlon_2d,
     )
+    # "2d" only for a genuine multi-rank lat-lon pencil; everything else
+    # (band, single-rank, other grids) is the default "band".
+    decomposition = "2d" if (
+        latlon_2d and grid_type == "latlon" and n_ranks > 1
+    ) else "band"
 
     if grid_type == "spectral":
         res_label = f"T{resolution}"
@@ -914,6 +993,7 @@ def run_single_benchmark(
         total_cells=total_cells,
         cells_per_rank=cells_per_rank,
         mcells_per_s=mcells_per_s,
+        decomposition=decomposition,
     )
 
 
@@ -989,8 +1069,12 @@ def generate_sweep_cases(
 def write_result_json(result: TimingResult, output_dir: Path) -> None:
     """Write a single result as a JSON file."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Tag a non-default (2-D) decomposition into the filename so a 2-D-pencil
+    # run never overwrites the band run at the same grid/res/np (the payload
+    # also carries ``decomposition`` for the collector).
+    _dtag = "" if result.decomposition == "band" else f"_{result.decomposition}"
     fname = (
-        f"{result.grid_type}_{result.physics_level}_{result.mode}_"
+        f"{result.grid_type}{_dtag}_{result.physics_level}_{result.mode}_"
         f"r{result.resolution}_n{result.n_ranks}_{result.precision}.json"
     )
     path = output_dir / fname
@@ -1077,6 +1161,17 @@ def build_parser() -> argparse.ArgumentParser:
              "(shard-local vs serial = 6.7e-10 @5 steps, job 8462928).",
     )
     p.add_argument(
+        "--latlon-2d", action="store_true",
+        help="Lat-lon C-grid 2-D pencil decomposition (proc_lat x proc_lon "
+             "factored from the rank count to minimise the per-rank halo "
+             "perimeter) instead of the 1-D latitude band.  WALL POLES only "
+             "(regular grid; use_polar_filter off) — a labeled throughput "
+             "benchmark, NOT the atmosphere's 180-deg pole fold.  Targets the "
+             "band's high-rank starvation (weak-E ~0.05).  Validated by "
+             "tests/distributed/test_latlon_2d_mpi_step.py (mass<1e-12 + "
+             "2x2==1x4).  --grid latlon only.",
+    )
+    p.add_argument(
         "--output-dir", type=str, default="results/cpu_scaling",
         help="Output directory for results.",
     )
@@ -1097,6 +1192,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # --latlon-2d does not propagate through the sweep/--case round-trip yet
+    # (CaseSpec carries no decomposition field), so a ``--sweep --latlon-2d``
+    # would silently emit band cases and the launcher would run the BAND path.
+    # Fail loud — use a direct ``--resolution N --latlon-2d`` invocation (the
+    # measurement sbatch does) until the sweep threads the flag (codex).
+    if args.sweep and args.latlon_2d:
+        print(
+            "ERROR: --latlon-2d is not threaded through --sweep yet (CaseSpec "
+            "has no decomposition field), so the swept cases would silently "
+            "run the 1-D band.  Use a direct '--grid latlon --resolution N "
+            "--latlon-2d' run (one per rank count) instead.",
+            flush=True,
+        )
+        return 2
 
     # --- Sweep mode: just print cases and exit ---
     if args.sweep:
@@ -1253,7 +1363,17 @@ def main() -> int:
     # biharmonic exchange (``pad_halo_latlon_mpi`` raises when
     # ``halo > n_lat_local``).  Refuse undersized configurations
     # up-front with a clear message instead of a mid-build traceback.
-    if grid_type == "latlon" and n_ranks > 1 and resolution // n_ranks < 2:
+    if args.latlon_2d and grid_type != "latlon":
+        if is_rank0:
+            print("ERROR: --latlon-2d applies only to --grid latlon.",
+                  flush=True)
+        return 2
+    # The >=2-lat-rows-per-rank guard is for the 1-D BAND (all ranks split
+    # lat).  The 2-D pencil splits lat over proc_lat (< n_ranks), so its own
+    # _factor_2d_latlon validates the per-block rows/cols — skip the band
+    # guard for --latlon-2d.
+    if (grid_type == "latlon" and not args.latlon_2d
+            and n_ranks > 1 and resolution // n_ranks < 2):
         if is_rank0:
             print(
                 f"ERROR: lat-lon band MPI needs >=2 lat rows per rank "
@@ -1289,6 +1409,7 @@ def main() -> int:
         n_warmup=args.n_warmup,
         n_timing=args.n_timing,
         cs_spmd=bool(args.cs_spmd),
+        latlon_2d=bool(args.latlon_2d),
     )
 
     if is_rank0:
