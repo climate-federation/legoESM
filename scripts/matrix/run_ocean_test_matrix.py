@@ -5190,6 +5190,26 @@ def _run_experiment_via_registry(
     if extra_setup_kwargs:
         setup_kw.update(extra_setup_kwargs)
 
+    # Recipe-factory path: when the experiment exposes a model-config factory
+    # (EXPERIMENT_CONFIG["create_model_config"] / ["create_mpas_model_config"],
+    # e.g. global_overturning), build the config with it and inject it VERBATIM
+    # so the matrix tests the SAME recipe the production driver runs. Without
+    # this the field-by-field scrape above silently drops K_v / bottom_drag /
+    # eos / gm_redi on the lat-lon path (see the divergence note in
+    # docs/planning/ocean_recipe_consolidation_audit.md, #488). This is the
+    # generalisation of what DINO already does by hand (run_dino calls
+    # dino_*_model_config directly, bypassing this registry helper). Only the
+    # latlon/mpas grids are wired; other grids fall back to the scrape.
+    factory_key = {"latlon": "create_model_config",
+                   "mpas": "create_mpas_model_config"}.get(tc.grid_type)
+    factory = exp_config.get(factory_key) if factory_key else None
+    if factory is not None:
+        eos_cfg = eos_linear_factory(cfg) if eos_linear_factory is not None \
+            else None
+        gm_redi_cfg = (extra_setup_kwargs or {}).get("gm_redi")
+        setup_kw["model_config"] = factory(
+            cfg, physics=physics, eos_config=eos_cfg, gm_redi_cfg=gm_redi_cfg)
+
     # Plumb channel / regional bounds into ``tc.run_kwargs``.
     bounds = {}
     for attr in ("lat_south", "lat_north", "lon_west", "lon_east"):

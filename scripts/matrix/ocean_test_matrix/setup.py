@@ -119,7 +119,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         momentum_advection: str | None = None,
                         weno_d_term: bool | None = None,
                         barotropic_solver: str | None = None,
-                        cube_light_diffusion: bool = False):
+                        cube_light_diffusion: bool = False,
+                        model_config=None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -132,9 +133,21 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         (e.g. prescribed surface forcing for wind-driven experiments).
     A_h : float or None
         Override horizontal viscosity [m^2/s]. If None, uses config default.
+    model_config : *OceanConfig or None
+        Pre-built model config to use VERBATIM instead of assembling one from
+        the scraped scalar kwargs above. This is how an experiment that exposes
+        a recipe factory (``EXPERIMENT_CONFIG["create_model_config"]``) makes the
+        matrix test the SAME recipe its production driver runs — the field-by-
+        field scrape above silently drops K_v / bottom_drag / eos / gm_redi on
+        the lat-lon path, so the factory path is strictly more faithful. Only
+        the ``latlon`` and ``mpas`` branches honour it (raises otherwise).
 
     Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
+    if model_config is not None and tc.grid_type not in ("latlon", "mpas"):
+        raise NotImplementedError(
+            "model_config injection is only wired for grid_type in "
+            f"{{'latlon', 'mpas'}}, got {tc.grid_type!r}")
     if nlev is None:
         nlev = config.DEFAULT_NLEV
     if H_max is None:
@@ -183,12 +196,15 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        kw = dict(n_barotropic_substeps=30, physics=physics)
-        if A_h is not None:
-            kw["A_h"] = A_h
-        if A_v is not None:
-            kw["A_v"] = A_v
-        cfg = LatLonCGridOceanConfig(**kw)
+        if model_config is not None:
+            cfg = model_config
+        else:
+            kw = dict(n_barotropic_substeps=30, physics=physics)
+            if A_h is not None:
+                kw["A_h"] = A_h
+            if A_v is not None:
+                kw["A_v"] = A_v
+            cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -201,6 +217,13 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         from legoesm.ocean.mpas_config import MPASOceanConfig
 
         mesh = create_voronoi_mesh(params["level"])
+        if model_config is not None:
+            cfg = model_config
+            model = MPASOceanModel(mesh, z_coord, cfg)
+            coord_kind = "mpas"
+            lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+            lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+            return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
