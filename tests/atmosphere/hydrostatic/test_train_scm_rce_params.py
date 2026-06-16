@@ -20,6 +20,9 @@ from legoesm.training.scm_rce_metrics import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "run" / "train_scm_rce_params.py"
 REFERENCE_DIR = REPO_ROOT / "results" / "rcemip1_n128_ocean"
+RECOMMENDED_DEFAULTS = (
+    REPO_ROOT / "results" / "scm_rce_campaign" / "recommended_defaults.json"
+)
 TUNED_PARAMETERS = REPO_ROOT / "results" / "scm_rce_campaign" / "tuned_parameters.json"
 
 
@@ -64,7 +67,9 @@ def test_precip_score_units_and_normalization():
 
 
 @pytest.mark.skipif(
-    not (REFERENCE_DIR / "snapshots3d").is_dir() or not TUNED_PARAMETERS.exists(),
+    not (REFERENCE_DIR / "snapshots3d").is_dir()
+    or not RECOMMENDED_DEFAULTS.exists()
+    or not TUNED_PARAMETERS.exists(),
     reason="CRM reference snapshots or SCM campaign tuned parameters are absent",
 )
 def test_train_scm_rce_params_quick_gradients_loss_and_bounds(tmp_path):
@@ -79,6 +84,8 @@ def test_train_scm_rce_params_quick_gradients_loss_and_bounds(tmp_path):
             "--quick",
             "--steps",
             "2",
+            "--recommended",
+            str(RECOMMENDED_DEFAULTS),
             "--outdir",
             str(outdir),
         ],
@@ -95,6 +102,25 @@ def test_train_scm_rce_params_quick_gradients_loss_and_bounds(tmp_path):
     )
 
     payload = json.loads((outdir / "trained_parameters.json").read_text())
+    winners = payload["campaign_recommendation"]["winners"]
+    assert winners == {
+        "radiation": "rrtmgp",
+        "turbulence": "clubb",
+        "microphysics": "sundqvist",
+        "convection": "sbm",
+        "gravity_wave_drag": "mcfarlane",
+    }
+    config = payload["campaign_tuned_config"]
+    assert config["radiation"]["scheme"] == "rrtmgp"
+    assert config["turbulence"]["scheme"] == "clubb"
+    assert config["microphysics"]["scheme"] == "sundqvist"
+    assert config["convection"]["scheme"] == "sbm"
+    assert config["gravity_wave_drag"]["scheme"] == "mcfarlane"
+    assert payload["campaign_recommendation"]["trained_scheme_keys"] == [
+        "atm.conv.SBMConfig",
+        "atm.gwd.McFarlaneConfig",
+        "atm.micro.SundqvistConfig",
+    ]
     trained = [row for row in payload["parameters"] if row["trained"]]
     assert trained, "quick mode must keep at least one finite nonzero-gradient leaf"
     assert payload["gradient_check"]["all_trained_finite_nonzero"]
