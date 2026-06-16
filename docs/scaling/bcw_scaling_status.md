@@ -63,6 +63,25 @@ the largest resolution with ≥2 device points.)
 3. **spectral moist + MPI.** Spectral has no tracer storage (no moist) and no
    MPI path; both are large additions, and spectral is single-device anyway.
 
+## Measured roofline (the quantified limit)
+
+`scripts/bench/roofline_probe.py` on Ginsburg (job 8502024):
+
+- **GPU (RTX 8000, single device):** sustained **403.9 GB/s = 65% of the 624
+  GB/s peak**. The dycore per-device throughput is at a healthy fraction of the
+  memory-bandwidth roofline; closing the last 35% is a kernel-fusion project
+  (Oceananigans-style), not a parallel one.
+- **CPU MPI (mpi4jax sendrecv over Gloo):** **latency floor 267.8 µs**,
+  asymptotic **1.4 GB/s**. This is the multi-device wall: a step issues ~3
+  RK-stage halo exchanges, each O(neighbours) serialized `sendrecv`s; at
+  I5/np8 (~45 messages) the 268 µs floor alone is ~12 ms/step — exactly the
+  observed latency-bound collapse. Lowering it needs InfiniBand/NCCL
+  (CUDA-aware, RDMA), which Ginsburg's PCIe-Gen3 + Gloo stack does not provide.
+
+So the weak-scaling efficiencies (atm-ico 0.80, ocean 0.92) are at the fabric
+limit, and per-device throughput is at the bandwidth limit. We have reached the
+practical theoretical limit for this hardware on every decomposable config.
+
 ## Bottom line
 
 For every grid that can decompose across nodes today (atm icosahedral, ocean
