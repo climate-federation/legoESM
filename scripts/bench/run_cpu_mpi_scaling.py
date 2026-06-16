@@ -1008,6 +1008,9 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
     _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
     payload["cpus_per_task"] = _cpt
     payload["n_cores"] = result.n_ranks * _cpt
+    # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
+    # with / is mislabeled as a production (mass-conserving) run (codex audit).
+    payload["fix_mass"] = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"  Result: {path}")

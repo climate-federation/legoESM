@@ -33,11 +33,19 @@ from pathlib import Path
 from legoesm import constants
 
 FIELDS = [
-    "component", "backend", "grid", "case", "precision", "mode", "n_devices",
+    "component", "backend", "grid", "case", "precision", "mode",
+    "n_devices", "cpus_per_task", "n_cores", "n_resource",
     "resolution", "resolution_km", "n_levels", "sypd", "time_per_step_ms",
     "total_cells", "mcells_per_s", "scaling_efficiency", "dt_seconds",
-    "physics_level", "compile_time_s", "source",
+    "physics_level", "fix_mass", "compile_time_s", "source",
 ]
+
+
+def _resource_count(backend: str, n_dev: int, n_cores: int) -> int:
+    """The scaling x-axis: CPU -> cores (hybrid 8r x 4c = 32 cores, not 8),
+    GPU/TPU -> device (=rank) count. Packed CPU (cpus_per_task=1) has
+    n_cores == n_ranks so this is unchanged for the existing ladder."""
+    return n_cores if backend == "CPU" else n_dev
 
 # Default result roots: atmosphere baroclinic-wave campaign + ocean campaign.
 DEFAULT_ROOTS = ("results/bcw_scaling", "results/scaling_cpu_ocean",
@@ -97,14 +105,21 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
         return None
     phys = d.get("physics_level", "none")
     res = d.get("resolution")
+    backend = resolve_backend(d, source)
+    cpt = int(d.get("cpus_per_task") or 1)
+    n_cores = int(d.get("n_cores") or (int(n_dev) * cpt))
     return {
         "component": "atm",
-        "backend": resolve_backend(d, source),
+        "backend": backend,
         "grid": grid,
         "case": _CASE.get(phys, phys),
         "precision": d.get("precision", ""),
         "mode": d.get("mode", ""),
         "n_devices": int(n_dev),
+        "cpus_per_task": cpt,
+        "n_cores": n_cores,
+        "n_resource": _resource_count(backend, int(n_dev), n_cores),
+        "fix_mass": d.get("fix_mass", True),
         "resolution": res,
         "resolution_km": round(resolution_km(grid, res), 3) if res is not None else "",
         "n_levels": d.get("n_levels", ""),
@@ -155,6 +170,8 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
             continue
         grid = r.get("grid_type", "latlon")
         res = r.get("resolution")
+        cpt = int(r.get("cpus_per_task") or 1)
+        n_cores = int(r.get("n_cores") or (int(n_dev) * cpt))
         out.append({
             "component": "ocean",
             "backend": backend,
@@ -163,6 +180,10 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
             "precision": r.get("precision", ""),
             "mode": str(r.get("mode", "strong")).replace("ocean_", "") or "strong",
             "n_devices": int(n_dev),
+            "cpus_per_task": cpt,
+            "n_cores": n_cores,
+            "n_resource": _resource_count(backend, int(n_dev), n_cores),
+            "fix_mass": r.get("fix_mass", True),
             "resolution": res,
             "resolution_km": round(resolution_km(grid, res), 3) if res is not None else "",
             "n_levels": r.get("n_levels", ""),
@@ -180,12 +201,14 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
 
 
 def _key(row: dict) -> tuple:
-    # Include component + n_levels + physics_level so otherwise-identical rows
-    # (atm vs ocean latlon, L26 vs L40, or ocean baro=explicit_substep vs
-    # implicit_cn) do NOT collapse to one row (codex review).
+    # Key on the RESOURCE count (CPU cores / GPU devices) so a hybrid
+    # 8r x 4c run does not collide with a packed 32r x 1c run, and include
+    # component + n_levels + physics_level + fix_mass so otherwise-identical
+    # rows (atm vs ocean latlon, L26 vs L40, ocean baro solver, or a
+    # NO_MASS_FIX ablation) never collapse to one row (codex review/audit).
     return (row["component"], row["backend"], row["grid"], row["case"],
-            row["precision"], row["mode"], row["n_devices"], row["resolution"],
-            row["n_levels"], row.get("physics_level", ""))
+            row["precision"], row["mode"], row["n_resource"], row["resolution"],
+            row["n_levels"], row.get("physics_level", ""), row.get("fix_mass", True))
 
 
 def collect(roots) -> tuple[list[dict], int]:

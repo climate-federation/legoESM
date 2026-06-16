@@ -58,7 +58,9 @@ def _read(csv_path: Path) -> list[dict]:
     for r in rows:
         for k in ("sypd", "resolution_km"):
             r[k] = float(r[k]) if r[k] not in ("", None) else float("nan")
-        r["n_devices"] = int(r["n_devices"])
+        # x-axis = resource count (CPU cores / GPU devices); falls back to
+        # n_devices for legacy rows without n_resource.
+        r["n_resource"] = int(r.get("n_resource") or r["n_devices"])
     return rows
 
 
@@ -68,7 +70,7 @@ def _panel(ax, rows, title):
     groups: dict[str, dict] = defaultdict(lambda: defaultdict(list))
     for r in rows:
         groups[r["grid"]][r["resolution"]].append(
-            (r["n_devices"], r["sypd"], r["resolution_km"]))
+            (r["n_resource"], r["sypd"], r["resolution_km"]))
 
     plotted = False
     for grid in sorted(groups, key=lambda g: GRID_LABEL.get(g, g)):

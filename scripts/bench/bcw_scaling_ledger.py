@@ -56,10 +56,12 @@ def _f(x, default=0.0):
 
 def series_metrics(rows: list[dict]) -> dict:
     """Headline metrics for one (backend,grid,case,precision) strong series."""
+    def _res(r):  # resource count: CPU cores / GPU devices (legacy fallback)
+        return int(r.get("n_resource") or r["n_devices"])
     byres: dict = defaultdict(list)
     for r in rows:
         byres[r["resolution"]].append(
-            (int(r["n_devices"]), _f(r["sypd"]), _f(r.get("mcells_per_s"))))
+            (_res(r), _f(r["sypd"]), _f(r.get("mcells_per_s"))))
     # Anchor efficiency on the LARGEST resolution that has >=2 device points.
     # Strong-scaling a *small* problem to many ranks is Amdahl/comm-bound by
     # construction (cells/rank -> 0); the theoretical-limit question is how
@@ -81,7 +83,7 @@ def series_metrics(rows: list[dict]) -> dict:
         if nN > n0 and s0 > 0:
             strong_eff = (sN / s0) / (nN / n0)
     return {
-        "max_ndev": max(int(r["n_devices"]) for r in rows),
+        "max_ndev": max(_res(r) for r in rows),
         "peak_sypd": max(_f(r["sypd"]) for r in rows),
         "strong_eff": strong_eff,
         "peak_mcells_per_s": max(_f(r.get("mcells_per_s")) for r in rows),
@@ -99,7 +101,7 @@ def weak_efficiency(rows: list[dict]) -> float:
     """
     pts = []
     for r in rows:
-        n = int(r["n_devices"])
+        n = int(r.get("n_resource") or r["n_devices"])  # cores (CPU)/devices (GPU)
         tps_s = _f(r.get("time_per_step_ms")) / 1000.0
         tc = _f(r.get("total_cells"))
         if n > 0 and tps_s > 0 and tc > 0:
