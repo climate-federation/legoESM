@@ -142,6 +142,60 @@ def get_recipe(name: str, kind: str = "latlon") -> dict:
     return dict(table[name])
 
 
+def assemble_ocean_config(recipe, kind, config_cls, *,
+                          eos_linear=None, overrides=None, **setup_params):
+    """Assemble a ``*OceanConfig`` from a named recipe + setup parameters.
+
+    This is the ``assemble(recipe, setup)`` entry point (#490): the **recipe**
+    (a catalog name) supplies the SCHEME identity; ``setup_params`` supply the
+    resolution/experiment-dependent values (``physics``, ``A_h``, ``gm_redi``,
+    ...); ``overrides`` win last; the result is compatibility-validated.
+
+    **EOS-config matching** is the rung-2 piece that lets ANY recipe pair with a
+    setup: the setup's ``eos_linear`` is attached ONLY when the recipe's ``eos``
+    is ``"linear"``. A non-linear EOS scheme (``veros_nonlin2`` / ``wright`` /
+    ...) carries its own fixed coefficients, so ``eos_linear`` is irrelevant and
+    is dropped — i.e. ``global_overturning`` (a linear setup) x
+    ``veros_faithful_v1`` now assembles the *Veros* EOS, instead of a
+    half-configured linear-config-attached-to-a-nonlinear-EOS mix.
+
+    Parameters
+    ----------
+    recipe : str
+        Catalog recipe name (see :func:`list_recipes`).
+    kind : str
+        ``"latlon"`` or ``"mpas"`` (selects the catalog table).
+    config_cls : type
+        The ``*OceanConfig`` class to construct (``LatLonCGridOceanConfig`` /
+        ``MPASOceanConfig``); passed in so this module stays config-class-agnostic.
+    eos_linear : LinearEOSConfig or None
+        The setup's linear-EOS coefficients; attached only for a linear recipe.
+    overrides : dict or None
+        Per-run field overrides, applied last (win over recipe + setup).
+    **setup_params
+        Setup-dependent ``config_cls`` fields (``physics``, ``A_h``, ``A_v``,
+        ``K_v``, ``bottom_drag_r``, ``gm_redi``, ...).
+
+    Returns
+    -------
+    config_cls instance
+
+    Raises
+    ------
+    ValueError
+        On an unknown recipe, or a config the compatibility check rejects.
+    """
+    params = get_recipe(recipe, kind)
+    if params.get("eos") == "linear" and eos_linear is not None:
+        params["eos_linear"] = eos_linear
+    params.update(setup_params)
+    if overrides:
+        params.update(overrides)
+    cfg = config_cls(**params)
+    assert_recipe_setup_compatible(cfg)
+    return cfg
+
+
 def assert_recipe_setup_compatible(config) -> None:
     """Fail loudly when an assembled recipe x setup is internally inconsistent.
 

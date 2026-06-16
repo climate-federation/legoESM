@@ -348,10 +348,7 @@ def global_overturning_model_config(
     -------
     LatLonCGridOceanConfig
     """
-    from legoesm.ocean.recipes import (
-        assert_recipe_setup_compatible,
-        get_recipe,
-    )
+    from legoesm.ocean.recipes import assemble_ocean_config
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -361,24 +358,21 @@ def global_overturning_model_config(
     if gm_redi_cfg is None:
         gm_redi_cfg = create_gm_redi_config(config)
 
-    # Named recipe = the SCHEME identity (eos, advection, pgf, integrators, ...);
-    # this factory layers the setup-dependent parameters on top. Drivers still
-    # override any field via **overrides. Selecting legoesm_linear_v1 reproduces
-    # the previously-inlined GO dycore exactly (bit-identical).
-    params = get_recipe(recipe, "latlon")
-    params.update(
+    # Named recipe = the SCHEME identity; this factory supplies the setup params.
+    # assemble_ocean_config attaches eos_linear only for a linear recipe (so
+    # GO x veros_faithful_v1 assembles the Veros EOS, not a mismatch) and
+    # validates. Selecting legoesm_linear_v1 reproduces the previously-inlined
+    # GO dycore exactly (bit-identical); drivers override via **overrides.
+    return assemble_ocean_config(
+        recipe, "latlon", LatLonCGridOceanConfig,
+        eos_linear=eos_config, overrides=overrides,
         physics=physics,
         A_h=config.A_h,
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
     )
-    params.update(overrides)
-    cfg = LatLonCGridOceanConfig(**params)
-    assert_recipe_setup_compatible(cfg)   # verified-registry: catch recipe x setup EOS mismatch
-    return cfg
 
 
 def global_overturning_mpas_model_config(
@@ -410,10 +404,7 @@ def global_overturning_mpas_model_config(
     MPASOceanConfig
     """
     from legoesm.ocean.mpas_config import MPASOceanConfig
-    from legoesm.ocean.recipes import (
-        assert_recipe_setup_compatible,
-        get_recipe,
-    )
+    from legoesm.ocean.recipes import assemble_ocean_config
 
     if config is None:
         config = GlobalOverturningConfig()
@@ -422,23 +413,18 @@ def global_overturning_mpas_model_config(
     if gm_redi_cfg is None:
         gm_redi_cfg = create_gm_redi_config(config)
 
-    # Named MPAS recipe = the scheme identity; this factory layers the setup
-    # params. legoesm_linear_mpas_v1 reproduces the previously-inlined MPAS GO
-    # dycore exactly (bit-identical).
-    params = get_recipe(recipe, "mpas")
-    params.update(
+    # legoesm_linear_mpas_v1 reproduces the previously-inlined MPAS GO dycore
+    # exactly (bit-identical); assemble_ocean_config matches eos config + validates.
+    return assemble_ocean_config(
+        recipe, "mpas", MPASOceanConfig,
+        eos_linear=eos_config, overrides=overrides,
         physics=physics,
         A_h=config.A_h,
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
     )
-    params.update(overrides)
-    cfg = MPASOceanConfig(**params)
-    assert_recipe_setup_compatible(cfg)   # verified-registry: catch recipe x setup EOS mismatch
-    return cfg
 
 
 def create_domain_config(config: GlobalOverturningConfig = None) -> Dict[str, Any]:

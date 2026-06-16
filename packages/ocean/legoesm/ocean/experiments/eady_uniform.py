@@ -545,10 +545,7 @@ def eady_uniform_model_config(
     See ``build_eady_uniform_setup`` for the per-block rationale.
     """
     from legoesm.ocean.eos import LinearEOSConfig
-    from legoesm.ocean.recipes import (
-        assert_recipe_setup_compatible,
-        get_recipe,
-    )
+    from legoesm.ocean.recipes import assemble_ocean_config
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -558,27 +555,23 @@ def eady_uniform_model_config(
             alpha_T=config.alpha_T, rho_ref=config.rho_0,
             T_ref=config.T_ref_C, S_ref=config.S_uniform)
 
-    # Named recipe = the scheme identity; the track knobs override it when set.
-    params = get_recipe(recipe, "latlon")
-    for key, val in (("momentum_advection", momentum_advection),
-                     ("ke_gradient_scheme", ke_gradient_scheme),
-                     ("tracer_advection", tracer_advection),
-                     ("barotropic_solver", barotropic_solver)):
-        if val is not None:
-            params[key] = val
-    params.update(
+    # The track knobs override the recipe's scheme identity when set.
+    track = {k: v for k, v in (
+        ("momentum_advection", momentum_advection),
+        ("ke_gradient_scheme", ke_gradient_scheme),
+        ("tracer_advection", tracer_advection),
+        ("barotropic_solver", barotropic_solver)) if v is not None}
+    return assemble_ocean_config(
+        recipe, "latlon", LatLonCGridOceanConfig,
+        eos_linear=eos_config, overrides=track,
         physics=physics,
         A_h=a_h, B_h=b_h,
         C_smag=(config.C_smag if c_smag is None else c_smag),
         C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,
         A_v=config.A_v, K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
     )
-    cfg = LatLonCGridOceanConfig(**params)
-    assert_recipe_setup_compatible(cfg)
-    return cfg
 
 
 def build_eady_uniform_setup(*, n_lat: int, n_lon: int,

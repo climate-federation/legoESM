@@ -94,11 +94,11 @@ class TestCatalogMatchesFactories:
 
 
 class TestReuse:
-    """The point: pick a predefined recipe and run it on a COMPATIBLE setup."""
+    """The point: pick a predefined recipe and run it on ANY setup. The assembler
+    matches the EOS config to the recipe's eos scheme."""
 
     def test_go_setup_on_eady_recipe(self):
-        """GO setup x eady_weno5_v1 recipe — both linear EOS, so compatible:
-        the GO setup now carries the WENO5 dycore, with GO's setup params."""
+        """GO setup x eady_weno5_v1 (linear): GO carries the WENO5 dycore."""
         cfg = GlobalOverturningConfig()
         mc = global_overturning_model_config(
             cfg, eos_config=create_eos_config(cfg), recipe="eady_weno5_v1")
@@ -106,6 +106,28 @@ class TestReuse:
         assert mc.pgf_scheme == "smc03"
         assert mc.outer_integrator == "ab2"
         assert mc.A_h == cfg.A_h                      # ...but GO's setup params
+
+    def test_go_setup_on_veros_recipe_assembles(self):
+        """GO setup x veros_faithful_v1 (non-linear EOS) now ASSEMBLES the Veros
+        dycore — the linear eos_linear is dropped (the Veros EOS carries its own
+        coefficients), so no mismatch."""
+        cfg = GlobalOverturningConfig()
+        mc = global_overturning_model_config(
+            cfg, eos_config=create_eos_config(cfg), recipe="veros_faithful_v1")
+        assert mc.eos == "veros_nonlin2"
+        assert mc.eos_linear is None                  # dropped — not the right EOS
+        assert mc.outer_integrator == "ab2"
+        assert mc.barotropic_solver == "rigid_lid"
+        assert mc.A_h == cfg.A_h                       # GO's setup params kept
+
+    def test_go_setup_on_dino_recipe_assembles(self):
+        """GO setup x nemo_dino_v1 (eos='wright') assembles; eos_linear dropped."""
+        cfg = GlobalOverturningConfig()
+        mc = global_overturning_model_config(
+            cfg, eos_config=create_eos_config(cfg), recipe="nemo_dino_v1")
+        assert mc.eos == "wright"
+        assert mc.eos_linear is None
+        assert mc.ke_gradient_scheme == "hollingsworth"
 
     def test_override_beats_recipe(self):
         cfg = GlobalOverturningConfig()
@@ -123,26 +145,43 @@ class TestReuse:
             assert getattr(a, f) == getattr(b, f)
 
 
+class TestEosMatching:
+    """assemble_ocean_config attaches eos_linear ONLY for a linear recipe, so any
+    recipe x setup assembles a coherent config (rung 2)."""
+
+    def test_linear_recipe_keeps_eos_linear(self):
+        from legoesm.ocean.recipes import assemble_ocean_config
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        sentinel = object()
+        cfg = assemble_ocean_config(
+            "legoesm_linear_v1", "latlon", LatLonCGridOceanConfig,
+            eos_linear=sentinel)
+        assert cfg.eos == "linear"
+        assert cfg.eos_linear is sentinel
+
+    def test_nonlinear_recipe_drops_eos_linear(self):
+        from legoesm.ocean.recipes import assemble_ocean_config
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = assemble_ocean_config(
+            "veros_faithful_v1", "latlon", LatLonCGridOceanConfig,
+            eos_linear=object())   # supplied, but a non-linear recipe drops it
+        assert cfg.eos == "veros_nonlin2"
+        assert cfg.eos_linear is None
+
+    def test_overrides_win(self):
+        from legoesm.ocean.recipes import assemble_ocean_config
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = assemble_ocean_config(
+            "legoesm_linear_v1", "latlon", LatLonCGridOceanConfig,
+            eos_linear=object(), overrides={"pgf_scheme": "smc03"}, A_h=42.0)
+        assert cfg.pgf_scheme == "smc03"
+        assert cfg.A_h == 42.0
+
+
 class TestCompatibility:
-    """The verified-registry rung: an incompatible recipe x setup must fail loud."""
-
-    def test_go_setup_on_veros_recipe_raises(self):
-        """GO supplies a linear EOS config; veros_faithful_v1 is non-linear —
-        the assembler must REJECT the mismatch instead of silently ignoring the
-        linear config and running the Veros EOS."""
-        cfg = GlobalOverturningConfig()
-        with pytest.raises(ValueError, match="non-linear EOS"):
-            global_overturning_model_config(
-                cfg, eos_config=create_eos_config(cfg),
-                recipe="veros_faithful_v1")
-
-    def test_nemo_dino_recipe_on_go_raises(self):
-        """DINO's recipe is eos='wright' (non-linear) — also incompatible with
-        GO's linear setup."""
-        cfg = GlobalOverturningConfig()
-        with pytest.raises(ValueError, match="non-linear EOS"):
-            global_overturning_model_config(
-                cfg, eos_config=create_eos_config(cfg), recipe="nemo_dino_v1")
+    """The validator still rejects genuinely-incoherent configs (e.g. a forced
+    override producing eos='linear' with no coefficients, or a non-linear EOS
+    with a contradictory eos_linear)."""
 
     def test_compat_check_direct(self):
         from types import SimpleNamespace
@@ -158,7 +197,7 @@ class TestCompatibility:
         with pytest.raises(ValueError, match="no eos_linear"):
             assert_recipe_setup_compatible(
                 SimpleNamespace(eos="linear", eos_linear=None))
-        # non-linear + dangling eos_linear -> raise (the GO x veros footgun)
+        # non-linear + dangling eos_linear -> raise (contradictory)
         with pytest.raises(ValueError, match="non-linear EOS"):
             assert_recipe_setup_compatible(
                 SimpleNamespace(eos="veros_nonlin2", eos_linear=object()))
