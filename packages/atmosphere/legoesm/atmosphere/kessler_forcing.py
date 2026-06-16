@@ -159,4 +159,7 @@ def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
     # Introspectable bound timestep so a step wrapper can assert the caller
     # steps with the same dt the saturation-adjustment rate was scaled by.
     kessler_forcing_mpas._bound_dt = dt
+    # Warm-rain microphysics is purely column-local (reads only its own column),
+    # so the MPI step may SKIP the pre-physics halo exchange for it.
+    kessler_forcing_mpas._column_local = True
     return kessler_forcing_mpas

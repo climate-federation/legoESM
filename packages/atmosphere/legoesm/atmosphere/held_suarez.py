@@ -559,6 +559,11 @@ def held_suarez_forcing_mpas(
     )
 
 
+# Held-Suarez is a column-local Newtonian relaxation (no horizontal stencil),
+# so the MPAS MPI step may SKIP the pre-physics halo exchange for it.
+held_suarez_forcing_mpas._column_local = True
+
+
 def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,

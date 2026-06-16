@@ -562,6 +562,17 @@ def make_voronoi_mpi_step(
             "Pass return_phys_state=True and thread the returned carry, or "
             "use a diagnostic scheme."
         )
+    # Column-local physics (Newtonian relaxation, warm-rain microphysics) reads
+    # ONLY its own column and never touches halo cells, so the pre-physics halo
+    # exchange below is wasted work.  Skipping it removes one halo exchange per
+    # step (~1/4 of a moist step's exchanges: 3 RK-stage + 1 pre-physics) with
+    # NO effect on results — a latency-bound strong-scaling win.  Schemes opt in
+    # via a ``_column_local = True`` attribute; unknown physics defaults to
+    # exchanging (safe).  Static at trace time (set on the closure at build).
+    _phys_col_local = (
+        bool(getattr(physics_fn, "_column_local", False))
+        and os.environ.get("LEGOESM_NO_COLUMN_LOCAL_SKIP") != "1"
+    )
     if config is None:
         config = model.config
 
@@ -791,7 +802,10 @@ def make_voronoi_mpi_step(
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
         if physics_fn is not None:
-            state_phys_in = _exchange_mpas_state(state_new)
+            # Column-local physics needs no neighbor cells -> skip the exchange.
+            state_phys_in = (
+                state_new if _phys_col_local
+                else _exchange_mpas_state(state_new))
             _pr = physics_fn(
                 state_phys_in, local_mesh, sigma_coord,
                 phys_state=phys_state, forcing=forcing,
