@@ -302,6 +302,7 @@ def global_overturning_model_config(
     physics=None,
     eos_config=None,
     gm_redi_cfg=None,
+    recipe: str = "legoesm_linear_v1",
     **overrides,
 ):
     """Assemble the global-overturning ``LatLonCGridOceanConfig`` (shared factory).
@@ -330,15 +331,24 @@ def global_overturning_model_config(
         GM/Redi; defaults to ``create_gm_redi_config(config)`` (None unless
         ``config.use_gm_redi``).  Pass ``gm_redi=...`` in ``overrides`` to force
         a specific value regardless of ``config``.
+    recipe : str
+        Name of the scheme bundle to select from the recipe catalog
+        (``legoesm.ocean.recipes.LATLON_RECIPES``). Defaults to
+        ``"legoesm_linear_v1"`` — the canonical global-overturning dycore. Pass
+        another name (e.g. ``"veros_faithful_v1"``, ``"eady_weno5_v1"``) to run
+        the SAME setup on a different, predefined recipe (#490). The named recipe
+        supplies the SCHEME identity (EOS / advection / PGF / integrators / ...);
+        this factory supplies the setup params (``A_h``, ``eos_linear``, ...).
     **overrides
         Any ``LatLonCGridOceanConfig`` field; applied last so it wins over the
-        base (e.g. ``barotropic_solver``, ``B_h``, ``C_smag``,
+        recipe (e.g. ``barotropic_solver``, ``B_h``, ``C_smag``,
         ``A_h_lat_scaling``, ``n_barotropic_substeps``, ``pgf_scheme``).
 
     Returns
     -------
     LatLonCGridOceanConfig
     """
+    from legoesm.ocean.recipes import get_recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -348,31 +358,19 @@ def global_overturning_model_config(
     if gm_redi_cfg is None:
         gm_redi_cfg = create_gm_redi_config(config)
 
-    params = dict(
+    # Named recipe = the SCHEME identity (eos, advection, pgf, integrators, ...);
+    # this factory layers the setup-dependent parameters on top. Drivers still
+    # override any field via **overrides. Selecting legoesm_linear_v1 reproduces
+    # the previously-inlined GO dycore exactly (bit-identical).
+    params = get_recipe(recipe, "latlon")
+    params.update(
         physics=physics,
         A_h=config.A_h,
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
-        # Structural scheme identity pinned EXPLICITLY — even where it currently
-        # equals the LatLonCGridOceanConfig default — so a change to a model
-        # default cannot silently alter the global-overturning recipe across the
-        # ~17 drivers + matrix that consume it (#488). Drivers still override any
-        # of these via **overrides (e.g. realistic runs set barotropic_solver=
-        # "implicit_cn", pgf_scheme="smc03"). Pin to CURRENT defaults => bit-
-        # identical today; locks the recipe against future default drift.
-        momentum_advection="vector_invariant",
-        tracer_advection="tvd",
-        pgf_scheme="adcroft",
-        ke_gradient_scheme="centered",
-        barotropic_solver="explicit_substep",
-        coriolis_scheme="matsuno_split",
-        outer_integrator="forward_euler",
-        tracer_time_integrator="euler",
-        implicit_vertical_mixing=True,
     )
     params.update(overrides)
     return LatLonCGridOceanConfig(**params)
@@ -384,6 +382,7 @@ def global_overturning_mpas_model_config(
     physics=None,
     eos_config=None,
     gm_redi_cfg=None,
+    recipe: str = "legoesm_linear_mpas_v1",
     **overrides,
 ):
     """MPAS (Voronoi C-grid) counterpart of ``global_overturning_model_config``.
@@ -406,6 +405,7 @@ def global_overturning_mpas_model_config(
     MPASOceanConfig
     """
     from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.recipes import get_recipe
 
     if config is None:
         config = GlobalOverturningConfig()
@@ -414,23 +414,18 @@ def global_overturning_mpas_model_config(
     if gm_redi_cfg is None:
         gm_redi_cfg = create_gm_redi_config(config)
 
-    params = dict(
+    # Named MPAS recipe = the scheme identity; this factory layers the setup
+    # params. legoesm_linear_mpas_v1 reproduces the previously-inlined MPAS GO
+    # dycore exactly (bit-identical).
+    params = get_recipe(recipe, "mpas")
+    params.update(
         physics=physics,
         A_h=config.A_h,
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
-        # Structural scheme identity pinned EXPLICITLY (see the lat-lon factory)
-        # so a model-default change can't silently alter the MPAS GO recipe.
-        # Pinned to CURRENT MPASOceanConfig defaults => bit-identical today.
-        tracer_advection="upwind",
-        pgf_scheme="centered",
-        barotropic_solver="explicit_substep",
-        pv_scheme="enstrophy",
-        implicit_vertical_mixing=True,
     )
     params.update(overrides)
     return MPASOceanConfig(**params)
