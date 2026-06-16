@@ -20,10 +20,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
-    create_eos_config, create_gm_redi_config,
+    create_eos_config, create_gm_redi_config, global_overturning_model_config,
 )
 
 from _drake_momentum_budget_runner import (
@@ -52,15 +51,10 @@ def main():
     physics = create_forcings("latlon", grid, config)
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,                 # unused by implicit solver
-        physics=physics,
-        A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear", eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
         # ---- THE CHANGE ----
-        barotropic_solver="implicit_cn",
+        barotropic_solver="implicit_cn",          # n_barotropic_substeps unused
     )
     print(f"barotropic_solver = {ocean_config.barotropic_solver}")
     print(f"theta_eta = {ocean_config.barotropic_implicit_theta_eta}")
