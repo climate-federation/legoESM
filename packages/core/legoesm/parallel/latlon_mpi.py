@@ -2756,35 +2756,58 @@ def make_latlon_2d_mpi_step(
     wraps are correct.  This case reproduces :func:`make_latlon_mpi_step`
     and is the single-process / 2×1 conservation gate.
 
-    ``proc_lon > 1`` (a genuine LONGITUDE split) is REFUSED loudly: the
-    C-grid operators still take their longitude halo with LOCAL
-    ``jnp.roll(…, axis=1)`` / wrap-column appends (e.g.
-    ``gradient_x_cgrid``, ``interp_cell_to_uface``, ``curl_vertex_cgrid`` in
-    ``operators_latlon_cgrid.py``), which wrap the rank-local lon block
-    instead of exchanging with the lon neighbour.  Routing those through the
-    dispatched lon halo (:func:`exchange_halo_lon`, bit-identical to the
-    local wrap at ``proc_lon == 1``) is the next build increment.  Until it
-    lands a lon split would SILENTLY compute wrong longitude gradients that
-    still ~conserve mass after the fixer — so we raise rather than ship a
-    silent-wrong path (the same "fail loud, not silent" doctrine as the
-    pole-fold guard in :func:`pad_halo_latlon_2d`).
+    ``proc_lon > 1`` (a genuine LONGITUDE split) is now WIRED for REGULAR /
+    wall-pole grids: the C-grid operators route their longitude halo through
+    the dispatched
+    :func:`legoesm.grids.operators_latlon_cgrid.pad_lon_cgrid`
+    (``exchange_halo_lon`` under a 2-D layout, bit-identical to the local wrap
+    at ``proc_lon == 1``), so ``gradient_x_cgrid`` / ``interp_cell_to_uface`` /
+    ``curl_vertex_cgrid`` / the mask ops span longitude partition cuts.
+    TRIPOLAR grids are still REFUSED at ``proc_lon > 1``: the curl
+    tripolar-cap fold keeps a local lon roll, and the 180° fold under a
+    longitude split needs the lat-pencil transpose (fail loud, not a silent
+    wrong-fold — the same doctrine as the ``pole_bc="fold"`` guard in
+    :func:`pad_halo_latlon_2d`).
 
     Parameters / contract are otherwise identical to
     :func:`make_latlon_mpi_step` (rank-local ``model``; ``physics_fn`` a
     stable column-local closure; ``step_fn(local_state, dt, *,
     target_mass=None)``).
     """
-    if layout.proc_lon > 1:
+    # Regular / wall-pole grids: proc_lon>1 is wired (operators route their
+    # lon halo through pad_lon_cgrid -> exchange_halo_lon).  TRIPOLAR grids
+    # still keep a local lon roll in the curl tripolar-cap fold, so refuse
+    # them under a longitude split — fail loud rather than ship a silent
+    # wrong-fold.  Key on ``fold.is_active`` ALONE (a grid-global property,
+    # identical on every rank) — NOT ``fold_j`` (the rank-LOCAL fold-row
+    # index, -1 on ranks that don't own the seam): a fold_j-keyed guard would
+    # raise only on the seam-owning rank while the others enter the MPI
+    # collectives and DEADLOCK (codex — SPMD-asymmetric raise).
+    _fold = getattr(model.grid, "fold", None)
+    _is_tripolar = _fold is not None and bool(getattr(_fold, "is_active", False))
+    if layout.proc_lon > 1 and _is_tripolar:
         raise NotImplementedError(
-            "make_latlon_2d_mpi_step: proc_lon>1 (longitude split) is not "
-            "yet wired — the C-grid operators still take their lon halo with "
-            "local jnp.roll(..., axis=1) (gradient_x_cgrid, "
-            "interp_cell_to_uface, curl_vertex_cgrid), which would wrap the "
-            "rank-local lon block instead of the lon neighbour and silently "
-            "compute wrong longitude gradients.  Use proc_lon=1 (the "
-            "band-equivalent layout) until the operator lon ops route "
-            f"through exchange_halo_lon.  Got proc_lon={layout.proc_lon}, "
-            f"proc_lat={layout.proc_lat}."
+            "make_latlon_2d_mpi_step: proc_lon>1 on a TRIPOLAR grid is not "
+            "wired — curl_vertex_cgrid's tripolar-cap fold keeps a local "
+            "jnp.roll(..., axis=1); the 180-deg fold under a longitude split "
+            "needs the lat-pencil transpose.  Use proc_lon=1 for tripolar, or "
+            "a regular / wall-pole grid for the 2-D throughput benchmark.  "
+            f"Got proc_lon={layout.proc_lon}, proc_lat={layout.proc_lat}."
+        )
+    # The polar filter is a LONGITUDE FFT (rfft over the rank-local lon block,
+    # mask sized to the local n_lon), so it is wrong under a longitude split
+    # until a lon-gather FFT exists — refuse it loudly (config is grid-global,
+    # so all ranks raise together).  proc_lon==1 keeps full lon per rank and
+    # is fine.
+    if layout.proc_lon > 1 and bool(
+        getattr(model.config, "use_polar_filter", False)
+    ):
+        raise NotImplementedError(
+            "make_latlon_2d_mpi_step: proc_lon>1 with use_polar_filter=True is "
+            "not wired — the polar filter rfft's the rank-local longitude "
+            "block (wrong under a lon split; needs a lon-gather FFT).  Set "
+            "use_polar_filter=False for the 2-D benchmark, or use proc_lon=1.  "
+            f"Got proc_lon={layout.proc_lon}."
         )
 
     from legoesm.grids.halo import set_halo_backend

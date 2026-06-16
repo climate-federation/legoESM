@@ -34,6 +34,9 @@ MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.latlon import create_latlon_grid
+from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    absolute_vorticity_coriolis,
+)
 from legoesm.grids.operators_latlon_cgrid import (
     compute_vertex_mask,
     curl_vertex_cgrid,
@@ -76,6 +79,10 @@ def test_2d_operators_match_serial_window():
     gx_s = np.asarray(gradient_x_cgrid(f, grid))            # (n_lat, n_lon+1)
     iu_s = np.asarray(interp_cell_to_uface(f))              # (n_lat, n_lon+1)
     cz_s = np.asarray(curl_vertex_cgrid(u, v, grid))        # (n_lat+1, n_lon+1)
+    # absolute_vorticity_coriolis: the Coriolis v->u 4-pt average carried the
+    # missed local lon roll that broke the 2-D u-momentum (dycore-gate
+    # finding) — pin it at the operator level too.
+    cu_s, cv_s = (np.asarray(a) for a in absolute_vorticity_coriolis(u, v, grid))
     gx_s = jax.block_until_ready(gx_s)
 
     # --- This rank's 2-D block ---
@@ -91,6 +98,8 @@ def test_2d_operators_match_serial_window():
         gx_b = np.asarray(gradient_x_cgrid(f_b, gblk))
         iu_b = np.asarray(interp_cell_to_uface(f_b))
         cz_b = np.asarray(curl_vertex_cgrid(u_b, v_b, gblk))
+        cu_b, cv_b = (np.asarray(a)
+                      for a in absolute_vorticity_coriolis(u_b, v_b, gblk))
     finally:
         set_halo_backend("local")
 
@@ -104,6 +113,12 @@ def test_2d_operators_match_serial_window():
     np.testing.assert_allclose(
         cz_b, cz_s[s:e + 1, w:x + 1], rtol=1e-7, atol=1e-9,
         err_msg=f"rank {rank} curl_vertex_cgrid != serial window")
+    np.testing.assert_allclose(
+        cu_b, cu_s[s:e, w:x + 1], rtol=1e-7, atol=1e-9,
+        err_msg=f"rank {rank} coriolis cor_u != serial window (the v->u 4-pt)")
+    np.testing.assert_allclose(
+        cv_b, cv_s[s:e + 1, w:x], rtol=1e-7, atol=1e-9,
+        err_msg=f"rank {rank} coriolis cor_v != serial window")
     if rank == 0:
         print(f"OP_2D_EQUIVARIANCE_OK pr={pr} pc={pc}", flush=True)
 
