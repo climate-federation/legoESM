@@ -97,6 +97,28 @@ LATLON_RECIPES = {
         "lateral_viscosity_operator": "flux_divergence",
         "vertical_momentum_scheme": "centered_full",
     },
+    # The FAITHFUL NEMO dycore (#487/#496) — the scheme identity of
+    # fidelity/nemo_recipe.py's nemo_lat_lon_model_config: EEN-style
+    # vector-invariant momentum + Hollingsworth KE-gradient, PPM/FCT tracers,
+    # TEOS-10-like veros_gsw EOS, smc03 PGF, RK3 momentum, adaptive-implicit
+    # vertical advection, cosine free-surface filter. NB this catalog entry is the
+    # DYCORE SCHEMES only — the full NEMO card ALSO supplies NEMO constants + the
+    # prognostic TKE physics + GM/Redi/MLE; use nemo_recipe.build_nemo_recipe for
+    # full fidelity. Distinct from nemo_dino_v1 (the cruder Wright/KPP approx).
+    # Drift-guarded against the card by tests/ocean/unit/test_recipes.py.
+    "nemo_v1": {
+        "eos": "veros_gsw",
+        "momentum_advection": "vector_invariant",
+        "ke_gradient_scheme": "hollingsworth",
+        "tracer_advection": "ppm_fct",
+        "pgf_scheme": "smc03",
+        "barotropic_solver": "explicit_substep",
+        "barotropic_time_filter": "cosine",
+        "momentum_time_integrator": "rk3",
+        "adaptive_implicit_vertadv": True,
+        "implicit_vertical_mixing": True,
+        "n_barotropic_substeps": 30,
+    },
     # DINO (Kamm et al. 2025) NEMO double-gyre approximation — see dino.py for
     # the NEMO-namelist cross-checks (ke_gradient/barotropic ARE NEMO matches;
     # the forward_euler/euler integrators are a known NEMO-unfaithfulness, #487).

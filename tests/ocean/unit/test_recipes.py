@@ -100,6 +100,14 @@ class TestCatalogMatchesFactories:
         for k, v in get_recipe("nemo_dino_v1").items():
             assert getattr(mc, k) == v, k
 
+    def test_nemo_v1_is_the_real_nemo_card_dycore(self):
+        """Drift guard for nemo_v1 == fidelity/nemo_recipe.py's NEMO card dycore
+        (the FAITHFUL one — EEN/TKE/TEOS-10, #496), not the dino approximation."""
+        from legoesm.ocean.fidelity.nemo_recipe import nemo_lat_lon_model_config
+        mc = nemo_lat_lon_model_config()
+        for k, v in get_recipe("nemo_v1").items():
+            assert getattr(mc, k) == v, k
+
 
 class TestReuse:
     """The point: pick a predefined recipe and run it on another setup."""
