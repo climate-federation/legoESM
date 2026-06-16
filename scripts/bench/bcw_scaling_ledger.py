@@ -136,27 +136,32 @@ def compute_rows(tidy_csv: Path) -> list[dict]:
     return out
 
 
-def _next_iteration(ledger: Path) -> int:
+def _read_ledger(ledger: Path) -> list[dict]:
     if not ledger.exists():
-        return 1
+        return []
     with ledger.open() as f:
-        its = [int(r["iteration"]) for r in csv.DictReader(f) if r.get("iteration")]
-    return (max(its) + 1) if its else 1
+        return list(csv.DictReader(f))
 
 
 def snapshot(tidy_csv: Path, ledger: Path, note: str, timestamp: str) -> int:
-    it = _next_iteration(ledger)
+    existing = _read_ledger(ledger)
+    its = [int(r["iteration"]) for r in existing
+           if str(r.get("iteration", "")).isdigit()]
+    it = (max(its) + 1) if its else 1
     commit = _git_commit()
     metric_rows = compute_rows(tidy_csv)
     new = [{"iteration": it, "timestamp": timestamp, "commit": commit,
             "note": note, **m} for m in metric_rows]
-    exists = ledger.exists()
+    # Rewrite the WHOLE file with the current schema (append-mode would keep a
+    # stale header if LEDGER_FIELDS ever grows -> misaligned rows).
+    # extrasaction="ignore" drops any legacy/restkey columns; restval=""
+    # back-fills fields absent from older rows.
     ledger.parent.mkdir(parents=True, exist_ok=True)
-    with ledger.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=LEDGER_FIELDS)
-        if not exists:
-            w.writeheader()
-        w.writerows(new)
+    with ledger.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LEDGER_FIELDS,
+                           extrasaction="ignore", restval="")
+        w.writeheader()
+        w.writerows(existing + new)
     print(f"iteration {it}: appended {len(new)} series rows to {ledger}")
     for m in metric_rows:
         print(f"  {m['backend']:3s} {m['grid']:12s} {m['case']:5s} "
@@ -178,8 +183,8 @@ def plot(ledger: Path, out: Path, grid: str = "icosahedral") -> Path | None:
     series: dict = defaultdict(list)
     for r in rows:
         series[(r["backend"], r["case"], r["precision"])].append(
-            (int(r["iteration"]), _f(r["strong_eff"]), _f(r["weak_eff"]),
-             _f(r["peak_mcells_per_s"])))
+            (int(r["iteration"]), _f(r.get("strong_eff")), _f(r.get("weak_eff")),
+             _f(r.get("peak_mcells_per_s"))))
 
     fig, (ax_e, ax_w, ax_t) = plt.subplots(3, 1, figsize=(8.0, 10.5), sharex=True)
     for (backend, case, prec), pts in sorted(series.items()):
