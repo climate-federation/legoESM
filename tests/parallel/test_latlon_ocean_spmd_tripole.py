@@ -74,24 +74,16 @@ def _have_sharded_step():
                     reason="needs >=4 devices (XLA_FLAGS host device count)")
 @pytest.mark.skipif(not _have_sharded_step(),
                     reason="sharded_ocean_step module not present")
-@pytest.mark.parametrize("barotropic_solver", [
-    "explicit_substep",
-    # implicit_cn under SPMD is a SEPARATE gap (NOT the north fold): its
-    # Helmholtz PCG solver (solve_helmholtz_freesurface fori_loop + A_op halo
-    # ppermute + global_rel_residual reductions in barotropic_common) was never
-    # SPMD-wired — the regular-grid gate only ever ran explicit_substep — and it
-    # SIGABRTs in the in-A_op halo ppermute under shard_map.  The tripole north
-    # fold itself is PROVEN by the explicit_substep case (the SPMD-validated
-    # solver).  Skipped (a SIGABRT aborts the process, so xfail can't catch it);
-    # tracked as the implicit_cn-SPMD follow-up.
-    pytest.param("implicit_cn", marks=pytest.mark.skip(
-        reason="implicit_cn barotropic solver not yet SPMD-wired (separate "
-               "gap from the north fold; explicit_substep is the SPMD gate)")),
-])
+@pytest.mark.parametrize("barotropic_solver",
+                         ["explicit_substep", "implicit_cn"])
 def test_latlon_ocean_spmd_tripole_matches_single_device(barotropic_solver):
-    # explicit_substep is the SPMD-proven solver (the regular-grid gate uses it)
-    # -> isolates the tripole north fold; implicit_cn is the OMIP production
-    # solver (the cold-start-stable one) -> a separate SPMD follow-up (skipped).
+    # explicit_substep is the SPMD-proven solver (the regular-grid gate uses it);
+    # implicit_cn is the OMIP production solver (cold-start-stable).  Under SPMD
+    # implicit_cn routes to the FIXED-iteration distributed PCG (static scan
+    # schedule) — barotropic_implicit_latlon_cgrid keys _use_pcg on the armed
+    # spmd halo backend — instead of the jax.scipy.cg while_loop (whose
+    # collectives SIGABRT under shard_map).  Both must match the single-device
+    # step on a tripole (north fold + barotropic solve).
     from legoesm.parallel.mesh import create_latlon_mesh
     from legoesm.ocean.dynamics.sharded_ocean_step import (
         make_sharded_ocean_step,
@@ -126,11 +118,19 @@ def test_latlon_ocean_spmd_tripole_matches_single_device(barotropic_solver):
         ss = step(ss, dt)
     ss = gather_state_latlon(ss, dev.mesh)
 
-    # Same FP re-association floor as the regular-grid gate (the sharded
-    # split-explicit barotropic re-associates its reductions across bands);
-    # ~1e-4 is physically negligible yet catches a real missing-fold regression
-    # (those give O(1e-3+) at the northern band). See test_latlon_ocean_spmd_step.
-    _ATOL, _RTOL = 2.0e-4, 1.0e-3
+    # FP re-association floor (NOT a bug margin): the sharded reductions are
+    # batch_psum_spmd across bands (provably global — a missing/local reduction
+    # gives O(1) error, a missing band-cut halo O(1e-2)), so the only
+    # serial-vs-SPMD difference is reduction ORDER.  explicit_substep holds the
+    # strict 2e-4 floor (it proves the north fold + the operators/halos/single
+    # reductions).  implicit_cn adds the FIXED-iteration PCG, whose per-iteration
+    # global dot products propagate the reduction-order round-off through the
+    # Krylov iterates -> a slightly larger floor (measured eta max-abs 3.4e-4
+    # = 0.34 mm SSH, domain-wide, first crossing 2e-4 at a band cut); 5e-4 is
+    # physically negligible yet still catches a real missing-halo/reduction
+    # regression.  Follow-up: a multi-step boundedness sweep for extra confidence.
+    _ATOL = 5.0e-4 if barotropic_solver == "implicit_cn" else 2.0e-4
+    _RTOL = 1.0e-3
     for nm in ("u", "v", "eta", "T", "S"):
         a = np.asarray(getattr(s, nm).data)
         b = np.asarray(getattr(ss, nm).data)

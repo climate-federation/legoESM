@@ -1465,7 +1465,18 @@ def barotropic_implicit_latlon_cgrid(
     # (solver-matched parity references + the faster-single-rank
     # option, job 8458701); its global dots reduce locally when not
     # multi-process, so the flag is safe pre-arming.
-    _use_pcg = _is_distributed() or bool(config.barotropic_implicit_force_pcg)
+    # The lat-band SPMD backend (single-controller shard_map) is not
+    # multi-PROCESS, so _is_distributed() is False — but the stock-CG branch
+    # (solve_helmholtz_freesurface -> jax.scipy.sparse.linalg.cg) runs its
+    # A_op halo ppermute + CG reductions inside a DATA-DEPENDENT while_loop,
+    # whose collectives have no static schedule under shard_map (SIGABRT).
+    # Route SPMD to the FIXED-iteration distributed PCG (static scan schedule,
+    # SPMD-routed reductions — the same path MPI uses), exactly like the
+    # explicit_substep barotropic loop that is already SPMD-validated.
+    from legoesm.grids.halo import get_halo_backend as _get_halo_backend
+    _spmd_armed = _get_halo_backend() == "spmd"
+    _use_pcg = (_is_distributed() or _spmd_armed
+                or bool(config.barotropic_implicit_force_pcg))
     if not _use_pcg:
         # The stock-CG branch solves with its INTERNAL Jacobi (the
         # custom-VJP solver owns inv_diag for its exact adjoint) — a
