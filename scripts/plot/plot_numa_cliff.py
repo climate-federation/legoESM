@@ -26,7 +26,11 @@ def collect(root: Path, grid: str, res: int, prec: str, mode: str):
     # cpus_per_task -> {n_cores: max sypd}
     by_cfg: dict = defaultdict(dict)
     for jf in Path(root).rglob("*.json"):
-        if "/_ab_" in str(jf) or "/val_" in str(jf):
+        # CPU-ladder dirs only: skip A/B, validation, and GPU-job dirs (a GPU
+        # job that CUDA-fell-back to CPU lands under _gpu_ with backend=cpu and
+        # a non-comparable node spread).
+        s = str(jf)
+        if "/_ab_" in s or "/val_" in s or "_gpu_" in s:
             continue
         try:
             d = json.loads(jf.read_text())
