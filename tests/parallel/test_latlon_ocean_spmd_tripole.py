@@ -59,6 +59,29 @@ def _perturbed_state(grid, z_coord):
         T=state.T.replace(data=jnp.asarray(T)))
 
 
+def _smooth_surface_forcing(grid):
+    """A smooth, NONZERO cell-centred ``OceanSurfaceForcing`` (tau_x + q_net) so
+    the SPMD step exercises the in-core external-forcing path (wind-stress
+    momentum + surface heat), not just the rest/perturbation dynamics.
+
+    Both channels are ``(n_lat, n_lon)`` T-point fields (the
+    ``omip2_applicator`` layout) — they shard ``P("lat")`` exactly like a cell
+    state field and are interpolated to the u/v faces INSIDE the step.
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    lat = np.asarray(grid.lat_T)                      # (n_lat, n_lon) [rad]
+    lon = np.asarray(grid.lon_T)
+    # Idealised zonal wind stress (trade/westerly banding) + a smooth heat flux.
+    tau_x = (0.1 * np.cos(3.0 * lat)).astype(np.float64)     # [Pa]
+    q_net = (40.0 * np.cos(lat) * np.cos(lon)).astype(np.float64)  # [W/m^2]
+    return OceanSurfaceForcing(
+        tau_x=jnp.asarray(tau_x),
+        tau_y=jnp.zeros_like(jnp.asarray(tau_x)),
+        q_net=jnp.asarray(q_net),
+    )
+
+
 def _have_sharded_step():
     try:
         from legoesm.ocean.dynamics.sharded_ocean_step import (  # noqa: F401
@@ -76,7 +99,10 @@ def _have_sharded_step():
                     reason="sharded_ocean_step module not present")
 @pytest.mark.parametrize("barotropic_solver",
                          ["explicit_substep", "implicit_cn"])
-def test_latlon_ocean_spmd_tripole_matches_single_device(barotropic_solver):
+@pytest.mark.parametrize("with_forcing", [False, True],
+                         ids=["unforced", "forced"])
+def test_latlon_ocean_spmd_tripole_matches_single_device(
+        barotropic_solver, with_forcing):
     # explicit_substep is the SPMD-proven solver (the regular-grid gate uses it);
     # implicit_cn is the OMIP production solver (cold-start-stable).  Under SPMD
     # implicit_cn routes to the FIXED-iteration distributed PCG (static scan
@@ -104,10 +130,19 @@ def test_latlon_ocean_spmd_tripole_matches_single_device(barotropic_solver):
     state0 = _perturbed_state(grid, z_coord)
     dt, n_steps = 600.0, 3
 
+    # NONZERO surface forcing (wind stress + heat) when ``with_forcing`` — the
+    # SAME global pytree is passed to BOTH the serial and the SPMD step, so the
+    # equivalence gate now also proves the in-core external-forcing path
+    # (interp_cell_to_{u,v}face wind stress + surface heat) under SPMD: the
+    # cell-shaped forcing is sharded P("lat") and the tau face interpolation
+    # routes through the armed SPMD band halo.  ``None`` reproduces the unforced
+    # step byte-for-byte.
+    sf = _smooth_surface_forcing(grid) if with_forcing else None
+
     # single-device reference
     s = state0
     for _ in range(n_steps):
-        s = model.step(s, dt)
+        s = model.step(s, dt, surface_forcing=sf)
 
     model._ensure_vertex_mask(state0)        # prime the build-once vmask cache
 
@@ -115,7 +150,7 @@ def test_latlon_ocean_spmd_tripole_matches_single_device(barotropic_solver):
     step = make_sharded_ocean_step(model, dev.mesh)
     ss = shard_state_latlon(state0, dev.mesh)
     for _ in range(n_steps):
-        ss = step(ss, dt)
+        ss = step(ss, dt, surface_forcing=sf)
     ss = gather_state_latlon(ss, dev.mesh)
 
     # FP re-association floor (NOT a bug margin): the sharded reductions are

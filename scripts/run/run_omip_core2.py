@@ -55,6 +55,41 @@ def _squeeze2d(a: np.ndarray) -> np.ndarray:
     return a
 
 
+def _south_pad_rows(n_lat: int, n_gpus: int) -> int:
+    """Number of LAND rows to append at the SOUTH so ``n_lat`` is a multiple of
+    ``n_gpus`` (the lat-band SPMD step needs one uniform band per device).
+
+    eORCA025 ``n_lat=1207`` is odd: for ``n_gpus=2`` this returns 1 (-> 1208).
+    Returns 0 when already divisible (or ``n_gpus <= 1``).
+    """
+    if n_gpus <= 1:
+        return 0
+    rem = n_lat % n_gpus
+    return 0 if rem == 0 else (n_gpus - rem)
+
+
+def _pad_mask_bathy_south(land_mask: np.ndarray, H_bathy: np.ndarray,
+                          n_pad: int):
+    """Prepend ``n_pad`` LAND rows (mask=0, bathy=0) to the SOUTH of the cell
+    ``(n_lat, n_lon)`` land-mask + bathymetry arrays.
+
+    Pairs with :func:`legoesm.grids.tripole.pad_tripole_grid_south` (which pads
+    the GRID geometry the same way + keeps the north fold): the padded mask/bathy
+    + grid are fed to the SAME ``_init_rest_state`` / WOA-fill path, so the state
+    is built on the padded grid with the added rows masked LAND (inert dynamics).
+    The wet rows are preserved bit-exact, shifted ``+n_pad`` in the lat index.
+    """
+    if n_pad <= 0:
+        return land_mask, H_bathy
+    lm = np.asarray(land_mask)
+    hb = np.asarray(H_bathy)
+    n_lon = lm.shape[1]
+    zeros_lm = np.zeros((n_pad, n_lon), dtype=lm.dtype)
+    zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
+    return (np.concatenate([zeros_lm, lm], axis=0),
+            np.concatenate([zeros_hb, hb], axis=0))
+
+
 def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
     """Fill the ORCA 2-point cyclic-overlap halo columns of a static field.
 
@@ -471,7 +506,7 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
 
 
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
-                  woa_init: bool = False, woa_t=None, woa_s=None,
+                  woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
@@ -626,6 +661,22 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
+    n_pad = _south_pad_rows(n_lat, n_gpus)
+    if n_pad > 0:
+        # Multi-GPU lat-band SPMD divisibility: append n_pad LAND rows at the
+        # SOUTH (grid geometry + mask + bathy together) BEFORE the state /
+        # partial-cell build so everything downstream is consistent.  The bipolar
+        # fold stays at the north (pad_tripole_grid_south shifts fold_j/cap_j +n_pad).
+        from legoesm.grids.tripole import pad_tripole_grid_south
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        grid = pad_tripole_grid_south(grid, n_pad)
+        land_mask, H_bathy = _pad_mask_bathy_south(land_mask, H_bathy, n_pad)
+        model = LatLonCGridOceanModel(grid, z_coord, config)  # rebuild on padded grid
+        n_lat = int(grid.n_lat)
+        print(f"[setup] SPMD south-pad: +{n_pad} LAND rows -> n_lat={n_lat} "
+              f"(n_gpus={n_gpus}, fold still north at j={int(grid.fold.fold_j)})")
     if ew_cyclic_overlap:
         # ORCA 2-pt cyclic-overlap fill of the static geometry, applied BEFORE
         # make_partial_cell (codex HIGH): the partial-cell coordinate
@@ -2154,6 +2205,17 @@ def main() -> int:
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
                    help="cubed-sphere face resolution n (C-n) for --grid cubed_sphere.")
+    p.add_argument("--n-gpus", type=int, default=1,
+                   help="Multi-GPU lat-band SPMD ocean step (latlon_bathy / tripole "
+                        "only): partition the ocean state by latitude band across N "
+                        "local devices via make_sharded_ocean_step_global. n_lat is "
+                        "padded with LAND rows at the SOUTH to a multiple of N (the "
+                        "tripole north fold stays at the north). The host post-step "
+                        "BCs (SSS restore / prognostic ice / geothermal / BBL / nudge) "
+                        "run on the gathered GLOBAL state, unchanged. Default 1 = the "
+                        "single-device path (byte-identical). N must be <= "
+                        "jax.local_device_count() (single-node; multi-node needs "
+                        "jax.distributed wiring, a separate gap).")
     p.add_argument("--mpas-level", type=int, default=6,
                    help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
                         "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
@@ -2734,6 +2796,7 @@ def main() -> int:
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
+            n_gpus=args.n_gpus,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
@@ -2800,6 +2863,17 @@ def main() -> int:
         app_grid_type = "mpas"
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
+        if args.n_gpus > 1 and _nlat % args.n_gpus != 0:
+            # The regular lat-lon grid has a SOUTH POLE WALL, not a bipolar fold:
+            # padding rows would add unphysical sub-pole latitudes (cos(lat)->
+            # negative / tiny metrics), so the fold-preserving south-pad does NOT
+            # apply here.  Require a divisible --latlon-res instead (180x360 is
+            # divisible by 2/3/4/5/6...; pick e.g. 180/360 for n_gpus|180).
+            raise SystemExit(
+                f"--n-gpus {args.n_gpus} with --grid latlon_bathy needs "
+                f"n_lat ({_nlat}) divisible by n_gpus (the regular grid is "
+                f"south-pole-walled, not folded, so it is NOT land-padded). "
+                f"Choose --latlon-res with n_lat % {args.n_gpus} == 0.")
         grid, z_coord, model, state, H_bathy = build_latlon_bathy(
             args.nlev, args.H_max, args.mesh, n_lat=_nlat, n_lon=_nlon,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
@@ -3240,6 +3314,60 @@ def main() -> int:
 
     _log_diag_csv(0, 0.0, d0, 0.0)
 
+    # ------------------------------------------------------------------
+    # Multi-GPU lat-band SPMD step (--n-gpus N): partition the GLOBAL ocean state
+    # by latitude band across N local devices.  ``_ocean_step(state, sf, fw)`` is
+    # the single per-step entry the host loop calls; default (N=1) is the plain
+    # single-device model.step (byte-identical).  The global-in/global-out wrapper
+    # scatters/gathers each step, so the host post-step BCs (SSS restore /
+    # prognostic ice / geothermal / BBL / nudge / drag) operate on the gathered
+    # GLOBAL state UNCHANGED.  n_lat is already SPMD-divisible (build_tripole
+    # south-padded it; the latlon branch errored on a non-divisible --latlon-res).
+    # ------------------------------------------------------------------
+    _ocean_step = (lambda st, sf, fw:
+                   model.step(st, dt, surface_forcing=sf, freshwater=fw))
+    if args.n_gpus > 1:
+        if app_grid_type not in ("tripole", "latlon"):
+            raise SystemExit(
+                f"--n-gpus {args.n_gpus} is only wired for the lat-lon C-grid "
+                f"(grid=tripole|latlon_bathy); got grid={args.grid!r}. The cube / "
+                f"MPAS SPMD paths are separate.")
+        if args.visc_schedule:
+            raise SystemExit(
+                "--n-gpus > 1 with --visc-schedule is unsupported: the schedule "
+                "rebuilds the model mid-loop, which would leave the sharded step "
+                "holding a stale model. Run the viscosity schedule single-device, "
+                "or drop it for the multi-GPU run.")
+        import jax as _jax
+        _local = _jax.local_device_count()
+        if args.n_gpus > _local:
+            raise SystemExit(
+                f"--n-gpus {args.n_gpus} > local device count {_local}. This "
+                f"single-controller path uses ONE process' local devices (e.g. a "
+                f"2-GPU node sees 2). Multi-node (N spanning hosts) needs "
+                f"jax.distributed.initialize wiring — a separate gap (not yet "
+                f"implemented here); request a single node with N local GPUs.")
+        n_lat_final = int(grid.n_lat)
+        if n_lat_final % args.n_gpus != 0:
+            raise SystemExit(
+                f"internal: padded n_lat ({n_lat_final}) not divisible by "
+                f"n_gpus ({args.n_gpus}) — the south-pad failed.")
+        from legoesm.parallel.mesh import create_latlon_mesh
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            make_sharded_ocean_step_global,
+        )
+        # Prime the build-once vertex-mask cache from the concrete state BEFORE
+        # building the sharded step (the wrapper slices the primed global vmask
+        # per band; an unprimed cache raises in _build_band_vertex_masks).
+        model.prime_step_caches(state)
+        _spmd_mesh = create_latlon_mesh(n_devices=args.n_gpus).mesh
+        _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
+        _ocean_step = (lambda st, sf, fw:
+                       _spmd_step(st, dt, surface_forcing=sf, freshwater=fw))
+        print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
+              f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} rows/band); "
+              f"global-in/global-out wrapper (host BCs on gathered state).")
+
     t_wall = time.time()
 
     # ------------------------------------------------------------------
@@ -3251,6 +3379,12 @@ def main() -> int:
     # ------------------------------------------------------------------
     _tti = getattr(getattr(model, "config", None),
                    "tracer_time_integrator", "euler")
+    if args.n_gpus > 1 and int(args.scan_block) > 0:
+        raise SystemExit(
+            "--n-gpus > 1 and --scan-block are mutually exclusive: the lax.scan "
+            "block path fuses single-device on-device steps (it does not use the "
+            "lat-band sharded step). Pick one — multi-GPU SPMD (the host Python "
+            "loop, --scan-block 0) OR single-device scan fusion.")
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
                 and nudge_tau_s == 0.0 and drag_tau_s == 0.0
                 and not args.sss_restore
@@ -3486,7 +3620,11 @@ def main() -> int:
                     _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
                 sf, fw = _route_ice_response_to_ocean(
                     sf, fw, ice_resp, state.land_mask.data, _ice_conc)
-            state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
+            # _ocean_step = single-device model.step (default) OR the lat-band
+            # SPMD global-in/global-out step (--n-gpus > 1); both apply the
+            # in-core wind-stress / heat / freshwater forcing.  Returns a GLOBAL
+            # state, so the host post-step BCs below are unchanged.
+            state = _ocean_step(state, sf, fw)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses

@@ -51,7 +51,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -154,3 +154,74 @@ def test_latlon_ocean_spmd_matches_single_device():
         b = np.asarray(getattr(ss, nm).data)
         np.testing.assert_allclose(b, a, atol=_ATOL, rtol=_RTOL,
                                    err_msg=f"SPMD {nm} mismatch")
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_sharded_ocean_step_global_matches_explicit_scatter_gather():
+    """``make_sharded_ocean_step_global`` (global-in/global-out, the minimal
+    driver entry) must equal the explicit ``shard_state_latlon`` -> inner step ->
+    ``gather_state_latlon`` path BIT-FOR-BIT (it is literally that composition),
+    AND match the single-device reference to the same re-association floor.
+
+    Also exercises the WITH-forcing path through the global wrapper (a smooth
+    cell-shaped wind-stress + heat ``OceanSurfaceForcing``)."""
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        make_sharded_ocean_step,
+        make_sharded_ocean_step_global,
+        shard_state_latlon,
+        gather_state_latlon,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig()
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    state0 = _perturbed_state(grid, z_coord)
+    dt, n_steps = 600.0, 3
+
+    # create_latlon_grid returns a (legacy) LatLonGrid (1-D lat, no lat_T); the
+    # 2-D T-point latitude lives on its LatLonCGridGeometry (what the model uses).
+    lat = np.asarray(ensure_geometry(grid).lat_T)
+    tau_x = jnp.asarray((0.1 * np.cos(3.0 * lat)).astype(np.float64))
+    q_net = jnp.asarray((40.0 * np.cos(lat)).astype(np.float64))
+    sf = OceanSurfaceForcing(tau_x=tau_x, tau_y=jnp.zeros_like(tau_x),
+                             q_net=q_net)
+
+    # single-device reference (forced)
+    s = state0
+    for _ in range(n_steps):
+        s = model.step(s, dt, surface_forcing=sf)
+
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+
+    # explicit scatter -> inner sharded step -> gather
+    inner = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    for _ in range(n_steps):
+        ss = inner(ss, dt, surface_forcing=sf)
+    ss = gather_state_latlon(ss, dev.mesh)
+
+    # global-in/global-out wrapper (scatter + gather PER STEP)
+    glob = make_sharded_ocean_step_global(model, dev.mesh)
+    sg = state0
+    for _ in range(n_steps):
+        sg = glob(sg, dt, surface_forcing=sf)
+
+    for nm in ("u", "v", "eta", "T", "S"):
+        ref = np.asarray(getattr(s, nm).data)
+        man = np.asarray(getattr(ss, nm).data)
+        wrp = np.asarray(getattr(sg, nm).data)
+        # the global wrapper == explicit scatter/gather BIT-FOR-BIT (the gather is
+        # a per-step round trip but every band stays put -> identical reductions)
+        np.testing.assert_allclose(wrp, man, atol=0.0, rtol=0.0,
+                                   err_msg=f"global wrapper != explicit {nm}")
+        # and both match the single-device forced reference to the FP floor
+        np.testing.assert_allclose(wrp, ref, atol=2.0e-4, rtol=1.0e-3,
+                                   err_msg=f"global wrapper vs serial {nm}")
