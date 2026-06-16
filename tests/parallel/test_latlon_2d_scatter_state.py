@@ -14,6 +14,7 @@ import numpy as np
 from legoesm.parallel.latlon_mpi import (
     make_latlon_2d_layout,
     scatter_state_latlon_2d,
+    slice_latlon_grid_to_block_2d,
 )
 
 St = namedtuple("St", "u v T p_s phis tracers")
@@ -55,6 +56,28 @@ def test_scatter_2d_proc_lon_1_is_full_lon_band():
         assert loc.u.shape[1] == n_lon          # full longitude
         assert np.array_equal(loc.T, g.T[s:e, :])
         assert np.array_equal(loc.v, g.v[s:e + 1, :])
+
+
+def test_slice_grid_2d_block():
+    import jax.numpy as jnp
+    from legoesm.grids.latlon import create_latlon_grid
+
+    grid = create_latlon_grid(8)  # n_lat=8, n_lon=16
+    pr, pc = 2, 2
+    for rank in range(pr * pc):
+        L = make_latlon_2d_layout(rank, pr, pc, grid.n_lat, grid.n_lon)
+        g = slice_latlon_grid_to_block_2d(grid, L, skip_total_area_reduce=True)
+        s, e, w, x = L.lat_start, L.lat_end, L.lon_start, L.lon_end
+        assert g.n_lat == e - s and g.n_lon == x - w
+        assert jnp.array_equal(g.lat, grid.lat[s:e])
+        assert jnp.array_equal(g.lon, grid.lon[w:x])
+        assert jnp.array_equal(g.f, grid.f[s:e, w:x])
+        assert jnp.array_equal(g.area, grid.area[s:e, w:x])
+        # v-face lat keeps the shared boundary row.
+        assert jnp.array_equal(g.lat_v, grid.lat_v[s:e + 1])
+        assert g.lat_v.shape[0] == g.n_lat + 1
+        # skip_total_area_reduce => the full-sphere area (mass-fix denominator).
+        assert float(g.total_area) == float(grid.total_area)
 
 
 def test_scatter_2d_blocks_tile_global_cells():

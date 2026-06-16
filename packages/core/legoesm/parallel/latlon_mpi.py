@@ -2211,6 +2211,47 @@ def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout,
     )
 
 
+def slice_latlon_grid_to_block_2d(
+    grid, layout: LatLon2DLayout, *, skip_total_area_reduce: bool = False,
+):
+    """Slice a global ``LatLonGrid`` to this rank's 2-D lat x lon block.
+
+    The 2-D analog of :func:`slice_latlon_grid_to_band`: every lat-dependent
+    array is sliced ``[lat_start:lat_end]`` AND every lon-dependent array
+    ``[lon_start:lon_end]``.  v-face lat arrays span ``[lat_start:lat_end+1]``
+    (the shared boundary row, matching :func:`scatter_state_latlon_2d`).
+    ``n_lat``/``n_lon`` become the rank-local counts.  ``total_area`` is the
+    GLOBAL sphere area (allreduce of the block area; or the full passed grid's
+    area when ``skip_total_area_reduce`` — e.g. a replicated full grid) so the
+    mass fixer's uniform correction divides by the right denominator.
+    ``proc_lon == 1`` reproduces :func:`slice_latlon_grid_to_band`.
+    """
+    s, e = layout.lat_start, layout.lat_end
+    w, x = layout.lon_start, layout.lon_end
+    if skip_total_area_reduce:
+        global_total = jnp.sum(grid.area)
+    else:
+        from legoesm.parallel.reductions import global_sum_mpi
+        global_total = global_sum_mpi(jnp.sum(grid.area[s:e, w:x]))
+    return grid._replace(
+        n_lat=layout.n_lat_local,
+        n_lon=layout.n_lon_local,
+        lat=grid.lat[s:e],
+        lon=grid.lon[w:x],
+        lat2d=grid.lat2d[s:e, w:x],
+        lon2d=grid.lon2d[s:e, w:x],
+        cos_lat=grid.cos_lat[s:e],
+        sin_lat=grid.sin_lat[s:e],
+        lat_v=grid.lat_v[s:e + 1],
+        cos_lat_v=grid.cos_lat_v[s:e + 1],
+        f=grid.f[s:e, w:x],
+        dx=grid.dx[s:e, w:x],
+        dy=grid.dy[s:e],
+        area=grid.area[s:e, w:x],
+        total_area=global_total,
+    )
+
+
 def pole_v_bc_for_layout(layout: LatLonBandLayout) -> tuple[bool, bool]:
     """Return the ``(south_pole, north_pole)`` flags for a band.
 
