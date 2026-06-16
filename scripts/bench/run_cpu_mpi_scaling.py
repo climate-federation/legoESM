@@ -1002,6 +1002,12 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
         payload["backend"] = jax.default_backend()
     except Exception:
         payload["backend"] = ""
+    # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
+    # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
+    # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    payload["cpus_per_task"] = _cpt
+    payload["n_cores"] = result.n_ranks * _cpt
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
