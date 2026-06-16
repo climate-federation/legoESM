@@ -176,7 +176,7 @@ class ScalingReport:
 # ===========================================================================
 
 GRID_CHOICES = ("cubed-sphere", "latlon", "icosahedral", "spectral")
-PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
+PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full", "moist")
 
 # Grid/physics support matrix.  Moist tiers require tracer storage
 # that MPAS and spectral states do not have today.
@@ -190,7 +190,13 @@ _SUPPORTED_PHYSICS = {
     # benchmark dycore-only with the moist-physics label.
     "cubed-sphere": {"none", "held_suarez"},
     "latlon": {"none", "held_suarez"},
-    "icosahedral": {"none", "held_suarez"},
+    # "moist" = moisture (q_v/q_c/q_r) + Kessler warm-rain condensation,
+    # NO radiation: the moist baroclinic-wave case.  Only wired for
+    # icosahedral/MPAS, the sole multi-rank grid here — Kessler is
+    # column-local so it adds NO horizontal halo coupling beyond the
+    # dycore's tracer exchange, and the dycore already advects tracers
+    # mass-consistently (so moist scales on the same ladder as dry).
+    "icosahedral": {"none", "held_suarez", "moist"},
     "spectral": {"none", "held_suarez"},
 }
 
@@ -665,12 +671,20 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         time_integrator="ssp_rk3",
     )
     model = MPASPrimitiveEquationModel(mesh, sigma, config)
-    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = mesh.nCells * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "icosahedral")
+    if _moist:
+        # Kessler warm-rain forcing bound to this step's dt (the dycore's
+        # operator-split physics_fn convention passes no timestep).  Column-
+        # local ⇒ no extra halo; applied once per step over dt.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_mpas
+        physics_fn = make_kessler_forcing_mpas(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
         # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
@@ -969,8 +983,16 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
         f"r{result.resolution}_n{result.n_ranks}_{result.precision}.json"
     )
     path = output_dir / fname
+    payload = asdict(result)
+    # Record the actual JAX backend so downstream aggregation does not have to
+    # infer CPU-vs-GPU from the output-dir name (codex review): cpu/gpu/tpu.
+    try:
+        import jax
+        payload["backend"] = jax.default_backend()
+    except Exception:
+        payload["backend"] = ""
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(asdict(result), f, indent=2)
+        json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
 
 

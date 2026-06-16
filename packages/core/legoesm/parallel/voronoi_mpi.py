@@ -192,18 +192,30 @@ def scatter_state_voronoi(
 ) -> MPASHydrostaticState:
     """Extract rank-local state from a global MPASHydrostaticState.
 
-    u is edge-centered; T, p_s, phis are cell-centered.
+    u is edge-centered; T, p_s, phis and every tracer field are
+    cell-centered.  ``v`` is None for MPAS (edge-normal u only) and passes
+    through unchanged.
+
+    Tracers (``q_v``/``q_c``/``q_r`` for a moist run) MUST be scattered here
+    too: the per-step halo exchange only FILLS halos, it does not distribute
+    the initial global field.  Without this, a moist run's local state would
+    have ``tracers=None`` and the Kessler ``physics_fn`` would raise.
     """
-    return MPASHydrostaticState(
+    def _cell(f):
+        return f.replace(data=scatter_to_local(f.data, partition, "cell"))
+
+    new = global_state._replace(
         u=global_state.u.replace(
             data=scatter_to_local(global_state.u.data, partition, "edge")),
-        T=global_state.T.replace(
-            data=scatter_to_local(global_state.T.data, partition, "cell")),
-        p_s=global_state.p_s.replace(
-            data=scatter_to_local(global_state.p_s.data, partition, "cell")),
-        phis=global_state.phis.replace(
-            data=scatter_to_local(global_state.phis.data, partition, "cell")),
+        T=_cell(global_state.T),
+        p_s=_cell(global_state.p_s),
+        phis=_cell(global_state.phis),
     )
+    if global_state.tracers is not None:
+        new = new._replace(
+            tracers={k: _cell(f) for k, f in global_state.tracers.items()}
+        )
+    return new
 
 
 def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):

@@ -445,6 +445,8 @@ def baroclinic_wave_init_mpas(
     mesh,
     sigma_coord,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ):
     """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
 
@@ -459,6 +461,17 @@ def baroclinic_wave_init_mpas(
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     perturbed : bool
         If True, add the exponential perturbation to trigger instability.
+    moist : bool
+        If True, attach ``q_v``/``q_c``/``q_r`` tracers for a *moist*
+        baroclinic wave (the dycore then advects them and a Kessler
+        ``physics_fn`` condenses/precipitates).  ``q_v`` follows the same
+        RH-tapered profile used by ``ModelDriver`` for all grids
+        (``rh_init · q_sat(T,p) · σ²``, capped at saturation); ``q_c`` and
+        ``q_r`` start at zero.  Dry mass / temperature / wind are unchanged
+        (the moisture is added passively at t=0).
+    rh_init : float
+        Surface relative humidity used for the ``q_v`` taper when
+        ``moist=True``.
 
     Returns
     -------
@@ -509,11 +522,33 @@ def baroclinic_wave_init_mpas(
     # Surface geopotential: flat
     phis_data = jnp.zeros((nCells,))
 
+    tracers = None
+    if moist:
+        # Shared RH-tapered q_v init (identical formula to ModelDriver's
+        # all-grid moist initialization): q_v = rh · q_sat(T, p) · σ²,
+        # capped at saturation; q_c = q_r = 0.  Sigma coordinate ⇒
+        # p_full = p_s · σ_full.
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = p_s_data[:, None] * sigma_full[None, :]  # (nCells, nlev)
+        q_sat = saturation_mixing_ratio(T_data, p_full)
+        q_v_data = jnp.minimum(rh_init * q_sat * sigma_full[None, :] ** 2, q_sat)
+        q_zero = jnp.zeros((nCells, nlev))
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r",
+                         dims=("nCells", "level"), units="kg/kg"),
+        }
+
     return MPASHydrostaticState(
         u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
         T=Field(data=T_data, name="T", dims=("nCells", "level"), units="K"),
         p_s=Field(data=p_s_data, name="p_s", dims=("nCells",), units="Pa"),
         phis=Field(data=phis_data, name="phis", dims=("nCells",), units="m^2/s^2"),
+        tracers=tracers,
     )
 
 
