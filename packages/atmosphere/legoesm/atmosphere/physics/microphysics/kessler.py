@@ -213,4 +213,7 @@ def kessler_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=precipitation,
+        # Positive saturation-adjustment condensation (the q_v sink that becomes
+        # cloud water) for the coupled pipeline's joint vapour donor clamp.
+        dq_v_to_qc_dt=jnp.maximum(dq_c_sat, 0.0),
     )

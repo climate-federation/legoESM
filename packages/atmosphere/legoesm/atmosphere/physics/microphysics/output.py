@@ -87,6 +87,14 @@ class MicrophysicsOutput(NamedTuple):
     # Optional GRAUPEL number tendency [1/(kg·s)] per-mass; None for single-
     # moment graupel (matches HydrometeorState.N_g). Written to tracer slot [10].
     dN_g_dt: jax.Array | None = None
+    # Optional: the POSITIVE saturation-adjustment condensation rate
+    # [kg/kg/s, >= 0] — the part of the scheme's vapour sink that becomes cloud
+    # water (distinct from the net ``dq_c_dt``, which also carries autoconversion
+    # / accretion sinks).  The coupled pipeline's JOINT vapour donor clamp needs
+    # this isolated condensation to scale it consistently against the
+    # convective vapour sink (both draw the same pre-physics q_v).  ``None`` for
+    # schemes that do not expose it (the joint clamp then skips the micro term).
+    dq_v_to_qc_dt: jax.Array | None = None
 
 
 def make_zero_hydrometeors(

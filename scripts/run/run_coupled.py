@@ -141,6 +141,22 @@ def main():
                         choices=["cubed_sphere", "latlon"],
                         help="Atmosphere grid (default cubed_sphere); 'latlon' "
                              "is required for --ocean dynamic (shared grid)")
+    parser.add_argument("--couple-surface-radiation",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Feed the coupler's tile-blended (land+ocean) skin "
+                             "T/albedo back to atmosphere radiation (--ocean-ic "
+                             "woa). Default on; the slab-land skin feedback is "
+                             "stiff — turn off (--no-couple-surface-radiation) "
+                             "to trade land-radiation realism for stability.")
+    parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Fourier polar filter for the lat-lon C-grid "
+                             "(default on for --grid latlon; ignored on cube). "
+                             "Truncates the high-wavenumber lon modes that "
+                             "violate the pole-cell CFL, so dt is set by the "
+                             "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
+                             "being clamped to ~5s. Without it a 2deg lat-lon "
+                             "run is ~80x more steps and infeasible.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -149,6 +165,19 @@ def main():
                              "coupling_dt (never step the 3D ocean at 3600 s)")
     parser.add_argument("--ocean-H-max", type=float, default=5500.0,
                         help="Max ocean depth [m] (--ocean dynamic)")
+    parser.add_argument("--ocean-ic", default="rest",
+                        choices=["rest", "woa"],
+                        help="3D ocean initial condition (--ocean dynamic): "
+                             "'rest' = idealized aquaplanet rest state; 'woa' = "
+                             "WOA18 reanalysis T/S + WOA-derived continents "
+                             "(realistic cold start; f_land co-derived from the "
+                             "same ocean mask, land tile enabled)")
+    parser.add_argument("--woa-t-path",
+                        default="data/woa18/woa18_decav_t00_01.nc",
+                        help="WOA18 temperature file (--ocean-ic woa)")
+    parser.add_argument("--woa-s-path",
+                        default="data/woa18/woa18_decav_s00_01.nc",
+                        help="WOA18 salinity file (--ocean-ic woa)")
 
     # Carbon
     parser.add_argument("--co2-init", type=float, default=415.0,
@@ -265,6 +294,10 @@ def main():
             # cube-only.  Cube keeps the default cdgrid.
             discretization=("latlon_cgrid" if args.grid == "latlon"
                             else "cdgrid"),
+            # Fourier polar filter (lat-lon only): lets the factory/CFL clamp dt
+            # by the equatorial CFL instead of the ~60x-smaller pole-cell dx, so
+            # a 2deg run uses dt~450s (5760 steps/30d) not dt~5.6s (460k steps).
+            use_polar_filter=(args.grid == "latlon" and args.polar_filter),
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
@@ -305,6 +338,26 @@ def main():
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
+        overrides["ocean_ic"] = args.ocean_ic
+        if args.ocean_ic == "woa":
+            # Realistic WOA cold start: observed T/S + WOA-derived continents.
+            from legoesm.land.config import LandConfig
+            overrides["woa_t_path"] = args.woa_t_path
+            overrides["woa_s_path"] = args.woa_s_path
+            # Co-derive the atmosphere land fraction from the SAME ocean mask
+            # and enable a slab land tile over the continents (f_land>0 with
+            # land_mode='none' would try to run an unused land model).
+            overrides["f_land_mode"] = "from_ocean"
+            overrides["land_mode"] = "slab"
+            overrides["land_config"] = LandConfig()
+            # With real continents the atmospheric radiative surface boundary
+            # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
+            # ocean SST everywhere (else land cells radiate at the dynamic-ocean
+            # SST; codex MED).  But the slab-land skin temperature is a stiff
+            # radiative feedback that can destabilise the coarse coupled run, so
+            # it is gated by --couple-surface-radiation (default on; turn off to
+            # trade land-radiation realism for stability).
+            overrides["couple_surface_radiation"] = args.couple_surface_radiation
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
@@ -344,10 +397,20 @@ def main():
     logger.info(f"  Per sim-day: {t_run / max(args.days, 1):.1f}s")
 
     # Final SST: slab stores T_sfc [K]; the dynamic 3D ocean stores top-level T
-    # [degC] -> convert.  Use the driver's grid-agnostic accessor.
-    sst = driver._ocean_surface_KuvC()[0]
-    logger.info(f"  SST final: mean={float(sst.mean()):.1f}K, "
-                f"range=[{float(sst.min()):.1f}, {float(sst.max()):.1f}]K")
+    # [degC] -> convert.  Use the driver's grid-agnostic accessor.  For the
+    # dynamic ocean with a realistic land mask, reduce over OCEAN cells only
+    # (land cells carry an inert abyssal-fill T that would cold-bias the mean).
+    import numpy as _np
+    sst = _np.asarray(driver._ocean_surface_KuvC()[0])
+    _omask = getattr(driver, "_ocean_land_mask", None)  # 1=ocean, 0=land
+    if _omask is not None:
+        _wet = _np.asarray(_omask) > 0.5
+        sst_red = sst[_wet] if _wet.any() else sst
+    else:
+        sst_red = sst
+    logger.info(f"  SST final (ocean): mean={float(_np.nanmean(sst_red)):.1f}K, "
+                f"range=[{float(_np.nanmin(sst_red)):.1f}, "
+                f"{float(_np.nanmax(sst_red)):.1f}]K")
 
     if driver.coupled_diagnostics:
         d0 = driver.coupled_diagnostics[0]
