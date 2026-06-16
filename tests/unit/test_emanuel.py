@@ -85,6 +85,31 @@ def test_emanuel_outputs_finite():
         assert jnp.all(jnp.isfinite(arr))
 
 
+def test_emanuel_cbmf_relaxes_positive_from_rest():
+    """The CONVECT DTMA/ALPHA/DAMP closure can spin CBMF up from zero.
+
+    A moist, weakly unstable tropical column should not be permanently
+    zero-locked when the prognostic CBMF carry starts at rest; the
+    relaxed carry in ``[:, -1]`` becomes positive and remains AD-finite
+    through the ALPHA coefficient.
+    """
+    T, q, pf, ph = _column(ncol=1, nlev=30, T_sfc=300.0, q_sfc=22e-3, lapse_rate=6.5)
+    cpp = jnp.zeros_like(T)
+    out, cpp_new = emanuel_convection(T, q, pf, ph, cpp, dt=600.0)
+    assert float(out.cape[0]) > 0.0
+    assert float(cpp_new[0, -1]) > 0.0
+
+    def carry_for_alpha(alpha):
+        _, cpp_alpha = emanuel_convection(
+            T, q, pf, ph, cpp, dt=600.0,
+            config=EmanuelConfig(alpha_closure=alpha),
+        )
+        return cpp_alpha[0, -1]
+
+    g = jax.grad(carry_for_alpha)(jnp.asarray(0.2))
+    assert jnp.isfinite(g)
+
+
 def test_emanuel_no_cmt():
     T, q, pf, ph = _column()
     ncol, nlev = T.shape

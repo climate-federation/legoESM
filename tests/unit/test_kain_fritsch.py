@@ -36,8 +36,13 @@ from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
 from legoesm.atmosphere.physics.convection.kain_fritsch import (
+    _kf_condload_profile,
+    _kf_downdraft_evaporation,
+    _kf_initial_wlcl,
     kain_fritsch_convection,
 )
+from legoesm.atmosphere.physics.convection._plume import Plume
+from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geometry
 
 
 def _destabilized_column(
@@ -244,6 +249,105 @@ def test_kf_carry_layout():
     _, cpp_new = kain_fritsch_convection(T, q, pf, ph, w, cpp, dt=300.0)
     assert jnp.all(cpp_new[:, :-1] == 0.0)
     assert jnp.all(cpp_new[:, -1] >= 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Reference KF-Eta closure helpers
+# ---------------------------------------------------------------------------
+
+def test_kf_initial_wlcl_matches_kain_2004_formula_and_ad():
+    """KF-Eta initial LCL velocity follows Kain (2004) Eq. 3."""
+    dtlcl = jnp.asarray([0.0])
+    dtrh = jnp.asarray([0.36])
+    Tv_env = jnp.asarray([300.0])
+    wlcl = _kf_initial_wlcl(dtlcl, dtrh, Tv_env)
+    expected = 1.0 + 0.5 * jnp.sqrt(2.0 * constants.g * dtrh * 500.0 / Tv_env)
+    expected = jnp.minimum(expected, 3.0)
+    np.testing.assert_allclose(np.asarray(wlcl), np.asarray(expected), rtol=1e-6)
+
+    g = jax.grad(lambda x: _kf_initial_wlcl(dtlcl, jnp.asarray([x]), Tv_env)[0])(0.36)
+    assert jnp.isfinite(g)
+    assert float(g) > 0.0
+
+
+def test_kf_condload_fallout_reduces_retained_cloud_and_is_ad_safe():
+    """CONDLOAD keeps retained cloud finite and diagnoses fallout."""
+    T, q, pf, ph, _ = _destabilized_column(ncol=1, nlev=10, q_sfc=18e-3)
+    dz, rho, z = compute_column_geometry(T, pf, ph, q_v=q)
+    del dz, rho
+    M = jnp.array([[0.0, 0.0, 0.01, 0.025, 0.035, 0.04, 0.035, 0.02, 0.0, 0.0]])
+    qc = jnp.array([[0.0, 0.0, 1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3, 3.0e-3, 1.0e-3, 0.0, 0.0]])
+    plume = Plume(
+        M_u=M,
+        T_u=T + 1.0,
+        q_u=q,
+        q_c_u=qc,
+        B_u=jnp.ones_like(T),
+    )
+    cfg = KainFritschConfig()
+    result = _kf_condload_profile(
+        T, q, pf, ph, z, plume,
+        M_b=jnp.asarray([0.03]),
+        wkl=jnp.asarray([0.1]),
+        wlcl=jnp.asarray([2.0]),
+        config=cfg,
+    )
+    assert jnp.all(jnp.isfinite(result.q_c_u))
+    assert jnp.all(jnp.isfinite(result.M_u))
+    assert float(jnp.sum(result.q_c_u)) < float(jnp.sum(qc))
+    assert float(jnp.sum(result.precip_flux)) > 0.0
+
+    def retained(scale):
+        plume_scaled = plume._replace(q_c_u=qc * scale)
+        r = _kf_condload_profile(
+            T, q, pf, ph, z, plume_scaled,
+            M_b=jnp.asarray([0.03]),
+            wkl=jnp.asarray([0.1]),
+            wlcl=jnp.asarray([2.0]),
+            config=cfg,
+        )
+        return jnp.sum(r.q_c_u)
+
+    g = jax.grad(retained)(jnp.asarray(1.0))
+    assert jnp.isfinite(g)
+
+
+def test_kf_downdraft_evaporation_cools_moistens_and_conserves_latent_energy():
+    """The downdraft evaporation branch has local latent-energy closure."""
+    T, q, pf, ph, _ = _destabilized_column(ncol=1, nlev=10, q_sfc=6e-3)
+    q = 0.25 * q
+    dz, rho, z = compute_column_geometry(T, pf, ph, q_v=q)
+    del dz, rho
+    precip_flux = jnp.zeros_like(T).at[:, 4:6].set(2.0e-4)
+    dT, dqv = _kf_downdraft_evaporation(
+        T, q, pf, ph, z,
+        p_lcl=jnp.asarray([8.5e4]),
+        precip_flux=precip_flux,
+        branch_weight=jnp.asarray([1.0]),
+        dt=300.0,
+    )
+    assert jnp.all(jnp.isfinite(dT))
+    assert jnp.all(jnp.isfinite(dqv))
+    assert float(jnp.min(dT)) < 0.0
+    assert float(jnp.max(dqv)) > 0.0
+    np.testing.assert_allclose(
+        np.asarray(constants.c_pd * dT + constants.L_v * dqv),
+        np.zeros_like(np.asarray(dT)),
+        atol=1.0e-12,
+    )
+
+    def evap_total(scale):
+        _dT, _dqv = _kf_downdraft_evaporation(
+            T, q, pf, ph, z,
+            p_lcl=jnp.asarray([8.5e4]),
+            precip_flux=precip_flux * scale,
+            branch_weight=jnp.asarray([1.0]),
+            dt=300.0,
+        )
+        return jnp.sum(_dqv)
+
+    g = jax.grad(evap_total)(jnp.asarray(1.0))
+    assert jnp.isfinite(g)
 
 
 # ---------------------------------------------------------------------------
