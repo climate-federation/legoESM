@@ -73,3 +73,82 @@ def test_dynamic_ocean_requires_latlon_grid():
     drv._atm.setup()
     with pytest.raises(ValueError, match="requires a SHARED lat-lon ocean grid"):
         drv._init_ocean()
+
+
+# ---------------------------------------------------------------------------
+# WOA realistic initial condition (ocean_ic="woa")
+# ---------------------------------------------------------------------------
+
+import os
+
+_WOA_T = "data/woa18/woa18_decav_t00_01.nc"
+_WOA_S = "data/woa18/woa18_decav_s00_01.nc"
+
+
+def test_config_holds_woa_ic_fields():
+    """CoupledConfig exposes the WOA-IC knobs; defaults keep the rest state."""
+    c = CoupledConfig()
+    assert c.ocean_ic == "rest"
+    assert c.woa_t_path is None and c.woa_s_path is None
+    w = CoupledConfig(ocean_ic="woa", woa_t_path="t.nc", woa_s_path="s.nc")
+    assert w.ocean_ic == "woa" and w.woa_t_path == "t.nc"
+
+
+def test_woa_ic_requires_paths():
+    """ocean_ic='woa' without WOA paths raises (no silent fallback to rest)."""
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
+        radiation="gray", convection="none", days=1,
+    )
+    drv = CoupledESMDriver(
+        atm, CoupledConfig(ocean_mode="dynamic",
+                           ocean_config=LatLonCGridOceanConfig(),
+                           ocean_nlev=4, ocean_ic="woa"),
+    )
+    drv._atm.setup()
+    with pytest.raises(ValueError, match="requires woa_t_path"):
+        drv._init_ocean()
+
+
+def test_init_dynamic_ocean_rejects_unknown_ic():
+    """_init_dynamic_ocean raises on an unknown ocean_ic (dispatch-hardening)."""
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
+        radiation="gray", convection="none", days=1,
+    )
+    drv = CoupledESMDriver(
+        atm, CoupledConfig(ocean_mode="dynamic",
+                           ocean_config=LatLonCGridOceanConfig(),
+                           ocean_nlev=4, ocean_ic="garbage_ic"),
+    )
+    drv._atm.setup()
+    with pytest.raises(ValueError, match="ocean_ic must be"):
+        drv._init_ocean()
+
+
+@pytest.mark.skipif(
+    not (os.path.exists(_WOA_T) and os.path.exists(_WOA_S)),
+    reason="WOA18 files not present (data/woa18/)",
+)
+def test_woa_ocean_mask_realistic():
+    """woa_ocean_mask on a 2deg lat-lon grid yields a physical land/ocean split
+    (both land and ocean present; global ocean fraction ~0.6-0.75)."""
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_woa import woa_ocean_mask
+    grid = create_latlon_grid(n_lat=90, n_lon=180)  # 2 deg
+    mask = woa_ocean_mask(grid, _WOA_T)
+    assert mask.shape == (90, 180)
+    assert set(np.unique(mask)).issubset({0.0, 1.0})
+    ocean_frac = float(mask.mean())
+    assert 0.55 < ocean_frac < 0.80, f"ocean_frac={ocean_frac} unphysical"
+    # Land must exist (continents) and ocean must exist.
+    assert mask.min() == 0.0 and mask.max() == 1.0
