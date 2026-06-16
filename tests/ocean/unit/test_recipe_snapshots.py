@@ -69,6 +69,27 @@ EADY_IDENTITY = {
     "tracer_time_integrator": "rk3",
 }
 
+# DINO (Kamm et al. 2025 NEMO double-gyre approximation). Snapshot-protected but
+# NOT pinned in the factory — dino_lat_lon_model_config is Pierre's NEMO-fidelity
+# code, so we record its identity here without editing it. NOTE the inherited
+# defaults this surfaces: coriolis_scheme/outer_integrator/tracer_time_integrator
+# are legoESM defaults (forward_euler / euler), NOT NEMO's leapfrog — a known
+# NEMO-unfaithfulness (see #487, the NEMO recipe card). ke_gradient="hollingsworth"
+# and barotropic="implicit_cn" ARE deliberate NEMO matches.
+DINO_LATLON_IDENTITY = {
+    "eos": "wright",
+    "momentum_advection": "vector_invariant",
+    "tracer_advection": "tvd",
+    "pgf_scheme": "adcroft",
+    "ke_gradient_scheme": "hollingsworth",
+    "barotropic_solver": "implicit_cn",
+    "coriolis_scheme": "matsuno_split",
+    "outer_integrator": "forward_euler",
+    "tracer_time_integrator": "euler",
+    "implicit_vertical_mixing": True,
+    "A_h_lat_scaling": True,
+}
+
 
 def _assert_identity(mc, expected, label):
     actual = {f: getattr(mc, f) for f in expected}
@@ -98,6 +119,18 @@ def test_eady_uniform_snapshot():
     assert mc.gm_redi is None          # eddies resolved
 
 
+def test_dino_latlon_snapshot():
+    """DINO's recipe identity is snapshot-protected even though its factory lives
+    in Pierre's NEMO-fidelity code (we don't edit it here). Builds a tiny Mercator
+    grid; the scheme identity is grid-resolution-independent."""
+    from legoesm.grids.latlon import create_mercator_grid
+    from legoesm.ocean.experiments.dino import DINOConfig, dino_lat_lon_model_config
+    grid = create_mercator_grid(n_lon=16, lat_max_deg=70.0,
+                                lon_west_deg=0.0, lon_east_deg=50.0)
+    mc, _ = dino_lat_lon_model_config(grid, DINOConfig())
+    _assert_identity(mc, DINO_LATLON_IDENTITY, "dino (latlon)")
+
+
 def test_go_gm_redi_recipe_still_pins_identity():
     """The dynamical-core identity is independent of the GM/Redi toggle — a
     use_gm_redi run must keep the same pinned schemes (only gm_redi differs)."""
@@ -108,7 +141,7 @@ def test_go_gm_redi_recipe_still_pins_identity():
 
 
 @pytest.mark.parametrize("identity", [
-    GO_LATLON_IDENTITY, GO_MPAS_IDENTITY, EADY_IDENTITY])
+    GO_LATLON_IDENTITY, GO_MPAS_IDENTITY, EADY_IDENTITY, DINO_LATLON_IDENTITY])
 def test_snapshots_are_nonempty(identity):
     """Guard against a vacuous snapshot (empty dict would pass _assert_identity
     trivially)."""
