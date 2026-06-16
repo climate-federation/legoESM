@@ -55,22 +55,23 @@ from scripts.run import run_scm_rce_campaign as campaign
 
 
 DEFAULT_OUTDIR = Path("results/scm_rce_training")
-WINNING_SCHEME_KEYS = {
-    "radiation": "atm.rad.GrayRadiationConfig",
-    "turbulence": "atm.turb.CLUBBLiteConfig",
-    "microphysics": "atm.micro.SundqvistConfig",
-    "convection": "atm.conv.BechtoldConfig",
-}
-MASS_FLUX_SCHEME_KEY = "atm.conv.MassFluxConfig"
+CAMPAIGN_SCHEME_FIELDS = (
+    "radiation",
+    "turbulence",
+    "microphysics",
+    "convection",
+    "gravity_wave_drag",
+)
+BECHTOLD_SCHEME_KEY = "atm.conv.BechtoldConfig"
 BECHTOLD_STOCHASTIC_PARAMS = {
     "atm.conv.BechtoldConfig.stochastic_amplitude",
     "atm.conv.BechtoldConfig.stochastic_decorrelation",
 }
-DEFAULT_TARGET_LOSS = 1.158
 DEFAULT_STEPS = 8
 DEFAULT_LR = 1.0e-1
 DEFAULT_SPINUP_DAYS = 45.0
 DEFAULT_TRAIN_DAYS = 5.0
+DEFAULT_TARGET_LOSS = 0.976
 QUICK_STEPS = 3
 QUICK_TRAIN_DAYS = 0.03
 GRAD_NONZERO_TOL = 1.0e-14
@@ -93,6 +94,175 @@ def _read_tuned_records(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_recommended_defaults(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Campaign recommended defaults JSON not found: {path}")
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload
+
+
+def _optional_config_for_path(path: str):
+    if path == "radiation.cloud_config":
+        from legoesm.atmosphere.physics.clouds.config import CloudConfig
+
+        return CloudConfig()
+    if path == "turbulence.clubb":
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+        return CLUBBConfig()
+    raise ValueError(
+        f"recommended_physics_config field {path!r} is a nested object, but "
+        "the corresponding default config is None and no factory is registered"
+    )
+
+
+def _merge_config_dict(template: Any, values: dict[str, Any], path: str = "") -> Any:
+    fields = getattr(template, "_fields", None)
+    if fields is None:
+        raise ValueError(
+            f"recommended_physics_config field {path or '<root>'!r} is not a "
+            f"NamedTuple config ({type(template).__name__})"
+        )
+    updates: dict[str, Any] = {}
+    for key, value in values.items():
+        if key not in fields:
+            raise ValueError(
+                f"Unknown recommended_physics_config field "
+                f"{path + '.' if path else ''}{key!r}; known={list(fields)}"
+            )
+        current = getattr(template, key)
+        child_path = f"{path}.{key}" if path else key
+        if isinstance(value, dict):
+            if current is None:
+                current = _optional_config_for_path(child_path)
+            updates[key] = _merge_config_dict(current, value, child_path)
+        else:
+            updates[key] = value
+    return template._replace(**updates)
+
+
+def _physics_config_from_recommended_dict(data: dict[str, Any]) -> PhysicsConfig:
+    return _merge_config_dict(PhysicsConfig(), data)
+
+
+def _recommended_scheme_winners(
+    recommended: dict[str, Any],
+    recommended_cfg: PhysicsConfig | None,
+) -> dict[str, str]:
+    winners_raw = recommended.get("winners", {})
+    if winners_raw is None:
+        winners_raw = {}
+    if not isinstance(winners_raw, dict):
+        raise ValueError("recommended_defaults.json field 'winners' must be an object")
+
+    scheme_sources: list[dict[str, Any]] = []
+    for key in ("tuned_best", "best_per_category", "baseline"):
+        value = recommended.get(key)
+        if isinstance(value, dict) and isinstance(value.get("config"), dict):
+            scheme_sources.append(value["config"])
+
+    winners: dict[str, str] = {}
+    for field in CAMPAIGN_SCHEME_FIELDS:
+        value = winners_raw.get(field)
+        if value is None and recommended_cfg is not None:
+            value = getattr(recommended_cfg, field).scheme
+        if value is None:
+            for source in scheme_sources:
+                if source.get(field) is not None:
+                    value = source[field]
+                    break
+        if value is None:
+            raise ValueError(
+                f"recommended defaults do not specify a winner for {field!r}"
+            )
+        winners[field] = str(value)
+    return winners
+
+
+def _apply_bechtold_policy_to_winners(
+    winners: dict[str, str],
+    policy: str,
+) -> tuple[dict[str, str], str]:
+    out = dict(winners)
+    convection = out["convection"]
+    if policy == "mass_flux":
+        out["convection"] = "mass_flux"
+        return (
+            out,
+            "explicit CLI override substituted `mass_flux` for the campaign "
+            f"recommended convection winner `{convection}`.",
+        )
+    if convection != "bechtold":
+        return (
+            out,
+            f"not applicable; campaign recommended convection winner is "
+            f"`{convection}`, so the trainer follows that winner.",
+        )
+    if policy == "train_deterministic":
+        return (
+            out,
+            "trained deterministic Bechtold tier-1/2 leaves and explicitly "
+            "excluded stochastic leaves because `enable_stochastic=False` makes "
+            "them structurally zero-gradient.",
+        )
+    if policy == "force":
+        return (
+            out,
+            "forced Bechtold into the gradient preflight; any zero-gradient "
+            "leaves fail the nonzero-gradient gate.",
+        )
+    if policy == "freeze":
+        return (
+            out,
+            "frozen at the campaign-tuned values by explicit CLI policy.",
+        )
+    return (
+        out,
+        "frozen at the campaign-tuned values. Bechtold tier-2 stochastic "
+        "parameters are structurally dead with `enable_stochastic=False`, so "
+        "`auto` avoids handing MUON zero-gradient leaves.",
+    )
+
+
+def _build_recommended_base_config(
+    recommended: dict[str, Any],
+    *,
+    bechtold_policy: str,
+) -> tuple[PhysicsConfig, dict[str, str], str]:
+    recommended_cfg = None
+    recommended_cfg_raw = recommended.get("recommended_physics_config")
+    if recommended_cfg_raw is not None:
+        if not isinstance(recommended_cfg_raw, dict):
+            raise ValueError(
+                "recommended_defaults.json field 'recommended_physics_config' "
+                "must be an object when present"
+            )
+        recommended_cfg = _physics_config_from_recommended_dict(recommended_cfg_raw)
+
+    winners = _recommended_scheme_winners(recommended, recommended_cfg)
+    winners, bechtold_note = _apply_bechtold_policy_to_winners(
+        winners,
+        bechtold_policy,
+    )
+    rad_update_steps = (
+        recommended_cfg.radiation.update_interval_steps
+        if recommended_cfg is not None
+        else campaign.DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS
+    )
+    cfg = campaign.make_physics_config(
+        radiation=winners["radiation"],
+        radiation_update_interval_steps=rad_update_steps,
+        turbulence=winners["turbulence"],
+        microphysics=winners["microphysics"],
+        gravity_wave_drag=winners["gravity_wave_drag"],
+        convection=winners["convection"],
+        base=recommended_cfg,
+    )
+    return cfg, winners, bechtold_note
+
+
 def _active_subconfig_by_scheme_key(
     cfg: PhysicsConfig,
 ) -> dict[str, tuple[str, Any, Any]]:
@@ -107,6 +277,10 @@ def _active_subconfig_by_scheme_key(
         component = getattr(cfg, component_name)
         scheme = component.scheme
         subcfg = getattr(component, scheme, None)
+        if subcfg is None and component_name == "turbulence" and scheme == "clubb":
+            from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+            subcfg = CLUBBConfig()
         scheme_key = campaign._scheme_key_for_subconfig(subcfg)
         if scheme_key is not None:
             out[scheme_key] = (component_name, component, subcfg)
@@ -203,6 +377,15 @@ def _initial_params_from_campaign(
     return TrainablePhysicsParams(raw_values=raw_values, constraints=params.constraints)
 
 
+def _active_tuned_scheme_keys(
+    cfg: PhysicsConfig,
+    records: list[dict[str, Any]],
+) -> set[str]:
+    tuned_scheme_keys = {str(row["scheme_key"]) for row in records}
+    active_scheme_keys = set(_active_subconfig_by_scheme_key(cfg))
+    return active_scheme_keys & tuned_scheme_keys
+
+
 def _filter_params(
     params: TrainablePhysicsParams,
     keep_names: set[str],
@@ -249,8 +432,17 @@ def _qcond_from_tracers(tracers, microphysics_scheme: str) -> jax.Array:
     return campaign._qcond_from_tracers(tracers, microphysics_scheme)
 
 
+def _use_cached_radiation(cfg: PhysicsConfig) -> bool:
+    return cfg.radiation.scheme != "none" and int(cfg.radiation.update_interval_steps) > 1
+
+
 def _create_scm(cfg: PhysicsConfig, ref: campaign.ReferenceProfiles, dt: float) -> SingleColumnModel:
     T0, qv0 = campaign.wing_initial_profiles(ref)
+    scm_cfg = (
+        campaign._without_radiation_config(cfg)
+        if _use_cached_radiation(cfg)
+        else cfg
+    )
     use_split_convection = (
         campaign._effective_scm_convection_substeps(
             cfg.convection.scheme,
@@ -273,9 +465,9 @@ def _create_scm(cfg: PhysicsConfig, ref: campaign.ReferenceProfiles, dt: float) 
     )
     scm = SingleColumnModel.create(
         physics_config=(
-            campaign._without_convection_config(cfg)
+            campaign._without_convection_config(scm_cfg)
             if use_split_convection
-            else cfg
+            else scm_cfg
         ),
         nlev=len(ref.z_m),
         dt=dt,
@@ -298,6 +490,30 @@ def _create_scm(cfg: PhysicsConfig, ref: campaign.ReferenceProfiles, dt: float) 
     return scm
 
 
+def _initial_step_carry(scm: SingleColumnModel, cfg: PhysicsConfig):
+    if _use_cached_radiation(cfg):
+        return (
+            scm.state,
+            scm.phys_state,
+            _zero_radiation_tendency_like_state(scm.state),
+        )
+    return scm.state, scm.phys_state
+
+
+def _zero_radiation_tendency_like_state(state):
+    tend = campaign._zero_tendency_like_state(state)
+    return tend._replace(
+        du_dt=tend.du_dt.replace(name="du_dt_rad"),
+        dT_dt=tend.dT_dt.replace(name="dT_dt_rad"),
+        dp_s_dt=tend.dp_s_dt.replace(name="dp_s_dt_rad"),
+        dphis_dt=tend.dphis_dt.replace(name="dphis_dt_rad"),
+        dv_dt=(
+            None if tend.dv_dt is None
+            else tend.dv_dt.replace(name="dv_dt_rad")
+        ),
+    )
+
+
 def _make_step_once(
     scm: SingleColumnModel,
     cfg: PhysicsConfig,
@@ -312,6 +528,15 @@ def _make_step_once(
     sigma_coord = scm.sigma_coord
     dt_arr = jnp.asarray(dt, dtype=jnp.float64)
     microphysics_scheme = cfg.microphysics.scheme
+    use_cached_radiation = _use_cached_radiation(cfg)
+    radiation_interval = max(1, int(cfg.radiation.update_interval_steps))
+    rad_physics_fn = None
+    if use_cached_radiation:
+        rad_physics_fn = campaign.make_physics(
+            campaign._radiation_only_config(cfg),
+            model_type="hydrostatic",
+            dt=dt,
+        )
     effective_convection_substeps = campaign._effective_scm_convection_substeps(
         cfg.convection.scheme,
         campaign.DEFAULT_SCM_CONVECTION_SUBSTEPS,
@@ -343,9 +568,9 @@ def _make_step_once(
         T_data = jnp.where(mask, T_bl.reshape(1, 1, 1, -1), state.T.data)
         return state._replace(T=state.T.replace(data=T_data))
 
-    def fixed_sst_tendency(state, phys_state, _t):
+    def call_physics_with_fixed_sst(fn, state, phys_state):
         phys_state = phys_state._replace(surface_T_sfc_override=sst_col)
-        tend, phys_out = physics_fn(
+        tend, phys_out = fn(
             state,
             grid,
             sigma_coord,
@@ -357,6 +582,9 @@ def _make_step_once(
         else:
             phys_out = phys_out._replace(surface_T_sfc_override=sst_col)
         return tend, phys_out
+
+    def fixed_sst_tendency(state, phys_state, _t):
+        return call_physics_with_fixed_sst(physics_fn, state, phys_state)
 
     def apply_convection_substeps(state, phys_state):
         if not use_split_convection:
@@ -400,7 +628,47 @@ def _make_step_once(
         out = (new_state.T.data[0, 0, 0], qv, qcond)
         return (new_state, new_phys), out
 
-    return step_once
+    def cached_radiation_step_once(carry, k):
+        state, phys_state, rad_cache = carry
+        t = k.astype(jnp.float64) * dt_arr
+
+        def refresh(_unused):
+            rad_tend, _rad_phys = call_physics_with_fixed_sst(
+                rad_physics_fn,
+                state,
+                phys_state,
+            )
+            del _rad_phys
+            return rad_tend
+
+        rad_tend = lax.cond(
+            jnp.mod(k, radiation_interval) == 0,
+            refresh,
+            lambda _unused: rad_cache,
+            operand=None,
+        )
+
+        def cached_fixed_sst_tendency(step_state, step_phys_state, _t):
+            nonrad_tend, phys_out = fixed_sst_tendency(
+                step_state,
+                step_phys_state,
+                _t,
+            )
+            return campaign.add_tendencies(nonrad_tend, rad_tend), phys_out
+
+        new_state, new_phys = step_fn(
+            state, phys_state, cached_fixed_sst_tendency, dt, t,
+        )
+        new_state, new_phys = apply_convection_substeps(new_state, new_phys)
+        new_state = apply_surface_sst_anchor(new_state)
+        qv = new_state.tracers["q_v"].data[0, 0, 0]
+        qcond = _qcond_from_tracers(
+            new_state.tracers, microphysics_scheme,
+        )[0, 0, 0]
+        out = (new_state.T.data[0, 0, 0], qv, qcond)
+        return (new_state, new_phys, rad_tend), out
+
+    return cached_radiation_step_once if use_cached_radiation else step_once
 
 
 def _compute_static_spinup_carry(
@@ -413,8 +681,9 @@ def _compute_static_spinup_carry(
 ):
     spinup_steps = max(0, int(round(spinup_days * campaign.SECONDS_PER_DAY / dt)))
     scm = _create_scm(cfg, ref, dt)
+    carry0 = _initial_step_carry(scm, cfg)
     if spinup_steps == 0:
-        return scm.state, scm.phys_state
+        return carry0
     chunk_steps = max(1, int(chunk_steps))
     nchunks = int(math.ceil(spinup_steps / chunk_steps))
     step_once = _make_step_once(scm, cfg, ref, dt)
@@ -433,15 +702,15 @@ def _compute_static_spinup_carry(
         return lax.scan(masked_step, carry, ks)
 
     @jax.jit
-    def driver(state0, phys0):
+    def driver(initial_carry):
         carry, _ = lax.scan(
             chunk_body,
-            (state0, phys0),
+            initial_carry,
             jnp.arange(nchunks),
         )
         return carry
 
-    return driver(scm.state, scm.phys_state)
+    return driver(carry0)
 
 
 def _rollout_profiles(
@@ -466,6 +735,7 @@ def _rollout_profiles(
 
     cfg = _apply_trainable_params(base_cfg, params)
     scm = _create_scm(cfg, ref, dt)
+    initial_step_carry = _initial_step_carry(scm, cfg)
     nlev = len(ref.z_m)
     step_once = jax.checkpoint(_make_step_once(scm, cfg, ref, dt))
 
@@ -503,12 +773,12 @@ def _rollout_profiles(
         spinup_chunk_body = jax.checkpoint(spinup_chunk_body)
         carry0, _ = lax.scan(
             spinup_chunk_body,
-            (scm.state, scm.phys_state),
+            initial_step_carry,
             jnp.arange(spinup_chunks),
         )
         carry0 = jax.tree_util.tree_map(lax.stop_gradient, carry0)
     else:
-        carry0 = (scm.state, scm.phys_state)
+        carry0 = initial_step_carry
 
     def chunk_body(carry, chunk_index):
         start = chunk_index * chunk_steps
@@ -516,12 +786,12 @@ def _rollout_profiles(
         return lax.scan(masked_step, carry, ks)
 
     chunk_body = jax.checkpoint(chunk_body)
-    (_state_f, _phys_f), history_chunks = lax.scan(
+    _final_carry, history_chunks = lax.scan(
         chunk_body,
         carry0,
         jnp.arange(nchunks),
     )
-    del _state_f, _phys_f
+    del _final_carry
     T_hist, qv_hist, qcond_hist = (
         x.reshape((total_steps, nlev))[:nsteps] for x in history_chunks
     )
@@ -760,10 +1030,9 @@ def _write_summary(
     else:
         lines.append(
             "Verification: final eval score did not beat the requested threshold. "
-            "The run froze Bechtold's stochastic/dead tier-2 leaves and optimized "
-            "only parameters with finite nonzero gradients over the differentiable "
-            "window; this can limit improvement relative to the derivative-free "
-            "campaign optimum."
+            "The run optimized only active winning-scheme parameters with finite "
+            "nonzero gradients over the differentiable window; this can limit "
+            "improvement relative to the derivative-free campaign optimum."
         )
     if args.spinup_days > 0.0:
         spinup_mode = (
@@ -802,42 +1071,25 @@ def _write_summary(
 
 def _choose_active_scheme_keys(
     args: argparse.Namespace,
-) -> tuple[set[str], set[str], str]:
-    active = {
-        WINNING_SCHEME_KEYS["radiation"],
-        WINNING_SCHEME_KEYS["turbulence"],
-        WINNING_SCHEME_KEYS["microphysics"],
-    }
+    cfg: PhysicsConfig,
+    records: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    active = _active_tuned_scheme_keys(cfg, records)
     exclude: set[str] = set()
-    if args.bechtold_policy == "mass_flux":
-        active.add(MASS_FLUX_SCHEME_KEY)
-        note = (
-            "substituted `mass_flux` for the gradient-trained convection branch; "
-            "Bechtold remains in the campaign-tuned comparison only."
-        )
-    elif args.bechtold_policy == "train_deterministic":
-        active.add(WINNING_SCHEME_KEYS["convection"])
+    convection_key = None
+    by_scheme = _active_subconfig_by_scheme_key(cfg)
+    for scheme_key, (component_name, _component, _subcfg) in by_scheme.items():
+        if component_name == "convection":
+            convection_key = scheme_key
+            break
+    if convection_key == BECHTOLD_SCHEME_KEY and args.bechtold_policy == "train_deterministic":
         exclude |= BECHTOLD_STOCHASTIC_PARAMS
-        note = (
-            "trained deterministic Bechtold tier-1/2 leaves and explicitly "
-            "excluded stochastic leaves because `enable_stochastic=False` makes "
-            "them structurally zero-gradient."
-        )
-    elif args.bechtold_policy == "force":
-        active.add(WINNING_SCHEME_KEYS["convection"])
-        note = (
-            "forced Bechtold into the gradient preflight; any zero-gradient "
-            "leaves fail the nonzero-gradient gate."
-        )
-    elif args.bechtold_policy == "freeze":
-        note = "frozen at the campaign-tuned values by explicit CLI policy."
-    else:
-        note = (
-            "frozen at the campaign-tuned values.  Bechtold tier-2 stochastic "
-            "parameters are structurally dead with `enable_stochastic=False`, so "
-            "`auto` avoids handing MUON zero-gradient leaves."
-        )
-    return active, exclude, note
+    elif convection_key == BECHTOLD_SCHEME_KEY and args.bechtold_policy in {
+        "auto",
+        "freeze",
+    }:
+        active.discard(BECHTOLD_SCHEME_KEY)
+    return active, exclude
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -845,13 +1097,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     records = _read_tuned_records(args.tuned_parameters)
+    recommended = _read_recommended_defaults(args.recommended)
     ref = campaign.build_reference_profiles(args.reference_dir, args.last_reference_files)
-    convection = "mass_flux" if args.bechtold_policy == "mass_flux" else "bechtold"
-    base_cfg = campaign.make_physics_config(
-        turbulence="clubb_lite",
-        microphysics="sundqvist",
-        gravity_wave_drag="none",
-        convection=convection,
+    base_cfg, winners, bechtold_note = _build_recommended_base_config(
+        recommended,
+        bechtold_policy=args.bechtold_policy,
     )
     campaign_tuned_cfg = _apply_static_record_values(base_cfg, records)
     initial_carry = None
@@ -867,14 +1117,23 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             dt=args.dt,
             chunk_steps=args.chunk_steps,
         )
-    active_scheme_keys, exclude_names, bechtold_note = _choose_active_scheme_keys(args)
+    active_scheme_keys, exclude_names = _choose_active_scheme_keys(
+        args,
+        campaign_tuned_cfg,
+        records,
+    )
+    report_scheme_keys = _active_tuned_scheme_keys(campaign_tuned_cfg, records)
+    if not active_scheme_keys:
+        raise RuntimeError(
+            "No active campaign-winning tuned scheme has trainable parameters; "
+            f"winners={winners}, tuned_scheme_keys="
+            f"{sorted({str(row['scheme_key']) for row in records})}"
+        )
     initial_params_all = _initial_params_from_campaign(
         active_scheme_keys=active_scheme_keys,
         records=records,
         exclude=exclude_names,
     )
-    report_scheme_keys = set(active_scheme_keys)
-    report_scheme_keys.add(WINNING_SCHEME_KEYS["convection"])
     report_params_all = _initial_params_from_campaign(
         active_scheme_keys=report_scheme_keys,
         records=records,
@@ -915,7 +1174,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not bool(stat["nonzero"])
     }
     for constraint in report_params_all.constraints:
-        if constraint.scheme_key == WINNING_SCHEME_KEYS["convection"]:
+        if constraint.scheme_key == BECHTOLD_SCHEME_KEY:
             frozen_reasons.setdefault(constraint.name, bechtold_note)
     if args.bechtold_policy == "force" and frozen_reasons:
         raise RuntimeError(
@@ -976,7 +1235,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         accepted = False
         best_params = params
         best_loss = loss_val
-        for scale in (1.0, 0.5, 0.25, 0.1):
+        for scale in (1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01, 0.005, 0.001):
             candidate = eqx.apply_updates(params, _scale_updates(updates, scale))
             _assert_strict_bounds(candidate)
             candidate_loss = float(loss_fn(candidate))
@@ -986,10 +1245,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 accepted = True
                 break
         if not accepted:
-            raise RuntimeError(
-                f"MUON update did not reduce loss at step {step}; "
+            print(
+                f"[train] early_stop step={step} no reducing MUON update; "
                 f"loss={loss_val:.8g}"
             )
+            break
         params = best_params
         opt_state = opt_state_candidate
         loss_history.append(best_loss)
@@ -1046,6 +1306,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "analysis_days": args.analysis_days,
             "fixed_spinup": args.fixed_spinup,
             "chunk_steps": args.chunk_steps,
+        },
+        "campaign_recommendation": {
+            "recommended": str(args.recommended),
+            "winners": winners,
+            "active_tuned_scheme_keys": sorted(report_scheme_keys),
+            "trained_scheme_keys": sorted(active_scheme_keys),
         },
         "bechtold_ad_treatment": bechtold_note,
         "reference": _jsonable(ref),
@@ -1112,6 +1378,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-dir", type=Path, default=campaign.DEFAULT_REFERENCE_DIR)
     parser.add_argument("--campaign-dir", type=Path, default=campaign.DEFAULT_RESULTS_DIR)
+    parser.add_argument(
+        "--recommended",
+        "--recommended-defaults",
+        dest="recommended",
+        type=Path,
+        default=None,
+        help=(
+            "Campaign recommended_defaults.json. Defaults to "
+            "--campaign-dir/recommended_defaults.json."
+        ),
+    )
     parser.add_argument("--tuned-parameters", type=Path, default=None)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     parser.add_argument("--days", type=float, default=campaign.DEFAULT_DAYS)
@@ -1146,12 +1423,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--bechtold-policy",
         choices=("auto", "freeze", "train_deterministic", "force", "mass_flux"),
-        default="train_deterministic",
+        default="auto",
     )
     parser.add_argument("--target-loss", type=float, default=DEFAULT_TARGET_LOSS)
     parser.add_argument("--grad-nonzero-tol", type=float, default=GRAD_NONZERO_TOL)
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args(argv)
+    if args.recommended is None:
+        args.recommended = args.campaign_dir / "recommended_defaults.json"
     if args.tuned_parameters is None:
         args.tuned_parameters = args.campaign_dir / "tuned_parameters.json"
     if args.quick:
