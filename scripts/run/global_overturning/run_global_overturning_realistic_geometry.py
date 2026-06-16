@@ -82,13 +82,13 @@ from legoesm.ocean.vertical import (
     compute_centroid_depth,
 )
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig,
     create_forcings,
     create_eos_config,
     create_gm_redi_config,
+    global_overturning_model_config,
 )
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
@@ -245,25 +245,15 @@ def main():
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
 
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,            # unused by implicit-CN
-        physics=physics,
-        # Momentum / tracer dissipation
-        A_h=config.A_h,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
+        # Production partial-cell dycore + biharmonic on top of the shared base
         B_h=5.0e9,                           # production biharmonic
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
         bottom_drag_bbl_thickness=100.0,
-        # EOS / mixing
-        eos="linear",
-        eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
-        # Production-grade dynamical core for partial cells
         pgf_scheme="adcroft",   # AC + h_actual; previously "smc03"
                                 # (bit-equivalent on lat-lon, simpler)
         momentum_advection="vector_invariant",   # → AL81 for partial cells
-        barotropic_solver="implicit_cn",
+        barotropic_solver="implicit_cn",         # n_barotropic_substeps unused
     )
 
     print(f"=== Phase 4: Wolfe-Cessi spinup on real ETOPO bathymetry ===")
