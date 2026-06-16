@@ -123,23 +123,105 @@ class CoupledESMDriver:
         sst_init = remap_field(sst_init_atm, self._grid_remapper.a2o)
         T_sfc_mean = float(jnp.mean(sst_init))
 
-        self._ocean_state = init_slab_state(
-            shape_2d, T_sfc_init=T_sfc_mean,
+        # Dispatch on ocean_mode (explicit; ValueError on unknown — no silent
+        # else->slab, per the CLAUDE.md dispatch-hardening rule).
+        if cfg.ocean_mode in ("slab", "two_layer", "fixed"):
+            self._is_dynamic_ocean = False
+            self._ocean_state = init_slab_state(
+                shape_2d, T_sfc_init=T_sfc_mean,
+            )
+            # Override with the spatially varying AMIP SST
+            from legoesm.core.field import Field
+            self._ocean_state = self._ocean_state._replace(
+                T_sfc=Field(
+                    data=jnp.array(
+                        sst_init, dtype=self._ocean_state.T_sfc.data.dtype),
+                    name="T_sfc", dims=self._ocean_state.T_sfc.dims,
+                    units="K",
+                ),
+            )
+            self._ocean_step = make_ocean(cfg.ocean_config)
+            logger.info(f"  Ocean: mode={cfg.ocean_mode}, "
+                        f"h_mix={cfg.ocean_config.h_mix}m, "
+                        f"T_sfc_init={T_sfc_mean:.1f}K")
+        elif cfg.ocean_mode == "dynamic":
+            # Prognostic 3D ocean (LatLonCGridOceanModel) stepped by the coupler
+            # on a SHARED lat-lon grid (no cross-grid remap).  Phase 1 of
+            # docs/coupled_3d_ocean_plan.md.
+            self._init_dynamic_ocean(T_sfc_mean)
+        else:
+            raise ValueError(
+                f"unknown ocean_mode {cfg.ocean_mode!r}; expected one of "
+                f"'slab', 'two_layer', 'fixed', 'dynamic'.")
+
+    def _init_dynamic_ocean(self, T_sfc_mean: float):
+        """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
+        'dynamic') on the shared lat-lon grid with the OMIP-validated stable
+        cold-start stack.  See docs/coupled_3d_ocean_plan.md (Phase 1)."""
+        from legoesm.grids.latlon import LatLonGrid
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
         )
-        # Override with the spatially varying AMIP SST
-        from legoesm.core.field import Field
-        self._ocean_state = self._ocean_state._replace(
-            T_sfc=Field(
-                data=jnp.array(sst_init, dtype=self._ocean_state.T_sfc.data.dtype),
-                name="T_sfc", dims=self._ocean_state.T_sfc.dims,
-                units="K",
-            ),
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean, idealized_bathymetry_latlon_cgrid,
         )
 
-        self._ocean_step = make_ocean(cfg.ocean_config)
-        logger.info(f"  Ocean: mode={cfg.ocean_mode}, "
-                    f"h_mix={cfg.ocean_config.h_mix}m, "
-                    f"T_sfc_init={T_sfc_mean:.1f}K")
+        cfg = self.coupled_cfg
+        if not isinstance(self._ocean_grid, LatLonGrid):
+            raise ValueError(
+                "ocean_mode='dynamic' requires a SHARED lat-lon ocean grid "
+                "(lat-lon atm + lat-lon 3D ocean co-located, no cross-grid "
+                f"remap); got ocean grid {type(self._ocean_grid).__name__}. "
+                "Run with --grid latlon (cube-atm + tripole-ocean needs the "
+                "deferred cross-family remap, Phase 2).")
+
+        # The 3D ocean needs the full LatLonCGridOceanConfig; build a default
+        # one if the caller passed a SimpleOceanConfig.
+        _oc = cfg.ocean_config
+        if not isinstance(_oc, LatLonCGridOceanConfig):
+            _oc = LatLonCGridOceanConfig()
+        # Force the OMIP-validated cold-start stack (the defaults
+        # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
+        # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
+        # omip_rk3_coldstart_solve).
+        ocfg = _oc._replace(
+            barotropic_solver="implicit_cn",
+            momentum_time_integrator="rk3",
+            pgf_scheme="smc03",
+            implicit_vertical_mixing=True,
+        )
+
+        if cfg.ocean_dt_s <= 0.0:
+            raise ValueError(
+                f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
+        z_coord = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # Idealized aquaplanet bathymetry (flat bottom).  land_lat_threshold=90
+        # => ALL-OCEAN (no polar land caps), matching the aquaplanet f_land=0
+        # atmosphere so the same-grid surface/ocean wet masks AGREE (codex HIGH:
+        # caps vs all-ocean atm leak atm-side fluxes onto ocean-masked cells).
+        # A realistic regridded NEMO bathy + WOA T/S IC + a co-derived atm
+        # f_land is the next increment (docs/coupled_3d_ocean_plan).
+        H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
+            self._ocean_grid, H_max=cfg.ocean_H_max_m, land_lat_threshold=90.0,
+        )
+        self._ocean_state = rest_state_latlon_cgrid_ocean(
+            self._ocean_grid, z_coord,
+            land_mask_override=land_mask, H_bathy_override=H_bathy,
+        )
+        self._ocean_model = LatLonCGridOceanModel(
+            self._ocean_grid, z_coord, ocfg,
+        )
+        self._ocean_step = self._ocean_model.step
+        self._ocean_z_coord = z_coord
+        self._ocean_land_mask = land_mask
+        self._is_dynamic_ocean = True
+        logger.info(
+            "  Ocean: mode=dynamic (3D LatLonCGridOceanModel), "
+            f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
+            f"barotropic={ocfg.barotropic_solver}, "
+            f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
 
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
@@ -155,6 +237,7 @@ class CoupledESMDriver:
         _sd = get_policy().storage
 
         coupler_cfg = self._coupler_config or CouplerConfig()
+        self._coupler_cfg = coupler_cfg  # reused by the 3D-ocean flux assembly
         ice_cfg = self._ice_config or SeaIceConfig()
         lake_cfg = self._lake_config or LakeConfig()
 
@@ -325,7 +408,7 @@ class CoupledESMDriver:
             # SST from the ocean, remapped onto the atmosphere grid (identity
             # remapper => unchanged) so the atm physics always sees atm-grid SST
             # even when the ocean runs on a different grid.
-            sst = remap_field(self._ocean_state.T_sfc.data,
+            sst = remap_field(self._ocean_surface_KuvC()[0],
                               self._grid_remapper.o2a)
             # SIC from prognostic sea ice (already on the atm grid, where the
             # coupler runs) or the file fallback.
@@ -531,11 +614,81 @@ class CoupledESMDriver:
         """
         if self._ocean_step is None:
             return
-        self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
-            self._ocean_state, atm_forcing, dt,
+        if not getattr(self, "_is_dynamic_ocean", False):
+            self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
+                self._ocean_state, atm_forcing, dt,
+            )
+            self._ocean_u_sfc = u_sfc
+            self._ocean_v_sfc = v_sfc
+            return
+        # --- Prognostic 3D ocean (LatLonCGridOceanModel) ---
+        # Hold the atm flux over the coupling step (standard explicit coupling)
+        # and SUBSTEP the ocean at ocean_dt_s (the 3D ocean CFL forbids stepping
+        # at coupling_dt; OMIP runs ~300 s at 1°).  SST/currents are read from
+        # the 3D state by ``_ocean_surface_KuvC`` (no stored slab tuple).
+        sf, fw = self._assemble_ocean_forcing(atm_forcing)
+        # CEIL (not round) so the actual substep odt <= ocean_dt_s — never
+        # exceed the ocean CFL for a non-divisor coupling_dt (codex MED).
+        import math
+        n_o = max(1, math.ceil(dt / self.coupled_cfg.ocean_dt_s))
+        odt = dt / n_o
+        for _ in range(n_o):
+            self._ocean_state = self._ocean_step(
+                self._ocean_state, odt, freshwater=fw, surface_forcing=sf,
+            )
+
+    def _ocean_surface_KuvC(self):
+        """Ocean surface (SST [K], u_sfc, v_sfc [m/s]) at cell centres on the
+        ocean grid.  Slab: ``T_sfc`` [K] + zero currents.  Dynamic 3D: top-level
+        ``T`` [°C → K] + C-grid face-averaged top-level currents.  Reconciles
+        the slab(K) vs 3D-ocean(°C) SST-convention divergence so the atmosphere
+        always sees SST in Kelvin."""
+        if not getattr(self, "_is_dynamic_ocean", False):
+            sst = self._ocean_state.T_sfc.data
+            z = jnp.zeros_like(sst)
+            return sst, z, z
+        from legoesm import constants
+        T = self._ocean_state.T.data                 # (n_lat, n_lon, nlev) [°C]
+        sst = T[..., 0] + constants.T_freeze         # top level → K
+        u = self._ocean_state.u.data                 # (n_lat, n_lon+1, nlev)
+        v = self._ocean_state.v.data                 # (n_lat+1, n_lon, nlev)
+        u_c = 0.5 * (u[:, :-1, 0] + u[:, 1:, 0])      # lon-faces → centres
+        v_c = 0.5 * (v[:-1, :, 0] + v[1:, :, 0])      # lat-faces → centres
+        return sst, u_c, v_c
+
+    def _assemble_ocean_forcing(self, atm_forcing):
+        """Build ``(OceanSurfaceForcing, FreshwaterForcing)`` for the 3D ocean
+        from the atm forcing + the ocean-tile bulk fluxes — the audited OMIP
+        assembly (``run_omip.py`` ocean-tile path): ``q_net = sw_net + lw_down -
+        lw_up - SH - LH`` (positive into ocean, INCLUDING shortwave); ``sw_down``
+        is the downwelling SW for sub-surface penetration; ``tau`` is in the
+        ATMOSPHERIC convention (the ocean core applies ``-tau`` + grid rotation);
+        freshwater is passed via the ``freshwater=`` arg (NOT ``sf.freshwater``,
+        which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
+        ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
+        aquaplanet Phase-1 run has no ice tile."""
+        from legoesm.coupler.coupler import ocean_tile_response
+        from legoesm.coupler.config import CouplerConfig
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.freshwater import FreshwaterForcing
+        from legoesm import constants
+
+        sst_K, u_o, v_o = self._ocean_surface_KuvC()
+        ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
+        tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
+        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        q_net = (sw_net + atm_forcing.lw_down
+                 - tile.lw_up - tile.shflx - tile.lhflx)
+        evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
+        z = jnp.zeros_like(sw_net)
+        fw = FreshwaterForcing(
+            precip=atm_forcing.precip_total, evap=evap, runoff=z, ice_fw=z,
         )
-        self._ocean_u_sfc = u_sfc
-        self._ocean_v_sfc = v_sfc
+        sf = OceanSurfaceForcing(
+            sw_down=atm_forcing.sw_down, q_net=q_net,
+            tau_x=tile.tau_x, tau_y=tile.tau_y, freshwater=None,
+        )
+        return sf, fw
 
     def _step_co2_tracer(self, dt):
         """Apply blended surface CO2 flux to lowest atmospheric level."""
@@ -583,9 +736,7 @@ class CoupledESMDriver:
             # Ocean state is on the ocean grid; remap SST / surface currents onto
             # the atmosphere grid for the coupler / surface step (identity =>
             # pass-through).
-            sst_o = self._ocean_state.T_sfc.data
-            u_o = getattr(self, '_ocean_u_sfc', jnp.zeros_like(sst_o))
-            v_o = getattr(self, '_ocean_v_sfc', jnp.zeros_like(sst_o))
+            sst_o, u_o, v_o = self._ocean_surface_KuvC()
             sst = remap_field(sst_o, self._grid_remapper.o2a)
             u_sfc = remap_field(u_o, self._grid_remapper.o2a)
             v_sfc = remap_field(v_o, self._grid_remapper.o2a)
@@ -628,7 +779,7 @@ class CoupledESMDriver:
         was previously its own device→host sync, serialising 3-5
         GPU stalls per coupling segment.
         """
-        sst = self._ocean_state.T_sfc.data
+        sst = self._ocean_surface_KuvC()[0]
         has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
         has_T_sfc = self._last_sfc_response is not None
 
@@ -723,12 +874,17 @@ class CoupledESMDriver:
         # checkpoint from a different ocean_grid / config is caught, not silently
         # restored into a mismatched state — see load_coupled_checkpoint).
         arrays["_ckpt_version"] = np.asarray(self._CKPT_VERSION, dtype=np.int64)
-        if self._ocean_state is not None:
+        # NOTE: the prognostic 3D ocean (ocean_mode='dynamic') is NOT yet
+        # checkpointed — its full LatLonCGridOceanState pytree (T,S,u,v,eta +
+        # AB2 history) needs the checkpoint-v2 flatten path (deferred, see
+        # docs/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
+        # for dynamic so a short Phase-1 run does not crash on the missing
+        # T_sfc field; a dynamic run must currently restart from the IC.
+        if self._ocean_state is not None and not getattr(
+                self, "_is_dynamic_ocean", False):
             arrays["_ckpt_ocean_shape"] = np.asarray(
                 self._ocean_state.T_sfc.data.shape, dtype=np.int64)
-
-        # Ocean state (SlabOceanState is a NamedTuple of Fields)
-        if self._ocean_state is not None:
+            # Ocean state (SlabOceanState is a NamedTuple of Fields)
             arrays["ocean_T_sfc"] = np.asarray(self._ocean_state.T_sfc.data)
             arrays["ocean_T_deep"] = np.asarray(self._ocean_state.T_deep.data)
 
@@ -771,6 +927,18 @@ class CoupledESMDriver:
             return
 
         data = np.load(coupled_path)
+
+        # The prognostic 3D ocean is NOT yet checkpointed (ckpt v2 deferred), so
+        # a restart would resume the atm/surface at day N with the ocean reset
+        # to its IC — a silent state inconsistency.  Refuse it loudly until full
+        # 3D-ocean checkpointing exists (codex MED); a dynamic run restarts from
+        # the IC.
+        if getattr(self, "_is_dynamic_ocean", False):
+            raise ValueError(
+                "Coupled checkpoint restart is not supported for "
+                "ocean_mode='dynamic' (the 3D ocean state is not checkpointed; "
+                "ckpt v2 is deferred — see docs/coupled_3d_ocean_plan.md). "
+                "Restart from the initial condition instead.")
 
         # Validate provenance BEFORE restoring — a checkpoint from a different
         # format version or a different ocean grid must NOT be silently mapped

@@ -1,0 +1,75 @@
+"""Phase-1 coupled 3D-ocean wiring (docs/coupled_3d_ocean_plan.md): the coupled
+driver can step the prognostic LatLonCGridOceanModel (ocean_mode='dynamic') on a
+SHARED lat-lon grid with the atmosphere, instead of only a thermodynamic slab.
+
+These tests pin the config dispatch + the build path (a real coupled segment is
+exercised by the integration smoke `scripts/tmp/_ocean3d_smoke.sbatch`, which is
+too heavy/JIT-bound for unit CI).
+"""
+from __future__ import annotations
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import pytest
+
+from legoesm.driver.coupled_config import CoupledConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.simple_ocean import SimpleOceanConfig
+
+
+def test_config_holds_dynamic_ocean():
+    """CoupledConfig accepts ocean_mode='dynamic' + a LatLonCGridOceanConfig +
+    the 3D-ocean knobs (the union widening); slab default is unchanged."""
+    slab = CoupledConfig()
+    assert slab.ocean_mode == "slab"
+    assert isinstance(slab.ocean_config, SimpleOceanConfig)
+    # 3D-ocean knobs default but present
+    assert slab.ocean_nlev == 20 and slab.ocean_dt_s == 300.0
+    dyn = CoupledConfig(
+        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_nlev=8, ocean_dt_s=300.0,
+    )
+    assert dyn.ocean_mode == "dynamic"
+    assert isinstance(dyn.ocean_config, LatLonCGridOceanConfig)
+
+
+def test_init_ocean_rejects_unknown_mode():
+    """_init_ocean dispatch raises on an unknown ocean_mode (no silent
+    else->slab; CLAUDE.md dispatch-hardening)."""
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    # Build a driver far enough to call _init_ocean with a bogus mode.  Use a
+    # tiny lat-lon atm; _init_ocean runs after the atm grid exists.
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
+        radiation="gray", convection="none", days=1,
+    )
+    drv = CoupledESMDriver(
+        atm, CoupledConfig(ocean_mode="garbage_mode"),
+    )
+    drv._atm.setup()
+    with pytest.raises(ValueError, match="unknown ocean_mode"):
+        drv._init_ocean()
+
+
+def test_dynamic_ocean_requires_latlon_grid():
+    """ocean_mode='dynamic' on a non-lat-lon ocean grid raises (same-grid Phase
+    1 only; cube-atm + tripole-ocean needs the deferred cross-grid remap)."""
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic"),
+        radiation="gray", convection="none", days=1,
+    )
+    drv = CoupledESMDriver(
+        atm, CoupledConfig(ocean_mode="dynamic",
+                           ocean_config=LatLonCGridOceanConfig(), ocean_nlev=4),
+    )
+    drv._atm.setup()
+    with pytest.raises(ValueError, match="requires a SHARED lat-lon ocean grid"):
+        drv._init_ocean()

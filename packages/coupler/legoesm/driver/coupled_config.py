@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm.ocean.simple_ocean import SimpleOceanConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.richards import RichardsConfig  # noqa: F401 (used in docstring)
@@ -53,9 +54,28 @@ class CoupledConfig(NamedTuple):
     coupling_dt : float
         Surface coupling interval [s].
     """
-    # Ocean
+    # Ocean.  ``ocean_mode`` ∈ {"slab", "two_layer", "fixed", "dynamic"}.
+    #   slab/two_layer/fixed  -> thermodynamic SimpleOceanConfig (make_ocean).
+    #   dynamic               -> the prognostic 3D LatLonCGridOceanModel
+    #     (T,S,u,v,eta; KPP/implicit vertical mixing, split-explicit barotropic,
+    #     EOS, baroclinic dynamics) stepped by the coupler on a SHARED lat-lon
+    #     grid with the atmosphere (no cross-grid remap).  Pair with a
+    #     LatLonCGridOceanConfig and the ocean_nlev/ocean_dt_s/ocean_H_max_m
+    #     fields below; the coupled cold-start uses the OMIP-validated stable
+    #     stack (rk3 momentum + implicit_cn barotropic + implicit vmix + smc03
+    #     PGF), forced in CoupledESMDriver._init_ocean.  See
+    #     docs/coupled_3d_ocean_plan.md.
     ocean_mode: str = "slab"
-    ocean_config: SimpleOceanConfig = SimpleOceanConfig(mode="slab")
+    ocean_config: SimpleOceanConfig | LatLonCGridOceanConfig = SimpleOceanConfig(
+        mode="slab")
+    # Dynamic (3D) ocean knobs — consumed only when ocean_mode=="dynamic"
+    # (defaults keep slab/two_layer runs byte-identical).
+    ocean_nlev: int = 20            # vertical levels (20 = OMIP production)
+    ocean_dt_s: float = 300.0       # ocean SUBSTEP dt [s]; the coupler substeps
+    # the 3D ocean at this dt within each coupling_dt (NEVER step the ocean at
+    # coupling_dt=3600 s — it violates the legoESM ocean CFL; OMIP runs 300 s
+    # at 1°).
+    ocean_H_max_m: float = 5500.0   # max ocean depth [m]
     # Land
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()
