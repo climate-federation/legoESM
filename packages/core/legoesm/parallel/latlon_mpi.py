@@ -1669,6 +1669,51 @@ def scatter_state_latlon(state, layout: LatLonBandLayout):
     )
 
 
+def scatter_state_latlon_2d(state, layout: LatLon2DLayout):
+    """Extract the rank-local 2-D block from a global C-grid lat-lon state.
+
+    The 2-D analog of :func:`scatter_state_latlon`: slice BOTH the latitude
+    band ``[lat_start, lat_end)`` and the longitude pencil
+    ``[lon_start, lon_end)``.  Pure indexing — no MPI (each rank slices its own
+    block; callers broadcast a global state or build it locally).
+
+    Staggering (codex design pitfall — slice lat AND lon together, lat first):
+
+    * ``T``/``p_s``/``phis``/tracers : cell-centred → ``[s:e, w:x]``.
+    * ``u`` : LON-face, periodic in longitude (n_lon faces for n_lon cells), so
+      no extra column → ``[s:e, w:x]``.  The periodic wrap face to the east
+      neighbour is filled by :func:`exchange_halo_lon`.
+    * ``v`` : LAT-face, one extra global row at the poles (shape ``n_lat+1``);
+      give rows ``[s, e+1)`` so N/S-neighbouring ranks DUPLICATE the shared
+      boundary face (the same convention as the 1-D band; both ranks must hold
+      the same value there).  Longitude is sliced ``[w:x]`` like the others.
+
+    ``proc_lon == 1`` reproduces :func:`scatter_state_latlon` exactly.
+    """
+    s, e = layout.lat_start, layout.lat_end
+    w, x = layout.lon_start, layout.lon_end
+
+    T_local = state.T[s:e, w:x]
+    p_s_local = state.p_s[s:e, w:x]
+    phis_local = state.phis[s:e, w:x]
+    u_local = state.u[s:e, w:x]
+    v_local = state.v[s:e + 1, w:x]   # lat-face: shared boundary row duplicated
+
+    tracers_local = {}
+    if getattr(state, "tracers", None):
+        for name, tr in state.tracers.items():
+            tracers_local[name] = tr[s:e, w:x]
+
+    return state._replace(
+        u=u_local,
+        v=v_local,
+        T=T_local,
+        p_s=p_s_local,
+        phis=phis_local,
+        tracers=tracers_local if tracers_local else state.tracers,
+    )
+
+
 def gather_field_latlon(
     local_arr,
     layout: LatLonBandLayout,
