@@ -127,6 +127,11 @@ def collect(root: Path) -> tuple[list[dict], int]:
     best: dict[tuple, dict] = {}
     dropped = 0
     for jf in sorted(Path(root).rglob("*.json")):
+        # Skip validation/smoke output dirs (val_cpu_/val_gpu_/val_moist_) so
+        # their small fixed-resolution probe points do not contaminate the
+        # production scaling curves.
+        if "/val_" in str(jf):
+            continue
         try:
             d = json.loads(jf.read_text())
         except (json.JSONDecodeError, OSError):

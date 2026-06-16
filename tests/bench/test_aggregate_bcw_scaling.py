@@ -71,13 +71,24 @@ def test_resolution_km_families():
 
 
 def test_backend_from_json_overrides_path(tmp_path):
-    # Dir name has no _cpu_/_gpu_ token; the JSON's recorded backend wins.
-    d = tmp_path / "val_moist_999"
+    # Dir name has no _cpu_/_gpu_ token (and is not a val_ dir); the JSON's
+    # recorded backend wins.
+    d = tmp_path / "moist_ico_999"
     payload = _case("icosahedral", "moist", "strong", 5, 4, "float64", 50.0)
     payload["backend"] = "gpu"
     _write(d, "x.json", payload)
     rows, _ = agg.collect(tmp_path)
     assert len(rows) == 1 and rows[0]["backend"] == "GPU"
+
+
+def test_skips_validation_dirs(tmp_path):
+    prod = tmp_path / "dry_icosahedral_cpu_np16_1"
+    val = tmp_path / "val_moist_999"
+    _write(prod, "a.json", _case("icosahedral", "none", "strong", 5, 16, "float64", 29.4))
+    _write(val, "b.json", _case("icosahedral", "moist", "strong", 4, 1, "float64", 80.0))
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["case"] == "dry"  # the val_ moist probe is excluded
 
 
 def test_skips_non_case_json(tmp_path):
