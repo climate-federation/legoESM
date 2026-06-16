@@ -283,11 +283,26 @@ def emanuel_convection(
     # the first level above cloud base on coarse RCE grids; when PLCL sat
     # at the surface it produced a spurious ~2 K negative DTMA and shut
     # off convection despite large free-tropospheric CAPE.
-    q_lcl = jnp.minimum(
-        q_base,
-        saturation_mixing_ratio(lcl_unpert.T_lcl, lcl_unpert.p_lcl),
+    # CONVECT does not recompute parcel virtual temperature at PLCL from
+    # Bolton's TLCL plus a separate saturation lookup.  It extrapolates the
+    # lifted parcel virtual temperature dry-adiabatically from the parcel
+    # origin to PLCL (convect43c.f lines 611-612):
+    #
+    #   TVPPLCL = TVP(ICB-1)
+    #             - R_d TVP(ICB-1) (P(ICB-1)-PLCL)/(CPN(ICB-1) P(ICB-1))
+    #
+    # The distinction matters in marginal quasi-equilibrium RCE: the
+    # independent Bolton+saturation reconstruction was biased low by
+    # O(0.05-0.1 K), enough to make ``TVPPLCL-TVAPLCL+DTMAX`` slightly
+    # negative and collapse a physically active prognostic CBMF to zero.
+    cpn_base = constants.c_pd * (1.0 - q_base) + constants.c_pv * q_base
+    Tv_base = virtual_temperature(T_base, q_base)
+    Tv_parcel_lcl = Tv_base - (
+        constants.R_d
+        * Tv_base
+        * (p_base - lcl_unpert.p_lcl)
+        / (cpn_base * p_base)
     )
-    Tv_parcel_lcl = virtual_temperature(lcl_unpert.T_lcl, q_lcl)
     Tv_env_lcl = jax.vmap(
         lambda p_lcl_i, p_i, tv_i: jnp.interp(p_lcl_i, p_i, tv_i),
     )(lcl_unpert.p_lcl, p_full, Tv_env)

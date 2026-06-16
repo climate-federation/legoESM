@@ -406,6 +406,7 @@ def entraining_detraining_plume(
     *,
     buoyancy_sharpness: float = 0.5,
     buoyancy_death_memory: bool = False,
+    filter_negative_buoyancy: bool = True,
 ) -> Plume:
     """Bulk entraining-detraining updraft from cloud base to LNB.
 
@@ -489,6 +490,12 @@ def entraining_detraining_plume(
         opt-in interface is preserved so a future PR can land a
         validated implementation; current callers stay on the
         legacy behaviour.
+    filter_negative_buoyancy : bool
+        Whether to apply the local ``sigmoid(B_u)`` reporting taper.
+        Bulk schemes use the default ``True``.  Kain-Fritsch disables it
+        because KF-Eta carries an explicit updraft vertical-velocity
+        budget (``WTW``) and exits on ``WTW < 1e-3`` rather than on
+        instantaneous negative buoyancy at a single level.
 
     Returns
     -------
@@ -737,7 +744,10 @@ def entraining_detraining_plume(
         #    dead even if buoyancy recovers above the inversion
         #    (audit Codex cycle 2 P2: "plume terminated by negative
         #    buoyancy can revive above an inversion").
-        plume_alive_local = jax.nn.sigmoid(buoyancy_sharpness * B_u)
+        if filter_negative_buoyancy:
+            plume_alive_local = jax.nn.sigmoid(buoyancy_sharpness * B_u)
+        else:
+            plume_alive_local = jnp.ones_like(B_u)
         if buoyancy_death_memory:
             # Buoyancy ramp: 0 for B_u ≤ 0, scales linearly above.
             # ``relu`` is a smooth-enough subgradient for AD.
