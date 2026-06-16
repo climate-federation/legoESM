@@ -20,6 +20,7 @@ from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig,
     create_eos_config,
+    create_gm_redi_config,
     global_overturning_model_config,
     global_overturning_mpas_model_config,
 )
@@ -27,6 +28,35 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 
 
 class TestBaseAssembly:
+    def test_default_latlon_bit_identical_to_pre_catalog_factory(self):
+        cfg = GlobalOverturningConfig()
+        physics = object()
+        eos = create_eos_config(cfg)
+        gm_redi = create_gm_redi_config(cfg)
+        actual = global_overturning_model_config(
+            cfg, physics=physics, eos_config=eos, gm_redi_cfg=gm_redi)
+        expected = LatLonCGridOceanConfig(
+            physics=physics,
+            eos="linear",
+            eos_linear=eos,
+            momentum_advection="vector_invariant",
+            tracer_advection="tvd",
+            pgf_scheme="adcroft",
+            ke_gradient_scheme="centered",
+            barotropic_solver="explicit_substep",
+            coriolis_scheme="matsuno_split",
+            outer_integrator="forward_euler",
+            tracer_time_integrator="euler",
+            implicit_vertical_mixing=True,
+            n_barotropic_substeps=30,
+            A_h=cfg.A_h,
+            A_v=cfg.A_v,
+            K_v=cfg.K_v,
+            bottom_drag_r=cfg.bottom_drag_coeff,
+            gm_redi=gm_redi,
+        )
+        assert actual == expected
+
     def test_base_matches_config_coefficients(self):
         cfg = GlobalOverturningConfig()
         mc = global_overturning_model_config(cfg)
@@ -124,6 +154,32 @@ class TestGMRedi:
 class TestMPASFactory:
     """The MPAS (Voronoi C-grid) counterpart — same shared base on
     MPASOceanConfig, used by the mpas_baseline / mpas_50yr_implicit drivers."""
+
+    def test_default_mpas_bit_identical_to_pre_catalog_factory(self):
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        cfg = GlobalOverturningConfig()
+        physics = object()
+        eos = create_eos_config(cfg)
+        gm_redi = create_gm_redi_config(cfg)
+        actual = global_overturning_mpas_model_config(
+            cfg, physics=physics, eos_config=eos, gm_redi_cfg=gm_redi)
+        expected = MPASOceanConfig(
+            physics=physics,
+            eos="linear",
+            eos_linear=eos,
+            tracer_advection="upwind",
+            pgf_scheme="centered",
+            barotropic_solver="explicit_substep",
+            pv_scheme="enstrophy",
+            implicit_vertical_mixing=True,
+            A_h=cfg.A_h,
+            A_v=cfg.A_v,
+            K_v=cfg.K_v,
+            bottom_drag_r=cfg.bottom_drag_coeff,
+            gm_redi=gm_redi,
+        )
+        assert actual == expected
 
     def test_base_matches_config_coefficients(self):
         cfg = GlobalOverturningConfig()

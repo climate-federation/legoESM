@@ -25,11 +25,10 @@ validated factory — ``legoesm_linear_v1`` = the global-overturning default,
 locked against drift by ``tests/ocean/unit/test_recipes.py`` +
 ``test_recipe_snapshots.py``.
 
-NOTE (the verified-registry caveat, #388): the catalog does NOT yet validate that
-an arbitrary recipe x setup pairing is physically consistent — e.g. selecting a
-non-linear-EOS recipe under a setup that supplies a linear ``eos_linear`` is a
-mismatch the assembler will not catch. Compatibility validation + provenance
-lineage is the follow-on #388 layer.
+NOTE (the verified-registry caveat, #388): the catalog does NOT validate that an
+arbitrary recipe x setup pairing is physically consistent or stable. It only
+provides named scheme bundles and a mechanical assembler; compatibility
+validation + provenance lineage is the follow-on #388 layer.
 """
 
 from __future__ import annotations
@@ -49,6 +48,7 @@ LATLON_RECIPES = {
         "outer_integrator": "forward_euler",
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
+        "n_barotropic_substeps": 30,
     },
     # Corrected eddy-resolving WENO5 stack — the eady_uniform recipe.
     "eady_weno5_v1": {
@@ -94,6 +94,7 @@ LATLON_RECIPES = {
         "outer_integrator": "forward_euler",
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
+        "A_h_lat_scaling": True,
     },
 }
 
@@ -114,24 +115,40 @@ MPAS_RECIPES = {
 _TABLES = {"latlon": LATLON_RECIPES, "mpas": MPAS_RECIPES}
 
 
-def list_recipes(kind: str = "latlon") -> list[str]:
-    """Return the sorted names of available recipes for a grid ``kind``
-    (``"latlon"`` or ``"mpas"``) — the menu a user picks from."""
+def list_recipes(kind: str | None = None) -> list[str]:
+    """Return the sorted available recipe names.
+
+    With ``kind=None`` (the public menu), returns the union of lat-lon and MPAS
+    recipe names. Pass ``kind="latlon"`` or ``kind="mpas"`` when a selector must
+    restrict lookup to a specific config family.
+    """
+    if kind is None:
+        return sorted({name for table in _TABLES.values() for name in table})
     if kind not in _TABLES:
         raise ValueError(
             f"unknown recipe kind {kind!r}; choose from {sorted(_TABLES)}")
     return sorted(_TABLES[kind])
 
 
-def get_recipe(name: str, kind: str = "latlon") -> dict:
+def get_recipe(name: str, kind: str | None = None) -> dict:
     """Return a COPY of the named recipe's scheme bundle.
 
     Splat the result into the matching ``*OceanConfig`` constructor; the caller
     supplies setup-dependent params (physics, A_h, eos_linear, gm_redi, ...).
 
     Raises ``ValueError`` on an unknown ``kind`` or ``name`` (no silent default —
-    a typo must fail loudly).
+    a typo must fail loudly). With ``kind=None``, searches both catalogs.
     """
+    if kind is None:
+        matches = [table[name] for table in _TABLES.values() if name in table]
+        if len(matches) == 1:
+            return dict(matches[0])
+        if len(matches) > 1:
+            raise ValueError(
+                f"ambiguous recipe {name!r}; pass kind= to choose from "
+                f"{sorted(_TABLES)}")
+        raise ValueError(
+            f"unknown recipe {name!r}; choose from {list_recipes()}")
     if kind not in _TABLES:
         raise ValueError(
             f"unknown recipe kind {kind!r}; choose from {sorted(_TABLES)}")
@@ -142,93 +159,39 @@ def get_recipe(name: str, kind: str = "latlon") -> dict:
     return dict(table[name])
 
 
-def assemble_ocean_config(recipe, kind, config_cls, *,
-                          eos_linear=None, overrides=None, **setup_params):
-    """Assemble a ``*OceanConfig`` from a named recipe + setup parameters.
+def assemble_ocean_config(recipe_bundle, config_cls, *,
+                          overrides=None, **setup_params):
+    """Assemble a ``*OceanConfig`` from a recipe bundle + setup parameters.
 
-    This is the ``assemble(recipe, setup)`` entry point (#490): the **recipe**
-    (a catalog name) supplies the SCHEME identity; ``setup_params`` supply the
+    This is the pure ``assemble(recipe_bundle, setup)`` entry point (#490): the
+    **recipe bundle** supplies the scheme identity; ``setup_params`` supply the
     resolution/experiment-dependent values (``physics``, ``A_h``, ``gm_redi``,
-    ...); ``overrides`` win last; the result is compatibility-validated.
-
-    **EOS-config matching** is the rung-2 piece that lets ANY recipe pair with a
-    setup: the setup's ``eos_linear`` is attached ONLY when the recipe's ``eos``
-    is ``"linear"``. A non-linear EOS scheme (``veros_nonlin2`` / ``wright`` /
-    ...) carries its own fixed coefficients, so ``eos_linear`` is irrelevant and
-    is dropped — i.e. ``global_overturning`` (a linear setup) x
-    ``veros_faithful_v1`` now assembles the *Veros* EOS, instead of a
-    half-configured linear-config-attached-to-a-nonlinear-EOS mix.
+    ``eos_linear``, ...); ``overrides`` win last.
 
     Parameters
     ----------
-    recipe : str
-        Catalog recipe name (see :func:`list_recipes`).
-    kind : str
-        ``"latlon"`` or ``"mpas"`` (selects the catalog table).
+    recipe_bundle : mapping
+        Scheme-identity bundle, usually from :func:`get_recipe`.
     config_cls : type
         The ``*OceanConfig`` class to construct (``LatLonCGridOceanConfig`` /
         ``MPASOceanConfig``); passed in so this module stays config-class-agnostic.
-    eos_linear : LinearEOSConfig or None
-        The setup's linear-EOS coefficients; attached only for a linear recipe.
     overrides : dict or None
         Per-run field overrides, applied last (win over recipe + setup).
     **setup_params
         Setup-dependent ``config_cls`` fields (``physics``, ``A_h``, ``A_v``,
-        ``K_v``, ``bottom_drag_r``, ``gm_redi``, ...).
+        ``K_v``, ``bottom_drag_r``, ``eos_linear``, ``gm_redi``, ...).
 
     Returns
     -------
     config_cls instance
 
-    Raises
-    ------
-    ValueError
-        On an unknown recipe, or a config the compatibility check rejects.
+    Notes
+    -----
+    No recipe x setup compatibility checks happen here; that verification layer
+    is intentionally out of scope for #490.
     """
-    params = get_recipe(recipe, kind)
-    if params.get("eos") == "linear" and eos_linear is not None:
-        params["eos_linear"] = eos_linear
+    params = dict(recipe_bundle)
     params.update(setup_params)
     if overrides:
         params.update(overrides)
-    cfg = config_cls(**params)
-    assert_recipe_setup_compatible(cfg)
-    return cfg
-
-
-def assert_recipe_setup_compatible(config) -> None:
-    """Fail loudly when an assembled recipe x setup is internally inconsistent.
-
-    This is the first rung of the verified-registry layer (#388/#490): a recipe
-    selects schemes, a setup supplies the matching scheme-level configs, and a
-    mismatched pairing must NOT silently run the wrong physics.
-
-    Currently enforces EOS consistency — the only scheme-level config the
-    ``*OceanConfig`` objects carry today (``eos`` + ``eos_linear``):
-
-    * ``eos="linear"`` requires an ``eos_linear`` config — otherwise the model
-      falls back to the DEFAULT ``LinearEOSConfig`` coefficients (wrong for any
-      setup with non-default ``alpha_T`` etc.).
-    * a non-linear ``eos`` (``"wright"`` / ``"veros_nonlin2"`` / ...) must NOT be
-      paired with an ``eos_linear`` config: the non-linear EOS ignores it, so its
-      presence means a non-linear *recipe* was paired with a linear-EOS *setup* —
-      almost always a mistake (e.g. ``global_overturning`` setup x
-      ``veros_faithful_v1`` recipe).
-
-    Extend with further rules (GM/Redi, grid-feature support, ...) as recipes
-    carry more scheme-level configs. Raises ``ValueError`` on a mismatch.
-    """
-    eos = getattr(config, "eos", None)
-    eos_linear = getattr(config, "eos_linear", None)
-    if eos == "linear" and eos_linear is None:
-        raise ValueError(
-            "recipe x setup mismatch: eos='linear' but no eos_linear config was "
-            "supplied — the model would run with DEFAULT LinearEOSConfig "
-            "coefficients. Supply the setup's eos_linear (e.g. via eos_config=).")
-    if eos is not None and eos != "linear" and eos_linear is not None:
-        raise ValueError(
-            f"recipe x setup mismatch: eos={eos!r} (a non-linear EOS) was paired "
-            "with a linear eos_linear config, which it IGNORES. This usually means "
-            "a non-linear recipe was run on a linear-EOS setup (e.g. "
-            "global_overturning x veros_faithful_v1). Use a linear-EOS recipe for "
-            f"this setup, or supply a setup whose EOS matches eos={eos!r}.")
+    return config_cls(**params)

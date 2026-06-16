@@ -17,6 +17,43 @@ from legoesm.ocean.experiments.eady_uniform import (
 
 
 class TestDefaults:
+    def test_default_bit_identical_to_pre_catalog_factory(self):
+        from legoesm.ocean.eos import LinearEOSConfig
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        cfg = EadyUniformConfig()
+        physics = object()
+        eos = LinearEOSConfig(
+            alpha_T=cfg.alpha_T,
+            rho_ref=cfg.rho_0,
+            T_ref=cfg.T_ref_C,
+            S_ref=cfg.S_uniform,
+        )
+        actual = eady_uniform_model_config(cfg, physics=physics, eos_config=eos)
+        expected = LatLonCGridOceanConfig(
+            physics=physics,
+            eos="linear",
+            eos_linear=eos,
+            barotropic_solver="implicit_cn",
+            tracer_advection="weno5",
+            momentum_advection="weno5",
+            ke_gradient_scheme="centered",
+            tracer_time_integrator="rk3",
+            outer_integrator="ab2",
+            pgf_scheme="smc03",
+            A_h=0.0,
+            B_h=0.0,
+            C_smag=cfg.C_smag,
+            C_leith=0.0,
+            C_smag_lap=0.0,
+            smag_cfl_safety=0.0,
+            A_v=cfg.A_v,
+            K_v=cfg.K_v,
+            bottom_drag_r=cfg.bottom_drag_coeff,
+            gm_redi=None,
+        )
+        assert actual == expected
+
     def test_corrected_dycore_stack(self):
         """The defaults are the Phase-G corrected stack — NOT the legacy
         adcroft / forward-Euler baseline the matrix scrape fell back to."""

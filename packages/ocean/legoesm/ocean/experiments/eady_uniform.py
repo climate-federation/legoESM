@@ -535,7 +535,7 @@ def eady_uniform_model_config(
     recipe. The matrix's ``latlon_channel`` field-scrape otherwise drops
     ``pgf_scheme``/``ke_gradient_scheme``/``C_leith``/``smag_cfl_safety`` and the
     rk3/ab2 integrators, silently testing a different (worse) dycore. The
-    The SCHEME identity comes from the named ``recipe`` (default
+    SCHEME identity comes from the named ``recipe`` (default
     ``"eady_weno5_v1"`` in the catalog ``legoesm.ocean.recipes``); the
     track-selection knobs (``momentum_advection``/``ke_gradient_scheme``/
     ``tracer_advection``/``barotropic_solver``), when not ``None``, OVERRIDE the
@@ -545,7 +545,7 @@ def eady_uniform_model_config(
     See ``build_eady_uniform_setup`` for the per-block rationale.
     """
     from legoesm.ocean.eos import LinearEOSConfig
-    from legoesm.ocean.recipes import assemble_ocean_config
+    from legoesm.ocean.recipes import assemble_ocean_config, get_recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -561,10 +561,12 @@ def eady_uniform_model_config(
         ("ke_gradient_scheme", ke_gradient_scheme),
         ("tracer_advection", tracer_advection),
         ("barotropic_solver", barotropic_solver)) if v is not None}
+    bundle = get_recipe(recipe, "latlon")
     return assemble_ocean_config(
-        recipe, "latlon", LatLonCGridOceanConfig,
-        eos_linear=eos_config, overrides=track,
+        bundle, LatLonCGridOceanConfig,
+        overrides=track,
         physics=physics,
+        eos_linear=eos_config,
         A_h=a_h, B_h=b_h,
         C_smag=(config.C_smag if c_smag is None else c_smag),
         C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,

@@ -1,20 +1,21 @@
 """Recipe-identity snapshots — the drift tripwire for #488.
 
 Each registered ocean recipe factory is built with its DEFAULT config and its
-structural scheme-selection identity is frozen here. This is the explicit recipe
-of record AND a tripwire: if a model-config DEFAULT changes (or a factory is
-edited) such that a recipe's dynamical-core identity drifts, the matching
-assertion fails LOUDLY with the exact field — forcing a conscious "yes, the
-recipe really should change" decision rather than a silent alteration of the
-~17 global-overturning drivers + matrix that consume these factories.
+structural scheme-selection identity is compared against the named recipe
+catalog. The catalog is the explicit recipe of record AND this test is the
+tripwire: if a model-config DEFAULT changes (or a factory is edited) such that a
+recipe's dynamical-core identity drifts, the matching assertion fails LOUDLY with
+the exact field — forcing a conscious "yes, the recipe really should change"
+decision rather than a silent alteration of the ~17 global-overturning drivers +
+matrix that consume these factories.
 
 Why a snapshot and not just "== model default": several of these fields are
 inherited defaults today, so a default flip would silently change the recipe.
 The factories now PIN their structural identity explicitly; this test locks the
 resolved values so the pin and the default can never drift apart unnoticed.
 
-To intentionally change a recipe: edit the factory, then update the expected
-dict below in the SAME commit (the diff documents the decision).
+To intentionally change a recipe: edit the catalog entry and the factory in the
+SAME commit (the diff documents the decision).
 """
 
 from __future__ import annotations
@@ -32,42 +33,15 @@ from legoesm.ocean.experiments.global_overturning import (
     global_overturning_mpas_model_config,
 )
 
+from legoesm.ocean.recipes import get_recipe
+
 # --- Frozen recipe identities (structural scheme selections only) -----------
-# field -> expected value, per registered recipe built from its DEFAULT config.
+# The registry is the named recipe of record; this file checks factories against
+# it so catalog and experiment defaults cannot silently drift apart.
 
-GO_LATLON_IDENTITY = {
-    "eos": "linear",
-    "momentum_advection": "vector_invariant",
-    "tracer_advection": "tvd",
-    "pgf_scheme": "adcroft",
-    "ke_gradient_scheme": "centered",
-    "barotropic_solver": "explicit_substep",
-    "coriolis_scheme": "matsuno_split",
-    "outer_integrator": "forward_euler",
-    "tracer_time_integrator": "euler",
-    "implicit_vertical_mixing": True,
-    "n_barotropic_substeps": 30,
-}
-
-GO_MPAS_IDENTITY = {
-    "eos": "linear",
-    "tracer_advection": "upwind",
-    "pgf_scheme": "centered",
-    "barotropic_solver": "explicit_substep",
-    "pv_scheme": "enstrophy",
-    "implicit_vertical_mixing": True,
-}
-
-EADY_IDENTITY = {
-    "eos": "linear",
-    "momentum_advection": "weno5",
-    "tracer_advection": "weno5",
-    "pgf_scheme": "smc03",
-    "ke_gradient_scheme": "centered",
-    "barotropic_solver": "implicit_cn",
-    "outer_integrator": "ab2",
-    "tracer_time_integrator": "rk3",
-}
+GO_LATLON_IDENTITY = get_recipe("legoesm_linear_v1")
+GO_MPAS_IDENTITY = get_recipe("legoesm_linear_mpas_v1", "mpas")
+EADY_IDENTITY = get_recipe("eady_weno5_v1")
 
 # DINO (Kamm et al. 2025 NEMO double-gyre approximation). Snapshot-protected but
 # NOT pinned in the factory — dino_lat_lon_model_config is Pierre's NEMO-fidelity
@@ -76,19 +50,7 @@ EADY_IDENTITY = {
 # are legoESM defaults (forward_euler / euler), NOT NEMO's leapfrog — a known
 # NEMO-unfaithfulness (see #487, the NEMO recipe card). ke_gradient="hollingsworth"
 # and barotropic="implicit_cn" ARE deliberate NEMO matches.
-DINO_LATLON_IDENTITY = {
-    "eos": "wright",
-    "momentum_advection": "vector_invariant",
-    "tracer_advection": "tvd",
-    "pgf_scheme": "adcroft",
-    "ke_gradient_scheme": "hollingsworth",
-    "barotropic_solver": "implicit_cn",
-    "coriolis_scheme": "matsuno_split",
-    "outer_integrator": "forward_euler",
-    "tracer_time_integrator": "euler",
-    "implicit_vertical_mixing": True,
-    "A_h_lat_scaling": True,
-}
+DINO_LATLON_IDENTITY = get_recipe("nemo_dino_v1")
 
 
 def _assert_identity(mc, expected, label):

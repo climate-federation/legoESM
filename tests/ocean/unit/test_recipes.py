@@ -21,6 +21,7 @@ from legoesm.ocean.experiments.global_overturning import (
 from legoesm.ocean.recipes import (
     LATLON_RECIPES,
     MPAS_RECIPES,
+    assemble_ocean_config,
     get_recipe,
     list_recipes,
 )
@@ -28,19 +29,22 @@ from legoesm.ocean.recipes import (
 
 class TestRegistry:
     def test_list_recipes(self):
-        latlon = list_recipes("latlon")
-        assert "legoesm_linear_v1" in latlon
-        assert "veros_faithful_v1" in latlon
-        assert "nemo_dino_v1" in latlon
+        all_recipes = list_recipes()
+        assert "legoesm_linear_v1" in all_recipes
+        assert "veros_faithful_v1" in all_recipes
+        assert "nemo_dino_v1" in all_recipes
+        assert "legoesm_linear_mpas_v1" in all_recipes
         assert list_recipes("mpas") == ["legoesm_linear_mpas_v1"]
 
     def test_get_recipe_returns_copy(self):
         a = get_recipe("legoesm_linear_v1")
         a["eos"] = "MUTATED"
         assert LATLON_RECIPES["legoesm_linear_v1"]["eos"] == "linear"
+        assert get_recipe("legoesm_linear_mpas_v1") == \
+            MPAS_RECIPES["legoesm_linear_mpas_v1"]
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="unknown latlon recipe"):
+        with pytest.raises(ValueError, match="unknown recipe"):
             get_recipe("does_not_exist")
 
     def test_unknown_kind_raises(self):
@@ -54,6 +58,10 @@ class TestRegistry:
             for name, bundle in table.items():
                 assert "eos" in bundle, name
                 assert len(bundle) >= 6, name
+
+    def test_snapshot_identity_keys_live_in_catalog(self):
+        assert LATLON_RECIPES["legoesm_linear_v1"]["n_barotropic_substeps"] == 30
+        assert LATLON_RECIPES["nemo_dino_v1"]["A_h_lat_scaling"] is True
 
 
 class TestCatalogMatchesFactories:
@@ -94,8 +102,7 @@ class TestCatalogMatchesFactories:
 
 
 class TestReuse:
-    """The point: pick a predefined recipe and run it on ANY setup. The assembler
-    matches the EOS config to the recipe's eos scheme."""
+    """The point: pick a predefined recipe and run it on another setup."""
 
     def test_go_setup_on_eady_recipe(self):
         """GO setup x eady_weno5_v1 (linear): GO carries the WENO5 dycore."""
@@ -106,28 +113,6 @@ class TestReuse:
         assert mc.pgf_scheme == "smc03"
         assert mc.outer_integrator == "ab2"
         assert mc.A_h == cfg.A_h                      # ...but GO's setup params
-
-    def test_go_setup_on_veros_recipe_assembles(self):
-        """GO setup x veros_faithful_v1 (non-linear EOS) now ASSEMBLES the Veros
-        dycore — the linear eos_linear is dropped (the Veros EOS carries its own
-        coefficients), so no mismatch."""
-        cfg = GlobalOverturningConfig()
-        mc = global_overturning_model_config(
-            cfg, eos_config=create_eos_config(cfg), recipe="veros_faithful_v1")
-        assert mc.eos == "veros_nonlin2"
-        assert mc.eos_linear is None                  # dropped — not the right EOS
-        assert mc.outer_integrator == "ab2"
-        assert mc.barotropic_solver == "rigid_lid"
-        assert mc.A_h == cfg.A_h                       # GO's setup params kept
-
-    def test_go_setup_on_dino_recipe_assembles(self):
-        """GO setup x nemo_dino_v1 (eos='wright') assembles; eos_linear dropped."""
-        cfg = GlobalOverturningConfig()
-        mc = global_overturning_model_config(
-            cfg, eos_config=create_eos_config(cfg), recipe="nemo_dino_v1")
-        assert mc.eos == "wright"
-        assert mc.eos_linear is None
-        assert mc.ke_gradient_scheme == "hollingsworth"
 
     def test_override_beats_recipe(self):
         cfg = GlobalOverturningConfig()
@@ -144,60 +129,29 @@ class TestReuse:
         for f in ("eos", "outer_integrator", "barotropic_solver", "pgf_scheme"):
             assert getattr(a, f) == getattr(b, f)
 
+    def test_unknown_recipe_raises_from_factory(self):
+        with pytest.raises(ValueError, match="unknown latlon recipe"):
+            global_overturning_model_config(
+                GlobalOverturningConfig(), recipe="not_a_recipe")
+        with pytest.raises(ValueError, match="unknown mpas recipe"):
+            global_overturning_mpas_model_config(
+                GlobalOverturningConfig(), recipe="not_a_recipe")
 
-class TestEosMatching:
-    """assemble_ocean_config attaches eos_linear ONLY for a linear recipe, so any
-    recipe x setup assembles a coherent config (rung 2)."""
 
-    def test_linear_recipe_keeps_eos_linear(self):
-        from legoesm.ocean.recipes import assemble_ocean_config
+class TestAssembler:
+    """The assembler is mechanical: recipe bundle, setup params, overrides."""
+
+    def test_setup_params_and_overrides_layer_on_bundle(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        sentinel = object()
+
+        sentinel_eos = object()
         cfg = assemble_ocean_config(
-            "legoesm_linear_v1", "latlon", LatLonCGridOceanConfig,
-            eos_linear=sentinel)
+            get_recipe("legoesm_linear_v1"), LatLonCGridOceanConfig,
+            eos_linear=sentinel_eos,
+            overrides={"pgf_scheme": "smc03"},
+            A_h=42.0,
+        )
         assert cfg.eos == "linear"
-        assert cfg.eos_linear is sentinel
-
-    def test_nonlinear_recipe_drops_eos_linear(self):
-        from legoesm.ocean.recipes import assemble_ocean_config
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = assemble_ocean_config(
-            "veros_faithful_v1", "latlon", LatLonCGridOceanConfig,
-            eos_linear=object())   # supplied, but a non-linear recipe drops it
-        assert cfg.eos == "veros_nonlin2"
-        assert cfg.eos_linear is None
-
-    def test_overrides_win(self):
-        from legoesm.ocean.recipes import assemble_ocean_config
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = assemble_ocean_config(
-            "legoesm_linear_v1", "latlon", LatLonCGridOceanConfig,
-            eos_linear=object(), overrides={"pgf_scheme": "smc03"}, A_h=42.0)
+        assert cfg.eos_linear is sentinel_eos
         assert cfg.pgf_scheme == "smc03"
         assert cfg.A_h == 42.0
-
-
-class TestCompatibility:
-    """The validator still rejects genuinely-incoherent configs (e.g. a forced
-    override producing eos='linear' with no coefficients, or a non-linear EOS
-    with a contradictory eos_linear)."""
-
-    def test_compat_check_direct(self):
-        from types import SimpleNamespace
-
-        from legoesm.ocean.recipes import assert_recipe_setup_compatible
-        # linear + eos_linear -> OK
-        assert_recipe_setup_compatible(
-            SimpleNamespace(eos="linear", eos_linear=object()))
-        # non-linear + no eos_linear -> OK (wright/veros need no linear config)
-        assert_recipe_setup_compatible(
-            SimpleNamespace(eos="wright", eos_linear=None))
-        # linear + no eos_linear -> raise (would use default coeffs)
-        with pytest.raises(ValueError, match="no eos_linear"):
-            assert_recipe_setup_compatible(
-                SimpleNamespace(eos="linear", eos_linear=None))
-        # non-linear + dangling eos_linear -> raise (contradictory)
-        with pytest.raises(ValueError, match="non-linear EOS"):
-            assert_recipe_setup_compatible(
-                SimpleNamespace(eos="veros_nonlin2", eos_linear=object()))
