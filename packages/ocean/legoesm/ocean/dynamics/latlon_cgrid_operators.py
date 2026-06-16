@@ -35,6 +35,8 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero_multi,
     is_tripolar,
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
@@ -117,10 +119,11 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        n_lon = fold.perm_T.shape[0]
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+                         fold.perm_T.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 

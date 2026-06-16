@@ -124,21 +124,12 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        # Fold: last interior row, i-reversed via perm_T.
-        # Handle the wrap column: fields with n_lon+1 columns have a
-        # periodic wrap at column n_lon (== column 0).  Fold the first
-        # n_lon columns, then append the wrap.
-        last_row = interior[-1:]                     # (1, n_cols, ...)
-        n_cols = last_row.shape[1]
-        n_lon = fold.perm_T.shape[0]
-        if n_cols == n_lon:
-            north = last_row[:, fold.perm_T]
-        else:
-            # n_cols == n_lon + 1 (vertex or u-face field with wrap column)
-            core = last_row[:, :n_lon][:, fold.perm_T]
-            north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        # Fold: last interior row, i-reversed via perm_T (scalar sign +1).
+        # fold_row handles the n_lon+1 wrap column (vertex / u-face fields).
+        north = fold_row(interior[-1:], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 
@@ -152,6 +143,52 @@ def fold_row(last_row, perm, sign, n_lon):
         return jnp.concatenate([core, core[:, 0:1]], axis=1)
 
 
+def north_fold_mask(grid):
+    """Traced north-band scalar bool for the tripolar fold under SPMD, else None.
+
+    Companion to :func:`fold_is_local`.  ``fold_is_local`` is the STATIC
+    (serial / MPI) "this rank owns the fold seam" test used in a Python ``if``;
+    under the lat-band SPMD backend ONE ``shard_map`` trace runs on every band,
+    so ``fold_is_local`` is uniformly False (the slicer sets ``fold_j=-1`` on
+    every band) and the seam must instead be selected DATA-dependently on the
+    north band (``axis_index("lat") == N-1``).  This returns that traced mask
+    when the SPMD backend is armed AND ``grid.fold`` is active, else ``None`` so
+    the caller keeps its existing ``if fold_is_local`` path unchanged
+    (serial / MPI / regular grid byte-for-byte identical).
+
+    The band geometry preserves ``grid.fold.perm_T``/``perm_v``/signs (the
+    slicer only zeroes ``fold_j``/``cap_j``), so the caller computes the fold
+    row from ``grid.fold`` exactly as in the serial path."""
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(getattr(fold, "is_active", False)):
+        return None
+    # Function-scope import: core/grids must not import parallel/ at module top.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    pm = spmd_pole_end_masks()
+    return None if pm is None else pm[1]
+
+
+def apply_north_fold(padded, north_row, grid, *, north_mask=None):
+    """Write the tripolar fold-partner row into ``padded``'s north (last) lat-row.
+
+    Serial / MPI northernmost rank (:func:`fold_is_local`): overwrite the row
+    (the historical path).  Lat-band SPMD: select it on the north band only
+    (``north_mask`` from :func:`north_fold_mask`) via ``jnp.where`` — the single
+    shard_map trace runs on every band, so a static overwrite would fold every
+    band's interior cut.  Non-seam (regular grid / interior MPI rank / no mask):
+    ``padded`` unchanged.
+
+    padded    : (n_lat+1, n_cols, ...) wall-padded field (:func:`pad_ns_zero`).
+    north_row : (1, n_cols, ...) fold-partner row (:func:`fold_row`)."""
+    if fold_is_local(grid):
+        return jnp.concatenate([padded[:-1], north_row], axis=0)
+    if north_mask is None:
+        north_mask = north_fold_mask(grid)
+    if north_mask is not None:
+        return padded.at[-1].set(jnp.where(north_mask, north_row[0], padded[-1]))
+    return padded
+
+
 def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """Pad south/north for a v-component at v-face latitudes.
 
@@ -163,10 +200,11 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        n_lon = fold.perm_v.shape[0]
-        north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v,
+                         fold.perm_v.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 
