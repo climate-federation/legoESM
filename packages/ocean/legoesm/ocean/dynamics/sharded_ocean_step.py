@@ -449,24 +449,28 @@ def make_sharded_ocean_step(model, mesh):
             out_specs=in_spec,
             check_vma=False,
         )
-        # Arm the SPMD halo backend ONLY around the shard_map trace+call, then
-        # RESTORE the previous backend (codex finding): leaving it globally armed
-        # makes a later serial/full-domain ocean call take SPMD-only branches
-        # (axis_index / ppermute / psum in pad_with_pole_bc_lat, conservation,
-        # eta_floor) OUTSIDE a shard_map -> crash. The first call traces with the
-        # backend armed (baking the SPMD halo/reduction ops into the cached
-        # executable); subsequent calls reuse that cache, so the per-call
-        # arm/restore is correct and keeps the serial path untouched.
+        # Arm the SPMD halo backend ONLY around the shard_map call, then RESTORE
+        # the previous backend (codex finding): leaving it globally armed makes a
+        # later serial/full-domain ocean call take SPMD-only branches (axis_index /
+        # ppermute / psum in pad_with_pole_bc_lat, conservation, eta_floor) OUTSIDE
+        # a shard_map -> crash. ``shard_map`` is rebuilt per call, so each call
+        # re-traces WITH the backend armed (baking the SPMD halo/reduction ops) ->
+        # the per-call arm/restore is correct and keeps the serial path untouched.
+        # Save+restore the FULL backend state (backend + MPI topology + SPMD mesh)
+        # so a prior "mpi"/"spmd" backend is restored intact: activate_* clears the
+        # MPI topology, and set_halo_backend("mpi") REQUIRES a topology (codex).
         from legoesm.grids.halo import (
-            get_halo_backend, get_spmd_mesh, set_halo_backend, set_spmd_mesh,
+            get_halo_backend, get_mpi_topology, get_spmd_mesh,
+            set_halo_backend, set_spmd_mesh,
         )
         _prev_backend = get_halo_backend()
+        _prev_topo = get_mpi_topology()
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
             return fn(state, geom_stacks, vmask_stack)
         finally:
             set_spmd_mesh(_prev_mesh)
-            set_halo_backend(_prev_backend)
+            set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_step
