@@ -40,18 +40,18 @@ class TestBaseAssembly:
         assert mc.eos_linear.alpha_T == cfg.alpha_T
         assert mc.eos_linear.beta_S == 0.0
 
-    def test_base_leaves_other_fields_at_model_default(self):
-        """The factory must NOT silently turn on dissipation a driver didn't ask
-        for — every field it doesn't set stays at the LatLonCGridOceanConfig
-        default (bit-identical to the old minimal inline construction)."""
+    def test_base_leaves_dissipation_off(self):
+        """Anti-vacuity guard: the factory must NOT silently turn on dissipation
+        a driver didn't ask for — these stay at the LatLonCGridOceanConfig
+        default (the structural SCHEME fields are pinned separately; see
+        test_recipe_snapshots)."""
         mc = global_overturning_model_config(GlobalOverturningConfig())
         default = LatLonCGridOceanConfig()
         for field in ("B_h", "C_smag", "C_smag_lap", "slope_foot_alpha",
                       "A_h_lat_scaling", "A_h_floor", "A_h_eq_boost",
                       "A_h_eq_sigma_deg", "A_h_merid", "n_barotropic_substeps",
                       "bottom_drag_bbl_thickness", "bottom_drag_bg_velocity",
-                      "maxvel_barotropic", "barotropic_solver", "pgf_scheme",
-                      "momentum_advection"):
+                      "maxvel_barotropic"):
             assert getattr(mc, field) == getattr(default, field), field
 
     def test_none_config_uses_defaults(self):

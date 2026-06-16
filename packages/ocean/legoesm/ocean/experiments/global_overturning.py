@@ -357,6 +357,22 @@ def global_overturning_model_config(
         eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
+        # Structural scheme identity pinned EXPLICITLY — even where it currently
+        # equals the LatLonCGridOceanConfig default — so a change to a model
+        # default cannot silently alter the global-overturning recipe across the
+        # ~17 drivers + matrix that consume it (#488). Drivers still override any
+        # of these via **overrides (e.g. realistic runs set barotropic_solver=
+        # "implicit_cn", pgf_scheme="smc03"). Pin to CURRENT defaults => bit-
+        # identical today; locks the recipe against future default drift.
+        momentum_advection="vector_invariant",
+        tracer_advection="tvd",
+        pgf_scheme="adcroft",
+        ke_gradient_scheme="centered",
+        barotropic_solver="explicit_substep",
+        coriolis_scheme="matsuno_split",
+        outer_integrator="forward_euler",
+        tracer_time_integrator="euler",
+        implicit_vertical_mixing=True,
     )
     params.update(overrides)
     return LatLonCGridOceanConfig(**params)
@@ -407,6 +423,14 @@ def global_overturning_mpas_model_config(
         eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
+        # Structural scheme identity pinned EXPLICITLY (see the lat-lon factory)
+        # so a model-default change can't silently alter the MPAS GO recipe.
+        # Pinned to CURRENT MPASOceanConfig defaults => bit-identical today.
+        tracer_advection="upwind",
+        pgf_scheme="centered",
+        barotropic_solver="explicit_substep",
+        pv_scheme="enstrophy",
+        implicit_vertical_mixing=True,
     )
     params.update(overrides)
     return MPASOceanConfig(**params)
