@@ -33,11 +33,15 @@ from pathlib import Path
 from legoesm import constants
 
 FIELDS = [
-    "backend", "grid", "case", "precision", "mode", "n_devices",
+    "component", "backend", "grid", "case", "precision", "mode", "n_devices",
     "resolution", "resolution_km", "n_levels", "sypd", "time_per_step_ms",
     "total_cells", "mcells_per_s", "scaling_efficiency", "dt_seconds",
     "physics_level", "compile_time_s", "source",
 ]
+
+# Default result roots: atmosphere baroclinic-wave campaign + ocean campaign.
+DEFAULT_ROOTS = ("results/bcw_scaling", "results/scaling_cpu_ocean",
+                 "results/scaling_ocean")
 
 _CASE = {"none": "dry", "moist": "moist"}
 
@@ -94,6 +98,7 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     phys = d.get("physics_level", "none")
     res = d.get("resolution")
     return {
+        "component": "atm",
         "backend": resolve_backend(d, source),
         "grid": grid,
         "case": _CASE.get(phys, phys),
@@ -115,30 +120,73 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     }
 
 
+def _rows_from_nested(d: dict, source: Path) -> list[dict]:
+    """Ocean-campaign schema: ``{backend, results:[TimingResult,...]}``.
+
+    Flattens each inner result into a component='ocean' tidy row so the
+    atmosphere (flat per-case JSON) and ocean (nested) campaigns land in one
+    unified table.
+    """
+    backend = str(d.get("backend", "")).upper() or backend_from_path(source)
+    if backend not in ("CPU", "GPU", "TPU"):
+        backend = backend_from_path(source)
+    out = []
+    for r in d.get("results") or []:
+        if not isinstance(r, dict) or r.get("sypd") is None:
+            continue
+        n_dev = r.get("n_ranks", r.get("n_gpus"))
+        if n_dev is None:
+            continue
+        grid = r.get("grid_type", "latlon")
+        res = r.get("resolution")
+        out.append({
+            "component": "ocean",
+            "backend": backend,
+            "grid": grid,
+            "case": "ocean",
+            "precision": r.get("precision", ""),
+            "mode": str(r.get("mode", "strong")).replace("ocean_", "") or "strong",
+            "n_devices": int(n_dev),
+            "resolution": res,
+            "resolution_km": round(resolution_km(grid, res), 3) if res is not None else "",
+            "n_levels": r.get("n_levels", ""),
+            "sypd": r.get("sypd"),
+            "time_per_step_ms": r.get("time_per_step_ms"),
+            "total_cells": r.get("total_cells"),
+            "mcells_per_s": r.get("mcells_per_s"),
+            "scaling_efficiency": r.get("scaling_efficiency"),
+            "dt_seconds": r.get("dt_seconds"),
+            "physics_level": r.get("physics_level", ""),
+            "compile_time_s": r.get("compile_time_s"),
+            "source": str(source),
+        })
+    return out
+
+
 def _key(row: dict) -> tuple:
-    # Include n_levels so otherwise-identical L26 vs L40 runs at the same
-    # grid/resolution/device do NOT collapse to one row (codex review).
-    return (row["backend"], row["grid"], row["case"], row["precision"],
-            row["mode"], row["n_devices"], row["resolution"], row["n_levels"])
+    # Include component + n_levels so otherwise-identical rows (e.g. atm vs
+    # ocean latlon, or L26 vs L40) do NOT collapse to one row (codex review).
+    return (row["component"], row["backend"], row["grid"], row["case"],
+            row["precision"], row["mode"], row["n_devices"], row["resolution"],
+            row["n_levels"])
 
 
-def collect(root: Path) -> tuple[list[dict], int]:
-    """Return (deduped rows, n_dropped_duplicates)."""
+def collect(roots) -> tuple[list[dict], int]:
+    """Return (deduped rows, n_dropped_duplicates) across one or more roots.
+
+    ``roots`` may be a single path or an iterable of paths.  Flat per-case
+    JSONs (atmosphere) and nested ``{results:[...]}`` JSONs (ocean) are both
+    ingested.
+    """
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
     best: dict[tuple, dict] = {}
     dropped = 0
-    for jf in sorted(Path(root).rglob("*.json")):
-        # Skip validation/smoke output dirs (val_cpu_/val_gpu_/val_moist_) so
-        # their small fixed-resolution probe points do not contaminate the
-        # production scaling curves.
-        if "/val_" in str(jf):
-            continue
-        try:
-            d = json.loads(jf.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        row = _row_from_json(d, jf)
-        if row is None or row["sypd"] is None:
-            continue
+
+    def _add(row):
+        nonlocal dropped
+        if row is None or row.get("sypd") is None:
+            return
         k = _key(row)
         if k in best:
             dropped += 1
@@ -146,6 +194,25 @@ def collect(root: Path) -> tuple[list[dict], int]:
                 best[k] = row
         else:
             best[k] = row
+
+    for root in roots:
+        rp = Path(root)
+        if not rp.exists():
+            continue
+        for jf in sorted(rp.rglob("*.json")):
+            # Skip validation/smoke output dirs so their small fixed-resolution
+            # probe points do not contaminate the production scaling curves.
+            if "/val_" in str(jf) or "/_ab_" in str(jf):
+                continue
+            try:
+                d = json.loads(jf.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(d, dict) and isinstance(d.get("results"), list):
+                for row in _rows_from_nested(d, jf):
+                    _add(row)
+            else:
+                _add(_row_from_json(d, jf))
     rows = sorted(
         best.values(),
         key=lambda r: (r["backend"], r["grid"], r["case"], r["precision"],
@@ -164,24 +231,26 @@ def write_csv(rows: list[dict], out: Path) -> None:
 
 def summarize(rows: list[dict]) -> str:
     from collections import Counter
-    c = Counter((r["backend"], r["grid"], r["case"], r["precision"]) for r in rows)
-    lines = [f"{n:3d}  {b:3s} {g:12s} {case:5s} {prec}"
-             for (b, g, case, prec), n in sorted(c.items())]
+    c = Counter((r["component"], r["backend"], r["grid"], r["case"], r["precision"])
+                for r in rows)
+    lines = [f"{n:3d}  {comp:5s} {b:3s} {g:12s} {case:9s} {prec}"
+             for (comp, b, g, case, prec), n in sorted(c.items())]
     return "\n".join(lines)
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--root", default="results/bcw_scaling")
+    p.add_argument("--root", nargs="+", default=list(DEFAULT_ROOTS),
+                   help="One or more result roots (atm flat + ocean nested).")
     p.add_argument("--out", default="results/bcw_scaling/bcw_scaling_tidy.csv")
     args = p.parse_args()
 
-    rows, dropped = collect(Path(args.root))
+    rows, dropped = collect(args.root)
     write_csv(rows, Path(args.out))
     print(f"Collected {len(rows)} unique rows ({dropped} duplicate(s) dropped) "
           f"from {args.root}")
     print(f"Wrote {args.out}")
-    print("count  backend grid         case  precision")
+    print("count  comp  bk  grid         case      precision")
     print(summarize(rows))
     return 0
 

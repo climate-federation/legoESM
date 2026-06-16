@@ -81,6 +81,40 @@ def test_backend_from_json_overrides_path(tmp_path):
     assert len(rows) == 1 and rows[0]["backend"] == "GPU"
 
 
+def test_ingests_nested_ocean_schema(tmp_path):
+    d = tmp_path / "scaling_cpu_ocean"
+    d.mkdir()
+    payload = {
+        "backend": "CPU", "mode": "ocean_strong",
+        "results": [{
+            "n_ranks": 16, "resolution": 192, "precision": "float64",
+            "mode": "ocean_strong", "sypd": 24.3, "mcells_per_s": 21.8,
+            "total_cells": 1474560, "time_per_step_ms": 67.4,
+        }],
+    }
+    (d / "ocean_strong_r192_np16_float64.json").write_text(json.dumps(payload))
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["component"] == "ocean" and r["case"] == "ocean"
+    assert r["backend"] == "CPU" and r["n_devices"] == 16 and r["mode"] == "strong"
+
+
+def test_multi_root_collect(tmp_path):
+    a = tmp_path / "bcw_scaling" / "dry_icosahedral_cpu_np16_1"
+    o = tmp_path / "scaling_cpu_ocean"
+    a.mkdir(parents=True)
+    o.mkdir(parents=True)
+    _write(a, "x.json", _case("icosahedral", "none", "strong", 5, 16, "float64", 29.4))
+    (o / "y.json").write_text(json.dumps({
+        "backend": "CPU", "results": [{
+            "n_ranks": 8, "resolution": 192, "precision": "float64",
+            "mode": "ocean_strong", "sypd": 30.0}]}))
+    rows, _ = agg.collect([a.parent, o])
+    comps = {r["component"] for r in rows}
+    assert comps == {"atm", "ocean"}
+
+
 def test_skips_validation_dirs(tmp_path):
     prod = tmp_path / "dry_icosahedral_cpu_np16_1"
     val = tmp_path / "val_moist_999"
