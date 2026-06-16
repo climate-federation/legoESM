@@ -5201,6 +5201,7 @@ def _run_experiment_via_registry(
     # dino_*_model_config directly, bypassing this registry helper). Only the
     # latlon/mpas grids are wired; other grids fall back to the scrape.
     factory_key = {"latlon": "create_model_config",
+                   "latlon_channel": "create_model_config",
                    "mpas": "create_mpas_model_config"}.get(tc.grid_type)
     factory = exp_config.get(factory_key) if factory_key else None
     if factory is not None:

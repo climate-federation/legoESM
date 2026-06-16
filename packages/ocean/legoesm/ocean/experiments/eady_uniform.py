@@ -509,6 +509,68 @@ class EadyUniformRecipe(NamedTuple):
     initial_state: "object"         # LatLonCGridOceanState
 
 
+def eady_uniform_model_config(
+    config: "EadyUniformConfig" = None,
+    *,
+    physics=None,
+    eos_config=None,
+    gm_redi_cfg=None,
+    c_smag: float = None,
+    c_leith: float = 0.0,
+    c_smag_lap: float = 0.0,
+    b_h: float = 0.0,
+    smag_cfl_safety: float = 0.0,
+    a_h: float = 0.0,
+    momentum_advection: str = "weno5",
+    ke_gradient_scheme: str = "centered",
+    tracer_advection: str = "weno5",
+    barotropic_solver: str = "implicit_cn",
+):
+    """Build the Eady-uniform ``LatLonCGridOceanConfig`` (corrected eddy-resolving
+    dycore stack).
+
+    Shared by ``build_eady_uniform_setup`` (driver path) and the test matrix
+    (``EXPERIMENT_CONFIG["create_model_config"]``) so both exercise the SAME
+    recipe. The matrix's ``latlon_channel`` field-scrape otherwise drops
+    ``pgf_scheme``/``ke_gradient_scheme``/``C_leith``/``smag_cfl_safety`` and the
+    rk3/ab2 integrators, silently testing a different (worse) dycore. The
+    track/dissipation knobs default to the WENO5 minimum-dissipation recipe; pass
+    them to select the NEMO-like track or a resolution-sweep dissipation. See
+    ``build_eady_uniform_setup`` for the per-block rationale.
+
+    ``eos_config`` defaults to the analytic Eady linear EOS built from ``config``;
+    GM/Redi is off (eddies resolved) unless a caller injects one.
+    """
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    if config is None:
+        config = EadyUniformConfig()
+    if eos_config is None:
+        eos_config = LinearEOSConfig(
+            alpha_T=config.alpha_T, rho_ref=config.rho_0,
+            T_ref=config.T_ref_C, S_ref=config.S_uniform)
+
+    return LatLonCGridOceanConfig(
+        physics=physics,
+        barotropic_solver=barotropic_solver,
+        tracer_advection=tracer_advection,
+        momentum_advection=momentum_advection,
+        ke_gradient_scheme=ke_gradient_scheme,
+        tracer_time_integrator="rk3",
+        outer_integrator="ab2",
+        pgf_scheme="smc03",
+        A_h=a_h, B_h=b_h,
+        C_smag=(config.C_smag if c_smag is None else c_smag),
+        C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,
+        A_v=config.A_v, K_v=config.K_v,
+        bottom_drag_r=config.bottom_drag_coeff,
+        eos="linear",
+        eos_linear=eos_config,
+        gm_redi=gm_redi_cfg,
+    )
+
+
 def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
                              config: "EadyUniformConfig" = None, nlev: int = 20,
                              c_smag: float = None, c_leith: float = 0.0,
@@ -552,8 +614,6 @@ def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
     """
     from legoesm.grids.latlon import create_regional_latlon_grid
     from legoesm.ocean.vertical import create_ocean_z_star
-    from legoesm.ocean.state import LatLonCGridOceanConfig
-    from legoesm.ocean.eos import LinearEOSConfig
 
     if config is None:
         config = EadyUniformConfig()
@@ -564,48 +624,29 @@ def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max)
     physics = create_forcings("latlon_channel", grid, config)   # vertical mix none → KPP OFF
 
-    model_config = LatLonCGridOceanConfig(
-        physics=physics,
-        # --- corrected eddy-resolving numerics (track-selectable) ---
-        # WENO5 track: momentum_advection="weno5" (flux-form, no KE gradient).
-        # NEMO-like track: momentum_advection="vector_invariant" +
-        #   ke_gradient_scheme="hollingsworth" (NEMO nn_dynkeg=1).
+    # Shared recipe factory (also the matrix's create_model_config). WENO5 track:
+    # momentum_advection="weno5" (flux-form, no KE gradient). NEMO-like track:
+    # momentum_advection="vector_invariant" + ke_gradient_scheme="hollingsworth"
+    # (NEMO nn_dynkeg=1).
+    model_config = eady_uniform_model_config(
+        config, physics=physics,
         barotropic_solver=barotropic_solver,
         tracer_advection=tracer_advection,
         momentum_advection=momentum_advection,
         ke_gradient_scheme=ke_gradient_scheme,
-        tracer_time_integrator="rk3",
-        outer_integrator="ab2",
-        pgf_scheme="smc03",
         # --- scale-aware dissipation (tunable for eddy-resolving) ---
         # C_smag = biharmonic Smagorinsky (scale-selective); C_leith = Leith
         # (enstrophy-cascade-aware); both grid-aware so they scale across a
         # resolution sweep. c_smag_lap/b_h available for extra grid-scale control.
-        #
         # VALIDATED EDDY-RESOLVING MINIMUM-DISSIPATION RECIPE (≥120×120, weak U=0.2,
         # dt=600; ralph-loop search, docs/planning/eady_eddy_resolving_ralph.md):
-        # use the COMBINATION  a_h≈1000 + c_smag≈0.1 + smag_cfl_safety=0.5.
-        #   - Pure Laplacian (A_h alone) OVER-DAMPS the eddies (stable but EKE ~150×
-        #     too weak) and blows up below A_h≈1000 → no low-dissipation regime.
-        #   - Pure biharmonic Smagorinsky (C_smag alone) BLOWS UP at 120 (the
-        #     ~4–5Δx grid-scale mode is too close to the eddy scale for it to
-        #     stabilize under CFL).
-        #   - The combination is STABLE, spectrally CLEAN (top-quartile-wavenumber
-        #     energy fraction ~1e-4) AND keeps strong eddies (EKE ~4.5e-3 at 150 d,
-        #     comparable to the 60×60 reference). Minimum stable ≈ a_h≈800; use
-        #     a_h=1000 for robustness. Strong forcing (U=0.8) needs heavier
-        #     dissipation that over-damps → weak is the better eddy-resolving regime.
-        A_h=a_h, B_h=b_h,
-        C_smag=(config.C_smag if c_smag is None else c_smag),
-        C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,
-        A_v=config.A_v, K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        # --- analytic Eady EOS; mesoscale parameterization OFF ---
-        eos="linear",
-        eos_linear=LinearEOSConfig(
-            alpha_T=config.alpha_T, rho_ref=config.rho_0,
-            T_ref=config.T_ref_C, S_ref=config.S_uniform),
-        gm_redi=None,
+        # the COMBINATION a_h≈1000 + c_smag≈0.1 + smag_cfl_safety=0.5 is stable,
+        # spectrally clean, and keeps strong eddies (pure A_h over-damps; pure
+        # biharmonic Smagorinsky blows up at 120 — the ~4–5Δx mode is too close to
+        # the eddy scale). (pgf_scheme="smc03", rk3/ab2, linear EOS, GM/Redi off all
+        # fixed inside eady_uniform_model_config.)
+        c_smag=c_smag, c_leith=c_leith, c_smag_lap=c_smag_lap,
+        b_h=b_h, smag_cfl_safety=smag_cfl_safety, a_h=a_h,
     )
     initial_state = create_initial_conditions("latlon_channel", grid, z_coord, config)
     return EadyUniformRecipe(
@@ -666,6 +707,7 @@ EXPERIMENT_CONFIG = {
     "config_class": EadyUniformConfig,
     "create_initial_conditions": create_initial_conditions,
     "create_forcings": create_forcings,
+    "create_model_config": eady_uniform_model_config,
     "create_domain": lambda config=None: {
         "H_max": (config or EadyUniformConfig()).H_max,
         "description": "Classical Eady: uniform N², linear shear, linear EOS",

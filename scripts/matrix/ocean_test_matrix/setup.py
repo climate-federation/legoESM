@@ -140,14 +140,16 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         matrix test the SAME recipe its production driver runs — the field-by-
         field scrape above silently drops K_v / bottom_drag / eos / gm_redi on
         the lat-lon path, so the factory path is strictly more faithful. Only
-        the ``latlon`` and ``mpas`` branches honour it (raises otherwise).
+        the ``latlon``/``mpas``/``latlon_channel`` branches honour it (raises
+        otherwise).
 
     Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
-    if model_config is not None and tc.grid_type not in ("latlon", "mpas"):
+    _MODEL_CONFIG_GRIDS = ("latlon", "mpas", "latlon_channel")
+    if model_config is not None and tc.grid_type not in _MODEL_CONFIG_GRIDS:
         raise NotImplementedError(
             "model_config injection is only wired for grid_type in "
-            f"{{'latlon', 'mpas'}}, got {tc.grid_type!r}")
+            f"{set(_MODEL_CONFIG_GRIDS)}, got {tc.grid_type!r}")
     if nlev is None:
         nlev = config.DEFAULT_NLEV
     if H_max is None:
@@ -403,7 +405,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["weno_d_term"] = weno_d_term
         if barotropic_solver is not None:
             kw["barotropic_solver"] = barotropic_solver
-        cfg = LatLonCGridOceanConfig(**kw)
+        cfg = model_config if model_config is not None \
+            else LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
