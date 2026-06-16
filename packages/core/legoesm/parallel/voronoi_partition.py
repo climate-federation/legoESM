@@ -527,8 +527,28 @@ def partition_voronoi_mesh(
     # For each neighbor rank R, precompute which cells are in R's local
     # domain (owned + halo).  This lets us determine which of our owned
     # edges/vertices R needs as halo.
+    # Candidate ranks for the SEND schedule must be a SUPERSET of the cell-recv
+    # neighbours.  A rank can share only an EDGE or VERTEX boundary with me — it
+    # holds an edge/vertex I own in its halo — without its cell-halo reaching my
+    # cells, so it is absent from `neighbor_ranks` (= cell-recv owners) and the
+    # cell-neighbour-only `cell_to_nbr` would never mark it as needing that edge:
+    # I would not send, its blocking sendrecv to me would hang.  This is the
+    # np>=64 multi-node deadlock (asymmetric edge schedule; cells were fine).
+    # An edge/vertex spans exactly one cell-ring beyond the cell halo, so owners
+    # of cells within (halo_depth + 1) rings of my owned cells are a provably
+    # sufficient superset (an edge I own has one cell of mine and one neighbour
+    # cell; any rank needing it is within halo_depth of that neighbour cell,
+    # i.e. within halo_depth + 1 of my cell).
+    send_candidate_cells = compute_halo_cells(
+        cell_owner, cellsOnCell, mesh.maxEdges, rank, halo_depth + 1,
+    )
+    cell_to_nbr_ranks = sorted(
+        (set(neighbor_ranks)
+         | {int(cell_owner[c]) for c in send_candidate_cells})
+        - {rank}
+    )
     cell_to_nbr: dict[int, set[int]] = {}
-    for R in neighbor_ranks:
+    for R in cell_to_nbr_ranks:
         R_owned = set(np.where(cell_owner == R)[0].tolist())
         R_halo = compute_halo_cells(
             cell_owner, cellsOnCell, mesh.maxEdges, R, halo_depth,
@@ -542,7 +562,7 @@ def partition_voronoi_mesh(
         c_int = int(c)
         for r in cell_to_nbr.get(c_int, ()):
             if r != rank:
-                cell_send[r].append(c_int)
+                cell_send.setdefault(r, []).append(c_int)
     cell_send = {r: sorted(set(v)) for r, v in cell_send.items()}
 
     # --- Edge send ---
