@@ -664,10 +664,15 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
     mesh = create_voronoi_mesh(subdivision_level=resolution)
+    # Mass fixer adds one global allreduce per step (267.8 us latency floor on
+    # Ginsburg/Gloo). LEGOESM_NO_MASS_FIX=1 disables it for a scaling ABLATION
+    # that isolates the dynamics+halo cost from the conservation allreduce
+    # (codex MPI-improve #3). Production keeps it ON (conservation).
+    _fix_mass = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     config = MPASPrimitiveEquationConfig(
         nu_del4=0.0,
         nu_del4_ps=0.0,
-        fix_mass=True,
+        fix_mass=_fix_mass,
         time_integrator="ssp_rk3",
     )
     model = MPASPrimitiveEquationModel(mesh, sigma, config)
