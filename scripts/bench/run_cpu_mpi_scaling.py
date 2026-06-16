@@ -77,14 +77,20 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Pin each MPI rank to a single CPU thread
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
-        xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
-    os.environ["XLA_FLAGS"] = xla_flags
+    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
+    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
+    # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
+    # its allocated cores -- fewer ranks means fewer halo messages, the codex
+    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(_v, str(n_thr))
+    if n_thr <= 1:
+        xla_flags = os.environ.get("XLA_FLAGS", "")
+        if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
+            xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
+        os.environ["XLA_FLAGS"] = xla_flags
 
 
 def _configure_jax_gpu(precision: str) -> None:
