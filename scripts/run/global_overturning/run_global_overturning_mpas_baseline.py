@@ -64,10 +64,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
-    create_eos_config,
+    create_eos_config, global_overturning_mpas_model_config,
 )
 
 
@@ -164,17 +163,11 @@ def main():
     # the lat-lon reference (config.A_h = 2e5) is visible in the log.
     a_h_used = max(config.A_h, MPAS_A_H_FLOOR)
 
-    ocean_config = MPASOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
-        A_h=a_h_used,
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
+    ocean_config = global_overturning_mpas_model_config(
+        config, physics=physics, eos_config=eos_config,
+        A_h=a_h_used,                                   # lifted to MPAS A_h floor
         barotropic_u_viscosity=args.baro_u_viscosity,
         barotropic_solver=args.barotropic_solver,
-        eos="linear",
-        eos_linear=eos_config,
     )
 
     print(f"=== MPAS baseline: {total_years:g}-year fresh spinup (no GM/Redi) ===")

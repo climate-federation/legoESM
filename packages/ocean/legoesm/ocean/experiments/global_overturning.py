@@ -296,6 +296,122 @@ def create_eos_config(config: GlobalOverturningConfig = None):
     )
 
 
+def global_overturning_model_config(
+    config: GlobalOverturningConfig = None,
+    *,
+    physics=None,
+    eos_config=None,
+    gm_redi_cfg=None,
+    **overrides,
+):
+    """Assemble the global-overturning ``LatLonCGridOceanConfig`` (shared factory).
+
+    The ~dozen drivers in ``scripts/run/global_overturning/`` previously each
+    hand-copied this construction, so the "recipe" for global overturning was
+    smeared across many call sites that could silently drift apart.  This factory
+    captures the shared base — linear T-only EOS, Laplacian + background vertical
+    viscosity, linear bottom drag, and the optional Visbeck GM/Redi path — once.
+    Drivers select it and pass only their genuine per-run variations (the
+    biharmonic ``B_h``/``C_smag`` OMIP stack, ``barotropic_solver="implicit_cn"``,
+    ``A_h`` lat-scaling / equatorial boost, partial-cell
+    ``bottom_drag_bbl_thickness``, ...) as keyword ``overrides``.  Mirrors
+    ``dino.dino_lat_lon_model_config``.
+
+    Parameters
+    ----------
+    config : GlobalOverturningConfig
+        Source of the base coefficients (``A_h``, ``A_v``, ``K_v``,
+        ``bottom_drag_coeff``) and the EOS / GM-Redi settings.
+    physics : OceanPhysicsConfig or None
+        Wired onto ``LatLonCGridOceanConfig.physics`` verbatim.
+    eos_config : LinearEOSConfig or None
+        Linear EOS; defaults to ``create_eos_config(config)``.
+    gm_redi_cfg : GMRediConfig or None
+        GM/Redi; defaults to ``create_gm_redi_config(config)`` (None unless
+        ``config.use_gm_redi``).  Pass ``gm_redi=...`` in ``overrides`` to force
+        a specific value regardless of ``config``.
+    **overrides
+        Any ``LatLonCGridOceanConfig`` field; applied last so it wins over the
+        base (e.g. ``barotropic_solver``, ``B_h``, ``C_smag``,
+        ``A_h_lat_scaling``, ``n_barotropic_substeps``, ``pgf_scheme``).
+
+    Returns
+    -------
+    LatLonCGridOceanConfig
+    """
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    if config is None:
+        config = GlobalOverturningConfig()
+    if eos_config is None:
+        eos_config = create_eos_config(config)
+    if gm_redi_cfg is None:
+        gm_redi_cfg = create_gm_redi_config(config)
+
+    params = dict(
+        physics=physics,
+        A_h=config.A_h,
+        A_v=config.A_v,
+        K_v=config.K_v,
+        bottom_drag_r=config.bottom_drag_coeff,
+        eos="linear",
+        eos_linear=eos_config,
+        gm_redi=gm_redi_cfg,
+    )
+    params.update(overrides)
+    return LatLonCGridOceanConfig(**params)
+
+
+def global_overturning_mpas_model_config(
+    config: GlobalOverturningConfig = None,
+    *,
+    physics=None,
+    eos_config=None,
+    gm_redi_cfg=None,
+    **overrides,
+):
+    """MPAS (Voronoi C-grid) counterpart of ``global_overturning_model_config``.
+
+    Same shared base — linear T-only EOS, Laplacian + background vertical
+    viscosity, linear bottom drag, optional GM/Redi — assembled onto an
+    ``MPASOceanConfig`` instead of ``LatLonCGridOceanConfig``.  The MPAS
+    overturning drivers (``run_global_overturning_mpas_{baseline,50yr_implicit}``)
+    previously hand-copied this construction just like their lat-lon siblings;
+    this factory dedups it.  Mirrors DINO's
+    ``dino_lat_lon_model_config`` / ``dino_mpas_model_config`` pair.
+
+    Drivers pass their per-run variations as keyword ``overrides`` — e.g. the
+    MPAS-floored Laplacian viscosity ``A_h=max(config.A_h, MPAS_A_H_FLOOR)``,
+    ``barotropic_solver``, ``barotropic_u_viscosity``.  See
+    ``global_overturning_model_config`` for parameter semantics.
+
+    Returns
+    -------
+    MPASOceanConfig
+    """
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+
+    if config is None:
+        config = GlobalOverturningConfig()
+    if eos_config is None:
+        eos_config = create_eos_config(config)
+    if gm_redi_cfg is None:
+        gm_redi_cfg = create_gm_redi_config(config)
+
+    params = dict(
+        physics=physics,
+        A_h=config.A_h,
+        A_v=config.A_v,
+        K_v=config.K_v,
+        bottom_drag_r=config.bottom_drag_coeff,
+        eos="linear",
+        eos_linear=eos_config,
+        gm_redi=gm_redi_cfg,
+    )
+    params.update(overrides)
+    return MPASOceanConfig(**params)
+
+
 def create_domain_config(config: GlobalOverturningConfig = None) -> Dict[str, Any]:
     if config is None:
         config = GlobalOverturningConfig()
@@ -380,6 +496,8 @@ EXPERIMENT_CONFIG = {
     "create_initial_conditions": create_initial_conditions,
     "create_forcings": create_forcings,
     "create_gm_redi_config": create_gm_redi_config,
+    "create_model_config": global_overturning_model_config,
+    "create_mpas_model_config": global_overturning_mpas_model_config,
     "create_domain": create_domain_config,
     "validate": validate_results,
     "get_field_specs": get_diagnostic_field_specs,
