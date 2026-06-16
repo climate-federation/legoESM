@@ -140,3 +140,41 @@ def get_recipe(name: str, kind: str = "latlon") -> dict:
         raise ValueError(
             f"unknown {kind} recipe {name!r}; choose from {sorted(table)}")
     return dict(table[name])
+
+
+def assert_recipe_setup_compatible(config) -> None:
+    """Fail loudly when an assembled recipe x setup is internally inconsistent.
+
+    This is the first rung of the verified-registry layer (#388/#490): a recipe
+    selects schemes, a setup supplies the matching scheme-level configs, and a
+    mismatched pairing must NOT silently run the wrong physics.
+
+    Currently enforces EOS consistency — the only scheme-level config the
+    ``*OceanConfig`` objects carry today (``eos`` + ``eos_linear``):
+
+    * ``eos="linear"`` requires an ``eos_linear`` config — otherwise the model
+      falls back to the DEFAULT ``LinearEOSConfig`` coefficients (wrong for any
+      setup with non-default ``alpha_T`` etc.).
+    * a non-linear ``eos`` (``"wright"`` / ``"veros_nonlin2"`` / ...) must NOT be
+      paired with an ``eos_linear`` config: the non-linear EOS ignores it, so its
+      presence means a non-linear *recipe* was paired with a linear-EOS *setup* —
+      almost always a mistake (e.g. ``global_overturning`` setup x
+      ``veros_faithful_v1`` recipe).
+
+    Extend with further rules (GM/Redi, grid-feature support, ...) as recipes
+    carry more scheme-level configs. Raises ``ValueError`` on a mismatch.
+    """
+    eos = getattr(config, "eos", None)
+    eos_linear = getattr(config, "eos_linear", None)
+    if eos == "linear" and eos_linear is None:
+        raise ValueError(
+            "recipe x setup mismatch: eos='linear' but no eos_linear config was "
+            "supplied — the model would run with DEFAULT LinearEOSConfig "
+            "coefficients. Supply the setup's eos_linear (e.g. via eos_config=).")
+    if eos is not None and eos != "linear" and eos_linear is not None:
+        raise ValueError(
+            f"recipe x setup mismatch: eos={eos!r} (a non-linear EOS) was paired "
+            "with a linear eos_linear config, which it IGNORES. This usually means "
+            "a non-linear recipe was run on a linear-EOS setup (e.g. "
+            "global_overturning x veros_faithful_v1). Use a linear-EOS recipe for "
+            f"this setup, or supply a setup whose EOS matches eos={eos!r}.")

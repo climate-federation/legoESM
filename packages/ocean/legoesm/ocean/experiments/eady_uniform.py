@@ -515,16 +515,17 @@ def eady_uniform_model_config(
     physics=None,
     eos_config=None,
     gm_redi_cfg=None,
+    recipe: str = "eady_weno5_v1",
     c_smag: float = None,
     c_leith: float = 0.0,
     c_smag_lap: float = 0.0,
     b_h: float = 0.0,
     smag_cfl_safety: float = 0.0,
     a_h: float = 0.0,
-    momentum_advection: str = "weno5",
-    ke_gradient_scheme: str = "centered",
-    tracer_advection: str = "weno5",
-    barotropic_solver: str = "implicit_cn",
+    momentum_advection: str = None,
+    ke_gradient_scheme: str = None,
+    tracer_advection: str = None,
+    barotropic_solver: str = None,
 ):
     """Build the Eady-uniform ``LatLonCGridOceanConfig`` (corrected eddy-resolving
     dycore stack).
@@ -534,14 +535,20 @@ def eady_uniform_model_config(
     recipe. The matrix's ``latlon_channel`` field-scrape otherwise drops
     ``pgf_scheme``/``ke_gradient_scheme``/``C_leith``/``smag_cfl_safety`` and the
     rk3/ab2 integrators, silently testing a different (worse) dycore. The
-    track/dissipation knobs default to the WENO5 minimum-dissipation recipe; pass
-    them to select the NEMO-like track or a resolution-sweep dissipation. See
-    ``build_eady_uniform_setup`` for the per-block rationale.
-
-    ``eos_config`` defaults to the analytic Eady linear EOS built from ``config``;
-    GM/Redi is off (eddies resolved) unless a caller injects one.
+    The SCHEME identity comes from the named ``recipe`` (default
+    ``"eady_weno5_v1"`` in the catalog ``legoesm.ocean.recipes``); the
+    track-selection knobs (``momentum_advection``/``ke_gradient_scheme``/
+    ``tracer_advection``/``barotropic_solver``), when not ``None``, OVERRIDE the
+    recipe (e.g. select the NEMO-like track). The dissipation/setup params are
+    layered on top. ``eos_config`` defaults to the analytic Eady linear EOS built
+    from ``config``; GM/Redi is off (eddies resolved) unless a caller injects one.
+    See ``build_eady_uniform_setup`` for the per-block rationale.
     """
     from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.recipes import (
+        assert_recipe_setup_compatible,
+        get_recipe,
+    )
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -551,24 +558,27 @@ def eady_uniform_model_config(
             alpha_T=config.alpha_T, rho_ref=config.rho_0,
             T_ref=config.T_ref_C, S_ref=config.S_uniform)
 
-    return LatLonCGridOceanConfig(
+    # Named recipe = the scheme identity; the track knobs override it when set.
+    params = get_recipe(recipe, "latlon")
+    for key, val in (("momentum_advection", momentum_advection),
+                     ("ke_gradient_scheme", ke_gradient_scheme),
+                     ("tracer_advection", tracer_advection),
+                     ("barotropic_solver", barotropic_solver)):
+        if val is not None:
+            params[key] = val
+    params.update(
         physics=physics,
-        barotropic_solver=barotropic_solver,
-        tracer_advection=tracer_advection,
-        momentum_advection=momentum_advection,
-        ke_gradient_scheme=ke_gradient_scheme,
-        tracer_time_integrator="rk3",
-        outer_integrator="ab2",
-        pgf_scheme="smc03",
         A_h=a_h, B_h=b_h,
         C_smag=(config.C_smag if c_smag is None else c_smag),
         C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,
         A_v=config.A_v, K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
     )
+    cfg = LatLonCGridOceanConfig(**params)
+    assert_recipe_setup_compatible(cfg)
+    return cfg
 
 
 def build_eady_uniform_setup(*, n_lat: int, n_lon: int,

@@ -348,7 +348,10 @@ def global_overturning_model_config(
     -------
     LatLonCGridOceanConfig
     """
-    from legoesm.ocean.recipes import get_recipe
+    from legoesm.ocean.recipes import (
+        assert_recipe_setup_compatible,
+        get_recipe,
+    )
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     if config is None:
@@ -373,7 +376,9 @@ def global_overturning_model_config(
         gm_redi=gm_redi_cfg,
     )
     params.update(overrides)
-    return LatLonCGridOceanConfig(**params)
+    cfg = LatLonCGridOceanConfig(**params)
+    assert_recipe_setup_compatible(cfg)   # verified-registry: catch recipe x setup EOS mismatch
+    return cfg
 
 
 def global_overturning_mpas_model_config(
@@ -405,7 +410,10 @@ def global_overturning_mpas_model_config(
     MPASOceanConfig
     """
     from legoesm.ocean.mpas_config import MPASOceanConfig
-    from legoesm.ocean.recipes import get_recipe
+    from legoesm.ocean.recipes import (
+        assert_recipe_setup_compatible,
+        get_recipe,
+    )
 
     if config is None:
         config = GlobalOverturningConfig()
@@ -428,7 +436,9 @@ def global_overturning_mpas_model_config(
         gm_redi=gm_redi_cfg,
     )
     params.update(overrides)
-    return MPASOceanConfig(**params)
+    cfg = MPASOceanConfig(**params)
+    assert_recipe_setup_compatible(cfg)   # verified-registry: catch recipe x setup EOS mismatch
+    return cfg
 
 
 def create_domain_config(config: GlobalOverturningConfig = None) -> Dict[str, Any]:
