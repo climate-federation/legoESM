@@ -211,45 +211,63 @@ class CoupledESMDriver:
                 f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
         from legoesm.core.precision import get_policy
         _sd = get_policy().storage
-        z_coord = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        z_star = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
 
         if cfg.ocean_ic == "woa":
-            # REALISTIC cold start: WOA18 reanalysis T/S stratification +
-            # WOA-derived continents.  The SAME ocean mask seeds the ocean
-            # land_mask AND the atmosphere f_land (_init_coupler, f_land_mode=
-            # 'from_ocean') on the shared grid, so the surface/ocean wet masks
-            # agree exactly (codex Phase-1 HIGH).  Flat bottom (H_max on wet
-            # cells) for this first realistic run — realistic bathymetry is a
-            # later increment.
+            # REALISTIC cold start: WOA18 reanalysis T/S + WOA-derived continents
+            # AND WOA-derived bathymetry on an OMIP-validated PARTIAL-CELL coord.
+            # The SAME ocean mask seeds the ocean land_mask AND the atmosphere
+            # f_land (_init_coupler, f_land_mode='from_ocean') on the shared grid,
+            # so the wet masks agree exactly (codex Phase-1 HIGH).
+            #
+            # A stable WOA cold start REQUIRES all of the following — each one is
+            # empirically necessary (the flat-bottom z-star coord blows up from
+            # the WOA IC alone; this geometry survives at max|u| ~ 1 m/s):
+            #   * REAL WOA bathymetry (not flat H_max) + make_partial_cell_latlon
+            #     bathy smoothing + thin-cell snap + min_levels masking;
+            #   * the PARTIAL-CELL coordinate, which ACTIVATES the smc03 density-
+            #     Jacobian PGF (a plain z-star coord silently falls back to the
+            #     centered-difference PGF whose truncation error on the sharp WOA
+            #     pycnocline seeds the geostrophic-adjustment blow-up);
+            #   * apply_balanced_init (geostrophic / level-of-no-motion balance);
+            #   * the CFL-capped Laplacian-Smagorinsky viscosity (set in ocfg).
             from legoesm.ocean.init_woa import (
-                woa_ocean_mask, init_ocean_from_woa,
+                woa_ocean_mask, woa_ocean_bathymetry, init_ocean_from_woa,
             )
-            from legoesm.ocean.init_latlon_cgrid import apply_balanced_init
+            from legoesm.ocean.init_latlon_cgrid import (
+                apply_balanced_init, make_partial_cell_latlon,
+            )
             if not cfg.woa_t_path or not cfg.woa_s_path:
                 raise ValueError(
                     "ocean_ic='woa' requires woa_t_path and woa_s_path "
                     f"(got woa_t_path={cfg.woa_t_path!r}, "
                     f"woa_s_path={cfg.woa_s_path!r}).")
-            ocean_mask = jnp.asarray(
-                woa_ocean_mask(self._ocean_grid, cfg.woa_t_path), dtype=_sd)
-            land_mask = ocean_mask                       # 1=ocean, 0=land
-            # Flat bottom: H_max on EVERY cell — matching idealized_bathymetry_
-            # latlon_cgrid, which also fills H=H_max everywhere and lets the
-            # land_mask (0 on land), NOT a zero depth, gate the dry cells.  A
-            # zero H on land divides-by-zero in the ocean dynamics (1/H) and
-            # poisons the continent cells with NaN (the all-ocean Phase-1 had
-            # H_max everywhere so never hit this).
-            H_bathy = jnp.full_like(ocean_mask, cfg.ocean_H_max_m)
-            base_state = rest_state_latlon_cgrid_ocean(
-                self._ocean_grid, z_coord,
-                land_mask_override=land_mask, H_bathy_override=H_bathy,
+            ocean_mask = woa_ocean_mask(self._ocean_grid, cfg.woa_t_path)
+            H_woa = woa_ocean_bathymetry(
+                self._ocean_grid, cfg.woa_t_path, H_max=cfg.ocean_H_max_m)
+            # Smooth + thin-cell snap + shallow-mask -> partial-cell coordinate
+            # (this is the coord the MODEL steps on, NOT the plain z-star).
+            model_z_coord, H_snap, land_np = make_partial_cell_latlon(
+                z_star, H_woa, ocean_mask,
             )
-            # Observed potential T [degC] / S [PSU] on model levels.  WOA fills
-            # land + below-WOA columns with the abyssal climatology; those land
-            # cells are inert (masked by land_mask / face masks in the dynamics).
+            land_mask = jnp.asarray(land_np, dtype=_sd)   # 1=ocean, 0=land
+            _wet = land_np > 0.5
+            # Bathymetry on the state: snapped depth on wet cells, H_max on land
+            # (land cells are inert — gated by land_mask, not depth).
+            H_state = np.where(_wet, H_snap, cfg.ocean_H_max_m)
+            base_state = rest_state_latlon_cgrid_ocean(
+                self._ocean_grid, z_star,
+                land_mask_override=land_mask,
+                H_bathy_override=jnp.asarray(H_state, dtype=_sd),
+            )
+            # Observed T [degC] / S [PSU] on model levels, masking cells below
+            # the local bathymetry so deep cells get the abyssal fill (not a
+            # surface-extended profile).  bathymetry_depth must be strictly
+            # positive everywhere (land uses H_max — inert).
             T_woa, S_woa = init_ocean_from_woa(
-                self._ocean_grid, z_coord,
+                self._ocean_grid, z_star,
                 T_path=cfg.woa_t_path, S_path=cfg.woa_s_path, interp="bilinear",
+                bathymetry_depth=H_state,
             )
             _expect = base_state.T.data.shape
             if tuple(T_woa.shape) != tuple(_expect):
@@ -260,27 +278,22 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
-            # Balanced cold start (MANDATORY for WOA): the rest-velocity state
-            # leaves WOA's baroclinic PGF UNBALANCED -> a violent geostrophic
-            # adjustment that goes nonlinear (the standalone ocean blows from
-            # the WOA IC alone: max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h).
-            # apply_balanced_init seeds u/v/eta in geostrophic / level-of-no-
-            # motion balance so there is no adjustment shock (OMIP-validated
-            # cold-start; see omip_smag_cap_stabilizer / omip_rk3_coldstart).
+            # Balanced cold start on the PARTIAL-CELL coord (no adjustment shock).
             self._ocean_state = apply_balanced_init(
-                self._ocean_state, self._ocean_grid, z_coord, ocfg,
+                self._ocean_state, self._ocean_grid, model_z_coord, ocfg,
             )
         elif cfg.ocean_ic == "rest":
             # Idealized aquaplanet rest state: flat bottom, ALL-OCEAN (no polar
             # land caps), matching an f_land=0 atmosphere so the same-grid wet
             # masks AGREE (codex HIGH: caps vs all-ocean atm leak atm-side
             # fluxes onto ocean-masked cells).
+            model_z_coord = z_star
             H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
                 self._ocean_grid, H_max=cfg.ocean_H_max_m,
                 land_lat_threshold=90.0,
             )
             self._ocean_state = rest_state_latlon_cgrid_ocean(
-                self._ocean_grid, z_coord,
+                self._ocean_grid, z_star,
                 land_mask_override=land_mask, H_bathy_override=H_bathy,
             )
         else:
@@ -288,10 +301,10 @@ class CoupledESMDriver:
                 f"ocean_ic must be 'rest' or 'woa', got {cfg.ocean_ic!r}.")
 
         self._ocean_model = LatLonCGridOceanModel(
-            self._ocean_grid, z_coord, ocfg,
+            self._ocean_grid, model_z_coord, ocfg,
         )
         self._ocean_step = self._ocean_model.step
-        self._ocean_z_coord = z_coord
+        self._ocean_z_coord = model_z_coord
         self._ocean_land_mask = land_mask
         self._is_dynamic_ocean = True
         _ocean_frac = float(jnp.mean(land_mask))

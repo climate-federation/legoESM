@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import jax.numpy as jnp
 import numpy as np
 
@@ -538,3 +539,74 @@ def apply_balanced_init(state, grid, z_coord, config,
         eta = jnp.clip(eta - eta_mean, -5.0, 5.0) * mask   # physical SSH bound
         repl["eta"] = state.eta.replace(data=eta)
     return state._replace(**repl)
+
+
+def make_partial_cell_latlon(z_coord, H_bathy, land_mask, thin_threshold=0.3,
+                             smoothing_passes=4, min_levels=2):
+    """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry,
+    with bathymetry smoothing + thin-cell snap + shallow-column masking.
+
+    Promoted from ``scripts/run/run_omip_core2.py:make_partial_cell`` so the
+    coupled 3D-ocean driver can reuse the OMIP-validated WOA-cold-start geometry.
+
+    Why each step matters for the WOA cold start (all empirically required — the
+    flat-bottom z-star coord blows up; this geometry survives, max|u|~1 m/s):
+
+    * ``smoothing_passes`` Laplacian passes on the OCEAN ``H_bathy`` (land held
+      fixed) reduce the bathymetric slope (r-factor ``|H_i-H_j|/(H_i+H_j)``);
+      the spurious partial-cell PGF seed that blows up the cold start scales with
+      the slope (NEMO/ROMS smooth bathymetry for exactly this reason).
+    * the thin-cell snap snaps ``H_bathy`` DOWN to the interface above whenever
+      the bottom partial cell would be thinner than ``thin_threshold*dz_ref``
+      (MOM6/MITgcm thin-cell fix) — a tiny bottom cell is a ``1/h`` instability
+      seed.
+    * ``min_levels`` masks ocean columns with fewer than that many active
+      reference levels as land (single-thin-level coastal cells amplify a tiny
+      smc03 PGF residual into a blow-up).
+
+    The returned ``OceanPartialCellCoordinate`` (vs a plain ``OceanZStarCoordinate``)
+    also ACTIVATES the smc03 density-Jacobian PGF in ``ocean_pe_latlon_cgrid`` —
+    a plain z-star coord silently falls back to the centered-difference PGF
+    whose truncation error on the sharp WOA pycnocline seeds the blow-up.
+
+    Returns ``(z_coord_partial, H_snapped, land_mask_out)``.
+    """
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+    from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+
+    H_np = np.asarray(H_bathy, dtype=np.float64)
+    lm0 = np.asarray(land_mask, dtype=np.float64)
+    ocean = lm0 > 0.5
+
+    if smoothing_passes and smoothing_passes > 0:
+        r_before = float(_r_factor_max(H_np, lm0))
+        H_s = H_np.copy()
+        for _ in range(int(smoothing_passes)):
+            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=False))
+            H_s = np.where(ocean, H_sm, H_np)
+        H_np = np.where(ocean, H_s, H_np)
+        logging.getLogger("legoesm.ocean").info(
+            "  partial-cell bathy smoothing: %d passes, max r-factor %.3f -> %.3f",
+            smoothing_passes, r_before, float(_r_factor_max(H_np, lm0)))
+
+    abs_z_half = np.abs(np.asarray(z_coord.z_half_ref))
+    dz_ref_np = np.asarray(z_coord.dz_ref)
+    H_snapped = H_np.copy()
+    for k in range(z_coord.n_levels):
+        top, bot = abs_z_half[k], abs_z_half[k + 1]
+        in_layer = (H_np > top) & (H_np <= bot)
+        too_thin = in_layer & ((H_np - top) < thin_threshold * dz_ref_np[k])
+        H_snapped = np.where(too_thin, top, H_snapped)
+
+    new_land = (H_snapped <= 0.0) & ocean
+    if min_levels and int(min_levels) > 1:
+        n_active = (abs_z_half[None, None, :z_coord.n_levels]
+                    < H_snapped[..., None]).sum(axis=2)
+        too_shallow = (n_active < int(min_levels)) & ocean & (H_snapped > 0.0)
+        H_snapped = np.where(too_shallow, 0.0, H_snapped)
+        new_land = new_land | too_shallow
+    lm_out = np.where(new_land, 0.0, lm0)
+
+    zc = create_partial_cell_coordinate(
+        z_coord, jnp.asarray(H_snapped, dtype=jnp.float64))
+    return zc, H_snapped.astype(np.float64), lm_out.astype(np.float64)

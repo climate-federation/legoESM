@@ -792,3 +792,95 @@ def woa_ocean_mask(
     frac = np.where(np.isnan(frac), 0.0, frac)
     ocean_mask = (frac >= ocean_fraction_threshold).astype(np.float64)
     return ocean_mask
+
+
+def woa_ocean_bathymetry(
+    grid,
+    T_path: str | Path,
+    *,
+    H_max: float = 5500.0,
+    min_depth_m: float = 200.0,
+    T_var: str | None = None,
+    ocean_fraction_threshold: float = 0.5,
+) -> np.ndarray:
+    """Derive a realistic per-column bathymetry [m] from WOA18 temperature.
+
+    For each model column the depth is the DEEPEST WOA standard level that is
+    still ocean (valid T) after the NaN-aware bilinear regrid of the per-level
+    valid-data fraction, clamped to ``[min_depth_m, H_max]``.  Land columns
+    (surface fraction below threshold) get ``0``.
+
+    A realistic (varying) bathymetry — instead of a flat ``H_max`` everywhere —
+    is REQUIRED for a stable WOA cold start: the flat bottom extends the WOA
+    abyssal-fill density into a spurious deep column and (with the plain z-star
+    coord) gates off the smc03 partial-cell pressure-gradient correction.  Feed
+    the result through :func:`make_partial_cell_latlon` (smoothing + thin-cell
+    snap) before building the ocean coordinate.
+
+    Parameters
+    ----------
+    grid : LatLonGrid (lat2d/lon2d in radians).
+    T_path : WOA18 temperature file.
+    H_max : maximum depth clamp [m].
+    min_depth_m : minimum wet-column depth [m] (shallow shelves are floored
+        here; ``make_partial_cell_latlon(min_levels=...)`` later masks columns
+        with too few active levels).
+    T_var : override temperature variable name (default ``"t_an"``).
+    ocean_fraction_threshold : ocean cutoff for the per-level regrid.
+
+    Returns
+    -------
+    H_bathy : np.ndarray (n_lat, n_lon), float64 — depth [m], 0 over land.
+    """
+    if not (0.0 < ocean_fraction_threshold <= 1.0):
+        raise ValueError(
+            f"ocean_fraction_threshold must be in (0, 1]; got "
+            f"{ocean_fraction_threshold}.")
+    if not (0.0 < min_depth_m < H_max):
+        raise ValueError(
+            f"min_depth_m must be in (0, H_max={H_max}); got {min_depth_m}.")
+    lat2d = getattr(grid, "lat2d", None)
+    lon2d = getattr(grid, "lon2d", None)
+    if lat2d is None or lon2d is None:
+        raise TypeError(
+            "woa_ocean_bathymetry requires a lat-lon grid exposing lat2d/lon2d.")
+    lat_deg = np.asarray(lat2d) * (180.0 / np.pi)
+    lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+
+    t_name = T_var if T_var is not None else "t_an"
+    ds = _open_woa_dataset(T_path)
+    if t_name not in ds.data_vars:
+        avail = list(ds.data_vars)
+        ds.close()
+        raise ValueError(
+            f"WOA T file {str(T_path)!r} has no variable {t_name!r}; "
+            f"available: {avail}.")
+    da = ds[t_name]
+    isel = {}
+    if "time" in da.dims:
+        isel["time"] = 0
+    depth_dim = next(
+        (d for d in da.dims if d not in ("lat", "lon", "time")), None)
+    if depth_dim is None:
+        ds.close()
+        raise ValueError(
+            f"WOA T variable has no depth dim (dims {da.dims}).")
+    da3 = da.isel(**isel).transpose(depth_dim, "lat", "lon")
+    T3 = np.asarray(da3.values)                       # (n_depth, lat, lon)
+    lat_woa = np.array(ds["lat"].values)
+    lon_woa = np.array(ds["lon"].values)
+    ds.close()
+
+    n_depth = T3.shape[0]
+    depths = WOA_DEPTHS[:n_depth]
+    # Ocean fraction per WOA level, regridded to the model grid.
+    valid = (~np.isnan(T3)).astype(np.float64)        # (depth, lat, lon)
+    valid_lld = np.moveaxis(valid, 0, -1)             # (lat, lon, depth)
+    fr = _bilinear_2d(lat_deg, lon_deg, lat_woa, lon_woa, valid_lld)
+    fr = np.where(np.isnan(fr), 0.0, fr)
+    ocean_at_depth = fr >= ocean_fraction_threshold   # (n_lat, n_lon, n_depth)
+    # Deepest ocean depth per column (0 if no ocean at any level).
+    H = np.where(ocean_at_depth, depths[None, None, :], 0.0).max(axis=-1)
+    wet = H > 0.0
+    H = np.where(wet, np.clip(H, min_depth_m, H_max), 0.0)
+    return H.astype(np.float64)
