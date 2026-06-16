@@ -37,6 +37,23 @@ from __future__ import annotations
 # --- Lat-lon C-grid recipes (LatLonCGridOceanConfig scheme bundles) ----------
 
 LATLON_RECIPES = {
+    # The DE-FACTO default dycore most test-matrix experiments run today: the
+    # legoESM model defaults with eos="wright" (the scrape path leaves eos at its
+    # default). Named here so the ~16 experiments that silently share it are
+    # explicit — most did NOT deliberately choose this dycore (#488). Identical to
+    # legoesm_linear_v1 except eos.
+    "default_wright_v1": {
+        "eos": "wright",
+        "momentum_advection": "vector_invariant",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "adcroft",
+        "ke_gradient_scheme": "centered",
+        "barotropic_solver": "explicit_substep",
+        "coriolis_scheme": "matsuno_split",
+        "outer_integrator": "forward_euler",
+        "tracer_time_integrator": "euler",
+        "implicit_vertical_mixing": True,
+    },
     # legoESM default linear-EOS dycore — the global-overturning recipe.
     "legoesm_linear_v1": {
         "eos": "linear",
