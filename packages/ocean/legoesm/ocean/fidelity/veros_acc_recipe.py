@@ -34,6 +34,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -867,19 +868,14 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         #   ab2_scope="advective"         ↔ dissipative tendencies at weight
         #                                   1.0 (solve_stream.py placement)
         #   momentum_friction_additive=True ↔ explicit additive du_mix
-        outer_integrator="ab2" if with_surface_forcing else "forward_euler",
-        dt_mom_ratio=9.0 if with_surface_forcing else 1.0,
-        barotropic_solver=("rigid_lid" if with_surface_forcing
-                           else "explicit_substep"),
-        coriolis_scheme=("explicit_ab2" if with_surface_forcing
-                         else "matsuno_split"),
-        ab2_scope="advective" if with_surface_forcing else "total",
-        momentum_friction_additive=with_surface_forcing,
         # implicit_vmix_dzw_slot ↔ Veros dzw divisor of the implicit T/S +
         # friction solves (#428): the ACC z-coordinate is u_centered, so the
-        # dz_half_ref·J slot differs from the midpoint reconstruction. Gated like
-        # the rest of the bundle — the frozen-state probe stays bit-identical.
-        implicit_vmix_dzw_slot=with_surface_forcing,
+        # dz_half_ref·J slot differs from the midpoint reconstruction. The whole
+        # bundle is gated on with_surface_forcing — the frozen-state probe keeps
+        # legoESM defaults and stays bit-identical. Shared across all 5 Veros
+        # recipes via veros_stepping.veros_faithful_stepping (#433).
+        **veros_faithful_stepping(with_surface_forcing=with_surface_forcing,
+                                  dt_mom_ratio=9.0),
         physics=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
