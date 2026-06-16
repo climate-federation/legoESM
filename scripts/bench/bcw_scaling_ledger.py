@@ -116,11 +116,19 @@ def compute_rows(tidy_csv: Path) -> list[dict]:
     strong: dict = defaultdict(list)
     weak: dict = defaultdict(list)
     for r in all_rows:
-        key = (r["backend"], r["grid"], r["case"], r["precision"])
-        (strong if r["mode"] == "strong" else weak)[key].append(r)
+        # Group on component + n_levels too so atm/ocean (or L26/L40) series do
+        # not pool (codex review).  Only strong/weak modes feed metrics; any
+        # other mode ("single", "", future) is skipped, not silently weak.
+        key = (r.get("component", "atm"), r["backend"], r["grid"], r["case"],
+               r["precision"], r.get("n_levels", ""))
+        mode = r["mode"]
+        if mode == "strong":
+            strong[key].append(r)
+        elif mode == "weak":
+            weak[key].append(r)
     out = []
     for key, grp in sorted(strong.items()):
-        backend, grid, case, prec = key
+        _comp, backend, grid, case, prec, _nlev = key
         m = series_metrics(grp)
         m["weak_eff"] = weak_efficiency(weak.get(key, []))
         out.append({"backend": backend, "grid": grid, "case": case,

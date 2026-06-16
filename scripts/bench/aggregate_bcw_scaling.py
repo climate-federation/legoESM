@@ -120,6 +120,22 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     }
 
 
+def _is_ocean_schema(d: dict) -> bool:
+    """True only for the OCEAN nested report (mode starts 'ocean_').
+
+    The atmosphere GPU harness (run_levante_gpu_scaling.py) writes nested
+    ``{results:[...]}`` too, with mode 'weak'/'strong' — those must NOT be
+    misrouted to ocean (codex review).  Gate on the ocean mode prefix at the
+    top level or in the first result.
+    """
+    if str(d.get("mode", "")).startswith("ocean"):
+        return True
+    res = d.get("results")
+    if isinstance(res, list) and res and isinstance(res[0], dict):
+        return str(res[0].get("mode", "")).startswith("ocean")
+    return False
+
+
 def _rows_from_nested(d: dict, source: Path) -> list[dict]:
     """Ocean-campaign schema: ``{backend, results:[TimingResult,...]}``.
 
@@ -164,11 +180,12 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
 
 
 def _key(row: dict) -> tuple:
-    # Include component + n_levels so otherwise-identical rows (e.g. atm vs
-    # ocean latlon, or L26 vs L40) do NOT collapse to one row (codex review).
+    # Include component + n_levels + physics_level so otherwise-identical rows
+    # (atm vs ocean latlon, L26 vs L40, or ocean baro=explicit_substep vs
+    # implicit_cn) do NOT collapse to one row (codex review).
     return (row["component"], row["backend"], row["grid"], row["case"],
             row["precision"], row["mode"], row["n_devices"], row["resolution"],
-            row["n_levels"])
+            row["n_levels"], row.get("physics_level", ""))
 
 
 def collect(roots) -> tuple[list[dict], int]:
@@ -200,17 +217,20 @@ def collect(roots) -> tuple[list[dict], int]:
         if not rp.exists():
             continue
         for jf in sorted(rp.rglob("*.json")):
-            # Skip validation/smoke output dirs so their small fixed-resolution
-            # probe points do not contaminate the production scaling curves.
-            if "/val_" in str(jf) or "/_ab_" in str(jf):
+            # Skip validation/smoke/AB dirs (any path PART, incl. the root
+            # itself) so their probe points never contaminate the curves.
+            if any(part.startswith(("val_", "_ab_")) for part in jf.parts):
                 continue
             try:
                 d = json.loads(jf.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
             if isinstance(d, dict) and isinstance(d.get("results"), list):
-                for row in _rows_from_nested(d, jf):
-                    _add(row)
+                # Nested ONLY ingested for the ocean schema; a nested atm
+                # (levante) report is skipped, not faked as ocean.
+                if _is_ocean_schema(d):
+                    for row in _rows_from_nested(d, jf):
+                        _add(row)
             else:
                 _add(_row_from_json(d, jf))
     rows = sorted(
