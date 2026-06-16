@@ -22,6 +22,8 @@ composites; uneven splits via n=2·p+1) — same factoring as
 """
 from __future__ import annotations
 
+from collections import namedtuple
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -39,12 +41,14 @@ from legoesm.grids.halo_latlon import (
     pad_with_pole_bc_lat,
 )
 from legoesm.parallel.latlon_mpi import (
+    gather_field_latlon_2d,
     make_latlon_2d_layout,
     make_latlon_band_layout,
     pad_halo_latlon_2d,
     pad_halo_latlon_mpi,
     pad_with_pole_bc_lat_2d,
     scatter_field_latlon_2d,
+    scatter_state_latlon_2d,
 )
 from legoesm.parallel.reductions import global_sum_mpi
 
@@ -220,3 +224,44 @@ def test_fold_family_reuses_band_fold_at_proc_lon1():
     assert got.shape == (L2d.n_lat_local + 2 * h, n_lon + 2 * h)
     if rank == 0:
         print(f"FOLD_REUSE_OK pr={pr}", flush=True)
+
+
+_St = namedtuple("_St", "u v T p_s phis tracers")
+
+
+def test_scatter_gather_state_faces_roundtrip():
+    """scatter_state_latlon_2d -> gather_field_latlon_2d reproduces the global
+    C-grid state EXACTLY for the staggered faces under a real 2-D split: u is
+    a lon-face (n_lon+1, shared east column, periodic closure) gathered with
+    ``is_u_face``; v is a lat-face (n_lat+1, shared row) gathered with
+    ``is_v_face``; cell fields tile plainly.  Guards the u-face scatter fix +
+    the gather lon-face mode (codex round-2: the old gather overran for u)."""
+    comm = MPI.COMM_WORLD
+    rank, n = comm.Get_rank(), comm.Get_size()
+    if n < 2:
+        pytest.skip("needs mpirun with >=2 ranks")
+    pr, pc = _pick_grid(n)
+    n_lat, n_lon, nlev = 2 * pr, 2 * pc, 2
+    rng = np.random.default_rng(23)
+    T = rng.standard_normal((n_lat, n_lon, nlev))
+    u = rng.standard_normal((n_lat, n_lon + 1, nlev))
+    u[:, n_lon, :] = u[:, 0, :]                       # periodic closure invariant
+    v = rng.standard_normal((n_lat + 1, n_lon, nlev))
+    p_s = rng.standard_normal((n_lat, n_lon))
+    g = _St(u=jnp.asarray(u), v=jnp.asarray(v), T=jnp.asarray(T),
+            p_s=jnp.asarray(p_s), phis=jnp.zeros((n_lat, n_lon)), tracers={})
+
+    L = make_latlon_2d_layout(rank, pr, pc, n_lat, n_lon)
+    loc = scatter_state_latlon_2d(g, L)
+    u_g = gather_field_latlon_2d(loc.u, L, is_u_face=True)
+    v_g = gather_field_latlon_2d(loc.v, L, is_v_face=True)
+    T_g = gather_field_latlon_2d(loc.T, L)
+
+    np.testing.assert_allclose(np.asarray(u_g), u, atol=1e-12,
+                               err_msg=f"rank {rank} u-face roundtrip")
+    np.testing.assert_allclose(np.asarray(v_g), v, atol=1e-12,
+                               err_msg=f"rank {rank} v-face roundtrip")
+    np.testing.assert_allclose(np.asarray(T_g), T, atol=1e-12,
+                               err_msg=f"rank {rank} cell roundtrip")
+    if rank == 0:
+        print(f"FACE_ROUNDTRIP_OK pr={pr} pc={pc}", flush=True)

@@ -24,11 +24,17 @@ Conventions
   single-rank paths can never disagree at pole-touching ranks.
 - C-grid layout:
 
-      u : (n_lat_local,    n_lon,   nlev)  — zonal velocity at lon faces
-                              (n_lon+1 in serial; lon is periodic so we
-                              treat the trailing face as wrap-around)
+      u : zonal velocity at LON faces.  Global ``n_lon+1`` faces (the
+                              trailing one the periodic closure
+                              ``face n_lon == face 0``).  The 1-D band keeps
+                              the full ``n_lon+1`` (lon is not split); the 2-D
+                              pencil keeps ``n_lon_local+1`` faces, so W/E
+                              neighbours SHARE the boundary east face — the
+                              lon twin of v's shared row (see
+                              ``scatter_state_latlon_2d`` / the ``is_u_face``
+                              gather mode).
       v : (n_lat_local+1,  n_lon,   nlev)  — meridional velocity at lat
-                              interfaces; neighbouring ranks share the
+                              interfaces; N/S neighbouring ranks share the
                               ``v`` row at the partition boundary
       T, p_s, phis, tracers : (n_lat_local, n_lon, ...) cell-centered
 
@@ -297,14 +303,36 @@ def scatter_field_latlon_2d(
     ]
 
 
-def gather_field_latlon_2d(local_field, layout: LatLon2DLayout):
+def gather_field_latlon_2d(
+    local_field, layout: LatLon2DLayout,
+    *, is_u_face: bool = False, is_v_face: bool = False,
+):
     """Reassemble the global field from every rank's 2-D block (I/O only).
 
     mpi4py ``allgather`` of host blocks, placed by (proc_row, proc_col).
     Returns a numpy array on every rank; single-rank returns the input
     as numpy.
+
+    Staggering (mirror of :func:`scatter_state_latlon_2d`): a cell-centred
+    field tiles ``(n_lat_global, n_lon_global)`` exactly.  A FACE field has a
+    shared boundary face duplicated on the neighbour, so its block is one
+    wider/taller and the assembled global array gains the matching face:
+
+    * ``is_u_face`` — lon-face ``u`` (block ``n_lon_local+1``): assemble to
+      ``n_lon_global+1`` (faces ``0..n_lon``, the trailing the periodic
+      closure).  Interior shared east faces overwrite with the identical
+      neighbour value; the last block fills the closure column.
+    * ``is_v_face`` — lat-face ``v`` (block ``n_lat_local+1``): assemble to
+      ``n_lat_global+1``.
+
+    Passing both flags is an error (a field is one stagger or the other).
     """
     import numpy as _np
+
+    if is_u_face and is_v_face:
+        raise ValueError(
+            "gather_field_latlon_2d: a field is u-face OR v-face, not both."
+        )
 
     local_np = _np.asarray(local_field)
     if layout.n_ranks == 1:
@@ -326,9 +354,12 @@ def gather_field_latlon_2d(local_field, layout: LatLon2DLayout):
     blocks = comm.allgather(
         (layout.lat_start, layout.lon_start, local_np))
     trailing = local_np.shape[2:]
-    out = _np.zeros(
-        (layout.n_lat_global, layout.n_lon_global) + trailing,
-        dtype=local_np.dtype)
+    # Face fields carry the shared boundary face, so the global array gains
+    # the matching extra row/column (else an ``n_lon_local+1`` u block would
+    # overrun an ``n_lon_global``-wide buffer — codex round-2).
+    lat_g = layout.n_lat_global + (1 if is_v_face else 0)
+    lon_g = layout.n_lon_global + (1 if is_u_face else 0)
+    out = _np.zeros((lat_g, lon_g) + trailing, dtype=local_np.dtype)
     for ls, los, blk in blocks:
         out[ls:ls + blk.shape[0], los:los + blk.shape[1]] = blk
     return out
@@ -1739,15 +1770,23 @@ def scatter_state_latlon_2d(state, layout: LatLon2DLayout):
     Staggering (codex design pitfall — slice lat AND lon together, lat first):
 
     * ``T``/``p_s``/``phis``/tracers : cell-centred → ``[s:e, w:x]``.
-    * ``u`` : LON-face, periodic in longitude (n_lon faces for n_lon cells), so
-      no extra column → ``[s:e, w:x]``.  The periodic wrap face to the east
-      neighbour is filled by :func:`exchange_halo_lon`.
+    * ``u`` : LON-face.  The dycore stores u with ``n_lon+1`` faces (faces
+      ``0..n_lon``, the trailing one the periodic closure ``face n_lon ==
+      face 0``).  A block owns faces ``[w, x]`` → ``[w:x+1]`` (``n_lon_local+1``
+      faces), so W/E-neighbouring ranks DUPLICATE the shared east face — the
+      EXACT longitude analogue of v's shared lat-face row.  This matches the
+      dycore u convention directly (no operator rewrite) and makes
+      ``proc_lon==1`` reproduce the band's full ``n_lon+1`` u.  (The earlier
+      ``[w:x]`` slice dropped to ``n_lon_local`` cell-aligned columns — a
+      different, non-dycore convention that silently broke u at proc_lon==1
+      and was masked by a cell-shaped fake-u test fixture.)
     * ``v`` : LAT-face, one extra global row at the poles (shape ``n_lat+1``);
       give rows ``[s, e+1)`` so N/S-neighbouring ranks DUPLICATE the shared
       boundary face (the same convention as the 1-D band; both ranks must hold
-      the same value there).  Longitude is sliced ``[w:x]`` like the others.
+      the same value there).  Longitude is sliced ``[w:x]`` like the cells.
 
-    ``proc_lon == 1`` reproduces :func:`scatter_state_latlon` exactly.
+    ``proc_lon == 1`` reproduces :func:`scatter_state_latlon` exactly (u keeps
+    its full ``n_lon+1`` faces, v its shared lat row).
     """
     s, e = layout.lat_start, layout.lat_end
     w, x = layout.lon_start, layout.lon_end
@@ -1755,7 +1794,11 @@ def scatter_state_latlon_2d(state, layout: LatLon2DLayout):
     T_local = state.T[s:e, w:x]
     p_s_local = state.p_s[s:e, w:x]
     phis_local = state.phis[s:e, w:x]
-    u_local = state.u[s:e, w:x]
+    # lon-face: faces [w, x] => one extra (shared east) column, the lon twin
+    # of v's shared lat row.  The global u carries the n_lon+1 periodic-closure
+    # column, so [w:x+1] is well-defined at the seam too (last block's east
+    # face == global face n_lon == periodic dup of face 0).
+    u_local = state.u[s:e, w:x + 1]
     v_local = state.v[s:e + 1, w:x]   # lat-face: shared boundary row duplicated
 
     tracers_local = {}
