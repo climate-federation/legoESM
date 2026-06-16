@@ -1,5 +1,31 @@
 # legoESM Scaling Campaign — Theoretical-Limit Report (2026-06-15)
 
+> **ADDENDUM (2026-06-16) — the "at-limit" verdict below was broken through by
+> SOTA-ALGORITHMIC inspiration.** The verdict was correct for the *existing
+> algorithm at f64*; it was NOT a true theoretical limit. A user directive to
+> draw on SOTA codes (MOM6, MPAS-Ocean, Oceananigans, NeuralGCM) found **two new
+> ocean wins the within-algorithm audits had missed** — because those audits only
+> tuned the *existing* schemes, never questioned the *algorithm choice* or the
+> *precision*:
+> 1. **Split-explicit barotropic + reduction-free local eta-floor clamp**
+>    (MOM6/MPAS-O): replaces the implicit-CN PCG's ~120 allreduce/step with a
+>    halo-only subcycle. Same-job head-to-head, LL192 f64 strong: explicit beats
+>    implicit at ≥2 nodes, **1.15/1.23/1.65× at np16/32/64** (implicit
+>    anti-scales np32→np64 on the reduction wall); weak eff 0.92 vs 0.80;
+>    conservation eta_drift 1.4e-9; cold-start-stable (smoke 3.5 days). Opt-in
+>    `barotropic_local_subcycle_clamp`. Jobs 8498971/8499266/8499635/8499869/8500305.
+> 2. **Mixed-precision vmix** (f32 work / f64 state + f64 column-mass correction;
+>    Oceananigans/NeuralGCM): **1.15× full-step GPU** at production scale (LL192
+>    18.4→16.0 ms), conservation-exact. Opt-in `LEGOESM_VMIX_F32_SOLVE`. Job 8501006.
+>
+> **LESSON: "at-limit for the current algorithm + precision" ≠ "at theoretical
+> limit."** The within-algorithm audits (preconditioner tuning, halo fusion,
+> CUDA-graph) genuinely exhausted their space; the breakthrough came from a
+> different *algorithm* (split-explicit) and a different *precision* (mixed). Both
+> are opt-in + codex-clean; production-uptake gated by full-OMIP long-run
+> validation. Remaining f32 extensions (baroclinic EOS/PGF, tracer-advection
+> limiters) are large, science-risky careful-numerics, deferred.
+
 **Verdict: the production step-kernel scaling surface is exhausted on Ginsburg
 hardware.** Across ocean (lat-lon C-grid), atmosphere (cubed-sphere FV3, lat-lon
 FV, icosahedral MPAS, spectral) and every parallel axis (per-device, 2-GPU,
