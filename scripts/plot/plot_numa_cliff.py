@@ -36,6 +36,13 @@ def collect(root: Path, grid: str, res: int, prec: str, mode: str):
                 or d.get("precision") != prec or d.get("mode") != mode
                 or d.get("sypd") is None):
             continue
+        # The NUMA / rank-count cliff is CPU-specific; GPU runs also report
+        # cpus_per_task=1 and would contaminate the packed line.
+        backend = str(d.get("backend", "")).lower()
+        if not backend:
+            backend = "gpu" if "_gpu_" in str(jf) else "cpu"
+        if backend != "cpu":
+            continue
         cpt = int(d.get("cpus_per_task") or 1)
         n_ranks = d.get("n_ranks") or d.get("n_gpus") or 0
         cores = int(d.get("n_cores") or (n_ranks * cpt))
