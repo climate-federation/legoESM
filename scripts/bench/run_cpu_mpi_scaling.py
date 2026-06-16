@@ -1119,6 +1119,19 @@ def main() -> int:
     # --- Configure JAX for the target device ---
     if getattr(args, "device", "cpu") == "gpu":
         _configure_jax_gpu(args.precision)
+        # Fail LOUD on CUDA fallback: without this, a GPU job whose CUDA init
+        # failed (or that forgot --device gpu so _configure_jax_cpu pinned
+        # JAX_PLATFORMS=cpu) silently records CPU numbers labeled as GPU
+        # (bug: the whole g1..g16 ladder ran on CPU).  Refuse to mislabel.
+        import jax as _jax
+        _bk = _jax.default_backend()
+        if _bk != "gpu":
+            raise SystemExit(
+                f"--device gpu requested but JAX default backend is {_bk!r} "
+                f"(CUDA unavailable / not bound). Refusing to record "
+                f"CPU-fallback numbers as GPU. Check CUDA_VISIBLE_DEVICES / "
+                f"the cuda jax plugin on this node."
+            )
     else:
         _configure_jax_cpu(args.precision)
 
