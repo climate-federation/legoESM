@@ -31,9 +31,6 @@ from __future__ import annotations
 
 import numpy as np
 
-# FAO HWSD v2.0 fixed depth layers D1..D7 thicknesses [m] (0-20-40-60-80-100-150-200 cm).
-HWSD2_LAYER_DZ = np.array([0.20, 0.20, 0.20, 0.20, 0.20, 0.50, 0.50], dtype=np.float64)
-
 # Canonical variable names + (units, long_name) for the harmonized file.  The
 # loader's "legoesm_surfdata" preset references exactly these names.
 SURFDATA_VARS: dict[str, tuple[str, str]] = {

@@ -12,7 +12,8 @@ import pytest
 
 xr = pytest.importorskip("xarray")
 
-from legoesm.land.surface_data.schema import write_surfdata, HWSD2_LAYER_DZ
+from legoesm.land.surface_data.schema import write_surfdata
+from legoesm.land.surface_data.sources.hwsd2 import HWSD2_LAYER_DZ
 from legoesm.land.global_surface_data import (
     get_surfdata_preset,
     load_global_surface_data,

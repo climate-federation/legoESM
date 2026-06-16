@@ -53,7 +53,7 @@ from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_l
 from legoesm.land.slab_land import step_land
 from legoesm.land.global_surface_data import interp_monthly
 from legoesm.land.soil_albedo import soil_albedo_broadband
-from legoesm.land.surface_data.land_inputs import (
+from legoesm.land.boundary_data import (
     dominant_pft_index, glacier_mask, surface_data_to_land_params,
     init_land_surface_data, fill_land_param_gaps,
     make_step_land_params_updater)

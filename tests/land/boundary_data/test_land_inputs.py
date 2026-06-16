@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from legoesm.land.global_surface_data import GlobalSurfaceData, GlobalSurfaceDataConfig
 from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
-from legoesm.land.surface_data.land_inputs import (
+from legoesm.land.boundary_data import (
     build_canopy_params,
     build_soil_hydraulics,
     surface_data_param_provider,
@@ -15,8 +15,8 @@ from legoesm.land.surface_data.land_inputs import (
     surfdata_covered,
     dominant_pft_index,
     glacier_mask,
-    _bare_land_surface_params,
 )
+from legoesm.land.boundary_data.gap_fill import _bare_land_surface_params
 from legoesm.land.surface_params import LandSurfaceParams
 from legoesm.land.canopy.config import CanopyLandParams
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
