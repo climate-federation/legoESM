@@ -34,7 +34,7 @@ from pathlib import Path
 LEDGER_FIELDS = [
     "iteration", "timestamp", "commit", "note",
     "backend", "grid", "case", "precision",
-    "max_ndev", "peak_sypd", "strong_eff", "peak_mcells_per_s",
+    "max_ndev", "peak_sypd", "strong_eff", "weak_eff", "peak_mcells_per_s",
 ]
 
 
@@ -88,15 +88,41 @@ def series_metrics(rows: list[dict]) -> dict:
     }
 
 
+def weak_efficiency(rows: list[dict]) -> float:
+    """Per-rank-throughput retention for a weak-scaling series (ideal=1).
+
+    Weak ideal = constant per-rank throughput as devices+work both grow.  The
+    icosahedral subdivision jumps cell count 4x per level, so cells/rank is NOT
+    exactly constant; normalize by the ACTUAL per-rank throughput
+    tput(n) = (total_cells/n) / (time_per_step_s), then
+    weak_eff = tput(n_max)/tput(n_min).
+    """
+    pts = []
+    for r in rows:
+        n = int(r["n_devices"])
+        tps_s = _f(r.get("time_per_step_ms")) / 1000.0
+        tc = _f(r.get("total_cells"))
+        if n > 0 and tps_s > 0 and tc > 0:
+            pts.append((n, (tc / n) / tps_s))
+    if len(pts) < 2:
+        return float("nan")
+    pts.sort()
+    return pts[-1][1] / pts[0][1] if pts[0][1] > 0 else float("nan")
+
+
 def compute_rows(tidy_csv: Path) -> list[dict]:
     with tidy_csv.open() as f:
-        rows = [r for r in csv.DictReader(f) if r["mode"] == "strong"]
-    groups: dict = defaultdict(list)
-    for r in rows:
-        groups[(r["backend"], r["grid"], r["case"], r["precision"])].append(r)
+        all_rows = list(csv.DictReader(f))
+    strong: dict = defaultdict(list)
+    weak: dict = defaultdict(list)
+    for r in all_rows:
+        key = (r["backend"], r["grid"], r["case"], r["precision"])
+        (strong if r["mode"] == "strong" else weak)[key].append(r)
     out = []
-    for (backend, grid, case, prec), grp in sorted(groups.items()):
+    for key, grp in sorted(strong.items()):
+        backend, grid, case, prec = key
         m = series_metrics(grp)
+        m["weak_eff"] = weak_efficiency(weak.get(key, []))
         out.append({"backend": backend, "grid": grid, "case": case,
                     "precision": prec, **m})
     return out
@@ -128,7 +154,7 @@ def snapshot(tidy_csv: Path, ledger: Path, note: str, timestamp: str) -> int:
         print(f"  {m['backend']:3s} {m['grid']:12s} {m['case']:5s} "
               f"{m['precision']:8s}  ndev<= {m['max_ndev']:>3}  "
               f"peakSYPD={m['peak_sypd']:8.2f}  Estrong={m['strong_eff']:.3f}  "
-              f"peakMc/s={m['peak_mcells_per_s']:7.1f}")
+              f"Eweak={m['weak_eff']:.3f}  peakMc/s={m['peak_mcells_per_s']:7.1f}")
     return it
 
 
@@ -144,29 +170,31 @@ def plot(ledger: Path, out: Path, grid: str = "icosahedral") -> Path | None:
     series: dict = defaultdict(list)
     for r in rows:
         series[(r["backend"], r["case"], r["precision"])].append(
-            (int(r["iteration"]), _f(r["strong_eff"]), _f(r["peak_mcells_per_s"])))
+            (int(r["iteration"]), _f(r["strong_eff"]), _f(r["weak_eff"]),
+             _f(r["peak_mcells_per_s"])))
 
-    fig, (ax_e, ax_t) = plt.subplots(2, 1, figsize=(8.0, 8.0), sharex=True)
+    fig, (ax_e, ax_w, ax_t) = plt.subplots(3, 1, figsize=(8.0, 10.5), sharex=True)
     for (backend, case, prec), pts in sorted(series.items()):
         pts = sorted(pts)
         its = [p[0] for p in pts]
-        eff = [p[1] for p in pts]
-        thr = [p[2] for p in pts]
         lbl = f"{backend} {case} {prec}"
         ls = "-" if prec == "float64" else "--"
         mk = "o" if case == "dry" else "s"
-        ax_e.plot(its, eff, ls=ls, marker=mk, lw=1.6, ms=5, label=lbl)
-        ax_t.plot(its, thr, ls=ls, marker=mk, lw=1.6, ms=5, label=lbl)
+        ax_e.plot(its, [p[1] for p in pts], ls=ls, marker=mk, lw=1.6, ms=5, label=lbl)
+        ax_w.plot(its, [p[2] for p in pts], ls=ls, marker=mk, lw=1.6, ms=5, label=lbl)
+        ax_t.plot(its, [p[3] for p in pts], ls=ls, marker=mk, lw=1.6, ms=5, label=lbl)
 
     ax_e.axhline(1.0, color="0.4", ls=":", lw=1.2, label="ideal (E=1)")
     ax_e.set_ylabel("strong-scaling efficiency")
     ax_e.set_title(f"{grid}: scaling vs campaign iteration", fontsize=10, loc="left")
     ax_e.grid(True, alpha=0.25)
     ax_e.legend(fontsize=7, ncol=2)
+    ax_w.axhline(1.0, color="0.4", ls=":", lw=1.2, label="ideal (E=1)")
+    ax_w.set_ylabel("weak-scaling efficiency")
+    ax_w.grid(True, alpha=0.25)
     ax_t.set_ylabel("peak per-device throughput [Mcells/s]")
     ax_t.set_xlabel("campaign iteration")
     ax_t.grid(True, alpha=0.25)
-    ax_t.legend(fontsize=7, ncol=2)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=200, bbox_inches="tight")
