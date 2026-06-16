@@ -241,8 +241,17 @@ def get_band_mpi_cut_layout():
     if get_halo_backend() != "mpi":
         return None
     topology = get_mpi_topology()
-    from legoesm.parallel.latlon_mpi import LatLonBandLayout
-    if isinstance(topology, LatLonBandLayout) and (
+    from legoesm.parallel.latlon_mpi import (
+        LatLon2DLayout, LatLonBandLayout,
+    )
+    # Band AND 2-D pencil expose the same pole-terminated lat-LINE
+    # semantics (``south_rank``/``north_rank is None`` at the physical
+    # poles), so the pole-touch test is identical.  Recognising the 2-D
+    # layout here is what makes ``lat_ends_are_poles`` /
+    # ``interp_cell_to_vface_halo`` correct on a ``proc_lat>1`` pencil rank
+    # — without it an interior lat-cut rank would clamp its band edge to a
+    # physical pole (e.g. curl_vertex's sin clamp), corrupting metrics.
+    if isinstance(topology, (LatLonBandLayout, LatLon2DLayout)) and (
         topology.south_rank is not None
         or topology.north_rank is not None
     ):

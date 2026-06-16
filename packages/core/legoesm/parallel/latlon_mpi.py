@@ -927,6 +927,104 @@ def exchange_halo_lon(
     return jnp.concatenate([west_halo, field, east_halo], axis=1)
 
 
+def _pad_lat_wall_2d(
+    field: jax.Array,
+    layout: LatLon2DLayout,
+    halo: int,
+    south_value: float,
+    north_value: float,
+) -> jax.Array:
+    """Lat-axis (N/S) wall pad for a 2-D pencil row — the shared core of
+    :func:`pad_halo_latlon_2d` and :func:`pad_with_pole_bc_lat_2d`.
+
+    Interior lat cuts MPI-sendrecv their edge row with the south / north
+    neighbour (the AD-safe rank-as-tag LINE pattern — the lat axis is a
+    pole-terminated line, not the periodic ring); pole-touching rows
+    (``south_rank``/``north_rank is None``) fill the constant wall.
+    Longitude is NOT touched.  Works for 1-D lat metrics and N-D face
+    fields (trailing axes ride the reshape).  ``proc_lat == 1`` (both poles
+    local) runs serially without mpi4jax.
+
+    Returns ``(n_lat_local + 2*halo, …)`` — same trailing shape as input.
+    """
+    # halo must fit the SMALLEST local lat block: a neighbour owning fewer
+    # than `halo` rows would send/recv a mismatched slab and the exchange
+    # would truncate/hang (same guard rationale as pad_halo_latlon_2d's
+    # lon side).  _even_split gives the first blocks one extra row, so the
+    # smallest block is floor(n_lat_global / proc_lat).
+    min_lat_block = layout.n_lat_global // layout.proc_lat
+    if halo > min_lat_block:
+        raise ValueError(
+            f"_pad_lat_wall_2d: halo={halo} exceeds the smallest local lat "
+            f"block ({min_lat_block}=n_lat_global {layout.n_lat_global}//"
+            f"proc_lat {layout.proc_lat}); a neighbour would send/recv a "
+            f"mismatched halo and the MPI exchange would abort/hang.")
+    trailing = field.shape[1:]
+    south_is_pole = layout.south_rank is None
+    north_is_pole = layout.north_rank is None
+
+    # Both lat ends are physical poles (proc_lat==1): pure local wall pad,
+    # no MPI — keep the path runnable serially (the proc_lon==1, proc_lat==1
+    # single-process equivalence test, and the proc_lon-only ring case).
+    if south_is_pole and north_is_pole:
+        south = jnp.full((halo,) + trailing, south_value, field.dtype)
+        north = jnp.full((halo,) + trailing, north_value, field.dtype)
+        return jnp.concatenate([south, field, north], axis=0)
+
+    import mpi4jax
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    sendrecv = get_sendrecv_vjp(mpi4jax)
+
+    if south_is_pole:
+        south = jnp.full((halo,) + trailing, south_value, field.dtype)
+    else:
+        send_s = field[:halo].reshape(-1)
+        recv_s = sendrecv(
+            send_s, jnp.zeros_like(send_s),
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm)
+        south = recv_s.reshape((halo,) + trailing)
+
+    if north_is_pole:
+        north = jnp.full((halo,) + trailing, north_value, field.dtype)
+    else:
+        send_n = field[-halo:].reshape(-1)
+        recv_n = sendrecv(
+            send_n, jnp.zeros_like(send_n),
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm)
+        north = recv_n.reshape((halo,) + trailing)
+
+    return jnp.concatenate([south, field, north], axis=0)
+
+
+def pad_with_pole_bc_lat_2d(
+    interior: jax.Array,
+    layout: LatLon2DLayout,
+    halo: int = 1,
+    south_value: float = 0.0,
+    north_value: float = 0.0,
+) -> jax.Array:
+    """Lat-axis-ONLY wall pad for a 2-D pencil layout (NO longitude halo).
+
+    The 2-D analogue of the band
+    :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` MPI path: pad
+    only the lat axis (interior cut sendrecv + pole wall constant), leaving
+    longitude untouched.  The band path never split longitude, so its
+    wall-BC pad is lat-only; the 2-D pencil keeps that contract and the
+    operator adds lon ghosts through its own dispatched lon halo.  Routed
+    here from ``halo_latlon.pad_with_pole_bc_lat`` when the active topology
+    is a :class:`LatLon2DLayout` (wall poles only; the tripolar north fold /
+    vector-u seam is excluded upstream).  AD-safe via the shared sendrecv
+    VJP.
+    """
+    if halo <= 0:
+        return interior
+    return _pad_lat_wall_2d(interior, layout, halo, south_value, north_value)
+
+
 def pad_halo_latlon_2d(
     field: jax.Array,
     layout: LatLon2DLayout,
@@ -994,49 +1092,10 @@ def pad_halo_latlon_2d(
             f"{layout.proc_lon}); a neighbour would send/recv a mismatched "
             f"halo and the MPI exchange would abort/hang.")
 
-    trailing = field.shape[1:]
-    south_is_pole = layout.south_rank is None
-    north_is_pole = layout.north_rank is None
-
-    # Single-process lat (proc_lat==1, both poles local) without MPI:
-    # keep the path runnable serially.
-    if south_is_pole and north_is_pole:
-        south = jnp.full((halo,) + trailing, south_value, field.dtype)
-        north = jnp.full((halo,) + trailing, north_value, field.dtype)
-        ns = jnp.concatenate([south, field, north], axis=0)
-        return exchange_halo_lon(
-            ns, layout.west_rank, layout.east_rank, layout.rank, halo=halo)
-
-    import mpi4jax
-    from mpi4py import MPI
-
-    comm = MPI.COMM_WORLD
-    sendrecv = get_sendrecv_vjp(mpi4jax)
-
-    # N/S — interior sendrecv (rank-as-tag; the lat axis is a
-    # pole-terminated LINE, so this is the AD-safe pattern the 1-D band
-    # uses, NOT the ring case that needs phase tags), pole side wall.
-    if south_is_pole:
-        south = jnp.full((halo,) + trailing, south_value, field.dtype)
-    else:
-        send_s = field[:halo].reshape(-1)
-        recv_s = sendrecv(
-            send_s, jnp.zeros_like(send_s),
-            layout.south_rank, layout.south_rank,
-            layout.rank, layout.south_rank, comm)
-        south = recv_s.reshape((halo,) + trailing)
-
-    if north_is_pole:
-        north = jnp.full((halo,) + trailing, north_value, field.dtype)
-    else:
-        send_n = field[-halo:].reshape(-1)
-        recv_n = sendrecv(
-            send_n, jnp.zeros_like(send_n),
-            layout.north_rank, layout.north_rank,
-            layout.rank, layout.north_rank, comm)
-        north = recv_n.reshape((halo,) + trailing)
-
-    ns = jnp.concatenate([south, field, north], axis=0)
+    # N/S — lat-axis wall pad (interior cut sendrecv at the AD-safe
+    # rank-as-tag LINE pattern, pole side wall); shared verbatim with
+    # pad_with_pole_bc_lat_2d so the two lat exchanges stay bit-identical.
+    ns = _pad_lat_wall_2d(field, layout, halo, south_value, north_value)
     # E/W ring on the lat-padded block → fills lon ghosts + corners.
     return exchange_halo_lon(
         ns, layout.west_rank, layout.east_rank, layout.rank, halo=halo)
@@ -2616,6 +2675,114 @@ def make_latlon_mpi_step(
         # the #413 carry threading; no carry is threaded here (guarded
         # above), so unpack and return the state to preserve this
         # wrapper's documented contract.
+        state_new, _ = mpi_model._step_cgrid(
+            local_state, dt,
+            target_mass=target_mass,
+            physics_fn=physics_fn,
+        )
+        return state_new
+
+    return step_fn
+
+
+def make_latlon_2d_mpi_step(
+    model,
+    layout: LatLon2DLayout,
+    *,
+    physics_fn: Callable | None = None,
+) -> Callable:
+    """Build an MPI step for the lat-lon C-grid dycore on a 2-D pencil.
+
+    The 2-D ``(proc_lat × proc_lon)`` analogue of :func:`make_latlon_mpi_step`.
+    Identical architecture — activate the MPI halo backend once with the
+    :class:`LatLon2DLayout`, build a rank-local model with the global
+    sphere area (mass-fixer divisor) and ``pole_v_bc`` tracking which lat
+    ends touch a physical pole, then delegate each step to
+    ``model._step_cgrid`` whose backend-aware operators fetch halo data via
+    the 2-D dispatch (``pad_halo_latlon`` → :func:`pad_halo_latlon_2d`,
+    ``pad_with_pole_bc_lat`` → :func:`pad_with_pole_bc_lat_2d`,
+    ``zero_polar_lat_ends`` → the 2-D pole-touch test).
+
+    Wall poles only — a labeled midlatitude throughput benchmark, NOT the
+    atmosphere's 180° pole fold (that needs a lat-pencil transpose; see
+    ``docs/scaling/latlon_2d_build_plan.md``).
+
+    ``proc_lon == 1`` (latitude split only) is the band-EQUIVALENT layout
+    and is fully wired: the lat axis is exchanged via the 2-D dispatch and
+    longitude is full on every rank, so the operators' local longitude
+    wraps are correct.  This case reproduces :func:`make_latlon_mpi_step`
+    and is the single-process / 2×1 conservation gate.
+
+    ``proc_lon > 1`` (a genuine LONGITUDE split) is REFUSED loudly: the
+    C-grid operators still take their longitude halo with LOCAL
+    ``jnp.roll(…, axis=1)`` / wrap-column appends (e.g.
+    ``gradient_x_cgrid``, ``interp_cell_to_uface``, ``curl_vertex_cgrid`` in
+    ``operators_latlon_cgrid.py``), which wrap the rank-local lon block
+    instead of exchanging with the lon neighbour.  Routing those through the
+    dispatched lon halo (:func:`exchange_halo_lon`, bit-identical to the
+    local wrap at ``proc_lon == 1``) is the next build increment.  Until it
+    lands a lon split would SILENTLY compute wrong longitude gradients that
+    still ~conserve mass after the fixer — so we raise rather than ship a
+    silent-wrong path (the same "fail loud, not silent" doctrine as the
+    pole-fold guard in :func:`pad_halo_latlon_2d`).
+
+    Parameters / contract are otherwise identical to
+    :func:`make_latlon_mpi_step` (rank-local ``model``; ``physics_fn`` a
+    stable column-local closure; ``step_fn(local_state, dt, *,
+    target_mass=None)``).
+    """
+    if layout.proc_lon > 1:
+        raise NotImplementedError(
+            "make_latlon_2d_mpi_step: proc_lon>1 (longitude split) is not "
+            "yet wired — the C-grid operators still take their lon halo with "
+            "local jnp.roll(..., axis=1) (gradient_x_cgrid, "
+            "interp_cell_to_uface, curl_vertex_cgrid), which would wrap the "
+            "rank-local lon block instead of the lon neighbour and silently "
+            "compute wrong longitude gradients.  Use proc_lon=1 (the "
+            "band-equivalent layout) until the operator lon ops route "
+            f"through exchange_halo_lon.  Got proc_lon={layout.proc_lon}, "
+            f"proc_lat={layout.proc_lat}."
+        )
+
+    from legoesm.grids.halo import set_halo_backend
+    from legoesm.parallel.reductions import global_sum_mpi
+    from legoesm.timestepping.integration import (
+        physics_requires_phys_state,
+    )
+
+    set_halo_backend("mpi", layout)
+
+    global_total_area = global_sum_mpi(jnp.sum(model.grid.area))
+    mpi_grid = model.grid._replace(total_area=global_total_area)
+    mpi_config = model.config._replace(
+        pole_v_bc=(
+            layout.south_rank is None,
+            layout.north_rank is None,
+        ),
+        pole_v_bc_offset=0,
+    )
+    _mpi_dt = getattr(
+        model, "effective_dt",
+        getattr(model, "dt", None),
+    )
+    if _mpi_dt is None:
+        _mpi_dt = getattr(model, "_max_dt", 600.0)
+    mpi_model = type(model)(
+        grid=mpi_grid,
+        sigma_coord=model.sigma_coord,
+        config=mpi_config,
+        dt=_mpi_dt,
+    )
+
+    if physics_requires_phys_state(physics_fn):
+        raise NotImplementedError(
+            "make_latlon_2d_mpi_step does not thread the PhysicsState "
+            "carry yet, so a stateful physics_fn would silently reseed "
+            "every step (issue #405/#413).  Use a diagnostic scheme or the "
+            "ModelDriver loops, which thread the carry."
+        )
+
+    def step_fn(local_state, dt, *, target_mass=None):
         state_new, _ = mpi_model._step_cgrid(
             local_state, dt,
             target_mass=target_mass,
