@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from legoesm import constants
 from scripts.run.run_amip import build_arg_parser, build_config_from_args, _postprocess_args
 
 
@@ -101,3 +102,62 @@ def test_ic_era5_without_ic_path_fails():
     args = parser.parse_args(["--dataset", "analytical", "--ic", "era5"])
     with pytest.raises(SystemExit):
         _postprocess_args(args, parser)
+
+
+def test_issue484_new_amip_flags_flow_to_config():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--hyperdiff-scale", "1.25",
+        "--div-damp-scale", "0.75",
+        "--no-conservation-fixer",
+        "--no-fix-mass",
+        "--max-wallclock-seconds", "7200",
+        "--restart-buffer-seconds", "900",
+        "--checkpoint-format", "zarr",
+        "--seed", "123",
+        "--forcing-update-days", "2.5",
+        "--solar-s0", "1362.5",
+        "--tau-equator", "8.1",
+        "--tau-pole", "2.2",
+        "--unfused-radiation",
+        "--rrtmgp-gpoint-batch-size", "16",
+        "--volcanic-aerosol-lw",
+        "--t-ice-k", str(constants.T_freeze_ocean + 0.25),
+        "--albedo-ice", "0.7",
+        "--albedo-ocean", "0.08",
+        "--sfc-emissivity", "0.96",
+        "--emissivity-ice", "0.94",
+        "--k-bl-max-per-day", "1.5",
+        "--k-free-per-day", "0.2",
+        "--aerosol-forcing", "external",
+        "--microphysics", "morrison",
+        "--nc-from-aerosol",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.dycore.hyperdiff_scale == 1.25
+    assert cfg.dycore.div_damp_scale == 0.75
+    assert cfg.dycore.conservation_fixer is False
+    assert cfg.dycore.fix_mass is False
+    assert cfg.output.max_wallclock_seconds == 7200
+    assert cfg.output.restart_buffer_seconds == 900
+    assert cfg.output.checkpoint_format == "zarr"
+    assert cfg.seed == 123
+    assert cfg.forcing_update_days == 2.5
+    assert cfg.S_0 == 1362.5
+    assert cfg.tau_equator == 8.1
+    assert cfg.tau_pole == 2.2
+    assert cfg.unfused_radiation is True
+    assert cfg.rrtmgp_gpoint_batch_size == 16
+    assert cfg.volcanic_aerosol_lw is True
+    assert cfg.T_ice == constants.T_freeze_ocean + 0.25
+    assert cfg.albedo_ice == 0.7
+    assert cfg.albedo_ocean == 0.08
+    assert cfg.sfc_emissivity == 0.96
+    assert cfg.emissivity_ice == 0.94
+    assert cfg.k_BL_max_per_day == 1.5
+    assert cfg.k_free_per_day == 0.2
+    assert cfg.nc_from_aerosol is True
+    cfg.validate_strict()

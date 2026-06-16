@@ -26,6 +26,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -41,6 +42,10 @@ import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy.fp64())
+from legoesm.ocean.physics.vertical_mixing.config import (
+    KPPConfig,
+    VerticalMixingConfig,
+)
 
 # ===========================================================================
 # Grid types and default resolutions / timesteps
@@ -70,12 +75,58 @@ GRID_DEFAULTS: dict[str, dict] = {
 
 ALL_RESULTS: list[dict] = []
 
+_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "richardson", "constant", "none")
+_DEFAULT_KPP_CONFIG = KPPConfig()
+
+
+class OMIPRunConfig(NamedTuple):
+    """CLI-resolved run controls that are not a single ocean model config."""
+
+    max_wallclock_seconds: float
+    restart_buffer_seconds: float
+    seed: int
+    vertical_mixing: VerticalMixingConfig
+
+
+def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True when the loop should checkpoint and exit before wallclock expiry."""
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+
+
+def build_vertical_mixing_config_from_args(
+    args,
+    *,
+    default_scheme: str = "kpp",
+) -> VerticalMixingConfig:
+    """Resolve the OMIP vertical-mixing CLI flags into the physics config."""
+    scheme = args.vertical_mixing_scheme or default_scheme
+    return VerticalMixingConfig(
+        scheme=scheme,
+        kpp=KPPConfig(
+            Ri_crit=args.kpp_ri_crit,
+            K_max=args.kpp_k_max,
+            K_bg=args.kpp_k_bg,
+            K_conv=args.kpp_k_conv,
+            A_bg=args.kpp_a_bg,
+        ),
+    )
+
+
+def build_config_from_args(args) -> OMIPRunConfig:
+    """Build the CLI-resolved OMIP config fragments used by the driver."""
+    return OMIPRunConfig(
+        max_wallclock_seconds=args.max_wallclock_seconds,
+        restart_buffer_seconds=args.restart_buffer_seconds,
+        seed=args.seed,
+        vertical_mixing=build_vertical_mixing_config_from_args(args),
+    )
+
 
 # ===========================================================================
 # CLI
 # ===========================================================================
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     p = argparse.ArgumentParser(
         description="Reference OMIP simulation on all ocean grids",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -93,6 +144,12 @@ def parse_args():
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--max-wallclock-seconds", type=float, default=0.0,
+                   help="Wallclock budget [s] for clean checkpoint+exit")
+    p.add_argument("--restart-buffer-seconds", type=float, default=600.0,
+                   help="Wallclock buffer [s] reserved for restart writes")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Master RNG seed for reproducibility metadata")
     p.add_argument("--woa-t", type=str, default=None,
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
@@ -184,6 +241,24 @@ def parse_args():
                    choices=["full", "minimal", "none"])
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
+    p.add_argument("--vertical-mixing-scheme", type=str, default=None,
+                   choices=_VALID_VERTICAL_MIXING_SCHEMES,
+                   help="Override vertical mixing scheme")
+    p.add_argument("--kpp-ri-crit", type=float,
+                   default=_DEFAULT_KPP_CONFIG.Ri_crit,
+                   help="KPP critical bulk Richardson number")
+    p.add_argument("--kpp-k-max", type=float,
+                   default=_DEFAULT_KPP_CONFIG.K_max,
+                   help="KPP maximum diffusivity [m^2/s]")
+    p.add_argument("--kpp-k-conv", type=float,
+                   default=_DEFAULT_KPP_CONFIG.K_conv,
+                   help="KPP convective diffusivity [m^2/s]")
+    p.add_argument("--kpp-k-bg", type=float,
+                   default=_DEFAULT_KPP_CONFIG.K_bg,
+                   help="KPP background diffusivity [m^2/s]")
+    p.add_argument("--kpp-a-bg", type=float,
+                   default=_DEFAULT_KPP_CONFIG.A_bg,
+                   help="KPP background viscosity [m^2/s]")
     p.add_argument("--no-conservation-fixer", action="store_true")
     p.add_argument("--restoring-timescale", type=float, default=None,
                    help=(
@@ -288,7 +363,7 @@ def parse_args():
                          "K_conv=1 m²/s convection fires with surface dz<30 m "
                          "or when vertical resolution is increased.  KPP non-"
                          "local fluxes remain explicit."))
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 # ===========================================================================
@@ -331,11 +406,14 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
 # Physics config presets
 # ===========================================================================
 
-def _build_physics_config(preset: str, water_type: str):
+def _build_physics_config(
+    preset: str,
+    water_type: str,
+    vertical_mixing: VerticalMixingConfig | None = None,
+):
     """Build OceanPhysicsConfig from a preset name."""
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
-    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
@@ -346,7 +424,9 @@ def _build_physics_config(preset: str, water_type: str):
 
     if preset == "minimal":
         return OceanPhysicsConfig(
-            vertical_mixing=VerticalMixingConfig(scheme="constant"),
+            vertical_mixing=(
+                vertical_mixing or VerticalMixingConfig(scheme="constant")
+            ),
             lateral_mixing=LateralMixingConfig(scheme="harmonic"),
             surface_forcing=SurfaceForcingConfig(scheme="restoring"),
             bottom_drag=BottomDragConfig(scheme="linear"),
@@ -356,7 +436,7 @@ def _build_physics_config(preset: str, water_type: str):
 
     # "full" preset
     return OceanPhysicsConfig(
-        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+        vertical_mixing=vertical_mixing or VerticalMixingConfig(scheme="kpp"),
         lateral_mixing=LateralMixingConfig(scheme="gm_redi"),
         surface_forcing=SurfaceForcingConfig(scheme="restoring"),
         bottom_drag=BottomDragConfig(scheme="quadratic"),
@@ -386,6 +466,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
                   implicit_vertical_mixing: bool = False,
+                  vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
                   dz_ref_override=None):
     """Create grid, z_coord, config, model for any grid type.
@@ -420,6 +501,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     else:
         z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
     params = _parse_resolution(grid_type, resolution)
+    vertical_mixing = vertical_mixing or VerticalMixingConfig(scheme="kpp")
 
     # Mixing coefficients tuned per grid for equivalent effective diffusion
     # at ~5° resolution.  FV grids (cubed-sphere, latlon, MPAS) need higher
@@ -524,14 +606,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             from legoesm.ocean.physics.lateral_mixing.config import (
                 GMRediConfig, VisbeckConfig, LateralMixingConfig,
             )
-            from legoesm.ocean.physics.vertical_mixing.config import (
-                VerticalMixingConfig, KPPConfig,
-            )
             bathy_physics = OceanPhysicsConfig(
-                vertical_mixing=VerticalMixingConfig(
-                    scheme="kpp",
-                    kpp=KPPConfig(),
-                ),
+                vertical_mixing=vertical_mixing,
                 convection=OceanConvectionConfig(
                     scheme="enhanced_diffusion",
                     enhanced_diffusion=EnhancedDiffusionConfig(
@@ -638,9 +714,6 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.physics.surface_forcing.config import (
             SurfaceForcingConfig, PrescribedForcingConfig, RestoringConfig,
         )
-        from legoesm.ocean.physics.vertical_mixing.config import (
-            VerticalMixingConfig, KPPConfig,
-        )
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
         )
@@ -675,10 +748,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 
         physics = OceanPhysicsConfig(
             surface_forcing=sf_config,
-            vertical_mixing=VerticalMixingConfig(
-                scheme="kpp",
-                kpp=KPPConfig(K_conv=1.0),
-            ),
+            vertical_mixing=vertical_mixing,
             lateral_mixing=LateralMixingConfig(scheme="none"),
             bottom_drag=BottomDragConfig(scheme="none"),
             convection=OceanConvectionConfig(
@@ -751,9 +821,6 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.physics.surface_forcing.config import (
             SurfaceForcingConfig, RestoringConfig,
         )
-        from legoesm.ocean.physics.vertical_mixing.config import (
-            VerticalMixingConfig, KPPConfig,
-        )
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
         )
@@ -780,10 +847,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 
         physics = OceanPhysicsConfig(
             surface_forcing=sf_config,
-            vertical_mixing=VerticalMixingConfig(
-                scheme="kpp",
-                kpp=KPPConfig(K_conv=1.0),
-            ),
+            vertical_mixing=vertical_mixing,
             lateral_mixing=LateralMixingConfig(scheme="none"),
             bottom_drag=BottomDragConfig(scheme="none"),
             convection=OceanConvectionConfig(
@@ -2263,6 +2327,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    restoring_ramp_days: float = 0.0,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
+                   max_wallclock_seconds: float = 0.0,
+                   restart_buffer_seconds: float = 600.0,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None):
@@ -2305,6 +2371,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
         )
+    if max_wallclock_seconds > 0.0 and checkpoint_dir is None:
+        raise ValueError(
+            "_run_omip_loop: max_wallclock_seconds requires checkpoint_dir."
+        )
     _snapshot_fn = snapshot_fn
     diag: dict[str, list] = {"day": [], "step": []}
     snapshots: dict[int, dict] = {}
@@ -2332,6 +2402,26 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     t0 = time.time()
     last_print = t0
     blown_up = False
+
+    def _maybe_wallclock_exit(state, step: int, day: float) -> None:
+        if not _wallclock_exhausted(
+            time.time() - t0,
+            max_wallclock_seconds,
+            restart_buffer_seconds,
+        ):
+            return
+        fname = _save_restart(state, day, step, checkpoint_dir)
+        if _snapshot_fn is not None:
+            try:
+                _snapshot_fn(fname)
+            except Exception as e:
+                print(f"    Snapshot failed: {e}", flush=True)
+        print(
+            f"  Wallclock budget {max_wallclock_seconds:.0f}s nearly reached "
+            f"at day {day:.2f}; restart saved: {fname.name}.",
+            flush=True,
+        )
+        sys.exit(0)
 
     # ---- B2 standing-mode time diagnostic χ ----
     # χ(t) = ||η^n - ½(η^{n−1} + η^{n+1})||² / ||η^n||²  (Williams 2009).
@@ -2524,6 +2614,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     except Exception as e:
                         print(f"    Snapshot failed: {e}", flush=True)
                 print(f"    Restart saved: {fname.name}", flush=True)
+            _maybe_wallclock_exit(state, step, day)
 
         # After the block loop, jump to the post-loop tally below.
         if grid_type == "spectral":
@@ -2576,6 +2667,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         except Exception as e:
                             print(f"    Snapshot failed: {e}", flush=True)
                     print(f"    Restart saved: {fname.name}", flush=True)
+                _maybe_wallclock_exit(state, step, day)
 
         jax.block_until_ready(state.T.data)
         wall = time.time() - t0
@@ -2702,6 +2794,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 # the diag print so we don't spam.
                 if time.time() - last_print < 1.0:
                     print(f"    Restart saved: {fname.name}", flush=True)
+        _maybe_wallclock_exit(state, step, step * dt / 86400.0)
 
     if grid_type == "spectral":
         jax.block_until_ready(state.T_hat.data)
@@ -2868,6 +2961,7 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
+    run_config = build_config_from_args(args)
     # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
     # ``--resolution 16`` was applied verbatim to every grid
     # type.  Cube/spectral parsed it (silently wrong: cube
@@ -2924,6 +3018,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         no_gm_redi=getattr(args, "no_gm_redi", False),
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
+        vertical_mixing=run_config.vertical_mixing,
         forcing_mode=getattr(args, "forcing_mode", "restoring"),
     )
 
@@ -3522,6 +3617,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         "n_levels": int(z_coord.n_levels),
         "dt_seconds": float(dt),
         "days": float(args.days),
+        "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),
         "initial_condition": "woa18" if args.woa_init else "rest_state",
         "ocean_config": _namedtuple_to_dict(config),
@@ -3540,13 +3636,17 @@ def run_omip_single(grid_type: str, args) -> dict:
     # cheaper than maintaining restarts; revisit if needed).
     checkpoint_dir = None
     checkpoint_days = None
-    if jra55_state is not None and args.checkpoint_days > 0.0:
+    if (
+        (jra55_state is not None and args.checkpoint_days > 0.0)
+        or run_config.max_wallclock_seconds > 0.0
+    ):
         checkpoint_dir = Path(args.output) / grid_type / resolution / "restarts"
-        checkpoint_days = float(args.checkpoint_days)
-        print(
-            f"  Restart cadence: every {checkpoint_days:g} simulated days "
-            f"→ {checkpoint_dir}"
-        )
+        if jra55_state is not None and args.checkpoint_days > 0.0:
+            checkpoint_days = float(args.checkpoint_days)
+            print(
+                f"  Restart cadence: every {checkpoint_days:g} simulated days "
+                f"→ {checkpoint_dir}"
+            )
 
     # Build snapshot function for auto-plotting with each restart save.
     # Only for MPAS with the tripcolor/cartopy plotter; other grids use
@@ -3598,6 +3698,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         jra55_state=jra55_state,
         checkpoint_days=checkpoint_days,
         checkpoint_dir=checkpoint_dir,
+        max_wallclock_seconds=run_config.max_wallclock_seconds,
+        restart_buffer_seconds=run_config.restart_buffer_seconds,
         start_step=start_step,
         nudge_woa_tau=args.nudge_woa_tau,
         T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
