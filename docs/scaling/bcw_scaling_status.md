@@ -7,6 +7,39 @@ atmosphere baroclinic wave (dry + moist) and ocean, tracked per iteration in
 spectral/TPU), MPAS (Voronoi MPI), MOM6/E3SM (2D ocean/atm decomposition),
 CliMA (JAX GPU), Oceananigans (GPU kernel fusion).
 
+## UPDATE 2026-06-16 — multi-node UNBLOCKED (was a bug, not a fabric limit)
+
+The earlier "atm icosahedral is single-node only / at the practical limit"
+verdict was **wrong about the cause**: np>=64 across nodes deadlocked on the
+first step, which had been mis-attributed to the Gloo/PCIe fabric. It was a
+**bug** — an ASYMMETRIC Voronoi edge/vertex halo schedule. `edge_send`/
+`vert_send` were built only over cell-recv neighbours, so a rank sharing only an
+edge/vertex boundary (beyond the cell halo) never received the owned edge it
+needed and its blocking `sendrecv` hung forever (rendezvous, no cross-node eager
+buffering). Fix (commit 9247b4886): build the send candidate set over
+`neighbor_ranks ∪ owners(compute_halo_cells(rank, halo_depth+1))` so send
+mirrors recv; guarded by a host-side symmetry regression test
+(`tests/parallel/test_voronoi_schedule_symmetry.py`).
+
+**Genuine multi-node now runs** (8 ranks/node × 4 cores, res6 = 40962 cells,
+icosahedral, strong):
+
+| case | np64 (8 nodes) | np128 (16 nodes) | np64→128 |
+|---|---|---|---|
+| dry  f64 | SYPD 19.9 (43 Mc/s) | SYPD 27.0 (58 Mc/s) | 1.35× |
+| dry  f32 | SYPD 25.1 (54 Mc/s) | SYPD 26.8 (58 Mc/s) | 1.07× |
+| moist f64 | SYPD 14.6 (31 Mc/s) | SYPD 21.0 (45 Mc/s) | 1.44× |
+| moist f32 | SYPD 16.7 (36 Mc/s) | SYPD 23.6 (51 Mc/s) | 1.42× |
+
+Strong-scaling past np64 is comm-bound (the real Gloo/PCIe fabric limit — the
+267 µs `sendrecv` floor × per-step halos), as the roofline section predicts, but
+the runs are now CORRECT and complete rather than hanging. The disk mesh-cache
+(commit 49aaa133d) + rank-0-build barrier (259bf1ae2) remove the redundant
+per-rank SCVT rebuild that separately stalled setup at high rank count. The
+bottom-line "practical limit" framing below still holds for per-device
+throughput and weak efficiency; what changed is that the icosahedral grid
+decomposes across NODES for real now.
+
 ## Where each configuration stands
 
 | component / grid | multi-node path | weak E | strong E | peak Mc/s·dev | verdict |
