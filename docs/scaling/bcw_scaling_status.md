@@ -13,7 +13,7 @@ CliMA (JAX GPU), Oceananigans (GPU kernel fusion).
 |---|---|---|---|---|---|
 | **atm icosahedral** (MPAS) | CPU-MPI + GPU MPI, full ladder | **0.80** (f32) | 0.14–0.63 | **~107** | near practical limit |
 | **ocean lat-lon** (C-grid) | CPU band + GPU SPMD | **0.92** | 0.20–0.92 | ~105 | near practical limit |
-| **atm lat-lon** (FV C-grid) | CPU band only | 0.05 @128 | 0.04–0.11 | ~49 | band-starved at high np (see 2D) |
+| **atm lat-lon** (FV C-grid) | CPU band + 2-D pencil | 0.05 @128 (band) | 0.04–0.11 | ~49 | band is **fabric-optimal on Gloo**; 2-D built+validated but loses here (latency-bound, see below) |
 | **atm cubed-sphere** (FV3) | SPMD ≤6/node | — | — | ~46 (1 dev) | single-node only |
 | **atm spectral** | none | — | — | — | single-device (no MPI) |
 
@@ -35,7 +35,23 @@ the largest resolution with ≥2 device points.)
 
 - **atm lat-lon**: the 1D latitude-band decomposition starves at high rank
   count (each rank gets few lat rows; halo perimeter dominates → weak E 0.05 at
-  128 ranks). The SOTA fix is a 2D pencil decomposition (MOM6/E3SM). See below.
+  128 ranks). The SOTA fix is a 2D pencil decomposition (MOM6/E3SM) — now
+  **built, validated, and measured** (below). **Verdict: on this Gloo/PCIe
+  fabric the band is OPTIMAL and the 2-D pencil LOSES.** The band keeps
+  longitude LOCAL (ZERO lon messages — only N/S, one *direction*); the 2-D
+  pencil adds an E/W direction. On a latency-bound fabric the 267 µs sendrecv
+  floor dominates the payload (even a full-lon N/S message is ~343 µs ≈ one
+  floor), so the minimum-message-DIRECTION decomposition wins: band (1
+  direction) beats 2-D (2 directions) **regardless of np or fusion**. Measured
+  (job 8503081, strong res=64 f64): 2-D vs band SYPD np4 3.38/3.31, np8
+  2.95/4.05, np16 0.47/2.22. The np16 4.7× gap is inflated by the current
+  UNFUSED per-operator `exchange_halo_lon` (one lon exchange per lon-padding
+  op); a lon-halo fusion (one exchange/step) would narrow it to ~1.5× (the
+  single extra E/W floor) but NOT flip the verdict — 2 directions still lose to
+  1 when latency ≫ bandwidth. **The 2-D pencil wins only when payload ≫ latency
+  (RDMA/InfiniBand, or very high resolution) — the same fabric wall the roofline
+  already identified.** So atm-lat-lon is fabric-bound like the others; the band
+  is its fabric-optimal decomposition on Ginsburg.
 
 ## Levers evaluated this campaign
 
@@ -49,15 +65,24 @@ the largest resolution with ≥2 device points.)
 
 ## Remaining gaps = architectural projects (not quick levers)
 
-1. **atm lat-lon 2D pencil decomposition.** The 2D *layout* + halo primitives +
-   transpose + AD are built and tested (`LatLon2DLayout`, `exchange_halo_lon`,
-   `pad_halo_latlon_2d`, `tests/parallel/test_latlon_2d_*`,
-   `tests/distributed/test_latlon_2d_pad_wall_mpi.py`). **Blocker**:
-   `pad_halo_latlon_2d` supports only **wall poles** (ocean); the atmosphere's
-   180° pole-fold under a longitude split needs a lat-pencil transpose to gather
-   full-longitude at the pole (`NotImplementedError` today). Estimated
-   +200–300 LOC + MPI conservation tests. Ocean (wall poles) could use 2D but
-   does not need it (band weak E already 0.92).
+1. **atm lat-lon 2D pencil decomposition — BUILT + VALIDATED + MEASURED
+   (task #14 done).** Full wall-pole 2-D C-grid step: `LatLon2DLayout`,
+   `pad_halo_latlon_2d`, `exchange_halo_lon`, the operator lon-op conversion
+   (`pad_lon_cgrid`: gradient_x / interp_uface / curl-v / mask ops +
+   `absolute_vorticity_coriolis`), u-face scatter/gather convention,
+   `make_latlon_2d_mpi_step`, and the `run_cpu_mpi_scaling --latlon-2d` harness.
+   Validated: dycore gate `test_latlon_2d_mpi_step.py` (2×2 == 1×4, mass
+   < 1e-12, decomposition-invariant) + operator equivariance np={2,3,6} + codex
+   (multiple rounds). **Result: the band is fabric-optimal on Gloo; the 2-D
+   pencil loses here** (latency-floor analysis above — 2 message directions
+   can't beat 1 when latency ≫ bandwidth). Remaining (fabric-gated, like the
+   GPU-multi infra block): (a) the 2-D win requires RDMA/InfiniBand — re-measure
+   there to demonstrate it; (b) a lon-halo FUSION would narrow the Gloo gap
+   4.7×→~1.5× but not flip it (deferred — no Gloo payoff); (c) the atmosphere's
+   180° pole-FOLD under a lon split still needs a lat-pencil transpose
+   (`pole_bc="fold"` raises; the shipped path is wall-pole only — a labeled
+   midlatitude throughput benchmark, NOT atm-pole-correct). Ocean (wall poles)
+   could use 2-D but does not need it (band weak E already 0.92).
 2. **cubed-sphere multi-device.** No SPMD sub-face tiling beyond 6 faces;
    separate capability (see prior `omip_tiled_d2a2c_kernels` work).
 3. **spectral moist + MPI.** Spectral has no tracer storage (no moist) and no
