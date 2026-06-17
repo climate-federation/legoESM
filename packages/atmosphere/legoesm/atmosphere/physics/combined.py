@@ -217,6 +217,39 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     )
 
 
+def _attach_lifecycle_hooks(physics_fn, tagged_fns):
+    """Attach reset_state / set_time / set_T_sfc_override propagation hooks.
+
+    Each hook forwards to every sub-physics fn in ``tagged_fns`` that
+    advertises the matching attribute (radiation honours all three;
+    turbulence reads T_sfc from PhysicsState).  Shared by the hydrostatic,
+    non-hydrostatic and spectral combined builders — pure Python attribute
+    wiring that runs outside JIT/AD.  Returns ``physics_fn`` for chaining.
+    """
+    def reset_state():
+        for fn, _, _ in tagged_fns:
+            reset_fn = getattr(fn, "reset_state", None)
+            if callable(reset_fn):
+                reset_fn()
+
+    def set_time(day_of_year: float, seconds_of_day: float):
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_time", None)
+            if callable(st):
+                st(day_of_year, seconds_of_day)
+
+    def set_T_sfc_override(value):
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
+    physics_fn.reset_state = reset_state
+    physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
+    return physics_fn
+
+
 # ======================================================================
 # Hydrostatic
 # ======================================================================
@@ -383,37 +416,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        """Propagate time to all sub-physics modules (e.g. radiation)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics that honour
-        the hook (currently radiation; turbulence reads from PhysicsState).
-
-        Called by the single-column driver when
-        ``SCMForcing(prescribe="T_s")`` so the radiative surface
-        boundary stays in sync with turbulence's bulk-flux boundary
-        (Phase B v2 codex iter-2 finding).
-        """
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
-    return physics_fn
+    return _attach_lifecycle_hooks(physics_fn, tagged_fns)
 
 
 # ======================================================================
@@ -523,30 +526,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics radiation
-        modules (SCM Phase B v2)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
-    return physics_fn
+    return _attach_lifecycle_hooks(physics_fn, tagged_fns)
 
 
 # ======================================================================
@@ -713,29 +693,7 @@ def _make_spectral_pe_combined(
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics radiation
-        modules (SCM Phase B v2)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
+    physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
     # Marker: the combined fn consumes a per-step traced ``forcing``
     # dict when any sub-physics advertises ``_wants_forcing`` (currently
     # the spectral_pe radiation factory: T_sfc/o3_vmr/aerosol_od/ghg_vmr).
