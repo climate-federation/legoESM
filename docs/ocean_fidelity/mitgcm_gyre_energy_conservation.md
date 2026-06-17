@@ -48,42 +48,55 @@ So the source is **gradient-/grid-scale-activated** — negligible on smooth fie
 grid-scale structure appears. Spin-up from rest excites those modes and legoESM runs to a
 turbulent attractor while MITgcm stays laminar.
 
-The decisive localization: the semi-discrete source `dE/dt` is **byte-identical** (`+5.2518e5`,
-6 sig figs) under **upwind, centered, and vector-invariant** momentum advection. Advection
-contributes *exactly nothing*; Coriolis is energy-neutral. By elimination the source is the one
-remaining common element — the **barotropic free-surface predictor–corrector**:
+Localization, step 1 — advection-independent: the semi-discrete source `dE/dt` is **byte-identical**
+(`+5.2518e5`, 6 sig figs) under **upwind, centered, and vector-invariant** momentum advection.
+Advection contributes *exactly nothing*.
 
-> legoESM operator-splits the single layer into a "slow" explicit predictor (advection, FB
-> Coriolis, old-η PGF, forcing) followed by an **implicit free-surface solve** that projects the
-> predicted transport onto the balanced/continuity-satisfying state. That projection is **not
-> energy-orthogonal**: it injects KE+PE at a rate that scales with the divergent (gravity-wave)
-> content of the field. A projection error is exactly `dt`-independent and gradient-activated —
-> matching every measurement above.
+Localization, step 2 — it is the **Coriolis ⟷ implicit-free-surface coupling**. Re-running the
+inviscid + unforced semi-discrete `dE/dt` with **`f=0`** (no Coriolis) gives **exactly machine-zero**
+(`dE/dt = 0.0`); with the real β-plane `f` it is `+5.24e5`. So:
 
-This is the one structure **MITgcm does not have**: MITgcm is **unsplit** for a single layer —
-one symmetric elliptic `cg2d` free-surface solve whose discrete gradient/divergence pair is
-adjoint *by construction*, so the free-surface KE↔PE exchange conserves energy. legoESM's split
-predictor (explicit `gradient_*_cgrid`) + corrector (`divergence_cgrid` in the elliptic RHS) does
-not preserve that adjointness on a closed basin (`gradient_x_cgrid` also assumes periodic
-longitude, while the gyre is a closed box).
+> The free-surface projection *by itself* conserves energy exactly (the discrete grad/div pair is
+> adjoint for the actual masked flow — `f=0` proves it). The spurious source appears only when
+> there is **Coriolis-induced divergent flow** for the implicit free-surface step to project. The
+> Coriolis term is itself energy-neutral (`∫u·(f k×u)=0` to machine precision), but the **sequence
+> "apply explicit Coriolis → project onto the free-surface-balanced state"** is not energy-
+> conserving in legoESM's C-grid implicit solver. The error is `dt`-independent (semi-discrete) and
+> scales with the field's divergent content — hence gradient/grid-scale-activated.
 
-## The fix (scoped — NOT an Arakawa momentum scheme)
+This is the one structure **MITgcm does not have**: MITgcm is **unsplit** for a single layer and
+its specific explicit-Coriolis → `cg2d` sequencing keeps the laminar Munk gyre at 0.031.
 
-Make the **barotropic free-surface scheme energy-conserving**, one of:
+**Verified NOT the fix (this session):** moving Coriolis out of the solver's forward-backward
+predictor into the AB2 explicit tendency `F_slow` (`coriolis_scheme="explicit_ab2"`, the solver's
+FB-Coriolis gated off) leaves the leak **byte-identical** (`+5.2429e5`) — the placement of the
+explicit Coriolis (FB vs AB2-`F_slow`) does not matter, because either way the Coriolis-induced
+divergence is what the projection mishandles. Likewise an "unsplit single-layer path" built on the
+existing implicit solver does **not** help: with the recipe's `θ_eta=θ_pgf=1.0` the predictor's
+old-η PGF cancels *exactly* (in both the corrector and the η-equation), so the θ=1 implicit-CN solve
+is **already algebraically the unsplit fully-implicit free surface** — and it still leaks. The
+leak is intrinsic to how the C-grid implicit free-surface step balances the Coriolis-driven flow.
 
-1. **Energy-conserving split predictor–corrector** — choose the corrector projection so the
-   discrete `KE + ½g∫η²` is conserved by the free-surface exchange (discretely-adjoint
-   gradient/divergence with the closed-basin boundary, consistent time-weighting). Targeted fix
-   in `barotropic_implicit_latlon_cgrid.py` + the `gradient_*`/`divergence_cgrid` metric.
-2. **Unsplit single-layer path** — one implicit free-surface solve on the full momentum tendency,
-   matching MITgcm exactly (the oracle-faithful option; larger change).
+Symptom severity: bridging MITgcm's laminar 0.031 equilibrium into legoESM and integrating, legoESM
+**cannot hold it** — `|u|max` drifts 0.031 → 0.11 (and climbing) toward the turbulent attractor.
 
-What the fix is **not**: an Arakawa/Sadourny energy-conserving *Coriolis* (already energy-neutral)
-or *enstrophy-conserving advection* (provably irrelevant — the source is byte-identical across all
-advection schemes, and MITgcm's own flux-form advection is not energy-conserving yet stays laminar).
+## The fix (scoped — a real dycore task, NOT a config/wiring change)
+
+Make the **C-grid implicit free-surface step conserve total energy in the presence of Coriolis** —
+i.e. an energy-conserving coupling of the (energy-neutral) Coriolis operator with the free-surface
+projection, so the discrete `KE + ½g∫η²` is conserved when `f≠0`. This is genuinely a dycore
+problem (the projection of the Coriolis-divergent flow must be energy-orthogonal), and the
+oracle-faithful target is MITgcm's unsplit explicit-Coriolis → `cg2d` sequencing.
+
+What the fix is **NOT** (all ruled out by measurement): an Arakawa/Sadourny energy-conserving
+*Coriolis* (already energy-neutral); *enstrophy-conserving advection* (byte-identical source across
+all advection schemes; MITgcm's own flux-form isn't conserving yet stays laminar); a *time-scheme*
+change (source converges as `dt→0`); the *PGF/free-surface split* (`f=0` conserves exactly, and θ=1
+is already unsplit-equivalent); or the *explicit-Coriolis placement* (FB vs AB2 identical).
 
 The regression test `tests/ocean/unit/test_barotropic_energy_conservation.py` pins the inviscid-
-unforced KE growth so the fix has a target to drive to ~0.
+unforced KE growth so the fix has a target to drive to ~0. NOTE its IC carries `f≠0`; an `f=0`
+control conserves to machine zero and could be added to bracket the defect.
 
 ## Reproduce
 

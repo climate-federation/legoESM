@@ -6,16 +6,20 @@ energy (KE + ½g∫η²) exactly. A faithful discretization must too.
 
 This pins the root cause of the MITgcm barotropic-gyre oracle's residual. Direct
 measurement (see docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md) localized
-the spurious, dt-independent energy injection to the **barotropic free-surface
-predictor-corrector projection** in the operator-split solver — NOT the momentum
-scheme: the Coriolis is already energy-neutral (machine-zero work), and the
-semi-discrete source is byte-identical across upwind / centered / vector-invariant
-advection (advection contributes nothing). Against MITgcm's near-frictionless gyre
-equilibrium the injection drives the gyre turbulent (|u|max 0.15-0.37 vs 0.031).
+the spurious, dt-independent energy injection to the **Coriolis ⟷ implicit-free-
+surface-projection coupling** — NOT the momentum scheme: the source is byte-identical
+across upwind / centered / vector-invariant advection (advection contributes
+nothing), the Coriolis operator is itself energy-neutral (machine-zero work), the
+free surface alone conserves exactly (f=0 -> machine-zero dE/dt), yet the sequence
+"explicit Coriolis -> project onto the free-surface-balanced state" injects energy
+when f != 0. Moving Coriolis between the FB-predictor and the AB2 F_slow leaves the
+leak byte-identical (placement-independent). Against MITgcm's near-frictionless gyre
+equilibrium the injection drives the gyre turbulent (|u|max 0.15-0.37 vs 0.031);
+legoESM cannot even hold MITgcm's bridged 0.031 equilibrium (drifts to 0.11+).
 
-The test is xfail until an energy-conserving barotropic free-surface scheme lands
-(an energy-orthogonal split projection, or an unsplit single-layer path matching
-MITgcm's symmetric elliptic free surface); when it does, this flips to a guard.
+The test is xfail until the C-grid implicit free-surface step conserves total energy
+in the presence of Coriolis (a dycore fix; the oracle-faithful target is MITgcm's
+unsplit explicit-Coriolis -> cg2d sequencing); when it does, this flips to a guard.
 """
 
 from __future__ import annotations
@@ -88,10 +92,11 @@ def _ke(s):
 
 
 @pytest.mark.xfail(
-    reason="known root cause: barotropic free-surface predictor-corrector "
-    "projection is not energy-conserving (spurious dt-independent KE injection; "
-    "advection-independent, Coriolis is neutral). Pending an energy-conserving "
-    "free-surface scheme; see "
+    reason="known root cause: the Coriolis<->implicit-free-surface-projection "
+    "coupling is not energy-conserving (spurious dt-independent KE injection; "
+    "advection-independent; Coriolis neutral and free surface alone conserves, "
+    "but explicit-Coriolis-then-project injects when f!=0). Pending a dycore fix "
+    "to the C-grid implicit free-surface step; see "
     "docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md",
     strict=False,
 )
