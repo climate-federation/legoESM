@@ -74,6 +74,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
     flux_divergence_viscosity_cgrid,
+    no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
     is_tripolar,
     lat_ends_are_poles,
@@ -150,6 +151,9 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
+# at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
+VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
 # Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
 # (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
 # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
@@ -2258,6 +2262,22 @@ def _bc_horizontal_viscosity(
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
+
+    # No-slip lateral walls (MITgcm no_slip_sides): ADD the wall side-drag on top
+    # of the (free-slip) harmonic flux operator, exactly as MITgcm adds
+    # MOM_U_SIDEDRAG on top of MOM_U_DEL2U. Free-slip (the default) adds nothing.
+    _side_bc = getattr(config, "lateral_side_bc", "free_slip")
+    if _side_bc not in VALID_LATERAL_SIDE_BC:
+        raise ValueError(
+            f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
+            f"got {_side_bc!r}"
+        )
+    if _side_bc == "no_slip" and config.A_h > 0:
+        du_drag, dv_drag = no_slip_sidedrag_cgrid(
+            u, v, grid, config.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
+        du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
+        du_dt = du_dt + du_drag
+        dv_dt = dv_dt + dv_drag
 
     if config.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(

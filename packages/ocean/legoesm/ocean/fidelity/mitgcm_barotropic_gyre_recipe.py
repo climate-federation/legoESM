@@ -142,10 +142,11 @@ def build_gyre_config(
     * ``lateral_viscosity_operator="flux_divergence"`` — MITgcm's component-wise
       ``div(A_h grad u)`` flux form, not the default vector-Laplacian.
 
-    KNOWN remaining gap (needs new code, not config): MITgcm uses NO-SLIP
-    sidewalls (``no_slip_sides=.TRUE.``, ``sideDragFactor=2``); legoESM has only
-    free-slip. This sets the equilibrium Munk layer / gyre transport but is
-    inactive over a 10-step spin-up (the boundary layer has not formed).
+    * ``lateral_side_bc="no_slip"`` — MITgcm ``no_slip_sides=.TRUE.``
+      (``sideDragFactor=2``): the wall side-drag ``-(2/Δ)·A_h·u_tangential``
+      (``mom_u_sidedrag``/``mom_v_sidedrag``). Sets the equilibrium Munk layer /
+      gyre transport; inactive over a 10-step spin-up (the boundary layer has
+      not yet formed) but required for the equilibrated (multi-year) run.
     """
     return LatLonCGridOceanConfig(
         g=G_BARO,
@@ -158,6 +159,7 @@ def build_gyre_config(
         A_h=VISC_AH,
         A_h_lat_scaling=False,
         lateral_viscosity_operator="flux_divergence",
+        lateral_side_bc="no_slip",
         B_h=0.0,
         C_smag=0.0,
         # No bottom drag, no eddy params, no vertical mixing (single layer).

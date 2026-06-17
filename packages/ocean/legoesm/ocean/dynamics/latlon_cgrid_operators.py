@@ -997,6 +997,88 @@ def flux_divergence_viscosity_cgrid(
     return visc_u, visc_v, kdiss_h_cell
 
 
+def no_slip_sidedrag_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    A_h: float,
+    *,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""MITgcm no-slip lateral side-drag (``mom_u_sidedrag`` / ``mom_v_sidedrag``).
+
+    The free-slip lateral-viscosity operators (``vector_laplacian_cgrid`` /
+    ``flux_divergence_viscosity_cgrid``) zero the viscous flux across a wall face,
+    i.e. impose ``∂(tangential u)/∂n = 0`` (free-slip). MITgcm's default
+    ``no_slip_sides=.TRUE.`` instead imposes zero tangential velocity at the wall,
+    which adds a drag body force from the wall stress (``mom_u_sidedrag.F``)::
+
+        G^u_drag = -(2/Δy) A_h u   at u-cells touching a meridional (N/S) wall
+        G^v_drag = -(2/Δx) A_h v   at v-cells touching a zonal     (E/W) wall
+
+    Discretely (``sideDragFactor=2``), per CLOSED side
+    ``closed = hFacW − hFacZ = face_open·(1 − vertex_open)``::
+
+        du_drag[j,i] = -(closedS + closedN) · 2 A_h u[j,i] / dy_u[j,i]²
+        dv_drag[j,i] = -(closedW + closedE) · 2 A_h v[j,i] / dx_v[j,i]²
+
+    with the wall corners from :func:`compute_vertex_mask` (vertex ``(J,I)``
+    touches cells ``(J-1,I-1),(J-1,I),(J,I-1),(J,I)``): u-point ``(j,i)`` has south
+    vertex ``vmask[j,i]`` / north ``vmask[j+1,i]``; v-point ``(j,i)`` has west
+    ``vmask[j,i]`` / east ``vmask[j,i+1]``. This is the wall-tangential viscous
+    stress ``A_h·(u−0)/(Δy/2)`` distributed over the cell width ``Δy``. **This is
+    ADDED to** (not a replacement for) the free-slip flux operator, exactly as
+    MITgcm adds ``MOM_U_SIDEDRAG`` on top of ``MOM_U_DEL2U``.
+
+    Exact for uniform-Cartesian grids (the beta-plane oracle regime, where
+    ``dy_u``/``dx_v`` are constant and ``rAw = dx·dy``). Returns ``(du_drag,
+    dv_drag)`` at the u-/v-faces, masked.
+
+    Boundary note: :func:`compute_vertex_mask` zeros the north/south polar vertex
+    rows (the standard pole wall BC), so a meridional domain boundary is treated
+    as a wall and its edge u-row receives the side-drag even with no explicit
+    land — correct for a bounded/closed basin (the gyre), but a y-periodic domain
+    should keep ``lateral_side_bc="free_slip"``.
+    """
+    if not (hasattr(grid, "dy_u") and hasattr(grid, "dx_v")):
+        raise ValueError(
+            "no_slip_sidedrag_cgrid requires a LatLonCGridGeometry with dy_u/dx_v "
+            "metric fields (call ensure_geometry on the grid first)."
+        )
+    if mask is None and vertex_mask is None:
+        raise ValueError("no_slip_sidedrag_cgrid needs either mask or vertex_mask")
+    vmask = vertex_mask if vertex_mask is not None else compute_vertex_mask(mask, grid=grid)
+    vmask = vmask.astype(u.dtype)
+
+    is_3d = u.ndim == 3
+
+    def _b(a, like):
+        return a[..., jnp.newaxis] if (is_3d and a.ndim == like.ndim - 1) else a
+
+    # --- u side-drag: closed N/S sides (a meridional wall above/below) ---
+    v_south = vmask[:-1, :]      # (n_lat, n_lon+1): south vertex of u-point (j,i)
+    v_north = vmask[1:, :]       # (n_lat, n_lon+1): north vertex
+    closed_s = u_mask * (1.0 - v_south)
+    closed_n = u_mask * (1.0 - v_north)
+    inv_dy2_u = 1.0 / (grid.dy_u.astype(u.dtype) ** 2)
+    du_drag = -(2.0 * A_h) * _b(closed_s + closed_n, u) * u * _b(inv_dy2_u, u)
+    du_drag = du_drag * _b(u_mask, du_drag)
+
+    # --- v side-drag: closed E/W sides (a zonal wall to left/right) ---
+    v_west = vmask[:, :-1]       # (n_lat+1, n_lon): west vertex of v-point (j,i)
+    v_east = vmask[:, 1:]        # (n_lat+1, n_lon): east vertex
+    closed_w = v_mask * (1.0 - v_west)
+    closed_e = v_mask * (1.0 - v_east)
+    inv_dx2_v = 1.0 / (grid.dx_v.astype(v.dtype) ** 2)
+    dv_drag = -(2.0 * A_h) * _b(closed_w + closed_e, v) * v * _b(inv_dx2_v, v)
+    dv_drag = dv_drag * _b(v_mask, dv_drag)
+
+    return du_drag, dv_drag
+
+
 def vector_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
