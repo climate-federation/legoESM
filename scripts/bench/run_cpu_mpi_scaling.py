@@ -103,21 +103,31 @@ def _configure_jax_gpu(precision: str) -> None:
     (bench_ocean_mpi_scaling.py) so the atm lat-lon dycore gets a 2-GPU
     number via the proven overlay-venv route-A (cuda jax + CUDA-built
     mpi4jax)."""
-    local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
-    if local is None:
-        # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
-        # srun); pinning on it THERE hides all but GPU 0 from a single-process
-        # multi-GPU run (the documented silent eff=0.5 bug, jobs 8454397/
-        # 8454737). Only honor it for a genuine multi-task launch (codex
-        # capstone LOW).
-        slid = os.environ.get("SLURM_LOCALID")
-        nt = os.environ.get("SLURM_NTASKS", "1")
-        if slid is not None and nt.isdigit() and int(nt) > 1:
-            local = slid
-    if local is None:
-        local = "0"
-    os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU per rank
+    # RESPECT an EXPLICIT CUDA_VISIBLE_DEVICES (set by the launcher's per-task
+    # binding, or deliberately e.g. "0,1" for a single-process MULTI-GPU SPMD
+    # run): re-deriving it from the local rank would either DOUBLE-restrict a
+    # per-task binding (hiding the bound GPU -> "no supported devices for CUDA")
+    # or pin a single-process run to one GPU (the documented eff=0.5 bug). Only
+    # auto-pin from the local rank when CVD was NOT explicitly provided. NOTE:
+    # the warning below about SLURM_LOCALID is about AUTO-pinning, not an
+    # explicit CVD, so honoring an explicit CVD here is safe.
+    # (JAX_PLATFORMS / x64 / prealloc below run either way.)
+    _existing_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not _existing_cvd:
+        local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+                 or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+        if local is None:
+            # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
+            # srun); pinning on it THERE hides all but GPU 0 from a single-
+            # process multi-GPU run (the documented silent eff=0.5 bug, jobs
+            # 8454397/8454737). Only honor it for a genuine multi-task launch.
+            slid = os.environ.get("SLURM_LOCALID")
+            _nt = os.environ.get("SLURM_NTASKS", "1")
+            if slid is not None and _nt.isdigit() and int(_nt) > 1:
+                local = slid
+        if local is None:
+            local = "0"
+        os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU per rank
     os.environ["JAX_PLATFORMS"] = "cuda"
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
@@ -1260,22 +1270,12 @@ def main() -> int:
             print(json.dumps(asdict(c)))
         return 0
 
-    # --- Configure JAX for the target device ---
+    # --- Configure JAX for the target device (ENV only; no backend init) ---
+    # The GPU "is the backend really CUDA?" assertion is DEFERRED to after the
+    # --cs-spmd jax.distributed.initialize() below: that init must precede ANY
+    # call that brings up the XLA backend, and jax.default_backend() does.
     if getattr(args, "device", "cpu") == "gpu":
         _configure_jax_gpu(args.precision)
-        # Fail LOUD on CUDA fallback: without this, a GPU job whose CUDA init
-        # failed (or that forgot --device gpu so _configure_jax_cpu pinned
-        # JAX_PLATFORMS=cpu) silently records CPU numbers labeled as GPU
-        # (bug: the whole g1..g16 ladder ran on CPU).  Refuse to mislabel.
-        import jax as _jax
-        _bk = _jax.default_backend()
-        if _bk != "gpu":
-            raise SystemExit(
-                f"--device gpu requested but JAX default backend is {_bk!r} "
-                f"(CUDA unavailable / not bound). Refusing to record "
-                f"CPU-fallback numbers as GPU. Check CUDA_VISIBLE_DEVICES / "
-                f"the cuda jax plugin on this node."
-            )
     else:
         _configure_jax_cpu(args.precision)
 
@@ -1313,6 +1313,22 @@ def main() -> int:
             "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
         if _nproc > 1:
             _jax.distributed.initialize()
+
+    # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
+    # Now safe to touch the backend: jax.distributed.initialize() (if any) has
+    # run.  Fail LOUD on CUDA fallback so a GPU job that silently ran on CPU
+    # (CUDA init failed / not bound) can never record CPU numbers labeled GPU
+    # (the original g1..g16-ran-on-CPU bug).  Applies to single-GPU and cs-spmd.
+    if getattr(args, "device", "cpu") == "gpu":
+        import jax as _jax_bk
+        _bk = _jax_bk.default_backend()
+        if _bk != "gpu":
+            raise SystemExit(
+                f"--device gpu requested but JAX default backend is {_bk!r} "
+                f"(CUDA unavailable / not bound). Refusing to record "
+                f"CPU-fallback numbers as GPU. Check CUDA_VISIBLE_DEVICES / "
+                f"the cuda jax plugin on this node."
+            )
 
     # --- MPI init ---
     rank, n_ranks = _init_mpi()
