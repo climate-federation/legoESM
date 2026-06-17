@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 29):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). iter 27–28 add the **cubed-sphere** column-forcing extractor + grid dispatcher and wire it into the LES spin-off; iter 29 adds the **geostrophic-wind forcing** (lat-lon, two-term σ-PGF) and wires it into the column LES as the plane Coriolis reference wind (cubed-sphere geostrophic deferred pending a metric-correct rotation). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5, multi-day AMIP/CMIP + many-LES) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring, cubed-sphere geostrophic rotation, and Gaussian/Voronoi extractors.
+**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30 adds the time-mean `ColumnState` accumulator for climatological (vs instantaneous) AMIP-vs-ERA5 comparison. **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run — not unit-testable here — plus `diag_days=0.25` run wiring, cubed-sphere geostrophic rotation, and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -26,58 +26,44 @@
 > (double-where masked divisions, gradient-safe sqrt); dispatch raises on unknown;
 > mandatory Codex adversarial-review loop to clean before commit.
 >
-> | 4 / #3 grid-side forcing extractor (lat-lon) | `atmosphere/dynamics/column_large_scale_extract.py` (`extract_column_forcing_latlon`: ω from continuity, −V·∇θ/−V·∇q advection → `ColumnLargeScaleState`) | 10 |
-> | 4 / #4 1.5-order TKE SGS closure | `atmosphere/dynamics/tke_sgs_plane.py` (Deardorff/Lilly: ν_t=C_k ℓ√e, ε, Pr_t, TKE tendency, equilibrium↔Smagorinsky `C_s=(C_k³/C_ε)¼≈0.19`) | 11 |
-> | 5 LES regime selection | `atmosphere/dynamics/les_regime.py` (`les_resolution_for_column`: CAPE→shallow/deep dispatch + per-regime plane-LES resolution; raise on unknown/non-finite/invalid box) | 12 |
-> | 5 LES vertical mapping | `atmosphere/dynamics/les_vertical_mapping.py` (`interpolate_column_to_les`, `top_relaxation_rate` reusing `sponge_profile`, `relaxation_tendency`, `build_top_relaxation`) | 13 |
-> | 6 LES→coefficient composition | `atmosphere/dynamics/column_les_diagnosis.py` (`diagnose_column_coefficient`: dispatch eddy-K / entrainment-w_e; top-down→ascending reversal of fluxes+gradient) | 14 |
-> | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→`diagnose`; `process_column`/`extract_gcm_column`/`run_column_les_pipeline`; real `main` loops the manifest) | 15 |
-> | 7 LES diagnoses→feedback field | `training/feedback_assembly.py` (`reduce_column_diagnosis` K-profile→scalar / w_e; `assemble_feedback_field` scatters at worst-column flat indices) | 16 |
-> | verify bias↓ (success metric) | `training/bias_metrics.py` (`aggregate_combined_bias` area-weighted; `bias_improvement` baseline-vs-updated; `worst_column_bias_change`) | 17 |
-> | 7 per-scheme promotion | `training/promotable_params.py` (`apply_feedback_to_scheme`: registry of (ncol,)-capable coefficients; gray `tau_equator`/`tau_pole` promoted end-to-end, NO body change) | 18 |
-> | CLOSED LOOP orchestrator | `training/correction_loop.py` (`run_correction_iteration`: compare→LES-diagnose→assemble→apply→re-compare→`bias_improvement`; heavy AMIP/LES steps injected; empty-manifest no-op) | 19 |
-> | REAL-dycore integration test + moist-IC fix | `tests/run/test_run_column_les.py::test_process_column_real_dycore_integration` runs the actual plane-NH LES (mock-free); caught + fixed `run_forced_les` carrying no moisture (now seeds GCM q_v on the LES grid → `ColumnLESSetup.q_v_init`) | 20 |
-> | real-comparison loop adapter | `correction_loop.make_compare_fn` wraps the REAL `compare_state_to_reference` into the loop's `compare_fn` (only the AMIP/CMIP model run injected); loop now closes with real scoring+manifest, not a mocked score field | 21 |
-> | AMIP **and CMIP** mode bridge | `compare_reanalysis.column_state_from_hydrostatic` (driver `HydrostaticState`→`ColumnState`, unwraps `Field`s; mode-agnostic, SST = prescribed/coupled); fixed a latent `Field`-not-unwrapped bug also in iter-4 `model_state_from_restart` (now delegates) | 22 |
-> | REAL coupled-run (CMIP) → compare smoke | `tests/run/test_cmip_compare_integration.py` runs a real `CoupledESMDriver` (slab-ocean aquaplanet, C8/L5, 1 day) and feeds its actual atmosphere state + coupled SST through the real compare → finite scores + worst-column manifest (the AMIP/CMIP half, mock-free; complements iter-20's real-LES half) | 23 |
-> | PHYSICALLY-coherent promotion | `_shared.broadcast_column_param` enabler + `clubb_lite` `C_K` wrapped (`K_m=C_K·l·√wp2`); the LES eddy-diffusivity diagnosis now maps onto a real GCM turbulence coefficient per-column, scalar path BYTE-identical (registered `clubb_lite_C_K`) | 24 |
-> | iterative multi-round campaign | `correction_loop.run_correction_campaign` (N rounds, threads config + ACCUMULATES the feedback field — round-k field is round-(k+1) background; `scatter_column_field` gained array-background support) → the §1 offline iterative loop | 25 |
-> | FULL mock-free end-to-end gate | `tests/run/test_correction_e2e_integration.py` composes BOTH heavy real paths in one test: real lat-lon `CoupledESMDriver` (CMIP) → real `compare_state_to_reference` (1-column +6 K synthetic-ERA5 bias → deterministic worst column) → real plane-NH LES `process_column`/`run_forced_les` → eddy-K diagnosis → `assemble_feedback_field` → `apply_feedback_to_scheme` onto real `clubb_lite_C_K`. NON-VACUOUS: asserts ≥1 valid, strictly-positive diagnosed K (PRNGKey(0)-deterministic, 3/7 valid, Kmax≈0.48) and that the worst column moves off the uniform `C_K` background; exercises the `expected_ncol` splice guard | 26 |
-> | CUBED-SPHERE column extractor (native model grid) | `column_large_scale_extract.extract_column_forcing_cubed_sphere` mirrors the lat-lon extractor for the flagship dycore grid: ω (continuity) + θ/q advective tendencies on `(6,n,n,nlev)`, reusing the grid-agnostic `omega_from_divergence` + `advective_tendency` and the **4D-native** `operators_3d.gradient_x/y_3d`/`divergence_3d` (one 4D halo exchange, NO `vmap(pad_halo)` — AD/MPI-correct per CLAUDE.md). New `extract_column_forcing` dispatcher routes by grid type + validates `col_index` arity, raises on unsupported grid. Tests: uniform→zero, constant-scalar+nonzero-wind→zero-advection (non-vacuous gradient path), gather wiring cross-check (θ/q/ω separately) over interior + face-corner/edge columns, dispatch hardening | 27 |
-> | CUBED-SPHERE wired into the LES spin-off | `run_column_les.extract_gcm_column` made grid-agnostic: routes through the `extract_column_forcing` dispatcher and gathers the column with `arr[tuple(col_index)]` (works for lat-lon `(i,j)` AND cubed-sphere `(face,i,j)`); `process_column` already passes `tuple(record.grid_index)`, and the manifest unravels a `(6,n,n)` grid_shape to `(face,i,j)`, so a worst column flagged on the native cubed-sphere grid now spins off its LES. Tests: cubed `extract_gcm_column` with COLUMN-UNIQUE fields asserting the gather picks exactly `(2,3,5)` (not face 0 / off-by-level — a genuine wrong-column detector) + cubed `process_column` (mock LES) | 28 |
-> | GEOSTROPHIC wind forcing (lat-lon) + LES Coriolis wiring | `column_large_scale_extract.geostrophic_wind_from_gradients` diagnoses `u_geo`/`v_geo` from the sigma-surface geopotential (Φ=g·z) + the two-term σ→pressure-surface PGF conversion `∂Φ/∂x\|_p = ∂Φ/∂x\|_σ + R_d·T_v·∂ln p_s/∂x` (derivation in docstring), then geostrophic balance `v_g=∂Φ/∂x\|_p/f`, `u_g=−∂Φ/∂y\|_p/f` (sign-correct both hemispheres). Populated by the **lat-lon** extractor; **wired into the column LES** as the plane Coriolis reference wind `f×(V−V_geo)` via `height_coord.u_geo0/v_geo0` in `build_column_les_setup`. Equatorial (`\|lat\|<5°`) and **cubed-sphere** columns supply no reference wind (`None`) → plane Coriolis falls back to `f×V`; cubed disabled pending a metric-correct east/north↔grid rotation (Codex-flagged frame issue on the non-orthogonal cube — honest deferral). jit/AD-safe (host-side `f`). Tests: analytic NH-westerly + ln p_s term, thermal-wind sign, equator→None, cubed→None regression guard, LES-Coriolis wiring | 29 |
+> | 4 grid-side extractor (lat-lon) | `column_large_scale_extract.py` (`extract_column_forcing_latlon`: ω from continuity, −V·∇θ/−V·∇q → `ColumnLargeScaleState`) | 10 |
+> | 4 1.5-order TKE SGS closure | `tke_sgs_plane.py` (Deardorff/Lilly ν_t=C_kℓ√e, ε, Pr_t; eqm↔Smagorinsky) | 11 |
+> | 5 LES regime selection | `les_regime.py` (CAPE→shallow/deep + per-regime resolution; raise on unknown) | 12 |
+> | 5 LES vertical mapping | `les_vertical_mapping.py` (interp + `build_top_relaxation` reusing `sponge_profile`) | 13 |
+> | 6 LES→coefficient | `column_les_diagnosis.py` (`diagnose_column_coefficient`: eddy-K/entrainment-w_e; top-down→ascending reversal) | 14 |
+> | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→diagnose; `process_column`/`extract_gcm_column`) | 15 |
+> | 7 diagnoses→feedback field | `feedback_assembly.py` (`reduce_column_diagnosis`, `assemble_feedback_field`) | 16 |
+> | verify bias↓ | `bias_metrics.py` (`aggregate_combined_bias`, `bias_improvement`, `worst_column_bias_change`) | 17 |
+> | 7 per-scheme promotion | `promotable_params.py` (`apply_feedback_to_scheme`; gray `tau_equator`/`tau_pole`) | 18 |
+> | CLOSED-LOOP orchestrator | `correction_loop.py` (`run_correction_iteration`: compare→diagnose→assemble→apply→re-compare→bias; heavy steps injected) | 19 |
+> | real-dycore integration + moist-IC fix | `test_run_column_les.py` runs the real plane LES; fixed `run_forced_les` moisture seeding (`q_v_init`) | 20 |
+> | real-comparison loop adapter | `correction_loop.make_compare_fn` (wraps the real `compare_state_to_reference`) | 21 |
+> | AMIP+CMIP bridge | `compare_reanalysis.column_state_from_hydrostatic` (HydrostaticState→ColumnState, unwraps Field; SST prescribed/coupled) | 22 |
+> | real coupled-run (CMIP)→compare | `test_cmip_compare_integration.py` (real `CoupledESMDriver`, C8/L5) | 23 |
+> | physically-coherent promotion | `_shared.broadcast_column_param` + `clubb_lite` C_K wrapped (registered `clubb_lite_C_K`) | 24 |
+> | iterative multi-round campaign | `correction_loop.run_correction_campaign` (accumulates the feedback field across rounds) | 25 |
+> | FULL mock-free end-to-end gate | `test_correction_e2e_integration.py` (real coupled→compare→real LES→K→feedback→`clubb_lite_C_K`; non-vacuous valid-K) | 26 |
+> | cubed-sphere extractor | `extract_column_forcing_cubed_sphere` + `extract_column_forcing` dispatcher (4D-native ops, no `vmap(pad_halo)`, raise on unknown grid) | 27 |
+> | cubed wired into LES spin-off | `extract_gcm_column` grid-agnostic gather `arr[tuple(col_index)]`; cubed worst column spins off its LES | 28 |
+> | geostrophic wind (lat-lon) + LES Coriolis | `geostrophic_wind_from_gradients` (two-term σ-PGF, sign-correct both hemispheres) → `u_geo0/v_geo0`; cubed/equator→`f×V` | 29 |
+> | time-mean state accumulator | `column_state_accumulator.py` (scan-friendly, AD-safe `ColumnState` climatology mean feeding `compare_state_to_reference`) | 30 |
 >
-> **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
-> (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
+> **Feedback loop closes in code:** LES diagnoses → `assemble_feedback_field` (16)
+> → `apply_column_parameter_field` (9) → updated scheme config; iterated by
+> `correction_loop` (19/25). Both lat-lon and native cubed-sphere worst columns
+> spin off real LES; forcing = subsidence + advection + (lat-lon) geostrophic.
 >
-> **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
-> 1. **Extractor follow-ups** — cubed-sphere DONE (iter 27: native-grid ω +
->    advective tendencies via 4D-native operators + grid dispatcher; iter 28:
->    wired into `run_column_les.extract_gcm_column`). Geostrophic wind (∇Φ) DONE
->    for lat-lon (iter 29: two-term σ-PGF geostrophic balance + LES-Coriolis
->    wiring). Remaining: cubed-sphere geostrophic wind (needs a metric-correct
->    east/north↔grid rotation, visually verified for cube-edge artifacts) and
->    Gaussian/Voronoi grids (the dispatcher raises on those). iter-10 covers
->    lat-lon (ERA5-native).
-> 2. **Standalone LES driver** — DONE (iter 15): `scripts/run/run_column_les.py`
->    chains manifest→regime→θ/forcing interp→`run_forced_les`→coefficient. The
->    forced plane-dycore run loop (`run_forced_les`) + `main` are real but
->    HPC-validated, not unit-tested (the orchestration helpers are). Optional
->    follow-up: wire the iter-11 TKE closure into the dycore as the SGS option.
-> 3. **Per-scheme promotion** — DONE (iter 18) for the cleanest case: gray
->    `tau_equator`/`tau_pole` accept a per-column field with NO body change
->    (already `(ncol,)`-vectorised), applied via the `promoted_fields` allowlist
->    (no `__param_spec__`/collector change). A convection-entrainment or
->    turbulence-diffusivity promotion follows the same pattern once that scheme
->    body is wrapped in a column-broadcast (the physically-targeted follow-up).
-> 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
-> 5. **End-to-end bias-reduction demo** — the actual success criterion. The
->    *orchestrator* now exists (`correction_loop.run_correction_iteration`, iter
->    19) and is unit-tested with mocks (a correction that lowers worst-column
->    scores yields `improved=True`); the remaining work is supplying the real
->    HPC-scale `compare_fn` (AMIP run + `compare_amip_era5`) and `diagnose_fn`
->    (`run_column_les.process_column`) and running it on real ERA5 to produce
->    the empirical bias drop. That run is HPC-scale (not unit-testable here).
+> **Remaining to reach the done-criterion:**
+> - **Empirical bias-reduction demo** (the actual success criterion) — needs an
+>   HPC-scale run: real `compare_fn` (AMIP + `compare_amip_era5`) and `diagnose_fn`
+>   (`run_column_les.process_column`) on real ERA5 over a multi-day run + many
+>   LES. Orchestrator (19/25) ready + mock-tested; not unit-testable here. NB a
+>   self-consistent perfect-model OSSE cannot honestly prove it (the LES and the
+>   GCM closure are different models — that gap is the method's whole point).
+> - **AMIP/CMIP run wiring** (`diag_days=0.25`) → time-mean accumulator (30) → compare.
+> - **Extractor follow-ups** — cubed-sphere geostrophic (metric-correct
+>   east/north↔grid rotation, visually verified for cube-edge artifacts);
+>   Gaussian/Voronoi grids (the dispatcher raises on those).
 ---
 
 ## 1. Goal
