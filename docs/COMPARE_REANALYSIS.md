@@ -33,6 +33,7 @@
 > | 6 LES→coefficient composition | `atmosphere/dynamics/column_les_diagnosis.py` (`diagnose_column_coefficient`: dispatch eddy-K / entrainment-w_e; top-down→ascending reversal of fluxes+gradient) | 14 |
 > | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→`diagnose`; `process_column`/`extract_gcm_column`/`run_column_les_pipeline`; real `main` loops the manifest) | 15 |
 > | 7 LES diagnoses→feedback field | `training/feedback_assembly.py` (`reduce_column_diagnosis` K-profile→scalar / w_e; `assemble_feedback_field` scatters at worst-column flat indices) | 16 |
+> | verify bias↓ (success metric) | `training/bias_metrics.py` (`aggregate_combined_bias` area-weighted; `bias_improvement` baseline-vs-updated; `worst_column_bias_change`) | 17 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
@@ -48,7 +49,10 @@
 > 3. **Per-scheme promotion** of a real production coefficient (entrainment) —
 >    `shape`-keyed `__param_spec__` + scheme-body `(ncol,)` broadcast (physics-validated).
 > 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
-> 5. **End-to-end bias-reduction demo** — the actual success criterion.
+> 5. **End-to-end bias-reduction demo** — the actual success criterion. The
+>    *measurement* now exists (`bias_metrics.bias_improvement`, iter 17); the
+>    remaining work is the HPC-scale run that exercises it (baseline AMIP →
+>    feedback → updated AMIP, assert `improved`).
 ---
 
 ## 1. Goal
