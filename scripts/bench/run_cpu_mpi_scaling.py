@@ -208,7 +208,10 @@ _SUPPORTED_PHYSICS = {
     # dycore's tracer exchange, and the dycore already advects tracers
     # mass-consistently (so moist scales on the same ladder as dry).
     "icosahedral": {"none", "held_suarez", "moist"},
-    "spectral": {"none", "held_suarez"},
+    # spectral "moist" = q_v/q_c/q_r + Kessler warm-rain (no radiation), the
+    # moist baroclinic wave, via make_kessler_forcing_spectral.  Single-device
+    # (spectral has no MPI path) — a physics-capability case, not a scaling one.
+    "spectral": {"none", "held_suarez", "moist"},
 }
 
 
@@ -837,12 +840,19 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
         time_integrator="ssp_rk3",
     )
     model = SpectralPrimitiveEquationModel(grid, sigma, config)
-    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = grid.n_lat * grid.n_lon * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "spectral")
+    if _moist:
+        # Kessler warm-rain bound to this step's dt (the physics_fn convention
+        # passes no timestep); column-local, so no halo (spectral is 1 device).
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_spectral
+        physics_fn = make_kessler_forcing_spectral(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "spectral")
     if physics_fn is not None:
         _phys = physics_fn
         step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
@@ -933,9 +943,17 @@ def run_single_benchmark(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
     @jax.jit
-    def _scan_run(st, dt_val):
+    def _scan_run(st):
+        # ``dt_used`` is closed over as a STATIC Python float, NOT passed as a
+        # jit argument.  As an argument it becomes a tracer, and the spectral PE
+        # dycore caches its integrator/filter matrices keyed on a CONCRETE dt
+        # (``_ensure_tracer_filter`` / ``_ensure_si_data`` compare ``self._..._dt
+        # == dt``) -> a traced dt raised TracerBoolConversionError on the moist
+        # spectral path.  dt is constant per benchmark, so closing over it is
+        # correct and lets every dycore (including spectral) trace cleanly; the
+        # other grids are unaffected (dt was only used in jnp ops).
         def _body(carry, _):
-            new = step_fn(carry, dt_val)
+            new = step_fn(carry, dt_used)
             new = jax.tree.map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -951,7 +969,7 @@ def run_single_benchmark(
     # XLA still warms compile + caches against identical layout but
     # ``state`` keeps its original (post-warmup) trajectory.
     _precompile_state = jax.tree.map(lambda x: x, state)
-    _precompile_out = _scan_run(_precompile_state, dt_used)
+    _precompile_out = _scan_run(_precompile_state)
     jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
@@ -964,7 +982,7 @@ def run_single_benchmark(
         pass
 
     t0 = time.perf_counter()
-    state = _scan_run(state, dt_used)
+    state = _scan_run(state)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # MPI barrier after timing

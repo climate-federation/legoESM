@@ -114,3 +114,26 @@ def test_requires_tracers(grid, sigma):
 def test_rejects_nonpositive_dt():
     with pytest.raises(ValueError, match="must be > 0"):
         make_kessler_forcing_spectral(0.0)
+
+
+def test_moist_ic_attaches_tracers(grid, sigma):
+    """moist=True attaches q_v/q_c/q_r; q_v in [0, q_sat], q_c=q_r=0."""
+    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=False, moist=True)
+    assert state.tracers is not None
+    for k in ("q_v", "q_c", "q_r"):
+        assert k in state.tracers
+    q_v = state.tracers["q_v"].data
+    assert jnp.all(jnp.isfinite(q_v))
+    assert float(jnp.min(q_v)) >= 0.0
+    assert float(jnp.max(jnp.abs(state.tracers["q_c"].data))) == 0.0
+    assert float(jnp.max(jnp.abs(state.tracers["q_r"].data))) == 0.0
+    # q_v capped at saturation.
+    T_grid = sh_synthesis_3d(grid, state.T_hat.data)
+    p_full = jnp.exp(sh_synthesis(grid, state.lnps_hat.data))[..., None] * sigma.sigma_full
+    q_sat = saturation_mixing_ratio(T_grid, p_full)
+    assert float(jnp.max(q_v - q_sat)) <= 1e-12
+
+
+def test_dry_ic_has_no_tracers(grid, sigma):
+    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=False, moist=False)
+    assert state.tracers is None
