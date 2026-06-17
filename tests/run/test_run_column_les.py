@@ -1,4 +1,5 @@
-"""Unit tests for the ``scripts/run/run_column_les.py`` orchestration.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.column_les` (the column-LES
+orchestration; the manifest-looping CLI lives in ``scripts/run/run_column_les.py``).
 
 The heavy plane-LES run (``run_forced_les``) and ``main`` need real data and are
 not unit-tested here; every importable orchestration helper is, with a small
@@ -13,18 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
-from legoesm.atmosphere.dynamics.les_regime import (
-    LESRegimeConfig,
-    LESResolutionConfig,
-)
-from legoesm.grids.latlon import create_latlon_grid
-from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.les_vertical_mapping import (
-    interpolate_column_to_les,
-)
-from scripts.run.run_column_les import (
+from legoesm.atmosphere.dynamics.column_les import (
     ColumnLESConfig,
     ColumnLESSetup,
     build_column_les_setup,
@@ -34,6 +25,15 @@ from scripts.run.run_column_les import (
     run_column_les_pipeline,
     validate_column_les_config,
 )
+from legoesm.atmosphere.dynamics.les_regime import (
+    LESRegimeConfig,
+    LESResolutionConfig,
+)
+from legoesm.atmosphere.dynamics.les_vertical_mapping import (
+    interpolate_column_to_les,
+)
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.vertical import create_sigma_coordinate
 
 jax.config.update("jax_enable_x64", True)
 
@@ -360,7 +360,7 @@ def test_process_column_real_dycore_integration():
     (run_forced_les, a few real steps with the large-scale forcing + top
     relaxation) -> diagnose. Validates the run path the unit tests mock out
     (the compressible-Euler plane LES actually runs and stays finite)."""
-    from scripts.run.run_column_les import (
+    from legoesm.atmosphere.dynamics.column_les import (
         build_column_les_setup,
         run_forced_les,
     )

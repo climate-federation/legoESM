@@ -16,13 +16,13 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig  # noqa: E402
 from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
     LESRegimeConfig,
     LESResolutionConfig,
 )
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
-from scripts.run.run_column_les import ColumnLESConfig  # noqa: E402
 from scripts.run.run_correction_campaign import (  # noqa: E402
     build_correction_campaign,
     make_clubb_build_driver,

@@ -23,11 +23,13 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
-    LESRegimeConfig, LESResolutionConfig,
+    LESRegimeConfig,
+    LESResolutionConfig,
 )
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig  # noqa: E402
 from legoesm.training.compare_reanalysis import (  # noqa: E402
-    column_state_from_hydrostatic, compare_state_to_reference,
+    column_state_from_hydrostatic,
+    compare_state_to_reference,
 )
 from legoesm.training.feedback_assembly import assemble_feedback_field  # noqa: E402
 from legoesm.training.promotable_params import apply_feedback_to_scheme  # noqa: E402
@@ -41,7 +43,10 @@ _SMALL_REGIME = LESRegimeConfig(shallow=_SMALL_RES, deep=_SMALL_RES)
 
 def _run_tiny_latlon_coupled(days=1, n_lat=8, nlev=5):
     from legoesm.driver.config import (
-        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
@@ -67,8 +72,10 @@ def _run_tiny_latlon_coupled(days=1, n_lat=8, nlev=5):
 
 @pytest.mark.slow
 def test_full_pipeline_real_model_and_les():
-    from scripts.run.run_column_les import (
-        ColumnLESConfig, process_column, run_forced_les,
+    from legoesm.atmosphere.dynamics.column_les import (
+        ColumnLESConfig,
+        process_column,
+        run_forced_les,
     )
 
     driver = _run_tiny_latlon_coupled(days=1)

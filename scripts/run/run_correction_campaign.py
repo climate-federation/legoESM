@@ -85,7 +85,7 @@ def make_les_diagnose_fn(
     diagnoses the closure coefficient.  ``grid`` / ``sigma`` are the model grid +
     vertical coordinate the forcing extractor needs.
     """
-    from scripts.run.run_column_les import process_column
+    from legoesm.atmosphere.dynamics.column_les import process_column
 
     def diagnose_fn(record: Any, model_ctx: Any) -> Any:
         if getattr(model_ctx, "u", None) is None or getattr(model_ctx, "v", None) is None:
@@ -223,13 +223,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     import json
 
     import numpy as np
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
     from legoesm.driver.config import experiment_config_from_dict
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.compare_reanalysis import column_state_from_carry
     from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
     from legoesm.training.run_to_column_mean import amip_column_state
 
-    from scripts.run.run_column_les import ColumnLESConfig, run_forced_les
     from scripts.validate.compare_amip_era5 import (
         canonical_grid_type,
         select_era5_regrid,
