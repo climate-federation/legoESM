@@ -34,15 +34,14 @@ def __getattr__(name):
         }
         return _map[name]
     elif name in ("make_mpas_tile_config", "init_mpas_surface_state",
-                  "make_mpas_coupler", "compute_mpas_freshwater"):
+                  "compute_mpas_freshwater"):
         from legoesm.coupler.mpas_adapter import (
             make_mpas_tile_config, init_mpas_surface_state,
-            make_mpas_coupler, compute_mpas_freshwater,
+            compute_mpas_freshwater,
         )
         _map = {
             "make_mpas_tile_config": make_mpas_tile_config,
             "init_mpas_surface_state": init_mpas_surface_state,
-            "make_mpas_coupler": make_mpas_coupler,
             "compute_mpas_freshwater": compute_mpas_freshwater,
         }
         return _map[name]
@@ -60,6 +59,6 @@ __all__ = [
     "SurfaceState", "init_surface_state", "make_coupler", "ocean_tile_response",
     "LakeConfig", "LakeState", "step_lake",
     # MPAS Voronoi adapter
-    "make_mpas_tile_config", "init_mpas_surface_state", "make_mpas_coupler",
+    "make_mpas_tile_config", "init_mpas_surface_state",
     "compute_mpas_freshwater",
 ]
