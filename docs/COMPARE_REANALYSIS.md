@@ -7,6 +7,32 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 9 (2026-06-17) — Stage 7 (gap #7, application): feedback dispatch + apply ✅
+> Added `legoesm.training.feedback` — the feedback **application** layer:
+> - `build_parameter_field(strategy, ...)` — hardened dispatch over the iter-8
+>   strategies (`"static"` scatter vs `"environment"` kernel); raises on unknown
+>   strategy, missing required inputs, AND **cross-strategy input leakage** (a
+>   static call passing env-only inputs, or vice-versa, is rejected — not
+>   silently ignored).
+> - `apply_column_parameter_field(config, field_name, field, ...)` — flattens the
+>   grid field to `(ncol,)`, validates length, and splices it into a scheme
+>   `*Config` via `apply_param_overrides` (traced-in-loss). **Requires the field
+>   be authorized column-promoted** — explicit `promoted_fields` allowlist OR a
+>   non-None `shape` key in the config's `__param_spec__` (nested
+>   `{Class:{"params":{field:{shape}}}}` or flat layout) — so a per-column field
+>   can never silently overwrite a scalar parameter. Rejects scalar/0-d fields.
+> - Tests: 17 cases incl. dispatch + cross-strategy-leak raises, nested & flat
+>   spec authorization, unpromoted/unknown-field/scalar rejects, non-1D env
+>   guard, and an end-to-end `diagnosed-values → field → config-leaf` `jax.grad`.
+> - **Codex adversarial review: clean** (6 real findings fixed over 3 rounds,
+>   incl. the nested-`__param_spec__` layout bug and the scalar-overwrite footgun).
+>
+> **Next:** the per-scheme **promotion** of a real production coefficient
+> (e.g. a convection entrainment rate) — add the `shape`-keyed `__param_spec__`
+> entry + make the scheme body broadcast a `(ncol,)` field (physics-validated),
+> then the end-to-end bias-reduction demo. Still open: grid-side
+> `ColumnLargeScaleState` extractor; LES driver + 1.5-order TKE SGS.
+>
 > ### Iter 8 (2026-06-17) — Stage 7 (gap #7, assembly): parameter-field assembly ✅
 > Added `legoesm.training.parameter_field` — assemble the iter-7 per-column
 > diagnosed coefficients into a full-grid GCM parameter field (the feedback
