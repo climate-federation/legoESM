@@ -1587,6 +1587,14 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
 
     def _vbody(u_tile, v_tile, cos_angle, sin_angle,
                cos_angle_padded, sin_angle_padded, offsets):
+        # The angle metrics are 2D tile blocks (interior (n_loc,n_loc); padded
+        # (n_loc+2h, n_loc+2h)).  A 4D global wind (ndim=4) leaves a trailing
+        # channel/level axis on the per-device tile (n_loc, n_loc, C), so the
+        # rotation must broadcast the angle over that axis.  ndim=3 (SW): the
+        # wind tile is 2D == the angle rank -> no reshape (path unchanged).
+        if u_tile.ndim == cos_angle.ndim + 1:
+            cos_angle = cos_angle[..., None]
+            sin_angle = sin_angle[..., None]
         # 1. grid -> geographic (east, north): continuous across seams.
         u_east = cos_angle * u_tile - sin_angle * v_tile
         v_north = sin_angle * u_tile + cos_angle * v_tile
@@ -1595,6 +1603,9 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
         v_north_pad = scalar_body(v_north, offsets)
         # 3. geographic -> grid with the PADDED angle (inverse of step 1).
         cap, sap = cos_angle_padded, sin_angle_padded
+        if u_east_pad.ndim == cap.ndim + 1:
+            cap = cap[..., None]
+            sap = sap[..., None]
         u_pad = cap * u_east_pad + sap * v_north_pad
         v_pad = -sap * u_east_pad + cap * v_north_pad
         return u_pad, v_pad
