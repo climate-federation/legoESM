@@ -1,16 +1,21 @@
-"""Energy conservation of the nonlinear barotropic C-grid dynamics.
+"""Energy conservation of the nonlinear barotropic free-surface dynamics.
 
 In the INVISCID, UNFORCED limit, the continuous shallow-water momentum equations
-(advection + Coriolis + free-surface pressure gradient) conserve total kinetic
-energy exactly. A faithful discretization must too.
+(advection + Coriolis + free-surface pressure gradient) conserve total mechanical
+energy (KE + ½g∫η²) exactly. A faithful discretization must too.
 
-This is the root cause of the MITgcm barotropic-gyre oracle's residual: legoESM's
-nonlinear barotropic C-grid scheme spuriously INJECTS energy (~dt-independent),
-which — against MITgcm's near-frictionless gyre equilibrium — drives the gyre
-6-9x too energetic. See docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md.
+This pins the root cause of the MITgcm barotropic-gyre oracle's residual. Direct
+measurement (see docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md) localized
+the spurious, dt-independent energy injection to the **barotropic free-surface
+predictor-corrector projection** in the operator-split solver — NOT the momentum
+scheme: the Coriolis is already energy-neutral (machine-zero work), and the
+semi-discrete source is byte-identical across upwind / centered / vector-invariant
+advection (advection contributes nothing). Against MITgcm's near-frictionless gyre
+equilibrium the injection drives the gyre turbulent (|u|max 0.15-0.37 vs 0.031).
 
-The test is xfail until an energy-conserving C-grid momentum scheme
-(Arakawa/Sadourny-type) lands; when it does, this flips to a passing guard.
+The test is xfail until an energy-conserving barotropic free-surface scheme lands
+(an energy-orthogonal split projection, or an unsplit single-layer path matching
+MITgcm's symmetric elliptic free surface); when it does, this flips to a guard.
 """
 
 from __future__ import annotations
@@ -42,8 +47,9 @@ def _closed_box_geom_state():
     )
     # MUNK-like western-intensified gyre IC from psi = A sin(pi y) (1 - exp(-x/delta)),
     # delta = 1.5 cells, so the western boundary current carries GRID-SCALE
-    # gradients (where the enstrophy/energy non-conservation manifests — a smooth
-    # IC conserves fine; only sharp WBC-like features trigger the defect).
+    # gradients / divergent content (where the free-surface-projection energy
+    # injection manifests — a smooth IC conserves fine; only sharp WBC-like
+    # features with grid-scale divergence trigger the defect).
     delta = 1.5 / NX
     amp = 0.04
     yu = (np.arange(NY) + 0.5) / NY
@@ -82,9 +88,10 @@ def _ke(s):
 
 
 @pytest.mark.xfail(
-    reason="known root cause: nonlinear barotropic C-grid scheme is not "
-    "energy-conserving (spurious inviscid KE injection). Pending an "
-    "energy/enstrophy-conserving momentum scheme; see "
+    reason="known root cause: barotropic free-surface predictor-corrector "
+    "projection is not energy-conserving (spurious dt-independent KE injection; "
+    "advection-independent, Coriolis is neutral). Pending an energy-conserving "
+    "free-surface scheme; see "
     "docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md",
     strict=False,
 )
@@ -105,9 +112,10 @@ def test_inviscid_unforced_barotropic_conserves_energy():
 def test_energy_defect_is_present_and_bounded():
     """Non-xfail companion: the defect is real (KE is NOT conserved) but the run
     stays finite — locks in current behaviour so a future energy-conserving
-    scheme is detectable. The sign is state-dependent (a sharp western-boundary
-    jet numerically LOSES energy here; the equilibrated MITgcm WBC GAINS it) —
-    the hallmark of a non-conservative, gradient-sensitive C-grid scheme."""
+    free-surface scheme is detectable. The sign is state-dependent (a sharp
+    western-boundary jet numerically LOSES energy here; the equilibrated MITgcm
+    WBC GAINS it) — the hallmark of a gradient-sensitive, non-energy-orthogonal
+    free-surface projection."""
     geom, z, s0 = _closed_box_geom_state()
     model = LatLonCGridOceanModel(geom, z, _inviscid_unforced_config())
     step = jax.jit(lambda st: model.step(st, 1200.0, surface_forcing=None))
