@@ -7,6 +7,11 @@ headline payoff — running ONE experiment setup on a DIFFERENT named recipe.
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
 import pytest
 from legoesm.ocean.experiments.eady_uniform import (
     EadyUniformConfig,
@@ -34,7 +39,12 @@ class TestRegistry:
         assert "veros_faithful_v1" in all_recipes
         assert "nemo_dino_v1" in all_recipes
         assert "legoesm_linear_mpas_v1" in all_recipes
-        assert list_recipes("mpas") == ["legoesm_linear_mpas_v1"]
+        # The proven OMIP NEMO-match recipes (#500) appear in the menu.
+        assert "omip_nemo_match_mpas_v1" in all_recipes
+        assert "omip_nemo_match_tripole_v1" in all_recipes
+        assert list_recipes("mpas") == [
+            "legoesm_linear_mpas_v1", "omip_nemo_match_mpas_v1"]
+        assert "omip_nemo_match_tripole_v1" in list_recipes("latlon")
 
     def test_get_recipe_returns_copy(self):
         a = get_recipe("legoesm_linear_v1")
@@ -99,6 +109,179 @@ class TestCatalogMatchesFactories:
         mc, _ = dino_lat_lon_model_config(grid, DINOConfig())
         for k, v in get_recipe("nemo_dino_v1").items():
             assert getattr(mc, k) == v, k
+
+    def test_omip_nemo_match_mpas_v1_is_factory_dycore(self):
+        """Drift guard: catalog == nemo_match_mpas_model_config scheme fields."""
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        mc = nemo_match_mpas_model_config()
+        for k, v in get_recipe("omip_nemo_match_mpas_v1", "mpas").items():
+            assert getattr(mc, k) == v, k
+
+    def test_omip_nemo_match_tripole_v1_is_factory_dycore(self):
+        """Drift guard: catalog == nemo_match_tripole_model_config scheme fields."""
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_tripole_model_config,
+        )
+        mc = nemo_match_tripole_model_config()
+        for k, v in get_recipe("omip_nemo_match_tripole_v1", "latlon").items():
+            assert getattr(mc, k) == v, k
+
+
+# The PROVEN OMIP MPAS ico6 dycore — a FROZEN snapshot of the scheme + coefficient
+# fields _create_setup("mpas") produced BEFORE the factory rewire (#500).  This is
+# the regression net: a silent change to the proven config (which gave SST RMSE
+# 0.84 vs NEMO ORCA1) breaks this hard-coded expectation.  ``physics`` is SETUP
+# (run-dependent surface forcing + per-run vmix) and excluded from the snapshot.
+_FROZEN_MPAS_DYCORE = {
+    "A_h": 1.0e5,
+    "A_v": 1.0e-4,
+    "K_v": 1.0e-5,
+    "C_smag_lap": 0.33,
+    "K_zeta_bih": 1.0e14,
+    "barotropic_solver": "implicit_cn",
+    "barotropic_implicit_pcg_tol": 1.0e-10,
+    "barotropic_implicit_pcg_maxiter": 300,
+    "pgf_scheme": "adcroft",
+    "eos": "wright",
+    "pv_scheme": "enstrophy",
+    "implicit_vertical_mixing": True,
+    "normalize_freshwater": True,
+    "tracer_advection": "tvd",
+    "bottom_drag_r": 1.0e-3,
+    "bottom_drag_bbl_thickness": 100.0,
+    "bottom_drag_bg_velocity": 0.1,
+}
+
+# Same FROZEN snapshot for the PROVEN tripole eORCA025 dycore (SST RMSE 1.15).
+_FROZEN_TRIPOLE_DYCORE = {
+    "A_h": 1.0e5,
+    "A_v": 1.0e-4,
+    "K_v": 1.0e-5,
+    "B_h": 0.0,
+    "C_smag_lap": 0.33,
+    "n_barotropic_substeps": 30,
+    "barotropic_solver": "implicit_cn",
+    "barotropic_implicit_pcg_tol": 1.0e-10,
+    "barotropic_implicit_pcg_maxiter": 300,
+    "pgf_scheme": "adcroft",
+    "eos": "wright",
+    "momentum_advection": "vector_invariant",
+    "ke_gradient_scheme": "centered",
+    "coriolis_scheme": "matsuno_split",
+    "outer_integrator": "forward_euler",
+    "tracer_time_integrator": "euler",
+    "implicit_vertical_mixing": True,
+    "tracer_advection": "tvd",
+    "bottom_drag_r": 1.0e-3,
+    "bottom_drag_bbl_thickness": 100.0,
+    "bottom_drag_bg_velocity": 0.1,
+    "freshwater_closure": "virtual_salt_flux",
+}
+
+# The shared GM/Redi block both proven configs use (frozen, #500).
+_FROZEN_GM_REDI = {
+    "kappa_GM": 600.0,
+    "kappa_Redi": 600.0,
+    "S_max": 0.005,
+    "slope_scheme": "centered",
+}
+
+
+class TestOMIPNemoMatchFactories:
+    """The proven OMIP NEMO-match dycores are production config — a drift would
+    silently change a config validated against NEMO ORCA1 climate.  These guards
+    pin (a) the factory to its frozen winning coefficients, (b) the factory to
+    the PROVEN driver config (_create_setup), and (c) the catalog to the factory
+    (in TestCatalogMatchesFactories)."""
+
+    def test_mpas_factory_matches_frozen_coefficients(self):
+        """FROZEN-value guard: the MPAS factory reproduces the winning literals."""
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        mc = nemo_match_mpas_model_config()
+        for k, v in _FROZEN_MPAS_DYCORE.items():
+            assert getattr(mc, k) == v, k
+        assert mc.gm_redi is not None
+        assert mc.gm_redi.visbeck.enabled is False
+        for k, v in _FROZEN_GM_REDI.items():
+            assert getattr(mc.gm_redi, k) == v, k
+
+    def test_tripole_factory_matches_frozen_coefficients(self):
+        """FROZEN-value guard: the tripole factory reproduces the winning literals."""
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_tripole_model_config,
+        )
+        mc = nemo_match_tripole_model_config()
+        for k, v in _FROZEN_TRIPOLE_DYCORE.items():
+            assert getattr(mc, k) == v, k
+        assert mc.gm_redi is not None
+        assert mc.gm_redi.visbeck.enabled is False
+        for k, v in _FROZEN_GM_REDI.items():
+            assert getattr(mc.gm_redi, k) == v, k
+
+    def test_mpas_factory_equals_create_setup_dycore(self):
+        """Tie the factory + catalog to the PROVEN driver config: every dycore
+        field of _create_setup("mpas") must equal the factory's.  Uses a tiny
+        synthetic ico2 Voronoi mesh (162 cells) — no external files."""
+        from scripts.run import run_omip as R
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        _, _, config, _, kind = R._create_setup(
+            grid_type="mpas", resolution="ico2", nlev=3, H_max=4000.0,
+            physics_preset="none", water_type="jerlov_1",
+            forcing_mode="restoring",
+        )
+        assert kind == "mpas"
+        factory_mc = nemo_match_mpas_model_config()
+        # Every field EXCEPT physics (SETUP) must match the factory exactly.
+        for f in MPASOceanConfig._fields:
+            if f == "physics":
+                continue
+            assert getattr(config, f) == getattr(factory_mc, f), f
+        # ...and the run-dependent physics is the proven restoring-mode SETUP.
+        assert config.physics is not None
+        assert config.physics.surface_forcing.scheme == "combined"
+        assert config.physics.convection.scheme == "enhanced_diffusion"
+        # The catalog scheme bundle is exactly this config's scheme identity.
+        for k, v in get_recipe("omip_nemo_match_mpas_v1", "mpas").items():
+            assert getattr(config, k) == v, k
+
+    def test_mpas_create_setup_matches_frozen_snapshot(self):
+        """The rewired _create_setup("mpas") config == the pre-rewire FROZEN
+        snapshot — proves the factory rewire changed NO dycore field."""
+        from scripts.run import run_omip as R
+
+        _, _, config, _, _ = R._create_setup(
+            grid_type="mpas", resolution="ico2", nlev=3, H_max=4000.0,
+            physics_preset="none", water_type="jerlov_1",
+            forcing_mode="restoring",
+        )
+        for k, v in _FROZEN_MPAS_DYCORE.items():
+            assert getattr(config, k) == v, k
+        for k, v in _FROZEN_GM_REDI.items():
+            assert getattr(config.gm_redi, k) == v, k
+
+    def test_omip_recipes_are_nonvacuous(self):
+        """Non-vacuity: the new OMIP recipes differ from the linear defaults."""
+        mpas = get_recipe("omip_nemo_match_mpas_v1", "mpas")
+        assert mpas != get_recipe("legoesm_linear_mpas_v1", "mpas")
+        assert mpas["eos"] == "wright"            # not the linear default
+        assert mpas["barotropic_solver"] == "implicit_cn"  # not explicit_substep
+        tripole = get_recipe("omip_nemo_match_tripole_v1", "latlon")
+        assert tripole != get_recipe("legoesm_linear_v1", "latlon")
+        assert tripole["barotropic_solver"] == "implicit_cn"
+
+    def test_factory_default_physics_rejects_unknown_forcing_mode(self):
+        """Dispatch hardening: unknown forcing_mode raises (no silent default)."""
+        from legoesm.ocean.fidelity import nemo_match_recipe as M
+        with pytest.raises(ValueError, match="unknown NEMO-match forcing_mode"):
+            M._default_match_physics(forcing_mode="not_a_mode")
 
 
 class TestReuse:
