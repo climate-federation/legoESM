@@ -90,6 +90,7 @@ class ColumnLESSetup(NamedTuple):
     forcing_physics: Callable        # plane physics_fn (large-scale forcing)
     relax_theta_target: jax.Array    # (nlev,) GCM θ on the LES grid
     relax_rate: jax.Array            # (nlev,) Newtonian rate [1/s]
+    q_v_init: jax.Array              # (nlev,) GCM q_v on the LES grid (moist IC)
     regime: str
     resolution: Any
     f_c: float
@@ -165,10 +166,14 @@ def build_column_les_setup(
         hc.z_full, res.domain_top_m, gcm_z, gcm_theta,
         relax_width_m=relax_width_m, inv_tau=1.0 / config.relax_tau_s,
     )
+    # Moist initial condition: the GCM column q_v interpolated onto the LES grid
+    # (the LES must carry moisture so the resolved w'q_v' flux + the moist
+    # diagnosis exist).
+    q_v_init = interpolate_column_to_les(gcm_z, ls_state.q_v, hc.z_full)
     return ColumnLESSetup(
         grid=grid, height_coord=hc, forcing_physics=forcing_physics,
-        relax_theta_target=target, relax_rate=rate, regime=regime,
-        resolution=res, f_c=f_c,
+        relax_theta_target=target, relax_rate=rate, q_v_init=q_v_init,
+        regime=regime, resolution=res, f_c=f_c,
     )
 
 
@@ -228,12 +233,21 @@ def run_forced_les(
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
     dtype = grid.area_T.dtype
     state = make_rest_state(grid, hc, dtype=dtype)
+    ny, nx, nlev = grid.ny, grid.nx, hc.n_levels
     # Small θ' seed so resolved eddies spin up.
     key = jax.random.PRNGKey(0)
-    seed = theta_prime_seed * jax.random.normal(
-        key, (grid.ny, grid.nx, hc.n_levels), dtype=dtype
+    seed = theta_prime_seed * jax.random.normal(key, (ny, nx, nlev), dtype=dtype)
+    # Moist IC: broadcast the GCM column q_v (on the LES grid) into tracer slot 0
+    # so the LES carries moisture (a dry rest state has no tracers, which would
+    # break the resolved w'q_v' flux + the moist closure diagnosis).
+    q_v_init = jnp.asarray(setup.q_v_init, dtype=dtype)
+    tracers = jnp.zeros((ny, nx, nlev, 1), dtype=dtype).at[..., 0].set(
+        jnp.broadcast_to(q_v_init, (ny, nx, nlev))
     )
-    state = state._replace(theta_prime=state.theta_prime.replace(data=seed))
+    state = state._replace(
+        theta_prime=state.theta_prime.replace(data=seed),
+        tracers=state.tracers.replace(data=tracers),
+    )
 
     target = jnp.asarray(setup.relax_theta_target, dtype=dtype)
     rate = jnp.asarray(setup.relax_rate, dtype=dtype)

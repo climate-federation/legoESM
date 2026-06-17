@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status:** Implementation in progress — diagnosis→force→estimate→assemble→apply chain built + tested (iters 1–9); grid-side forcing extractor + LES driver + end-to-end demo remain.
+**Status (iter 20):** Whole pipeline built, tested + Codex-reviewed, and composed into the closed-loop orchestrator (`correction_loop`, iter 19) — every stage from AMIP↔ERA5 compare → worst-column manifest → forced column-LES → closure-coefficient diagnosis → feedback field → applied to a real production scheme (gray `tau_equator`) → bias-improvement measurement. **Remaining:** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring and per-grid extractor follow-ups.
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -36,6 +36,7 @@
 > | verify bias↓ (success metric) | `training/bias_metrics.py` (`aggregate_combined_bias` area-weighted; `bias_improvement` baseline-vs-updated; `worst_column_bias_change`) | 17 |
 > | 7 per-scheme promotion | `training/promotable_params.py` (`apply_feedback_to_scheme`: registry of (ncol,)-capable coefficients; gray `tau_equator`/`tau_pole` promoted end-to-end, NO body change) | 18 |
 > | CLOSED LOOP orchestrator | `training/correction_loop.py` (`run_correction_iteration`: compare→LES-diagnose→assemble→apply→re-compare→`bias_improvement`; heavy AMIP/LES steps injected; empty-manifest no-op) | 19 |
+> | REAL-dycore integration test + moist-IC fix | `tests/run/test_run_column_les.py::test_process_column_real_dycore_integration` runs the actual plane-NH LES (mock-free); caught + fixed `run_forced_les` carrying no moisture (now seeds GCM q_v on the LES grid → `ColumnLESSetup.q_v_init`) | 20 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
@@ -140,136 +141,21 @@ superparameterization).
 
 ---
 
-## 3. Existing infrastructure to reuse
+## 3–5, 8. Build plan — REALIZED (see the iter-1..19 status table above)
 
-> Pre-impl search done (per CLAUDE.md). The pipeline reuses these; **do not
-> re-derive** metrics, forcing, ERA5 loading, or LES dynamics.
-
-### ERA5 ingestion & regridding
-- `packages/ml/legoesm/ml/data/era5_loader.py` — ERA5 from WeatherBench2 GCS,
-  Zarr cache, variable aliasing, configurable levels/times/cadence.
-  Functions: `create_era5_dataset`, `load_era5_batch`, `load_era5_ic`.
-- `packages/ml/legoesm/training/era5_to_state.py` — regrid ERA5 lat-lon → model
-  grid (`era5_to_spectral_carry`, `era5_to_cubedsphere_carry`,
-  `era5_to_latlon_carry`), pressure→sigma interp (`interp_pressure_to_sigma`),
-  specific-humidity → mixing-ratio conversion.
-
-### AMIP driver & output
-- `scripts/run/run_amip.py` — AMIP driver (prescribed SST/SIC; analytical/COBE/
-  HadISST forcing; configurable physics).
-- `packages/coupler/legoesm/driver/config.py::OutputConfig` — `diag_days`,
-  `checkpoint_days`, `monthly_means`, `cmip_output`, `cmip_resolution_deg`.
-  **Set `diag_days = 0.25` for 6-hourly comparison.**
-
-### Comparison metrics (area/mass weighted)
-- `packages/ml/legoesm/ml/loss.py` — `area_weighted_mse`,
-  `latitude_weighted_rmse`, `latitude_weighted_bias`, `per_variable_mse`.
-- `packages/ml/legoesm/training/scm_rce_metrics.py` — mass-weighted vertical
-  RMSE: `weighted_rmse`, `score_profiles_jax`, `precip_score_jax`,
-  `score_profiles_precip_jax`. **Reuse for per-column profile scoring.**
-
-### SCM + large-scale forcing (for LES forcing extraction)
-- `packages/atmosphere/legoesm/atmosphere/scm.py::SingleColumnModel` — column
-  integration reusing the canonical physics pipeline.
-- `packages/atmosphere/legoesm/atmosphere/scm_forcing.py::SCMForcing` — the
-  **forcing API the LES will be driven through**: `f_c`, `u_geo`, `v_geo`,
-  `subsidence_w`, `theta_adv`, `qv_adv`, `prescribe` (`none`/`T_s`/`fluxes`),
-  `T_s`, `w_th_s`, `w_qv_s`.
-
-### LES / plane dynamics
-- `src/legoesm/atmosphere/dynamics/compressible_euler_plane.py` — doubly-periodic                                                                                                          
--  non-hydrostatic compressible-Euler dycore + Smagorinsky LES (c_s=0.2). **The                                                                                                             
--  LES engine.** Validated to RCE at dx=2 km (CRM regime); will need to run at                                                                                                              
--  finer dx for true turbulence-resolving LES (see §5/§7 risks).                                                                                                                            
-- `src/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py`,                                                                                                                      
--  `src/legoesm/parallel/plane_mpi.py` — MPI (2D pencil) support.                                                                                                                           
-- `packages/core/legoesm/grids/plane.py::PlaneGrid` — plane grid.
-- `packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py` —
-  3-D doubly-periodic non-hydrostatic compressible-Euler dycore + Smagorinsky SGS
-  (c_s=0.2). **The LES engine.** Validated to RCE at dx=2 km (CRM regime); needs
-  finer dx + stability re-validation for true turbulence-resolving LES (§5/§7).
-  **A 1.5-order TKE SGS closure does NOT exist yet** (only Smagorinsky) — adding
-  it is the one genuine new dynamics-side piece.
-- `packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py`,
-  `packages/core/legoesm/parallel/plane_mpi.py` — MPI (2D pencil) support.
-- `packages/atmosphere/legoesm/atmosphere/dynamics/plane_operators.py`,
-  `plane_operators_halo.py`, `plane_large_scale_forcing.py` — plane operators +
-  large-scale forcing application.
-- `packages/core/legoesm/grids/plane.py::PlaneGrid` — 3-D plane grid
-  (`nx, ny, nlev`).
-- `packages/atmosphere/legoesm/atmosphere/dynamics/rce_diagnostics.py` —
-  `domain_mean_profiles_plane`, `column_water_vapor_plane`,
-  `cloud_fraction_profile_plane`, etc. **Extend here for resolved-flux
-  diagnostics** (`w'T'`, `w'q'`, `w'u'`) — see §5.
-- `scripts/run/run_rce.py`, `run_rcemip_plane.py`, `run_rce_mpi_long.py` —
-  existing plane drivers (templates for the LES driver).
-
-### Parameter plumbing
-- `packages/ml/legoesm/training/param_collector.py`,
-  `packages/ml/legoesm/training/trainable_params.py` — spec-based parameter
-  registry; `__param_spec__` per `*Config`. **All atmosphere params are scalar
-  today (no `shape_key`)** — the spatially-varying field is new infra.
-
----
-
-## 4. Pipeline stages (proposed)
-
-1. **AMIP-run stage** — `run_amip.py` with `diag_days=0.25`, writing the 3-D
-   state at 6-hourly cadence to a run directory.
-2. **Compare-to-ERA5 stage** — load ERA5 (6-hourly) via `era5_loader`, regrid
-   ERA5→model grid (or model→ERA5; decide once, document), compute per-column
-   error fields (T/q mass-weighted profile RMSE, precip error, u/v error).
-3. **Diagnose-worst-columns stage** — rank columns by a combined score; select
-   top-N (config). Emit a manifest of `(lat, lon, time, large-scale state)`.
-4. **LES-forcing-extraction stage** — for each flagged column build an
-   `SCMForcing` from that column's GCM large-scale state (subsidence, advective
-   tendencies, geostrophic wind, surface fluxes), plus the GCM column profile
-   for vertical interpolation + top relaxation.
-5. **LES-run stage** — standalone 3-D LES (dycore at LES resolution),
-   regime chosen per column; output resolved fluxes + profiles.
-6. **Coefficient-diagnosis stage** — diagnose the closure coefficient (e.g.
-   entrainment rate) from the LES resolved fluxes; produce a per-column
-   (possibly height-varying) value.
-7. **Feedback stage** — assemble the spatially-varying parameter field; apply to
-   the next AMIP iteration.
-
----
-
-## 5. New infrastructure needed (gaps)
-
-1. **Per-column comparison metric module** — column-resolved (not zonal-mean)
-   error fields vs ERA5. Builds on `scm_rce_metrics` + `loss.py` (no new profile
-   numerics). Likely `packages/.../diagnostics/` + a `scripts/validate/` driver.
-2. **Worst-column ranking + manifest** — selection of top-N, environment tagging
-   (SST/CAPE/shear) for later generalization. **DONE (iter 2)** —
-   `legoesm.training.column_manifest` (`build_worst_column_manifest`,
-   `compute_column_environment`, JSON I/O).
-3. **GCM-column → SCMForcing extractor** — derive large-scale forcing terms from
-   a single GCM column's neighborhood (subsidence from continuity / ω, advective
-   tendencies, geostrophic wind, surface fluxes). New, but uses existing
-   `SCMForcing` schema.
-4. **LES-resolution config + standalone LES driver** — configure the (already
-   3-D) plane dycore for a true turbulence-resolving LES regime (finer dx,
-   acoustic-substep/Smagorinsky re-tuning, stability re-validation — *not* a
-   dimensionality change); add an **optional 1.5-order TKE SGS closure** as an
-   alternative to Smagorinsky; a `scripts/run/` driver that ingests the forcing
-   manifest. Closure + regime selection must dispatch-error on unknown values.
-5. **Resolved-flux diagnostics** — add `w'T'`, `w'q'`, `w'u'` (and entrainment
-   diagnosis) to `rce_diagnostics.py` (extend, don't duplicate). **DONE (iter 6)**
-   — `resolved_turbulent_fluxes_plane` (w'θ'/w'q'/w'u'/w'v'/w'θ_v').
-6. **Closure-coefficient diagnosis** — map LES resolved fluxes → coefficient
-   (entrainment rate / eddy diffusivity / mixing length). Physically-grounded,
-   with units/sign checks. **DONE (iter 7)** — `les_closure_diagnosis`
-   (`eddy_diffusivity_from_flux`, `mixing_length_from_momentum_diffusivity`,
-   `entrainment_velocity_from_buoyancy_flux`).
-7. **Spatially-varying parameter field infra** — promote a chosen scalar physics
-   coefficient to a per-column (height-varying) field. Needs:
-   - `__param_spec__` `shape` key support already exists (currently unused for
-     atmosphere) — extend a target `*Config` field to carry a spatial shape.
-   - Apply overrides via the config pytree (`apply_param_overrides`), traced
-     inside any loss, static floats in production (SegmentForcing doctrine).
-   - **Differentiability preserved** — field must flow through `jax.grad`/JIT
-     without retrace; no Python control flow on traced columns.
+The original §3 (infrastructure to reuse), §4 (pipeline stages), §5 (new-infra
+gaps), and §8 (proposed file layout) described *what to build*; all of it is now
+built, tested, and Codex-reviewed — see the status table at the top of this file
+and the git history on `feat/compare-reanalysis`. Key reuse anchors that the
+build honoured: ERA5 ingestion (`ml/data/era5_loader.py`, `training/era5_to_state.py`),
+AMIP driver (`scripts/run/run_amip.py`, `OutputConfig.diag_days`), comparison
+metrics (`ml/loss.py`, `training/scm_rce_metrics.py`), SCM forcing
+(`atmosphere/scm_forcing.py` + `plane_large_scale_forcing.py`), the plane NH LES
+dycore (`atmosphere/dynamics/compressible_euler_plane.py`, `scripts/run/run_les_plane.py`),
+plane diagnostics (`rce_diagnostics.py`), and the param registry
+(`training/param_collector.py`, `feedback.apply_column_parameter_field`). File
+layout followed repo rules (source under `packages/<pkg>/legoesm/`, scripts in the
+right bucket, a direct test per `.py`, dispatch raises on unknown).
 
 ---
 
@@ -321,30 +207,6 @@ superparameterization).
   clean pytree leaf with stable shape.
 - **Conservation.** Any feedback correction must not silently break column mass/
   energy/moisture conservation; validate with conservation diagnostics.
-
----
-
-## 8. Proposed file layout (respecting repo rules)
-
-> New scripts go in the correct `scripts/` bucket; source under
-> `packages/<pkg>/legoesm/`; every new `.py` gets a direct test; dispatch raises
-> on unknown selection.
-
-- `scripts/run/run_amip_reanalysis_compare.py` — orchestrates AMIP + compare.
-- `scripts/validate/compare_amip_era5.py` — per-column ERA5 comparison + ranking
-  (non-matrix validator). **DONE (iter 4)** — real `main()` + tested helpers;
-  uses `compare_reanalysis` (iter 3) core.
-- `scripts/run/run_column_les.py` — standalone forced 3-D LES from the manifest.
-- `packages/ml/legoesm/training/column_era5_metrics.py` — per-column metrics
-  (reusing `scm_rce_metrics`/`loss.py`). **DONE (iter 1).** Lives in the **ml**
-  package (not `tools/diagnostics`) because it reuses `scm_rce_metrics`, which
-  `legoesm.diagnostics` sits below in the FEDERATION.md dependency DAG.
-- `packages/atmosphere/.../dynamics/rce_diagnostics.py` — **extend** with
-  resolved-flux + entrainment diagnostics.
-- `packages/atmosphere/.../<scheme>_config.py` — target `*Config` gains a
-  spatially-shaped field + `__param_spec__` entry.
-- Tests mirror under `tests/<component>/...`; LES-resolution dispatch + manifest
-  parsing get direct unit tests.
 
 ---
 

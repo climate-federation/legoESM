@@ -82,6 +82,9 @@ def test_build_setup_shapes_and_relaxation():
     assert rate[np.argmax(z)] > 0.0
     # forcing physics is callable.
     assert callable(setup.forcing_physics)
+    # moist IC interpolated onto the LES grid.
+    assert setup.q_v_init.shape == (8,)
+    assert bool(jnp.all(setup.q_v_init >= 0.0))
 
 
 def test_forcing_profiles_interpolated_to_les_grid():
@@ -241,5 +244,55 @@ def test_process_column_end_to_end_with_mock_run():
         _Rec(), T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
         config=_CONFIG, run_les_fn=fake_run,
     )
+    assert out.K.shape == (7,)  # LES nlev 8 -> 7 interior interfaces
+    assert bool(jnp.all(jnp.isfinite(out.K)))
+
+
+def test_process_column_real_dycore_integration():
+    """MOCK-FREE end-to-end: extract -> setup -> the REAL plane-NH dycore
+    (run_forced_les, a few real steps with the large-scale forcing + top
+    relaxation) -> diagnose. Validates the run path the unit tests mock out
+    (the compressible-Euler plane LES actually runs and stays finite)."""
+    from scripts.run.run_column_les import (
+        build_column_les_setup,
+        run_forced_les,
+    )
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        diagnose_column_coefficient,
+    )
+
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    T = jnp.full(shape, 280.0)
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 8.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+
+    gcm_z, gcm_theta, ls = extract_gcm_column(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+        col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)),
+    )
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=float(jnp.deg2rad(20.0)),
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG,
+    )
+    # dx=50 m, n_acoustic_substeps=6, c≈340 ⇒ acoustic CFL = 340·0.5/(6·50) ≈
+    # 0.57 < 1; a few steps from rest + a small θ' seed stay finite.
+    final = run_forced_les(setup, dt_s=0.5, n_steps=3)
+
+    # The REAL dycore ran and stayed numerically stable (no blow-up): every
+    # prognostic finite, |w| bounded, moisture carried (tracer slot 0 present).
+    for arr in (final.u.data, final.v.data, final.w.data,
+                final.theta_prime.data, final.tracers.data):
+        assert bool(jnp.all(jnp.isfinite(arr)))
+    assert float(jnp.max(jnp.abs(final.w.data))) < 50.0
+    assert final.tracers.data.shape[-1] == 1  # q_v seeded
+
+    # The diagnosis runs on the real LES state and returns a finite K profile.
+    out = diagnose_column_coefficient(final, setup.height_coord,
+                                      method="eddy_diffusivity")
     assert out.K.shape == (7,)  # LES nlev 8 -> 7 interior interfaces
     assert bool(jnp.all(jnp.isfinite(out.K)))
