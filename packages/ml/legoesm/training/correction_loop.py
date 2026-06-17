@@ -1,0 +1,148 @@
+"""The closed LES-informed correction loop: diagnose → correct → verify bias↓.
+
+Capstone orchestration of ``docs/COMPARE_REANALYSIS.md``: compose every stage of
+the pipeline into one iteration of the offline correction loop —
+
+  baseline config
+    → run AMIP + compare to ERA5      (compare_fn → per-column score + manifest)
+    → LES-diagnose each worst column   (diagnose_fn → K / w_e)
+    → assemble the feedback field       (:func:`assemble_feedback_field`, iter 16)
+    → apply it to the target scheme     (:func:`apply_feedback_to_scheme`, iter 18)
+    → re-run AMIP + compare             (compare_fn on the updated config)
+    → measure the bias change           (:func:`bias_improvement`, iter 17).
+
+The two heavy, data-bound steps are **injected** so the loop logic is unit-
+testable end-to-end and the production driver swaps in the real AMIP/LES runs:
+
+* ``compare_fn(config) -> CompareResult`` runs an AMIP/CMIP simulation with that
+  config and scores it against ERA5 (``scripts/validate/compare_amip_era5.py`` +
+  :func:`legoesm.training.column_era5_metrics.score_columns`).
+* ``diagnose_fn(record, model_ctx) -> diagnosis`` spins off + diagnoses the
+  column LES (``scripts/run/run_column_les.py::process_column``).
+
+The loop is the offline / iterative correction of §1 — restartable, with the LES
+batch embarrassingly parallel across columns.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, NamedTuple, Sequence
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.training.bias_metrics import (
+    BiasImprovement,
+    bias_improvement,
+    worst_column_bias_change,
+)
+from legoesm.training.feedback_assembly import assemble_feedback_field
+from legoesm.training.promotable_params import apply_feedback_to_scheme
+
+
+class CompareResult(NamedTuple):
+    """One AMIP-vs-ERA5 comparison: the score field, manifest, and weights."""
+
+    combined_score: jax.Array          # per-column combined score (grid-shaped)
+    manifest: Sequence[Any]            # worst-column ColumnRecords
+    area_weights: jax.Array            # per-column quadrature weights
+    model_ctx: Any = None              # opaque state handed to diagnose_fn
+    valid_mask: jax.Array | None = None  # optional column validity for aggregation
+
+
+class CorrectionResult(NamedTuple):
+    """Outcome of one correction iteration."""
+
+    updated_config: Any
+    bias: BiasImprovement              # baseline vs updated global bias
+    worst_column_change: jax.Array     # mean bias reduction at the worst columns
+    feedback_field: jax.Array          # the assembled per-column field
+    n_corrected: int                   # number of worst columns diagnosed
+
+
+def run_correction_iteration(
+    baseline_config: Any,
+    *,
+    compare_fn: Callable[[Any], CompareResult],
+    diagnose_fn: Callable[[Any, Any], Any],
+    promotion_key: str,
+    grid_shape: tuple[int, ...],
+    diagnosis_method: str = "eddy_diffusivity",
+    background: float = 0.0,
+    expected_ncol: int | None = None,
+) -> CorrectionResult:
+    """Run one diagnose→correct→verify iteration; report the bias change.
+
+    ``promotion_key`` selects the target coefficient
+    (:mod:`legoesm.training.promotable_params`); ``diagnosis_method`` selects the
+    LES closure-coefficient (eddy diffusivity / entrainment).  ``background`` is
+    the coefficient's production default (columns with no valid diagnosis keep
+    it).  Returns the updated config + the :class:`BiasImprovement` (its
+    ``improved`` field is the success test) + the worst-column change.
+
+    A grid with no flagged worst columns short-circuits to a no-op correction
+    (baseline config unchanged, zero feedback, ``improved=False``) without a
+    second AMIP run or a config change.
+
+    ``compare_fn`` MUST be deterministic across the two calls — same ERA5
+    reference, grid, masks and (seeded) stochastic state — so the measured
+    change reflects only the config update, not run-to-run noise.  This is
+    host-side (non-jitted) orchestration: it drives AMIP/LES callbacks and loops
+    over the manifest in Python by design.  ``expected_ncol`` defaults to
+    ``prod(grid_shape)`` (the field IS the grid), so a field/grid length
+    mismatch is always caught at the splice; an explicit value that disagrees
+    raises.
+    """
+    ncol = 1
+    for d in grid_shape:
+        ncol *= int(d)
+    if expected_ncol is not None and int(expected_ncol) != ncol:
+        raise ValueError(
+            f"expected_ncol {expected_ncol} != prod(grid_shape) {ncol}."
+        )
+
+    baseline = compare_fn(baseline_config)
+    records = list(baseline.manifest)
+
+    if not records:
+        # No flagged columns → no-op correction (no second run, no config edit).
+        dtype = jnp.asarray(baseline.combined_score).dtype
+        noop_bias = bias_improvement(
+            baseline.combined_score, baseline.combined_score,
+            baseline.area_weights, valid_mask=baseline.valid_mask,
+        )
+        return CorrectionResult(
+            updated_config=baseline_config,
+            bias=noop_bias,
+            worst_column_change=jnp.asarray(0.0, dtype=dtype),
+            feedback_field=jnp.full(
+                grid_shape, jnp.asarray(background, dtype=dtype)
+            ),
+            n_corrected=0,
+        )
+
+    diagnoses = [diagnose_fn(rec, baseline.model_ctx) for rec in records]
+    field = assemble_feedback_field(
+        records, diagnoses, grid_shape,
+        method=diagnosis_method, background=background,
+    )
+    updated_config = apply_feedback_to_scheme(
+        baseline_config, promotion_key, field, expected_ncol=ncol
+    )
+
+    updated = compare_fn(updated_config)
+    improvement = bias_improvement(
+        baseline.combined_score, updated.combined_score,
+        baseline.area_weights, valid_mask=baseline.valid_mask,
+    )
+    worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
+    worst_change = worst_column_bias_change(
+        baseline.combined_score, updated.combined_score, worst_idx
+    )
+    return CorrectionResult(
+        updated_config=updated_config,
+        bias=improvement,
+        worst_column_change=worst_change,
+        feedback_field=field,
+        n_corrected=len(records),
+    )

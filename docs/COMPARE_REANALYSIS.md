@@ -35,6 +35,7 @@
 > | 7 LES diagnoses→feedback field | `training/feedback_assembly.py` (`reduce_column_diagnosis` K-profile→scalar / w_e; `assemble_feedback_field` scatters at worst-column flat indices) | 16 |
 > | verify bias↓ (success metric) | `training/bias_metrics.py` (`aggregate_combined_bias` area-weighted; `bias_improvement` baseline-vs-updated; `worst_column_bias_change`) | 17 |
 > | 7 per-scheme promotion | `training/promotable_params.py` (`apply_feedback_to_scheme`: registry of (ncol,)-capable coefficients; gray `tau_equator`/`tau_pole` promoted end-to-end, NO body change) | 18 |
+> | CLOSED LOOP orchestrator | `training/correction_loop.py` (`run_correction_iteration`: compare→LES-diagnose→assemble→apply→re-compare→`bias_improvement`; heavy AMIP/LES steps injected; empty-manifest no-op) | 19 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
@@ -55,9 +56,12 @@
 >    body is wrapped in a column-broadcast (the physically-targeted follow-up).
 > 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
 > 5. **End-to-end bias-reduction demo** — the actual success criterion. The
->    *measurement* now exists (`bias_metrics.bias_improvement`, iter 17); the
->    remaining work is the HPC-scale run that exercises it (baseline AMIP →
->    feedback → updated AMIP, assert `improved`).
+>    *orchestrator* now exists (`correction_loop.run_correction_iteration`, iter
+>    19) and is unit-tested with mocks (a correction that lowers worst-column
+>    scores yields `improved=True`); the remaining work is supplying the real
+>    HPC-scale `compare_fn` (AMIP run + `compare_amip_era5`) and `diagnose_fn`
+>    (`run_column_les.process_column`) and running it on real ERA5 to produce
+>    the empirical bias drop. That run is HPC-scale (not unit-testable here).
 ---
 
 ## 1. Goal
