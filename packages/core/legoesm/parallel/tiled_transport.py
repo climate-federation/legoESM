@@ -34,11 +34,7 @@ from functools import partial
 
 import jax
 from jax.sharding import PartitionSpec as P
-
-try:  # JAX >= 0.8 top-level export
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
+from legoesm.parallel.shard_map_compat import shard_map
 
 
 def transport_sweep_tile(vp_g, courant, rd_g, a, nl: int, h3: int = 4):

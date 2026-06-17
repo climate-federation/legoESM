@@ -1045,6 +1045,24 @@ def fill_corner_region(
     return padded
 
 
+def apply_duogrid_4d(padded, duogrid, halo):
+    """Apply the duogrid kinked-to-extended remap + corner fill to a 4D
+    padded field ``(6, n+2h, n+2h, nlev)``, level-by-level via ``jax.vmap``.
+
+    Mirrors the post-processing loop inside :func:`legoesm.grids.halo.pad_halo_4d`;
+    shared by the MPI (``parallel.halo_exchange``) and SPMD
+    (``parallel.cubesphere_exchange``) 4D halo paths so the two cannot drift.
+    """
+    def _remap_level(level_slice):
+        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+        level_slice = fill_corner_region(level_slice, duogrid, halo)
+        return level_slice
+
+    padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
+    padded_t = jax.vmap(_remap_level)(padded_t)
+    return jnp.transpose(padded_t, (1, 2, 3, 0))
+
+
 def _fill_corner_region_averaging(
     padded: jax.Array,
     duogrid: DuoGridData,
