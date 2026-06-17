@@ -120,7 +120,6 @@ __param_spec__ = {
         "excluded": {
             "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
             "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
-            "rms_gw_speed": "declared but never read by hines_gwd (launch amplitude uses total_rms_wind); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
@@ -365,14 +364,10 @@ class HinesConfig(NamedTuple):
 
     Fields
     ------
-    rms_gw_speed : float
-        RMS gravity wave speed [m/s] (default 1.0).
     m_star : float
         Characteristic vertical wavenumber [1/m] (default 2*pi/2e3).
     total_rms_wind : float
         Total RMS gravity wave wind [m/s] (default 2.0).
-    cutoff_wn : float
-        Maximum vertical wavenumber [1/m] (default 2*pi/500).
     Fmax : float
         Saturation momentum flux cap [Pa] (default 0.1).
     doppler_sharpness : float
@@ -388,10 +383,8 @@ class HinesConfig(NamedTuple):
         remove per step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so
         the single-step drag cannot reverse the wind.
     """
-    rms_gw_speed: float = 1.0
     m_star: float = 2.0 * math.pi / 2e3
     total_rms_wind: float = 2.0
-    cutoff_wn: float = 2.0 * math.pi / 500.0
     Fmax: float = 0.1
     doppler_sharpness: float = 50.0
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]

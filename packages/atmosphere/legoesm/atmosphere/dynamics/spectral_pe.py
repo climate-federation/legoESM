@@ -1665,11 +1665,6 @@ class SpectralPrimitiveEquationModel:
 
         return self._do_step(state, dt, tendency_fn)
 
-    # Keep old names as aliases for backward compatibility
-    _euler_si_physics_jit = _euler_si_jit
-    _leapfrog_si_physics_jit = _leapfrog_si_jit
-    _step_with_physics_jit = _step_jit
-
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_with_forcing_jit(
         self,
@@ -1708,11 +1703,6 @@ class SpectralPrimitiveEquationModel:
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            forcing_cpu = jax.device_put(forcing_data, self._cpu_device)
-            # Note: _do_step closes over tendency_fn which references
-            # forcing_data; the cpu-put forcing is not directly used
-            # but the device_put ensures the trace is on CPU.
-            del forcing_cpu  # keep linter happy
             result_cpu = self._do_step(state_cpu, dt, tendency_fn)
             return jax.device_put(result_cpu, self._default_device)
 
@@ -1740,9 +1730,6 @@ class SpectralPrimitiveEquationModel:
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
         return self._do_step(state, dt, tendency_fn)
-
-    # Keep old name as alias for backward compatibility
-    _step_on_cpu_with_physics = _step_on_cpu
 
     def integrate(
         self,

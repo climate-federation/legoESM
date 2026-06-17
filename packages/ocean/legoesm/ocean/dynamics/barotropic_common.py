@@ -513,9 +513,6 @@ def solve_helmholtz_implicit(
     stock_cg_maxiter: int,
     pcg_variant: str = "standard",
     dot_weight: jnp.ndarray | None = None,
-    inv_area_weight: jnp.ndarray | None = None,  # accepted for API
-    # stability; unused (the unrolled distributed path needs no area
-    # weight — see the module note on why custom_linear_solve was dropped).
 ) -> tuple[jnp.ndarray, HelmholtzSolveDiagnostics]:
     """Solve ``A eta = rhs`` for the implicit free-surface step.
 
@@ -558,10 +555,6 @@ def solve_helmholtz_implicit(
         (diagnostic only; never loop control).
     stock_cg_tol, stock_cg_maxiter :
         Single-rank stock-CG tolerance / iteration cap.
-    inv_area_weight : jax.Array or None
-        Accepted for API stability; unused (the unrolled path needs no
-        area weighting — only the dropped ``custom_linear_solve``
-        transpose did).
 
     Returns
     -------

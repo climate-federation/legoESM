@@ -34,8 +34,7 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
-# Cloud-optics defaults (fixed): default droplet number, effective-radius bounds.
-_NC_DEFAULT_PER_M3 = 1.0e8       # default cloud droplet number [1/m^3]
+# Cloud-optics defaults (fixed): effective-radius bounds.
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
@@ -298,8 +297,7 @@ def compute_cloud_properties(
         # Where the prognostic droplet number is 0/garbage (SAM specified-Nc
         # Morrison, dopredictNc=.false., keeps the Nc slot at 0), fall back to the
         # specified Nc_default so r_eff is the SAM constant-Nc value, not 35 um.
-        n_cloud = jnp.where(n_cloud > 1.0, n_cloud,
-                            getattr(config, "Nc_default", _NC_DEFAULT_PER_M3))
+        n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept

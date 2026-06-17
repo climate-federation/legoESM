@@ -268,7 +268,6 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         has_v = state.v is not None
 
         if not tagged_fns:
-            _sd = state.T.data.dtype
             dims_T = state.T.dims
             dims_ps = state.p_s.dims
             dv_dt_zero = None

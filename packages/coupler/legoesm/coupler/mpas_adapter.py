@@ -198,11 +198,10 @@ def compute_mpas_freshwater(
         ):
             runoff_sfc = land_state.runoff
 
-    # Phase-aware evap mass flux (audit F22).  Prefer
-    # ``surface_mass_flux`` over the L_v back-derivation when
-    # available, since SurfaceToAtm gained the field in iter-16 and
-    # it correctly accounts for sublimation over cold tiles.
-    surface_mass_flux = getattr(sfc_response, 'surface_mass_flux', None)
+    # Phase-aware evap mass flux (audit F22): ``surface_mass_flux`` is a
+    # mandatory SurfaceToAtm field that correctly accounts for sublimation
+    # over cold tiles, used in place of the L_v back-derivation.
+    surface_mass_flux = sfc_response.surface_mass_flux
 
     return freshwater_from_coupler(
         precip_total=atm_forcing.precip_total,
