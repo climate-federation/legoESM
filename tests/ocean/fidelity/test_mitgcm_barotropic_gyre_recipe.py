@@ -99,7 +99,10 @@ def test_oracle_pattern_match_against_real_mitgcm():
     li = lego_eta[1:-1, 1:-1].ravel()
     mi = m_eta[1:-1, 1:-1].ravel()
     corr = float(np.corrcoef(li, mi)[0, 1])
-    assert corr > 0.9, f"eta pattern correlation {corr:.3f} too low"
-    # Magnitude within a factor of ~1.5 (solver/placement residuals aside).
+    # With the audit-settled config (fully-backward-Euler free surface theta=1.0,
+    # flux-form momentum/viscosity) the 10-step pattern is near-perfect.
+    assert corr > 0.999, f"eta pattern correlation {corr:.4f} too low"
+    # Magnitude within ~15% (residual = time-scheme transient + free-slip vs
+    # MITgcm no-slip walls, which is inactive over a 10-step spin-up).
     ratio = np.abs(lego_eta).max() / np.abs(m_eta).max()
-    assert 0.5 < ratio < 2.0, f"eta magnitude ratio {ratio:.2f} off"
+    assert 0.85 < ratio < 1.15, f"eta magnitude ratio {ratio:.3f} off"
