@@ -81,10 +81,15 @@ def _existing(path: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--hwsd-bil", required=True, type=_existing,
-                    help="HWSD2.bil raster (30 arc-sec SMU ids)")
-    ap.add_argument("--hwsd-attr", required=True, type=_existing,
-                    help="HWSD2_LAYERS attribute table (.mdb or .csv)")
+    # Inputs to step 1 only.  Not required (nor existence-checked) when
+    # --skip-hwsd reuses an existing intermediate, since step 1 — the sole
+    # consumer of the raster + attribute table — is skipped on that path.
+    ap.add_argument("--hwsd-bil", default=None,
+                    help="HWSD2.bil raster (30 arc-sec SMU ids); "
+                         "required unless --skip-hwsd")
+    ap.add_argument("--hwsd-attr", default=None,
+                    help="HWSD2_LAYERS attribute table (.mdb or .csv); "
+                         "required unless --skip-hwsd")
     ap.add_argument("--clm-surfdata", required=True, type=_existing,
                     help="CLM5 surfdata NetCDF (cover/PFT/LAI source for v1)")
     ap.add_argument("--intermediate", default=str(_DEFAULT_INTERMEDIATE),
@@ -100,6 +105,15 @@ def main() -> None:
     ap.add_argument("--skip-hwsd", action="store_true",
                     help="reuse an existing intermediate; skip step 1")
     args = ap.parse_args()
+
+    # The step-1 inputs are required + must exist only when step 1 runs.  Under
+    # --skip-hwsd they are unused, so a stale/absent path must not block reusing
+    # the cached intermediate.
+    if not args.skip_hwsd:
+        for flag, val in (("--hwsd-bil", args.hwsd_bil), ("--hwsd-attr", args.hwsd_attr)):
+            if val is None:
+                ap.error(f"{flag} is required unless --skip-hwsd is set")
+            _existing(val)
 
     out_dir = Path(args.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
