@@ -7,6 +7,33 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 8 (2026-06-17) — Stage 7 (gap #7, assembly): parameter-field assembly ✅
+> Added `legoesm.training.parameter_field` — assemble the iter-7 per-column
+> diagnosed coefficients into a full-grid GCM parameter field (the feedback
+> field), both §6 generalization strategies, pure-JAX + differentiable:
+> - `scatter_column_field(grid_shape, flat_indices, values, background, valid)` —
+>   **static (lat,lon)**: background + diagnosed values at the worst columns
+>   (distinct indices per `rank_worst_columns`; differentiable w.r.t. values).
+> - `environment_kernel_field(grid_env, sample_env, sample_values, length_scales,
+>   ...)` — **regress onto environment predictors**: Nadaraya–Watson Gaussian
+>   kernel regression in normalized (SST/CAPE/shear) space → every grid column
+>   gets a value from environmentally-similar diagnosed columns; columns with no
+>   sample within ~3 normalized σ fall back to background.
+> - **Hardening (Codex, clean after 2 rounds):** invalid samples sanitized to
+>   finite zero BEFORE arithmetic (kills 0·NaN contamination + NaN adjoints),
+>   length-scale floor (no 0/0), `>=` threshold, conservative 3σ default,
+>   dtype promotion, exact-zero background gradient.
+> - Tests: 13 cases incl. analytic N-W recovery/averaging, threshold boundary,
+>   NaN-invalid non-contamination, AD-safety, jit.
+> - The *application* to a scheme `*Config` (shape-keyed field +
+>   `apply_param_overrides`, traced-in-loss) is the companion next step — the
+>   `shape_key` infra already exists in `param_collector`.
+>
+> **Next:** wire the assembled field into a target scheme `*Config` as a
+> `shape`-keyed `__param_spec__` param applied via `apply_param_overrides`
+> (traced-in-loss), then the end-to-end bias-reduction demo. Still open:
+> grid-side `ColumnLargeScaleState` extractor; LES driver + 1.5-order TKE SGS.
+>
 > ### Iter 7 (2026-06-17) — Stage 6 (gap #6): closure-coefficient diagnosis ✅
 > Added `atmosphere.dynamics.les_closure_diagnosis` — the **inverse** of the
 > forward turbulence schemes: diagnose a closure coefficient from the iter-6
