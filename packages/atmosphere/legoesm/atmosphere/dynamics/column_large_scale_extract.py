@@ -20,8 +20,14 @@ Reuse only (CLAUDE.md — no re-derived numerics):
 * Potential temperature via :func:`legoesm.atmosphere.physics._shared.exner_function`.
 * Coriolis handled in :func:`~legoesm.atmosphere.column_forcing.build_column_scm_forcing`.
 
-Geostrophic wind (``∇Φ``) is a documented follow-up — the SCM forcing simply
-disables geostrophic relaxation when ``u_geo`` is ``None``.
+Geostrophic wind (``∇Φ``, iter 29): :func:`geostrophic_wind_from_gradients`
+diagnoses ``u_geo``/``v_geo`` from the sigma-surface geopotential + surface-
+pressure gradients (two-term pressure-gradient conversion to the pressure
+surface), populated by the **lat-lon** extractor and wired into the column LES as
+the plane Coriolis reference wind (``f×(V − V_geo)``).  ``u_geo = None`` supplies
+no geostrophic reference (within :data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator,
+and on the cubed sphere pending a metric-correct east/north↔grid rotation — see
+the cubed extractor); the plane Coriolis then falls back to ``f×V``.
 
 Grids: ERA5 is lat-lon (``extract_column_forcing_latlon``), but the model's
 flagship dycore is cubed-sphere, so a worst column flagged on the *native* model
@@ -34,19 +40,67 @@ unsupported grid — Gaussian/Voronoi remain follow-ups).
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
-from legoesm.atmosphere.physics._shared import exner_function
+from legoesm.atmosphere.physics._shared import (
+    compute_heights_from_sigma,
+    exner_function,
+    virtual_temperature,
+)
 from legoesm.core.field import Field
 from legoesm.core.operators_latlon import divergence, gradient
 from legoesm.grids.vertical import (
     compute_pressure_velocity,
     compute_sigma_dot_and_total,
 )
+
+from legoesm import constants
+
+# --- geostrophic-balance validity (diagnostic convention, not tunable) -------
+# Geostrophic balance is ill-posed near the equator (f → 0); below this latitude
+# the column supplies NO geostrophic reference wind (u_geo/v_geo = None), so the
+# column LES's plane Coriolis falls back to f×V (no geostrophic target).
+_MIN_GEOSTROPHIC_LAT_DEG = 5.0  # ~|f| ≥ 1.3e-5 1/s; standard extratropical cutoff
+
+
+def geostrophic_wind_from_gradients(
+    dphi_dx_sigma: jax.Array,
+    dphi_dy_sigma: jax.Array,
+    dlnps_dx: jax.Array,
+    dlnps_dy: jax.Array,
+    T_v: jax.Array,
+    f_c: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Geostrophic wind from the sigma-surface geopotential + surface-pressure gradients.
+
+    Uses the standard two-term pressure-gradient decomposition to convert the
+    **sigma-surface** geopotential gradient ``∂Φ/∂·|_σ`` to the **pressure-surface**
+    gradient ``∂Φ/∂·|_p`` that enters geostrophic balance::
+
+        ∂Φ/∂x|_p = ∂Φ/∂x|_σ + R_d·T_v·∂ln p_s/∂x          (derivation: at constant p,
+        dσ/dx|_p = −σ ∂ln p_s/∂x and ∂Φ/∂σ = −R_d T_v/σ ⇒ the +R_d T_v ∂ln p_s term)
+
+    then geostrophic balance ``f v_g = ∂Φ/∂x|_p``, ``f u_g = −∂Φ/∂y|_p``::
+
+        v_g = +(∂Φ/∂x|_σ + R_d·T_v·∂ln p_s/∂x) / f
+        u_g = −(∂Φ/∂y|_σ + R_d·T_v·∂ln p_s/∂y) / f
+
+    All inputs are the gathered single column (``(nlev,)`` for the Φ gradients +
+    ``T_v``; the ``ln p_s`` gradient is column-scalar and broadcasts).  Components
+    are in the SAME grid-aligned frame as the gradient operator (so they match the
+    model's ``u``/``v``).  ``f_c`` is the column's scalar Coriolis; the caller
+    guards ``|f_c|`` away from zero (see :data:`_MIN_GEOSTROPHIC_LAT_DEG`), so no
+    masked division is needed here.  Pure-JAX, differentiable.
+    """
+    dphi_dx_p = dphi_dx_sigma + constants.R_d * T_v * dlnps_dx
+    dphi_dy_p = dphi_dy_sigma + constants.R_d * T_v * dlnps_dy
+    u_g = -dphi_dy_p / f_c
+    v_g = dphi_dx_p / f_c
+    return u_g, v_g
 
 
 def advective_tendency(
@@ -83,6 +137,77 @@ def omega_from_divergence(
     # surface-pressure-tendency closure).
     dp_s_dt = -p_s * d_total[..., 0] / (1.0 - sigma_top)
     return compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
+
+
+def _geopotential_full_grid(
+    T: jax.Array, q_v: jax.Array, p_s: jax.Array, sigma_coord: Any
+) -> jax.Array:
+    """Geopotential ``Φ = g·z`` [m²/s²] at full levels on the full grid (any shape).
+
+    Reuses the shared hydrostatic height integral
+    (:func:`compute_heights_from_sigma`) over a flattened column axis, then
+    reshapes back.  ``z`` is height ABOVE the surface, so ``Φ`` is the
+    above-surface geopotential — exact for a flat/ocean surface (``z_s = 0``, the
+    LES worst-column use case); the orographic surface-geopotential gradient
+    ``g·∇z_s`` is a documented follow-up for terrain.
+    """
+    spatial = T.shape[:-1]
+    nlev = T.shape[-1]
+    ncol = 1
+    for d in spatial:
+        ncol *= int(d)
+    sigma_half = jnp.asarray(sigma_coord.sigma_half, dtype=T.dtype)
+    p_half = p_s.reshape(ncol, 1) * sigma_half[None, :]
+    z_full, _ = compute_heights_from_sigma(
+        T.reshape(ncol, nlev), p_half, q_v.reshape(ncol, nlev)
+    )
+    return constants.g * z_full.reshape(spatial + (nlev,))
+
+
+def _geostrophic_wind_column(
+    *,
+    T: jax.Array,
+    q_v: jax.Array,
+    p_s: jax.Array,
+    grid: Any,
+    sigma_coord: Any,
+    grad_fn,
+    lat_rad: float,
+    col_index: tuple[int, ...],
+) -> tuple[jax.Array | None, jax.Array | None]:
+    """Diagnose one column's geostrophic wind (``u_geo``/``v_geo``) or ``(None, None)``.
+
+    Computes ``Φ = g·z`` + ``ln p_s`` on the FULL grid, takes their horizontal
+    gradients with the grid's operator ``grad_fn(field_3d, grid) -> (gx, gy)``
+    (so the metric-correct stencil sees the neighbourhood), gathers the flagged
+    column, and applies :func:`geostrophic_wind_from_gradients`.  Returns
+    ``(None, None)`` within :data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator (where
+    geostrophic balance is ill-posed) — no geostrophic reference wind is supplied
+    there, so the column LES's plane Coriolis falls back to ``f×V``.
+
+    **Precondition** — ``grad_fn``'s ``(x, y)`` axes must be **geographic**
+    (east/north), because geostrophic balance is applied directly in that frame.
+    This holds for the lat-lon operator; the cubed-sphere operators return
+    grid-axis derivatives on a non-orthogonal grid, so the cubed-sphere extractor
+    does NOT call this (it supplies no geostrophic reference wind pending a
+    metric-correct rotation; the plane Coriolis then falls back to f×V).
+    """
+    if abs(math.degrees(float(lat_rad))) < _MIN_GEOSTROPHIC_LAT_DEG:
+        return None, None
+    phi = _geopotential_full_grid(T, q_v, p_s, sigma_coord)
+    dphi_dx, dphi_dy = grad_fn(phi, grid)
+    ln_ps = jnp.log(jnp.clip(jnp.asarray(p_s, dtype=T.dtype), 1.0, None))[..., None]
+    dlnps_dx, dlnps_dy = grad_fn(ln_ps, grid)
+    T_v = virtual_temperature(T, q_v)
+    idx = tuple(int(c) for c in col_index)
+    # f_c host-side (jit-safe): lat_rad is static per the extractor contract, so
+    # use the pure-Python Coriolis f = 2Ω sinφ.  The shared jnp-based
+    # coriolis_f_c() calls float() on a jnp result, which is a tracer (and thus
+    # errors) when the extractor itself is traced under jax.jit.
+    f_c = 2.0 * constants.Omega * math.sin(float(lat_rad))
+    return geostrophic_wind_from_gradients(
+        dphi_dx[idx], dphi_dy[idx], dlnps_dx[idx], dlnps_dy[idx], T_v[idx], f_c
+    )
 
 
 def _gradient_latlon_3d(field_3d: jax.Array, grid: Any) -> tuple[jax.Array, jax.Array]:
@@ -150,6 +275,11 @@ def extract_column_forcing_latlon(
     div_3d = _divergence_latlon_3d(u, v, grid)
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
+    u_geo, v_geo = _geostrophic_wind_column(
+        T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
+        grad_fn=_gradient_latlon_3d, lat_rad=lat_rad, col_index=col_index,
+    )
+
     i, j = int(col_index[0]), int(col_index[1])
     return ColumnLargeScaleState(
         lat_rad=lat_rad,
@@ -159,6 +289,8 @@ def extract_column_forcing_latlon(
         omega=omega_3d[i, j, :],
         theta_adv=theta_adv_3d[i, j, :],
         qv_adv=qv_adv_3d[i, j, :],
+        u_geo=u_geo,
+        v_geo=v_geo,
     )
 
 
@@ -243,6 +375,17 @@ def extract_column_forcing_cubed_sphere(
     div_3d = _divergence_cubed_3d(u, v, grid)
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
+    # Geostrophic forcing is NOT applied on the cubed sphere (u_geo/v_geo=None, so
+    # no geostrophic reference wind is supplied — the column LES's plane Coriolis
+    # falls back to f×V, exactly as for equatorial columns).  Geostrophic balance
+    # is geographic
+    # (east/north), but the cubed-sphere gradient operators return GRID-AXIS
+    # derivatives on a NON-ORTHOGONAL grid; the metric-correct east/north↔grid
+    # rotation (grid.cos_angle/sin_angle) is a follow-up that must be visually
+    # verified for cube-edge/corner artifacts (CLAUDE.md) before it ships.  The
+    # lat-lon path (ERA5-native, the primary comparison grid) is fully geostrophic.
+    u_geo, v_geo = None, None
+
     f, i, j = int(col_index[0]), int(col_index[1]), int(col_index[2])
     return ColumnLargeScaleState(
         lat_rad=lat_rad,
@@ -252,6 +395,8 @@ def extract_column_forcing_cubed_sphere(
         omega=omega_3d[f, i, j, :],
         theta_adv=theta_adv_3d[f, i, j, :],
         qv_adv=qv_adv_3d[f, i, j, :],
+        u_geo=u_geo,
+        v_geo=v_geo,
     )
 
 

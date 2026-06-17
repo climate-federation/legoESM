@@ -18,8 +18,10 @@ from legoesm.atmosphere.column_forcing import (
     build_column_scm_forcing,
 )
 from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    _MIN_GEOSTROPHIC_LAT_DEG,
     advective_tendency,
     extract_column_forcing_latlon,
+    geostrophic_wind_from_gradients,
     omega_from_divergence,
 )
 from legoesm.grids.latlon import create_latlon_grid
@@ -187,3 +189,86 @@ def test_extract_jit():
     omega, th_adv, qv_adv = jax.jit(run)(T)
     for arr in (omega, th_adv, qv_adv):
         assert bool(jnp.all(jnp.isfinite(arr)))
+
+
+# --- geostrophic wind (iter 29) --------------------------------------------
+
+def test_geostrophic_wind_from_gradients_nh_sign_and_magnitude():
+    """Φ decreasing northward (∂Φ/∂y<0), f>0 ⇒ westerly geostrophic wind
+    u_g = -∂Φ/∂y/f > 0; v_g from ∂Φ/∂x only."""
+    f = 1.0e-4
+    T_v = jnp.full((4,), 280.0)
+    dphi_dy = jnp.full((4,), -1.0e-2)   # Φ down toward north
+    dphi_dx = jnp.zeros((4,))
+    zero = jnp.zeros((4,))
+    u_g, v_g = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f)
+    np.testing.assert_allclose(np.asarray(u_g), 1.0e-2 / f, rtol=1e-12)  # +100
+    np.testing.assert_allclose(np.asarray(v_g), 0.0, atol=1e-12)
+    assert bool(jnp.all(u_g > 0.0))  # westerly
+
+
+def test_geostrophic_wind_from_gradients_lnps_term():
+    """The +R_d·T_v·∂ln p_s term enters the pressure-surface gradient: with
+    ∂Φ/∂·|σ=0, v_g = R_d·T_v·∂ln p_s/∂x / f."""
+    from legoesm import constants
+
+    f = 1.0e-4
+    T_v = jnp.full((3,), 280.0)
+    dlnps_dx = jnp.full((3,), 1.0e-6)
+    zero = jnp.zeros((3,))
+    u_g, v_g = geostrophic_wind_from_gradients(zero, zero, dlnps_dx, zero, T_v, f)
+    expected_v = constants.R_d * 280.0 * 1.0e-6 / f
+    np.testing.assert_allclose(np.asarray(v_g), expected_v, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(u_g), 0.0, atol=1e-12)
+
+
+def test_extract_populates_geostrophic_wind_extratropics():
+    """An extratropical column (|lat| ≥ cutoff) gets a finite (nlev,) u_geo/v_geo."""
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()
+    nlev = T.shape[-1]
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(jnp.deg2rad(35.0)), col_index=(6, 8),
+    )
+    assert ls.u_geo is not None and ls.v_geo is not None
+    assert ls.u_geo.shape == (nlev,) and ls.v_geo.shape == (nlev,)
+    assert bool(jnp.all(jnp.isfinite(ls.u_geo)))
+    assert bool(jnp.all(jnp.isfinite(ls.v_geo)))
+
+
+def test_extract_no_geostrophic_wind_near_equator():
+    """Within the equatorial cutoff, geostrophic balance is ill-posed ⇒ None
+    (so build_column_scm_forcing disables geostrophic relaxation there)."""
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()
+    lat = 0.5 * _MIN_GEOSTROPHIC_LAT_DEG  # inside the cutoff
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(jnp.deg2rad(lat)), col_index=(4, 8),
+    )
+    assert ls.u_geo is None and ls.v_geo is None
+    forcing = build_column_scm_forcing(ls)
+    assert forcing.u_geo is None  # geostrophic relaxation disabled
+
+
+def test_extract_geostrophic_thermal_wind_westerly():
+    """Warm equator / cold pole (Φ decreasing poleward) ⇒ westerly (u_geo>0)
+    geostrophic wind at an NH column — the thermal-wind midlatitude westerlies."""
+    n_lat, n_lon, nlev = 16, 32, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    lat2d = jnp.asarray(grid.grid_lat)[:, :, None]  # (n_lat, n_lon, 1) radians
+    T = 240.0 + 50.0 * jnp.cos(lat2d) * jnp.ones((n_lat, n_lon, nlev))  # warm equator
+    q_v = jnp.full((n_lat, n_lon, nlev), 5e-3)
+    u = jnp.zeros((n_lat, n_lon, nlev))
+    v = jnp.zeros((n_lat, n_lon, nlev))
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+    # pick a clearly-NH column (lat well above the cutoff)
+    i_nh = int(np.argmin(np.abs(np.asarray(grid.grid_lat)[:, 0] - np.deg2rad(45.0))))
+    lat_rad = float(np.asarray(grid.grid_lat)[i_nh, 0])
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=lat_rad, col_index=(i_nh, 0),
+    )
+    assert ls.u_geo is not None
+    # westerly (eastward) geostrophic wind through the column depth.
+    assert bool(jnp.all(ls.u_geo > 0.0))

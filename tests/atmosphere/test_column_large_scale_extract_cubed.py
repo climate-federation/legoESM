@@ -53,7 +53,7 @@ def _nonuniform_state(grid):
     lev = jnp.arange(_NLEV, dtype=jnp.float64)
     # Smooth global fields with non-zero horizontal gradient.
     T = 280.0 + 12.0 * jnp.sin(lon) * jnp.cos(lat) + 0.5 * lev
-    q_v = 0.012 + 0.004 * jnp.cos(lon) * jnp.cos(lat)
+    q_v = 0.012 + 0.004 * jnp.cos(lon) * jnp.cos(lat) + 1e-4 * lev  # nlev levels
     u = jnp.full((6, _RES, _RES, _NLEV), 6.0)
     v = jnp.full((6, _RES, _RES, _NLEV), -3.0)
     p_s = jnp.full((6, _RES, _RES), 1.0e5) + 50.0 * jnp.sin(jnp.asarray(grid.grid_lon))
@@ -196,3 +196,21 @@ def test_dispatch_unknown_grid_raises():
             p_s=jnp.zeros((1, 1)), grid=_BogusGrid(), sigma_coord=sigma,
             lat_rad=0.0, col_index=(0, 0),
         )
+
+
+def test_extract_cubed_geostrophic_disabled_pending_metric_rotation():
+    """Geostrophic forcing is intentionally DISABLED on the cubed sphere (even at
+    extratropical latitudes): the gradient operators return grid-axis derivatives
+    on a non-orthogonal grid, so the geographic geostrophic balance is not applied
+    until a metric-correct east/north rotation lands (iter 29 / Codex).  Regression
+    guard so it is not silently re-enabled unverified."""
+    grid, sigma = _grid_and_sigma()
+    T, q_v, u, v, p_s = _nonuniform_state(grid)
+    ls = extract_column_forcing_cubed_sphere(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(jnp.deg2rad(40.0)), col_index=_COL,  # extratropical
+    )
+    assert ls.u_geo is None and ls.v_geo is None
+    # The rest of the forcing (advection, ω) is still populated.
+    assert ls.omega.shape == (_NLEV,)
+    assert bool(jnp.all(jnp.isfinite(ls.omega)))

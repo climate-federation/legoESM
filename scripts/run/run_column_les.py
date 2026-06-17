@@ -161,6 +161,16 @@ def build_column_les_setup(
         qv_adv=_to_les(forcing.qv_adv),
     )
 
+    # Wire the GCM column's geostrophic wind into the plane Coriolis as its
+    # reference wind: the f-plane Coriolis term reads u_geo0/v_geo0 from the
+    # height coordinate and applies f×(V − V_geo).  None (cubed-sphere /
+    # equatorial columns, where the extractor leaves u_geo=None) keeps u_geo0=None
+    # → the Coriolis falls back to f×V (no geostrophic target), unchanged.
+    u_geo0 = _to_les(forcing.u_geo)
+    v_geo0 = _to_les(forcing.v_geo)
+    if u_geo0 is not None:
+        hc = hc._replace(u_geo0=u_geo0, v_geo0=v_geo0)
+
     relax_width_m = config.relax_width_frac * res.domain_top_m
     target, rate = build_top_relaxation(
         hc.z_full, res.domain_top_m, gcm_z, gcm_theta,

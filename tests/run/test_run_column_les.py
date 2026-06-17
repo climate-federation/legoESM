@@ -109,6 +109,35 @@ def test_forcing_profiles_interpolated_to_les_grid():
     assert interp.shape == (8,)
 
 
+def test_geostrophic_wind_wired_into_les_coriolis():
+    """A GCM column with a geostrophic wind sets the LES height-coordinate
+    reference wind (u_geo0/v_geo0), which the plane f-plane Coriolis reads as
+    f×(V−V_geo); None leaves it unset (f×V), unchanged (iter 29)."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    # No geostrophic wind → reference winds stay None.
+    setup_none = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG,
+    )
+    assert setup_none.height_coord.u_geo0 is None
+    assert setup_none.height_coord.v_geo0 is None
+
+    # With a geostrophic wind → interpolated onto the LES grid + wired in.
+    ls_geo = ls._replace(
+        u_geo=jnp.linspace(5.0, 12.0, _NLEV_GCM),
+        v_geo=jnp.linspace(-2.0, 1.0, _NLEV_GCM),
+    )
+    setup_geo = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls_geo, config=_CONFIG,
+    )
+    assert setup_geo.height_coord.u_geo0 is not None
+    assert setup_geo.height_coord.u_geo0.shape == (8,)  # LES nlev
+    assert setup_geo.height_coord.v_geo0.shape == (8,)
+    assert bool(jnp.all(jnp.isfinite(setup_geo.height_coord.u_geo0)))
+    assert bool(jnp.all(jnp.isfinite(setup_geo.height_coord.v_geo0)))
+
+
 def test_validate_config_rejects_bad_settings():
     validate_column_les_config(ColumnLESConfig())  # defaults OK
     for bad in (
