@@ -694,3 +694,43 @@ def test_hines_drag_units_match_lindzen_pa():
         "the drag dimensional fix has regressed — units back to "
         "``kg/(m²·s)`` and the downstream acceleration in ``1/s``."
     )
+
+
+class TestBruntVaisalaShared:
+    """Direct tests for the shared physics._shared.brunt_vaisala_n_full helper
+    that the four GWD backends (hines/lindzen/mcfarlane/prognostic_spectral)
+    now call instead of an inline copy (ponytail dedup 2026-06-17)."""
+
+    def test_shape_and_positivity(self):
+        from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
+        from legoesm import constants
+        ncol, nlev = 4, 12
+        # Stably-stratified isothermal-ish column: θ grows with height.
+        z = jnp.broadcast_to(jnp.linspace(2.0e4, 0.0, nlev), (ncol, nlev))
+        p = jnp.broadcast_to(jnp.linspace(2.0e3, 1.0e5, nlev), (ncol, nlev))
+        T = jnp.full((ncol, nlev), 250.0)
+        N = brunt_vaisala_n_full(T, p, z)
+        assert N.shape == (ncol, nlev)
+        # N² floored at 1e-8 ⇒ N ≥ 1e-4 everywhere, finite.
+        assert jnp.all(N >= 1e-4 - 1e-12)
+        assert jnp.all(jnp.isfinite(N))
+
+    def test_matches_inline_reference(self):
+        """Byte-identical to the formula the GWD schemes used to inline."""
+        import numpy as np
+        from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
+        from legoesm import constants
+        rng = np.random.default_rng(1)
+        T = jnp.asarray(220 + 60 * rng.random((5, 12)))
+        p = jnp.asarray(np.sort(1e5 * rng.random((5, 12)))[:, ::-1].copy())
+        z = jnp.asarray(np.sort(2e4 * rng.random((5, 12))).copy())
+        theta = T * (constants.p_ref / jnp.clip(p, 1.0, None)) ** constants.kappa
+        dz = jnp.clip(jnp.abs(z[:, :-1] - z[:, 1:]), 1.0, None)
+        dth = (theta[:, :-1] - theta[:, 1:]) / dz
+        tb = 0.5 * (theta[:, :-1] + theta[:, 1:])
+        N2 = jnp.clip((constants.g / jnp.clip(tb, 1.0, None)) * dth, 1e-8, None)
+        Nh = jnp.sqrt(N2)
+        ref = jnp.concatenate(
+            [Nh[:, :1], 0.5 * (Nh[:, :-1] + Nh[:, 1:]), Nh[:, -1:]], axis=1
+        )
+        assert jnp.array_equal(brunt_vaisala_n_full(T, p, z), ref)

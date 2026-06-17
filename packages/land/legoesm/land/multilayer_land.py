@@ -42,6 +42,7 @@ from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import MultiLayerLandState
+from legoesm.land.surface_params import read_spatial_param as _get
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
@@ -53,11 +54,6 @@ from legoesm.surface_albedo import land_albedo as compute_land_albedo
 # (see step_multilayer_land). Small enough for an accurate slope, large enough
 # to stay well above bulk-flux round-off.
 _SURFACE_LIN_DT_K = 0.1
-
-
-def _get(lp, name: str, fallback):
-    """Read from spatial LandSurfaceParams if available, else config scalar."""
-    return getattr(lp, name) if lp is not None else fallback
 
 
 def step_multilayer_land(

@@ -31,11 +31,7 @@ from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
-
-
-def _get(lp, name: str, fallback):
-    """Read from spatial LandSurfaceParams if available, else config scalar."""
-    return getattr(lp, name) if lp is not None else fallback
+from legoesm.land.surface_params import read_spatial_param as _get
 
 
 def step_land(

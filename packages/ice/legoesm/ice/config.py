@@ -187,7 +187,6 @@ class SnowConfig(NamedTuple):
     k_snow: float = constants.k_snow
     c_snow: float = constants.c_snow
     h_snow_min: float = 1.0e-4         # Min snow depth for active conductivity [m]
-    snow_to_ice_density: float = constants.rho_ice / constants.rho_snow
     flooding: bool = True              # Enable snow-ice (white-ice) flooding
     sublim_partition: float = 1.0      # Fraction of sublimation mass drawn from snow
                                         # (1.0 = sublimate snow first, then ice)
