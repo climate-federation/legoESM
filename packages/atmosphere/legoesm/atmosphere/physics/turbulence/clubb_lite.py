@@ -98,6 +98,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import (
+    broadcast_column_param,
     exner_function,
     mixing_length,
     virtual_temperature,
@@ -199,7 +200,11 @@ def clubb_lite_turbulence(
     # — see comment block below).
 
     # ===== Eddy diffusivities =====
-    Km_full = config.C_K * l_mix * sqrt_wp2  # (ncol, nlev)
+    # ``C_K`` may be a scalar (production) OR a per-column ``(ncol,)`` field
+    # (the LES-informed eddy-diffusivity correction); broadcast_column_param
+    # keeps the scalar path byte-identical and reshapes a per-column field to
+    # broadcast over the vertical axis. See docs/COMPARE_REANALYSIS.md.
+    Km_full = broadcast_column_param(config.C_K, l_mix) * l_mix * sqrt_wp2  # (ncol, nlev)
     Kh_full = Km_full / config.Pr_t
 
     Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])  # (ncol, nlev-1)

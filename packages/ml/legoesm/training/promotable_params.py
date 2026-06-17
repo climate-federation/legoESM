@@ -12,7 +12,11 @@ optical depth is the cleanest example: ``tau_ref = tau_e + (tau_p−tau_e)·sin�
 is already ``(ncol,)``-vectorised, so promoting ``tau_equator`` / ``tau_pole``
 needs NO body change.  (Gray ``sfc_albedo`` is NOT promotable via the config
 field — the driver passes a per-column ``sfc_albedo`` *argument* that shadows
-``config.sfc_albedo``; see the NOTE by the registry.)
+``config.sfc_albedo``; see the NOTE by the registry.)  The CLUBB-lite
+eddy-diffusivity coefficient ``C_K`` is the **physically-coherent** target — the
+LES eddy-diffusivity diagnosis maps directly onto it; its body use is wrapped in
+:func:`legoesm.atmosphere.physics._shared.broadcast_column_param` so a per-column
+``C_K`` broadcasts over the vertical with the scalar path byte-identical.
 
 The field is applied through :func:`legoesm.training.feedback.apply_column_parameter_field`
 with the registered name as the ``promoted_fields`` allowlist — which avoids
@@ -53,6 +57,12 @@ PROMOTABLE_FIELDS: dict[str, PromotableField] = {
     "gray_tau_pole": PromotableField(
         field="tau_pole", scheme="gray radiation", units="1", body_safe=True,
         note="same element-wise optical-depth path as tau_equator.",
+    ),
+    "clubb_lite_C_K": PromotableField(
+        field="C_K", scheme="CLUBB-lite turbulence", units="1", body_safe=True,
+        note="K_m = C_K·l·√(wp2); the body wraps C_K in broadcast_column_param "
+             "so a per-column field broadcasts over the vertical. PHYSICALLY "
+             "maps the LES eddy-diffusivity diagnosis onto the GCM diffusivity.",
     ),
 }
 # NOTE: gray ``sfc_albedo`` is deliberately NOT registered — the driver passes a

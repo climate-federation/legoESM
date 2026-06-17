@@ -247,6 +247,42 @@ def virtual_temperature(T, q_v):
     return T * (1.0 + coeff * q_v)
 
 
+def broadcast_column_param(value, like):
+    """Broadcast a config coefficient over a column field's vertical dimension.
+
+    Enables a scheme coefficient to be EITHER a scalar (production default) OR a
+    per-column ``(ncol,)`` field (the LES-informed correction, see
+    ``docs/COMPARE_REANALYSIS.md``) **without** changing the scheme body's
+    arithmetic:
+
+    * a scalar / 0-d ``value`` is returned unchanged (it already broadcasts
+      against ``like`` — the production path stays byte-identical);
+    * a 1-D ``(ncol,)`` ``value`` is reshaped to ``(ncol, 1, …)`` so it
+      broadcasts over the trailing (vertical / other) axes of ``like`` (shape
+      ``(ncol, nlev)`` etc.).
+
+    Wrap a coefficient use as ``broadcast_column_param(cfg.coeff, X) * X`` in the
+    scheme body; ``like`` is any per-column array whose leading axis is the
+    column dimension.  Raises if a 1-D ``value`` length does not match
+    ``like.shape[0]``.
+    """
+    value = jnp.asarray(value)
+    like = jnp.asarray(like)
+    if value.ndim == 0:
+        return value
+    if value.ndim == 1:
+        if value.shape[0] != like.shape[0]:
+            raise ValueError(
+                f"broadcast_column_param: per-column value length "
+                f"{value.shape[0]} != column count {like.shape[0]}."
+            )
+        return value.reshape((value.shape[0],) + (1,) * (like.ndim - 1))
+    raise ValueError(
+        f"broadcast_column_param: value must be scalar or 1-D (ncol,); got "
+        f"shape {value.shape}."
+    )
+
+
 def exner_function(p):
     """Exner function ``Π = (p / p_ref)^κ`` (potential-temperature scaling).
 

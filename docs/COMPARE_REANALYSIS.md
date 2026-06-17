@@ -40,6 +40,7 @@
 > | real-comparison loop adapter | `correction_loop.make_compare_fn` wraps the REAL `compare_state_to_reference` into the loop's `compare_fn` (only the AMIP/CMIP model run injected); loop now closes with real scoring+manifest, not a mocked score field | 21 |
 > | AMIP **and CMIP** mode bridge | `compare_reanalysis.column_state_from_hydrostatic` (driver `HydrostaticState`→`ColumnState`, unwraps `Field`s; mode-agnostic, SST = prescribed/coupled); fixed a latent `Field`-not-unwrapped bug also in iter-4 `model_state_from_restart` (now delegates) | 22 |
 > | REAL coupled-run (CMIP) → compare smoke | `tests/run/test_cmip_compare_integration.py` runs a real `CoupledESMDriver` (slab-ocean aquaplanet, C8/L5, 1 day) and feeds its actual atmosphere state + coupled SST through the real compare → finite scores + worst-column manifest (the AMIP/CMIP half, mock-free; complements iter-20's real-LES half) | 23 |
+> | PHYSICALLY-coherent promotion | `_shared.broadcast_column_param` enabler + `clubb_lite` `C_K` wrapped (`K_m=C_K·l·√wp2`); the LES eddy-diffusivity diagnosis now maps onto a real GCM turbulence coefficient per-column, scalar path BYTE-identical (registered `clubb_lite_C_K`) | 24 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
