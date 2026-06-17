@@ -21,7 +21,11 @@ Provenance: each recipe is the verified dycore identity of an existing,
 validated factory — ``legoesm_linear_v1`` = the global-overturning default,
 ``eady_weno5_v1`` = the eady_uniform corrected eddy-resolving stack,
 ``veros_faithful_v1`` = the Veros ACC oracle dycore (``build_acc_recipe``),
-``nemo_dino_v1`` = the DINO (Kamm et al. 2025) NEMO approximation. These are
+``nemo_dino_v1`` = the DINO (Kamm et al. 2025) NEMO approximation,
+``omip_nemo_match_mpas_v1`` = the proven OMIP MPAS ico6 NEMO-climate-match dycore
+(``nemo_match_mpas_model_config``; SST RMSE 0.84 vs NEMO ORCA1),
+``omip_nemo_match_tripole_v1`` = the proven OMIP tripole eORCA025 NEMO-climate-match
+dycore (``nemo_match_tripole_model_config``; SST RMSE 1.15). These are
 locked against drift by ``tests/ocean/unit/test_recipes.py`` +
 ``test_recipe_snapshots.py``.
 
@@ -96,6 +100,27 @@ LATLON_RECIPES = {
         "implicit_vertical_mixing": True,
         "A_h_lat_scaling": True,
     },
+    # Proven OMIP tripole eORCA025 (¼°) NEMO-CLIMATE-match dycore — the tripole
+    # branch of run_omip.py::_create_setup (nemo_match_tripole_model_config).
+    # Matches NEMO ORCA1 CLIMATE: SST RMSE 1.15, corr 0.99
+    # (docs/md_files/ocean_faithfulness_nemo.md) — a climate-match stack
+    # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
+    # like nemo_v1. ke_gradient/outer/tracer integrators are config defaults the
+    # tripole branch intentionally leaves unset (the Hollingsworth KE stencil is
+    # not yet north-fold-aware — see the _create_setup tripole note).
+    "omip_nemo_match_tripole_v1": {
+        "eos": "wright",
+        "momentum_advection": "vector_invariant",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "adcroft",
+        "ke_gradient_scheme": "centered",
+        "barotropic_solver": "implicit_cn",
+        "coriolis_scheme": "matsuno_split",
+        "outer_integrator": "forward_euler",
+        "tracer_time_integrator": "euler",
+        "implicit_vertical_mixing": True,
+        "n_barotropic_substeps": 30,
+    },
 }
 
 # --- MPAS (Voronoi C-grid) recipes (MPASOceanConfig scheme bundles) ----------
@@ -107,6 +132,21 @@ MPAS_RECIPES = {
         "tracer_advection": "upwind",
         "pgf_scheme": "centered",
         "barotropic_solver": "explicit_substep",
+        "pv_scheme": "enstrophy",
+        "implicit_vertical_mixing": True,
+    },
+    # Proven OMIP MPAS ico6 (~115 km ≈ ORCA1) NEMO-CLIMATE-match dycore — the
+    # mpas branch of run_omip.py::_create_setup (nemo_match_mpas_model_config).
+    # Matches NEMO ORCA1 CLIMATE: SST RMSE 0.84 (the best grid)
+    # (docs/md_files/ocean_faithfulness_nemo.md) — a climate-match stack
+    # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
+    # like nemo_v1. eos/pv_scheme are the config defaults the mpas branch leaves
+    # unset; tracer_advection/pgf/barotropic/implicit are set explicitly.
+    "omip_nemo_match_mpas_v1": {
+        "eos": "wright",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "adcroft",
+        "barotropic_solver": "implicit_cn",
         "pv_scheme": "enstrophy",
         "implicit_vertical_mixing": True,
     },
