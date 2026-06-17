@@ -1018,8 +1018,15 @@ def run_single_benchmark(
             flush=True,
         )
 
+    # cs-spmd shards over the jax DEVICE mesh (n_global = jax.device_count()),
+    # but n_ranks is the PROCESS count (1 for a single-process multi-GPU run).
+    # Record the device count so a single-process 2-GPU run lands as n=2 (not
+    # n=1) in the CSV + JSON filename. cells_per_rank already used n_global on
+    # this path; the multi-controller cs-spmd path has n_ranks == device_count
+    # (one process per device), so this is a no-op there.
+    _record_ndev = jax.device_count() if cs_spmd else n_ranks
     return TimingResult(
-        n_ranks=n_ranks,
+        n_ranks=_record_ndev,
         resolution=resolution,
         n_levels=nlev,
         precision=precision,
