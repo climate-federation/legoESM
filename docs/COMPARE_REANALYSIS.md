@@ -32,6 +32,10 @@
 > | 5 LES vertical mapping | `atmosphere/dynamics/les_vertical_mapping.py` (`interpolate_column_to_les`, `top_relaxation_rate` reusing `sponge_profile`, `relaxation_tendency`, `build_top_relaxation`) | 13 |
 > | 6 LES→coefficient composition | `atmosphere/dynamics/column_les_diagnosis.py` (`diagnose_column_coefficient`: dispatch eddy-K / entrainment-w_e; top-down→ascending reversal of fluxes+gradient) | 14 |
 > | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→`diagnose`; `process_column`/`extract_gcm_column`/`run_column_les_pipeline`; real `main` loops the manifest) | 15 |
+> | 7 LES diagnoses→feedback field | `training/feedback_assembly.py` (`reduce_column_diagnosis` K-profile→scalar / w_e; `assemble_feedback_field` scatters at worst-column flat indices) | 16 |
+>
+> **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
+> (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
 >
 > **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
 > 1. **Extractor follow-ups** — geostrophic wind (∇Φ) + cubed-sphere/Gaussian
