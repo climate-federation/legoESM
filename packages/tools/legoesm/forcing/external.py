@@ -469,31 +469,38 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 @lru_cache(maxsize=16)
-def _load_volcanic_cmip6_anchored(
+def _load_volcanic_extinction_anchored(
     path: str,
+    ext_var: str,
+    kind_label: str,
 ) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
-    """Like :func:`_load_volcanic_cmip6` but also returns the first
-    record's CF-time anchor (``first_date``) so callers can map a
-    simulation day onto the file's absolute time axis when the file
-    spans multiple years (e.g. 1850–2014 CMIP6 volcanic climatology
-    with the 1982 El Chichón and 1991 Pinatubo eruptions in their
-    real calendar months)."""
+    """Load a CMIP6 volcanic stratospheric-extinction variable (anchored).
+
+    Shared body for the SW (``ext_sun``) and LW (``ext_earth``) loaders.
+    Reads ``ext_var`` [1/km] on an altitude grid, integrates over altitude
+    (trapezoid → AOD), collapses the spectral-band axis to a representative
+    single-band broadband AOD via the band-MEAN (Kinne convention; summing
+    bands would inflate it by the band count, not a broadband AOD), and
+    returns ``(mid_days, first_date, lat, aod)`` with ``aod`` shape
+    ``(ntime, nlat)``.  ``first_date`` is the CF-time anchor so callers can
+    map a simulation day onto a multi-year file's absolute axis (1982 El
+    Chichón / 1991 Pinatubo in their real months); ``None`` on a bare
+    ``month`` axis (caller falls back to cyclic dispatch).
+
+    The SW/LW bands are NOT interchangeable: reading ``ext_earth`` as a SW
+    quantity (or ``ext_sun`` as LW) would inject the wrong band into the
+    forcing budget, so each caller pins ``ext_var`` and a missing variable
+    raises (Codex review 2026-04-24).  ``kind_label`` ('SW'/'LW') only
+    labels the error.
+    """
     ds = _open_forcing_dataset(path)
-    # Only ``ext_sun`` (SW stratospheric extinction) is valid here: the SW
-    # aerosol branch multiplies this into broadband AOD, so reading the LW
-    # ``ext_earth`` variable as a SW quantity would silently inject
-    # terrestrial-IR extinction into the shortwave forcing budget
-    # (Codex review 2026-04-24).  A dedicated LW-aware path can use
-    # ``ext_earth`` later when the radiation scheme supports per-band LW
-    # aerosol input.
-    if "ext_sun" in ds.data_vars:
-        ext_name = "ext_sun"
+    if ext_var in ds.data_vars:
+        ext_name = ext_var
     else:
         ds.close()
         raise ValueError(
-            f"No CMIP6 volcanic SW extinction variable 'ext_sun' in "
-            f"{path!r}. (CMIP6 files typically also carry 'ext_earth' "
-            f"for LW; that variable is not usable as a SW AOD source.)",
+            f"No CMIP6 volcanic {kind_label} extinction variable "
+            f"{ext_var!r} in {path!r}.",
         )
     var = ds[ext_name]
     ext = np.asarray(var.values, dtype=np.float64)
@@ -528,8 +535,6 @@ def _load_volcanic_cmip6_anchored(
         time_name = "month"
         nm = ext.shape[dims.index("month")]
         mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
-        # No CF anchor on a bare 'month' axis — the caller falls back to
-        # cyclic dispatch automatically when ``first_date is None``.
         first_date = None
     else:
         ds.close()
@@ -545,15 +550,8 @@ def _load_volcanic_cmip6_anchored(
     aod_with_bands = _trapz(ext, alt, axis=alt_axis)
     dims_after = [d for i, d in enumerate(dims) if i != alt_axis]
 
-    # Collapse the spectral-band axis to a single broadband AOD BEFORE
-    # returning.  We take the mean over bands (not the sum) to match the
-    # implicit Kinne aerosol convention — ``_load_monthly_zonal_anchored``
-    # averages any non-(time, lat) axis via ``np.nanmean`` — and to avoid the
-    # n_bands factor Codex flagged: summing 14 SW bands would inflate
-    # the per-wavelength optical depth into a 14×-multiple that is not
-    # physically a broadband AOD.  The value returned is therefore a
-    # representative single-band AOD, consistent with the scalar AOD
-    # modifier used by the rest of the aerosol pipeline.
+    # Collapse the spectral-band axis to a single broadband AOD via the
+    # band-mean (see docstring for the Kinne-convention rationale).
     band_dim_name = next(
         (d for d in dims_after if d not in (time_name, "lat", "latitude")),
         None,
@@ -575,113 +573,23 @@ def _load_volcanic_cmip6_anchored(
     return mid_days, first_date, lat, aod
 
 
-@lru_cache(maxsize=16)
+def _load_volcanic_cmip6_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """SHORTWAVE volcanic extinction (``ext_sun``); see
+    :func:`_load_volcanic_extinction_anchored` for the shared body."""
+    return _load_volcanic_extinction_anchored(path, "ext_sun", "SW")
+
+
 def _load_volcanic_lw_cmip6_anchored(
     path: str,
 ) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
-    """Load the LONGWAVE volcanic stratospheric extinction (gap #9).
-
-    Mirrors :func:`_load_volcanic_cmip6_anchored` but reads the
-    ``ext_earth(terrestrial_bands, lat, altitude, month)`` variable —
-    the per-band terrestrial-IR (LW) stratospheric extinction in [1/km]
-    on an altitude grid in km — instead of ``ext_sun`` (SW).  The
-    altitude integration and band-mean collapse are identical, yielding
-    a representative single-band broadband LW absorption optical depth
-    per (time, lat).
-
-    Returns ``(mid_days, first_date, lat, aod_lw)`` with ``aod_lw`` shape
-    ``(ntime, nlat)`` — the LW analogue of the SW loader's output, a
-    drop-in for the LW aerosol pipeline.
-
-    Raises ``ValueError`` if the file has no ``ext_earth`` LW band; the
-    caller (``get_aerosol_lw_at_time``) treats that as "no LW source"
-    and returns zeros so the run stays byte-identical.
-    """
-    ds = _open_forcing_dataset(path)
-    # Only the LW band (``ext_earth``) is valid here: reading the SW
-    # ``ext_sun`` as a LW quantity would inject shortwave extinction into
-    # the terrestrial-IR aerosol budget (the symmetric counterpart of the
-    # SW loader's guard, Codex review 2026-04-24).
-    if "ext_earth" in ds.data_vars:
-        ext_name = "ext_earth"
-    else:
-        ds.close()
-        raise ValueError(
-            f"No CMIP6 volcanic LW extinction variable 'ext_earth' in "
-            f"{path!r}. (Some CMIP6 volcanic files carry only the SW "
-            f"'ext_sun' band; that variable is not usable as a LW AOD "
-            f"source.)",
-        )
-    var = ds[ext_name]
-    ext = np.asarray(var.values, dtype=np.float64)
-    dims = list(var.dims)
-
-    alt_name = next(
-        (v for v in ("altitude", "alt", "height", "lev") if v in ds),
-        None,
-    )
-    if alt_name is None:
-        ds.close()
-        raise ValueError(
-            f"No altitude coordinate in CMIP6 volcanic file {path!r}",
-        )
-    alt = np.asarray(ds[alt_name].values, dtype=np.float64)
-
-    if "lat" in ds:
-        lat = np.asarray(ds["lat"].values, dtype=np.float64)
-    elif "latitude" in ds:
-        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
-    else:
-        ds.close()
-        raise ValueError(
-            f"No 'lat'/'latitude' variable in CMIP6 volcanic file {path!r}",
-        )
-
-    # Month / time axis — CMIP6 volcanic may use ``month`` or ``time``.
-    if "time" in dims:
-        time_name = "time"
-        mid_days, first_date = _read_time_axis(ds)
-    elif "month" in dims:
-        time_name = "month"
-        nm = ext.shape[dims.index("month")]
-        mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
-        first_date = None
-    else:
-        ds.close()
-        raise ValueError(
-            f"No time/month dimension in CMIP6 volcanic file {path!r}",
-        )
-    ds.close()
-
-    # Trapezoidal integral over altitude: ext [1/km] * dz [km] → AOD.
-    alt_axis = dims.index(alt_name)
-    _trapz = getattr(np, "trapezoid", None) or np.trapz
-    aod_with_bands = _trapz(ext, alt, axis=alt_axis)
-    dims_after = [d for i, d in enumerate(dims) if i != alt_axis]
-
-    # Collapse the spectral-band axis to a single broadband LW AOD via the
-    # mean over bands (not the sum) — same Kinne convention as the SW
-    # loader; summing the LW bands would inflate the per-wavelength optical
-    # depth into a band-count multiple that is not a broadband AOD.
-    band_dim_name = next(
-        (d for d in dims_after if d not in (time_name, "lat", "latitude")),
-        None,
-    )
-    if band_dim_name is not None:
-        band_axis = dims_after.index(band_dim_name)
-        aod_with_bands = np.nanmean(aod_with_bands, axis=band_axis)
-        dims_after.pop(band_axis)
-
-    lat_dim_name = "lat" if "lat" in dims_after else (
-        "latitude" if "latitude" in dims_after else None
-    )
-    order: list[int] = []
-    for dim_name in (time_name, lat_dim_name):
-        if dim_name in dims_after:
-            order.append(dims_after.index(dim_name))
-    order += [i for i in range(len(dims_after)) if i not in order]
-    aod = np.transpose(aod_with_bands, order)
-    return mid_days, first_date, lat, aod
+    """LONGWAVE volcanic extinction (``ext_earth``, gap #9); see
+    :func:`_load_volcanic_extinction_anchored`.  Raises ``ValueError`` if
+    the file has no ``ext_earth`` band; the caller
+    (``get_aerosol_lw_at_time``) treats that as "no LW source" and returns
+    zeros so the run stays byte-identical."""
+    return _load_volcanic_extinction_anchored(path, "ext_earth", "LW")
 
 
 @lru_cache(maxsize=16)
