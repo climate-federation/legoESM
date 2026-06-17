@@ -1,259 +1,42 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status:** Implementation in progress — Stage 2 (per-column comparison metric) landed.
+**Status:** Implementation in progress — diagnosis→force→estimate→assemble→apply chain built + tested (iters 1–9); grid-side forcing extractor + LES driver + end-to-end demo remain.
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
-> ## Implementation progress (newest first)
+> ## Implementation status (compressed at iter 10; full history in git log `feat/compare-reanalysis`)
 >
-> ### Iter 9 (2026-06-17) — Stage 7 (gap #7, application): feedback dispatch + apply ✅
-> Added `legoesm.training.feedback` — the feedback **application** layer:
-> - `build_parameter_field(strategy, ...)` — hardened dispatch over the iter-8
->   strategies (`"static"` scatter vs `"environment"` kernel); raises on unknown
->   strategy, missing required inputs, AND **cross-strategy input leakage** (a
->   static call passing env-only inputs, or vice-versa, is rejected — not
->   silently ignored).
-> - `apply_column_parameter_field(config, field_name, field, ...)` — flattens the
->   grid field to `(ncol,)`, validates length, and splices it into a scheme
->   `*Config` via `apply_param_overrides` (traced-in-loss). **Requires the field
->   be authorized column-promoted** — explicit `promoted_fields` allowlist OR a
->   non-None `shape` key in the config's `__param_spec__` (nested
->   `{Class:{"params":{field:{shape}}}}` or flat layout) — so a per-column field
->   can never silently overwrite a scalar parameter. Rejects scalar/0-d fields.
-> - Tests: 17 cases incl. dispatch + cross-strategy-leak raises, nested & flat
->   spec authorization, unpromoted/unknown-field/scalar rejects, non-1D env
->   guard, and an end-to-end `diagnosed-values → field → config-leaf` `jax.grad`.
-> - **Codex adversarial review: clean** (6 real findings fixed over 3 rounds,
->   incl. the nested-`__param_spec__` layout bug and the scalar-overwrite footgun).
+> The pipeline is built bottom-up as tested, Codex-reviewed components. Done so far:
 >
-> **Next:** the per-scheme **promotion** of a real production coefficient
-> (e.g. a convection entrainment rate) — add the `shape`-keyed `__param_spec__`
-> entry + make the scheme body broadcast a `(ncol,)` field (physics-validated),
-> then the end-to-end bias-reduction demo. Still open: grid-side
-> `ColumnLargeScaleState` extractor; LES driver + 1.5-order TKE SGS.
+> | Stage / gap | Module (all tested + Codex-clean) | Iter |
+> |---|---|---|
+> | 2 / #1 per-column ERA5 metric | `training/column_era5_metrics.py` (`score_columns`, `rank_worst_columns`; +`safe_sqrt` in `scm_rce_metrics`) | 1 |
+> | 3 / #2 worst-column manifest + env tags | `training/column_manifest.py` (`build_worst_column_manifest`, `compute_column_environment` SST/CAPE/shear, JSON I/O) | 2 |
+> | 2 orchestration | `training/compare_reanalysis.py` (`compare_state_to_reference`; ERA5→model regrid decision) | 3 |
+> | 2 driver | `scripts/validate/compare_amip_era5.py` (real `main`: load restart+ERA5→regrid→compare→manifest) | 4 |
+> | 4 / #3 GCM-col→SCMForcing (assembly) | `atmosphere/column_forcing.py` (`build_column_scm_forcing`, ω→w, Coriolis) | 5 |
+> | 5 / #5 LES resolved fluxes | `atmosphere/dynamics/rce_diagnostics.py::resolved_turbulent_fluxes_plane` (w'θ'/w'q'/w'u'/w'v'/w'θ_v') | 6 |
+> | 6 / #6 closure-coeff diagnosis | `atmosphere/dynamics/les_closure_diagnosis.py` (eddy K, mixing length, **entrainment w_e**) | 7 |
+> | 7 / #7 parameter-field assembly | `training/parameter_field.py` (`scatter_column_field` static; `environment_kernel_field` N-W regression) | 8 |
+> | 7 / #7 feedback application | `training/feedback.py` (`build_parameter_field` dispatch; `apply_column_parameter_field` column-promotion-gated splice, traced-in-loss) | 9 |
 >
-> ### Iter 8 (2026-06-17) — Stage 7 (gap #7, assembly): parameter-field assembly ✅
-> Added `legoesm.training.parameter_field` — assemble the iter-7 per-column
-> diagnosed coefficients into a full-grid GCM parameter field (the feedback
-> field), both §6 generalization strategies, pure-JAX + differentiable:
-> - `scatter_column_field(grid_shape, flat_indices, values, background, valid)` —
->   **static (lat,lon)**: background + diagnosed values at the worst columns
->   (distinct indices per `rank_worst_columns`; differentiable w.r.t. values).
-> - `environment_kernel_field(grid_env, sample_env, sample_values, length_scales,
->   ...)` — **regress onto environment predictors**: Nadaraya–Watson Gaussian
->   kernel regression in normalized (SST/CAPE/shear) space → every grid column
->   gets a value from environmentally-similar diagnosed columns; columns with no
->   sample within ~3 normalized σ fall back to background.
-> - **Hardening (Codex, clean after 2 rounds):** invalid samples sanitized to
->   finite zero BEFORE arithmetic (kills 0·NaN contamination + NaN adjoints),
->   length-scale floor (no 0/0), `>=` threshold, conservative 3σ default,
->   dtype promotion, exact-zero background gradient.
-> - Tests: 13 cases incl. analytic N-W recovery/averaging, threshold boundary,
->   NaN-invalid non-contamination, AD-safety, jit.
-> - The *application* to a scheme `*Config` (shape-keyed field +
->   `apply_param_overrides`, traced-in-loss) is the companion next step — the
->   `shape_key` infra already exists in `param_collector`.
+> **Conventions held every iter:** pre-impl search + reuse (no re-derived numerics);
+> every new `.py` gets a direct unit test (analytic where possible); AD-safe
+> (double-where masked divisions, gradient-safe sqrt); dispatch raises on unknown;
+> mandatory Codex adversarial-review loop to clean before commit.
 >
-> **Next:** wire the assembled field into a target scheme `*Config` as a
-> `shape`-keyed `__param_spec__` param applied via `apply_param_overrides`
-> (traced-in-loss), then the end-to-end bias-reduction demo. Still open:
-> grid-side `ColumnLargeScaleState` extractor; LES driver + 1.5-order TKE SGS.
+> | 4 / #3 grid-side forcing extractor (lat-lon) | `atmosphere/dynamics/column_large_scale_extract.py` (`extract_column_forcing_latlon`: ω from continuity, −V·∇θ/−V·∇q advection → `ColumnLargeScaleState`) | 10 |
 >
-> ### Iter 7 (2026-06-17) — Stage 6 (gap #6): closure-coefficient diagnosis ✅
-> Added `atmosphere.dynamics.les_closure_diagnosis` — the **inverse** of the
-> forward turbulence schemes: diagnose a closure coefficient from the iter-6
-> resolved fluxes. Public API:
-> - `eddy_diffusivity_from_flux(flux, phi_full, z_full)` → `K=-w'φ'/(∂⟨φ⟩/∂z)`
->   per interior interface + `valid` mask (rejects ill-posed near-zero gradient
->   and counter-gradient `K<0`).
-> - `mixing_length_from_momentum_diffusivity(K_m, shear)` → Prandtl `ℓ=√(K_m/|∂U/∂z|)`.
-> - `entrainment_velocity_from_buoyancy_flux(w_θv, θv_full, z_iface)` →
->   `w_e=-(w'θ_v')_inv/Δθ_v` at the inversion (argmin buoyancy flux), valid only
->   for a stable interior inversion with negative entrainment flux — **the doc's
->   headline coefficient**.
-> - All AD-safe (double-where masked divisions; gradient-safe sqrt), jit/vmap-
->   friendly; thresholds are documented diagnostic regularizers.
-> - Tests: 13 cases incl. **analytic K recovery** (`flux=-K0·∂φ/∂z⇒K=K0`),
->   mixing-length round-trip, exact entrainment from a crafted inversion, ill-
->   posed/counter-gradient/boundary-min rejection, sqrt(0)+entrainment grad.
-> - **Codex adversarial review: clean** (4 real findings fixed: sqrt(0) AD leak,
->   false fail-safe claim, unguarded boundary inversion, tie convention).
->
-> **Next:** the **feedback half** — map the diagnosed per-column coefficient onto
-> a spatially-varying GCM parameter field (gap #7) and apply it via the config
-> pytree (`apply_param_overrides`, traced-in-loss). Still open: grid-side
-> `ColumnLargeScaleState` extractor; standalone LES driver + 1.5-order TKE SGS;
-> end-to-end bias-reduction demo.
->
-> ### Iter 6 (2026-06-17) — Stage 5 (gap #5): LES resolved-flux diagnostics ✅
-> **Extended** `atmosphere.dynamics.rce_diagnostics` (no new module) with the
-> LES-resolved turbulent fluxes the closure diagnosis (stage 6) consumes:
-> - `resolved_turbulent_fluxes_plane(state, height_coord, qv_slot)` →
->   `ResolvedTurbulentFluxes` = `w'θ'`, `w'q_v'`, `w'u'`, `w'v'`, `w'θ_v'`
->   (buoyancy) profiles at the `nlev-1` interior interfaces + `z_half_interior`.
-> - `_resolved_flux_interfaces` — domain-mean eddy covariance `<w'φ'>` with the
->   **correct staggering**: `w` stays native on its half-level grid (no
->   smoothing, matching `vertical_velocity_variance_plane`), the full-level
->   scalar is averaged to the interior interfaces; perturbations from the
->   per-level horizontal mean (so `theta_ref` cancels). Buoyancy flux uses
->   `θ_v=θ(1+(1/ε−1)q_v)` (reuses `constants.epsilon`, same convention as
->   `compute_cape`).
-> - Validates w-on-half-levels, u/v full-level shapes, z_half length, qv_slot.
-> - Tests: 11 new cases in `tests/unit/test_rce_diagnostics.py` incl. **analytic
->   checkerboard covariances** (`<w'θ'>=W·A`, `<w'q'>=W·B`, `<w'u'>=W·C`) and the
->   **exact nonlinear buoyancy cross-term** `W·(A(1+c·q0)+c·θ_ref·B)`; zero-flux
->   for uniform w/scalar; bad-shape raises; jit + grad.
-> - **Codex adversarial review: clean** (confirmed staggering/perturbation/θ_v
->   algebra correct; 2 validation gaps fixed).
->
-> **Next:** Stage 6 — closure-coefficient diagnosis (entrainment / eddy
-> diffusivity / mixing length) from these resolved fluxes (e.g. K from
-> `−w'φ'/(∂<φ>/∂z)`, entrainment from the flux-jump at inversion). Still also
-> open: the grid-side `ColumnLargeScaleState` extractor (iter 5 follow-up) and
-> the standalone LES driver + 1.5-order TKE SGS.
->
-> ### Iter 5 (2026-06-17) — Stage 4 (assembly): GCM-column → SCMForcing ✅
-> Added `legoesm.atmosphere.column_forcing` — assembles a **steady** `SCMForcing`
-> from a flagged column's extracted large-scale state, so the LES is forced
-> exactly like that column's environment. Public API:
-> - `ColumnLargeScaleState` — the extracted quantities (subsidence_w **or** omega,
->   u/v_geo, theta/qv advective tendencies, surface forcing, lat).
-> - `build_column_scm_forcing(ls, *, allow_no_subsidence=False)` → validated
->   `SCMForcing` (constant-in-time callables; Coriolis from lat; ω→w conversion).
-> - `subsidence_w_from_omega` (reuses `_shared.diagnose_grid_w_from_omega`),
->   `coriolis_f_c` (reuses `coriolis_parameter_fv3`).
-> - **Hardening (Codex-driven, clean after 3 rounds):** raises on both-/neither-
->   subsidence (neither needs explicit `allow_no_subsidence` — silently dropping
->   subsidence biases the forced LES), surface-prescription **exclusivity** guards
->   (reject conflicting extras, not just missing required channels), rank-1/nlev
->   profile-shape validation, and dtype promotion incl. q_v.
-> - Reuse-only physics (no re-derived ω→w, Coriolis, or forcing schema); lives in
->   the **atmosphere** package (ml pipeline calls it per-record).
-> - Tests: `tests/atmosphere/test_column_forcing.py` (16 cases).
->
-> **Remaining for Stage 4:** the **grid-side extractor** — derive `omega` (from
-> `∇·v_h` via `grids.vertical` continuity), geostrophic wind (`∇Φ`), and
-> theta/qv advective tendencies (`-V·∇·`) at a flagged column's neighbourhood,
-> producing `ColumnLargeScaleState`. Then Stage 5 — standalone LES driver +
-> 1.5-order TKE SGS + resolved-flux diagnostics.
->
-> ### Iter 4 (2026-06-17) — Stage 2 driver: `compare_amip_era5.py` ✅
-> Added `scripts/validate/compare_amip_era5.py` — the non-matrix validator that
-> loads a saved AMIP restart + an ERA5 slice, regrids ERA5 → model grid+sigma,
-> and writes the worst-column JSON manifest. **Real `main()`** wired on confirmed
-> APIs (`grids.factory.create_grid` / `grids.vertical.create_sigma_coordinate` /
-> `driver.restart.load_restart` (10-tuple) / `era5_to_state.load_era5_slice` +
-> `era5_to_*_carry`), not a stub. Importable, unit-tested helpers:
-> - `canonical_grid_type` / `select_era5_regrid` — grid-type dispatch (aliases;
->   raises on unknown; spectral↔gaussian token mapping between regrid + factory).
-> - `grid_lat_lon_deg` — uniform `grid.grid_lat`/`grid_lon` (works for
->   cubed-sphere `(6,n,n)` and lat-lon/Gaussian `(n_lat,n_lon)`).
-> - `sigma_levels`, `model_state_from_restart`, `compare_and_write`.
-> - **Hardening (Codex-driven, clean after 2 rounds):** `load_restart(strict=True)`
->   + explicit post-load shape/nlev checks vs the built grid (resolution/nlev
->   mismatch fails loudly); `--sst-npz` for prescribed SST with a **loud
->   UserWarning** when absent (SST tag → surface-air proxy; CAPE/shear/ranking
->   unaffected) instead of silent degradation.
-> - Tests: `tests/validate/test_compare_amip_era5.py` (8 cases incl. a
->   fully-monkeypatched `main()` wiring test asserting factory token, strict=True,
->   regrid call order, manifest written, proxy warning fires).
->
-> **Remaining for Stage 2/Stage 1:** thread real prescribed SST + segment precip
-> into the manifest; AMIP/CMIP run wiring with `diag_days=0.25`; an end-to-end
-> smoke on a tiny real checkpoint+ERA5 slice. **Next major:** Stage 4 — the
-> GCM-column → `SCMForcing` extractor (subsidence / advective tendencies /
-> geostrophic wind / surface fluxes from a flagged column's neighborhood).
->
-> ### Iter 3 (2026-06-17) — Stage 2 orchestration: model↔ERA5 compare entry point ✅
-> Added `legoesm.training.compare_reanalysis` — ties the iter-1 metric and
-> iter-2 manifest into one entry point on aligned model + ERA5 states.
-> **Regrid-direction decided: ERA5 → model grid + model sigma** (the supported
-> `era5_to_state` direction; comparison stays native to the model grid/columns).
-> Public API:
-> - `ColumnState` (T/q_v/u/v/p_s, optional precip_mm_day/sst_K) + `ColumnComparison`.
-> - `compare_state_to_reference(...)` — mass weights from dsigma → `score_columns`
->   → env tags from the **model** column → `build_worst_column_manifest`.
->   Precip enters only when **both** states carry it (avoids the exactly-one
->   raise; ERA5 precip is often absent).
-> - `build_pressure_from_sigma` (pure-sigma `p=σ·p_s`; hybrid coords pass explicit
->   `p_full`/`p_half` overrides), `precip_mm_day_from_accum`,
->   `column_state_from_carry` (duck-typed `SegmentCarry` adapter — no coupler import).
-> - **Hardening (Codex-driven):** strict surface-last increasing-σ check (rejects
->   reversed coords that would flip mass weights / CAPE), both-or-neither +
->   shape + monotonic-pressure validation on hybrid overrides, full column-shape
->   validation of all surface fields, and `rank_worst_columns` now routes
->   non-finite scores to −∞ (never selected, flagged invalid).
-> - Tests: `tests/unit/test_compare_reanalysis.py` (13 cases incl. biased-column
->   flagging, precip-drop, reversed-σ / reversed-pressure / mismatched-shape /
->   partial-override raises, accum→rate, carry adapter).
-> - **Codex adversarial review: clean** (6 findings over 3 rounds; all real
->   correctness/validation bugs fixed).
->
-> **Next:** the `scripts/validate/compare_amip_era5.py` driver — load a saved
-> AMIP snapshot + ERA5 slice (`era5_to_state` / `era5_loader`), call
-> `compare_state_to_reference`, write the manifest. Needs the AMIP snapshot
-> on-disk format inspected first. Then Stage 1 AMIP wiring (`diag_days=0.25`).
->
-> ### Iter 2 (2026-06-17) — Stage 3 / gap #2: worst-column manifest + env tags ✅
-> Added `legoesm.training.column_manifest` (ml package). Public API:
-> - `compute_bulk_shear(u, v, sigma_full, config)` — vector bulk wind shear
->   `|V(upper)-V(lower)|` between the model levels nearest config sigma refs
->   (JAX-native `jnp.argmin`+`jnp.take`, jit-safe with traced sigma).
-> - `compute_column_environment(...)` → `ColumnEnvironmentFields` (SST, CAPE,
->   bulk shear) per column. CAPE reuses canonical
->   `atmosphere.physics.thermodynamics.parcel_profile_and_cape` (surface-last
->   `(ncol,nlev)`, virtual-T CAPE); reshapes leading column dims and back.
-> - `build_worst_column_manifest(...)` → `list[ColumnRecord]` — host-side
->   assembly on top of `rank_worst_columns`; unravels flat→grid index, drops
->   invalid (padded) columns, broadcasts lat/lon (grid-shaped or 1-D
->   rectilinear via meshgrid; raises on cubed-sphere 1-D coords).
-> - `ColumnRecord` / `ColumnEnvironment` NamedTuples + JSON I/O
->   (`write_manifest`/`read_manifest`/`manifest_to_dicts`/`dicts_to_manifest`),
->   round-trip tested. Manifest is the lightweight index (grid_index, lat/lon,
->   time_index, scores, env tags); full column profiles are re-extracted from
->   the saved AMIP state in stage 4, not stored here.
-> - `EnvironmentConfig` — shear reference sigma levels (diagnostic, not physics).
-> - Tests: `tests/unit/test_column_manifest.py` (9 cases: shear math + level
->   selection, jit-with-traced-sigma, CAPE sign/shape, manifest selection +
->   invalid-drop, coord broadcasting + bad-shape raise, JSON round-trip).
-> - **Codex adversarial review: clean** (1 real bug: host-side `np.argmin` broke
->   the jit contract → fixed to JAX-native level selection).
->
-> **Next:** Stage 2 completion — the model↔ERA5 regrid + comparison driver
-> (`scripts/validate/compare_amip_era5.py`) that produces `score_columns` inputs
-> from a saved AMIP run + ERA5 (reuse `era5_to_state` / `era5_loader`), then
-> emits the manifest. Then Stage 1 AMIP driver wiring (`diag_days=0.25`).
->
-> ### Iter 1 (2026-06-17) — Stage 2 / gap #1: per-column comparison metric ✅
-> Added `legoesm.training.column_era5_metrics` (in the **ml** package — it must
-> sit above `legoesm.diagnostics` (tools), which cannot import the reused
-> `scm_rce_metrics`/`loss`/`era5_loader`; FEDERATION.md DAG). Public API:
-> - `normalized_mass_weights(dsigma)` — σ-coordinate per-level mass weights (Σ=1).
-> - `per_column_weighted_rmse(model, ref, weights)` — mass-weighted vertical RMSE
->   per column, NaN-level masked + renormalized; reuses `scm_rce_metrics.weighted_rmse`.
-> - `per_column_vector_wind_rmse(...)` — `sqrt(Σ w_k(Δu²+Δv²))` vector-wind RMS.
-> - `score_columns(...)` → `ColumnErrorFields` (T_rmse_K, qv_rmse, wind_rmse_m_s,
->   precip_err_mm_day, dimensionless `combined_score`). Precip reuses
->   `precip_score_jax`; raises on exactly-one-of precip args.
-> - `rank_worst_columns(score, n, valid_mask=)` → `(flat_idx, scores, valid)`;
->   `valid` flags padded slots when `n` > valid-column count (JIT-static shape).
-> - `ColumnErrorConfig` — diagnostic normalization scales (module `UPPER_SNAKE`
->   constants; not trainable physics → no `__param_spec__`).
-> - **Autodiff-safe**: added shared `safe_sqrt` to `scm_rce_metrics` (double-where
->   idiom) so `weighted_rmse` and all combined scores differentiate cleanly at
->   zero error (perfect-match / all-masked columns) — fixes a `sqrt(0)` NaN-grad
->   hazard that also latently affected the SCM-RCE training path. Primal unchanged
->   (SCM-RCE tests still green).
-> - Tests: `tests/unit/test_column_era5_metrics.py` (18 cases incl. AD-safety,
->   NaN masking, ranking validity, partial-precip guard).
-> - **Codex adversarial review: clean** (3 real bugs found+fixed across 3 rounds:
->   sqrt(0) NaN-grad ×2, ranking validity flag).
->
-> **Next:** Stage 3 — worst-column manifest (lat/lon/time + environment tags
-> SST/CAPE/shear) built on `rank_worst_columns`; then Stage 1 AMIP driver wiring
-> (`diag_days=0.25`) + the model↔ERA5 regrid that feeds `score_columns`.
-
+> **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
+> 1. **Extractor follow-ups** — geostrophic wind (∇Φ) + cubed-sphere/Gaussian
+>    grids (iter-10 covers lat-lon ω + advective tendencies, ERA5-native).
+> 2. **Standalone LES driver** + optional **1.5-order TKE SGS** (gap #4) at LES
+>    resolution; ingest the forcing manifest; resolved-flux output (iter 6).
+> 3. **Per-scheme promotion** of a real production coefficient (entrainment) —
+>    `shape`-keyed `__param_spec__` + scheme-body `(ncol,)` broadcast (physics-validated).
+> 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
+> 5. **End-to-end bias-reduction demo** — the actual success criterion.
 ---
 
 ## 1. Goal
