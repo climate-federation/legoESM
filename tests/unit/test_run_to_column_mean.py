@@ -20,6 +20,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 from legoesm.training.run_to_column_mean import (  # noqa: E402
     amip_column_state,
     cmip_column_state,
+    make_run_fn,
     run_to_column_mean,
 )
 
@@ -132,6 +133,35 @@ def test_amip_prescribed_sst_threaded_through_segments():
     # (A day-0-only bug would give 290.0.)
 
 
+def test_make_run_fn_builds_driver_from_config_and_means():
+    """make_run_fn(config) builds a fresh driver from the config each call and
+    returns the time mean — the run_amip_fn/run_cmip_fn make_compare_fn expects."""
+    seen = {}
+
+    def build_driver(config):
+        seen["config"] = config
+        return _FakeDriver([_state(0.0), _state(2.0)])  # mean scale = 1
+
+    run_fn = make_run_fn(build_driver, _extract)
+    mean = run_fn("my-config")
+    assert seen["config"] == "my-config"
+    np.testing.assert_allclose(np.asarray(mean.T), 281.0, rtol=1e-12)
+
+
+def test_make_run_fn_output_depends_on_config():
+    """config flows through build_driver into the run output (the loop's premise:
+    a different config ⇒ a different scored state), not silently ignored."""
+    def build_driver(config):
+        return _FakeDriver([_state(float(config))])  # state scales with config
+
+    run_fn = make_run_fn(build_driver, _extract)
+    mean_a = run_fn(2.0)
+    mean_b = run_fn(5.0)
+    assert not bool(jnp.allclose(mean_a.T, mean_b.T))
+    np.testing.assert_allclose(np.asarray(mean_a.T), 282.0, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(mean_b.T), 285.0, rtol=1e-12)
+
+
 def _tiny_coupled(days, diag_days, n_lat=8, nlev=5):
     from legoesm.driver.config import (
         DycoreConfig,
@@ -187,3 +217,56 @@ def test_segment_callback_compose_is_optional():
     driver = _tiny_coupled(days=0.5, diag_days=0.5)
     status = driver.run()  # no segment_callback → plain coupled run
     assert isinstance(status, str)
+
+
+@pytest.mark.slow
+def test_make_compare_fn_real_cmip_run_to_mean():
+    """Full real compare path through the loop adapters: make_run_fn(real CMIP
+    build) → make_compare_fn → compare_fn(config) runs the coupled model,
+    time-means it, and scores it against a synthetic ERA5 reference, emitting the
+    worst-column manifest — the run→time-mean→compare→score chain end-to-end."""
+    from legoesm.training.correction_loop import make_compare_fn
+
+    rad2deg = 180.0 / np.pi
+    probe = _tiny_coupled(days=1.0, diag_days=0.5)  # for grid/sigma only (not run)
+    sigma = probe._atm.sigma
+    grid = probe._atm.grid
+    lat_deg = jnp.asarray(np.asarray(grid.grid_lat) * rad2deg)
+    lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
+
+    def build_driver(config):  # config unused here (the run is config-fixed)
+        return _tiny_coupled(days=1.0, diag_days=0.5)
+
+    run_fn = make_run_fn(build_driver, cmip_column_state)
+
+    # Reference = one real time-mean run with a localized +6 K cold bias in one
+    # column (deterministic run ⇒ that column is the worst).
+    model0 = run_fn(None)
+    n_lat, n_lon, _ = model0.T.shape
+    bias = np.zeros((n_lat, n_lon))
+    bias[n_lat // 2, n_lon // 2] = 6.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    compare_fn = make_compare_fn(
+        reference=reference,
+        sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=lat_deg, lon_deg=lon_deg,
+        area_weights=jnp.ones((n_lat, n_lon)),
+        n_worst=1, run_amip_fn=run_fn,
+    )
+    result = compare_fn(None)
+    assert result.combined_score.shape == (n_lat, n_lon)
+    assert bool(jnp.all(jnp.isfinite(result.combined_score)))
+    assert len(result.manifest) == 1
+    # The +6 K biased column is the worst — and by a clear DOMINANCE MARGIN over
+    # the runner-up (the run is deterministic, so non-biased columns score ~0),
+    # so the assertion is robust to any minor run-to-run difference, not flaky.
+    assert result.manifest[0].grid_index == (n_lat // 2, n_lon // 2)
+    score = np.asarray(result.combined_score)
+    biased = float(score[n_lat // 2, n_lon // 2])
+    others = score.copy()
+    others[n_lat // 2, n_lon // 2] = -np.inf
+    runner_up = float(others.max())
+    assert biased > 0.0
+    assert runner_up < 0.5 * biased  # biased column ≥ 2× any other column

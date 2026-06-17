@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30 adds the time-mean `ColumnState` accumulator and iter 31 the run→time-mean→compare wiring (`run_to_column_mean`, the real AMIP/CMIP `run_*_fn`), so a configured run now yields a climatological mean state for comparison. **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run (plug `run_to_column_mean` into a real `make_compare_fn` + real ERA5) — not unit-testable here — plus cubed-sphere geostrophic rotation and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
+**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30–32 add the time-mean `ColumnState` accumulator + the run→time-mean→compare→score wiring (`run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real `compare_fn(config)`, integration-tested on a real coupled run). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run — a production `build_driver(scheme_config)` that injects the corrected per-column config into the dycore/physics, + real ERA5 + a multi-day run — not unit-testable here; plus cubed-sphere geostrophic rotation and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -48,6 +48,7 @@
 > | geostrophic wind (lat-lon) + LES Coriolis | `geostrophic_wind_from_gradients` (two-term σ-PGF, sign-correct both hemispheres) → `u_geo0/v_geo0`; cubed/equator→`f×V` | 29 |
 > | time-mean state accumulator | `column_state_accumulator.py` (scan-friendly, AD-safe `ColumnState` climatology mean feeding `compare_state_to_reference`) | 30 |
 > | run→time-mean→compare wiring | `run_to_column_mean.py` (`run_to_column_mean` samples the column state at each `diag_days` segment via the driver's `segment_callback`, folds into the iter-30 mean; `cmip_column_state`/`amip_column_state` extractors — AMIP threads the segment `day` for time-dependent prescribed SST). `CoupledESMDriver.run` gained an optional composed `segment_callback` + public `q_v` property (the real `run_amip_fn`/`run_cmip_fn` for `make_compare_fn`) | 31 |
+> | real `compare_fn(config)` adapter | `run_to_column_mean.make_run_fn(build_driver, extract)` → `run_fn(config)` (config→fresh driver→time-mean ColumnState) = the real `run_amip_fn`/`run_cmip_fn` for `make_compare_fn`. Integration test composes it with `make_compare_fn` over a real tiny coupled run → a real `compare_fn(config)` that runs+time-means+scores vs a synthetic ERA5 reference, with a DOMINANCE-MARGIN worst-column assertion (biased column ≥2× runner-up). The last mock in the compare path is now real | 32 |
 >
 > **Feedback loop closes in code:** LES diagnoses → `assemble_feedback_field` (16)
 > → `apply_column_parameter_field` (9) → updated scheme config; iterated by
@@ -61,10 +62,14 @@
 >   LES. Orchestrator (19/25) ready + mock-tested; not unit-testable here. NB a
 >   self-consistent perfect-model OSSE cannot honestly prove it (the LES and the
 >   GCM closure are different models — that gap is the method's whole point).
-> - **AMIP/CMIP run wiring** → time-mean → compare: DONE (iter 31,
->   `run_to_column_mean`); remaining is only plugging it into a real
->   `correction_loop.make_compare_fn` for the HPC demo (config → run → mean →
->   score), which is the same HPC-scale run as the bias-reduction demo above.
+> - **AMIP/CMIP run → time-mean → compare → score**: DONE (iter 31–32,
+>   `run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real
+>   `compare_fn(config)`, integration-tested on a real coupled run). The ONLY
+>   remaining piece for the HPC demo is a production `build_driver(scheme_config)`
+>   that injects the corrected per-column scheme config (e.g. the `clubb_lite_C_K`
+>   field) into the dycore/physics — the config→model wiring is intentionally
+>   injected so this stays generic; that wiring + real ERA5 + the multi-day run is
+>   the HPC-scale bias-reduction demo (not unit-testable here).
 > - **Extractor follow-ups** — cubed-sphere geostrophic (metric-correct
 >   east/north↔grid rotation, visually verified for cube-edge artifacts);
 >   Gaussian/Voronoi grids (the dispatcher raises on those).

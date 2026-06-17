@@ -72,6 +72,37 @@ def run_to_column_mean(
     return mean_column_state(box["acc"])
 
 
+def make_run_fn(
+    build_driver: Callable[[Any], Any],
+    extract_column_state: Callable[[Any, float, float], ColumnState],
+    *,
+    run_kwargs: dict | None = None,
+) -> Callable[[Any], ColumnState]:
+    """Adapt a ``config → driver`` builder into the ``run_amip_fn``/``run_cmip_fn``
+    that :func:`legoesm.training.correction_loop.make_compare_fn` (iter 21) expects.
+
+    Returns ``run_fn(config) -> ColumnState`` (the climatological time mean): each
+    call builds a fresh driver from ``config`` via ``build_driver`` (which MUST
+    return a driver already ``setup()``-d), runs it, and time-means the column
+    state (:func:`run_to_column_mean`).  This is the last real piece of the
+    run→time-mean→compare chain — ``make_compare_fn(..., run_amip_fn=run_fn)`` then
+    scores the mean against the (regridded) ERA5 ``reference`` and emits the
+    worst-column manifest.
+
+    ``build_driver`` carries the production-specific config→model wiring (apply
+    the corrected scheme config, pick the grid/levels, prescribe SST for AMIP or
+    attach the ocean for CMIP); keeping it injected leaves this adapter generic +
+    unit-testable.  It MUST be deterministic except for ``config`` (same reference
+    grid/masks across calls) so the loop's measured bias change reflects only the
+    config update.
+    """
+    def run_fn(config: Any) -> ColumnState:
+        driver = build_driver(config)
+        return run_to_column_mean(driver, extract_column_state, run_kwargs=run_kwargs)
+
+    return run_fn
+
+
 def _sst_array(sst: Any) -> Any:
     """Unwrap a ``Field``-wrapped SST to its raw array (``.data``) if needed."""
     return sst.data if hasattr(sst, "data") else sst
