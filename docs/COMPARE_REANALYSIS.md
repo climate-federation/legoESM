@@ -7,6 +7,31 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 5 (2026-06-17) — Stage 4 (assembly): GCM-column → SCMForcing ✅
+> Added `legoesm.atmosphere.column_forcing` — assembles a **steady** `SCMForcing`
+> from a flagged column's extracted large-scale state, so the LES is forced
+> exactly like that column's environment. Public API:
+> - `ColumnLargeScaleState` — the extracted quantities (subsidence_w **or** omega,
+>   u/v_geo, theta/qv advective tendencies, surface forcing, lat).
+> - `build_column_scm_forcing(ls, *, allow_no_subsidence=False)` → validated
+>   `SCMForcing` (constant-in-time callables; Coriolis from lat; ω→w conversion).
+> - `subsidence_w_from_omega` (reuses `_shared.diagnose_grid_w_from_omega`),
+>   `coriolis_f_c` (reuses `coriolis_parameter_fv3`).
+> - **Hardening (Codex-driven, clean after 3 rounds):** raises on both-/neither-
+>   subsidence (neither needs explicit `allow_no_subsidence` — silently dropping
+>   subsidence biases the forced LES), surface-prescription **exclusivity** guards
+>   (reject conflicting extras, not just missing required channels), rank-1/nlev
+>   profile-shape validation, and dtype promotion incl. q_v.
+> - Reuse-only physics (no re-derived ω→w, Coriolis, or forcing schema); lives in
+>   the **atmosphere** package (ml pipeline calls it per-record).
+> - Tests: `tests/atmosphere/test_column_forcing.py` (16 cases).
+>
+> **Remaining for Stage 4:** the **grid-side extractor** — derive `omega` (from
+> `∇·v_h` via `grids.vertical` continuity), geostrophic wind (`∇Φ`), and
+> theta/qv advective tendencies (`-V·∇·`) at a flagged column's neighbourhood,
+> producing `ColumnLargeScaleState`. Then Stage 5 — standalone LES driver +
+> 1.5-order TKE SGS + resolved-flux diagnostics.
+>
 > ### Iter 4 (2026-06-17) — Stage 2 driver: `compare_amip_era5.py` ✅
 > Added `scripts/validate/compare_amip_era5.py` — the non-matrix validator that
 > loads a saved AMIP restart + an ERA5 slice, regrids ERA5 → model grid+sigma,
