@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     build_physics_pipeline,
     required_microphysics_tracer_slots,
+    turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
 from legoesm.driver.diagnostics import DiagnosticCollector
@@ -3837,7 +3838,7 @@ class ModelDriver:
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
-            turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+            turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
@@ -4719,9 +4720,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.convection.config import (
                 ConvectionConfig,
             )
-            from legoesm.atmosphere.physics.turbulence.config import (
-                TurbulenceConfig,
-            )
             from legoesm.atmosphere.physics.microphysics.config import (
                 MicrophysicsConfig,
             )
@@ -4759,7 +4757,7 @@ class ModelDriver:
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
-                turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+                turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
                 gravity_wave_drag=GravityWaveDragConfig(
                     scheme=cfg.gravity_wave_drag),

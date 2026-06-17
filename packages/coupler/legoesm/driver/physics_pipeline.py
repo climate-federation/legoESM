@@ -2296,6 +2296,25 @@ def _resolve_microphysics(config):
 # Turbulence resolver
 # ---------------------------------------------------------------------------
 
+def turbulence_config_for(config):
+    """The ``TurbulenceConfig`` to build the turbulence kernel from.
+
+    The explicit ``config.turbulence_override`` if set (it must share
+    ``config.turbulence``'s scheme — enforced by
+    ``ExperimentConfig.validate_strict``), else the default
+    ``TurbulenceConfig(scheme=config.turbulence)``.  Single source of truth so
+    every dycore backend (FV ``_resolve_turbulence``, MPAS, spectral) honours an
+    injected override consistently (e.g. a corrected per-column
+    ``clubb_lite.C_K`` from the LES-informed correction loop).
+    """
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    override = getattr(config, "turbulence_override", None)
+    if override is not None:
+        return override
+    return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+
+
 def _resolve_turbulence(config):
     """Resolve turbulence kernel and config from ExperimentConfig.
 
@@ -2305,10 +2324,9 @@ def _resolve_turbulence(config):
     if scheme == "none":
         return None, None
 
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
-    tc = TurbulenceConfig(scheme=scheme)
+    tc = turbulence_config_for(config)
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
     # Propagate the experiment-level surface bulk-flux algorithm into the
     # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-

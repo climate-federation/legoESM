@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30–32 add the time-mean `ColumnState` accumulator + the run→time-mean→compare→score wiring (`run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real `compare_fn(config)`, integration-tested on a real coupled run); iter 33–34 add env-clustering of worst columns wired into the loop via `les_budget` (one LES per representative, the §7 LES-cost path). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run — a production `build_driver(scheme_config)` that injects the corrected per-column config into the dycore/physics, + real ERA5 + a multi-day run — not unit-testable here; plus cubed-sphere geostrophic rotation and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
+**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30–32 add the time-mean `ColumnState` accumulator + the run→time-mean→compare→score wiring (`run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real `compare_fn(config)`, integration-tested on a real coupled run); iter 33–34 add env-clustering of worst columns wired into the loop via `les_budget`; iter 35 lands the **build_driver config-injection** (`ExperimentConfig.turbulence_override` → corrected per-column `clubb_lite` C_K reaches all dycore backends; a real run with a changed C_K provably changes the simulation). **Remaining (the done-criterion):** the EMPIRICAL bias-reduction demonstration on real ERA5 at HPC scale (the parameter-update *mechanism* is now proven; what's left is the multi-day run + the LES-informed C_K actually lowering the ERA5 bias) — not unit-testable here — plus the column-ordering contract guard, cubed-sphere geostrophic rotation, and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -51,6 +51,7 @@
 > | real `compare_fn(config)` adapter | `run_to_column_mean.make_run_fn(build_driver, extract)` → `run_fn(config)` (config→fresh driver→time-mean ColumnState) = the real `run_amip_fn`/`run_cmip_fn` for `make_compare_fn`. Integration test composes it with `make_compare_fn` over a real tiny coupled run → a real `compare_fn(config)` that runs+time-means+scores vs a synthetic ERA5 reference, with a DOMINANCE-MARGIN worst-column assertion (biased column ≥2× runner-up). The last mock in the compare path is now real | 32 |
 > | env-clustering worst columns (LES cost) | `column_clustering.py::cluster_columns_by_environment` — deterministic farthest-first (Gonzalez k-center) over the manifest's normalised env tags (SST/CAPE/shear), anchored at the worst-scoring column, picks K REPRESENTATIVE REAL columns + per-column labels so one LES per cluster covers many worst columns (§6/§7 cost path). Finiteness + env_scales validation, near-constant-feature suppression, duplicate-env early stop | 33 |
 > | clustering WIRED into the loop | `run_correction_iteration`/`run_correction_campaign` gained `les_budget=K` (+`env_scales`): when `K < len(manifest)`, diagnose only the K env-representatives and map each coefficient to its cluster members before the feedback splice — so `n_corrected` columns corrected but only `n_diagnosed=K` (new `CorrectionResult` field) LES run. `les_budget=None` = unchanged (diagnose all). Tests: K diagnose calls (not N), n_diagnosed==K<n_corrected, cluster members get the RIGHT representative's coefficient (distinct CAPE-based K), None/≥N/≤0 paths | 34 |
+> | **build_driver CONFIG-INJECTION** (the parameter-update mechanism) | `ExperimentConfig.turbulence_override` (a `TurbulenceConfig`, default None) + shared `physics_pipeline.turbulence_config_for(config)` used by ALL backends (FV `_resolve_turbulence`, MPAS, spectral) → the corrected `clubb_lite` config (incl. a **per-column C_K array** from the feedback field) reaches the turbulence kernel WITHOUT a new driver signature. `validate_strict` enforces `override.scheme==turbulence` + isinstance; serialization drops it (runtime-only). **PROVEN**: a real coupled run with different C_K (0.2 vs 1.2) gives a different T field, and a per-column (ncol,) C_K array runs a real forward step (finite output) — i.e. "updating these parameters in the AMIP/CMIP simulation" genuinely changes the simulation | 35 |
 >
 > **Feedback loop closes in code:** LES diagnoses → `assemble_feedback_field` (16)
 > → `apply_column_parameter_field` (9) → updated scheme config; iterated by
@@ -78,7 +79,17 @@
 >   `TurbulenceConfig(scheme=cfg.turbulence)` with DEFAULT sub-configs at ~3 backend
 >   sites (MPAS/spectral/FV). So `build_driver` needs a shared physics-config
 >   builder + an `ExperimentConfig` turbulence override threaded through those
->   sites — an invasive, HPC-validated driver refactor.
+>   sites — an invasive, HPC-validated driver refactor.  **DONE (iter 35):**
+>   `ExperimentConfig.turbulence_override` + `turbulence_config_for` thread the
+>   corrected config (scalar OR per-column-array C_K) through all backends; a real
+>   run with a different C_K provably changes the model state. So `build_driver`
+>   is now `ExperimentConfig(..., turbulence=clubb_lite,
+>   turbulence_override=apply_feedback_to_scheme(...))`.  Two pieces remain for
+>   the empirical demo: (a) the **column-ordering contract** — the feedback
+>   field's flat (grid row-major) order must match the physics `ColumnAdapter`'s
+>   row-major flatten; assumed-consistent, no guard yet (a sentinel test across
+>   extractor→injector→physics is the safest check); (b) the run itself on real
+>   ERA5 at scale.
 > - **LES batch cost**: DONE (iter 33 clustering + iter 34 wired into
 >   `run_correction_iteration` via `les_budget`); the HPC harness sets `les_budget`
 >   to its affordable LES count.

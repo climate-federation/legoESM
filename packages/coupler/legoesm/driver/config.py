@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from legoesm import constants
 
@@ -685,6 +685,19 @@ class ExperimentConfig(NamedTuple):
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
 
+    # Optional explicit turbulence scheme config (a
+    # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
+    # default ``TurbulenceConfig(scheme=turbulence)`` that the driver builds from
+    # the scheme STRING.  Lets a caller inject a refined / per-column scheme
+    # sub-config (e.g. a corrected per-column ``clubb_lite.C_K`` field from the
+    # LES-informed correction loop) WITHOUT a new driver signature.  Its
+    # ``.scheme`` MUST equal ``turbulence`` (it refines the same scheme, it does
+    # NOT switch schemes — validated in ``validate_strict``).  ``None`` (default)
+    # ⇒ the driver builds the default config, byte-identical to before.  Typed
+    # ``Any`` to avoid importing the atmosphere physics config into the driver
+    # config module.
+    turbulence_override: Any = None
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -937,6 +950,21 @@ class ExperimentConfig(NamedTuple):
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
+        if self.turbulence_override is not None:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                TurbulenceConfig,
+            )
+            if not isinstance(self.turbulence_override, TurbulenceConfig):
+                errors.append(
+                    "turbulence_override must be a TurbulenceConfig, got "
+                    f"{type(self.turbulence_override).__name__}"
+                )
+            elif self.turbulence_override.scheme != self.turbulence:
+                errors.append(
+                    f"turbulence_override.scheme={self.turbulence_override.scheme!r} "
+                    f"must equal turbulence={self.turbulence!r} (an override refines "
+                    f"the same scheme's sub-config, it does not switch schemes)"
                 )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
@@ -1439,6 +1467,12 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     This is the canonical serialization format.
     """
     d = config._asdict()
+    # ``turbulence_override`` is a RUNTIME-ONLY injection (it may carry a
+    # per-column JAX array C_K) — it is NOT persisted: the serialized config is
+    # the base config, and the override is re-applied in memory after load (the
+    # correction loop's build_driver). Drop it so it cannot be stringified +
+    # silently corrupted on round-trip.
+    d["turbulence_override"] = None
     for key in _SUB_CONFIGS:
         sub = d[key]
         if hasattr(sub, '_asdict'):
@@ -1478,6 +1512,9 @@ def config_to_dict(config) -> dict:
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
     d = config._asdict()
+    # Runtime-only injection — never serialized (see experiment_config_to_dict).
+    if "turbulence_override" in d:
+        d["turbulence_override"] = None
     for key, val in d.items():
         if hasattr(val, "_asdict"):
             d[key] = val._asdict()
