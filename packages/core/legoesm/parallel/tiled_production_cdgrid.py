@@ -1389,18 +1389,9 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
     ``CDGridPrimitiveEquationConfig.p_floor`` [Pa] (the adiabatic 1/p floor).
     Base cut + halo/reduction structure: see the module comment above.
     """
-    from legoesm import constants
-    from legoesm.core.operators_cdgrid import (
-        dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
-        interp_center_to_corner, interp_corner_to_center, cgrid_divergence_local)
-    from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
-    from legoesm.core.precision import resolve_dtype
-    from legoesm.grids.vertical import (
-        compute_geopotential, compute_geopotential_hybrid, pressure_from_hybrid,
-        compute_mass_flux_hybrid, compute_sigma_dot_and_total,
-        vertical_advection, vertical_advection_hybrid,
-        compute_omega_hybrid, compute_pressure_velocity,
-        HybridSigmaPressureCoordinate)
+    # The tendency numerics + their imports live in _build_hydro_tile_tendency_fns
+    # (shared with the step stage); this factory only builds the halo bodies +
+    # slices the face-sharded state/metrics and calls the shared tendency.
     from legoesm.parallel.cubesphere_exchange import (
         make_tiled_pad_body, make_tiled_pad_vector_body)
 
