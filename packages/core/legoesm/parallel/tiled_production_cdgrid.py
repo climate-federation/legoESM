@@ -1081,6 +1081,103 @@ def make_tiled_fv3_hydrostatic_thermo_stage_2d(mesh, cdgrid, coord, n: int,
 
 
 # ---------------------------------------------------------------------------
+# P-3D cc->D-grid VECTOR lift: tiled ``center_to_dgrid_vector`` (base case,
+# use_fv3_a2b_ord4=False) — the cell-centre wind vector to D-grid CORNER lift.
+# This is the section-12c ``_vert_adv_uv_d`` contribution
+# (primitive_eq_cdgrid.py:957-977) that the standalone tiled momentum stage
+# OMITS: the true base-case du_d_dt/dv_d_dt = momentum(307-479) +
+# center_to_dgrid_vector(vert_adv_uv_cc) added UNCONDITIONALLY.  So the full
+# hydrostatic capstone must add this lift to its momentum output.  Base case =
+# a halo=1 ROTATING vector pad (the ndim=4 ``make_tiled_pad_vector_body``,
+# pinned by test_tiled_pad_body's ndim=4-vector lane) + the 4-pt corner average
+# (mirror of the SW capstone's corner-wind block, fv3_sw_tendencies lines
+# 1800-1805).  Coord-FREE (pure geometry).  No new numerics.
+# ---------------------------------------------------------------------------
+
+def make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                              nlev: int):
+    """Tiled ``center_to_dgrid_vector`` (cc wind vector -> D-grid corners) on a
+    ``(6, kt, kt)`` mesh (axes ``("face","tile_i","tile_j")``).
+
+    Returns ``stage(u_cc, v_cc) -> (u_d, v_d)``: cc winds ``(6, n, n, nlev)``
+    FACE-SHARDED, TILE-REPLICATED (``P("face",None,None,None)``); both outputs
+    corner-staggered tiles ``P("face","tile_i","tile_j",None)``; gathered
+    ``(6, kt*(nl+1), kt*(nl+1), nlev)`` reassemble lower-owns-shared (drop the
+    duplicated shared corner face) to ``(6, n+1, n+1, nlev)`` — the same
+    convention as the momentum stage's corner outputs.
+
+    Base cut (``center_to_dgrid_vector`` default ``use_fv3_a2b_ord4=False``,
+    operators_cdgrid.py:327-337): halo=1 ROTATING vector pad + the 4-pt corner
+    average.  Non-duogrid orthogonal rotation only.  Coord-free.  No new
+    numerics — the rotating halo is the shared ndim=4 ``make_tiled_pad_vector_body``
+    and the average is the same stencil as the global op.
+    """
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_vector_body
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_center_to_dgrid_vector_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_center_to_dgrid_vector_stage_2d: base cut supports the "
+            "orthogonal-rotation (non-duogrid) cube only (use_fv3_a2b_ord4=False; "
+            "the in-stage vector halo does not carry the duogrid h2 remap).")
+    nl = n // kt
+
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle              # (6, n, n)
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded    # (6, n+2, n+2)
+    offsets = grid.halo_interp_offsets                         # (6, 4, n)
+
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=4, halo=1, with_offsets=True)
+
+    fw = P("face", None, None, None)               # 4D cc winds
+    fo = P("face", None, None)                     # 2D angle metrics
+    cz = P("face", "tile_i", "tile_j", None)       # 4D corner outputs
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fo, fo, fo, fo, P()),  # u_cc,v_cc,ca,sa,cap,sap,offs
+             out_specs=(cz, cz), check_vma=False)
+    def _body(u_cc, v_cc, ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_cc_t = _s(u_cc, nl, nl)              # (1, nl, nl, nlev) cc
+        v_cc_t = _s(v_cc, nl, nl)
+        ca_t = _s(ca, nl, nl)[0]               # (nl, nl) interior angle
+        sa_t = _s(sa, nl, nl)[0]
+        cap_t = _s(capf, nl + 2, nl + 2)[0]    # (nl+2, nl+2) padded angle
+        sap_t = _s(sapf, nl + 2, nl + 2)[0]
+
+        # halo=1 ROTATING vector pad (ndim=4: cc tile -> (nl+2, nl+2, nlev)).
+        u_pad, v_pad = vector_body(u_cc_t[0], v_cc_t[0], ca_t, sa_t,
+                                   cap_t, sap_t, offs)
+        u_pad = u_pad[None]                    # (1, nl+2, nl+2, nlev)
+        v_pad = v_pad[None]
+
+        # 4-pt corner average (mirror operators_cdgrid.center_to_dgrid_vector).
+        u_d = 0.25 * (u_pad[:, :-1, :-1, :] + u_pad[:, 1:, :-1, :]
+                      + u_pad[:, :-1, 1:, :] + u_pad[:, 1:, 1:, :])
+        v_d = 0.25 * (v_pad[:, :-1, :-1, :] + v_pad[:, 1:, :-1, :]
+                      + v_pad[:, :-1, 1:, :] + v_pad[:, 1:, 1:, :])
+        return u_d, v_d                        # (1, nl+1, nl+1, nlev) corner
+
+    def stage(u_cc, v_cc):
+        _check_shapes(n, u_cc=(u_cc, (n, n, nlev)), v_cc=(v_cc, (n, n, nlev)))
+        return _body(u_cc, v_cc, cos_a, sin_a, cap, sap, offsets)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
