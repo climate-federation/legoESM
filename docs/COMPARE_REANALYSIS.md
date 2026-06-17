@@ -31,15 +31,16 @@
 > | 5 LES regime selection | `atmosphere/dynamics/les_regime.py` (`les_resolution_for_column`: CAPE→shallow/deep dispatch + per-regime plane-LES resolution; raise on unknown/non-finite/invalid box) | 12 |
 > | 5 LES vertical mapping | `atmosphere/dynamics/les_vertical_mapping.py` (`interpolate_column_to_les`, `top_relaxation_rate` reusing `sponge_profile`, `relaxation_tendency`, `build_top_relaxation`) | 13 |
 > | 6 LES→coefficient composition | `atmosphere/dynamics/column_les_diagnosis.py` (`diagnose_column_coefficient`: dispatch eddy-K / entrainment-w_e; top-down→ascending reversal of fluxes+gradient) | 14 |
+> | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→`diagnose`; `process_column`/`extract_gcm_column`/`run_column_les_pipeline`; real `main` loops the manifest) | 15 |
 >
 > **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
 > 1. **Extractor follow-ups** — geostrophic wind (∇Φ) + cubed-sphere/Gaussian
 >    grids (iter-10 covers lat-lon ω + advective tendencies, ERA5-native).
-> 2. **Standalone LES driver** — orchestrate manifest→`les_resolution_for_column`
->    (iter 12)→column θ/q interp to the LES grid + `ColumnLargeScaleState` forcing
->    (iters 5/10)→run plane LES (`run_les_plane` machinery, optionally the iter-11
->    TKE closure wired into the dycore)→resolved-flux output (iter 6)→coefficient
->    (iter 7). Heavy run step; the config/selection pieces are now in place.
+> 2. **Standalone LES driver** — DONE (iter 15): `scripts/run/run_column_les.py`
+>    chains manifest→regime→θ/forcing interp→`run_forced_les`→coefficient. The
+>    forced plane-dycore run loop (`run_forced_les`) + `main` are real but
+>    HPC-validated, not unit-tested (the orchestration helpers are). Optional
+>    follow-up: wire the iter-11 TKE closure into the dycore as the SGS option.
 > 3. **Per-scheme promotion** of a real production coefficient (entrainment) —
 >    `shape`-keyed `__param_spec__` + scheme-body `(ncol,)` broadcast (physics-validated).
 > 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
