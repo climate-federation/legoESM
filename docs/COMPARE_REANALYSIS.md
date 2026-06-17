@@ -29,6 +29,7 @@
 > | 4 / #3 grid-side forcing extractor (lat-lon) | `atmosphere/dynamics/column_large_scale_extract.py` (`extract_column_forcing_latlon`: ω from continuity, −V·∇θ/−V·∇q advection → `ColumnLargeScaleState`) | 10 |
 > | 4 / #4 1.5-order TKE SGS closure | `atmosphere/dynamics/tke_sgs_plane.py` (Deardorff/Lilly: ν_t=C_k ℓ√e, ε, Pr_t, TKE tendency, equilibrium↔Smagorinsky `C_s=(C_k³/C_ε)¼≈0.19`) | 11 |
 > | 5 LES regime selection | `atmosphere/dynamics/les_regime.py` (`les_resolution_for_column`: CAPE→shallow/deep dispatch + per-regime plane-LES resolution; raise on unknown/non-finite/invalid box) | 12 |
+> | 5 LES vertical mapping | `atmosphere/dynamics/les_vertical_mapping.py` (`interpolate_column_to_les`, `top_relaxation_rate` reusing `sponge_profile`, `relaxation_tendency`, `build_top_relaxation`) | 13 |
 >
 > **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
 > 1. **Extractor follow-ups** — geostrophic wind (∇Φ) + cubed-sphere/Gaussian
