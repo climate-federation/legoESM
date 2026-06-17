@@ -1452,6 +1452,69 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 
 
 # ---------------------------------------------------------------------------
+# Tiled GLOBAL reduction primitive: area-weighted zero_mean_tendency via psum.
+# The FIRST global reduction in the cube tiled stages (all prior stages are
+# halo-only) — the primitive the full tiled STEP needs for its mass-fixer and
+# for the capstone's _apply_zero_mean_per_stage=True config path (the production
+# default fix_mass=True path uses raw dp_s/dt, so the capstone's base cut omits
+# it; this stage provides the alternative).  Bit-identical to the global
+# core.conservation.zero_mean_tendency up to psum reduction-ORDER reordering;
+# the conserved property sum(out*area)==0 holds to machine precision (the point).
+# ---------------------------------------------------------------------------
+
+def make_tiled_zero_mean_tendency_stage_2d(mesh, grid, n: int, kt: int):
+    """Tiled area-weighted ``zero_mean_tendency`` on a ``(6, kt, kt)`` mesh.
+
+    ``stage(tend) -> tend - sum(tend*area)/sum(area)``: a 2D cc tendency
+    ``(6, n, n)`` FACE-REPLICATED in; tile-sharded ``P("face","tile_i","tile_j")``
+    out (exact cc partition).  Computes the area-weighted global mean via a single
+    ``jax.lax.psum`` over the (face, tile_i, tile_j) mesh axes — the first tiled
+    GLOBAL collective in the cube stages (vs the halo-only tendency stages).  The
+    global total area is closed over (a static reduction of the face-replicated
+    ``grid.area``).  Accumulation in ``conservation_accumulator`` (f64 under x64).
+    """
+    from legoesm.core.conservation import conservation_accumulator
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(grid, "area", None) is None:
+        raise ValueError(
+            "make_tiled_zero_mean_tendency_stage_2d: grid must have .area")
+    nl = n // kt
+    acc = conservation_accumulator()
+    area = grid.area                                   # (6, n, n)
+    total_area = jnp.sum(area.astype(acc))             # global; closed over
+
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo), out_specs=co,
+             check_vma=False)
+    def _body(tend, ar):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+        tend_t = _s(tend)                              # (1, nl, nl)
+        ar_t = _s(ar)
+        local_wsum = jnp.sum(tend_t.astype(acc) * ar_t.astype(acc))
+        # global area-weighted sum across ALL 6*kt*kt tiles (the new collective).
+        global_wsum = jax.lax.psum(
+            local_wsum, axis_name=("face", "tile_i", "tile_j"))
+        correction = global_wsum / total_area
+        return (tend_t.astype(acc) - correction).astype(tend.dtype)
+
+    def stage(tend):
+        _check_shapes(n, tend=(tend, (n, n)))
+        return _body(tend, area)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
