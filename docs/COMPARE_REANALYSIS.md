@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30–32 add the time-mean `ColumnState` accumulator + the run→time-mean→compare→score wiring (`run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real `compare_fn(config)`, integration-tested on a real coupled run). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run — a production `build_driver(scheme_config)` that injects the corrected per-column config into the dycore/physics, + real ERA5 + a multi-day run — not unit-testable here; plus cubed-sphere geostrophic rotation and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
+**Status (iter 30, compressed):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). Both lat-lon and native cubed-sphere worst columns spin off real plane LES (iter 27–28); forcing includes lat-lon geostrophic wind wired into the LES Coriolis (iter 29); iter 30–32 add the time-mean `ColumnState` accumulator + the run→time-mean→compare→score wiring (`run_to_column_mean` + `make_run_fn` composed with `make_compare_fn` → a real `compare_fn(config)`, integration-tested on a real coupled run); iter 33 adds env-clustering of worst columns (one LES per representative, the §7 LES-cost path). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run — a production `build_driver(scheme_config)` that injects the corrected per-column config into the dycore/physics, + real ERA5 + a multi-day run — not unit-testable here; plus cubed-sphere geostrophic rotation and Gaussian/Voronoi extractors. (Per-iteration history compressed at iters 10/20/30; full detail in git log.)
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -49,6 +49,7 @@
 > | time-mean state accumulator | `column_state_accumulator.py` (scan-friendly, AD-safe `ColumnState` climatology mean feeding `compare_state_to_reference`) | 30 |
 > | run→time-mean→compare wiring | `run_to_column_mean.py` (`run_to_column_mean` samples the column state at each `diag_days` segment via the driver's `segment_callback`, folds into the iter-30 mean; `cmip_column_state`/`amip_column_state` extractors — AMIP threads the segment `day` for time-dependent prescribed SST). `CoupledESMDriver.run` gained an optional composed `segment_callback` + public `q_v` property (the real `run_amip_fn`/`run_cmip_fn` for `make_compare_fn`) | 31 |
 > | real `compare_fn(config)` adapter | `run_to_column_mean.make_run_fn(build_driver, extract)` → `run_fn(config)` (config→fresh driver→time-mean ColumnState) = the real `run_amip_fn`/`run_cmip_fn` for `make_compare_fn`. Integration test composes it with `make_compare_fn` over a real tiny coupled run → a real `compare_fn(config)` that runs+time-means+scores vs a synthetic ERA5 reference, with a DOMINANCE-MARGIN worst-column assertion (biased column ≥2× runner-up). The last mock in the compare path is now real | 32 |
+> | env-clustering worst columns (LES cost) | `column_clustering.py::cluster_columns_by_environment` — deterministic farthest-first (Gonzalez k-center) over the manifest's normalised env tags (SST/CAPE/shear), anchored at the worst-scoring column, picks K REPRESENTATIVE REAL columns + per-column labels so one LES per cluster covers many worst columns (§6/§7 cost path). Finiteness + env_scales validation, near-constant-feature suppression, duplicate-env early stop. Composes: cluster → LES on reps → map coefficient to cluster members via labels (feedback scatter). Wiring into `run_correction_iteration`'s batch step is the next step | 33 |
 >
 > **Feedback loop closes in code:** LES diagnoses → `assemble_feedback_field` (16)
 > → `apply_column_parameter_field` (9) → updated scheme config; iterated by
@@ -69,7 +70,17 @@
 >   that injects the corrected per-column scheme config (e.g. the `clubb_lite_C_K`
 >   field) into the dycore/physics — the config→model wiring is intentionally
 >   injected so this stays generic; that wiring + real ERA5 + the multi-day run is
->   the HPC-scale bias-reduction demo (not unit-testable here).
+>   the HPC-scale bias-reduction demo (not unit-testable here).  **Injection-point
+>   finding (iter 33):** `clubb_lite` IS production-wired (`turbulence="clubb_lite"`
+>   → `clubb_lite_turbulence` with `config.clubb_lite`), but `ExperimentConfig`
+>   carries only the scheme *string* and the driver builds
+>   `TurbulenceConfig(scheme=cfg.turbulence)` with DEFAULT sub-configs at ~3 backend
+>   sites (MPAS/spectral/FV). So `build_driver` needs a shared physics-config
+>   builder + an `ExperimentConfig` turbulence override threaded through those
+>   sites — an invasive, HPC-validated driver refactor.
+> - **LES batch cost**: `cluster_columns_by_environment` (iter 33) picks K
+>   representatives; wiring it into `run_correction_iteration` (diagnose reps → map
+>   the coefficient to cluster members via labels) is the immediate follow-up.
 > - **Extractor follow-ups** — cubed-sphere geostrophic (metric-correct
 >   east/north↔grid rotation, visually verified for cube-edge artifacts);
 >   Gaussian/Voronoi grids (the dispatcher raises on those).
