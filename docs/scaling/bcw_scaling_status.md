@@ -281,6 +281,26 @@ mislabeled n=1 (the numbers above are read from the run logs). A label fix
 (record `n_global` for cs-spmd) is a small follow-up; it does not affect the
 multi-controller CPU cs-spmd runs (those use one process per device).
 
+**Ocean/lat-lon GPU multi-device (same route-B jax-mesh):** the latitude-band
+SPMD step (`bench_ocean_latlon_spmd_pcg.py`, `shard_map` over a 1-D `lat` mesh,
+single process drives both GPUs — no mpi4jax) also runs on 2 GPUs. Barotropic
+solve, LL720 (720x1440), 1- vs 2-GPU: **f64 18.90→16.35 ms = 1.16x** (eff 0.58);
+f32 8.59→9.79 ms = 0.88x (too light — the cross-GPU halo over PCIe outweighs the
+shrunk per-device compute, the same crossover as cubed-sphere f32 at C96). So
+GPU multi-device scaling works via the single-process jax-mesh path for BOTH
+decomposable grids — cubed-sphere (C192 f32 1.11x) and ocean lat-lon (LL720 f64
+1.16x) — modest and PCIe-bound (no NVLink), positive once the per-device problem
+is large enough. This is a microbench (ms/solve, not a tidy-CSV SYPD row), so the
+numbers live here rather than in the auto-generated figure.
+
+**GPU multi-device — final verdict.** Three paths, now fully characterised:
+mpi4jax-GPU halo = infra-blocked (CPU-only build); jax.distributed multi-
+controller = env-blocked (NCCL local-topology gather times out); single-process
+jax device-mesh SPMD = WORKS for both cubed-sphere and ocean, ~1.1–1.2x at 2 GPUs
+intra-node, PCIe-bound. The "GPU multi-device infra-blocked" verdict was wrong
+for the third path; bigger speedups need NVLink (or >2 GPUs/node), which this
+hardware does not have.
+
 ## Measured roofline (the quantified limit)
 
 `scripts/bench/roofline_probe.py` on Ginsburg (job 8502024):
