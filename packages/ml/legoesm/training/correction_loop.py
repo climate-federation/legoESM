@@ -36,6 +36,7 @@ from legoesm.training.bias_metrics import (
     bias_improvement,
     worst_column_bias_change,
 )
+from legoesm.training.column_clustering import cluster_columns_by_environment
 from legoesm.training.compare_reanalysis import (
     ColumnState,
     compare_state_to_reference,
@@ -61,7 +62,9 @@ class CorrectionResult(NamedTuple):
     bias: BiasImprovement              # baseline vs updated global bias
     worst_column_change: jax.Array     # mean bias reduction at the worst columns
     feedback_field: jax.Array          # the assembled per-column field
-    n_corrected: int                   # number of worst columns diagnosed
+    n_corrected: int                   # number of worst columns corrected (all flagged)
+    n_diagnosed: int = 0               # number of LES diagnoses run (= n_corrected, or
+    #                                    K representatives when clustering w/ les_budget)
 
 
 class CampaignResult(NamedTuple):
@@ -83,6 +86,8 @@ def run_correction_campaign(
     diagnosis_method: str = "eddy_diffusivity",
     background: float = 0.0,
     expected_ncol: int | None = None,
+    les_budget: int | None = None,
+    env_scales: Sequence[float] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -109,6 +114,7 @@ def run_correction_campaign(
             promotion_key=promotion_key, grid_shape=grid_shape,
             diagnosis_method=diagnosis_method, background=base,
             expected_ncol=expected_ncol,
+            les_budget=les_budget, env_scales=env_scales,
         )
         config = result.updated_config
         base = result.feedback_field   # accumulate into the next round's base
@@ -192,6 +198,8 @@ def run_correction_iteration(
     diagnosis_method: str = "eddy_diffusivity",
     background: float = 0.0,
     expected_ncol: int | None = None,
+    les_budget: int | None = None,
+    env_scales: Sequence[float] | None = None,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -201,6 +209,15 @@ def run_correction_iteration(
     the coefficient's production default (columns with no valid diagnosis keep
     it).  Returns the updated config + the :class:`BiasImprovement` (its
     ``improved`` field is the success test) + the worst-column change.
+
+    **LES-cost reduction** (``les_budget``): the LES is the loop's dominant cost
+    (§7), so when ``les_budget = K < len(manifest)`` is set, the worst columns are
+    environment-clustered (:func:`cluster_columns_by_environment`, ``env_scales``
+    forwarded) into ``K`` groups and the LES ``diagnose_fn`` runs ONLY on the
+    ``K`` representative columns; each representative's coefficient is then mapped
+    to every column in its cluster before the feedback field is assembled.  So
+    ``n_corrected`` columns are still corrected but only ``n_diagnosed = K`` LES
+    run.  ``les_budget=None`` (default) diagnoses every worst column.
 
     A grid with no flagged worst columns short-circuits to a no-op correction
     (baseline config unchanged, zero feedback, ``improved=False``) without a
@@ -248,9 +265,26 @@ def run_correction_iteration(
             worst_column_change=jnp.asarray(0.0, dtype=dtype),
             feedback_field=noop_field,
             n_corrected=0,
+            n_diagnosed=0,
         )
 
-    diagnoses = [diagnose_fn(rec, baseline.model_ctx) for rec in records]
+    if les_budget is not None and int(les_budget) < len(records):
+        if int(les_budget) <= 0:
+            raise ValueError(f"les_budget must be > 0, got {les_budget}.")
+        # Diagnose only the K environment-representative columns, then map each
+        # representative's coefficient to every column in its cluster.
+        clusters = cluster_columns_by_environment(
+            records, int(les_budget), env_scales=env_scales
+        )
+        rep_diagnoses = [
+            diagnose_fn(records[ri], baseline.model_ctx)
+            for ri in clusters.representative_indices
+        ]
+        diagnoses = [rep_diagnoses[label] for label in clusters.labels]
+        n_diagnosed = len(clusters.representative_indices)
+    else:
+        diagnoses = [diagnose_fn(rec, baseline.model_ctx) for rec in records]
+        n_diagnosed = len(records)
     field = assemble_feedback_field(
         records, diagnoses, grid_shape,
         method=diagnosis_method, background=background,
@@ -274,4 +308,5 @@ def run_correction_iteration(
         worst_column_change=worst_change,
         feedback_field=field,
         n_corrected=len(records),
+        n_diagnosed=n_diagnosed,
     )

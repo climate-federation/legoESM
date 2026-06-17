@@ -15,9 +15,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+from legoesm.training.column_manifest import ColumnEnvironment, ColumnRecord
 from legoesm.training.compare_reanalysis import ColumnState
 from legoesm.training.correction_loop import (
     CompareResult,
@@ -384,4 +384,108 @@ def test_loop_expected_ncol_guard():
             compare_fn=compare_fn, diagnose_fn=_diagnose,
             promotion_key="gray_tau_equator", grid_shape=(2, 2),
             background=7.2, expected_ncol=99,  # != 4
+        )
+
+
+# --- LES-cost reduction via environment clustering (iter 34) ----------------
+
+def _crec(flat, score, sst, cape, shear):
+    return ColumnRecord(
+        flat_index=flat, grid_index=(flat,), lat_deg=0.0, lon_deg=0.0,
+        time_index=0, combined_score=score, T_rmse_K=0.0, qv_rmse_kg_kg=0.0,
+        wind_rmse_m_s=0.0, precip_err_mm_day=0.0,
+        environment=ColumnEnvironment(sst_K=sst, cape_J_kg=cape, bulk_shear_m_s=shear),
+    )
+
+
+# 4 worst columns on a (2,3)=6 grid: cols 0,1 (cold/dry group A) + 4,5 (warm/moist B).
+_CLUSTER_WORST = [
+    _crec(0, 2.0, 280.0, 100.0, 2.0),
+    _crec(1, 1.5, 281.0, 120.0, 2.5),
+    _crec(4, 1.8, 302.0, 3000.0, 25.0),
+    _crec(5, 1.4, 303.0, 2900.0, 26.0),
+]
+
+
+def _cluster_compare_fn():
+    baseline = jnp.asarray([[2.0, 2.0, 1.0], [1.0, 2.0, 2.0]])
+    corrected = jnp.ones((2, 3))
+
+    def compare_fn(config):
+        score = corrected if _is_corrected(config) else baseline
+        return CompareResult(
+            combined_score=score, manifest=_CLUSTER_WORST,
+            area_weights=jnp.ones((2, 3)), model_ctx=None,
+        )
+
+    return compare_fn
+
+
+def _diagnose_by_cape(record, model_ctx):
+    """K depends on CAPE, so the two cluster representatives give DISTINCT
+    coefficients (10 for the low-CAPE group, 20 for the high-CAPE group)."""
+    k = 10.0 if record.environment.cape_J_kg < 1000.0 else 20.0
+    return _Eddy(K=jnp.array([k, k]), valid=jnp.array([True, True]))
+
+
+def test_les_budget_clusters_and_reduces_diagnoses():
+    """les_budget=2 ⇒ diagnose only the 2 environment representatives, then map
+    each representative's coefficient to its cluster members (all 4 corrected)."""
+    n_calls = {"n": 0}
+
+    def diag(rec, ctx):
+        n_calls["n"] += 1
+        return _diagnose_by_cape(rec, ctx)
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=_cluster_compare_fn(), diagnose_fn=diag,
+        promotion_key="gray_tau_equator", grid_shape=(2, 3),
+        background=7.2, les_budget=2,
+    )
+    assert result.n_corrected == 4          # all worst columns corrected
+    assert result.n_diagnosed == 2          # but only 2 LES diagnoses run
+    assert n_calls["n"] == 2                 # diagnose_fn called exactly twice
+    f = np.asarray(result.feedback_field).reshape(-1)
+    # group A (cols 0,1) → low-CAPE rep's K=10; group B (cols 4,5) → 20.
+    assert f[0] == pytest.approx(10.0) and f[1] == pytest.approx(10.0)
+    assert f[4] == pytest.approx(20.0) and f[5] == pytest.approx(20.0)
+    # non-worst columns keep the background.
+    assert f[2] == pytest.approx(7.2) and f[3] == pytest.approx(7.2)
+
+
+def test_les_budget_none_diagnoses_every_worst_column():
+    n_calls = {"n": 0}
+
+    def diag(rec, ctx):
+        n_calls["n"] += 1
+        return _diagnose_by_cape(rec, ctx)
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=_cluster_compare_fn(), diagnose_fn=diag,
+        promotion_key="gray_tau_equator", grid_shape=(2, 3), background=7.2,
+    )
+    assert result.n_corrected == 4
+    assert result.n_diagnosed == 4   # no budget → diagnose all
+    assert n_calls["n"] == 4
+
+
+def test_les_budget_geq_records_diagnoses_all():
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=_cluster_compare_fn(), diagnose_fn=_diagnose_by_cape,
+        promotion_key="gray_tau_equator", grid_shape=(2, 3), background=7.2,
+        les_budget=10,  # >= 4 worst columns → diagnose all
+    )
+    assert result.n_diagnosed == 4
+
+
+def test_les_budget_nonpositive_raises():
+    with pytest.raises(ValueError, match="les_budget must be > 0"):
+        run_correction_iteration(
+            GrayRadiationConfig(),
+            compare_fn=_cluster_compare_fn(), diagnose_fn=_diagnose_by_cape,
+            promotion_key="gray_tau_equator", grid_shape=(2, 3), background=7.2,
+            les_budget=0,
         )
