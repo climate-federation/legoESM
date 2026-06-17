@@ -99,7 +99,8 @@ arithmetic intensity on a latency-bound interconnect).
 | atm lat-lon (FV) | f64 & f32 | band np..128 ✓ | yes — band fabric-optimal on Gloo; 2-D pencil loses (latency-bound) | 2-D win needs InfiniBand |
 | atm cubed-sphere | f64 & f32 | ≤6 faces/node | partial | >6-device sub-face tiling = future-HW project |
 | atm spectral | f64 | single-device | n/a | no tracer storage (moist) + no MPI path — large additions |
-| GPU (any) multi-device | f32 & f64 | **infra-blocked** | n/a | env's mpi4jax is CPU-only; needs CUDA-aware rebuild (not a code gap) |
+| GPU multi-device (jax-mesh SPMD) | f32 & f64 | **WORKS intra-node** | 1.11x @ 2-GPU C192 | single-process jax device-mesh (commit 001b18bcb); PCIe-bound (no NVLink), crossover ~C192. See GPU UPDATE below |
+| GPU multi-device (mpi4jax / jax.distributed) | f32 & f64 | **blocked** | n/a | mpi4jax CPU-only build; jax.distributed multi-controller NCCL topology times out — infra, not a code gap |
 
 The CPU-decomposable grids (atm icosahedral, ocean lat-lon, atm lat-lon band)
 are characterised to their fabric limit on Ginsburg. The open items are
@@ -245,11 +246,40 @@ Two GPU bugs found + handled:
    Mc/s), f64 158 SYPD (39 Mc/s)** — 8-16x the bogus CPU-fallback numbers and
    ~2x the CPU per-device throughput. But MULTI-GPU MPI (g2+) fails with
    "mpi4jax GPU extensions could not be imported — rebuild mpi4jax with CUDA":
-   the env's mpi4jax is CPU-only, so the GPU halo exchange cannot run. GPU
-   multi-node scaling is therefore BLOCKED until mpi4jax is rebuilt CUDA-aware
-   (infra task), or a single-process multi-GPU SPMD path (no mpi4jax) is used.
-   The GPU panel today is single-device per-resolution throughput (the real
-   per-GPU ceiling).
+   the env's mpi4jax is CPU-only, so the GPU halo exchange cannot run. The
+   mpi4jax GPU path is therefore BLOCKED until mpi4jax is rebuilt CUDA-aware.
+
+### UPDATE 2026-06-17 — GPU multi-device is NOT wholly blocked (jax-mesh SPMD works)
+
+The "single-process multi-GPU SPMD path (no mpi4jax)" anticipated above now
+RUNS (commit 001b18bcb). `--cs-spmd --device gpu` as a SINGLE process with
+`CUDA_VISIBLE_DEVICES=0,1` builds the global face mesh from `jax.devices()` (=2)
+and shards the cubed-sphere over both GPUs via the jax device-mesh + multiface
+ppermute halo — no mpi4jax, and `jax.distributed` is skipped for one process.
+Three harness fixes unblocked it: defer the `--device gpu` backend assertion past
+the (skipped) cs-spmd init, and stop `_configure_jax_gpu` from clobbering an
+explicit `CUDA_VISIBLE_DEVICES` (it had double-restricted / single-pinned).
+
+So the GPU-multi-device picture is three-way, not "blocked":
+- **mpi4jax-GPU halo**: blocked (CPU-only mpi4jax build) — infra.
+- **jax.distributed multi-controller (srun -n2) on GPU**: blocked here — the NCCL
+  local-topology gather times out (`GetKeyValue cuda:local_topology/cuda/1`, 2 min)
+  on this stack — an env/NCCL issue, not a code gap.
+- **single-process jax device-mesh SPMD**: WORKS.
+
+Measured single-process cubed-sphere f32, 1-GPU vs 2-GPU (strong, same face):
+C48 1.62→2.99 ms (222→120 Mc/s), C96 4.63→6.22 ms (310→231), **C192 19.97→17.96
+ms (288→320 Mc/s = 1.11x speedup)**. Crossover ~C192: below it the cross-GPU
+ppermute halo over the shared PCIe-Gen3 link (no NVLink on these RTX-8000 pairs)
+costs more than the per-GPU compute saved; at C192 compute finally dominates and
+2 GPUs win — modestly, the same PCIe-fabric wall the CPU side hit. Single-device
+GPU per-resolution throughput (the per-GPU ceiling) stands as the main GPU panel.
+
+KNOWN minor: a single-process cs-spmd run records `n_ranks=1` (the process count)
+rather than the jax mesh size `n_global`, so the 2-GPU point lands in the CSV
+mislabeled n=1 (the numbers above are read from the run logs). A label fix
+(record `n_global` for cs-spmd) is a small follow-up; it does not affect the
+multi-controller CPU cs-spmd runs (those use one process per device).
 
 ## Measured roofline (the quantified limit)
 
