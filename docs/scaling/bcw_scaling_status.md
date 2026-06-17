@@ -184,33 +184,28 @@ the largest resolution with ≥2 device points.)
    could use 2-D but does not need it (band weak E already 0.92).
 2. **cubed-sphere multi-device.** No SPMD sub-face tiling beyond 6 faces;
    separate capability (see prior `omip_tiled_d2a2c_kernels` work).
-3. **spectral moist (capability, single-device — precise scope).** Correction to
-   an earlier note: the global spectral PE dycore (`spectral_pe.py`) ALREADY has
-   tracer storage (`SpectralHydrostaticState.tracers`), spectral tracer advection
-   (`_tracer_advection_gaussian`), and a per-tracer physics hook (the tendency
-   adds `physics_tendency.tracers[name]`); `spectral_les_moist.py` already has
-   Kessler-style microphysics. So spectral moist is a bounded WIRING job, not a
-   from-scratch build:
-   (a) `make_kessler_forcing_spectral(dt)` returning a `physics_fn(state, grid,
-       sigma_coord, forcing_data)` (the `model.step(physics_fn=...)` contract) —
-       mirror `make_kessler_forcing_mpas`: inverse-SH `T_hat`→`T_grid` and
-       `p_s=exp(synthesis(lnps_hat))` (via the grid's `sh_synthesis_3d`/analysis
-       helpers — confirm the forward-transform symbol), reuse the SHARED
-       `pressure_from_sigma`/`compute_rho`/`compute_layer_dz` + the grid-agnostic
-       `kessler_microphysics` core, return a `SpectralHydrostaticState` tendency
-       with `T_hat = analysis(dT_grid)` (latent heat → spectral) and grid-space
-       `tracers={q_v,q_c,q_r}` (zeros for vor/div/lnps).
-   (b) a moist `q_v` IC for the spectral baroclinic-wave / Held–Suarez init.
-   (c) wire `--grid spectral --physics moist` in `run_cpu_mpi_scaling.py`
-       (spectral is dry-only there today).
-   (d) a DIRECT tendency-level unit test (q_v sink == q_c source pre-rain;
-       latent-heat sign; tracer non-negativity after a forward step) + the
-       RCE/idealised-realism check per the physics-contract policy.
-   NUMERICS TO PIN before coding (CLAUDE.md "ambiguous numerics → confirm"): the
-   forward-SH transform symbol/normalisation, the latent-heat sign into `T_hat`,
-   and the saturation-adjustment dt-scaling contract (Kessler's adjustment is an
-   increment/dt rate — the step must apply it with the SAME dt). NO MPI/scaling
-   angle: spectral is single-device, so this is a physics-capability gain only.
+3. **spectral moist — DONE (capability; single-device, no scaling).** Moist
+   physics (q_v/q_c/q_r + Kessler warm-rain) now runs on the global spectral PE
+   dycore, so moisture is wired on ALL atmosphere grids (icosahedral,
+   cubed-sphere, lat-lon, spectral). Shipped: `make_kessler_forcing_spectral`
+   (commit cc85018ee) — an SH-transform bridge to the SHARED column Kessler
+   (inverse-SH `T_hat`→grid + `p_s=exp(synthesis(lnps_hat))`, flatten to
+   `(ncol,nlev)` so `pressure_from_sigma`/`compute_rho`/`compute_layer_dz` +
+   `kessler_microphysics` apply unchanged, forward-SH the latent-heating rate
+   back to `T_hat`); the `moist=` IC on `baroclinic_wave_init_spectral` + the
+   `--grid spectral --physics moist` harness path (commit d7b61a8a3). Bugfix in
+   the same commit: the timing scan passed `dt` as a jit argument → tracer, and
+   the spectral dycore caches integrator/filter matrices keyed on a CONCRETE dt
+   (`_ensure_tracer_filter`/`_ensure_si_data`) → `TracerBoolConversionError`;
+   `dt` is now closed over as a static float. Tests 7/7 + clean T21 e2e.
+
+   **Spectral throughput (single device, CPU, the theoretical limit):** it is
+   spherical-harmonic-transform bound — O(N³) Legendre transforms dominate, so
+   per-device throughput is ~0.2–0.6 Mcells/s (≈100× below the grid-point ico
+   ~40–150 Mc/s) and collapses with truncation: dry f64 T21 97 ms/step → T42
+   459 ms → T85 3.15 s; moist ≈2× (extra tracer transforms). There is no MPI
+   path, so spectral does not scale across devices here; the limit is
+   algorithmic (global transforms), reached.
 
 ## The np16 -> np32 (2^4 -> 2^5) MPAS cliff — root cause + fix
 
