@@ -709,7 +709,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     elif grid_type == "mpas":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             SurfaceForcingConfig, PrescribedForcingConfig, RestoringConfig,
@@ -719,7 +721,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
         from legoesm.ocean.physics.lateral_mixing.config import (
-            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+            LateralMixingConfig,
         )
 
         mesh = create_voronoi_mesh(params["level"])
@@ -746,6 +748,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 ),
             )
 
+        # SETUP (run-dependent): surface_forcing depends on forcing_mode and the
+        # per-run vertical_mixing is passed in; the rest is the proven dycore.
         physics = OceanPhysicsConfig(
             surface_forcing=sf_config,
             vertical_mixing=vertical_mixing,
@@ -758,31 +762,11 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             shortwave_penetration=None,
         )
 
-        config = MPASOceanConfig(
-            A_h=1.0e5,    # Higher than PR #261 (1e4) for stability under
-                          # JRA55 forcing over centennial integrations.
-            A_v=1.0e-4,   # PR #261 value (generic is 1e-3, too high for MPAS)
-            K_v=1.0e-5,   # PR #261 value (generic is 1e-4, too high for MPAS)
-            C_smag_lap=0.33,
-            K_zeta_bih=1e14,
-            barotropic_solver="implicit_cn",
-            barotropic_implicit_pcg_tol=1e-10,
-            barotropic_implicit_pcg_maxiter=300,
-            pgf_scheme="adcroft",
-            implicit_vertical_mixing=True,
-            normalize_freshwater=True,
-            tracer_advection="tvd",
-            bottom_drag_r=1e-3,
-            bottom_drag_bbl_thickness=100.0,
-            bottom_drag_bg_velocity=0.1,
-            gm_redi=GMRediConfig(
-                kappa_GM=600.0, kappa_Redi=600.0,
-                S_max=0.005,
-                visbeck=VisbeckConfig(enabled=False),
-                slope_scheme="centered",
-            ),
-            physics=physics,
-        )
+        # Build the PROVEN OMIP NEMO-match MPAS dycore from the shared factory
+        # (single source of truth, locked to the catalog recipe
+        # ``omip_nemo_match_mpas_v1`` by tests/ocean/unit/test_recipes.py), then
+        # overlay only the run-dependent SETUP physics above.
+        config = nemo_match_mpas_model_config(physics=physics)
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
 
@@ -816,7 +800,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_tripole_model_config,
+        )
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             SurfaceForcingConfig, RestoringConfig,
@@ -826,7 +812,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
         from legoesm.ocean.physics.lateral_mixing.config import (
-            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+            LateralMixingConfig,
         )
 
         geom = create_tripole_grid(
@@ -845,6 +831,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 ),
             )
 
+        # SETUP (run-dependent): surface_forcing depends on forcing_mode and the
+        # per-run vertical_mixing is passed in; the rest is the proven dycore.
         physics = OceanPhysicsConfig(
             surface_forcing=sf_config,
             vertical_mixing=vertical_mixing,
@@ -857,44 +845,20 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             shortwave_penetration=None,
         )
 
-        config = LatLonCGridOceanConfig(
-            A_h=1.0e5,
-            A_v=1.0e-4,
-            K_v=1.0e-5,
-            B_h=0.0,
-            C_smag_lap=0.33,
-            n_barotropic_substeps=30,
-            barotropic_solver="implicit_cn",
-            barotropic_implicit_pcg_tol=1e-10,
-            barotropic_implicit_pcg_maxiter=300,
-            pgf_scheme="adcroft",
-            # NOTE: ke_gradient_scheme is intentionally left at the
-            # "centered" config default for the TRIPOLE (the latlon-bathy
-            # branch above also keeps the centered default — neither grid's
-            # production default is hollingsworth).  The Hollingsworth KE
-            # stencil (ocean_pe_latlon_cgrid.py) widens to j±1 with
-            # edge-replication wall halos and does NOT yet use the tripole
-            # north-fold permutation/sign, so defaulting it on would compute
-            # KE gradients across the wrong topology at the bipolar cap.
-            # A/B-test it explicitly via ``run_omip_core2.py
-            # --ke-gradient-scheme hollingsworth`` (the equatorial cold-start
-            # blowup is far from the fold, and job 8106193 showed it does not
-            # fix that blowup anyway).  A fold-aware KE halo + regression test
-            # is the prerequisite to ever making it the tripole default.
-            implicit_vertical_mixing=True,
-            tracer_advection="tvd",
-            bottom_drag_r=1e-3,
-            bottom_drag_bbl_thickness=100.0,
-            bottom_drag_bg_velocity=0.1,
-            freshwater_closure="virtual_salt_flux",
-            gm_redi=GMRediConfig(
-                kappa_GM=600.0, kappa_Redi=600.0,
-                S_max=0.005,
-                visbeck=VisbeckConfig(enabled=False),
-                slope_scheme="centered",
-            ),
-            physics=physics,
-        )
+        # Build the PROVEN OMIP NEMO-match tripole eORCA025 dycore from the
+        # shared factory (single source of truth, locked to the catalog recipe
+        # ``omip_nemo_match_tripole_v1`` by tests/ocean/unit/test_recipes.py),
+        # then overlay only the run-dependent SETUP physics above.  NOTE:
+        # ke_gradient_scheme is intentionally left at the "centered" config
+        # default for the TRIPOLE — the Hollingsworth KE stencil
+        # (ocean_pe_latlon_cgrid.py) widens to j±1 with edge-replication wall
+        # halos and does NOT yet use the tripole north-fold permutation/sign, so
+        # defaulting it on would compute KE gradients across the wrong topology
+        # at the bipolar cap.  A/B-test it explicitly via ``run_omip_core2.py
+        # --ke-gradient-scheme hollingsworth`` (job 8106193 showed it does not
+        # fix the equatorial cold-start blowup anyway); a fold-aware KE halo +
+        # regression test is the prerequisite to ever making it the default.
+        config = nemo_match_tripole_model_config(physics=physics)
         model = LatLonCGridOceanModel(geom, z_coord, config)
         return geom, z_coord, config, model, "tripole"
 
