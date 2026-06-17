@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 20):** Whole pipeline built, tested + Codex-reviewed, and composed into the closed-loop orchestrator (`correction_loop`, iter 19) — every stage from AMIP↔ERA5 compare → worst-column manifest → forced column-LES → closure-coefficient diagnosis → feedback field → applied to a real production scheme (gray `tau_equator`) → bias-improvement measurement. **Remaining:** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring and per-grid extractor follow-ups.
+**Status (iter 26):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND now covered by a single FULL mock-free end-to-end gate (iter 26) that drives a real coupled run + a real plane LES through every stage onto the real `clubb_lite_C_K` coefficient, with non-vacuous valid-K + load-bearing-feedback assertions. **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5, multi-day AMIP/CMIP + many-LES) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring and per-grid (cubed-sphere/Gaussian) extractor follow-ups.
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -42,6 +42,7 @@
 > | REAL coupled-run (CMIP) → compare smoke | `tests/run/test_cmip_compare_integration.py` runs a real `CoupledESMDriver` (slab-ocean aquaplanet, C8/L5, 1 day) and feeds its actual atmosphere state + coupled SST through the real compare → finite scores + worst-column manifest (the AMIP/CMIP half, mock-free; complements iter-20's real-LES half) | 23 |
 > | PHYSICALLY-coherent promotion | `_shared.broadcast_column_param` enabler + `clubb_lite` `C_K` wrapped (`K_m=C_K·l·√wp2`); the LES eddy-diffusivity diagnosis now maps onto a real GCM turbulence coefficient per-column, scalar path BYTE-identical (registered `clubb_lite_C_K`) | 24 |
 > | iterative multi-round campaign | `correction_loop.run_correction_campaign` (N rounds, threads config + ACCUMULATES the feedback field — round-k field is round-(k+1) background; `scatter_column_field` gained array-background support) → the §1 offline iterative loop | 25 |
+> | FULL mock-free end-to-end gate | `tests/run/test_correction_e2e_integration.py` composes BOTH heavy real paths in one test: real lat-lon `CoupledESMDriver` (CMIP) → real `compare_state_to_reference` (1-column +6 K synthetic-ERA5 bias → deterministic worst column) → real plane-NH LES `process_column`/`run_forced_les` → eddy-K diagnosis → `assemble_feedback_field` → `apply_feedback_to_scheme` onto real `clubb_lite_C_K`. NON-VACUOUS: asserts ≥1 valid, strictly-positive diagnosed K (PRNGKey(0)-deterministic, 3/7 valid, Kmax≈0.48) and that the worst column moves off the uniform `C_K` background; exercises the `expected_ncol` splice guard | 26 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
