@@ -68,6 +68,28 @@ with a clean error, not a hang). The band halo (N/S neighbours) is structurally
 symmetric — it never had the Voronoi edge/vertex asymmetry bug, confirmed running
 clean to np128.
 
+### atm icosahedral WEAK scaling (constant work per rank)
+
+True weak scaling holds 3-D cells/rank fixed (~16640 = nCells·26/np): the triple
+np16/res5, np64/res6, np256/res7. SYPD is NOT the weak metric here (CFL halves dt
+each resolution level — res5 dt 390 s, res6 180, res7 90 — so SYPD drops by
+construction); **throughput (Mc/s) is** — ideal weak scaling = Mc/s growing
+linearly with np. Measured np64→np256 (4× ranks, 4× problem):
+
+| case | np64 Mc/s | np256 Mc/s | weak E (np64→256) |
+|---|---|---|---|
+| dry  f64 | 43.1 | 154.8 | **0.90** |
+| moist f64 | 31.5 | 106.7 | **0.85** |
+| dry  f32 | 54.1 | 140.3 | 0.65 |
+| moist f32 | 40.3 | 116.9 | 0.73 |
+
+Weak efficiency 0.85–0.90 in f64 across 4× the nodes (np64=8 nodes → np256=32
+nodes) — the multi-node fix scales weakly, not just strong. f32 is lower (0.65–
+0.73): halving the compute makes the fixed halo/latency a larger fraction, so f32
+goes comm-bound sooner — the same fabric wall, reached at a smaller compute
+budget. This matches the SOTA picture (MPAS/MOM6 weak E falls with thinner
+arithmetic intensity on a latency-bound interconnect).
+
 ### Status of every grid × precision toward its theoretical limit
 
 | grid | precision | multi-node | limit reached | residual |
