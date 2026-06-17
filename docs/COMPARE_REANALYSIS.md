@@ -7,6 +7,36 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 2 (2026-06-17) — Stage 3 / gap #2: worst-column manifest + env tags ✅
+> Added `legoesm.training.column_manifest` (ml package). Public API:
+> - `compute_bulk_shear(u, v, sigma_full, config)` — vector bulk wind shear
+>   `|V(upper)-V(lower)|` between the model levels nearest config sigma refs
+>   (JAX-native `jnp.argmin`+`jnp.take`, jit-safe with traced sigma).
+> - `compute_column_environment(...)` → `ColumnEnvironmentFields` (SST, CAPE,
+>   bulk shear) per column. CAPE reuses canonical
+>   `atmosphere.physics.thermodynamics.parcel_profile_and_cape` (surface-last
+>   `(ncol,nlev)`, virtual-T CAPE); reshapes leading column dims and back.
+> - `build_worst_column_manifest(...)` → `list[ColumnRecord]` — host-side
+>   assembly on top of `rank_worst_columns`; unravels flat→grid index, drops
+>   invalid (padded) columns, broadcasts lat/lon (grid-shaped or 1-D
+>   rectilinear via meshgrid; raises on cubed-sphere 1-D coords).
+> - `ColumnRecord` / `ColumnEnvironment` NamedTuples + JSON I/O
+>   (`write_manifest`/`read_manifest`/`manifest_to_dicts`/`dicts_to_manifest`),
+>   round-trip tested. Manifest is the lightweight index (grid_index, lat/lon,
+>   time_index, scores, env tags); full column profiles are re-extracted from
+>   the saved AMIP state in stage 4, not stored here.
+> - `EnvironmentConfig` — shear reference sigma levels (diagnostic, not physics).
+> - Tests: `tests/unit/test_column_manifest.py` (9 cases: shear math + level
+>   selection, jit-with-traced-sigma, CAPE sign/shape, manifest selection +
+>   invalid-drop, coord broadcasting + bad-shape raise, JSON round-trip).
+> - **Codex adversarial review: clean** (1 real bug: host-side `np.argmin` broke
+>   the jit contract → fixed to JAX-native level selection).
+>
+> **Next:** Stage 2 completion — the model↔ERA5 regrid + comparison driver
+> (`scripts/validate/compare_amip_era5.py`) that produces `score_columns` inputs
+> from a saved AMIP run + ERA5 (reuse `era5_to_state` / `era5_loader`), then
+> emits the manifest. Then Stage 1 AMIP driver wiring (`diag_days=0.25`).
+>
 > ### Iter 1 (2026-06-17) — Stage 2 / gap #1: per-column comparison metric ✅
 > Added `legoesm.training.column_era5_metrics` (in the **ml** package — it must
 > sit above `legoesm.diagnostics` (tools), which cannot import the reused
@@ -215,7 +245,9 @@ superparameterization).
    error fields vs ERA5. Builds on `scm_rce_metrics` + `loss.py` (no new profile
    numerics). Likely `packages/.../diagnostics/` + a `scripts/validate/` driver.
 2. **Worst-column ranking + manifest** — selection of top-N, environment tagging
-   (SST/CAPE/shear) for later generalization.
+   (SST/CAPE/shear) for later generalization. **DONE (iter 2)** —
+   `legoesm.training.column_manifest` (`build_worst_column_manifest`,
+   `compute_column_environment`, JSON I/O).
 3. **GCM-column → SCMForcing extractor** — derive large-scale forcing terms from
    a single GCM column's neighborhood (subsidence from continuity / ω, advective
    tendencies, geostrophic wind, surface fluxes). New, but uses existing
