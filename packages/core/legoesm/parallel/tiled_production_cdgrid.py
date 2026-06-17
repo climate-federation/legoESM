@@ -1697,6 +1697,72 @@ def make_tiled_zero_mean_tendency_stage_2d(mesh, grid, n: int, kt: int):
 
 
 # ---------------------------------------------------------------------------
+# Tiled GLOBAL reduction: dry-mass fixer fix_ps_mass via psum.  The cube tiled
+# STEP's post-RK3 mass conservation (default use_conservation_fixer+fix_mass) —
+# the second tiled global reduction (after zero_mean), and a TIER-0 truth
+# (conservation) op.  Two area-weighted global sums (psum) of p_s_old/p_s_new ->
+# a uniform additive p_s correction so dry mass is conserved.  Bit-identical to
+# core.conservation.fix_ps_mass up to psum reduction-ORDER reordering; conserves
+# sum(out*area)==sum(p_s_old*area) to machine precision (the point).
+# ---------------------------------------------------------------------------
+
+def make_tiled_fix_ps_mass_stage_2d(mesh, grid, n: int, kt: int):
+    """Tiled ``fix_ps_mass`` (non-anchor dry-mass fixer) on a ``(6, kt, kt)`` mesh.
+
+    ``stage(p_s_new, p_s_old) -> p_s_new + (mass_old - mass_new)/total_area`` with
+    ``mass_* = sum(p_s_* * area)`` over ALL tiles via a single ``jax.lax.psum`` of
+    the stacked per-tile (old, new) area-weighted sums.  Both inputs 2D cc
+    ``(6, n, n)`` FACE-REPLICATED; tile-sharded ``P("face","tile_i","tile_j")``
+    out.  Accumulation in ``conservation_accumulator`` (f64 under x64); the global
+    total area is closed over (static reduction of face-replicated ``grid.area``).
+    """
+    from legoesm.core.conservation import conservation_accumulator
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(grid, "area", None) is None:
+        raise ValueError(
+            "make_tiled_fix_ps_mass_stage_2d: grid must have .area")
+    nl = n // kt
+    acc = conservation_accumulator()
+    area = grid.area                                   # (6, n, n)
+    total_area = jnp.sum(area.astype(acc))             # global; closed over
+
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo, fo), out_specs=co,
+             check_vma=False)
+    def _body(p_s_new, p_s_old, ar):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+        pn = _s(p_s_new)
+        po = _s(p_s_old)
+        art = _s(ar).astype(acc)
+        local_old = jnp.sum(po.astype(acc) * art)
+        local_new = jnp.sum(pn.astype(acc) * art)
+        # one psum of the stacked (old, new) per-tile sums -> global (old, new).
+        g = jax.lax.psum(jnp.stack([local_old, local_new]),
+                         axis_name=("face", "tile_i", "tile_j"))
+        correction = (g[0] - g[1]) / total_area
+        # Match the global fix_ps_mass EXACTLY: `p_s_new + correction` with NO
+        # cast-back (unlike zero_mean_tendency, fix_ps_mass keeps the promoted
+        # dtype) — so the tiled stage is bit-identical in f32 too, not just x64.
+        return pn + correction
+
+    def stage(p_s_new, p_s_old):
+        _check_shapes(n, p_s_new=(p_s_new, (n, n)), p_s_old=(p_s_old, (n, n)))
+        return _body(p_s_new, p_s_old, area)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
