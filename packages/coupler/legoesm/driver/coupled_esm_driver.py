@@ -1611,13 +1611,31 @@ class CoupledESMDriver:
     # Run
     # ==================================================================
 
-    def run(self, start_step: int = 0, start_day: float | None = None) -> str:
-        """Run the coupled integration."""
+    def run(
+        self,
+        start_step: int = 0,
+        start_day: float | None = None,
+        segment_callback=None,
+    ) -> str:
+        """Run the coupled integration.
+
+        ``segment_callback(driver, day, dt_segment)`` is an OPTIONAL extra hook
+        invoked at each segment boundary AFTER the coupling step ``_segment_hook``
+        (so it sees the post-coupling state, e.g. the updated ocean SST) — used to
+        sample diagnostics such as the time-mean column state for ERA5 comparison.
+        ``None`` (default) is byte-identical to the plain coupled run.
+        """
         logger.info("Starting coupled ESM run")
+        if segment_callback is None:
+            hook = self._segment_hook
+        else:
+            def hook(driver, day, dt_segment):
+                self._segment_hook(driver, day, dt_segment)  # couple first
+                segment_callback(driver, day, dt_segment)    # then sample
         status = self._atm.run(
             start_step=start_step,
             start_day=start_day,
-            segment_callback=self._segment_hook,
+            segment_callback=hook,
             # Checkpoint the FULL coupled state (atm + ocean + surface + CO2),
             # not just the atmosphere, on periodic and wallclock-budget saves.
             checkpoint_callback=self.save_checkpoint,
@@ -1632,6 +1650,11 @@ class CoupledESMDriver:
     @property
     def state(self):
         return self._atm.state
+
+    @property
+    def q_v(self):
+        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
+        return self._atm.q_v
 
     @property
     def ocean_state(self):
