@@ -17,8 +17,10 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+from legoesm.training.compare_reanalysis import ColumnState
 from legoesm.training.correction_loop import (
     CompareResult,
+    make_compare_fn,
     run_correction_iteration,
 )
 
@@ -175,6 +177,111 @@ def test_loop_multi_iteration_threads_updated_config():
     # scores ⇒ no further improvement (already at the floor), but no crash.
     assert jnp.ndim(jnp.asarray(r2.updated_config.tau_equator)) == 1
     assert r2.n_corrected == 2
+
+
+def test_make_compare_fn_uses_real_comparison_in_loop():
+    """End-to-end loop with the REAL compare_state_to_reference (not a mocked
+    score field): a config-driven model that moves CLOSER to the ERA5 reference
+    yields a measurable bias reduction."""
+    nlat, nlon, nlev = 4, 4, 5
+    shape = (nlat, nlon, nlev)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    lat = jnp.linspace(-60.0, 60.0, nlat)
+    lon = jnp.linspace(0.0, 270.0, nlon)
+    area_w = jnp.cos(jnp.deg2rad(lat))[:, None] * jnp.ones((nlat, nlon))
+
+    # ERA5 reference column state.
+    reference = ColumnState(
+        T=jnp.full(shape, 250.0), q_v=jnp.full(shape, 1e-3),
+        u=jnp.zeros(shape), v=jnp.zeros(shape), p_s=jnp.full((nlat, nlon), 1e5),
+    )
+
+    # SPATIALLY VARYING bias so the worst-column ranking is exercised: a big
+    # +10 K bias at flat columns {0,5,10,15}, a small +1 K elsewhere.
+    bias_field = np.full((nlat, nlon), 1.0)
+    for flat in (0, 5, 10, 15):
+        bias_field[np.unravel_index(flat, (nlat, nlon))] = 10.0
+    bias_field = jnp.asarray(bias_field)
+
+    def run_amip_fn(config):
+        # Corrected (per-column tau_equator): bias removed; else the bias field.
+        corrected = jnp.ndim(jnp.asarray(config.tau_equator)) > 0
+        b = jnp.zeros((nlat, nlon)) if corrected else bias_field
+        return reference._replace(T=reference.T + b[:, :, None])
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat, lon_deg=lon, area_weights=area_w, n_worst=4,
+        run_amip_fn=run_amip_fn,
+    )
+
+    def diagnose(record, model_ctx):
+        return _Eddy(K=jnp.array([8.0]), valid=jnp.array([True]))
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="gray_tau_equator", grid_shape=(nlat, nlon),
+        background=7.2,
+    )
+    # The REAL manifest must have flagged exactly the 4 high-bias columns.
+    flagged = {int(r.flat_index) for r in compare_fn(GrayRadiationConfig()).manifest}
+    assert flagged == {0, 5, 10, 15}
+    # The corrected model matches ERA5 ⇒ zero bias ⇒ improvement detected.
+    assert bool(result.bias.improved)
+    assert float(result.bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
+    assert float(result.bias.baseline_bias) > 0.0
+    assert result.n_corrected == 4
+
+
+def test_make_compare_fn_real_compare_not_improved():
+    """Real-compare path: a correction that does NOT remove the bias reports
+    improved == False."""
+    nlat, nlon, nlev = 4, 4, 4
+    shape = (nlat, nlon, nlev)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    lat = jnp.linspace(-30.0, 30.0, nlat)
+    lon = jnp.linspace(0.0, 270.0, nlon)
+    area_w = jnp.ones((nlat, nlon))
+    reference = ColumnState(
+        T=jnp.full(shape, 250.0), q_v=jnp.full(shape, 1e-3),
+        u=jnp.zeros(shape), v=jnp.zeros(shape), p_s=jnp.full((nlat, nlon), 1e5),
+    )
+
+    def run_amip_fn(config):
+        # The "correction" makes it WORSE (bias grows from 3 to 5 K).
+        b = 5.0 if jnp.ndim(jnp.asarray(config.tau_equator)) > 0 else 3.0
+        return reference._replace(T=reference.T + b)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat, lon_deg=lon, area_weights=area_w, n_worst=4,
+        run_amip_fn=run_amip_fn,
+    )
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=compare_fn,
+        diagnose_fn=lambda r, c: _Eddy(K=jnp.array([8.0]), valid=jnp.array([True])),
+        promotion_key="gray_tau_equator", grid_shape=(nlat, nlon), background=7.2,
+    )
+    assert not bool(result.bias.improved)
+    assert float(result.bias.updated_bias) > float(result.bias.baseline_bias)
+
+
+def test_make_compare_fn_rejects_reserved_kwarg():
+    ref = ColumnState(
+        T=jnp.zeros((2, 2, 3)), q_v=jnp.zeros((2, 2, 3)),
+        u=jnp.zeros((2, 2, 3)), v=jnp.zeros((2, 2, 3)), p_s=jnp.zeros((2, 2)),
+    )
+    with pytest.raises(ValueError, match="may not override"):
+        make_compare_fn(
+            reference=ref, sigma_full=jnp.zeros(3), sigma_half=jnp.zeros(4),
+            lat_deg=jnp.zeros(2), lon_deg=jnp.zeros(2), area_weights=jnp.ones((2, 2)),
+            n_worst=1, run_amip_fn=lambda c: ref,
+            model=ref,  # reserved (set internally) -> reaches compare_kwargs -> raises
+        )
 
 
 def test_loop_unknown_promotion_key_raises():

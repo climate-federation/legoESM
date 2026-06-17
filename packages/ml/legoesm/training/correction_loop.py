@@ -36,6 +36,10 @@ from legoesm.training.bias_metrics import (
     bias_improvement,
     worst_column_bias_change,
 )
+from legoesm.training.compare_reanalysis import (
+    ColumnState,
+    compare_state_to_reference,
+)
 from legoesm.training.feedback_assembly import assemble_feedback_field
 from legoesm.training.promotable_params import apply_feedback_to_scheme
 
@@ -58,6 +62,63 @@ class CorrectionResult(NamedTuple):
     worst_column_change: jax.Array     # mean bias reduction at the worst columns
     feedback_field: jax.Array          # the assembled per-column field
     n_corrected: int                   # number of worst columns diagnosed
+
+
+def make_compare_fn(
+    *,
+    reference: ColumnState,
+    sigma_full: jax.Array,
+    sigma_half: jax.Array,
+    lat_deg: jax.Array,
+    lon_deg: jax.Array,
+    area_weights: jax.Array,
+    n_worst: int,
+    run_amip_fn: Callable[[Any], ColumnState],
+    time_index: int = 0,
+    valid_mask: jax.Array | None = None,
+    **compare_kwargs: Any,
+) -> Callable[[Any], CompareResult]:
+    """Build a ``compare_fn`` for :func:`run_correction_iteration` over the REAL
+    comparison (:func:`legoesm.training.compare_reanalysis.compare_state_to_reference`).
+
+    Only the AMIP/CMIP *run* is injected (``run_amip_fn(config) -> ColumnState``,
+    a model state on the model grid + sigma levels); the scoring + worst-column
+    manifest reuse the already-tested compare logic.  ``reference`` is the ERA5
+    state regridded to the model grid; ``area_weights`` feed the bias
+    aggregation.  ``run_amip_fn`` MUST be deterministic except for ``config``
+    (same ERA5 reference, grid, masks across calls) so the measured change
+    reflects only the parameter update.  Extra ``compare_kwargs`` (e.g.
+    ``error_config`` / ``env_config``) forward to ``compare_state_to_reference``.
+    ``model`` is the one comparison argument this adapter injects that is NOT an
+    explicit parameter here, so a duplicate would silently shadow it rather than
+    raise; it is therefore rejected.  The other injected args (``reference`` /
+    ``sigma_full`` / ``lat_deg`` / ``time_index`` / ``n_worst`` / ``valid_mask``
+    …) are explicit parameters, so a duplicate is already a Python ``TypeError``.
+    """
+    if "model" in compare_kwargs:
+        raise ValueError(
+            "compare_kwargs may not override 'model' — it is the per-config "
+            "model state produced by run_amip_fn inside make_compare_fn."
+        )
+
+    def compare_fn(config: Any) -> CompareResult:
+        model = run_amip_fn(config)
+        comparison = compare_state_to_reference(
+            model=model, reference=reference,
+            sigma_full=sigma_full, sigma_half=sigma_half,
+            lat_deg=lat_deg, lon_deg=lon_deg,
+            time_index=time_index, n_worst=n_worst,
+            valid_mask=valid_mask, **compare_kwargs,
+        )
+        return CompareResult(
+            combined_score=comparison.error_fields.combined_score,
+            manifest=comparison.manifest,
+            area_weights=area_weights,
+            model_ctx=model,
+            valid_mask=valid_mask,
+        )
+
+    return compare_fn
 
 
 def run_correction_iteration(
