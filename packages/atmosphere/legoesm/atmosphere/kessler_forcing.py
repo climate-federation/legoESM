@@ -163,3 +163,135 @@ def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
     # so the MPI step may SKIP the pre-physics halo exchange for it.
     kessler_forcing_mpas._column_local = True
     return kessler_forcing_mpas
+
+
+def make_kessler_forcing_spectral(dt, config: KesslerConfig | None = None):
+    """Build a spectral-PE ``physics_fn`` applying Kessler warm-rain over ``dt``.
+
+    Mirrors :func:`make_kessler_forcing_mpas` for the global spectral primitive
+    equation dycore (:class:`SpectralPrimitiveEquationModel`).  The dycore's
+    ``physics_fn`` contract is ``physics_fn(state, grid, sigma_coord,
+    forcing_data)`` returning a ``SpectralHydrostaticState`` whose fields are
+    *tendencies*: the spectral tendency adds ``.T_hat`` (spectral) and
+    ``.tracers[name]`` (grid-space) to the dynamics tendency each RK stage.
+
+    The microphysics is grid-agnostic and column-local, so this adapter only
+    bridges representations:
+      * inverse-SH ``T_hat`` -> grid temperature and ``p_s = exp(synthesis(
+        lnps_hat))`` (tracers ``q_v``/``q_c``/``q_r`` are ALREADY grid-space in
+        ``state.tracers``);
+      * flatten the horizontal ``(n_lat, n_lon, nlev) -> (ncol, nlev)`` so the
+        SAME shared column thermo (``pressure_from_sigma`` / ``compute_rho`` /
+        ``compute_layer_dz``) and ``kessler_microphysics`` core used by the MPAS
+        adapter apply unchanged;
+      * forward-SH the latent-heating rate ``dT/dt`` back to ``T_hat`` (sign as
+        produced by Kessler — condensation warms; identical convention to the
+        MPAS path which returns ``dT_dt`` directly); tracer rates stay grid-space.
+
+    CONTRACT (same as MPAS): ``dt`` is bound into the closure (the physics_fn
+    convention passes no timestep) and the caller MUST step the model with the
+    SAME ``dt`` — Kessler's saturation adjustment is an increment/``dt`` rate.
+    ``_bound_dt`` carries it for assertion.  Spectral is SINGLE-DEVICE (no MPI);
+    this is a physics-capability adapter, not a scaling path.
+
+    Parameters
+    ----------
+    dt : float
+        Physics step [s].  Must be > 0.
+    config : KesslerConfig, optional
+
+    Returns
+    -------
+    callable
+        ``physics_fn(state, grid, sigma_coord, forcing_data=None) ->
+        SpectralHydrostaticState`` tendency (zero vor/div/lnps/phis tendencies;
+        ``T_hat`` latent heating; grid-space ``q_v``/``q_c``/``q_r`` rates).
+    """
+    cfg = config if config is not None else KesslerConfig()
+    if not (dt > 0.0):
+        raise ValueError(f"kessler forcing dt must be > 0, got {dt!r}")
+    dt = float(dt)
+
+    def kessler_forcing_spectral(state, grid, sigma_coord, forcing_data=None):
+        # Deferred imports: SpectralHydrostaticState + the Gaussian SH transforms
+        # live in heavier modules; keep them out of module import time and avoid
+        # any dynamics<->forcing import cycle.
+        from legoesm.grids.gaussian import (
+            sh_analysis_3d, sh_synthesis, sh_synthesis_3d,
+        )
+
+        if state.tracers is None or any(
+            k not in state.tracers for k in _REQUIRED_TRACERS
+        ):
+            have = None if state.tracers is None else sorted(state.tracers)
+            raise ValueError(
+                "kessler_forcing_spectral requires state.tracers with keys "
+                f"{_REQUIRED_TRACERS}; got {have}. Initialize the spectral state "
+                "with a moist q_v (and zero q_c/q_r) before stepping."
+            )
+        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+            raise NotImplementedError(
+                "kessler_forcing_spectral supports sigma coordinates only "
+                "(half-level hybrid pressure is not wired); got "
+                f"{type(sigma_coord).__name__}."
+            )
+
+        # Spectral -> grid for the prognostics the column scheme needs.
+        T_grid = sh_synthesis_3d(grid, state.T_hat.data)   # (n_lat, n_lon, nlev)
+        lnps_grid = sh_synthesis(grid, state.lnps_hat.data)  # (n_lat, n_lon)
+        p_s_grid = jnp.exp(lnps_grid)
+        n_lat, n_lon, nlev = T_grid.shape
+
+        # Flatten the horizontal so the shared (ncol, nlev) column path applies
+        # unchanged (same contract as the MPAS adapter's (nCells, nlev)).
+        T = T_grid.reshape(-1, nlev)
+        p_s = p_s_grid.reshape(-1)
+        # Tracers are grid-space; clip the physics INPUT to >=0 (advection is not
+        # positive-definite and the dycore floors only AFTER physics) — same
+        # reasoning as the MPAS adapter.
+        q_v = jnp.maximum(state.tracers["q_v"].data, 0.0).reshape(-1, nlev)
+        q_c = jnp.maximum(state.tracers["q_c"].data, 0.0).reshape(-1, nlev)
+        q_r = jnp.maximum(state.tracers["q_r"].data, 0.0).reshape(-1, nlev)
+
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (ncol, nlev)
+        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (ncol, nlev+1)
+        rho = compute_rho(T, p_full, q_v)
+        dz = compute_layer_dz(T, p_half, q_v)
+
+        ncol = T.shape[0]
+        hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
+            q_c=q_c, q_r=q_r,
+        )
+        out = kessler_microphysics(
+            T=T, q_v=q_v, hydrometeors=hydro,
+            p_full=p_full, p_half=p_half, rho=rho, dz=dz,
+            dt=dt, config=cfg,
+        )
+
+        # Unflatten back to the spectral grid layout.
+        dT_dt_grid = out.dT_dt.reshape(n_lat, n_lon, nlev)
+        dq_v_grid = out.dq_v_dt.reshape(n_lat, n_lon, nlev)
+        dq_c_grid = out.dq_c_dt.reshape(n_lat, n_lon, nlev)
+        dq_r_grid = out.dq_r_dt.reshape(n_lat, n_lon, nlev)
+
+        # Latent heating -> spectral T tendency; momentum / surface pressure have
+        # no warm-rain source (zero spectral tendencies).
+        dT_hat = sh_analysis_3d(grid, dT_dt_grid)
+        return state.__class__(
+            vor_hat=state.vor_hat.replace(data=jnp.zeros_like(state.vor_hat.data)),
+            div_hat=state.div_hat.replace(data=jnp.zeros_like(state.div_hat.data)),
+            T_hat=state.T_hat.replace(data=dT_hat),
+            lnps_hat=state.lnps_hat.replace(
+                data=jnp.zeros_like(state.lnps_hat.data)),
+            phis_hat=state.phis_hat.replace(
+                data=jnp.zeros_like(state.phis_hat.data)),
+            tracers={
+                "q_v": state.tracers["q_v"].replace(data=dq_v_grid),
+                "q_c": state.tracers["q_c"].replace(data=dq_c_grid),
+                "q_r": state.tracers["q_r"].replace(data=dq_r_grid),
+            },
+        )
+
+    kessler_forcing_spectral._bound_dt = dt
+    kessler_forcing_spectral._column_local = True
+    return kessler_forcing_spectral
