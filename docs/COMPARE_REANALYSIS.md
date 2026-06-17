@@ -1,7 +1,7 @@
 # Compare-to-Reanalysis + LES-Informed Column Correction
 
 **Branch:** `feat/compare-reanalysis`
-**Status (iter 27):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). iter 27 adds the **cubed-sphere** (native model grid) column-forcing extractor + a grid dispatcher, using the 4D-native cubed operators (AD/MPI-correct, no `vmap(pad_halo)`). **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5, multi-day AMIP/CMIP + many-LES) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring, geostrophic-wind + Gaussian/Voronoi extractor follow-ups, and wiring the cubed extractor into `run_column_les`.
+**Status (iter 28):** Whole pipeline built, tested + Codex-reviewed, composed into the closed-loop orchestrator (`correction_loop`, iter 19/25) AND covered by a single FULL mock-free end-to-end gate (iter 26). iter 27 adds the **cubed-sphere** (native model grid) column-forcing extractor + a grid dispatcher (4D-native operators, AD/MPI-correct); iter 28 **wires it into the LES spin-off** (`run_column_les.extract_gcm_column` is now grid-agnostic), so a worst column flagged on the native cubed-sphere grid spins off its LES. **Remaining (the done-criterion):** the empirical bias-reduction demonstration from an HPC-scale run (real `compare_fn`/`diagnose_fn` on real ERA5, multi-day AMIP/CMIP + many-LES) — not unit-testable here — plus AMIP/CMIP `diag_days=0.25` run wiring and geostrophic-wind + Gaussian/Voronoi extractor follow-ups.
 **Date:** 2026-06-15 (design); 2026-06-17 (impl began)
 **Scope:** Atmosphere component only. ERA5 reanalysis only. **Not** supervised learning.
 
@@ -44,16 +44,18 @@
 > | iterative multi-round campaign | `correction_loop.run_correction_campaign` (N rounds, threads config + ACCUMULATES the feedback field — round-k field is round-(k+1) background; `scatter_column_field` gained array-background support) → the §1 offline iterative loop | 25 |
 > | FULL mock-free end-to-end gate | `tests/run/test_correction_e2e_integration.py` composes BOTH heavy real paths in one test: real lat-lon `CoupledESMDriver` (CMIP) → real `compare_state_to_reference` (1-column +6 K synthetic-ERA5 bias → deterministic worst column) → real plane-NH LES `process_column`/`run_forced_les` → eddy-K diagnosis → `assemble_feedback_field` → `apply_feedback_to_scheme` onto real `clubb_lite_C_K`. NON-VACUOUS: asserts ≥1 valid, strictly-positive diagnosed K (PRNGKey(0)-deterministic, 3/7 valid, Kmax≈0.48) and that the worst column moves off the uniform `C_K` background; exercises the `expected_ncol` splice guard | 26 |
 > | CUBED-SPHERE column extractor (native model grid) | `column_large_scale_extract.extract_column_forcing_cubed_sphere` mirrors the lat-lon extractor for the flagship dycore grid: ω (continuity) + θ/q advective tendencies on `(6,n,n,nlev)`, reusing the grid-agnostic `omega_from_divergence` + `advective_tendency` and the **4D-native** `operators_3d.gradient_x/y_3d`/`divergence_3d` (one 4D halo exchange, NO `vmap(pad_halo)` — AD/MPI-correct per CLAUDE.md). New `extract_column_forcing` dispatcher routes by grid type + validates `col_index` arity, raises on unsupported grid. Tests: uniform→zero, constant-scalar+nonzero-wind→zero-advection (non-vacuous gradient path), gather wiring cross-check (θ/q/ω separately) over interior + face-corner/edge columns, dispatch hardening | 27 |
+> | CUBED-SPHERE wired into the LES spin-off | `run_column_les.extract_gcm_column` made grid-agnostic: routes through the `extract_column_forcing` dispatcher and gathers the column with `arr[tuple(col_index)]` (works for lat-lon `(i,j)` AND cubed-sphere `(face,i,j)`); `process_column` already passes `tuple(record.grid_index)`, and the manifest unravels a `(6,n,n)` grid_shape to `(face,i,j)`, so a worst column flagged on the native cubed-sphere grid now spins off its LES. Tests: cubed `extract_gcm_column` with COLUMN-UNIQUE fields asserting the gather picks exactly `(2,3,5)` (not face 0 / off-by-level — a genuine wrong-column detector) + cubed `process_column` (mock LES) | 28 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
 >
 > **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
 > 1. **Extractor follow-ups** — cubed-sphere DONE (iter 27: native-grid ω +
->    advective tendencies via 4D-native operators + grid dispatcher); remaining:
->    geostrophic wind (∇Φ) and Gaussian/Voronoi grids (the dispatcher raises on
->    those). iter-10 covers lat-lon (ERA5-native); the cubed path is not yet
->    wired into `run_column_les.extract_gcm_column` (still lat-lon-only).
+>    advective tendencies via 4D-native operators + grid dispatcher; iter 28:
+>    wired into `run_column_les.extract_gcm_column`, so the spin-off runs on a
+>    native cubed-sphere worst column). Remaining: geostrophic wind (∇Φ) and
+>    Gaussian/Voronoi grids (the dispatcher raises on those). iter-10 covers
+>    lat-lon (ERA5-native).
 > 2. **Standalone LES driver** — DONE (iter 15): `scripts/run/run_column_les.py`
 >    chains manifest→regime→θ/forcing interp→`run_forced_les`→coefficient. The
 >    forced plane-dycore run loop (`run_forced_les`) + `main` are real but

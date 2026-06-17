@@ -248,6 +248,84 @@ def test_process_column_end_to_end_with_mock_run():
     assert bool(jnp.all(jnp.isfinite(out.K)))
 
 
+def test_extract_gcm_column_cubed_sphere():
+    """The column extractor is grid-agnostic: a (face,i,j) index on a cubed-
+    sphere state gathers the RIGHT column (not another face) + builds the
+    forcing (iter 28).  Fields are column-unique so a wrong-face gather is
+    caught (Codex iter-28)."""
+    from legoesm.atmosphere.physics._shared import exner_function
+    from legoesm.grids.factory import create_grid
+
+    res, nlev = 8, 6
+    grid = create_grid("cubed_sphere", resolution=res)
+    sigma = create_sigma_coordinate(nlev)
+    f, i, j = 2, 3, 5
+    # Column-unique fields: every (face,i,j,k) value is distinct, so the gather
+    # MUST reproduce exactly the (2,3,5) column, not face 0 or any neighbour.
+    faces = jnp.arange(6.0)[:, None, None, None]
+    ii = jnp.arange(res, dtype=jnp.float64)[None, :, None, None]
+    jj = jnp.arange(res, dtype=jnp.float64)[None, None, :, None]
+    kk = jnp.arange(nlev, dtype=jnp.float64)[None, None, None, :]
+    T = 280.0 + 100.0 * faces + 10.0 * ii + jj + 0.5 * kk
+    q_v = 5e-3 + 1e-4 * (faces + ii + jj) + 1e-5 * kk  # varies across levels too
+    u = jnp.full((6, res, res, nlev), 10.0)
+    v = jnp.zeros((6, res, res, nlev))
+    p_s = 1.0e5 + 100.0 * faces[..., 0] + 10.0 * ii[..., 0] + jj[..., 0]
+
+    gcm_z, gcm_theta, ls = extract_gcm_column(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+        col_index=(f, i, j), lat_rad=float(jnp.deg2rad(20.0)),
+    )
+    assert gcm_z.shape == (nlev,)
+    assert isinstance(ls, ColumnLargeScaleState)
+    assert bool(jnp.all(jnp.isfinite(gcm_z)))
+    assert bool(jnp.all(gcm_z >= 0.0))
+
+    # The gather picked EXACTLY column (2,3,5) — and not face 0.
+    np.testing.assert_array_equal(np.asarray(ls.T), np.asarray(T[f, i, j, :]))
+    assert not bool(jnp.allclose(ls.T, T[0, i, j, :]))
+    np.testing.assert_allclose(np.asarray(ls.q_v), np.asarray(q_v[f, i, j, :]))
+    # gcm_theta is the (2,3,5) θ = T/exner(p_full) with that column's p_s.
+    p_full_col = p_s[f, i, j] * jnp.asarray(sigma.sigma_full)
+    np.testing.assert_allclose(
+        np.asarray(gcm_theta),
+        np.asarray(T[f, i, j, :] / exner_function(p_full_col)), rtol=1e-12)
+
+
+def test_process_column_cubed_sphere_with_mock_run():
+    """Full per-column pipeline composes on a cubed-sphere GCM state with a
+    (face,i,j) record + a mock LES run (iter 28)."""
+    from legoesm.grids.factory import create_grid
+
+    res, nlev = 8, 6
+    grid = create_grid("cubed_sphere", resolution=res)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (6, res, res, nlev)
+    T = jnp.full(shape, 280.0)
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 10.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((6, res, res), 1.0e5)
+
+    class _Env:
+        cape_J_kg = 200.0
+
+    class _Rec:
+        grid_index = (2, 3, 5)  # (face, i, j)
+        lat_deg = 20.0
+        environment = _Env()
+
+    def fake_run(s):
+        return _synthetic_plane_state(s.grid, s.height_coord)
+
+    out = process_column(
+        _Rec(), T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+        config=_CONFIG, run_les_fn=fake_run,
+    )
+    assert out.K.shape == (7,)
+    assert bool(jnp.all(jnp.isfinite(out.K)))
+
+
 def test_process_column_real_dycore_integration():
     """MOCK-FREE end-to-end: extract -> setup -> the REAL plane-NH dycore
     (run_forced_les, a few real steps with the large-scale forcing + top

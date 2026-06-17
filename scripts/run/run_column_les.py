@@ -274,36 +274,41 @@ def extract_gcm_column(
     p_s: jax.Array,
     grid: Any,
     sigma: Any,
-    col_index: tuple[int, int],
+    col_index: tuple[int, ...],
     lat_rad: float,
 ) -> tuple[jax.Array, jax.Array, ColumnLargeScaleState]:
     """Extract one column's heights, θ profile, and large-scale forcing state.
 
-    Reuses the grid-side extractor (iter 10) for the ``ColumnLargeScaleState`` and
-    the hydrostatic height integral + Exner for the LES reference profiles.
+    Reuses the grid-side extractor (iter 10/27) for the ``ColumnLargeScaleState``
+    and the hydrostatic height integral + Exner for the LES reference profiles.
     Returns ``(gcm_z, gcm_theta, ls_state)`` — ``gcm_z`` / ``gcm_theta`` are the
     column's full-level heights [m] and potential temperature [K].
+
+    Grid-agnostic: ``col_index`` is ``(i_lat, i_lon)`` on a lat-lon grid or
+    ``(face, i, j)`` on a cubed-sphere grid — the spatial gather
+    ``arr[tuple(col_index)]`` keeps the trailing level axis either way, and the
+    forcing extraction routes through the grid dispatcher.
     """
     from legoesm.atmosphere.dynamics.column_large_scale_extract import (
-        extract_column_forcing_latlon,
+        extract_column_forcing,
     )
     from legoesm.atmosphere.physics._shared import (
         compute_heights_from_sigma,
         exner_function,
     )
 
-    ls_state = extract_column_forcing_latlon(
+    ls_state = extract_column_forcing(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
         lat_rad=lat_rad, col_index=col_index,
     )
-    i, j = int(col_index[0]), int(col_index[1])
+    idx = tuple(int(c) for c in col_index)
     sigma_full = jnp.asarray(sigma.sigma_full)
     sigma_half = jnp.asarray(sigma.sigma_half)
-    p_s_col = jnp.asarray(p_s)[i, j]
+    p_s_col = jnp.asarray(p_s)[idx]
     p_full_col = p_s_col * sigma_full
     p_half_col = p_s_col * sigma_half
-    T_col = jnp.asarray(T)[i, j, :]
-    q_col = jnp.asarray(q_v)[i, j, :]
+    T_col = jnp.asarray(T)[idx]
+    q_col = jnp.asarray(q_v)[idx]
     z_full, _ = compute_heights_from_sigma(
         T_col[None, :], p_half_col[None, :], q_col[None, :]
     )
