@@ -1,0 +1,259 @@
+"""Compare a saved AMIP model snapshot to ERA5 and write a worst-column manifest.
+
+Stage-2 driver of ``docs/COMPARE_REANALYSIS.md`` (non-matrix validator).  It
+loads an AMIP restart checkpoint (the full 3-D model state) and an ERA5 slice,
+regrids ERA5 → the model grid + sigma levels (the
+:mod:`legoesm.training.era5_to_state` direction), then calls
+:func:`legoesm.training.compare_reanalysis.compare_state_to_reference` to score
+every model column and emit the ``top-N`` worst columns (with SST/CAPE/shear
+environment tags) as a JSON manifest for the LES stage.
+
+The data-agnostic comparison core lives in
+:mod:`legoesm.training.compare_reanalysis`; this module is the thin glue that
+(a) selects the right ERA5→grid regrid, (b) extracts grid-shaped lat/lon in
+degrees, and (c) builds a :class:`ColumnState` from a restart checkpoint.  Those
+helpers are importable and unit-tested; heavy I/O imports (ERA5, restart, grid
+factory) are function-scoped so importing this module stays cheap.
+
+Run::
+
+    python scripts/validate/compare_amip_era5.py \
+        --restart run/amip_chkpt.npz --grid-type cubed_sphere \
+        --resolution 48 --nlev 40 \
+        --era5-zarr gs://weatherbench2/.../era5.zarr --era5-time-idx 0 \
+        --n-worst 20 --out worst_columns.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import warnings
+from typing import Any, Callable
+
+import jax.numpy as jnp
+
+from legoesm.training.compare_reanalysis import (
+    ColumnComparison,
+    ColumnState,
+    column_state_from_carry,
+    compare_state_to_reference,
+)
+from legoesm.training.column_manifest import write_manifest
+
+# Canonical grid-type tokens → aliases.  Anything else is a hard error.
+_GRID_TYPE_ALIASES = {
+    "spectral": "spectral",
+    "gaussian": "spectral",
+    "cubed_sphere": "cubed_sphere",
+    "cubedsphere": "cubed_sphere",
+    "cs": "cubed_sphere",
+    "latlon": "latlon",
+    "lat_lon": "latlon",
+}
+_KNOWN_GRID_TYPES = sorted(set(_GRID_TYPE_ALIASES.values()))
+# Canonical token → the token understood by ``legoesm.grids.factory.create_grid``
+# (the factory spells the spectral/Gaussian grid "gaussian").
+_FACTORY_GRID_TOKEN = {
+    "spectral": "gaussian",
+    "cubed_sphere": "cubed_sphere",
+    "latlon": "latlon",
+}
+
+
+def canonical_grid_type(grid_type: str) -> str:
+    """Map a grid-type token to its canonical form, raising on unknown.
+
+    Dispatch hardening (CLAUDE.md): an unrecognized grid selects nothing, so we
+    raise rather than silently defaulting to one regrid path.
+    """
+    key = str(grid_type).strip().lower()
+    if key not in _GRID_TYPE_ALIASES:
+        raise ValueError(
+            f"Unknown grid_type {grid_type!r}; expected one of "
+            f"{_KNOWN_GRID_TYPES} (or an alias)."
+        )
+    return _GRID_TYPE_ALIASES[key]
+
+
+def select_era5_regrid(grid_type: str) -> Callable:
+    """Return the ``era5_to_*_carry`` regrid for ``grid_type`` (raises on unknown).
+
+    The returned callable has signature ``(era5_slice, grid, sigma) ->
+    SegmentCarry`` (ERA5 → model grid + sigma).
+    """
+    canon = canonical_grid_type(grid_type)
+    from legoesm.training import era5_to_state
+
+    table = {
+        "spectral": era5_to_state.era5_to_spectral_carry,
+        "cubed_sphere": era5_to_state.era5_to_cubedsphere_carry,
+        "latlon": era5_to_state.era5_to_latlon_carry,
+    }
+    return table[canon]
+
+
+def sigma_levels(sigma: Any) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract ``(sigma_full, sigma_half)`` arrays from a vertical coordinate."""
+    return jnp.asarray(sigma.sigma_full), jnp.asarray(sigma.sigma_half)
+
+
+def grid_lat_lon_deg(grid: Any) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return grid-shaped lat/lon in **degrees** via the uniform grid accessors.
+
+    Every legoESM grid exposes ``grid_lat`` / ``grid_lon`` (radians) at the
+    horizontal cell centres with the grid's 2-D / cubed-sphere shape, so this
+    works for cubed-sphere ``(6, n, n)`` and lat-lon / Gaussian ``(n_lat,
+    n_lon)`` alike; the manifest builder consumes the grid-shaped coordinates
+    directly.
+    """
+    rad2deg = 180.0 / jnp.pi
+    return jnp.asarray(grid.grid_lat) * rad2deg, jnp.asarray(grid.grid_lon) * rad2deg
+
+
+def model_state_from_restart(
+    state: Any,
+    q_v: jnp.ndarray,
+    *,
+    sst_K: jnp.ndarray | None = None,
+    precip_mm_day: jnp.ndarray | None = None,
+) -> ColumnState:
+    """Build a model :class:`ColumnState` from a loaded restart ``state`` + ``q_v``.
+
+    The restart ``state`` carries ``u``/``v``/``T``/``p_s``; ``q_v`` is loaded
+    separately by :func:`legoesm.driver.restart.load_restart`.  SST (prescribed
+    AMIP forcing) and precip are threaded in by the caller when available; when
+    omitted the SST environment tag falls back to surface air temperature and
+    the precipitation error term is dropped (documented in
+    :func:`compare_state_to_reference`).
+    """
+    return ColumnState(
+        T=state.T, q_v=q_v, u=state.u, v=state.v, p_s=state.p_s,
+        precip_mm_day=precip_mm_day, sst_K=sst_K,
+    )
+
+
+def compare_and_write(
+    *,
+    model: ColumnState,
+    reference: ColumnState,
+    sigma: Any,
+    grid: Any,
+    time_index: int,
+    n_worst: int,
+    out_path: str | None = None,
+    valid_mask: jnp.ndarray | None = None,
+) -> ColumnComparison:
+    """Run the comparison and (optionally) write the manifest to ``out_path``."""
+    sigma_full, sigma_half = sigma_levels(sigma)
+    lat_deg, lon_deg = grid_lat_lon_deg(grid)
+    result = compare_state_to_reference(
+        model=model, reference=reference,
+        sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat_deg, lon_deg=lon_deg,
+        time_index=time_index, n_worst=n_worst, valid_mask=valid_mask,
+    )
+    if out_path is not None:
+        write_manifest(result.manifest, out_path)
+    return result
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Compare AMIP snapshot to ERA5.")
+    p.add_argument("--restart", required=True,
+                   help="AMIP restart checkpoint (.npz/.zarr)")
+    p.add_argument("--grid-type", required=True,
+                   choices=sorted(_GRID_TYPE_ALIASES))
+    p.add_argument("--resolution", type=int, required=True,
+                   help="Grid resolution matching the checkpoint")
+    p.add_argument("--nlev", type=int, required=True,
+                   help="Number of sigma levels matching the checkpoint")
+    p.add_argument("--era5-zarr", required=True,
+                   help="ERA5 Zarr store (GCS or local)")
+    p.add_argument("--era5-time-idx", type=int, default=0,
+                   help="Time index into the ERA5 dataset")
+    p.add_argument("--era5-cache", default="",
+                   help="Optional local ERA5 cache dir")
+    p.add_argument("--sst-npz", default="",
+                   help="Optional .npz with a grid-shaped 'sst_K' array "
+                        "(prescribed AMIP SST) for the environment tag; "
+                        "without it the SST tag uses a surface-air proxy")
+    p.add_argument("--n-worst", type=int, default=20)
+    p.add_argument("--time-index", type=int, default=0,
+                   help="Time index stamped into the manifest records")
+    p.add_argument("--out", default="worst_columns.json")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: load AMIP snapshot + ERA5, regrid, compare, write manifest."""
+    args = _build_arg_parser().parse_args(argv)
+    canon = canonical_grid_type(args.grid_type)
+
+    # Deferred heavy imports (kept out of module import so the unit-tested
+    # helpers above load without the grid factory / ERA5 / restart machinery).
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.driver.restart import load_restart
+    from legoesm.training.era5_to_state import (
+        TrainingERA5Config,
+        load_era5_slice,
+    )
+
+    grid = create_grid(_FACTORY_GRID_TOKEN[canon], resolution=args.resolution)
+    sigma = create_sigma_coordinate(args.nlev)
+
+    # strict=True keeps the restart's reproducibility checks on (x64 / shape /
+    # config-hash); a metadata mismatch surfaces instead of silently loading a
+    # wrong checkpoint.  We then assert the loaded state matches the grid/sigma
+    # we built, so a resolution/nlev mismatch fails loudly here, not as a
+    # mis-shaped comparison downstream.
+    loaded = load_restart(args.restart, grid, sigma, strict=True)
+    state, q_v = loaded[0], loaded[1]
+    expected_cols = tuple(grid.grid_shape_2d)
+    if tuple(state.T.shape[:-1]) != expected_cols:
+        raise ValueError(
+            f"restart column shape {tuple(state.T.shape[:-1])} != grid "
+            f"{expected_cols}; --grid-type/--resolution must match the run."
+        )
+    if int(state.T.shape[-1]) != int(args.nlev):
+        raise ValueError(
+            f"restart nlev {state.T.shape[-1]} != --nlev {args.nlev}."
+        )
+
+    if args.sst_npz:
+        import numpy as np
+
+        sst_K = jnp.asarray(np.load(args.sst_npz)["sst_K"])
+    else:
+        sst_K = None
+        warnings.warn(
+            "compare_amip_era5: no prescribed-SST source (--sst-npz) provided; "
+            "the SST environment tag falls back to surface air temperature "
+            "(proxy). CAPE/shear tags and the worst-column ranking are "
+            "unaffected. Threading the run's prescribed SST is a documented "
+            "follow-up (docs/COMPARE_REANALYSIS.md).",
+            stacklevel=2,
+        )
+    model = model_state_from_restart(state, q_v, sst_K=sst_K)
+
+    era5_cfg = TrainingERA5Config(
+        zarr_store=args.era5_zarr,
+        local_cache_dir=args.era5_cache,
+    )
+    era5_slice = load_era5_slice(era5_cfg, args.era5_time_idx)
+    regrid = select_era5_regrid(canon)
+    reference = column_state_from_carry(regrid(era5_slice, grid, sigma))
+
+    result = compare_and_write(
+        model=model, reference=reference, sigma=sigma, grid=grid,
+        time_index=args.time_index, n_worst=args.n_worst, out_path=args.out,
+    )
+    print(
+        f"[compare_amip_era5] wrote {len(result.manifest)} worst columns to "
+        f"{args.out} (grid={canon}, N={args.resolution}, nlev={args.nlev})."
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

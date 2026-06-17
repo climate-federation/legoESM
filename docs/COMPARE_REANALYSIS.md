@@ -7,6 +7,33 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 4 (2026-06-17) — Stage 2 driver: `compare_amip_era5.py` ✅
+> Added `scripts/validate/compare_amip_era5.py` — the non-matrix validator that
+> loads a saved AMIP restart + an ERA5 slice, regrids ERA5 → model grid+sigma,
+> and writes the worst-column JSON manifest. **Real `main()`** wired on confirmed
+> APIs (`grids.factory.create_grid` / `grids.vertical.create_sigma_coordinate` /
+> `driver.restart.load_restart` (10-tuple) / `era5_to_state.load_era5_slice` +
+> `era5_to_*_carry`), not a stub. Importable, unit-tested helpers:
+> - `canonical_grid_type` / `select_era5_regrid` — grid-type dispatch (aliases;
+>   raises on unknown; spectral↔gaussian token mapping between regrid + factory).
+> - `grid_lat_lon_deg` — uniform `grid.grid_lat`/`grid_lon` (works for
+>   cubed-sphere `(6,n,n)` and lat-lon/Gaussian `(n_lat,n_lon)`).
+> - `sigma_levels`, `model_state_from_restart`, `compare_and_write`.
+> - **Hardening (Codex-driven, clean after 2 rounds):** `load_restart(strict=True)`
+>   + explicit post-load shape/nlev checks vs the built grid (resolution/nlev
+>   mismatch fails loudly); `--sst-npz` for prescribed SST with a **loud
+>   UserWarning** when absent (SST tag → surface-air proxy; CAPE/shear/ranking
+>   unaffected) instead of silent degradation.
+> - Tests: `tests/validate/test_compare_amip_era5.py` (8 cases incl. a
+>   fully-monkeypatched `main()` wiring test asserting factory token, strict=True,
+>   regrid call order, manifest written, proxy warning fires).
+>
+> **Remaining for Stage 2/Stage 1:** thread real prescribed SST + segment precip
+> into the manifest; AMIP/CMIP run wiring with `diag_days=0.25`; an end-to-end
+> smoke on a tiny real checkpoint+ERA5 slice. **Next major:** Stage 4 — the
+> GCM-column → `SCMForcing` extractor (subsidence / advective tendencies /
+> geostrophic wind / surface fluxes from a flagged column's neighborhood).
+>
 > ### Iter 3 (2026-06-17) — Stage 2 orchestration: model↔ERA5 compare entry point ✅
 > Added `legoesm.training.compare_reanalysis` — ties the iter-1 metric and
 > iter-2 manifest into one entry point on aligned model + ERA5 states.
@@ -363,7 +390,8 @@ superparameterization).
 
 - `scripts/run/run_amip_reanalysis_compare.py` — orchestrates AMIP + compare.
 - `scripts/validate/compare_amip_era5.py` — per-column ERA5 comparison + ranking
-  (non-matrix validator).
+  (non-matrix validator). **DONE (iter 4)** — real `main()` + tested helpers;
+  uses `compare_reanalysis` (iter 3) core.
 - `scripts/run/run_column_les.py` — standalone forced 3-D LES from the manifest.
 - `packages/ml/legoesm/training/column_era5_metrics.py` — per-column metrics
   (reusing `scm_rce_metrics`/`loss.py`). **DONE (iter 1).** Lives in the **ml**
