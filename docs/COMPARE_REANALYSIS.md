@@ -7,6 +7,36 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 3 (2026-06-17) — Stage 2 orchestration: model↔ERA5 compare entry point ✅
+> Added `legoesm.training.compare_reanalysis` — ties the iter-1 metric and
+> iter-2 manifest into one entry point on aligned model + ERA5 states.
+> **Regrid-direction decided: ERA5 → model grid + model sigma** (the supported
+> `era5_to_state` direction; comparison stays native to the model grid/columns).
+> Public API:
+> - `ColumnState` (T/q_v/u/v/p_s, optional precip_mm_day/sst_K) + `ColumnComparison`.
+> - `compare_state_to_reference(...)` — mass weights from dsigma → `score_columns`
+>   → env tags from the **model** column → `build_worst_column_manifest`.
+>   Precip enters only when **both** states carry it (avoids the exactly-one
+>   raise; ERA5 precip is often absent).
+> - `build_pressure_from_sigma` (pure-sigma `p=σ·p_s`; hybrid coords pass explicit
+>   `p_full`/`p_half` overrides), `precip_mm_day_from_accum`,
+>   `column_state_from_carry` (duck-typed `SegmentCarry` adapter — no coupler import).
+> - **Hardening (Codex-driven):** strict surface-last increasing-σ check (rejects
+>   reversed coords that would flip mass weights / CAPE), both-or-neither +
+>   shape + monotonic-pressure validation on hybrid overrides, full column-shape
+>   validation of all surface fields, and `rank_worst_columns` now routes
+>   non-finite scores to −∞ (never selected, flagged invalid).
+> - Tests: `tests/unit/test_compare_reanalysis.py` (13 cases incl. biased-column
+>   flagging, precip-drop, reversed-σ / reversed-pressure / mismatched-shape /
+>   partial-override raises, accum→rate, carry adapter).
+> - **Codex adversarial review: clean** (6 findings over 3 rounds; all real
+>   correctness/validation bugs fixed).
+>
+> **Next:** the `scripts/validate/compare_amip_era5.py` driver — load a saved
+> AMIP snapshot + ERA5 slice (`era5_to_state` / `era5_loader`), call
+> `compare_state_to_reference`, write the manifest. Needs the AMIP snapshot
+> on-disk format inspected first. Then Stage 1 AMIP wiring (`diag_days=0.25`).
+>
 > ### Iter 2 (2026-06-17) — Stage 3 / gap #2: worst-column manifest + env tags ✅
 > Added `legoesm.training.column_manifest` (ml package). Public API:
 > - `compute_bulk_shear(u, v, sigma_full, config)` — vector bulk wind shear

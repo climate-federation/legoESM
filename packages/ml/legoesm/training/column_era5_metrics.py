@@ -298,6 +298,10 @@ def rank_worst_columns(
     score = jnp.asarray(combined_score)
     flat = score.reshape(-1)
     neg_inf = jnp.asarray(-jnp.inf, dtype=flat.dtype)
+    # A non-finite score (e.g. NaN) has undefined top_k ordering and cannot be
+    # trusted as "worst": route it to -inf so it is never selected and is
+    # flagged invalid below.
+    flat = jnp.where(jnp.isfinite(flat), flat, neg_inf)
     if valid_mask is not None:
         valid_flat = jnp.asarray(valid_mask, dtype=bool).reshape(-1)
         flat = jnp.where(valid_flat, flat, neg_inf)
