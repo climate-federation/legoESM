@@ -7,6 +7,33 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 6 (2026-06-17) — Stage 5 (gap #5): LES resolved-flux diagnostics ✅
+> **Extended** `atmosphere.dynamics.rce_diagnostics` (no new module) with the
+> LES-resolved turbulent fluxes the closure diagnosis (stage 6) consumes:
+> - `resolved_turbulent_fluxes_plane(state, height_coord, qv_slot)` →
+>   `ResolvedTurbulentFluxes` = `w'θ'`, `w'q_v'`, `w'u'`, `w'v'`, `w'θ_v'`
+>   (buoyancy) profiles at the `nlev-1` interior interfaces + `z_half_interior`.
+> - `_resolved_flux_interfaces` — domain-mean eddy covariance `<w'φ'>` with the
+>   **correct staggering**: `w` stays native on its half-level grid (no
+>   smoothing, matching `vertical_velocity_variance_plane`), the full-level
+>   scalar is averaged to the interior interfaces; perturbations from the
+>   per-level horizontal mean (so `theta_ref` cancels). Buoyancy flux uses
+>   `θ_v=θ(1+(1/ε−1)q_v)` (reuses `constants.epsilon`, same convention as
+>   `compute_cape`).
+> - Validates w-on-half-levels, u/v full-level shapes, z_half length, qv_slot.
+> - Tests: 11 new cases in `tests/unit/test_rce_diagnostics.py` incl. **analytic
+>   checkerboard covariances** (`<w'θ'>=W·A`, `<w'q'>=W·B`, `<w'u'>=W·C`) and the
+>   **exact nonlinear buoyancy cross-term** `W·(A(1+c·q0)+c·θ_ref·B)`; zero-flux
+>   for uniform w/scalar; bad-shape raises; jit + grad.
+> - **Codex adversarial review: clean** (confirmed staggering/perturbation/θ_v
+>   algebra correct; 2 validation gaps fixed).
+>
+> **Next:** Stage 6 — closure-coefficient diagnosis (entrainment / eddy
+> diffusivity / mixing length) from these resolved fluxes (e.g. K from
+> `−w'φ'/(∂<φ>/∂z)`, entrainment from the flux-jump at inversion). Still also
+> open: the grid-side `ColumnLargeScaleState` extractor (iter 5 follow-up) and
+> the standalone LES driver + 1.5-order TKE SGS.
+>
 > ### Iter 5 (2026-06-17) — Stage 4 (assembly): GCM-column → SCMForcing ✅
 > Added `legoesm.atmosphere.column_forcing` — assembles a **steady** `SCMForcing`
 > from a flagged column's extracted large-scale state, so the LES is forced
@@ -341,7 +368,8 @@ superparameterization).
    alternative to Smagorinsky; a `scripts/run/` driver that ingests the forcing
    manifest. Closure + regime selection must dispatch-error on unknown values.
 5. **Resolved-flux diagnostics** — add `w'T'`, `w'q'`, `w'u'` (and entrainment
-   diagnosis) to `rce_diagnostics.py` (extend, don't duplicate).
+   diagnosis) to `rce_diagnostics.py` (extend, don't duplicate). **DONE (iter 6)**
+   — `resolved_turbulent_fluxes_plane` (w'θ'/w'q'/w'u'/w'v'/w'θ_v').
 6. **Closure-coefficient diagnosis** — map LES resolved fluxes → coefficient
    (entrainment rate / eddy diffusivity / mixing length). Physically-grounded,
    with units/sign checks.
