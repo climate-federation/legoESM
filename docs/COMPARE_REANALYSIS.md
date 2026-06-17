@@ -38,6 +38,7 @@
 > | CLOSED LOOP orchestrator | `training/correction_loop.py` (`run_correction_iteration`: compare→LES-diagnose→assemble→apply→re-compare→`bias_improvement`; heavy AMIP/LES steps injected; empty-manifest no-op) | 19 |
 > | REAL-dycore integration test + moist-IC fix | `tests/run/test_run_column_les.py::test_process_column_real_dycore_integration` runs the actual plane-NH LES (mock-free); caught + fixed `run_forced_les` carrying no moisture (now seeds GCM q_v on the LES grid → `ColumnLESSetup.q_v_init`) | 20 |
 > | real-comparison loop adapter | `correction_loop.make_compare_fn` wraps the REAL `compare_state_to_reference` into the loop's `compare_fn` (only the AMIP/CMIP model run injected); loop now closes with real scoring+manifest, not a mocked score field | 21 |
+> | AMIP **and CMIP** mode bridge | `compare_reanalysis.column_state_from_hydrostatic` (driver `HydrostaticState`→`ColumnState`, unwraps `Field`s; mode-agnostic, SST = prescribed/coupled); fixed a latent `Field`-not-unwrapped bug also in iter-4 `model_state_from_restart` (now delegates) | 22 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.

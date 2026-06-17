@@ -16,6 +16,7 @@ from legoesm.training.compare_reanalysis import (
     ColumnState,
     build_pressure_from_sigma,
     column_state_from_carry,
+    column_state_from_hydrostatic,
     compare_state_to_reference,
     precip_mm_day_from_accum,
 )
@@ -243,3 +244,76 @@ def test_column_state_from_carry():
     assert float(state.sst_K[0, 0]) == pytest.approx(301.0)
     assert float(state.precip_mm_day[0, 0]) == pytest.approx(2.0)
     assert state.p_s.shape == (2, 3)
+
+
+def _hydro_state(shape, nlev):
+    """A REAL driver HydrostaticState (Field-wrapped leaves; q_v separate)."""
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+
+    full = shape + (nlev,)
+
+    def _f(x):
+        return Field(data=jnp.asarray(x))
+
+    return HydrostaticState(
+        u=_f(jnp.full(full, 5.0)), v=_f(jnp.zeros(full)),
+        T=_f(jnp.full(full, 250.0)), p_s=_f(jnp.full(shape, 1.0e5)),
+        phis=_f(jnp.zeros(shape)),
+    )
+
+
+def test_column_state_from_hydrostatic_unwraps_fields():
+    """The driver state fields are Field wrappers — they must be unwrapped to
+    raw arrays for the comparison."""
+    shape, nlev = (2, 3), 5
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    cs = column_state_from_hydrostatic(atm, q_v, sst_K=jnp.full(shape, 300.0))
+    # Raw arrays, not Field wrappers.
+    for arr in (cs.T, cs.u, cs.v, cs.p_s):
+        assert isinstance(arr, jnp.ndarray)
+        assert not hasattr(arr, "data")
+    assert cs.T.shape == shape + (nlev,)
+    assert cs.p_s.shape == shape
+
+
+def test_column_state_from_hydrostatic_amip_and_cmip():
+    """One adapter feeds the compare for BOTH run modes; q_v is separate, only
+    the SST source differs (prescribed for AMIP, coupled-ocean for CMIP) — and
+    that difference propagates to the environment tag."""
+    shape, nlev = (2, 3), 5
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    ref = column_state_from_hydrostatic(atm, q_v)
+    lat = jnp.array([10.0, 20.0])
+    lon = jnp.array([100.0, 110.0, 120.0])
+
+    for sst_value in (300.0, 298.5):  # AMIP prescribed vs CMIP coupled SST
+        cs = column_state_from_hydrostatic(
+            atm, q_v, sst_K=jnp.full(shape, sst_value))
+        comp = compare_state_to_reference(
+            model=cs, reference=ref, sigma_full=sigma_full, sigma_half=sigma_half,
+            lat_deg=lat, lon_deg=lon, time_index=0, n_worst=2,
+        )
+        # Identical atmosphere ⇒ zero combined score regardless of SST source.
+        assert float(jnp.max(comp.error_fields.combined_score)) == pytest.approx(
+            0.0, abs=1e-10)
+        # ...but the SST environment tag reflects the per-mode SST.
+        assert float(comp.environment.sst_K[0, 0]) == pytest.approx(sst_value)
+
+
+def test_column_state_from_hydrostatic_sst_optional():
+    atm = _hydro_state((2, 2), 4)
+    q_v = jnp.full((2, 2, 4), 1e-3)
+    cs = column_state_from_hydrostatic(atm, q_v)  # no SST (CMIP can omit)
+    assert cs.sst_K is None
+    assert cs.precip_mm_day is None
+
+
+def test_column_state_from_hydrostatic_rejects_none_v():
+    atm = _hydro_state((2, 2), 4)._replace(v=None)  # MPAS edge-velocity state
+    with pytest.raises(ValueError, match="atm_state.v is None"):
+        column_state_from_hydrostatic(atm, jnp.zeros((2, 2, 4)))

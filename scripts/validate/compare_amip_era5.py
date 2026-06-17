@@ -119,16 +119,18 @@ def model_state_from_restart(
 ) -> ColumnState:
     """Build a model :class:`ColumnState` from a loaded restart ``state`` + ``q_v``.
 
-    The restart ``state`` carries ``u``/``v``/``T``/``p_s``; ``q_v`` is loaded
-    separately by :func:`legoesm.driver.restart.load_restart`.  SST (prescribed
-    AMIP forcing) and precip are threaded in by the caller when available; when
-    omitted the SST environment tag falls back to surface air temperature and
-    the precipitation error term is dropped (documented in
-    :func:`compare_state_to_reference`).
+    The restart ``state`` carries ``u``/``v``/``T``/``p_s`` (as ``Field``
+    wrappers); ``q_v`` is loaded separately by
+    :func:`legoesm.driver.restart.load_restart`.  Delegates to
+    :func:`legoesm.training.compare_reanalysis.column_state_from_hydrostatic`,
+    which unwraps the ``Field``\\ s.  SST (prescribed AMIP forcing) and precip are
+    threaded in by the caller when available; when omitted the SST environment
+    tag falls back to surface air temperature and the precip term is dropped.
     """
-    return ColumnState(
-        T=state.T, q_v=q_v, u=state.u, v=state.v, p_s=state.p_s,
-        precip_mm_day=precip_mm_day, sst_K=sst_K,
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+
+    return column_state_from_hydrostatic(
+        state, q_v, sst_K=sst_K, precip_mm_day=precip_mm_day
     )
 
 

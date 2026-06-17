@@ -53,8 +53,8 @@ class ColumnState(NamedTuple):
 
     Profiles are ``[..., nlev]`` (surface-last); ``p_s`` is ``[...]`` [Pa].
     ``precip_mm_day`` is an optional ``[...]`` surface field; ``sst_K`` is the
-    optional prescribed surface temperature (AMIP forcing) used only for
-    environment tagging.
+    optional surface temperature used only for environment tagging — the
+    prescribed SST under AMIP or the coupled-ocean SST under CMIP.
     """
 
     T: jax.Array
@@ -281,5 +281,52 @@ def column_state_from_carry(
     """
     return ColumnState(
         T=carry.T, q_v=carry.q_v, u=carry.u, v=carry.v, p_s=carry.p_s,
+        precip_mm_day=precip_mm_day, sst_K=sst_K,
+    )
+
+
+def column_state_from_hydrostatic(
+    atm_state: Any,
+    q_v: jax.Array,
+    *,
+    sst_K: jax.Array | None = None,
+    precip_mm_day: jax.Array | None = None,
+) -> ColumnState:
+    """Build a :class:`ColumnState` from a driver atmosphere state + ``q_v``.
+
+    The model driver's prognostic atmosphere state (``HydrostaticState``: ``u`` /
+    ``v`` / ``T`` / ``p_s``) carries moisture *separately* (``q_v`` is the tracer
+    returned alongside the state, e.g. by ``driver.restart.load_restart``), so —
+    unlike :func:`column_state_from_carry` — ``q_v`` is passed explicitly.
+
+    **Run-mode agnostic (AMIP *and* CMIP).**  The comparison to ERA5 acts on the
+    atmosphere state regardless of how the surface was driven, so this single
+    adapter feeds both modes — the only difference is the SST source: in **AMIP**
+    ``sst_K`` is the prescribed forcing; in **CMIP** (coupled) it is the
+    interactive SST from the ocean component's surface state.  SST enters only
+    the environment tag, so it is optional (falls back to the surface-air
+    temperature in :func:`compare_state_to_reference`).
+
+    The driver state stores ``u``/``v``/``T``/``p_s`` as :class:`Field` wrappers,
+    so they are unwrapped to raw arrays (raw arrays also pass through).
+    ``atm_state.v`` must be a cell-centred wind — an MPAS edge-velocity state
+    (``v is None``) is rejected.
+    """
+    def _arr(x):
+        return x.data if hasattr(x, "data") else x
+
+    if getattr(atm_state, "v", None) is None:
+        raise ValueError(
+            "column_state_from_hydrostatic: atm_state.v is None — the comparison "
+            "needs cell-centred u/v (an MPAS edge-velocity state is not supported)."
+        )
+    T = jnp.asarray(_arr(atm_state.T))
+    dt = T.dtype
+    return ColumnState(
+        T=T,
+        q_v=jnp.asarray(q_v, dtype=dt),
+        u=jnp.asarray(_arr(atm_state.u), dtype=dt),
+        v=jnp.asarray(_arr(atm_state.v), dtype=dt),
+        p_s=jnp.asarray(_arr(atm_state.p_s), dtype=dt),
         precip_mm_day=precip_mm_day, sst_K=sst_K,
     )
