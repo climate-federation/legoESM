@@ -83,6 +83,10 @@ _LNPS_MIN = math.log(100.0)
 _LNPS_MAX = math.log(2.0e6)
 _COS_LAT_MIN = 1.0e-6
 
+# Sentinel distinguishing "no forcing arg" (3-arg physics_fn) from a forcing
+# value of None (4-arg) in SpectralPrimitiveEquationModel._make_tendency_fn.
+_NO_FORCING = object()
+
 
 # =============================================================================
 # State and config
@@ -1553,17 +1557,36 @@ class SpectralPrimitiveEquationModel:
         """Backward-compatible wrapper for step() with physics."""
         return self.step(state, dt, physics_fn=physics_fn)
 
-    @partial(jax.jit, static_argnums=(0, 3))
-    def _euler_si_jit(self, state, dt, physics_fn=None):
-        """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
+    def _make_tendency_fn(self, physics_fn, forcing_data=_NO_FORCING):
+        """Build the SI/leapfrog tendency closure (one per step at trace time).
+
+        Calls ``physics_fn`` with ``(s, grid, sigma_coord)`` — or the 4-arg
+        ``(..., forcing_data)`` signature when ``forcing_data`` is supplied —
+        then :func:`spectral_pe_tendencies`.  The ``_NO_FORCING`` sentinel
+        (not ``None``) distinguishes "no forcing arg" from a forcing value of
+        ``None``, so the 3-arg and 4-arg step methods keep their exact prior
+        physics_fn call.  Replaces the byte-identical closure inlined in all
+        seven step methods.
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                _phys_result = physics_fn(s, self.grid, self.sigma_coord)
+                if forcing_data is _NO_FORCING:
+                    _phys_result = physics_fn(s, self.grid, self.sigma_coord)
+                else:
+                    _phys_result = physics_fn(
+                        s, self.grid, self.sigma_coord, forcing_data,
+                    )
                 phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
+        return tendency_fn
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _euler_si_jit(self, state, dt, physics_fn=None):
+        """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
+        tendency_fn = self._make_tendency_fn(physics_fn)
         from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
@@ -1576,29 +1599,13 @@ class SpectralPrimitiveEquationModel:
         and ``forcing_data`` are both traced.  This is required for
         multi-device sharding compatibility.
         """
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(
-                    s, self.grid, self.sigma_coord, forcing_data,
-                )
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 4))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
         """JIT-compiled leapfrog + SI step, optionally with physics."""
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(s, self.grid, self.sigma_coord)
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1613,16 +1620,7 @@ class SpectralPrimitiveEquationModel:
         pattern: only ``self`` and ``physics_fn`` static; ``dt``
         and ``forcing_data`` traced.
         """
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(
-                    s, self.grid, self.sigma_coord, forcing_data,
-                )
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1649,14 +1647,7 @@ class SpectralPrimitiveEquationModel:
         recomputing on every ``step()`` entry — the JIT cache is keyed
         on ``id(self)`` and the dt value, so a dt change re-traces.
         """
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(s, self.grid, self.sigma_coord)
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
@@ -1690,16 +1681,7 @@ class SpectralPrimitiveEquationModel:
         pattern (PR #232): only ``self`` and ``physics_fn`` are
         static; ``dt`` and ``forcing_data`` are both traced.
         """
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(
-                    s, self.grid, self.sigma_coord, forcing_data,
-                )
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
@@ -1721,14 +1703,7 @@ class SpectralPrimitiveEquationModel:
         iter-5 dynamic-arg variant in favour of main's measured perf
         choice (see ``_step_jit`` docstring for the iter-211 rationale).
         """
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(s, self.grid, self.sigma_coord)
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-            return spectral_pe_tendencies(
-                s, self.grid, self.sigma_coord, self.config, phys,
-            )
+        tendency_fn = self._make_tendency_fn(physics_fn)
         return self._do_step(state, dt, tendency_fn)
 
     def integrate(
