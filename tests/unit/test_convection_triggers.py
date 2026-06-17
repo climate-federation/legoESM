@@ -1,14 +1,12 @@
 """Unit tests for ``legoesm.atmosphere.physics.convection._triggers``.
 
-The eight smooth-trigger primitives (``smooth_step``, ``smooth_max``,
-``smooth_min``, ``smooth_positive_part``, ``smooth_level_indicator``,
-``smooth_lowest_crossing_index``, ``cape_trigger``) are the foundation
-that every new convection scheme uses to replace ``if`` / ``where``
-discontinuities with differentiable approximations.  These tests pin
-their mathematical contract:
+The smooth-trigger primitives (``smooth_step``, ``smooth_positive_part``,
+``smooth_level_indicator``, ``smooth_lowest_crossing_index``,
+``cape_trigger``) are the foundation that every new convection scheme uses
+to replace ``if`` / ``where`` discontinuities with differentiable
+approximations.  These tests pin their mathematical contract:
 
 * monotonicity / boundedness of step;
-* upper-bound property and sharpness limit of ``smooth_max``;
 * exact softplus identity for ``smooth_positive_part``;
 * per-level indicator level count;
 * fractional crossing index against analytical reference values
@@ -28,7 +26,7 @@ from legoesm.atmosphere.physics.convection import _triggers as T
 
 
 # ---------------------------------------------------------------------------
-# smooth_step / smooth_heaviside
+# smooth_step
 # ---------------------------------------------------------------------------
 
 def test_smooth_step_monotonicity_and_bounds():
@@ -54,53 +52,6 @@ def test_smooth_step_grad_at_zero_is_sharpness_over_four():
     for s in (1.0, 5.0, 10.0):
         g = float(jax.grad(lambda x: T.smooth_step(x, s))(jnp.asarray(0.0)))
         assert pytest.approx(s / 4.0, rel=1e-10) == g
-
-
-def test_smooth_heaviside_is_alias_for_smooth_step():
-    xs = jnp.linspace(-2.0, 2.0, 11)
-    assert jnp.allclose(
-        T.smooth_heaviside(xs, sharpness=3.5),
-        T.smooth_step(xs, sharpness=3.5),
-    )
-
-
-# ---------------------------------------------------------------------------
-# smooth_max / smooth_min
-# ---------------------------------------------------------------------------
-
-def test_smooth_max_upper_bound():
-    """smooth_max(a, b, s) >= max(a, b) for all finite s > 0."""
-    rng = np.random.default_rng(0)
-    for _ in range(10):
-        a = float(rng.uniform(-10, 10))
-        b = float(rng.uniform(-10, 10))
-        for s in (0.5, 1.0, 5.0):
-            sm = float(T.smooth_max(jnp.asarray(a), jnp.asarray(b), s))
-            assert sm >= max(a, b) - 1e-12
-
-
-def test_smooth_max_sharpness_limit():
-    """As sharpness → ∞, smooth_max → max."""
-    a, b = 1.0, 2.0
-    sm = float(T.smooth_max(jnp.asarray(a), jnp.asarray(b), 100.0))
-    assert pytest.approx(2.0, abs=1e-6) == sm
-
-
-def test_smooth_max_symmetric_in_arguments():
-    a, b = 1.7, -0.3
-    s = 2.0
-    sm_ab = float(T.smooth_max(jnp.asarray(a), jnp.asarray(b), s))
-    sm_ba = float(T.smooth_max(jnp.asarray(b), jnp.asarray(a), s))
-    assert pytest.approx(sm_ab, rel=1e-12) == sm_ba
-
-
-def test_smooth_min_dual_to_smooth_max():
-    """smooth_min(a, b, s) = -smooth_max(-a, -b, s)."""
-    a, b = 0.4, 1.2
-    s = 3.0
-    sm_min = float(T.smooth_min(jnp.asarray(a), jnp.asarray(b), s))
-    expected = -float(T.smooth_max(jnp.asarray(-a), jnp.asarray(-b), s))
-    assert pytest.approx(expected, rel=1e-12) == sm_min
 
 
 # ---------------------------------------------------------------------------
