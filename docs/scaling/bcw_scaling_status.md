@@ -40,6 +40,50 @@ bottom-line "practical limit" framing below still holds for per-device
 throughput and weak efficiency; what changed is that the icosahedral grid
 decomposes across NODES for real now.
 
+### Multi-node chapter — full strong-scaling curves (8 ranks/node)
+
+Both decomposable CPU grids now run across nodes. Each resolution has a
+strong-scaling sweet spot, then goes comm-bound (cells/rank too small → the
+267 µs `sendrecv` floor dominates the shrinking payload). This is the fabric
+theoretical limit, now reached on CORRECT runs.
+
+**atm icosahedral, res6 (40962 cells), strong, f64 dry** — SYPD vs np:
+
+| np | 8 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|
+| SYPD | 4.8 | 13.6 | 19.9 | **27.0** | 16.4 |
+| Mc/s | 10.5 | 29.4 | 43.1 | **58.4** | 35.5 |
+
+Peak at np128 (640→320 cells/rank); np256 (160 cells/rank) collapses — past the
+useful decomposition for res6. f32 ≈ 1.3× f64 (np128 f32 SYPD 26.8). NO np16→32
+cliff at 8 ranks/node (the old 32-ranks/node Gloo cliff is gone — fewer ranks =
+fewer messages). np256 only scales with a bigger problem (res7) — the weak
+regime; that point (np256/res7 = 640 cells/rank, matching np16/res5 + np64/res6)
+is the natural weak-scaling triple.
+
+**ocean lat-lon (band), strong, f64** — SYPD vs np: np8 12.4 (res192) → np16
+24.4 → np32 **31.3** (res192 peak) → np64 39.3 (res128) → np128 15.5 (res256).
+res192 peaks ~np32; np64/128 need res≥256 (the harness GUARDS bands <2 rows/rank
+with a clean error, not a hang). The band halo (N/S neighbours) is structurally
+symmetric — it never had the Voronoi edge/vertex asymmetry bug, confirmed running
+clean to np128.
+
+### Status of every grid × precision toward its theoretical limit
+
+| grid | precision | multi-node | limit reached | residual |
+|---|---|---|---|---|
+| atm icosahedral | f64 & f32 | **np8..256 ✓** | yes — res-dependent strong peak (np128 @ res6), fabric comm-bound past it | none (fabric-bound) |
+| ocean lat-lon | f64 & f32 | **np1..128 ✓** | yes — res-dependent strong peak, same fabric wall | none (fabric-bound) |
+| atm lat-lon (FV) | f64 & f32 | band np..128 ✓ | yes — band fabric-optimal on Gloo; 2-D pencil loses (latency-bound) | 2-D win needs InfiniBand |
+| atm cubed-sphere | f64 & f32 | ≤6 faces/node | partial | >6-device sub-face tiling = future-HW project |
+| atm spectral | f64 | single-device | n/a | no tracer storage (moist) + no MPI path — large additions |
+| GPU (any) multi-device | f32 & f64 | **infra-blocked** | n/a | env's mpi4jax is CPU-only; needs CUDA-aware rebuild (not a code gap) |
+
+The CPU-decomposable grids (atm icosahedral, ocean lat-lon, atm lat-lon band)
+are characterised to their fabric limit on Ginsburg. The open items are
+capability gaps (spectral moist, cubed-sphere sub-face tiling) or infra blocks
+(CUDA-aware mpi4jax), not algorithmic scaling bugs.
+
 ## Where each configuration stands
 
 | component / grid | multi-node path | weak E | strong E | peak Mc/s·dev | verdict |
