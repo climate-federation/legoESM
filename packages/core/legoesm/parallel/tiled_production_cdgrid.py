@@ -1208,26 +1208,16 @@ def make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdgrid, n: int, kt: int,
 # sponge, no physics, non-duogrid, use_fv3_a2b_zeta_corner=False.
 # ===========================================================================
 
-def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
-                                                  kt: int, nlev: int, *,
-                                                  p_floor: float):
-    """Full tiled ``fv3_hydrostatic_tendencies`` on a ``(6, kt, kt)`` mesh.
-
-    Returns ``stage(u_d, v_d, T, p_s, phis) -> (du_d_dt, dv_d_dt, dT_dt,
-    dp_s_dt)``.  State inputs FACE-SHARDED, TILE-REPLICATED: ``u_d``/``v_d``
-    D-grid corner winds ``(6, n+1, n+1, nlev)``; ``T`` cc ``(6, n, n, nlev)``;
-    ``p_s``/``phis`` cc ``(6, n, n)``.  Outputs: ``du_d_dt``/``dv_d_dt``
-    corner-staggered tiles ``P("face","tile_i","tile_j",None)`` (gathered
-    lower-owns-shared to ``(6, n+1, n+1, nlev)``); ``dT_dt`` cc
-    ``P("face","tile_i","tile_j",None)`` -> ``(6, n, n, nlev)``; ``dp_s_dt`` cc
-    ``P("face","tile_i","tile_j")`` -> ``(6, n, n)`` (both exact cc partition).
-    ``dphis_dt`` is identically zero and not returned.
-
-    ``coord`` (sigma OR hybrid) closed over; the mass-flux / vertical-advection /
-    omega / geopotential cores are dispatched on its type.  ``p_floor`` =
-    ``CDGridPrimitiveEquationConfig.p_floor`` [Pa] (the adiabatic 1/p floor).
-    Base cut + halo/reduction structure: see the module comment above.
-    """
+def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
+                                   p_floor: float, scalar_body, vector_body):
+    """Build the SHARED per-tile hydrostatic tendency + metric-slicer closures
+    used by BOTH ``make_tiled_fv3_hydrostatic_tendencies_stage_2d`` (called once)
+    and ``make_tiled_fv3_hydrostatic_step_stage_2d`` (called once per SSP-RK3
+    stage on the evolving tile-local state — no gather).  Single source of the
+    cube hydrostatic tendency numerics (no duplication across the two factories);
+    the body is the bit-identity-gated capstone tendency verbatim.  ``coord``
+    sigma OR hybrid (cores dispatched on type); ``scalar_body``/``vector_body``
+    the mesh-bound in-stage halo bodies; ``cdgrid`` for the box interps."""
     from legoesm import constants
     from legoesm.core.operators_cdgrid import (
         dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
@@ -1236,72 +1226,16 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
     from legoesm.core.precision import resolve_dtype
     from legoesm.grids.vertical import (
         compute_geopotential, compute_geopotential_hybrid, pressure_from_hybrid,
-        compute_mass_flux_hybrid, compute_sigma_dot_and_total,
+        pressure_from_sigma, compute_mass_flux_hybrid, compute_sigma_dot_and_total,
         vertical_advection, vertical_advection_hybrid,
         compute_omega_hybrid, compute_pressure_velocity,
         HybridSigmaPressureCoordinate)
-    from legoesm.parallel.cubesphere_exchange import (
-        make_tiled_pad_body, make_tiled_pad_vector_body)
-
-    if n % kt:
-        raise ValueError(f"n={n} not divisible by kt={kt}")
-    if getattr(cdgrid, "n", n) != n:
-        raise ValueError(
-            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: n={n} != "
-            f"cdgrid.n={cdgrid.n}")
-    grid = cdgrid.base
-    if grid.duogrid is not None:
-        raise ValueError(
-            "make_tiled_fv3_hydrostatic_tendencies_stage_2d: base cut supports "
-            "the orthogonal-rotation (non-duogrid) cube only.")
-    if getattr(coord, "n_levels", nlev) != nlev:
-        raise ValueError(
-            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: coord.n_levels="
-            f"{coord.n_levels} != nlev={nlev}")
-    if not (float(p_floor) > 0.0):
-        raise ValueError(
-            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: p_floor must be a "
-            f"positive pressure [Pa]; got {p_floor}")
-    nl = n // kt
     R_d = constants.R_d
     kappa = constants.kappa
     _p_floor = float(p_floor)
     _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
     _geo = compute_geopotential_hybrid if _hybrid else compute_geopotential
-    if not _hybrid:
-        _sigma_range = 1.0 - float(coord.sigma_half[0])      # static scalar
-
-    # Static metrics (face-sharded, tile-replicated -> sliced per tile).
-    cosa_corner = cdgrid.cosa_corner                          # (6, n+1, n+1)
-    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x  # (6,n,n+1)/(6,n+1,n)
-    area = grid.area                                          # (6, n, n)
-    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01             # (6, n+1, n+1)
-    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
-    f_corner = cdgrid.f_corner                                # (6, n+1, n+1)
-    cosa_u = cdgrid.cosa_u                                    # (6, n+1, n)
-    dx, dy = grid.dx, grid.dy                                 # (6, n, n) cc
-    cos_a, sin_a = grid.cos_angle, grid.sin_angle             # (6, n, n)
-    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded   # (6, n+2, n+2)
-    offsets = grid.halo_interp_offsets                        # (6, 4, n)
-
-    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
-    vector_body = make_tiled_pad_vector_body(
-        mesh, ndim=4, halo=1, with_offsets=True)
-
-    fo = P("face", None, None)                     # 2D-face metric / cc 2D
-    fw = P("face", None, None, None)               # 4D state
-    cz = P("face", "tile_i", "tile_j", None)       # 4D corner / cc 4D out
-    co = P("face", "tile_i", "tile_j")             # 2D cc out (dp_s_dt)
-
-    # --- Reusable per-tile tendency, SHARED by the capstone _body (called once)
-    #     and the tiled STEP (calls it once per SSP-RK3 stage on the evolving
-    #     tile-local state — no gather).  Takes the per-tile state blocks (corner
-    #     (nl+1) / cc (nl)) + the PRE-SLICED tile metrics + offsets; closes over
-    #     coord / consts / the halo bodies.  D->C runs on the pre-sliced corner
-    #     tile via a_i=a_j=0 (bit-identical to slicing the full face array at
-    #     (a_i,a_j) — same (nl+1,nl+1) block, same cosa_u (nl+1,nl) slice).  No
-    #     new numerics (verbatim move of the gated capstone math).
-    from legoesm.grids.vertical import pressure_from_sigma
+    _sigma_range = None if _hybrid else 1.0 - float(coord.sigma_half[0])
 
     def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
                        cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
@@ -1432,6 +1366,91 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
             ca_t=_s(ca, nl, nl)[0], sa_t=_s(sa, nl, nl)[0],
             cap_t=_s(capf, nl + 2, nl + 2)[0], sap_t=_s(sapf, nl + 2, nl + 2)[0])
 
+    return _tile_tendency, _slice_metrics
+
+
+def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
+                                                  kt: int, nlev: int, *,
+                                                  p_floor: float):
+    """Full tiled ``fv3_hydrostatic_tendencies`` on a ``(6, kt, kt)`` mesh.
+
+    Returns ``stage(u_d, v_d, T, p_s, phis) -> (du_d_dt, dv_d_dt, dT_dt,
+    dp_s_dt)``.  State inputs FACE-SHARDED, TILE-REPLICATED: ``u_d``/``v_d``
+    D-grid corner winds ``(6, n+1, n+1, nlev)``; ``T`` cc ``(6, n, n, nlev)``;
+    ``p_s``/``phis`` cc ``(6, n, n)``.  Outputs: ``du_d_dt``/``dv_d_dt``
+    corner-staggered tiles ``P("face","tile_i","tile_j",None)`` (gathered
+    lower-owns-shared to ``(6, n+1, n+1, nlev)``); ``dT_dt`` cc
+    ``P("face","tile_i","tile_j",None)`` -> ``(6, n, n, nlev)``; ``dp_s_dt`` cc
+    ``P("face","tile_i","tile_j")`` -> ``(6, n, n)`` (both exact cc partition).
+    ``dphis_dt`` is identically zero and not returned.
+
+    ``coord`` (sigma OR hybrid) closed over; the mass-flux / vertical-advection /
+    omega / geopotential cores are dispatched on its type.  ``p_floor`` =
+    ``CDGridPrimitiveEquationConfig.p_floor`` [Pa] (the adiabatic 1/p floor).
+    Base cut + halo/reduction structure: see the module comment above.
+    """
+    from legoesm import constants
+    from legoesm.core.operators_cdgrid import (
+        dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
+        interp_center_to_corner, interp_corner_to_center, cgrid_divergence_local)
+    from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
+    from legoesm.core.precision import resolve_dtype
+    from legoesm.grids.vertical import (
+        compute_geopotential, compute_geopotential_hybrid, pressure_from_hybrid,
+        compute_mass_flux_hybrid, compute_sigma_dot_and_total,
+        vertical_advection, vertical_advection_hybrid,
+        compute_omega_hybrid, compute_pressure_velocity,
+        HybridSigmaPressureCoordinate)
+    from legoesm.parallel.cubesphere_exchange import (
+        make_tiled_pad_body, make_tiled_pad_vector_body)
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_tendencies_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: coord.n_levels="
+            f"{coord.n_levels} != nlev={nlev}")
+    if not (float(p_floor) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: p_floor must be a "
+            f"positive pressure [Pa]; got {p_floor}")
+    nl = n // kt
+
+    # Static metrics (face-sharded, tile-replicated -> sliced per tile).
+    cosa_corner = cdgrid.cosa_corner                          # (6, n+1, n+1)
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x  # (6,n,n+1)/(6,n+1,n)
+    area = grid.area                                          # (6, n, n)
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01             # (6, n+1, n+1)
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    f_corner = cdgrid.f_corner                                # (6, n+1, n+1)
+    cosa_u = cdgrid.cosa_u                                    # (6, n+1, n)
+    dx, dy = grid.dx, grid.dy                                 # (6, n, n) cc
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle             # (6, n, n)
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded   # (6, n+2, n+2)
+    offsets = grid.halo_interp_offsets                        # (6, 4, n)
+
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=4, halo=1, with_offsets=True)
+
+    fo = P("face", None, None)                     # 2D-face metric / cc 2D
+    fw = P("face", None, None, None)               # 4D state
+    cz = P("face", "tile_i", "tile_j", None)       # 4D corner / cc 4D out
+    co = P("face", "tile_i", "tile_j")             # 2D cc out (dp_s_dt)
+
+    # Single source of the tendency numerics (shared with the tiled STEP).
+    _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+
     @partial(shard_map, mesh=mesh,
              in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
                        + (fo,) * 4                  # cosa_corner, dxe, dye, area
@@ -1470,6 +1489,157 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
                      dx, dy, cos_a, sin_a, cap, sap, offsets)
 
     return stage
+
+
+# ===========================================================================
+# TILED STEP: the full SSP-RK3 time step wrapping the hydrostatic tendency
+# capstone, in ONE shard_map with NO gather between RK3 stages.  The dominant
+# compute (the tendency) runs sub-face-tiled on np=6*kt^2 devices; the 3 SSP-RK3
+# stages + the 2 pointwise SSP combines run on the TILE-LOCAL state.  The
+# corner-staggered D-grid winds carry a duplicated shared tile face that stays
+# self-consistent across stages because adjacent tiles compute BIT-IDENTICAL
+# shared-face du_d/dv_d (proven by the capstone gate's du/dv corner-overlap at
+# 1e-10 — both tiles match the global there, hence each other).  Base cut: no
+# post-step (sponge / damp_v / fix_ps_mass = increment-4); dphis=0 (phis const).
+# Bit-identical (to RK3-accumulated reorder) to ssp_rk3_step(state, the base-cut
+# fv3_hydrostatic_tendencies, dt) — NOT the full _step_fv3 (which also does the
+# post-step _sync_dgrid_boundary).  Future-HW (np>6 anti-scales on Ginsburg);
+# gated by bit-identity, not wall-clock.
+# ===========================================================================
+
+def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
+                                            kt: int, nlev: int, *,
+                                            p_floor: float, dt: float):
+    """Full tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh.
+
+    Returns ``step(u_d, v_d, T, p_s, phis) -> (u_d, v_d, T, p_s)`` advanced one
+    ``dt``.  State inputs FACE-SHARDED, TILE-REPLICATED (same layout as the
+    tendency stage); outputs the STEPPED state in the same per-tile staggering
+    (u_d/v_d corner ``P("face","tile_i","tile_j",None)``, T cc 4D, p_s cc 2D
+    ``P("face","tile_i","tile_j")``).  ``dt`` [s] closed over (static — recompiles
+    per dt, fine for a fixed-step run).  Reuses the SHARED ``_tile_tendency``
+    builder (no duplicated numerics).  See the module comment above for the
+    base cut + the no-gather self-consistency argument.
+    """
+    from legoesm.parallel.cubesphere_exchange import (
+        make_tiled_pad_body, make_tiled_pad_vector_body)
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_step_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_step_stage_2d: base cut supports the "
+            "orthogonal-rotation (non-duogrid) cube only.")
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_step_stage_2d: coord.n_levels="
+            f"{coord.n_levels} != nlev={nlev}")
+    if not (float(p_floor) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_step_stage_2d: p_floor must be a "
+            f"positive pressure [Pa]; got {p_floor}")
+    if not (float(dt) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_step_stage_2d: dt must be a positive "
+            f"time step [s]; got {dt}")
+    nl = n // kt
+    _dt = float(dt)
+
+    # Static metrics (face-sharded, tile-replicated -> sliced per tile).
+    cosa_corner = cdgrid.cosa_corner
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x
+    area = grid.area
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    f_corner = cdgrid.f_corner
+    cosa_u = cdgrid.cosa_u
+    dx, dy = grid.dx, grid.dy
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded
+    offsets = grid.halo_interp_offsets
+
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=4, halo=1, with_offsets=True)
+
+    # Shared tendency numerics (same builder as the tendency stage — no dup).
+    _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+
+    fo = P("face", None, None)
+    fw = P("face", None, None, None)
+    cz = P("face", "tile_i", "tile_j", None)       # corner / cc 4D state out
+    co = P("face", "tile_i", "tile_j")             # p_s 2D cc state out
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
+                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
+                       + (fo,) * 4                  # gc00..gc11
+                       + (fo, fo)                   # f_corner, cosa_u
+                       + (fo, fo)                   # dx, dy
+                       + (fo,) * 4                  # cos_a, sin_a, cap, sap
+                       + (P(),),                    # offsets
+             out_specs=(cz, cz, cz, co), check_vma=False)
+    def _step_body(u_d, v_d, T, p_s, phis,
+                   cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
+                   dx_, dy_, ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        m = _slice_metrics(_s, cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco,
+                           cosau, dx_, dy_, ca, sa, capf, sapf)
+        mt = (m["cosa_c_t"], m["dxe_t"], m["dye_t"], m["ar_t"], m["gc"],
+              m["fco_t"], m["cosau_t"], m["dx_t"], m["dy_t"],
+              m["ca_t"], m["sa_t"], m["cap_t"], m["sap_t"], offs)
+
+        phis_t = _s(phis, nl, nl)                  # constant (dphis=0)
+        ud0 = _s(u_d, nl + 1, nl + 1)
+        vd0 = _s(v_d, nl + 1, nl + 1)
+        T0 = _s(T, nl, nl)
+        ps0 = _s(p_s, nl, nl)
+
+        def _F(ud, vd, Tt, ps):
+            return _tile_tendency(ud, vd, Tt, ps, phis_t, *mt)
+
+        # SSP-RK3 (timestepping/ssp_rk3.py) — pointwise tile-local combines.
+        du, dv, dTt, dps = _F(ud0, vd0, T0, ps0)          # k1 = s0 + dt*F(s0)
+        ud1 = ud0 + _dt * du
+        vd1 = vd0 + _dt * dv
+        T1 = T0 + _dt * dTt
+        ps1 = ps0 + _dt * dps
+
+        du, dv, dTt, dps = _F(ud1, vd1, T1, ps1)          # k2 = 3/4 s0 + 1/4(k1+dt*F)
+        ud2 = 0.75 * ud0 + 0.25 * (ud1 + _dt * du)
+        vd2 = 0.75 * vd0 + 0.25 * (vd1 + _dt * dv)
+        T2 = 0.75 * T0 + 0.25 * (T1 + _dt * dTt)
+        ps2 = 0.75 * ps0 + 0.25 * (ps1 + _dt * dps)
+
+        du, dv, dTt, dps = _F(ud2, vd2, T2, ps2)          # k3 = 1/3 s0 + 2/3(k2+dt*F)
+        ud3 = (1.0 / 3.0) * ud0 + (2.0 / 3.0) * (ud2 + _dt * du)
+        vd3 = (1.0 / 3.0) * vd0 + (2.0 / 3.0) * (vd2 + _dt * dv)
+        T3 = (1.0 / 3.0) * T0 + (2.0 / 3.0) * (T2 + _dt * dTt)
+        ps3 = (1.0 / 3.0) * ps0 + (2.0 / 3.0) * (ps2 + _dt * dps)
+        return ud3, vd3, T3, ps3
+
+    def step(u_d, v_d, T, p_s, phis):
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)), T=(T, (n, n, nlev)),
+                      p_s=(p_s, (n, n)), phis=(phis, (n, n)))
+        return _step_body(u_d, v_d, T, p_s, phis,
+                          cosa_corner, dx_edge_y, dy_edge_x, area,
+                          gc00, gc01, gc10, gc11, f_corner, cosa_u,
+                          dx, dy, cos_a, sin_a, cap, sap, offsets)
+
+    return step
 
 
 # ---------------------------------------------------------------------------
