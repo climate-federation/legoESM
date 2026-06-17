@@ -44,6 +44,21 @@ COLD_POINT_MAX_K = 210.0
 MIN_FREE_TROP_LEVELS = 3
 
 
+def safe_sqrt(x: jax.Array) -> jax.Array:
+    """Gradient-safe square root: exact ``sqrt`` for ``x > 0``, else ``0``.
+
+    Plain ``jnp.sqrt`` has an infinite (→ ``NaN`` in reverse-mode AD) derivative
+    at ``x == 0``.  The mass-weighted RMSE is exactly zero for a perfect-match
+    or fully-masked column, so the metric must differentiate cleanly there.  The
+    double-``where`` idiom (used throughout the codebase, e.g.
+    ``vertical_mixing/tke.py``) keeps the primal exact while routing a zero
+    gradient through the ``x <= 0`` branch.
+    """
+    x = jnp.asarray(x)
+    positive = x > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, x, jnp.ones_like(x))), jnp.zeros_like(x))
+
+
 def weighted_std(profile: jax.Array, weights: jax.Array) -> jax.Array:
     """Mass-weighted vertical standard deviation."""
     profile = jnp.asarray(profile)
