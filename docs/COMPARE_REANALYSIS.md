@@ -34,6 +34,7 @@
 > | 4–6 column-LES driver | `scripts/run/run_column_les.py` (`build_column_les_setup`→`run_forced_les`→`diagnose`; `process_column`/`extract_gcm_column`/`run_column_les_pipeline`; real `main` loops the manifest) | 15 |
 > | 7 LES diagnoses→feedback field | `training/feedback_assembly.py` (`reduce_column_diagnosis` K-profile→scalar / w_e; `assemble_feedback_field` scatters at worst-column flat indices) | 16 |
 > | verify bias↓ (success metric) | `training/bias_metrics.py` (`aggregate_combined_bias` area-weighted; `bias_improvement` baseline-vs-updated; `worst_column_bias_change`) | 17 |
+> | 7 per-scheme promotion | `training/promotable_params.py` (`apply_feedback_to_scheme`: registry of (ncol,)-capable coefficients; gray `tau_equator`/`tau_pole` promoted end-to-end, NO body change) | 18 |
 >
 > **Feedback loop now closes in code:** LES diagnoses → `assemble_feedback_field`
 > (iter 16) → `apply_column_parameter_field` (iter 9) → updated scheme config.
@@ -46,8 +47,12 @@
 >    forced plane-dycore run loop (`run_forced_les`) + `main` are real but
 >    HPC-validated, not unit-tested (the orchestration helpers are). Optional
 >    follow-up: wire the iter-11 TKE closure into the dycore as the SGS option.
-> 3. **Per-scheme promotion** of a real production coefficient (entrainment) —
->    `shape`-keyed `__param_spec__` + scheme-body `(ncol,)` broadcast (physics-validated).
+> 3. **Per-scheme promotion** — DONE (iter 18) for the cleanest case: gray
+>    `tau_equator`/`tau_pole` accept a per-column field with NO body change
+>    (already `(ncol,)`-vectorised), applied via the `promoted_fields` allowlist
+>    (no `__param_spec__`/collector change). A convection-entrainment or
+>    turbulence-diffusivity promotion follows the same pattern once that scheme
+>    body is wrapped in a column-broadcast (the physically-targeted follow-up).
 > 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
 > 5. **End-to-end bias-reduction demo** — the actual success criterion. The
 >    *measurement* now exists (`bias_metrics.bias_improvement`, iter 17); the
