@@ -7,6 +7,32 @@
 
 > ## Implementation progress (newest first)
 >
+> ### Iter 7 (2026-06-17) — Stage 6 (gap #6): closure-coefficient diagnosis ✅
+> Added `atmosphere.dynamics.les_closure_diagnosis` — the **inverse** of the
+> forward turbulence schemes: diagnose a closure coefficient from the iter-6
+> resolved fluxes. Public API:
+> - `eddy_diffusivity_from_flux(flux, phi_full, z_full)` → `K=-w'φ'/(∂⟨φ⟩/∂z)`
+>   per interior interface + `valid` mask (rejects ill-posed near-zero gradient
+>   and counter-gradient `K<0`).
+> - `mixing_length_from_momentum_diffusivity(K_m, shear)` → Prandtl `ℓ=√(K_m/|∂U/∂z|)`.
+> - `entrainment_velocity_from_buoyancy_flux(w_θv, θv_full, z_iface)` →
+>   `w_e=-(w'θ_v')_inv/Δθ_v` at the inversion (argmin buoyancy flux), valid only
+>   for a stable interior inversion with negative entrainment flux — **the doc's
+>   headline coefficient**.
+> - All AD-safe (double-where masked divisions; gradient-safe sqrt), jit/vmap-
+>   friendly; thresholds are documented diagnostic regularizers.
+> - Tests: 13 cases incl. **analytic K recovery** (`flux=-K0·∂φ/∂z⇒K=K0`),
+>   mixing-length round-trip, exact entrainment from a crafted inversion, ill-
+>   posed/counter-gradient/boundary-min rejection, sqrt(0)+entrainment grad.
+> - **Codex adversarial review: clean** (4 real findings fixed: sqrt(0) AD leak,
+>   false fail-safe claim, unguarded boundary inversion, tie convention).
+>
+> **Next:** the **feedback half** — map the diagnosed per-column coefficient onto
+> a spatially-varying GCM parameter field (gap #7) and apply it via the config
+> pytree (`apply_param_overrides`, traced-in-loss). Still open: grid-side
+> `ColumnLargeScaleState` extractor; standalone LES driver + 1.5-order TKE SGS;
+> end-to-end bias-reduction demo.
+>
 > ### Iter 6 (2026-06-17) — Stage 5 (gap #5): LES resolved-flux diagnostics ✅
 > **Extended** `atmosphere.dynamics.rce_diagnostics` (no new module) with the
 > LES-resolved turbulent fluxes the closure diagnosis (stage 6) consumes:
@@ -372,7 +398,9 @@ superparameterization).
    — `resolved_turbulent_fluxes_plane` (w'θ'/w'q'/w'u'/w'v'/w'θ_v').
 6. **Closure-coefficient diagnosis** — map LES resolved fluxes → coefficient
    (entrainment rate / eddy diffusivity / mixing length). Physically-grounded,
-   with units/sign checks.
+   with units/sign checks. **DONE (iter 7)** — `les_closure_diagnosis`
+   (`eddy_diffusivity_from_flux`, `mixing_length_from_momentum_diffusivity`,
+   `entrainment_velocity_from_buoyancy_flux`).
 7. **Spatially-varying parameter field infra** — promote a chosen scalar physics
    coefficient to a per-column (height-varying) field. Needs:
    - `__param_spec__` `shape` key support already exists (currently unused for
