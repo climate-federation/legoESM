@@ -28,14 +28,16 @@
 >
 > | 4 / #3 grid-side forcing extractor (lat-lon) | `atmosphere/dynamics/column_large_scale_extract.py` (`extract_column_forcing_latlon`: ω from continuity, −V·∇θ/−V·∇q advection → `ColumnLargeScaleState`) | 10 |
 > | 4 / #4 1.5-order TKE SGS closure | `atmosphere/dynamics/tke_sgs_plane.py` (Deardorff/Lilly: ν_t=C_k ℓ√e, ε, Pr_t, TKE tendency, equilibrium↔Smagorinsky `C_s=(C_k³/C_ε)¼≈0.19`) | 11 |
+> | 5 LES regime selection | `atmosphere/dynamics/les_regime.py` (`les_resolution_for_column`: CAPE→shallow/deep dispatch + per-regime plane-LES resolution; raise on unknown/non-finite/invalid box) | 12 |
 >
 > **Remaining to reach the done-criterion (AMIP/CMIP vs reanalysis → LES → params → bias↓):**
 > 1. **Extractor follow-ups** — geostrophic wind (∇Φ) + cubed-sphere/Gaussian
 >    grids (iter-10 covers lat-lon ω + advective tendencies, ERA5-native).
-> 2. **Standalone LES driver** — wire the TKE closure (iter 11) into the plane
->    dycore (prognostic `e` carry + `turbulence_closure="tke_1.5"` dispatch +
->    `validate_tke_config` at setup) at LES resolution; ingest the forcing
->    manifest; resolved-flux output (iter 6).
+> 2. **Standalone LES driver** — orchestrate manifest→`les_resolution_for_column`
+>    (iter 12)→column θ/q interp to the LES grid + `ColumnLargeScaleState` forcing
+>    (iters 5/10)→run plane LES (`run_les_plane` machinery, optionally the iter-11
+>    TKE closure wired into the dycore)→resolved-flux output (iter 6)→coefficient
+>    (iter 7). Heavy run step; the config/selection pieces are now in place.
 > 3. **Per-scheme promotion** of a real production coefficient (entrainment) —
 >    `shape`-keyed `__param_spec__` + scheme-body `(ncol,)` broadcast (physics-validated).
 > 4. **AMIP/CMIP run wiring** (`diag_days=0.25`) + a tiny real end-to-end smoke.
