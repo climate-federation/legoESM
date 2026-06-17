@@ -1177,6 +1177,280 @@ def make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdgrid, n: int, kt: int,
     return stage
 
 
+# ===========================================================================
+# CAPSTONE: the FULL tiled fv3_hydrostatic_tendencies stage — the production
+# cube 3D-PE dycore tendency (du_d_dt, dv_d_dt, dT_dt, dp_s_dt) on np=6*kt^2
+# devices.  Composes ALL component stages in ONE shard_map (the 3D analogue of
+# the SW capstone make_tiled_fv3_sw_tendencies_stage_2d):
+#   continuity: dgrid_to_cgrid -> cgrid_divergence -> mass_flux/sigma_dot ->
+#               dp_s/dt (RAW; base cut _apply_zero_mean_per_stage=False) -> omega
+#   vertical:   vertical_advection of {interp_corner_to_center winds, T} (local)
+#               -> vert_adv_uv_cc + vert_adv_T
+#   momentum:   B=KE+Phi ; zeta ; [scalar halo {B,zeta,1/T,ln_ps,hf}] ;
+#               zeta_corner ; A-L grad(B) ; PGF -> du/dv (eq 307-479)
+#               + center_to_dgrid_vector(vert_adv_uv_cc) lift (vector halo;
+#               the section-12c contribution at 976-977, ADDED unconditionally)
+#   thermo:     [scalar halo {T}; ln_ps halo SHARED w/ momentum] horiz_adv(-u.gradT)
+#               + adiabatic(kappa*T*omega/p + kappa*T*v.grad ln p_s) + vert_adv_T
+#   dphis_dt = 0.
+# Cross-stage flow is all per-column-LOCAL (continuity/vertical/omega read no
+# horizontal halo); the ONLY collectives are the in-stage scalar halo (momentum
+# {B,zeta,1/T,ln_ps,hf}+thermo {T}) and the vector halo (the lift).  NO global
+# reduction: the base cut takes the fix_mass path (dp_s/dt used raw), so there is
+# no per-stage zero_mean_tendency — the global-zero-mean variant (a psum over
+# face+tile) is a documented follow-up.  The ln_ps scalar halo is SHARED between
+# the momentum PGF (Arakawa-Lamb corner gradient) and the thermo adiabatic
+# (centred cc gradient): in x64 the momentum's _pg_dt cast is a no-op, so the one
+# padded ln_ps is bit-identical to both standalone stages' halos.  No new
+# numerics — every op is the shared *_core / vertical.py / box-interp used by the
+# already-gated component stages.  Base cut (primitive_eq_cdgrid.py defaults):
+# div_damp=0, hyperdiff=0, corner_div_damp=0, A_h=0, T_diss=0, KE-heat off, no
+# sponge, no physics, non-duogrid, use_fv3_a2b_zeta_corner=False.
+# ===========================================================================
+
+def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
+                                                  kt: int, nlev: int, *,
+                                                  p_floor: float):
+    """Full tiled ``fv3_hydrostatic_tendencies`` on a ``(6, kt, kt)`` mesh.
+
+    Returns ``stage(u_d, v_d, T, p_s, phis) -> (du_d_dt, dv_d_dt, dT_dt,
+    dp_s_dt)``.  State inputs FACE-SHARDED, TILE-REPLICATED: ``u_d``/``v_d``
+    D-grid corner winds ``(6, n+1, n+1, nlev)``; ``T`` cc ``(6, n, n, nlev)``;
+    ``p_s``/``phis`` cc ``(6, n, n)``.  Outputs: ``du_d_dt``/``dv_d_dt``
+    corner-staggered tiles ``P("face","tile_i","tile_j",None)`` (gathered
+    lower-owns-shared to ``(6, n+1, n+1, nlev)``); ``dT_dt`` cc
+    ``P("face","tile_i","tile_j",None)`` -> ``(6, n, n, nlev)``; ``dp_s_dt`` cc
+    ``P("face","tile_i","tile_j")`` -> ``(6, n, n)`` (both exact cc partition).
+    ``dphis_dt`` is identically zero and not returned.
+
+    ``coord`` (sigma OR hybrid) closed over; the mass-flux / vertical-advection /
+    omega / geopotential cores are dispatched on its type.  ``p_floor`` =
+    ``CDGridPrimitiveEquationConfig.p_floor`` [Pa] (the adiabatic 1/p floor).
+    Base cut + halo/reduction structure: see the module comment above.
+    """
+    from legoesm import constants
+    from legoesm.core.operators_cdgrid import (
+        dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
+        interp_center_to_corner, interp_corner_to_center, cgrid_divergence_local)
+    from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
+    from legoesm.core.precision import resolve_dtype
+    from legoesm.grids.vertical import (
+        compute_geopotential, compute_geopotential_hybrid, pressure_from_hybrid,
+        compute_mass_flux_hybrid, compute_sigma_dot_and_total,
+        vertical_advection, vertical_advection_hybrid,
+        compute_omega_hybrid, compute_pressure_velocity,
+        HybridSigmaPressureCoordinate)
+    from legoesm.parallel.cubesphere_exchange import (
+        make_tiled_pad_body, make_tiled_pad_vector_body)
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_tendencies_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: coord.n_levels="
+            f"{coord.n_levels} != nlev={nlev}")
+    if not (float(p_floor) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: p_floor must be a "
+            f"positive pressure [Pa]; got {p_floor}")
+    nl = n // kt
+    R_d = constants.R_d
+    kappa = constants.kappa
+    _p_floor = float(p_floor)
+    _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
+    _geo = compute_geopotential_hybrid if _hybrid else compute_geopotential
+    if not _hybrid:
+        _sigma_range = 1.0 - float(coord.sigma_half[0])      # static scalar
+
+    # Static metrics (face-sharded, tile-replicated -> sliced per tile).
+    cosa_corner = cdgrid.cosa_corner                          # (6, n+1, n+1)
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x  # (6,n,n+1)/(6,n+1,n)
+    area = grid.area                                          # (6, n, n)
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01             # (6, n+1, n+1)
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    f_corner = cdgrid.f_corner                                # (6, n+1, n+1)
+    cosa_u = cdgrid.cosa_u                                    # (6, n+1, n)
+    dx, dy = grid.dx, grid.dy                                 # (6, n, n) cc
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle             # (6, n, n)
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded   # (6, n+2, n+2)
+    offsets = grid.halo_interp_offsets                        # (6, 4, n)
+
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=4, halo=1, with_offsets=True)
+
+    fo = P("face", None, None)                     # 2D-face metric / cc 2D
+    fw = P("face", None, None, None)               # 4D state
+    cz = P("face", "tile_i", "tile_j", None)       # 4D corner / cc 4D out
+    co = P("face", "tile_i", "tile_j")             # 2D cc out (dp_s_dt)
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
+                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
+                       + (fo,) * 4                  # gc00..gc11
+                       + (fo, fo)                   # f_corner, cosa_u
+                       + (fo, fo)                   # dx, dy (thermo)
+                       + (fo,) * 4                  # cos_a, sin_a, cap, sap (lift)
+                       + (P(),),                    # offsets
+             out_specs=(cz, cz, cz, co), check_vma=False)
+    def _body(u_d, v_d, T, p_s, phis,
+              cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
+              dx_, dy_, ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        T_t = _s(T, nl, nl)                        # (1, nl, nl, nlev) cc
+        p_s_t = _s(p_s, nl, nl)                    # (1, nl, nl) cc
+        phis_t = _s(phis, nl, nl)
+
+        # ---- cc winds: dgrid_to_center_vector for B/thermo (within-face, NO
+        #      halo); interp_corner_to_center (batched) for vertical advection.
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
+        _uv_d = jnp.stack([u_d_t, v_d_t], axis=-1)
+        _uv_cc = interp_corner_to_center(
+            _uv_d.reshape(*_uv_d.shape[:-2], nlev * 2)
+        ).reshape(1, nl, nl, nlev, 2)
+        u_cc_va, v_cc_va = _uv_cc[..., 0], _uv_cc[..., 1]
+
+        # ---- CONTINUITY: D->C (local) -> divergence (local) -> dp_s/dt + vert ----
+        u_c, v_c = dgrid_to_cgrid_tile_2d(u_d, v_d, cosau, a_i, a_j, nl)
+        div_v = cgrid_divergence_local(
+            u_c, v_c, _s(dye, nl + 1, nl), _s(dxe, nl, nl + 1),
+            _s(ar, nl, nl))                        # (1, nl, nl, nlev)
+        if _hybrid:
+            mass_flux, D_total_p = compute_mass_flux_hybrid(div_v, p_s_t, coord)
+            dp_s_dt = -D_total_p[..., 0] / coord.B_range
+            # base cut: _apply_zero_mean_per_stage=False (fix_mass path) -> raw.
+            omega = compute_omega_hybrid(mass_flux, p_s_t, dp_s_dt, coord)
+            _vadv_drive = mass_flux
+            _vadv = vertical_advection_hybrid
+        else:
+            sigma_dot, D_total = compute_sigma_dot_and_total(div_v, coord)
+            dp_s_dt = -p_s_t * D_total[..., 0] / _sigma_range
+            omega = compute_pressure_velocity(sigma_dot, p_s_t, dp_s_dt, coord)
+            _vadv_drive = sigma_dot
+            _vadv = vertical_advection
+
+        # ---- VERTICAL advection of {u_cc_va, v_cc_va, T} (per-column local) ----
+        _uvT_lead = jnp.stack([u_cc_va, v_cc_va, T_t], axis=0)   # (3,1,nl,nl,nlev)
+        if _hybrid:
+            _vadv_uvT = _vadv(_uvT_lead, _vadv_drive, p_s_t, coord)
+        else:
+            _vadv_uvT = _vadv(_uvT_lead, _vadv_drive, coord)
+        vert_adv_u_cc, vert_adv_v_cc, vert_adv_T = (
+            _vadv_uvT[0], _vadv_uvT[1], _vadv_uvT[2])
+
+        # ---- p_adiab + ln_ps (cc-local) ----
+        if _hybrid:
+            p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
+        else:
+            from legoesm.grids.vertical import pressure_from_sigma
+            p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
+        p_adiab = jnp.maximum(p_full, _p_floor)
+        ln_ps = jnp.log(p_s_t)
+        _pg_dt = jnp.result_type(
+            ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
+        ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]              # (1, nl, nl, 1)
+
+        # ---- MOMENTUM (eq 307-479): B=KE+Phi ; zeta ; scalar halos ----
+        Phi = _geo(T_t, p_s_t, coord, phis_t)
+        B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
+        zeta = dgrid_vorticity_core(
+            u_d_t, v_d_t, _s(cosa_c, nl + 1, nl + 1),
+            _s(dxe, nl, nl + 1), _s(dye, nl + 1, nl), _s(ar, nl, nl))
+        inv_T = 1.0 / T_t
+
+        # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64: the
+        # _pg_dt cast is a no-op, so this padded ln_ps == both standalone halos).
+        B_pad = scalar_body(B[0], offs)[None]
+        zeta_pad = scalar_body(zeta[0], offs)[None]
+        invT_pad = scalar_body(inv_T[0], offs)[None]
+        lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
+        T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
+
+        gc = (_s(c00, nl + 1, nl + 1), _s(c01, nl + 1, nl + 1),
+              _s(c10, nl + 1, nl + 1), _s(c11, nl + 1, nl + 1))
+        zeta_corner = (interp_center_to_corner(zeta_pad, cdgrid, padded=zeta_pad)
+                       + _s(fco, nl + 1, nl + 1)[..., None])
+        dB_dx, dB_dy_perp = arakawa_lamb_gradient_core(B_pad, *gc)
+        dln_dx_hi, dln_dy_perp_hi = arakawa_lamb_gradient_core(lnps_pad, *gc)
+        T_corner = 1.0 / interp_center_to_corner(invT_pad, cdgrid, padded=invT_pad)
+        T_corner_hi = T_corner.astype(_pg_dt)
+        pg_corr_x = (R_d * T_corner_hi * dln_dx_hi).astype(u_d_t.dtype)
+        pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi).astype(v_d_t.dtype)
+        if _hybrid:
+            p_full_c = pressure_from_hybrid(coord, p_s_t)
+            hf = coord.B_full * p_s_t[..., None] / p_full_c
+            hf_pad = scalar_body(hf[0], offs)[None]
+            hf_corner = interp_center_to_corner(hf_pad, cdgrid, padded=hf_pad)
+            pg_corr_x = pg_corr_x * hf_corner
+            pg_corr_y_perp = pg_corr_y_perp * hf_corner
+        du_d_dt = zeta_corner * v_d_t - dB_dx - pg_corr_x      # (1, nl+1, nl+1, nlev)
+        dv_d_dt = -zeta_corner * u_d_t - dB_dy_perp - pg_corr_y_perp
+
+        # ---- vert_adv_uv_d lift (center_to_dgrid_vector: VECTOR halo + corner
+        #      avg) ADDED to du/dv (primitive_eq_cdgrid.py:961-977) ----
+        ca_t = _s(ca, nl, nl)[0]
+        sa_t = _s(sa, nl, nl)[0]
+        cap_t = _s(capf, nl + 2, nl + 2)[0]
+        sap_t = _s(sapf, nl + 2, nl + 2)[0]
+        vau_pad, vav_pad = vector_body(
+            vert_adv_u_cc[0], vert_adv_v_cc[0], ca_t, sa_t, cap_t, sap_t, offs)
+        vau_pad = vau_pad[None]                    # (1, nl+2, nl+2, nlev)
+        vav_pad = vav_pad[None]
+        vau_d = 0.25 * (vau_pad[:, :-1, :-1, :] + vau_pad[:, 1:, :-1, :]
+                        + vau_pad[:, :-1, 1:, :] + vau_pad[:, 1:, 1:, :])
+        vav_d = 0.25 * (vav_pad[:, :-1, :-1, :] + vav_pad[:, 1:, :-1, :]
+                        + vav_pad[:, :-1, 1:, :] + vav_pad[:, 1:, 1:, :])
+        du_d_dt = du_d_dt + vau_d
+        dv_d_dt = dv_d_dt + vav_d
+
+        # ---- THERMO dT/dt: horiz_adv + adiabatic + vert_adv_T ----
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+        dT_dx = gradient_x_3d_core(T_pad, dx_t)
+        dT_dy = gradient_y_3d_core(T_pad, dy_t)
+        horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
+        dln_ps_dx = gradient_x_3d_core(lnps_pad, dx_t)[..., 0]
+        dln_ps_dy = gradient_y_3d_core(lnps_pad, dy_t)[..., 0]
+        adiabatic = kappa * T_t * omega / p_adiab
+        v_dot_grad_lnps = (u_cell * dln_ps_dx[..., None]
+                           + v_cell * dln_ps_dy[..., None])
+        if _hybrid:
+            v_dot_grad_lnps = v_dot_grad_lnps * (
+                coord.B_full * p_s_t[..., None] / p_adiab)
+        adiabatic = adiabatic + kappa * T_t * v_dot_grad_lnps
+        dT_dt = horiz_adv_T + vert_adv_T + adiabatic
+
+        return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
+
+    def stage(u_d, v_d, T, p_s, phis):
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)), T=(T, (n, n, nlev)),
+                      p_s=(p_s, (n, n)), phis=(phis, (n, n)))
+        return _body(u_d, v_d, T, p_s, phis,
+                     cosa_corner, dx_edge_y, dy_edge_x, area,
+                     gc00, gc01, gc10, gc11, f_corner, cosa_u,
+                     dx, dy, cos_a, sin_a, cap, sap, offsets)
+
+    return stage
+
+
 # ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
