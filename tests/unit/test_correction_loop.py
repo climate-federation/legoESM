@@ -17,10 +17,12 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.training.compare_reanalysis import ColumnState
 from legoesm.training.correction_loop import (
     CompareResult,
     make_compare_fn,
+    run_correction_campaign,
     run_correction_iteration,
 )
 
@@ -281,6 +283,80 @@ def test_make_compare_fn_rejects_reserved_kwarg():
             lat_deg=jnp.zeros(2), lon_deg=jnp.zeros(2), area_weights=jnp.ones((2, 2)),
             n_worst=1, run_amip_fn=lambda c: ref,
             model=ref,  # reserved (set internally) -> reaches compare_kwargs -> raises
+        )
+
+
+def test_campaign_accumulates_corrections_across_rounds():
+    """The iterative loop: each round corrects the worst columns and ACCUMULATES
+    (earlier corrections persist), driving the bias to zero over rounds."""
+    nlat, nlon = 2, 2  # 4 columns
+    area_w = jnp.ones((nlat, nlon))
+    default_ck = float(CLUBBLiteConfig().C_K)
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim == 0:  # round 0: nothing corrected yet
+            bias = jnp.full((nlat, nlon), 8.0)
+        else:
+            ck2d = ck.reshape((nlat, nlon))
+            # A column is "corrected" once its C_K differs from the default.
+            bias = jnp.where(jnp.isclose(ck2d, default_ck), 8.0, 0.0)
+        # combined_score field = the T bias proxy (uniform per column).
+        return CompareResult(
+            combined_score=bias, manifest=_manifest_from_bias(bias),
+            area_weights=area_w, model_ctx=None,
+        )
+
+    def _manifest_from_bias(bias):
+        flat = np.asarray(bias).reshape(-1)
+        # the high-bias (uncorrected) columns are the worst.
+        worst = [i for i in np.argsort(-flat)[:2] if flat[i] > 0.0]
+        return [_Rec(flat_index=int(i), lat_deg=0.0, environment=_Env(0.0))
+                for i in worst]
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))  # != default
+
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=2,
+        compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(nlat, nlon),
+        background=default_ck,
+    )
+    assert len(campaign.iterations) == 2
+    # Round 0 corrected 2 columns, round 1 the other 2 (different worst columns).
+    assert campaign.iterations[0].n_corrected == 2
+    assert campaign.iterations[1].n_corrected == 2
+    # ACCUMULATION: the final field corrected ALL 4 columns (round-0 corrections
+    # were NOT overwritten by round 1).
+    final_ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    assert np.all(np.isclose(final_ck, 0.9))
+    # The bias fell monotonically to zero across rounds.
+    assert float(campaign.iterations[0].bias.baseline_bias) == pytest.approx(8.0)
+    assert float(campaign.iterations[1].bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_campaign_zero_iterations_is_noop():
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=0,
+        compare_fn=lambda c: CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2))),
+        diagnose_fn=lambda r, c: None,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=0.4,
+    )
+    assert campaign.iterations == ()
+    assert jnp.ndim(jnp.asarray(campaign.final_config.C_K)) == 0  # unchanged scalar
+    # final_field is the (scalar) background broadcast to the grid.
+    assert campaign.final_field.shape == (2, 2)
+    np.testing.assert_allclose(np.asarray(campaign.final_field), 0.4)
+
+
+def test_campaign_negative_iterations_raises():
+    with pytest.raises(ValueError, match="n_iterations must be"):
+        run_correction_campaign(
+            CLUBBLiteConfig(), n_iterations=-1,
+            compare_fn=lambda c: CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2))),
+            diagnose_fn=lambda r, c: None,
+            promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
         )
 
 

@@ -64,6 +64,67 @@ class CorrectionResult(NamedTuple):
     n_corrected: int                   # number of worst columns diagnosed
 
 
+class CampaignResult(NamedTuple):
+    """Outcome of a multi-iteration correction campaign."""
+
+    final_config: Any
+    iterations: tuple                  # the per-iteration CorrectionResults
+    final_field: jax.Array             # the accumulated per-column field
+
+
+def run_correction_campaign(
+    initial_config: Any,
+    n_iterations: int,
+    *,
+    compare_fn: Callable[[Any], "CompareResult"],
+    diagnose_fn: Callable[[Any, Any], Any],
+    promotion_key: str,
+    grid_shape: tuple[int, ...],
+    diagnosis_method: str = "eddy_diffusivity",
+    background: float = 0.0,
+    expected_ncol: int | None = None,
+) -> CampaignResult:
+    """Run the offline iterative correction loop for ``n_iterations`` rounds.
+
+    The §1 offline / iterative loop: each round re-runs the model, re-diagnoses
+    the (now different) worst columns, and folds their correction into a
+    persistent per-column field — so a column corrected in an earlier round
+    keeps its value while newly-flagged columns are added (the feedback field
+    of round *k* becomes the **background** of round *k+1*, accumulating).
+    ``background`` is the production scalar default used as the round-0 base.
+
+    Returns the final config + every round's :class:`CorrectionResult`.  The
+    overall bias change is ``iterations[0].bias.baseline_bias`` (first run) vs
+    ``iterations[-1].bias.updated_bias`` (final run).
+    """
+    if int(n_iterations) < 0:
+        raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
+    config = initial_config
+    base = background
+    iterations: list = []
+    for _ in range(int(n_iterations)):
+        result = run_correction_iteration(
+            config,
+            compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+            promotion_key=promotion_key, grid_shape=grid_shape,
+            diagnosis_method=diagnosis_method, background=base,
+            expected_ncol=expected_ncol,
+        )
+        config = result.updated_config
+        base = result.feedback_field   # accumulate into the next round's base
+        iterations.append(result)
+    if iterations:
+        final_field = iterations[-1].feedback_field
+    else:
+        bg = jnp.asarray(background)
+        final_field = (
+            jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+        )
+    return CampaignResult(
+        final_config=config, iterations=tuple(iterations), final_field=final_field
+    )
+
+
 def make_compare_fn(
     *,
     reference: ColumnState,
@@ -172,13 +233,20 @@ def run_correction_iteration(
             baseline.combined_score, baseline.combined_score,
             baseline.area_weights, valid_mask=baseline.valid_mask,
         )
+        # No flagged columns ⇒ the feedback field is the unchanged background
+        # (scalar → uniform at the score dtype; array → the accumulated field
+        # reshaped to the grid, dtype PRESERVED so it cannot diverge from config).
+        bg = jnp.asarray(background)
+        noop_field = (
+            jnp.full(grid_shape, bg.astype(dtype))
+            if bg.ndim == 0
+            else bg.reshape(grid_shape)
+        )
         return CorrectionResult(
             updated_config=baseline_config,
             bias=noop_bias,
             worst_column_change=jnp.asarray(0.0, dtype=dtype),
-            feedback_field=jnp.full(
-                grid_shape, jnp.asarray(background, dtype=dtype)
-            ),
+            feedback_field=noop_field,
             n_corrected=0,
         )
 

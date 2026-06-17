@@ -96,8 +96,12 @@ def assemble_feedback_field(
             f"have the same length (one diagnosis per worst column)."
         )
     if not records:
-        # No worst columns → uniform background field.
-        return jnp.full(grid_shape, jnp.asarray(background))
+        # No worst columns → the background field unchanged (scalar → uniform,
+        # array → the accumulated field reshaped to the grid).
+        bg = jnp.asarray(background)
+        return (
+            jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+        )
 
     flat_indices = jnp.asarray([int(r.flat_index) for r in records])
     reduced = [reduce_column_diagnosis(d, method) for d in diagnoses]

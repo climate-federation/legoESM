@@ -45,7 +45,7 @@ def scatter_column_field(
     flat_indices: jax.Array,
     values: jax.Array,
     *,
-    background: float = 0.0,
+    background: float | jax.Array = 0.0,
     valid: jax.Array | None = None,
 ) -> jax.Array:
     """Static ``(lat, lon)`` field: ``background`` everywhere, ``values`` scattered.
@@ -53,8 +53,13 @@ def scatter_column_field(
     ``flat_indices`` are flat column indices into ``grid_shape`` (e.g. from
     :func:`legoesm.training.column_era5_metrics.rank_worst_columns`); ``values``
     is the diagnosed coefficient per column.  ``valid`` (same length) drops
-    flagged-invalid diagnoses (they keep the background).  Differentiable w.r.t.
-    ``values``; ``flat_indices`` are static.
+    flagged-invalid diagnoses (they keep the background value at their index).
+    Differentiable w.r.t. ``values``; ``flat_indices`` are static.
+
+    ``background`` may be a **scalar** (uniform base) or a grid-shaped /
+    ``(ncol,)`` **array** — the latter lets an iterative campaign ACCUMULATE
+    corrections: pass the current per-column field as the base so columns not
+    re-diagnosed this round keep their existing correction.
 
     Duplicate indices: the **last** write wins (``.set`` semantics) — dedupe
     upstream if several diagnoses map to one column.
@@ -64,14 +69,25 @@ def scatter_column_field(
     n = 1
     for d in grid_shape:
         n *= int(d)
-    field = jnp.full((n,), jnp.asarray(background, dtype=values.dtype))
+    bg = jnp.asarray(background)
+    # Promote so a float64 accumulated background is not downcast to a float32
+    # values dtype (or vice-versa).
+    dtype = jnp.result_type(bg, values)
+    values = values.astype(dtype)
+    if bg.ndim == 0:
+        base = jnp.full((n,), bg.astype(dtype))
+    else:
+        base = bg.reshape(-1).astype(dtype)
+        if base.shape[0] != n:
+            raise ValueError(
+                f"array background size {base.shape[0]} != prod(grid_shape) {n}."
+            )
     if valid is not None:
         valid = jnp.asarray(valid, dtype=bool)
-        # Invalid samples write the existing background at their index (no-op
-        # value) so the scatter stays a fixed-shape, traceable operation.
-        bg = jnp.asarray(background, dtype=values.dtype)
-        values = jnp.where(valid, values, bg)
-    field = field.at[flat_indices].set(values)
+        # Invalid samples keep the EXISTING base value at their index (a no-op
+        # write) — for an array background this preserves the accumulated value.
+        values = jnp.where(valid, values, base[flat_indices])
+    field = base.at[flat_indices].set(values)
     return field.reshape(grid_shape)
 
 
