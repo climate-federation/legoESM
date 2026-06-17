@@ -1293,31 +1293,19 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
     cz = P("face", "tile_i", "tile_j", None)       # 4D corner / cc 4D out
     co = P("face", "tile_i", "tile_j")             # 2D cc out (dp_s_dt)
 
-    @partial(shard_map, mesh=mesh,
-             in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
-                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
-                       + (fo,) * 4                  # gc00..gc11
-                       + (fo, fo)                   # f_corner, cosa_u
-                       + (fo, fo)                   # dx, dy (thermo)
-                       + (fo,) * 4                  # cos_a, sin_a, cap, sap (lift)
-                       + (P(),),                    # offsets
-             out_specs=(cz, cz, cz, co), check_vma=False)
-    def _body(u_d, v_d, T, p_s, phis,
-              cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
-              dx_, dy_, ca, sa, capf, sapf, offs):
-        a_i = jax.lax.axis_index("tile_i") * nl
-        a_j = jax.lax.axis_index("tile_j") * nl
+    # --- Reusable per-tile tendency, SHARED by the capstone _body (called once)
+    #     and the tiled STEP (calls it once per SSP-RK3 stage on the evolving
+    #     tile-local state — no gather).  Takes the per-tile state blocks (corner
+    #     (nl+1) / cc (nl)) + the PRE-SLICED tile metrics + offsets; closes over
+    #     coord / consts / the halo bodies.  D->C runs on the pre-sliced corner
+    #     tile via a_i=a_j=0 (bit-identical to slicing the full face array at
+    #     (a_i,a_j) — same (nl+1,nl+1) block, same cosa_u (nl+1,nl) slice).  No
+    #     new numerics (verbatim move of the gated capstone math).
+    from legoesm.grids.vertical import pressure_from_sigma
 
-        def _s(arr, si, sj):
-            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
-            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
-
-        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
-        v_d_t = _s(v_d, nl + 1, nl + 1)
-        T_t = _s(T, nl, nl)                        # (1, nl, nl, nlev) cc
-        p_s_t = _s(p_s, nl, nl)                    # (1, nl, nl) cc
-        phis_t = _s(phis, nl, nl)
-
+    def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
+                       cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
+                       dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs):
         # ---- cc winds: dgrid_to_center_vector for B/thermo (within-face, NO
         #      halo); interp_corner_to_center (batched) for vertical advection.
         u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
@@ -1328,10 +1316,9 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         u_cc_va, v_cc_va = _uv_cc[..., 0], _uv_cc[..., 1]
 
         # ---- CONTINUITY: D->C (local) -> divergence (local) -> dp_s/dt + vert ----
-        u_c, v_c = dgrid_to_cgrid_tile_2d(u_d, v_d, cosau, a_i, a_j, nl)
+        u_c, v_c = dgrid_to_cgrid_tile_2d(u_d_t, v_d_t, cosau_t, 0, 0, nl)
         div_v = cgrid_divergence_local(
-            u_c, v_c, _s(dye, nl + 1, nl), _s(dxe, nl, nl + 1),
-            _s(ar, nl, nl))                        # (1, nl, nl, nlev)
+            u_c, v_c, dye_t, dxe_t, ar_t)          # (1, nl, nl, nlev)
         if _hybrid:
             mass_flux, D_total_p = compute_mass_flux_hybrid(div_v, p_s_t, coord)
             dp_s_dt = -D_total_p[..., 0] / coord.B_range
@@ -1359,7 +1346,6 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         if _hybrid:
             p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
         else:
-            from legoesm.grids.vertical import pressure_from_sigma
             p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
         p_adiab = jnp.maximum(p_full, _p_floor)
         ln_ps = jnp.log(p_s_t)
@@ -1371,8 +1357,7 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         Phi = _geo(T_t, p_s_t, coord, phis_t)
         B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
         zeta = dgrid_vorticity_core(
-            u_d_t, v_d_t, _s(cosa_c, nl + 1, nl + 1),
-            _s(dxe, nl, nl + 1), _s(dye, nl + 1, nl), _s(ar, nl, nl))
+            u_d_t, v_d_t, cosa_c_t, dxe_t, dye_t, ar_t)
         inv_T = 1.0 / T_t
 
         # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64: the
@@ -1383,10 +1368,8 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
         T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
 
-        gc = (_s(c00, nl + 1, nl + 1), _s(c01, nl + 1, nl + 1),
-              _s(c10, nl + 1, nl + 1), _s(c11, nl + 1, nl + 1))
         zeta_corner = (interp_center_to_corner(zeta_pad, cdgrid, padded=zeta_pad)
-                       + _s(fco, nl + 1, nl + 1)[..., None])
+                       + fco_t[..., None])
         dB_dx, dB_dy_perp = arakawa_lamb_gradient_core(B_pad, *gc)
         dln_dx_hi, dln_dy_perp_hi = arakawa_lamb_gradient_core(lnps_pad, *gc)
         T_corner = 1.0 / interp_center_to_corner(invT_pad, cdgrid, padded=invT_pad)
@@ -1405,10 +1388,6 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 
         # ---- vert_adv_uv_d lift (center_to_dgrid_vector: VECTOR halo + corner
         #      avg) ADDED to du/dv (primitive_eq_cdgrid.py:961-977) ----
-        ca_t = _s(ca, nl, nl)[0]
-        sa_t = _s(sa, nl, nl)[0]
-        cap_t = _s(capf, nl + 2, nl + 2)[0]
-        sap_t = _s(sapf, nl + 2, nl + 2)[0]
         vau_pad, vav_pad = vector_body(
             vert_adv_u_cc[0], vert_adv_v_cc[0], ca_t, sa_t, cap_t, sap_t, offs)
         vau_pad = vau_pad[None]                    # (1, nl+2, nl+2, nlev)
@@ -1421,8 +1400,6 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         dv_d_dt = dv_d_dt + vav_d
 
         # ---- THERMO dT/dt: horiz_adv + adiabatic + vert_adv_T ----
-        dx_t = _s(dx_, nl, nl)
-        dy_t = _s(dy_, nl, nl)
         dT_dx = gradient_x_3d_core(T_pad, dx_t)
         dT_dy = gradient_y_3d_core(T_pad, dy_t)
         horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
@@ -1438,6 +1415,50 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
         dT_dt = horiz_adv_T + vert_adv_T + adiabatic
 
         return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
+
+    def _slice_metrics(_s, cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco,
+                       cosau, dx_, dy_, ca, sa, capf, sapf):
+        """Per-tile metric slices (constant across RK3 stages) — sliced from the
+        FACE-SHARDED metric args (NEVER closed over the full (6,n,n) array; that
+        broadcasts the output to face extent 6 — the codex U4a HIGH)."""
+        return dict(
+            cosa_c_t=_s(cosa_c, nl + 1, nl + 1),
+            dxe_t=_s(dxe, nl, nl + 1), dye_t=_s(dye, nl + 1, nl),
+            ar_t=_s(ar, nl, nl),
+            gc=(_s(c00, nl + 1, nl + 1), _s(c01, nl + 1, nl + 1),
+                _s(c10, nl + 1, nl + 1), _s(c11, nl + 1, nl + 1)),
+            fco_t=_s(fco, nl + 1, nl + 1), cosau_t=_s(cosau, nl + 1, nl),
+            dx_t=_s(dx_, nl, nl), dy_t=_s(dy_, nl, nl),
+            ca_t=_s(ca, nl, nl)[0], sa_t=_s(sa, nl, nl)[0],
+            cap_t=_s(capf, nl + 2, nl + 2)[0], sap_t=_s(sapf, nl + 2, nl + 2)[0])
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
+                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
+                       + (fo,) * 4                  # gc00..gc11
+                       + (fo, fo)                   # f_corner, cosa_u
+                       + (fo, fo)                   # dx, dy (thermo)
+                       + (fo,) * 4                  # cos_a, sin_a, cap, sap (lift)
+                       + (P(),),                    # offsets
+             out_specs=(cz, cz, cz, co), check_vma=False)
+    def _body(u_d, v_d, T, p_s, phis,
+              cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
+              dx_, dy_, ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        m = _slice_metrics(_s, cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco,
+                           cosau, dx_, dy_, ca, sa, capf, sapf)
+        return _tile_tendency(
+            _s(u_d, nl + 1, nl + 1), _s(v_d, nl + 1, nl + 1),
+            _s(T, nl, nl), _s(p_s, nl, nl), _s(phis, nl, nl),
+            m["cosa_c_t"], m["dxe_t"], m["dye_t"], m["ar_t"], m["gc"],
+            m["fco_t"], m["cosau_t"], m["dx_t"], m["dy_t"],
+            m["ca_t"], m["sa_t"], m["cap_t"], m["sap_t"], offs)
 
     def stage(u_d, v_d, T, p_s, phis):
         _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
