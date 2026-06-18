@@ -29,6 +29,7 @@ from legoesm.training.column_state_accumulator import (
 from legoesm.training.compare_reanalysis import (
     ColumnState,
     column_state_from_hydrostatic,
+    grid_winds_from_spectral,
 )
 
 
@@ -118,12 +119,16 @@ def cmip_column_state(
     ``dt_segment`` are accepted for the ``extract_column_state`` protocol but
     unused — the coupled SST is prognostic, not a time-prescribed forcing.
     """
+    # Spectral CMIP: synthesize the grid winds from the spectral state first
+    # (no-op for grid / MPAS states); MPAS: column_state_from_hydrostatic
+    # reconstructs the cell wind from the edge velocity via mesh=driver.grid.
+    state = grid_winds_from_spectral(
+        coupled_driver.state, getattr(coupled_driver, "grid", None),
+        getattr(coupled_driver, "sigma", None))
     return column_state_from_hydrostatic(
-        coupled_driver.state,
+        state,
         coupled_driver.q_v,
         sst_K=_sst_array(coupled_driver.ocean_state.T_sfc),
-        # MPAS coupled run: the cell wind is reconstructed from the edge velocity
-        # (driver.grid is the VoronoiMesh); ignored for lat-lon / cubed (v set).
         mesh=getattr(coupled_driver, "grid", None),
     )
 
@@ -139,11 +144,15 @@ def amip_column_state(
     is unused; the SIC is not needed for the column comparison.
     """
     sst, _sic = atm_driver.get_sst_sic(day)
+    # Spectral AMIP: synthesize the grid winds from the spectral state first
+    # (no-op for grid / MPAS states); MPAS reconstructs the cell wind in
+    # column_state_from_hydrostatic via mesh=driver.grid.
+    state = grid_winds_from_spectral(
+        atm_driver.state, getattr(atm_driver, "grid", None),
+        getattr(atm_driver, "sigma", None))
     return column_state_from_hydrostatic(
-        atm_driver.state,
+        state,
         atm_driver.q_v,
         sst_K=_sst_array(sst),
-        # MPAS atm run: reconstruct the cell wind from the edge velocity
-        # (driver.grid is the VoronoiMesh); ignored for lat-lon / cubed (v set).
         mesh=getattr(atm_driver, "grid", None),
     )

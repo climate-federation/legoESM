@@ -196,6 +196,16 @@ class CoupledESMDriver:
         """
         return self._atm.grid
 
+    @property
+    def sigma(self):
+        """The atmosphere vertical coordinate (delegates to the atm driver).
+
+        Exposes the same public ``sigma`` as :class:`ModelDriver` so the column
+        comparison can synthesize the grid winds from a spectral CMIP state
+        (``spectral_pe_to_grid`` needs the grid + sigma) for both AMIP and CMIP.
+        """
+        return self._atm.sigma
+
     # ==================================================================
     # Setup
     # ==================================================================

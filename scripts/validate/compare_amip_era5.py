@@ -122,6 +122,7 @@ def model_state_from_restart(
     sst_K: jnp.ndarray | None = None,
     precip_mm_day: jnp.ndarray | None = None,
     mesh: Any = None,
+    sigma: Any = None,
 ) -> ColumnState:
     """Build a model :class:`ColumnState` from a loaded restart ``state`` + ``q_v``.
 
@@ -132,9 +133,16 @@ def model_state_from_restart(
     which unwraps the ``Field``\\ s.  SST (prescribed AMIP forcing) and precip are
     threaded in by the caller when available; when omitted the SST environment
     tag falls back to surface air temperature and the precip term is dropped.
+    A SPECTRAL restart state is first synthesized to grid winds (``mesh`` = the
+    model GaussianGrid, ``sigma`` the vertical coord); MPAS reconstructs the cell
+    wind from the edge velocity via ``mesh``; lat-lon/cubed pass through.
     """
-    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.compare_reanalysis import (
+        column_state_from_hydrostatic,
+        grid_winds_from_spectral,
+    )
 
+    state = grid_winds_from_spectral(state, mesh, sigma)
     return column_state_from_hydrostatic(
         state, q_v, sst_K=sst_K, precip_mm_day=precip_mm_day, mesh=mesh
     )
@@ -215,8 +223,19 @@ def main(argv: list[str] | None = None) -> int:
     # wrong checkpoint.  We then assert the loaded state matches the grid/sigma
     # we built, so a resolution/nlev mismatch fails loudly here, not as a
     # mis-shaped comparison downstream.
+    # NOTE (Codex): this one-shot CLI accepts GRID-format restarts. A spectral
+    # run's checkpoint stores SPECTRAL keys (vor_hat/div_hat/... + spectral_layout),
+    # which `load_restart` does not yet reconstruct (it hard-reads grid keys) — so
+    # `--grid-type spectral --restart <spectral_checkpoint>` fails in the loader
+    # BELOW. The WORKING spectral-compare route is the live-state campaign path
+    # (legoesm.training.run_to_column_mean, which converts driver.state via
+    # grid_winds_from_spectral); a restart-loader spectral-layout branch is the
+    # documented follow-up. The conversion here is DEFENSIVE — correct + a no-op if
+    # a grid state is returned, and ready if the loader is later made spectral-aware.
     loaded = load_restart(args.restart, grid, sigma, strict=True)
     state, q_v = loaded[0], loaded[1]
+    from legoesm.training.compare_reanalysis import grid_winds_from_spectral
+    state = grid_winds_from_spectral(state, grid, sigma)
     expected_cols = tuple(grid.grid_shape_2d)
     if tuple(state.T.shape[:-1]) != expected_cols:
         raise ValueError(
@@ -242,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
             "follow-up (docs/COMPARE_REANALYSIS.md).",
             stacklevel=2,
         )
-    model = model_state_from_restart(state, q_v, sst_K=sst_K)
+    # state is already grid-synthesized above; mesh=grid lets the MPAS branch
+    # reconstruct cell winds if this is an MPAS edge-velocity restart.
+    model = model_state_from_restart(state, q_v, sst_K=sst_K, mesh=grid)
 
     era5_cfg = TrainingERA5Config(
         zarr_store=args.era5_zarr,
