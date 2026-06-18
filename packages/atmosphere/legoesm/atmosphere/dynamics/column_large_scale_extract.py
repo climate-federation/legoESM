@@ -379,15 +379,21 @@ def extract_column_forcing_cubed_sphere(
     div_3d = _divergence_cubed_3d(u, v, grid)
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
-    # Geostrophic forcing is NOT applied on the cubed sphere (u_geo/v_geo=None, so
-    # no geostrophic reference wind is supplied — the column LES's plane Coriolis
-    # falls back to f×V, exactly as for equatorial columns).  Geostrophic balance
-    # is geographic
-    # (east/north), but the cubed-sphere gradient operators return GRID-AXIS
-    # derivatives on a NON-ORTHOGONAL grid; the metric-correct east/north↔grid
-    # rotation (grid.cos_angle/sin_angle) is a follow-up that must be visually
-    # verified for cube-edge/corner artifacts (CLAUDE.md) before it ships.  The
-    # lat-lon path (ERA5-native, the primary comparison grid) is fully geostrophic.
+    # Geostrophic forcing is NOT applied on the cubed sphere (u_geo/v_geo=None → the
+    # column LES's plane Coriolis falls back to f×V, as for equatorial columns).
+    # A naive rotation of the grid-axis gradient to geographic (grid.angle +
+    # rotate_winds_grid_to_geo) is NOT sufficient (iter 91, Codex NO-SHIP): the cube
+    # gradient operators return COVARIANT directional derivatives, so on the
+    # NON-orthogonal equiangular grid the metric-inverse step is missing —
+    # ``G^x = (g_x − c·g_y)/(1 − c²)``, ``G^y = (g_y − c·g_x)/(1 − c²)`` with
+    # ``c = ê_x·ê_y`` — and the naive rotation leaves a SYSTEMATIC, non-convergent
+    # ~10–17% error near panel edges/corners (the missing c/(1−c²) cross-coupling).
+    # Unlike an advection tendency, a geostrophic REFERENCE wind feeds the LES plane
+    # Coriolis directly (a persistent f·ΔV_geo departure), so this error is NOT
+    # tolerable.  A metric-correct gradient (the contravariant inverse above; the
+    # grid must expose ê_x·ê_y) OR a calibrated orthogonality-deficit cell gate
+    # (``1 − area/(dx·dy)``) is the follow-up.  The lat-lon (ERA5-native, primary
+    # compare grid), Voronoi (iter 82) and Gaussian (iter 90) paths ARE geostrophic.
     u_geo, v_geo = None, None
 
     f, i, j = int(col_index[0]), int(col_index[1]), int(col_index[2])

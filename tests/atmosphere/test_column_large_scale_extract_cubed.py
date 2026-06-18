@@ -14,7 +14,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
 from legoesm.atmosphere.dynamics.column_large_scale_extract import (
     advective_tendency,
@@ -198,12 +197,16 @@ def test_dispatch_unknown_grid_raises():
         )
 
 
-def test_extract_cubed_geostrophic_disabled_pending_metric_rotation():
-    """Geostrophic forcing is intentionally DISABLED on the cubed sphere (even at
-    extratropical latitudes): the gradient operators return grid-axis derivatives
-    on a non-orthogonal grid, so the geographic geostrophic balance is not applied
-    until a metric-correct east/north rotation lands (iter 29 / Codex).  Regression
-    guard so it is not silently re-enabled unverified."""
+def test_extract_cubed_geostrophic_disabled_pending_metric_gradient():
+    """Geostrophic forcing stays DISABLED on the cubed sphere (u_geo/v_geo=None even
+    at extratropical latitudes): the cube gradient operators return COVARIANT
+    directional derivatives, so on the NON-orthogonal equiangular grid a naive
+    rotation to geographic (grid.angle) omits the metric-inverse step
+    ``G^x=(g_x-c*g_y)/(1-c^2)`` (c = e_x.e_y) and leaves a SYSTEMATIC non-convergent
+    ~10-17% near-edge error (iter 91, Codex NO-SHIP — a reference WIND feeds the LES
+    plane Coriolis directly, unlike an advection tendency).  A metric-correct
+    gradient OR a calibrated orthogonality-deficit cell gate is the follow-up.
+    Regression guard so geostrophic is not silently re-enabled unverified."""
     grid, sigma = _grid_and_sigma()
     T, q_v, u, v, p_s = _nonuniform_state(grid)
     ls = extract_column_forcing_cubed_sphere(
@@ -211,6 +214,6 @@ def test_extract_cubed_geostrophic_disabled_pending_metric_rotation():
         lat_rad=float(jnp.deg2rad(40.0)), col_index=_COL,  # extratropical
     )
     assert ls.u_geo is None and ls.v_geo is None
-    # The rest of the forcing (advection, ω) is still populated.
+    # The rest of the forcing (advection, omega) is still populated.
     assert ls.omega.shape == (_NLEV,)
     assert bool(jnp.all(jnp.isfinite(ls.omega)))
