@@ -106,6 +106,27 @@ class CampaignResult(NamedTuple):
     stop_reason: str = "max_iterations"  # "max_iterations" | "converged" (early stop)
 
 
+def last_accepted_env_kernel(campaign_result):
+    """The ``env_kernel`` of the LAST ACCEPTED round that produced one, or ``None``.
+
+    The cross-resolution deploy artifact (the RAW env→coefficient ``EnvKernel``,
+    iter 70).  Under the monotonic gate a REJECTED final round's kernel is
+    inconsistent with the accepted final field/config, so the transferable kernel
+    is the last ACCEPTED round's.  ``accepted`` is populated EVERY round by
+    :func:`run_correction_campaign` (kept rounds flagged True); an EMPTY tuple — a
+    hand-built or zero-round :class:`CampaignResult` — is treated as all-kept.
+    Returns ``None`` for a static / non-CLUBB / no-op campaign (no round produced a
+    kernel).  Shared by the campaign CLI and the cross-resolution OSSE.
+    """
+    accepted = list(campaign_result.accepted)
+    kernel = None
+    for i, it in enumerate(campaign_result.iterations):
+        kept = accepted[i] if i < len(accepted) else True
+        if kept and getattr(it, "env_kernel", None) is not None:
+            kernel = it.env_kernel
+    return kernel
+
+
 class CorrectionSpec(NamedTuple):
     """One coefficient to correct in a SIMULTANEOUS multi-coefficient round.
 

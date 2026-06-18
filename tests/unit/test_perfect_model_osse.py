@@ -17,13 +17,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+from legoesm.training.column_manifest import ColumnEnvironment, ColumnRecord
 from legoesm.training.correction_loop import CompareResult, CorrectionSpec
 from legoesm.training.perfect_model_osse import (
     CoefRecovery,
+    CrossResOSSEResult,
     MultiOSSEResult,
     OSSEResult,
+    cross_res_osse_verdict,
     multi_osse_verdict,
     osse_verdict,
+    run_cross_resolution_osse,
     run_multi_perfect_model_osse,
     run_perfect_model_osse,
 )
@@ -340,3 +344,176 @@ def test_multi_verdict_bias_only_when_not_all_recover():
         n_rounds=2, n_accepted=2, summary=None)
     v = multi_osse_verdict(res)
     assert v.status == "bias_only" and "1/2" in v.message
+
+
+# --------------------------------------------------------------------------- #
+# Cross-resolution OSSE: learn the env-dependent correction on a COARSE grid,
+# deploy via the env-kernel on a FINE grid (different ncol), measure the bias.
+# --------------------------------------------------------------------------- #
+class _CKDiag(NamedTuple):
+    C_K: jax.Array
+    valid: jax.Array
+
+
+def _c_true(env):
+    """Env-OPTIMAL C_K rises with CAPE (predictor 1): 0.4..0.7 over [0, 3000]."""
+    cape = np.asarray(env)[:, 1]
+    return 0.4 + 1.0e-4 * cape
+
+
+def _crec(flat, score, sst, cape, shear):
+    return ColumnRecord(
+        flat_index=int(flat), grid_index=(int(flat),), lat_deg=0.0, lon_deg=0.0,
+        time_index=0, combined_score=float(score), T_rmse_K=0.0, qv_rmse_kg_kg=0.0,
+        wind_rmse_m_s=0.0, precip_err_mm_day=0.0,
+        environment=ColumnEnvironment(sst_K=float(sst), cape_J_kg=float(cape),
+                                      bulk_shear_m_s=float(shear)))
+
+
+def _obs(config, grid_shape):
+    """'Model time mean' = the per-column C_K broadcast to the grid (flat)."""
+    ck = jnp.asarray(config.C_K)
+    n = int(np.prod(grid_shape))
+    flat = jnp.full((n,), float(ck)) if ck.ndim == 0 else ck.reshape(-1)
+    return np.asarray(flat)
+
+
+def _make_run_fn(grid_shape):
+    def run_fn(config):
+        return jnp.asarray(_obs(config, grid_shape)).reshape(grid_shape)
+    return run_fn
+
+
+def _make_build_compare(grid_shape, env):
+    # The pseudo-truth observable is the env-OPTIMAL C_K (env-dependent); bias =
+    # |C_K - c_true(env)|.  ALL columns with non-zero bias are flagged worst so the
+    # kernel samples span the env range (the reference arg is the constant run, not
+    # used — the analytic env truth is the pseudo-reanalysis).
+    truth = _c_true(env)
+    area_w = jnp.ones(grid_shape)
+
+    def build(_reference):
+        def compare(config):
+            bias = np.abs(_obs(config, grid_shape) - truth)
+            manifest = [_crec(i, bias[i], *np.asarray(env)[i])
+                        for i in range(bias.shape[0]) if bias[i] > 1e-9]
+            return CompareResult(
+                combined_score=jnp.asarray(bias.reshape(grid_shape)),
+                manifest=manifest, area_weights=area_w, model_ctx=None)
+        return compare
+    return build
+
+
+def _make_env_grid_fn(env):
+    grid_env = jnp.asarray(env, dtype=float)
+    length_scales = jnp.std(grid_env, axis=0)
+
+    def env_grid_fn(_model_ctx):
+        return grid_env, length_scales
+    return env_grid_fn
+
+
+def _diagnose_c_true(record, ctx):
+    env = np.asarray([[record.environment.sst_K, record.environment.cape_J_kg,
+                       record.environment.bulk_shear_m_s]])
+    return _CKDiag(C_K=jnp.array([float(_c_true(env)[0])]), valid=jnp.array([True]))
+
+
+# Coarse: 6 columns spanning CAPE [200, 3000]; SST/shear co-vary.
+_COARSE_ENV = np.array([
+    [296.0, 200.0, 4.0], [298.0, 800.0, 7.0], [300.0, 1400.0, 11.0],
+    [301.0, 2000.0, 15.0], [302.0, 2600.0, 19.0], [303.0, 3000.0, 22.0],
+])
+# Fine: 8 columns, CAPE WITHIN the coarse hull (covered) — different ncol + envs.
+_FINE_ENV = np.array([
+    [297.0, 500.0, 5.0], [299.0, 1000.0, 9.0], [300.5, 1700.0, 13.0],
+    [301.5, 2300.0, 17.0], [296.5, 350.0, 4.5], [298.5, 900.0, 8.0],
+    [302.5, 2800.0, 20.0], [300.0, 1500.0, 12.0],
+])
+# Far-climate fine grid (CAPE ~10000, way above the coarse hull) — out of hull.
+_FAR_ENV = np.array([[310.0, 9000.0, 60.0], [312.0, 11000.0, 70.0]] * 2)
+
+
+def _cross_res(fine_env, fine_shape, coverage_threshold=0.8):
+    return run_cross_resolution_osse(
+        true_config=CLUBBLiteConfig(C_K=0.55),     # value irrelevant (env truth)
+        biased_config=CLUBBLiteConfig(),           # C_K = 0.4 constant
+        coefficient_field="C_K", promotion_key="clubb_lite_C_K",
+        diagnosis_method="clubb_coefficient",
+        coarse_grid_shape=(2, 3),
+        coarse_run_fn=_make_run_fn((2, 3)),
+        coarse_build_compare_fn=_make_build_compare((2, 3), _COARSE_ENV),
+        coarse_diagnose_fn=_diagnose_c_true,
+        coarse_env_grid_fn=_make_env_grid_fn(_COARSE_ENV),
+        fine_grid_shape=fine_shape,
+        fine_run_fn=_make_run_fn(fine_shape),
+        fine_build_compare_fn=_make_build_compare(fine_shape, fine_env),
+        fine_env_grid_fn=_make_env_grid_fn(fine_env),
+        coverage_threshold=coverage_threshold, n_iterations=2)
+
+
+def test_cross_resolution_kernel_transfers_and_lowers_fine_bias():
+    """The coarse-learned env-kernel deploys on a DIFFERENT-ncol fine grid and
+    LOWERS its bias — the cross-resolution deploy generalizes across resolution."""
+    res = _cross_res(_FINE_ENV, (2, 4))
+    assert isinstance(res, CrossResOSSEResult)
+    assert res.n_fine_columns == 8                  # not the coarse 6
+    assert res.kernel_field == "C_K"
+    assert res.coarse_bias_reduced                  # the coarse leg learned
+    assert res.fine_bias_corrected < res.fine_bias_uncorrected   # cross-res improved
+    assert res.fine_bias_reduction > 0.0
+    assert res.fraction_in_hull >= 0.8              # fine climate inside coarse hull
+    v = cross_res_osse_verdict(res)
+    assert v.status == "transferred" and v.ok
+
+
+def test_cross_resolution_out_of_hull_is_untrusted():
+    """A fine grid whose climate lies OUTSIDE the coarse-sampled env → low coverage
+    → 'out_of_hull' verdict (the kernel extrapolates; not trustworthy)."""
+    res = _cross_res(_FAR_ENV, (2, 2))
+    assert res.fraction_in_hull < 0.8
+    v = cross_res_osse_verdict(res)
+    assert v.status == "out_of_hull" and not v.ok
+
+
+def test_cross_resolution_rejects_mismatched_field():
+    import pytest
+    with pytest.raises(ValueError, match="does not match"):
+        run_cross_resolution_osse(
+            true_config=CLUBBLiteConfig(), biased_config=CLUBBLiteConfig(),
+            coefficient_field="Pr_t", promotion_key="clubb_lite_C_K",
+            diagnosis_method="clubb_coefficient",
+            coarse_grid_shape=(2, 3), coarse_run_fn=_make_run_fn((2, 3)),
+            coarse_build_compare_fn=_make_build_compare((2, 3), _COARSE_ENV),
+            coarse_diagnose_fn=_diagnose_c_true,
+            coarse_env_grid_fn=_make_env_grid_fn(_COARSE_ENV),
+            fine_grid_shape=(2, 4), fine_run_fn=_make_run_fn((2, 4)),
+            fine_build_compare_fn=_make_build_compare((2, 4), _FINE_ENV),
+            fine_env_grid_fn=_make_env_grid_fn(_FINE_ENV))
+
+
+def test_last_accepted_env_kernel_skips_rejected_final_round():
+    """The helper returns the last ACCEPTED round's kernel, not a later rejected
+    round's (the rejected kernel is inconsistent with the accepted final state)."""
+    from legoesm.training.correction_loop import (
+        CampaignResult,
+        CorrectionResult,
+        last_accepted_env_kernel,
+    )
+
+    def _cres(kernel):
+        return CorrectionResult(
+            updated_config=None, bias=None, worst_column_change=jnp.asarray(0.0),
+            feedback_field=jnp.zeros((2, 2)), n_corrected=1, env_kernel=kernel)
+
+    r = CampaignResult(
+        final_config=None,
+        iterations=(_cres("K0"), _cres("K1"), _cres("K2")),
+        final_field=jnp.zeros((2, 2)), accepted=(True, True, False))
+    assert last_accepted_env_kernel(r) == "K1"      # K2's round was rejected
+    # Empty accepted ⇒ all kept ⇒ the last kernel.
+    r2 = r._replace(accepted=())
+    assert last_accepted_env_kernel(r2) == "K2"
+    # No kernel anywhere ⇒ None.
+    r3 = r._replace(iterations=(_cres(None),), accepted=(True,))
+    assert last_accepted_env_kernel(r3) is None

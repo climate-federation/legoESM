@@ -850,23 +850,19 @@ def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
     """
     import json
 
+    from legoesm.training.correction_loop import last_accepted_env_kernel
     from legoesm.training.deploy_correction import env_kernel_to_dict
 
-    accepted = list(result.accepted)
-    last = None
-    for i, it in enumerate(result.iterations):
-        # No accept_only_if_improved ⇒ accepted is empty ⇒ every round is kept.
-        kept = accepted[i] if i < len(accepted) else True
-        if kept and it.env_kernel is not None:
-            last = (i, it.env_kernel)
-    if last is None:
+    # The last ACCEPTED round's kernel (run_correction_campaign fills `accepted`
+    # every round; a rejected final round's kernel must not sit beside the
+    # accepted per-column --out). None ⇒ static / non-CLUBB / no-op campaign.
+    kernel = last_accepted_env_kernel(result)
+    if kernel is None:
         return
-    round_idx, kernel = last
     out = f"{args.out}.env_kernel.json"
     with open(out, "w") as f:
         json.dump(env_kernel_to_dict(kernel), f, indent=2)
-    print(f"[campaign] wrote RAW environment kernel (accepted round {round_idx}, "
-          f"cross-resolution deploy) to {out}")
+    print(f"[campaign] wrote RAW environment kernel (cross-resolution deploy) to {out}")
     print(
         "[campaign] deploy on ANY grid with: apply_env_kernel_override("
         "env_kernel_from_dict(json.load(open(...))), "
