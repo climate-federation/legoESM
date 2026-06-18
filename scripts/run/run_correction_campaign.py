@@ -114,17 +114,17 @@ _COEFFICIENT_SPEC_MAP = {
 
 # Single-coefficient LES diagnosis method → (promotion_key, CLUBBLiteConfig field).
 # eddy_diffusivity (legacy, dimensional) targets C_K like clubb_coefficient.
-_METHOD_PROMOTION = {
+METHOD_PROMOTION = {
     "clubb_coefficient": ("clubb_lite_C_K", "C_K"),
     "eddy_diffusivity": ("clubb_lite_C_K", "C_K"),
     "prandtl_number": ("clubb_lite_Pr_t", "Pr_t"),
     "c_eps": ("clubb_lite_C_eps", "C_eps"),
 }
 # Diagnosis methods that evaluate the GCM mixing length (need clubb_l_mix_max).
-_METHODS_NEED_LMIX = frozenset({"clubb_coefficient", "c_eps"})
+METHODS_NEED_LMIX = frozenset({"clubb_coefficient", "c_eps"})
 
 
-def _grid_latlon_deg(grid, lat_deg, lon_deg):
+def grid_latlon_deg(grid, lat_deg, lon_deg):
     """Default ``lat_deg``/``lon_deg`` to the grid's centre lat/lon in degrees."""
     import jax.numpy as jnp
     import numpy as np
@@ -137,7 +137,7 @@ def _grid_latlon_deg(grid, lat_deg, lon_deg):
     return lat_deg, lon_deg
 
 
-def _compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
+def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
                         reference, sigma, area_weights, n_worst,
                         lat_deg, lon_deg):
     """``compare_fn(config)`` = build clubb driver → run AMIP/CMIP → time-mean →
@@ -220,7 +220,7 @@ def build_correction_campaign(
     ``clubb_lite_C_K``.
     """
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
-    lat_deg, lon_deg = _grid_latlon_deg(grid, lat_deg, lon_deg)
+    lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
 
     # Keep the loop's reduction in lock-step with the LES diagnosis, and select
     # the promotable coefficient + its production default by method:
@@ -236,20 +236,20 @@ def build_correction_campaign(
             "les_config.diagnosis_method, not diagnosis_methods. For SIMULTANEOUS "
             "multi-coefficient correction use build_multi_correction_campaign.")
     diagnosis_method = les_config.diagnosis_method
-    if diagnosis_method not in _METHOD_PROMOTION:
+    if diagnosis_method not in METHOD_PROMOTION:
         raise ValueError(
             f"unknown diagnosis_method {diagnosis_method!r}; choose from "
-            f"{tuple(_METHOD_PROMOTION)}.")
-    promotion_key, field_name = _METHOD_PROMOTION[diagnosis_method]
+            f"{tuple(METHOD_PROMOTION)}.")
+    promotion_key, field_name = METHOD_PROMOTION[diagnosis_method]
     background = float(getattr(CLUBBLiteConfig(), field_name))
     # clubb_coefficient (C_K) and c_eps evaluate the GCM mixing length; auto-
     # populate clubb_l_mix_max from the CLUBB config so the diagnosis matches it.
-    if diagnosis_method in _METHODS_NEED_LMIX and \
+    if diagnosis_method in METHODS_NEED_LMIX and \
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(
             clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
-    compare_fn = _compose_compare_fn(
+    compare_fn = compose_compare_fn(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
         area_weights=area_weights, n_worst=n_worst,
@@ -326,7 +326,7 @@ def build_multi_correction_campaign(
     if not coefficients:
         raise ValueError("coefficients must be a non-empty tuple.")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
-    lat_deg, lon_deg = _grid_latlon_deg(grid, lat_deg, lon_deg)
+    lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
 
     specs = []
@@ -346,7 +346,7 @@ def build_multi_correction_campaign(
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
-    compare_fn = _compose_compare_fn(
+    compare_fn = compose_compare_fn(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
         area_weights=area_weights, n_worst=n_worst,
@@ -655,6 +655,30 @@ def _print_deploy_hint(out_path: str, grid) -> None:
     )
 
 
+def load_base_config_and_grid(config_path: str):
+    """Load the base ``ExperimentConfig`` + build its grid / vertical coordinate.
+
+    The grid + vertical coordinate are built the EXACT way the run builds them (so
+    the ERA5 regrid + LES forcing extraction match the run's grid + vertical coord,
+    hybrid vs sigma), but WITHOUT the heavy ``setup()`` side effects — the campaign
+    is single-rank offline orchestration, so the driver's own grid constructor
+    suffices.  ``_bootstrap_runtime`` runs first so the precision policy is applied
+    (else a non-default-precision sigma would get the wrong dtype).  Shared by the
+    campaign CLI and the perfect-model OSSE CLI.
+    """
+    import json
+
+    from legoesm.driver.config import experiment_config_from_dict
+    from legoesm.driver.model_driver import ModelDriver
+
+    with open(config_path) as f:
+        base_cfg = experiment_config_from_dict(json.load(f))
+    probe = ModelDriver(base_cfg)
+    probe._bootstrap_runtime()
+    probe._create_grid()
+    return base_cfg, probe.grid, probe.sigma
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: load a base config + an ERA5 reference, run the campaign, write the
     corrected ``clubb_lite`` config + a per-round bias report.
@@ -675,8 +699,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
 
     import numpy as np
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
-    from legoesm.driver.config import experiment_config_from_dict
-    from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.compare_reanalysis import column_state_from_carry
     from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
 
@@ -686,20 +708,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     )
 
     args = _build_arg_parser().parse_args(argv)
-    with open(args.config) as f:
-        base_cfg = experiment_config_from_dict(json.load(f))
-
-    # Grid + vertical coordinate the EXACT way the run builds them (so the ERA5
-    # regrid + LES forcing extraction match the run's grid and vertical coord —
-    # hybrid vs sigma — with no rebuilt-grid mismatch), but WITHOUT the heavy
-    # setup() side effects (output dirs, dycore/physics build): the campaign is
-    # single-rank offline orchestration, so the driver's own grid constructor
-    # suffices.  ``_bootstrap_runtime`` is run first so the precision policy is
-    # applied (else a non-default-precision sigma would get the wrong dtype).
-    _probe = ModelDriver(base_cfg)
-    _probe._bootstrap_runtime()
-    _probe._create_grid()
-    grid, sigma = _probe.grid, _probe.sigma
+    base_cfg, grid, sigma = load_base_config_and_grid(args.config)
 
     # Run mode: AMIP (prescribed SST) or CMIP (coupled ocean on the SAME grid as
     # the atmosphere — ocean_grid=None lets the coupled driver use its own atm
@@ -737,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # round), so a multi-day campaign survives a job timeout (§1 restartable).
     # The CLUBB field the diagnosis corrects (C_K / Pr_t / C_eps) — so the
     # checkpoint/output persist the right field.
-    corrected_field = _METHOD_PROMOTION[args.diagnosis_method][1]
+    corrected_field = METHOD_PROMOTION[args.diagnosis_method][1]
     initial_clubb, initial_field, start_round = None, None, 0
     if args.resume:
         with open(args.resume) as f:
@@ -806,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         campaign_health,
         summarize_campaign,
     )
-    promotion_key = _METHOD_PROMOTION[args.diagnosis_method][0]
+    promotion_key = METHOD_PROMOTION[args.diagnosis_method][0]
     summary = summarize_campaign(result, promotion_key=promotion_key)
     health = campaign_health(summary)
     with open(args.out, "w") as f:
