@@ -161,13 +161,15 @@ def test_validate_config_rejects_bad_settings():
         ColumnLESConfig(les_realism_wp2_floor=float("inf")),
         ColumnLESConfig(les_realism_q_v_max=0.0),
         ColumnLESConfig(les_realism_q_v_max=-0.01),
+        ColumnLESConfig(les_realism_rh_max=0.0),
+        ColumnLESConfig(les_realism_rh_max=float("inf")),
     ):
         with pytest.raises(ValueError):
             validate_column_les_config(bad)
     # None (default) + explicit finite-positive realism thresholds validate.
     validate_column_les_config(ColumnLESConfig(
         les_realism_theta_drift_K=5.0, les_realism_wp2_floor=1e-3,
-        les_realism_q_v_max=0.05))
+        les_realism_q_v_max=0.05, les_realism_rh_max=1.5))
     # clubb_coefficient WITH a positive l_mix_max validates (single + multi).
     validate_column_les_config(
         ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=100.0))
@@ -274,6 +276,35 @@ def test_run_pipeline_realism_gate_invalidates_dead_les():
         l_mix_max=100.0)
     assert not bool(jnp.any(dead_multi["clubb_coefficient"].valid))
     assert not bool(jnp.any(dead_multi["prandtl_number"].valid))
+
+
+def test_run_pipeline_optin_rh_cap_threads_and_invalidates():
+    """iter 68: the OPT-IN supersaturation cap threads config → pipeline → gate. The
+    synthetic LES carries the (unphysical) uniform q=0.01, grossly supersaturated
+    aloft, so it is VALID by default (cap off) but INVALIDATED once realism_rh_max is
+    set — proving the rh_max threading reaches column_les_realism."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+
+    def turb_run(s):                       # sheared+turbulent (valid C_K), q=0.04 —
+        st = _synthetic_plane_state(s.grid, s.height_coord)   # < q_v_max so default passes
+        z = jnp.asarray(s.height_coord.z_full)
+        ny, nx = s.grid.ny, s.grid.nx
+        u = (0.01 * z)[None, None, :] * jnp.ones((ny, nx, z.shape[0]))  # constant shear
+        return st._replace(
+            u=st.u.replace(data=u),
+            tracers=st.tracers.replace(
+                data=st.tracers.data.at[..., 0].set(0.04)))   # ~2x surface q_sat → RH~2
+
+    base = run_column_les_pipeline(
+        setup, turb_run, method="clubb_coefficient", l_mix_max=100.0)
+    assert bool(jnp.any(base.valid))       # cap off (default) ⇒ valid
+    capped = run_column_les_pipeline(
+        setup, turb_run, method="clubb_coefficient", l_mix_max=100.0,
+        realism_rh_max=1.5)
+    assert not bool(jnp.any(capped.valid))  # cap on ⇒ supersaturated → invalid
 
 
 def test_run_pipeline_diagnose_many_shares_one_les_run():

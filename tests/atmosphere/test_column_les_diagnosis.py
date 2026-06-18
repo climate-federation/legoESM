@@ -365,6 +365,30 @@ def test_column_les_realism_rejects_moisture_blowup():
     assert not bool(column_les_realism(neg, hc))
 
 
+def test_column_les_realism_optin_rh_cap():
+    """iter 68: the OPT-IN supersaturation cap (rh_max). The shared mock uses an
+    UNPHYSICAL uniform q (= 0.01 kg/kg), grossly supersaturated aloft where q_sat→0
+    — so it passes the default gate (rh_max off) but is REJECTED when the cap is
+    enabled, which is exactly why the cap is off by default. A PHYSICAL q (sub-
+    saturated everywhere) passes even with the cap on."""
+    from legoesm import constants
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    from legoesm.atmosphere.dynamics.rce_diagnostics import temperature_3d_plane
+    from legoesm.thermo import saturation_mixing_ratio
+
+    state, hc = _les_state_with_shear()
+    assert bool(column_les_realism(state, hc))                  # rh_max off → passes
+    assert not bool(column_les_realism(state, hc, rh_max=1.5))  # uniform q supersat aloft
+
+    # A physical q = 0.5·q_sat (RH ≈ 0.5 at every level) passes the enabled cap.
+    temp = temperature_3d_plane(state, hc)
+    p = constants.p_ref * jnp.asarray(hc.exner_ref) ** (1.0 / constants.kappa)
+    q_phys = 0.5 * saturation_mixing_ratio(temp, p)
+    physical = state._replace(tracers=state.tracers.replace(
+        data=state.tracers.data.at[..., 0].set(q_phys)))
+    assert bool(column_les_realism(physical, hc, rh_max=1.5))
+
+
 def test_gate_diagnosis_realism_invalidates():
     from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
     prof = ClubbCoefficientProfile(

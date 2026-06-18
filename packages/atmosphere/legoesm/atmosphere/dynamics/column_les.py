@@ -74,6 +74,10 @@ class ColumnLESConfig(NamedTuple):
     # Moisture physical-sanity cap [kg/kg] (iter 67): reject a finite-but-runaway
     # water-vapor blow-up (max q_v above this). None ⇒ the module default.
     les_realism_q_v_max: float | None = None
+    # OPT-IN supersaturation cap [-] (iter 68): reject a turbulent + finite LES whose
+    # max RH = q_v/q_sat exceeds this (cold-cloud runaway). None ⇒ OFF (the default;
+    # the test mocks use an unphysical uniform q). Recommended ~1.5 when enabled.
+    les_realism_rh_max: float | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -91,7 +95,8 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
     # reject every column — a confusing footgun, Codex iter-66).
     for _name, _v in (("les_realism_wp2_floor", config.les_realism_wp2_floor),
                       ("les_realism_theta_drift_K", config.les_realism_theta_drift_K),
-                      ("les_realism_q_v_max", config.les_realism_q_v_max)):
+                      ("les_realism_q_v_max", config.les_realism_q_v_max),
+                      ("les_realism_rh_max", config.les_realism_rh_max)):
         if _v is not None and not (0.0 < _v < float("inf")):
             raise ValueError(
                 f"{_name} must be None or a finite positive value, got {_v}.")
@@ -254,6 +259,7 @@ def run_column_les_pipeline(
     realism_wp2_floor: float | None = None,
     realism_theta_drift_K: float | None = None,
     realism_q_v_max: float | None = None,
+    realism_rh_max: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
@@ -284,6 +290,8 @@ def run_column_les_pipeline(
         realism_kw["wp2_floor"] = realism_wp2_floor
     if realism_q_v_max is not None:
         realism_kw["q_v_max"] = realism_q_v_max
+    if realism_rh_max is not None:
+        realism_kw["rh_max"] = realism_rh_max
     if realism_theta_drift_K is not None:
         realism_kw["theta_drift_rms_max_K"] = realism_theta_drift_K
     realistic = (
@@ -465,5 +473,6 @@ def process_column(
         realism_wp2_floor=config.les_realism_wp2_floor,
         realism_theta_drift_K=config.les_realism_theta_drift_K,
         realism_q_v_max=config.les_realism_q_v_max,
+        realism_rh_max=config.les_realism_rh_max,
     )
 

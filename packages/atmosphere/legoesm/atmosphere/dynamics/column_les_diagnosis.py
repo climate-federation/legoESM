@@ -91,6 +91,10 @@ _THETA_DRIFT_RMS_MAX_K = 3.0
 _Q_V_MAX_KG_KG = 0.05
 _Q_V_NEG_TOL_KG_KG = 1.0e-3   # allow tiny advective undershoot; reject a large negative
 
+# Denominator floor for RH = q_v / (q_sat + floor) — avoids a div-by-zero at the LES
+# top where the reference saturation mixing ratio → 0; tiny vs any physical q_sat.
+_Q_SAT_FLOOR_KG_KG = 1.0e-12
+
 
 def _thermo_drift_rms(theta_prime: jax.Array) -> jax.Array:
     """RMS over levels of the horizontal-mean θ′ — the LES mean's drift from the
@@ -99,9 +103,29 @@ def _thermo_drift_rms(theta_prime: jax.Array) -> jax.Array:
     return jnp.sqrt(jnp.mean(mean_thp ** 2))
 
 
+def _relative_humidity_field(les_state, height_coord, q_v: jax.Array) -> jax.Array:
+    """3-D RH = ``q_v / q_sat(T, p)`` for the supersaturation cap (iter 68).
+
+    ``T`` from the shared Exner conversion (``temperature_3d_plane``); ``p`` from the
+    REFERENCE Exner (``p = p_ref · exner_ref^{1/κ}`` — the LES pressure perturbation is
+    small, ignored for a coarse sanity gate); ``q_sat`` from the shared
+    :func:`legoesm.thermo.saturation_mixing_ratio` (liquid; for ``T < T_freeze`` it
+    over-reads ``q_sat`` so RH UNDER-reads ice supersaturation — tolerable for a cap).
+    """
+    from legoesm.atmosphere.dynamics.rce_diagnostics import temperature_3d_plane
+    from legoesm.thermo import saturation_mixing_ratio
+
+    temp = temperature_3d_plane(les_state, height_coord)          # (ny, nx, nlev)
+    exner = jnp.asarray(height_coord.exner_ref)                   # (nlev,)
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)        # (nlev,) reference p
+    q_sat = saturation_mixing_ratio(temp, p)                      # broadcasts → 3-D
+    return q_v / (q_sat + _Q_SAT_FLOOR_KG_KG)
+
+
 def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
                        theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K,
-                       q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0):
+                       q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0,
+                       rh_max: float | None = None):
     """Coarse TRUST gate on a finished column LES (``docs/COMPARE_REANALYSIS.md`` §9):
     did it develop turbulence, stay finite, stay thermodynamically near the column it
     represents, AND keep moisture physical?  Returns a TRACED scalar bool.
@@ -121,9 +145,11 @@ def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_W
     toward the column (it evolves freely via large-scale advection + microphysics),
     and a CWV-plateau check needs the time series.  So the valid final-state moisture
     term is a physical-sanity cap (too-high OR large-negative — centered tracer
-    advection can overshoot, so q_v ≥ 0 is not guaranteed); a
-    T-dependent RH supersaturation cap (the fuller check) is a follow-up needing
-    realistic test fixtures.  A legitimately quiescent stable column correctly FAILS
+    advection can overshoot, so q_v ≥ 0 is not guaranteed).  A T-dependent RH
+    supersaturation cap (iter 68, the physically-fuller check) is OPT-IN via
+    ``rh_max`` — OFF by default because the current test mocks use an unphysical
+    uniform q that is supersaturated aloft; a cold-cloud campaign can enable it.  A
+    legitimately quiescent stable column correctly FAILS
     the turbulence term (no signal ⇒ the background is right), a correct outcome, not
     a false negative.  Thresholds are regime-sensitive and configurable.  Pure-JAX (a
     boolean mask; no NaN grad — ``&`` is logical-and on bool scalars, and ``NaN < thr``
@@ -140,7 +166,15 @@ def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_W
     moisture_physical = (
         (jnp.max(q_v) < jnp.asarray(q_v_max, dtype=q_v.dtype))
         & (jnp.min(q_v) > jnp.asarray(-_Q_V_NEG_TOL_KG_KG, dtype=q_v.dtype)))
-    return turbulent & finite & thermo_consistent & moisture_physical
+    realistic = turbulent & finite & thermo_consistent & moisture_physical
+    if rh_max is not None:
+        # OPT-IN supersaturation cap (iter 68): static gate on a config float (None
+        # ⇒ off), so the T/p/q_sat work is skipped unless a campaign enables it. The
+        # finite term covers rh too (NaN rh ⇒ rejected by both isfinite and max<thr).
+        rh = _relative_humidity_field(les_state, height_coord, q_v)
+        realistic = realistic & jnp.all(jnp.isfinite(rh)) & (
+            jnp.max(rh) < jnp.asarray(rh_max, dtype=rh.dtype))
+    return realistic
 
 
 def gate_diagnosis_realism(diagnosis, realistic):
