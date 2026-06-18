@@ -1130,14 +1130,17 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
                       apply_fortran_xppm_boundary=(
                           apply_fortran_xppm_boundary),
                       hord=hord)
-    # new_test_dycores iter-3: fp64 flux differencing.  Without this
-    # promotion the cube transport accrues ~4.66e-10 cancellation noise
-    # per step from the fp32 ``fx[:-1] - fx[1:]`` subtraction across
-    # ~6·N² cells (per-step measurement on C36 cosine-bell IC).  The
-    # anchor path masks this via rescaling; the no-anchor path leaks
-    # the noise as a visible mass drift.  Promotion preserves bit-clean
-    # flux closure (cube panel-edge flux is conservative when summed
-    # in fp64).  Output cast back to input dtype.
+    return _finalize_transport(h, fx, fy, area, mass_target)
+
+
+def _finalize_transport(h, fx, fy, area, mass_target):
+    """fp64 flux closure + optional mass-conserving rescale (shared).
+
+    new_test_dycores iter-3: fp64 flux differencing.  Without this promotion
+    the cube transport accrues ~4.66e-10 cancellation noise per step from the
+    fp32 ``fx[:-1] - fx[1:]`` subtraction across ~6·N² cells.  Promotion
+    preserves bit-clean flux closure; output cast back to input dtype.
+    """
     from legoesm.core.conservation import conservation_accumulator
     _acc = conservation_accumulator()
     h64 = h.astype(_acc)
@@ -1148,22 +1151,74 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
                     + fy64[:, :, :-1] - fy64[:, :, 1:]) / area64
              ).astype(h.dtype)
 
-    # Mass conservation fixer: clip negative values and rescale
-    # positive values to conserve total mass.  This compensates for
-    # flux mismatches at face boundaries while maintaining non-negativity.
+    # Mass conservation fixer: clip negatives and rescale positives to conserve
+    # total mass.  iter-6: fp64 budget accumulator (matches SW model fixer).
     if mass_target is not None:
-        # iter-6: fp64 budget accumulator (matches SW model fixer).
-        # The bare ``jnp.sum(h_pos * area)`` over a fp32 product reduces
-        # in fp32 over ~6·N² cells and leaks ~N·eps noise into ``scale``,
-        # which then multiplies every cell — turning O(1e-7) reduction
-        # noise into a directly visible cosine_bell mass drift.
-        from legoesm.core.conservation import conservation_accumulator
-        _acc = conservation_accumulator()
-        # Step 1: clip negatives to zero
         h_pos = jnp.maximum(h_new, 0.0)
         mass_pos = jnp.sum(h_pos.astype(_acc) * area.astype(_acc))
-        # Step 2: scale positive values to match target mass
         scale = mass_target / jnp.maximum(mass_pos, 1.0)
         h_new = h_pos * scale.astype(h_pos.dtype)
 
     return h_new
+
+
+def streamfunction_mass_fluxes(cdgrid, psi_corner, dt):
+    """Discretely divergence-free C-grid mass fluxes from a corner
+    streamfunction (FV3 ``test_cases.F90`` wind_field=0 construction).
+
+    The transport mass flux is the discrete curl of ``psi`` evaluated at cube
+    corners::
+
+        xfx[i,j] = dt*(psi[i,j] - psi[i,j+1])     # u-face flux  (6,n+1,n)
+        yfx[i,j] = dt*(psi[i+1,j] - psi[i,j])     # v-face flux  (6,n,n+1)
+
+    so the discrete divergence ``xfx[i]-xfx[i+1] + yfx[j]-yfx[j+1]``
+    telescopes to ZERO for ANY ``psi`` — i.e. free-stream is preserved to
+    machine precision.  This bypasses the contravariant ``d2a2c`` flux
+    reconstruction whose face-boundary seam injects spurious area-flux
+    divergence (issue 504: that seam fragments the corner-crossing bell).
+
+    Parameters
+    ----------
+    cdgrid : CubedSphereCDGrid
+    psi_corner : (6, n+1, n+1) — velocity streamfunction [m^2/s] at cube corners
+    dt : float — transport timestep [s]
+
+    Returns
+    -------
+    crx, cry, xfx, yfx, ra_x, ra_y : ready for :func:`fv_tp_2d`.
+    """
+    # Sign: the FV update is h += (xfx[i]-xfx[i+1])/area, so xfx is the flux
+    # F_x with F[i]-F[i+1] = inflow.  For a streamfunction the +x mass flux is
+    # F_x = -dpsi/dy ~ psi[i,j]-psi[i,j+1] (and F_y = +dpsi/dx ~
+    # psi[i+1,j]-psi[i,j]).  Negating BOTH preserves the telescoping (free-
+    # stream) and orients the flow to match the physical wind / the exact
+    # solution (the opposite sign advects the bell BACKWARDS — caught by the
+    # 1-day cross-grid L2, invisible to the full-revolution metric).
+    area = cdgrid.base.area
+    xfx = dt * (psi_corner[:, :, :-1] - psi_corner[:, :, 1:])   # (6,n+1,n)
+    yfx = dt * (psi_corner[:, 1:, :] - psi_corner[:, :-1, :])   # (6,n,n+1)
+    # Courant numbers ~ swept-area / local cell area (sign carries direction).
+    ap = pad_halo(area, halo=1)                                 # (6,n+2,n+2)
+    area_u = 0.5 * (ap[:, :-1, 1:-1] + ap[:, 1:, 1:-1])         # (6,n+1,n)
+    area_v = 0.5 * (ap[:, 1:-1, :-1] + ap[:, 1:-1, 1:])         # (6,n,n+1)
+    crx = xfx / area_u
+    cry = yfx / area_v
+    ra_x = area + xfx[:, :-1, :] - xfx[:, 1:, :]
+    ra_y = area + yfx[:, :, :-1] - yfx[:, :, 1:]
+    return crx, cry, xfx, yfx, ra_x, ra_y
+
+
+def streamfunction_transport_step(h, fluxes, cdgrid, mass_target=None,
+                                  hord: int = 10,
+                                  apply_fortran_xppm_boundary: bool = True):
+    """One free-stream-preserving transport step from prescribed divergence-
+    free mass ``fluxes`` (see :func:`streamfunction_mass_fluxes`).
+
+    Reuses the SAME :func:`fv_tp_2d` PPM operator and flux closure as
+    :func:`transport_step`; only the flux *source* differs.
+    """
+    crx, cry, xfx, yfx, ra_x, ra_y = fluxes
+    fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid, hord=hord,
+                      apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+    return _finalize_transport(h, fx, fy, cdgrid.base.area, mass_target)
