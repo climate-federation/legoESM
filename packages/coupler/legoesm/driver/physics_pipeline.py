@@ -2310,9 +2310,22 @@ def turbulence_config_for(config):
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     override = getattr(config, "turbulence_override", None)
-    if override is not None:
+    if override is None:
+        return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+    # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
+    # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
+    # parallel layout machinery is only touched when an override is actually set;
+    # get_mpi_topology() is None in serial → a strict no-op (the override verbatim).
+    from legoesm.grids.halo import get_mpi_topology
+
+    layout = get_mpi_topology()
+    if layout is None:
         return override
-    return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+    from legoesm.atmosphere.physics.turbulence.override_sharding import (
+        localize_turbulence_override,
+    )
+
+    return localize_turbulence_override(override, layout)
 
 
 def _resolve_turbulence(config):

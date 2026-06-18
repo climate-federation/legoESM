@@ -340,32 +340,28 @@ def slice_override_columns(override, local_column_indices):
 
 
 def slice_override_latlon_2d(override, layout):
-    """Slice a GLOBAL per-column clubb override to a rank's LOCAL lat-lon tile.
+    """Slice a GLOBAL per-column clubb override to a rank's LOCAL lat-lon tile (STRICT).
 
-    The safe lat-lon path: each corrected ``(ncol,)`` field is reshaped to the
-    global ``(n_lat, n_lon)`` and sliced with the EXACT same partition the model
-    scatters state with (:func:`legoesm.parallel.latlon_mpi.scatter_field_latlon_2d`
-    — the rank's ``[lat_start:lat_end, lon_start:lon_end]`` cell-centered block),
-    then row-major-flattened to ``(ncol_local,)``.  Because it reuses the model's
-    own cell-centered scatter, the local override lands on exactly the columns the
-    rank's physics consumes (the row-major ColumnAdapter flatten).  ``layout`` is a
-    ``LatLon2DLayout`` (``make_latlon_2d_layout(0, 1, 1, ...)`` is the single-rank
-    identity).  lat-lon cell-centered only; non-lat-lon decompositions supply their
-    own indices to :func:`slice_override_columns`.
+    The deploy-context (strict) wrapper around the shared slicer
+    :func:`legoesm.atmosphere.physics.turbulence.override_sharding.localize_turbulence_override`:
+    it validates the override is a clubb_lite config whose per-column fields are 1-D,
+    consistent, and span the layout's GLOBAL grid (a wrong-grid deploy fails LOUDLY
+    here), then delegates the reshape→``[lat_start:lat_end, lon_start:lon_end]``
+    cell-centered slice→row-major-flatten — landing the local override on exactly the
+    columns the rank's physics consumes.  ``make_latlon_2d_layout(0, 1, 1, ...)`` is
+    the single-rank identity.  lat-lon cell-centered only; non-lat-lon decompositions
+    supply their own indices to :func:`slice_override_columns`.
     """
+    from legoesm.atmosphere.physics.turbulence.override_sharding import (
+        localize_turbulence_override,
+    )
 
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    from legoesm.parallel.latlon_mpi import scatter_field_latlon_2d
-
-    clubb, per_column = _per_column_clubb_fields(override)
+    _clubb, per_column = _per_column_clubb_fields(override)
     n_lat, n_lon = int(layout.n_lat_global), int(layout.n_lon_global)
     ncol = n_lat * n_lon
-    sliced = {}
-    for field, arr in per_column.items():
+    for field, arr in per_column.items():        # strict: must span the global grid
         if int(arr.shape[0]) != ncol:
             raise ValueError(
                 f"per-column override field '{field}' has {int(arr.shape[0])} "
                 f"columns but the layout's global grid is {n_lat}x{n_lon}={ncol}.")
-        local = scatter_field_latlon_2d(arr.reshape(n_lat, n_lon), layout)
-        sliced[field] = local.reshape(-1)
-    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))
+    return localize_turbulence_override(override, layout)
