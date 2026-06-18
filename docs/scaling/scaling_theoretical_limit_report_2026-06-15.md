@@ -24,7 +24,12 @@
 > different *algorithm* (split-explicit) and a different *precision* (mixed). Both
 > are opt-in + codex-clean; production-uptake gated by full-OMIP long-run
 > validation. Remaining f32 extensions (baroclinic EOS/PGF, tracer-advection
-> limiters) are large, science-risky careful-numerics, deferred.
+> limiters) are large, science-risky careful-numerics. **Assessed 2026-06-18 and CLOSED as
+sub-5% (see §3 row "Mixed-precision baroclinic"):** the baroclinic phase is
+16–21 % of the step and halo/latency-bound (f32 doesn't speed Gloo comm), so the
+f32-EOS/PGF payoff is below the >5 % bar despite being numerically feasible. With
+this, the SOTA-extension space the addendum opened is also exhausted — the
+campaign is fully converged for the current hardware.
 
 **Verdict: the production step-kernel scaling surface is exhausted on Ginsburg
 hardware.** Across ocean (lat-lon C-grid), atmosphere (cubed-sphere FV3, lat-lon
@@ -91,9 +96,11 @@ measured roofline), never to efficiency ratios alone.
 | Banded multigrid barotropic (wall-time) | converges (M12→1e-6) but **6–9× SLOWER** — zonal-line V-cycle compute ≫ jacobi diagonal; reductions weren't the bottleneck | 8488551 |
 | Cube np>6 (sub-face tiling speedup) | anti-scales on Gloo/TCP+PCIe → capability only, not speedup | 8482583 |
 | Spectral multi-GPU global transform | all-to-all dominated on PCIe; local GEMM is the right lever | (roofline) |
+| Spectral **level-axis sharding** (multi-device) | MEASURED anti-scaling: T85 **0.74×** @4dev, T42 flat — the semi-implicit (nlev,nlev)/wavenumber solve all-gathers levels + SH transforms emit no collectives ⇒ single-device by design (`_valid_gpu_counts→[1]`). Both spectral multi-device schemes (level-shard AND transpose all-to-all) are now dead on this HW | 8520392 (`spectral_level_shard_cliff.md`, 2026-06-18) |
 | CUDA-aware MPI rebuild | conda mpi4py shadows the cuda-aware libmpi → segfault; full-stack rebuild not worth it (prod already 0.92–0.95) | 8486212 |
 | MPAS METIS partitioning | +2.6 % np16 (rank-growing, opt-in, pymetis dep) — real but "not a new mechanism" | 8491002 |
 | Field-batched voronoi halo (the "18× regression") | was I5/f32/stale-code; batched actually WINS at I6/f64 (now default) | 8488023 |
+| Mixed-precision baroclinic EOS/PGF (f32 work) | Sub-5% ceiling, not worth the f32 density-gradient science risk: baroclinic is only **16–21 %** of the step (`distance_to_limit_2026-06-13.md`) and is **halo/latency-bound** (#1 rank-growing, ~27 sendrecvs) where f32 does NOT speed Gloo-latency comm; EOS+PGF arithmetic is ~½ of that. The 67 % vmix phase already has its f32 lever shipped (1.15×). Anomaly EOS makes f32 *numerically* feasible (`iterate_eos_and_pressure_anomaly` builds p′ from ρ′~O(1)), but the throughput payoff is below the >5 % bar. | phase-split 8458934 / 8489559 + `distance_to_limit_2026-06-13.md` |
 
 ---
 

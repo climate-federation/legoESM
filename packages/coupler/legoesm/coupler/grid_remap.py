@@ -61,6 +61,26 @@ def _is_voronoi(grid) -> bool:
     )
 
 
+def _is_tripole(grid) -> bool:
+    """True if ``grid`` is a curvilinear tripole C-grid with an ACTIVE bipolar
+    fold (duck-typed: a :class:`LatLonCGridGeometry` whose ``fold.is_active``).
+
+    A tripole grid carries 2-D centres (``lat_T``/``lon_T``) but NOT the 1-D
+    ``lat_v`` of a regular grid, so ``_is_regular_latlon`` is False for it; the
+    two detectors are mutually exclusive.  The active-fold gate means a regular
+    lat-lon C-grid geometry (``fold.is_active = False``) is NOT treated as
+    tripole — it stays on the separable regular-lat-lon remap path."""
+    fold = getattr(grid, "fold", None)
+    return (
+        fold is not None
+        and getattr(fold, "is_active", False)
+        and hasattr(grid, "lat_T")
+        and hasattr(grid, "lon_T")
+        and hasattr(grid, "n_lat")
+        and hasattr(grid, "n_lon")
+    )
+
+
 def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     """Conservative, differentiable remap weights ``src_grid -> dst_grid``.
 
@@ -120,6 +140,33 @@ def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
         src_shape=(n_src_lat, n_src_lon),
         dst_shape=w.dst_shape,
         n_dst_cells=w.n_dst_cells,
+    )
+
+
+def make_curvilinear_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
+    """Conservative, differentiable remap weights ``src_grid -> dst_grid`` where
+    EXACTLY ONE of the two grids is a curvilinear tripole C-grid and the other
+    is a regular lat-lon grid.
+
+    Dispatches to the fine-quadrature first-order conservative generator in
+    :mod:`legoesm.grids.conservative_regrid_curvilinear` (only the regular grid
+    is tiled; the tripole side is located by nearest cell centre).  The returned
+    weights are the same :class:`ConservativeRegridWeights` triple as the
+    separable lat-lon path, applied unchanged by ``apply_conservative_regrid``.
+    """
+    from legoesm.grids.conservative_regrid_curvilinear import (
+        make_regular_to_curvilinear_weights,
+        make_curvilinear_to_regular_weights,
+    )
+    if _is_regular_latlon(src_grid) and _is_tripole(dst_grid):
+        return make_regular_to_curvilinear_weights(src_grid, dst_grid)
+    if _is_tripole(src_grid) and _is_regular_latlon(dst_grid):
+        return make_curvilinear_to_regular_weights(src_grid, dst_grid)
+    raise NotImplementedError(
+        "make_curvilinear_latlon_remapper requires exactly one regular lat-lon "
+        "grid and one tripole (active-fold) curvilinear grid; got "
+        f"src={type(src_grid).__name__}, dst={type(dst_grid).__name__}. "
+        "Tripole<->tripole and cube<->tripole remaps are not implemented."
     )
 
 
@@ -192,6 +239,25 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
             o2a=compute_mpas_to_mpas_weights(ocean_grid, atm_grid),
             identity=False,
         )
+    # Regular lat-lon ATM <-> curvilinear TRIPOLE ocean (Phase-2 cross-grid
+    # coupling).  Only this orientation is supported — the atmosphere dycore is
+    # regular lat-lon; a cube-atm <-> tripole-ocean coupling is cross-family and
+    # still deferred (see the NotImplementedError below).
+    if _is_regular_latlon(atm_grid) and _is_tripole(ocean_grid):
+        return GridRemapper(
+            a2o=make_curvilinear_latlon_remapper(atm_grid, ocean_grid),
+            o2a=make_curvilinear_latlon_remapper(ocean_grid, atm_grid),
+            identity=False,
+        )
+    if _is_tripole(atm_grid) and _is_regular_latlon(ocean_grid):
+        # Symmetric orientation (regular ocean, tripole "atm") — not a real
+        # configuration, but handle it rather than fall through to the generic
+        # error so the dispatch is total over {regular, tripole}.
+        return GridRemapper(
+            a2o=make_curvilinear_latlon_remapper(atm_grid, ocean_grid),
+            o2a=make_curvilinear_latlon_remapper(ocean_grid, atm_grid),
+            identity=False,
+        )
     same_family = type(atm_grid) is type(ocean_grid)
     raise NotImplementedError(
         f"Differentiable atm<->ocean coupling between "
@@ -247,3 +313,56 @@ def remap_surface_fields(obj, weights: ConservativeRegridWeights | None):
         return x
 
     return jax.tree_util.tree_map(_maybe, obj)
+
+
+def rotate_tpoint_currents_to_geographic(u_c, v_c, cos_alpha_u, sin_alpha_u):
+    """Rotate grid-aligned T-point currents to geographic east/north.
+
+    On a curvilinear C-grid (the tripole bipolar cap), the prognostic
+    velocity components ``(u_c, v_c)`` are aligned with the LOCAL grid axes
+    (i, j), whereas the atmosphere/coupler expects geographic (east, north).
+    This rotation MUST be applied on the ocean grid BEFORE remapping each
+    component as a scalar (once both components share the geographic basis the
+    remap is per-component scalar — see the module docstring on shared-basis
+    scalar remap of u/v).
+
+    The rotation angle is the SAME ``i``-axis -> geographic-east angle the
+    ocean core uses (in the inverse direction) for wind stress
+    (``ocean_pe_latlon_cgrid._apply_external_surface_forcing``: it maps
+    geographic stress to grid-aligned via ``tau_i = tau_e cosα + tau_n sinα``).
+    Currents are the INVERSE of that rotation::
+
+        u_east  = u_i cosα − v_j sinα
+        v_north = u_i sinα + v_j cosα
+
+    The angle is supplied at u-faces (``cos_alpha_u``/``sin_alpha_u``, shape
+    ``(n_lat, n_lon+1)``); it is averaged to T-centres and renormalised to unit
+    length.  OUTSIDE the bipolar cap ``cosα = 1``, ``sinα = 0`` so this is the
+    IDENTITY — a regular lat-lon C-grid (and the regular sub-domain of a
+    tripole) is bit-exact unchanged.  Differentiable: the rotation is an
+    elementwise multiply/add of the traced currents by the static angle arrays.
+
+    Parameters
+    ----------
+    u_c, v_c : jax.Array, shape ``(n_lat, n_lon)``
+        Grid-aligned currents at T-centres (i-, j-components).
+    cos_alpha_u, sin_alpha_u : jax.Array, shape ``(n_lat, n_lon+1)``
+        u-face rotation angles (i-axis -> geographic east).
+
+    Returns
+    -------
+    (u_east, v_north) : tuple of jax.Array, shape ``(n_lat, n_lon)``
+    """
+    cos_a_u = jnp.asarray(cos_alpha_u, dtype=u_c.dtype)
+    sin_a_u = jnp.asarray(sin_alpha_u, dtype=u_c.dtype)
+    # Average the two bracketing u-faces of each T-cell, then renormalise to a
+    # unit (cosα, sinα) so averaging unit vectors does not shrink the rotation.
+    cos_T = 0.5 * (cos_a_u[:, :-1] + cos_a_u[:, 1:])
+    sin_T = 0.5 * (sin_a_u[:, :-1] + sin_a_u[:, 1:])
+    norm = jnp.sqrt(cos_T * cos_T + sin_T * sin_T)
+    norm = jnp.where(norm > 1e-12, norm, 1.0)   # safety floor (degenerate cell)
+    cos_T = cos_T / norm
+    sin_T = sin_T / norm
+    u_east = u_c * cos_T - v_c * sin_T
+    v_north = u_c * sin_T + v_c * cos_T
+    return u_east, v_north

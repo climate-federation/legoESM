@@ -21,9 +21,12 @@ References
 
 from __future__ import annotations
 
+import os
+import warnings
 from typing import NamedTuple
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from scipy.spatial import ConvexHull, Delaunay, SphericalVoronoi
 
@@ -1070,6 +1073,130 @@ def _trisk_walk(iEdge, c, global_sign, k_slot,
 # Public API
 # ============================================================================
 
+# ============================================================================
+# Mesh disk cache (avoids redundant per-rank SCVT rebuild under MPI)
+# ============================================================================
+#
+# create_voronoi_mesh runs Lloyd relaxation (scipy SphericalVoronoi) which is
+# DETERMINISTIC in (subdivision_level, radius, lloyd_iterations, omega) when
+# density_fn is None, and slow (~10^2 s at level>=6).  Under MPI every rank
+# rebuilds the SAME mesh; at 32 ranks/node the redundant builds contend for
+# cores and exceed the job walltime (the multi-node "hang" was this, not an MPI
+# fault: a surviving rank reported mesh=105.4 s while its peers timed out).
+# Caching the built mesh to a shared-filesystem .npz lets the first process
+# build once and every other process (this run or a later one) load it in
+# O(1 s).  Pre-warm once before an MPI launch (prewarm_voronoi_cache) so all
+# ranks only load.
+
+_MESH_CACHE_ENV = "LEGOESM_MESH_CACHE_DIR"
+_MESH_CACHE_DISABLE_ENV = "LEGOESM_MESH_CACHE_DISABLE"
+# Bump whenever the SCVT/connectivity/geometry construction changes VALUES for
+# unchanged args (e.g. edits to _lloyd_relaxation / _build_mesh_from_generators).
+# The schema check below only catches FIELD changes; a value-changing algorithm
+# edit must invalidate old caches via this token.
+_MESH_CACHE_VERSION = 1
+
+
+def _voronoi_cache_disabled() -> bool:
+    """True when LEGOESM_MESH_CACHE_DISABLE is set to a truthy value."""
+    return os.environ.get(_MESH_CACHE_DISABLE_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _voronoi_cache_dir() -> str:
+    """Cache directory (LEGOESM_MESH_CACHE_DIR or ~/.cache/legoesm/voronoi)."""
+    d = os.environ.get(_MESH_CACHE_ENV, "").strip()
+    if not d:
+        d = os.path.join(
+            os.path.expanduser("~"), ".cache", "legoesm", "voronoi")
+    return d
+
+
+def _voronoi_cache_path(
+    subdivision_level: int, radius: float, lloyd_iterations: int, omega: float
+) -> str:
+    """Deterministic cache filename keyed on every parameter that changes the mesh.
+
+    Includes the active x64 flag because the stored dtypes (and a fresh rebuild)
+    depend on it — a float32-built mesh must never be served to an x64 run.
+    ``radius``/``omega`` use ``repr`` (round-trippable for Python floats).
+    """
+    x64 = bool(jax.config.read("jax_enable_x64"))
+    name = (
+        f"scvt_v{_MESH_CACHE_VERSION}_lvl{subdivision_level}"
+        f"_r{radius!r}_omega{omega!r}_lloyd{lloyd_iterations}"
+        f"_x64{int(x64)}.npz"
+    )
+    return os.path.join(_voronoi_cache_dir(), name)
+
+
+def _load_voronoi_cache(path: str):
+    """Reconstruct a VoronoiMesh from *path*, or None on miss/corruption/schema drift."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with np.load(path) as data:
+            if set(data.files) != set(VoronoiMesh._fields):
+                # Stale schema (fields added/removed) -> ignore, rebuild.
+                return None
+            fields = {}
+            for field_name in VoronoiMesh._fields:
+                arr = data[field_name]
+                if arr.ndim == 0:
+                    fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
+                else:
+                    fields[field_name] = jnp.asarray(arr)  # respects current x64
+        return VoronoiMesh(**fields)
+    except Exception as exc:  # corrupt / truncated cache file -> rebuild
+        warnings.warn(
+            f"Ignoring unreadable Voronoi mesh cache {path!r}: {exc}",
+            RuntimeWarning, stacklevel=2)
+        return None
+
+
+def _save_voronoi_cache(path: str, mesh: "VoronoiMesh") -> None:
+    """Atomically write *mesh* to *path* (tmp + os.replace; safe under the N-rank race)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    arrays = {field_name: np.asarray(getattr(mesh, field_name))
+              for field_name in mesh._fields}
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "wb") as f:
+            np.savez(f, **arrays)  # file handle -> no .npz extension munging
+        os.replace(tmp, path)      # atomic on same filesystem; last writer wins
+    except Exception as exc:  # never let a cache-write failure break generation
+        warnings.warn(
+            f"Could not write Voronoi mesh cache {path!r}: {exc}",
+            RuntimeWarning, stacklevel=2)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def prewarm_voronoi_cache(
+    subdivision_level: int,
+    radius: float = constants.R_earth,
+    lloyd_iterations: int = 50,
+    omega: float = constants.Omega,
+) -> str:
+    """Build (if absent) and cache the uniform SCVT mesh; return the cache path.
+
+    Call ONCE from a single process before an MPI launch so every rank loads the
+    mesh instead of redundantly rebuilding it.  Cheap no-op when already cached
+    (create_voronoi_mesh returns the cached mesh without rebuilding).
+    """
+    if _voronoi_cache_disabled():
+        raise RuntimeError(
+            f"{_MESH_CACHE_DISABLE_ENV} is set; cannot pre-warm a disabled cache.")
+    path = _voronoi_cache_path(subdivision_level, radius, lloyd_iterations, omega)
+    create_voronoi_mesh(
+        subdivision_level, radius=radius,
+        lloyd_iterations=lloyd_iterations, omega=omega)
+    return path
+
+
 def create_voronoi_mesh(
     subdivision_level: int,
     radius: float = constants.R_earth,
@@ -1120,6 +1247,18 @@ def create_voronoi_mesh(
             f"For higher resolutions, use load_mpas_mesh() with a pre-built mesh file."
         )
 
+    # Disk cache: a uniform SCVT mesh is deterministic in these args, so skip the
+    # expensive rebuild on a hit.  density_fn meshes are NOT cached (a callable
+    # has no stable key); the env switch lets a run force a fresh build.
+    use_cache = density_fn is None and not _voronoi_cache_disabled()
+    cache_path = None
+    if use_cache:
+        cache_path = _voronoi_cache_path(
+            subdivision_level, radius, lloyd_iterations, omega)
+        cached = _load_voronoi_cache(cache_path)
+        if cached is not None:
+            return cached
+
     # Step 1: Icosahedral base
     verts, triangles = _icosahedral_base()
 
@@ -1142,6 +1281,8 @@ def create_voronoi_mesh(
 
     # Step 4: Build complete mesh
     mesh = _build_mesh_from_generators(cell_points, radius, omega)
+    if use_cache and cache_path is not None:
+        _save_voronoi_cache(cache_path, mesh)
     return mesh
 
 
