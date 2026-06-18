@@ -79,6 +79,7 @@ class CampaignResult(NamedTuple):
     final_field: jax.Array             # the accumulated per-column field
     accepted: tuple = ()               # per-round bool: was the round kept?
                                        # (all True unless accept_only_if_improved)
+    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" (early stop)
 
 
 class CorrectionSpec(NamedTuple):
@@ -118,6 +119,7 @@ class MultiCampaignResult(NamedTuple):
     iterations: tuple                  # the per-round MultiCorrectionResults
     final_fields: dict                 # {promotion_key: accumulated per-column field}
     accepted: tuple = ()
+    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" (early stop)
 
 
 def run_correction_campaign(
@@ -141,6 +143,8 @@ def run_correction_campaign(
     accept_only_if_improved: bool = False,
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
+    bias_tol: float | None = None,
+    patience: int = 2,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -181,6 +185,13 @@ def run_correction_campaign(
     improving sub-step, and a round that cannot improve at any fraction is then
     rejected by ``accept_only_if_improved``.
 
+    **Convergence early-stopping** (``bias_tol``): when set, the campaign STOPS once
+    ``patience`` (default 2) consecutive rounds make no meaningful progress — a
+    rejected round, or an accepted round whose area-weighted bias reduction is below
+    ``bias_tol`` — so the multi-day HPC campaign does not waste expensive rounds once
+    the bias has plateaued.  ``CampaignResult.stop_reason`` is ``"converged"`` then,
+    else ``"max_iterations"``.  ``None`` (default) runs all ``n_iterations`` rounds.
+
     Returns the final config + every round's :class:`CorrectionResult`.
     ``final_config``/``final_field`` are the LAST ACCEPTED state (not necessarily
     ``iterations[-1]``, which is retained for logging even if rejected).  With the
@@ -191,10 +202,15 @@ def run_correction_campaign(
     """
     if int(n_iterations) < 0:
         raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
+    if bias_tol is not None and int(patience) < 1:
+        raise ValueError(
+            f"patience must be >= 1 when bias_tol is set, got {patience}.")
     config = initial_config
     base = background if initial_field is None else initial_field
     iterations: list = []
     accepted_flags: list = []
+    no_progress = 0
+    stop_reason = "max_iterations"
     for i in range(int(n_iterations)):
         result = run_correction_iteration(
             config,
@@ -224,6 +240,17 @@ def run_correction_campaign(
             # Pass the ACCEPTED accumulated field so a checkpoint never persists a
             # rejected (worsening) correction.
             checkpoint_callback(int(start_round) + i, result, base)
+        # Convergence early-stopping: stop once `patience` consecutive rounds make
+        # no meaningful progress (rejected, or improving by < bias_tol) — the bias
+        # has plateaued, so further expensive rounds are wasted.
+        if bias_tol is not None:
+            no_progress = (
+                0 if _round_made_progress(accepted, result.bias, bias_tol)
+                else no_progress + 1
+            )
+            if no_progress >= int(patience):
+                stop_reason = "converged"
+                break
     # ``base`` is the last ACCEPTED accumulated field (or the round-0 base when no
     # round was accepted / no iterations ran); reshape it to the grid uniformly.
     bg = jnp.asarray(base)
@@ -233,6 +260,7 @@ def run_correction_campaign(
     return CampaignResult(
         final_config=config, iterations=tuple(iterations),
         final_field=final_field, accepted=tuple(accepted_flags),
+        stop_reason=stop_reason,
     )
 
 
@@ -386,6 +414,14 @@ def _raw_and_base_field(
         jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
     )
     return raw_field, base_field
+
+
+def _round_made_progress(accepted: bool, bias, bias_tol: float) -> bool:
+    """Whether a campaign round counts as PROGRESS for convergence early-stopping:
+    it was accepted AND its area-weighted absolute bias reduction ≥ ``bias_tol``.
+    A rejected round, or an accepted round whose improvement is below the
+    tolerance, is "no progress" — ``patience`` consecutive ⇒ converged."""
+    return accepted and float(bias.absolute_reduction) >= bias_tol
 
 
 def _validate_step_fractions(
@@ -778,6 +814,8 @@ def run_multi_correction_campaign(
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
     sequential: bool = False,
+    bias_tol: float | None = None,
+    patience: int = 2,
     initial_fields: dict | None = None,
     start_round: int = 0,
     checkpoint_callback: Callable[[int, MultiCorrectionResult, dict], None] | None = None,
@@ -794,6 +832,9 @@ def run_multi_correction_campaign(
     """
     if int(n_iterations) < 0:
         raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
+    if bias_tol is not None and int(patience) < 1:
+        raise ValueError(
+            f"patience must be >= 1 when bias_tol is set, got {patience}.")
     config = initial_config
     bases = {s.promotion_key: s.background for s in specs}
     if initial_fields is not None:
@@ -804,6 +845,8 @@ def run_multi_correction_campaign(
             bases[key] = field
     iterations: list = []
     accepted_flags: list = []
+    no_progress = 0
+    stop_reason = "max_iterations"
     for i in range(int(n_iterations)):
         round_specs = [s._replace(background=bases[s.promotion_key]) for s in specs]
         result = run_multi_correction_iteration(
@@ -826,6 +869,14 @@ def run_multi_correction_campaign(
         accepted_flags.append(accepted)
         if checkpoint_callback is not None:
             checkpoint_callback(int(start_round) + i, result, bases)
+        if bias_tol is not None:   # convergence early-stopping (see run_correction_campaign)
+            no_progress = (
+                0 if _round_made_progress(accepted, result.bias, bias_tol)
+                else no_progress + 1
+            )
+            if no_progress >= int(patience):
+                stop_reason = "converged"
+                break
     final_fields = {}
     for key, base in bases.items():
         bg = jnp.asarray(base)
@@ -835,4 +886,5 @@ def run_multi_correction_campaign(
     return MultiCampaignResult(
         final_config=config, iterations=tuple(iterations),
         final_fields=final_fields, accepted=tuple(accepted_flags),
+        stop_reason=stop_reason,
     )

@@ -268,6 +268,33 @@ def test_build_correction_campaign_prandtl_number_method():
     assert result.final_config.C_K == CLUBBLiteConfig().C_K
 
 
+def test_build_correction_campaign_bias_tol_early_stops():
+    """build_correction_campaign forwards bias_tol/patience: a mock driver that
+    never improves the bias is rejected every round, so the campaign stops early
+    ('converged') instead of running all n_iterations."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),  # fixed → never improves
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=10,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        bias_tol=1e-9, patience=2)            # default gate ON
+    assert result.stop_reason == "converged"
+    assert len(result.iterations) == 2        # 2 rejected rounds → early stop
+
+
 def test_build_correction_campaign_default_gate_rejects_non_improving():
     """build_correction_campaign defaults the monotonic gate ON: the mock driver
     returns a fixed state regardless of C_K, so the round does not lower the bias

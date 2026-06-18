@@ -1251,3 +1251,103 @@ def test_multi_campaign_sequential_accumulates():
     it = campaign.iterations[0]
     assert it.step_fractions_by_key is not None
     assert set(campaign.final_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}
+
+
+def test_campaign_early_stops_on_convergence():
+    # A round that can never improve (mock worsens) is rejected ⇒ no progress;
+    # after `patience` such rounds the campaign STOPS early instead of running all
+    # n_iterations ("converged" once the bias has plateaued).
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 5.0)   # worsens → reject
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=10, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True, bias_tol=1e-9, patience=2)
+    assert campaign.stop_reason == "converged"
+    assert len(campaign.iterations) == 2          # 2 no-progress rounds → stop early
+
+
+def test_campaign_no_bias_tol_runs_all_rounds():
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 5.0)
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=3, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True)   # bias_tol=None
+    assert campaign.stop_reason == "max_iterations"
+    assert len(campaign.iterations) == 3
+
+
+def test_multi_campaign_early_stops_on_convergence():
+    compare_fn, diagnose_fn = _help_hurt_setup()        # combined can't improve → reject
+    campaign = run_multi_correction_campaign(
+        CLUBBLiteConfig(), 8, _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2), accept_only_if_improved=True, bias_tol=1e-9, patience=2)
+    assert campaign.stop_reason == "converged"
+    assert len(campaign.iterations) == 2
+
+
+def test_campaign_real_compare_multi_round_converges_to_zero_bias():
+    """PERFECT-MODEL OSSE for the LOOP mechanics: a multi-round campaign over the
+    REAL compare_state_to_reference drives the model's per-column coefficient so the
+    bias DECREASES MONOTONICALLY to ~0 and the campaign converges + early-stops.
+    Only the LES is replaced by a perfect diagnose_fn (returns the fixing value);
+    every other stage (real compare, ranking, apply, gate, accumulation) is real —
+    the strongest in-environment demonstration that updating the parameters lowers
+    the bias (the LES↔GCM transfer is the separate, HPC-only empirical question)."""
+    nlat, nlon, nlev = 4, 4, 5
+    shape = (nlat, nlon, nlev)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    lat = jnp.linspace(-60.0, 60.0, nlat)
+    lon = jnp.linspace(0.0, 270.0, nlon)
+    area_w = jnp.cos(jnp.deg2rad(lat))[:, None] * jnp.ones((nlat, nlon))
+    reference = ColumnState(
+        T=jnp.full(shape, 250.0), q_v=jnp.full(shape, 1e-3),
+        u=jnp.zeros(shape), v=jnp.zeros(shape), p_s=jnp.full((nlat, nlon), 1e5))
+
+    # +8 K bias at 8 columns; a column is "fixed" (zero bias) once its per-column
+    # tau_equator differs from the background — so accumulating corrections over
+    # rounds removes the bias column-by-column.
+    biased = {0, 2, 5, 7, 8, 10, 13, 15}
+    bias_vec = np.array([8.0 if c in biased else 0.0 for c in range(16)])
+    bg_tau = float(GrayRadiationConfig().tau_equator)
+
+    def run_amip_fn(config):
+        tau = np.asarray(config.tau_equator)
+        if tau.ndim == 0:
+            b = bias_vec                                 # round 0: nothing corrected
+        else:
+            fixed = ~np.isclose(tau, bg_tau)             # corrected columns → bias 0
+            b = np.where(fixed, 0.0, bias_vec)
+        return reference._replace(
+            T=reference.T + jnp.asarray(b).reshape(nlat, nlon)[:, :, None])
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat, lon_deg=lon, area_weights=area_w, n_worst=4,
+        run_amip_fn=run_amip_fn)
+
+    def diagnose(record, model_ctx):                     # perfect: fix the column
+        return _Eddy(K=jnp.array([2.0 * bg_tau]), valid=jnp.array([True]))
+
+    campaign = run_correction_campaign(
+        GrayRadiationConfig(), n_iterations=12, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="gray_tau_equator", grid_shape=(nlat, nlon),
+        background=bg_tau, accept_only_if_improved=True, bias_tol=1e-6, patience=2)
+
+    # Monotonic decrease across the ACCEPTED rounds, converging to ~0.
+    accepted_biases = [float(it.bias.updated_bias)
+                       for it, ok in zip(campaign.iterations, campaign.accepted) if ok]
+    assert accepted_biases == sorted(accepted_biases, reverse=True)  # monotone ↓
+    assert float(campaign.iterations[-1].bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
+    # It CONVERGED + stopped early (well before the 12-round budget).
+    assert campaign.stop_reason == "converged"
+    assert len(campaign.iterations) < 12
+
+
+def test_campaign_patience_must_be_positive_with_bias_tol():
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 1.0)
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        run_correction_campaign(
+            CLUBBLiteConfig(), n_iterations=3, compare_fn=compare_fn,
+            diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+            background=dck, bias_tol=1e-9, patience=0)

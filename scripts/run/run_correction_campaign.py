@@ -191,6 +191,8 @@ def build_correction_campaign(
     accept_only_if_improved: bool = True,
     step_fractions: Any | None = None,
     clip_to_bounds: bool = True,
+    bias_tol: float | None = None,
+    patience: int = 2,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -269,6 +271,7 @@ def build_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+        bias_tol=bias_tol, patience=patience,
     )
 
 
@@ -299,6 +302,8 @@ def build_multi_correction_campaign(
     step_fractions: Any | None = None,
     clip_to_bounds: bool = True,
     sequential: bool = False,
+    bias_tol: float | None = None,
+    patience: int = 2,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -358,7 +363,7 @@ def build_multi_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
-        sequential=sequential,
+        sequential=sequential, bias_tol=bias_tol, patience=patience,
         initial_fields=initial_fields, start_round=start_round,
         checkpoint_callback=checkpoint_callback,
     )
@@ -430,6 +435,12 @@ def _build_arg_parser():
     p.add_argument("--era5-cache", default=None, help="ERA5 local cache dir")
     p.add_argument("--era5-time-idx", type=int, default=0)
     p.add_argument("--iterations", type=int, default=3)
+    p.add_argument("--bias-tol", type=float, default=None,
+                   help="convergence tolerance: stop early once --patience "
+                        "consecutive rounds improve the global bias by less than "
+                        "this (or are rejected). Default: run all --iterations.")
+    p.add_argument("--patience", type=int, default=2,
+                   help="rounds of no-progress before --bias-tol early-stops")
     p.add_argument("--n-worst", type=int, default=20)
     p.add_argument("--les-budget", type=int, default=None,
                    help="cap LES to K env-cluster representatives (default: all)")
@@ -558,7 +569,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         accept_only_if_improved=not args.keep_worsening_rounds,
         step_fractions=([float(s) for s in args.step_fractions.split(",")]
                         if args.step_fractions else None),
-        clip_to_bounds=not args.allow_unphysical_coeff, sequential=args.staged)
+        clip_to_bounds=not args.allow_unphysical_coeff, sequential=args.staged,
+        bias_tol=args.bias_tol, patience=args.patience)
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
@@ -715,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             [float(s) for s in args.step_fractions.split(",")]
             if args.step_fractions else None),
         clip_to_bounds=not args.allow_unphysical_coeff,
+        bias_tol=args.bias_tol, patience=args.patience,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
