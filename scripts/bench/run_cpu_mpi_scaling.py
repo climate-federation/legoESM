@@ -210,13 +210,14 @@ _SUPPORTED_PHYSICS = {
     # here let users pass ``--physics gray_sbm`` and silently
     # benchmark dycore-only with the moist-physics label.
     "cubed-sphere": {"none", "held_suarez"},
-    "latlon": {"none", "held_suarez"},
     # "moist" = moisture (q_v/q_c/q_r) + Kessler warm-rain condensation,
-    # NO radiation: the moist baroclinic-wave case.  Only wired for
-    # icosahedral/MPAS, the sole multi-rank grid here — Kessler is
-    # column-local so it adds NO horizontal halo coupling beyond the
-    # dycore's tracer exchange, and the dycore already advects tracers
-    # mass-consistently (so moist scales on the same ladder as dry).
+    # NO radiation: the moist baroclinic-wave case.  Wired for the lat-lon
+    # C-grid (serial + band/2-D-pencil MPI) and icosahedral/MPAS — both
+    # advect tracers in mass-weighted flux form, and Kessler is column-local
+    # so it adds NO horizontal halo coupling beyond the dycore's existing
+    # tracer exchange (moist scales on the same ladder as dry).  NOT wired
+    # for the cubed-sphere FV3 dycore, which does not yet advect tracers.
+    "latlon": {"none", "held_suarez", "moist"},
     "icosahedral": {"none", "held_suarez", "moist"},
     # spectral "moist" = q_v/q_c/q_r + Kessler warm-rain (no radiation), the
     # moist baroclinic wave, via make_kessler_forcing_spectral.  Single-device
@@ -637,12 +638,21 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     from tests.test_cases.baroclinic_wave import (
         baroclinic_wave_init_latlon,
     )
-    state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = n_lat * n_lon * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "latlon")
+    if _moist:
+        # Kessler warm-rain bound to this step's dt (the physics_fn convention
+        # passes no timestep).  Column-local, so it adds NO horizontal halo
+        # coupling beyond the dycore's existing mass-consistent tracer
+        # exchange — moist scales on the same ladder as dry.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_latlon
+        physics_fn = make_kessler_forcing_latlon(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "latlon")
 
     if n_ranks > 1 and latlon_2d:
         # 2-D pencil (proc_lat x proc_lon) decomposition — the SOTA fix for
