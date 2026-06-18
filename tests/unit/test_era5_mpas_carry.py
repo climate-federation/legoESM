@@ -159,3 +159,41 @@ def test_voronoi_weights_cache_separates_ascending_descending():
     w_asc = _get_voronoi_weights(asc.lat, asc.lon, mesh)
     w_desc = _get_voronoi_weights(asc.lat[::-1].copy(), asc.lon, mesh)
     assert w_asc is not w_desc        # same shape, different lat bounds → no reuse
+
+
+def test_voronoi_weights_cache_hits_on_identical_content():
+    from legoesm.training.era5_to_state import _get_voronoi_weights
+    mesh = create_voronoi_mesh(2)
+    asc = _synthetic_era5()
+    # A freshly-built but value-identical source grid still hits the cache
+    # (content fingerprint, not object identity).
+    w1 = _get_voronoi_weights(asc.lat.copy(), asc.lon.copy(), mesh)
+    w2 = _get_voronoi_weights(asc.lat.copy(), asc.lon.copy(), mesh)
+    assert w1 is w2
+
+
+def test_voronoi_weights_cache_separates_same_endpoint_different_interior():
+    """The bug class fixed in iter 109's cubed-sphere path, here for MPAS: a source
+    grid with the SAME shape + endpoints but different INTERIOR spacing (e.g. uniform
+    lat-lon vs Gaussian of the same bounds) must NOT collide on the cache."""
+    from legoesm.training.era5_to_state import _get_voronoi_weights
+    mesh = create_voronoi_mesh(2)
+    asc = _synthetic_era5()
+    w_uniform = _get_voronoi_weights(asc.lat, asc.lon, mesh)
+    lat_perturbed = asc.lat.copy()
+    lat_perturbed[1:-1] *= 0.5            # change interior, keep endpoints
+    w_perturbed = _get_voronoi_weights(lat_perturbed, asc.lon, mesh)
+    assert w_uniform is not w_perturbed
+
+
+def test_voronoi_weights_cache_separates_different_meshes():
+    """Different MESH cell coordinates → different cached weights (the mesh is
+    fingerprinted by content, so two distinct meshes never alias even if a GC'd
+    mesh's id were reused)."""
+    from legoesm.training.era5_to_state import _get_voronoi_weights
+    asc = _synthetic_era5()
+    mesh2 = create_voronoi_mesh(2)
+    mesh3 = create_voronoi_mesh(3)        # different nCells / cell coords
+    w2 = _get_voronoi_weights(asc.lat, asc.lon, mesh2)
+    w3 = _get_voronoi_weights(asc.lat, asc.lon, mesh3)
+    assert w2 is not w3

@@ -641,17 +641,19 @@ _VORONOI_WEIGHT_CACHE: dict[tuple, object] = {}
 def _get_voronoi_weights(src_lat_rad, src_lon_rad, mesh):
     """Cached ERA5-lat-lon → MPAS-cell inverse-distance regridding weights.
 
-    Keyed by the source-grid SHAPE **and its coordinate bounds** (not just shape +
-    ``id(mesh)``) so weights are never silently reused across two ERA5 grids that
-    share a shape but differ in extent/ordering (Codex).
+    Keyed on the CONTENT fingerprint of both the source coords AND the mesh cell
+    coords (``_coord_fingerprint``), exactly as the cubed-sphere path: keying on
+    shape + endpoints alone COLLIDES on two source grids that share an extent but
+    differ in INTERIOR spacing (a uniform lat-lon grid vs a Gaussian grid of the
+    same bounds), and an ``id(mesh)`` key is unsafe after the mesh is
+    garbage-collected and its id reused.  Fingerprinting the mesh cells makes the
+    cache collision- and GC-safe (see #cs / iter 109's cubed-sphere fix).
     """
     src_lat = np.asarray(src_lat_rad)
     src_lon = np.asarray(src_lon_rad)
     key = (
-        int(src_lat.size), int(src_lon.size),
-        float(src_lat[0]), float(src_lat[-1]),
-        float(src_lon[0]), float(src_lon[-1]),
-        id(mesh),
+        _coord_fingerprint(src_lat), _coord_fingerprint(src_lon),
+        _coord_fingerprint(mesh.latCell), _coord_fingerprint(mesh.lonCell),
     )
     if key not in _VORONOI_WEIGHT_CACHE:
         from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
