@@ -31,8 +31,9 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     ``LatLon2DLayout`` — a lat×lon pencil).  Returns ``override`` UNCHANGED when no
     slicing is needed (non-clubb scheme, all-scalar fields, or per-column fields not
     at the global column count — i.e. already rank-local).  Supports lat-lon
-    (``LatLonBandLayout`` / ``LatLon2DLayout``) AND cubed-sphere
-    (``DistributedLayout`` face-only / tiled, via the model's ``scatter``).  An
+    (``LatLonBandLayout`` / ``LatLon2DLayout``), cubed-sphere (``DistributedLayout``
+    face-only / tiled, via the model's ``scatter``), AND MPAS/Voronoi
+    (``VoronoiPartitionLayout``, gathered at the rank's ``local_cells``).  An
     UNRECOGNIZED decomposition passes the override THROUGH unchanged (honoring an
     advanced user who pre-sliced per rank via
     :func:`legoesm.training.deploy_correction.slice_override_columns`); a GLOBAL
@@ -79,16 +80,45 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     return override  # already rank-local (or a different grid) → leave as-is
 
 
+def active_column_layout():
+    """The active per-column MPI layout across all grid families, or ``None`` (serial).
+
+    The three grid families register their layout DIFFERENTLY: lat-lon sets it as
+    the halo topology (``get_mpi_topology``); cubed-sphere sets a halo
+    ``CommTopology`` (the column ``DistributedLayout`` is resolved inside
+    :func:`_layout_partition`); MPAS/Voronoi sets ONLY the active voronoi layout (no
+    halo topology), so fall back to it when no halo topology is active.  This is the
+    single accessor ``turbulence_config_for`` uses to find the rank's partition.
+
+    Precedence is halo-topology-FIRST, which assumes ONE grid family per process —
+    the production case (a run drives a single dycore).  A same-process run that
+    switched grid families without resetting (a test) could leave a stale halo
+    topology shadowing an active voronoi layout; distributed tests must reset it
+    (``set_halo_backend('local')`` / ``reset_distributed_topology()``), exactly as a
+    fresh MPAS process has no halo topology set.
+    """
+    from legoesm.grids.halo import get_mpi_topology
+
+    layout = get_mpi_topology()
+    if layout is not None:
+        return layout  # lat-lon band/2-D, or a cubed CommTopology
+    from legoesm.parallel.voronoi_mpi import get_active_voronoi_layout
+
+    return get_active_voronoi_layout()  # MPAS Voronoi layout, or None (serial)
+
+
 def _layout_partition(layout):
     """``(global_shape, slice_to_local)`` for a supported MPI layout, else ``None``.
 
     ``global_shape`` is the per-column field's native horizontal shape (``(n_lat,
-    n_lon)`` for lat-lon, ``(6, n, n)`` for cubed-sphere) and ``slice_to_local`` is
-    the rank's deterministic block extractor — reusing the MODEL's own partition
-    (the lat-lon band/2-D slice, or :func:`legoesm.parallel.layout.scatter` for
-    cubed-sphere face-only / tiled), so the local override lands on EXACTLY the
-    columns the rank's physics consumes.  ``None`` ⇒ an unrecognized decomposition.
+    n_lon)`` lat-lon, ``(6, n, n)`` cubed-sphere, ``(nCells_global,)`` MPAS) and
+    ``slice_to_local`` is the rank's deterministic block extractor — reusing the
+    MODEL's own partition (the lat-lon band/2-D slice, :func:`legoesm.parallel.
+    layout.scatter` for cubed-sphere, or a ``jnp.take`` over the MPAS partition's
+    owned+halo ``local_cells``), so the local override lands on EXACTLY the columns
+    the rank's physics consumes.  ``None`` ⇒ an unrecognized decomposition.
     """
+    import jax.numpy as jnp
     from legoesm.parallel.comm import CommTopology
     from legoesm.parallel.latlon_mpi import LatLon2DLayout, LatLonBandLayout
     from legoesm.parallel.layout import (
@@ -96,6 +126,7 @@ def _layout_partition(layout):
         SingleRankLayout,
         scatter,
     )
+    from legoesm.parallel.voronoi_mpi import VoronoiPartitionLayout
 
     if isinstance(layout, LatLon2DLayout):
         return ((layout.n_lat_global, layout.n_lon_global),
@@ -122,4 +153,12 @@ def _layout_partition(layout):
     if isinstance(layout, (DistributedLayout, SingleRankLayout)):  # cubed-sphere
         n = int(layout.global_n)
         return ((6, n, n), lambda f: scatter(f, layout))
+    if isinstance(layout, VoronoiPartitionLayout):  # MPAS / Voronoi (unstructured)
+        part = layout.partition
+        # The rank's physics runs on the LOCAL mesh (owned + halo cells); gather the
+        # override at those cells' GLOBAL indices (halo cells take the owned value
+        # they duplicate). 1-D field, so the "global_shape" is just (nCells_global,).
+        local_cells = jnp.asarray(part.local_cells)
+        return ((int(part.nCells_global),),
+                lambda f: jnp.take(f, local_cells, axis=0))
     return None

@@ -169,6 +169,66 @@ def test_comm_topology_without_active_layout_raises():
 
 
 # --------------------------------------------------------------------------- #
+# MPAS / Voronoi: unstructured — gather the override at the rank's local_cells.
+# --------------------------------------------------------------------------- #
+def _voronoi_layout(n_global, local_cells, n_owned):
+    from legoesm.parallel.voronoi_mpi import VoronoiPartitionLayout
+    from legoesm.parallel.voronoi_partition import VoronoiPartition
+
+    local = np.asarray(local_cells)
+    part = VoronoiPartition(
+        rank=0, n_ranks=2, nCells_global=n_global, nEdges_global=0,
+        nVertices_global=0, n_owned_cells=n_owned, n_owned_edges=0,
+        n_owned_vertices=0, n_local_cells=len(local), n_local_edges=0,
+        n_local_vertices=0, local_cells=local, local_edges=np.array([], int),
+        local_vertices=np.array([], int), cell_comm=None, edge_comm=None,
+        vertex_comm=None, cell_g2l={}, edge_g2l={}, vertex_g2l={})
+    return VoronoiPartitionLayout(
+        rank=0, n_ranks=2, partition=part, halo_exchange=None, local_mesh=None,
+        owned_mask_cells=None, owned_mask_edges=None)
+
+
+def test_mpas_gathers_at_local_cells():
+    n_global = 12
+    ov = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(
+        C_K=jnp.arange(n_global, dtype=jnp.float64) * 0.01 + 0.3))
+    # Owned cells {1,3,5,7} + halo {0,2} — the rank's local mesh order.
+    local_cells = [1, 3, 5, 7, 0, 2]
+    layout = _voronoi_layout(n_global, local_cells, n_owned=4)
+    local = np.asarray(localize_turbulence_override(ov, layout).clubb_lite.C_K)
+    np.testing.assert_allclose(local, np.asarray(ov.clubb_lite.C_K)[local_cells])
+
+
+def test_mpas_already_local_passes_through():
+    # A field already at the local-cell count (6 != 12 global) is left as-is.
+    ov = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(
+        C_K=jnp.arange(6, dtype=jnp.float64)))
+    layout = _voronoi_layout(12, [1, 3, 5, 7, 0, 2], n_owned=4)
+    assert localize_turbulence_override(ov, layout) is ov
+
+
+def test_active_column_layout_resolves_mpas(monkeypatch):
+    # get_mpi_topology() is None under MPAS; active_column_layout() falls back to the
+    # active voronoi layout so turbulence_config_for localizes for MPAS too.
+    from legoesm.atmosphere.physics.turbulence import override_sharding
+
+    monkeypatch.setattr("legoesm.grids.halo.get_mpi_topology", lambda: None)
+    vlayout = _voronoi_layout(12, [0, 1, 2], n_owned=3)
+    monkeypatch.setattr(
+        "legoesm.parallel.voronoi_mpi.get_active_voronoi_layout", lambda: vlayout)
+    assert override_sharding.active_column_layout() is vlayout
+
+
+def test_active_column_layout_serial_is_none(monkeypatch):
+    from legoesm.atmosphere.physics.turbulence import override_sharding
+
+    monkeypatch.setattr("legoesm.grids.halo.get_mpi_topology", lambda: None)
+    monkeypatch.setattr(
+        "legoesm.parallel.voronoi_mpi.get_active_voronoi_layout", lambda: None)
+    assert override_sharding.active_column_layout() is None
+
+
+# --------------------------------------------------------------------------- #
 # Unrecognized decomposition → pass-through (the escape hatch).
 # --------------------------------------------------------------------------- #
 class _UnknownLayout:

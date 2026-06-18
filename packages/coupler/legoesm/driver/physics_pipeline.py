@@ -2315,16 +2315,16 @@ def turbulence_config_for(config):
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
     # parallel layout machinery is only touched when an override is actually set;
-    # get_mpi_topology() is None in serial → a strict no-op (the override verbatim).
-    from legoesm.grids.halo import get_mpi_topology
-
-    layout = get_mpi_topology()
-    if layout is None:
-        return override
+    # active_column_layout() is None in serial → a strict no-op (override verbatim),
+    # and resolves the layout across lat-lon / cubed-sphere / MPAS grid families.
     from legoesm.atmosphere.physics.turbulence.override_sharding import (
+        active_column_layout,
         localize_turbulence_override,
     )
 
+    layout = active_column_layout()
+    if layout is None:
+        return override
     return localize_turbulence_override(override, layout)
 
 
