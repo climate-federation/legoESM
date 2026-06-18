@@ -588,6 +588,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
                    "biases": biases, "accepted": accepted,
                    "step_fractions": steps}, f, indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
+    from legoesm.training.campaign_summary import summarize_campaign
+    print(summarize_campaign(result).report())
     return 0
 
 
@@ -744,6 +746,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
                    "biases": biases, "accepted": accepted,
                    "step_fractions": steps}, f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
+    from legoesm.training.campaign_summary import summarize_campaign
+    promotion_key = _METHOD_PROMOTION[args.diagnosis_method][0]
+    print(summarize_campaign(result, promotion_key=promotion_key).report())
     return 0
 
 
