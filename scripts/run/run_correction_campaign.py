@@ -732,6 +732,32 @@ def _build_arg_parser():
     return p
 
 
+def _campaign_knobs_from_args(args) -> dict:
+    """The arg-derived campaign knobs SHARED by the single- and multi-coefficient CLI
+    build calls — the ONE place the CLI flags map to ``build_correction_campaign`` /
+    ``build_multi_correction_campaign`` kwargs.
+
+    Centralizing the mapping (especially the boolean NEGATIONS — ``--keep-dry-rounds``
+    → ``stop_on_no_valid_diagnoses=False``, ``--allow-unphysical-coeff`` →
+    ``clip_to_bounds=False``, ``--keep-worsening-rounds`` → ``accept_only_if_improved=
+    False`` — and the ``--step-fractions`` CSV parse) means the two call sites cannot
+    DRIFT: a forgotten / inverted flag is a silent bug that would only surface on a
+    multi-day HPC launch.  Pure (no I/O), so it is unit-tested directly.
+    """
+    return dict(
+        n_worst=args.n_worst,
+        les_budget=args.les_budget,
+        feedback_strategy=args.feedback_strategy,
+        accept_only_if_improved=not args.keep_worsening_rounds,
+        step_fractions=([float(s) for s in args.step_fractions.split(",")]
+                        if args.step_fractions else None),
+        clip_to_bounds=not args.allow_unphysical_coeff,
+        bias_tol=args.bias_tol,
+        patience=args.patience,
+        stop_on_no_valid_diagnoses=not args.keep_dry_rounds,
+    )
+
+
 def _summary_to_json(summary):  # pragma: no cover - HPC path
     """JSON-serializable form of a :class:`CampaignSummary` for the output file."""
     return {
@@ -824,17 +850,12 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma, grid=grid,
         area_weights=_area_weights(grid), n_iterations=args.iterations,
-        les_config=ColumnLESConfig(), n_worst=args.n_worst, coefficients=coefficients,
-        les_budget=args.les_budget, run_les_fn=run_les,
+        les_config=ColumnLESConfig(), coefficients=coefficients,
+        run_les_fn=run_les,
         initial_clubb=initial_clubb, initial_fields=initial_fields,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
-        feedback_strategy=args.feedback_strategy,
-        accept_only_if_improved=not args.keep_worsening_rounds,
-        step_fractions=([float(s) for s in args.step_fractions.split(",")]
-                        if args.step_fractions else None),
-        clip_to_bounds=not args.allow_unphysical_coeff, sequential=args.staged,
-        bias_tol=args.bias_tol, patience=args.patience,
-        stop_on_no_valid_diagnoses=not args.keep_dry_rounds)
+        sequential=args.staged,
+        **_campaign_knobs_from_args(args))
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
@@ -1067,19 +1088,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         extract_column_state=extract_fn, reference=reference, sigma=sigma,
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
-        n_worst=args.n_worst,
-        les_budget=args.les_budget,
         run_les_fn=run_les,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
-        feedback_strategy=args.feedback_strategy,
-        accept_only_if_improved=not args.keep_worsening_rounds,
-        step_fractions=(
-            [float(s) for s in args.step_fractions.split(",")]
-            if args.step_fractions else None),
-        clip_to_bounds=not args.allow_unphysical_coeff,
-        bias_tol=args.bias_tol, patience=args.patience,
-        stop_on_no_valid_diagnoses=not args.keep_dry_rounds,
+        **_campaign_knobs_from_args(args),
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]

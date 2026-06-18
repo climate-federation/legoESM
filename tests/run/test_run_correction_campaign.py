@@ -26,6 +26,8 @@ from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
+    _build_arg_parser,
+    _campaign_knobs_from_args,
     _distributed_campaign_kwargs,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
@@ -1262,3 +1264,114 @@ def test_build_distributed_mpas_campaign_wires_local_mesh(monkeypatch, multi, ta
 
 def _boom_wrapper(**kwargs):                            # the wrapper that must NOT run
     raise AssertionError("wrong distributed wrapper dispatched")
+
+
+def test_build_arg_parser_defaults():
+    """The CLI parser (the HPC entry point, previously untested) has the documented
+    defaults: abort/clamp/gate are ON, mode=amip (iter 102)."""
+    args = _build_arg_parser().parse_args(["--config", "base.json", "--era5-zarr", "era5.zarr"])
+    assert args.mode == "amip"
+    assert args.iterations == 3 and args.n_worst == 20 and args.patience == 2
+    assert args.bias_tol is None
+    assert args.keep_dry_rounds is False          # default → dry-abort ON
+    assert args.allow_unphysical_coeff is False   # default → bounds clamp ON
+    assert args.keep_worsening_rounds is False    # default → monotonic gate ON
+    assert args.feedback_strategy == "static"
+
+
+def test_build_arg_parser_required_and_choices():
+    parser = _build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([])                                   # --config required
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--config", "x", "--era5-zarr", "z", "--mode", "bogus"])  # bad choice
+
+
+def test_campaign_knobs_from_args_maps_flags():
+    """The shared arg→build-kwargs mapping handles the boolean NEGATIONS + the CSV
+    step-fractions parse correctly (an inverted flag = a silent HPC bug; iter 102)."""
+    parser = _build_arg_parser()
+    knobs = _campaign_knobs_from_args(parser.parse_args(["--config", "x", "--era5-zarr", "z"]))
+    assert knobs["stop_on_no_valid_diagnoses"] is True    # NOT --keep-dry-rounds
+    assert knobs["clip_to_bounds"] is True                # NOT --allow-unphysical-coeff
+    assert knobs["accept_only_if_improved"] is True       # NOT --keep-worsening-rounds
+    assert knobs["step_fractions"] is None
+    assert knobs["patience"] == 2 and knobs["n_worst"] == 20 and knobs["bias_tol"] is None
+
+    flagged = _campaign_knobs_from_args(parser.parse_args([
+        "--config", "x", "--era5-zarr", "z", "--keep-dry-rounds", "--allow-unphysical-coeff",
+        "--keep-worsening-rounds", "--step-fractions", "1.0,0.5,0.25",
+        "--bias-tol", "1e-3", "--patience", "5", "--n-worst", "8",
+        "--feedback-strategy", "environment", "--les-budget", "4"]))
+    assert flagged["stop_on_no_valid_diagnoses"] is False
+    assert flagged["clip_to_bounds"] is False
+    assert flagged["accept_only_if_improved"] is False
+    assert flagged["step_fractions"] == [1.0, 0.5, 0.25]
+    assert flagged["bias_tol"] == pytest.approx(1e-3) and flagged["patience"] == 5
+    assert flagged["n_worst"] == 8 and flagged["les_budget"] == 4
+    assert flagged["feedback_strategy"] == "environment"
+
+
+def test_campaign_knobs_are_valid_kwargs_for_both_builders():
+    """Every knob the CLI maps MUST be a real kwarg of BOTH builders — so a renamed /
+    removed builder param fails LOUDLY here, not silently on an HPC launch (this is
+    the test that would have caught the iter-101 'CLI forgot to forward the flag'
+    drift; iter 102)."""
+    import inspect
+
+    knobs = set(_campaign_knobs_from_args(
+        _build_arg_parser().parse_args(["--config", "x", "--era5-zarr", "z"])))
+    assert "stop_on_no_valid_diagnoses" in knobs            # the iter-101 flag
+    for fn in (build_correction_campaign, build_multi_correction_campaign):
+        params = set(inspect.signature(fn).parameters)
+        missing = knobs - params
+        assert not missing, f"{fn.__name__} missing CLI knobs: {missing}"
+
+
+def test_builders_forward_campaign_knobs_to_run_loop(monkeypatch):
+    """Closes the builder→run-loop hop (the subset test only proves CLI→builder): each
+    builder must FORWARD the run-bound knobs to run_*correction_campaign. The loop is
+    monkeypatched to capture kwargs; sentinel values are asserted. (n_worst is NOT here
+    — it is consumed by compose_compare_fn, a different hop.) iter 102 Codex."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    ms = _full_grid_state()                                   # physical → passes validate
+    common = dict(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(ms),        # noqa: ARG005
+        extract_column_state=lambda d, day, dt: d.state,      # noqa: ARG005
+        reference=ms, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=4, n_worst=1,
+        run_les_fn=_mock_run_les_sheared)
+    # sentinel knobs (non-default so a dropped forward is visible).
+    knobs = dict(les_budget=3, feedback_strategy="environment",
+                 accept_only_if_improved=False, step_fractions=[0.5],
+                 clip_to_bounds=False, bias_tol=0.123, patience=9,
+                 stop_on_no_valid_diagnoses=False)
+
+    # run_correction_campaign is a module-top import (patch on rcc);
+    # run_multi_correction_campaign is a function-scope import (patch the SOURCE).
+    cap_single = {}
+    monkeypatch.setattr(rcc, "run_correction_campaign",
+                        lambda *a, **k: (cap_single.update(k), "R")[1])
+    assert build_correction_campaign(
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        **common, **knobs) == "R"
+    for key, val in knobs.items():
+        assert cap_single[key] == val, f"single builder dropped {key}"
+
+    cap_multi = {}
+    monkeypatch.setattr(
+        "legoesm.training.correction_loop.run_multi_correction_campaign",
+        lambda *a, **k: (cap_multi.update(k), "M")[1])
+    assert build_multi_correction_campaign(
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        coefficients=("C_K", "Pr_t"), **common, **knobs) == "M"
+    for key, val in knobs.items():
+        assert cap_multi[key] == val, f"multi builder dropped {key}"
