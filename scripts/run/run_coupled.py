@@ -178,6 +178,14 @@ def main():
     parser.add_argument("--woa-s-path",
                         default="data/woa18/woa18_decav_s00_01.nc",
                         help="WOA18 salinity file (--ocean-ic woa)")
+    parser.add_argument("--tripole-mesh", default=None,
+                        help="NEMO eORCA mesh_mask file (e.g. "
+                             "data/grids/eORCA1.2_mesh_mask.nc).  When set with "
+                             "--ocean dynamic, the 3D ocean runs on the TRIPOLE "
+                             "grid (a DIFFERENT grid from the lat-lon atmosphere) "
+                             "coupled via the Phase-2 cross-grid conservative "
+                             "remap, using the OMIP-validated cold-start recipe. "
+                             "The land mask + bathymetry come from this file.")
 
     # Carbon
     parser.add_argument("--co2-init", type=float, default=415.0,
@@ -325,20 +333,39 @@ def main():
     # ocean physics the coupled slab supports.  Every preset holds a
     # SimpleOceanConfig, so replacing it is type-safe.
     overrides = {}
+    ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     if args.ocean == "dynamic":
-        # Prognostic 3D LatLonCGridOceanModel on the SHARED lat-lon grid.
+        # Prognostic 3D LatLonCGridOceanModel.  Two grid configurations:
+        #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
+        #     lat-lon grid (no remap).  Requires --grid latlon.
+        #   * TRIPOLE (--tripole-mesh): the ocean runs on the eORCA tripole grid
+        #     (a DIFFERENT grid from the lat-lon atm), coupled via the Phase-2
+        #     cross-grid conservative remap (coupler.grid_remap).
         from legoesm.ocean.state import LatLonCGridOceanConfig
         if args.grid != "latlon":
             raise SystemExit(
-                "--ocean dynamic requires --grid latlon (the 3D ocean shares "
-                "the atmosphere's lat-lon grid; cube-atm + tripole-ocean needs "
-                "the deferred cross-grid remap).")
+                "--ocean dynamic requires --grid latlon (the atmosphere is "
+                "lat-lon; the 3D ocean is either co-located lat-lon or, with "
+                "--tripole-mesh, the tripole grid coupled by the cross-grid "
+                "remap).  Cube-atm + tripole-ocean needs the deferred "
+                "cross-family remap.")
         overrides["ocean_mode"] = "dynamic"
         overrides["ocean_config"] = LatLonCGridOceanConfig()
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
         overrides["ocean_ic"] = args.ocean_ic
+        if args.tripole_mesh:
+            # Build the tripole geometry from the NEMO mesh and pass it as a
+            # DISTINCT ocean grid (make_grid_remapper builds the atm<->tripole
+            # cross-grid remap; _init_tripole_dynamic_ocean clones the OMIP
+            # cold-start recipe and reads mask+bathy from this same mesh).
+            from legoesm.grids.tripole import create_tripole_grid
+            ocean_grid_obj = create_tripole_grid(args.tripole_mesh)
+            overrides["tripole_mesh_path"] = args.tripole_mesh
+            logger.info(f"  Ocean grid: TRIPOLE from {args.tripole_mesh} "
+                        f"({ocean_grid_obj.n_lat}x{ocean_grid_obj.n_lon}); "
+                        f"atm lat-lon -> tripole cross-grid remap")
         if args.ocean_ic == "woa":
             # Realistic WOA cold start: observed T/S + WOA-derived continents.
             from legoesm.land.config import LandConfig
@@ -378,7 +405,8 @@ def main():
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
     driver = CoupledESMDriver(
-        atm_config, coupled_cfg, output_dir=args.output,
+        atm_config, coupled_cfg, ocean_grid=ocean_grid_obj,
+        output_dir=args.output,
     )
 
     t0 = time.time()

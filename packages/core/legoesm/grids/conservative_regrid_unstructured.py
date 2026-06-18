@@ -55,13 +55,17 @@ from legoesm.grids.conservative_regrid import ConservativeRegridWeights
 from legoesm.grids.voronoi import spherical_triangle_area, shift_near
 
 
-def _unit(v: np.ndarray) -> np.ndarray:
+def unit_vector(v: np.ndarray) -> np.ndarray:
     """Normalise the last axis to unit length (sphere projection)."""
     n = np.linalg.norm(v, axis=-1, keepdims=True)
     return v / np.maximum(n, 1e-30)
 
 
-def _triangle_subcells(a, b, c, n_sub):
+# Backward-compatible private alias (used throughout this module).
+_unit = unit_vector
+
+
+def triangle_subcells(a, b, c, n_sub):
     """Tile spherical triangle (unit vectors ``a``,``b``,``c``) into ``n_sub**2``
     sub-triangles; return ``(centroids (M,3) unit, areas (M,))``.
 
@@ -97,6 +101,10 @@ def _triangle_subcells(a, b, c, n_sub):
                 cents.append(_unit(A2 + B2 + C2))
                 areas.append(spherical_triangle_area(A2, B2, C2, 1.0))
     return np.asarray(cents, dtype=np.float64), np.asarray(areas, dtype=np.float64)
+
+
+# Backward-compatible private alias (used by ``compute_mpas_to_mpas_weights``).
+_triangle_subcells = triangle_subcells
 
 
 def _voronoi_cell_polygons(mesh):

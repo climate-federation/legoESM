@@ -85,6 +85,14 @@ class CoupledConfig(NamedTuple):
     ocean_ic: str = "rest"
     woa_t_path: str | None = None   # WOA18 temperature file (ocean_ic=="woa")
     woa_s_path: str | None = None   # WOA18 salinity    file (ocean_ic=="woa")
+    # NEMO eORCA tripole mesh_mask file. When the dynamic-ocean grid is a
+    # tripole (active-fold) geometry — a DIFFERENT grid from the lat-lon
+    # atmosphere, coupled via the Phase-2 cross-grid conservative remap — the
+    # land mask + bathymetry are read from THIS file (the same file the tripole
+    # geometry was built from), via the OMIP-validated cold-start recipe
+    # (adcroft PGF + implicit_cn barotropic + implicit vmix + C_smag_lap=0.33).
+    # Required when ocean_mode=="dynamic" and the ocean grid is tripole.
+    tripole_mesh_path: str | None = None
     # Land
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()

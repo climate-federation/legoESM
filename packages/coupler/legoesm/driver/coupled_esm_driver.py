@@ -169,13 +169,29 @@ class CoupledESMDriver:
         )
 
         cfg = self.coupled_cfg
-        if not isinstance(self._ocean_grid, LatLonGrid):
+        # Accept EITHER a regular lat-lon ocean grid (co-located with the
+        # atmosphere, identity remap) OR a tripole (active-fold) curvilinear
+        # ocean grid (a DIFFERENT grid coupled to the lat-lon atm via the
+        # Phase-2 cross-grid conservative remap, make_grid_remapper).  Cube /
+        # MPAS ocean grids stay unsupported (the cross-family overlap generator
+        # is still deferred).  ``fold.is_active`` is a static Python bool set at
+        # geometry-build time.
+        _fold = getattr(self._ocean_grid, "fold", None)
+        _is_tripole_grid = _fold is not None and getattr(_fold, "is_active", False)
+        if not (isinstance(self._ocean_grid, LatLonGrid) or _is_tripole_grid):
             raise ValueError(
-                "ocean_mode='dynamic' requires a SHARED lat-lon ocean grid "
-                "(lat-lon atm + lat-lon 3D ocean co-located, no cross-grid "
-                f"remap); got ocean grid {type(self._ocean_grid).__name__}. "
-                "Run with --grid latlon (cube-atm + tripole-ocean needs the "
-                "deferred cross-family remap, Phase 2).")
+                "ocean_mode='dynamic' requires a regular lat-lon ocean grid "
+                "(lat-lon atm + lat-lon 3D ocean co-located) OR a tripole "
+                "(active-fold) ocean grid coupled via the Phase-2 cross-grid "
+                f"remap; got ocean grid {type(self._ocean_grid).__name__}. "
+                "Cube / MPAS ocean grids need the deferred cross-family "
+                "spherical-overlap remap.")
+        if _is_tripole_grid:
+            # Tripole ocean: build with the OMIP-validated cold-start recipe
+            # (NOT the lat-lon smc03/rk3 recipe below — they differ and mixing
+            # them blows the cold start up; see top-risk #2 in the build plan).
+            self._init_tripole_dynamic_ocean()
+            return
 
         # The 3D ocean needs the full LatLonCGridOceanConfig; build a default
         # one if the caller passed a SimpleOceanConfig.
@@ -315,6 +331,165 @@ class CoupledESMDriver:
             f"barotropic={ocfg.barotropic_solver}, "
             f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
 
+    def _build_tripole_ocean_config(self):
+        """The OMIP-validated tripole ``LatLonCGridOceanConfig`` — cloned VERBATIM
+        from the standalone forced-ocean recipe (``run_omip.py`` tripole branch,
+        the config validated by the 20-yr production run): adcroft PGF +
+        implicit_cn barotropic (30 substeps) + implicit vertical mixing + KPP +
+        enhanced-diffusion convection + GM/Redi 600 + C_smag_lap 0.33 + tvd
+        tracer advection + 1e-3 bottom drag + virtual-salt freshwater.  The
+        coupled run delivers atm fluxes as an ``OceanSurfaceForcing`` consumed by
+        the SAME dynamics-core external-tau block the OMIP run uses, so the
+        surface-forcing scheme is "none" (the coupler is the forcing source)."""
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, KPPConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+        )
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp", kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
+        return LatLonCGridOceanConfig(
+            A_h=1.0e5, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
+            C_smag_lap=0.33,
+            n_barotropic_substeps=30,
+            barotropic_solver="implicit_cn",
+            barotropic_implicit_pcg_tol=1e-10,
+            barotropic_implicit_pcg_maxiter=300,
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            tracer_advection="tvd",
+            bottom_drag_r=1e-3,
+            bottom_drag_bbl_thickness=100.0,
+            bottom_drag_bg_velocity=0.1,
+            freshwater_closure="virtual_salt_flux",
+            gm_redi=GMRediConfig(
+                kappa_GM=600.0, kappa_Redi=600.0, S_max=0.005,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="centered",
+            ),
+            physics=physics,
+        )
+
+    def _init_tripole_dynamic_ocean(self):
+        """Build the 3D ``LatLonCGridOceanModel`` on a tripole (eORCA) grid with
+        the OMIP-validated cold-start stack: NEMO mesh land mask + bathymetry ->
+        partial-cell coordinate -> WOA18 (or rest) IC -> balanced init, stepped
+        with the cloned OMIP tripole config.  Geometry/IC are READ from the SAME
+        NEMO mesh_mask the tripole geometry was built from (``tripole_mesh_path``)
+        so the wet domain is identical to the standalone OMIP run we already
+        validated as stable (memory: omip_latlon_75lev_solved /
+        omip_rk3_coldstart_solve — do NOT re-tune; reuse)."""
+        import numpy as np
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean, apply_balanced_init,
+            make_partial_cell_latlon,
+        )
+        from legoesm.ocean.init_tripole import (
+            read_mesh_mask_bathy, compute_woa_3d,
+        )
+        from legoesm.core.precision import get_policy
+
+        cfg = self.coupled_cfg
+        if not cfg.tripole_mesh_path:
+            raise ValueError(
+                "a tripole dynamic ocean requires tripole_mesh_path (the NEMO "
+                "eORCA mesh_mask file the land mask + bathymetry are read from).")
+        if cfg.ocean_dt_s <= 0.0:
+            raise ValueError(f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
+        _sd = get_policy().storage
+
+        ocfg = self._build_tripole_ocean_config()
+        z_star = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+
+        # NEMO land mask (1=ocean) + total wet-column bathymetry [m].
+        land_np, H_nemo = read_mesh_mask_bathy(cfg.tripole_mesh_path)
+        # Smooth + thin-cell snap + shallow-mask -> partial-cell coordinate
+        # (ACTIVATES the adcroft density-Jacobian PGF; a plain z-star silently
+        # falls back to the centered-diff PGF that blows up on sharp bathymetry).
+        model_z_coord, H_snap, land_np = make_partial_cell_latlon(
+            z_star, np.asarray(H_nemo), np.asarray(land_np),
+        )
+        land_mask = jnp.asarray(land_np, dtype=_sd)        # 1=ocean, 0=land
+        _wet = np.asarray(land_np) > 0.5
+        H_state = np.where(_wet, H_snap, cfg.ocean_H_max_m)
+        base_state = rest_state_latlon_cgrid_ocean(
+            self._ocean_grid, z_star,
+            land_mask_override=land_mask,
+            H_bathy_override=jnp.asarray(H_state, dtype=_sd),
+        )
+
+        if cfg.ocean_ic == "woa":
+            if not cfg.woa_t_path or not cfg.woa_s_path:
+                raise ValueError(
+                    "ocean_ic='woa' requires woa_t_path and woa_s_path "
+                    f"(got {cfg.woa_t_path!r}, {cfg.woa_s_path!r}).")
+            # WOA18 T/S on the partial-cell levels (NaN-aware, flood-filled for
+            # NEMO-ocean cells WOA lacks data for, deep-filled below seafloor) —
+            # the shared OMIP loader so the coupled IC matches the standalone.
+            T_woa, S_woa = compute_woa_3d(
+                self._ocean_grid, model_z_coord,
+                cfg.woa_t_path, cfg.woa_s_path, H_state, land_np,
+            )
+            _expect = base_state.T.data.shape
+            if tuple(T_woa.shape) != tuple(_expect):
+                raise ValueError(
+                    f"WOA T/S shape {tuple(T_woa.shape)} != ocean state "
+                    f"{tuple(_expect)} — grid/level mismatch.")
+            self._ocean_state = base_state._replace(
+                T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
+                S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
+            )
+            self._ocean_state = apply_balanced_init(
+                self._ocean_state, self._ocean_grid, model_z_coord, ocfg,
+            )
+        elif cfg.ocean_ic == "rest":
+            # Rest state on the NEMO geometry (exponential T / uniform S from
+            # rest_state_latlon_cgrid_ocean above) — no balanced init needed.
+            self._ocean_state = base_state
+        else:
+            raise ValueError(
+                f"ocean_ic must be 'rest' or 'woa', got {cfg.ocean_ic!r}.")
+
+        self._ocean_model = LatLonCGridOceanModel(
+            self._ocean_grid, model_z_coord, ocfg,
+        )
+        self._ocean_step = self._ocean_model.step
+        self._ocean_z_coord = model_z_coord
+        self._ocean_land_mask = land_mask
+        self._is_dynamic_ocean = True
+        _ocean_frac = float(jnp.mean(land_mask))
+        logger.info(
+            "  Ocean: mode=dynamic (3D LatLonCGridOceanModel, TRIPOLE), "
+            f"ic={cfg.ocean_ic}, ocean_frac={_ocean_frac:.2f}, "
+            f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
+            f"barotropic={ocfg.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
+            f"mesh={cfg.tripole_mesh_path}")
+
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.coupler.coupler import make_coupler, init_surface_state
@@ -411,11 +586,28 @@ class CoupledESMDriver:
                     "(ocean_mode='dynamic' + ocean_ic='woa') — no ocean wet "
                     "mask was initialised.")
             if tuple(ocean_mask.shape) != tuple(shape_2d):
-                raise ValueError(
-                    f"ocean mask shape {tuple(ocean_mask.shape)} != atm grid "
-                    f"{tuple(shape_2d)}; from_ocean f_land needs the SHARED "
-                    "lat-lon grid.")
-            f_land = (1.0 - ocean_mask).astype(_sd)
+                # Cross-grid (tripole ocean): the ocean wet mask lives on the
+                # ocean grid, NOT the atm grid.  Remap it to the atm grid with
+                # the conservative ocean->atm remapper to get the atm-cell OCEAN
+                # FRACTION (a 0/1 mask area-averaged onto each atm cell -> a
+                # fraction in [0,1]); f_land is its complement.  This keeps the
+                # atm land fraction and the 3D-ocean wet mask consistent across
+                # the two grids (no flux leak), the cross-grid analogue of the
+                # shared-grid identity below.
+                from legoesm.coupler.grid_remap import remap_field
+                rem = getattr(self, "_grid_remapper", None)
+                if rem is None or rem.o2a is None:
+                    raise ValueError(
+                        "from_ocean f_land on a non-shared ocean grid needs an "
+                        "ocean->atm remapper, but none was built "
+                        f"(ocean mask shape {tuple(ocean_mask.shape)} != atm "
+                        f"{tuple(shape_2d)}).")
+                ocean_frac = remap_field(
+                    jnp.asarray(ocean_mask, dtype=_sd), rem.o2a)
+                ocean_frac = jnp.clip(ocean_frac, 0.0, 1.0)
+                f_land = (1.0 - ocean_frac).astype(_sd)
+            else:
+                f_land = (1.0 - ocean_mask).astype(_sd)
         else:
             # No silent fallback to f_land=0: a typo (e.g. 'from-ocean') would
             # make the atmosphere treat WOA land cells as ocean while the 3D
@@ -768,8 +960,27 @@ class CoupledESMDriver:
         sst = T[..., 0] + constants.T_freeze         # top level → K
         u = self._ocean_state.u.data                 # (n_lat, n_lon+1, nlev)
         v = self._ocean_state.v.data                 # (n_lat+1, n_lon, nlev)
-        u_c = 0.5 * (u[:, :-1, 0] + u[:, 1:, 0])      # lon-faces → centres
-        v_c = 0.5 * (v[:-1, :, 0] + v[1:, :, 0])      # lat-faces → centres
+        u_c = 0.5 * (u[:, :-1, 0] + u[:, 1:, 0])      # lon-faces → centres (grid-i)
+        v_c = 0.5 * (v[:-1, :, 0] + v[1:, :, 0])      # lat-faces → centres (grid-j)
+        # Tripole bipolar cap: the prognostic currents are GRID-ALIGNED (i, j);
+        # the atmosphere expects geographic east/north.  Rotate on the ocean
+        # grid BEFORE the o2a remap (the remap is per-component scalar only once
+        # both components share the geographic basis).  ``fold.is_active`` is a
+        # static Python bool (geometry build time) → a Python ``if`` is correct
+        # here (the JAX feature-gating exception; not data-dependent).  Below
+        # the cap (and for a regular lat-lon ocean with no rotation angles) this
+        # is the identity → byte-identical to the pre-tripole path.
+        grid = getattr(self, "_ocean_grid", None)
+        fold = getattr(grid, "fold", None)
+        cos_a_u = getattr(grid, "cos_alpha_u", None)
+        sin_a_u = getattr(grid, "sin_alpha_u", None)
+        if (fold is not None and getattr(fold, "is_active", False)
+                and cos_a_u is not None and sin_a_u is not None):
+            from legoesm.coupler.grid_remap import (
+                rotate_tpoint_currents_to_geographic,
+            )
+            u_c, v_c = rotate_tpoint_currents_to_geographic(
+                u_c, v_c, cos_a_u, sin_a_u)
         return sst, u_c, v_c
 
     def _assemble_ocean_forcing(self, atm_forcing):
