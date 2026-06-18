@@ -33,7 +33,6 @@ import sys
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.training.param_collector import apply_param_overrides
 from legoesm.training.parameter_field import (
     environment_kernel_field,
@@ -150,6 +149,33 @@ def _field_spec_entry(spec: dict, config_obj, field_name: str) -> dict | None:
     else:
         entry = spec.get(field_name)
     return entry if isinstance(entry, dict) else None
+
+
+def param_field_bounds(config_obj, field_name: str) -> tuple[float, float] | None:
+    """The ``(lo, hi)`` physical bounds for ``field_name`` from the config's
+    ``__param_spec__``, or ``None`` if the field/spec/bounds are absent.
+
+    Used to clamp an LES-diagnosed feedback coefficient to its registered
+    calibratable range (the param-hygiene bounds, CLAUDE.md) so a degenerate
+    diagnosis cannot inject an unphysical / destabilizing value.  Only scalar
+    ``(lo, hi)`` bounds are returned; a tuple-valued (per-element) bound is
+    treated as absent here (the column field is a single coefficient broadcast
+    over the vertical).
+    """
+    spec = _find_param_spec(config_obj)
+    if spec is None:
+        return None
+    entry = _field_spec_entry(spec, config_obj, field_name)
+    if not (isinstance(entry, dict) and "bounds" in entry):
+        return None
+    lo, hi = entry["bounds"]
+    try:
+        return (float(lo), float(hi))
+    except (TypeError, ValueError):
+        # TODO: a per-element (tuple) bound on a future array-shaped promotable
+        # param lands here and silently skips clamping; extend to a per-element
+        # clip when such a param is registered (none today — all scalar bounds).
+        return None
 
 
 def _check_field_promoted(config_obj, field_name, promoted_fields) -> None:

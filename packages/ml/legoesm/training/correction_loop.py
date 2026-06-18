@@ -41,7 +41,10 @@ from legoesm.training.compare_reanalysis import (
     compare_state_to_reference,
 )
 from legoesm.training.feedback_assembly import assemble_feedback_field
-from legoesm.training.promotable_params import apply_feedback_to_scheme
+from legoesm.training.promotable_params import (
+    apply_feedback_to_scheme,
+    clip_field_to_promotable_bounds,
+)
 
 
 class CompareResult(NamedTuple):
@@ -98,6 +101,7 @@ def run_correction_campaign(
     env_grid_fn: Callable[[Any], tuple] | None = None,
     accept_only_if_improved: bool = False,
     step_fractions: Sequence[float] | None = None,
+    clip_to_bounds: bool = False,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -161,7 +165,7 @@ def run_correction_campaign(
             expected_ncol=expected_ncol,
             les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
-            step_fractions=step_fractions,
+            step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
         )
         # Monotonic acceptance: keep the round only if it lowered the global bias.
         # A no-op round (no flagged columns) changes nothing → vacuously accepted.
@@ -285,6 +289,7 @@ def run_correction_iteration(
     feedback_strategy: str = "static",
     env_grid_fn: Callable[[Any], tuple] | None = None,
     step_fractions: Sequence[float] | None = None,
+    clip_to_bounds: bool = False,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -315,6 +320,15 @@ def run_correction_iteration(
     ``improved=False`` (so the monotonic gate rejects it, exactly as the single-shot
     path would).  ``step_fractions=None`` (default) ⇒ ``(1.0,)`` — the full-step,
     single-re-run behaviour.  The accepted ``s`` is ``CorrectionResult.step_fraction``.
+
+    **Physical bounds** (``clip_to_bounds``): the LES diagnosis is trusted only
+    within the coefficient's registered ``__param_spec__`` range — when true, the
+    diagnosed field is clamped to ``(lo, hi)`` (the calibratable bounds, e.g.
+    ``C_K ∈ (0.1, 1.2)``) BEFORE the line search, so a degenerate column cannot
+    inject an unphysical / destabilizing value and every sub-step stays in range.
+    A non-finite reduced diagnosis is ALWAYS treated as invalid (keeps the
+    background), independent of this flag.  Default false (library compat); the
+    production campaign enables it.
 
     A grid with no flagged worst columns short-circuits to a no-op correction
     (baseline config unchanged, zero feedback, ``improved=False``, ``step_fraction=0``)
@@ -356,6 +370,13 @@ def run_correction_iteration(
             if bg.ndim == 0
             else bg.reshape(grid_shape)
         )
+        if clip_to_bounds:
+            # Keep the bounds invariant even on a no-op round: the campaign
+            # accumulates feedback_field as the next round's base, so an
+            # out-of-range carried background must not survive a no-op unclamped.
+            noop_field = clip_field_to_promotable_bounds(
+                baseline_config, promotion_key, noop_field
+            )
         return CorrectionResult(
             updated_config=baseline_config,
             bias=noop_bias,
@@ -399,6 +420,14 @@ def run_correction_iteration(
         method=diagnosis_method, background=background,
         strategy=feedback_strategy, grid_env=grid_env, length_scales=length_scales,
     )
+    if clip_to_bounds:
+        # Clamp the diagnosed field to the coefficient's registered physical bounds
+        # BEFORE the line search, so a degenerate LES cannot inject an unphysical
+        # value and every convex sub-step (base + s·(clamped − base)) stays in range
+        # (base is in-bounds by induction: prior accepted clamped field / default).
+        raw_field = clip_field_to_promotable_bounds(
+            baseline_config, promotion_key, raw_field
+        )
     # Line search over the correction magnitude. ``base`` (the prior accepted
     # field) is broadcast to the grid so the blend ``base + s·(raw − base)`` is a
     # partial step from the current state toward the raw diagnosis; at columns the
@@ -417,6 +446,15 @@ def run_correction_iteration(
     fallback = None
     for k, frac in enumerate(fractions):           # descending: largest step first
         field = raw_field if frac == 1.0 else base_field + frac * (raw_field - base_field)
+        if clip_to_bounds:
+            # Pre-clamping raw_field gives a MEANINGFUL line search (distinct in-range
+            # sub-steps); this post-blend clamp is the actual invariant — it also
+            # bounds the result when ``base`` itself is out of range (e.g. the guard
+            # toggled on mid-campaign, or an out-of-range initial_field), so the
+            # injected field can NEVER leave the registered bounds.
+            field = clip_field_to_promotable_bounds(
+                baseline_config, promotion_key, field
+            )
         cfg = apply_feedback_to_scheme(
             baseline_config, promotion_key, field, expected_ncol=ncol
         )

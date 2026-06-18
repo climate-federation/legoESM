@@ -53,11 +53,14 @@ def reduce_column_diagnosis(
             jnp.sum(jnp.where(valid, K, jnp.zeros_like(K))) / jnp.maximum(n, 1),
             jnp.asarray(0.0, dtype=K.dtype),
         )
-        return value, n > 0
+        # A non-finite reduced coefficient (a degenerate / blown-up LES column) is
+        # marked INVALID so it keeps the background instead of injecting NaN/inf.
+        return value, (n > 0) & jnp.isfinite(value)
     if method == "entrainment":
+        w_e = jnp.asarray(diagnosis.w_entrainment)
         return (
-            jnp.asarray(diagnosis.w_entrainment),
-            jnp.asarray(diagnosis.valid, dtype=bool),
+            w_e,
+            jnp.asarray(diagnosis.valid, dtype=bool) & jnp.isfinite(w_e),
         )
     raise ValueError(
         f"Unknown diagnosis method {method!r}; choose from {_METHODS}."

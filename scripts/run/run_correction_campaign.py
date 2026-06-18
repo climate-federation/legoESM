@@ -128,6 +128,7 @@ def build_correction_campaign(
     feedback_strategy: str = "static",
     accept_only_if_improved: bool = True,
     step_fractions: Any | None = None,
+    clip_to_bounds: bool = True,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -147,7 +148,9 @@ def build_correction_campaign(
     accumulated ``clubb_lite.C_K`` field never regresses (the done-criterion).
     ``step_fractions`` (e.g. ``[1.0, 0.5, 0.25]``) enables the per-round line
     search over the correction magnitude toward the LES diagnosis (robust to the
-    LES↔GCM overshoot); ``None`` ⇒ the full single step.
+    LES↔GCM overshoot); ``None`` ⇒ the full single step.  ``clip_to_bounds``
+    (default true) clamps the diagnosed ``C_K`` to its registered physical bounds
+    so a degenerate LES cannot inject an unphysical value.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -192,7 +195,7 @@ def build_correction_campaign(
         checkpoint_callback=checkpoint_callback,
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
-        step_fractions=step_fractions,
+        step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
     )
 
 
@@ -277,6 +280,10 @@ def _build_arg_parser():
                         "(e.g. '1.0,0.5,0.25'): backtrack the correction magnitude "
                         "toward the LES diagnosis, keeping the largest improving "
                         "step (default: full single step)")
+    p.add_argument("--allow-unphysical-coeff", action="store_true",
+                   help="do NOT clamp the diagnosed C_K to its registered physical "
+                        "bounds (default: clamp, so a degenerate LES cannot inject "
+                        "an out-of-range / destabilizing coefficient)")
     p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
@@ -422,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         step_fractions=(
             [float(s) for s in args.step_fractions.split(",")]
             if args.step_fractions else None),
+        clip_to_bounds=not args.allow_unphysical_coeff,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]

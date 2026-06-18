@@ -76,6 +76,37 @@ def test_assemble_field_scatters_at_flat_indices():
     assert (f == -1.0).sum() == 4  # background elsewhere
 
 
+def test_reduce_eddy_nonfinite_marked_invalid():
+    # A non-finite reduced coefficient (degenerate / blown-up LES) → invalid.
+    nan_diag = _Eddy(K=jnp.array([jnp.nan, 1.0]), valid=jnp.array([True, True]))
+    _, valid = reduce_column_diagnosis(nan_diag, "eddy_diffusivity")
+    assert not bool(valid)
+    inf_diag = _Eddy(K=jnp.array([jnp.inf]), valid=jnp.array([True]))
+    _, valid_inf = reduce_column_diagnosis(inf_diag, "eddy_diffusivity")
+    assert not bool(valid_inf)
+    # a finite diagnosis stays valid (backward compatible).
+    ok = _Eddy(K=jnp.array([2.0, 4.0]), valid=jnp.array([True, True]))
+    val, valid_ok = reduce_column_diagnosis(ok, "eddy_diffusivity")
+    assert bool(valid_ok)
+    assert float(val) == pytest.approx(3.0)
+
+
+def test_reduce_entrainment_nonfinite_marked_invalid():
+    nan_ent = _Ent(w_entrainment=jnp.asarray(jnp.nan), valid=jnp.asarray(True))
+    _, valid = reduce_column_diagnosis(nan_ent, "entrainment")
+    assert not bool(valid)
+
+
+def test_assemble_nonfinite_diagnosis_keeps_background():
+    # A NaN diagnosis at the worst column keeps the background, never injects NaN.
+    records = [_Rec(flat_index=0)]
+    diagnoses = [_Eddy(K=jnp.array([jnp.nan]), valid=jnp.array([True]))]
+    field = assemble_feedback_field(
+        records, diagnoses, (2, 2), method="eddy_diffusivity", background=0.4)
+    assert np.all(np.isfinite(np.asarray(field)))
+    np.testing.assert_allclose(np.asarray(field), 0.4)   # dropped → all background
+
+
 def test_assemble_field_invalid_column_keeps_background():
     records = [_Rec(flat_index=0), _Rec(flat_index=3)]
     diagnoses = [

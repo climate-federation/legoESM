@@ -11,12 +11,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.training.promotable_params import (
     PROMOTABLE_FIELDS,
     apply_feedback_to_scheme,
+    clip_field_to_promotable_bounds,
     promotable_field_names,
 )
 
@@ -116,3 +116,49 @@ def test_nonuniform_percolumn_changes_lw_per_column():
     out_scalar = gray_radiation(*inp, config=cfg)
     np.testing.assert_allclose(lw[0], np.asarray(out_scalar.lw_heating_rate)[0],
                                rtol=1e-12)
+
+
+def test_clip_field_to_promotable_bounds_clamps_ck():
+    # C_K registered bounds are (0.1, 1.2); out-of-range diagnoses are clamped.
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    field = jnp.array([[0.05, 5.0], [0.4, 1.5]])   # below lo / far above / in / above
+    clipped = clip_field_to_promotable_bounds(
+        CLUBBLiteConfig(), "clubb_lite_C_K", field)
+    np.testing.assert_allclose(
+        np.asarray(clipped).reshape(-1), [0.1, 1.2, 0.4, 1.2])
+    assert float(np.asarray(clipped).min()) >= 0.1
+    assert float(np.asarray(clipped).max()) <= 1.2
+
+
+def test_clip_field_unknown_key_raises():
+    with pytest.raises(ValueError, match="Unknown promotable"):
+        clip_field_to_promotable_bounds(GrayRadiationConfig(), "bogus",
+                                        jnp.zeros((2, 2)))
+
+
+def test_clip_field_clamps_gray_tau_generically():
+    # The clamp is generic over registered coefficients: gray tau_equator bounds
+    # are (2.0, 15.0), so an out-of-range field is clamped to that range.
+    out = clip_field_to_promotable_bounds(
+        GrayRadiationConfig(), "gray_tau_equator", jnp.array([1.0, 20.0, 7.0]))
+    np.testing.assert_allclose(np.asarray(out), [2.0, 15.0, 7.0])
+
+
+def test_clip_field_no_bounds_returns_unchanged():
+    # When the target field has no resolvable scalar bounds in the config's spec
+    # (param_field_bounds → None), the field is returned unchanged (no clamp).
+    from legoesm.training.feedback import param_field_bounds
+
+    class _NoSpec:                      # a config object with no __param_spec__
+        C_K = 0.4
+    assert param_field_bounds(_NoSpec(), "C_K") is None
+    field = jnp.array([7.0, -3.0])
+    out = clip_field_to_promotable_bounds(_NoSpec(), "clubb_lite_C_K", field)
+    np.testing.assert_allclose(np.asarray(out), np.asarray(field))
+
+
+def test_param_field_bounds_resolves_ck():
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.feedback import param_field_bounds
+    assert param_field_bounds(CLUBBLiteConfig(), "C_K") == (0.1, 1.2)
+    assert param_field_bounds(CLUBBLiteConfig(), "nonexistent_field") is None

@@ -921,3 +921,85 @@ def test_campaign_line_search_rescues_round_the_gate_would_reject():
         background=dck, accept_only_if_improved=True)
     assert bare.accepted == (False,)
     assert jnp.ndim(jnp.asarray(bare.final_config.C_K)) == 0   # unchanged default
+
+
+def test_iteration_clip_to_bounds_clamps_unphysical_diagnosis():
+    # An out-of-range LES diagnosis (5.0 >> C_K's hi 1.2) is clamped to 1.2 before
+    # injection when clip_to_bounds=True; the injected config + stored field agree.
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=5.0, target=1.2)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        clip_to_bounds=True)
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    assert ck[0] == pytest.approx(1.2)                       # clamped from 5.0
+    assert np.asarray(res.feedback_field).reshape(-1)[0] == pytest.approx(1.2)
+    assert bool(res.bias.improved)                           # 1.2 lands on target
+
+    # Without the clamp (default), the raw unphysical 5.0 is injected.
+    res2 = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck)
+    assert np.asarray(res2.updated_config.C_K).reshape(-1)[0] == pytest.approx(5.0)
+
+
+def test_iteration_clip_to_bounds_keeps_line_search_in_range():
+    # clip clamps the raw diagnosis BEFORE the line search, so every blended
+    # sub-step stays within (0.1, 1.2): a 5.0 diagnosis clamped to 1.2, half step
+    # lands at 0.4 + 0.5*(1.2-0.4) = 0.8 (in range), not 0.4 + 0.5*(5.0-0.4).
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=5.0, target=0.8)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        clip_to_bounds=True, step_fractions=(1.0, 0.5))
+    assert res.step_fraction == pytest.approx(0.5)
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    assert ck[0] == pytest.approx(0.8)                       # 0.4 + 0.5*(1.2-0.4)
+    assert 0.1 <= ck[0] <= 1.2
+
+
+def test_iteration_clip_to_bounds_clamps_out_of_range_background():
+    # The post-blend clamp is the invariant: even when the BASE (background) is
+    # itself out of range (e.g. the guard toggled on mid-campaign, or an
+    # out-of-range initial_field), the injected field can never leave the bounds.
+    compare_fn, diagnose = _line_search_setup(diag_value=1.0, target=1.0)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=jnp.full((4,), 5.0)),       # out-of-range base config
+        compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=jnp.full((2, 2), 5.0),               # out-of-range accumulated base
+        clip_to_bounds=True, step_fractions=(0.5,))
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    assert float(ck.max()) <= 1.2                        # blend clamped despite base=5.0
+    assert float(ck.min()) >= 0.1
+
+
+def test_campaign_clip_to_bounds_never_injects_unphysical():
+    # Across rounds, the accumulated field stays within the registered C_K bounds.
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=9.0, target=1.2)
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, clip_to_bounds=True, accept_only_if_improved=True)
+    ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    assert float(ck.min()) >= 0.1
+    assert float(ck.max()) <= 1.2
+
+
+def test_iteration_noop_round_clamps_field_under_clip_to_bounds():
+    # Even a no-op round (no flagged columns) keeps the bounds invariant when
+    # clip_to_bounds=True, so an out-of-range carried background is not propagated
+    # unclamped into the campaign's next-round base.
+    def compare_fn(config):
+        return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)), model_ctx=None)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=jnp.full((4,), 5.0)),
+        compare_fn=compare_fn, diagnose_fn=lambda r, c: None,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=jnp.full((2, 2), 5.0), clip_to_bounds=True)
+    assert res.n_corrected == 0
+    ck = np.asarray(res.feedback_field).reshape(-1)
+    assert float(ck.max()) <= 1.2 and float(ck.min()) >= 0.1   # clamped no-op field

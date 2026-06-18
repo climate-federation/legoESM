@@ -34,7 +34,11 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from legoesm.training.feedback import apply_column_parameter_field
+import jax.numpy as jnp
+from legoesm.training.feedback import (
+    apply_column_parameter_field,
+    param_field_bounds,
+)
 
 
 class PromotableField(NamedTuple):
@@ -76,6 +80,30 @@ PROMOTABLE_FIELDS: dict[str, PromotableField] = {
 def promotable_field_names() -> tuple[str, ...]:
     """Registry keys of the currently per-column-promotable coefficients."""
     return tuple(PROMOTABLE_FIELDS)
+
+
+def clip_field_to_promotable_bounds(config, registry_key: str, field):
+    """Clip a per-column feedback ``field`` to the target coefficient's registered
+    ``__param_spec__`` bounds, so an out-of-range LES diagnosis cannot inject an
+    unphysical / destabilizing value (e.g. a degenerate column diagnosing a
+    ``C_K`` far outside its calibratable ``(0.1, 1.2)``).
+
+    ``registry_key`` selects the coefficient (raises on unknown — dispatch
+    hardening).  Returns the field UNCHANGED when the scheme declares no scalar
+    ``(lo, hi)`` bounds for the field (nothing to clamp against).  Pure-JAX /
+    differentiable w.r.t. the in-range values (``jnp.clip``); clamp this BEFORE a
+    line-search blend so every convex sub-step stays in range.
+    """
+    if registry_key not in PROMOTABLE_FIELDS:
+        raise ValueError(
+            f"Unknown promotable coefficient {registry_key!r}; choose from "
+            f"{tuple(PROMOTABLE_FIELDS)}."
+        )
+    bounds = param_field_bounds(config, PROMOTABLE_FIELDS[registry_key].field)
+    if bounds is None:
+        return field
+    lo, hi = bounds
+    return jnp.clip(jnp.asarray(field), lo, hi)
 
 
 def apply_feedback_to_scheme(
