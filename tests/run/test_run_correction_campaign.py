@@ -220,6 +220,73 @@ def test_build_correction_campaign_wiring_one_round():
     # The campaign produced a per-column clubb C_K (the loop closed).
     assert jnp.ndim(jnp.asarray(result.final_config.C_K)) == 1
     assert result.final_config.C_K.shape == (8 * 16,)
+
+
+def _mpas_base_config(nlev=5):
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=nlev),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="mpas"),
+        radiation="gray", turbulence="clubb_lite")
+
+
+def _mpas_full_state(mesh, nlev=5, *, bias_cell=None, bias_dt=0.0):
+    """An MPAS comparison ColumnState: cell T/q_v/p_s + the native u_edge."""
+    temp = np.full((mesh.nCells, nlev), 285.0)
+    if bias_cell is not None:
+        temp[bias_cell] += bias_dt
+    u_edge = 6.0 * np.cos(np.asarray(mesh.angleEdge))[:, None] * np.ones((1, nlev))
+    return ColumnState(
+        T=jnp.asarray(temp), q_v=jnp.full((mesh.nCells, nlev), 6e-3),
+        u=jnp.zeros((mesh.nCells, nlev)), v=jnp.zeros((mesh.nCells, nlev)),
+        p_s=jnp.full((mesh.nCells,), 1.0e5),
+        sst_K=jnp.full((mesh.nCells,), 290.0),
+        u_edge=jnp.asarray(u_edge))
+
+
+@pytest.mark.parametrize("feedback_strategy", ["static", "environment"])
+def test_build_correction_campaign_mpas_one_round(feedback_strategy):
+    """CAPSTONE (iters 73-76): the FULL MPAS pipeline composes through the REAL
+    build_correction_campaign — cell compare/rank → Voronoi forcing extract (via
+    the native u_edge) → mock LES → per-CELL clubb C_K feedback → re-run → finite
+    bias. Exercises both the static scatter and the environment-kernel strategy
+    (the latter runs column_environment_grid on the cell layout). Mock driver +
+    mock LES; the C_K-changes-output mechanism is iter 35/37."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    bias_cell = 37
+    model_state = _mpas_full_state(mesh, nlev)
+    # reference = model with one cold-biased cell → a deterministic worst cell.
+    reference = _mpas_full_state(mesh, nlev, bias_cell=bias_cell, bias_dt=-6.0)
+
+    def build_base(cfg):           # mock: fixed MPAS state regardless of C_K
+        return _FakeDriver(model_state)
+
+    def extract(driver, day, dt):  # noqa: ARG001
+        return driver.state
+
+    result = build_correction_campaign(
+        base_atm_config=_mpas_base_config(nlev), build_base_driver=build_base,
+        extract_column_state=extract, reference=reference, sigma=sigma, grid=mesh,
+        area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les, n_worst=1,
+        feedback_strategy=feedback_strategy,
+        accept_only_if_improved=False)
+
+    assert len(result.iterations) == 1
+    it = result.iterations[0]
+    assert it.n_diagnosed == 1                 # the worst CELL spun off its LES
+    assert bool(np.isfinite(float(it.bias.updated_bias)))
+    # A per-CELL clubb C_K reached the config (the loop closed on the 1-D cell axis).
+    ck = jnp.asarray(result.final_config.C_K)
+    assert jnp.ndim(ck) == 1 and ck.shape == (mesh.nCells,)
+    assert bool(jnp.all(jnp.isfinite(ck)))
     assert np.isfinite(float(it.bias.baseline_bias))
     assert np.isfinite(float(it.bias.updated_bias))
 

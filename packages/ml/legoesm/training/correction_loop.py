@@ -696,6 +696,18 @@ def _maybe_build_env_kernel(
     if feedback_strategy != "environment" or clubb_field is None:
         return None
     from legoesm.training.deploy_correction import build_env_kernel
+    from legoesm.training.feedback_assembly import reduce_column_diagnosis
+
+    # A round whose LES diagnoses are ALL invalid (e.g. no turbulence developed in
+    # any worst column) yields no transferable kernel.  The kernel is an OPTIONAL
+    # deploy EXPORT, so skip it (return None) — the campaign must NOT crash (the
+    # feedback assembly already keeps the background for invalid columns).  Without
+    # this, build_env_kernel's strict "no VALID samples" raise would abort the run.
+    if not any(
+        bool(jnp.asarray(reduce_column_diagnosis(d, diagnosis_method)[1]).any())
+        for d in diagnoses
+    ):
+        return None
 
     bg = jnp.asarray(background)
     if kernel_background is not None:

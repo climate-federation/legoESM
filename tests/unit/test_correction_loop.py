@@ -667,6 +667,24 @@ def _kernel_diagnose(record, ctx):
     return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))
 
 
+def _kernel_diagnose_invalid(record, ctx):
+    return _Eddy(K=jnp.array([0.9]), valid=jnp.array([False]))   # all-invalid
+
+
+def test_env_strategy_all_invalid_diagnoses_skips_kernel_no_crash():
+    """An "environment"-strategy round whose LES diagnoses are ALL invalid yields
+    no transferable kernel — the OPTIONAL export is skipped (env_kernel=None), the
+    campaign does NOT crash on build_env_kernel's strict 'no VALID samples' raise.
+    The round itself still completes (the feedback keeps the background)."""
+    result = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+        diagnose_fn=_kernel_diagnose_invalid, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=0.4, clip_to_bounds=True,
+        feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+    assert result.env_kernel is None          # gracefully skipped, not raised
+    assert result.n_corrected == 1            # the round still ran
+
+
 def test_env_strategy_iteration_exports_raw_kernel_matching_feedback_field():
     """The exported env_kernel reproduces THIS round's injected field on the SAME
     grid in the controlled case (scalar background, full step, no clip) — proving
