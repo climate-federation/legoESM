@@ -75,6 +75,22 @@ _REALISM_WP2_FLOOR = 1.0e-3
 # Regime-sensitive (stable / convective differ) and configurable via ColumnLESConfig.
 _THETA_DRIFT_RMS_MAX_K = 3.0
 
+# Moisture physical-sanity cap [kg/kg]: q_v RUNNING AWAY — above _Q_V_MAX or below
+# −_Q_V_NEG_TOL — flags a finite-but-unphysical moisture blow-up the finite check
+# misses. 0.05 = 50 g/kg is above ANY physical atmospheric water-vapor mixing ratio
+# (extreme tropical surface ~40 g/kg), so a legitimate LES — however convective —
+# never trips the upper cap (no false-reject). The column LES uses CENTERED vertical
+# tracer advection (not van_leer), which can overshoot slightly NEGATIVE, so q_v ≥ 0
+# is NOT guaranteed; the negative tolerance rejects only a large-negative blow-up, not
+# a small numerical undershoot.  WHY a raw cap, not a drift/RH check: a
+# drift-from-reference check is ill-posed (unlike θ, the LES q is NOT relaxed toward
+# the GCM column — it evolves freely via large-scale advection + microphysics, so
+# drifting off q_v_init is EXPECTED physics); and a T-dependent RH supersaturation cap
+# (the physically-fuller check) needs realistic test fixtures (the current mocks use an
+# unphysical uniform q, grossly supersaturated aloft) — a documented follow-up.
+_Q_V_MAX_KG_KG = 0.05
+_Q_V_NEG_TOL_KG_KG = 1.0e-3   # allow tiny advective undershoot; reject a large negative
+
 
 def _thermo_drift_rms(theta_prime: jax.Array) -> jax.Array:
     """RMS over levels of the horizontal-mean θ′ — the LES mean's drift from the
@@ -84,36 +100,47 @@ def _thermo_drift_rms(theta_prime: jax.Array) -> jax.Array:
 
 
 def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
-                       theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K):
+                       theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K,
+                       q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0):
     """Coarse TRUST gate on a finished column LES (``docs/COMPARE_REANALYSIS.md`` §9):
-    did it develop turbulence, stay finite, AND stay thermodynamically near the
-    column it represents?  Returns a TRACED scalar bool.
+    did it develop turbulence, stay finite, stay thermodynamically near the column it
+    represents, AND keep moisture physical?  Returns a TRACED scalar bool.
 
     A dead/laminar LES (peak resolved ``w'²`` below ``wp2_floor``), a blown-up one
-    (any non-finite field), OR a DRIFTED one (its horizontal-mean θ′ wandered off
-    the GCM column reference θ(z) by more than ``theta_drift_rms_max_K``) carries no
-    trustworthy turbulence signal, so the loop keeps the column's BACKGROUND
+    (any non-finite field), a DRIFTED one (its horizontal-mean θ′ wandered off the
+    GCM column reference θ(z) by more than ``theta_drift_rms_max_K``), OR one whose
+    water-vapor mixing ratio ran away (``q_v`` above ``q_v_max`` or large-negative)
+    carries no trustworthy turbulence signal, so the loop keeps the column's BACKGROUND
     coefficient rather than inject a finite-but-meaningless diagnosis (which the
     bounds + non-finite guards would not otherwise catch).
 
     The thermodynamic term (iter 66) closes the TEMPERATURE/MSE-drift part of the
-    documented §9 gap: a turbulent + finite LES whose mean potential temperature
-    drifted off the column (bad forcing/radiation/condensation) is now rejected.
-    Still NOT the FULL RCE realism — the moisture side (CWV plateau / precip ≈
-    3 mm/day) needs the reference q threaded in (the LES tracer q is absolute, not a
-    perturbation) and remains a follow-up.  A legitimately quiescent stable column
-    correctly FAILS the turbulence term (no signal ⇒ the background is right), a
-    correct outcome, not a false negative.  Thresholds are regime-sensitive and
-    configurable.  Pure-JAX (a boolean mask; no NaN grad — ``&`` is logical-and on
-    bool scalars, and ``NaN < thr`` is ``False`` so a non-finite field still rejects).
+    documented §9 gap; the moisture cap (iter 67) catches a finite-but-runaway q_v.
+    The CORRECTED moisture finding (iter 67): a q drift/CWV/MSE check against the GCM
+    column is ILL-POSED for a final-state gate — unlike θ, the LES q is NOT relaxed
+    toward the column (it evolves freely via large-scale advection + microphysics),
+    and a CWV-plateau check needs the time series.  So the valid final-state moisture
+    term is a physical-sanity cap (too-high OR large-negative — centered tracer
+    advection can overshoot, so q_v ≥ 0 is not guaranteed); a
+    T-dependent RH supersaturation cap (the fuller check) is a follow-up needing
+    realistic test fixtures.  A legitimately quiescent stable column correctly FAILS
+    the turbulence term (no signal ⇒ the background is right), a correct outcome, not
+    a false negative.  Thresholds are regime-sensitive and configurable.  Pure-JAX (a
+    boolean mask; no NaN grad — ``&`` is logical-and on bool scalars, and ``NaN < thr``
+    is ``False`` so a non-finite field still rejects).
     """
     thp = jnp.asarray(les_state.theta_prime.data)
     wp2 = vertical_velocity_variance_plane(les_state, height_coord)
+    q_v = jnp.asarray(les_state.tracers.data)[..., qv_slot]
     turbulent = jnp.max(wp2) > jnp.asarray(wp2_floor, dtype=wp2.dtype)
-    finite = jnp.all(jnp.isfinite(wp2)) & jnp.all(jnp.isfinite(thp))
+    finite = (jnp.all(jnp.isfinite(wp2)) & jnp.all(jnp.isfinite(thp))
+              & jnp.all(jnp.isfinite(q_v)))
     thermo_consistent = (
         _thermo_drift_rms(thp) < jnp.asarray(theta_drift_rms_max_K, dtype=thp.dtype))
-    return turbulent & finite & thermo_consistent
+    moisture_physical = (
+        (jnp.max(q_v) < jnp.asarray(q_v_max, dtype=q_v.dtype))
+        & (jnp.min(q_v) > jnp.asarray(-_Q_V_NEG_TOL_KG_KG, dtype=q_v.dtype)))
+    return turbulent & finite & thermo_consistent & moisture_physical
 
 
 def gate_diagnosis_realism(diagnosis, realistic):

@@ -159,12 +159,15 @@ def test_validate_config_rejects_bad_settings():
         ColumnLESConfig(les_realism_theta_drift_K=-1.0),
         ColumnLESConfig(les_realism_theta_drift_K=float("nan")),
         ColumnLESConfig(les_realism_wp2_floor=float("inf")),
+        ColumnLESConfig(les_realism_q_v_max=0.0),
+        ColumnLESConfig(les_realism_q_v_max=-0.01),
     ):
         with pytest.raises(ValueError):
             validate_column_les_config(bad)
     # None (default) + explicit finite-positive realism thresholds validate.
     validate_column_les_config(ColumnLESConfig(
-        les_realism_theta_drift_K=5.0, les_realism_wp2_floor=1e-3))
+        les_realism_theta_drift_K=5.0, les_realism_wp2_floor=1e-3,
+        les_realism_q_v_max=0.05))
     # clubb_coefficient WITH a positive l_mix_max validates (single + multi).
     validate_column_les_config(
         ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=100.0))

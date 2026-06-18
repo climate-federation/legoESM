@@ -345,6 +345,26 @@ def test_column_les_realism_rejects_thermo_drift():
     assert bool(column_les_realism(drifted, hc, theta_drift_rms_max_K=20.0))
 
 
+def test_column_les_realism_rejects_moisture_blowup():
+    """iter 67: a turbulent + finite + θ-consistent LES whose q_v ran away (a
+    finite-but-unphysical moisture blow-up the finite check misses) is rejected."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    state, hc = _les_state_with_shear()
+    assert bool(column_les_realism(state, hc))   # q_v ≈ 0.01 kg/kg → physical
+    # Drive q_v to 0.1 kg/kg (100 g/kg, ~2.5x any physical value) → rejected, even
+    # though it stays turbulent + finite + θ-consistent.
+    wet = state._replace(tracers=state.tracers.replace(
+        data=state.tracers.data.at[..., 0].set(0.1)))
+    assert not bool(column_les_realism(wet, hc))
+    # The moisture cap is the ONLY failure: a looser configured cap accepts it.
+    assert bool(column_les_realism(wet, hc, q_v_max=0.2))
+    # A large-NEGATIVE q_v (centered advection can overshoot; q>=0 is NOT guaranteed)
+    # is also a runaway → rejected (a tiny undershoot would pass the -1e-3 tolerance).
+    neg = state._replace(tracers=state.tracers.replace(
+        data=state.tracers.data.at[..., 0].set(-0.05)))
+    assert not bool(column_les_realism(neg, hc))
+
+
 def test_gate_diagnosis_realism_invalidates():
     from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
     prof = ClubbCoefficientProfile(

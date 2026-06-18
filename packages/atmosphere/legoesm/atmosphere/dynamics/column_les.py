@@ -71,6 +71,9 @@ class ColumnLESConfig(NamedTuple):
     # Thermodynamic-drift threshold [K] (iter 66): reject a turbulent + finite but
     # DRIFTED LES (mean θ wandered off the GCM column). None ⇒ the module default.
     les_realism_theta_drift_K: float | None = None
+    # Moisture physical-sanity cap [kg/kg] (iter 67): reject a finite-but-runaway
+    # water-vapor blow-up (max q_v above this). None ⇒ the module default.
+    les_realism_q_v_max: float | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -87,7 +90,8 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
     # value must be finite + positive (0 / negative / NaN / inf would silently
     # reject every column — a confusing footgun, Codex iter-66).
     for _name, _v in (("les_realism_wp2_floor", config.les_realism_wp2_floor),
-                      ("les_realism_theta_drift_K", config.les_realism_theta_drift_K)):
+                      ("les_realism_theta_drift_K", config.les_realism_theta_drift_K),
+                      ("les_realism_q_v_max", config.les_realism_q_v_max)):
         if _v is not None and not (0.0 < _v < float("inf")):
             raise ValueError(
                 f"{_name} must be None or a finite positive value, got {_v}.")
@@ -249,6 +253,7 @@ def run_column_les_pipeline(
     gate_realism: bool = True,
     realism_wp2_floor: float | None = None,
     realism_theta_drift_K: float | None = None,
+    realism_q_v_max: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
@@ -274,9 +279,11 @@ def run_column_les_pipeline(
     """
     final_state = run_les_fn(setup)
     # None ⇒ column_les_realism uses its own (module-default) threshold for each.
-    realism_kw = {}
+    realism_kw = {"qv_slot": qv_slot}      # the moisture cap reads tracer slot qv_slot
     if realism_wp2_floor is not None:
         realism_kw["wp2_floor"] = realism_wp2_floor
+    if realism_q_v_max is not None:
+        realism_kw["q_v_max"] = realism_q_v_max
     if realism_theta_drift_K is not None:
         realism_kw["theta_drift_rms_max_K"] = realism_theta_drift_K
     realistic = (
@@ -457,5 +464,6 @@ def process_column(
         gate_realism=config.gate_les_realism,
         realism_wp2_floor=config.les_realism_wp2_floor,
         realism_theta_drift_K=config.les_realism_theta_drift_K,
+        realism_q_v_max=config.les_realism_q_v_max,
     )
 
