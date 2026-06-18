@@ -91,6 +91,7 @@ measured roofline), never to efficiency ratios alone.
 | Banded multigrid barotropic (wall-time) | converges (M12→1e-6) but **6–9× SLOWER** — zonal-line V-cycle compute ≫ jacobi diagonal; reductions weren't the bottleneck | 8488551 |
 | Cube np>6 (sub-face tiling speedup) | anti-scales on Gloo/TCP+PCIe → capability only, not speedup | 8482583 |
 | Spectral multi-GPU global transform | all-to-all dominated on PCIe; local GEMM is the right lever | (roofline) |
+| Spectral **level-axis sharding** (multi-device) | MEASURED anti-scaling: T85 **0.74×** @4dev, T42 flat — the semi-implicit (nlev,nlev)/wavenumber solve all-gathers levels + SH transforms emit no collectives ⇒ single-device by design (`_valid_gpu_counts→[1]`). Both spectral multi-device schemes (level-shard AND transpose all-to-all) are now dead on this HW | 8520392 (`spectral_level_shard_cliff.md`, 2026-06-18) |
 | CUDA-aware MPI rebuild | conda mpi4py shadows the cuda-aware libmpi → segfault; full-stack rebuild not worth it (prod already 0.92–0.95) | 8486212 |
 | MPAS METIS partitioning | +2.6 % np16 (rank-growing, opt-in, pymetis dep) — real but "not a new mechanism" | 8491002 |
 | Field-batched voronoi halo (the "18× regression") | was I5/f32/stale-code; batched actually WINS at I6/f64 (now default) | 8488023 |
