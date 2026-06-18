@@ -354,6 +354,121 @@ def test_build_correction_campaign_mpas_les_budget_clusters_cells():
     assert np.isfinite(float(it.bias.updated_bias))
 
 
+def _gaussian_full_state(grid, nlev=5, *, bias_col=None, bias_dt=0.0):
+    """A Gaussian (spectral) comparison ColumnState on the (n_lat, n_lon) grid.
+
+    The zonal wind is DIVERGENT (``u = U cos λ``, varying with longitude) so the SH
+    continuity chain in the iter-83 Gaussian extractor produces a genuinely NONZERO
+    ω — a solid-body (``u = U cos φ``) field is non-divergent (∇·v = 0) and would
+    leave ω ≈ 0, making the spectral path vacuously exercised.  T/q_v/p_s are
+    uniform with one optionally cold-biased column for a deterministic worst column;
+    the winds are identical in model and reference, so the worst-column ranking is
+    driven purely by the T bias.  ALL arrays are float64 (the Gaussian extractor
+    hard-raises on a float32 ``T``)."""
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    temp = np.full((n_lat, n_lon, nlev), 285.0)
+    if bias_col is not None:
+        temp[bias_col] += bias_dt
+    lon = np.asarray(grid.grid_lon)[:, :, None]    # (n_lat, n_lon, 1)
+    u = 15.0 * np.cos(lon) * np.ones((n_lat, n_lon, nlev))   # divergent → ω ≠ 0
+    return ColumnState(
+        T=jnp.asarray(temp, dtype=jnp.float64),
+        q_v=jnp.full((n_lat, n_lon, nlev), 6e-3, dtype=jnp.float64),
+        u=jnp.asarray(u, dtype=jnp.float64),
+        v=jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5, dtype=jnp.float64),
+        sst_K=jnp.full((n_lat, n_lon), 290.0, dtype=jnp.float64))
+
+
+def test_build_correction_campaign_gaussian_one_round(monkeypatch):
+    """CAPSTONE (iters 83-84): the FULL Gaussian/spectral pipeline composes through
+    the REAL build_correction_campaign — 2-D (n_lat, n_lon) compare/rank → the
+    iter-83 SH-divergence forcing extract (``extract_column_forcing_gaussian`` via
+    the GaussianGrid dispatch branch, col_index=(i_lat, i_lon)) → sheared mock LES →
+    per-COLUMN clubb C_K feedback → re-run → finite bias.
+
+    NON-VACUOUS, each property MACHINE-CHECKED rather than inferred:
+      1. A SPY wraps ``extract_column_forcing_gaussian`` and asserts the spectral
+         branch fired EXACTLY ONCE, for the BIASED worst column, producing a FINITE,
+         NONZERO ω (the SH continuity chain genuinely ran — the divergent wind makes
+         ω ≠ 0).  The lat-lon FD extractor is monkeypatched to RAISE, so a silent
+         FD fallback is impossible (Codex iter-85 issues 1+2).
+      2. A SHEARED mock LES gives a VALID clubb_coefficient diagnosis, so the
+         diagnosed C_K actually REPLACES the background at the worst column and the
+         OTHER columns stay at the background (Codex iter-85 issue 4).
+      3. The float64 ``T`` survives the campaign into the extractor's float64 guard
+         (a float32 ``T`` would raise; the other fields are widened to T's dtype).
+    Mock driver + mock LES; the C_K-changes-model-output mechanism is iter 35/37."""
+    from legoesm.atmosphere.dynamics import column_large_scale_extract as clse
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_gaussian_grid(n_max=21, dealiasing="linear")
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    # mid-grid, off the poles AND off the u=15cos(λ) divergence nodes (λ=0,π at
+    # i_lon 0,22) so the SH continuity chain produces a genuinely nonzero ω there.
+    bias_col = (11, 10)
+    bg = float(CLUBBLiteConfig().C_K)              # production default (0.4)
+    model_state = _gaussian_full_state(grid, nlev)
+    # reference = model with one cold-biased column → a deterministic worst column.
+    reference = _gaussian_full_state(grid, nlev, bias_col=bias_col, bias_dt=-6.0)
+
+    # ROUTING + FORCING probe (Codex iter-85): the dispatcher resolves both
+    # extractors as module globals, so patch them on the module the dispatcher reads.
+    real_gaussian = clse.extract_column_forcing_gaussian
+    calls: dict = {"n": 0}
+
+    def _spy_gaussian(*, col_index, **kw):
+        out = real_gaussian(col_index=col_index, **kw)
+        omega = np.asarray(out.omega)
+        assert np.all(np.isfinite(omega)), "spectral extractor produced non-finite ω"
+        assert float(np.max(np.abs(omega))) > 1e-4, "ω is vacuously ~0 (no divergence)"
+        calls["n"] += 1
+        calls["col_index"] = tuple(int(c) for c in col_index)
+        return out
+
+    def _no_latlon(**kw):  # noqa: ARG001
+        raise AssertionError("lat-lon FD extractor called for a GaussianGrid")
+
+    monkeypatch.setattr(clse, "extract_column_forcing_gaussian", _spy_gaussian)
+    monkeypatch.setattr(clse, "extract_column_forcing_latlon", _no_latlon)
+
+    def build_base(cfg):           # mock: fixed Gaussian state regardless of C_K
+        return _FakeDriver(model_state)
+
+    def extract(driver, day, dt):  # noqa: ARG001
+        return driver.state
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(), build_base_driver=build_base,
+        extract_column_state=extract, reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.asarray(grid.grid_area), n_iterations=1,
+        # clubb_coefficient + a SHEARED mock → a VALID, non-background C_K diagnosis.
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        accept_only_if_improved=False)
+
+    assert len(result.iterations) == 1
+    it = result.iterations[0]
+    assert it.n_diagnosed == 1                 # the worst COLUMN spun off its LES
+    assert bool(np.isfinite(float(it.bias.updated_bias)))
+    # ROUTING: the SPECTRAL branch fired exactly once, for the biased worst column
+    # (the lat-lon FD extractor would have raised — proven not taken).
+    assert calls["n"] == 1, "the Gaussian/spectral extractor was not the path taken"
+    assert calls["col_index"] == bias_col, "ranked the wrong column as worst"
+    # A per-column clubb C_K reached the config, flattened on the (n_lat*n_lon) axis.
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.ndim == 1 and ck.shape == (grid.n_lat * grid.n_lon,)
+    assert np.all(np.isfinite(ck))
+    # NON-VACUOUS: the diagnosed C_K landed on the worst column, others stay at bg.
+    flat_worst = bias_col[0] * grid.n_lon + bias_col[1]
+    assert not np.isclose(ck[flat_worst], bg), "diagnosed C_K never reached the column"
+    np.testing.assert_allclose(np.delete(ck, flat_worst), bg)  # rest untouched
+
+
 def _mock_run_les_sheared(setup):
     """Mock plane-LES with a mean-wind shear so the clubb_coefficient diagnosis
     yields a VALID dimensionless C_K (the rest-state mock has no shear)."""
