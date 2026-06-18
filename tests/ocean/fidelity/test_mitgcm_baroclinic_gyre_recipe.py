@@ -99,7 +99,13 @@ def test_baroclinic_gyre_matches_mitgcm_monitor():
     1.097 (step10) -> 1.013 (step50) -> 0.996 (step100) -> 0.987 (step200) while
     the v pattern correlation stays 0.999 throughout, so it self-corrects to ~1%
     as the flow spins up — not a structural amplitude error.  Theta stays in
-    [2, 30]."""
+    [2, 30].
+
+    Per-term TENDENCY tier (``scripts/tmp/_bgyre_tendency_tier.py``, against MITgcm
+    DIAGNOSTICS_PKG momentum dumps): the decomposition-independent total momentum
+    tendency matches MITgcm's ``TOTUTEND`` to corr 0.987 (du/dt) / 0.9996 (dv/dt),
+    and the path-independent depth-integrated wind input to corr 0.987 (peak
+    identical, tau/rho_0)."""
     import os
     os.environ.setdefault("JAX_ENABLE_X64", "1")
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (

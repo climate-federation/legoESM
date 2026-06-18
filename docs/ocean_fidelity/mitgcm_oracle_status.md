@@ -32,7 +32,7 @@ Fidelity tiers: (0) construction/forcing bit-exactness, (1) 10-step free-surface
 |---|---|---|---|---|
 | `tutorial_barotropic_gyre` | single-layer wind-driven gyre | Cartesian β-plane 62×62×1 | on-box MITgcm (built), 75k-step + `%MON` | 10-step eta pattern **0.9997**; per-term tendencies match; **equilibrium LAMINAR** |
 | `front_relax` | baroclinic front geostrophic adjustment | Cartesian f-plane channel 32×1×15 | shipped `results/output.txt` `%MON` (no rebuild) | 20-step `eta_max` **1%**, `uvel_max` **3%** |
-| `tutorial_baroclinic_gyre` | wind+buoyancy double gyre | **spherical** 62×62×15 (lat 15–75N) | on-box rebuild, `%MON` + **field dumps** | 10-step `eta_max` **0.9%**, `uvel_max` **3%**, `vvel_max` **10%** (signed-max convention); field-tier max\|u\| **1–5%** row-by-row, eta pattern corr **0.9989** |
+| `tutorial_baroclinic_gyre` | wind+buoyancy double gyre | **spherical** 62×62×15 (lat 15–75N) | on-box rebuild, `%MON` + **field + momentum-tendency dumps** | 10-step `eta_max` **0.9%**, `uvel_max` **3%**, `vvel_max` **10%**→~1% (transient); field max\|u\| **1–5%** row-by-row, eta corr **0.9989**; **tendency tier**: total `du/dt` corr **0.987** / `dv/dt` **0.9996**, wind input corr **0.987** |
 
 ### Barotropic gyre — two tiers
 
@@ -100,8 +100,20 @@ operator/vorticity suites pass byte-for-byte unchanged.
    ratio decay 1.097→1.013→0.996→0.987 (steps 10/50/100/200) with the v pattern correlation
    pinned at 0.999 — it self-corrects to ~1%, not a structural error. **No structural bug
    remains in this case.**
-2. **Per-term tendency tier** for all cases — per-term momentum-tendency match against
-   MITgcm intermediate dumps (currently monitor-stats / field-snapshot / 10-step pattern).
+2. **Per-term tendency tier — DONE for `tutorial_baroclinic_gyre`.** Using MITgcm's
+   DIAGNOSTICS_PKG momentum dumps (`TOTUTEND`, `Um_Advec`, `Um_Cori`, `Um_dPhiX`, `Um_Diss`,
+   `USidDrag`, `Um_Ext`; `scripts/tmp/_bgyre_tendency_tier.py`). MITgcm's flux-form split
+   (`Um_Advec`/`Um_Cori` separate) vs legoESM's vector-invariant diagnostic (`KE_PGF`+
+   `vortcor`, planetary Coriolis applied in the step function) makes a term-by-term
+   advection/Coriolis comparison decomposition-dependent, so we match the two
+   **decomposition-independent** quantities: (a) the **total** tendency — MITgcm
+   `TOTUTEND ≡ Δu/Δt` vs legoESM by one-step finite-difference — `du/dt` **corr 0.987**
+   (RMS ratio 0.958), `dv/dt` **corr 0.9996** (RMS ratio 1.001); and (b) the **wind** term,
+   isolated path-independently by differencing (legoESM routes wind through the implicit-vmix
+   surface BC, MITgcm through the explicit `Um_Ext` body force) — depth-integrated momentum
+   input **corr 0.987**, peak **identical** (`9.99e-5 = τ/ρ₀` for both). Tendency tier for
+   `front_relax` / `barotropic_gyre` (the latter already had per-term calibration via the
+   faithful stepper) is the remaining extension.
 3. **front_relax full fidelity** — variable `dy` + 25-level partial-cell vertical; close the
    `vvel_max` transient.
 4. **Production-model exactness** — close the gyre's residual ~13% (production CG solve vs
