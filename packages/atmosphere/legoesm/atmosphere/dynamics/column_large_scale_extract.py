@@ -590,6 +590,19 @@ def _spectral_divergence_3d(u3d: jax.Array, v3d: jax.Array, grid: Any) -> jax.Ar
     return sh_synthesis_3d(grid, div_hat)
 
 
+def _gradient_gaussian_3d(field_3d: jax.Array, grid: Any) -> tuple[jax.Array, jax.Array]:
+    """Geographic east/north gradient ``(∂f/∂x, ∂f/∂y)`` of a grid-space scalar on
+    the Gaussian grid — analyze to the SH spectrum, then the SHARED spectral gradient
+    :func:`legoesm.grids.gaussian.spectral_gradient_3d` (the SAME operator the
+    spectral NH dycore uses; promoted iter 90 — no parallel gradient).  Returns the
+    geographic axes (``∂f/∂x = (1/(a cos φ))∂f/∂λ`` east, ``∂f/∂y = (1/a)∂f/∂φ``
+    north) that :func:`_geostrophic_wind_column` requires.  Float64 / spectral
+    precision."""
+    from legoesm.grids.gaussian import sh_analysis_3d, spectral_gradient_3d
+
+    return spectral_gradient_3d(grid, sh_analysis_3d(grid, jnp.asarray(field_3d)))
+
+
 def extract_column_forcing_gaussian(
     *,
     T: jax.Array,
@@ -628,9 +641,11 @@ def extract_column_forcing_gaussian(
     Gaussian grid's machinery is float64/complex128) — the same constraint as the
     spectral dycore.
 
-    Geostrophic forcing is DEFERRED (``u_geo``/``v_geo`` = None ⇒ the column LES
-    falls back to ``f×V``), like the cubed-sphere extractor: a metric-correct
-    spectral scalar gradient of ``Φ`` is the follow-up.
+    Geostrophic forcing IS supplied (iter 90): :func:`_geostrophic_wind_column` with
+    the spectral scalar gradient :func:`_gradient_gaussian_3d` (geographic east/north
+    — the precondition the shared helper requires, UNLIKE the cubed-sphere grid-axis
+    operators).  Equatorial columns (within :data:`_MIN_GEOSTROPHIC_LAT_DEG`) still
+    return ``(None, None)`` ⇒ the column LES falls back to ``f×V`` there.
     """
     # x64 GATE (Codex): the SH transforms need float64; fail LOUDLY for a float32
     # input (whether x64 is off, or float32 was passed under x64) rather than
@@ -658,6 +673,13 @@ def extract_column_forcing_gaussian(
 
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
+    # Geostrophic reference wind from the spectral Φ gradient (geographic east/north),
+    # or (None, None) within the equatorial cutoff → the LES plane Coriolis uses f×V.
+    u_geo, v_geo = _geostrophic_wind_column(
+        T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
+        grad_fn=_gradient_gaussian_3d, lat_rad=lat_rad, col_index=col_index,
+    )
+
     i, j = int(col_index[0]), int(col_index[1])
     return ColumnLargeScaleState(
         lat_rad=lat_rad,
@@ -667,8 +689,8 @@ def extract_column_forcing_gaussian(
         omega=omega_3d[i, j, :],
         theta_adv=theta_adv_3d[i, j, :],
         qv_adv=qv_adv_3d[i, j, :],
-        u_geo=None,
-        v_geo=None,
+        u_geo=u_geo,
+        v_geo=v_geo,
     )
 
 

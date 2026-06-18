@@ -6,7 +6,8 @@ MPAS already worked).  The Gaussian path computes the divergence + advection
 PSEUDOSPECTRALLY (reusing the dycore's ``vordiv_from_uv_3d`` SH operators), with
 the advective tendency in flux form ``−V·∇φ = −∇·(φV) + φ·∇·V``; the grid-agnostic
 ``omega_from_divergence`` continuity is reused unchanged.  Geostrophic forcing is
-deferred (``u_geo/v_geo = None`` → f×V), like the cubed-sphere extractor.
+supplied (iter 90) from the spectral Φ gradient (geographic east/north) except
+within the equatorial cutoff (``u_geo/v_geo = None`` → f×V there).
 
 Float64 required (spectral transforms).
 """
@@ -22,6 +23,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from legoesm.atmosphere.column_forcing import ColumnLargeScaleState  # noqa: E402
 from legoesm.atmosphere.dynamics.column_large_scale_extract import (  # noqa: E402
+    _gradient_gaussian_3d,
     extract_column_forcing,
     extract_column_forcing_gaussian,
 )
@@ -72,7 +74,8 @@ def test_extract_gaussian_shapes_and_finite():
     for name in ("T", "p_full", "q_v", "omega", "theta_adv", "qv_adv"):
         arr = np.asarray(getattr(out, name))
         assert arr.shape == (_NLEV,) and np.all(np.isfinite(arr)), name
-    assert out.u_geo is None and out.v_geo is None         # geostrophic deferred
+    # _COL is at lat[11] ≈ 4° — WITHIN the equatorial cutoff, so no geostrophic wind.
+    assert out.u_geo is None and out.v_geo is None
 
 
 def test_extract_gaussian_constant_theta_zero_advection_nonvacuous_moisture():
@@ -150,3 +153,97 @@ def test_dispatch_gaussian_mismatched_field_shape_raises():
         extract_column_forcing(
             T=T, q_v=q_v, u=u[:, :, :-1], v=v, p_s=p_s, grid=grid,
             sigma_coord=sigma, lat_rad=0.1, col_index=_COL)
+
+
+# --- Geostrophic forcing (iter 90) ------------------------------------------
+_MIDLAT_COL = (16, 20)   # lat[16] ≈ 44°, well outside the 5° equatorial cutoff
+
+
+def _uniform_geo_state(grid):
+    """A HORIZONTALLY-uniform state (uniform θ + constant q_v + constant p_s) ⇒ a
+    horizontally-uniform Φ ⇒ ZERO geostrophic wind (the analytic anchor)."""
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    p_s = jnp.full((n_lat, n_lon), 1.0e5, dtype=jnp.float64)
+    p_full = p_s[..., None] * jnp.asarray(create_sigma_coordinate(_NLEV).sigma_full)
+    T = (290.0 * exner_function(p_full)).astype(jnp.float64)        # uniform θ
+    q_v = jnp.full((n_lat, n_lon, _NLEV), 5e-3, dtype=jnp.float64)  # constant
+    return T, q_v, p_s
+
+
+def test_spectral_gradient_3d_direct_analytic():
+    """The PROMOTED shared operator ``legoesm.grids.gaussian.spectral_gradient_3d``
+    (iter 90) on the SH spectrum of Φ = C·sin(lat): ∂Φ/∂x = 0, ∂Φ/∂y = (C/a)cos(lat)."""
+    from legoesm.grids.gaussian import sh_analysis_3d, spectral_gradient_3d
+    grid, _ = _grid_sigma()
+    lat = np.asarray(grid.grid_lat)
+    a = float(grid.radius)
+    C = 500.0
+    phi = jnp.asarray((C * np.sin(lat))[:, :, None] * np.ones((1, 1, 2)), dtype=jnp.float64)
+    dfdx, dfdy = spectral_gradient_3d(grid, sh_analysis_3d(grid, phi))
+    interior = np.abs(lat) < np.deg2rad(80.0)
+    assert float(np.max(np.abs(np.asarray(dfdx)[:, :, 0][interior]))) < 1e-12
+    np.testing.assert_allclose(
+        np.asarray(dfdy)[:, :, 0][interior], ((C / a) * np.cos(lat))[interior], rtol=1e-8)
+
+
+def test_gradient_gaussian_analytic():
+    """``_gradient_gaussian_3d`` matches the analytic gradient of Φ = C·sin(lat):
+    ∂Φ/∂x = 0 (no longitude dependence), ∂Φ/∂y = (C/a)·cos(lat)."""
+    grid, _ = _grid_sigma()
+    lat = np.asarray(grid.grid_lat)
+    a = float(grid.radius)
+    C = 1000.0
+    phi = (C * np.sin(lat))[:, :, None] * np.ones((1, 1, 2))
+    dfdx, dfdy = _gradient_gaussian_3d(jnp.asarray(phi, dtype=jnp.float64), grid)
+    dfdx, dfdy = np.asarray(dfdx), np.asarray(dfdy)
+    interior = np.abs(lat) < np.deg2rad(80.0)            # away from the cos-φ floor
+    assert float(np.max(np.abs(dfdx[:, :, 0][interior]))) < 1e-12   # no zonal grad
+    dfdy_analytic = (C / a) * np.cos(lat)
+    np.testing.assert_allclose(
+        dfdy[:, :, 0][interior], dfdy_analytic[interior], rtol=1e-8)
+
+
+def test_extract_gaussian_geostrophic_uniform_state_zero_wind():
+    """ANALYTIC ANCHOR: a horizontally-uniform state ⇒ ∇Φ = 0 ⇒ the geostrophic
+    wind is EXACTLY zero (to spectral precision) at a mid-latitude column."""
+    grid, sigma = _grid_sigma()
+    T, q_v, p_s = _uniform_geo_state(grid)
+    out = extract_column_forcing_gaussian(
+        T=T, q_v=q_v, u=jnp.zeros_like(T), v=jnp.zeros_like(T), p_s=p_s, grid=grid,
+        sigma_coord=sigma, lat_rad=float(grid.lat[_MIDLAT_COL[0]]),
+        col_index=_MIDLAT_COL)
+    assert out.u_geo is not None and out.v_geo is not None
+    np.testing.assert_allclose(np.asarray(out.u_geo), 0.0, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(out.v_geo), 0.0, atol=1e-9)
+
+
+def test_extract_gaussian_geostrophic_meridional_gradient_zonal_jet():
+    """A meridional temperature (⇒ geopotential) gradient at a mid-latitude column
+    gives a FINITE, predominantly-ZONAL geostrophic wind (|u_geo| > |v_geo|) — the
+    thermal-wind signature, same anchor as the Voronoi geostrophic (iter 82)."""
+    grid, sigma = _grid_sigma()
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    p_s = jnp.full((n_lat, n_lon), 1.0e5, dtype=jnp.float64)
+    p_full = p_s[..., None] * jnp.asarray(sigma.sigma_full)
+    cos2 = jnp.asarray(grid.cos_lat)[:, None, None] ** 2     # latitude-only structure
+    T = ((290.0 + 30.0 * cos2) * exner_function(p_full)).astype(jnp.float64)
+    q_v = jnp.full((n_lat, n_lon, _NLEV), 5e-3, dtype=jnp.float64)
+    out = extract_column_forcing_gaussian(
+        T=T, q_v=q_v, u=jnp.zeros_like(T), v=jnp.zeros_like(T), p_s=p_s, grid=grid,
+        sigma_coord=sigma, lat_rad=float(grid.lat[_MIDLAT_COL[0]]),
+        col_index=_MIDLAT_COL)
+    ug, vg = np.asarray(out.u_geo), np.asarray(out.v_geo)
+    assert np.all(np.isfinite(ug)) and np.all(np.isfinite(vg))
+    assert float(np.max(np.abs(ug))) > 1.0                  # a real jet (m/s)
+    assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))   # predominantly zonal
+
+
+def test_extract_gaussian_geostrophic_equatorial_is_none():
+    """Within the equatorial cutoff (lat[11] ≈ 4°) no geostrophic reference wind is
+    supplied (f → 0 is ill-posed) — the LES plane Coriolis falls back to f×V."""
+    grid, sigma = _grid_sigma()
+    T, q_v, p_s = _uniform_geo_state(grid)
+    out = extract_column_forcing_gaussian(
+        T=T, q_v=q_v, u=jnp.zeros_like(T), v=jnp.zeros_like(T), p_s=p_s, grid=grid,
+        sigma_coord=sigma, lat_rad=float(grid.lat[11]), col_index=(11, 20))
+    assert out.u_geo is None and out.v_geo is None
