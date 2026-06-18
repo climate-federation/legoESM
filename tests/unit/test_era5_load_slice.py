@@ -188,3 +188,11 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
         np.testing.assert_allclose(u[k], 10.0 + 0.5 * (ld / 90.0), atol=2e-3)
     # a non-flat u profile across latitude (proves it is NOT a constant-fill).
     assert float(u[0].mean()) < float(u[1].mean()) < float(u[2].mean())
+    # q is converted SPECIFIC HUMIDITY → MIXING RATIO r = q/(1−q) (NOT left as raw
+    # specific humidity): the synthetic q≡5e-3 ⇒ r = 5e-3/(1−5e-3) via the canonical
+    # thermo helper. (For this physical q the helper and the old inline form agree
+    # to machine precision, so this pins "is the mixing ratio", not "which code path".)
+    from legoesm.thermo import specific_humidity_to_mixing_ratio
+    expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(5e-3)))
+    np.testing.assert_allclose(np.asarray(ref.q_v), expected_r, rtol=1e-4)
+    assert expected_r > 5e-3        # mixing ratio strictly exceeds specific humidity

@@ -25,6 +25,7 @@ from legoesm.ml.data.era5_loader import (
     ERA5Config,
     create_era5_dataset,
 )
+from legoesm.thermo import specific_humidity_to_mixing_ratio
 
 # Canonical long ERA5/WeatherBench variable name → its short ECMWF/GRIB alias.
 # Used BIDIRECTIONALLY by resolve_var: a request for either form finds the other.
@@ -401,13 +402,11 @@ def era5_to_spectral_carry(
     # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
     # / mass dry air) — saturation_mixing_ratio in thermo.py returns
     # the mixing-ratio convention, and atmosphere/physics modules
-    # consume q_v under that convention.  Convert at the ERA5
-    # boundary: r = q / (1 − q).  In the tropical PBL (q ≈ 0.025) the
-    # bias from skipping this conversion is ~3% of q.  Clip to avoid
-    # division blow-up at q = 1.
-    q_specific = jnp.maximum(_vinterp(q_ll), 0.0)
-    q_specific = jnp.clip(q_specific, 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    # consume q_v under that convention.  Convert at the ERA5 boundary
+    # via the CANONICAL thermo helper r = q/(1−q) (clips q below 1 and
+    # floors the denominator to guard the float32 divide).  In the
+    # tropical PBL (q ≈ 0.025) the bias from skipping this is ~3% of q.
+    q_model = specific_humidity_to_mixing_ratio(_vinterp(q_ll))
 
     # Surface geopotential (regrid to Gaussian)
     phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
@@ -580,12 +579,10 @@ def era5_to_cubedsphere_carry(
     T_model = _vinterp(T_cs)
     u_model = _vinterp(u_cs)
     v_model = _vinterp(v_cs)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
-    # RATIO (see comment at the lat-lon path above).  Convert
-    # r = q / (1 − q) at the boundary.
-    q_specific = jnp.maximum(_vinterp(q_cs), 0.0)
-    q_specific = jnp.clip(q_specific, 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) via the CANONICAL thermo helper (see the lat-lon path
+    # above; clips q below 1 and floors the float32 divide).
+    q_model = specific_humidity_to_mixing_ratio(_vinterp(q_cs))
 
     if logger.isEnabledFor(logging.INFO):
         import jax as _jax
@@ -713,11 +710,10 @@ def era5_to_mpas_carry(
     u_model = interp_pressure_to_sigma(u_cell, plev, p_s_cell, sigma_f)
     v_model = interp_pressure_to_sigma(v_cell, plev, p_s_cell, sigma_f)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
-    # r = q/(1−q) (see era5_to_cubedsphere_carry for the rationale).
-    q_specific = jnp.clip(
-        jnp.maximum(interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f), 0.0),
-        0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f)
+    )
 
     dims_3d = ("cell", "level")
     dims_2d = ("cell",)
@@ -791,16 +787,11 @@ def era5_to_latlon_carry(
     T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
     u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
     v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
-    # RATIO r = q / (1 − q) (see the spectral path for the rationale).
-    q_specific = jnp.clip(
-        jnp.maximum(
-            interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
-            0.0,
-        ),
-        0.0, 0.99,
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f)
     )
-    q_model = q_specific / (1.0 - q_specific)
 
     phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
     phis_jax = jnp.asarray(phis_ll)
