@@ -24,12 +24,15 @@
 > different *algorithm* (split-explicit) and a different *precision* (mixed). Both
 > are opt-in + codex-clean; production-uptake gated by full-OMIP long-run
 > validation. Remaining f32 extensions (baroclinic EOS/PGF, tracer-advection
-> limiters) are large, science-risky careful-numerics. **Assessed 2026-06-18 and CLOSED as
-sub-5% (see §3 row "Mixed-precision baroclinic"):** the baroclinic phase is
-16–21 % of the step and halo/latency-bound (f32 doesn't speed Gloo comm), so the
-f32-EOS/PGF payoff is below the >5 % bar despite being numerically feasible. With
-this, the SOTA-extension space the addendum opened is also exhausted — the
-campaign is fully converged for the current hardware.
+> limiters) are large, science-risky careful-numerics. **PURSUED 2026-06-18 (see
+§3 row "Mixed-precision baroclinic"): precision-VIABLE (offline experiment 8520588:
+f32-anomaly PGF relRMS 8e-5 — the fp64-EOS policy rule is overcautious for the
+ρ′~O(1) anomaly path) but NOT shipped** — production runs `PrecisionPolicy.fp64()`
+so the EOS computes f64 regardless of input, and a *working* f32-EOS lever needs a
+broad shared-EOS-compute override / refactor not justified by the marginal
+(16–21 % baroclinic × ~½ EOS+PGF, GPU-mainly) upside. With this, the SOTA-extension
+space the addendum opened is exhausted — the campaign is fully converged for the
+current hardware.
 
 **Verdict: the production step-kernel scaling surface is exhausted on Ginsburg
 hardware.** Across ocean (lat-lon C-grid), atmosphere (cubed-sphere FV3, lat-lon
@@ -100,7 +103,7 @@ measured roofline), never to efficiency ratios alone.
 | CUDA-aware MPI rebuild | conda mpi4py shadows the cuda-aware libmpi → segfault; full-stack rebuild not worth it (prod already 0.92–0.95) | 8486212 |
 | MPAS METIS partitioning | +2.6 % np16 (rank-growing, opt-in, pymetis dep) — real but "not a new mechanism" | 8491002 |
 | Field-batched voronoi halo (the "18× regression") | was I5/f32/stale-code; batched actually WINS at I6/f64 (now default) | 8488023 |
-| Mixed-precision baroclinic EOS/PGF (f32 work) | Sub-5% ceiling, not worth the f32 density-gradient science risk: baroclinic is only **16–21 %** of the step (`distance_to_limit_2026-06-13.md`) and is **halo/latency-bound** (#1 rank-growing, ~27 sendrecvs) where f32 does NOT speed Gloo-latency comm; EOS+PGF arithmetic is ~½ of that. The 67 % vmix phase already has its f32 lever shipped (1.15×). Anomaly EOS makes f32 *numerically* feasible (`iterate_eos_and_pressure_anomaly` builds p′ from ρ′~O(1)), but the throughput payoff is below the >5 % bar. | phase-split 8458934 / 8489559 + `distance_to_limit_2026-06-13.md` |
+| Mixed-precision baroclinic EOS/PGF (f32 work) | PURSUED 2026-06-18 (user ask) → precision-VIABLE but NOT shipped (v1 reverted). Offline experiment (job 8520588, thermal-front state): f32-anomaly EOS preserves the horizontal PGF to relRMS **8e-5**, spurious \|v\| ~1 mm/s/day — i.e. the precision-policy `equation_of_state`/`pressure_gradient` f64 rule is **overcautious for the baroclinic ANOMALY path** (ρ′~O(1) is f32-representable; the rule targets naive full-ρ~1025). BUT production OMIP sets `PrecisionPolicy.fp64()` (`run_omip_core2.py:2498`), so `wright_eos` (eos.py:111) computes the EOS in f64 regardless of input dtype → a *working* f32-EOS lever requires OVERRIDING that shared fp64 EOS-compute (broad: also hits non-anomaly EOS consumers the f64 rule legitimately protects, or a multi-call-site `compute_dtype` refactor through `make_eos_fn`). Marginal upside (baroclinic 16–21 % of step × ~½ EOS+PGF, GPU-mainly) does not justify the refactor. codex caught the v1 (input-cast) as a no-op under fp64. | experiment 8520588 + phase-split 8458934/8489559 |
 
 ---
 
