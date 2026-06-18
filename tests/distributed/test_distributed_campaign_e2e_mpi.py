@@ -1,0 +1,161 @@
+"""End-to-end distributed-MPAS correction campaign (iter 89).
+
+Run: ``mpirun -np 2 .venv/bin/python -m pytest <this file>``
+
+The capstone of iters 86–89: ``build_distributed_correction_campaign`` composes the
+three distributed hooks (owned ``valid_mask`` + global top-k ``manifest_reducer`` +
+collective ``global_reduce``) from a REAL Voronoi partition layout and runs the FULL
+campaign across ranks.  A global mesh (``create_voronoi_mesh(2)``, 162 cells) is
+partitioned with ``make_voronoi_partition_layout``; one global cell is cold-biased
+in the GLOBAL ERA5 reference, so it is the single global-worst column.  Verifies:
+the campaign COMPLETES on every rank (no deadlock); the globally-worst cell is
+diagnosed + corrected on EXACTLY its owning rank (no double-count); every other
+rank corrects nothing yet still runs in lockstep; and the bias verdict is identical
+across ranks.  np=1 degenerates to a single owner of every cell (the real local
+mesh + LES path), so it also runs serially.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+pytest.importorskip("mpi4py")
+pytest.importorskip("mpi4jax")
+from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig  # noqa: E402
+from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
+    LESRegimeConfig,
+    LESResolutionConfig,
+)
+from legoesm.grids.vertical import create_sigma_coordinate  # noqa: E402
+from legoesm.grids.voronoi import create_voronoi_mesh  # noqa: E402
+from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout  # noqa: E402
+from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
+from mpi4py import MPI  # noqa: E402
+
+from scripts.run.run_correction_campaign import (  # noqa: E402
+    build_distributed_correction_campaign,
+)
+
+COMM = MPI.COMM_WORLD
+RANK = COMM.Get_rank()
+NPROC = COMM.Get_size()
+
+_RES = LESResolutionConfig(
+    dx_m=50.0, nx=8, ny=8, nlev=8, domain_top_m=2000.0, dz_sfc_m=50.0)
+_REGIME = LESRegimeConfig(shallow=_RES, deep=_RES)
+
+
+def _mock_run_les_sheared(setup):
+    """A mock plane-LES with synthetic w/θ'/tracers + a mean-wind shear → a VALID
+    clubb_coefficient diagnosis (mirrors the single-process MPAS capstone mock)."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
+    grid, hc = setup.grid, setup.height_coord
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    ny, nx, nlev = grid.ny, grid.nx, hc.n_levels
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="xy")
+    s = jnp.asarray(np.where((ii + jj) % 2 == 0, 1.0, -1.0))
+    w = 2.0 * s[:, :, None] * jnp.ones((ny, nx, nlev + 1))
+    thp = 0.5 * s[:, :, None] * jnp.ones((ny, nx, nlev))
+    tr = jnp.zeros((ny, nx, nlev, 3)).at[..., 0].set(0.01)
+    z = jnp.asarray(hc.z_full)
+    u = (0.01 * z)[None, None, :] * jnp.ones((ny, nx, z.shape[0]))   # constant shear
+    return state._replace(
+        u=state.u.replace(data=u),
+        w=state.w.replace(data=w),
+        theta_prime=state.theta_prime.replace(data=thp),
+        tracers=state.tracers.replace(data=tr))
+
+
+def _mpas_base_config(nlev):
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=nlev),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic", discretization="mpas"),
+        radiation="gray", turbulence="clubb_lite")
+
+
+def _local_model_state(local_mesh, nlev):
+    """A rank-local MPAS comparison ColumnState (uniform; the bias lives in the
+    reference) carrying the native edge velocity for the Voronoi forcing extract."""
+    ncell = local_mesh.nCells
+    u_edge = 6.0 * np.cos(np.asarray(local_mesh.angleEdge))[:, None] * np.ones((1, nlev))
+    return ColumnState(
+        T=jnp.full((ncell, nlev), 285.0), q_v=jnp.full((ncell, nlev), 6e-3),
+        u=jnp.zeros((ncell, nlev)), v=jnp.zeros((ncell, nlev)),
+        p_s=jnp.full((ncell,), 1.0e5), sst_K=jnp.full((ncell,), 290.0),
+        u_edge=jnp.asarray(u_edge))
+
+
+def _global_reference(global_mesh, nlev, bias_cell, bias_dt):
+    temp = np.full((global_mesh.nCells, nlev), 285.0)
+    temp[bias_cell] += bias_dt                       # one cold-biased global cell
+    ncell = global_mesh.nCells
+    return ColumnState(
+        T=jnp.asarray(temp), q_v=jnp.full((ncell, nlev), 6e-3),
+        u=jnp.zeros((ncell, nlev)), v=jnp.zeros((ncell, nlev)),
+        p_s=jnp.full((ncell,), 1.0e5), sst_K=jnp.full((ncell,), 290.0))
+
+
+class _FakeDriver:
+    def __init__(self, state):
+        self.state = state
+
+    def run(self, segment_callback, **kwargs):       # noqa: ARG002
+        segment_callback(self, 0.0, 1.0)
+
+
+@pytest.mark.timeout(300)
+def test_distributed_campaign_corrects_global_worst_on_its_owner():
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+
+    nlev = 5
+    bias_cell = 100                                  # the single global-worst cell
+    bg = float(CLUBBLiteConfig().C_K)
+    global_mesh = create_voronoi_mesh(2)
+    sigma = create_sigma_coordinate(nlev)
+    layout = make_voronoi_partition_layout(global_mesh, RANK, NPROC)
+    local_mesh = layout.local_mesh
+    local_cells = np.asarray(layout.partition.local_cells)
+    n_owned = int(layout.partition.n_owned_cells)
+    owns_bias = bias_cell in local_cells[:n_owned]   # is THIS rank the owner?
+
+    model_state = _local_model_state(local_mesh, nlev)
+    reference = _global_reference(global_mesh, nlev, bias_cell, bias_dt=-12.0)
+
+    def build_base(cfg):
+        return _FakeDriver(model_state)
+
+    def extract(driver, day, dt):                    # noqa: ARG001
+        return driver.state
+
+    result = build_distributed_correction_campaign(
+        layout=layout, reference=reference,
+        area_weights=jnp.asarray(global_mesh.grid_area), n_worst=1,
+        base_atm_config=_mpas_base_config(nlev), build_base_driver=build_base,
+        extract_column_state=extract, sigma=sigma, grid=local_mesh, n_iterations=1,
+        les_config=ColumnLESConfig(
+            regime=_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, accept_only_if_improved=False)
+
+    # Reaching here on every rank ⇒ no deadlock in the collective loop.
+    it = result.iterations[0]
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.shape == (local_mesh.nCells,)
+
+    if owns_bias:
+        assert it.n_diagnosed == 1                   # the owner spun off the LES
+        li = int(np.where(local_cells == bias_cell)[0][0])
+        assert not np.isclose(ck[li], bg), "owner did not correct the global-worst cell"
+    else:
+        assert it.n_diagnosed == 0                   # owns none of the global top-1
+        np.testing.assert_allclose(ck, bg)           # nothing corrected, but ran lockstep
+
+    # Every rank must agree on the GLOBAL improvement verdict (collective bias).
+    verdicts = COMM.allgather(bool(it.bias.improved))
+    assert all(v == verdicts[0] for v in verdicts), f"ranks disagree: {verdicts}"
+    # Exactly ONE rank owns + corrects the global-worst cell (no double-count).
+    n_owners = COMM.allreduce(1 if owns_bias else 0, op=MPI.SUM)
+    assert n_owners == 1
+    COMM.Barrier()

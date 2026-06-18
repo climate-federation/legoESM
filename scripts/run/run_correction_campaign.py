@@ -308,6 +308,51 @@ def build_correction_campaign(
     )
 
 
+def build_distributed_correction_campaign(
+    *, layout: Any, reference: Any, area_weights: Any, n_worst: int,
+    base_valid_mask: Any = None, **campaign_kwargs: Any,
+):
+    """Run :func:`build_correction_campaign` on a DISTRIBUTED-MPAS partition.
+
+    The distributed-MPAS entry point that COMPOSES iters 86–88 into one call: from
+    the rank's partition ``layout`` it builds the three hooks (owned ``valid_mask``,
+    global top-k ``manifest_reducer``, collective ``global_reduce``) via
+    :func:`legoesm.training.distributed_campaign.distributed_campaign_hooks`, and
+    slices BOTH the GLOBAL ERA5 ``reference`` (a :class:`ColumnState`) AND the
+    GLOBAL ``area_weights`` down to the rank's local cells
+    (``layout.partition.local_cells``) so they align with the rank-local model
+    state, then forwards everything to :func:`build_correction_campaign`.
+
+    ``campaign_kwargs`` are the usual campaign args (``base_atm_config``,
+    ``build_base_driver``, ``extract_column_state``, ``sigma``, ``grid`` = the
+    rank-local mesh, ``n_iterations``, ``les_config``, ``run_les_fn``, …).  They MUST
+    NOT include ``valid_mask`` / ``manifest_reducer`` / ``global_reduce`` /
+    ``reference`` / ``area_weights`` / ``n_worst`` — this function supplies them; a
+    duplicate is a Python ``TypeError`` (it is the ONE place those distributed hooks
+    are wired, so they cannot be set inconsistently).  Returns the ``CampaignResult``.
+
+    MUST be called on EVERY rank (the hooks are collective); ``grid`` is the rank's
+    local ``VoronoiMesh`` (so the manifest lat/lon + grid_shape are rank-local too).
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.training.distributed_campaign import (
+        distributed_campaign_hooks,
+        slice_reference_to_local,
+    )
+
+    valid_mask, manifest_reducer, global_reduce = distributed_campaign_hooks(
+        layout, n_worst, base_valid_mask=base_valid_mask)
+    local_cells = np.asarray(layout.partition.local_cells)
+    local_reference = slice_reference_to_local(reference, local_cells)
+    local_area_weights = jnp.asarray(np.asarray(area_weights))[jnp.asarray(local_cells)]
+    return build_correction_campaign(
+        reference=local_reference, area_weights=local_area_weights, n_worst=n_worst,
+        valid_mask=valid_mask, manifest_reducer=manifest_reducer,
+        global_reduce=global_reduce, **campaign_kwargs,
+    )
+
+
 def build_multi_correction_campaign(
     *,
     base_atm_config: Any,
