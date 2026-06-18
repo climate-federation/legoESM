@@ -831,7 +831,48 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
     _print_deploy_hint(args.out, grid)
+    _maybe_write_env_kernel(args, result)
     return 0
+
+
+def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
+    """Export the RAW environment kernel (the grid-AGNOSTIC cross-resolution deploy
+    artifact) when the campaign used ``--feedback-strategy environment``.
+
+    Writes ``<out>.env_kernel.json`` ONLY when a kernel is present (a CLUBB
+    environment-strategy round produced one); static / non-CLUBB campaigns skip it
+    silently — those have no env→coefficient regression to transfer.  Exports the
+    last ACCEPTED round's kernel (under the monotonic gate a REJECTED final round's
+    kernel is inconsistent with the accepted per-column ``--out`` it would sit
+    beside, so it must NOT be the exported artifact).  This is the PRODUCER half of
+    the iter-69 deploy library: the saved JSON deploys on a DIFFERENT-resolution
+    grid via :func:`deploy_correction.apply_env_kernel_override`.
+    """
+    import json
+
+    from legoesm.training.deploy_correction import env_kernel_to_dict
+
+    accepted = list(result.accepted)
+    last = None
+    for i, it in enumerate(result.iterations):
+        # No accept_only_if_improved ⇒ accepted is empty ⇒ every round is kept.
+        kept = accepted[i] if i < len(accepted) else True
+        if kept and it.env_kernel is not None:
+            last = (i, it.env_kernel)
+    if last is None:
+        return
+    round_idx, kernel = last
+    out = f"{args.out}.env_kernel.json"
+    with open(out, "w") as f:
+        json.dump(env_kernel_to_dict(kernel), f, indent=2)
+    print(f"[campaign] wrote RAW environment kernel (accepted round {round_idx}, "
+          f"cross-resolution deploy) to {out}")
+    print(
+        "[campaign] deploy on ANY grid with: apply_env_kernel_override("
+        "env_kernel_from_dict(json.load(open(...))), "
+        "column_environment_grid(model, sigma, env_config=..., p_full=..., "
+        "p_half=...)[0])"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

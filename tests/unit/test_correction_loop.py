@@ -642,6 +642,136 @@ def test_loop_environment_strategy_requires_env_grid_fn():
             feedback_strategy="environment", env_grid_fn=None)
 
 
+# --- env-kernel PRODUCER wiring (iter 70: closes deploy Finding 6) -----------
+
+_KERNEL_GRID_ENV = jnp.asarray([
+    [280.0, 100.0, 2.0], [281.0, 110.0, 2.2],      # env A (cols 0,1)
+    [302.0, 3000.0, 25.0], [301.0, 2950.0, 24.0],  # env B (cols 2,3)
+])
+
+
+def _kernel_env_grid_fn(model_ctx):
+    return _KERNEL_GRID_ENV, jnp.std(_KERNEL_GRID_ENV, axis=0)
+
+
+def _kernel_compare_fn(config):
+    ck = jnp.asarray(config.C_K)
+    if ck.ndim == 0:
+        return CompareResult(
+            jnp.zeros((2, 2)).at[0, 0].set(8.0),
+            [_crec(0, 8.0, 280.0, 100.0, 2.0)], jnp.ones((2, 2)))
+    return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)))
+
+
+def _kernel_diagnose(record, ctx):
+    return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))
+
+
+def test_env_strategy_iteration_exports_raw_kernel_matching_feedback_field():
+    """The exported env_kernel reproduces THIS round's injected field on the SAME
+    grid in the controlled case (scalar background, full step, no clip) — proving
+    the kernel IS the raw env→coefficient regression the campaign applied, so a
+    cross-resolution deploy lands the same values the campaign would have."""
+    from legoesm.training.deploy_correction import apply_env_kernel_override
+
+    result = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+        diagnose_fn=_kernel_diagnose, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=0.4,
+        feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+
+    assert result.env_kernel is not None
+    assert result.env_kernel.field == "C_K"
+    assert float(result.env_kernel.background) == pytest.approx(0.4)
+    override, coverage = apply_env_kernel_override(
+        result.env_kernel, _KERNEL_GRID_ENV)
+    # frac=1, no clip, scalar bg ⇒ feedback_field == the raw env regression.
+    np.testing.assert_allclose(
+        np.asarray(override.clubb_lite.C_K).reshape(-1),
+        np.asarray(result.feedback_field).reshape(-1), rtol=1e-5)
+    # Only env A (cols 0,1) is near the single diagnosed sample; env B (cols 2,3)
+    # falls back to background — so half the campaign's OWN grid is covered.
+    assert coverage["fraction_covered"] == pytest.approx(0.5)
+
+
+def test_env_kernel_deploys_on_different_resolution_grid():
+    """The producer→serialize→deserialize→deploy-on-a-DIFFERENT-ncol chain: the
+    saved kernel evaluates on a 6-column grid (vs the campaign's 4) + the deployed
+    override passes validate_strict (the end-to-end non-dead gate)."""
+    import json
+
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+    )
+    from legoesm.training.deploy_correction import (
+        apply_env_kernel_override,
+        env_kernel_from_dict,
+        env_kernel_to_dict,
+    )
+
+    result = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+        diagnose_fn=_kernel_diagnose, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=0.4,
+        feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+    k2 = env_kernel_from_dict(json.loads(json.dumps(env_kernel_to_dict(result.env_kernel))))
+    new_env = jnp.asarray([[280.5, 105.0, 2.1]] * 3 + [[301.5, 2975.0, 24.5]] * 3)
+    override, coverage = apply_env_kernel_override(k2, new_env)
+    assert np.asarray(override.clubb_lite.C_K).shape == (6,)   # not the campaign's 4
+    assert coverage["n_columns"] == 6
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray", turbulence="clubb_lite", turbulence_override=override)
+    cfg.validate_strict()
+
+
+def test_static_or_nonclubb_strategy_exports_no_kernel():
+    """env_kernel is None for static strategy AND for a non-CLUBB promotion key
+    (the env kernel is a CLUBB-turbulence deploy artifact)."""
+    static = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+        diagnose_fn=_kernel_diagnose, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=0.4, feedback_strategy="static")
+    assert static.env_kernel is None
+
+    def gray_compare(config):
+        ck = jnp.asarray(config.tau_equator)
+        if ck.ndim == 0:
+            return CompareResult(jnp.zeros((2, 2)).at[0, 0].set(8.0),
+                                 [_crec(0, 8.0, 280.0, 100.0, 2.0)], jnp.ones((2, 2)))
+        return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)))
+
+    gray = run_correction_iteration(
+        GrayRadiationConfig(), compare_fn=gray_compare,
+        diagnose_fn=lambda r, c: _Eddy(K=jnp.array([0.9]), valid=jnp.array([True])),
+        promotion_key="gray_tau_equator", grid_shape=(2, 2), background=0.5,
+        feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+    assert gray.env_kernel is None   # non-CLUBB key → no kernel
+
+
+def test_env_kernel_array_background_requires_scalar_fallback():
+    """Condition: an accumulated per-column array background with NO
+    kernel_background RAISES (no silent arbitrary out-of-hull fallback)."""
+    with pytest.raises(ValueError, match="SCALAR out-of-hull fallback"):
+        run_correction_iteration(
+            CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+            diagnose_fn=_kernel_diagnose, promotion_key="clubb_lite_C_K",
+            grid_shape=(2, 2), background=jnp.full((2, 2), 0.4),
+            feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+    # ...but supplying the scalar kernel_background succeeds (campaign forwards it).
+    ok = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=_kernel_compare_fn,
+        diagnose_fn=_kernel_diagnose, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=jnp.full((2, 2), 0.4), kernel_background=0.4,
+        feedback_strategy="environment", env_grid_fn=_kernel_env_grid_fn)
+    assert ok.env_kernel is not None
+    assert float(ok.env_kernel.background) == pytest.approx(0.4)
+
+
 def test_campaign_environment_strategy_accumulates_across_rounds():
     """2-round campaign with feedback_strategy='environment': round 0 corrects
     env A, round 1 corrects env B, and round 0's env-generalized values PERSIST

@@ -505,11 +505,23 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
     return override, coverage
 
 
+#: Schema tag stamped on a serialized kernel — labels the artifact the RAW
+#: env→coefficient regression (full-step, unclipped, scalar out-of-hull fallback),
+#: NOT a campaign's accepted/line-searched/accumulated feedback field. A deploy
+#: re-applies it fresh on the target grid and runs its OWN line search + gate.
+_ENV_KERNEL_ARTIFACT = "raw_environment_kernel"
+
+
 def env_kernel_to_dict(kernel: EnvKernel) -> dict:
-    """Serialize an :class:`EnvKernel` to a JSON-friendly dict (lists)."""
+    """Serialize an :class:`EnvKernel` to a JSON-friendly dict (lists).
+
+    Stamps ``"artifact": "raw_environment_kernel"`` so a consumer cannot mistake
+    this for a campaign's accepted feedback field (see :data:`_ENV_KERNEL_ARTIFACT`).
+    """
     import numpy as np
 
     return {
+        "artifact": _ENV_KERNEL_ARTIFACT,
         "sample_env": np.asarray(kernel.sample_env).tolist(),
         "sample_values": np.asarray(kernel.sample_values).reshape(-1).tolist(),
         "valid": [bool(v) for v in np.asarray(kernel.valid).reshape(-1)],
@@ -525,6 +537,12 @@ def env_kernel_from_dict(data: dict) -> EnvKernel:
     """Deserialize an :class:`EnvKernel` (inverse of :func:`env_kernel_to_dict`)."""
     import jax.numpy as jnp
 
+    # Reject a mislabelled artifact LOUDLY (a campaign accepted-field JSON is NOT a
+    # kernel); a missing tag is tolerated for back-compat with pre-tag kernels.
+    artifact = data.get("artifact")
+    if artifact is not None and artifact != _ENV_KERNEL_ARTIFACT:
+        raise ValueError(
+            f"expected a {_ENV_KERNEL_ARTIFACT!r} artifact, got {artifact!r}.")
     # ``_validate_env_kernel`` enforces field membership + every shape invariant
     # (a length-skewed ``env_lo`` would otherwise broadcast silently in the hull
     # check). Default float dtype (no forced float64) honours the x64 flag and

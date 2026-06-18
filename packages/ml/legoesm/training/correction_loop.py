@@ -42,9 +42,27 @@ from legoesm.training.compare_reanalysis import (
 )
 from legoesm.training.feedback_assembly import assemble_feedback_field
 from legoesm.training.promotable_params import (
+    PROMOTABLE_FIELDS,
     apply_feedback_to_scheme,
     clip_field_to_promotable_bounds,
 )
+
+
+def _clubb_field_for_promotion_key(promotion_key: str) -> str | None:
+    """Resolve a promotion key to its CLUBB-lite coefficient field for env-kernel
+    export, or ``None`` when the key targets a NON-CLUBB scheme.
+
+    The cross-resolution environment kernel
+    (:class:`legoesm.training.deploy_correction.EnvKernel`) is a CLUBB-turbulence
+    deploy artifact, so only ``clubb_lite_*`` keys produce one.  Resolves through
+    the :data:`promotable_params.PROMOTABLE_FIELDS` registry (NOT string-stripping),
+    so a malformed / unregistered key resolves to ``None`` rather than silently
+    fabricating a field name.
+    """
+    pf = PROMOTABLE_FIELDS.get(promotion_key)
+    if pf is None or not pf.scheme.startswith("CLUBB"):
+        return None
+    return pf.field
 
 
 class CompareResult(NamedTuple):
@@ -69,6 +87,12 @@ class CorrectionResult(NamedTuple):
     #                                    K representatives when clustering w/ les_budget)
     step_fraction: float = 1.0         # the accepted line-search step toward the raw
     #                                    diagnosis (1.0 = full; 0.0 = no-op round)
+    env_kernel: Any = None             # the exported RAW environment kernel
+    #   (deploy_correction.EnvKernel) for an "environment"-strategy CLUBB round —
+    #   the grid-AGNOSTIC env→coefficient regression for cross-resolution deploy.
+    #   None for static/non-CLUBB/no-op rounds. RAW = full-step, unclipped, scalar
+    #   background: deploy re-applies it fresh and runs its OWN line search + gate,
+    #   so it is NOT this round's post-line-search/clipped/accumulated feedback_field.
 
 
 class CampaignResult(NamedTuple):
@@ -221,6 +245,10 @@ def run_correction_campaign(
             les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
             step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+            # Forward the ORIGINAL scalar production default as the env-kernel
+            # out-of-hull fallback even once ``base`` is the accumulated array,
+            # so each round's exported EnvKernel has a scalar (not array) fallback.
+            kernel_background=background,
         )
         # Monotonic acceptance: keep the round only if it lowered the global bias.
         # A no-op round (no flagged columns) changes nothing → vacuously accepted.
@@ -460,6 +488,7 @@ def run_correction_iteration(
     env_grid_fn: Callable[[Any], tuple] | None = None,
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
+    kernel_background: float | None = None,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -499,6 +528,18 @@ def run_correction_iteration(
     A non-finite reduced diagnosis is ALWAYS treated as invalid (keeps the
     background), independent of this flag.  Default false (library compat); the
     production campaign enables it.
+
+    **Env-kernel export** (``CorrectionResult.env_kernel``): for an
+    ``feedback_strategy="environment"`` round whose ``promotion_key`` targets a
+    CLUBB-lite coefficient, the result carries the RAW environment kernel
+    (:class:`legoesm.training.deploy_correction.EnvKernel`) — the grid-AGNOSTIC
+    env→coefficient regression — so a cheap low-res campaign deploys on an
+    expensive high-res run by environmental similarity.  ``kernel_background`` is
+    its scalar out-of-hull fallback (the production default); when ``background``
+    is an accumulated per-column array it is REQUIRED (else a ``ValueError`` — no
+    silent fallback).  ``env_kernel`` is ``None`` for static / non-CLUBB / no-op
+    rounds.  SINGLE-coefficient only: the SIMULTANEOUS multi-coefficient path
+    (:func:`run_multi_correction_iteration`) does not export a kernel.
 
     A grid with no flagged worst columns short-circuits to a no-op correction
     (baseline config unchanged, zero feedback, ``improved=False``, ``step_fraction=0``)
@@ -600,6 +641,10 @@ def run_correction_iteration(
     worst_change = worst_column_bias_change(
         baseline.combined_score, updated.combined_score, worst_idx
     )
+    env_kernel = _maybe_build_env_kernel(
+        feedback_strategy, promotion_key, records, diagnoses, diagnosis_method,
+        length_scales, background, kernel_background,
+    )
     return CorrectionResult(
         updated_config=updated_config,
         bias=improvement,
@@ -608,6 +653,44 @@ def run_correction_iteration(
         n_corrected=len(records),
         n_diagnosed=n_diagnosed,
         step_fraction=frac,
+        env_kernel=env_kernel,
+    )
+
+
+def _maybe_build_env_kernel(
+    feedback_strategy, promotion_key, records, diagnoses, diagnosis_method,
+    length_scales, background, kernel_background,
+):
+    """Build the exported RAW environment kernel for an "environment"-strategy
+    CLUBB round, or ``None`` (static / non-CLUBB strategy → the cross-resolution
+    env kernel does not apply).  The out-of-hull fallback MUST be a scalar (the
+    production default): use ``kernel_background`` when given, else ``background``
+    when it is still scalar; a non-scalar ``background`` (the accumulated per-column
+    field of a multi-round campaign) with no ``kernel_background`` RAISES rather than
+    silently picking an arbitrary fallback (``run_correction_campaign`` forwards its
+    original scalar default).  The kernel captures the full-step, unclipped raw
+    env→coefficient regression — deploy re-applies it and runs its own gate.
+    """
+    clubb_field = _clubb_field_for_promotion_key(promotion_key)
+    if feedback_strategy != "environment" or clubb_field is None:
+        return None
+    from legoesm.training.deploy_correction import build_env_kernel
+
+    bg = jnp.asarray(background)
+    if kernel_background is not None:
+        kbg = float(kernel_background)
+    elif bg.ndim == 0:
+        kbg = float(bg)
+    else:
+        raise ValueError(
+            "env-kernel export needs a SCALAR out-of-hull fallback: pass "
+            "kernel_background (the coefficient's production default) when "
+            "'background' is an accumulated per-column array — "
+            "run_correction_campaign forwards its scalar default automatically."
+        )
+    return build_env_kernel(
+        records, diagnoses, diagnosis_method,
+        length_scales=length_scales, field=clubb_field, background=kbg,
     )
 
 

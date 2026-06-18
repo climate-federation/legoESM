@@ -155,6 +155,19 @@ def test_build_rejects_bad_length_scales():
         build_env_kernel(recs, diags, "clubb_coefficient", length_scales=[1.0, 2.0])
 
 
+def test_from_dict_rejects_mislabelled_artifact():
+    # A wrong/foreign artifact tag fails loudly; a missing tag is tolerated
+    # (pre-tag iter-69 kernels still deserialize).
+    k = _kernel()
+    d = env_kernel_to_dict(k)
+    assert d["artifact"] == "raw_environment_kernel"
+    bad = dict(d, artifact="accepted_campaign_field")
+    with pytest.raises(ValueError, match="raw_environment_kernel"):
+        env_kernel_from_dict(bad)
+    no_tag = {key: v for key, v in d.items() if key != "artifact"}
+    env_kernel_from_dict(no_tag)   # back-compat: missing tag OK
+
+
 def test_apply_rejects_wrong_grid_env_shape():
     k = _kernel()
     with pytest.raises(ValueError, match=r"must be \(ncol"):
