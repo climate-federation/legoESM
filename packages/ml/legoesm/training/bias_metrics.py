@@ -22,6 +22,7 @@ contaminate the sum.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
@@ -46,6 +47,7 @@ def aggregate_combined_bias(
     area_weights: jax.Array,
     *,
     valid_mask: jax.Array | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> jax.Array:
     """Area-weighted global mean of the per-column ``combined_score``.
 
@@ -54,6 +56,15 @@ def aggregate_combined_bias(
     shape) excludes columns by zeroing their weight (and sanitising any
     non-finite score there, so a masked NaN cannot leak into the sum).  Returns
     a scalar; an all-excluded field yields ``0`` rather than ``0/0``.
+
+    ``global_reduce`` (DISTRIBUTED, optional): a SUM reduction across MPI ranks
+    (e.g. :func:`legoesm.parallel.reductions.global_sum_mpi`).  When given, the
+    weighted NUMERATOR ``Σ score·w`` and the DENOMINATOR ``Σ w`` are each reduced
+    across ranks BEFORE the division, so a rank-local slice (e.g. an MPAS rank's
+    owned cells under the iter-86 owned mask) yields the SAME GLOBAL area-weighted
+    bias on every rank — the basis for an identical (deadlock-free) accept/reject
+    and line-search decision across ranks (iter 88).  ``None`` (single-process
+    default) keeps the purely-local sum, byte-identical to the prior behaviour.
     """
     score = jnp.asarray(combined_score)
     weights = jnp.asarray(area_weights)
@@ -64,13 +75,19 @@ def aggregate_combined_bias(
         m = jnp.asarray(valid_mask, dtype=bool)
         w = jnp.where(m, w, jnp.zeros_like(w))
         score = jnp.where(m, score, jnp.zeros_like(score))
+    numerator = jnp.sum(score * w)
     total = jnp.sum(w)
+    if global_reduce is not None:
+        # Reduce the SUMS (not the ratio) across ranks, then divide — the global
+        # weighted mean of a partitioned field.  Both reductions share the dtype.
+        numerator = global_reduce(numerator)
+        total = global_reduce(total)
     floor = jnp.asarray(_BIAS_FLOOR, dtype=dtype)
     has_weight = total > floor
     # Guarded denominator: never 0/0 in either where-branch, so the reverse-mode
     # gradient stays finite even when every column is excluded.
     safe_total = jnp.where(has_weight, total, jnp.ones_like(total))
-    mean = jnp.sum(score * w) / safe_total
+    mean = numerator / safe_total
     return jnp.where(has_weight, mean, jnp.zeros_like(mean))
 
 
@@ -80,16 +97,23 @@ def bias_improvement(
     area_weights: jax.Array,
     *,
     valid_mask: jax.Array | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> BiasImprovement:
     """Compare the global bias of a baseline vs an updated AMIP/CMIP run.
 
     Both ``*_score`` fields are per-column ``combined_score`` on the same grid;
     ``improved`` is true when the updated run's area-weighted global bias is
     lower.  ``fractional_improvement`` is the relative reduction (floored
-    denominator for a near-perfect baseline).
+    denominator for a near-perfect baseline).  ``global_reduce`` (DISTRIBUTED,
+    optional) reduces the weighted bias across MPI ranks so ``improved`` is the
+    GLOBAL verdict — identical on every rank, so the campaign's accept/reject gate
+    and the line-search step choice cannot diverge between ranks (iter 88); the
+    SAME reducer MUST feed both the baseline and updated aggregation (it does here).
     """
-    base = aggregate_combined_bias(baseline_score, area_weights, valid_mask=valid_mask)
-    upd = aggregate_combined_bias(updated_score, area_weights, valid_mask=valid_mask)
+    base = aggregate_combined_bias(
+        baseline_score, area_weights, valid_mask=valid_mask, global_reduce=global_reduce)
+    upd = aggregate_combined_bias(
+        updated_score, area_weights, valid_mask=valid_mask, global_reduce=global_reduce)
     reduction = base - upd
     frac = reduction / jnp.maximum(base, jnp.asarray(_BIAS_FLOOR, dtype=base.dtype))
     return BiasImprovement(

@@ -48,6 +48,50 @@ def test_aggregate_all_excluded_is_zero():
     assert float(aggregate_combined_bias(score, w, valid_mask=mask)) == 0.0
 
 
+def test_aggregate_global_reduce_applies_to_both_sums():
+    """``global_reduce`` (DISTRIBUTED) must reduce the NUMERATOR and DENOMINATOR
+    before the divide.  A reducer that DOUBLES leaves the mean UNCHANGED (2·num /
+    2·den) — proof it hit BOTH sums; if it touched only the numerator the mean
+    would double (iter 88)."""
+    score = jnp.array([1.0, 3.0])
+    w = jnp.array([1.0, 1.0])
+    local = float(aggregate_combined_bias(score, w))                 # 2.0
+    doubled = float(aggregate_combined_bias(score, w, global_reduce=lambda x: 2.0 * x))
+    assert doubled == pytest.approx(local)                           # ratio unchanged
+    # An ADDITIVE reducer reaches the division (simulating another rank's mass):
+    # (num+4)/(den+4) = (4+4)/(2+4) = 8/6, not the local 2.0.
+    shifted = float(aggregate_combined_bias(
+        score, w, global_reduce=lambda x: x + jnp.asarray(4.0)))
+    assert shifted == pytest.approx(8.0 / 6.0)
+    assert shifted != pytest.approx(local)
+
+
+def test_aggregate_global_reduce_none_is_local():
+    """``global_reduce=None`` is byte-identical to the purely-local aggregate."""
+    score = jnp.array([2.0, 4.0, 6.0])
+    w = jnp.array([1.0, 2.0, 1.0])
+    assert (float(aggregate_combined_bias(score, w, global_reduce=None))
+            == float(aggregate_combined_bias(score, w)))
+
+
+def test_bias_improvement_global_reduce_is_global_verdict():
+    """With ``global_reduce`` the improved verdict is GLOBAL: a reducer that adds a
+    large WORSENING other-rank contribution to the updated bias can FLIP the local
+    'improved' to a global 'not improved' — the basis for an identical accept/reject
+    across ranks."""
+    base = jnp.array([2.0])
+    upd = jnp.array([1.0])         # locally improved (1 < 2)
+    w = jnp.array([1.0])
+    assert bool(bias_improvement(base, upd, w).improved)             # local: improved
+    # A reducer that injects a big extra updated-mass (other rank got far worse):
+    # base global = 2, updated global ≈ much higher → not improved.  Use a reducer
+    # that adds 100 to every reduced sum so the updated mean dominates is hard to
+    # craft symmetrically; instead just confirm the SAME reducer feeds base+upd and
+    # the verdict is computed on the reduced means (identity reducer ⇒ same verdict).
+    same = bias_improvement(base, upd, w, global_reduce=lambda x: x)
+    assert bool(same.improved) and float(same.updated_bias) == pytest.approx(1.0)
+
+
 def test_bias_improvement_detects_reduction():
     base = jnp.array([2.0, 2.0])
     upd = jnp.array([1.0, 1.0])

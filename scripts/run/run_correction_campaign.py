@@ -224,6 +224,7 @@ def build_correction_campaign(
     patience: int = 2,
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
+    global_reduce: Any | None = None,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -303,7 +304,7 @@ def build_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
-        bias_tol=bias_tol, patience=patience,
+        bias_tol=bias_tol, patience=patience, global_reduce=global_reduce,
     )
 
 
@@ -338,6 +339,7 @@ def build_multi_correction_campaign(
     patience: int = 2,
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
+    global_reduce: Any | None = None,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -400,7 +402,7 @@ def build_multi_correction_campaign(
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
         sequential=sequential, bias_tol=bias_tol, patience=patience,
         initial_fields=initial_fields, start_round=start_round,
-        checkpoint_callback=checkpoint_callback,
+        checkpoint_callback=checkpoint_callback, global_reduce=global_reduce,
     )
 
 
@@ -714,6 +716,38 @@ def load_base_config_and_grid(config_path: str):
     return base_cfg, probe.grid, probe.sigma
 
 
+def refuse_unsupported_multirank(comm_size: int | None = None) -> None:
+    """Refuse a multi-rank ``mpirun`` invocation of this SINGLE-PROCESS CLI.
+
+    The CLI wires NONE of the distributed hooks — the owned-cell ``valid_mask``
+    (iter 86), the global top-k ``manifest_reducer`` (iter 87), or the collective
+    ``global_reduce`` (iter 88) — and performs no MPI scatter.  Under ``mpirun -np
+    N`` it would therefore EITHER deadlock (a distributed model makes ``compare_fn``
+    collective, but the loop's gate/line-search stay rank-local without
+    ``global_reduce``) OR run N REDUNDANT full-grid campaigns.  Refuse LOUDLY rather
+    than silently burning N× the compute or hanging; the distributed-MPAS campaign
+    driver that composes those three hooks + scatter is a separate, not-yet-built
+    entry point.  ``comm_size`` is injectable for testing; otherwise it is probed
+    from ``MPI.COMM_WORLD`` (absent mpi4py ⇒ single process ⇒ allowed).
+    """
+    if comm_size is None:
+        try:
+            from mpi4py import MPI
+            comm_size = int(MPI.COMM_WORLD.Get_size())
+        except Exception:
+            comm_size = 1
+    if comm_size > 1:
+        raise SystemExit(
+            f"run_correction_campaign is a SINGLE-PROCESS CLI but was launched on "
+            f"{comm_size} MPI ranks.  It wires none of the distributed hooks "
+            f"(owned-cell valid_mask, global top-k manifest_reducer, global_reduce) "
+            f"and does no scatter, so a multi-rank run would deadlock or run "
+            f"{comm_size} redundant full campaigns.  Run it on ONE rank; a "
+            f"distributed-MPAS campaign needs the dedicated distributed driver "
+            f"(docs/COMPARE_REANALYSIS.md)."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: load a base config + an ERA5 reference, run the campaign, write the
     corrected ``clubb_lite`` config + a per-round bias report.
@@ -742,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         select_era5_regrid,
     )
 
+    refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
 

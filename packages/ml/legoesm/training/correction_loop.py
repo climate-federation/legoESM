@@ -190,6 +190,7 @@ def run_correction_campaign(
     clip_to_bounds: bool = False,
     bias_tol: float | None = None,
     patience: int = 2,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -270,14 +271,19 @@ def run_correction_campaign(
             # out-of-hull fallback even once ``base`` is the accumulated array,
             # so each round's exported EnvKernel has a scalar (not array) fallback.
             kernel_background=background,
+            global_reduce=global_reduce,
         )
         # Monotonic acceptance: keep the round only if it lowered the global bias.
         # A no-op round (no flagged columns) changes nothing → vacuously accepted.
         # A rejected round's worsening config + field are discarded; the next
         # round restarts from the prior accepted base, so the field never regresses.
+        # DISTRIBUTED: gate on the GLOBAL corrected count + the GLOBAL bias verdict
+        # (both already global) so EVERY rank accepts/rejects identically — a
+        # rank-local ``n_corrected`` would let a rank owning no columns vacuously
+        # accept a round its peers reject, diverging the campaign state (iter 88).
         accepted = not (
             accept_only_if_improved
-            and result.n_corrected > 0
+            and _global_count(result.n_corrected, global_reduce) > 0
             and not bool(result.bias.improved)
         )
         if accepted:
@@ -388,7 +394,8 @@ def make_compare_fn(
     return compare_fn
 
 
-def _run_line_search(compare_fn, baseline, fractions, make_candidate):
+def _run_line_search(compare_fn, baseline, fractions, make_candidate, *,
+                     global_reduce=None):
     """Backtracking line search shared by the single- and (future) multi-coefficient
     iterations: try ``fractions`` (already descending) and keep the LARGEST whose
     re-run lowers the global bias (first improving, Armijo-style); if none improve
@@ -408,6 +415,7 @@ def _run_line_search(compare_fn, baseline, fractions, make_candidate):
         imp = bias_improvement(
             baseline.combined_score, upd.combined_score,
             baseline.area_weights, valid_mask=baseline.valid_mask,
+            global_reduce=global_reduce,
         )
         candidate = (float(frac), field_state, cfg, upd, imp)
         if k == 0:
@@ -511,6 +519,22 @@ def _validate_step_fractions(
     return tuple(sorted(set(fracs), reverse=True))
 
 
+def _global_count(n_local: int, global_reduce) -> int:
+    """Total selected columns across ranks (SUM of per-rank counts); ``== n_local``
+    single-process (``global_reduce=None``).
+
+    Drives the COLLECTIVE no-op gate so every rank takes the SAME branch (all
+    no-op, or all proceed-and-re-run).  A rank-local ``len(records)`` gate would
+    let a rank owning NONE of the globally-selected columns skip the second
+    ``compare_fn`` (model re-run) while peers re-run, mismatching the model's MPI
+    collectives → deadlock (Codex iter-87).  Owned subsets are disjoint, so the SUM
+    of per-rank counts is the true global count.
+    """
+    if global_reduce is None:
+        return int(n_local)
+    return int(global_reduce(jnp.asarray(int(n_local), dtype=jnp.int32)))
+
+
 def run_correction_iteration(
     baseline_config: Any,
     *,
@@ -528,6 +552,7 @@ def run_correction_iteration(
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
     kernel_background: float | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -604,12 +629,14 @@ def run_correction_iteration(
     baseline = compare_fn(baseline_config)
     records = list(baseline.manifest)
 
-    if not records:
-        # No flagged columns → no-op correction (no second run, no config edit).
+    if _global_count(len(records), global_reduce) == 0:
+        # No flagged columns ANYWHERE → no-op correction (no second run, no config
+        # edit) on EVERY rank in lockstep (the gate is GLOBAL, not rank-local).
         dtype = jnp.asarray(baseline.combined_score).dtype
         noop_bias = bias_improvement(
             baseline.combined_score, baseline.combined_score,
             baseline.area_weights, valid_mask=baseline.valid_mask,
+            global_reduce=global_reduce,
         )
         # No flagged columns ⇒ the feedback field is the unchanged background
         # (scalar → uniform at the score dtype; array → the accumulated field
@@ -674,7 +701,7 @@ def run_correction_iteration(
         return cfg, field
 
     frac, field, updated_config, updated, improvement = _run_line_search(
-        compare_fn, baseline, fractions, _make_candidate
+        compare_fn, baseline, fractions, _make_candidate, global_reduce=global_reduce
     )
     worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
     worst_change = worst_column_bias_change(
@@ -760,6 +787,7 @@ def run_multi_correction_iteration(
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
     sequential: bool = False,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> MultiCorrectionResult:
     """Correct SEVERAL coefficients SIMULTANEOUSLY from ONE LES run per column.
 
@@ -802,11 +830,13 @@ def run_multi_correction_iteration(
     baseline = compare_fn(baseline_config)
     records = list(baseline.manifest)
 
-    if not records:
+    if _global_count(len(records), global_reduce) == 0:
+        # GLOBAL no-op (no flagged column on ANY rank) — lockstep across ranks.
         dtype = jnp.asarray(baseline.combined_score).dtype
         noop_bias = bias_improvement(
             baseline.combined_score, baseline.combined_score,
             baseline.area_weights, valid_mask=baseline.valid_mask,
+            global_reduce=global_reduce,
         )
         fields = {}
         for s in specs:
@@ -882,7 +912,7 @@ def run_multi_correction_iteration(
                     _cfg, _s.promotion_key, field, expected_ncol=ncol
                 ), field
             f, field, cand_cfg, upd, imp = _run_line_search(
-                compare_fn, running, fractions, _make_one
+                compare_fn, running, fractions, _make_one, global_reduce=global_reduce
             )
             if bool(imp.improved):
                 cfg, running = cand_cfg, upd          # accept → advance running state
@@ -895,6 +925,7 @@ def run_multi_correction_iteration(
         improvement = bias_improvement(
             baseline.combined_score, updated.combined_score,
             baseline.area_weights, valid_mask=baseline.valid_mask,
+            global_reduce=global_reduce,
         )
         frac = max(fracs_by_key.values(), default=0.0)
         fracs_out: dict | None = fracs_by_key
@@ -915,7 +946,7 @@ def run_multi_correction_iteration(
             return cfg, fields
 
         frac, fields, updated_config, updated, improvement = _run_line_search(
-            compare_fn, baseline, fractions, _make_candidate
+            compare_fn, baseline, fractions, _make_candidate, global_reduce=global_reduce
         )
         fracs_out = None
 
@@ -953,6 +984,7 @@ def run_multi_correction_campaign(
     initial_fields: dict | None = None,
     start_round: int = 0,
     checkpoint_callback: Callable[[int, MultiCorrectionResult, dict], None] | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> MultiCampaignResult:
     """Run the SIMULTANEOUS multi-coefficient correction loop for ``n_iterations``.
 
@@ -989,11 +1021,13 @@ def run_multi_correction_campaign(
             expected_ncol=expected_ncol, les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
             step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
-            sequential=sequential,
+            sequential=sequential, global_reduce=global_reduce,
         )
+        # DISTRIBUTED: GLOBAL corrected count + GLOBAL bias verdict (see
+        # run_correction_campaign) so every rank accepts/rejects identically.
         accepted = not (
             accept_only_if_improved
-            and result.n_corrected > 0
+            and _global_count(result.n_corrected, global_reduce) > 0
             and not bool(result.bias.improved)
         )
         if accepted:

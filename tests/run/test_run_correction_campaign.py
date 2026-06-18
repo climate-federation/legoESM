@@ -29,7 +29,16 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     make_base_driver_builder,
     make_clubb_build_driver,
     make_les_diagnose_fn,
+    refuse_unsupported_multirank,
 )
+
+
+def test_refuse_unsupported_multirank_guards_cli():
+    """The single-process CLI refuses an mpirun -np >1 launch LOUDLY (it wires none
+    of the distributed hooks); a single rank (or no MPI) is allowed (iter 88)."""
+    refuse_unsupported_multirank(comm_size=1)          # single rank: allowed
+    with pytest.raises(SystemExit, match="SINGLE-PROCESS CLI"):
+        refuse_unsupported_multirank(comm_size=2)      # multi-rank: refused
 
 _SMALL_RES = LESResolutionConfig(
     dx_m=50.0, nx=8, ny=8, nlev=8, domain_top_m=2000.0, dz_sfc_m=50.0)

@@ -163,6 +163,46 @@ def test_loop_empty_manifest_is_noop():
     np.testing.assert_allclose(np.asarray(result.feedback_field), 7.2)
 
 
+def test_loop_empty_local_manifest_proceeds_when_global_count_nonzero():
+    """DISTRIBUTED gate (iter 88): a rank with an EMPTY local manifest must still
+    RE-RUN ``compare_fn`` (the model, an MPI collective) when ANOTHER rank owns a
+    flagged column — else it skips the collective the peers execute and deadlocks.
+    A ``global_reduce`` that reports the global count as nonzero forces the
+    collective proceed path even with no local records (compare called TWICE)."""
+    compare_calls = {"n": 0}
+
+    def compare_fn(config):
+        compare_calls["n"] += 1
+        return CompareResult(
+            combined_score=jnp.array([[1.0, 1.0], [1.0, 1.0]]),
+            manifest=[],  # THIS rank owns nothing flagged...
+            area_weights=_AREA_W, model_ctx=None,
+        )
+
+    # ...but a peer rank does: the global count is len(local)=0 + 1 = 1 > 0.
+    def global_reduce(x):
+        return jnp.asarray(x) + jnp.asarray(1, dtype=jnp.asarray(x).dtype)
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(), compare_fn=compare_fn, diagnose_fn=_diagnose,
+        promotion_key="gray_tau_equator", grid_shape=(2, 2), background=7.2,
+        global_reduce=global_reduce,
+    )
+    assert compare_calls["n"] == 2   # baseline + the lockstep re-run (NOT a no-op)
+    assert result.n_corrected == 0   # this rank still corrected none of its own
+    # The single-process default (no reducer) IS a no-op for the same empty manifest.
+    solo = {"n": 0}
+
+    def compare_solo(config):
+        solo["n"] += 1
+        return CompareResult(jnp.array([[1.0, 1.0], [1.0, 1.0]]), [], _AREA_W)
+
+    run_correction_iteration(
+        GrayRadiationConfig(), compare_fn=compare_solo, diagnose_fn=_diagnose,
+        promotion_key="gray_tau_equator", grid_shape=(2, 2), background=7.2)
+    assert solo["n"] == 1            # no peer ⇒ no-op, single compare
+
+
 def test_loop_multi_iteration_threads_updated_config():
     """A two-step campaign: the 2nd iteration starts from the 1st's updated config."""
     compare_fn = _make_compare_fn(
