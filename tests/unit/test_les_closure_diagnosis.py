@@ -237,6 +237,41 @@ def test_clubb_coefficient_dimensionless_value():
     np.testing.assert_allclose(np.asarray(CK), 0.2, rtol=1e-12)
 
 
+def test_clubb_coefficient_exact_inverse_of_gcm_forward():
+    """The C_K diagnosis is the EXACT inverse of the GCM closure (the iter-46
+    claim that underpins 'parameters estimated from LES'): injecting a known C_K
+    through the REAL GCM forward Km = broadcast_column_param(C_K, l_mix)·l_mix·
+    √wp2 (exactly clubb_lite.py) and inverting recovers C_K to machine precision —
+    so the diagnosed coefficient IS the one the GCM would use (modulo the
+    documented LES-vs-GCM-wp2 caveat). Validated for BOTH the scalar (production
+    column-constant) AND the per-column-array (LES-corrected) usage of C_K."""
+    from legoesm.atmosphere.physics._shared import broadcast_column_param
+
+    l_mix = jnp.array([50.0, 100.0, 150.0, 200.0])
+    wp2 = jnp.array([0.5, 1.0, 1.5, 2.0])
+
+    # (1) Scalar C_K — the production, vertically-constant coefficient.
+    ck_true = 0.37
+    km = broadcast_column_param(ck_true, l_mix) * l_mix * jnp.sqrt(wp2)   # GCM forward
+    ck_rec, valid = clubb_coefficient_from_diffusivity(
+        km, jnp.ones_like(km, bool), l_mix, wp2)
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(ck_rec), ck_true, rtol=1e-12)
+
+    # (2) Per-column array C_K — the LES-informed per-column correction (2 columns).
+    l2 = jnp.broadcast_to(l_mix, (2, 4))
+    w2 = jnp.broadcast_to(wp2, (2, 4))
+    ck_col = jnp.array([0.25, 0.6])                                      # (ncol,)
+    km2 = broadcast_column_param(ck_col, l2) * l2 * jnp.sqrt(w2)         # (2,4) forward
+    ck_rec2, valid2 = clubb_coefficient_from_diffusivity(
+        km2, jnp.ones_like(km2, bool), l2, w2)
+    assert bool(jnp.all(valid2))
+    # Each column's recovered C_K equals its injected per-column value at every level.
+    np.testing.assert_allclose(
+        np.asarray(ck_rec2),
+        np.broadcast_to(np.asarray(ck_col)[:, None], (2, 4)), rtol=1e-12)
+
+
 def test_clubb_coefficient_low_wp2_invalid_and_ad_safe():
     Km = jnp.full((3,), 5.0)
     wp2 = jnp.array([0.25, 1.0e-12, 0.25])   # middle below the floor
