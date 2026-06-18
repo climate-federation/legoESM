@@ -1192,6 +1192,7 @@ def _bc_geometry_and_density(
         n_iter=2,
         hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
