@@ -325,6 +325,7 @@ def make_compare_fn(
     run_amip_fn: Callable[[Any], ColumnState],
     time_index: int = 0,
     valid_mask: jax.Array | None = None,
+    manifest_reducer: Callable[[list], list] | None = None,
     **compare_kwargs: Any,
 ) -> Callable[[Any], CompareResult]:
     """Build a ``compare_fn`` for :func:`run_correction_iteration` over the REAL
@@ -343,6 +344,15 @@ def make_compare_fn(
     raise; it is therefore rejected.  The other injected args (``reference`` /
     ``sigma_full`` / ``lat_deg`` / ``time_index`` / ``n_worst`` / ``valid_mask``
     …) are explicit parameters, so a duplicate is already a Python ``TypeError``.
+
+    ``manifest_reducer`` (optional, ``list[ColumnRecord] -> list[ColumnRecord]``)
+    post-processes the worst-column manifest; ``None`` (default) is a no-op.  Under
+    distributed MPAS it is
+    :func:`legoesm.training.distributed_manifest.gather_global_worst_columns`
+    (closed over the rank's ``local_to_global`` map) — the cross-rank global top-k
+    that turns per-rank owned rankings into the rank's share of the GLOBAL worst
+    ``n_worst`` (iter 87).  Single-process runs leave it ``None`` (the local
+    manifest already IS the global top-k).
     """
     if "model" in compare_kwargs:
         raise ValueError(
@@ -359,9 +369,17 @@ def make_compare_fn(
             time_index=time_index, n_worst=n_worst,
             valid_mask=valid_mask, **compare_kwargs,
         )
+        # DISTRIBUTED hook: reduce the rank-local (owned-only, iter-86 valid_mask)
+        # manifest to this rank's owned subset of the GLOBAL n_worst worst columns
+        # (cross-rank top-k, iter-87 distributed_manifest.gather_global_worst_columns)
+        # so the campaign diagnoses each globally worst cell on exactly one rank.
+        # None (single-process default) ⇒ the local manifest already IS the global.
+        manifest = comparison.manifest
+        if manifest_reducer is not None:
+            manifest = list(manifest_reducer(list(manifest)))
         return CompareResult(
             combined_score=comparison.error_fields.combined_score,
-            manifest=comparison.manifest,
+            manifest=manifest,
             area_weights=area_weights,
             model_ctx=model,
             valid_mask=valid_mask,
