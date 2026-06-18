@@ -264,3 +264,108 @@ def _assert_compatible(cfg, data: dict, grid: Any, allow_unverified_grid: bool) 
                 f"{rv!r} but the target grid has {tv!r}. The per-column "
                 "coefficients were learned on a different grid and would land on "
                 "the wrong cells; deploy on the SAME grid the campaign used.")
+
+
+# --------------------------------------------------------------------------- #
+# Distributed deploy: slice a GLOBAL per-column override to a rank's LOCAL columns.
+# Under MPI spatial decomposition each rank owns a tile (a subset of columns), so
+# the physics runs on rank-local (ncol_local, nlev) shapes — a global (ncol,)
+# override must be sliced to match. The campaign + grid guard operate on the GLOBAL
+# grid; these helpers produce the rank-local override AFTER that global validation.
+# --------------------------------------------------------------------------- #
+def _per_column_clubb_fields(override):
+    """Validate a clubb_lite override + return (clubb_cfg, {field: 1-D array}).
+
+    Only ndim==1 per-column fields are sliceable; ndim>1 is rejected (the physics
+    `broadcast_column_param` accepts scalar or 1-D only). Scalar defaults are left
+    out (they broadcast on every rank unchanged).
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    if not isinstance(override, TurbulenceConfig) or override.scheme != "clubb_lite":
+        raise ValueError(
+            "override must be a clubb_lite TurbulenceConfig; got "
+            f"{getattr(override, 'scheme', type(override).__name__)!r}.")
+    clubb = override.clubb_lite
+    per_column = {}
+    for field in _CLUBB_FIELDS:
+        arr = jnp.asarray(getattr(clubb, field))
+        if arr.ndim == 0:
+            continue                       # scalar default → broadcasts per rank
+        if arr.ndim != 1:
+            raise ValueError(
+                f"per-column override field '{field}' must be 1-D (ncol,); got "
+                f"ndim={arr.ndim} (shape {tuple(arr.shape)}).")
+        per_column[field] = arr
+    # All per-column fields share ONE column count (the global ncol) — else an
+    # index valid for one field would be OOB for another (silent jnp.take fill).
+    lengths = {int(a.shape[0]) for a in per_column.values()}
+    if len(lengths) > 1:
+        raise ValueError(
+            f"per-column override fields have inconsistent column counts {lengths}; "
+            "every corrected field must span the same global grid.")
+    return clubb, per_column
+
+
+def slice_override_columns(override, local_column_indices):
+    """Gather a GLOBAL per-column clubb override to a rank's LOCAL columns (grid-AGNOSTIC).
+
+    ``local_column_indices`` are the rank's columns' GLOBAL flat indices in local
+    order (the caller derives them from its decomposition's canonical scatter — for
+    lat-lon use :func:`slice_override_latlon_2d`, which needs no indices).  Each
+    corrected per-column field is gathered at those indices (AD-safe ``jnp.take`` —
+    grads flow to the global leaf, so a TRAINED override stays differentiable);
+    scalar default fields pass through.  Indices are bounds-checked host-side at
+    deploy time (NOT traced), so an out-of-range index fails LOUDLY rather than
+    silently filling/clamping under JIT.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    clubb, per_column = _per_column_clubb_fields(override)
+    idx = jnp.asarray(local_column_indices).reshape(-1)
+    if not jnp.issubdtype(idx.dtype, jnp.integer):
+        raise ValueError(
+            f"local_column_indices must be integer; got dtype {idx.dtype}.")
+    if per_column:
+        ncol = int(next(iter(per_column.values())).shape[0])
+        lo, hi = int(idx.min()), int(idx.max())
+        if lo < 0 or hi >= ncol:
+            raise ValueError(
+                f"local_column_indices out of range [0, {ncol}) for the global "
+                f"override: got [{lo}, {hi}].")
+    sliced = {f: jnp.take(arr, idx, axis=0) for f, arr in per_column.items()}
+    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))
+
+
+def slice_override_latlon_2d(override, layout):
+    """Slice a GLOBAL per-column clubb override to a rank's LOCAL lat-lon tile.
+
+    The safe lat-lon path: each corrected ``(ncol,)`` field is reshaped to the
+    global ``(n_lat, n_lon)`` and sliced with the EXACT same partition the model
+    scatters state with (:func:`legoesm.parallel.latlon_mpi.scatter_field_latlon_2d`
+    — the rank's ``[lat_start:lat_end, lon_start:lon_end]`` cell-centered block),
+    then row-major-flattened to ``(ncol_local,)``.  Because it reuses the model's
+    own cell-centered scatter, the local override lands on exactly the columns the
+    rank's physics consumes (the row-major ColumnAdapter flatten).  ``layout`` is a
+    ``LatLon2DLayout`` (``make_latlon_2d_layout(0, 1, 1, ...)`` is the single-rank
+    identity).  lat-lon cell-centered only; non-lat-lon decompositions supply their
+    own indices to :func:`slice_override_columns`.
+    """
+
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.parallel.latlon_mpi import scatter_field_latlon_2d
+
+    clubb, per_column = _per_column_clubb_fields(override)
+    n_lat, n_lon = int(layout.n_lat_global), int(layout.n_lon_global)
+    ncol = n_lat * n_lon
+    sliced = {}
+    for field, arr in per_column.items():
+        if int(arr.shape[0]) != ncol:
+            raise ValueError(
+                f"per-column override field '{field}' has {int(arr.shape[0])} "
+                f"columns but the layout's global grid is {n_lat}x{n_lon}={ncol}.")
+        local = scatter_field_latlon_2d(arr.reshape(n_lat, n_lon), layout)
+        sliced[field] = local.reshape(-1)
+    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))

