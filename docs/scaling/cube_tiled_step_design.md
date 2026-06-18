@@ -7,6 +7,18 @@ tiled tendency in the full SSP-RK3 **time step** (the production `_step_fv3`).
 **Future-HW only** — np>6 anti-scales on Ginsburg's Gloo/TCP fabric; gate by
 BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 
+> **UPDATE (2026-06-18) — BUILT.** This track is complete:
+> `make_tiled_fv3_hydrostatic_step_stage_2d` (no-gather 3-stage SSP-RK3, commit
+> 308202ff3), `make_tiled_zero_mean_tendency_stage_2d` + the delta-first
+> `make_tiled_fix_ps_mass_stage_2d` (post-RK3 conservation psums, 798e174f5 +
+> b66f82bb7) are all in `parallel/tiled_production_cdgrid.py`, bit-identity- /
+> conservation-gated (np24/np54), cavecrew-clean and codex-reviewed (3 findings
+> fixed: mesh/kt + nl≥2 guards 0f50c4afe, f32 delta-first fixer b66f82bb7).
+> **Still UNWIRED into production** (`ModelDriver` / `make_sharded_step` do not
+> call the tiled step — the driver warns) — by design: np>6 anti-scales on Gloo,
+> so wiring is deferred to NVLink/IB/TPU hardware. The capability exists and is
+> verified; the production hookup is the remaining future-HW task.
+
 ## The layout problem (the crux)
 
 `ssp_rk3_step(state, tendency_fn, dt)` (timestepping/ssp_rk3.py) is generic: it
