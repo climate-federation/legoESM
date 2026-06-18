@@ -199,11 +199,15 @@ def build_baroclinic_gyre_config(grid: LatLonGrid) -> LatLonCGridOceanConfig:
             # Constant vertical mixing (config A_v/K_v) — no KPP/TKE.
             vertical_mixing=VerticalMixingConfig(scheme="none"),
             lateral_mixing=LateralMixingConfig(scheme="none"),
-            # ivdc_kappa=1 convective adjustment.
+            # ivdc_kappa=1 convective adjustment.  K_bg=0: the background
+            # diapycnal diffusivity (DIFF_KR_T) is supplied ONCE by config.K_v
+            # (the implicit-vmix solve adds the config K_v floor); the convection
+            # scheme contributes only the convective ENHANCEMENT above it, so
+            # stable-region K_v stays DIFF_KR_T and is not double-counted.
             convection=OceanConvectionConfig(
                 scheme="enhanced_diffusion",
                 enhanced_diffusion=EnhancedDiffusionConfig(
-                    K_conv=IVDC_KAPPA, K_bg=DIFF_KR_T),
+                    K_conv=IVDC_KAPPA, K_bg=0.0),
             ),
             surface_forcing=SurfaceForcingConfig(
                 scheme="restoring", restoring=build_baroclinic_gyre_restoring(grid)),
