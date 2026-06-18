@@ -25,13 +25,13 @@
 > are opt-in + codex-clean; production-uptake gated by full-OMIP long-run
 > validation. Remaining f32 extensions (baroclinic EOS/PGF, tracer-advection
 > limiters) are large, science-risky careful-numerics. **PURSUED 2026-06-18 (see
-§3 row "Mixed-precision baroclinic"): precision-VIABLE (offline experiment 8520588:
-f32-anomaly PGF relRMS 8e-5 — the fp64-EOS policy rule is overcautious for the
-ρ′~O(1) anomaly path) but NOT shipped** — production runs `PrecisionPolicy.fp64()`
-so the EOS computes f64 regardless of input, and a *working* f32-EOS lever needs a
-broad shared-EOS-compute override / refactor not justified by the marginal
-(16–21 % baroclinic × ~½ EOS+PGF, GPU-mainly) upside. With this, the SOTA-extension
-space the addendum opened is exhausted — the campaign is fully converged for the
+§2): precision-VIABLE (offline experiment 8520588: f32-anomaly PGF relRMS 8e-5 —
+the fp64-EOS policy rule is overcautious for the ρ′~O(1) anomaly path) and now
+SHIPPED opt-in** (`LEGOESM_BAROCLINIC_F32`): a `wright_eos` `compute_dtype`
+override runs the EOS polynomial in f32 for the PGF path only (scope-gated to the 3
+PE callers), default OFF = byte-identical. Marginal (1.10× EOS-kernel A/B under
+fp64, GPU larger) but real + codex-clean (v3). With this, the SOTA-extension
+space the addendum opened is harvested — the campaign is fully converged for the
 current hardware.
 
 **Verdict: the production step-kernel scaling surface is exhausted on Ginsburg
@@ -86,6 +86,7 @@ measured roofline), never to efficiency ratios alone.
 | Ocean WEAK multinode at production tile | ocean | **0.97** near-flat (np8→16, ~590k cells/rank) | 8489559 |
 | MPAS batched union-neighbor halo (default flip) | icosahedral | **+4.6 %** np8, +3.5 % np16 | 8488023 |
 | `ln_ps`/`hybrid_factor`/`div_v` ride the cube-PE stage pack | cube SPMD | −3 collectives/RK3-substep (count-cut, bit-identical) | 8481480 |
+| Mixed-precision **f32-EOS baroclinic** (opt-in `LEGOESM_BAROCLINIC_F32`) | ocean PGF | **1.10×** EOS-kernel A/B under fp64 policy (CPU; GPU larger, RTX8000 f64=1/32 f32). f32 EOS polynomial / f64 state; anomaly-safe (PGF relRMS 8e-5, job 8520588); `wright_eos` compute_dtype override, scope-gated to the 3 PE callers; default OFF = byte-identical. codex v3 CLEAN | 8520646 |
 
 ---
 
@@ -103,7 +104,7 @@ measured roofline), never to efficiency ratios alone.
 | CUDA-aware MPI rebuild | conda mpi4py shadows the cuda-aware libmpi → segfault; full-stack rebuild not worth it (prod already 0.92–0.95) | 8486212 |
 | MPAS METIS partitioning | +2.6 % np16 (rank-growing, opt-in, pymetis dep) — real but "not a new mechanism" | 8491002 |
 | Field-batched voronoi halo (the "18× regression") | was I5/f32/stale-code; batched actually WINS at I6/f64 (now default) | 8488023 |
-| Mixed-precision baroclinic EOS/PGF (f32 work) | PURSUED 2026-06-18 (user ask) → precision-VIABLE but NOT shipped (v1 reverted). Offline experiment (job 8520588, thermal-front state): f32-anomaly EOS preserves the horizontal PGF to relRMS **8e-5**, spurious \|v\| ~1 mm/s/day — i.e. the precision-policy `equation_of_state`/`pressure_gradient` f64 rule is **overcautious for the baroclinic ANOMALY path** (ρ′~O(1) is f32-representable; the rule targets naive full-ρ~1025). BUT production OMIP sets `PrecisionPolicy.fp64()` (`run_omip_core2.py:2498`), so `wright_eos` (eos.py:111) computes the EOS in f64 regardless of input dtype → a *working* f32-EOS lever requires OVERRIDING that shared fp64 EOS-compute (broad: also hits non-anomaly EOS consumers the f64 rule legitimately protects, or a multi-call-site `compute_dtype` refactor through `make_eos_fn`). Marginal upside (baroclinic 16–21 % of step × ~½ EOS+PGF, GPU-mainly) does not justify the refactor. codex caught the v1 (input-cast) as a no-op under fp64. | experiment 8520588 + phase-split 8458934/8489559 |
+| Mixed-precision baroclinic EOS/PGF (f32 work) | NOT dead — initially assessed not-worth-it, then user-green-lit and **SHIPPED opt-in 2026-06-18 (see §2)**. A `wright_eos` `compute_dtype` override runs the EOS polynomial in f32 for the anomaly-safe PGF path only (the fp64 policy's blanket EOS-f64 rule is overcautious for ρ′~O(1); experiment 8520588 PGF relRMS 8e-5). Marginal but real (1.10× kernel, GPU larger); codex caught a v1 no-op + a scope leak en route. | see §2 / 8520646 |
 
 ---
 
