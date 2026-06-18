@@ -422,6 +422,43 @@ def test_build_correction_campaign_rejects_multi_methods():
             run_les_fn=_mock_run_les_sheared, n_worst=1)
 
 
+def test_build_multi_correction_campaign_mpas_three_coefficients():
+    """The SIMULTANEOUS multi-coefficient campaign composes on the MPAS cell
+    layout: C_K + Pr_t + C_eps co-corrected from ONE Voronoi LES spin-off per
+    worst CELL (via the native u_edge through the SAME make_les_diagnose_fn) →
+    three in-bounds per-CELL (nCells,) fields. Exercises run_multi_correction_*
+    + the {method: diagnosis} dict path for MPAS."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    model_state = _mpas_full_state(mesh, nlev)
+    reference = _mpas_full_state(mesh, nlev, bias_cell=37, bias_dt=-6.0)
+
+    result = build_multi_correction_campaign(
+        base_atm_config=_mpas_base_config(nlev),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=mesh,
+        area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        coefficients=("C_K", "Pr_t", "C_eps"), accept_only_if_improved=False)
+
+    assert set(result.final_fields) == {
+        "clubb_lite_C_K", "clubb_lite_Pr_t", "clubb_lite_C_eps"}
+    ck = np.asarray(result.final_config.C_K).reshape(-1)
+    prt = np.asarray(result.final_config.Pr_t).reshape(-1)
+    ceps = np.asarray(result.final_config.C_eps).reshape(-1)
+    assert ck.shape == (mesh.nCells,) and prt.shape == (mesh.nCells,)
+    assert ceps.shape == (mesh.nCells,)
+    assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2       # C_K bounds
+    assert float(prt.min()) >= 0.3 and float(prt.max()) <= 1.5     # Pr_t bounds
+    assert float(ceps.min()) >= 0.06 and float(ceps.max()) <= 0.6  # C_eps bounds
+
+
 def test_build_correction_campaign_prandtl_number_method():
     """The prandtl_number diagnosis is wired end-to-end: the campaign selects the
     clubb_lite_Pr_t promotion + Pr_t background by method, the LES diagnoses a
@@ -628,6 +665,45 @@ def test_build_correction_campaign_checkpoint_passthrough():
     np.testing.assert_allclose(flat, np.asarray(res.updated_config.C_K))
     np.testing.assert_allclose(
         flat, np.asarray(result.final_config.C_K).reshape(-1))
+
+
+@pytest.mark.slow
+def test_build_correction_campaign_mpas_resume_accumulates_on_cells():
+    """The restartable campaign (§1) works on the MPAS cell layout: an
+    initial_field (nCells,) is the round-0 base, so every non-worst CELL keeps it
+    and the worst CELL is corrected ON TOP — the (ncol,)-field accumulation +
+    grid.grid_shape_2d=(nCells,) resume path is grid-agnostic."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    bias_cell = 37
+    model_state = _mpas_full_state(mesh, nlev)
+    reference = _mpas_full_state(mesh, nlev, bias_cell=bias_cell, bias_dt=-6.0)
+
+    calls = []
+    init_field = jnp.full((mesh.nCells,), 0.55)       # the resume base
+    result = build_correction_campaign(
+        base_atm_config=_mpas_base_config(nlev),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=mesh,
+        area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        initial_field=init_field, start_round=7,
+        checkpoint_callback=lambda r, res, f: calls.append((r, np.asarray(f).copy())),
+        accept_only_if_improved=False)
+
+    assert len(calls) == 1 and calls[0][0] == 7       # start_round forwarded
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.shape == (mesh.nCells,)
+    # Non-worst cells keep the resume base; the worst cell is corrected on top.
+    np.testing.assert_allclose(np.delete(ck, bias_cell), 0.55)
+    assert not np.isclose(float(ck[bias_cell]), 0.55)
 
 
 @pytest.mark.slow
