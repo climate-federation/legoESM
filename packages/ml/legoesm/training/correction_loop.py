@@ -81,6 +81,42 @@ class CampaignResult(NamedTuple):
                                        # (all True unless accept_only_if_improved)
 
 
+class CorrectionSpec(NamedTuple):
+    """One coefficient to correct in a SIMULTANEOUS multi-coefficient round.
+
+    ``promotion_key`` selects the promotable config field
+    (:mod:`legoesm.training.promotable_params`); ``diagnosis_method`` selects the
+    LES diagnosis (a key of the ``{method: diagnosis}`` dict the multi diagnose_fn
+    returns); ``background`` is the coefficient's production default / accumulated
+    base.  All specs in a round share one LES run and one line-search fraction.
+    """
+
+    promotion_key: str
+    diagnosis_method: str
+    background: Any
+
+
+class MultiCorrectionResult(NamedTuple):
+    """Outcome of one SIMULTANEOUS multi-coefficient correction iteration."""
+
+    updated_config: Any
+    bias: BiasImprovement              # baseline vs combined-update global bias
+    worst_column_change: jax.Array
+    feedback_fields: dict              # {promotion_key: per-column field}
+    n_corrected: int
+    n_diagnosed: int = 0
+    step_fraction: float = 1.0
+
+
+class MultiCampaignResult(NamedTuple):
+    """Outcome of a multi-iteration SIMULTANEOUS multi-coefficient campaign."""
+
+    final_config: Any
+    iterations: tuple                  # the per-round MultiCorrectionResults
+    final_fields: dict                 # {promotion_key: accumulated per-column field}
+    accepted: tuple = ()
+
+
 def run_correction_campaign(
     initial_config: Any,
     n_iterations: int,
@@ -284,6 +320,71 @@ def _run_line_search(compare_fn, baseline, fractions, make_candidate):
     return chosen if chosen is not None else fallback
 
 
+def _diagnose_columns(records, diagnose_fn, model_ctx, les_budget, env_scales):
+    """Diagnose each worst column, returning ``(per-column diagnoses, n_diagnosed)``.
+
+    With ``les_budget = K < len(records)`` the worst columns are environment-
+    clustered into ``K`` groups, the LES ``diagnose_fn`` runs ONLY on the ``K``
+    representatives, and each representative's result is mapped to its cluster.
+    ``diagnose_fn``'s return type is opaque (a single diagnosis OR a
+    ``{method: diagnosis}`` dict) — the plumbing is identical, so this is shared by
+    the single- and multi-coefficient iterations.
+    """
+    if les_budget is not None and int(les_budget) < len(records):
+        if int(les_budget) <= 0:
+            raise ValueError(f"les_budget must be > 0, got {les_budget}.")
+        clusters = cluster_columns_by_environment(
+            records, int(les_budget), env_scales=env_scales
+        )
+        rep = [
+            diagnose_fn(records[ri], model_ctx)
+            for ri in clusters.representative_indices
+        ]
+        return ([rep[label] for label in clusters.labels],
+                len(clusters.representative_indices))
+    return [diagnose_fn(rec, model_ctx) for rec in records], len(records)
+
+
+def _env_grid_predictors(feedback_strategy, env_grid_fn, model_ctx):
+    """``(grid_env, length_scales)`` for the env-generalization feedback strategy
+    (``None, None`` for the static scatter); shared by single + multi."""
+    if feedback_strategy == "environment":
+        if env_grid_fn is None:
+            raise ValueError(
+                "feedback_strategy='environment' requires env_grid_fn(model_ctx) "
+                "-> (grid_env, length_scales)."
+            )
+        return env_grid_fn(model_ctx)
+    return None, None
+
+
+def _raw_and_base_field(
+    records, diagnoses, grid_shape, *, method, background, strategy,
+    grid_env, length_scales, clip_to_bounds, config, promotion_key,
+):
+    """Assemble (+ optionally bounds-clamp) the diagnosed ``raw_field`` for ONE
+    coefficient and the dtype-matched accumulated ``base_field`` — the per-
+    coefficient piece shared by the single iteration and each multi spec.
+    """
+    raw_field = assemble_feedback_field(
+        records, diagnoses, grid_shape,
+        method=method, background=background,
+        strategy=strategy, grid_env=grid_env, length_scales=length_scales,
+    )
+    if clip_to_bounds:
+        # Clamp BEFORE the line search so every convex sub-step stays in range
+        # (base is in-bounds by induction: prior accepted clamped field / default).
+        raw_field = clip_field_to_promotable_bounds(config, promotion_key, raw_field)
+    # base_field at raw_field's dtype: assemble writes the SAME background into the
+    # untouched columns at that dtype, so raw − base is EXACTLY zero there (the
+    # blend is the identity for any step) and full-step/partial share one dtype.
+    bg = jnp.asarray(background, dtype=raw_field.dtype)
+    base_field = (
+        jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+    )
+    return raw_field, base_field
+
+
 def _validate_step_fractions(
     step_fractions: Sequence[float] | None,
 ) -> tuple[float, ...]:
@@ -417,60 +518,22 @@ def run_correction_iteration(
             step_fraction=0.0,
         )
 
-    if les_budget is not None and int(les_budget) < len(records):
-        if int(les_budget) <= 0:
-            raise ValueError(f"les_budget must be > 0, got {les_budget}.")
-        # Diagnose only the K environment-representative columns, then map each
-        # representative's coefficient to every column in its cluster.
-        clusters = cluster_columns_by_environment(
-            records, int(les_budget), env_scales=env_scales
-        )
-        rep_diagnoses = [
-            diagnose_fn(records[ri], baseline.model_ctx)
-            for ri in clusters.representative_indices
-        ]
-        diagnoses = [rep_diagnoses[label] for label in clusters.labels]
-        n_diagnosed = len(clusters.representative_indices)
-    else:
-        diagnoses = [diagnose_fn(rec, baseline.model_ctx) for rec in records]
-        n_diagnosed = len(records)
+    diagnoses, n_diagnosed = _diagnose_columns(
+        records, diagnose_fn, baseline.model_ctx, les_budget, env_scales
+    )
     # Feedback field: scatter at the worst columns ("static"), or generalise the
-    # diagnosed coefficients to ALL environmentally-similar columns ("environment"
-    # — `env_grid_fn(model_ctx)` supplies the full-grid env predictors).
-    grid_env, length_scales = (None, None)
-    if feedback_strategy == "environment":
-        if env_grid_fn is None:
-            raise ValueError(
-                "feedback_strategy='environment' requires env_grid_fn(model_ctx) "
-                "-> (grid_env, length_scales)."
-            )
-        grid_env, length_scales = env_grid_fn(baseline.model_ctx)
-    raw_field = assemble_feedback_field(
+    # diagnosed coefficients to ALL environmentally-similar columns ("environment").
+    grid_env, length_scales = _env_grid_predictors(
+        feedback_strategy, env_grid_fn, baseline.model_ctx
+    )
+    raw_field, base_field = _raw_and_base_field(
         records, diagnoses, grid_shape,
-        method=diagnosis_method, background=background,
-        strategy=feedback_strategy, grid_env=grid_env, length_scales=length_scales,
+        method=diagnosis_method, background=background, strategy=feedback_strategy,
+        grid_env=grid_env, length_scales=length_scales,
+        clip_to_bounds=clip_to_bounds, config=baseline_config,
+        promotion_key=promotion_key,
     )
-    if clip_to_bounds:
-        # Clamp the diagnosed field to the coefficient's registered physical bounds
-        # BEFORE the line search, so a degenerate LES cannot inject an unphysical
-        # value and every convex sub-step (base + s·(clamped − base)) stays in range
-        # (base is in-bounds by induction: prior accepted clamped field / default).
-        raw_field = clip_field_to_promotable_bounds(
-            baseline_config, promotion_key, raw_field
-        )
-    # Line search over the correction magnitude. ``base`` (the prior accepted
-    # field) is broadcast to the grid so the blend ``base + s·(raw − base)`` is a
-    # partial step from the current state toward the raw diagnosis; at columns the
-    # round did not touch ``raw == base`` so the blend is the identity for any ``s``.
     fractions = _validate_step_fractions(step_fractions)
-    # Build base_field at raw_field's dtype: assemble_feedback_field writes the
-    # SAME background into raw_field's untouched columns at that dtype, so this
-    # makes raw_field − base_field EXACTLY zero there (the blend is the identity
-    # for any step) and keeps the full-step (frac==1) and partial paths in one dtype.
-    bg = jnp.asarray(background, dtype=raw_field.dtype)
-    base_field = (
-        jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
-    )
 
     def _make_candidate(frac):
         # frac==1.0 short-circuit (NOT a generic blend) keeps the full-step path
@@ -506,4 +569,214 @@ def run_correction_iteration(
         n_corrected=len(records),
         n_diagnosed=n_diagnosed,
         step_fraction=frac,
+    )
+
+
+def run_multi_correction_iteration(
+    baseline_config: Any,
+    specs: Sequence[CorrectionSpec],
+    *,
+    compare_fn: Callable[[Any], CompareResult],
+    diagnose_fn: Callable[[Any, Any], Any],
+    grid_shape: tuple[int, ...],
+    expected_ncol: int | None = None,
+    les_budget: int | None = None,
+    env_scales: Sequence[float] | None = None,
+    feedback_strategy: str = "static",
+    env_grid_fn: Callable[[Any], tuple] | None = None,
+    step_fractions: Sequence[float] | None = None,
+    clip_to_bounds: bool = False,
+) -> MultiCorrectionResult:
+    """Correct SEVERAL coefficients SIMULTANEOUSLY from ONE LES run per column.
+
+    Each :class:`CorrectionSpec` is corrected in the same round: the (multi)
+    ``diagnose_fn(record, model_ctx)`` returns a ``{method: diagnosis}`` dict per
+    worst column (one LES run — share with :func:`run_column_les_pipeline`'s
+    ``methods=``), each spec assembles + bounds-clamps its own ``raw_field``, and
+    the line search applies ALL specs' blends at the SAME fraction ``s`` (a single
+    trust-region step), measuring the COMBINED bias ONCE.  The corrected config is
+    ``apply(apply(base, key₁, f₁), key₂, f₂)`` — the specs target independent
+    config slots, so order does not matter.
+
+    **Single shared fraction / single gate** (design note): one fraction across
+    all coefficients is the natural extension of the scalar trust-region, and the
+    monotonic gate accepts the round iff the COMBINED bias improved.  Consequence:
+    if one coefficient helps and another hurts, the whole step is rejected (the
+    beneficial partial update is lost) — conservative and cheap; independent
+    per-coefficient step sizes are a future refinement.  Reuses the shared
+    :func:`_run_line_search`, :func:`_diagnose_columns`, :func:`_env_grid_predictors`
+    and :func:`_raw_and_base_field`, so the numerics match the single path.
+    """
+    if not specs:
+        raise ValueError("specs must be a non-empty sequence of CorrectionSpec.")
+    keys = [s.promotion_key for s in specs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"specs must have distinct promotion_keys; got {keys}.")
+    ncol = 1
+    for d in grid_shape:
+        ncol *= int(d)
+    if expected_ncol is not None and int(expected_ncol) != ncol:
+        raise ValueError(f"expected_ncol {expected_ncol} != prod(grid_shape) {ncol}.")
+
+    baseline = compare_fn(baseline_config)
+    records = list(baseline.manifest)
+
+    if not records:
+        dtype = jnp.asarray(baseline.combined_score).dtype
+        noop_bias = bias_improvement(
+            baseline.combined_score, baseline.combined_score,
+            baseline.area_weights, valid_mask=baseline.valid_mask,
+        )
+        fields = {}
+        for s in specs:
+            bg = jnp.asarray(s.background)
+            f = (jnp.full(grid_shape, bg.astype(dtype))
+                 if bg.ndim == 0 else bg.reshape(grid_shape))
+            if clip_to_bounds:
+                f = clip_field_to_promotable_bounds(baseline_config, s.promotion_key, f)
+            fields[s.promotion_key] = f
+        return MultiCorrectionResult(
+            updated_config=baseline_config, bias=noop_bias,
+            worst_column_change=jnp.asarray(0.0, dtype=dtype),
+            feedback_fields=fields, n_corrected=0, n_diagnosed=0, step_fraction=0.0,
+        )
+
+    diagnoses, n_diagnosed = _diagnose_columns(
+        records, diagnose_fn, baseline.model_ctx, les_budget, env_scales
+    )
+    # The MULTI diagnose_fn must return a {method: diagnosis} dict per column
+    # covering every spec's method (one LES run → many diagnoses); fail clearly
+    # rather than with a bare KeyError/TypeError deep in the per-spec extraction.
+    required = {s.diagnosis_method for s in specs}
+    for i, d in enumerate(diagnoses):
+        if not isinstance(d, dict):
+            raise TypeError(
+                "multi-correction diagnose_fn must return a {method: diagnosis} "
+                f"dict per column; got {type(d).__name__} at column {i}. (Use a "
+                "diagnose_fn backed by run_column_les_pipeline(methods=...).)"
+            )
+        missing = required - d.keys()
+        if missing:
+            raise ValueError(
+                f"diagnose_fn output at column {i} is missing the method(s) "
+                f"{sorted(missing)} required by the specs (has {sorted(d.keys())})."
+            )
+    grid_env, length_scales = _env_grid_predictors(
+        feedback_strategy, env_grid_fn, baseline.model_ctx
+    )
+    # Per spec: extract this method's per-column diagnoses + build raw/base fields.
+    per_spec = []
+    for s in specs:
+        method_diag = [d[s.diagnosis_method] for d in diagnoses]
+        raw_i, base_i = _raw_and_base_field(
+            records, method_diag, grid_shape,
+            method=s.diagnosis_method, background=s.background,
+            strategy=feedback_strategy, grid_env=grid_env, length_scales=length_scales,
+            clip_to_bounds=clip_to_bounds, config=baseline_config,
+            promotion_key=s.promotion_key,
+        )
+        per_spec.append((s, raw_i, base_i))
+    fractions = _validate_step_fractions(step_fractions)
+
+    def _make_candidate(frac):
+        cfg = baseline_config
+        fields = {}
+        for s, raw_i, base_i in per_spec:
+            field = raw_i if frac == 1.0 else base_i + frac * (raw_i - base_i)
+            if clip_to_bounds:
+                field = clip_field_to_promotable_bounds(
+                    baseline_config, s.promotion_key, field
+                )
+            cfg = apply_feedback_to_scheme(
+                cfg, s.promotion_key, field, expected_ncol=ncol
+            )
+            fields[s.promotion_key] = field
+        return cfg, fields
+
+    frac, fields, updated_config, updated, improvement = _run_line_search(
+        compare_fn, baseline, fractions, _make_candidate
+    )
+    worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
+    worst_change = worst_column_bias_change(
+        baseline.combined_score, updated.combined_score, worst_idx
+    )
+    return MultiCorrectionResult(
+        updated_config=updated_config, bias=improvement,
+        worst_column_change=worst_change, feedback_fields=fields,
+        n_corrected=len(records), n_diagnosed=n_diagnosed, step_fraction=frac,
+    )
+
+
+def run_multi_correction_campaign(
+    initial_config: Any,
+    n_iterations: int,
+    specs: Sequence[CorrectionSpec],
+    *,
+    compare_fn: Callable[[Any], CompareResult],
+    diagnose_fn: Callable[[Any, Any], Any],
+    grid_shape: tuple[int, ...],
+    expected_ncol: int | None = None,
+    les_budget: int | None = None,
+    env_scales: Sequence[float] | None = None,
+    feedback_strategy: str = "static",
+    env_grid_fn: Callable[[Any], tuple] | None = None,
+    accept_only_if_improved: bool = False,
+    step_fractions: Sequence[float] | None = None,
+    clip_to_bounds: bool = False,
+    initial_fields: dict | None = None,
+    start_round: int = 0,
+    checkpoint_callback: Callable[[int, MultiCorrectionResult, dict], None] | None = None,
+) -> MultiCampaignResult:
+    """Run the SIMULTANEOUS multi-coefficient correction loop for ``n_iterations``.
+
+    Mirrors :func:`run_correction_campaign` with a per-coefficient base DICT:
+    ``specs`` give the initial backgrounds; each round corrects all coefficients
+    together (one LES run, one fraction, one gate).  The monotonic gate
+    (``accept_only_if_improved``) keeps the round only if the COMBINED bias fell —
+    accept advances the config + ALL coefficient bases together; a rejected round
+    reverts ALL bases atomically (no partial accumulation).  ``initial_fields``
+    (``{promotion_key: field}``) RESUMES the accumulated per-coefficient state.
+    """
+    if int(n_iterations) < 0:
+        raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
+    config = initial_config
+    bases = {s.promotion_key: s.background for s in specs}
+    if initial_fields is not None:
+        for key, field in initial_fields.items():
+            if key not in bases:
+                raise ValueError(
+                    f"initial_fields key {key!r} is not a spec promotion_key {list(bases)}.")
+            bases[key] = field
+    iterations: list = []
+    accepted_flags: list = []
+    for i in range(int(n_iterations)):
+        round_specs = [s._replace(background=bases[s.promotion_key]) for s in specs]
+        result = run_multi_correction_iteration(
+            config, round_specs,
+            compare_fn=compare_fn, diagnose_fn=diagnose_fn, grid_shape=grid_shape,
+            expected_ncol=expected_ncol, les_budget=les_budget, env_scales=env_scales,
+            feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
+            step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+        )
+        accepted = not (
+            accept_only_if_improved
+            and result.n_corrected > 0
+            and not bool(result.bias.improved)
+        )
+        if accepted:
+            config = result.updated_config
+            bases = dict(result.feedback_fields)   # advance ALL coefficients together
+        iterations.append(result)
+        accepted_flags.append(accepted)
+        if checkpoint_callback is not None:
+            checkpoint_callback(int(start_round) + i, result, bases)
+    final_fields = {}
+    for key, base in bases.items():
+        bg = jnp.asarray(base)
+        final_fields[key] = (
+            jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+        )
+    return MultiCampaignResult(
+        final_config=config, iterations=tuple(iterations),
+        final_fields=final_fields, accepted=tuple(accepted_flags),
     )

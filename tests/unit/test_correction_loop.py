@@ -21,9 +21,13 @@ from legoesm.training.column_manifest import ColumnEnvironment, ColumnRecord
 from legoesm.training.compare_reanalysis import ColumnState
 from legoesm.training.correction_loop import (
     CompareResult,
+    CorrectionSpec,
+    MultiCorrectionResult,
     make_compare_fn,
     run_correction_campaign,
     run_correction_iteration,
+    run_multi_correction_campaign,
+    run_multi_correction_iteration,
 )
 
 
@@ -1038,3 +1042,155 @@ def test_run_line_search_helper_picks_largest_improving():
     frac2, _, _, _, imp2 = _run_line_search(
         compare_none, _Base(), (1.0, 0.5), make_candidate)
     assert frac2 == pytest.approx(1.0) and not bool(imp2.improved)
+
+
+# --- simultaneous multi-coefficient correction (C_K + Pr_t) ---------------
+class _CkDiag(NamedTuple):
+    C_K: jax.Array
+    valid: jax.Array
+
+
+class _PrtDiag(NamedTuple):
+    Pr_t: jax.Array
+    valid: jax.Array
+
+
+def _multi_setup(diag_ck, diag_prt, target_ck, target_prt):
+    """2x2 grid; combined_score = |C_K - tC| + |Pr_t - tP| per column. One worst
+    column flagged; the multi diagnose_fn returns {method: diagnosis} per column."""
+    nlat, nlon = 2, 2
+    area_w = jnp.ones((nlat, nlon))
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        prt = jnp.asarray(config.Pr_t)
+        ck2d = jnp.broadcast_to(ck, (nlat, nlon)) if ck.ndim == 0 else ck.reshape((nlat, nlon))
+        prt2d = jnp.broadcast_to(prt, (nlat, nlon)) if prt.ndim == 0 else prt.reshape((nlat, nlon))
+        score = jnp.abs(ck2d - target_ck) + jnp.abs(prt2d - target_prt)
+        flat = np.asarray(score).reshape(-1)
+        worst = [int(i) for i in np.argsort(-flat)[:1] if flat[i] > 1e-9]
+        manifest = [_Rec(flat_index=i, lat_deg=0.0, environment=_Env(0.0)) for i in worst]
+        return CompareResult(score, manifest, area_w, model_ctx=None)
+
+    def diagnose_fn(record, ctx):
+        return {
+            "clubb_coefficient": _CkDiag(jnp.array([diag_ck]), jnp.array([True])),
+            "prandtl_number": _PrtDiag(jnp.array([diag_prt]), jnp.array([True])),
+        }
+
+    return compare_fn, diagnose_fn
+
+
+_SPECS = (
+    CorrectionSpec("clubb_lite_C_K", "clubb_coefficient", float(CLUBBLiteConfig().C_K)),
+    CorrectionSpec("clubb_lite_Pr_t", "prandtl_number", float(CLUBBLiteConfig().Pr_t)),
+)
+
+
+def test_multi_iteration_corrects_both_coefficients():
+    # diag == targets ⇒ the full step corrects BOTH C_K and Pr_t at the worst column.
+    compare_fn, diagnose_fn = _multi_setup(
+        diag_ck=1.0, diag_prt=0.8, target_ck=1.0, target_prt=0.8)
+    res = run_multi_correction_iteration(
+        CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2))
+    assert isinstance(res, MultiCorrectionResult)
+    assert set(res.feedback_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}
+    assert bool(res.bias.improved)
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    prt = np.asarray(res.updated_config.Pr_t).reshape(-1)
+    assert ck[0] == pytest.approx(1.0)               # worst col C_K corrected
+    assert prt[0] == pytest.approx(0.8)              # worst col Pr_t corrected
+    assert res.n_corrected == 1
+
+
+def test_multi_iteration_one_les_run_per_column():
+    # The (multi) diagnose_fn is called ONCE per worst column (it returns BOTH
+    # coefficients from one LES run); the C_K + Pr_t share that single call.
+    compare_fn, _ = _multi_setup(1.0, 0.8, 1.0, 0.8)
+    calls = {"n": 0}
+
+    def diagnose_fn(record, ctx):
+        calls["n"] += 1
+        return {
+            "clubb_coefficient": _CkDiag(jnp.array([1.0]), jnp.array([True])),
+            "prandtl_number": _PrtDiag(jnp.array([0.8]), jnp.array([True])),
+        }
+
+    run_multi_correction_iteration(
+        CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2))
+    assert calls["n"] == 1                            # one LES run, both diagnoses
+
+
+def test_multi_iteration_validates_specs():
+    compare_fn, diagnose_fn = _multi_setup(1.0, 0.8, 1.0, 0.8)
+    with pytest.raises(ValueError, match="non-empty"):
+        run_multi_correction_iteration(
+            CLUBBLiteConfig(), (), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+            grid_shape=(2, 2))
+    dup = (_SPECS[0], _SPECS[0])
+    with pytest.raises(ValueError, match="distinct promotion_keys"):
+        run_multi_correction_iteration(
+            CLUBBLiteConfig(), dup, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+            grid_shape=(2, 2))
+
+
+def test_multi_iteration_no_records_is_noop():
+    def compare_fn(config):
+        return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)), model_ctx=None)
+    res = run_multi_correction_iteration(
+        CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn,
+        diagnose_fn=lambda r, c: None, grid_shape=(2, 2))
+    assert res.n_corrected == 0 and res.step_fraction == 0.0
+    assert set(res.feedback_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}
+
+
+def test_multi_campaign_accumulates_and_gate_reverts_atomically():
+    # Round 0: worst col 0 (both coeffs off target) -> corrected to target -> improves.
+    # Round 1: worst col is now elsewhere; diag stays on-target so it keeps improving.
+    compare_fn, diagnose_fn = _multi_setup(
+        diag_ck=1.0, diag_prt=0.8, target_ck=1.0, target_prt=0.8)
+    campaign = run_multi_correction_campaign(
+        CLUBBLiteConfig(), 2, _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2), accept_only_if_improved=True)
+    assert all(campaign.accepted)
+    ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    prt = np.asarray(campaign.final_config.Pr_t).reshape(-1)
+    # both coefficients accumulated across rounds (>=2 columns moved toward target).
+    assert np.sum(np.isclose(ck, 1.0)) >= 2
+    assert np.sum(np.isclose(prt, 0.8)) >= 2
+    assert set(campaign.final_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}
+
+
+def test_multi_campaign_gate_rejects_worsening_round_both_revert():
+    # diag moves AWAY from target ⇒ the combined bias worsens ⇒ the WHOLE round is
+    # rejected and BOTH coefficients revert (no partial accumulation).
+    compare_fn, diagnose_fn = _multi_setup(
+        diag_ck=5.0, diag_prt=5.0, target_ck=1.0, target_prt=0.8)
+    campaign = run_multi_correction_campaign(
+        CLUBBLiteConfig(), 1, _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2), accept_only_if_improved=True)
+    assert campaign.accepted == (False,)
+    # both config fields stay the scalar defaults (atomic revert).
+    assert jnp.ndim(jnp.asarray(campaign.final_config.C_K)) == 0
+    assert jnp.ndim(jnp.asarray(campaign.final_config.Pr_t)) == 0
+
+
+def test_multi_iteration_requires_dict_diagnoses():
+    # A multi diagnose_fn that returns a single diagnosis (not a {method: ...} dict)
+    # — or one missing a spec's method — fails clearly, not with a bare KeyError.
+    compare_fn, _ = _multi_setup(1.0, 0.8, 1.0, 0.8)
+    with pytest.raises(TypeError, match="dict per column"):
+        run_multi_correction_iteration(
+            CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn,
+            diagnose_fn=lambda r, c: _CkDiag(jnp.array([1.0]), jnp.array([True])),
+            grid_shape=(2, 2))
+
+    def missing_method(record, ctx):
+        return {"clubb_coefficient": _CkDiag(jnp.array([1.0]), jnp.array([True]))}
+
+    with pytest.raises(ValueError, match="missing the method"):
+        run_multi_correction_iteration(
+            CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn,
+            diagnose_fn=missing_method, grid_shape=(2, 2))

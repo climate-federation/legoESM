@@ -174,3 +174,22 @@ def test_prandtl_promotion_registered_and_clamped():
     np.testing.assert_allclose(np.asarray(out), [0.3, 1.5, 0.7])
     # the per-column Pr_t body wiring (uniform == scalar; per-column changes Kh)
     # is tested in tests/atmosphere/test_clubb_lite_ck_promotion.py.
+
+
+def test_apply_feedback_independent_slots_order_independent():
+    # The simultaneous multi-coefficient path applies C_K then Pr_t sequentially;
+    # they are independent config slots, so the order must not matter (no clobber).
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    base = CLUBBLiteConfig()
+    f_ck = jnp.array([0.5, 0.6, 0.7, 0.8])
+    f_prt = jnp.array([0.7, 0.8, 0.9, 1.0])
+    a = apply_feedback_to_scheme(
+        apply_feedback_to_scheme(base, "clubb_lite_C_K", f_ck),
+        "clubb_lite_Pr_t", f_prt)
+    b = apply_feedback_to_scheme(
+        apply_feedback_to_scheme(base, "clubb_lite_Pr_t", f_prt),
+        "clubb_lite_C_K", f_ck)
+    np.testing.assert_array_equal(np.asarray(a.C_K), np.asarray(b.C_K))
+    np.testing.assert_array_equal(np.asarray(a.Pr_t), np.asarray(b.Pr_t))
+    np.testing.assert_array_equal(np.asarray(a.C_K), np.asarray(f_ck))
+    np.testing.assert_array_equal(np.asarray(a.Pr_t), np.asarray(f_prt))
