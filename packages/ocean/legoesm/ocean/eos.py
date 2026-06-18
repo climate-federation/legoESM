@@ -73,6 +73,7 @@ def wright_eos(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
+    compute_dtype: "jnp.dtype | None" = None,
 ) -> jnp.ndarray:
     """Compute in-situ density from Wright (1997) EOS.
 
@@ -108,7 +109,14 @@ def wright_eos(
     # Promote to the EOS compute dtype (float64 in mixed mode) for
     # intermediate polynomial evaluation.  On backends that lack float64
     # (e.g. Metal), resolve_dtype silently returns float32.
-    hi = resolve_dtype("equation_of_state", "compute")
+    # ``compute_dtype`` (opt-in mixed-precision baroclinic lever) overrides the
+    # policy compute dtype — e.g. float32 for the f32-EOS path — and is honoured
+    # over the policy; the density ANOMALY rho'~O(1) formed downstream keeps this
+    # precision-safe (offline experiment 8520588: PGF relRMS ~8e-5).  ``orig_dtype``
+    # is still restored on return, so the STATE stays f64 (only the polynomial
+    # runs in compute_dtype).
+    hi = compute_dtype if compute_dtype is not None else resolve_dtype(
+        "equation_of_state", "compute")
     T = T.astype(hi)
     S = S.astype(hi)
     p = p.astype(hi)
@@ -1470,6 +1478,24 @@ VALID_EOS_SCHEMES = frozenset(
 )
 
 
+def _eos_compute_dtype_adapter(base_fn):
+    """Wrap an EOS ``(T,S,p)->rho`` that computes in its INPUT dtype so it also
+    accepts the ``compute_dtype`` kwarg (the opt-in f32-EOS lever): cast inputs to
+    ``compute_dtype``, run the polynomial, then restore the input dtype so the
+    STATE stays f64.  ``wright_eos`` instead honours ``compute_dtype`` natively
+    (it force-promotes to the precision-policy dtype, which input-casting alone
+    cannot override).  ``compute_dtype=None`` -> byte-identical to the bare EOS."""
+    def _wrapped(T, S, p, compute_dtype=None):
+        if compute_dtype is None:
+            return base_fn(T, S, p)
+        orig = jnp.result_type(T)
+        return base_fn(
+            T.astype(compute_dtype), S.astype(compute_dtype),
+            p.astype(compute_dtype),
+        ).astype(orig)
+    return _wrapped
+
+
 def make_eos_fn(eos="wright", eos_linear=None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None,
@@ -1495,6 +1521,14 @@ def make_eos_fn(eos="wright", eos_linear=None,
     -------
     Callable[[array, array, array], array]
     """
+    # All returned callables accept ``fn(T, S, p, compute_dtype=None)`` — wright
+    # honours compute_dtype natively (it force-promotes via the policy); the
+    # input-dtype variants are wrapped by _eos_compute_dtype_adapter.  Default
+    # (compute_dtype=None) is byte-identical to the bare EOS.  NOTE: variants that
+    # internally re-promote to the policy dtype (``unesco80``, ``veros_*``) accept
+    # compute_dtype but it is a NO-OP for them (they keep policy precision — safe,
+    # just no f32 speedup); the validated f32 lever is the production default
+    # ``wright`` (and the genuinely input-dtype ``linear``).
     if eos == "wright":
         return wright_eos
     elif eos == "linear":
@@ -1505,24 +1539,24 @@ def make_eos_fn(eos="wright", eos_linear=None,
                 rho_ref=cfg.rho_ref, alpha_T=cfg.alpha_T,
                 beta_S=cfg.beta_S, T_ref=cfg.T_ref, S_ref=cfg.S_ref,
             )
-        return _linear
+        return _eos_compute_dtype_adapter(_linear)
     elif eos == "unesco80":
-        return unesco80_eos
+        return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
         cfg = eos_veros_nonlin2 if eos_veros_nonlin2 is not None else VerosNonlin2Config()
         def _veros_nl2(T, S, p):
             return veros_nonlin2_eos(T, S, p, cfg=cfg)
-        return _veros_nl2
+        return _eos_compute_dtype_adapter(_veros_nl2)
     elif eos == "veros_nonlin3":
         cfg = eos_veros_nonlin3 if eos_veros_nonlin3 is not None else VerosNonlin3Config()
         def _veros_nl3(T, S, p):
             return veros_nonlin3_eos(T, S, p, cfg=cfg)
-        return _veros_nl3
+        return _eos_compute_dtype_adapter(_veros_nl3)
     elif eos == "veros_gsw":
         cfg = eos_veros_gsw if eos_veros_gsw is not None else VerosGswConfig()
         def _veros_gsw(T, S, p):
             return veros_gsw_eos(T, S, p, cfg=cfg)
-        return _veros_gsw
+        return _eos_compute_dtype_adapter(_veros_gsw)
     else:
         raise ValueError(
             f"Unknown EOS scheme: {eos!r}. Valid schemes: "
