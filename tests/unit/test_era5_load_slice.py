@@ -8,6 +8,7 @@ the loop "corrects" garbage).  These lock: bidirectional name resolution (long
 
 from __future__ import annotations
 
+import jax.numpy as jnp
 import legoesm.training.era5_to_state as e2s
 import numpy as np
 import pytest
@@ -40,7 +41,7 @@ def _synthetic_era5(names="long", *, drop=()):
     """A tiny in-memory ERA5-like dataset with the requested naming convention."""
     import xarray as xr
 
-    nlat, nlon, nlev = 4, 5, 3
+    nlat, nlon, nlev = 5, 6, 3
     long_to_short = {
         "temperature": "t", "u_component_of_wind": "u",
         "v_component_of_wind": "v", "specific_humidity": "q",
@@ -49,15 +50,21 @@ def _synthetic_era5(names="long", *, drop=()):
     }
     # temperature VARIES by level (300/250/200 K at 1000/500/100 hPa) so the loader's
     # descending→ascending-pressure reversal is genuinely exercised (Codex iter 106);
-    # the others are level-constant for simple value checks.
+    # u VARIES by LATITUDE (10 + 0.5·lat/90, linear) so the horizontal regrid's lat
+    # interpolation is genuinely exercised (Codex iter 107 — a lat/lon axis swap would
+    # otherwise pass on a uniform field); v/q level+space-constant for simple checks.
     t_profile = np.array([300.0, 250.0, 200.0], dtype=np.float32)
-    vals3 = {"temperature": None, "u_component_of_wind": 10.0,
+    # GLOBAL coverage (lat 90→-90 descending, the ERA5 convention; lon 0..300) so a
+    # model grid (cell-centred, ⊂ this range) regrids by INTERPOLATION, not edge
+    # extrapolation — exercised by the load→regrid→reference integration test below.
+    lat_deg = np.linspace(90.0, -90.0, nlat)
+    u_lat = (10.0 + 0.5 * (lat_deg / 90.0)).astype(np.float32)   # (nlat,), linear in lat
+    vals3 = {"temperature": None, "u_component_of_wind": None,
              "v_component_of_wind": 2.0, "specific_humidity": 5e-3}
     vals2 = {"surface_pressure": 1.0e5, "skin_temperature": 290.0,
              "geopotential_at_surface": 0.0}
     coords = {"time": [0], "level": list(_LEVELS),
-              "lat": np.linspace(-60.0, 60.0, nlat),
-              "lon": np.linspace(0.0, 300.0, nlon)}
+              "lat": lat_deg, "lon": np.linspace(0.0, 300.0, nlon)}
 
     def _key(long):
         return long if names == "long" else long_to_short[long]
@@ -69,6 +76,9 @@ def _synthetic_era5(names="long", *, drop=()):
         if long == "temperature":
             arr = np.broadcast_to(
                 t_profile[None, :, None, None], (1, nlev, nlat, nlon)).astype(np.float32)
+        elif long == "u_component_of_wind":
+            arr = np.broadcast_to(
+                u_lat[None, None, :, None], (1, nlev, nlat, nlon)).astype(np.float32)
         else:
             arr = np.full((1, nlev, nlat, nlon), val, dtype=np.float32)
         data[_key(long)] = (("time", "level", "lat", "lon"), arr)
@@ -88,12 +98,13 @@ def test_load_era5_slice_long_names(monkeypatch):
     """A long-name store loads all required fields with the right shapes/values."""
     monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
     sl = load_era5_slice(_config(), 0)
-    assert sl.T.shape == (4, 5, 3) and sl.p_s.shape == (4, 5)
+    assert sl.T.shape == (5, 6, 3) and sl.p_s.shape == (5, 6)
     # levels are reversed descending(1000,500,100 hPa) → ascending Pa, and T rides
     # with them: 300/250/200 K at 1000/500/100 hPa → [200,250,300] ascending-P.
     np.testing.assert_allclose(sl.plev_Pa, [10000.0, 50000.0, 100000.0])
     np.testing.assert_allclose(sl.T[0, 0, :], [200.0, 250.0, 300.0])
-    np.testing.assert_allclose(sl.u, 10.0)
+    np.testing.assert_allclose(sl.u[0, 0, :], 10.5)   # lat=+90 row: 10 + 0.5·(90/90)
+    np.testing.assert_allclose(sl.u[2, 0, :], 10.0)   # lat=0 row
     np.testing.assert_allclose(sl.q, 5e-3, rtol=1e-5)
     np.testing.assert_allclose(sl.p_s, 1.0e5)
 
@@ -134,3 +145,46 @@ def test_load_era5_slice_missing_optional_zero_fills(monkeypatch):
     sl = load_era5_slice(_config(), 0)
     np.testing.assert_allclose(sl.sst, 0.0)          # optional → zeros, no raise
     np.testing.assert_allclose(sl.T[0, 0, :], [200.0, 250.0, 300.0])  # required loaded
+
+
+def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
+    """END-TO-END input chain (the path the empirical run consumes, currently bypassed
+    by the compare test's monkeypatch): REAL load_era5_slice → REAL era5_to_latlon_carry
+    (regrid + log-p interp + q→mixing-ratio) → column_state_from_carry → a PHYSICALLY
+    VALID reference ColumnState on the model grid+sigma (iter 107). This is exactly the
+    integration gap that hid iter 106's silent-zeros bug."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import (
+        column_state_from_carry,
+        validate_reference_physical,
+    )
+    from legoesm.training.era5_to_state import era5_to_latlon_carry
+
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
+    era5 = load_era5_slice(_config(), 0)          # REAL load
+
+    # model lats [-60, 0, 60] fall BETWEEN the ERA5 lat nodes (±45/±90) so the bilinear
+    # lat interpolation is genuinely exercised (lon 0/90/180/270 ⊂ ERA5 [0,300]).
+    nlat, nlon, nlev = 3, 4, 5
+    grid = create_latlon_grid(nlat, nlon)
+    sigma = create_sigma_coordinate(nlev)
+    carry = era5_to_latlon_carry(era5, grid, sigma)   # REAL regrid + interp + carry
+    ref = column_state_from_carry(carry)
+
+    # shapes land on the MODEL grid + sigma (not the ERA5 grid/levels).
+    assert ref.T.shape == (nlat, nlon, nlev)
+    assert ref.q_v.shape == (nlat, nlon, nlev)
+    assert ref.p_s.shape == (nlat, nlon)
+    # the chain produced a PHYSICALLY-VALID reference (T∈[150,350] K, q≥0, p_s in Pa,
+    # |wind|<200): the iter-99 guard passes, proving regrid+interp+q-conversion are sane.
+    validate_reference_physical(ref, name="regridded ERA5")
+    assert 150.0 < float(jnp.min(ref.T)) and float(jnp.max(ref.T)) < 350.0
+    # the LAT interpolation is exact for the linear u field: u(model_lat) = 10 +
+    # 0.5·(lat_deg/90) at EACH model latitude (an axis swap or mis-aligned regrid fails).
+    model_lat_deg = np.rad2deg(np.asarray(grid.lat))           # [-60, 0, 60]
+    u = np.asarray(ref.u)
+    for k, ld in enumerate(model_lat_deg):
+        np.testing.assert_allclose(u[k], 10.0 + 0.5 * (ld / 90.0), atol=2e-3)
+    # a non-flat u profile across latitude (proves it is NOT a constant-fill).
+    assert float(u[0].mean()) < float(u[1].mean()) < float(u[2].mean())
