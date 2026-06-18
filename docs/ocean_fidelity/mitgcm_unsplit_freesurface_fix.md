@@ -83,6 +83,25 @@ above — NO `F_slow`/`du_dt_pert` depth-mean split, NO `U_bar` recombination:
 4. Correct `u^{n+1} = u* − Δt·g·∇η^{n+1}` uniformly on all levels.
 5. exactConserv continuity update for `η`.
 
+## Fidelity caveats (adversarial review, physics-validator)
+
+- **Volume conservation is at CG tolerance, NOT machine-exact.** `eta^{n+1}` comes from the
+  CG Helmholtz solve while the uniform correction recomputes the divergence separately, so the
+  domain-integral `Σ(area·Δeta)` drifts by the area-weighted CG residual (measured ~2.5e3 m³/step,
+  mean eta ~1e-10 m/step, floored at the solver's terminal accuracy). MITgcm's `exactConserv` is
+  machine-exact by construction (eta updated from the *same* depth-integrated divergence). Cellwise
+  continuity is solver-tight (`|Δeta + dt·div(∫u dz)|` ≈ 6e-7, 1.8e-9 post-vmix). Negligible for
+  the gyre and shared with the split path; to get true `exactConserv`, update `eta` from the same
+  divergence used in the correction (follow-up).
+- **The float64 CG conditioning requires the global `JAX_ENABLE_X64` flag** (production default).
+  With x64 off, the `jnp.asarray(..., float64)` cast silently truncates to float32 and the
+  continuity residual degrades to ~1e-5 — same caveat as the rest of the model.
+- **Opt-in gate (F1):** the unsplit step carries ONLY the baroclinic tendencies + implicit FS +
+  implicit vmix; it does NOT thread GM/Redi, `ab2_scope="advective"` dissipation, implicit
+  surface/sponge forcing, prognostic TKE, additive friction, or the freshwater arg. These are
+  REJECTED at construction/step entry (not silently dropped) — extend `_unsplit_ab2_step` to lift
+  a restriction. The gyre/front recipes use none of them.
+
 ## Validation (acceptance)
 - 30-day then 1-yr velocity zig-zag ≤ 0.4 at FAITHFUL `A_h=5000`, `K_h=1000`, NO added dissipation.
 - Term-by-term: full PGF (baroclinic+surface) vs `Um_dPhiX` corr ≥0.99; the 1-step grid-scale

@@ -88,6 +88,26 @@ def test_implicit_unsplit_requires_ab2():
         m.step(r.state, r.dt_s, surface_forcing=r.wind_forcing)
 
 
+def test_implicit_unsplit_rejects_unsupported_physics():
+    """Dispatch hardening (F1): the unsplit step carries only baroclinic tendencies
+    + implicit FS + implicit vmix, so it must FAIL LOUD on physics it would silently
+    drop (GM/Redi, implicit surface/sponge forcing, ab2_scope=advective, additive
+    friction, prognostic TKE) — not run a silently-climate-wrong model."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity import mitgcm_baroclinic_gyre_recipe as bg
+    r = bg.build_baroclinic_gyre_recipe()
+    for override in (
+        {"surface_forcing_implicit": True},
+        {"ab2_scope": "advective"},
+        {"momentum_friction_additive": True},
+    ):
+        cfg = r.config._replace(barotropic_solver="implicit_unsplit", **override)
+        with pytest.raises(ValueError, match="implicit_unsplit.*does not yet support"):
+            LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
+
+
 def test_implicit_unsplit_runs_finite():
     """The unsplit path dispatches + runs a few steps finite, stratification bounded."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (

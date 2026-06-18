@@ -1079,6 +1079,37 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        if config.barotropic_solver == "implicit_unsplit":
+            # The unsplit step (_unsplit_ab2_step) integrates self.tendencies()
+            # (the baroclinic tendencies) + one implicit free-surface solve +
+            # _apply_implicit_vertical_mixing.  It does NOT yet thread the extra
+            # physics the split _step_impl/_ab2_step path carries, so REJECT configs
+            # that use them rather than silently dropping them (CLAUDE.md dispatch-
+            # hardening / "no silent coerce").  The freshwater step-arg is gated in
+            # _unsplit_ab2_step itself.
+            _unsupported = []
+            if getattr(config, "gm_redi", None) is not None:
+                _unsupported.append("gm_redi (isopycnal/skew tracer mixing)")
+            if getattr(config, "ab2_scope", "total") == "advective":
+                _unsupported.append('ab2_scope="advective" (withheld dissipation)')
+            if getattr(config, "surface_forcing_implicit", False):
+                _unsupported.append("surface_forcing_implicit")
+            if getattr(config, "sponge_forcing_implicit", False):
+                _unsupported.append("sponge_forcing_implicit")
+            if getattr(config, "momentum_friction_additive", False):
+                _unsupported.append("momentum_friction_additive")
+            _vm = getattr(getattr(config, "physics", None), "vertical_mixing", None)
+            if (_vm is not None and getattr(_vm, "scheme", None) == "tke"
+                    and getattr(getattr(_vm, "tke", None), "prognostic", False)):
+                _unsupported.append("prognostic TKE")
+            if _unsupported:
+                raise ValueError(
+                    'barotropic_solver="implicit_unsplit" does not yet support: '
+                    + ", ".join(_unsupported)
+                    + ". The unsplit free-surface step carries only the baroclinic "
+                    "tendencies + implicit FS + implicit vertical mixing; these "
+                    "features are threaded by the split implicit_cn path only. Use "
+                    'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine"}
         if config.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
@@ -4210,6 +4241,11 @@ class LatLonCGridOceanModel:
             solve_unsplit_freesurface,
         )
         from legoesm.ocean.state import Field
+        if freshwater is not None:
+            raise ValueError(
+                'barotropic_solver="implicit_unsplit" does not yet support the '
+                "freshwater argument (E-P-R free-surface forcing + virtual-salt "
+                'flux); use barotropic_solver="implicit_cn".')
         _grid = grid if grid is not None else self.grid
         g = self.config.g
         eps = self.config.ab2_epsilon
