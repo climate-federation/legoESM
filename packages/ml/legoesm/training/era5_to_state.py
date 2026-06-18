@@ -19,12 +19,14 @@ import numpy as np
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
 from legoesm.ml.data.era5_loader import (
-    ERA5Config,
     WB2_ERA5_ZARR,
+    ERA5Config,
     create_era5_dataset,
 )
-from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
+
+
 def resolve_var(ds, name):
     """Find a variable in the dataset, trying common aliases."""
     aliases = {
@@ -77,8 +79,8 @@ def _get_cs_weights(n_lon_era5: int, grid):
     """Get or compute cached cubed-sphere regridding weights."""
     key = (n_lon_era5, id(grid))
     if key not in _CS_WEIGHT_CACHE:
-        from legoesm.grids.regridding import compute_gauss_to_cs_weights
         from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.regridding import compute_gauss_to_cs_weights
         gauss_proxy = create_gaussian_grid(
             n_max=n_lon_era5 // 2 - 1, dealiasing="linear",
         )
@@ -306,9 +308,9 @@ def era5_to_spectral_carry(
     -------
     SegmentCarry
     """
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
 
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
@@ -420,10 +422,10 @@ def era5_to_cubedsphere_carry(
     """
     # ``target_phis`` is intentionally unused — see the parameter docstring.
     del target_phis
-    from legoesm.grids.regridding import regrid_scalar
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.grids.regridding import regrid_scalar
 
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
@@ -577,6 +579,114 @@ def era5_to_cubedsphere_carry(
     )
 
 
+_VORONOI_WEIGHT_CACHE: dict[tuple, object] = {}
+
+
+def _get_voronoi_weights(src_lat_rad, src_lon_rad, mesh):
+    """Cached ERA5-lat-lon → MPAS-cell inverse-distance regridding weights.
+
+    Keyed by the source-grid SHAPE **and its coordinate bounds** (not just shape +
+    ``id(mesh)``) so weights are never silently reused across two ERA5 grids that
+    share a shape but differ in extent/ordering (Codex).
+    """
+    src_lat = np.asarray(src_lat_rad)
+    src_lon = np.asarray(src_lon_rad)
+    key = (
+        int(src_lat.size), int(src_lon.size),
+        float(src_lat[0]), float(src_lat[-1]),
+        float(src_lon[0]), float(src_lon[-1]),
+        id(mesh),
+    )
+    if key not in _VORONOI_WEIGHT_CACHE:
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        _VORONOI_WEIGHT_CACHE[key] = compute_latlon_to_voronoi_weights(
+            src_lat, src_lon,
+            np.asarray(mesh.latCell), np.asarray(mesh.lonCell),
+        )
+    return _VORONOI_WEIGHT_CACHE[key]
+
+
+def era5_to_mpas_carry(
+    era5: ERA5Slice,
+    grid,
+    sigma,
+):
+    """Convert an ERA5 slice to a ``SegmentCarry`` on an MPAS/Voronoi mesh.
+
+    The real-data reference path for the MPAS column comparison (the Voronoi
+    sibling of :func:`era5_to_cubedsphere_carry`): ERA5 lat-lon fields are
+    inverse-distance regridded to the mesh CELL centres
+    (:func:`~legoesm.grids.regridding.compute_latlon_to_voronoi_weights`, keyed on
+    ``mesh.latCell``/``lonCell``), then vertically interpolated to model sigma.
+
+    ``grid`` is the :class:`~legoesm.grids.voronoi.VoronoiMesh`.  ``u``/``v`` are
+    regridded COMPONENT-WISE in the geographic (east, north) basis — frame-
+    consistent with the model-side Perot cell wind (iter 74,
+    ``reconstruct_cell_velocity`` returns ``u_east, v_north``), so the model-vs-ERA5
+    vector-wind RMSE is like-for-like.  This is a DIAGNOSTIC component
+    interpolation, NOT a conservative vector remap; near-pole geographic-basis
+    distortion is a known limitation (the same as the cubed-sphere path).  Single-
+    rank / full mesh (matching the column extractor + iter-74 compare scope).
+    """
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.grids.regridding import regrid_scalar
+
+    mesh = grid
+    weights = _get_voronoi_weights(era5.lat, era5.lon, mesh)
+    sigma_f = jnp.asarray(sigma.sigma_full)
+    plev = jnp.asarray(era5.plev_Pa)            # ascending (interp searchsorted)
+
+    def _regrid_3d(field_ll):
+        # (n_lat, n_lon, n_plev) → (n_lat*n_lon, n_plev): the SAME (lat, lon)
+        # C-order ravel the weights' meshgrid was built over → cells map correctly.
+        flat = jnp.asarray(field_ll).reshape(-1, field_ll.shape[-1])
+        return regrid_scalar(flat, weights)     # (nCells, n_plev)
+
+    T_cell = _regrid_3d(era5.T)
+    u_cell = _regrid_3d(era5.u)
+    v_cell = _regrid_3d(era5.v)
+    q_cell = _regrid_3d(era5.q)
+    p_s_cell = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)   # (nCells,)
+    phis_cell = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
+
+    T_model = interp_pressure_to_sigma(T_cell, plev, p_s_cell, sigma_f)
+    u_model = interp_pressure_to_sigma(u_cell, plev, p_s_cell, sigma_f)
+    v_model = interp_pressure_to_sigma(v_cell, plev, p_s_cell, sigma_f)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) (see era5_to_cubedsphere_carry for the rationale).
+    q_specific = jnp.clip(
+        jnp.maximum(interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f), 0.0),
+        0.0, 0.99)
+    q_model = q_specific / (1.0 - q_specific)
+
+    dims_3d = ("cell", "level")
+    dims_2d = ("cell",)
+    state = HydrostaticState(
+        u=Field(u_model, name="u", dims=dims_3d, units="m/s"),
+        v=Field(v_model, name="v", dims=dims_3d, units="m/s"),
+        T=Field(T_model, name="T", dims=dims_3d, units="K"),
+        p_s=Field(p_s_cell, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(phis_cell, name="phis", dims=dims_2d, units="m2/s2"),
+    )
+    shape_3d = T_model.shape
+    shape_2d = p_s_cell.shape
+    return pack_carry(
+        state,
+        q_v=q_model,
+        q_c=jnp.zeros(shape_3d),
+        q_r=jnp.zeros(shape_3d),
+        held_dT_rad=jnp.zeros(shape_3d),
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_down_toa=jnp.zeros(shape_2d),
+        step_index=0,
+    )
+
+
 def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
@@ -606,9 +716,9 @@ def era5_to_latlon_carry(
     -------
     SegmentCarry
     """
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
 
     sigma_full = np.asarray(sigma.sigma_full)
 

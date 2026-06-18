@@ -180,6 +180,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/ml/legoesm/training/compare_reanalysis.py" = ["N803", "N806", "N815"]
 "tests/unit/test_compare_reanalysis.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
+# ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
+# field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the
+# x64-before-import idiom / logging setup.
+"packages/ml/legoesm/training/era5_to_state.py" = ["E402", "N803", "N806", "N815"]
+"tests/unit/test_era5_mpas_carry.py" = ["N806"]
 # CLUBB port tests use the same physical symbol names as the modules under test
 # (T for temperature, Tc for deg C, etc.) — clearer than snake_case here. E402:
 # these tests set jax_enable_x64 before importing the modules under test (a

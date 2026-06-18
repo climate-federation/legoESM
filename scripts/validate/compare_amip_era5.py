@@ -49,6 +49,9 @@ _GRID_TYPE_ALIASES = {
     "cs": "cubed_sphere",
     "latlon": "latlon",
     "lat_lon": "latlon",
+    "mpas": "mpas",
+    "voronoi": "mpas",
+    "icosahedral": "mpas",
 }
 _KNOWN_GRID_TYPES = sorted(set(_GRID_TYPE_ALIASES.values()))
 # Canonical token → the token understood by ``legoesm.grids.factory.create_grid``
@@ -57,6 +60,7 @@ _FACTORY_GRID_TOKEN = {
     "spectral": "gaussian",
     "cubed_sphere": "cubed_sphere",
     "latlon": "latlon",
+    "mpas": "mpas",
 }
 
 
@@ -88,6 +92,7 @@ def select_era5_regrid(grid_type: str) -> Callable:
         "spectral": era5_to_state.era5_to_spectral_carry,
         "cubed_sphere": era5_to_state.era5_to_cubedsphere_carry,
         "latlon": era5_to_state.era5_to_latlon_carry,
+        "mpas": era5_to_state.era5_to_mpas_carry,
     }
     return table[canon]
 
