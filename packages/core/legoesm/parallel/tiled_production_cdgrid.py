@@ -45,6 +45,32 @@ def _check_shapes(n, **named):
                 f"{name}: expected trailing shape {want} (n={n}); got {got}")
 
 
+def _check_tiled_mesh(mesh, n: int, kt: int):
+    """Fail-loud factory-time guard for the (6, kt, kt) tiled cube stages
+    (codex review).  The bit-identity gates only exercise a mesh whose shape
+    MATCHES kt at nl=n//kt>=2, so two misuse modes slip past them:
+
+    1. ``mesh.devices.shape != (6, kt, kt)``: the tiled halo tables derive their
+       tiling from ``mesh`` while the per-tile ``dynamic_slice`` offsets use the
+       caller's ``kt``; a mismatch silently CLAMPS the slices / exchanges halos
+       on a different tiling -> wrong answer, no error.
+    2. ``nl = n // kt < 2``: the in-stage halo's 2-cell offset slivers + the
+       corner-staggered ``(nl+1)`` blocks assume nl>=2; nl==1 builds and then
+       produces wrong clamped halo interpolation.
+
+    ``n % kt`` is checked separately at each factory entry."""
+    want = (6, kt, kt)
+    got = tuple(mesh.devices.shape)
+    if got != want:
+        raise ValueError(
+            f"tiled stage: mesh.devices.shape {got} != (6, kt, kt)={want} "
+            f"(kt={kt}); the mesh tiling must match kt")
+    if n // kt < 2:
+        raise ValueError(
+            f"tiled stage: nl = n//kt = {n // kt} < 2 (n={n}, kt={kt}); the "
+            f"in-stage halo offset slivers + (nl+1) corner blocks need nl>=2")
+
+
 def dgrid_vorticity_tile_2d(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area,
                             a_i, a_j, nl: int):
     """Per-tile ``dgrid_vorticity`` (P-i) on a 2-D ``(tile_i, tile_j)`` tiling.
@@ -119,6 +145,7 @@ def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int,
     fv3_hydrostatic_tendencies (4D)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_dgrid_vorticity_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
@@ -216,6 +243,7 @@ def make_tiled_dgrid_to_cgrid_stage_2d(mesh, cdgrid, n: int, kt: int,
     ``nlev`` -> 4D winds (vertical replicated); ``cosa_u`` stays 2D-face."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_dgrid_to_cgrid_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
@@ -254,6 +282,7 @@ def make_tiled_dgrid_to_center_vector_stage_2d(mesh, n: int, kt: int,
     ``nlev`` -> 4D (vertical replicated)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)
     co = P("face", "tile_i", "tile_j")
@@ -318,6 +347,7 @@ def make_tiled_compute_geopotential_stage_2d(mesh, sigma_coord, n: int, kt: int)
     (1-D vertical arrays) is closed over."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s, phis)
     fw = P("face", None, None, None)           # 4D T
@@ -382,6 +412,7 @@ def make_tiled_compute_geopotential_hybrid_stage_2d(mesh, coord, n: int, kt: int
     ``Phi`` out (exact cc partition, vertical replicated).  ``coord`` closed over."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s, phis)
     fw = P("face", None, None, None)           # 4D T
@@ -444,6 +475,7 @@ def make_tiled_compute_mass_flux_hybrid_stage_2d(mesh, coord, n: int, kt: int):
     (exact cc partition, vertical replicated).  ``coord`` closed over."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s)
     fw = P("face", None, None, None)           # 4D div_3d
@@ -505,6 +537,7 @@ def make_tiled_vertical_advection_hybrid_stage_2d(mesh, coord, n: int, kt: int):
     partition, vertical replicated).  ``coord`` closed over."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s)
     fw = P("face", None, None, None)           # 4D field / mass_flux
@@ -558,6 +591,7 @@ def make_tiled_compute_omega_hybrid_stage_2d(mesh, coord, n: int, kt: int):
     partition, vertical replicated).  ``coord`` closed over."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s, dp_s_dt)
     fw = P("face", None, None, None)           # 4D mass_flux
@@ -605,6 +639,7 @@ def make_tiled_vertical_pe_stage_2d(mesh, coord, n: int, kt: int):
     )
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)                 # 2D cc (p_s, dp_s_dt)
     fw = P("face", None, None, None)           # 4D div_3d, field
@@ -694,6 +729,7 @@ def make_tiled_fv3_hydrostatic_momentum_stage_2d(mesh, cdgrid, coord, n: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_hydrostatic_momentum_stage_2d: n={n} != "
@@ -862,6 +898,7 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
         HybridSigmaPressureCoordinate)
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_dp_s_dt_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
@@ -969,6 +1006,7 @@ def make_tiled_fv3_hydrostatic_thermo_stage_2d(mesh, cdgrid, coord, n: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_hydrostatic_thermo_stage_2d: n={n} != "
@@ -1116,6 +1154,7 @@ def make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdgrid, n: int, kt: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_center_to_dgrid_vector_stage_2d: n={n} != "
@@ -1397,6 +1436,7 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_hydrostatic_tendencies_stage_2d: n={n} != "
@@ -1517,6 +1557,7 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_hydrostatic_step_stage_2d: n={n} != "
@@ -1659,6 +1700,7 @@ def make_tiled_zero_mean_tendency_stage_2d(mesh, grid, n: int, kt: int):
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(grid, "area", None) is None:
         raise ValueError(
             "make_tiled_zero_mean_tendency_stage_2d: grid must have .area")
@@ -1720,6 +1762,7 @@ def make_tiled_fix_ps_mass_stage_2d(mesh, grid, n: int, kt: int):
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(grid, "area", None) is None:
         raise ValueError(
             "make_tiled_fix_ps_mass_stage_2d: grid must have .area")
@@ -1819,6 +1862,7 @@ def make_tiled_interp_corner_to_center_stage_2d(mesh, n: int, kt: int,
     (the vertical is NOT tiled)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fi = P("face", None, None, None) if nlev else P("face", None, None)
     co = (P("face", "tile_i", "tile_j", None) if nlev
@@ -1843,6 +1887,7 @@ def make_tiled_interp_center_to_corner_stage_2d(mesh, cdgrid, n: int, kt: int):
     supplied in the tile body, so no compute reads it)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)
     co = P("face", "tile_i", "tile_j")
@@ -1910,6 +1955,7 @@ def make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cdgrid, n: int, kt: int,
     vertical axis; the corner matrices stay 2D-face (broadcast over nlev)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
     gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
@@ -1996,6 +2042,7 @@ def make_tiled_fv3_d2cc_stage_2d(mesh, n: int, kt: int):
     ``(6, n, n)`` exact)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     fo = P("face", None, None)
     co = P("face", "tile_i", "tile_j")
@@ -2019,6 +2066,7 @@ def make_tiled_fv3_cc2c_stage_2d(mesh, cdgrid, n: int, kt: int):
     to ``(6, n+1, n)`` / ``(6, n, n+1)``."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     nl = n // kt
     cosa_u = cdgrid.cosa_u
     fo = P("face", None, None)
@@ -2094,6 +2142,7 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_sw_momentum_stage_2d: n={n} != cdgrid.n="
@@ -2317,6 +2366,7 @@ def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_cgrid_mass_divergence_stage_2d: n={n} != cdgrid.n="
@@ -2395,6 +2445,7 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
     if getattr(cdgrid, "n", n) != n:
         raise ValueError(
             f"make_tiled_fv3_sw_tendencies_stage_2d: n={n} != cdgrid.n="

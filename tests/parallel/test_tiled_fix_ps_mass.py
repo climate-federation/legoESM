@@ -80,3 +80,26 @@ def test_tiled_fix_ps_mass_rejects_bad_n(cdg):
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
     with pytest.raises(ValueError, match="divisible"):
         make_tiled_fix_ps_mass_stage_2d(mesh, cdg.base, N, 5)
+
+
+def test_tiled_mesh_guard_rejects_shape_mismatch_and_thin_tile(cdg):
+    """codex review: the shared _check_tiled_mesh guard (in EVERY tiled factory)
+    must reject (a) a mesh whose shape != (6, kt, kt) [caller kt vs mesh tiling
+    mismatch -> silent slice/halo clamp] and (b) nl = n//kt < 2 [halo offset
+    slivers break].  Tested via the factory (no private-symbol import)."""
+    from jax.sharding import Mesh
+    grid = cdg.base
+    if len(jax.devices()) >= 6:
+        # (a) shape mismatch: a (6,1,1) mesh but kt=3 (24%3==0 passes n%kt first)
+        m1 = Mesh(np.array(jax.devices()[:6]).reshape(6, 1, 1),
+                  axis_names=("face", "tile_i", "tile_j"))
+        with pytest.raises(ValueError, match="must match kt"):
+            make_tiled_fix_ps_mass_stage_2d(m1, grid, N, 3)
+    if len(jax.devices()) >= 24:
+        # (b) nl<2: a (6,2,2) mesh with n=2, kt=2 -> nl=1
+        m2 = Mesh(np.array(jax.devices()[:24]).reshape(6, 2, 2),
+                  axis_names=("face", "tile_i", "tile_j"))
+        with pytest.raises(ValueError, match="nl>=2"):
+            make_tiled_fix_ps_mass_stage_2d(m2, grid, 2, 2)
+    if len(jax.devices()) < 6:
+        pytest.skip("mesh-guard test needs >=6 host devices")
