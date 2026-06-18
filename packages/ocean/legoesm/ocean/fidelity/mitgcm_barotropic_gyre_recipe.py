@@ -86,6 +86,11 @@ def build_gyre_geometry() -> LatLonCGridGeometry:
     return create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DY_M, f0=F0, beta=BETA,
         y_origin_m=Y_ORIGIN_M, x_origin_m=X_ORIGIN_M,
+        # Metric-consistent pseudo-lat (lat=0): the implicit free-surface
+        # projection is energy-conserving only when divergence_cgrid's recomputed
+        # cos(lat_v) v-face length matches the gradient's cos_lat=1 metric.  A
+        # non-zero y/radius pseudo-lat leaks ~1% and flips this WBC turbulent.
+        cartesian_pseudo_lat=True,
     )
 
 
@@ -147,6 +152,26 @@ def build_gyre_config(
       (``mom_u_sidedrag``/``mom_v_sidedrag``). Sets the equilibrium Munk layer /
       gyre transport; inactive over a 10-step spin-up (the boundary layer has
       not yet formed) but required for the equilibrated (multi-year) run.
+
+    * ``coriolis_scheme="explicit_ab2"`` + ``outer_integrator="ab2"`` +
+      ``ab2_epsilon=0.01`` + ``momentum_flux_scheme="centered"`` — MITgcm's exact
+      unsplit numerics: the planetary Coriolis enters the explicit momentum
+      tendency and is Adams-Bashforth-2 extrapolated (``abEps=0.01``) alongside
+      2nd-order centered flux-form advection, then the implicit free surface
+      projects (the barotropic solver's own FB-Coriolis is gated off — Coriolis is
+      already in ``F_slow``). The default ``coriolis_energy_conserving`` face-f
+      Coriolis is used (NOT the Sadourny vertex-f override): an earlier version of
+      this recipe set the vertex-f form to suppress a β-plane "Coriolis energy
+      leak", but that leak was misdiagnosed — its true source was a cos(lat)
+      metric inconsistency in the Cartesian beta-plane grid (the pseudo-``lat``
+      was ``y_c/radius`` instead of 0, so ``divergence_cgrid`` and the flux-form
+      advection recomputed an ~1.8%-short v-face length while the gradient used
+      ``cos_lat=1``, breaking grad/div adjointness in the free-surface projection).
+      With that grid fixed
+      (``create_beta_plane_cgrid_geometry`` now pins ``lat=0``), the MITgcm-faithful
+      face-f Coriolis runs the gyre LAMINAR to ``|u|max≈0.027`` / ``|v|max≈0.078``
+      (within ~13% of MITgcm's 0.031/0.084), not the turbulent 0.066+ overshoot.
+      See docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md (iteration 7).
     """
     return LatLonCGridOceanConfig(
         g=G_BARO,
@@ -166,16 +191,20 @@ def build_gyre_config(
         bottom_drag_r=0.0,
         gm_redi=None,
         K_h=0.0,
-        # MITgcm flux-form momentum advection (vs the vector-invariant default).
+        # MITgcm flux-form momentum advection (vs the vector-invariant default),
+        # 2nd-order CENTERED reconstruction (vs the legoESM upwind default).
         momentum_advection="flux_form",
+        momentum_flux_scheme="centered",
         # MITgcm fully-backward-Euler implicit free surface (audit: the lever).
         barotropic_solver=barotropic_solver,
         barotropic_implicit_theta_eta=1.0,
         barotropic_implicit_theta_pgf=1.0,
-        # Sadourny energy-conserving (vertex-f) Coriolis: the face-f form leaks
-        # energy on a β-plane (f_u != f_v) and runs the inviscid gyre turbulent;
-        # the vertex-f form conserves KE+PE so the gyre stays laminar like MITgcm.
-        coriolis_energy_conserving=True,
+        # MITgcm unsplit explicit-Coriolis → AB2(abEps) → implicit free surface.
+        # Face-f Coriolis (default); the β-plane "energy leak" that motivated the
+        # Sadourny override was a grid-metric bug, now fixed at the grid (lat=0).
+        coriolis_scheme="explicit_ab2",
+        outer_integrator="ab2",
+        ab2_epsilon=0.01,
         differentiable_barotropic=True,
         use_conservation_fixer=False,
         enable_runtime_checks=False,
