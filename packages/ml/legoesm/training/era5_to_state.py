@@ -26,23 +26,37 @@ from legoesm.ml.data.era5_loader import (
     create_era5_dataset,
 )
 
+# Canonical long ERA5/WeatherBench variable name → its short ECMWF/GRIB alias.
+# Used BIDIRECTIONALLY by resolve_var: a request for either form finds the other.
+_ERA5_VAR_ALIASES = {
+    'temperature': 't', 'u_component_of_wind': 'u',
+    'v_component_of_wind': 'v', 'specific_humidity': 'q',
+    'surface_pressure': 'sp', 'skin_temperature': 'skt',
+    'geopotential': 'z',
+    'geopotential_at_surface': 'z_sfc',
+}
+
 
 def resolve_var(ds, name):
-    """Find a variable in the dataset, trying common aliases."""
-    aliases = {
-        'temperature': 't', 'u_component_of_wind': 'u',
-        'v_component_of_wind': 'v', 'specific_humidity': 'q',
-        'surface_pressure': 'sp', 'skin_temperature': 'skt',
-        'geopotential': 'z',
-        'geopotential_at_surface': 'z_sfc',
-    }
+    """Find a variable in the dataset by ``name`` or an equivalent alias.
+
+    BIDIRECTIONAL: a long-name request (``"temperature"``) finds a short-named
+    store variable (``"t"``) AND a short-name request (``"t"``) finds a long-named
+    store variable — so the loader is robust to either the WeatherBench/ARCO-ERA5
+    long-name convention or the classic ECMWF/GRIB short-name convention.  Returns
+    the matched store key, or ``None`` if neither ``name`` nor any alias is present.
+    """
     if name in ds:
         return name
-    if name in aliases and aliases[name] in ds:
-        return aliases[name]
-    for k, v in aliases.items():
-        if name == k and v in ds:
-            return v
+    candidates = []
+    short = _ERA5_VAR_ALIASES.get(name)          # name is a long key → its short
+    if short is not None:
+        candidates.append(short)
+    candidates += [long for long, s in _ERA5_VAR_ALIASES.items()
+                   if s == name]                  # name is a short alias → its long(s)
+    for cand in candidates:
+        if cand in ds:
+            return cand
     return None
 
 
@@ -239,14 +253,29 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     plev_hPa = np.array(config.levels, dtype=np.float64)
     plev_Pa = np.sort(plev_hPa * 100.0)  # ascending in Pa
 
-    def _get_3d(name):
-        """Extract a 3D variable as (lat, lon, level) with levels ascending in pressure."""
-        resolved = [v for v in [resolve_var(ds_t, name)] if v]
-        if not resolved:
-            return np.zeros((len(lat), len(lon), len(plev_Pa)))
-        data = ds_t[resolved[0]].sel({level_dim: list(config.levels)}).values
+    def _missing(name):
+        return (
+            f"load_era5_slice: REQUIRED ERA5 variable {name!r} not found in the "
+            f"store (tried alias {_ERA5_VAR_ALIASES.get(name, '—')!r}); available "
+            f"variables: {sorted(map(str, ds_t.data_vars))}. Fix the store / "
+            "--era5-zarr or the variable naming — a missing required field must NOT "
+            "silently load as zeros (it would corrupt the whole compare)."
+        )
+
+    def _get_3d(name, *, required=True):
+        """Extract a 3D variable as (lat, lon, level), levels ascending in pressure.
+
+        A REQUIRED but unresolvable variable RAISES (never silently zero-fills — a
+        zeros T/u/v/q would corrupt the bias and make the loop 'correct' garbage).
+        """
+        resolved = resolve_var(ds_t, name)
+        if resolved is None:
+            if required:
+                raise ValueError(_missing(name))
+            return np.zeros((len(lat), len(lon), len(plev_Pa)), dtype=np.float32)
+        data = ds_t[resolved].sel({level_dim: list(config.levels)}).values
         if data.ndim == 3:
-            dims = list(ds_t[resolved[0]].dims)
+            dims = list(ds_t[resolved].dims)
             spatial = {"lat", "lon", "latitude", "longitude"}
             level_axis = next((i for i, d in enumerate(dims) if d not in spatial), 0)
             if level_axis != 2:
@@ -256,13 +285,20 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
             data = data[..., ::-1]
         return data.astype(np.float32)
 
-    def _get_2d(name):
-        """Extract a 2D surface variable as (lat, lon)."""
+    def _get_2d(name, *, required=False):
+        """Extract a 2D surface variable as (lat, lon).
+
+        ``required`` (e.g. ``surface_pressure``) RAISES on an unresolvable variable;
+        optional surface fields (skin temperature, surface geopotential) keep the
+        zero-fill so an IC missing them still loads.
+        """
         # Try time-selected dataset first, then full dataset for static fields
         resolved = resolve_var(ds_t, name)
         if resolved is None:
             resolved = resolve_var(ds, name)
             if resolved is None:
+                if required:
+                    raise ValueError(_missing(name))
                 return np.zeros((len(lat), len(lon)), dtype=np.float32)
             data = ds[resolved].values
         else:
@@ -278,9 +314,9 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
         u=_get_3d("u_component_of_wind"),
         v=_get_3d("v_component_of_wind"),
         q=_get_3d("specific_humidity"),
-        p_s=_get_2d("surface_pressure"),
-        sst=_get_2d("skin_temperature"),
-        phis=_get_2d("geopotential_at_surface"),  # already in m²/s²
+        p_s=_get_2d("surface_pressure", required=True),
+        sst=_get_2d("skin_temperature"),          # optional (zero-fill if absent)
+        phis=_get_2d("geopotential_at_surface"),  # optional; already in m²/s²
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
