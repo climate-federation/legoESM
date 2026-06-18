@@ -35,7 +35,44 @@ laminar, no overshoot. legoESM at the same wall-clock is already 0.064 → 0.107
 | **Centered advection** | instantaneous power `∫u·adv` | **machine-zero** (`P=1e-13`); legoESM's centered flux-form is energy-neutral |
 | **Time integration** | inviscid `E(T)/E0` vs `dt` (1200→150 s) | growth **converges** to +20.5% as `dt→0` → spatial, not a time-truncation error |
 
-## The source (measured): the free-surface split projection
+## UPDATE 2026-06-17 (iteration 2): the "Coriolis" attribution below is WRONG
+
+A clean **same-state f-toggle** (one rough gyre state, scale the grid ``f`` by 0/0.5/1.0)
+shows the inviscid leak is **independent of Coriolis**: ``f=0`` leaks IDENTICALLY to ``f=1``
+(``+5.2429e5`` both). The earlier ``f=0`` result that pointed at Coriolis used a *different*,
+smoother ``f=0`` spin-up state — a contaminated control. So the Coriolis attribution in the
+"## The source" section below is **superseded**.
+
+What iteration 2 established (solid, by measurement):
+- **Not Coriolis** (same-state f-toggle identical; a Sadourny vertex-f energy-conserving Coriolis
+  — now in ``coriolis_cgrid_energy_conserving``, committed — does not change the gyre).
+- **Not advection**: the thickness-weighted (physical) momentum-advection power ``⟨h_u u, adv⟩``
+  is machine-zero (so is the unweighted), and the semi-discrete ``dE/dt`` is byte-identical
+  across upwind/centered/vector-invariant.
+- **Not the free-surface solver in isolation**: calling the barotropic solver alone (``f=0``,
+  ``F_slow=0``) is mildly *dissipative* (−0.14 %/200 steps), and the Helmholtz operator
+  ``A = I − gΔt²∇·(H∇)`` is **exactly symmetric** (rel asym ~1e-15) → grad/div ARE discrete
+  adjoints.
+- **Not a default knob**: ``fix_eta_drift``, ``barotropic_diffusion_alpha``, the barotropic
+  time filter all toggle to byte-identical leak.
+- **Not a time-scheme error**: the leak *converges* as ``dt→0`` (clean centered-advection
+  dt-scan +11.3→12.1 %), i.e. it is a **first-order, spatial** effect; AB2 does not fix it.
+
+The defect is therefore in the **composition** advection→``F_slow``→barotropic predictor-corrector:
+a single inviscid step's ``dKE = ⟨Hu, du⟩ = +7.6e8`` (∝Δt, first-order) is NOT matched by the PE
+change (``dPE = +5.7e5``, ~1300× smaller) — KE rises with no corresponding PE drop, even though
+the individual PGF/continuity operators are adjoint. The leading hypothesis is a
+**momentum-advection ↔ continuity mass-flux inconsistency** (the momentum flux-form advection
+uses an ``h_k``-weighted transport that is not the same discrete mass flux the free-surface
+continuity uses, so the predictor-corrector is not energy-conserving for the coupled system —
+the "continuity-consistent advection" requirement of Arakawa / MOM6). This was NOT yet isolated
+or fixed; it needs a careful from-scratch energy budget of the exact stepped scheme, not the
+black-box probing above. **The fix is a scoped dycore task, still open.**
+
+Delivered this session: the energy-conserving vertex-f Coriolis option (correct + unit-tested,
+necessary-not-sufficient) and the elimination chain above.
+
+## The source (measured): the free-surface split projection  [SUPERSEDED — see UPDATE above]
 
 A **total mechanical-energy** budget (`E = KE + ½g∫η²`; PE is only ~0.1 % of KE here) shows a
 genuine spurious source under inviscid + unforced dynamics:
