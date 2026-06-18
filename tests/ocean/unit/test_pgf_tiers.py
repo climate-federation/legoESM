@@ -117,8 +117,8 @@ def _seamount_bathymetry(grid, H_max, height_m=3800.0, sigma_deg=10.0,
     H_bathy = H_max - seamount
     H_bathy = np.maximum(H_bathy, 10.0)
     if smoothing_passes > 0:
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d
-        H_bathy = _laplacian_smooth_2d(H_bathy, smoothing_passes, is_cubed=False)
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d
+        H_bathy = laplacian_smooth_2d(H_bathy, smoothing_passes, is_cubed=False)
     land_mask = np.where(np.abs(lat_deg) < 80.0, 1.0, 0.0)
     return jnp.asarray(H_bathy), jnp.asarray(land_mask)
 

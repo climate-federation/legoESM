@@ -1,4 +1,4 @@
-"""Multi-GPU SPMD step for the lat-lon C-grid ocean (latlon / tripole).
+r"""Multi-GPU SPMD step for the lat-lon C-grid ocean (latlon / tripole).
 
 Wraps ``LatLonCGridOceanModel.step`` in ``jax.shard_map`` over a 1-D ``"lat"``
 device mesh, so the ocean state is partitioned by latitude band across devices

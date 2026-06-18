@@ -695,6 +695,12 @@ class ExperimentConfig(NamedTuple):
                 "column unstable.  Disable --fix-moisture or replace it "
                 "with a fix_total_water path that tracks precipitation."
             )
+        _valid_perf_modes = ("auto", "always", "never")
+        if self.output.diagnostics_perf_mode not in _valid_perf_modes:
+            raise ValueError(
+                f"diagnostics_perf_mode must be one of {_valid_perf_modes}, "
+                f"got {self.output.diagnostics_perf_mode!r}"
+            )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):
             warns.append(

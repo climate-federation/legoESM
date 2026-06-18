@@ -1083,6 +1083,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic_time_filter!r}")
+        # Mirrors the flux-form tendency dispatch (its else-raise) plus the
+        # SOM special case handled in step(); keep in sync if a scheme is added.
+        _valid_tracer_adv = {
+            "upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
+            "dst3", "dst3_multidim", "weno5", "weno7", "som",
+        }
+        if config.tracer_advection not in _valid_tracer_adv:
+            raise ValueError(
+                f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
+                f"got {config.tracer_advection!r}")
+        _valid_outer_int = {"forward_euler", "ab2"}
+        _outer_int = getattr(config, "outer_integrator", "forward_euler")
+        if _outer_int not in _valid_outer_int:
+            raise ValueError(
+                f"outer_integrator must be one of {sorted(_valid_outer_int)}, "
+                f"got {_outer_int!r}")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
