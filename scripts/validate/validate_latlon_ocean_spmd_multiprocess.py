@@ -88,7 +88,7 @@ def _build_perturbed_state(grid, z_coord):
         T=state.T.replace(data=jnp.asarray(T)))
 
 
-def _build_model(tripole: bool):
+def _build_model(tripole: bool, implicit_cn: bool = False):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.tripole import create_synthetic_tripole
     from legoesm.ocean.vertical import create_ocean_z_star
@@ -102,7 +102,13 @@ def _build_model(tripole: bool):
     else:
         grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
     z_coord = create_ocean_z_star(n_levels=NLEV, H_max=4000.0)
-    model = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig())
+    # implicit_cn exercises barotropic_implicit_latlon_cgrid's PCG + mass-
+    # conservation reduction (the eORCA025 smoke uses it); its in-step reductions
+    # must route through the "spmd" psum backend, not batch_allreduce_mpi.  Default
+    # explicit_substep exercises the substep-loop eta-floor reduction.
+    cfg = (LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+           if implicit_cn else LatLonCGridOceanConfig())
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
     return model, grid, z_coord
 
 
@@ -122,7 +128,7 @@ def _spmd_step_result(model, state0, n_dev):
     return ss
 
 
-def _phase_ref(tripole: bool, out_path: str) -> int:
+def _phase_ref(tripole: bool, out_path: str, implicit_cn: bool = False) -> int:
     """PHASE 1 (single process, 4 CPU devices, NO jax.distributed): compute the
     serial single-device reference + the single-process 4-device SPMD result,
     assert they agree to the FP floor (the established single-process gate), and
@@ -135,7 +141,7 @@ def _phase_ref(tripole: bool, out_path: str) -> int:
               "XLA_FLAGS=--xla_force_host_platform_device_count=4).")
         return 0
 
-    model, _grid, _z = _build_model(tripole)
+    model, _grid, _z = _build_model(tripole, implicit_cn=implicit_cn)
     state0 = _build_perturbed_state(model.grid, _z)
 
     # serial single-device reference (is_multi_process() is False here -> the
@@ -162,13 +168,14 @@ def _phase_ref(tripole: bool, out_path: str) -> int:
     # Save the SERIAL reference (the source of truth phase 2 compares to).
     ref = {nm: np.asarray(getattr(s, nm).data) for nm in _FIELDS}
     np.savez(out_path, **ref)
-    g = "tripole" if tripole else "latlon"
+    g = ("tripole" if tripole else "latlon") + ("/implicit_cn" if implicit_cn
+                                                 else "")
     print(f"[{'PASS' if ok else 'FAIL'} ref] single-process SPMD ({g}) == serial "
           f"to FP floor; saved serial reference -> {out_path}", flush=True)
     return 0 if ok else 1
 
 
-def _phase_mp(tripole: bool, ref_path: str) -> int:
+def _phase_mp(tripole: bool, ref_path: str, implicit_cn: bool = False) -> int:
     """PHASE 2 (mpirun, 4 global devices): bootstrap jax.distributed, run the
     MULTI-PROCESS SPMD step, compare to the phase-1 serial reference + assert the
     gathered state is bitwise-replicated across processes."""
@@ -197,13 +204,14 @@ def _phase_mp(tripole: bool, ref_path: str) -> int:
         return 0
 
     ref = np.load(ref_path)             # serial reference from phase 1
-    model, _grid, _z = _build_model(tripole)
+    model, _grid, _z = _build_model(tripole, implicit_cn=implicit_cn)
     state0 = _build_perturbed_state(model.grid, _z)
 
     if rank == 0:
+        _gl = ("tripole" if tripole else "latlon") + ("/implicit_cn"
+                                                      if implicit_cn else "")
         print(f"[setup] {nproc} processes, {jax.device_count()} global devices "
-              f"({jax.local_device_count()} local/proc), "
-              f"grid={'tripole' if tripole else 'latlon'}", flush=True)
+              f"({jax.local_device_count()} local/proc), grid={_gl}", flush=True)
 
     # MULTI-PROCESS SPMD step: the lat mesh spans the GLOBAL device set (all 4
     # across both processes); the band halo + barotropic reductions cross the
@@ -245,7 +253,8 @@ def _phase_mp(tripole: bool, ref_path: str) -> int:
 
     # All ranks must pass — LAND-reduce so the exit code is the WHOLE-job verdict.
     all_ok = comm.allreduce(local_ok, op=MPI.LAND)
-    g = "tripole" if tripole else "latlon"
+    g = ("tripole" if tripole else "latlon") + ("/implicit_cn" if implicit_cn
+                                                 else "")
     if rank == 0:
         if all_ok:
             print(f"[PASS] multi-process SPMD ({g}) == serial reference to FP "
@@ -269,10 +278,14 @@ def main(argv=None) -> int:
     p.add_argument("--tripole", action="store_true",
                    help="active-north-fold synthetic tripole (eORCA025 is tripole; "
                         "the fold lands on the north band = a remote process)")
+    p.add_argument("--implicit-cn", action="store_true",
+                   help="barotropic_solver='implicit_cn' (the eORCA025 smoke "
+                        "solver) -- exercises the PCG + mass-conservation reduction "
+                        "SPMD psum path in barotropic_implicit_latlon_cgrid")
     args = p.parse_args(argv)
     if args.phase == "ref":
-        return _phase_ref(args.tripole, args.out)
-    return _phase_mp(args.tripole, args.ref)
+        return _phase_ref(args.tripole, args.out, implicit_cn=args.implicit_cn)
+    return _phase_mp(args.tripole, args.ref, implicit_cn=args.implicit_cn)
 
 
 if __name__ == "__main__":

@@ -560,7 +560,29 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
     diag = jnp.where(wet, 1.0 / jnp.maximum(inv_diag, 1.0e-30), 0.0)
     gersh = jnp.where(wet, 2.0 * diag - 1.0, -jnp.inf)
     lmax_local = jnp.max(gersh)
-    lmax = global_max_mpi(lmax_local) if is_multi_process() else lmax_local
+    # Global spectral-radius bound: under the single-controller lat-band shard_map
+    # lmax_local is this band's PARTIAL max -> take the max across "lat" with
+    # jax.lax.pmax (the SPMD analogue of global_max_mpi; mpi4jax not even required
+    # on the route-B multi-GPU path).  Checked FIRST (is_multi_process() is False
+    # under one process), and -- like eta_floor._global_sum_pair -- gated on a
+    # "lat" mesh axis so a coupled cube-atm SPMD mesh (NON-lat axes) falls through
+    # to MPI/local instead of crashing (codex).  pmax/global_max are MAX, so NON-
+    # differentiable -- fine because lmax is stop_gradient'd just below (a
+    # preconditioner tuning parameter, not part of the converged answer).
+    from legoesm.grids.halo import (
+        get_halo_backend as _get_halo_backend, get_spmd_mesh as _get_spmd_mesh,
+    )
+    lmax = None
+    if _get_halo_backend() == "spmd":
+        _mesh = _get_spmd_mesh()
+        if _mesh is None:
+            raise RuntimeError(
+                "chebyshev preconditioner: halo backend is 'spmd' but no SPMD "
+                "mesh is set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(_mesh.axis_names):
+            lmax = jax.lax.pmax(lmax_local, "lat")
+    if lmax is None:
+        lmax = global_max_mpi(lmax_local) if is_multi_process() else lmax_local
     # stop_gradient: the preconditioner's spectral window is a tuning
     # parameter (only affects convergence speed, not the converged answer),
     # so the non-differentiable allreduce(MAX) is safe here.
@@ -1568,6 +1590,7 @@ def barotropic_implicit_latlon_cgrid(
     # (mirrors the outer ``fix_eta_drift`` cast in ocean_model_latlon).
     from legoesm.parallel.reductions import (
         batch_allreduce_mpi as _batch_allreduce_mpi,
+        batch_psum_spmd as _batch_psum_spmd,
         is_multi_process as _is_multi_process,
     )
     from legoesm.core.precision import cast as _cast
@@ -1578,7 +1601,34 @@ def barotropic_implicit_latlon_cgrid(
     _ocean_area_l = jnp.sum(_wa)
     _target_mass_l = jnp.sum(_cast(rhs, _M, "accumulate") * _area_acc)
     _actual_mass_l = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_acc)
-    if _is_multi_process():
+    # SPMD-aware batched reduction (SAME dispatch as eta_floor._global_sum_pair /
+    # barotropic_common._global_dot_batch -- check "spmd" backend AND a "lat" mesh
+    # axis, not just the backend): under the single-controller lat-band shard_map
+    # these are PARTIAL sums over this device's latitude band -> sum across "lat"
+    # with jax.lax.psum (NOT mpi4jax, not even required on the route-B multi-GPU
+    # path).  Checked FIRST because is_multi_process() is False under one process;
+    # without it each band would keep its PARTIAL (target_mass, actual_mass, area)
+    # and the global mass-conservation correction would be per-band WRONG (this
+    # fires every implicit_cn step under SPMD).  The "lat"-in-axis_names guard lets
+    # a coupled cube-atm SPMD mesh (backend "spmd", NON-lat axes) fall through to
+    # MPI/local instead of crashing on a missing "lat" axis (codex).  psum is
+    # self-transposing => AD-safe.
+    from legoesm.grids.halo import (
+        get_halo_backend as _get_halo_backend, get_spmd_mesh as _get_spmd_mesh,
+    )
+    _reduced = None
+    if _get_halo_backend() == "spmd":
+        _mesh = _get_spmd_mesh()
+        if _mesh is None:
+            raise RuntimeError(
+                "barotropic_implicit_latlon_cgrid: halo backend is 'spmd' but no "
+                "SPMD mesh is set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(_mesh.axis_names):
+            _reduced = _batch_psum_spmd(
+                [_ocean_area_l, _target_mass_l, _actual_mass_l], "lat")
+    if _reduced is not None:
+        _ocean_area, _target_mass, _actual_mass = _reduced
+    elif _is_multi_process():
         _ocean_area, _target_mass, _actual_mass = _batch_allreduce_mpi(
             [_ocean_area_l, _target_mass_l, _actual_mass_l], op="sum",
         )

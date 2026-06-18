@@ -76,7 +76,11 @@ run_variant () {  # $1 = label, $2.. = extra script args (e.g. --tripole)
 rc_all=0
 run_variant "latlon"  || rc_all=1
 run_variant "tripole" --tripole || rc_all=1
-echo "(rc 0 = both phases PASS for BOTH variants; non-zero = a gate failed)"
+# implicit_cn (the eORCA025 smoke solver): exercises the barotropic PCG + mass-
+# conservation reduction SPMD psum path (a different reduction site than the
+# explicit-substep eta-floor one the two above hit).
+run_variant "tripole_implicitcn" --tripole --implicit-cn || rc_all=1
+echo "(rc 0 = both phases PASS for ALL variants; non-zero = a gate failed)"
 echo "mpequiv_overall_rc=${rc_all}"
 echo "=== DONE ==="
 exit ${rc_all}
