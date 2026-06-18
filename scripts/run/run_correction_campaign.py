@@ -327,9 +327,32 @@ def _distributed_campaign_kwargs(layout, reference, area_weights, n_worst, base_
     valid_mask, manifest_reducer, global_reduce = distributed_campaign_hooks(
         layout, n_worst, base_valid_mask=base_valid_mask)
     local_cells = np.asarray(layout.partition.local_cells)
+    n_global = int(layout.partition.nCells_global)   # authoritative GLOBAL cell count
+    area_np = np.asarray(area_weights)
+    # FAIL FAST on a GLOBAL/mesh cell-count mismatch (same silent-clamp hazard as the
+    # reference slice): a wrong-length GLOBAL area_weights would make the JAX gather
+    # ``area_weights[local_cells]`` clamp overflowing ids to the last weight, silently
+    # mis-weighting the rank's columns. EXACT-equality vs nCells_global also rejects a
+    # too-LONG array (a too-short array alone is caught by a bounds check). 1-D per-cell.
+    if area_np.ndim != 1:
+        raise ValueError(
+            "_distributed_campaign_kwargs: area_weights must be 1-D per-cell "
+            f"(got shape {area_np.shape}).")
+    if area_np.shape[0] != n_global:
+        raise ValueError(
+            f"_distributed_campaign_kwargs: area_weights has {area_np.shape[0]} cells "
+            f"but the partitioned global mesh has {n_global} — the GLOBAL area_weights "
+            "must be defined on the SAME mesh as the model run.")
+    if local_cells.size:
+        lo, hi = int(local_cells.min()), int(local_cells.max())
+        if lo < 0 or hi >= n_global:
+            raise ValueError(
+                "_distributed_campaign_kwargs: local_cells index out of range "
+                f"[{lo}, {hi}] for a global mesh of {n_global} cells.")
     return dict(
-        reference=slice_reference_to_local(reference, local_cells),
-        area_weights=jnp.asarray(np.asarray(area_weights))[jnp.asarray(local_cells)],
+        reference=slice_reference_to_local(
+            reference, local_cells, expected_n_cells=n_global),
+        area_weights=jnp.asarray(area_np)[jnp.asarray(local_cells)],
         n_worst=n_worst, valid_mask=valid_mask,
         manifest_reducer=manifest_reducer, global_reduce=global_reduce,
     )

@@ -99,6 +99,38 @@ def test_slice_reference_to_local_rejects_edge_field_reference():
         slice_reference_to_local(ref, [0, 1])
 
 
+def test_slice_reference_to_local_rejects_out_of_range_cell_id():
+    """An out-of-range cell id is REJECTED LOUDLY — a JAX gather silently CLAMPS
+    overflowing ids, so a too-small / wrong-mesh GLOBAL reference would corrupt the
+    compare on a multi-day run with no error (iter 97)."""
+    ref = _global_ref(ncells=4, nlev=3)              # cells 0..3
+    with pytest.raises(ValueError, match="out of range.*4 cells"):
+        slice_reference_to_local(ref, [2, 3, 4])     # 4 ∉ [0,4)
+    with pytest.raises(ValueError, match="out of range"):
+        slice_reference_to_local(ref, [-1, 0])       # negative id
+
+
+def test_slice_reference_to_local_rejects_inconsistent_field_lengths():
+    """EVERY per-cell field is gathered by the SAME ids, so they must share the
+    cell-axis length — an inconsistent later field (here T has 5 cells, q_v has 4)
+    is caught BEFORE the gather silently clamps it (Codex iter 97, HIGH)."""
+    ref = _global_ref(ncells=4, nlev=3)._replace(T=jnp.zeros((5, 3)))   # T longer
+    with pytest.raises(ValueError, match="inconsistent reference cell-axis"):
+        slice_reference_to_local(ref, [0, 1])
+
+
+def test_slice_reference_to_local_rejects_expected_n_cells_mismatch():
+    """``expected_n_cells`` enforces EXACT mesh identity — a reference whose cell-count
+    ≠ the partitioned global mesh is rejected even when every id is in range (catches a
+    reference LONGER than the mesh, which the bounds check alone misses; iter 97)."""
+    ref = _global_ref(ncells=4, nlev=3)
+    with pytest.raises(ValueError, match="reference has 4 cells.*global mesh has 5"):
+        slice_reference_to_local(ref, [0, 1], expected_n_cells=5)
+    # the exact count passes through (in-range ids, matching N).
+    out = slice_reference_to_local(ref, [0, 1], expected_n_cells=4)
+    assert out.T.shape == (2, 3)
+
+
 def test_slice_reference_to_local_gathers_cells_in_order():
     ref = _global_ref(ncells=4, nlev=3)
     local_cells = [2, 3, 1]            # owned + halo, NOT contiguous / sorted

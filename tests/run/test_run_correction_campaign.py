@@ -1055,11 +1055,13 @@ def test_build_multi_correction_campaign_rejects_unknown_coefficient():
 
 
 # --- Distributed multi-coefficient campaign wrapper (iter 95) ----------------
-def _mock_layout(owned, local_cells):
-    from types import SimpleNamespace
+def _mock_layout(owned, local_cells, n_global=None):
+    lc = np.asarray(local_cells)
+    if n_global is None:                              # default: tightest mesh spanning lc
+        n_global = int(lc.max()) + 1 if lc.size else 0
     return SimpleNamespace(
         owned_mask_cells=jnp.asarray(owned),
-        partition=SimpleNamespace(local_cells=np.asarray(local_cells)))
+        partition=SimpleNamespace(local_cells=lc, nCells_global=n_global))
 
 
 def _global_cell_state(ncells, nlev=4):
@@ -1093,6 +1095,31 @@ def test_distributed_campaign_kwargs_composes_hooks_and_slices():
     np.testing.assert_array_equal(
         np.asarray(kw["reference"].T), np.asarray(ref.T)[[2, 3, 1]])
     np.testing.assert_array_equal(np.asarray(kw["area_weights"]), [3.0, 4.0, 2.0])
+
+
+def test_distributed_campaign_kwargs_rejects_mesh_mismatch():
+    """A GLOBAL area_weights / reference whose cell-count ≠ the partitioned mesh is
+    REJECTED LOUDLY — the JAX gather would otherwise silently clamp out-of-range cell
+    ids (too-short) or mis-align (wrong mesh), corrupting the rank's compare/weights
+    on a multi-day run (iter 97; EXACT-N vs nCells_global also catches too-LONG)."""
+    layout = _mock_layout([True, True, False], [2, 3, 4], n_global=5)
+    ref5 = _global_cell_state(5)
+    # area_weights shorter than the global mesh (5).
+    with pytest.raises(ValueError, match="area_weights has 4 cells.*global mesh has 5"):
+        _distributed_campaign_kwargs(
+            layout, ref5, jnp.ones(4), n_worst=1, base_valid_mask=None)
+    # area_weights LONGER than the global mesh — exact check (a bounds check misses this).
+    with pytest.raises(ValueError, match="area_weights has 6 cells.*global mesh has 5"):
+        _distributed_campaign_kwargs(
+            layout, ref5, jnp.ones(6), n_worst=1, base_valid_mask=None)
+    # a non-1-D area_weights is rejected (must be per-cell).
+    with pytest.raises(ValueError, match="must be 1-D"):
+        _distributed_campaign_kwargs(
+            layout, ref5, jnp.ones((5, 2)), n_worst=1, base_valid_mask=None)
+    # reference cell-count ≠ the mesh (here a reference for 6 cells, mesh has 5).
+    with pytest.raises(ValueError, match="reference has 6 cells.*global mesh has 5"):
+        _distributed_campaign_kwargs(
+            layout, _global_cell_state(6), jnp.ones(5), n_worst=1, base_valid_mask=None)
 
 
 def test_build_distributed_multi_forwards_composed_kwargs(monkeypatch):

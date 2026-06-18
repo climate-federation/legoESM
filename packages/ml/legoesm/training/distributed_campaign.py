@@ -62,7 +62,9 @@ def distributed_campaign_hooks(
     return valid_mask, manifest_reducer, global_sum_mpi
 
 
-def slice_reference_to_local(reference: Any, local_cells: Any) -> Any:
+def slice_reference_to_local(
+    reference: Any, local_cells: Any, *, expected_n_cells: int | None = None
+) -> Any:
     """Cut a GLOBAL reference :class:`ColumnState` to a rank's LOCAL cells.
 
     The distributed model runs rank-local (each rank holds its ``local_cells`` =
@@ -73,6 +75,11 @@ def slice_reference_to_local(reference: Any, local_cells: Any) -> Any:
     ``precip_mm_day`` absent on a cell-wind reference) pass through.  Order is
     PRESERVED so the sliced reference aligns row-for-row with the rank-local model
     state.
+
+    ``expected_n_cells`` (optional) is the partitioned GLOBAL cell count
+    (``layout.partition.nCells_global``); when given, the reference's cell-axis
+    length MUST equal it (an EXACT mesh-identity check that also rejects a reference
+    LONGER than the mesh, which the bounds check alone would miss).
 
     The reference MUST be a CELL-space comparison state: every field's leading axis
     is the cell axis, so ``u_edge`` (the model's NATIVE edge velocity, ``nEdges`` —
@@ -87,7 +94,42 @@ def slice_reference_to_local(reference: Any, local_cells: Any) -> Any:
             "sliced by cell ids); got a non-None u_edge (a model state was passed "
             "as the reference?)."
         )
-    idx = jnp.asarray(np.asarray(local_cells))
+    idx_np = np.asarray(local_cells)
+    # FAIL FAST on a global/reference cell-count MISMATCH: a JAX gather (``x[idx]``)
+    # SILENTLY CLAMPS out-of-bounds indices to the edge, so a wrong-mesh ERA5
+    # reference (or one for fewer cells than the partition spans) would corrupt the
+    # compare on a multi-day run with NO error. ``local_cells`` + the reference shapes
+    # are concrete (host) here (campaign-build time, never traced), so a Python check
+    # is safe. EVERY per-cell field is gathered, so ALL must share the cell-axis
+    # length (checking only the first would let an inconsistent later field clamp).
+    cell_lens = {
+        f: int(np.asarray(getattr(reference, f)).shape[0])
+        for f in reference._fields if getattr(reference, f) is not None
+    }
+    if not cell_lens:
+        raise ValueError(
+            "slice_reference_to_local: reference has no per-cell fields to slice.")
+    n_cells = next(iter(cell_lens.values()))
+    bad = {f: length for f, length in cell_lens.items() if length != n_cells}
+    if bad:
+        raise ValueError(
+            "slice_reference_to_local: inconsistent reference cell-axis lengths "
+            f"(expected {n_cells}, got {bad}) — every per-cell field is sliced by the "
+            "same cell ids, so they must agree.")
+    if expected_n_cells is not None and n_cells != expected_n_cells:
+        raise ValueError(
+            f"slice_reference_to_local: reference has {n_cells} cells but the "
+            f"partitioned global mesh has {expected_n_cells} — the GLOBAL ERA5 "
+            "reference must be defined on the SAME mesh as the model run.")
+    if idx_np.size:
+        lo, hi = int(idx_np.min()), int(idx_np.max())
+        if lo < 0 or hi >= n_cells:
+            raise ValueError(
+                "slice_reference_to_local: local_cells index out of range "
+                f"[{lo}, {hi}] for a reference with {n_cells} cells (a JAX gather "
+                "would otherwise silently clamp out-of-range ids and corrupt the "
+                "compare).")
+    idx = jnp.asarray(idx_np)
 
     def _slice(x: Any) -> Any:
         return None if x is None else jnp.asarray(x)[idx]
