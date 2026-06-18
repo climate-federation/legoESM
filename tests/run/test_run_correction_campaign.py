@@ -25,6 +25,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
     build_correction_campaign,
+    build_multi_correction_campaign,
     make_base_driver_builder,
     make_clubb_build_driver,
     make_les_diagnose_fn,
@@ -443,3 +444,54 @@ def test_build_correction_campaign_environment_strategy():
     ck = np.asarray(result.final_config.C_K)
     assert ck.shape == (8 * 16,)             # per-column (env-generalized) field
     assert np.all(np.isfinite(ck))
+
+
+def test_build_multi_correction_campaign_corrects_both_coefficients():
+    """build_multi_correction_campaign co-corrects C_K AND Pr_t from ONE LES run
+    per column: it sets diagnosis_methods, auto-populates l_mix_max, and the multi
+    campaign produces in-bounds per-column fields for BOTH coefficients."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_multi_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        coefficients=("C_K", "Pr_t"), accept_only_if_improved=False)
+
+    assert set(result.final_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}
+    ck = np.asarray(result.final_config.C_K).reshape(-1)
+    prt = np.asarray(result.final_config.Pr_t).reshape(-1)
+    assert ck.shape == (8 * 16,) and prt.shape == (8 * 16,)
+    assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2     # C_K bounds
+    assert float(prt.min()) >= 0.3 and float(prt.max()) <= 1.5   # Pr_t bounds
+
+
+def test_build_multi_correction_campaign_rejects_unknown_coefficient():
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    with pytest.raises(ValueError, match="unknown coefficient"):
+        build_multi_correction_campaign(
+            base_atm_config=_base_config(),
+            build_base_driver=lambda cfg: _FakeDriver(model_state),
+            extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+            reference=model_state, sigma=sigma, grid=grid,
+            area_weights=jnp.ones((8, 16)), n_iterations=1,
+            les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+            run_les_fn=_mock_run_les_sheared, n_worst=1,
+            coefficients=("C_K", "bogus"))

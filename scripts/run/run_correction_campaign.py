@@ -105,6 +105,55 @@ def make_les_diagnose_fn(
     return diagnose_fn
 
 
+# Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.
+_COEFFICIENT_SPEC_MAP = {
+    "C_K": ("clubb_lite_C_K", "clubb_coefficient"),
+    "Pr_t": ("clubb_lite_Pr_t", "prandtl_number"),
+}
+
+
+def _grid_latlon_deg(grid, lat_deg, lon_deg):
+    """Default ``lat_deg``/``lon_deg`` to the grid's centre lat/lon in degrees."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    rad2deg = 180.0 / np.pi
+    if lat_deg is None:
+        lat_deg = jnp.asarray(np.asarray(grid.grid_lat) * rad2deg)
+    if lon_deg is None:
+        lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
+    return lat_deg, lon_deg
+
+
+def _compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
+                        reference, sigma, area_weights, n_worst,
+                        lat_deg, lon_deg):
+    """``compare_fn(config)`` = build clubb driver → run AMIP/CMIP → time-mean →
+    compare to ``reference`` (shared by the single + multi build functions)."""
+    import jax.numpy as jnp
+
+    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
+    run_fn = make_run_fn(build_driver, extract_column_state)
+    return make_compare_fn(
+        reference=reference,
+        sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=lat_deg, lon_deg=lon_deg, area_weights=area_weights,
+        n_worst=n_worst, run_amip_fn=run_fn,
+    )
+
+
+def _maybe_env_grid_fn(feedback_strategy, sigma):
+    """The env-generalization ``env_grid_fn(model_ctx)`` for ``feedback_strategy=
+    'environment'`` (``None`` for the static scatter)."""
+    if feedback_strategy != "environment":
+        return None
+    from functools import partial as _partial
+
+    from legoesm.training.feedback_assembly import column_environment_grid
+    return _partial(column_environment_grid, sigma=sigma)
+
+
 def build_correction_campaign(
     *,
     base_atm_config: Any,
@@ -156,15 +205,8 @@ def build_correction_campaign(
     corrects ``clubb_lite_Pr_t`` (the dimensionless ``Pr_t = K_m/K_h``), otherwise
     ``clubb_lite_C_K``.
     """
-    import jax.numpy as jnp
-    import numpy as np
-
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
-    rad2deg = 180.0 / np.pi
-    if lat_deg is None:
-        lat_deg = jnp.asarray(np.asarray(grid.grid_lat) * rad2deg)
-    if lon_deg is None:
-        lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
+    lat_deg, lon_deg = _grid_latlon_deg(grid, lat_deg, lon_deg)
 
     # Keep the loop's reduction in lock-step with the LES diagnosis, and select
     # the promotable coefficient + its production default by method:
@@ -177,8 +219,8 @@ def build_correction_campaign(
         # campaign (run_multi_correction_*) is a separate, not-yet-wired path.
         raise ValueError(
             "build_correction_campaign is single-coefficient: set "
-            "les_config.diagnosis_method, not diagnosis_methods (the simultaneous "
-            "multi-coefficient campaign is not wired here yet).")
+            "les_config.diagnosis_method, not diagnosis_methods. For SIMULTANEOUS "
+            "multi-coefficient correction use build_multi_correction_campaign.")
     diagnosis_method = les_config.diagnosis_method
     if diagnosis_method == "prandtl_number":
         promotion_key = "clubb_lite_Pr_t"
@@ -193,27 +235,15 @@ def build_correction_campaign(
             les_config = les_config._replace(
                 clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
-    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
-    run_fn = make_run_fn(build_driver, extract_column_state)
-    compare_fn = make_compare_fn(
-        reference=reference,
-        sigma_full=jnp.asarray(sigma.sigma_full),
-        sigma_half=jnp.asarray(sigma.sigma_half),
-        lat_deg=lat_deg, lon_deg=lon_deg, area_weights=area_weights,
-        n_worst=n_worst, run_amip_fn=run_fn,
+    compare_fn = _compose_compare_fn(
+        base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, reference=reference, sigma=sigma,
+        area_weights=area_weights, n_worst=n_worst,
+        lat_deg=lat_deg, lon_deg=lon_deg,
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
-
-    # The "environment" feedback strategy generalizes each diagnosed coefficient
-    # to ALL env-similar columns; env_grid_fn(model_ctx) supplies the full-grid
-    # env predictors (computed on the model's sigma levels) each round.
-    env_grid_fn = None
-    if feedback_strategy == "environment":
-        from functools import partial as _partial
-
-        from legoesm.training.feedback_assembly import column_environment_grid
-        env_grid_fn = _partial(column_environment_grid, sigma=sigma)
+    env_grid_fn = _maybe_env_grid_fn(feedback_strategy, sigma)
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -227,6 +257,95 @@ def build_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+    )
+
+
+def build_multi_correction_campaign(
+    *,
+    base_atm_config: Any,
+    build_base_driver: Callable[[Any], Any],
+    extract_column_state: Callable[..., Any],
+    reference: Any,
+    sigma: Any,
+    grid: Any,
+    area_weights: Any,
+    n_iterations: int,
+    les_config: Any,
+    run_les_fn: Callable[[Any], Any],
+    n_worst: int,
+    coefficients: tuple[str, ...] = ("C_K", "Pr_t"),
+    les_budget: int | None = None,
+    env_scales: Any | None = None,
+    initial_clubb: Any | None = None,
+    lat_deg: Any | None = None,
+    lon_deg: Any | None = None,
+    initial_fields: dict | None = None,
+    start_round: int = 0,
+    checkpoint_callback: Any | None = None,
+    feedback_strategy: str = "static",
+    accept_only_if_improved: bool = True,
+    step_fractions: Any | None = None,
+    clip_to_bounds: bool = True,
+):
+    """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
+
+    Like :func:`build_correction_campaign` but corrects EVERY coefficient in
+    ``coefficients`` (e.g. ``("C_K", "Pr_t")``) together from ONE LES run per
+    column: it builds a :class:`~legoesm.training.correction_loop.CorrectionSpec`
+    per coefficient, sets ``les_config.diagnosis_methods`` to their union so the
+    spin-off LES is diagnosed for all of them at once, and drives
+    :func:`~legoesm.training.correction_loop.run_multi_correction_campaign`.
+    Auto-populates ``clubb_l_mix_max`` when ``"C_K"`` (the ``clubb_coefficient``
+    diagnosis) is requested.  ``initial_fields`` (``{promotion_key: field}``)
+    resumes the accumulated per-coefficient state.  Returns the
+    :class:`~legoesm.training.correction_loop.MultiCampaignResult`.
+    """
+    from legoesm.training.correction_loop import (
+        CorrectionSpec,
+        run_multi_correction_campaign,
+    )
+
+    if not coefficients:
+        raise ValueError("coefficients must be a non-empty tuple.")
+    grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
+    lat_deg, lon_deg = _grid_latlon_deg(grid, lat_deg, lon_deg)
+    clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
+
+    specs = []
+    for name in coefficients:
+        if name not in _COEFFICIENT_SPEC_MAP:
+            raise ValueError(
+                f"unknown coefficient {name!r}; choose from "
+                f"{tuple(_COEFFICIENT_SPEC_MAP)}.")
+        key, method = _COEFFICIENT_SPEC_MAP[name]
+        specs.append(CorrectionSpec(key, method, float(getattr(CLUBBLiteConfig(), name))))
+
+    # Diagnose every coefficient's method from ONE LES run (dedup, keep order).
+    methods = tuple(dict.fromkeys(s.diagnosis_method for s in specs))
+    les_config = les_config._replace(diagnosis_methods=methods)
+    if "clubb_coefficient" in methods and \
+            getattr(les_config, "clubb_l_mix_max", None) is None:
+        les_config = les_config._replace(clubb_l_mix_max=float(clubb_cfg.l_mix_max))
+
+    compare_fn = _compose_compare_fn(
+        base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, reference=reference, sigma=sigma,
+        area_weights=area_weights, n_worst=n_worst,
+        lat_deg=lat_deg, lon_deg=lon_deg,
+    )
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+    env_grid_fn = _maybe_env_grid_fn(feedback_strategy, sigma)
+
+    return run_multi_correction_campaign(
+        clubb_cfg, int(n_iterations), specs,
+        compare_fn=compare_fn, diagnose_fn=diagnose_fn, grid_shape=grid_shape,
+        les_budget=les_budget, env_scales=env_scales,
+        feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
+        accept_only_if_improved=accept_only_if_improved,
+        step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+        initial_fields=initial_fields, start_round=start_round,
+        checkpoint_callback=checkpoint_callback,
     )
 
 
@@ -311,6 +430,11 @@ def _build_arg_parser():
                         "(e.g. '1.0,0.5,0.25'): backtrack the correction magnitude "
                         "toward the LES diagnosis, keeping the largest improving "
                         "step (default: full single step)")
+    p.add_argument("--coefficients", default=None,
+                   help="comma-separated coefficients to correct SIMULTANEOUSLY "
+                        "from one LES run (e.g. 'C_K,Pr_t'): routes to the multi-"
+                        "coefficient campaign. Omit for the single-coefficient "
+                        "--diagnosis-method path.")
     p.add_argument("--diagnosis-method",
                    choices=("clubb_coefficient", "prandtl_number",
                             "eddy_diffusivity"),
@@ -354,6 +478,84 @@ def _area_weights(grid):  # pragma: no cover - HPC path
         "run_correction_campaign: grid exposes no cell-area weights; using "
         "cos-latitude (a lat-lon proxy) for the bias aggregation.", stacklevel=2)
     return jnp.cos(jnp.deg2rad(jnp.asarray(np.asarray(grid.grid_lat))))
+
+
+def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
+                    extract_fn, run_les):  # pragma: no cover - heavy I/O
+    """Multi-coefficient campaign entry (``--coefficients``): a dict checkpoint /
+    resume / output for the per-coefficient accumulated fields."""
+    import json
+
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+
+    coefficients = tuple(c.strip() for c in args.coefficients.split(","))
+    # promotion_key -> config field name (the coefficient name IS the field name).
+    promo_to_field = {
+        _COEFFICIENT_SPEC_MAP[c][0]: c
+        for c in coefficients if c in _COEFFICIENT_SPEC_MAP
+    }
+    gshape = grid.grid_shape_2d
+    initial_clubb, initial_fields, start_round = None, None, 0
+    if args.resume:
+        with open(args.resume) as f:
+            ckpt = json.load(f)
+        if sorted(ckpt.get("coefficients", [])) != sorted(coefficients):
+            raise SystemExit(
+                f"checkpoint coefficients {ckpt.get('coefficients')} != requested "
+                f"{list(coefficients)}; resume with the matching set.")
+        initial_fields = {
+            k: jnp.asarray(v).reshape(gshape) for k, v in ckpt["fields"].items()}
+        # Rebuild the config FROM the accumulated fields (single source of truth).
+        overrides = {
+            promo_to_field[k]: jnp.asarray(v).reshape(-1)
+            for k, v in ckpt["fields"].items()}
+        initial_clubb = CLUBBLiteConfig(**overrides)
+        start_round = int(ckpt["round"]) + 1
+        print(f"[campaign] resuming multi from {args.resume} at round {start_round}")
+
+    checkpoint_callback = None
+    if args.checkpoint:
+        def checkpoint_callback(round_idx, res, fields):  # noqa: ARG001
+            with open(args.checkpoint, "w") as f:
+                json.dump({"round": int(round_idx),
+                           "coefficients": list(coefficients),
+                           "fields": {k: np.asarray(v).reshape(-1).tolist()
+                                      for k, v in fields.items()}}, f)
+
+    result = build_multi_correction_campaign(
+        base_atm_config=base_cfg, build_base_driver=build_base_driver,
+        extract_column_state=extract_fn, reference=reference, sigma=sigma, grid=grid,
+        area_weights=_area_weights(grid), n_iterations=args.iterations,
+        les_config=ColumnLESConfig(), n_worst=args.n_worst, coefficients=coefficients,
+        les_budget=args.les_budget, run_les_fn=run_les,
+        initial_clubb=initial_clubb, initial_fields=initial_fields,
+        start_round=start_round, checkpoint_callback=checkpoint_callback,
+        feedback_strategy=args.feedback_strategy,
+        accept_only_if_improved=not args.keep_worsening_rounds,
+        step_fractions=([float(s) for s in args.step_fractions.split(",")]
+                        if args.step_fractions else None),
+        clip_to_bounds=not args.allow_unphysical_coeff)
+
+    biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
+               bool(it.bias.improved)) for it in result.iterations]
+    accepted = list(result.accepted)
+    steps = [float(it.step_fraction) for it in result.iterations]
+    for i, (b0, b1, imp) in enumerate(biases):
+        kept = accepted[i] if i < len(accepted) else True
+        print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
+              f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
+              f"{'kept' if kept else 'REJECTED'})")
+    with open(args.out, "w") as f:
+        json.dump({"coefficients": list(coefficients),
+                   "fields": {k: np.asarray(v).reshape(-1).tolist()
+                              for k, v in result.final_fields.items()},
+                   "biases": biases, "accepted": accepted,
+                   "step_fractions": steps}, f, indent=2)
+    print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
@@ -424,10 +626,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         args.era5_time_idx)
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
-    # Restart: resume from a checkpoint (corrected config + accumulated field +
-    # round), so a multi-day campaign survives a job timeout (§1 restartable).
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+
+    n_steps = int(args.les_hours * 3600.0 / args.les_dt)
+    run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
+    if args.coefficients is not None:
+        return _run_multi_main(
+            args, base_cfg, grid, sigma, reference, build_base_driver, extract_fn,
+            run_les)
+
+    # Restart: resume from a checkpoint (corrected config + accumulated field +
+    # round), so a multi-day campaign survives a job timeout (§1 restartable).
     # The CLUBB field the diagnosis corrects (C_K for the diffusivity methods,
     # Pr_t for prandtl_number) — so the checkpoint/output persist the right field.
     corrected_field = "Pr_t" if args.diagnosis_method == "prandtl_number" else "C_K"
@@ -468,7 +678,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
                            corrected_field: flat.tolist(),
                            "field": np.asarray(field).tolist()}, f)
 
-    n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma,
@@ -476,7 +685,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
         n_worst=args.n_worst,
         les_budget=args.les_budget,
-        run_les_fn=partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps),
+        run_les_fn=run_les,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         feedback_strategy=args.feedback_strategy,
