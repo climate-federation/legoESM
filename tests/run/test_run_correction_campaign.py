@@ -268,3 +268,33 @@ def test_build_correction_campaign_checkpoint_passthrough():
     # Non-worst columns keep initial_field (0.55), NOT the default background 0.4
     # — so initial_field was genuinely forwarded + used as the round's base.
     np.testing.assert_allclose(others, 0.55)
+
+
+@pytest.mark.slow
+def test_build_correction_campaign_environment_strategy():
+    """feedback_strategy='environment' runs end-to-end through the campaign
+    (column_environment_grid computes the full-grid env each round) → a
+    per-column C_K."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les, n_worst=1, feedback_strategy="environment")
+
+    assert len(result.iterations) == 1
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.shape == (8 * 16,)             # per-column (env-generalized) field
+    assert np.all(np.isfinite(ck))

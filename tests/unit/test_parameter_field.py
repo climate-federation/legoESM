@@ -13,7 +13,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.training.parameter_field import (
     environment_kernel_field,
     scatter_column_field,
@@ -72,6 +71,54 @@ def test_kernel_field_recovers_value_at_sample():
     # The far column (~4.5 normalized σ away, single sample) is below the
     # 3σ total-weight floor ⇒ NOT extrapolated to ⇒ background.
     assert float(field[1]) == pytest.approx(-9.0)
+
+
+def test_kernel_field_array_background_per_column_fallback():
+    # Array background (accumulated round-k field): a column with NO env-similar
+    # diagnosis this round retains its prior per-column value, while a column
+    # near a sample is overwritten by the regression. Enables multi-round
+    # campaign accumulation under strategy="environment".
+    grid_env = jnp.array([[300.0, 1000.0], [0.0, 0.0]])  # col 0 near sample, col 1 far
+    sample_env = jnp.array([[300.0, 1000.0]])
+    sample_values = jnp.array([0.9])
+    L = jnp.array([1.0, 1.0])
+    prior = jnp.array([-1.0, -2.0])  # flat (ncol,) accumulated background
+    field = environment_kernel_field(
+        grid_env, sample_env, sample_values, length_scales=L, background=prior,
+    )
+    assert float(field[0]) == pytest.approx(0.9, abs=1e-6)   # regressed
+    assert float(field[1]) == pytest.approx(-2.0)            # prior retained
+
+
+def test_kernel_field_array_background_row_major_ordering():
+    # A genuinely 2-D (2, 3) background where C-order and F-order flattening
+    # diverge: the kernel must flatten row-major (C-order) to match the flat
+    # column contract. Only the column near the sample is overwritten; every
+    # other column keeps its own prior value at the C-order position.
+    grid_env = jnp.array([
+        [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+        [0.0, 0.0], [300.0, 1000.0], [0.0, 0.0],   # flat index 4 near sample
+    ])
+    sample_env = jnp.array([[300.0, 1000.0]])
+    sample_values = jnp.array([0.9])
+    L = jnp.array([1.0, 1.0])
+    prior_2d = jnp.arange(6.0).reshape(2, 3) - 10.0   # C-order: [-10..-5]
+    field = environment_kernel_field(
+        grid_env, sample_env, sample_values, length_scales=L, background=prior_2d,
+    )
+    expected = np.array([-10.0, -9.0, -8.0, -7.0, 0.9, -5.0])  # C-order, idx 4 regressed
+    np.testing.assert_allclose(np.asarray(field), expected, atol=1e-6)
+
+
+def test_kernel_field_array_background_size_mismatch_raises():
+    grid_env = jnp.array([[300.0, 1000.0], [0.0, 0.0]])
+    sample_env = jnp.array([[300.0, 1000.0]])
+    with pytest.raises(ValueError, match="array background size"):
+        environment_kernel_field(
+            grid_env, sample_env, jnp.array([0.9]),
+            length_scales=jnp.array([1.0, 1.0]),
+            background=jnp.array([1.0, 2.0, 3.0]),  # size 3 != ncol 2
+        )
 
 
 def test_kernel_field_background_when_no_neighbor():

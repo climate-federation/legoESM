@@ -125,6 +125,7 @@ def build_correction_campaign(
     initial_field: Any | None = None,
     start_round: int = 0,
     checkpoint_callback: Any | None = None,
+    feedback_strategy: str = "static",
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -161,6 +162,16 @@ def build_correction_campaign(
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
 
+    # The "environment" feedback strategy generalizes each diagnosed coefficient
+    # to ALL env-similar columns; env_grid_fn(model_ctx) supplies the full-grid
+    # env predictors (computed on the model's sigma levels) each round.
+    env_grid_fn = None
+    if feedback_strategy == "environment":
+        from functools import partial as _partial
+
+        from legoesm.training.feedback_assembly import column_environment_grid
+        env_grid_fn = _partial(column_environment_grid, sigma=sigma)
+
     background = float(CLUBBLiteConfig().C_K)
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -170,6 +181,7 @@ def build_correction_campaign(
         background=background, les_budget=les_budget, env_scales=env_scales,
         initial_field=initial_field, start_round=start_round,
         checkpoint_callback=checkpoint_callback,
+        feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
     )
 
 
@@ -242,6 +254,10 @@ def _build_arg_parser():
     p.add_argument("--n-worst", type=int, default=20)
     p.add_argument("--les-budget", type=int, default=None,
                    help="cap LES to K env-cluster representatives (default: all)")
+    p.add_argument("--feedback-strategy", choices=("static", "environment"),
+                   default="static",
+                   help="static: correct only the worst columns; environment: "
+                        "generalize the diagnoses to all env-similar columns")
     p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
@@ -373,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         run_les_fn=partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps),
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
+        feedback_strategy=args.feedback_strategy,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]

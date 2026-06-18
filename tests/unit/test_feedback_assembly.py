@@ -13,7 +13,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.training.feedback_assembly import (
     assemble_feedback_field,
     reduce_column_diagnosis,
@@ -154,3 +153,77 @@ def test_assemble_field_differentiable():
     assert bool(jnp.all(jnp.isfinite(g0)))
     # field[0] = mean(2,4)=3; d(9)/dK0 via 0.5 each = 2*3*0.5 = 3.
     np.testing.assert_allclose(np.asarray(g0), [3.0, 3.0], rtol=1e-12)
+
+
+# --- environment-kernel generalization (iter 42) ----------------------------
+
+from legoesm.training.column_manifest import (  # noqa: E402
+    ColumnEnvironment,
+    ColumnRecord,
+)
+from legoesm.training.feedback_assembly import column_environment_grid  # noqa: E402
+
+
+def _erec(flat, sst, cape, shear):
+    return ColumnRecord(
+        flat_index=flat, grid_index=(flat,), lat_deg=0.0, lon_deg=0.0,
+        time_index=0, combined_score=1.0, T_rmse_K=0.0, qv_rmse_kg_kg=0.0,
+        wind_rmse_m_s=0.0, precip_err_mm_day=0.0,
+        environment=ColumnEnvironment(sst_K=sst, cape_J_kg=cape, bulk_shear_m_s=shear))
+
+
+def test_assemble_environment_generalizes_to_similar_columns():
+    """strategy='environment' spreads each diagnosed value to columns whose env
+    is similar — incl. columns NOT in the manifest."""
+    # 4 columns: 0,1 share env A (cold/dry); 2,3 share env B (warm/moist).
+    grid_env = jnp.asarray([
+        [280.0, 100.0, 2.0], [281.0, 110.0, 2.2],     # env A (cols 0,1)
+        [302.0, 3000.0, 25.0], [301.0, 2950.0, 24.0],  # env B (cols 2,3)
+    ])
+    length_scales = jnp.std(grid_env, axis=0)
+    # worst columns: col 0 (env A) diagnosed K→10; col 3 (env B) diagnosed K→20.
+    records = [_erec(0, 280.0, 100.0, 2.0), _erec(3, 301.0, 2950.0, 24.0)]
+    diagnoses = [_Eddy(K=jnp.array([10.0, 10.0]), valid=jnp.array([True, True])),
+                 _Eddy(K=jnp.array([20.0, 20.0]), valid=jnp.array([True, True]))]
+
+    field = assemble_feedback_field(
+        records, diagnoses, (2, 2), method="eddy_diffusivity", background=0.4,
+        strategy="environment", grid_env=grid_env, length_scales=length_scales)
+    f = np.asarray(field).reshape(-1)
+    # The NON-manifest columns got generalized: col 1 (env A) ≈10, col 2 (env B) ≈20.
+    assert f[1] == pytest.approx(10.0, abs=0.5)
+    assert f[2] == pytest.approx(20.0, abs=0.5)
+    assert f[0] == pytest.approx(10.0, abs=0.5) and f[3] == pytest.approx(20.0, abs=0.5)
+
+
+def test_assemble_environment_requires_grid_env():
+    records = [_erec(0, 280.0, 100.0, 2.0)]
+    diagnoses = [_Eddy(K=jnp.array([10.0]), valid=jnp.array([True]))]
+    with pytest.raises(ValueError, match="requires grid_env"):
+        assemble_feedback_field(records, diagnoses, (1, 1), strategy="environment")
+
+
+def test_assemble_unknown_strategy_raises():
+    with pytest.raises(ValueError, match="Unknown strategy"):
+        assemble_feedback_field([], [], (2, 2), strategy="bogus")
+
+
+def test_column_environment_grid_shapes_and_sst():
+    """column_environment_grid → (ncol, 3) env predictors + (3,) length scales;
+    the SST predictor equals the state's sst_K."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import ColumnState
+
+    nlat, nlon, nlev = 3, 4, 5
+    sigma = create_sigma_coordinate(nlev)
+    sst = jnp.full((nlat, nlon), 295.0)
+    model = ColumnState(
+        T=jnp.full((nlat, nlon, nlev), 280.0), q_v=jnp.full((nlat, nlon, nlev), 5e-3),
+        u=jnp.full((nlat, nlon, nlev), 5.0), v=jnp.zeros((nlat, nlon, nlev)),
+        p_s=jnp.full((nlat, nlon), 1.0e5), sst_K=sst)
+    grid_env, length_scales = column_environment_grid(model, sigma)
+    assert grid_env.shape == (nlat * nlon, 3)
+    assert length_scales.shape == (3,)
+    assert bool(jnp.all(jnp.isfinite(grid_env)))
+    np.testing.assert_allclose(np.asarray(grid_env[:, 0]), 295.0)  # SST predictor
+    assert bool(jnp.all(length_scales > 0))

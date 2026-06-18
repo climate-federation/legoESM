@@ -20,11 +20,11 @@ keep the background.  Pure-JAX, differentiable w.r.t. the diagnosed values.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.training.feedback import build_parameter_field
 
 _METHODS = ("eddy_diffusivity", "entrainment")
@@ -71,25 +71,37 @@ def assemble_feedback_field(
     *,
     method: str = "eddy_diffusivity",
     background: float = 0.0,
+    strategy: str = "static",
+    grid_env: Any = None,
+    length_scales: Any = None,
 ) -> jax.Array:
-    """Assemble the static ``(lat, lon)`` feedback field from the LES diagnoses.
+    """Assemble the ``(lat, lon)`` feedback field from the LES diagnoses.
 
     ``records`` are the manifest :class:`~legoesm.training.column_manifest.ColumnRecord`
     s (one per worst column, in the same order as ``diagnoses``); each diagnosis
-    is reduced to a scalar and scattered at its column's ``flat_index`` into a
-    ``grid_shape`` field (``background`` elsewhere).  Columns whose diagnosis is
-    invalid keep the background.  Builds via :func:`build_parameter_field`
-    (``"static"`` strategy), so it is differentiable w.r.t. the diagnosed values.
+    is reduced to a scalar (``method``).  Columns whose diagnosis is invalid keep
+    the background.  Differentiable w.r.t. the diagnosed values.
 
-    The environment-kernel generalization (``strategy="environment"``) is the
-    natural extension: pass the manifest env tags as ``sample_env`` — kept out of
-    this helper since it needs the full-grid environment from the caller.
+    ``strategy="static"`` (default) scatters each reduced value at its column's
+    ``flat_index`` (``background`` elsewhere) — only the flagged columns change.
+    ``strategy="environment"`` GENERALISES: it Nadaraya–Watson-regresses the
+    reduced values onto the **environment** (the manifest's SST/CAPE/shear tags as
+    ``sample_env``) over the FULL grid, so every column environmentally similar to
+    a diagnosed one gets a value — the §6 "regress onto env predictors" option
+    that lets a few LES (one per cluster, §7) correct many columns.  It needs the
+    full-grid env predictors ``grid_env`` ``(ncol, 3)`` + per-predictor
+    ``length_scales`` ``(3,)`` from the caller (see :func:`column_environment_grid`).
+    An unknown strategy raises (dispatch hardening).
     """
     if method not in _METHODS:
         # Validate up front so an unknown method raises even with empty records
         # (the empty branch would otherwise never reach reduce_column_diagnosis).
         raise ValueError(
             f"Unknown diagnosis method {method!r}; choose from {_METHODS}."
+        )
+    if strategy not in ("static", "environment"):
+        raise ValueError(
+            f"Unknown strategy {strategy!r}; choose 'static' or 'environment'."
         )
     if len(records) != len(diagnoses):
         raise ValueError(
@@ -104,15 +116,98 @@ def assemble_feedback_field(
             jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
         )
 
-    flat_indices = jnp.asarray([int(r.flat_index) for r in records])
     reduced = [reduce_column_diagnosis(d, method) for d in diagnoses]
     values = jnp.stack([v for v, _ in reduced])
     valid = jnp.stack([ok for _, ok in reduced])
+
+    if strategy == "static":
+        return build_parameter_field(
+            "static",
+            grid_shape=grid_shape,
+            flat_indices=jnp.asarray([int(r.flat_index) for r in records]),
+            values=values,
+            valid=valid,
+            background=background,
+        )
+
+    # strategy == "environment"
+    if grid_env is None or length_scales is None:
+        raise ValueError(
+            "strategy='environment' requires grid_env (ncol, 3) + length_scales "
+            "(3,) — the full-grid environment predictors (see "
+            "column_environment_grid)."
+        )
+    sample_env = jnp.asarray([
+        [float(r.environment.sst_K), float(r.environment.cape_J_kg),
+         float(r.environment.bulk_shear_m_s)]
+        for r in records
+    ])
     return build_parameter_field(
-        "static",
+        "environment",
         grid_shape=grid_shape,
-        flat_indices=flat_indices,
-        values=values,
+        grid_env=jnp.asarray(grid_env),
+        sample_env=sample_env,
+        sample_values=values,
+        length_scales=jnp.asarray(length_scales),
         valid=valid,
         background=background,
     )
+
+
+def column_environment_grid(
+    model: Any,
+    sigma: Any,
+    *,
+    env_config: Any = None,
+    p_full: Any = None,
+    p_half: Any = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Full-grid environment predictors + per-predictor length scales from a
+    :class:`~legoesm.training.compare_reanalysis.ColumnState`, for the
+    ``strategy="environment"`` feedback generalization.
+
+    Computes ``(ncol, 3)`` ``[SST, CAPE, bulk-shear]`` via the SAME
+    :func:`~legoesm.training.column_manifest.compute_column_environment` the
+    manifest used, and per-predictor length scales = the std over the grid
+    (floored) so the Nadaraya–Watson kernel weights the three
+    very-different-magnitude axes comparably.
+
+    **Consistency** (Codex iter-42): ``grid_env`` and the records' ``sample_env``
+    MUST be computed identically or the kernel distances are meaningless, so this
+    accepts the SAME knobs the comparison can use — ``env_config`` (default
+    :class:`EnvironmentConfig`, e.g. the shear reference levels) and explicit
+    ``p_full``/``p_half`` (both-or-neither; default pure sigma ``p = σ·p_s``).
+    Pass the same ``env_config``/pressure the manifest (``make_compare_fn``) used
+    for a hybrid-coordinate or custom-config run.  ``sst`` falls back to the
+    surface-level temperature when the state carries no SST.
+    """
+    from legoesm.training.column_manifest import (
+        EnvironmentConfig,
+        compute_column_environment,
+    )
+
+    p_s = jnp.asarray(model.p_s)
+    sigma_full = jnp.asarray(sigma.sigma_full, dtype=p_s.dtype)
+    sigma_half = jnp.asarray(sigma.sigma_half, dtype=p_s.dtype)
+    if (p_full is None) != (p_half is None):
+        raise ValueError(
+            "column_environment_grid: pass both p_full and p_half, or neither "
+            "(neither ⇒ pure sigma p = σ·p_s)."
+        )
+    if p_full is None:
+        p_full = p_s[..., None] * sigma_full
+        p_half = p_s[..., None] * sigma_half
+    sst = model.sst_K if getattr(model, "sst_K", None) is not None \
+        else jnp.asarray(model.T)[..., -1]
+    fields = compute_column_environment(
+        T=jnp.asarray(model.T), q_v=jnp.asarray(model.q_v),
+        u=jnp.asarray(model.u), v=jnp.asarray(model.v),
+        p_full=jnp.asarray(p_full), p_half=jnp.asarray(p_half),
+        sst=jnp.asarray(sst), sigma_full=sigma_full,
+        config=env_config if env_config is not None else EnvironmentConfig(),
+    )
+    grid_env = jnp.stack(
+        [fields.sst_K.reshape(-1), fields.cape_J_kg.reshape(-1),
+         fields.bulk_shear_m_s.reshape(-1)], axis=-1)            # (ncol, 3)
+    length_scales = jnp.maximum(jnp.std(grid_env, axis=0), 1.0e-6)
+    return grid_env, length_scales

@@ -30,7 +30,6 @@ from typing import Any, Callable, NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.training.bias_metrics import (
     BiasImprovement,
     bias_improvement,
@@ -91,6 +90,8 @@ def run_correction_campaign(
     initial_field: jax.Array | None = None,
     start_round: int = 0,
     checkpoint_callback: Callable[[int, CorrectionResult, jax.Array], None] | None = None,
+    feedback_strategy: str = "static",
+    env_grid_fn: Callable[[Any], tuple] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -127,6 +128,7 @@ def run_correction_campaign(
             diagnosis_method=diagnosis_method, background=base,
             expected_ncol=expected_ncol,
             les_budget=les_budget, env_scales=env_scales,
+            feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         )
         config = result.updated_config
         base = result.feedback_field   # accumulate into the next round's base
@@ -216,6 +218,8 @@ def run_correction_iteration(
     expected_ncol: int | None = None,
     les_budget: int | None = None,
     env_scales: Sequence[float] | None = None,
+    feedback_strategy: str = "static",
+    env_grid_fn: Callable[[Any], tuple] | None = None,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -301,9 +305,21 @@ def run_correction_iteration(
     else:
         diagnoses = [diagnose_fn(rec, baseline.model_ctx) for rec in records]
         n_diagnosed = len(records)
+    # Feedback field: scatter at the worst columns ("static"), or generalise the
+    # diagnosed coefficients to ALL environmentally-similar columns ("environment"
+    # — `env_grid_fn(model_ctx)` supplies the full-grid env predictors).
+    grid_env, length_scales = (None, None)
+    if feedback_strategy == "environment":
+        if env_grid_fn is None:
+            raise ValueError(
+                "feedback_strategy='environment' requires env_grid_fn(model_ctx) "
+                "-> (grid_env, length_scales)."
+            )
+        grid_env, length_scales = env_grid_fn(baseline.model_ctx)
     field = assemble_feedback_field(
         records, diagnoses, grid_shape,
         method=diagnosis_method, background=background,
+        strategy=feedback_strategy, grid_env=grid_env, length_scales=length_scales,
     )
     updated_config = apply_feedback_to_scheme(
         baseline_config, promotion_key, field, expected_ncol=ncol

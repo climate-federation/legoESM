@@ -581,3 +581,99 @@ def test_campaign_resume_zero_iterations_returns_initial_field():
         initial_field=field)
     assert camp.iterations == ()
     np.testing.assert_allclose(np.asarray(camp.final_field), 0.7)  # not 0.4
+
+
+# --- environment-kernel feedback strategy (iter 42) -------------------------
+
+def test_loop_environment_strategy_generalizes_to_similar_columns():
+    """feedback_strategy='environment' spreads the diagnosed coefficient to ALL
+    env-similar columns (incl. non-worst), via env_grid_fn(model_ctx)."""
+    grid_env = jnp.asarray([
+        [280.0, 100.0, 2.0], [281.0, 110.0, 2.2],      # env A (cols 0,1)
+        [302.0, 3000.0, 25.0], [301.0, 2950.0, 24.0],  # env B (cols 2,3)
+    ])
+    length_scales = jnp.std(grid_env, axis=0)
+
+    def env_grid_fn(model_ctx):
+        return grid_env, length_scales
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim == 0:                       # baseline: col 0 (env A) is worst
+            score = jnp.zeros((2, 2)).at[0, 0].set(8.0)
+            manifest = [_crec(0, 8.0, 280.0, 100.0, 2.0)]
+        else:
+            score = jnp.zeros((2, 2))
+            manifest = []
+        return CompareResult(combined_score=score, manifest=manifest,
+                             area_weights=jnp.ones((2, 2)), model_ctx=None)
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))
+
+    result = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=0.4,
+        feedback_strategy="environment", env_grid_fn=env_grid_fn)
+
+    ck = np.asarray(result.updated_config.C_K).reshape(-1)
+    # env A columns (0 AND the non-worst 1) generalized to ~0.9; env B kept 0.4.
+    assert ck[0] == pytest.approx(0.9, abs=0.1)
+    assert ck[1] == pytest.approx(0.9, abs=0.1)   # NON-worst, generalized
+    assert ck[2] == pytest.approx(0.4, abs=0.1)
+    assert ck[3] == pytest.approx(0.4, abs=0.1)
+
+
+def test_loop_environment_strategy_requires_env_grid_fn():
+    def compare_fn(config):
+        return CompareResult(
+            jnp.zeros((2, 2)).at[0, 0].set(8.0),
+            [_crec(0, 8.0, 280.0, 100.0, 2.0)], jnp.ones((2, 2)))
+
+    with pytest.raises(ValueError, match="requires env_grid_fn"):
+        run_correction_iteration(
+            CLUBBLiteConfig(), compare_fn=compare_fn,
+            diagnose_fn=lambda r, c: _Eddy(K=jnp.array([0.9]), valid=jnp.array([True])),
+            promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=0.4,
+            feedback_strategy="environment", env_grid_fn=None)
+
+
+def test_campaign_environment_strategy_accumulates_across_rounds():
+    """2-round campaign with feedback_strategy='environment': round 0 corrects
+    env A, round 1 corrects env B, and round 0's env-generalized values PERSIST
+    (the round-k field is round-(k+1) background — array-background path)."""
+    grid_env = jnp.asarray([
+        [280.0, 100.0, 2.0], [281.0, 110.0, 2.2],      # env A (cols 0,1)
+        [302.0, 3000.0, 25.0], [301.0, 2950.0, 24.0],  # env B (cols 2,3)
+    ])
+    length_scales = jnp.std(grid_env, axis=0)
+
+    def env_grid_fn(model_ctx):
+        return grid_env, length_scales
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim == 0:                       # round 0: col 0 (env A) worst
+            worst, env = 0, (280.0, 100.0, 2.0)
+        else:
+            ck4 = np.asarray(ck).reshape(-1)
+            if not np.isclose(ck4[2], 0.4):    # env B already corrected → done
+                return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)))
+            worst, env = 2, (302.0, 3000.0, 25.0)
+        score = jnp.zeros((2, 2)).reshape(-1).at[worst].set(8.0).reshape(2, 2)
+        return CompareResult(score, [_crec(worst, 8.0, *env)], jnp.ones((2, 2)))
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))
+
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=2, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=0.4, feedback_strategy="environment", env_grid_fn=env_grid_fn)
+
+    ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    # BOTH env clusters ended up corrected (~0.9): round-0 env-A correction
+    # persisted into round 1 (array-background accumulation), and round 1 added env B.
+    np.testing.assert_allclose(ck, 0.9, atol=0.1)
+    assert campaign.iterations[0].n_corrected == 1   # env A worst column
+    assert campaign.iterations[1].n_corrected == 1   # env B worst column

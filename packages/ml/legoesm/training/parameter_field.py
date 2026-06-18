@@ -149,5 +149,17 @@ def environment_kernel_field(
     weighted = jnp.sum(weights * sample_values[None, :], axis=-1)  # (ncol,)
     has_neighbor = total >= jnp.asarray(min_total_weight, dtype=dtype)
     denom = jnp.where(has_neighbor, total, jnp.ones_like(total))
+    # background may be a scalar (uniform base) OR a grid-shaped / flat (ncol,)
+    # array — the accumulated round-k field, so a column with no environmentally
+    # similar diagnosis this round retains its prior value (symmetric with
+    # scatter_column_field; required for multi-round campaign accumulation).
     bg = jnp.asarray(background, dtype=dtype)
+    if bg.ndim != 0:
+        ncol = grid_env.shape[0]
+        bg = bg.reshape(-1)
+        if bg.shape[0] != ncol:
+            raise ValueError(
+                f"array background size {bg.shape[0]} != ncol {ncol} "
+                f"(prod of grid_env rows)."
+            )
     return jnp.where(has_neighbor, weighted / denom, bg)
