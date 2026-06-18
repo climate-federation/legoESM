@@ -15,11 +15,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
-from legoesm.training.column_manifest import ColumnEnvironment, ColumnRecord
-from legoesm.training.compare_reanalysis import ColumnState
-from legoesm.training.correction_loop import (
+
+# The correction loop is a scientific (not float32/Metal) path — run x64 so the
+# registered-bound clamp + bias reductions are at the production precision (a float32
+# field clamps to float32(hi), e.g. float32(1.2)=1.2000000476 > the float64 bound; the
+# campaign itself runs x64). Matches tests/run/test_run_correction_campaign.py.
+jax.config.update("jax_enable_x64", True)
+
+from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig  # noqa: E402
+from legoesm.training.column_manifest import (  # noqa: E402
+    ColumnEnvironment,
+    ColumnRecord,
+)
+from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
+from legoesm.training.correction_loop import (  # noqa: E402
     CompareResult,
     CorrectionSpec,
     MultiCorrectionResult,
@@ -378,6 +388,115 @@ def test_campaign_accumulates_corrections_across_rounds():
     # The bias fell monotonically to zero across rounds.
     assert float(campaign.iterations[0].bias.baseline_bias) == pytest.approx(8.0)
     assert float(campaign.iterations[1].bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
+
+
+def _always_worst_compare_fn(nlat=2, nlon=2):
+    """compare_fn that ALWAYS reports a high uniform bias ⇒ the 2 worst columns are
+    flagged every round (regardless of the config) — to exercise the dry-LES abort."""
+    area_w = jnp.ones((nlat, nlon))
+
+    def compare_fn(config):                              # noqa: ARG001
+        bias = jnp.full((nlat, nlon), 8.0)
+        flat = np.asarray(bias).reshape(-1)
+        manifest = [_Rec(flat_index=int(i), lat_deg=0.0, environment=_Env(0.0))
+                    for i in np.argsort(-flat)[:2]]
+        return CompareResult(combined_score=bias, manifest=manifest,
+                             area_weights=area_w, model_ctx=None)
+    return compare_fn
+
+
+def _diag_invalid(record, ctx):                          # noqa: ARG001
+    return _Eddy(K=jnp.array([0.9]), valid=jnp.array([False]))  # REJECTED by realism
+
+
+def test_campaign_aborts_on_dry_les_diagnoses():
+    """`patience` consecutive rounds that flag columns but produce ZERO valid LES
+    diagnoses ⇒ the campaign STOPS early with stop_reason='no_valid_diagnoses' (the
+    spin-off LES develops no turbulence — don't waste multi-day rounds; iter 101)."""
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=5,
+        compare_fn=_always_worst_compare_fn(), diagnose_fn=_diag_invalid,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2)
+    assert campaign.stop_reason == "no_valid_diagnoses"
+    assert len(campaign.iterations) == 2                 # stopped after 2 dry rounds
+    assert all(it.n_corrected > 0 for it in campaign.iterations)
+    assert all(it.n_diagnoses_valid == 0 for it in campaign.iterations)
+
+
+def test_campaign_no_dry_abort_when_diagnoses_valid():
+    """Valid diagnoses every round ⇒ NO dry-abort; the campaign runs all rounds."""
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=3,
+        compare_fn=_always_worst_compare_fn(),
+        diagnose_fn=lambda r, c: _Eddy(K=jnp.array([0.9]), valid=jnp.array([True])),
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2)
+    assert campaign.stop_reason == "max_iterations"
+    assert len(campaign.iterations) == 3
+
+
+def test_campaign_dry_abort_can_be_disabled():
+    """stop_on_no_valid_diagnoses=False keeps the old behaviour (run all rounds)."""
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=3,
+        compare_fn=_always_worst_compare_fn(), diagnose_fn=_diag_invalid,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2,
+        stop_on_no_valid_diagnoses=False)
+    assert campaign.stop_reason == "max_iterations"
+    assert len(campaign.iterations) == 3
+
+
+def test_campaign_noop_round_is_not_dry():
+    """A NO-OP round (no columns flagged — bias already zero) is NOT 'dry' (there was
+    nothing to diagnose), so it must NOT trigger the dry-abort (iter 101 edge case)."""
+    def compare_zero(config):                            # noqa: ARG001
+        z = jnp.zeros((2, 2))
+        return CompareResult(combined_score=z, manifest=[],
+                             area_weights=jnp.ones((2, 2)), model_ctx=None)
+
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=3,
+        compare_fn=compare_zero, diagnose_fn=_diag_invalid,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2)
+    assert campaign.stop_reason == "max_iterations"     # NOT no_valid_diagnoses
+    assert len(campaign.iterations) == 3
+
+
+def test_campaign_dry_abort_uses_global_not_local_valid_count():
+    """The dry test reads the GLOBAL valid count (via global_reduce), NOT the rank-
+    local one — proven by a reducer that ADDS a peer rank's valid diagnosis: this
+    rank is LOCALLY dry (n_diagnoses_valid==0 every round) but GLOBALLY there IS a
+    valid diagnosis, so the campaign must NOT abort. A rank-local implementation would
+    (wrongly) abort and deadlock its peers under real MPI (iter 101 collective-safety)."""
+    # +1 to every count == a peer rank that owns a flagged column with a VALID diagnosis.
+    peer_has_valid = lambda x: x + 1                     # noqa: E731
+
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=3,
+        compare_fn=_always_worst_compare_fn(), diagnose_fn=_diag_invalid,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2,
+        global_reduce=peer_has_valid)
+    # globally non-dry (peer's valid count > 0) ⇒ NO abort, runs all rounds.
+    assert all(it.n_diagnoses_valid == 0 for it in campaign.iterations)   # LOCALLY dry
+    assert campaign.stop_reason == "max_iterations"
+    assert len(campaign.iterations) == 3
+
+
+def test_campaign_dry_abort_fires_when_globally_dry():
+    """The companion: identity reduce (np=1, no peer) ⇒ the campaign IS globally dry
+    and aborts. Together these pin the abort to the GLOBAL valid count (iter 101)."""
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=5,
+        compare_fn=_always_worst_compare_fn(), diagnose_fn=_diag_invalid,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=float(CLUBBLiteConfig().C_K), patience=2,
+        global_reduce=lambda x: x)                       # single-rank SUM == identity
+    assert campaign.stop_reason == "no_valid_diagnoses"
+    assert len(campaign.iterations) == 2
 
 
 def test_campaign_zero_iterations_is_noop():
@@ -1498,6 +1617,25 @@ def test_multi_campaign_early_stops_on_convergence():
         grid_shape=(2, 2), accept_only_if_improved=True, bias_tol=1e-9, patience=2)
     assert campaign.stop_reason == "converged"
     assert len(campaign.iterations) == 2
+
+
+def test_multi_campaign_aborts_on_dry_les_diagnoses():
+    """The dry-LES early-abort works for the SIMULTANEOUS multi-coefficient campaign
+    too: off-target so a column is always flagged, but BOTH coefficient diagnoses are
+    invalid every round ⇒ stop_reason='no_valid_diagnoses' after `patience` (iter 101)."""
+    compare_fn, _ = _multi_setup(
+        diag_ck=1.0, diag_prt=0.8, target_ck=5.0, target_prt=2.0)  # off-target → flagged
+
+    def diag_invalid(record, ctx):                       # noqa: ARG001
+        return {"clubb_coefficient": _CkDiag(jnp.array([1.0]), jnp.array([False])),
+                "prandtl_number": _PrtDiag(jnp.array([0.8]), jnp.array([False]))}
+
+    campaign = run_multi_correction_campaign(
+        CLUBBLiteConfig(), 5, _SPECS, compare_fn=compare_fn, diagnose_fn=diag_invalid,
+        grid_shape=(2, 2), patience=2)
+    assert campaign.stop_reason == "no_valid_diagnoses"
+    assert len(campaign.iterations) == 2
+    assert all(it.n_diagnoses_valid == 0 for it in campaign.iterations)
 
 
 def test_campaign_real_compare_multi_round_converges_to_zero_bias():

@@ -113,7 +113,8 @@ class CampaignResult(NamedTuple):
     final_field: jax.Array             # the accumulated per-column field
     accepted: tuple = ()               # per-round bool: was the round kept?
                                        # (all True unless accept_only_if_improved)
-    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" (early stop)
+    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" |
+    #                                    "no_valid_diagnoses" (early stop)
 
 
 def last_accepted_env_kernel(campaign_result):
@@ -176,7 +177,8 @@ class MultiCampaignResult(NamedTuple):
     iterations: tuple                  # the per-round MultiCorrectionResults
     final_fields: dict                 # {promotion_key: accumulated per-column field}
     accepted: tuple = ()
-    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" (early stop)
+    stop_reason: str = "max_iterations"  # "max_iterations" | "converged" |
+    #                                    "no_valid_diagnoses" (early stop)
 
 
 def run_correction_campaign(
@@ -202,6 +204,7 @@ def run_correction_campaign(
     clip_to_bounds: bool = False,
     bias_tol: float | None = None,
     patience: int = 2,
+    stop_on_no_valid_diagnoses: bool = True,
     global_reduce: Callable[[jax.Array], jax.Array] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
@@ -250,6 +253,14 @@ def run_correction_campaign(
     the bias has plateaued.  ``CampaignResult.stop_reason`` is ``"converged"`` then,
     else ``"max_iterations"``.  ``None`` (default) runs all ``n_iterations`` rounds.
 
+    **Dry-LES early-abort** (``stop_on_no_valid_diagnoses``, default ``True``): the
+    campaign also STOPS (``stop_reason="no_valid_diagnoses"``) once ``patience``
+    consecutive rounds FLAG worst columns but produce ZERO globally-valid LES
+    diagnoses — the spin-off LES is developing no turbulence (too short / unforced),
+    so every further multi-day round is wasted; this is independent of ``bias_tol``
+    and is checked FIRST so the cause is reported correctly.  The dry test is on the
+    GLOBAL corrected + valid counts (collective-safe under MPI).
+
     Returns the final config + every round's :class:`CorrectionResult`.
     ``final_config``/``final_field`` are the LAST ACCEPTED state (not necessarily
     ``iterations[-1]``, which is retained for logging even if rejected).  With the
@@ -268,6 +279,7 @@ def run_correction_campaign(
     iterations: list = []
     accepted_flags: list = []
     no_progress = 0
+    no_valid_streak = 0
     stop_reason = "max_iterations"
     for i in range(int(n_iterations)):
         result = run_correction_iteration(
@@ -307,6 +319,21 @@ def run_correction_campaign(
             # Pass the ACCEPTED accumulated field so a checkpoint never persists a
             # rejected (worsening) correction.
             checkpoint_callback(int(start_round) + i, result, base)
+        # ABORT a DRY campaign: `patience` consecutive rounds that FLAGGED columns but
+        # produced ZERO valid LES diagnoses globally ⇒ the spin-off LES is developing
+        # no turbulence (too short / unforced), so every further multi-day round is
+        # wasted. Checked BEFORE convergence so the stop_reason is the CORRECT cause
+        # ("no_valid_diagnoses", not "converged"). COLLECTIVE-SAFE: the dry test is on
+        # the GLOBAL corrected + valid counts (every rank sees the same totals → all
+        # break or none; a rank-local count would diverge and deadlock — iter 88/98).
+        if stop_on_no_valid_diagnoses and int(patience) >= 1:
+            global_corrected = _global_count(result.n_corrected, global_reduce)
+            global_valid = _global_count(result.n_diagnoses_valid, global_reduce)
+            dry = global_corrected > 0 and global_valid == 0
+            no_valid_streak = 0 if not dry else no_valid_streak + 1
+            if no_valid_streak >= int(patience):
+                stop_reason = "no_valid_diagnoses"
+                break
         # Convergence early-stopping: stop once `patience` consecutive rounds make
         # no meaningful progress (rejected, or improving by < bias_tol) — the bias
         # has plateaued, so further expensive rounds are wasted.
@@ -1009,6 +1036,7 @@ def run_multi_correction_campaign(
     sequential: bool = False,
     bias_tol: float | None = None,
     patience: int = 2,
+    stop_on_no_valid_diagnoses: bool = True,
     initial_fields: dict | None = None,
     start_round: int = 0,
     checkpoint_callback: Callable[[int, MultiCorrectionResult, dict], None] | None = None,
@@ -1040,6 +1068,7 @@ def run_multi_correction_campaign(
     iterations: list = []
     accepted_flags: list = []
     no_progress = 0
+    no_valid_streak = 0
     stop_reason = "max_iterations"
     for i in range(int(n_iterations)):
         round_specs = [s._replace(background=bases[s.promotion_key]) for s in specs]
@@ -1065,6 +1094,17 @@ def run_multi_correction_campaign(
         accepted_flags.append(accepted)
         if checkpoint_callback is not None:
             checkpoint_callback(int(start_round) + i, result, bases)
+        # ABORT a DRY campaign (see run_correction_campaign): `patience` consecutive
+        # rounds that flagged columns but produced ZERO valid LES diagnoses globally.
+        # COLLECTIVE-SAFE (gated on the GLOBAL counts), checked BEFORE convergence.
+        if stop_on_no_valid_diagnoses and int(patience) >= 1:
+            global_corrected = _global_count(result.n_corrected, global_reduce)
+            global_valid = _global_count(result.n_diagnoses_valid, global_reduce)
+            dry = global_corrected > 0 and global_valid == 0
+            no_valid_streak = 0 if not dry else no_valid_streak + 1
+            if no_valid_streak >= int(patience):
+                stop_reason = "no_valid_diagnoses"
+                break
         if bias_tol is not None:   # convergence early-stopping (see run_correction_campaign)
             no_progress = (
                 0 if _round_made_progress(accepted, result.bias, bias_tol)

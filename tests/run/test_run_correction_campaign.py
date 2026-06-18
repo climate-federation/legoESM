@@ -676,7 +676,9 @@ def test_build_correction_campaign_prandtl_number_method():
 def test_build_correction_campaign_bias_tol_early_stops():
     """build_correction_campaign forwards bias_tol/patience: a mock driver that
     never improves the bias is rejected every round, so the campaign stops early
-    ('converged') instead of running all n_iterations."""
+    ('converged') instead of running all n_iterations. Uses diagnosis_method=
+    'clubb_coefficient' (which the sheared mock LES diagnoses VALIDLY) so the rounds
+    genuinely RUN + get rejected — not the dry-LES abort path (iter 101)."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -693,10 +695,14 @@ def test_build_correction_campaign_bias_tol_early_stops():
         extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
         reference=reference, sigma=sigma, grid=grid,
         area_weights=jnp.ones((8, 16)), n_iterations=10,
-        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
         run_les_fn=_mock_run_les_sheared, n_worst=1,
         bias_tol=1e-9, patience=2)            # default gate ON
     assert result.stop_reason == "converged"
+    # sanity: the rounds genuinely produced VALID diagnoses (so this exercises the
+    # convergence path, not the dry-LES abort).
+    assert all(it.n_diagnoses_valid > 0 for it in result.iterations)
     assert len(result.iterations) == 2        # 2 rejected rounds → early stop
 
 

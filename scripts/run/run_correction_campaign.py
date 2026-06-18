@@ -222,6 +222,7 @@ def build_correction_campaign(
     clip_to_bounds: bool = True,
     bias_tol: float | None = None,
     patience: int = 2,
+    stop_on_no_valid_diagnoses: bool = True,
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
@@ -308,7 +309,9 @@ def build_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
-        bias_tol=bias_tol, patience=patience, global_reduce=global_reduce,
+        bias_tol=bias_tol, patience=patience,
+        stop_on_no_valid_diagnoses=stop_on_no_valid_diagnoses,
+        global_reduce=global_reduce,
     )
 
 
@@ -526,6 +529,7 @@ def build_multi_correction_campaign(
     sequential: bool = False,
     bias_tol: float | None = None,
     patience: int = 2,
+    stop_on_no_valid_diagnoses: bool = True,
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
@@ -594,6 +598,7 @@ def build_multi_correction_campaign(
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
         sequential=sequential, bias_tol=bias_tol, patience=patience,
+        stop_on_no_valid_diagnoses=stop_on_no_valid_diagnoses,
         initial_fields=initial_fields, start_round=start_round,
         checkpoint_callback=checkpoint_callback, global_reduce=global_reduce,
     )
@@ -668,9 +673,16 @@ def _build_arg_parser():
     p.add_argument("--bias-tol", type=float, default=None,
                    help="convergence tolerance: stop early once --patience "
                         "consecutive rounds improve the global bias by less than "
-                        "this (or are rejected). Default: run all --iterations.")
+                        "this (or are rejected). Default: run all --iterations "
+                        "(but see --keep-dry-rounds: a DRY-LES streak still aborts).")
     p.add_argument("--patience", type=int, default=2,
-                   help="rounds of no-progress before --bias-tol early-stops")
+                   help="rounds of no-progress (or dry-LES rounds) before an "
+                        "early-stop / abort fires")
+    p.add_argument("--keep-dry-rounds", action="store_true",
+                   help="do NOT abort when --patience consecutive rounds produce zero "
+                        "VALID LES diagnoses (default: abort with "
+                        "stop_reason='no_valid_diagnoses' to save compute on a "
+                        "spin-off LES that develops no turbulence)")
     p.add_argument("--n-worst", type=int, default=20)
     p.add_argument("--les-budget", type=int, default=None,
                    help="cap LES to K env-cluster representatives (default: all)")
@@ -821,7 +833,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         step_fractions=([float(s) for s in args.step_fractions.split(",")]
                         if args.step_fractions else None),
         clip_to_bounds=not args.allow_unphysical_coeff, sequential=args.staged,
-        bias_tol=args.bias_tol, patience=args.patience)
+        bias_tol=args.bias_tol, patience=args.patience,
+        stop_on_no_valid_diagnoses=not args.keep_dry_rounds)
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
@@ -1066,6 +1079,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             if args.step_fractions else None),
         clip_to_bounds=not args.allow_unphysical_coeff,
         bias_tol=args.bias_tol, patience=args.patience,
+        stop_on_no_valid_diagnoses=not args.keep_dry_rounds,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
