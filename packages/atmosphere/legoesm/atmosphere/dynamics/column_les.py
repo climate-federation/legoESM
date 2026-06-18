@@ -44,6 +44,22 @@ from legoesm.atmosphere.dynamics.les_vertical_mapping import (
     interpolate_column_to_les,
 )
 
+# --- LES dynamics stability (split-explicit acoustic CFL) ---
+# Hard upper bound on the HORIZONTAL acoustic Courant for the plane-LES dycore
+# (Skamarock-Klemp split-explicit forward-backward + RK3, the run_forced_les config).
+# Set to the CLASSICAL acoustic CFL limit 1.0 — the codebase's own documented-safe
+# region (the real-LES test runs at C_a ≈ 0.57 and notes "< 1"); there is no evidence
+# the FB scheme is stable above it, so 1.0 (not a looser guess) is the defensible bound.
+# This is the standard acoustic CFL — NOT the subgrid/Smagorinsky re-tuning §7 flags.
+# c_sound is the DRY sound speed, which is EXACT for this dycore (its EOS/pressure is
+# dry — R_d, c_vd — so its acoustic mode propagates at the dry speed, not moist).
+_LES_ACOUSTIC_CFL_MAX = 1.0
+# The pre-flight uses the REST-state c_sound, but the column WARMS convectively during
+# the run (c_s ∝ sqrt(θ); +30 K on ~290 K ≈ +5 %), raising the run-time acoustic
+# Courant above the rest estimate. Inflate the rest Courant by this margin so a config
+# that is marginal at rest but unstable once warm is rejected (Codex iter 103).
+_LES_ACOUSTIC_WARMING_MARGIN = 1.05
+
 
 class ColumnLESConfig(NamedTuple):
     """Campaign config for the column-LES spin-off."""
@@ -351,6 +367,30 @@ def run_forced_les(
         substep_horizontal_acoustic=True, smagorinsky_cs=0.17,
         sgs_vertical_diffusion=True, fix_mass=True, anchor_mass_to_initial=True,
     )
+    # FAIL FAST on an acoustically-unstable timestep BEFORE the (multi-day) run: this
+    # config solves the vertical acoustic mode semi-implicitly + substeps the
+    # horizontal, so the binding EXPLICIT acoustic CFL is HORIZONTAL (dx). A grossly-
+    # oversized dt_s blows the LES up → an invalid diagnosis + wasted HPC compute. This
+    # checks the ACOUSTIC mode ONLY (the most restrictive explicit mode for a
+    # compressible dycore — c_sound ≫ wind); it is not a full advective/diffusion/
+    # buoyancy stability proof. Host-side scalar check (one sync; run_forced_les is
+    # eager), rest-state c_s inflated by the convective-warming margin.
+    from legoesm.atmosphere.dynamics.cfl_diagnostic import acoustic_courant_horizontal
+    c_acoustic = float(acoustic_courant_horizontal(
+        hc, grid, dt_s, n_acoustic_substeps=cfg.n_acoustic_substeps))
+    c_effective = c_acoustic * _LES_ACOUSTIC_WARMING_MARGIN
+    if c_effective > _LES_ACOUSTIC_CFL_MAX:
+        # Recommend a dt safely BELOW the limit (0.95×), not exactly on it, so a user
+        # copying it verbatim is not left sitting at the marginal boundary.
+        dt_safe = 0.95 * _LES_ACOUSTIC_CFL_MAX * dt_s / c_effective
+        raise ValueError(
+            f"run_forced_les: horizontal ACOUSTIC Courant {c_acoustic:.3g} "
+            f"(×{_LES_ACOUSTIC_WARMING_MARGIN} convective-warming margin = "
+            f"{c_effective:.3g}) exceeds the stable limit {_LES_ACOUSTIC_CFL_MAX} "
+            f"(dx={float(grid.dx):.3g} m, dt_s={dt_s} s, "
+            f"n_acoustic_substeps={cfg.n_acoustic_substeps}) — the LES would blow up. "
+            f"Reduce dt_s to <= {dt_safe:.3g} s. NOTE: this is the ACOUSTIC CFL only, "
+            "not a full advective/diffusion/buoyancy stability check.")
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
     dtype = grid.area_T.dtype
     state = make_rest_state(grid, hc, dtype=dtype)

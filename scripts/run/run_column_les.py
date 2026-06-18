@@ -19,7 +19,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--restart", required=True, help="AMIP restart for the columns")
     p.add_argument("--resolution", type=int, required=True, help="GCM resolution")
     p.add_argument("--nlev", type=int, required=True, help="GCM nlev")
-    p.add_argument("--dt", type=float, default=1.0, help="LES timestep [s]")
+    p.add_argument("--dt", type=float, default=0.5,
+                   help="LES timestep [s]. Default 0.5 keeps the acoustic Courant < 1 "
+                        "at the shallow-regime dx=50 m; a larger dt is rejected by "
+                        "run_forced_les' acoustic-CFL pre-flight.")
     p.add_argument("--hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--method", default="eddy_diffusivity")
     p.add_argument("--out", default="column_coefficients.npz")

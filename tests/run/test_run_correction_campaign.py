@@ -1277,6 +1277,9 @@ def test_build_arg_parser_defaults():
     assert args.allow_unphysical_coeff is False   # default → bounds clamp ON
     assert args.keep_worsening_rounds is False    # default → monotonic gate ON
     assert args.feedback_strategy == "static"
+    # --les-dt default 0.5 keeps the acoustic Courant < 1 at dx=50 m (iter 103); the
+    # old 1.0 default gave C_a≈1.16 and is now rejected by the LES CFL pre-flight.
+    assert args.les_dt == 0.5
 
 
 def test_build_arg_parser_required_and_choices():

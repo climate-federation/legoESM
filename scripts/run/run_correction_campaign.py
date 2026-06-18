@@ -722,7 +722,10 @@ def _build_arg_parser():
                    help="do NOT clamp the diagnosed C_K to its registered physical "
                         "bounds (default: clamp, so a degenerate LES cannot inject "
                         "an out-of-range / destabilizing coefficient)")
-    p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
+    p.add_argument("--les-dt", type=float, default=0.5,
+                   help="LES timestep [s]. Default 0.5 keeps the acoustic Courant < 1 "
+                        "at the shallow-regime dx=50 m (n_acoustic=6); a larger dt is "
+                        "rejected by run_forced_les' acoustic-CFL pre-flight.")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
     p.add_argument("--checkpoint", default=None,

@@ -550,3 +550,65 @@ def test_process_column_real_dycore_integration():
                                       method="eddy_diffusivity")
     assert out.K.shape == (7,)  # LES nlev 8 -> 7 interior interfaces
     assert bool(jnp.all(jnp.isfinite(out.K)))
+
+
+def test_run_forced_les_rejects_acoustically_unstable_dt():
+    """run_forced_les FAILS FAST on a timestep that violates the horizontal acoustic
+    CFL — caught BEFORE the multi-day run, not as a mid-run blow-up (iter 103). The
+    raise fires before the time loop, so this is cheap (no LES steps); the tested-
+    stable dt_s=0.5 (C_a≈0.57) is covered by the real-dycore test above."""
+    from legoesm.atmosphere.dynamics.column_les import (
+        build_column_les_setup,
+        extract_gcm_column,
+        run_forced_les,
+    )
+
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    gcm_z, gcm_theta, ls = extract_gcm_column(
+        T=jnp.full(shape, 280.0), q_v=jnp.full(shape, 5e-3),
+        u=jnp.full(shape, 8.0), v=jnp.zeros(shape),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5), grid=grid, sigma=sigma,
+        col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)))
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=float(jnp.deg2rad(20.0)),
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+    # dx=50 m, n_acoustic=6, c≈340 ⇒ dt_s=2.0 gives C_a≈2.3 > 1.0 ⇒ reject.
+    with pytest.raises(ValueError, match="Courant.*exceeds the stable limit"):
+        run_forced_les(setup, dt_s=2.0, n_steps=1)
+
+
+def test_run_forced_les_warming_margin_rejects_marginal_dt():
+    """The convective-warming margin REJECTS a dt whose RAW (rest-state) acoustic
+    Courant is just BELOW 1.0 but exceeds it once inflated — a config that is marginal
+    at rest but unstable once the column warms (iter 103 Codex). Computed (not a magic
+    dt) so it is robust to the setup's exact c_sound."""
+    from legoesm.atmosphere.dynamics.cfl_diagnostic import acoustic_courant_horizontal
+    from legoesm.atmosphere.dynamics.column_les import (
+        _LES_ACOUSTIC_WARMING_MARGIN,
+        build_column_les_setup,
+        extract_gcm_column,
+        run_forced_les,
+    )
+
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    gcm_z, gcm_theta, ls = extract_gcm_column(
+        T=jnp.full(shape, 280.0), q_v=jnp.full(shape, 5e-3),
+        u=jnp.full(shape, 8.0), v=jnp.zeros(shape),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5), grid=grid, sigma=sigma,
+        col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)))
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=float(jnp.deg2rad(20.0)),
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+    # pick dt so the RAW Courant ≈ 0.97 (∈ (1/margin, 1.0)) → margin pushes it over.
+    raw_at_1 = float(acoustic_courant_horizontal(
+        setup.height_coord, setup.grid, 1.0, n_acoustic_substeps=6))
+    dt_marginal = 0.97 / raw_at_1
+    assert 1.0 / _LES_ACOUSTIC_WARMING_MARGIN < 0.97 < 1.0   # genuinely in the band
+    with pytest.raises(ValueError, match="warming margin"):
+        run_forced_les(setup, dt_s=dt_marginal, n_steps=1)

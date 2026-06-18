@@ -199,7 +199,10 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--n-worst", type=int, default=8)
     p.add_argument("--les-hours", type=float, default=6.0)
-    p.add_argument("--les-dt", type=float, default=20.0)
+    p.add_argument("--les-dt", type=float, default=0.5,
+                   help="LES timestep [s]. Default 0.5 keeps the acoustic Courant < 1 "
+                        "at the shallow-regime dx=50 m; a larger dt is rejected by "
+                        "run_forced_les' acoustic-CFL pre-flight.")
     return p
 
 
@@ -207,8 +210,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: build the real driver, run the OSSE, print the recovery verdict."""
     from functools import partial
 
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
-    from legoesm.atmosphere.dynamics.rce_diagnostics import run_forced_les
+    from legoesm.atmosphere.dynamics.column_les import (
+        ColumnLESConfig,
+        run_forced_les,  # the only module that defines it (rce_diagnostics never did)
+    )
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.perfect_model_osse import osse_verdict
 
