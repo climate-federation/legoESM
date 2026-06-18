@@ -53,6 +53,7 @@ class GyreFaithfulState(NamedTuple):
     eta: np.ndarray      # (ny, nx) cell-centre free surface
     gu_prev: np.ndarray  # previous explicit u-tendency (AB2 history)
     gv_prev: np.ndarray
+    first: bool = True   # first step is forward-Euler (MITgcm abFac=0), not AB2
 
 
 class GyreFaithfulModel:
@@ -117,8 +118,12 @@ class GyreFaithfulModel:
         fZx = A * (dy / dx) * (rx(u, -1) - u) * m
         fMy = A * (dx / dy) * (u - ry(u, 1)) * hFacZ
         vU = (1 / rAw) * ((fZx - rx(fZx, 1)) + (ry(fMy, -1) - fMy)) * mW
-        gZx = A * (dy / dx) * (rx(v, -1) - v) * m
-        gMy = A * (dx / dy) * (v - ry(v, 1)) * hFacZ
+        # MITgcm mom_v_del2v: the zonal flux of v lives at vorticity points
+        # (mask = hFacZ), the meridional flux of v lives at cell centres
+        # (mask = hFacC = m).  gZx[i] is fZon_v(i+1) -> hFacZ at i+1 = rx(hFacZ,-1);
+        # gMy[j] is fMer_v(j-1) -> hFacC at j-1 = ry(m,1).
+        gZx = A * (dy / dx) * (rx(v, -1) - v) * rx(hFacZ, -1)
+        gMy = A * (dx / dy) * (v - ry(v, 1)) * ry(m, 1)
         vV = (1 / rAw) * ((gZx - rx(gZx, 1)) + (ry(gMy, -1) - gMy)) * mS
         hzcS = (mW - hFacZ); hzcN = (mW - ry(hFacZ, -1))
         sU = -(1 / rAw) * (hzcS * (dx / dy) + hzcN * (dx / dy)) * u * _SIDE_DRAG_FACTOR * A * mW
@@ -157,8 +162,13 @@ class GyreFaithfulModel:
     def step(self, s: GyreFaithfulState) -> GyreFaithfulState:
         rx, ry = self._rx, self._ry
         Gu, Gv = self._G(s.u, s.v)
-        Gu_ab = (1.5 + _AB_EPS) * Gu - (0.5 + _AB_EPS) * s.gu_prev
-        Gv_ab = (1.5 + _AB_EPS) * Gv - (0.5 + _AB_EPS) * s.gv_prev
+        if s.first:
+            # MITgcm adams_bashforth2.F: abFac=0 on the first step (myIter==nIter0,
+            # startAB==0) → pure forward Euler (weight 1.0), NOT (1.5+ε)·G⁰.
+            Gu_ab, Gv_ab = Gu, Gv
+        else:
+            Gu_ab = (1.5 + _AB_EPS) * Gu - (0.5 + _AB_EPS) * s.gu_prev
+            Gv_ab = (1.5 + _AB_EPS) * Gv - (0.5 + _AB_EPS) * s.gv_prev
         us = (s.u + self.dt * Gu_ab) * self.mW
         vs = (s.v + self.dt * Gv_ab) * self.mS
         divHu = _H * ((rx(us, -1) - us) / self.dx + (ry(vs, -1) - vs) / self.dy) * self.m
@@ -166,4 +176,4 @@ class GyreFaithfulModel:
         eta = self._solve_fs(rhs).reshape(self.n, self.n) * self.m
         u = (us - self.g * self.dt * (eta - rx(eta, 1)) / self.dx) * self.mW
         v = (vs - self.g * self.dt * (eta - ry(eta, 1)) / self.dy) * self.mS
-        return GyreFaithfulState(u, v, eta, Gu, Gv)
+        return GyreFaithfulState(u, v, eta, Gu, Gv, False)
