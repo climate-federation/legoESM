@@ -24,7 +24,9 @@ from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
+    _distributed_campaign_kwargs,
     build_correction_campaign,
+    build_distributed_multi_correction_campaign,
     build_multi_correction_campaign,
     make_base_driver_builder,
     make_clubb_build_driver,
@@ -1048,3 +1050,86 @@ def test_build_multi_correction_campaign_rejects_unknown_coefficient():
             les_config=ColumnLESConfig(regime=_SMALL_REGIME),
             run_les_fn=_mock_run_les_sheared, n_worst=1,
             coefficients=("C_K", "bogus"))
+
+
+# --- Distributed multi-coefficient campaign wrapper (iter 95) ----------------
+def _mock_layout(owned, local_cells):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        owned_mask_cells=jnp.asarray(owned),
+        partition=SimpleNamespace(local_cells=np.asarray(local_cells)))
+
+
+def _global_cell_state(ncells, nlev=4):
+    rng = np.arange(ncells * nlev, dtype=float).reshape(ncells, nlev)
+    return ColumnState(
+        T=jnp.asarray(rng), q_v=jnp.zeros((ncells, nlev)), u=jnp.zeros((ncells, nlev)),
+        v=jnp.zeros((ncells, nlev)), p_s=jnp.arange(float(ncells)),
+        sst_K=jnp.arange(float(ncells)) + 290.0)
+
+
+def test_distributed_campaign_kwargs_composes_hooks_and_slices():
+    """``_distributed_campaign_kwargs`` (the shared composition for BOTH the single +
+    multi distributed wrappers) builds the three hooks from the layout AND slices the
+    GLOBAL reference + area_weights to the rank's local cells — order-preserving."""
+    from functools import partial
+
+    from legoesm.parallel.reductions import global_sum_mpi
+    from legoesm.training.distributed_manifest import gather_global_worst_columns
+
+    # 4 global cells; this rank's local_cells = [2, 3, 1] (owned 2,3; halo 1).
+    layout = _mock_layout([True, True, False], [2, 3, 1])
+    ref = _global_cell_state(4)
+    area = jnp.arange(4.0) + 1.0
+    kw = _distributed_campaign_kwargs(layout, ref, area, n_worst=1, base_valid_mask=None)
+    np.testing.assert_array_equal(np.asarray(kw["valid_mask"]), [True, True, False])
+    assert kw["global_reduce"] is global_sum_mpi
+    assert isinstance(kw["manifest_reducer"], partial)
+    assert kw["manifest_reducer"].func is gather_global_worst_columns
+    assert kw["n_worst"] == 1
+    # reference + area sliced to local_cells [2,3,1] (order preserved).
+    np.testing.assert_array_equal(
+        np.asarray(kw["reference"].T), np.asarray(ref.T)[[2, 3, 1]])
+    np.testing.assert_array_equal(np.asarray(kw["area_weights"]), [3.0, 4.0, 2.0])
+
+
+def test_build_distributed_multi_forwards_composed_kwargs(monkeypatch):
+    """``build_distributed_multi_correction_campaign`` forwards the composed
+    distributed kwargs (the three hooks + the rank-local reference/area slice) AND the
+    multi-coefficient ``campaign_kwargs`` (e.g. ``coefficients``) to
+    ``build_multi_correction_campaign`` — the multi sibling of the iter-89 single
+    wrapper, sharing the SAME composition (no MPI: only the wiring is exercised)."""
+    captured = {}
+
+    def _fake_multi(**kwargs):
+        captured.update(kwargs)
+        return "MULTI_RESULT"
+
+    monkeypatch.setattr(
+        "scripts.run.run_correction_campaign.build_multi_correction_campaign",
+        _fake_multi)
+    layout = _mock_layout([True, True, False], [2, 3, 1])
+    ref = _global_cell_state(4)
+    out = build_distributed_multi_correction_campaign(
+        layout=layout, reference=ref, area_weights=jnp.arange(4.0) + 1.0, n_worst=1,
+        base_atm_config="CFG", coefficients=("C_K", "Pr_t", "C_eps"))
+    assert out == "MULTI_RESULT"
+    # the distributed hooks + rank-local slice reached build_multi...
+    np.testing.assert_array_equal(np.asarray(captured["valid_mask"]), [True, True, False])
+    assert captured["manifest_reducer"] is not None and captured["global_reduce"] is not None
+    np.testing.assert_array_equal(
+        np.asarray(captured["reference"].T), np.asarray(ref.T)[[2, 3, 1]])
+    # ...and the multi-only kwargs pass through.
+    assert captured["coefficients"] == ("C_K", "Pr_t", "C_eps")
+    assert captured["base_atm_config"] == "CFG"
+
+
+def test_build_distributed_multi_rejects_duplicate_hook_kwarg():
+    """A caller cannot set the distributed hooks inconsistently — passing one in
+    campaign_kwargs collides with the supplied one (TypeError)."""
+    layout = _mock_layout([True, True], [0, 1])
+    ref = _global_cell_state(2)
+    with pytest.raises(TypeError):
+        build_distributed_multi_correction_campaign(
+            layout=layout, reference=ref, area_weights=jnp.ones(2), n_worst=1,
+            valid_mask=jnp.ones(2, dtype=bool))   # duplicate of the supplied hook

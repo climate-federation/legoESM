@@ -308,6 +308,33 @@ def build_correction_campaign(
     )
 
 
+def _distributed_campaign_kwargs(layout, reference, area_weights, n_worst, base_valid_mask):
+    """The distributed-MPAS hook + rank-local-slice kwargs shared by the single AND
+    multi distributed wrappers — the ONE place the three hooks (owned ``valid_mask``,
+    global top-k ``manifest_reducer``, collective ``global_reduce``) are composed
+    from the partition ``layout`` (so a caller cannot set them inconsistently) and
+    the GLOBAL ``reference`` + ``area_weights`` are sliced to the rank's local cells
+    (``layout.partition.local_cells``).  Returns the kwargs both ``build_*`` campaign
+    builders accept identically.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.training.distributed_campaign import (
+        distributed_campaign_hooks,
+        slice_reference_to_local,
+    )
+
+    valid_mask, manifest_reducer, global_reduce = distributed_campaign_hooks(
+        layout, n_worst, base_valid_mask=base_valid_mask)
+    local_cells = np.asarray(layout.partition.local_cells)
+    return dict(
+        reference=slice_reference_to_local(reference, local_cells),
+        area_weights=jnp.asarray(np.asarray(area_weights))[jnp.asarray(local_cells)],
+        n_worst=n_worst, valid_mask=valid_mask,
+        manifest_reducer=manifest_reducer, global_reduce=global_reduce,
+    )
+
+
 def build_distributed_correction_campaign(
     *, layout: Any, reference: Any, area_weights: Any, n_worst: int,
     base_valid_mask: Any = None, **campaign_kwargs: Any,
@@ -334,22 +361,34 @@ def build_distributed_correction_campaign(
     MUST be called on EVERY rank (the hooks are collective); ``grid`` is the rank's
     local ``VoronoiMesh`` (so the manifest lat/lon + grid_shape are rank-local too).
     """
-    import jax.numpy as jnp
-    import numpy as np
-    from legoesm.training.distributed_campaign import (
-        distributed_campaign_hooks,
-        slice_reference_to_local,
+    return build_correction_campaign(
+        **_distributed_campaign_kwargs(
+            layout, reference, area_weights, n_worst, base_valid_mask),
+        **campaign_kwargs,
     )
 
-    valid_mask, manifest_reducer, global_reduce = distributed_campaign_hooks(
-        layout, n_worst, base_valid_mask=base_valid_mask)
-    local_cells = np.asarray(layout.partition.local_cells)
-    local_reference = slice_reference_to_local(reference, local_cells)
-    local_area_weights = jnp.asarray(np.asarray(area_weights))[jnp.asarray(local_cells)]
-    return build_correction_campaign(
-        reference=local_reference, area_weights=local_area_weights, n_worst=n_worst,
-        valid_mask=valid_mask, manifest_reducer=manifest_reducer,
-        global_reduce=global_reduce, **campaign_kwargs,
+
+def build_distributed_multi_correction_campaign(
+    *, layout: Any, reference: Any, area_weights: Any, n_worst: int,
+    base_valid_mask: Any = None, **campaign_kwargs: Any,
+):
+    """Run :func:`build_multi_correction_campaign` (SIMULTANEOUS multi-coefficient)
+    on a DISTRIBUTED-MPAS partition — the multi-coefficient sibling of
+    :func:`build_distributed_correction_campaign` (iter 95).
+
+    Identical distributed composition (the three hooks + the rank-local
+    ``reference``/``area_weights`` slice via :func:`_distributed_campaign_kwargs`),
+    but corrects EVERY coefficient in ``coefficients`` (e.g. ``("C_K", "Pr_t",
+    "C_eps")``, in ``campaign_kwargs``) together from one LES per worst cell.  Same
+    contract: call on EVERY rank; ``grid`` is the rank-local ``VoronoiMesh``;
+    ``campaign_kwargs`` MUST NOT include ``valid_mask`` / ``manifest_reducer`` /
+    ``global_reduce`` / ``reference`` / ``area_weights`` / ``n_worst`` (supplied
+    here — a duplicate is a ``TypeError``).  Returns the ``MultiCampaignResult``.
+    """
+    return build_multi_correction_campaign(
+        **_distributed_campaign_kwargs(
+            layout, reference, area_weights, n_worst, base_valid_mask),
+        **campaign_kwargs,
     )
 
 
