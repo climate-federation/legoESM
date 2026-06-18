@@ -1452,7 +1452,8 @@ class ModelDriver:
                     ps_g = _g(state.p_s.data)
                     phis_g = _g(state.phis.data)
                     for _tname in (
-                        'q_v', 'q_c', 'q_r', 'sst', 'sic', 'precip_total',
+                        'q_v', 'q_c', 'q_r', 'q_i', 'sst', 'sic',
+                        'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
                     ):
@@ -1490,7 +1491,7 @@ class ModelDriver:
                         fields_global[name] = gather(arr, self._layout, root_only=True)
 
                     # Gather tracers (all ranks participate)
-                    for tname in ('q_v', 'q_c', 'q_r'):
+                    for tname in ('q_v', 'q_c', 'q_r', 'q_i'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -3536,6 +3537,8 @@ class ModelDriver:
                     include_clouds=(_cloud_scheme != "none"),
                     gpoint_batch_size=getattr(
                         cfg, "rrtmgp_gpoint_batch_size", 0),
+                    gpoint_checkpoint=getattr(
+                        cfg, "rrtmgp_gpoint_checkpoint", True),
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
@@ -4396,6 +4399,8 @@ class ModelDriver:
                         include_clouds=(_cloud_scheme != "none"),
                         gpoint_batch_size=getattr(
                             cfg, "rrtmgp_gpoint_batch_size", 0),
+                        gpoint_checkpoint=getattr(
+                            cfg, "rrtmgp_gpoint_checkpoint", True),
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,
@@ -5457,6 +5462,52 @@ class ModelDriver:
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
+            if os.environ.get("LEGOESM_DEBUG_HELD"):
+                import numpy as _np
+                _h = lambda a: (round(float(_np.mean(_np.asarray(a))), 1),
+                                round(float(_np.min(_np.asarray(a))), 1),
+                                round(float(_np.max(_np.asarray(a))), 1))
+                logger.info(
+                    "DEBUG held@day%.1f (mean,min,max): sw_down_toa=%s "
+                    "lw_up_toa=%s", day, _h(held_sw_down_toa),
+                    _h(held_lw_up_toa))
+
+            # BUG-B state dump: when the held TOA SW goes super-physical, save the
+            # full radiation-input state so it can be replayed offline through
+            # compute_radiation_core (which produced this garbage) and bisected.
+            _dump_path = os.environ.get("LEGOESM_DUMP_RAD")
+            if _dump_path and not getattr(self, "_rad_dumped", False):
+                import numpy as _np
+                if float(_np.max(_np.asarray(held_sw_down_toa))) > 600.0:
+                    self._rad_dumped = True
+                    _tr = self.tracers if isinstance(self.tracers, dict) else {}
+                    _g = lambda x: (None if x is None else _np.asarray(x))
+                    _np.savez_compressed(
+                        _dump_path,
+                        T=_g(self.state.T.data), p_s=_g(self.state.p_s.data),
+                        u=_g(self.state.u.data), v=_g(self.state.v.data),
+                        q_v=_g(self.q_v), q_c=_g(self.q_c), q_r=_g(self.q_r),
+                        q_i=_g(_tr.get("q_i")), N_c=_g(_tr.get("N_c")),
+                        N_i=_g(_tr.get("N_i")),
+                        sst=_g(sst), sic=_g(sic),
+                        lat=_g(_seg_lat), lon=_g(_seg_lon),
+                        day_of_year=_np.asarray(forcing.day_of_year),
+                        seconds_of_day=_np.asarray(forcing.seconds_of_day),
+                        s_0=_np.asarray(forcing.s_0),
+                        solar_weights=_g(forcing.solar_weights),
+                        o3_vmr=_g(forcing.o3_vmr),
+                        aerosol_od=_g(forcing.aerosol_od),
+                        T_land=_g(getattr(carry, "T_land", None)),
+                        held_sw_down_toa=_g(held_sw_down_toa),
+                        held_sw_up_toa=_g(held_sw_up_toa),
+                        held_lw_up_toa=_g(held_lw_up_toa),
+                        day=_np.asarray(day),
+                    )
+                    logger.info("BUG-B: dumped corrupt-radiation state to %s "
+                                "at day %.1f (sw_down_toa max=%.1f)",
+                                _dump_path, day,
+                                float(_np.max(_np.asarray(held_sw_down_toa))))
+
             # Keep carry auxiliary fields for checkpoint persistence and coupling
             self._carry_aux = {
                 "held_dT_rad": held_dT_rad,
@@ -5542,6 +5593,7 @@ class ModelDriver:
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
+                    q_i=self.q_i,
                     sst=sst,
                     sic=sic,
                     precip_total=seg_precip_rate,
@@ -6060,6 +6112,7 @@ class ModelDriver:
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
+                    q_i=self.q_i,
                     sst=sst,
                     sic=sic,
                     precip_total=phys_out.precip + precip_ls,

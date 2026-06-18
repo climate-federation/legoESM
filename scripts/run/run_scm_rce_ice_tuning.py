@@ -138,7 +138,14 @@ def _radiation_cfg(radiation: str, rad_interval: int) -> RadiationConfig:
     if radiation == "rrtmgp":
         return RadiationConfig(
             scheme="rrtmgp", cloud_scheme="resolved",
-            rrtmgp=RRTMGPConfig(include_clouds=True),
+            # FORWARD rrtmgp deck for CPU/GPU/TPU. gpoint_batch_size=16 = the
+            # vmap-over-blocks g-point path (no prevent_cse checkpoint, ~15
+            # batched kernels). Combined with the optics-table
+            # optimization_barriers (gas_optics.py + cloud_optics.py) that stop
+            # XLA constant-folding the per-band/g-point table slices into the
+            # kernels, this keeps the rrtmgp executable under the XLA-CPU
+            # LLVM-JIT code-region limit and speeds GPU/TPU compile.
+            rrtmgp=RRTMGPConfig(include_clouds=True, gpoint_batch_size=16),
             update_interval_steps=rad_interval, diurnal_cycle=False)
     raise ValueError(f"radiation must be 'rrtmgp' or 'gray', got {radiation!r}")
 

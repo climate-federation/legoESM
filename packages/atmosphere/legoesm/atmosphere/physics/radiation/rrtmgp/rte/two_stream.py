@@ -226,7 +226,8 @@ def _compute_optimal_lw_secant(
   return c0 * trans_total + c1
 
 
-def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size):
+def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
+                             checkpoint=True):
   """Sum the per-g-point flux contributions produced by ``step_fn``.
 
   ``step_fn(igpt, cumulative) -> cumulative + flux(igpt)`` is the shared
@@ -281,6 +282,18 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size):
   def _scan_step(carry, igpt):
     return step_fn(igpt, carry), None
 
+  if not checkpoint:
+    # FORWARD path: a PLAIN scan (no jax.checkpoint, no prevent_cse).  The
+    # checkpoint's prevent_cse=True is ONLY for reverse-mode AD memory; it
+    # DISABLES common-subexpression elimination, which forces XLA to emit a
+    # distinct compiled body per g-point instead of ONE reused scan-body
+    # kernel.  That code blow-up is what overflows the XLA-CPU LLVM-JIT
+    # executable code region (rrtmgp CPU "Failed to materialize symbols") and
+    # bloats GPU/TPU compile.  A plain scan compiles ONE small body and is
+    # answer-identical (no AD memory benefit, but a forward run needs none).
+    fluxes, _ = jax.lax.scan(_scan_step, init_val, jnp.arange(n_gpt))
+    return fluxes
+
   _scan_step_ckpt = jax.checkpoint(
       _scan_step,
       prevent_cse=True,
@@ -307,6 +320,7 @@ def solve_lw(
     use_scan: bool | None = None,
     use_optimal_angle: bool = False,
     gpoint_batch_size: int = 0,
+    gpoint_checkpoint: bool = True,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -498,6 +512,7 @@ def solve_lw(
   # :func:`_accumulate_over_gpoints`.
   fluxes = _accumulate_over_gpoints(
       step_fn, optics_lib.n_gpt_lw, init_val, gpoint_batch_size,
+      checkpoint=gpoint_checkpoint,
   )
   # There are problematic values for the fluxes at the top boundary (the top
   # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  The
@@ -531,6 +546,7 @@ def solve_sw(
     solar_fraction_by_gpt: Array | None = None,
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
+    gpoint_checkpoint: bool = True,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 
@@ -725,6 +741,7 @@ def solve_sw(
     # :func:`_accumulate_over_gpoints` and the solve_lw companion.
     fluxes = _accumulate_over_gpoints(
         step_fn, optics_lib.n_gpt_sw, fluxes_0, gpoint_batch_size,
+        checkpoint=gpoint_checkpoint,
     )
     # There are problematic values for the fluxes at the top boundary (the top
     # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  Clip

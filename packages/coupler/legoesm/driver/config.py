@@ -235,6 +235,13 @@ class ExperimentConfig(NamedTuple):
     # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
     # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
     rrtmgp_gpoint_batch_size: int = 0
+    # G-point checkpointing in the RRTMGP two-stream scan (see
+    # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
+    # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for
+    # reverse-mode AD / training.  False = plain ``lax.scan`` (no prevent_cse):
+    # smaller compiled footprint / faster cold compile for FORWARD/inference
+    # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
+    rrtmgp_gpoint_checkpoint: bool = True
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0

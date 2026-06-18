@@ -120,9 +120,15 @@ def compute_optical_properties(
   )
 
   roughness = lookup.ice_roughness.value
-  ext_tables = (lookup.ext_liq[ibnd, :], lookup.ext_ice[roughness, ibnd, :])
-  ssa_tables = (lookup.ssa_liq[ibnd, :], lookup.ssa_ice[roughness, ibnd, :])
-  asy_tables = (lookup.asy_liq[ibnd, :], lookup.asy_ice[roughness, ibnd, :])
+  # optimization_barrier: keep XLA from CONSTANT-FOLDING the per-band slices of
+  # the (constant) cloud-optics lookup tables into the kernel — that fold is
+  # what tips the rrtmgp executable over the XLA-CPU LLVM-JIT code-region limit
+  # when clouds are active (clear-sky rrtmgp compiles; the cloud path overflows)
+  # and bloats GPU/TPU compile.  Identity at runtime -> answer-preserving.
+  _ob = jax.lax.optimization_barrier
+  ext_tables = (_ob(lookup.ext_liq)[ibnd, :], _ob(lookup.ext_ice)[roughness, ibnd, :])
+  ssa_tables = (_ob(lookup.ssa_liq)[ibnd, :], _ob(lookup.ssa_ice)[roughness, ibnd, :])
+  asy_tables = (_ob(lookup.asy_liq)[ibnd, :], _ob(lookup.asy_ice)[roughness, ibnd, :])
   # Convert cloud path to g/m² to conform to the lookup tables.
   cloud_path = (
       cloud_path_liq * _KG_TO_G_FACTOR,
