@@ -143,6 +143,88 @@ def test_prt_promotion_registered_and_applies():
     np.testing.assert_allclose(np.asarray(new.Pr_t), [0.7, 0.9, 1.1])
 
 
+def _mass_weight(kw):
+    """The diffusion solver's EXACT mass weight ``w_k = ρ_k·dz_layer_k`` (the
+    same ``clip(|Δz_half|, 1, None)`` the scheme applies) — the weight under which
+    the flux-form column integral telescopes to the boundary flux."""
+    z_half = np.asarray(kw["z_half"])
+    dz_layer = np.clip(np.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
+    return np.asarray(kw["rho"]) * dz_layer            # (ncol, nlev)
+
+
+def _exner_pref(kw):
+    """``θ = T·(p_ref/p)^κ`` ⇒ dθ/dt = exner_pref·dT/dt; the energy-conserving
+    weight for the θ-space heat diffusion (raw Σw·dT/dt is NOT conserved).
+    Matches ``implicit_vertical_diffusion_theta``'s ``clip(p_full, 1, None)``."""
+    p_safe = np.clip(np.asarray(kw["p_full"]), 1.0, None)
+    return (constants.p_ref / p_safe) ** constants.kappa
+
+
+def _col_int(tendency, weight):
+    """Per-column mass-weighted vertical integral Σ_k weight_k·tendency_k."""
+    return np.sum(np.asarray(weight) * np.asarray(tendency), axis=1)   # (ncol,)
+
+
+def test_per_column_ck_prt_conserves_column_integrals():
+    """CONSERVATION GATE (§9 / CLAUDE.md): the LES-informed per-column parameter
+    deploy must NOT leak column mass/moisture/momentum/energy.
+
+    The interior eddy diffusion is flux-form, so the mass-weighted column-integrated
+    tendency = the surface flux — and the surface fluxes are bulk-formula
+    (``compute_surface_fluxes``), INDEPENDENT of C_K/Pr_t/C_eps.  So two runs
+    differing ONLY in a strongly-varying per-column C_K AND Pr_t produce IDENTICAL
+    column integrals of q_v, u, v (raw) and θ (energy = exner-weighted T), even
+    though every per-LEVEL profile differs.  (wp2_new is C_eps-dependent BY DESIGN
+    and excluded.)"""
+    kw = _inputs()
+    # Ensure genuinely non-zero surface fluxes so rtol is a real test (not all ~0).
+    kw["T_sfc"] = kw["T"][:, -1] + 2.0
+    kw["q_sfc"] = kw["q_v"][:, -1] + 3.0e-3
+    cfg = CLUBBLiteConfig()
+    out0, _ = clubb_lite_turbulence(**kw, config=cfg)
+
+    # The deployed correction: a strongly-varying per-column C_K AND Pr_t.
+    ck = jnp.array([0.5 * cfg.C_K, 2.0 * cfg.C_K, 1.3 * cfg.C_K])
+    prt = jnp.array([0.6 * cfg.Pr_t, 1.5 * cfg.Pr_t, 0.9 * cfg.Pr_t])
+    out1, _ = clubb_lite_turbulence(**kw, config=cfg._replace(C_K=ck, Pr_t=prt))
+
+    w = _mass_weight(kw)
+    we = w * _exner_pref(kw)                            # energy (θ) weight
+    for name, t0, t1, weight in [
+        ("moisture", out0.dq_v_dt, out1.dq_v_dt, w),
+        ("u-momentum", out0.du_dt, out1.du_dt, w),
+        ("v-momentum", out0.dv_dt, out1.dv_dt, w),
+        ("energy (θ)", out0.dT_dt, out1.dT_dt, we),
+    ]:
+        np.testing.assert_allclose(
+            _col_int(t1, weight), _col_int(t0, weight), rtol=1e-9, atol=1e-12,
+            err_msg=f"per-column C_K/Pr_t changed the column-integrated {name} "
+                    f"tendency — the deploy leaks {name}.")
+
+    # NON-VACUOUS: BOTH coefficients genuinely reached the body. du_dt depends on
+    # Km = C_K·l·√wp2 (NO Pr_t) → it isolates C_K's effect; dq_v_dt/dT_dt are
+    # Kh-driven → Pr_t's effect. Checking momentum separately rules out a silently
+    # dropped C_K that Pr_t's Kh-modulation would otherwise mask (Codex e2).
+    assert float(np.max(np.abs(np.asarray(out1.du_dt) - np.asarray(out0.du_dt)))) > 1e-10
+    assert float(np.max(np.abs(np.asarray(out1.dq_v_dt) - np.asarray(out0.dq_v_dt)))) > 1e-10
+    assert float(np.max(np.abs(np.asarray(out1.dT_dt) - np.asarray(out0.dT_dt)))) > 1e-10
+
+
+def test_conservation_gate_detects_a_leak():
+    """SYNTHETIC-VIOLATION self-test (CLAUDE.md 'provably non-vacuous' tripwire):
+    a non-flux-form column source makes the mass-weighted integral differ, so the
+    equality assertion the gate relies on FAILS — proving the gate is not vacuous."""
+    kw = _inputs()
+    out0, _ = clubb_lite_turbulence(**kw, config=CLUBBLiteConfig())
+    w = _mass_weight(kw)
+    # Inject a fake non-conservative source at the top level of one column only.
+    leaked = np.asarray(out0.dq_v_dt).copy()
+    leaked[1, 0] += 1.0e-6                              # a spurious moisture source
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(
+            _col_int(leaked, w), _col_int(out0.dq_v_dt, w), rtol=1e-9, atol=1e-12)
+
+
 def test_uniform_per_column_ceps_matches_scalar():
     """A uniform (ncol,) C_eps reproduces the scalar default EXACTLY."""
     kw = _inputs()
