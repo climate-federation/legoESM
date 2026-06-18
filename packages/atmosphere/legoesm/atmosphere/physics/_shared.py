@@ -305,6 +305,29 @@ def exner_function(p):
     return (p / constants.p_ref) ** poisson_exponent
 
 
+def exner_to_pressure(exner):
+    """Inverse Exner: pressure ``p = p_ref · Π^(1/κ)`` from the Exner function ``Π``.
+
+    The inverse of :func:`exner_function` (``Π = (p/p_ref)^κ``) — the canonical home
+    for the inverse-Poisson recovery ``p = p_ref·Π^{1/κ}`` (e.g. converting a stored
+    Exner reference back to a reference pressure), so the formula lives in one place
+    (CLAUDE.md "shared utilities — never re-derive"; the
+    ``exner_potential_temperature`` ratchet flags the ``Π^{1/κ}`` direction too).
+
+    Parameters
+    ----------
+    exner : array
+        Exner function ``Π`` [-].
+
+    Returns
+    -------
+    array
+        Pressure [Pa], same shape as ``exner``.
+    """
+    inverse_poisson_exponent = 1.0 / constants.kappa
+    return constants.p_ref * exner ** inverse_poisson_exponent
+
+
 def buoyancy_coefficient(theta):
     """Buoyancy coefficient ``g / θ`` [m s⁻² K⁻¹] for buoyancy / N² terms.
 
@@ -327,6 +350,32 @@ def buoyancy_coefficient(theta):
         ``g / θ``, same shape as ``theta``.
     """
     return constants.g / theta
+
+
+def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
+    """Brunt-Väisälä frequency squared ``N² = g·∂θ/∂z/θ`` from an ALREADY-COMPUTED
+    potential-temperature gradient + ``θ`` at the SAME levels.
+
+    The canonical home for the N²-from-a-gradient form (the
+    ``buoyancy_term_g_over_theta`` ratchet) — distinct from
+    :func:`brunt_vaisala_n_full`, which itself builds ``θ`` + the gradient + the
+    edge mapping from ``T``/``p``/``z`` for the GWD schemes.  Floor/clip ``θ`` at
+    the CALL site as needed.  The arithmetic order ``g·∂θ/∂z/θ`` is PRESERVED (not
+    ``(g/θ)·∂θ/∂z``) so a caller replacing an inline form stays BIT-IDENTICAL.
+
+    Parameters
+    ----------
+    theta : array
+        (Virtual) potential temperature [K] co-located with ``dtheta_dz``.
+    dtheta_dz : array
+        Potential-temperature vertical gradient ``∂θ/∂z`` [K/m], same shape.
+
+    Returns
+    -------
+    array
+        ``N²`` [s⁻²], same shape.
+    """
+    return constants.g * dtheta_dz / theta
 
 
 def mixing_length(z, l_mix_max, z_floor=1.0):

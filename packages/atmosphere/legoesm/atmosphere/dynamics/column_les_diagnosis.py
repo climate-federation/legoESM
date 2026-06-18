@@ -45,7 +45,11 @@ from legoesm.atmosphere.dynamics.rce_diagnostics import (
     resolved_turbulent_fluxes_plane,
     vertical_velocity_variance_plane,
 )
-from legoesm.atmosphere.physics._shared import mixing_length
+from legoesm.atmosphere.physics._shared import (
+    brunt_vaisala_n_squared_from_gradient,
+    exner_to_pressure,
+    mixing_length,
+)
 
 from legoesm import constants
 
@@ -117,7 +121,7 @@ def _relative_humidity_field(les_state, height_coord, q_v: jax.Array) -> jax.Arr
 
     temp = temperature_3d_plane(les_state, height_coord)          # (ny, nx, nlev)
     exner = jnp.asarray(height_coord.exner_ref)                   # (nlev,)
-    p = constants.p_ref * exner ** (1.0 / constants.kappa)        # (nlev,) reference p
+    p = exner_to_pressure(exner)                                  # (nlev,) reference p
     q_sat = saturation_mixing_ratio(temp, p)                      # broadcasts → 3-D
     return q_v / (q_sat + _Q_SAT_FLOOR_KG_KG)
 
@@ -404,7 +408,10 @@ def diagnose_c_eps_coefficient(
     shear_sq = du_dz ** 2 + dv_dz ** 2
     dthetav_dz = mean_gradient_at_interfaces(thetav_asc, z_asc)
     thetav_iface = 0.5 * (thetav_asc[1:] + thetav_asc[:-1])          # co-located ⟨θ_v⟩
-    N_sq = constants.g * dthetav_dz / jnp.maximum(thetav_iface, 1.0)
+    # N² = g·∂θ_v/∂z/θ_v via the shared canonical helper (no re-derived buoyancy);
+    # BIT-IDENTICAL to the prior inline (the helper preserves the g·grad/θ order).
+    N_sq = brunt_vaisala_n_squared_from_gradient(
+        jnp.maximum(thetav_iface, 1.0), dthetav_dz)
     z_m = fluxes.z_half_interior[::-1]
     c_eps, valid = c_eps_from_budget(
         K_m, km_valid, kh.K, kh.valid, shear_sq, N_sq,
