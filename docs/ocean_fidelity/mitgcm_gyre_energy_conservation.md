@@ -231,3 +231,39 @@ amplification of the (legitimately scheme-dependent) 2Δx behaviour at the **mar
 Munk layer** (δ≈1.7 cells): legoESM sits on the unstable side of the WBC barotropic instability,
 MITgcm on the stable side. Falsifiable prediction under test: at 2× resolution (δ≈3.4 cells,
 resolved) the gyre should go laminar.
+
+## UPDATE 2026-06-18 (iteration 5): DECISIVE — resolution-independent marginal-stability difference
+
+Built MITgcm at **2× resolution** (122×122, 10 km, Munk δ≈3.4 cells, well-resolved; recompiled
+SIZE.h, regenerated inputs) and ran both models there. Result:
+
+| | MITgcm | legoESM |
+|---|---|---|
+| 1× res (20 km, δ≈1.7) | **laminar 0.031** | turbulent 0.15–0.37 |
+| 2× res (10 km, δ≈3.4) | **laminar 0.031** (peak 0.034) | turbulent 0.23 |
+
+They **match at 0.1yr** (0.0237 vs 0.0225) then split. So the "marginal resolution" hypothesis is
+**refuted**: MITgcm's steady Munk gyre is **stable and resolution-converged at 0.031**; legoESM
+cannot hold it at *either* resolution. This is a genuine, resolution-independent difference (the
+user was right that the statistics should — but don't — match).
+
+Yet it is **not a bug and not a single wrong operator**:
+- advection is analytically correct (corr 1.0) and matches MITgcm on the smooth gyre (corr 0.9998);
+- **inviscid energy conservation matches**: from the same rough state, MITgcm (centered) drops
+  ~7.2% (backward-Euler free-surface damping the initial imbalance) then is FLAT/conserved;
+  legoESM **centered** does the same (−7.72% then flat). The earlier "−10%" was the recipe's upwind
+  dissipation; the earlier "+12% leak" was specific to legoESM's *own* evolved turbulent state, not
+  a generic property — on MITgcm's states legoESM conserves like MITgcm.
+
+**Conclusion**: the two discretizations agree per-term and in energy to ~1%, but the **steady Munk
+gyre is marginally (linearly) stable**, and legoESM's ~1% differences put it on the *unstable* side
+while MITgcm sits on the *stable* side. legoESM literally cannot hold MITgcm's 0.031 state (drifts
+off). The effective gap is ~1.5–2× in WBC-stabilising dissipation (legoESM needs A_h≈600–1600 to go
+laminar). The lead is the **western-boundary-layer stability** (the viscous + no-slip-sidedrag
+operator's effective stabilisation at the wall) — even though the interior `Um_Diss` and the
+`USidDrag` *values* match at the smooth equilibrium, the marginal growth rate of the WBC shear
+instability differs at the ~1% level that decides laminar-vs-turbulent here.
+
+This is a known sensitive regime (wind-driven-gyre WBC instability). The oracle stands at its strong
+tiers (10-step eta 0.9997 + per-term tendency + inviscid-energy match); the equilibrium laminar/
+turbulent selection is a marginal-stability difference of two valid schemes, documented as open.
