@@ -89,16 +89,35 @@ def _hybrid_p_s_floor(sigma, dp_floor: float = 100.0) -> float:
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
 
 
-def _get_cs_weights(n_lon_era5: int, grid):
-    """Get or compute cached cubed-sphere regridding weights."""
-    key = (n_lon_era5, id(grid))
+def _coord_fingerprint(arr) -> tuple:
+    """Content fingerprint ``(shape, hash(bytes))`` of a coordinate array.
+
+    Keyed on the FULL array contents, not just shape + endpoints: two source grids
+    with the same bounding box but different INTERIOR spacing (e.g. a uniform lat-lon
+    grid vs a Gaussian-quadrature grid of the same extent — the very confusion this
+    path fixes) must NOT collide.  Fingerprinting the target grid's coordinates too
+    makes the cache robust to ``id()`` reuse after a grid is garbage-collected.
+    """
+    a = np.ascontiguousarray(np.asarray(arr))
+    return (a.shape, hash(a.tobytes()))
+
+
+def _get_cs_weights(src_lat, src_lon, grid):
+    """Get or compute cached ERA5-lat-lon → cubed-sphere regridding weights.
+
+    Built from the ACTUAL ERA5 lat/lon grid (``src_lat``/``src_lon``, 1-D radians) —
+    NOT a Gaussian proxy of it, whose quadrature latitudes + differing latitude count
+    mis-index the uniform ERA5 data (the regrid pulled near-antipodal latitudes; #cs).
+    Cached on the CONTENT fingerprint of both source coords and the target grid
+    coords (collision- and GC-safe; see ``_coord_fingerprint``).
+    """
+    src_lat = np.asarray(src_lat)
+    src_lon = np.asarray(src_lon)
+    key = (_coord_fingerprint(src_lat), _coord_fingerprint(src_lon),
+           _coord_fingerprint(grid.lat), _coord_fingerprint(grid.lon))
     if key not in _CS_WEIGHT_CACHE:
-        from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.grids.regridding import compute_gauss_to_cs_weights
-        gauss_proxy = create_gaussian_grid(
-            n_max=n_lon_era5 // 2 - 1, dealiasing="linear",
-        )
-        _CS_WEIGHT_CACHE[key] = compute_gauss_to_cs_weights(gauss_proxy, grid)
+        from legoesm.grids.regridding import compute_latlon_to_cs_weights
+        _CS_WEIGHT_CACHE[key] = compute_latlon_to_cs_weights(src_lat, src_lon, grid)
     return _CS_WEIGHT_CACHE[key]
 
 
@@ -466,8 +485,9 @@ def era5_to_cubedsphere_carry(
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
-    n_lon_era5 = era5.T.shape[1]
-    weights = _get_cs_weights(n_lon_era5, grid)
+    # Build the regrid weights from the ACTUAL ERA5 lat/lon grid (not a Gaussian
+    # proxy — see _get_cs_weights / compute_latlon_to_cs_weights for the bug fixed).
+    weights = _get_cs_weights(era5.lat, era5.lon, grid)
 
     # Regrid 3D fields
     def _regrid_3d(field_ll):

@@ -369,9 +369,18 @@ class TestERA5ToState:
 
     def test_weight_cache(self):
         from legoesm.training.era5_to_state import _get_cs_weights
-        w1 = _get_cs_weights(100, _GRID)
-        w2 = _get_cs_weights(100, _GRID)
-        assert w1 is w2  # same object from cache
+        # New 3-arg API: weights built from the ACTUAL source lat/lon (radians).
+        src_lat = np.linspace(np.pi / 2, -np.pi / 2, 18)
+        src_lon = np.linspace(0.0, 2 * np.pi, 36, endpoint=False)
+        w1 = _get_cs_weights(src_lat, src_lon, _GRID)
+        w2 = _get_cs_weights(src_lat, src_lon, _GRID)
+        assert w1 is w2  # same object from content-fingerprinted cache
+        # A source grid with the SAME shape+endpoints but different INTERIOR
+        # spacing must NOT collide on the cache (the proxy-bug failure mode).
+        src_lat_stretched = np.linspace(np.pi / 2, -np.pi / 2, 18)
+        src_lat_stretched[1:-1] *= 0.5   # perturb interior, keep endpoints
+        w3 = _get_cs_weights(src_lat_stretched, src_lon, _GRID)
+        assert w3 is not w1
 
     def test_era5_to_cubedsphere_carry_shapes_and_finite(self):
         """era5_to_cubedsphere_carry produces carry with correct shapes
