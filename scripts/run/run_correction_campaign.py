@@ -618,7 +618,25 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
+    _print_deploy_hint(args.out)
     return 0
+
+
+def _print_deploy_hint(out_path: str) -> None:
+    """Verify the just-written output is deployable + print the deploy one-liner.
+
+    Round-trips the campaign JSON through the production deploy loader so a
+    non-deployable output fails LOUDLY here (at write time) rather than silently
+    in a downstream production run.
+    """
+    from legoesm.training.deploy_correction import corrected_turbulence_override
+
+    corrected_turbulence_override(out_path)  # raises if the output is not deployable
+    print(
+        "[campaign] deploy into a production run with: "
+        "ExperimentConfig(..., turbulence='clubb_lite', "
+        f"turbulence_override=corrected_turbulence_override({out_path!r}))"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
@@ -786,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
+    _print_deploy_hint(args.out)
     return 0
 
 
