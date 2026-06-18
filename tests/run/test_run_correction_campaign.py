@@ -165,6 +165,50 @@ def test_build_correction_campaign_wiring_one_round():
     assert np.isfinite(float(it.bias.updated_bias))
 
 
+def _mock_run_les_sheared(setup):
+    """Mock plane-LES with a mean-wind shear so the clubb_coefficient diagnosis
+    yields a VALID dimensionless C_K (the rest-state mock has no shear)."""
+    state = _mock_run_les(setup)
+    z = jnp.asarray(setup.height_coord.z_full)
+    ny, nx = setup.grid.ny, setup.grid.nx
+    u = (0.01 * z)[None, None, :] * jnp.ones((ny, nx, z.shape[0]))   # constant shear
+    return state._replace(u=state.u.replace(data=u))
+
+
+def test_build_correction_campaign_clubb_coefficient_method():
+    """The dimensionless clubb_coefficient diagnosis is wired end-to-end: the
+    campaign auto-populates l_mix_max from the GCM config, the LES diagnoses a
+    DIMENSIONLESS C_K, the loop reduces it (same method), and a per-column,
+    in-bounds C_K is produced — proving the units-correct path runs."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        accept_only_if_improved=False)            # wiring test (no improvement signal)
+
+    it = result.iterations[0]
+    assert it.n_diagnosed == 1
+    ck = np.asarray(result.final_config.C_K).reshape(-1)
+    assert ck.shape == (8 * 16,)
+    # clip_to_bounds default ON ⇒ the dimensionless C_K stays in (0.1, 1.2).
+    assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2
+
+
 def test_build_correction_campaign_default_gate_rejects_non_improving():
     """build_correction_campaign defaults the monotonic gate ON: the mock driver
     returns a fixed state regardless of C_K, so the round does not lower the bias

@@ -145,9 +145,15 @@ def test_validate_config_rejects_bad_settings():
         ColumnLESConfig(relax_width_frac=1.5),
         ColumnLESConfig(relax_tau_s=0.0),
         ColumnLESConfig(p_sfc_Pa=-1.0),
+        # clubb_coefficient method without l_mix_max is rejected.
+        ColumnLESConfig(diagnosis_method="clubb_coefficient"),
+        ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=0.0),
     ):
         with pytest.raises(ValueError):
             validate_column_les_config(bad)
+    # clubb_coefficient WITH a positive l_mix_max validates.
+    validate_column_les_config(
+        ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=100.0))
 
 
 def test_coefficient_value_dispatch():
@@ -157,10 +163,16 @@ def test_coefficient_value_dispatch():
     class _Ent:
         w_entrainment = jnp.asarray(0.01)
 
+    class _Ck:
+        C_K = jnp.full((7,), 0.3)
+
     assert coefficient_value(_K(), "eddy_diffusivity").shape == (7,)
     assert float(coefficient_value(_Ent(), "entrainment")) == pytest.approx(0.01)
+    assert coefficient_value(_Ck(), "clubb_coefficient").shape == (7,)
     with pytest.raises(ValueError, match="no coefficient"):
         coefficient_value(_K(), "entrainment")  # wrong pairing
+    with pytest.raises(ValueError, match="no coefficient"):
+        coefficient_value(_K(), "clubb_coefficient")  # K has no C_K
 
 
 def test_build_setup_deep_regime_by_cape():

@@ -34,14 +34,22 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
     EntrainmentDiagnosis,
+    clubb_coefficient_from_diffusivity,
     eddy_diffusivity_from_flux,
     entrainment_velocity_from_buoyancy_flux,
+    momentum_diffusivity_from_fluxes,
 )
 from legoesm.atmosphere.dynamics.rce_diagnostics import (
     resolved_turbulent_fluxes_plane,
+    vertical_velocity_variance_plane,
 )
+from legoesm.atmosphere.physics._shared import mixing_length
 
-_METHODS = ("eddy_diffusivity", "entrainment")
+_METHODS = ("eddy_diffusivity", "entrainment", "clubb_coefficient")
+
+# Minimum number of valid interior interfaces for a trustworthy column C_K
+# (a single anomalous-shear interface should not define the whole column).
+_MIN_VALID_CK_LEVELS = 3
 
 
 class EddyDiffusivityProfile(NamedTuple):
@@ -100,19 +108,100 @@ def diagnose_entrainment(
     )
 
 
+class ClubbCoefficientProfile(NamedTuple):
+    """Dimensionless CLUBB-lite eddy coefficient ``C_K`` per interior interface."""
+
+    z_m: jax.Array     # (nlev-1,) interior-interface heights [m], ascending
+    C_K: jax.Array     # (nlev-1,) dimensionless C_K = K_m/(ℓ·√wp2)
+    valid: jax.Array   # (nlev-1,) bool
+
+
+def diagnose_clubb_coefficient(
+    les_state,
+    height_coord,
+    *,
+    l_mix_max: float,
+    qv_slot: int = 0,
+    min_valid_levels: int = _MIN_VALID_CK_LEVELS,
+) -> ClubbCoefficientProfile:
+    """Diagnose the DIMENSIONLESS CLUBB-lite coefficient ``C_K = K_m/(ℓ·√wp2)``.
+
+    Unlike :func:`diagnose_eddy_diffusivity` (which returns a *dimensional* heat
+    diffusivity ``K`` [m²/s]), this returns the actual GCM parameter: the
+    dimensionless coefficient that, with the GCM's own mixing length and velocity
+    scale, reproduces the LES MOMENTUM diffusivity — the exact inverse of
+    ``Km = C_K·ℓ·√wp2`` (``clubb_lite.py``).  Using the momentum flux (not heat)
+    avoids conflating ``C_K`` with the turbulent Prandtl number ``Pr_t``.
+
+    Pipeline (all co-located at the ``nlev-1`` interior interfaces, reversed
+    top-down→ascending together — the plane convention):
+      * ``K_m`` from the resolved ``⟨w'u'⟩, ⟨w'v'⟩`` + mean-wind shear
+        (:func:`momentum_diffusivity_from_fluxes`);
+      * ``ℓ`` from the SAME Blackadar :func:`mixing_length` the GCM uses, with
+        the GCM's ``l_mix_max``;
+      * ``√wp2`` from the resolved vertical-velocity variance
+        (:func:`vertical_velocity_variance_plane`, interior half levels);
+      * ``C_K`` and the valid mask from
+        :func:`clubb_coefficient_from_diffusivity`.
+    Fewer than ``min_valid_levels`` valid interfaces ⇒ the WHOLE column is
+    flagged invalid (a single anomalous-shear interface must not define ``C_K``);
+    the loop then keeps the background.  Pure-JAX, AD-safe.
+    """
+    fluxes = resolved_turbulent_fluxes_plane(les_state, height_coord, qv_slot)
+    wp2_half = vertical_velocity_variance_plane(les_state, height_coord)  # (nlev+1,) top-down
+    u_mean = jnp.mean(les_state.u.data, axis=(0, 1))                      # (nlev,) top-down
+    v_mean = jnp.mean(les_state.v.data, axis=(0, 1))
+    z_full = jnp.asarray(height_coord.z_full)                            # (nlev,) top-down
+    # Reverse EVERY array top-down→ascending together so K_m's flux + shear,
+    # √wp2 and ℓ(z) are all co-located at the same ascending interior interfaces.
+    w_u = fluxes.w_u[::-1]
+    w_v = fluxes.w_v[::-1]
+    u_asc = u_mean[::-1]
+    v_asc = v_mean[::-1]
+    z_asc = z_full[::-1]
+    wp2_interior = wp2_half[1:-1][::-1]                                  # (nlev-1,) ascending
+    z_m = fluxes.z_half_interior[::-1]                                   # (nlev-1,) ascending
+    K_m, km_valid = momentum_diffusivity_from_fluxes(
+        w_u, w_v, u_asc, v_asc, z_asc
+    )
+    l_mix = mixing_length(z_m, l_mix_max)
+    C_K, valid = clubb_coefficient_from_diffusivity(
+        K_m, km_valid, l_mix, wp2_interior
+    )
+    # Column-level trust guard: too few valid interfaces ⇒ invalidate the column.
+    enough = jnp.sum(valid) >= int(min_valid_levels)
+    valid = valid & enough
+    return ClubbCoefficientProfile(z_m=z_m, C_K=C_K, valid=valid)
+
+
 def diagnose_column_coefficient(
-    les_state, height_coord, *, method: str = "eddy_diffusivity", qv_slot: int = 0
+    les_state,
+    height_coord,
+    *,
+    method: str = "eddy_diffusivity",
+    qv_slot: int = 0,
+    l_mix_max: float | None = None,
 ):
     """Dispatch to the chosen closure-coefficient diagnosis (raises on unknown).
 
-    Returns an :class:`EddyDiffusivityProfile` for ``"eddy_diffusivity"`` or an
+    Returns an :class:`EddyDiffusivityProfile` for ``"eddy_diffusivity"``, an
     :class:`~legoesm.atmosphere.dynamics.les_closure_diagnosis.EntrainmentDiagnosis`
-    for ``"entrainment"``.
+    for ``"entrainment"``, or a :class:`ClubbCoefficientProfile` for
+    ``"clubb_coefficient"`` (which requires the GCM ``l_mix_max``).
     """
     if method == "eddy_diffusivity":
         return diagnose_eddy_diffusivity(les_state, height_coord, qv_slot)
     if method == "entrainment":
         return diagnose_entrainment(les_state, height_coord, qv_slot)
+    if method == "clubb_coefficient":
+        if l_mix_max is None:
+            raise ValueError(
+                "method='clubb_coefficient' requires l_mix_max (the GCM "
+                "CLUBBLiteConfig.l_mix_max) to evaluate the mixing length."
+            )
+        return diagnose_clubb_coefficient(
+            les_state, height_coord, l_mix_max=l_mix_max, qv_slot=qv_slot
+        )
     raise ValueError(
         f"Unknown column-LES diagnosis method {method!r}; choose from {_METHODS}."
     )

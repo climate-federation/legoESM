@@ -162,6 +162,16 @@ def build_correction_campaign(
     if lon_deg is None:
         lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
 
+    # Keep the loop's reduction in lock-step with the LES diagnosis, and for the
+    # dimensionless clubb_coefficient method auto-populate l_mix_max (the GCM
+    # mixing length) so the diagnosed C_K matches how the GCM uses it.
+    clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
+    diagnosis_method = les_config.diagnosis_method
+    if diagnosis_method == "clubb_coefficient" and \
+            getattr(les_config, "clubb_l_mix_max", None) is None:
+        les_config = les_config._replace(
+            clubb_l_mix_max=float(clubb_cfg.l_mix_max))
+
     build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
     run_fn = make_run_fn(build_driver, extract_column_state)
     compare_fn = make_compare_fn(
@@ -190,6 +200,7 @@ def build_correction_campaign(
         int(n_iterations),
         compare_fn=compare_fn, diagnose_fn=diagnose_fn,
         promotion_key="clubb_lite_C_K", grid_shape=grid_shape,
+        diagnosis_method=diagnosis_method,
         background=background, les_budget=les_budget, env_scales=env_scales,
         initial_field=initial_field, start_round=start_round,
         checkpoint_callback=checkpoint_callback,
@@ -280,6 +291,13 @@ def _build_arg_parser():
                         "(e.g. '1.0,0.5,0.25'): backtrack the correction magnitude "
                         "toward the LES diagnosis, keeping the largest improving "
                         "step (default: full single step)")
+    p.add_argument("--diagnosis-method",
+                   choices=("clubb_coefficient", "eddy_diffusivity"),
+                   default="clubb_coefficient",
+                   help="LES closure-coefficient diagnosis: clubb_coefficient "
+                        "(default) diagnoses the DIMENSIONLESS C_K = K_m/(l*sqrt(wp2)) "
+                        "consistent with the GCM; eddy_diffusivity diagnoses the "
+                        "dimensional heat K [m^2/s] (legacy)")
     p.add_argument("--allow-unphysical-coeff", action="store_true",
                    help="do NOT clamp the diagnosed C_K to its registered physical "
                         "bounds (default: clamp, so a degenerate LES cannot inject "
@@ -419,7 +437,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma,
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
-        les_config=ColumnLESConfig(), n_worst=args.n_worst,
+        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
+        n_worst=args.n_worst,
         les_budget=args.les_budget,
         run_les_fn=partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps),
         initial_clubb=initial_clubb, initial_field=initial_field,

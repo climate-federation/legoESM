@@ -50,6 +50,10 @@ class ColumnLESConfig(NamedTuple):
     relax_tau_s: float = 600.0       # Newtonian relaxation timescale [s]
     p_sfc_Pa: float = 1.0e5
     diagnosis_method: str = "eddy_diffusivity"
+    # The GCM CLUBBLiteConfig.l_mix_max, REQUIRED for the dimensionless
+    # ``"clubb_coefficient"`` diagnosis (C_K = K_m/(ℓ·√wp2)) so the diagnosed
+    # mixing length matches the GCM's; unused by the other methods.
+    clubb_l_mix_max: float | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -62,6 +66,13 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
         raise ValueError(f"relax_tau_s must be > 0, got {config.relax_tau_s}.")
     if config.p_sfc_Pa <= 0.0:
         raise ValueError(f"p_sfc_Pa must be > 0, got {config.p_sfc_Pa}.")
+    if config.diagnosis_method == "clubb_coefficient" and (
+        config.clubb_l_mix_max is None or config.clubb_l_mix_max <= 0.0
+    ):
+        raise ValueError(
+            "diagnosis_method='clubb_coefficient' requires clubb_l_mix_max > 0 "
+            "(the GCM CLUBBLiteConfig.l_mix_max)."
+        )
 
 
 def coefficient_value(diagnosis: Any, method: str):
@@ -73,6 +84,8 @@ def coefficient_value(diagnosis: Any, method: str):
     """
     if method == "eddy_diffusivity" and hasattr(diagnosis, "K"):
         return diagnosis.K
+    if method == "clubb_coefficient" and hasattr(diagnosis, "C_K"):
+        return diagnosis.C_K
     if method == "entrainment" and hasattr(diagnosis, "w_entrainment"):
         return diagnosis.w_entrainment
     raise ValueError(
@@ -192,6 +205,7 @@ def run_column_les_pipeline(
     *,
     method: str = "eddy_diffusivity",
     qv_slot: int = 0,
+    l_mix_max: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient.
 
@@ -199,10 +213,13 @@ def run_column_les_pipeline(
     coefficient is then diagnosed with :func:`diagnose_column_coefficient`
     (``method`` raises on unknown).  ``run_les_fn`` is injected so the heavy run
     can be mocked in tests and swapped for :func:`run_forced_les` in production.
+    ``l_mix_max`` (the GCM mixing length) is required for ``method=
+    "clubb_coefficient"`` and ignored otherwise.
     """
     final_state = run_les_fn(setup)
     return diagnose_column_coefficient(
-        final_state, setup.height_coord, method=method, qv_slot=qv_slot
+        final_state, setup.height_coord, method=method, qv_slot=qv_slot,
+        l_mix_max=l_mix_max,
     )
 
 
@@ -355,6 +372,7 @@ def process_column(
         gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls_state, config=config,
     )
     return run_column_les_pipeline(
-        setup, run_les_fn, method=config.diagnosis_method
+        setup, run_les_fn, method=config.diagnosis_method,
+        l_mix_max=config.clubb_l_mix_max,
     )
 

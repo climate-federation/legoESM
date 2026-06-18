@@ -172,3 +172,83 @@ def test_entrainment_jit_and_grad():
     g = jax.grad(loss)(w_thetav)
     assert g.shape == w_thetav.shape
     assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# --- momentum diffusivity (shear-projected) + dimensionless C_K -----------
+from legoesm.atmosphere.dynamics.les_closure_diagnosis import (  # noqa: E402
+    clubb_coefficient_from_diffusivity,
+    momentum_diffusivity_from_fluxes,
+)
+
+
+def test_momentum_diffusivity_recovers_km():
+    # u = S0*z (constant shear), v=0, down-gradient w'u' = -Km0*S0 ⇒ recover Km0.
+    z = jnp.array([0.0, 100.0, 200.0, 300.0])
+    s0, km0 = 0.01, 5.0
+    u = s0 * z
+    v = jnp.zeros_like(z)
+    w_u = jnp.full((3,), -km0 * s0)
+    Km, valid = momentum_diffusivity_from_fluxes(w_u, jnp.zeros((3,)), u, v, z)
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-9)
+
+
+def test_momentum_diffusivity_projects_misaligned_flux():
+    # Shear purely in u; a v-flux component is cross-shear and must be projected
+    # out (K_m depends only on the along-shear flux w'u').
+    z = jnp.array([0.0, 100.0, 200.0])
+    u = 0.01 * z
+    v = jnp.zeros_like(z)
+    w_u = jnp.full((2,), -0.05)            # along-shear
+    Km_a, _ = momentum_diffusivity_from_fluxes(w_u, jnp.zeros((2,)), u, v, z)
+    Km_b, _ = momentum_diffusivity_from_fluxes(w_u, jnp.full((2,), 9.9), u, v, z)
+    np.testing.assert_allclose(np.asarray(Km_a), np.asarray(Km_b))  # v-flux ignored
+
+
+def test_momentum_diffusivity_countergradient_invalid():
+    z = jnp.array([0.0, 100.0, 200.0])
+    u = 0.01 * z
+    Km, valid = momentum_diffusivity_from_fluxes(
+        jnp.full((2,), +0.05), jnp.zeros((2,)), u, jnp.zeros_like(z), z)  # up-gradient
+    assert not bool(jnp.any(valid))
+
+
+def test_momentum_diffusivity_zero_shear_invalid_and_ad_safe():
+    z = jnp.array([0.0, 100.0, 200.0])
+    flat = jnp.zeros((3,))                  # no shear
+    w_u = jnp.full((2,), -0.05)
+
+    def loss(wu):
+        Km, _ = momentum_diffusivity_from_fluxes(wu, jnp.zeros((2,)), flat, flat, z)
+        return jnp.sum(Km ** 2)
+
+    _, valid = momentum_diffusivity_from_fluxes(w_u, jnp.zeros((2,)), flat, flat, z)
+    assert not bool(jnp.any(valid))
+    g = jax.grad(loss)(w_u)
+    assert bool(jnp.all(jnp.isfinite(g)))   # no NaN gradient at zero shear
+
+
+def test_clubb_coefficient_dimensionless_value():
+    # C_K = Km/(l*sqrt(wp2)) = 5/(50*0.5) = 0.2.
+    Km = jnp.full((3,), 5.0)
+    CK, valid = clubb_coefficient_from_diffusivity(
+        Km, jnp.ones((3,), bool), jnp.full((3,), 50.0), jnp.full((3,), 0.25))
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(CK), 0.2, rtol=1e-12)
+
+
+def test_clubb_coefficient_low_wp2_invalid_and_ad_safe():
+    Km = jnp.full((3,), 5.0)
+    wp2 = jnp.array([0.25, 1.0e-12, 0.25])   # middle below the floor
+    CK, valid = clubb_coefficient_from_diffusivity(
+        Km, jnp.ones((3,), bool), jnp.full((3,), 50.0), wp2)
+    assert bool(valid[0]) and not bool(valid[1]) and bool(valid[2])
+    assert float(CK[1]) == 0.0
+
+    def loss(w):
+        CK, _ = clubb_coefficient_from_diffusivity(
+            Km, jnp.ones((3,), bool), jnp.full((3,), 50.0), w)
+        return jnp.sum(CK ** 2)
+
+    g = jax.grad(loss)(wp2)
+    assert bool(jnp.all(jnp.isfinite(g)))    # sqrt(wp2) double-where is AD-safe

@@ -27,7 +27,29 @@ import jax
 import jax.numpy as jnp
 from legoesm.training.feedback import build_parameter_field
 
-_METHODS = ("eddy_diffusivity", "entrainment")
+_METHODS = ("eddy_diffusivity", "entrainment", "clubb_coefficient")
+
+
+def _valid_profile_mean(values: Any) -> tuple[jax.Array, jax.Array]:
+    """Unweighted mean of a ``(profile, valid)`` over its valid levels.
+
+    Returns ``(value, valid)``; ``valid`` is true iff ≥1 level is valid AND the
+    reduced value is finite (a non-finite reduced coefficient — a degenerate /
+    blown-up LES column — is marked invalid so it keeps the background instead of
+    injecting NaN/inf).  (A height/mass-weighted mean within the diagnosed BL
+    depth is a natural refinement if the target scheme is BL-depth sensitive.)
+    """
+    profile, valid = values
+    profile = jnp.asarray(profile)
+    valid = jnp.asarray(valid, dtype=bool)
+    n = jnp.sum(valid)
+    value = jnp.where(
+        n > 0,
+        jnp.sum(jnp.where(valid, profile, jnp.zeros_like(profile)))
+        / jnp.maximum(n, 1),
+        jnp.asarray(0.0, dtype=profile.dtype),
+    )
+    return value, (n > 0) & jnp.isfinite(value)
 
 
 def reduce_column_diagnosis(
@@ -35,27 +57,20 @@ def reduce_column_diagnosis(
 ) -> tuple[jax.Array, jax.Array]:
     """Reduce one column's LES diagnosis to ``(value, valid)`` scalars.
 
-    * ``"eddy_diffusivity"`` — the valid-level (unweighted) mean of the ``K``
-      profile, a representative column eddy diffusivity; ``valid`` is true iff
-      any level is valid.  (A height/mass-weighted mean is a natural refinement
-      if the target scheme is sensitive to the BL-depth weighting.)
+    * ``"eddy_diffusivity"`` — the valid-level mean of the DIMENSIONAL ``K``
+      [m²/s] profile (a representative column eddy diffusivity).
+    * ``"clubb_coefficient"`` — the valid-level mean of the DIMENSIONLESS CLUBB
+      ``C_K`` profile (the actual GCM coefficient, ``K_m = C_K·ℓ·√wp2``); the
+      dimensionally-correct target for the ``clubb_lite_C_K`` promotion.
     * ``"entrainment"`` — the scalar ``w_entrainment`` and its ``valid`` flag.
 
     Raises on an unknown ``method`` (dispatch hardening).  Differentiable w.r.t.
     the diagnosed arrays.
     """
     if method == "eddy_diffusivity":
-        K = jnp.asarray(diagnosis.K)
-        valid = jnp.asarray(diagnosis.valid, dtype=bool)
-        n = jnp.sum(valid)
-        value = jnp.where(
-            n > 0,
-            jnp.sum(jnp.where(valid, K, jnp.zeros_like(K))) / jnp.maximum(n, 1),
-            jnp.asarray(0.0, dtype=K.dtype),
-        )
-        # A non-finite reduced coefficient (a degenerate / blown-up LES column) is
-        # marked INVALID so it keeps the background instead of injecting NaN/inf.
-        return value, (n > 0) & jnp.isfinite(value)
+        return _valid_profile_mean((diagnosis.K, diagnosis.valid))
+    if method == "clubb_coefficient":
+        return _valid_profile_mean((diagnosis.C_K, diagnosis.valid))
     if method == "entrainment":
         w_e = jnp.asarray(diagnosis.w_entrainment)
         return (

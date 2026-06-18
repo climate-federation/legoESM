@@ -44,6 +44,7 @@ import jax.numpy as jnp
 _MIN_ABS_GRADIENT_DEFAULT = 1.0e-12  # |∂⟨φ⟩/∂z| floor (φ-units per metre)
 _MIN_SHEAR_DEFAULT = 1.0e-6  # |∂U/∂z| floor [1/s]
 _MIN_DELTA_THETAV_DEFAULT = 1.0e-3  # inversion θ_v jump floor [K]
+_WP2_FLOOR_DEFAULT = 1.0e-4  # w'² floor [m²/s²] (velocity scale √wp2 ≳ 0.01 m/s)
 
 
 class EddyDiffusivityDiagnosis(NamedTuple):
@@ -103,6 +104,84 @@ def eddy_diffusivity_from_flux(
     valid = significant & (K >= 0.0)
     K = jnp.where(valid, K, jnp.zeros_like(K))
     return EddyDiffusivityDiagnosis(K=K, dphi_dz=dphi_dz, valid=valid)
+
+
+def momentum_diffusivity_from_fluxes(
+    w_u: jax.Array,
+    w_v: jax.Array,
+    u_full: jax.Array,
+    v_full: jax.Array,
+    z_full: jax.Array,
+    *,
+    min_shear: float = _MIN_SHEAR_DEFAULT,
+) -> tuple[jax.Array, jax.Array]:
+    """Shear-projected down-gradient momentum diffusivity ``K_m`` at the
+    ``nlev-1`` interior interfaces from the resolved momentum fluxes.
+
+    For a vector eddy flux ``F = (⟨w'u'⟩, ⟨w'v'⟩)`` and mean shear
+    ``S = (∂⟨u⟩/∂z, ∂⟨v⟩/∂z)``, the scalar ``K_m`` minimizing ``|F + K_m·S|²``
+    (the best down-gradient scalar viscosity for a possibly-misaligned flux) is
+    the least-squares projection ``K_m = −(F·S)/|S|²``.  Down-gradient momentum
+    flux opposes the shear (``F·S < 0``), so ``K_m > 0`` for normal shear-driven
+    mixing; the cross-shear flux component a scalar viscosity cannot represent is
+    discarded by the projection.  ``valid`` where ``|S|² > min_shear²`` AND
+    ``K_m ≥ 0`` (counter-gradient momentum transport ⇒ K-theory inapplicable).
+    Inputs are ascending-``z`` and co-located; AD-safe (denominator masked
+    before division).
+    """
+    w_u = jnp.asarray(w_u)
+    w_v = jnp.asarray(w_v, dtype=w_u.dtype)
+    du_dz = mean_gradient_at_interfaces(u_full, z_full).astype(w_u.dtype)
+    dv_dz = mean_gradient_at_interfaces(v_full, z_full).astype(w_u.dtype)
+    shear_sq = du_dz**2 + dv_dz**2
+    min_sq = jnp.asarray(min_shear, dtype=w_u.dtype) ** 2
+    ok = shear_sq > min_sq
+    denom = jnp.where(ok, shear_sq, jnp.ones_like(shear_sq))
+    flux_dot_shear = w_u * du_dz + w_v * dv_dz
+    K_m_raw = jnp.where(ok, -flux_dot_shear / denom, jnp.zeros_like(shear_sq))
+    valid = ok & (K_m_raw >= 0.0)
+    K_m = jnp.where(valid, K_m_raw, jnp.zeros_like(K_m_raw))
+    return K_m, valid
+
+
+def clubb_coefficient_from_diffusivity(
+    K_m: jax.Array,
+    K_m_valid: jax.Array,
+    l_mix: jax.Array,
+    wp2: jax.Array,
+    *,
+    wp2_floor: float = _WP2_FLOOR_DEFAULT,
+) -> tuple[jax.Array, jax.Array]:
+    """Dimensionless CLUBB-lite eddy coefficient ``C_K = K_m/(ℓ·√wp2)`` — the
+    exact inverse of the GCM closure ``K_m = C_K·ℓ·√wp2`` (``clubb_lite.py``).
+
+    ``K_m`` [m²/s], the mixing length ``l_mix`` [m] and the vertical-velocity
+    variance ``wp2`` [m²/s²] are co-located at the same interfaces.  ``C_K`` is
+    dimensionless: ``[m²/s] / ([m]·[m/s]) = [1]``.  ``valid`` where ``K_m_valid``
+    AND ``wp2 > wp2_floor`` AND ``l_mix > 0``.  AD-safe via the double-where idiom
+    at the ``√wp2`` (infinite VJP at 0) and the division.
+
+    NOTE on transferability: the GCM evaluates ``√wp2`` from its OWN prognostic
+    wp2 budget, whereas this uses the LES resolved ``w'²`` (the "truth" the GCM
+    wp2 approximates under the shared large-scale forcing).  When the GCM
+    equilibrium wp2 departs from the LES ``w'²`` (e.g. deep convection) the
+    diagnosed ``C_K`` carries an O(1) offset; the loop's iter-43 gate / iter-44
+    line search and the bias monitor are the safeguards.  Co-tuning ``C_eps`` to
+    align the GCM wp2 with the LES truth would remove the assumption (follow-up).
+    """
+    K_m = jnp.asarray(K_m)
+    l_mix = jnp.asarray(l_mix, dtype=K_m.dtype)
+    wp2 = jnp.asarray(wp2, dtype=K_m.dtype)
+    floor = jnp.asarray(wp2_floor, dtype=K_m.dtype)
+    wp2_ok = wp2 > floor
+    safe_wp2 = jnp.where(wp2_ok, wp2, jnp.ones_like(wp2))
+    sqrt_wp2 = jnp.where(wp2_ok, jnp.sqrt(safe_wp2), jnp.zeros_like(wp2))
+    l_ok = l_mix > 0.0
+    valid = jnp.asarray(K_m_valid, dtype=bool) & wp2_ok & l_ok
+    denom = l_mix * sqrt_wp2
+    denom_safe = jnp.where(valid, denom, jnp.ones_like(denom))
+    C_K = jnp.where(valid, K_m / denom_safe, jnp.zeros_like(K_m))
+    return C_K, valid
 
 
 def mixing_length_from_momentum_diffusivity(

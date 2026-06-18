@@ -17,7 +17,9 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
 from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    ClubbCoefficientProfile,
     EddyDiffusivityProfile,
+    diagnose_clubb_coefficient,
     diagnose_column_coefficient,
     diagnose_eddy_diffusivity,
     diagnose_entrainment,
@@ -130,6 +132,66 @@ def test_dispatch_entrainment():
     state, hc = _les_state_with_known_K()
     out = diagnose_column_coefficient(state, hc, method="entrainment")
     assert isinstance(out, EntrainmentDiagnosis)
+
+
+def _les_state_with_shear():
+    """LES state with a mean-wind shear (for K_m) + checkerboard w (for wp2)."""
+    state, hc = _les_state_with_known_K()
+    z = jnp.asarray(hc.z_full)
+    s2d = _checkerboard_sign()
+    u_mean = 0.01 * z                                  # constant shear in u
+    u = u_mean[None, None, :] + 0.3 * jnp.asarray(s2d)[:, :, None]
+    return state._replace(u=state.u.replace(data=u)), hc
+
+
+def test_clubb_coefficient_matches_manual_composition():
+    """diagnose_clubb_coefficient must equal an independent manual composition of
+    the leaf functions — validates the top-down→ascending reversal of ALL arrays,
+    the wp2 interior co-location, and the mixing_length wiring."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        clubb_coefficient_from_diffusivity,
+        momentum_diffusivity_from_fluxes,
+    )
+    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+        resolved_turbulent_fluxes_plane,
+        vertical_velocity_variance_plane,
+    )
+    from legoesm.atmosphere.physics._shared import mixing_length
+
+    state, hc = _les_state_with_shear()
+    l_mix_max = 100.0
+    out = diagnose_clubb_coefficient(state, hc, l_mix_max=l_mix_max)
+    assert isinstance(out, ClubbCoefficientProfile)
+    assert out.C_K.shape == (7,) and bool(jnp.all(jnp.diff(out.z_m) > 0))
+
+    fluxes = resolved_turbulent_fluxes_plane(state, hc)
+    wp2_half = vertical_velocity_variance_plane(state, hc)
+    u_mean = jnp.mean(state.u.data, axis=(0, 1))
+    v_mean = jnp.mean(state.v.data, axis=(0, 1))
+    z_full = jnp.asarray(hc.z_full)
+    Km, km_v = momentum_diffusivity_from_fluxes(
+        fluxes.w_u[::-1], fluxes.w_v[::-1], u_mean[::-1], v_mean[::-1], z_full[::-1])
+    z_m = fluxes.z_half_interior[::-1]
+    CK, valid = clubb_coefficient_from_diffusivity(
+        Km, km_v, mixing_length(z_m, l_mix_max), wp2_half[1:-1][::-1])
+    np.testing.assert_allclose(np.asarray(out.C_K), np.asarray(CK), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(out.valid), np.asarray(valid))
+
+
+def test_clubb_coefficient_min_valid_levels_invalidates_column():
+    # Requiring more valid levels than exist flags the WHOLE column invalid.
+    state, hc = _les_state_with_shear()
+    out = diagnose_clubb_coefficient(state, hc, l_mix_max=100.0, min_valid_levels=999)
+    assert not bool(jnp.any(out.valid))
+
+
+def test_dispatch_clubb_coefficient_requires_l_mix_max():
+    state, hc = _les_state_with_shear()
+    out = diagnose_column_coefficient(
+        state, hc, method="clubb_coefficient", l_mix_max=100.0)
+    assert isinstance(out, ClubbCoefficientProfile)
+    with pytest.raises(ValueError, match="requires l_mix_max"):
+        diagnose_column_coefficient(state, hc, method="clubb_coefficient")
 
 
 def test_dispatch_unknown_method_raises():

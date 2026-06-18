@@ -91,6 +91,32 @@ def test_reduce_eddy_nonfinite_marked_invalid():
     assert float(val) == pytest.approx(3.0)
 
 
+class _Ck(NamedTuple):
+    C_K: jax.Array
+    valid: jax.Array
+
+
+def test_reduce_clubb_coefficient_valid_mean():
+    # dimensionless C_K profile → valid-level mean (here (0.2+0.4)/2 = 0.3).
+    diag = _Ck(C_K=jnp.array([0.2, 0.4, 9.9]),
+               valid=jnp.array([True, True, False]))
+    value, valid = reduce_column_diagnosis(diag, "clubb_coefficient")
+    assert bool(valid)
+    assert float(value) == pytest.approx(0.3)
+
+
+def test_reduce_clubb_coefficient_all_invalid_keeps_background():
+    diag = _Ck(C_K=jnp.array([0.5, 0.6]), valid=jnp.array([False, False]))
+    _, valid = reduce_column_diagnosis(diag, "clubb_coefficient")
+    assert not bool(valid)
+
+
+def test_reduce_clubb_coefficient_nonfinite_marked_invalid():
+    diag = _Ck(C_K=jnp.array([jnp.nan, 0.4]), valid=jnp.array([True, True]))
+    _, valid = reduce_column_diagnosis(diag, "clubb_coefficient")
+    assert not bool(valid)
+
+
 def test_reduce_entrainment_nonfinite_marked_invalid():
     nan_ent = _Ent(w_entrainment=jnp.asarray(jnp.nan), valid=jnp.asarray(True))
     _, valid = reduce_column_diagnosis(nan_ent, "entrainment")
