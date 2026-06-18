@@ -93,7 +93,63 @@ def test_extract_voronoi_constant_theta_zero_advection_nonvacuous_moisture():
     np.testing.assert_allclose(np.asarray(out.theta_adv), 0.0, atol=1e-10)
     # Non-vacuous: q varies across cells ⇒ a real moisture-advection tendency.
     assert float(np.max(np.abs(np.asarray(out.qv_adv)))) > 1e-12
-    assert out.u_geo is None and out.v_geo is None     # f×V fallback (documented)
+    # Geostrophic wind is computed (mid-lat cell, outside the cutoff) + finite —
+    # NON-zero here because q_v varies with latitude (a virtual-temperature /
+    # geopotential gradient → a real thermal wind); the EXACT zero anchor is the
+    # truly-uniform-state test below.
+    assert out.u_geo is not None and np.all(np.isfinite(np.asarray(out.u_geo)))
+
+
+def test_extract_voronoi_geostrophic_uniform_state_zero_wind():
+    """ANALYTIC ANCHOR (Codex): a TRULY uniform state (uniform T, q_v, p_s across
+    cells) has zero geopotential + ln(p_s) gradient ⇒ the geostrophic wind is
+    EXACTLY zero (the Perot reconstruction of a zero edge-gradient is zero) at a
+    mid-latitude cell — and finite (no NaN/inf)."""
+    mesh, sigma = _mesh_sigma()
+    p_s = jnp.full((mesh.nCells,), 1.0e5)
+    p_full = p_s[:, None] * jnp.asarray(sigma.sigma_full)
+    T = 290.0 * exner_function(p_full)           # identical at every cell
+    q_v = jnp.full((mesh.nCells, _NLEV), 0.01)   # uniform moisture too
+    u_edge = _uniform_edge_flow(mesh, 6.0, 0.0)
+    out = extract_column_forcing_voronoi(
+        T=T, q_v=q_v, u_edge=u_edge, p_s=p_s, mesh=mesh, sigma_coord=sigma,
+        lat_rad=float(mesh.latCell[42]), col_index=(42,))     # ~−45°, outside cutoff
+    np.testing.assert_allclose(np.asarray(out.u_geo), 0.0, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(out.v_geo), 0.0, atol=1e-9)
+
+
+_MIDLAT_CELL = 42       # ~−45°, well outside the 5° equatorial geostrophic cutoff
+_EQ_CELL = 102          # ~0°, INSIDE the cutoff (f → 0 ill-posed)
+
+
+def test_extract_voronoi_geostrophic_meridional_gradient_zonal_jet():
+    """A MERIDIONAL temperature gradient ⇒ a Φ that varies with latitude ⇒ a
+    finite, predominantly-ZONAL geostrophic wind (|u_geo| > |v_geo|) at a
+    mid-latitude cell. Finite (catches the Perot-weight / degenerate-cell NaN
+    hazards) + a real O(1) jet (non-vacuous)."""
+    mesh, sigma = _mesh_sigma()
+    T, q_v, p_s = _state(mesh, theta_const=False)   # T = (290 + 5·cos lat)·exner
+    u_edge = _uniform_edge_flow(mesh, 6.0, 0.0)
+    out = extract_column_forcing_voronoi(
+        T=T, q_v=q_v, u_edge=u_edge, p_s=p_s, mesh=mesh, sigma_coord=sigma,
+        lat_rad=float(mesh.latCell[_MIDLAT_CELL]), col_index=(_MIDLAT_CELL,))
+    ug, vg = np.asarray(out.u_geo), np.asarray(out.v_geo)
+    assert ug.shape == (_NLEV,) and np.all(np.isfinite(ug)) and np.all(np.isfinite(vg))
+    assert float(np.max(np.abs(ug))) > 1.0                  # a real jet, not noise
+    assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))  # predominantly zonal
+
+
+def test_extract_voronoi_geostrophic_equatorial_cell_is_none():
+    """Within _MIN_GEOSTROPHIC_LAT_DEG of the equator (f → 0) the geostrophic wind
+    is None ⇒ the column LES falls back to f×V — NEVER worse than the previous
+    unconditional None (enabling geostrophic does not degrade equatorial cols)."""
+    mesh, sigma = _mesh_sigma()
+    T, q_v, p_s = _state(mesh, theta_const=False)
+    u_edge = _uniform_edge_flow(mesh, 6.0, 0.0)
+    out = extract_column_forcing_voronoi(
+        T=T, q_v=q_v, u_edge=u_edge, p_s=p_s, mesh=mesh, sigma_coord=sigma,
+        lat_rad=float(mesh.latCell[_EQ_CELL]), col_index=(_EQ_CELL,))
+    assert out.u_geo is None and out.v_geo is None
 
 
 def test_extract_voronoi_shapes_and_finite():

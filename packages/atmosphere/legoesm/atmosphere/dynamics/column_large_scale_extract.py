@@ -471,11 +471,34 @@ def extract_column_forcing_voronoi(
     ``u ∂φ/∂x + v ∂φ/∂y`` with BOTH velocity and gradient Perot-reconstructed at
     the cell is leading-order A-grid; it is adequate for a large-scale *forcing*
     tendency and is NOT a conservation-critical flux (do not reuse it as the MPAS
-    tracer transport scheme).  Geostrophic forcing is omitted (``u_geo/v_geo =
-    None`` ⇒ the column LES's plane Coriolis falls back to ``f×V``): UNLIKE the
-    cubed sphere, the Perot gradient is already geographic east/north, so
-    geostrophic balance is a clean low-risk follow-up (it still needs the
-    pressure-surface geopotential handling + a near-equator/orientation test).
+    tracer transport scheme).
+
+    Geostrophic reference wind is ENABLED here (``u_geo``/``v_geo`` from
+    :func:`_geostrophic_wind_column`) — UNLIKE the cubed sphere, the Perot
+    cell-gradient is already in the geographic (east, north) frame geostrophic
+    balance requires, so the helper's documented precondition holds.  Within
+    :data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator (f → 0 ill-posed) ``(None,
+    None)`` is returned → the column LES falls back to ``f×V`` there, identical to
+    the previous unconditional ``None`` (so equatorial columns are never changed).
+    OUTSIDE the cutoff the geostrophic wind REPLACES the LES's ``f×V`` default
+    (which was itself an approximation — the model wind as a geostrophic proxy):
+    the pressure-gradient geostrophic reference is the physically-correct
+    large-scale forcing, but it is NOT a guaranteed improvement for every column —
+    on a coarse mesh the Perot ``Φ = g·z`` gradient is leading-order, so a specific
+    column's reference may be noisier than ``f×V`` (a known trade-off the loop's
+    iter-43 acceptance gate / iter-44 line search / bias monitor safeguard, the
+    same safeguards as the C_K-vs-GCM-wp2 offset).  Accuracy is leading-order on a
+    coarse mesh (the Perot gradient of ``Φ = g·z`` reconstructs the geographic
+    geopotential gradient to ~the mesh resolution); it is a *forcing* reference,
+    validated for a uniform state (→ zero geostrophic wind, exact) + a meridional
+    gradient (→ sign-correct zonal jet) + finiteness in
+    ``test_column_large_scale_extract_voronoi.py``.  Assumptions (per Codex): a
+    valid mesh (positive ``areaCell`` / edge lengths — the Perot reconstruction
+    divides by them, no degeneracy guard); the ``ln p_s`` ``clip(p_s, 1.0)`` never
+    activates for realistic surface pressures (~1e5 Pa) so it cannot flatten the
+    forcing; the geostrophic gradient path uses ``cellsOnEdge`` / ``edgesOnCell`` /
+    ``angleEdge`` (NOT ``edgeSignOnCell``), so the edge-sign guard below — for the
+    divergence/ω — already covers the only edge-sign dependency.
 
     **Scope (single-rank / full mesh):** the TRiSK operators are local gathers
     over the mesh connectivity with NO halo exchange — correct for a complete
@@ -517,6 +540,21 @@ def extract_column_forcing_voronoi(
     div_3d = _divergence_voronoi_3d(u_edge, mesh)
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
+    # Geostrophic reference wind — ENABLED on Voronoi (unlike cubed-sphere): the
+    # Perot cell-gradient (_gradient_voronoi_3d) is already in the GEOGRAPHIC
+    # (east, north) frame geostrophic_wind_from_gradients requires (iter-73
+    # orientation regression). The geostrophic gradient path uses gradient_edge_3d
+    # (cellsOnEdge) + the Perot reconstruction (edgesOnCell/angleEdge), NOT
+    # edgeSignOnCell, so the edge-sign guard above (for ω) already covers it.
+    # Within _MIN_GEOSTROPHIC_LAT_DEG of the equator → (None, None) (f×V fallback,
+    # identical to the old behavior there); OUTSIDE, it REPLACES the f×V default
+    # with the pressure-gradient reference (a known trade-off, not a guarantee —
+    # see the docstring; the loop's gate/line-search/bias-monitor are the safeguards).
+    u_geo, v_geo = _geostrophic_wind_column(
+        T=T, q_v=q_v, p_s=p_s, grid=mesh, sigma_coord=sigma_coord,
+        grad_fn=_gradient_voronoi_3d, lat_rad=lat_rad, col_index=col_index,
+    )
+
     c = int(col_index[0])
     return ColumnLargeScaleState(
         lat_rad=lat_rad,
@@ -526,8 +564,8 @@ def extract_column_forcing_voronoi(
         omega=omega_3d[c, :],
         theta_adv=theta_adv_3d[c, :],
         qv_adv=qv_adv_3d[c, :],
-        u_geo=None,
-        v_geo=None,
+        u_geo=u_geo,
+        v_geo=v_geo,
     )
 
 
