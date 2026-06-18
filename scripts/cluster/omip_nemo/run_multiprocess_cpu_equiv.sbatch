@@ -6,7 +6,9 @@
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=00:30:00
+# CPU multi-device shard_map compile of the full ocean step is heavy (~20 min per
+# variant x 2 variants x 2 phases); give it generous walltime.
+#SBATCH --time=02:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/spmd_mpequiv_%j.out
 
 # VALIDATION GATE (CLAUDE.md "single-rank -> smallest distributed"): the multi-

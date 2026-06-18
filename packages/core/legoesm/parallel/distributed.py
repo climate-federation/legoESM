@@ -81,6 +81,7 @@ def _require_mpi4py():
 def initialize_jax_distributed_multiprocess(
     *,
     coordinator_port: int = _JAX_DIST_COORDINATOR_PORT,
+    local_device_ids=None,
 ):
     """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
     the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap the lat-lon
@@ -154,12 +155,37 @@ def initialize_jax_distributed_multiprocess(
     coordinator_address = all_hostnames[0]
     coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
+    # Per-process LOCAL device id(s).  On a multi-GPU node with one process per
+    # GPU, jax's auto-detect of the per-process device from the global CUDA
+    # topology can DEADLOCK (DEADLINE_EXCEEDED on key cuda:global_topology) when
+    # several co-located processes each see all the node's GPUs.  Declaring this
+    # process' local GPU index explicitly (SLURM exposes it as SLURM_LOCALID under
+    # srun) makes the topology exchange deterministic.  ONLY auto-derive on a GPU
+    # platform: a CPU multi-process run (mpirun) wants MULTIPLE CPU devices per
+    # process (xla_force_host_platform_device_count) -> pinning local_device_ids to
+    # one would wrongly claim a single CPU device.  Falls back to None (jax
+    # auto-detect) for single-GPU-per-node, CPU, or non-SLURM launches.
+    if local_device_ids is None:
+        _plats = (os.environ.get("JAX_PLATFORMS")
+                  or os.environ.get("JAX_PLATFORM_NAME") or "")
+        _is_gpu = ("cuda" in _plats.lower()) or ("gpu" in _plats.lower())
+        _localid = os.environ.get("SLURM_LOCALID")
+        if _is_gpu and _localid is not None:
+            try:
+                local_device_ids = int(_localid)
+            except ValueError:
+                local_device_ids = None
+
+    _init_kwargs = dict(
+        coordinator_address=coordinator_bind,
+        num_processes=n_processes,
+        process_id=rank,
+    )
+    if local_device_ids is not None:
+        _init_kwargs["local_device_ids"] = local_device_ids
+
     try:
-        jax.distributed.initialize(
-            coordinator_address=coordinator_bind,
-            num_processes=n_processes,
-            process_id=rank,
-        )
+        jax.distributed.initialize(**_init_kwargs)
     except RuntimeError as e:
         raise RuntimeError(
             f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "

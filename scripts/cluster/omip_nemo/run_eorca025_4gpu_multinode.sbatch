@@ -35,24 +35,26 @@ echo "=== ALLOC ==="; date
 echo "nodes: $SLURM_JOB_NODELIST  ntasks: $SLURM_NTASKS  gpus/node: 2"
 scontrol show hostnames "$SLURM_JOB_NODELIST"
 
-# Per-process GPU pinning: ``--gpu-bind=single:1`` makes SLURM expose exactly ONE
-# GPU to each task (re-indexed to 0), so every process owns one distinct GPU and
-# jax sees a single local device -- run_omip_core2 --distributed asserts
-# n_gpus==jax.device_count(), so >1 visible GPU per process would trip the guard.
-# We deliberately do NOT write a node-local /tmp wrapper to set CUDA_VISIBLE_DEVICES
-# (an earlier version did, and it broke: /tmp is per-node, so the wrapper existed
-# only on the batch node and the second node's ranks could not exec it -> PMIx
-# collective hang).  gpu-bind is the SLURM-native, multi-node-safe equivalent.
+# Per-process GPU selection: each task sees BOTH node GPUs; the bootstrap passes
+# local_device_ids=SLURM_LOCALID to jax.distributed.initialize so each process
+# claims its OWN local GPU.  We deliberately do NOT use --gpu-bind=single:1 here:
+# re-indexing every task's GPU to 0 makes jax's cross-node global-topology
+# key-value exchange DEADLOCK (DEADLINE_EXCEEDED on key cuda:global_topology,
+# observed at 4 GPUs / 2 nodes) because the co-located processes cannot
+# distinguish their devices.  Declaring local_device_ids explicitly is the
+# jax-on-SLURM idiom that makes the topology exchange deterministic.  (We also do
+# NOT write a node-local /tmp wrapper -- /tmp is per-node, so the 2nd node's ranks
+# could not exec it -> earlier PMIx hang.)
 LOG=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/e025_4gpu_mn_${SLURM_JOB_ID}_full.log
 
 # srun launches one process per task (4 total, 2 per node).  jax.distributed
-# discovers rank/coordinator from MPI (mpi4py reads the SLURM PMI env); the SPMD
-# halo is pure-JAX ppermute/psum across processes (no mpi4jax).  Env is passed
-# inline via `env` (no wrapper file).  tee the full log so we capture the REAL srun
-# rc (the `| tail` would mask it) AND scan for the success/abort markers.  The
-# DRIVER script (with the --distributed edits) lives in the WORKTREE; cwd is MAIN
-# only for the relative data/ paths.
-srun --mpi=pmix --gpu-bind=single:1 \
+# discovers rank/coordinator from MPI (mpi4py reads the SLURM PMI env) and the
+# per-process GPU from SLURM_LOCALID; the SPMD halo is pure-JAX ppermute/psum
+# across processes (no mpi4jax).  Env is passed inline via `env` (no wrapper file).
+# tee the full log so we capture the REAL srun rc (the `| tail` would mask it) AND
+# scan for the success/abort markers.  The DRIVER script (with the --distributed
+# edits) lives in the WORKTREE; cwd is MAIN only for the relative data/ paths.
+srun --mpi=pmix \
   env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
   $PY "$WT/scripts/run/run_omip_core2.py" \
     --grid tripole \
