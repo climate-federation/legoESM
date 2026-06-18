@@ -100,6 +100,7 @@ def environment_kernel_field(
     background: float = 0.0,
     valid: jax.Array | None = None,
     min_total_weight: float = _MIN_TOTAL_WEIGHT,
+    return_coverage: bool = False,
 ) -> jax.Array:
     """Generalize sampled diagnoses to every grid column by kernel regression.
 
@@ -118,8 +119,10 @@ def environment_kernel_field(
     ``background``.  ``valid`` drops flagged-invalid samples.
 
     Pure-JAX and differentiable w.r.t. ``sample_values`` / ``sample_env`` /
-    ``grid_env`` (AD-safe: the normalizer is masked before division).  Returns
-    ``(ncol,)``.
+    ``grid_env`` (AD-safe: the normalizer is masked before division).  Returns the
+    ``(ncol,)`` field, or ``(field, has_neighbor)`` (the ``(ncol,)`` coverage mask)
+    when ``return_coverage`` — used by the cross-grid deploy to surface the fraction
+    of columns that fell back to ``background`` (outside the sampled env hull).
     """
     # Include ``background`` in the dtype: an ACCUMULATED array background (the
     # round-k field, possibly float64) must not be silently downcast at
@@ -169,4 +172,11 @@ def environment_kernel_field(
                 f"array background size {bg.shape[0]} != ncol {ncol} "
                 f"(prod of grid_env rows)."
             )
-    return jnp.where(has_neighbor, weighted / denom, bg)
+    field = jnp.where(has_neighbor, weighted / denom, bg)
+    if return_coverage:
+        # ``has_neighbor`` (ncol,) bool: which columns found an environmentally
+        # similar diagnosis (vs fell back to ``background``). The caller reports the
+        # fraction — a low value flags a cross-grid/cross-climate deploy whose
+        # columns lie OUTSIDE the sampled environment hull (Codex iter-69).
+        return field, has_neighbor
+    return field

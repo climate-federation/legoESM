@@ -22,7 +22,7 @@ requires the override scheme to match).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 # CLUBB-lite promotion key → CLUBBLiteConfig field name (the campaign output's
 # multi "fields" dict is keyed by promotion_key; the single output by field name).
@@ -365,3 +365,175 @@ def slice_override_latlon_2d(override, layout):
                 f"per-column override field '{field}' has {int(arr.shape[0])} "
                 f"columns but the layout's global grid is {n_lat}x{n_lon}={ncol}.")
     return localize_turbulence_override(override, layout)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-resolution deploy via the environment kernel (iter 69).
+# The per-column array deploy above is GRID-LOCKED (the iter-58 guard rejects a
+# different grid). The environment kernel is GRID-AGNOSTIC: the diagnosed
+# (environment, coefficient) SAMPLES + length-scales evaluate on ANY grid's
+# environment by environmental similarity — so a cheap LOW-res campaign deploys on
+# the expensive HIGH-res production run (the practical way to scale).
+# --------------------------------------------------------------------------- #
+class EnvKernel(NamedTuple):
+    """A serializable, grid-agnostic environment→coefficient kernel.
+
+    ``sample_env`` ``(nsamp, 3)`` [SST, CAPE, bulk-shear] + ``sample_values``
+    ``(nsamp,)`` are the campaign's diagnosed columns' environments + reduced
+    coefficients; ``length_scales`` ``(3,)`` set the per-predictor similarity scale.
+    ``env_lo``/``env_hi`` ``(3,)`` are the sampled env range — provenance for
+    detecting a deploy whose grid lies OUTSIDE the sampled hull (domain shift).
+    """
+
+    sample_env: Any            # (nsamp, 3)
+    sample_values: Any         # (nsamp,)
+    valid: Any                 # (nsamp,) bool
+    length_scales: Any         # (3,)
+    field: str                 # "C_K" / "Pr_t" / "C_eps"
+    background: float
+    env_lo: Any                # (3,) sampled-env min (domain-shift provenance)
+    env_hi: Any                # (3,) sampled-env max
+
+
+def build_env_kernel(records, diagnoses, method, length_scales, *,
+                     field: str = "C_K", background: float = 0.0) -> EnvKernel:
+    """Build a grid-agnostic :class:`EnvKernel` from a campaign's worst-column
+    diagnoses (the producer side of the cross-resolution deploy).
+
+    ``records`` carry each worst column's ``ColumnEnvironment`` (the SAME [SST, CAPE,
+    bulk-shear] tags the loop's env strategy uses); ``diagnoses`` are reduced to a
+    scalar per column via the SHARED :func:`legoesm.training.feedback_assembly.
+    reduce_column_diagnosis` (so the kernel samples MATCH what the static strategy
+    would scatter — no re-derivation).  ``length_scales`` come from the campaign's
+    :func:`column_environment_grid`.
+    """
+    import jax.numpy as jnp
+    from legoesm.training.feedback_assembly import reduce_column_diagnosis
+
+    if field not in _CLUBB_FIELDS:
+        raise ValueError(
+            f"field {field!r} must be one of {_CLUBB_FIELDS}.")
+    records = list(records)
+    diagnoses = list(diagnoses)
+    if len(records) != len(diagnoses):
+        raise ValueError(
+            f"records ({len(records)}) and diagnoses ({len(diagnoses)}) must align.")
+    if not records:
+        raise ValueError("need at least one diagnosed column to build a kernel.")
+    sample_env = jnp.asarray([
+        [float(r.environment.sst_K), float(r.environment.cape_J_kg),
+         float(r.environment.bulk_shear_m_s)] for r in records])
+    reduced = [reduce_column_diagnosis(d, method) for d in diagnoses]
+    sample_values = jnp.stack([v for v, _ in reduced])
+    valid = jnp.stack([jnp.asarray(ok, bool) for _, ok in reduced])
+    return _validate_env_kernel(EnvKernel(
+        sample_env=sample_env, sample_values=sample_values, valid=valid,
+        length_scales=jnp.asarray(length_scales).reshape(-1), field=field,
+        background=float(background),
+        env_lo=jnp.min(sample_env, axis=0), env_hi=jnp.max(sample_env, axis=0)))
+
+
+def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
+    """Enforce the EnvKernel shape invariants (shared by build + deserialize), so a
+    malformed / version-skewed kernel fails LOUDLY rather than silently broadcasting
+    (e.g. a length-1 ``env_lo`` corrupting the hull check). Returns ``kernel``."""
+    import jax.numpy as jnp
+
+    if kernel.field not in _CLUBB_FIELDS:
+        raise ValueError(f"kernel.field {kernel.field!r} not in {_CLUBB_FIELDS}.")
+    se = jnp.asarray(kernel.sample_env)
+    if se.ndim != 2:
+        raise ValueError(
+            f"sample_env must be (nsamp, npred); got {tuple(se.shape)}.")
+    nsamp, npred = int(se.shape[0]), int(se.shape[1])
+    for name, arr, n in (("sample_values", kernel.sample_values, nsamp),
+                         ("valid", kernel.valid, nsamp),
+                         ("length_scales", kernel.length_scales, npred),
+                         ("env_lo", kernel.env_lo, npred),
+                         ("env_hi", kernel.env_hi, npred)):
+        if int(jnp.asarray(arr).reshape(-1).shape[0]) != n:
+            raise ValueError(
+                f"env kernel '{name}' length "
+                f"{int(jnp.asarray(arr).reshape(-1).shape[0])} != {n}.")
+    if nsamp == 0 or not bool(jnp.any(jnp.asarray(kernel.valid, bool))):
+        raise ValueError("env kernel has no VALID samples — it would be empty.")
+    return kernel
+
+
+def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
+                              min_total_weight: float | None = None):
+    """Evaluate an :class:`EnvKernel` on a NEW grid's environment → an override.
+
+    ``new_grid_env`` ``(ncol_new, 3)`` from :func:`column_environment_grid` on the
+    production run's state (ANY resolution).  Returns ``(TurbulenceConfig, coverage)``
+    where ``coverage`` reports the fraction of columns that found an environmentally
+    similar diagnosis vs fell back to ``background``, and the fraction WITHIN the
+    sampled env hull — a LOW ``fraction_covered`` warns the deploy grid's climate
+    lies outside the campaign's sampled environments (Codex iter-69).
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.turbulence.config import (
+        CLUBBLiteConfig,
+        TurbulenceConfig,
+    )
+    from legoesm.training.parameter_field import environment_kernel_field
+
+    if kernel.field not in _CLUBB_FIELDS:
+        raise ValueError(f"kernel.field {kernel.field!r} not in {_CLUBB_FIELDS}.")
+    grid_env = jnp.asarray(new_grid_env)
+    npred = jnp.asarray(kernel.sample_env).shape[1]
+    if grid_env.ndim != 2 or grid_env.shape[1] != npred:
+        raise ValueError(
+            f"new_grid_env must be (ncol, {npred}); got {tuple(grid_env.shape)}.")
+    kw = {} if min_total_weight is None else {"min_total_weight": min_total_weight}
+    field, has_neighbor = environment_kernel_field(
+        grid_env, kernel.sample_env, kernel.sample_values,
+        length_scales=kernel.length_scales, background=kernel.background,
+        valid=kernel.valid, return_coverage=True, **kw)
+    field = jnp.asarray(field).reshape(-1)
+    if not bool(jnp.all(jnp.isfinite(field))):
+        raise ValueError("kernel evaluation produced non-finite coefficients.")
+    in_hull = jnp.all(
+        (grid_env >= kernel.env_lo) & (grid_env <= kernel.env_hi), axis=1)
+    coverage = {
+        "n_columns": int(field.shape[0]),
+        "fraction_covered": float(jnp.mean(has_neighbor)),
+        "fraction_in_hull": float(jnp.mean(in_hull)),
+    }
+    override = TurbulenceConfig(
+        scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(**{kernel.field: field}))
+    return override, coverage
+
+
+def env_kernel_to_dict(kernel: EnvKernel) -> dict:
+    """Serialize an :class:`EnvKernel` to a JSON-friendly dict (lists)."""
+    import numpy as np
+
+    return {
+        "sample_env": np.asarray(kernel.sample_env).tolist(),
+        "sample_values": np.asarray(kernel.sample_values).reshape(-1).tolist(),
+        "valid": [bool(v) for v in np.asarray(kernel.valid).reshape(-1)],
+        "length_scales": np.asarray(kernel.length_scales).reshape(-1).tolist(),
+        "field": kernel.field,
+        "background": float(kernel.background),
+        "env_lo": np.asarray(kernel.env_lo).reshape(-1).tolist(),
+        "env_hi": np.asarray(kernel.env_hi).reshape(-1).tolist(),
+    }
+
+
+def env_kernel_from_dict(data: dict) -> EnvKernel:
+    """Deserialize an :class:`EnvKernel` (inverse of :func:`env_kernel_to_dict`)."""
+    import jax.numpy as jnp
+
+    # ``_validate_env_kernel`` enforces field membership + every shape invariant
+    # (a length-skewed ``env_lo`` would otherwise broadcast silently in the hull
+    # check). Default float dtype (no forced float64) honours the x64 flag and
+    # matches what ``build_env_kernel`` produces.
+    return _validate_env_kernel(EnvKernel(
+        sample_env=jnp.asarray(data["sample_env"]),
+        sample_values=jnp.asarray(data["sample_values"]),
+        valid=jnp.asarray(data["valid"], dtype=bool),
+        length_scales=jnp.asarray(data["length_scales"]),
+        field=data.get("field"), background=float(data["background"]),
+        env_lo=jnp.asarray(data["env_lo"]),
+        env_hi=jnp.asarray(data["env_hi"])))
