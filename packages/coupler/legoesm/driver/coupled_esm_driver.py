@@ -294,7 +294,14 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
-            # Balanced cold start on the PARTIAL-CELL coord (no adjustment shock).
+            # Balanced cold start (MANDATORY for WOA): the rest-velocity state
+            # leaves WOA's baroclinic PGF UNBALANCED -> a violent geostrophic
+            # adjustment that goes nonlinear (the standalone ocean blows from
+            # the WOA IC alone: max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h).
+            # apply_balanced_init seeds u/v/eta in geostrophic / level-of-no-
+            # motion balance so there is no adjustment shock (OMIP-validated
+            # cold-start; see omip_smag_cap_stabilizer / omip_rk3_coldstart).
+            # Runs on the PARTIAL-CELL coord the model steps on (model_z_coord).
             self._ocean_state = apply_balanced_init(
                 self._ocean_state, self._ocean_grid, model_z_coord, ocfg,
             )

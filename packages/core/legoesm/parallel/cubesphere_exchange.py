@@ -54,10 +54,7 @@ from legoesm.grids.halo import (
 
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
-try:
-    from jax import shard_map  # JAX >= 0.8 exposes it at top level
-except ImportError:
-    from jax.experimental.shard_map import shard_map  # older JAX fallback
+from legoesm.parallel.shard_map_compat import shard_map
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
@@ -2209,6 +2206,7 @@ def packed_pad_halo_4d(
                 f"FV3_3D.md iter-1072."
             )
 
+    from legoesm.grids.duogrid import apply_duogrid_4d
     if len(fields) == 1:
         out = explicit_pad_halo_4d(
             fields[0], mesh, halo=halo, interp_offsets=interp_offsets,
@@ -2218,7 +2216,7 @@ def packed_pad_halo_4d(
         # `packed_pad_halo_4d(f, duogrid=dg)` silently returned a nearest-copy
         # halo while the unpacked `pad_halo_4d(f, duogrid=dg)` applied the remap).
         if duogrid is not None:
-            out = _apply_duogrid_4d(out, duogrid, halo=halo)
+            out = apply_duogrid_4d(out, duogrid, halo=halo)
         return [out]
 
     # Use plain Python ints for split indices so JAX treats them as
@@ -2233,26 +2231,8 @@ def packed_pad_halo_4d(
     )
     pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
-        pieces = [_apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
+        pieces = [apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
     return pieces
-
-
-def _apply_duogrid_4d(padded, duogrid, halo):
-    """Apply duogrid kinked-to-extended remap + corner fill to a 4D
-    padded field, level-by-level via ``jax.vmap``.  Mirrors the
-    post-processing loop inside ``halo.pad_halo_4d``.
-    """
-    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
-    import jax
-
-    def _remap_level(level_slice):
-        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-        level_slice = fill_corner_region(level_slice, duogrid, halo)
-        return level_slice
-
-    padded_t = jnp.transpose(padded, (3, 0, 1, 2))
-    padded_t = jax.vmap(_remap_level)(padded_t)
-    return jnp.transpose(padded_t, (1, 2, 3, 0))
 
 
 # ===================================================================

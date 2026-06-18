@@ -763,7 +763,7 @@ def acoustic_substeps(
 
     beta = euler_config.acoustic_off_centering
 
-    def substep_body(i, carry):
+    def substep_body(carry):
         w_c, theta_p_c, rho_p_c = carry
         return acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
@@ -775,7 +775,7 @@ def acoustic_substeps(
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _i in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = substep_body(
-            _i, (w_final, theta_p_final, rho_p_final),
+            (w_final, theta_p_final, rho_p_final),
         )
 
     return NonHydrostaticState(
@@ -1128,7 +1128,7 @@ def acoustic_substeps_semi_implicit(
         height_coord, J, dt_s, g, implicit_buoyancy, nlev=nlev,
     )
 
-    def substep_body(i, carry):
+    def substep_body(carry):
         w_c, theta_p_c, rho_p_c = carry
 
         theta_total, rho_total = sanitize_theta_rho(
@@ -1209,7 +1209,7 @@ def acoustic_substeps_semi_implicit(
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _i in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = substep_body(
-            _i, (w_final, theta_p_final, rho_p_final),
+            (w_final, theta_p_final, rho_p_final),
         )
 
     return NonHydrostaticState(

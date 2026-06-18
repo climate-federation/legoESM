@@ -28,13 +28,8 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-
-try:  # JAX >= 0.8 top-level export
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
-
 from jax.sharding import PartitionSpec as P
+from legoesm.parallel.shard_map_compat import shard_map
 
 
 def latlon_band_perms(n_dev: int):

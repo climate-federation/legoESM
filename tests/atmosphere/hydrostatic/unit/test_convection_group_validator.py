@@ -707,8 +707,9 @@ def test_tier5_kuo_quiescent_without_convergence():
 # ===========================================================================
 
 def test_triggers_smooth_max_upper_bounds_and_diff():
+    from legoesm.core.smooth import smooth_max, smooth_min
     from legoesm.atmosphere.physics.convection._triggers import (
-        smooth_max, smooth_min, smooth_positive_part, cape_trigger,
+        smooth_positive_part, cape_trigger,
     )
     a = jnp.array([1.0, -2.0, 3.5])
     b = jnp.array([0.5, 1.0, 3.5])

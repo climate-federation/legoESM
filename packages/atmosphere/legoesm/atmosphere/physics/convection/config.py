@@ -114,12 +114,14 @@ __param_spec__ = {
             "beta_downdraft": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
+            "cloud_base_index_width": "legacy numerics: superseded by pressure-interpolated PLCL closure",
             "coeffr": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "coeffs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "cu_momentum": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
+            "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
             "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
@@ -137,7 +139,6 @@ __param_spec__ = {
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
-            "cloud_base_index_width": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) cloud-base selector width", "shape": None},
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
@@ -161,8 +162,14 @@ __param_spec__ = {
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
+            "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
+            "cloud_top_detrainment_width_levels": "numerics: smoothing width [levels] of the cloud-top detrainment taper",
+            "condload_fresh_retention_fraction": "fixed KF CONDLOAD retained fresh-condensate fraction",
             "dtlcl_pos_sharpness": "numerics: sharpness of the outer positive-part on the DTLCL base",
             "epsilon_0": "entrainment: legacy constant rate, superseded by the faithful radius-based profile",
+            "rh_trigger_rhmax": "fixed KF-Eta trigger-3 upper RH branch threshold",
+            "rh_trigger_slope": "fixed KF-Eta trigger-3 mid-RH branch coefficient",
+            "rh_trigger_u00": "fixed KF-Eta trigger-3 RH threshold coefficient",
             "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
             "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
             "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
@@ -798,6 +805,22 @@ class KainFritschConfig(NamedTuple):
     # DTLCL coefficient and exponent (Kain 2004 Eq. 1: DTLCL = c * WKL^p, K).
     dtlcl_coeff: float = 4.64
     dtlcl_exponent: float = 0.33
+    # KF-Eta trigger-3 relative-humidity perturbation DTRH (WRF
+    # module_cu_kfeta.F lines 996-1017).  The ETA branch uses U00=0.75:
+    # humid LCL environments get an additional temperature perturbation
+    # derived from the local saturation derivative.  This stays faithful to
+    # the reference trigger path without imposing external SCM forcing.
+    enable_rh_trigger_perturb: bool = True
+    rh_trigger_u00: float = 0.75
+    rh_trigger_rhmax: float = 0.95
+    rh_trigger_slope: float = 0.25
+    # KF CONDLOAD precipitation fallout (KF90 Eq. 9; WRF module_cu_kfeta.F
+    # lines 2869-2923) lets only 60% of fresh condensate participate in
+    # immediate conversion and retains the remaining 40% as cloud condensate.
+    # The full WTW/load recursion is not in the shared plume helper, but this
+    # reference fraction prevents treating all fresh updraft condensate as
+    # retained grid cloud.
+    condload_fresh_retention_fraction: float = 0.4
     # Reference vertical velocity for the LCL-height threshold (Kain 2004
     # Eq. 2: WKLCL = wklcl_ref * min(ZLCL, z_ref)/z_ref) [m/s] and [m].
     wklcl_ref: float = 0.02
@@ -830,6 +853,13 @@ class KainFritschConfig(NamedTuple):
     rad_min_m: float = 1.0e3
     rad_max_m: float = 2.0e3
     rad_wkl_ref: float = 0.1
+    # Smooth surrogate for the oracle's cloud-top total-detrainment step
+    # (WRF KF-Eta ``UDR(LTOP)=UMF(LTOP)+UDR(LTOP)-UER(LTOP)``): detrain this
+    # fraction of the remaining updraft over the LNB-centred transition
+    # layer.  0.99 is the differentiable finite-rate stand-in for total
+    # detrainment; the width is in model levels.
+    cloud_top_detrainment_fraction: float = 0.99
+    cloud_top_detrainment_width_levels: float = 1.0
     # Convective (CAPE-removal) timescale bounds [s] (oracle TIMEC clamp
     # [1800, 3600]).  The SCM/idealised bridge does not expose the LCL/
     # mid-trop wind that sets TIMEC=DX/VCONV, so ``cape_consumption_time``
@@ -936,11 +966,15 @@ class EmanuelConfig(NamedTuple):
     alpha_closure: float = 0.2
     damp_coefficient: float = 0.1
     dtmax: float = 0.9
-    # Width [levels] of the smooth cloud-base-level selector used to read
-    # the parcel buoyancy excess at the LCL for the DTMA closure.  A
-    # narrow Gaussian (≈1 level) localises the buoyancy to cloud base
-    # while staying differentiable.
+    # Legacy width [levels] of the old smooth cloud-base selector.  Kept
+    # for config/back-compat; the faithful DTMA closure now pressure-
+    # interpolates exactly to PLCL as in CONVECT v4.3c lines 549-558.
     cloud_base_index_width: float = 1.0
+    # Pressure sharpness [1/Pa] for the differentiable mask that bounds
+    # the DTPBL average to levels between the launch level NK and cloud
+    # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
+    # transition, matching the shared LCL crossing sharpness.
+    lcl_pressure_sharpness: float = 1.0e-3
     # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
     # relaxed CBMF so it is ~0 when the relaxation target goes negative
     # (stable column) without a hard ``max`` that would kill the gradient.

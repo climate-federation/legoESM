@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import safe_divide
+from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full, safe_divide
 from legoesm.atmosphere.physics.gravity_wave_drag.config import LindzenConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
@@ -66,22 +66,7 @@ def lindzen_gwd(
     ncol, nlev = u.shape
 
     # Brunt-Väisälä frequency at full levels
-    # theta_v = T * (p_ref/p)^kappa
-    theta = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    dz_full = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)
-    dz_full = jnp.clip(dz_full, 1.0, None)
-    dtheta_dz = (theta[:, :-1] - theta[:, 1:]) / dz_full
-    theta_bar = 0.5 * (theta[:, :-1] + theta[:, 1:])
-    N2_half = (constants.g / jnp.clip(theta_bar, 1.0, None)) * dtheta_dz
-    N2_half = jnp.clip(N2_half, 1e-8, None)
-    N_half = jnp.sqrt(N2_half)  # (ncol, nlev-1)
-
-    # Extrapolate N to full levels by padding
-    N_full = jnp.concatenate([
-        N_half[:, :1],
-        0.5 * (N_half[:, :-1] + N_half[:, 1:]),
-        N_half[:, -1:],
-    ], axis=1)  # (ncol, nlev)
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)  # (ncol, nlev)
 
     # Low-level wind at surface level
     u_sfc = u[:, -1]

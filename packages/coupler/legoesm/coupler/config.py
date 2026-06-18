@@ -13,7 +13,6 @@ __param_spec__ = {
         "scheme_key": "coupler.surface",
         "excluded": {
             "U_min": "numerics: minimum wind-speed floor for bulk fluxes [m/s]",
-            "blend_sharpness": "numerics: surface-tile blend sigmoid sharpness",
             "co2_ppmv_default": "forcing: default atmospheric CO2 [ppmv]",
             "coupling_dt": "numerics: coupling timestep [s]",
             "z_q_atm": "convention: humidity measurement reference height [m]",
@@ -70,7 +69,6 @@ class CouplerConfig(NamedTuple):
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]
     co2_ppmv_default: float = 400.0   # Default CO2 concentration
-    blend_sharpness: float = 20.0     # Sigmoid sharpness for tile blending
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"

@@ -59,7 +59,6 @@ __param_spec__ = {
             "C4": "unused in CLUBB-lite: higher-moment closure block removed",
             "C5": "unused in CLUBB-lite: higher-moment closure block removed",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "var_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
             # C_eps is the LIVE wp2-dissipation coefficient (diss = C_eps·sqrt(wp2)/l,
@@ -410,8 +409,6 @@ class CLUBBLiteConfig(NamedTuple):
         Maximum mixing length [m] (default 100.0).
     tke_min : float
         Minimum TKE (w'²) [m²/s²] (default 1e-6).
-    var_min : float
-        Minimum scalar variance [K² or (kg/kg)²] (default 1e-12).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -423,7 +420,6 @@ class CLUBBLiteConfig(NamedTuple):
     Pr_t: float = 0.33
     l_mix_max: float = 100.0
     tke_min: float = 1e-6
-    var_min: float = 1e-12
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

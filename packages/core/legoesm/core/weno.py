@@ -283,7 +283,6 @@ def _compute_betas_right(f: list, k: int, beta_table: tuple) -> list:
 
 def _reconstruct_left(coeffs: tuple, f: list) -> list:
     """Left-biased reconstructions. Sub-stencil r uses f[r:r+k]."""
-    len(coeffs[0])
     return [sum(c * f[r + j] for j, c in enumerate(cs))
             for r, cs in enumerate(coeffs)]
 

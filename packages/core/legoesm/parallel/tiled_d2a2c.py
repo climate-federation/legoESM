@@ -22,11 +22,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
-
-try:  # JAX >= 0.8 top-level export
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
+from legoesm.parallel.shard_map_compat import shard_map
 
 
 def make_tiled_d2a2c_stage(mesh, cdgrid, kt: int, apply_strips: bool = True):
@@ -50,8 +46,8 @@ def make_tiled_d2a2c_stage(mesh, cdgrid, kt: int, apply_strips: bool = True):
     :func:`d2a2c_adjacent_strips` post-gather.
     """
     from legoesm.core.fv3_sw_core import (
-        d2a2c_tile_unified,
         d2a2c_tile_strips,
+        d2a2c_tile_unified,
     )
 
     n = cdgrid.n

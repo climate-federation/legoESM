@@ -113,8 +113,8 @@ def make_column_state(
     *,
     T_profile: jax.Array,
     q_v_profile: jax.Array | None = None,
-    u: float = 0.0,
-    v: float = 0.0,
+    u: float | jax.Array = 0.0,
+    v: float | jax.Array = 0.0,
     p_s: float = 1.0e5,
     phis: float = 0.0,
     dtype=None,
@@ -134,8 +134,17 @@ def make_column_state(
             f"T_profile must have {nlev} elements, got {T_profile.size}"
         )
     T_data = T_profile.reshape(1, 1, 1, nlev)
-    u_data = jnp.full((1, 1, 1, nlev), u, dtype=dtype)
-    v_data = jnp.full((1, 1, 1, nlev), v, dtype=dtype)
+
+    def _wind_data(value, name: str):
+        arr = jnp.asarray(value, dtype=dtype)
+        if arr.ndim == 0:
+            return jnp.full((1, 1, 1, nlev), arr, dtype=dtype)
+        if arr.size != nlev:
+            raise ValueError(f"{name} must be scalar or have {nlev} elements")
+        return arr.reshape(1, 1, 1, nlev)
+
+    u_data = _wind_data(u, "u")
+    v_data = _wind_data(v, "v")
     p_s_data = jnp.full((1, 1, 1), p_s, dtype=dtype)
     phis_data = jnp.full((1, 1, 1), phis, dtype=dtype)
 
@@ -743,8 +752,8 @@ class SingleColumnModel:
         dt: float,
         T_profile: jax.Array,
         q_v_profile: jax.Array | None = None,
-        u: float = 0.0,
-        v: float = 0.0,
+        u: float | jax.Array = 0.0,
+        v: float | jax.Array = 0.0,
         p_s: float = 1.0e5,
         phis: float = 0.0,
         latitude_deg: float = 0.0,
@@ -775,7 +784,9 @@ class SingleColumnModel:
             Optional initial water-vapor mixing ratio [kg/kg], shape
             ``(nlev,)``. When omitted no tracers are carried.
         u, v
-            Initial uniform wind components [m/s].
+            Initial wind components [m/s]. Scalars initialize uniform winds;
+            ``(nlev,)`` profiles initialize level-varying winds, indexed
+            top-to-bottom.
         p_s
             Initial surface pressure [Pa].
         phis

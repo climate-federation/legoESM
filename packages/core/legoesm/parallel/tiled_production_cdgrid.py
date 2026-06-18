@@ -22,11 +22,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
-
-try:  # JAX >= 0.8 top-level export
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
+from legoesm.parallel.shard_map_compat import shard_map
 
 
 def _check_shapes(n, **named):
@@ -635,7 +631,9 @@ def make_tiled_vertical_pe_stage_2d(mesh, coord, n: int, kt: int):
     is sliced ONCE then mass_flux -> vertical_advection -> omega chain locally —
     bit-identical to running each global op then slicing (all per-column)."""
     from legoesm.grids.vertical import (
-        compute_mass_flux_hybrid, vertical_advection_hybrid, compute_omega_hybrid,
+        compute_mass_flux_hybrid,
+        compute_omega_hybrid,
+        vertical_advection_hybrid,
     )
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
@@ -717,15 +715,22 @@ def make_tiled_fv3_hydrostatic_momentum_stage_2d(mesh, cdgrid, coord, n: int,
     (sigma OR hybrid; 1-D vertical arrays) is closed over and the geopotential /
     hybrid-factor cores are dispatched on its type.  No new numerics.
     """
-    from legoesm import constants
     from legoesm.core.operators_cdgrid import (
-        dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
-        interp_center_to_corner)
+        arakawa_lamb_gradient_core,
+        dgrid_to_center_vector,
+        dgrid_vorticity_core,
+        interp_center_to_corner,
+    )
     from legoesm.core.precision import resolve_dtype
     from legoesm.grids.vertical import (
-        compute_geopotential, compute_geopotential_hybrid,
-        HybridSigmaPressureCoordinate, pressure_from_hybrid)
+        HybridSigmaPressureCoordinate,
+        compute_geopotential,
+        compute_geopotential_hybrid,
+        pressure_from_hybrid,
+    )
     from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    from legoesm import constants
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
@@ -894,8 +899,10 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
     """
     from legoesm.core.operators_cdgrid import cgrid_divergence_local
     from legoesm.grids.vertical import (
-        compute_sigma_dot_and_total, compute_mass_flux_hybrid,
-        HybridSigmaPressureCoordinate)
+        HybridSigmaPressureCoordinate,
+        compute_mass_flux_hybrid,
+        compute_sigma_dot_and_total,
+    )
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     _check_tiled_mesh(mesh, n, kt)
@@ -2138,12 +2145,15 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
     a duogrid grid raises (the vector body does not yet carry the
     kinked->extended remap).
     """
-    from legoesm import constants
     from legoesm.core.operators_cdgrid import (
-        fv3_d2cc, arakawa_lamb_gradient_core, dgrid_vorticity_core,
-        interp_corner_to_center)
-    from legoesm.parallel.cubesphere_exchange import (
-        make_tiled_pad_body, make_tiled_pad_vector_body)
+        arakawa_lamb_gradient_core,
+        dgrid_vorticity_core,
+        fv3_d2cc,
+        interp_corner_to_center,
+    )
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body, make_tiled_pad_vector_body
+
+    from legoesm import constants
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
@@ -2366,8 +2376,8 @@ def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
     Base case only: non-duogrid (no ``synchronize_cgrid_fluxes``) and
     apply_fortran_xppm_boundary=False (the ``n_interior`` face-edge override is
     off; tiling a GLOBAL-index-keyed override is a later increment)."""
-    from legoesm.core.operators_cdgrid import pad_halo_auto_h2
     import jax.numpy as jnp
+    from legoesm.core.operators_cdgrid import pad_halo_auto_h2
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
@@ -2439,14 +2449,19 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
     ``u_cc``/``v_cc`` vector halo.  All static metrics passed as face-sharded
     in_specs (never closed over -> the codex U4a face-broadcast HIGH).  ``g``
     defaults to ``constants.g``.  Base cut: non-duogrid orthogonal rotation."""
-    from legoesm import constants
-    from legoesm.core.operators_cdgrid import (
-        fv3_d2cc, fv3_cc2c_core, arakawa_lamb_gradient_core,
-        dgrid_vorticity_core, interp_corner_to_center, cgrid_ppm_fluxes_core,
-        pad_halo_auto_h2)
-    from legoesm.parallel.cubesphere_exchange import (
-        make_tiled_pad_body, make_tiled_pad_vector_body)
     import jax.numpy as jnp
+    from legoesm.core.operators_cdgrid import (
+        arakawa_lamb_gradient_core,
+        cgrid_ppm_fluxes_core,
+        dgrid_vorticity_core,
+        fv3_cc2c_core,
+        fv3_d2cc,
+        interp_corner_to_center,
+        pad_halo_auto_h2,
+    )
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body, make_tiled_pad_vector_body
+
+    from legoesm import constants
 
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
