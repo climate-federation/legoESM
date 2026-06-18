@@ -1787,15 +1787,20 @@ def make_tiled_fix_ps_mass_stage_2d(mesh, grid, n: int, kt: int):
         pn = _s(p_s_new)
         po = _s(p_s_old)
         art = _s(ar).astype(acc)
-        local_old = jnp.sum(po.astype(acc) * art)
-        local_new = jnp.sum(pn.astype(acc) * art)
-        # one psum of the stacked (old, new) per-tile sums -> global (old, new).
-        g = jax.lax.psum(jnp.stack([local_old, local_new]),
-                         axis_name=("face", "tile_i", "tile_j"))
-        correction = (g[0] - g[1]) / total_area
-        # Match the global fix_ps_mass EXACTLY: `p_s_new + correction` with NO
-        # cast-back (unlike zero_mean_tendency, fix_ps_mass keeps the promoted
-        # dtype) — so the tiled stage is bit-identical in f32 too, not just x64.
+        # DELTA-FIRST (codex MAJOR): sum the per-cell (old-new)*area BEFORE the
+        # reduction, so the small dry-mass drift is NOT lost to catastrophic
+        # cancellation of two huge near-equal masses (mass~1e19) in f32-storage /
+        # x64-off mode.  Mathematically == the global fix_ps_mass's
+        # (mass_old-mass_new)/total_area; bit-identical to it in x64 to ~1e-16 (the
+        # correction is O(drift/area) << p_s, so the output match is ULP-level) and
+        # strictly more robust + conservation-tighter in f32.  total_area is the
+        # closed-over global single-sum (matches the global op's _total_area;
+        # NOT a psummed local_area, which would reorder the denominator off the
+        # global).  No cast-back (fix_ps_mass keeps the promoted dtype).
+        local_delta = jnp.sum((po.astype(acc) - pn.astype(acc)) * art)
+        g_delta = jax.lax.psum(
+            local_delta, axis_name=("face", "tile_i", "tile_j"))
+        correction = g_delta / total_area
         return pn + correction
 
     def stage(p_s_new, p_s_old):
