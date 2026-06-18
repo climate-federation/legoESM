@@ -29,6 +29,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _build_arg_parser,
     _campaign_knobs_from_args,
     _distributed_campaign_kwargs,
+    build_campaign_output_dict,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
     build_multi_correction_campaign,
@@ -1378,3 +1379,128 @@ def test_builders_forward_campaign_knobs_to_run_loop(monkeypatch):
         coefficients=("C_K", "Pr_t"), **common, **knobs) == "M"
     for key, val in knobs.items():
         assert cap_multi[key] == val, f"multi builder dropped {key}"
+
+
+def _bias_imp(base, upd):
+    from legoesm.training.bias_metrics import BiasImprovement
+    frac = (base - upd) / base if base != 0.0 else 0.0
+    return BiasImprovement(
+        baseline_bias=jnp.asarray(base), updated_bias=jnp.asarray(upd),
+        absolute_reduction=jnp.asarray(base - upd),
+        fractional_improvement=jnp.asarray(frac), improved=jnp.asarray(upd < base))
+
+
+def test_campaign_output_dict_single_round_trips_into_deploy():
+    """The single-coefficient campaign OUTPUT dict, after a JSON round-trip, loads
+    through the DEPLOY path (corrected_clubb_config) into a per-column CLUBBLiteConfig
+    with the SAME C_K — locking the write/read format of the clause-5 'update the
+    parameters' plumbing against drift (iter 105)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+    from legoesm.training.deploy_correction import corrected_clubb_config
+
+    field = jnp.array([0.42, 0.55, 0.61, 0.73])
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 0.6),
+            worst_column_change=jnp.asarray(0.0), feedback_field=field.reshape(2, 2),
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+        final_field=field.reshape(2, 2), accepted=(True,), stop_reason="converged")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    health = campaign_health(summary)
+
+    out = build_campaign_output_dict(
+        res, grid_provenance={"grid_type": "latlon", "n_columns": 4},
+        summary=summary, health=health, corrected_field="C_K")
+    loaded = json.loads(json.dumps(out))                  # the REAL on-disk round trip
+    cfg = corrected_clubb_config(loaded)
+    np.testing.assert_allclose(np.asarray(cfg.C_K).reshape(-1), np.asarray(field))
+    # the diagnostics survive too (the file is also the campaign's human report).
+    assert loaded["summary"]["stop_reason"] == "converged"
+    assert loaded["health"]["status"] == health.status
+    assert loaded["grid"]["grid_type"] == "latlon"
+
+
+def test_campaign_output_dict_multi_round_trips_into_deploy():
+    """The multi-coefficient ``"fields"`` shape round-trips into corrected_clubb_config
+    recovering BOTH C_K and Pr_t per column (iter 105)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import (
+        MultiCampaignResult,
+        MultiCorrectionResult,
+    )
+    from legoesm.training.deploy_correction import corrected_clubb_config
+
+    ck = jnp.array([0.42, 0.55, 0.61, 0.73])
+    prt = jnp.array([0.78, 0.81, 0.83, 0.80])
+    res = MultiCampaignResult(
+        final_config=CLUBBLiteConfig(C_K=ck, Pr_t=prt),
+        iterations=(MultiCorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 0.5),
+            worst_column_change=jnp.asarray(0.0), feedback_fields={},
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+        final_fields={"clubb_lite_C_K": ck.reshape(2, 2),
+                      "clubb_lite_Pr_t": prt.reshape(2, 2)},
+        accepted=(True,), stop_reason="max_iterations")
+    summary = summarize_campaign(res)
+    health = campaign_health(summary)
+
+    out = build_campaign_output_dict(
+        res, grid_provenance={"grid_type": "latlon", "n_columns": 4},
+        summary=summary, health=health, coefficients=("C_K", "Pr_t"))
+    loaded = json.loads(json.dumps(out))
+    assert loaded["coefficients"] == ["C_K", "Pr_t"]
+    cfg = corrected_clubb_config(loaded)
+    np.testing.assert_allclose(np.asarray(cfg.C_K).reshape(-1), np.asarray(ck))
+    np.testing.assert_allclose(np.asarray(cfg.Pr_t).reshape(-1), np.asarray(prt))
+
+
+def test_campaign_output_dict_requires_exactly_one_shape():
+    """Dispatch hardening: pass exactly one of corrected_field / coefficients."""
+    res = SimpleNamespace(iterations=(), accepted=(), final_config=None,
+                          final_fields={})
+    summary = SimpleNamespace()
+    health = SimpleNamespace(status="x", message="y")
+    with pytest.raises(ValueError, match="EXACTLY one"):
+        build_campaign_output_dict(res, grid_provenance={}, summary=summary,
+                                   health=health)                       # neither
+    with pytest.raises(ValueError, match="EXACTLY one"):
+        build_campaign_output_dict(res, grid_provenance={}, summary=summary,
+                                   health=health,
+                                   corrected_field="C_K", coefficients=("C_K",))  # both
+
+
+def test_campaign_output_dict_scalar_single_field_is_rejected_by_deploy():
+    """A no-op / zero-round campaign that corrected NOTHING leaves a SCALAR
+    final_config field; the output writes it as a bare float (NO reshape), so the
+    deploy loader's 1-D assertion REJECTS it loudly instead of silently accepting a
+    1-column array (Codex iter 105 — the un-masked failure path)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+    from legoesm.training.deploy_correction import corrected_clubb_config
+
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(),                  # scalar default C_K (no-op)
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 1.0),  # never improved
+            worst_column_change=jnp.asarray(0.0), feedback_field=jnp.zeros((2, 2)),
+            n_corrected=0, n_diagnosed=0, n_diagnoses_valid=0),),
+        final_field=jnp.zeros((2, 2)), accepted=(True,), stop_reason="max_iterations")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    out = build_campaign_output_dict(
+        res, grid_provenance={"grid_type": "latlon"}, summary=summary,
+        health=campaign_health(summary), corrected_field="C_K")
+    loaded = json.loads(json.dumps(out))
+    assert not isinstance(loaded["C_K"], list)            # a bare float, NOT [0.4]
+    with pytest.raises(ValueError, match="1-D per-column"):
+        corrected_clubb_config(loaded)

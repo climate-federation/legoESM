@@ -782,6 +782,51 @@ def _summary_to_json(summary):  # pragma: no cover - HPC path
     }
 
 
+def build_campaign_output_dict(result, *, grid_provenance, summary, health,
+                               corrected_field=None, coefficients=None):
+    """Assemble the JSON-serializable campaign-output dict — the on-disk artifact the
+    DEPLOY path (:func:`legoesm.training.deploy_correction.corrected_clubb_config`)
+    reads to update a production AMIP/CMIP run (the literal "update the parameters"
+    plumbing).  SHARED by the single- and multi-coefficient CLI write sites so the
+    written format CANNOT DRIFT from what the deploy loader expects (round-trip
+    tested).  Pure (no I/O).
+
+    Pass EXACTLY one of ``corrected_field`` (single — a top-level ``C_K``/``Pr_t``/
+    ``C_eps`` per-column array, read from ``result.final_config``) or ``coefficients``
+    (multi — a ``"fields"`` dict keyed by promotion_key, read from
+    ``result.final_fields``).  The two shapes mirror :func:`corrected_clubb_config`.
+    """
+    import numpy as np
+
+    if (corrected_field is None) == (coefficients is None):
+        raise ValueError(
+            "build_campaign_output_dict: pass EXACTLY one of corrected_field "
+            "(single-coefficient) or coefficients (multi-coefficient).")
+    biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
+               bool(it.bias.improved)) for it in result.iterations]
+    accepted = list(result.accepted)
+    steps = [float(it.step_fraction) for it in result.iterations]
+    if corrected_field is not None:
+        # NO reshape (behavior-preserving): the single final_config field is the
+        # per-column 1-D array; ``.tolist()`` keeps a 0-D scalar (a no-op / zero-round
+        # campaign that corrected NOTHING) as a bare float so the deploy loader's
+        # 1-D assertion REJECTS it LOUDLY rather than silently promoting it to a
+        # length-1 single-column array (Codex iter 105).
+        payload = {corrected_field: np.asarray(
+            getattr(result.final_config, corrected_field)).tolist()}
+    else:
+        payload = {
+            "coefficients": list(coefficients),
+            "fields": {k: np.asarray(v).reshape(-1).tolist()
+                       for k, v in result.final_fields.items()},
+        }
+    return {**payload,
+            "grid": grid_provenance,
+            "biases": biases, "accepted": accepted, "step_fractions": steps,
+            "summary": _summary_to_json(summary),
+            "health": {"status": health.status, "message": health.message}}
+
+
 def _area_weights(grid):  # pragma: no cover - HPC path
     """Per-column quadrature weights for the bias aggregation.
 
@@ -876,15 +921,10 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     summary = summarize_campaign(result)
     health = campaign_health(summary)
     with open(args.out, "w") as f:
-        json.dump({"coefficients": list(coefficients),
-                   "fields": {k: np.asarray(v).reshape(-1).tolist()
-                              for k, v in result.final_fields.items()},
-                   "grid": _grid_provenance(base_cfg, grid),
-                   "biases": biases, "accepted": accepted,
-                   "step_fractions": steps,
-                   "summary": _summary_to_json(summary),
-                   "health": {"status": health.status, "message": health.message}},
-                  f, indent=2)
+        json.dump(build_campaign_output_dict(
+            result, grid_provenance=_grid_provenance(base_cfg, grid),
+            summary=summary, health=health, coefficients=coefficients),
+            f, indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -1113,14 +1153,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     summary = summarize_campaign(result, promotion_key=promotion_key)
     health = campaign_health(summary)
     with open(args.out, "w") as f:
-        json.dump({corrected_field: np.asarray(
-                       getattr(result.final_config, corrected_field)).tolist(),
-                   "grid": _grid_provenance(base_cfg, grid),
-                   "biases": biases, "accepted": accepted,
-                   "step_fractions": steps,
-                   "summary": _summary_to_json(summary),
-                   "health": {"status": health.status, "message": health.message}},
-                  f, indent=2)
+        json.dump(build_campaign_output_dict(
+            result, grid_provenance=_grid_provenance(base_cfg, grid),
+            summary=summary, health=health, corrected_field=corrected_field),
+            f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
