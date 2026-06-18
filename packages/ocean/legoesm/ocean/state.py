@@ -1350,6 +1350,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # warns at 0.5 and 0.55. Default
     # "matsuno_split" ⇒ BIT-IDENTICAL for every existing config.
     coriolis_scheme: str = "matsuno_split"
+    # Energy-conserving (Sadourny vertex-f) C-grid Coriolis.  DEFAULT False keeps
+    # the existing face-f stencil (f_u·v→u, f_v·u→v) BYTE-IDENTICAL.  When True,
+    # both the barotropic-solver Coriolis and the Matsuno baroclinic sub-step use
+    # the single shared VERTEX f so Σu·cor_u+Σv·cor_v == 0 on a β-plane (the
+    # face-f form leaks ~1e-6·f·KE because f_u != f_v when f varies with lat —
+    # the MITgcm barotropic-gyre oracle residual; see
+    # docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
+    # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
+    coriolis_energy_conserving: bool = False
 
     # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
     # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:

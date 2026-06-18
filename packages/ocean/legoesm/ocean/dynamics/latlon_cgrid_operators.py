@@ -456,6 +456,104 @@ def coriolis_cgrid(
     return cor_u, cor_v
 
 
+def _vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Planetary Coriolis ``f`` at C-grid VERTICES (corners), shape
+    ``(n_lat+1, n_lon+1)``.
+
+    On a lat-lon grid ``f`` depends only on latitude, and the vertex latitude
+    equals the v-face latitude, so the vertex ``f`` is ``grid.f_v`` extended by
+    one periodic-wrap column.  This is the single shared ``f`` value that makes
+    the C-grid Coriolis energy-conserving on a β-plane (see
+    :func:`coriolis_cgrid_energy_conserving`).
+    """
+    if hasattr(grid, "f_v"):
+        f_v = grid.f_v  # (n_lat+1, n_lon)
+    else:
+        f_cell = grid.f
+        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def coriolis_cgrid_energy_conserving(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """ENERGY-CONSERVING C-grid Coriolis (Sadourny 1975) using VERTEX ``f``.
+
+    The default :func:`coriolis_cgrid` evaluates ``f`` at u-points (``f_u``) for
+    the ``f·v→u`` term and at v-points (``f_v``) for the ``-f·u→v`` term.  On a
+    β-plane these are DIFFERENT values (``f`` varies with latitude), so the two
+    terms do not cancel in the discrete kinetic-energy budget
+    ``Σ u·(f·v) − Σ v·(f·u) ≠ 0`` and the scheme spuriously injects/removes
+    energy (measured ``~1e-6·f·KE`` on grid-scale fields; the root cause of the
+    MITgcm barotropic-gyre oracle residual — see
+    ``docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md``).
+
+    This variant uses the SINGLE ``f`` value at the VERTEX shared by each
+    (u-point, v-point) pair, so the paired contributions
+    ``0.25·f_vertex·u·v`` appear identically in ``cor_u`` and ``cor_v`` and
+    cancel exactly in the energy sum (verified machine-zero power on random
+    β-plane fields).  On an f-plane (``f`` constant) it reduces to the same
+    answer as :func:`coriolis_cgrid`.
+
+    ``cor_u`` depends only on ``v`` and ``cor_v`` only on ``u`` — so a
+    forward-backward caller can compute ``cor_u`` from ``v_old`` and ``cor_v``
+    from the updated ``u_pred`` by two calls (or by passing the right field).
+
+    Shapes match :func:`coriolis_cgrid`: ``u`` is ``(n_lat, n_lon+1[, nlev])``,
+    ``v`` is ``(n_lat+1, n_lon[, nlev])``.
+    """
+    if is_tripolar(grid):
+        raise NotImplementedError(
+            "coriolis_cgrid_energy_conserving is not yet implemented on tripolar "
+            "grids (vertex f + fold-seam averaging needs the 2D metric handling "
+            "of coriolis_cgrid). Use coriolis_energy_conserving=False there."
+        )
+    is_3d = u.ndim == 3
+    f_q = _vertex_coriolis(grid)                       # (n_lat+1, n_lon+1)
+    if is_3d:
+        f_q = f_q[..., jnp.newaxis]
+
+    # --- cor_u at u-points (n_lat, n_lon+1): + f·v averaged with vertex f ---
+    # South/north vertices of u-row i are vertex rows i and i+1.
+    fq_s = f_q[:-1]                                     # (n_lat, n_lon+1[,1])
+    fq_n = f_q[1:]
+    v_west = jnp.roll(v, 1, axis=1)                     # v(:, j-1)
+
+    def _lon_face(a):  # (rows, n_lon[,nlev]) cell field -> (rows, n_lon+1) face
+        return jnp.concatenate([a, a[:, 0:1]], axis=1)
+
+    vs_w = _lon_face(v_west[:-1]); vs_e = _lon_face(v[:-1])   # south (v row i)
+    vn_w = _lon_face(v_west[1:]);  vn_e = _lon_face(v[1:])    # north (v row i+1)
+    cor_u = 0.25 * (fq_s * (vs_w + vs_e) + fq_n * (vn_w + vn_e))
+
+    # --- cor_v at v-points (n_lat+1, n_lon): - f·u averaged with vertex f ---
+    # West/east vertices of v-col j are vertex cols j and j+1.
+    fq_w = f_q[:, :-1]                                  # (n_lat+1, n_lon[,1])
+    fq_e = f_q[:, 1:]
+    u_east = jnp.roll(u, -1, axis=1)                    # u(:, J+1)
+
+    def _lat_sum(a):  # sum u-rows i-1 and i at v-face row i; walls at the ends
+        return jnp.concatenate([a[0:1], a[:-1] + a[1:], a[-1:]], axis=0)
+
+    u_w = u[:, :-1]                                     # west-face col J=j
+    u_e = u_east[:, :-1]                                # east-face col J=j+1
+    cor_v = -0.25 * (fq_w * _lat_sum(u_w) + fq_e * _lat_sum(u_e))
+
+    if u_mask is not None:
+        um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
+        cor_u = cor_u * um
+    if v_mask is not None:
+        vm = v_mask[..., jnp.newaxis] if is_3d and v_mask.ndim == 2 else v_mask
+        cor_v = cor_v * vm
+    return cor_u, cor_v
+
+
 # =============================================================================
 # =============================================================================
 # Laplacian for C-grid scalar fields (at cell centers)

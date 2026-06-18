@@ -71,6 +71,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    coriolis_cgrid_energy_conserving,
     fold_is_local,
     divergence_cgrid,
     fold_vface_row,
@@ -1335,27 +1336,45 @@ def barotropic_implicit_latlon_cgrid(
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)
     grad_y_eta_old = gradient_y_cgrid(eta_old, grid).astype(eta_dtype)
 
-    # V at u-points (4-pt average over surrounding v-faces)
-    V_west = jnp.roll(V_old, 1, axis=1)
-    V_at_u = 0.25 * (V_old[:-1] + V_old[1:] + V_west[:-1] + V_west[1:])
-    V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
+    if getattr(config, "coriolis_energy_conserving", False):
+        # Sadourny energy-conserving Coriolis with the SHARED VERTEX f, kept in
+        # forward-backward order: cor_u from V_old (forward), cor_v from U_pred
+        # (backward).  cor_v already carries the -f sign.  This removes the
+        # β-plane energy leak of the face-f form (f_u != f_v).
+        cor_u, _ = coriolis_cgrid_energy_conserving(
+            U_old, V_old, grid, u_mask=u_mask, v_mask=v_mask,
+        )
+        U_pred = (
+            U_old + dt_t * (-g * grad_x_eta_old + cor_u.astype(eta_dtype) + F_slow_u)
+        ) * u_mask
+        _, cor_v = coriolis_cgrid_energy_conserving(
+            U_pred, V_old, grid, u_mask=u_mask, v_mask=v_mask,
+        )
+        V_pred = (
+            V_old + dt_t * (-g * grad_y_eta_old + cor_v.astype(eta_dtype) + F_slow_v)
+        ) * v_mask
+    else:
+        # V at u-points (4-pt average over surrounding v-faces)
+        V_west = jnp.roll(V_old, 1, axis=1)
+        V_at_u = 0.25 * (V_old[:-1] + V_old[1:] + V_west[:-1] + V_west[1:])
+        V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
-    U_pred = (
-        U_old + dt_t * (-g * grad_x_eta_old + f_u * V_at_u + F_slow_u)
-    ) * u_mask
+        U_pred = (
+            U_old + dt_t * (-g * grad_x_eta_old + f_u * V_at_u + F_slow_u)
+        ) * u_mask
 
-    # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
-    # shared cell-pad-first helper (partition-cut faces average the
-    # neighbour rank's true U row; wall/fold conventions bit-identical
-    # to the old interior-then-pad_ns_vector_u serial path).
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        interp_u_to_vface_4pt,
-    )
-    U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
+        # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
+        # shared cell-pad-first helper (partition-cut faces average the
+        # neighbour rank's true U row; wall/fold conventions bit-identical
+        # to the old interior-then-pad_ns_vector_u serial path).
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_u_to_vface_4pt,
+        )
+        U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
 
-    V_pred = (
-        V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
-    ) * v_mask
+        V_pred = (
+            V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
+        ) * v_mask
 
     # ----- Step 5: build elliptic RHS and solve ------------------------
     theta_eta = jnp.asarray(config.barotropic_implicit_theta_eta, dtype=eta_dtype)

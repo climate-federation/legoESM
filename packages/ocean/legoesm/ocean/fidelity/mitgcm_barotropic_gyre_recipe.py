@@ -172,6 +172,10 @@ def build_gyre_config(
         barotropic_solver=barotropic_solver,
         barotropic_implicit_theta_eta=1.0,
         barotropic_implicit_theta_pgf=1.0,
+        # Sadourny energy-conserving (vertex-f) Coriolis: the face-f form leaks
+        # energy on a β-plane (f_u != f_v) and runs the inviscid gyre turbulent;
+        # the vertex-f form conserves KE+PE so the gyre stays laminar like MITgcm.
+        coriolis_energy_conserving=True,
         differentiable_barotropic=True,
         use_conservation_fixer=False,
         enable_runtime_checks=False,
