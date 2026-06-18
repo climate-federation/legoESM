@@ -31,11 +31,13 @@ the cubed extractor); the plane Coriolis then falls back to ``f×V``.
 
 Grids: ERA5 is lat-lon (``extract_column_forcing_latlon``), but the model's
 flagship dycore is cubed-sphere, so a worst column flagged on the *native* model
-grid needs cubed-sphere extraction (``extract_column_forcing_cubed_sphere``).
-Both share the grid-agnostic continuity chain (:func:`omega_from_divergence`) and
-advection (:func:`advective_tendency`); only the horizontal operators differ.
+grid needs cubed-sphere extraction (``extract_column_forcing_cubed_sphere``); the
+unstructured MPAS/Voronoi family has ``extract_column_forcing_voronoi`` (edge-
+normal velocity + Perot reconstruction).  All three share the grid-agnostic
+continuity chain (:func:`omega_from_divergence`) and advection
+(:func:`advective_tendency`); only the horizontal operators differ.
 :func:`extract_column_forcing` dispatches on the grid type (raises on an
-unsupported grid — Gaussian/Voronoi remain follow-ups).
+unsupported grid — Gaussian/spectral remains a follow-up).
 """
 
 from __future__ import annotations
@@ -400,6 +402,135 @@ def extract_column_forcing_cubed_sphere(
     )
 
 
+def _gradient_voronoi_3d(field_cell_3d: jax.Array, mesh: Any) -> tuple[jax.Array, jax.Array]:
+    """Per-level cell-centered ``(∂/∂x_east, ∂/∂y_north)`` on an MPAS/Voronoi mesh.
+
+    Two steps, both 4D-/3D-native (NEVER ``vmap(pad_halo)``; these local TRiSK
+    operators carry no halo exchange):
+
+    1. :func:`legoesm.core.operators_voronoi.gradient_edge_3d` gives the
+       EDGE-NORMAL gradient ``∂φ/∂n = (φ[c2] − φ[c1])/dcEdge`` at every edge.
+    2. :func:`legoesm.grids.voronoi.reconstruct_cell_velocity` (Perot 2000) maps
+       those edge-normal components to the cell-centered VECTOR in geographic
+       (east, north) — exactly the reconstruction MPAS uses for cell winds, here
+       applied to ``∇φ`` (a vector field whose edge-normal component IS the
+       gradient_edge output, so the reconstruction yields the cell ``∇φ``).
+
+    The result is in the geographic frame (so it co-locates with the Perot-
+    reconstructed cell wind, frame-consistent for the advective dot product).
+    """
+    from legoesm.core.operators_voronoi import gradient_edge_3d
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+    grad_edge = gradient_edge_3d(jnp.asarray(field_cell_3d), mesh)  # (nEdges, nlev)
+    gx, gy = reconstruct_cell_velocity(grad_edge, mesh)             # (nCells, nlev)
+    return gx, gy
+
+
+def _divergence_voronoi_3d(u_edge_3d: jax.Array, mesh: Any) -> jax.Array:
+    """Cell-centered horizontal divergence of the EDGE-NORMAL velocity on a Voronoi
+    mesh (:func:`legoesm.core.operators_voronoi.divergence_cell_3d`): the
+    sign-weighted edge-flux sum over ``edgesOnCell`` / ``areaCell``.  Same units +
+    sign convention (positive = outflow) as the lat-lon / cubed divergence the
+    continuity chain (:func:`omega_from_divergence`) expects."""
+    from legoesm.core.operators_voronoi import divergence_cell_3d
+
+    return divergence_cell_3d(jnp.asarray(u_edge_3d), mesh)
+
+
+def extract_column_forcing_voronoi(
+    *,
+    T: jax.Array,
+    q_v: jax.Array,
+    u_edge: jax.Array,
+    p_s: jax.Array,
+    mesh: Any,
+    sigma_coord: Any,
+    lat_rad: float,
+    col_index: tuple[int],
+) -> ColumnLargeScaleState:
+    """Build a column's :class:`ColumnLargeScaleState` from an MPAS/Voronoi state.
+
+    The Voronoi sibling of :func:`extract_column_forcing_latlon` /
+    ``_cubed_sphere`` for the model's unstructured grid family.  ``T``/``q_v`` are
+    CELL-centered ``(nCells, nlev)`` (surface-last), ``p_s`` ``(nCells,)``;
+    ``u_edge`` is the EDGE-NORMAL velocity ``(nEdges, nlev)`` (MPAS stores wind on
+    edges, not cells — there is no cell ``v``); ``mesh`` is the
+    :class:`~legoesm.grids.voronoi.VoronoiMesh`.  ``col_index = (cell,)`` (a static
+    Python int from the manifest) selects the flagged cell; ``lat_rad`` is its
+    latitude (``mesh.latCell[cell]``).
+
+    The horizontal gradient + divergence use the local TRiSK operators on the FULL
+    mesh, with the Perot reconstruction giving the cell-centered velocity AND
+    gradient in the SAME geographic (east, north) frame; the grid-AGNOSTIC
+    continuity (:func:`omega_from_divergence`) and advection
+    (:func:`advective_tendency`) chains are reused unchanged.  The single cell
+    column is then gathered.
+
+    Caveat (metric, honest — same as the cubed extractor): the advection
+    ``u ∂φ/∂x + v ∂φ/∂y`` with BOTH velocity and gradient Perot-reconstructed at
+    the cell is leading-order A-grid; it is adequate for a large-scale *forcing*
+    tendency and is NOT a conservation-critical flux (do not reuse it as the MPAS
+    tracer transport scheme).  Geostrophic forcing is omitted (``u_geo/v_geo =
+    None`` ⇒ the column LES's plane Coriolis falls back to ``f×V``): UNLIKE the
+    cubed sphere, the Perot gradient is already geographic east/north, so
+    geostrophic balance is a clean low-risk follow-up (it still needs the
+    pressure-surface geopotential handling + a near-equator/orientation test).
+
+    **Scope (single-rank / full mesh):** the TRiSK operators are local gathers
+    over the mesh connectivity with NO halo exchange — correct for a complete
+    serial/global mesh (the worst-column spin-off use case), exactly like the
+    lat-lon / cubed extractors.  Distributed-MPAS (rank-local mesh + ghost cells)
+    handoff is a follow-up.  ``mesh.edgeSignOnCell`` MUST be populated (it is by
+    :func:`~legoesm.grids.voronoi.create_voronoi_mesh`); an all-zero sign array
+    (a mesh loaded without it) would silently ZERO the divergence + ``ω``, so it
+    is rejected LOUDLY here.
+    """
+    import numpy as np
+
+    # Guard the silent-zero-divergence failure mode (Codex #d): a mesh whose
+    # edgeSignOnCell was never populated yields div ≡ 0 ⇒ ω ≡ 0.  Mesh connectivity
+    # is static, so this host-side check is jit-safe (mesh arrays are concrete).
+    if not bool(np.any(np.asarray(mesh.edgeSignOnCell) != 0)):
+        raise ValueError(
+            "extract_column_forcing_voronoi: mesh.edgeSignOnCell is all zero — the "
+            "divergence (hence ω) would be silently zero; this mesh lacks edge-sign "
+            "connectivity (e.g. a load_mpas_mesh mesh that did not populate it)."
+        )
+
+    T = jnp.asarray(T)
+    q_v = jnp.asarray(q_v, dtype=T.dtype)
+    u_edge = jnp.asarray(u_edge, dtype=T.dtype)
+    p_s = jnp.asarray(p_s, dtype=T.dtype)
+    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
+    p_full = p_s[..., None] * sigma_full
+
+    theta = T / exner_function(p_full)
+    th_x, th_y = _gradient_voronoi_3d(theta, mesh)
+    q_x, q_y = _gradient_voronoi_3d(q_v, mesh)
+
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+    u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)  # cell (east, north)
+    theta_adv_3d = advective_tendency(u_cell, v_cell, th_x, th_y)
+    qv_adv_3d = advective_tendency(u_cell, v_cell, q_x, q_y)
+
+    div_3d = _divergence_voronoi_3d(u_edge, mesh)
+    omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
+
+    c = int(col_index[0])
+    return ColumnLargeScaleState(
+        lat_rad=lat_rad,
+        T=T[c, :],
+        p_full=p_full[c, :],
+        q_v=q_v[c, :],
+        omega=omega_3d[c, :],
+        theta_adv=theta_adv_3d[c, :],
+        qv_adv=qv_adv_3d[c, :],
+        u_geo=None,
+        v_geo=None,
+    )
+
+
 def extract_column_forcing(
     *,
     T: jax.Array,
@@ -414,15 +545,51 @@ def extract_column_forcing(
 ) -> ColumnLargeScaleState:
     """Dispatch column-forcing extraction on the grid type (raises on unknown).
 
-    Routes a flagged column to the lat-lon (``col_index = (i_lat, i_lon)``) or
-    cubed-sphere (``col_index = (face, i, j)``) extractor, validating the
-    ``col_index`` arity for the grid so a mismatched index fails LOUDLY instead of
-    mis-gathering.  An unsupported grid (Gaussian/Voronoi — follow-ups) raises
-    :class:`ValueError` (dispatch hardening, CLAUDE.md) rather than silently
-    falling through to a wrong path.
+    Routes a flagged column to the lat-lon (``col_index = (i_lat, i_lon)``),
+    cubed-sphere (``col_index = (face, i, j)``), or MPAS/Voronoi
+    (``col_index = (cell,)``) extractor, validating the ``col_index`` arity for the
+    grid so a mismatched index fails LOUDLY instead of mis-gathering.  An
+    unsupported grid (Gaussian/spectral — a follow-up) raises :class:`ValueError`
+    (dispatch hardening, CLAUDE.md) rather than silently falling through.
+
+    **Voronoi velocity convention:** MPAS stores the EDGE-NORMAL velocity (there is
+    no cell ``v``), so for a :class:`~legoesm.grids.voronoi.VoronoiMesh` the ``u``
+    argument carries the edge-normal velocity ``(nEdges, nlev)`` and ``v`` MUST be
+    ``None`` (a non-``None`` ``v`` is REJECTED rather than silently ignored — a
+    caller passing cell winds for MPAS would otherwise mis-extract).
     """
     from legoesm.grids.cubed_sphere import CubedSphereGrid
     from legoesm.grids.latlon import LatLonGrid
+    from legoesm.grids.voronoi import VoronoiMesh
+
+    if isinstance(grid, VoronoiMesh):
+        if len(col_index) != 1:
+            raise ValueError(
+                f"Voronoi col_index must be (cell,); got {col_index!r}."
+            )
+        if v is not None:
+            raise ValueError(
+                "Voronoi extraction takes the EDGE-NORMAL velocity in `u` "
+                "(nEdges, nlev) and requires `v=None`; got a non-None v "
+                "(MPAS has no cell-centred v — pass the edge velocity as u)."
+            )
+        n_edges = int(grid.nEdges)
+        if jnp.asarray(u).shape[0] != n_edges:
+            raise ValueError(
+                f"Voronoi `u` must be edge-normal velocity with leading dim "
+                f"nEdges={n_edges}; got shape {tuple(jnp.asarray(u).shape)}."
+            )
+        n_cells = int(grid.nCells)
+        for name, arr in (("T", T), ("q_v", q_v), ("p_s", p_s)):
+            if jnp.asarray(arr).shape[0] != n_cells:
+                raise ValueError(
+                    f"Voronoi `{name}` must have leading dim nCells={n_cells}; "
+                    f"got shape {tuple(jnp.asarray(arr).shape)}."
+                )
+        return extract_column_forcing_voronoi(
+            T=T, q_v=q_v, u_edge=u, p_s=p_s, mesh=grid,
+            sigma_coord=sigma_coord, lat_rad=lat_rad, col_index=col_index,
+        )
 
     kwargs = dict(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid,
@@ -442,6 +609,6 @@ def extract_column_forcing(
         return extract_column_forcing_cubed_sphere(col_index=col_index, **kwargs)
     raise ValueError(
         f"extract_column_forcing: unsupported grid type {type(grid).__name__}; "
-        f"only LatLonGrid and CubedSphereGrid are supported "
-        f"(Gaussian/Voronoi are follow-ups)."
+        f"only LatLonGrid, CubedSphereGrid and VoronoiMesh (MPAS) are supported "
+        f"(Gaussian/spectral is a follow-up)."
     )
