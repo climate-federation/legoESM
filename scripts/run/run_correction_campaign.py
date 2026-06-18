@@ -610,6 +610,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         json.dump({"coefficients": list(coefficients),
                    "fields": {k: np.asarray(v).reshape(-1).tolist()
                               for k, v in result.final_fields.items()},
+                   "grid": _grid_provenance(base_cfg, grid),
                    "biases": biases, "accepted": accepted,
                    "step_fractions": steps,
                    "summary": _summary_to_json(summary),
@@ -618,24 +619,39 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
-    _print_deploy_hint(args.out)
+    _print_deploy_hint(args.out, grid)
     return 0
 
 
-def _print_deploy_hint(out_path: str) -> None:
-    """Verify the just-written output is deployable + print the deploy one-liner.
+def _grid_provenance(base_cfg, grid) -> dict:
+    """Adapter-order grid fingerprint + human-readable grid identity for the output.
 
-    Round-trips the campaign JSON through the production deploy loader so a
-    non-deployable output fails LOUDLY here (at write time) rather than silently
-    in a downstream production run.
+    Recorded so a deploy onto a DIFFERENT grid (even one with the same column
+    count) is caught by :func:`deploy_correction.assert_deploy_compatible` instead
+    of silently landing the per-column coefficients on the wrong cells.
+    """
+    from legoesm.training.deploy_correction import grid_fingerprint
+
+    prov = grid_fingerprint(grid)
+    gc = base_cfg.grid
+    prov.update(grid_type=gc.grid_type, resolution=gc.resolution, nlev=gc.nlev)
+    return prov
+
+
+def _print_deploy_hint(out_path: str, grid) -> None:
+    """Verify the just-written output deploys onto its OWN grid + print the hint.
+
+    Round-trips the campaign JSON through the production deploy loader WITH the
+    grid the output was made for, so a non-deployable or grid-inconsistent output
+    fails LOUDLY here (at write time) rather than silently in a downstream run.
     """
     from legoesm.training.deploy_correction import corrected_turbulence_override
 
-    corrected_turbulence_override(out_path)  # raises if the output is not deployable
+    corrected_turbulence_override(out_path, grid=grid)  # raises if not deployable
     print(
         "[campaign] deploy into a production run with: "
         "ExperimentConfig(..., turbulence='clubb_lite', "
-        f"turbulence_override=corrected_turbulence_override({out_path!r}))"
+        f"turbulence_override=corrected_turbulence_override({out_path!r}, grid=grid))"
     )
 
 
@@ -796,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     with open(args.out, "w") as f:
         json.dump({corrected_field: np.asarray(
                        getattr(result.final_config, corrected_field)).tolist(),
+                   "grid": _grid_provenance(base_cfg, grid),
                    "biases": biases, "accepted": accepted,
                    "step_fractions": steps,
                    "summary": _summary_to_json(summary),
@@ -804,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
-    _print_deploy_hint(args.out)
+    _print_deploy_hint(args.out, grid)
     return 0
 
 

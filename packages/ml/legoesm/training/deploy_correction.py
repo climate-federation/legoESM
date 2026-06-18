@@ -106,23 +106,161 @@ def _clean_field_array(field: str, vals: Any, defaults):
     return arr
 
 
-def corrected_turbulence_override(source: dict | str | Any):
+def corrected_turbulence_override(
+    source: dict | str | Any,
+    *,
+    grid: Any = None,
+    allow_unverified_grid: bool = False,
+):
     """Load a campaign output into a deployable ``TurbulenceConfig``.
 
     ``source`` is the campaign-output dict, a JSON path (str/``os.PathLike``), or
     an open file object.  Returns ``TurbulenceConfig(scheme="clubb_lite",
     clubb_lite=<per-column CLUBBLiteConfig>)`` for ``ExperimentConfig.turbulence_
     override`` (the base config's ``turbulence`` must be ``"clubb_lite"``).
+
+    If ``grid`` (the PRODUCTION grid object) is supplied, the per-column
+    coefficients are verified to belong on it via :func:`assert_deploy_compatible`
+    — a per-column field learned on a DIFFERENT grid would otherwise silently land
+    on the wrong cells.  ``allow_unverified_grid=True`` deploys on the array-length
+    check alone when the output predates grid provenance (UNSAFE if grids differ).
     """
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
+    data = _load_campaign_output(source)
+    cfg = corrected_clubb_config(data)
+    if grid is not None:
+        _assert_compatible(cfg, data, grid, allow_unverified_grid)
+    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=cfg)
+
+
+def _load_campaign_output(source: dict | str | Any) -> dict:
+    """Resolve a campaign-output dict / JSON path / open file to a dict."""
     if isinstance(source, dict):
-        data = source
-    elif hasattr(source, "read"):
-        data = json.load(source)
-    else:
-        with open(source) as f:
-            data = json.load(f)
-    return TurbulenceConfig(
-        scheme="clubb_lite", clubb_lite=corrected_clubb_config(data)
-    )
+        return source
+    if hasattr(source, "read"):
+        return json.load(source)
+    with open(source) as f:
+        return json.load(f)
+
+
+# Round flattened coordinates (radians) before hashing: absorbs cross-machine ULP
+# jitter for the grid AS BUILT. The guarantee is one-sided by design — the SAME
+# grid construction (same config/resolution/dtype, the normal campaign->deploy
+# case) yields an identical fingerprint, and the coordinate hash makes a collision
+# between two genuinely-different grids essentially impossible. A grid rebuilt in a
+# DIFFERENT precision may hash differently → a SAFE false-positive block (fails
+# loud, resolvable with allow_unverified_grid), never a silent wrong-cell deploy.
+_COORD_HASH_DECIMALS = 9
+
+
+def grid_fingerprint(grid: Any) -> dict:
+    """Adapter-order structural + coordinate fingerprint of a grid.
+
+    Beyond ``(ncol, shape_2d)`` (reshape compatibility) it hashes the flattened
+    lat/lon in the EXACT order :class:`~legoesm.core.grid_adapters.ColumnAdapter`
+    consumes them, so two grids with equal shape but different cell identity /
+    flatten order (Gaussian vs equiangular lat, a cubed-sphere panel permutation,
+    a transposed axis) are DISTINGUISHED — equal shape alone does not prove a
+    per-column coefficient lands on the same physical cell.
+
+    Returns ``{"ncol", "shape_2d", "coord_sha256"}`` (the campaign records this as
+    the output's ``"grid"`` provenance block; the deploy guard compares against it).
+    """
+    import hashlib
+
+    import numpy as np
+    from legoesm.core.grid_adapters import make_adapter
+
+    adapter = make_adapter(grid)
+    ncol = int(adapter.ncol)
+    shape_2d = [int(s) for s in adapter.shape_2d]
+    lat = np.asarray(grid.grid_lat).reshape(-1)
+    lon = np.asarray(grid.grid_lon).reshape(-1)
+    if lat.size != ncol or lon.size != ncol:
+        raise ValueError(
+            f"grid_fingerprint: flattened lat/lon size ({lat.size}/{lon.size}) "
+            f"!= ncol ({ncol}); the grid's coordinate field is not in column "
+            "order, so a per-column deploy cannot be fingerprinted on it.")
+    # round + (+0.0) normalizes negative zero; the FIXED little-endian float64
+    # dtype ('<f8') makes the byte stream — and thus the hash — machine-endianness
+    # independent (a big-endian HPC node hashes identically).
+    le = np.dtype("<f8")
+    lat_b = (np.round(lat.astype(np.float64), _COORD_HASH_DECIMALS) + 0.0).astype(le)
+    lon_b = (np.round(lon.astype(np.float64), _COORD_HASH_DECIMALS) + 0.0).astype(le)
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(lat_b).tobytes())
+    h.update(np.ascontiguousarray(lon_b).tobytes())
+    return {"ncol": ncol, "shape_2d": shape_2d, "coord_sha256": h.hexdigest()}
+
+
+def assert_deploy_compatible(
+    source: dict | str | Any,
+    grid: Any,
+    *,
+    allow_unverified_grid: bool = False,
+) -> None:
+    """Raise if the campaign output's per-column coefficients do not belong on ``grid``.
+
+    Two layers: (a) ALWAYS — every corrected per-column array's length must equal
+    the target grid's column count; (b) if the output carries a ``"grid"``
+    provenance block, its ``ncol``/``shape_2d``/``coord_sha256`` must match the
+    target grid's :func:`grid_fingerprint` EXACTLY — this is what catches the
+    silent same-``ncol`` different-grid case (coefficients on the wrong cells).
+
+    A missing provenance block (an output predating this guard) is an EXPLICIT
+    error when ``grid`` is supplied — the layout cannot be verified — unless
+    ``allow_unverified_grid=True`` (deploys on the length check alone; UNSAFE if
+    the deploy grid differs from the campaign grid).  Provenance is GLOBAL
+    (whole-grid) column order; validate the global grid before any MPI rank-local
+    slicing.
+    """
+    data = _load_campaign_output(source)
+    _assert_compatible(
+        corrected_clubb_config(data), data, grid, allow_unverified_grid)
+
+
+def _assert_compatible(cfg, data: dict, grid: Any, allow_unverified_grid: bool) -> None:
+    """Shared check over an already-built CLUBBLiteConfig (no double build)."""
+    import jax.numpy as jnp
+
+    target = grid_fingerprint(grid)
+    target_ncol = target["ncol"]
+
+    # (a) length: every corrected per-column array spans the target columns.
+    for field in _CLUBB_FIELDS:
+        arr = jnp.asarray(getattr(cfg, field))
+        if arr.ndim == 1 and int(arr.shape[0]) != target_ncol:
+            raise ValueError(
+                f"deploy mismatch: corrected '{field}' spans {int(arr.shape[0])} "
+                f"columns but the target grid has {target_ncol} (the campaign was "
+                "run on a different grid).")
+
+    # (b) grid identity (coordinate fingerprint) — catches same-ncol wrong layout.
+    # A present-but-null coord_sha256 is treated as missing provenance (not a
+    # silent bypass): a missing / null / non-dict block, or a falsy coord_sha256,
+    # all route to the unverified path.
+    _raw = data.get("grid")
+    rec = _raw if isinstance(_raw, dict) else {}
+    if not rec.get("coord_sha256"):
+        if allow_unverified_grid:
+            return
+        raise ValueError(
+            "deploy: campaign output lacks a 'grid' coordinate-provenance block "
+            "(or its coord_sha256 is null), so the per-column coefficients' grid "
+            "layout cannot be verified against the target grid — a same-ncol "
+            "different-grid deploy would silently apply coefficients to the WRONG "
+            "cells. Re-run the campaign to record provenance, or pass "
+            "allow_unverified_grid=True to deploy on the length check alone "
+            "(UNSAFE if the grids differ).")
+    for key in ("ncol", "shape_2d", "coord_sha256"):
+        rv = rec.get(key)
+        tv = target[key]
+        if key == "shape_2d" and rv is not None:
+            rv = list(rv)
+        if rv is not None and rv != tv:
+            raise ValueError(
+                f"deploy grid mismatch on {key!r}: campaign output recorded "
+                f"{rv!r} but the target grid has {tv!r}. The per-column "
+                "coefficients were learned on a different grid and would land on "
+                "the wrong cells; deploy on the SAME grid the campaign used.")

@@ -24,9 +24,36 @@ from legoesm.driver.config import (
     GridConfig,
 )
 from legoesm.training.deploy_correction import (
+    assert_deploy_compatible,
     corrected_clubb_config,
     corrected_turbulence_override,
+    grid_fingerprint,
 )
+
+
+class _FakeGrid:
+    """Duck-typed grid for the deploy guard: 2-D lat/lon column field + ncol.
+
+    ``make_adapter`` reads ``grid_n_columns`` + ``grid_lat.shape``; the
+    fingerprint reads flattened ``grid_lat``/``grid_lon`` — so this exercises the
+    coordinate hash without standing up a full grid object.
+    """
+
+    def __init__(self, lat, lon):
+        self.grid_lat = jnp.asarray(lat)
+        self.grid_lon = jnp.asarray(lon)
+
+    @property
+    def grid_n_columns(self):
+        return int(self.grid_lat.reshape(-1).size)
+
+
+def _grid_8x16(lon_shift=0.0, dtype=jnp.float64):
+    # Radian-range coordinates (the model convention) so the float32/float64
+    # fingerprint is dtype-invariant (abs error < 5e-7 < the 1e-6 round step).
+    lat = jnp.linspace(-1.5, 1.5, 128, dtype=dtype).reshape(8, 16)
+    lon = (jnp.linspace(0.0, 6.0, 128, dtype=dtype) + lon_shift).reshape(8, 16)
+    return _FakeGrid(lat, lon)
 
 
 def _single_output(field="C_K", vals=(0.5, 0.6, 0.7)):
@@ -167,6 +194,109 @@ def test_rank2_array_raises():
 def test_arrays_are_jax_for_differentiable_deploy():
     over = corrected_turbulence_override(_multi_output())
     assert isinstance(over.clubb_lite.C_K, jnp.ndarray)
+
+
+# --------------------------------------------------------------------------- #
+# Grid-compatibility guard (iter 58): per-column coefficients must belong on the
+# DEPLOY grid, or they silently land on the wrong cells.
+# --------------------------------------------------------------------------- #
+def test_grid_fingerprint_deterministic():
+    # Same grid construction → identical fingerprint (stable hash, not salted
+    # Python hash) — the campaign→deploy normal case (same config/dtype).
+    fp = grid_fingerprint(_grid_8x16(dtype=jnp.float64))
+    fpb = grid_fingerprint(_grid_8x16(dtype=jnp.float64))
+    assert fp == fpb
+    assert fp["ncol"] == 128 and fp["shape_2d"] == [8, 16]
+    assert len(fp["coord_sha256"]) == 64  # sha256 hexdigest
+
+
+def test_grid_fingerprint_distinguishes_same_shape_different_coords():
+    a = grid_fingerprint(_grid_8x16())
+    b = grid_fingerprint(_grid_8x16(lon_shift=1.0))  # same ncol+shape, diff coords
+    assert a["ncol"] == b["ncol"] and a["shape_2d"] == b["shape_2d"]
+    assert a["coord_sha256"] != b["coord_sha256"]
+
+
+def _provenanced_output(grid, ncol=128):
+    return {"C_K": list(np.linspace(0.3, 0.8, ncol)),
+            "grid": grid_fingerprint(grid)}
+
+
+def test_compatible_grid_passes():
+    grid = _grid_8x16()
+    assert_deploy_compatible(_provenanced_output(grid), grid)  # no raise
+    over = corrected_turbulence_override(_provenanced_output(grid), grid=grid)
+    assert over.scheme == "clubb_lite"
+
+
+def test_length_mismatch_raises():
+    out = _provenanced_output(_grid_8x16(), ncol=128)
+    smaller = _FakeGrid(jnp.zeros((8, 8)), jnp.zeros((8, 8)))  # 64 columns
+    with pytest.raises(ValueError, match="spans 128 columns but the target grid"):
+        assert_deploy_compatible(out, smaller)
+
+
+def test_same_ncol_different_grid_raises():
+    # THE silent-corruption case: same ncol + shape, different coordinates.
+    out = _provenanced_output(_grid_8x16())
+    other = _grid_8x16(lon_shift=1.0)
+    with pytest.raises(ValueError, match="coord_sha256"):
+        assert_deploy_compatible(out, other)
+
+
+def test_missing_provenance_is_explicit_error():
+    grid = _grid_8x16()
+    out = {"C_K": list(np.linspace(0.3, 0.8, 128))}  # no "grid" block
+    with pytest.raises(ValueError, match="lacks a 'grid'"):
+        assert_deploy_compatible(out, grid)
+    # ...but length still matches, so the escape hatch deploys.
+    assert_deploy_compatible(out, grid, allow_unverified_grid=True)
+
+
+def test_null_coord_hash_is_not_a_bypass():
+    # A present-but-null coord_sha256 must NOT silently skip the identity check
+    # (Codex Q3): treat it as missing provenance, not a verified match.
+    grid = _grid_8x16()
+    out = {"C_K": list(np.linspace(0.3, 0.8, 128)),
+           "grid": {"ncol": 128, "shape_2d": [8, 16], "coord_sha256": None}}
+    with pytest.raises(ValueError, match="coord_sha256 is null"):
+        assert_deploy_compatible(out, grid)
+    assert_deploy_compatible(out, grid, allow_unverified_grid=True)  # escape hatch
+
+
+@pytest.mark.parametrize("block", [None, "bad", {"coord_sha256": ""}])
+def test_malformed_grid_block_is_unverified_not_crash(block):
+    # A null / non-dict / empty-hash grid block must route to the explicit
+    # unverified-provenance ValueError, never an AttributeError (Codex follow-up).
+    grid = _grid_8x16()
+    out = {"C_K": list(np.linspace(0.3, 0.8, 128)), "grid": block}
+    with pytest.raises(ValueError, match="cannot be verified"):
+        assert_deploy_compatible(out, grid)
+    assert_deploy_compatible(out, grid, allow_unverified_grid=True)
+
+
+def test_allow_unverified_still_enforces_length():
+    grid = _grid_8x16()
+    out = {"C_K": list(np.linspace(0.3, 0.8, 64))}  # wrong length, no provenance
+    with pytest.raises(ValueError, match="spans 64 columns"):
+        assert_deploy_compatible(out, grid, allow_unverified_grid=True)
+
+
+def test_override_without_grid_skips_check():
+    # Backward compat: grid=None deploys with no grid verification.
+    over = corrected_turbulence_override({"C_K": [0.5, 0.6]})
+    assert over.scheme == "clubb_lite"
+
+
+def test_real_latlon_grid_roundtrip():
+    import jax.numpy as _jnp
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(8, 16, dtype=_jnp.float64)
+    out = _provenanced_output(grid, ncol=int(grid.grid_n_columns))
+    assert_deploy_compatible(out, grid)  # deploys onto its own grid
+    other = create_latlon_grid(16, 8, dtype=_jnp.float64)  # 128 cols, diff shape
+    with pytest.raises(ValueError):
+        assert_deploy_compatible(out, other)
 
 
 def test_integer_json_coerced_to_float_for_autodiff():
