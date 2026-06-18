@@ -334,6 +334,59 @@ def grid_winds_from_spectral(state: Any, grid: Any, sigma: Any) -> Any:
     )
 
 
+def owned_cell_valid_mask(layout_or_mask: Any, *, base_mask: Any = None) -> jax.Array:
+    """Ranking validity mask restricting a DISTRIBUTED MPAS rank to its OWNED cells.
+
+    A rank-local :class:`~legoesm.grids.voronoi.VoronoiMesh` carries HALO (ghost)
+    cells it does not own (the standard MPAS ``n_owned`` ≤ ``n_local`` split, owned
+    cells first).  Without masking, the worst-column ranking
+    (:func:`compare_state_to_reference` → :func:`rank_worst_columns`) could pick a
+    halo cell on a rank that does NOT own it, so the SAME physical cell is spun off
+    into an LES + corrected on multiple ranks (double-count), or a stale halo value
+    drives the rank.  Pass the active partition's owned-cell mask as the comparison
+    ``valid_mask`` so only owned cells are ranked.
+
+    ``layout_or_mask`` is either a :class:`VoronoiPartitionLayout` (anything with an
+    ``owned_mask_cells`` attribute — ``(n_local_cells,)`` bool, ``True`` for the
+    first ``n_owned`` cells) or the raw bool mask itself.  ``base_mask`` (optional,
+    same column shape) is a further validity restriction (e.g. an ocean/land mask
+    when a metric is ocean-only); the result is the elementwise AND, so a cell is
+    rankable only if it is BOTH owned AND base-valid.  Returns a flat
+    ``(n_local_cells,)`` bool array suitable for ``valid_mask=`` on the compare.
+
+    Serial / single-rank / gathered-global runs need NO owned mask (every cell is
+    owned); this helper is for the rank-local distributed-MPAS compare only.
+
+    **Prerequisite, not the whole story.** This restricts each rank to ranking its
+    OWNED cells; a complete distributed ranking ALSO needs a CROSS-RANK global top-k
+    of the per-rank worst cells (else ``R`` ranks each pick ``n_worst`` → ``R ×
+    n_worst`` LES, not the global ``n_worst``).  That gather is a SEPARATE distributed
+    step (not yet implemented); the single-process runner needs neither (every cell
+    owned).  Do not read "owned mask wired" as "distributed-MPAS ranking complete".
+    """
+    owned_attr = getattr(layout_or_mask, "owned_mask_cells", None)
+    raw = layout_or_mask if owned_attr is None else owned_attr
+    owned = jnp.asarray(raw, dtype=bool)
+    # The MPAS owned mask is the rank-local cell axis: strictly 1-D (n_local_cells,).
+    # Require 1-D + EXACT shape equality so a (n,1)-vs-(n,) or length-1 broadcast
+    # mismatch fails LOUDLY instead of silently mis-ordering / broadcasting (Codex).
+    if owned.ndim != 1:
+        raise ValueError(
+            f"owned_cell_valid_mask: the owned mask must be 1-D (n_local_cells,); "
+            f"got shape {tuple(owned.shape)}."
+        )
+    if base_mask is None:
+        return owned
+    base = jnp.asarray(base_mask, dtype=bool)
+    if base.shape != owned.shape:
+        raise ValueError(
+            f"owned_cell_valid_mask: base_mask shape {tuple(base.shape)} != owned "
+            f"mask shape {tuple(owned.shape)} — they must align EXACTLY on the same "
+            f"rank-local cell axis (both 1-D (n_local_cells,))."
+        )
+    return owned & base
+
+
 def column_state_from_hydrostatic(
     atm_state: Any,
     q_v: jax.Array,
@@ -374,8 +427,11 @@ def column_state_from_hydrostatic(
     **Scope (single-rank / full mesh):** ``reconstruct_cell_velocity`` runs on the
     supplied mesh; for a serial / global mesh that is the whole grid (matching the
     column extractor + ERA5 regrid scope).  A DISTRIBUTED MPAS run (``driver.grid``
-    = the rank-local mesh) would reconstruct rank-local cell winds and needs an
-    owned-cell ``valid_mask`` (or gather-to-global) before ranking — a follow-up.
+    = the rank-local mesh) reconstructs rank-local cell winds (owned + halo); pass
+    :func:`owned_cell_valid_mask` (the active partition's ``owned_mask_cells``) as
+    the comparison ``valid_mask`` so only OWNED cells are ranked (a halo cell would
+    otherwise be spun off + corrected on multiple ranks).  The cross-rank global
+    top-k of the per-rank worst cells remains a separate distributed step.
     """
     def _arr(x):
         return x.data if hasattr(x, "data") else x

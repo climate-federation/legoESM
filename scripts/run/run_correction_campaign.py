@@ -158,9 +158,14 @@ def grid_latlon_deg(grid, lat_deg, lon_deg):
 
 def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
                         reference, sigma, area_weights, n_worst,
-                        lat_deg, lon_deg):
+                        lat_deg, lon_deg, valid_mask=None):
     """``compare_fn(config)`` = build clubb driver → run AMIP/CMIP → time-mean →
-    compare to ``reference`` (shared by the single + multi build functions)."""
+    compare to ``reference`` (shared by the single + multi build functions).
+
+    ``valid_mask`` (optional, column-shaped) restricts the worst-column ranking —
+    e.g. an ocean/land mask, or (DISTRIBUTED MPAS) the rank's owned-cell mask from
+    :func:`legoesm.training.compare_reanalysis.owned_cell_valid_mask` so a halo cell
+    is not ranked + corrected on a rank that does not own it."""
     import jax.numpy as jnp
 
     build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
@@ -170,7 +175,7 @@ def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_sta
         sigma_full=jnp.asarray(sigma.sigma_full),
         sigma_half=jnp.asarray(sigma.sigma_half),
         lat_deg=lat_deg, lon_deg=lon_deg, area_weights=area_weights,
-        n_worst=n_worst, run_amip_fn=run_fn,
+        n_worst=n_worst, run_amip_fn=run_fn, valid_mask=valid_mask,
     )
 
 
@@ -212,6 +217,7 @@ def build_correction_campaign(
     clip_to_bounds: bool = True,
     bias_tol: float | None = None,
     patience: int = 2,
+    valid_mask: Any | None = None,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -272,7 +278,7 @@ def build_correction_campaign(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
         area_weights=area_weights, n_worst=n_worst,
-        lat_deg=lat_deg, lon_deg=lon_deg,
+        lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
@@ -323,6 +329,7 @@ def build_multi_correction_campaign(
     sequential: bool = False,
     bias_tol: float | None = None,
     patience: int = 2,
+    valid_mask: Any | None = None,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -369,7 +376,7 @@ def build_multi_correction_campaign(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
         area_weights=area_weights, n_worst=n_worst,
-        lat_deg=lat_deg, lon_deg=lon_deg,
+        lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)

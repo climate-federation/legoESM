@@ -17,6 +17,7 @@ from legoesm.training.compare_reanalysis import (
     column_state_from_carry,
     column_state_from_hydrostatic,
     compare_state_to_reference,
+    owned_cell_valid_mask,
     precip_mm_day_from_accum,
 )
 
@@ -434,3 +435,74 @@ def test_mpas_compare_end_to_end_flags_worst_cell():
     assert len(result.manifest) == 1
     assert result.manifest[0].grid_index == (bias_cell,)   # the biased cell ranked
     assert result.manifest[0].T_rmse_K == pytest.approx(12.0, abs=1e-4)
+
+
+def test_owned_cell_valid_mask_combines_owned_and_base():
+    """The owned-cell mask helper: owned-only, owned-AND-base, layout duck-typing,
+    and a shape-mismatch guard (the rank-local cell axes MUST align)."""
+    from types import SimpleNamespace
+
+    owned = jnp.array([True, True, True, False, False])     # 3 owned, 2 halo
+    # raw-mask form and the VoronoiPartitionLayout duck-typed form agree.
+    np.testing.assert_array_equal(np.asarray(owned_cell_valid_mask(owned)),
+                                  np.asarray(owned))
+    layout = SimpleNamespace(owned_mask_cells=owned)
+    np.testing.assert_array_equal(
+        np.asarray(owned_cell_valid_mask(layout)), np.asarray(owned))
+    # AND with a base (e.g. land) mask: rankable only if owned AND base-valid.
+    base = jnp.array([True, False, True, True, True])
+    np.testing.assert_array_equal(
+        np.asarray(owned_cell_valid_mask(layout, base_mask=base)),
+        np.array([True, False, True, False, False]))
+    # Misaligned (different-length) base mask must raise, not truncate/broadcast.
+    with pytest.raises(ValueError, match="must align EXACTLY"):
+        owned_cell_valid_mask(owned, base_mask=jnp.array([True, False]))
+    # A non-1-D owned mask must raise (the cell axis is strictly (n_local_cells,)).
+    with pytest.raises(ValueError, match="must be 1-D"):
+        owned_cell_valid_mask(owned.reshape(5, 1))
+    # A same-length but wrong-RANK base ((n,1) vs (n,)) must raise (not broadcast).
+    with pytest.raises(ValueError, match="must align EXACTLY"):
+        owned_cell_valid_mask(owned, base_mask=base.reshape(5, 1))
+
+
+def test_mpas_owned_cell_mask_excludes_halo_from_ranking():
+    """NON-VACUOUS distributed-MPAS guard: a HALO cell with the globally-LARGEST
+    bias is excluded from the worst-column ranking when the owned-cell mask is
+    passed as ``valid_mask`` — without it, that halo cell would be (wrongly) ranked
+    + spun off on a rank that does NOT own it.  With the mask, the worst OWNED cell
+    is ranked instead."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    n_owned = 120                          # owned = cells [0, 120); halo = [120, 162)
+    halo_worst = 150                       # a HALO cell, the globally-worst bias
+    owned_worst = 50                       # an OWNED cell, the second-worst bias
+
+    state, q_v = _mpas_state(mesh, nlev)
+    T = np.asarray(state.T.data).copy()
+    T[halo_worst] = 250.0 - 12.0           # biggest model-vs-ref diff (12 K)
+    T[owned_worst] = 250.0 - 8.0           # second biggest (8 K), but OWNED
+    from legoesm.core.field import Field
+    model_state = state._replace(T=Field(data=jnp.asarray(T)))
+    model = column_state_from_hydrostatic(model_state, q_v, mesh=mesh)
+    ref_state, q_v_ref = _mpas_state(mesh, nlev)
+    reference = column_state_from_hydrostatic(ref_state, q_v_ref, mesh=mesh)
+    sigma_full, sigma_half = _sigma(nlev)
+    rad2deg = 180.0 / np.pi
+    owned_mask = owned_cell_valid_mask(jnp.arange(mesh.nCells) < n_owned)
+
+    def _rank(valid_mask):
+        return compare_state_to_reference(
+            model=model, reference=reference,
+            sigma_full=sigma_full, sigma_half=sigma_half,
+            lat_deg=jnp.asarray(mesh.latCell) * rad2deg,
+            lon_deg=jnp.asarray(mesh.lonCell) * rad2deg,
+            time_index=0, n_worst=1, valid_mask=valid_mask)
+
+    # Control (NO mask): the halo cell IS ranked worst — proving the bias is real
+    # and the mask below is what changes the outcome (non-vacuous).
+    assert _rank(None).manifest[0].grid_index == (halo_worst,)
+    # With the owned mask: the halo cell is excluded; the worst OWNED cell is ranked.
+    masked = _rank(owned_mask)
+    assert masked.manifest[0].grid_index == (owned_worst,)
+    assert masked.manifest[0].T_rmse_K == pytest.approx(8.0, abs=1e-4)

@@ -304,6 +304,58 @@ def test_build_correction_campaign_mpas_one_round(feedback_strategy):
         assert it.env_kernel is not None and it.env_kernel.field == "C_K"
 
 
+def test_build_correction_campaign_owned_cell_mask_excludes_halo():
+    """WIRING (iter 86): the ``valid_mask`` param threads through
+    build_correction_campaign → compose_compare_fn → make_compare_fn, so a
+    DISTRIBUTED-MPAS owned-cell mask keeps a HALO cell out of the ranking. A halo
+    cell carrying the globally-LARGEST bias is masked out; the campaign instead
+    spins off + corrects the worst OWNED cell — proving the mask both threads
+    through AND changes the outcome (non-vacuous)."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.training.compare_reanalysis import owned_cell_valid_mask
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    n_owned = 120                          # owned = [0, 120); halo = [120, 162)
+    halo_worst, owned_worst = 150, 50
+    bg = float(CLUBBLiteConfig().C_K)
+    model_state = _mpas_full_state(mesh, nlev)
+    # reference: TWO cold-biased cells — the halo one colder (worst), the owned one
+    # second.  Without the mask the halo cell is worst; with it, the owned cell is.
+    ref = _mpas_full_state(mesh, nlev)
+    rt = np.asarray(ref.T).copy()
+    rt[halo_worst] -= 12.0
+    rt[owned_worst] -= 8.0
+    reference = ref._replace(T=jnp.asarray(rt))
+    owned_mask = owned_cell_valid_mask(jnp.arange(mesh.nCells) < n_owned)
+
+    def build_base(cfg):
+        return _FakeDriver(model_state)
+
+    def extract(driver, day, dt):  # noqa: ARG001
+        return driver.state
+
+    result = build_correction_campaign(
+        base_atm_config=_mpas_base_config(nlev), build_base_driver=build_base,
+        extract_column_state=extract, reference=reference, sigma=sigma, grid=mesh,
+        area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        accept_only_if_improved=False, valid_mask=owned_mask)
+
+    it = result.iterations[0]
+    assert it.n_diagnosed == 1
+    ck = np.asarray(result.final_config.C_K)
+    # The masked HALO cell was NEVER diagnosed (stays background); the worst OWNED
+    # cell got the correction.
+    assert np.isclose(float(ck[halo_worst]), bg), "a halo cell was wrongly corrected"
+    assert not np.isclose(float(ck[owned_worst]), bg), "the owned worst cell was skipped"
+
+
 def test_build_correction_campaign_mpas_les_budget_clusters_cells():
     """The LES-cost reduction (env clustering) works on the MPAS cell layout: 4
     worst cells in 2 distinct-SST environments + les_budget=2 → only 2 LES run
