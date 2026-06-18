@@ -1003,3 +1003,38 @@ def test_iteration_noop_round_clamps_field_under_clip_to_bounds():
     assert res.n_corrected == 0
     ck = np.asarray(res.feedback_field).reshape(-1)
     assert float(ck.max()) <= 1.2 and float(ck.min()) >= 0.1   # clamped no-op field
+
+
+def test_run_line_search_helper_picks_largest_improving():
+    # Direct test of the factored line-search helper (shared by single + future
+    # multi-coefficient iterations): largest-improving step, k==0 fallback.
+    from legoesm.training.correction_loop import _run_line_search
+
+    class _Base:
+        combined_score = jnp.full((2, 2), 1.0)
+        area_weights = jnp.ones((2, 2))
+        valid_mask = None
+
+    # make_candidate(frac) -> (config, field); compare_fn(config) lowers the score
+    # only for frac <= 0.5 (the full step 1.0 "overshoots" and does not improve).
+    def make_candidate(frac):
+        return {"frac": frac}, jnp.asarray(frac)
+
+    def compare_fn(cfg):
+        improved = cfg["frac"] <= 0.5
+        score = jnp.full((2, 2), 0.5 if improved else 1.0)
+        return CompareResult(score, [], jnp.ones((2, 2)), model_ctx=None)
+
+    frac, field, cfg, upd, imp = _run_line_search(
+        compare_fn, _Base(), (1.0, 0.5, 0.25), make_candidate)
+    assert frac == pytest.approx(0.5)            # first improving (largest) step
+    assert bool(imp.improved)
+    assert float(field) == pytest.approx(0.5)
+
+    # None improve → the k==0 (largest) fallback is returned, improved=False.
+    def compare_none(cfg):
+        return CompareResult(jnp.full((2, 2), 2.0), [], jnp.ones((2, 2)), model_ctx=None)
+
+    frac2, _, _, _, imp2 = _run_line_search(
+        compare_none, _Base(), (1.0, 0.5), make_candidate)
+    assert frac2 == pytest.approx(1.0) and not bool(imp2.improved)

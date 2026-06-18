@@ -209,6 +209,30 @@ def test_build_correction_campaign_clubb_coefficient_method():
     assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2
 
 
+def test_build_correction_campaign_rejects_multi_methods():
+    """build_correction_campaign is single-coefficient: a diagnosis_methods config
+    (which makes process_column return a dict) is rejected up front, not crashed
+    downstream (the simultaneous multi-coefficient campaign is not wired here)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    with pytest.raises(ValueError, match="diagnosis_methods"):
+        build_correction_campaign(
+            base_atm_config=_base_config(),
+            build_base_driver=lambda cfg: _FakeDriver(model_state),
+            extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+            reference=model_state, sigma=sigma, grid=grid,
+            area_weights=jnp.ones((8, 16)), n_iterations=1,
+            les_config=ColumnLESConfig(
+                regime=_SMALL_REGIME,
+                diagnosis_methods=("clubb_coefficient", "prandtl_number"),
+                clubb_l_mix_max=100.0),
+            run_les_fn=_mock_run_les_sheared, n_worst=1)
+
+
 def test_build_correction_campaign_prandtl_number_method():
     """The prandtl_number diagnosis is wired end-to-end: the campaign selects the
     clubb_lite_Pr_t promotion + Pr_t background by method, the LES diagnoses a

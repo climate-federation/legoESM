@@ -254,6 +254,36 @@ def make_compare_fn(
     return compare_fn
 
 
+def _run_line_search(compare_fn, baseline, fractions, make_candidate):
+    """Backtracking line search shared by the single- and (future) multi-coefficient
+    iterations: try ``fractions`` (already descending) and keep the LARGEST whose
+    re-run lowers the global bias (first improving, Armijo-style); if none improve
+    report the ``k==0`` (largest) candidate so the monotonic gate rejects it.
+
+    ``make_candidate(frac) -> (config, field_state)`` builds the injected config +
+    the field state to store for that step (the per-coefficient blend/clamp/apply
+    lives in the caller's closure — including the ``frac == 1.0`` short-circuit — so
+    the single-coefficient path stays byte-identical).  Returns
+    ``(frac, field_state, config, updated_compare, bias)``.
+    """
+    chosen = None
+    fallback = None
+    for k, frac in enumerate(fractions):           # descending: largest step first
+        cfg, field_state = make_candidate(frac)
+        upd = compare_fn(cfg)
+        imp = bias_improvement(
+            baseline.combined_score, upd.combined_score,
+            baseline.area_weights, valid_mask=baseline.valid_mask,
+        )
+        candidate = (float(frac), field_state, cfg, upd, imp)
+        if k == 0:
+            fallback = candidate                   # largest configured step
+        if bool(imp.improved):
+            chosen = candidate                     # first (largest) improving step
+            break
+    return chosen if chosen is not None else fallback
+
+
 def _validate_step_fractions(
     step_fractions: Sequence[float] | None,
 ) -> tuple[float, ...]:
@@ -442,9 +472,10 @@ def run_correction_iteration(
         jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
     )
 
-    chosen = None
-    fallback = None
-    for k, frac in enumerate(fractions):           # descending: largest step first
+    def _make_candidate(frac):
+        # frac==1.0 short-circuit (NOT a generic blend) keeps the full-step path
+        # FP-identical to the pre-refactor behavior; at untouched columns the blend
+        # is the identity (raw==base) for any frac.
         field = raw_field if frac == 1.0 else base_field + frac * (raw_field - base_field)
         if clip_to_bounds:
             # Pre-clamping raw_field gives a MEANINGFUL line search (distinct in-range
@@ -458,21 +489,11 @@ def run_correction_iteration(
         cfg = apply_feedback_to_scheme(
             baseline_config, promotion_key, field, expected_ncol=ncol
         )
-        upd = compare_fn(cfg)
-        imp = bias_improvement(
-            baseline.combined_score, upd.combined_score,
-            baseline.area_weights, valid_mask=baseline.valid_mask,
-        )
-        candidate = (float(frac), field, cfg, upd, imp)
-        if k == 0:
-            fallback = candidate                   # largest configured step
-        if bool(imp.improved):
-            chosen = candidate                     # first (largest) improving step
-            break
-    if chosen is None:                             # none improved → report full step
-        chosen = fallback                          # (improved=False ⇒ the gate rejects)
+        return cfg, field
 
-    frac, field, updated_config, updated, improvement = chosen
+    frac, field, updated_config, updated, improvement = _run_line_search(
+        compare_fn, baseline, fractions, _make_candidate
+    )
     worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
     worst_change = worst_column_bias_change(
         baseline.combined_score, updated.combined_score, worst_idx

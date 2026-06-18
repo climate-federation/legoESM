@@ -54,6 +54,11 @@ class ColumnLESConfig(NamedTuple):
     # ``"clubb_coefficient"`` diagnosis (C_K = K_m/(ℓ·√wp2)) so the diagnosed
     # mixing length matches the GCM's; unused by the other methods.
     clubb_l_mix_max: float | None = None
+    # Multi-coefficient: when set, the spin-off LES is diagnosed for EVERY method
+    # in one run (e.g. ("clubb_coefficient", "prandtl_number")) and
+    # ``process_column`` returns ``{method: diagnosis}``; overrides
+    # ``diagnosis_method``.  ``None`` ⇒ the single-coefficient ``diagnosis_method``.
+    diagnosis_methods: tuple[str, ...] | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -66,11 +71,19 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
         raise ValueError(f"relax_tau_s must be > 0, got {config.relax_tau_s}.")
     if config.p_sfc_Pa <= 0.0:
         raise ValueError(f"p_sfc_Pa must be > 0, got {config.p_sfc_Pa}.")
-    if config.diagnosis_method == "clubb_coefficient" and (
+    # clubb_coefficient (single OR one of the multi methods) needs l_mix_max.
+    active_methods = (
+        config.diagnosis_methods
+        if config.diagnosis_methods is not None
+        else (config.diagnosis_method,)
+    )
+    if config.diagnosis_methods is not None and len(config.diagnosis_methods) == 0:
+        raise ValueError("diagnosis_methods must be a non-empty tuple (or None).")
+    if "clubb_coefficient" in active_methods and (
         config.clubb_l_mix_max is None or config.clubb_l_mix_max <= 0.0
     ):
         raise ValueError(
-            "diagnosis_method='clubb_coefficient' requires clubb_l_mix_max > 0 "
+            "the 'clubb_coefficient' diagnosis requires clubb_l_mix_max > 0 "
             "(the GCM CLUBBLiteConfig.l_mix_max)."
         )
 
@@ -206,19 +219,36 @@ def run_column_les_pipeline(
     run_les_fn: Callable[[ColumnLESSetup], Any],
     *,
     method: str = "eddy_diffusivity",
+    methods: list[str] | tuple[str, ...] | None = None,
     qv_slot: int = 0,
     l_mix_max: float | None = None,
 ):
-    """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient.
+    """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
     ``run_les_fn(setup)`` returns the finished plane LES state; the closure
     coefficient is then diagnosed with :func:`diagnose_column_coefficient`
     (``method`` raises on unknown).  ``run_les_fn`` is injected so the heavy run
     can be mocked in tests and swapped for :func:`run_forced_les` in production.
-    ``l_mix_max`` (the GCM mixing length) is required for ``method=
-    "clubb_coefficient"`` and ignored otherwise.
+    ``l_mix_max`` (the GCM mixing length) is required for ``"clubb_coefficient"``
+    and ignored otherwise.
+
+    **Diagnose-many** (``methods``): the LES run is the loop's dominant cost, so
+    when ``methods`` (a list) is given the LES runs ONCE and every method is
+    diagnosed from the SAME final state — returning ``{method: diagnosis}`` (vs a
+    single diagnosis for the scalar ``method`` path).  This lets a multi-coefficient
+    correction (e.g. ``C_K`` AND ``Pr_t``) share one spin-off LES per column.
     """
     final_state = run_les_fn(setup)
+    if methods is not None:
+        if len(methods) == 0:
+            raise ValueError("methods must be a non-empty list (or None).")
+        return {
+            m: diagnose_column_coefficient(
+                final_state, setup.height_coord, method=m, qv_slot=qv_slot,
+                l_mix_max=l_mix_max,
+            )
+            for m in methods
+        }
     return diagnose_column_coefficient(
         final_state, setup.height_coord, method=method, qv_slot=qv_slot,
         l_mix_max=l_mix_max,
@@ -375,6 +405,6 @@ def process_column(
     )
     return run_column_les_pipeline(
         setup, run_les_fn, method=config.diagnosis_method,
-        l_mix_max=config.clubb_l_mix_max,
+        methods=config.diagnosis_methods, l_mix_max=config.clubb_l_mix_max,
     )
 

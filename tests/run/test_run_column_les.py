@@ -148,12 +148,21 @@ def test_validate_config_rejects_bad_settings():
         # clubb_coefficient method without l_mix_max is rejected.
         ColumnLESConfig(diagnosis_method="clubb_coefficient"),
         ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=0.0),
+        # clubb_coefficient as ONE of the multi methods still needs l_mix_max.
+        ColumnLESConfig(diagnosis_methods=("clubb_coefficient", "prandtl_number")),
+        ColumnLESConfig(diagnosis_methods=()),   # empty multi list
     ):
         with pytest.raises(ValueError):
             validate_column_les_config(bad)
-    # clubb_coefficient WITH a positive l_mix_max validates.
+    # clubb_coefficient WITH a positive l_mix_max validates (single + multi).
     validate_column_les_config(
         ColumnLESConfig(diagnosis_method="clubb_coefficient", clubb_l_mix_max=100.0))
+    validate_column_les_config(ColumnLESConfig(
+        diagnosis_methods=("clubb_coefficient", "prandtl_number"),
+        clubb_l_mix_max=100.0))
+    # a multi list WITHOUT clubb_coefficient needs no l_mix_max.
+    validate_column_les_config(
+        ColumnLESConfig(diagnosis_methods=("prandtl_number", "entrainment")))
 
 
 def test_coefficient_value_dispatch():
@@ -217,6 +226,34 @@ def test_run_pipeline_runs_and_diagnoses():
     # Unknown diagnosis method raises (dispatch hardening).
     with pytest.raises(ValueError, match="Unknown column-LES diagnosis method"):
         run_column_les_pipeline(setup, fake_run, method="bogus")
+
+
+def test_run_pipeline_diagnose_many_shares_one_les_run():
+    """`methods` runs the LES ONCE and diagnoses every method from the same final
+    state — the shared spin-off for multi-coefficient correction."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+
+    n_runs = {"n": 0}
+
+    def fake_run(s):
+        n_runs["n"] += 1
+        return _synthetic_plane_state(s.grid, s.height_coord)
+
+    out = run_column_les_pipeline(
+        setup, fake_run,
+        methods=["clubb_coefficient", "prandtl_number"], l_mix_max=100.0)
+    assert n_runs["n"] == 1                       # ONE LES run for BOTH diagnoses
+    assert set(out) == {"clubb_coefficient", "prandtl_number"}
+    assert hasattr(out["clubb_coefficient"], "C_K")
+    assert hasattr(out["prandtl_number"], "Pr_t")
+    # clubb_coefficient in the list still requires l_mix_max (per-method guard).
+    with pytest.raises(ValueError, match="requires l_mix_max"):
+        run_column_les_pipeline(setup, fake_run, methods=["clubb_coefficient"])
+    with pytest.raises(ValueError, match="non-empty"):
+        run_column_les_pipeline(setup, fake_run, methods=[])
 
 
 def s_nlev(setup):
@@ -293,6 +330,19 @@ def test_process_column_end_to_end_with_mock_run():
     )
     assert out.K.shape == (7,)  # LES nlev 8 -> 7 interior interfaces
     assert bool(jnp.all(jnp.isfinite(out.K)))
+
+    # Multi-coefficient: diagnosis_methods → one LES run, a {method: diagnosis} dict.
+    multi_cfg = ColumnLESConfig(
+        regime=_SMALL_REGIME,
+        diagnosis_methods=("clubb_coefficient", "prandtl_number"),
+        clubb_l_mix_max=100.0)
+    multi = process_column(
+        _Rec(), T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+        config=multi_cfg, run_les_fn=fake_run,
+    )
+    assert set(multi) == {"clubb_coefficient", "prandtl_number"}
+    assert multi["clubb_coefficient"].C_K.shape == (7,)
+    assert multi["prandtl_number"].Pr_t.shape == (7,)
 
 
 def test_extract_gcm_column_cubed_sphere():

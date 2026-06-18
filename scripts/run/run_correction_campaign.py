@@ -171,6 +171,14 @@ def build_correction_campaign(
     #   prandtl_number              → clubb_lite_Pr_t (K_m/K_h)
     #   clubb_coefficient / eddy_*  → clubb_lite_C_K
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
+    if getattr(les_config, "diagnosis_methods", None) is not None:
+        # process_column would return a {method: diagnosis} dict, which the
+        # single-coefficient loop cannot reduce. The simultaneous multi-coefficient
+        # campaign (run_multi_correction_*) is a separate, not-yet-wired path.
+        raise ValueError(
+            "build_correction_campaign is single-coefficient: set "
+            "les_config.diagnosis_method, not diagnosis_methods (the simultaneous "
+            "multi-coefficient campaign is not wired here yet).")
     diagnosis_method = les_config.diagnosis_method
     if diagnosis_method == "prandtl_number":
         promotion_key = "clubb_lite_Pr_t"
