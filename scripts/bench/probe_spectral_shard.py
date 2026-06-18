@@ -86,6 +86,12 @@ def main():
                                   if sh is not None else leaf,
                 new, out_shardings,
             )
+        # The level-shard path wraps a single ``_do_step`` (no scan fusion), so
+        # the timing-loop counters must be set here too — without these the
+        # ``for _ in range(n_outer)`` loop below raised UnboundLocalError and the
+        # entire level branch was dead (only the ``else`` path set them).
+        n_outer = args.n_steps
+        n_eff = args.n_steps
     else:
         @jax.jit
         def _step_one(s, dt_arr):
