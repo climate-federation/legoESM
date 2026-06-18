@@ -55,6 +55,18 @@ class OSSEResult(NamedTuple):
     summary: Any                   # the underlying CampaignSummary (bias detail)
 
 
+class CoefRecovery(NamedTuple):
+    """Per-coefficient parameter recovery (shared by the single + multi OSSE)."""
+
+    field: str
+    true_value: float
+    initial_value: float
+    recovered_value: float
+    initial_param_error: float
+    final_param_error: float
+    param_error_reduced: bool
+
+
 class OSSEVerdict(NamedTuple):
     status: str                    # recovered | bias_only | no_change | worsened
     message: str
@@ -63,6 +75,38 @@ class OSSEVerdict(NamedTuple):
     def ok(self) -> bool:
         """The perfect-model twin succeeded: bias fell AND the parameter recovered."""
         return self.status == "recovered"
+
+
+def _recovery_metrics(field_name, true_config, biased_config, final_field) -> CoefRecovery:
+    """Parameter recovery for one coefficient field, the SAME norm at both ends.
+
+    RMS of the field's distance to the KNOWN scalar truth — for the (uniform)
+    biased start and the corrected per-column field — so a non-uniform start or
+    final field is compared fairly (for a uniform start this is just |bias-true|).
+    """
+    import jax.numpy as jnp
+
+    true_value = float(jnp.mean(jnp.asarray(getattr(true_config, field_name))))
+    biased_flat = jnp.asarray(getattr(biased_config, field_name)).reshape(-1)
+    final_flat = jnp.asarray(final_field).reshape(-1)
+    init_flat = jnp.broadcast_to(biased_flat, final_flat.shape)
+    init_err = float(jnp.sqrt(jnp.mean((init_flat - true_value) ** 2)))
+    final_err = float(jnp.sqrt(jnp.mean((final_flat - true_value) ** 2)))
+    return CoefRecovery(
+        field=field_name, true_value=true_value,
+        initial_value=float(jnp.mean(biased_flat)),
+        recovered_value=float(jnp.mean(final_flat)),
+        initial_param_error=init_err, final_param_error=final_err,
+        param_error_reduced=(init_err - final_err) > _REL_TOL * max(init_err, _REL_TOL),
+    )
+
+
+def _bias_outcome(summary):
+    """``(initial_bias, final_bias, bias_reduced)`` from a CampaignSummary."""
+    init_bias = float(summary.initial_bias)
+    final_bias = float(summary.final_bias)
+    bias_reduced = (init_bias - final_bias) > _REL_TOL * max(abs(init_bias), _REL_TOL)
+    return init_bias, final_bias, bias_reduced
 
 
 def run_perfect_model_osse(
@@ -109,16 +153,13 @@ def run_perfect_model_osse(
             f"({getattr(promoted, 'field', None)!r}); the OSSE would report "
             "recovery for a different coefficient than the loop corrects.")
 
-    true_value = float(jnp.mean(jnp.asarray(getattr(true_config, coefficient_field))))
-
     # The pseudo-reanalysis: the model's OWN time mean under the known true config.
     reference = run_fn(true_config)
     compare_fn = build_compare_fn(reference)
 
     # Uncorrected columns hold the biased start (round-0 base) unless overridden.
     biased_flat = jnp.asarray(getattr(biased_config, coefficient_field)).reshape(-1)
-    initial_value = float(jnp.mean(biased_flat))
-    campaign_kwargs.setdefault("background", initial_value)
+    campaign_kwargs.setdefault("background", float(jnp.mean(biased_flat)))
     result = run_correction_campaign(
         biased_config, n_iterations,
         compare_fn=compare_fn, diagnose_fn=diagnose_fn,
@@ -128,32 +169,18 @@ def run_perfect_model_osse(
         **campaign_kwargs,
     )
     summary = summarize_campaign(result, promotion_key=promotion_key)
-
-    # Parameter recovery: SAME norm (RMS vs the known scalar truth) for the biased
-    # start and the corrected field, so the comparison is fair even if the start /
-    # final field is non-uniform.  For a uniform start this is just |bias - true|.
-    final_flat = jnp.asarray(result.final_field).reshape(-1)
-    init_flat = jnp.broadcast_to(biased_flat, final_flat.shape)
-    initial_param_error = float(jnp.sqrt(jnp.mean((init_flat - true_value) ** 2)))
-    final_param_error = float(jnp.sqrt(jnp.mean((final_flat - true_value) ** 2)))
-    recovered_value = float(jnp.mean(final_flat))
-
-    init_bias = float(summary.initial_bias)
-    final_bias = float(summary.final_bias)
-    scale = max(abs(init_bias), _REL_TOL)
-    bias_reduced = (init_bias - final_bias) > _REL_TOL * scale
-    err_scale = max(initial_param_error, _REL_TOL)
-    param_error_reduced = (
-        (initial_param_error - final_param_error) > _REL_TOL * err_scale)
+    rec = _recovery_metrics(
+        coefficient_field, true_config, biased_config, result.final_field)
+    init_bias, final_bias, bias_reduced = _bias_outcome(summary)
 
     return OSSEResult(
         initial_bias=init_bias, final_bias=final_bias,
         bias_reduction=init_bias - final_bias, bias_reduced=bias_reduced,
-        true_value=true_value, initial_value=initial_value,
-        recovered_value=recovered_value,
-        initial_param_error=initial_param_error,
-        final_param_error=final_param_error,
-        param_error_reduced=param_error_reduced,
+        true_value=rec.true_value, initial_value=rec.initial_value,
+        recovered_value=rec.recovered_value,
+        initial_param_error=rec.initial_param_error,
+        final_param_error=rec.final_param_error,
+        param_error_reduced=rec.param_error_reduced,
         n_rounds=len(result.iterations),
         n_accepted=int(sum(1 for a in result.accepted if a)),
         summary=summary,
@@ -200,3 +227,128 @@ def osse_verdict(result: OSSEResult) -> OSSEVerdict:
         f"no accepted round reduced the bias (kept {result.n_accepted}/"
         f"{result.n_rounds}); the LES diagnosis did not recover the parameter in "
         "this perfect-model setup — fix that before spending HPC on real ERA5.")
+
+
+class MultiOSSEResult(NamedTuple):
+    """Outcome of a SIMULTANEOUS multi-coefficient perfect-model OSSE."""
+
+    initial_bias: float
+    final_bias: float
+    bias_reduction: float
+    bias_reduced: bool
+    per_coefficient: dict          # {promotion_key: CoefRecovery}
+    all_recovered: bool            # every coefficient's param error fell
+    n_rounds: int
+    n_accepted: int
+    summary: Any
+
+
+def run_multi_perfect_model_osse(
+    *,
+    true_config: Any,
+    biased_config: Any,
+    specs: Any,
+    run_fn: Callable[[Any], Any],
+    build_compare_fn: Callable[[Any], Callable[[Any], Any]],
+    diagnose_fn: Callable[[Any, Any], Any],
+    grid_shape: tuple[int, ...],
+    n_iterations: int = 3,
+    accept_only_if_improved: bool = True,
+    sequential: bool = False,
+    **campaign_kwargs: Any,
+) -> MultiOSSEResult:
+    """Perfect-model OSSE for the SIMULTANEOUS multi-coefficient correction.
+
+    Like :func:`run_perfect_model_osse` but recovers SEVERAL known coefficients at
+    once (each ``CorrectionSpec`` in ``specs``), exercising the coupled
+    block-coordinate machinery (e.g. C_eps↔C_K): the pseudo-truth is
+    ``run_fn(true_config)`` and the loop must lower the bias AND move EVERY
+    coefficient toward its known value.  ``sequential`` selects the staged
+    (block-coordinate) mode; the monotonic gate is ON by default.
+    """
+    from legoesm.training.campaign_summary import summarize_campaign
+    from legoesm.training.correction_loop import run_multi_correction_campaign
+    from legoesm.training.promotable_params import PROMOTABLE_FIELDS
+
+    specs = list(specs)
+    if n_iterations < 1:
+        raise ValueError(
+            f"run_multi_perfect_model_osse needs n_iterations >= 1 "
+            f"(got {n_iterations}).")
+    if not specs:
+        raise ValueError(
+            "run_multi_perfect_model_osse needs at least one CorrectionSpec.")
+    keys = [s.promotion_key for s in specs]
+    if len(set(keys)) != len(keys):
+        # Else per_coefficient would silently collapse a duplicate's recovery.
+        raise ValueError(
+            f"duplicate promotion_key in specs ({keys}); each coefficient appears "
+            "once.")
+    for spec in specs:
+        if PROMOTABLE_FIELDS.get(spec.promotion_key) is None:
+            raise ValueError(
+                f"unknown promotion_key {spec.promotion_key!r} in a CorrectionSpec; "
+                f"choose from {tuple(PROMOTABLE_FIELDS)}.")
+
+    reference = run_fn(true_config)
+    compare_fn = build_compare_fn(reference)
+    result = run_multi_correction_campaign(
+        biased_config, n_iterations, specs,
+        compare_fn=compare_fn, diagnose_fn=diagnose_fn, grid_shape=grid_shape,
+        accept_only_if_improved=accept_only_if_improved, sequential=sequential,
+        **campaign_kwargs,
+    )
+    summary = summarize_campaign(result)
+    init_bias, final_bias, bias_reduced = _bias_outcome(summary)
+
+    per_coefficient = {
+        spec.promotion_key: _recovery_metrics(
+            PROMOTABLE_FIELDS[spec.promotion_key].field,
+            true_config, biased_config, result.final_fields[spec.promotion_key])
+        for spec in specs
+    }
+    all_recovered = all(
+        c.param_error_reduced for c in per_coefficient.values())
+    return MultiOSSEResult(
+        initial_bias=init_bias, final_bias=final_bias,
+        bias_reduction=init_bias - final_bias, bias_reduced=bias_reduced,
+        per_coefficient=per_coefficient, all_recovered=all_recovered,
+        n_rounds=len(result.iterations),
+        n_accepted=int(sum(1 for a in result.accepted if a)),
+        summary=summary,
+    )
+
+
+def multi_osse_verdict(result: MultiOSSEResult) -> OSSEVerdict:
+    """Classify a multi-coefficient OSSE; ``recovered`` requires ALL coefficients.
+
+    Same partition as :func:`osse_verdict` but ``recovered`` demands the bias fell
+    AND every coefficient moved toward its truth; ``bias_only`` reports how many of
+    the N coefficients recovered.
+    """
+    n = len(result.per_coefficient)
+    n_rec = sum(c.param_error_reduced for c in result.per_coefficient.values())
+    if result.final_bias > result.initial_bias + _REL_TOL * max(
+            abs(result.initial_bias), _REL_TOL):
+        return OSSEVerdict(
+            "worsened",
+            f"final bias {result.final_bias:.4g} EXCEEDS initial "
+            f"{result.initial_bias:.4g} — only possible with the monotonic gate "
+            "disabled or a bias-accounting bug; investigate.")
+    if result.bias_reduced and result.all_recovered:
+        return OSSEVerdict(
+            "recovered",
+            f"bias {result.initial_bias:.4g} -> {result.final_bias:.4g} and all "
+            f"{n} coefficients moved toward their truth. The simultaneous loop "
+            "works in the perfect-model twin; proceed to the real-ERA5 campaign.")
+    if result.bias_reduced:
+        return OSSEVerdict(
+            "bias_only",
+            f"bias fell ({result.initial_bias:.4g} -> {result.final_bias:.4g}) but "
+            f"only {n_rec}/{n} coefficients recovered; suspect compensating errors "
+            "across the coupled coefficients before trusting a real-ERA5 gain.")
+    return OSSEVerdict(
+        "no_change",
+        f"no accepted round reduced the bias (kept {result.n_accepted}/"
+        f"{result.n_rounds}); the simultaneous LES diagnosis did not recover the "
+        "coefficients in this perfect-model setup.")

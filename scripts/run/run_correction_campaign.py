@@ -106,7 +106,7 @@ def make_les_diagnose_fn(
 
 
 # Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.
-_COEFFICIENT_SPEC_MAP = {
+COEFFICIENT_SPEC_MAP = {
     "C_K": ("clubb_lite_C_K", "clubb_coefficient"),
     "Pr_t": ("clubb_lite_Pr_t", "prandtl_number"),
     "C_eps": ("clubb_lite_C_eps", "c_eps"),
@@ -155,7 +155,7 @@ def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_sta
     )
 
 
-def _maybe_env_grid_fn(feedback_strategy, sigma):
+def maybe_env_grid_fn(feedback_strategy, sigma):
     """The env-generalization ``env_grid_fn(model_ctx)`` for ``feedback_strategy=
     'environment'`` (``None`` for the static scatter)."""
     if feedback_strategy != "environment":
@@ -257,7 +257,7 @@ def build_correction_campaign(
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
-    env_grid_fn = _maybe_env_grid_fn(feedback_strategy, sigma)
+    env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -331,11 +331,11 @@ def build_multi_correction_campaign(
 
     specs = []
     for name in coefficients:
-        if name not in _COEFFICIENT_SPEC_MAP:
+        if name not in COEFFICIENT_SPEC_MAP:
             raise ValueError(
                 f"unknown coefficient {name!r}; choose from "
-                f"{tuple(_COEFFICIENT_SPEC_MAP)}.")
-        key, method = _COEFFICIENT_SPEC_MAP[name]
+                f"{tuple(COEFFICIENT_SPEC_MAP)}.")
+        key, method = COEFFICIENT_SPEC_MAP[name]
         specs.append(CorrectionSpec(key, method, float(getattr(CLUBBLiteConfig(), name))))
 
     # Diagnose every coefficient's method from ONE LES run (dedup, keep order).
@@ -354,7 +354,7 @@ def build_multi_correction_campaign(
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
-    env_grid_fn = _maybe_env_grid_fn(feedback_strategy, sigma)
+    env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
 
     return run_multi_correction_campaign(
         clubb_cfg, int(n_iterations), specs,
@@ -545,8 +545,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     coefficients = tuple(c.strip() for c in args.coefficients.split(","))
     # promotion_key -> config field name (the coefficient name IS the field name).
     promo_to_field = {
-        _COEFFICIENT_SPEC_MAP[c][0]: c
-        for c in coefficients if c in _COEFFICIENT_SPEC_MAP
+        COEFFICIENT_SPEC_MAP[c][0]: c
+        for c in coefficients if c in COEFFICIENT_SPEC_MAP
     }
     gshape = grid.grid_shape_2d
     initial_clubb, initial_fields, start_round = None, None, 0

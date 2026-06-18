@@ -27,6 +27,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 from legoesm.training.perfect_model_osse import osse_verdict  # noqa: E402
 
 from scripts.validate.run_perfect_model_osse import (  # noqa: E402
+    build_multi_perfect_model_osse,
     build_perfect_model_osse,
 )
 
@@ -121,6 +122,53 @@ def test_build_perfect_model_osse_wiring():
     # The verdict is one of the gated outcomes (the recovered/no_change outcomes
     # are asserted non-vacuously with controllable diagnoses in the unit test).
     assert osse_verdict(res).status in {"recovered", "bias_only", "no_change"}
+
+
+def test_build_multi_perfect_model_osse_wiring():
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+
+    res = build_multi_perfect_model_osse(
+        base_atm_config=_base_config(),
+        build_base_driver=_ck_sensitive_base,
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        sigma=sigma, grid=grid, area_weights=jnp.ones((8, 16)),
+        true_clubb=CLUBBLiteConfig(C_K=0.9, Pr_t=0.5, C_eps=0.3),
+        biased_clubb=CLUBBLiteConfig(C_K=0.4, Pr_t=0.33, C_eps=0.1),
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1,
+        coefficients=("C_K", "Pr_t", "C_eps"))
+
+    # All three coefficients are tracked; the monotonic gate invariant holds.
+    assert set(res.per_coefficient) == {
+        "clubb_lite_C_K", "clubb_lite_Pr_t", "clubb_lite_C_eps"}
+    assert res.initial_bias > 0.0
+    assert res.final_bias <= res.initial_bias + 1e-9
+    assert all(np.isfinite(c.final_param_error)
+               for c in res.per_coefficient.values())
+
+
+def test_build_multi_perfect_model_osse_rejects_unknown_coefficient():
+    import pytest
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    with pytest.raises(ValueError, match="unknown coefficient"):
+        build_multi_perfect_model_osse(
+            base_atm_config=_base_config(),
+            build_base_driver=_ck_sensitive_base,
+            extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+            sigma=sigma, grid=grid, area_weights=jnp.ones((8, 16)),
+            true_clubb=CLUBBLiteConfig(C_K=0.9),
+            biased_clubb=CLUBBLiteConfig(C_K=0.4),
+            les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+            run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1,
+            coefficients=("C_K", "bogus"))
 
 
 def test_build_perfect_model_osse_rejects_unknown_method():

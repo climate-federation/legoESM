@@ -20,13 +20,25 @@ from typing import Any
 from legoesm.training.run_to_column_mean import make_run_fn
 
 from scripts.run.run_correction_campaign import (
+    COEFFICIENT_SPEC_MAP,
     METHOD_PROMOTION,
     METHODS_NEED_LMIX,
     compose_compare_fn,
     grid_latlon_deg,
     make_clubb_build_driver,
     make_les_diagnose_fn,
+    maybe_env_grid_fn,
 )
+
+
+def _production_loop_defaults(osse_kwargs: dict, sigma: Any) -> None:
+    """Match the production campaign's loop defaults so the twin is not falsely
+    optimistic: clip the diagnosed coefficient to its registered bounds (as
+    ``build_correction_campaign`` does), and wire the env-generalization grid fn
+    when ``feedback_strategy='environment'`` (else the loop raises on a None)."""
+    osse_kwargs.setdefault("clip_to_bounds", True)
+    strategy = osse_kwargs.get("feedback_strategy", "static")
+    osse_kwargs.setdefault("env_grid_fn", maybe_env_grid_fn(strategy, sigma))
 
 
 def build_perfect_model_osse(
@@ -88,6 +100,7 @@ def build_perfect_model_osse(
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
     grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
+    _production_loop_defaults(osse_kwargs, sigma)
 
     return run_perfect_model_osse(
         true_config=true_clubb, biased_config=biased_clubb,
@@ -95,6 +108,79 @@ def build_perfect_model_osse(
         build_compare_fn=build_compare_fn, diagnose_fn=diagnose_fn,
         promotion_key=promotion_key, grid_shape=grid_shape,
         diagnosis_method=method, n_iterations=n_iterations, **osse_kwargs)
+
+
+def build_multi_perfect_model_osse(
+    *,
+    base_atm_config: Any,
+    build_base_driver: Callable[[Any], Any],
+    extract_column_state: Callable[..., Any],
+    sigma: Any,
+    grid: Any,
+    area_weights: Any,
+    true_clubb: Any,
+    biased_clubb: Any,
+    les_config: Any,
+    run_les_fn: Callable[[Any], Any],
+    n_worst: int,
+    n_iterations: int,
+    coefficients: tuple[str, ...] = ("C_K", "Pr_t", "C_eps"),
+    sequential: bool = False,
+    lat_deg: Any | None = None,
+    lon_deg: Any | None = None,
+    **osse_kwargs: Any,
+):
+    """Wire the real driver/LES and run a SIMULTANEOUS multi-coefficient OSSE.
+
+    Mirrors ``build_multi_correction_campaign`` (one LES per column diagnosed for
+    every coefficient's method) but in the perfect-model twin: recovers EVERY known
+    coefficient in ``coefficients`` from a single pseudo-truth run.  Returns a
+    :class:`~legoesm.training.perfect_model_osse.MultiOSSEResult`.
+    """
+    from legoesm.training.correction_loop import CorrectionSpec
+    from legoesm.training.perfect_model_osse import run_multi_perfect_model_osse
+
+    if not coefficients:
+        raise ValueError("coefficients must be a non-empty tuple.")
+    lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
+
+    specs = []
+    for name in coefficients:
+        if name not in COEFFICIENT_SPEC_MAP:
+            raise ValueError(
+                f"unknown coefficient {name!r}; choose from "
+                f"{tuple(COEFFICIENT_SPEC_MAP)}.")
+        key, method = COEFFICIENT_SPEC_MAP[name]
+        # The biased start is the round-0 base for each coefficient (the twin's bias).
+        specs.append(CorrectionSpec(key, method, float(getattr(biased_clubb, name))))
+
+    # Diagnose every coefficient's method from ONE LES run (dedup, keep order).
+    methods = tuple(dict.fromkeys(s.diagnosis_method for s in specs))
+    les_config = les_config._replace(diagnosis_methods=methods)
+    if {"clubb_coefficient", "c_eps"}.intersection(methods) and \
+            getattr(les_config, "clubb_l_mix_max", None) is None:
+        les_config = les_config._replace(clubb_l_mix_max=float(biased_clubb.l_mix_max))
+
+    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
+    run_fn = make_run_fn(build_driver, extract_column_state)
+
+    def build_compare_fn(reference):
+        return compose_compare_fn(
+            base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+            extract_column_state=extract_column_state, reference=reference,
+            sigma=sigma, area_weights=area_weights, n_worst=n_worst,
+            lat_deg=lat_deg, lon_deg=lon_deg)
+
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+    grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
+    _production_loop_defaults(osse_kwargs, sigma)
+
+    return run_multi_perfect_model_osse(
+        true_config=true_clubb, biased_config=biased_clubb, specs=specs,
+        run_fn=run_fn, build_compare_fn=build_compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=grid_shape, n_iterations=n_iterations, sequential=sequential,
+        **osse_kwargs)
 
 
 def _build_argparser():  # pragma: no cover - thin CLI plumbing
