@@ -36,6 +36,7 @@ class CoefficientSummary(NamedTuple):
     """Field statistics for one corrected coefficient over the whole grid."""
 
     promotion_key: str
+    n_columns: int              # grid columns (for the bound-pinned FRACTION)
     field_min: float
     field_max: float
     field_mean: float
@@ -43,6 +44,16 @@ class CoefficientSummary(NamedTuple):
     n_at_lower_bound: int       # columns pinned at the registered lower bound
     n_at_upper_bound: int       # columns pinned at the upper bound (clamp binding)
     bounds: tuple | None        # (lo, hi) or None if the field is not bound-spec'd
+
+    @property
+    def clamp_fraction(self) -> float:
+        """Fraction of columns pinned at EITHER registered bound (0 if no bounds /
+        no columns) — a high value means the LES wants a coefficient outside its
+        calibratable range, i.e. the clamp is shaping the correction."""
+        if not self.n_columns:
+            return 0.0
+        # min(1, …) guards the degenerate lo==hi case (a column counted at both).
+        return min(1.0, (self.n_at_lower_bound + self.n_at_upper_bound) / self.n_columns)
 
 
 class CampaignSummary(NamedTuple):
@@ -90,7 +101,7 @@ def _coefficient_summary(promotion_key: str, field, config: Any) -> CoefficientS
         n_lo = int(np.sum(np.isclose(arr, lo, atol=_BOUND_ATOL, rtol=_BOUND_RTOL)))
         n_hi = int(np.sum(np.isclose(arr, hi, atol=_BOUND_ATOL, rtol=_BOUND_RTOL)))
     return CoefficientSummary(
-        promotion_key=promotion_key,
+        promotion_key=promotion_key, n_columns=int(arr.size),
         field_min=float(arr.min()), field_max=float(arr.max()),
         field_mean=float(arr.mean()), field_std=float(arr.std()),
         n_at_lower_bound=n_lo, n_at_upper_bound=n_hi, bounds=bounds,
@@ -146,3 +157,71 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
         absolute_reduction=absolute_reduction,
         fractional_reduction=fractional_reduction, coefficients=coefficients,
     )
+
+
+# Health thresholds (campaign-control judgments, not physics): the fractional bias
+# reduction below which a campaign is "stalled", and the bound-pinned fraction
+# above which it is "clamp-limited".
+_MIN_FRACTIONAL_REDUCTION = 0.02
+_CLAMP_FRACTION_WARN = 0.2
+
+
+class CampaignHealth(NamedTuple):
+    """A one-look verdict on whether the corrections are working + why/why not."""
+
+    status: str     # "improved" | "stalled" | "clamp_limited" | "no_rounds"
+    message: str    # actionable one-line explanation
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "improved"
+
+
+def campaign_health(
+    summary: CampaignSummary,
+    *,
+    min_fractional_reduction: float = _MIN_FRACTIONAL_REDUCTION,
+    clamp_fraction_warn: float = _CLAMP_FRACTION_WARN,
+) -> CampaignHealth:
+    """Classify a :class:`CampaignSummary` into an actionable verdict.
+
+    * ``"improved"`` — the area-weighted bias fell by ≥ ``min_fractional_reduction``.
+      A genuinely-improving run is reported "improved" (``.ok``) EVEN IF the clamp is
+      binding — the clamp is then surfaced as a NOTE in the message (the in-range
+      correction still helped, but the LES wanted more).
+    * ``"clamp_limited"`` — the bias did NOT improve AND ≥ ``clamp_fraction_warn`` of
+      columns are pinned at a coefficient's registered bounds: the clamp (not the
+      diagnosis) is the likely cause — the LES wants a value OUTSIDE the calibratable
+      range, so widen the bounds or check the diagnosis.
+    * ``"stalled"`` — the bias did not improve and the clamp is not the cause, so the
+      corrections are not improving the bias (check the LES↔GCM transfer or config).
+    * ``"no_rounds"`` — the campaign ran no rounds.
+
+    Improvement is judged FIRST: a strongly-improving run is never demoted to a
+    warning status just because the clamp is binding (it is noted instead).  Pure
+    host-side classification.
+    """
+    if summary.n_rounds == 0:
+        return CampaignHealth("no_rounds", "Campaign ran no rounds.")
+    worst_clamp, clamp_key = 0.0, None
+    for c in summary.coefficients:
+        if c.clamp_fraction > worst_clamp:
+            worst_clamp, clamp_key = c.clamp_fraction, c.promotion_key
+    acc = f"{summary.n_accepted}/{summary.n_rounds} rounds accepted"
+    red = f"{summary.fractional_reduction:.0%}"
+    clamp_binding = worst_clamp >= clamp_fraction_warn
+    if summary.fractional_reduction >= min_fractional_reduction:
+        note = (f" Note: {worst_clamp:.0%} of columns pinned at {clamp_key} bounds "
+                "(the LES wants a value outside its calibratable range)."
+                if clamp_binding else "")
+        return CampaignHealth("improved", f"Bias reduced {red} ({acc}).{note}")
+    if clamp_binding:
+        return CampaignHealth(
+            "clamp_limited",
+            f"{worst_clamp:.0%} of columns pinned at {clamp_key} bounds — the LES "
+            f"wants a coefficient outside its calibratable range; widen the bounds "
+            f"or check the diagnosis. Bias reduced {red} ({acc}).")
+    return CampaignHealth(
+        "stalled",
+        f"Bias reduced only {red} ({acc}) — the corrections are not improving "
+        f"the bias; check the LES↔GCM transfer or the config.")

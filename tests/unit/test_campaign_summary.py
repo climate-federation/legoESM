@@ -98,3 +98,71 @@ def test_summarize_no_rounds_safe():
     s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
     assert s.n_rounds == 0 and s.fractional_reduction == 0.0
     assert s.coefficients[0].field_std == pytest.approx(0.0)   # uniform = no correction
+
+
+from legoesm.training.campaign_summary import campaign_health  # noqa: E402
+
+
+def _multi_result(ck_field, bias_pair, accepted):
+    prt = jnp.full(ck_field.shape, 0.8)
+    iters = tuple(_mres(b, u) for (b, u) in bias_pair)
+    return MultiCampaignResult(
+        final_config=CLUBBLiteConfig(C_K=ck_field.reshape(-1), Pr_t=prt.reshape(-1)),
+        iterations=iters,
+        final_fields={"clubb_lite_C_K": ck_field, "clubb_lite_Pr_t": prt},
+        accepted=accepted, stop_reason="max_iterations")
+
+
+def test_campaign_health_improved():
+    # In-bounds C_K, 60% bias reduction → "improved".
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])
+    s = summarize_campaign(_multi_result(ck, [(1.0, 0.4)], (True,)))
+    h = campaign_health(s)
+    assert h.status == "improved" and h.ok
+    assert "60%" in h.message
+
+
+def test_campaign_health_stalled():
+    # In-bounds C_K, tiny bias reduction → "stalled".
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])
+    s = summarize_campaign(_multi_result(ck, [(1.0, 0.995)], (True,)))
+    h = campaign_health(s)
+    assert h.status == "stalled" and not h.ok
+    assert "not improving" in h.message
+
+
+def test_campaign_health_clamp_limited_when_not_improving():
+    # Bias barely moved (1%) AND half the C_K columns pinned at the upper bound →
+    # "clamp_limited" (the clamp is the likely cause of the non-improvement).
+    ck = jnp.array([[1.2, 1.2], [0.6, 0.7]])      # 2/4 = 50% at hi bound
+    s = summarize_campaign(_multi_result(ck, [(1.0, 0.99)], (True,)))
+    h = campaign_health(s)
+    assert h.status == "clamp_limited"
+    assert "clubb_lite_C_K" in h.message and "outside its calibratable range" in h.message
+
+
+def test_campaign_health_improved_takes_precedence_over_clamp():
+    # A STRONGLY-improving run with heavy clamp-binding is still "improved" (ok),
+    # with the clamp surfaced as a NOTE — not demoted to a warning status.
+    ck = jnp.array([[1.2, 1.2], [0.6, 0.7]])      # 50% at hi bound
+    s = summarize_campaign(_multi_result(ck, [(1.0, 0.3)], (True,)))   # 70% reduction
+    h = campaign_health(s)
+    assert h.status == "improved" and h.ok
+    assert "Note:" in h.message and "calibratable range" in h.message
+
+
+def test_campaign_health_no_rounds():
+    s = summarize_campaign(
+        CampaignResult(final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+                       iterations=(), final_field=jnp.full((2, 2), 0.4), accepted=()),
+        promotion_key="clubb_lite_C_K")
+    h = campaign_health(s)
+    assert h.status == "no_rounds"
+
+
+def test_coefficient_clamp_fraction():
+    ck = jnp.array([0.1, 1.2, 0.5, 0.6])          # 1 lo + 1 hi of 4 = 0.5
+    s = summarize_campaign(_multi_result(ck.reshape(2, 2), [(1.0, 0.5)], (True,)))
+    ck_c = next(c for c in s.coefficients if c.promotion_key == "clubb_lite_C_K")
+    assert ck_c.n_columns == 4
+    assert ck_c.clamp_fraction == pytest.approx(0.5)

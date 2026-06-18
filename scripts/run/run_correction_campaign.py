@@ -490,6 +490,25 @@ def _build_arg_parser():
     return p
 
 
+def _summary_to_json(summary):  # pragma: no cover - HPC path
+    """JSON-serializable form of a :class:`CampaignSummary` for the output file."""
+    return {
+        "n_rounds": summary.n_rounds, "n_accepted": summary.n_accepted,
+        "acceptance_rate": summary.acceptance_rate, "stop_reason": summary.stop_reason,
+        "initial_bias": summary.initial_bias, "final_bias": summary.final_bias,
+        "absolute_reduction": summary.absolute_reduction,
+        "fractional_reduction": summary.fractional_reduction,
+        "coefficients": [
+            {"promotion_key": c.promotion_key, "n_columns": c.n_columns,
+             "field_min": c.field_min, "field_max": c.field_max,
+             "field_mean": c.field_mean, "field_std": c.field_std,
+             "n_at_lower_bound": c.n_at_lower_bound,
+             "n_at_upper_bound": c.n_at_upper_bound,
+             "bounds": list(c.bounds) if c.bounds is not None else None}
+            for c in summary.coefficients],
+    }
+
+
 def _area_weights(grid):  # pragma: no cover - HPC path
     """Per-column quadrature weights for the bias aggregation.
 
@@ -581,15 +600,24 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
               f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
+    from legoesm.training.campaign_summary import (
+        campaign_health,
+        summarize_campaign,
+    )
+    summary = summarize_campaign(result)
+    health = campaign_health(summary)
     with open(args.out, "w") as f:
         json.dump({"coefficients": list(coefficients),
                    "fields": {k: np.asarray(v).reshape(-1).tolist()
                               for k, v in result.final_fields.items()},
                    "biases": biases, "accepted": accepted,
-                   "step_fractions": steps}, f, indent=2)
+                   "step_fractions": steps,
+                   "summary": _summary_to_json(summary),
+                   "health": {"status": health.status, "message": health.message}},
+                  f, indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
-    from legoesm.training.campaign_summary import summarize_campaign
-    print(summarize_campaign(result).report())
+    print(summary.report())
+    print(f"[campaign] {health.status.upper()}: {health.message}")
     return 0
 
 
@@ -740,15 +768,24 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
               f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
+    from legoesm.training.campaign_summary import (
+        campaign_health,
+        summarize_campaign,
+    )
+    promotion_key = _METHOD_PROMOTION[args.diagnosis_method][0]
+    summary = summarize_campaign(result, promotion_key=promotion_key)
+    health = campaign_health(summary)
     with open(args.out, "w") as f:
         json.dump({corrected_field: np.asarray(
                        getattr(result.final_config, corrected_field)).tolist(),
                    "biases": biases, "accepted": accepted,
-                   "step_fractions": steps}, f, indent=2)
+                   "step_fractions": steps,
+                   "summary": _summary_to_json(summary),
+                   "health": {"status": health.status, "message": health.message}},
+                  f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
-    from legoesm.training.campaign_summary import summarize_campaign
-    promotion_key = _METHOD_PROMOTION[args.diagnosis_method][0]
-    print(summarize_campaign(result, promotion_key=promotion_key).report())
+    print(summary.report())
+    print(f"[campaign] {health.status.upper()}: {health.message}")
     return 0
 
 
