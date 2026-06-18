@@ -536,6 +536,34 @@ def test_build_multi_correction_campaign_three_coefficients_with_c_eps():
     assert float(ceps.min()) >= 0.06 and float(ceps.max()) <= 0.6   # C_eps bounds
 
 
+def test_build_multi_correction_campaign_sequential_staged():
+    """sequential=True routes the staged (block-coordinate-descent) mode through
+    build_multi_correction_campaign; per-coefficient fractions are reported."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_multi_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        coefficients=("C_eps", "C_K", "Pr_t"), sequential=True,
+        accept_only_if_improved=False)
+    assert set(result.final_fields) == {
+        "clubb_lite_C_K", "clubb_lite_Pr_t", "clubb_lite_C_eps"}
+    assert result.iterations[0].step_fractions_by_key is not None
+
+
 def test_build_multi_correction_campaign_rejects_unknown_coefficient():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate

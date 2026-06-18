@@ -1194,3 +1194,60 @@ def test_multi_iteration_requires_dict_diagnoses():
         run_multi_correction_iteration(
             CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn,
             diagnose_fn=missing_method, grid_shape=(2, 2))
+
+
+def _help_hurt_setup():
+    """compare_fn where applying C_K LOWERS the bias (helps) but applying Pr_t
+    RAISES it more (hurts). Combined mode rejects the whole round; sequential
+    keeps C_K and rejects Pr_t."""
+    area_w = jnp.ones((2, 2))
+
+    def compare_fn(config):
+        ck_applied = jnp.asarray(config.C_K).ndim > 0
+        prt_applied = jnp.asarray(config.Pr_t).ndim > 0
+        bias = 10.0 - (3.0 if ck_applied else 0.0) + (5.0 if prt_applied else 0.0)
+        return CompareResult(jnp.full((2, 2), bias),
+                             [_Rec(flat_index=0, lat_deg=0.0, environment=_Env(0.0))],
+                             area_w, model_ctx=None)
+
+    def diagnose_fn(record, ctx):
+        return {"clubb_coefficient": _CkDiag(jnp.array([0.9]), jnp.array([True])),
+                "prandtl_number": _PrtDiag(jnp.array([0.9]), jnp.array([True]))}
+
+    return compare_fn, diagnose_fn
+
+
+def test_multi_iteration_combined_rejects_help_plus_hurt():
+    compare_fn, diagnose_fn = _help_hurt_setup()
+    res = run_multi_correction_iteration(
+        CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2))                                   # combined (default)
+    assert not bool(res.bias.improved)                      # whole round not improving
+    assert res.step_fractions_by_key is None
+
+
+def test_multi_iteration_sequential_keeps_helping_rejects_hurting():
+    compare_fn, diagnose_fn = _help_hurt_setup()
+    res = run_multi_correction_iteration(
+        CLUBBLiteConfig(), _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2), sequential=True)
+    assert bool(res.bias.improved)                          # C_K's help is KEPT
+    assert jnp.ndim(jnp.asarray(res.updated_config.C_K)) == 1    # C_K corrected
+    assert jnp.ndim(jnp.asarray(res.updated_config.Pr_t)) == 0   # Pr_t rejected (scalar)
+    assert res.step_fractions_by_key["clubb_lite_C_K"] > 0.0
+    assert res.step_fractions_by_key["clubb_lite_Pr_t"] == 0.0
+    # the rejected coefficient's stored field is its (scalar-broadcast) base.
+    assert res.feedback_fields["clubb_lite_Pr_t"].shape == (2, 2)
+
+
+def test_multi_campaign_sequential_accumulates():
+    # A sequential campaign where both coefficients help → both accumulate.
+    compare_fn, diagnose_fn = _multi_setup(
+        diag_ck=1.0, diag_prt=0.8, target_ck=1.0, target_prt=0.8)
+    campaign = run_multi_correction_campaign(
+        CLUBBLiteConfig(), 1, _SPECS, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(2, 2), accept_only_if_improved=True, sequential=True)
+    assert campaign.accepted == (True,)
+    it = campaign.iterations[0]
+    assert it.step_fractions_by_key is not None
+    assert set(campaign.final_fields) == {"clubb_lite_C_K", "clubb_lite_Pr_t"}

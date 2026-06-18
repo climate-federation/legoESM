@@ -298,6 +298,7 @@ def build_multi_correction_campaign(
     accept_only_if_improved: bool = True,
     step_fractions: Any | None = None,
     clip_to_bounds: bool = True,
+    sequential: bool = False,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -357,6 +358,7 @@ def build_multi_correction_campaign(
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
         step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+        sequential=sequential,
         initial_fields=initial_fields, start_round=start_round,
         checkpoint_callback=checkpoint_callback,
     )
@@ -444,10 +446,15 @@ def _build_arg_parser():
                         "toward the LES diagnosis, keeping the largest improving "
                         "step (default: full single step)")
     p.add_argument("--coefficients", default=None,
-                   help="comma-separated coefficients to correct SIMULTANEOUSLY "
-                        "from one LES run (e.g. 'C_K,Pr_t'): routes to the multi-"
-                        "coefficient campaign. Omit for the single-coefficient "
+                   help="comma-separated coefficients to correct from one LES run "
+                        "(e.g. 'C_eps,C_K,Pr_t'): routes to the multi-coefficient "
+                        "campaign. Omit for the single-coefficient "
                         "--diagnosis-method path.")
+    p.add_argument("--staged", action="store_true",
+                   help="multi-coefficient: correct the coefficients IN ORDER, each "
+                        "with its own line search + gate (block coordinate descent), "
+                        "instead of one shared step. Recommended order C_eps,C_K,Pr_t "
+                        "(let wp2 converge before C_K). Default: one combined step.")
     p.add_argument("--diagnosis-method",
                    choices=("clubb_coefficient", "prandtl_number", "c_eps",
                             "eddy_diffusivity"),
@@ -551,7 +558,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         accept_only_if_improved=not args.keep_worsening_rounds,
         step_fractions=([float(s) for s in args.step_fractions.split(",")]
                         if args.step_fractions else None),
-        clip_to_bounds=not args.allow_unphysical_coeff)
+        clip_to_bounds=not args.allow_unphysical_coeff, sequential=args.staged)
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]

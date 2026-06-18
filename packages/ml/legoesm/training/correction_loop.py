@@ -105,7 +105,10 @@ class MultiCorrectionResult(NamedTuple):
     feedback_fields: dict              # {promotion_key: per-column field}
     n_corrected: int
     n_diagnosed: int = 0
-    step_fraction: float = 1.0
+    step_fraction: float = 1.0         # combined: the shared fraction; sequential:
+    #                                    the largest accepted per-coefficient fraction
+    step_fractions_by_key: dict | None = None  # sequential mode: per-coefficient
+    #                                            accepted fraction (0.0 = rejected)
 
 
 class MultiCampaignResult(NamedTuple):
@@ -586,6 +589,7 @@ def run_multi_correction_iteration(
     env_grid_fn: Callable[[Any], tuple] | None = None,
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
+    sequential: bool = False,
 ) -> MultiCorrectionResult:
     """Correct SEVERAL coefficients SIMULTANEOUSLY from ONE LES run per column.
 
@@ -598,12 +602,19 @@ def run_multi_correction_iteration(
     ``apply(apply(base, key₁, f₁), key₂, f₂)`` — the specs target independent
     config slots, so order does not matter.
 
-    **Single shared fraction / single gate** (design note): one fraction across
-    all coefficients is the natural extension of the scalar trust-region, and the
-    monotonic gate accepts the round iff the COMBINED bias improved.  Consequence:
-    if one coefficient helps and another hurts, the whole step is rejected (the
-    beneficial partial update is lost) — conservative and cheap; independent
-    per-coefficient step sizes are a future refinement.  Reuses the shared
+    **Two modes.**  ``sequential=False`` (default, *combined*): one fraction across
+    all coefficients (the natural scalar-trust-region extension), the monotonic gate
+    accepts the round iff the COMBINED bias improved.  Consequence: if one
+    coefficient helps and another hurts, the whole step is rejected (the beneficial
+    partial update is lost) — conservative and cheap.  ``sequential=True``
+    (*staged*, block coordinate descent): the coefficients are corrected IN SPEC
+    ORDER, each with its OWN line search + gate against the running state, so a
+    coefficient is kept only if IT improves and the others are unaffected.  This
+    handles COUPLED coefficients (e.g. C_eps sets the GCM wp2 that C_K then uses, so
+    order C_eps→C_K→Pr_t lets wp2 converge first) and avoids the rejected-whole loss
+    — at the cost of one line search per coefficient.  ``step_fractions_by_key``
+    reports the accepted per-coefficient fraction (0.0 = that coefficient rejected).
+    Reuses the shared
     :func:`_run_line_search`, :func:`_diagnose_columns`, :func:`_env_grid_predictors`
     and :func:`_raw_and_base_field`, so the numerics match the single path.
     """
@@ -678,24 +689,66 @@ def run_multi_correction_iteration(
         per_spec.append((s, raw_i, base_i))
     fractions = _validate_step_fractions(step_fractions)
 
-    def _make_candidate(frac):
-        cfg = baseline_config
-        fields = {}
-        for s, raw_i, base_i in per_spec:
-            field = raw_i if frac == 1.0 else base_i + frac * (raw_i - base_i)
-            if clip_to_bounds:
-                field = clip_field_to_promotable_bounds(
-                    baseline_config, s.promotion_key, field
-                )
-            cfg = apply_feedback_to_scheme(
-                cfg, s.promotion_key, field, expected_ncol=ncol
-            )
-            fields[s.promotion_key] = field
-        return cfg, fields
+    def _blend(raw_i, base_i, frac):
+        field = raw_i if frac == 1.0 else base_i + frac * (raw_i - base_i)
+        return field
 
-    frac, fields, updated_config, updated, improvement = _run_line_search(
-        compare_fn, baseline, fractions, _make_candidate
-    )
+    if sequential:
+        # Block coordinate descent: each coefficient gated against the running
+        # state, in spec order (so a coupled coefficient sees the prior ones'
+        # accepted effect — e.g. C_eps adjusts wp2 before C_K is line-searched).
+        cfg = baseline_config
+        running = baseline
+        fields = {}
+        fracs_by_key = {}
+        for s, raw_i, base_i in per_spec:
+            def _make_one(frac, _s=s, _raw=raw_i, _base=base_i, _cfg=cfg):
+                field = _blend(_raw, _base, frac)
+                if clip_to_bounds:
+                    field = clip_field_to_promotable_bounds(
+                        baseline_config, _s.promotion_key, field
+                    )
+                return apply_feedback_to_scheme(
+                    _cfg, _s.promotion_key, field, expected_ncol=ncol
+                ), field
+            f, field, cand_cfg, upd, imp = _run_line_search(
+                compare_fn, running, fractions, _make_one
+            )
+            if bool(imp.improved):
+                cfg, running = cand_cfg, upd          # accept → advance running state
+                fields[s.promotion_key] = field
+                fracs_by_key[s.promotion_key] = float(f)
+            else:
+                fields[s.promotion_key] = base_i      # reject this coefficient only
+                fracs_by_key[s.promotion_key] = 0.0
+        updated_config, updated = cfg, running
+        improvement = bias_improvement(
+            baseline.combined_score, updated.combined_score,
+            baseline.area_weights, valid_mask=baseline.valid_mask,
+        )
+        frac = max(fracs_by_key.values(), default=0.0)
+        fracs_out: dict | None = fracs_by_key
+    else:
+        def _make_candidate(frac):
+            cfg = baseline_config
+            fields = {}
+            for s, raw_i, base_i in per_spec:
+                field = _blend(raw_i, base_i, frac)
+                if clip_to_bounds:
+                    field = clip_field_to_promotable_bounds(
+                        baseline_config, s.promotion_key, field
+                    )
+                cfg = apply_feedback_to_scheme(
+                    cfg, s.promotion_key, field, expected_ncol=ncol
+                )
+                fields[s.promotion_key] = field
+            return cfg, fields
+
+        frac, fields, updated_config, updated, improvement = _run_line_search(
+            compare_fn, baseline, fractions, _make_candidate
+        )
+        fracs_out = None
+
     worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
     worst_change = worst_column_bias_change(
         baseline.combined_score, updated.combined_score, worst_idx
@@ -704,6 +757,7 @@ def run_multi_correction_iteration(
         updated_config=updated_config, bias=improvement,
         worst_column_change=worst_change, feedback_fields=fields,
         n_corrected=len(records), n_diagnosed=n_diagnosed, step_fraction=frac,
+        step_fractions_by_key=fracs_out,
     )
 
 
@@ -723,6 +777,7 @@ def run_multi_correction_campaign(
     accept_only_if_improved: bool = False,
     step_fractions: Sequence[float] | None = None,
     clip_to_bounds: bool = False,
+    sequential: bool = False,
     initial_fields: dict | None = None,
     start_round: int = 0,
     checkpoint_callback: Callable[[int, MultiCorrectionResult, dict], None] | None = None,
@@ -757,6 +812,7 @@ def run_multi_correction_campaign(
             expected_ncol=expected_ncol, les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
             step_fractions=step_fractions, clip_to_bounds=clip_to_bounds,
+            sequential=sequential,
         )
         accepted = not (
             accept_only_if_improved
