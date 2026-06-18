@@ -93,6 +93,32 @@ def reduce_column_diagnosis(
     )
 
 
+def count_valid_diagnoses(diagnoses: Sequence[Any], method: str) -> int:
+    """How many columns have a VALID single-method LES diagnosis (≥1 valid level AND
+    a finite reduced value) — the EXACT per-column validity
+    :func:`assemble_feedback_field` uses, so this is precisely the set of columns
+    that receive a non-background correction.  ``n == 0`` with corrected columns
+    means EVERY LES spin-off was rejected by the realism gate (e.g. too short to
+    develop turbulence) → the round makes no correction by design.  Host-side
+    (``bool`` on a concrete reduced flag); call once per iteration, not in a scan.
+    """
+    return int(sum(bool(reduce_column_diagnosis(d, method)[1]) for d in diagnoses))
+
+
+def count_valid_multi_diagnoses(diagnoses: Sequence[Any], methods) -> int:
+    """How many columns are valid for AT LEAST ONE of the REQUESTED coefficient
+    ``methods`` — each column's diagnosis is a ``{method: diagnosis}`` dict (the
+    SIMULTANEOUS multi-coefficient path), and a column receives some correction iff
+    any one SPEC method's diagnosis is valid.  Only ``methods`` are checked: a
+    diagnose_fn may emit EXTRA methods that no spec corrects, which must NOT mark a
+    column valid.  Same per-column validity as :func:`count_valid_diagnoses`.
+    """
+    return int(sum(
+        any(bool(reduce_column_diagnosis(d[m], m)[1]) for m in methods)
+        for d in diagnoses
+    ))
+
+
 def assemble_feedback_field(
     records: Sequence[Any],
     diagnoses: Sequence[Any],

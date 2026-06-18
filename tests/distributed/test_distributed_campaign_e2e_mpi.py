@@ -147,10 +147,12 @@ def test_distributed_campaign_corrects_global_worst_on_its_owner():
 
     if owns_bias:
         assert it.n_diagnosed == 1                   # the owner spun off the LES
+        assert it.n_diagnoses_valid == 1             # ...and the sheared LES was VALID
         li = int(np.where(local_cells == bias_cell)[0][0])
         assert not np.isclose(ck[li], bg), "owner did not correct the global-worst cell"
     else:
         assert it.n_diagnosed == 0                   # owns none of the global top-1
+        assert it.n_diagnoses_valid == 0
         np.testing.assert_allclose(ck, bg)           # nothing corrected, but ran lockstep
 
     # Every rank must agree on the GLOBAL improvement verdict (collective bias).

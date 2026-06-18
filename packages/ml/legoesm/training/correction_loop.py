@@ -40,7 +40,11 @@ from legoesm.training.compare_reanalysis import (
     ColumnState,
     compare_state_to_reference,
 )
-from legoesm.training.feedback_assembly import assemble_feedback_field
+from legoesm.training.feedback_assembly import (
+    assemble_feedback_field,
+    count_valid_diagnoses,
+    count_valid_multi_diagnoses,
+)
 from legoesm.training.promotable_params import (
     PROMOTABLE_FIELDS,
     apply_feedback_to_scheme,
@@ -85,6 +89,12 @@ class CorrectionResult(NamedTuple):
     n_corrected: int                   # number of worst columns corrected (all flagged)
     n_diagnosed: int = 0               # number of LES diagnoses run (= n_corrected, or
     #                                    K representatives when clustering w/ les_budget)
+    n_diagnoses_valid: int = 0         # of the n_corrected columns, how many received a
+    #                                    VALID LES diagnosis (≥1 valid level + finite);
+    #                                    the rest kept the background. 0 with
+    #                                    n_corrected>0 ⇒ every LES spin-off was rejected
+    #                                    by the realism gate (e.g. too short to develop
+    #                                    turbulence) → no correction this round.
     step_fraction: float = 1.0         # the accepted line-search step toward the raw
     #                                    diagnosis (1.0 = full; 0.0 = no-op round)
     env_kernel: Any = None             # the exported RAW environment kernel
@@ -151,6 +161,8 @@ class MultiCorrectionResult(NamedTuple):
     feedback_fields: dict              # {promotion_key: per-column field}
     n_corrected: int
     n_diagnosed: int = 0
+    n_diagnoses_valid: int = 0         # columns valid for ≥1 requested coefficient (0
+    #                                    with n_corrected>0 ⇒ all LES rejected this round)
     step_fraction: float = 1.0         # combined: the shared fraction; sequential:
     #                                    the largest accepted per-coefficient fraction
     step_fractions_by_key: dict | None = None  # sequential mode: per-coefficient
@@ -427,7 +439,8 @@ def _run_line_search(compare_fn, baseline, fractions, make_candidate, *,
 
 
 def _diagnose_columns(records, diagnose_fn, model_ctx, les_budget, env_scales):
-    """Diagnose each worst column, returning ``(per-column diagnoses, n_diagnosed)``.
+    """Diagnose each worst column, returning ``(per-column diagnoses, n_diagnosed,
+    run_diagnoses)``.
 
     With ``les_budget = K < len(records)`` the worst columns are environment-
     clustered into ``K`` groups, the LES ``diagnose_fn`` runs ONLY on the ``K``
@@ -435,6 +448,11 @@ def _diagnose_columns(records, diagnose_fn, model_ctx, les_budget, env_scales):
     ``diagnose_fn``'s return type is opaque (a single diagnosis OR a
     ``{method: diagnosis}`` dict) — the plumbing is identical, so this is shared by
     the single- and multi-coefficient iterations.
+
+    ``run_diagnoses`` is the list of the ``n_diagnosed`` ACTUAL LES-run diagnoses
+    (the ``K`` representatives when clustering, else one per column) — DISTINCT from
+    the cluster-EXPANDED per-column ``diagnoses``.  Validity counts use it so the
+    valid count is over LES RUNS (≤ ``n_diagnosed``), not the duplicated columns.
     """
     if les_budget is not None and int(les_budget) < len(records):
         if int(les_budget) <= 0:
@@ -447,8 +465,9 @@ def _diagnose_columns(records, diagnose_fn, model_ctx, les_budget, env_scales):
             for ri in clusters.representative_indices
         ]
         return ([rep[label] for label in clusters.labels],
-                len(clusters.representative_indices))
-    return [diagnose_fn(rec, model_ctx) for rec in records], len(records)
+                len(clusters.representative_indices), rep)
+    per_column = [diagnose_fn(rec, model_ctx) for rec in records]
+    return per_column, len(records), per_column
 
 
 def _env_grid_predictors(feedback_strategy, env_grid_fn, model_ctx):
@@ -664,9 +683,12 @@ def run_correction_iteration(
             step_fraction=0.0,
         )
 
-    diagnoses, n_diagnosed = _diagnose_columns(
+    diagnoses, n_diagnosed, run_diagnoses = _diagnose_columns(
         records, diagnose_fn, baseline.model_ctx, les_budget, env_scales
     )
+    # Count validity over the LES RUNS (representatives), so n_diagnoses_valid ≤
+    # n_diagnosed even when clustering expands K runs across more columns.
+    n_diagnoses_valid = count_valid_diagnoses(run_diagnoses, diagnosis_method)
     # Feedback field: scatter at the worst columns ("static"), or generalise the
     # diagnosed coefficients to ALL environmentally-similar columns ("environment").
     grid_env, length_scales = _env_grid_predictors(
@@ -718,6 +740,7 @@ def run_correction_iteration(
         feedback_field=field,
         n_corrected=len(records),
         n_diagnosed=n_diagnosed,
+        n_diagnoses_valid=n_diagnoses_valid,
         step_fraction=frac,
         env_kernel=env_kernel,
     )
@@ -852,7 +875,7 @@ def run_multi_correction_iteration(
             feedback_fields=fields, n_corrected=0, n_diagnosed=0, step_fraction=0.0,
         )
 
-    diagnoses, n_diagnosed = _diagnose_columns(
+    diagnoses, n_diagnosed, run_diagnoses = _diagnose_columns(
         records, diagnose_fn, baseline.model_ctx, les_budget, env_scales
     )
     # The MULTI diagnose_fn must return a {method: diagnosis} dict per column
@@ -872,6 +895,10 @@ def run_multi_correction_iteration(
                 f"diagnose_fn output at column {i} is missing the method(s) "
                 f"{sorted(missing)} required by the specs (has {sorted(d.keys())})."
             )
+    # Count validity over the LES RUNS, and ONLY for the spec-required methods (a
+    # diagnose_fn may emit extra methods that no spec corrects — they must not mark a
+    # column "valid").
+    n_diagnoses_valid = count_valid_multi_diagnoses(run_diagnoses, required)
     grid_env, length_scales = _env_grid_predictors(
         feedback_strategy, env_grid_fn, baseline.model_ctx
     )
@@ -957,7 +984,8 @@ def run_multi_correction_iteration(
     return MultiCorrectionResult(
         updated_config=updated_config, bias=improvement,
         worst_column_change=worst_change, feedback_fields=fields,
-        n_corrected=len(records), n_diagnosed=n_diagnosed, step_fraction=frac,
+        n_corrected=len(records), n_diagnosed=n_diagnosed,
+        n_diagnoses_valid=n_diagnoses_valid, step_fraction=frac,
         step_fractions_by_key=fracs_out,
     )
 

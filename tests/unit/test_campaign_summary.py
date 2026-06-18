@@ -26,17 +26,18 @@ def _bias(base, upd):
         fractional_improvement=jnp.asarray(frac), improved=jnp.asarray(upd < base))
 
 
-def _cres(base, upd):
+def _cres(base, upd, *, n_diagnosed=1, n_diagnoses_valid=1):
     return CorrectionResult(
         updated_config=None, bias=_bias(base, upd),
         worst_column_change=jnp.asarray(0.0), feedback_field=jnp.zeros((2, 2)),
-        n_corrected=1)
+        n_corrected=1, n_diagnosed=n_diagnosed, n_diagnoses_valid=n_diagnoses_valid)
 
 
-def _mres(base, upd):
+def _mres(base, upd, *, n_diagnosed=1, n_diagnoses_valid=1):
     return MultiCorrectionResult(
         updated_config=None, bias=_bias(base, upd),
-        worst_column_change=jnp.asarray(0.0), feedback_fields={}, n_corrected=1)
+        worst_column_change=jnp.asarray(0.0), feedback_fields={}, n_corrected=1,
+        n_diagnosed=n_diagnosed, n_diagnoses_valid=n_diagnoses_valid)
 
 
 def test_summarize_single_campaign():
@@ -103,9 +104,11 @@ def test_summarize_no_rounds_safe():
 from legoesm.training.campaign_summary import campaign_health  # noqa: E402
 
 
-def _multi_result(ck_field, bias_pair, accepted):
+def _multi_result(ck_field, bias_pair, accepted, *, n_diagnosed=1, n_diagnoses_valid=1):
     prt = jnp.full(ck_field.shape, 0.8)
-    iters = tuple(_mres(b, u) for (b, u) in bias_pair)
+    iters = tuple(
+        _mres(b, u, n_diagnosed=n_diagnosed, n_diagnoses_valid=n_diagnoses_valid)
+        for (b, u) in bias_pair)
     return MultiCampaignResult(
         final_config=CLUBBLiteConfig(C_K=ck_field.reshape(-1), Pr_t=prt.reshape(-1)),
         iterations=iters,
@@ -149,6 +152,51 @@ def test_campaign_health_improved_takes_precedence_over_clamp():
     h = campaign_health(s)
     assert h.status == "improved" and h.ok
     assert "Note:" in h.message and "calibratable range" in h.message
+
+
+def test_summary_surfaces_diagnosis_validity_totals():
+    """The summary sums n_diagnosed + n_diagnoses_valid across rounds, and report()
+    states the valid fraction (iter 100)."""
+    field = jnp.array([0.4, 0.5, 0.6, 0.7])
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(_cres(1.0, 0.6, n_diagnosed=5, n_diagnoses_valid=3),
+                    _cres(0.6, 0.3, n_diagnosed=4, n_diagnoses_valid=2)),
+        final_field=field.reshape(2, 2), accepted=(True, True))
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    assert s.n_diagnosed_total == 9 and s.n_diagnoses_valid_total == 5
+    assert "5/9 valid" in s.report()
+
+
+def test_campaign_health_no_valid_diagnoses():
+    """A non-improving campaign where LES ran but EVERY diagnosis was rejected →
+    'no_valid_diagnoses' (the root cause is the LES, not the correction; iter 100)."""
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])         # in-bounds → no clamp
+    s = summarize_campaign(_multi_result(
+        ck, [(1.0, 0.995)], (True,), n_diagnosed=6, n_diagnoses_valid=0))
+    h = campaign_health(s)
+    assert h.status == "no_valid_diagnoses" and not h.ok
+    assert "All 6 LES diagnoses were rejected" in h.message
+    assert "lengthen or properly force" in h.message
+
+
+def test_campaign_health_no_valid_diagnoses_precedes_clamp():
+    """When NO diagnosis is valid, nothing is corrected, so 'no_valid_diagnoses' is
+    reported even if the (background) field happens to sit at a bound — it is checked
+    before 'clamp_limited' (iter 100 ordering)."""
+    ck = jnp.array([[1.2, 1.2], [0.6, 0.7]])         # 50% at hi bound
+    s = summarize_campaign(_multi_result(
+        ck, [(1.0, 0.99)], (True,), n_diagnosed=3, n_diagnoses_valid=0))
+    assert campaign_health(s).status == "no_valid_diagnoses"
+
+
+def test_campaign_health_some_valid_is_not_no_valid_diagnoses():
+    """≥1 valid diagnosis but still not improving (and clamp-bound) → 'clamp_limited',
+    NOT 'no_valid_diagnoses' (the gate is n_diagnoses_valid_total == 0)."""
+    ck = jnp.array([[1.2, 1.2], [0.6, 0.7]])
+    s = summarize_campaign(_multi_result(
+        ck, [(1.0, 0.99)], (True,), n_diagnosed=3, n_diagnoses_valid=1))
+    assert campaign_health(s).status == "clamp_limited"
 
 
 def test_campaign_health_no_rounds():

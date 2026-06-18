@@ -728,6 +728,8 @@ def _summary_to_json(summary):  # pragma: no cover - HPC path
         "initial_bias": summary.initial_bias, "final_bias": summary.final_bias,
         "absolute_reduction": summary.absolute_reduction,
         "fractional_reduction": summary.fractional_reduction,
+        "n_diagnosed_total": summary.n_diagnosed_total,
+        "n_diagnoses_valid_total": summary.n_diagnoses_valid_total,
         "coefficients": [
             {"promotion_key": c.promotion_key, "n_columns": c.n_columns,
              "field_min": c.field_min, "field_max": c.field_max,

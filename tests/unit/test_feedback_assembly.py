@@ -15,6 +15,8 @@ import numpy as np
 import pytest
 from legoesm.training.feedback_assembly import (
     assemble_feedback_field,
+    count_valid_diagnoses,
+    count_valid_multi_diagnoses,
     reduce_column_diagnosis,
 )
 
@@ -310,3 +312,38 @@ def test_reduce_c_eps_valid_mean():
     value, valid = reduce_column_diagnosis(diag, "c_eps")
     assert bool(valid)
     assert float(value) == pytest.approx(0.3)
+
+
+def test_count_valid_diagnoses_counts_usable_columns():
+    """count_valid_diagnoses = number of columns with a VALID single-method diagnosis
+    (≥1 valid level + finite) — the exact set assemble corrects (iter 100)."""
+    diags = [
+        _Eddy(K=jnp.array([10.0, 30.0]), valid=jnp.array([True, True])),   # valid
+        _Eddy(K=jnp.array([5.0, 6.0]), valid=jnp.array([False, False])),   # no valid lvl
+        _Eddy(K=jnp.array([jnp.nan, 1.0]), valid=jnp.array([True, True])),  # non-finite
+        _Eddy(K=jnp.array([2.0]), valid=jnp.array([True])),                # valid
+    ]
+    assert count_valid_diagnoses(diags, "eddy_diffusivity") == 2
+    assert count_valid_diagnoses([], "eddy_diffusivity") == 0
+
+
+def test_count_valid_multi_diagnoses_any_method_valid():
+    """A column counts if ANY requested coefficient's diagnosis is valid (the multi
+    {method: diagnosis} dict path) — iter 100. clubb_coefficient reads .C_K and
+    prandtl_number reads .Pr_t, so use the matching stand-in profiles."""
+    col_a = {"clubb_coefficient": _Ck(jnp.array([0.4]), jnp.array([True])),
+             "prandtl_number": _Prt(jnp.array([0.8]), jnp.array([False]))}  # C_K valid
+    col_b = {"clubb_coefficient": _Ck(jnp.array([0.4]), jnp.array([False])),
+             "prandtl_number": _Prt(jnp.array([0.8]), jnp.array([False]))}  # neither
+    col_c = {"clubb_coefficient": _Ck(jnp.array([0.4]), jnp.array([True])),
+             "prandtl_number": _Prt(jnp.array([0.8]), jnp.array([True]))}   # both valid
+    methods = {"clubb_coefficient", "prandtl_number"}
+    assert count_valid_multi_diagnoses([col_a, col_b, col_c], methods) == 2  # a + c
+    assert count_valid_multi_diagnoses([col_b], methods) == 0
+    assert count_valid_multi_diagnoses([], methods) == 0
+    # an EXTRA non-spec method that is valid must NOT mark the column valid (only the
+    # requested `methods` are checked) — iter 100 Codex fix.
+    col_extra = {"clubb_coefficient": _Ck(jnp.array([0.4]), jnp.array([False])),
+                 "prandtl_number": _Prt(jnp.array([0.8]), jnp.array([False])),
+                 "entrainment": _Ent(jnp.asarray(0.02), jnp.asarray(True))}  # valid extra
+    assert count_valid_multi_diagnoses([col_extra], methods) == 0

@@ -68,6 +68,10 @@ class CampaignSummary(NamedTuple):
     absolute_reduction: float       # initial_bias − final_bias (> 0 ⇒ improved)
     fractional_reduction: float     # absolute_reduction / initial_bias (0 if init 0)
     coefficients: tuple             # tuple[CoefficientSummary]
+    n_diagnosed_total: int = 0      # LES diagnoses RUN across all rounds
+    n_diagnoses_valid_total: int = 0  # of those, how many were VALID (≥1 valid level +
+    #   finite). 0 with n_diagnosed_total>0 ⇒ EVERY LES spin-off was rejected by the
+    #   realism gate (e.g. too short to develop turbulence) — no column was corrected.
 
     def report(self) -> str:
         """A concise human-readable multi-line report."""
@@ -78,6 +82,8 @@ class CampaignSummary(NamedTuple):
             f"{self.stop_reason}.",
             f"Bias: {self.initial_bias:.4g} -> {self.final_bias:.4g} "
             f"(reduced {self.absolute_reduction:.4g}, {pct:.1f}%).",
+            f"LES diagnoses: {self.n_diagnoses_valid_total}/{self.n_diagnosed_total} "
+            "valid (the rest kept the background).",
         ]
         for c in self.coefficients:
             line = (f"  {c.promotion_key}: mean {c.field_mean:.3g} "
@@ -151,11 +157,16 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
     coefficients = tuple(
         _coefficient_summary(key, f, config) for key, f in fields.items()
     )
+    n_diagnosed_total = int(sum(getattr(it, "n_diagnosed", 0) for it in iters))
+    n_diagnoses_valid_total = int(
+        sum(getattr(it, "n_diagnoses_valid", 0) for it in iters))
     return CampaignSummary(
         n_rounds=n_rounds, n_accepted=n_accepted, acceptance_rate=acceptance_rate,
         stop_reason=stop_reason, initial_bias=initial_bias, final_bias=final_bias,
         absolute_reduction=absolute_reduction,
         fractional_reduction=fractional_reduction, coefficients=coefficients,
+        n_diagnosed_total=n_diagnosed_total,
+        n_diagnoses_valid_total=n_diagnoses_valid_total,
     )
 
 
@@ -189,17 +200,25 @@ def campaign_health(
       A genuinely-improving run is reported "improved" (``.ok``) EVEN IF the clamp is
       binding — the clamp is then surfaced as a NOTE in the message (the in-range
       correction still helped, but the LES wanted more).
+    * ``"no_valid_diagnoses"`` — the bias did NOT improve AND LES ran but EVERY
+      diagnosis was rejected by the realism gate (``n_diagnoses_valid_total == 0`` with
+      ``n_diagnosed_total > 0``): no column was corrected, so the root cause is the LES
+      itself (too short / unforced to develop turbulence), NOT the correction logic —
+      lengthen or properly force the spin-off LES.
     * ``"clamp_limited"`` — the bias did NOT improve AND ≥ ``clamp_fraction_warn`` of
       columns are pinned at a coefficient's registered bounds: the clamp (not the
       diagnosis) is the likely cause — the LES wants a value OUTSIDE the calibratable
       range, so widen the bounds or check the diagnosis.
-    * ``"stalled"`` — the bias did not improve and the clamp is not the cause, so the
-      corrections are not improving the bias (check the LES↔GCM transfer or config).
+    * ``"stalled"`` — the bias did not improve and neither the LES-validity nor the
+      clamp is the cause, so the corrections are not improving the bias (check the
+      LES↔GCM transfer or config).
     * ``"no_rounds"`` — the campaign ran no rounds.
 
     Improvement is judged FIRST: a strongly-improving run is never demoted to a
-    warning status just because the clamp is binding (it is noted instead).  Pure
-    host-side classification.
+    warning status just because the clamp is binding (it is noted instead).  Among the
+    non-improving statuses, ``no_valid_diagnoses`` is checked before ``clamp_limited``
+    (with no valid diagnosis nothing is corrected, so the clamp cannot be the cause).
+    Pure host-side classification.
     """
     if summary.n_rounds == 0:
         return CampaignHealth("no_rounds", "Campaign ran no rounds.")
@@ -215,6 +234,13 @@ def campaign_health(
                 "(the LES wants a value outside its calibratable range)."
                 if clamp_binding else "")
         return CampaignHealth("improved", f"Bias reduced {red} ({acc}).{note}")
+    if summary.n_diagnosed_total > 0 and summary.n_diagnoses_valid_total == 0:
+        return CampaignHealth(
+            "no_valid_diagnoses",
+            f"All {summary.n_diagnosed_total} LES diagnoses were rejected by the "
+            "realism gate (no turbulence developed) — no column was corrected; "
+            "lengthen or properly force the spin-off LES. "
+            f"Bias reduced {red} ({acc}).")
     if clamp_binding:
         return CampaignHealth(
             "clamp_limited",

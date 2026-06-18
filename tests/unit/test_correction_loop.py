@@ -489,6 +489,9 @@ def test_les_budget_clusters_and_reduces_diagnoses():
     )
     assert result.n_corrected == 4          # all worst columns corrected
     assert result.n_diagnosed == 2          # but only 2 LES diagnoses run
+    # validity is counted over the 2 LES RUNS (representatives), NOT the 4 expanded
+    # columns — so n_diagnoses_valid never exceeds n_diagnosed (iter 100 Codex fix).
+    assert result.n_diagnoses_valid == 2
     assert n_calls["n"] == 2                 # diagnose_fn called exactly twice
     f = np.asarray(result.feedback_field).reshape(-1)
     # group A (cols 0,1) → low-CAPE rep's K=10; group B (cols 4,5) → 20.
@@ -496,6 +499,30 @@ def test_les_budget_clusters_and_reduces_diagnoses():
     assert f[4] == pytest.approx(20.0) and f[5] == pytest.approx(20.0)
     # non-worst columns keep the background.
     assert f[2] == pytest.approx(7.2) and f[3] == pytest.approx(7.2)
+
+
+def test_les_budget_counts_valid_over_runs_not_columns():
+    """One of the 2 cluster representatives is INVALID ⇒ n_diagnoses_valid == 1 even
+    though each rep maps to 2 columns — the SHARP proof that validity is counted over
+    LES RUNS (representatives), not the expanded columns (iter 100 Codex)."""
+    def diag(rec, ctx):                                  # noqa: ARG001
+        if rec.environment.cape_J_kg < 1000.0:
+            return _Eddy(K=jnp.array([10.0, 10.0]), valid=jnp.array([True, True]))
+        return _Eddy(K=jnp.array([20.0, 20.0]),         # high-CAPE rep: REJECTED
+                     valid=jnp.array([False, False]))
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=_cluster_compare_fn(), diagnose_fn=diag,
+        promotion_key="gray_tau_equator", grid_shape=(2, 3),
+        background=7.2, les_budget=2,
+    )
+    assert result.n_corrected == 4          # all 4 worst columns flagged
+    assert result.n_diagnosed == 2          # 2 LES runs
+    assert result.n_diagnoses_valid == 1    # but only ONE run was valid (≤ n_diagnosed)
+    f = np.asarray(result.feedback_field).reshape(-1)
+    assert f[0] == pytest.approx(10.0) and f[1] == pytest.approx(10.0)  # valid rep
+    assert f[4] == pytest.approx(7.2) and f[5] == pytest.approx(7.2)    # invalid → bg
 
 
 def test_les_budget_none_diagnoses_every_worst_column():
