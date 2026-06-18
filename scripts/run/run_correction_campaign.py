@@ -126,6 +126,7 @@ def build_correction_campaign(
     start_round: int = 0,
     checkpoint_callback: Any | None = None,
     feedback_strategy: str = "static",
+    accept_only_if_improved: bool = True,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -139,6 +140,10 @@ def build_correction_campaign(
     Restart (§1): pass ``initial_clubb`` + ``initial_field`` + ``start_round`` to
     RESUME a checkpointed campaign, and ``checkpoint_callback(round, result,
     field)`` to persist each round.  Returns the :class:`CampaignResult`.
+
+    ``accept_only_if_improved`` (default true here — the bias-reduction campaign
+    SHOULD be monotonic) keeps a round only if it lowered the global bias, so the
+    accumulated ``clubb_lite.C_K`` field never regresses (the done-criterion).
     """
     import jax.numpy as jnp
     import numpy as np
@@ -182,6 +187,7 @@ def build_correction_campaign(
         initial_field=initial_field, start_round=start_round,
         checkpoint_callback=checkpoint_callback,
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
+        accept_only_if_improved=accept_only_if_improved,
     )
 
 
@@ -258,6 +264,9 @@ def _build_arg_parser():
                    default="static",
                    help="static: correct only the worst columns; environment: "
                         "generalize the diagnoses to all env-similar columns")
+    p.add_argument("--keep-worsening-rounds", action="store_true",
+                   help="accumulate every round unconditionally (default: keep a "
+                        "round only if it lowered the global bias — monotonic)")
     p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
@@ -366,17 +375,26 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
-        initial_clubb = CLUBBLiteConfig(C_K=jnp.asarray(ckpt["C_K"]))
         initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
+        # The accumulated FIELD is the single source of truth for the accepted
+        # state; the per-column C_K is exactly its flattened form (the
+        # column-ordering contract). Rebuilding the config FROM the field cannot
+        # desync from initial_field, even after a rejected-round checkpoint.
+        initial_clubb = CLUBBLiteConfig(C_K=initial_field.reshape(-1))
         start_round = int(ckpt["round"]) + 1
         print(f"[campaign] resuming from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
     if args.checkpoint:
         def checkpoint_callback(round_idx, res, field):  # noqa: ARG001
+            # Persist the ACCEPTED accumulated `field` (post-gate base), NOT
+            # res.updated_config — under the monotonic gate a rejected round's
+            # updated_config is discarded while `field` stays the accepted state.
+            # C_K is stored for inspection only; resume reconstructs it from field.
+            flat = np.asarray(field).reshape(-1)
             with open(args.checkpoint, "w") as f:
                 json.dump({"round": int(round_idx),
-                           "C_K": np.asarray(res.updated_config.C_K).tolist(),
+                           "C_K": flat.tolist(),
                            "field": np.asarray(field).tolist()}, f)
 
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
@@ -390,15 +408,19 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         feedback_strategy=args.feedback_strategy,
+        accept_only_if_improved=not args.keep_worsening_rounds,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
+    accepted = list(result.accepted)
     for i, (b0, b1, imp) in enumerate(biases):
+        kept = accepted[i] if i < len(accepted) else True
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
-              f"({'IMPROVED' if imp else 'no improvement'})")
+              f"({'IMPROVED' if imp else 'no improvement'}; "
+              f"{'kept' if kept else 'REJECTED'})")
     with open(args.out, "w") as f:
         json.dump({"C_K": np.asarray(result.final_config.C_K).tolist(),
-                   "biases": biases}, f, indent=2)
+                   "biases": biases, "accepted": accepted}, f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     return 0
 

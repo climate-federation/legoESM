@@ -72,6 +72,8 @@ class CampaignResult(NamedTuple):
     final_config: Any
     iterations: tuple                  # the per-iteration CorrectionResults
     final_field: jax.Array             # the accumulated per-column field
+    accepted: tuple = ()               # per-round bool: was the round kept?
+                                       # (all True unless accept_only_if_improved)
 
 
 def run_correction_campaign(
@@ -92,6 +94,7 @@ def run_correction_campaign(
     checkpoint_callback: Callable[[int, CorrectionResult, jax.Array], None] | None = None,
     feedback_strategy: str = "static",
     env_grid_fn: Callable[[Any], tuple] | None = None,
+    accept_only_if_improved: bool = False,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -107,19 +110,38 @@ def run_correction_campaign(
     + ``initial_config`` (its corrected config) to RESUME — that field is the
     round-0 base instead of ``background``, so the accumulation continues
     seamlessly.  ``checkpoint_callback(round_index, result, accumulated_field)`` is
-    invoked after EVERY round so the caller can persist the corrected config + the
-    field; ``start_round`` offsets ``round_index`` for the checkpoint label on
-    resume.
+    invoked after EVERY round; ``start_round`` offsets ``round_index`` for the
+    checkpoint label on resume.  **The ``accumulated_field`` is the ACCEPTED
+    restart state** (post-gate base) and is the single source of truth — under the
+    monotonic gate a rejected round's ``result.updated_config`` is the DISCARDED
+    update, so persist/resume the config FROM ``accumulated_field`` (its flattened
+    column field), never from ``result.updated_config``.  ``result`` is for logging
+    (bias, ``n_corrected``).
 
-    Returns the final config + every round's :class:`CorrectionResult`.  The
-    overall bias change is ``iterations[0].bias.baseline_bias`` (first run) vs
-    ``iterations[-1].bias.updated_bias`` (final run).
+    **Monotonic acceptance** (``accept_only_if_improved``, the done-criterion
+    "updating these parameters IMPROVE the biases"): when true, a round is KEPT
+    only if its correction lowered the area-weighted global bias
+    (``result.bias.improved``); a worsening round is REJECTED — its config + field
+    are discarded and the next round restarts from the prior accepted (best-so-far)
+    base, so the accumulated field can never regress.  A no-op round (no flagged
+    columns) changes nothing and is vacuously accepted.  ``CampaignResult.accepted``
+    records the per-round decision.  Default false preserves the unconditional
+    accumulation used by the existing callers/tests.
+
+    Returns the final config + every round's :class:`CorrectionResult`.
+    ``final_config``/``final_field`` are the LAST ACCEPTED state (not necessarily
+    ``iterations[-1]``, which is retained for logging even if rejected).  With the
+    gate off every round is accepted, so the overall bias change is
+    ``iterations[0].bias.baseline_bias`` (first run) vs
+    ``iterations[-1].bias.updated_bias`` (final run); with the gate on, use the last
+    ACCEPTED round's ``updated_bias`` for the achieved bias.
     """
     if int(n_iterations) < 0:
         raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
     config = initial_config
     base = background if initial_field is None else initial_field
     iterations: list = []
+    accepted_flags: list = []
     for i in range(int(n_iterations)):
         result = run_correction_iteration(
             config,
@@ -130,22 +152,33 @@ def run_correction_campaign(
             les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         )
-        config = result.updated_config
-        base = result.feedback_field   # accumulate into the next round's base
-        iterations.append(result)
-        if checkpoint_callback is not None:
-            checkpoint_callback(int(start_round) + i, result, base)
-    if iterations:
-        final_field = iterations[-1].feedback_field
-    elif initial_field is not None:
-        final_field = jnp.asarray(initial_field).reshape(grid_shape)
-    else:
-        bg = jnp.asarray(background)
-        final_field = (
-            jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+        # Monotonic acceptance: keep the round only if it lowered the global bias.
+        # A no-op round (no flagged columns) changes nothing → vacuously accepted.
+        # A rejected round's worsening config + field are discarded; the next
+        # round restarts from the prior accepted base, so the field never regresses.
+        accepted = not (
+            accept_only_if_improved
+            and result.n_corrected > 0
+            and not bool(result.bias.improved)
         )
+        if accepted:
+            config = result.updated_config
+            base = result.feedback_field   # accumulate into the next round's base
+        iterations.append(result)
+        accepted_flags.append(accepted)
+        if checkpoint_callback is not None:
+            # Pass the ACCEPTED accumulated field so a checkpoint never persists a
+            # rejected (worsening) correction.
+            checkpoint_callback(int(start_round) + i, result, base)
+    # ``base`` is the last ACCEPTED accumulated field (or the round-0 base when no
+    # round was accepted / no iterations ran); reshape it to the grid uniformly.
+    bg = jnp.asarray(base)
+    final_field = (
+        jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
+    )
     return CampaignResult(
-        final_config=config, iterations=tuple(iterations), final_field=final_field
+        final_config=config, iterations=tuple(iterations),
+        final_field=final_field, accepted=tuple(accepted_flags),
     )
 
 

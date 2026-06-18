@@ -677,3 +677,134 @@ def test_campaign_environment_strategy_accumulates_across_rounds():
     np.testing.assert_allclose(ck, 0.9, atol=0.1)
     assert campaign.iterations[0].n_corrected == 1   # env A worst column
     assert campaign.iterations[1].n_corrected == 1   # env B worst column
+
+
+def _abs_target_setup(diag_for):
+    """compare_fn + diagnose where combined_score[col] = |C_K[col] - 1.0| on a
+    2x2 grid (uniform area weights). The single worst column is flagged each
+    round; ``diag_for(flat_index) -> C_K`` sets the diagnosed coefficient, so a
+    correction toward 1.0 lowers the global bias (improves) and one away raises
+    it (worsens) — a controllable improve/worsen knob for the acceptance gate."""
+    nlat, nlon = 2, 2
+    area_w = jnp.ones((nlat, nlon))
+    default_ck = float(CLUBBLiteConfig().C_K)
+    target = 1.0
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        ck2d = (jnp.broadcast_to(ck, (nlat, nlon)) if ck.ndim == 0
+                else ck.reshape((nlat, nlon)))
+        score = jnp.abs(ck2d - target)
+        flat = np.asarray(score).reshape(-1)
+        worst = [int(i) for i in np.argsort(-flat)[:1] if flat[i] > 1e-9]
+        manifest = [_Rec(flat_index=i, lat_deg=0.0, environment=_Env(0.0))
+                    for i in worst]
+        return CompareResult(combined_score=score, manifest=manifest,
+                             area_weights=area_w, model_ctx=None)
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([diag_for(record.flat_index)]),
+                     valid=jnp.array([True]))
+
+    return compare_fn, diagnose, default_ck
+
+
+def test_campaign_gate_rejects_worsening_round():
+    # A round whose correction RAISES the global bias is rejected: the config +
+    # field are discarded, leaving the unchanged scalar default.
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 5.0)  # away from 1.0
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True)
+    assert campaign.accepted == (False,)
+    assert not bool(campaign.iterations[0].bias.improved)
+    assert jnp.ndim(jnp.asarray(campaign.final_config.C_K)) == 0   # unchanged
+    np.testing.assert_allclose(np.asarray(campaign.final_field), dck)
+
+
+def test_campaign_gate_keeps_improving_round():
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 1.0)  # onto the target
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True)
+    assert campaign.accepted == (True,)
+    assert bool(campaign.iterations[0].bias.improved)
+    final_ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    assert final_ck[0] == pytest.approx(1.0)            # worst col corrected
+
+
+def test_campaign_gate_default_off_keeps_worsening_round():
+    # Backward compat: default accept_only_if_improved=False accumulates the
+    # worsening correction unconditionally (the prior loop semantics).
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 5.0)
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck)
+    assert campaign.accepted == (True,)                 # accepted unconditionally
+    final_ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    assert final_ck[0] == pytest.approx(5.0)            # worsening correction KEPT
+
+
+def test_campaign_gate_noop_round_vacuously_accepted():
+    # A round with no flagged columns changes nothing → accepted even under the gate.
+    def compare_fn(config):
+        return CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)), model_ctx=None)
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=lambda r, c: None, promotion_key="clubb_lite_C_K",
+        grid_shape=(2, 2), background=0.4, accept_only_if_improved=True)
+    assert campaign.accepted == (True,)
+    assert campaign.iterations[0].n_corrected == 0
+
+
+def test_campaign_gate_monotonic_two_rounds_no_regression():
+    # Round 0 (worst col 0, diag 1.0) IMPROVES → kept; round 1 (now worst col 1,
+    # diag 5.0) WORSENS → rejected. The accumulated field never regresses: the
+    # round-0 correction survives and the round-1 worsening is discarded.
+    compare_fn, diagnose, dck = _abs_target_setup(
+        lambda i: 1.0 if i == 0 else 5.0)
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=2, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True)
+    assert campaign.accepted == (True, False)
+    final_ck = np.asarray(campaign.final_config.C_K).reshape(-1)
+    assert final_ck[0] == pytest.approx(1.0)            # round-0 kept
+    assert final_ck[1] == pytest.approx(dck)            # round-1 rejected
+    # final field == the round-0 accepted field (best-so-far, no regression).
+    np.testing.assert_allclose(
+        np.asarray(campaign.final_field),
+        np.asarray(campaign.iterations[0].feedback_field))
+
+
+def test_campaign_checkpoint_field_is_accepted_not_rejected_config():
+    # Locks the HIGH checkpoint-desync fix: on a REJECTED round the
+    # checkpoint_callback receives the PRIOR accepted base (`field`), which
+    # DIVERGES from result.updated_config (the discarded worsening update). A
+    # caller MUST persist `field`, not result.updated_config — else resume loads a
+    # rejected C_K against an accepted field. This test would catch a revert.
+    compare_fn, diagnose, dck = _abs_target_setup(lambda _i: 5.0)  # worsens → reject
+    seen = []
+
+    def ckpt(round_idx, result, field):  # noqa: ARG001
+        seen.append((np.asarray(field).copy(),
+                     np.asarray(result.updated_config.C_K).copy(),
+                     bool(result.bias.improved)))
+
+    campaign = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True, checkpoint_callback=ckpt)
+
+    assert campaign.accepted == (False,)
+    field, rejected_ck, improved = seen[0]
+    assert not improved
+    # The DISCARDED updated_config carries the worsening 5.0 correction ...
+    assert np.any(np.isclose(rejected_ck, 5.0))
+    # ... but the checkpointed `field` is the ACCEPTED base (uniform default) —
+    # it must NOT contain the rejected 5.0, or resume would desync.
+    assert not np.any(np.isclose(field.reshape(-1), 5.0))
+    np.testing.assert_allclose(field, dck)

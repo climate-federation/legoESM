@@ -149,7 +149,11 @@ def test_build_correction_campaign_wiring_one_round():
         extract_column_state=extract, reference=reference, sigma=sigma, grid=grid,
         area_weights=jnp.ones((8, 16)), n_iterations=1,
         les_config=ColumnLESConfig(regime=_SMALL_REGIME),
-        run_les_fn=_mock_run_les, n_worst=1)
+        run_les_fn=_mock_run_les, n_worst=1,
+        # Test the config→model wiring (a per-column C_K is applied); the mock
+        # compare has no real improvement signal, so disable the monotonic gate
+        # that would otherwise reject this round (gate tested in test_correction_loop).
+        accept_only_if_improved=False)
 
     assert len(result.iterations) == 1
     it = result.iterations[0]
@@ -159,6 +163,34 @@ def test_build_correction_campaign_wiring_one_round():
     assert result.final_config.C_K.shape == (8 * 16,)
     assert np.isfinite(float(it.bias.baseline_bias))
     assert np.isfinite(float(it.bias.updated_bias))
+
+
+def test_build_correction_campaign_default_gate_rejects_non_improving():
+    """build_correction_campaign defaults the monotonic gate ON: the mock driver
+    returns a fixed state regardless of C_K, so the round does not lower the bias
+    and is REJECTED — the config stays the uncorrected scalar default."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les, n_worst=1)            # default gate ON
+
+    assert result.accepted == (False,)                  # non-improving → rejected
+    assert not bool(result.iterations[0].bias.improved)
+    assert jnp.ndim(jnp.asarray(result.final_config.C_K)) == 0  # unchanged default
 
 
 def test_make_base_driver_builder_dispatch():
@@ -244,12 +276,14 @@ def test_build_correction_campaign_checkpoint_passthrough():
     calls = []
 
     def ckpt(round_idx, res, field):
-        calls.append((round_idx, np.asarray(field).copy()))
+        calls.append((round_idx, np.asarray(field).copy(), res))
 
     # initial_field (resume base): every non-worst column keeps this value, so the
     # checkpointed accumulated field proves initial_field was forwarded + used.
+    # Gate OFF: this is the forwarding/wiring test (the gate is tested separately),
+    # so the round is accepted and the worst column gets a correction on top of base.
     init_field = jnp.full((8, 16), 0.55)
-    build_correction_campaign(
+    result = build_correction_campaign(
         base_atm_config=_base_config(),
         build_base_driver=lambda cfg: _FakeDriver(model_state),
         extract_column_state=lambda d, day, dt: d.state,
@@ -257,17 +291,25 @@ def test_build_correction_campaign_checkpoint_passthrough():
         area_weights=jnp.ones((8, 16)), n_iterations=1,
         les_config=ColumnLESConfig(regime=_SMALL_REGIME),
         run_les_fn=_mock_run_les, n_worst=1,
-        initial_field=init_field, start_round=7, checkpoint_callback=ckpt)
+        initial_field=init_field, start_round=7, checkpoint_callback=ckpt,
+        accept_only_if_improved=False)
 
     assert len(calls) == 1
-    round_idx, field = calls[0]
+    round_idx, field, res = calls[0]
     assert round_idx == 7            # start_round forwarded; callback fired once
-    field = field.reshape(-1)
+    flat = field.reshape(-1)
     worst = 4 * 16 + 8               # the +6 K worst column (row-major)
-    others = np.delete(field, worst)
+    others = np.delete(flat, worst)
     # Non-worst columns keep initial_field (0.55), NOT the default background 0.4
     # — so initial_field was genuinely forwarded + used as the round's base.
     np.testing.assert_allclose(others, 0.55)
+    # Resume contract (the CLI checkpoint fix relies on this): the persisted
+    # accumulated field IS the accepted state and its flattened form equals the
+    # accepted config's per-column C_K — so rebuilding the config FROM the field on
+    # resume cannot desync. (Accepted round ⇒ res.updated_config.C_K matches too.)
+    np.testing.assert_allclose(flat, np.asarray(res.updated_config.C_K))
+    np.testing.assert_allclose(
+        flat, np.asarray(result.final_config.C_K).reshape(-1))
 
 
 @pytest.mark.slow
@@ -292,7 +334,8 @@ def test_build_correction_campaign_environment_strategy():
         reference=reference, sigma=sigma, grid=grid,
         area_weights=jnp.ones((8, 16)), n_iterations=1,
         les_config=ColumnLESConfig(regime=_SMALL_REGIME),
-        run_les_fn=_mock_run_les, n_worst=1, feedback_strategy="environment")
+        run_les_fn=_mock_run_les, n_worst=1, feedback_strategy="environment",
+        accept_only_if_improved=False)  # wiring test; gate tested separately
 
     assert len(result.iterations) == 1
     ck = np.asarray(result.final_config.C_K)
