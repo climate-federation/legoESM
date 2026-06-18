@@ -164,6 +164,95 @@ class TestVerticalInterp:
         ))(jnp.float64(95000.0))
         assert jnp.isfinite(grad)
 
+    # ---- numerical contract (the shape/constant-field tests above are vacuous:
+    # a constant field hides bracketing / log-p / axis / extrapolation bugs) ----
+
+    _PLEV = jnp.array([5000., 10000., 25000., 50000., 85000., 100000.])  # ascending Pa
+
+    def test_logp_linear_field_is_exact_interior(self):
+        """A field linear in log-p, f = a + b·ln(p), must be reproduced EXACTLY by
+        log-p interpolation at interior targets (catches linear-in-p, wrong bracket,
+        or axis bugs that a constant field would not)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        a, b = 280.0, -8.0
+        f = (a + b * jnp.log(self._PLEV))[None, :]
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.1, 0.3, 0.6, 0.85, 0.99])     # p_target strictly in-range
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        p_t = np.asarray(sigma) * 1.0e5
+        np.testing.assert_allclose(out, a + b * np.log(p_t), rtol=1e-4)
+
+    def test_reproduces_values_at_source_levels(self):
+        """Target pressure exactly on a source level returns that level's value."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        p_s = jnp.array([100000.])
+        sigma = self._PLEV / 1.0e5                          # p_target == plev exactly
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        np.testing.assert_allclose(out, np.asarray(f)[0], rtol=1e-5)
+
+    def test_hold_constant_above_model_top(self):
+        """p_target below the lowest source level (above model top) holds f[0]."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        out = interp_pressure_to_sigma(
+            f, self._PLEV, jnp.array([100000.]), jnp.array([0.01]))   # p=1000 < 5000
+        assert float(out[0, 0]) == pytest.approx(200.0, abs=1e-5)
+
+    def test_hold_constant_below_surface(self):
+        """p_target above the highest source level (below surface) holds f[-1]."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        out = interp_pressure_to_sigma(
+            f, self._PLEV, jnp.array([110000.]), jnp.array([1.0]))    # p=110000 > 100000
+        assert float(out[0, 0]) == pytest.approx(285.0, abs=1e-5)
+
+    def test_per_column_surface_pressure_vectorized(self):
+        """Different p_s AND a different source profile per column: catches BOTH a
+        take_along_axis target-pressure broadcast bug AND a source-field
+        column-mixing bug (each column must use its OWN p_s and its OWN profile)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        coeffs = ((280.0, -8.0), (300.0, -12.0))     # distinct (a,b) per column
+        f = jnp.stack([a + b * jnp.log(self._PLEV) for a, b in coeffs])  # (2, 6), rows differ
+        p_s = jnp.array([100000., 60000.])           # column 1 surface = 600 hPa
+        sigma = jnp.array([0.5, 0.9])
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))
+        # each column's targets are sigma * its OWN p_s, all interior → exact log-p
+        # of THAT column's profile (a column-mix would pull the other (a,b)).
+        for c, ((a, b), ps) in enumerate(zip(coeffs, (100000.0, 60000.0))):
+            p_t = np.asarray(sigma) * ps
+            np.testing.assert_allclose(out[c], a + b * np.log(p_t), rtol=1e-4)
+
+    def test_monotone_field_no_overshoot(self):
+        """Interpolated values stay within the bracketing source values (the clamp
+        on alpha forbids overshoot)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])   # increasing with p
+        p_s = jnp.array([100000.])
+        sigma = jnp.linspace(0.02, 1.05, 40)                    # spans both extrapolations
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        assert out.min() >= 200.0 - 1e-4 and out.max() <= 285.0 + 1e-4
+
+    def test_gradient_wrt_field_nonconstant(self):
+        """Gradient flows through the (non-constant) source field with the EXACT
+        LOG-P weights: an interior target depends ONLY on its two bracketing levels,
+        and d/df equals the log-pressure interpolation weight (a linear-in-PRESSURE
+        interpolator with the same bracket would give a DIFFERENT, wrong weight)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f0 = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.6])                 # p_t=60000 ∈ (50000, 85000) → levels 3,4
+        g = jax.grad(lambda f: interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma).sum())(f0)
+        g = np.asarray(g)[0]
+        # exact log-p weight on the UPPER bracket level (index 4 @ 85000 Pa):
+        alpha = (np.log(60000.0) - np.log(50000.0)) / (np.log(85000.0) - np.log(50000.0))
+        # distinct from the linear-in-pressure weight 10000/35000≈0.286 → this asserts log-p.
+        assert abs(alpha - 10000.0 / 35000.0) > 0.05
+        np.testing.assert_allclose(g[4], alpha, rtol=1e-4)        # d/df[4] = alpha (log-p)
+        np.testing.assert_allclose(g[3], 1.0 - alpha, rtol=1e-4)  # d/df[3] = 1-alpha
+        assert np.allclose(g[[0, 1, 2, 5]], 0.0)                  # non-bracket levels unused
+
 
 # ---------------------------------------------------------------------------
 # 2. losses
