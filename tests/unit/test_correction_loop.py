@@ -489,3 +489,95 @@ def test_les_budget_nonpositive_raises():
             promotion_key="gray_tau_equator", grid_shape=(2, 3), background=7.2,
             les_budget=0,
         )
+
+
+# --- restartable campaign: checkpoint + resume (iter 41) --------------------
+
+def _accum_campaign_fns(nlat=2, nlon=2):
+    """compare_fn/diagnose for the accumulation scenario (a column is 'corrected'
+    once its C_K differs from the default; the 2 worst uncorrected columns flag)."""
+    area_w = jnp.ones((nlat, nlon))
+    default_ck = float(CLUBBLiteConfig().C_K)
+
+    def _manifest_from_bias(bias):
+        flat = np.asarray(bias).reshape(-1)
+        worst = [i for i in np.argsort(-flat)[:2] if flat[i] > 0.0]
+        return [_Rec(flat_index=int(i), lat_deg=0.0, environment=_Env(0.0))
+                for i in worst]
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim == 0:
+            bias = jnp.full((nlat, nlon), 8.0)
+        else:
+            ck2d = ck.reshape((nlat, nlon))
+            bias = jnp.where(jnp.isclose(ck2d, default_ck), 8.0, 0.0)
+        return CompareResult(
+            combined_score=bias, manifest=_manifest_from_bias(bias),
+            area_weights=area_w, model_ctx=None)
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))
+
+    return compare_fn, diagnose, default_ck
+
+
+def test_campaign_checkpoint_callback_per_round():
+    """checkpoint_callback fires once per round with (start_round+i, result,
+    accumulated_field); the field grows as corrections accumulate."""
+    compare_fn, diagnose, default_ck = _accum_campaign_fns()
+    calls = []
+
+    def ckpt(round_idx, result, field):
+        calls.append((round_idx, result.n_corrected, np.asarray(field).copy()))
+
+    run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=2, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=default_ck, start_round=5, checkpoint_callback=ckpt)
+
+    assert [c[0] for c in calls] == [5, 6]          # start_round offset
+    assert all(c[1] == 2 for c in calls)            # 2 corrected per round
+    # the checkpointed field accumulates (round 6 ≥ round 5 corrected columns).
+    n5 = int(np.count_nonzero(np.isclose(calls[0][2].reshape(-1), 0.9)))
+    n6 = int(np.count_nonzero(np.isclose(calls[1][2].reshape(-1), 0.9)))
+    assert n6 >= n5 and n6 == 4
+
+
+def test_campaign_resume_equals_uninterrupted():
+    """Splitting a 2-round campaign into round-0 + a RESUMED round-1 (from the
+    saved config + accumulated field) gives the SAME final config/field as the
+    uninterrupted 2-round run — restart is seamless."""
+    compare_fn, diagnose, default_ck = _accum_campaign_fns()
+    kw = dict(compare_fn=compare_fn, diagnose_fn=diagnose,
+              promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+              background=default_ck)
+
+    full = run_correction_campaign(CLUBBLiteConfig(), n_iterations=2, **kw)
+    part1 = run_correction_campaign(CLUBBLiteConfig(), n_iterations=1, **kw)
+    resumed = run_correction_campaign(
+        part1.final_config, n_iterations=1,
+        initial_field=part1.final_field, start_round=1, **kw)
+
+    np.testing.assert_allclose(
+        np.asarray(resumed.final_config.C_K), np.asarray(full.final_config.C_K))
+    np.testing.assert_allclose(
+        np.asarray(resumed.final_field), np.asarray(full.final_field))
+    # The resumed first round reproduces the full campaign's SECOND round.
+    np.testing.assert_allclose(
+        np.asarray(resumed.iterations[0].updated_config.C_K),
+        np.asarray(full.iterations[1].updated_config.C_K))
+
+
+def test_campaign_resume_zero_iterations_returns_initial_field():
+    """n_iterations=0 on resume returns the supplied initial_field (the resume
+    base) as the final field — NOT the scalar background."""
+    field = jnp.full((2, 2), 0.7)
+    camp = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=0,
+        compare_fn=lambda c: CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2))),
+        diagnose_fn=lambda r, c: None,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=0.4,
+        initial_field=field)
+    assert camp.iterations == ()
+    np.testing.assert_allclose(np.asarray(camp.final_field), 0.7)  # not 0.4

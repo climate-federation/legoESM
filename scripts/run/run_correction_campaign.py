@@ -122,6 +122,9 @@ def build_correction_campaign(
     initial_clubb: Any | None = None,
     lat_deg: Any | None = None,
     lon_deg: Any | None = None,
+    initial_field: Any | None = None,
+    start_round: int = 0,
+    checkpoint_callback: Any | None = None,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -131,7 +134,10 @@ def build_correction_campaign(
     :func:`~legoesm.training.correction_loop.run_correction_campaign` for
     ``n_iterations`` rounds (``les_budget`` caps the LES count by environment
     clustering).  ``grid_shape`` is taken from ``reference.T`` (the model grid).
-    Returns the :class:`CampaignResult`.
+
+    Restart (§1): pass ``initial_clubb`` + ``initial_field`` + ``start_round`` to
+    RESUME a checkpointed campaign, and ``checkpoint_callback(round, result,
+    field)`` to persist each round.  Returns the :class:`CampaignResult`.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -162,6 +168,8 @@ def build_correction_campaign(
         compare_fn=compare_fn, diagnose_fn=diagnose_fn,
         promotion_key="clubb_lite_C_K", grid_shape=grid_shape,
         background=background, les_budget=les_budget, env_scales=env_scales,
+        initial_field=initial_field, start_round=start_round,
+        checkpoint_callback=checkpoint_callback,
     )
 
 
@@ -237,6 +245,10 @@ def _build_arg_parser():
     p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
+    p.add_argument("--checkpoint", default=None,
+                   help="write a per-round checkpoint JSON (restartable campaign)")
+    p.add_argument("--resume", default=None,
+                   help="resume from a --checkpoint JSON (continues the accumulation)")
     return p
 
 
@@ -330,6 +342,27 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         args.era5_time_idx)
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
+    # Restart: resume from a checkpoint (corrected config + accumulated field +
+    # round), so a multi-day campaign survives a job timeout (§1 restartable).
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    initial_clubb, initial_field, start_round = None, None, 0
+    if args.resume:
+        with open(args.resume) as f:
+            ckpt = json.load(f)
+        initial_clubb = CLUBBLiteConfig(C_K=jnp.asarray(ckpt["C_K"]))
+        initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
+        start_round = int(ckpt["round"]) + 1
+        print(f"[campaign] resuming from {args.resume} at round {start_round}")
+
+    checkpoint_callback = None
+    if args.checkpoint:
+        def checkpoint_callback(round_idx, res, field):  # noqa: ARG001
+            with open(args.checkpoint, "w") as f:
+                json.dump({"round": int(round_idx),
+                           "C_K": np.asarray(res.updated_config.C_K).tolist(),
+                           "field": np.asarray(field).tolist()}, f)
+
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -338,11 +371,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         les_config=ColumnLESConfig(), n_worst=args.n_worst,
         les_budget=args.les_budget,
         run_les_fn=partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps),
+        initial_clubb=initial_clubb, initial_field=initial_field,
+        start_round=start_round, checkpoint_callback=checkpoint_callback,
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
     for i, (b0, b1, imp) in enumerate(biases):
-        print(f"[campaign] round {i}: bias {b0:.5g} -> {b1:.5g} "
+        print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
               f"({'IMPROVED' if imp else 'no improvement'})")
     with open(args.out, "w") as f:
         json.dump({"C_K": np.asarray(result.final_config.C_K).tolist(),

@@ -79,7 +79,7 @@ def run_correction_campaign(
     initial_config: Any,
     n_iterations: int,
     *,
-    compare_fn: Callable[[Any], "CompareResult"],
+    compare_fn: Callable[[Any], CompareResult],
     diagnose_fn: Callable[[Any, Any], Any],
     promotion_key: str,
     grid_shape: tuple[int, ...],
@@ -88,6 +88,9 @@ def run_correction_campaign(
     expected_ncol: int | None = None,
     les_budget: int | None = None,
     env_scales: Sequence[float] | None = None,
+    initial_field: jax.Array | None = None,
+    start_round: int = 0,
+    checkpoint_callback: Callable[[int, CorrectionResult, jax.Array], None] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -98,6 +101,15 @@ def run_correction_campaign(
     of round *k* becomes the **background** of round *k+1*, accumulating).
     ``background`` is the production scalar default used as the round-0 base.
 
+    **Restartable** (§1, for the HPC campaign that may outlive a job): pass
+    ``initial_field`` (the accumulated feedback field of the last completed round)
+    + ``initial_config`` (its corrected config) to RESUME — that field is the
+    round-0 base instead of ``background``, so the accumulation continues
+    seamlessly.  ``checkpoint_callback(round_index, result, accumulated_field)`` is
+    invoked after EVERY round so the caller can persist the corrected config + the
+    field; ``start_round`` offsets ``round_index`` for the checkpoint label on
+    resume.
+
     Returns the final config + every round's :class:`CorrectionResult`.  The
     overall bias change is ``iterations[0].bias.baseline_bias`` (first run) vs
     ``iterations[-1].bias.updated_bias`` (final run).
@@ -105,9 +117,9 @@ def run_correction_campaign(
     if int(n_iterations) < 0:
         raise ValueError(f"n_iterations must be >= 0, got {n_iterations}.")
     config = initial_config
-    base = background
+    base = background if initial_field is None else initial_field
     iterations: list = []
-    for _ in range(int(n_iterations)):
+    for i in range(int(n_iterations)):
         result = run_correction_iteration(
             config,
             compare_fn=compare_fn, diagnose_fn=diagnose_fn,
@@ -119,8 +131,12 @@ def run_correction_campaign(
         config = result.updated_config
         base = result.feedback_field   # accumulate into the next round's base
         iterations.append(result)
+        if checkpoint_callback is not None:
+            checkpoint_callback(int(start_round) + i, result, base)
     if iterations:
         final_field = iterations[-1].feedback_field
+    elif initial_field is not None:
+        final_field = jnp.asarray(initial_field).reshape(grid_shape)
     else:
         bg = jnp.asarray(background)
         final_field = (
