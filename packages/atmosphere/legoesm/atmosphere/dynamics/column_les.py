@@ -20,7 +20,8 @@ manifest lives in ``scripts/run/run_column_les.py`` (imports this module).
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -67,6 +68,9 @@ class ColumnLESConfig(NamedTuple):
     # module's default "turbulence developed" threshold.
     gate_les_realism: bool = True
     les_realism_wp2_floor: float | None = None
+    # Thermodynamic-drift threshold [K] (iter 66): reject a turbulent + finite but
+    # DRIFTED LES (mean θ wandered off the GCM column). None ⇒ the module default.
+    les_realism_theta_drift_K: float | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -79,6 +83,14 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
         raise ValueError(f"relax_tau_s must be > 0, got {config.relax_tau_s}.")
     if config.p_sfc_Pa <= 0.0:
         raise ValueError(f"p_sfc_Pa must be > 0, got {config.p_sfc_Pa}.")
+    # Realism-gate thresholds: None ⇒ the diagnosis module default; an explicit
+    # value must be finite + positive (0 / negative / NaN / inf would silently
+    # reject every column — a confusing footgun, Codex iter-66).
+    for _name, _v in (("les_realism_wp2_floor", config.les_realism_wp2_floor),
+                      ("les_realism_theta_drift_K", config.les_realism_theta_drift_K)):
+        if _v is not None and not (0.0 < _v < float("inf")):
+            raise ValueError(
+                f"{_name} must be None or a finite positive value, got {_v}.")
     # clubb_coefficient (single OR one of the multi methods) needs l_mix_max.
     active_methods = (
         config.diagnosis_methods
@@ -236,6 +248,7 @@ def run_column_les_pipeline(
     l_mix_max: float | None = None,
     gate_realism: bool = True,
     realism_wp2_floor: float | None = None,
+    realism_theta_drift_K: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
@@ -260,8 +273,12 @@ def run_column_les_pipeline(
     every method in the diagnose-many path.
     """
     final_state = run_les_fn(setup)
-    # realism_wp2_floor=None ⇒ column_les_realism uses its own (module-default) floor.
-    realism_kw = {} if realism_wp2_floor is None else {"wp2_floor": realism_wp2_floor}
+    # None ⇒ column_les_realism uses its own (module-default) threshold for each.
+    realism_kw = {}
+    if realism_wp2_floor is not None:
+        realism_kw["wp2_floor"] = realism_wp2_floor
+    if realism_theta_drift_K is not None:
+        realism_kw["theta_drift_rms_max_K"] = realism_theta_drift_K
     realistic = (
         column_les_realism(final_state, setup.height_coord, **realism_kw)
         if gate_realism else jnp.asarray(True)
@@ -439,5 +456,6 @@ def process_column(
         methods=config.diagnosis_methods, l_mix_max=config.clubb_l_mix_max,
         gate_realism=config.gate_les_realism,
         realism_wp2_floor=config.les_realism_wp2_floor,
+        realism_theta_drift_K=config.les_realism_theta_drift_K,
     )
 

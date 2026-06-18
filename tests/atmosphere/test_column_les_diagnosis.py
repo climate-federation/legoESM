@@ -326,6 +326,25 @@ def test_column_les_realism_nonfinite_is_unrealistic():
     assert not bool(column_les_realism(blown, hc))
 
 
+def test_column_les_realism_rejects_thermo_drift():
+    """iter 66: a turbulent + finite LES whose mean θ drifted off the GCM column
+    reference is rejected (the §9 temperature/MSE-drift gap)."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    # The shear fixture's θ' is a zero-MEAN checkerboard (pure fluctuation) — the
+    # mean state sits on the reference, so it passes (turbulent + finite + consistent).
+    state, hc = _les_state_with_shear()
+    assert bool(column_les_realism(state, hc))
+    # Add a uniform +6 K offset to θ' → the mean state drifted 6 K (> the 3 K
+    # default) — rejected, even though it stays turbulent + finite. Turbulent
+    # FLUCTUATIONS are unchanged (the offset is horizontally uniform), so only the
+    # mean-drift term fires.
+    drifted = state._replace(theta_prime=state.theta_prime.replace(
+        data=state.theta_prime.data + 6.0))
+    assert not bool(column_les_realism(drifted, hc))
+    # The drift is the ONLY failure: a looser configured threshold accepts it.
+    assert bool(column_les_realism(drifted, hc, theta_drift_rms_max_K=20.0))
+
+
 def test_gate_diagnosis_realism_invalidates():
     from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
     prof = ClubbCoefficientProfile(

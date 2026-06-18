@@ -5,7 +5,8 @@ a flagged column reaches statistical steady state, turn its resolved turbulent
 fluxes into the per-column closure coefficient that feeds the spatially-varying
 parameter field.  This is the glue between the two already-tested leaves:
 
-* resolved fluxes — :func:`legoesm.atmosphere.dynamics.rce_diagnostics.resolved_turbulent_fluxes_plane`,
+* resolved fluxes —
+  :func:`legoesm.atmosphere.dynamics.rce_diagnostics.resolved_turbulent_fluxes_plane`,
 * closure inversion — :mod:`legoesm.atmosphere.dynamics.les_closure_diagnosis`.
 
 Two methods (selected by ``method``; an unknown method raises — dispatch
@@ -30,8 +31,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
-from legoesm import constants
 from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
     EntrainmentDiagnosis,
     c_eps_from_budget,
@@ -48,6 +47,8 @@ from legoesm.atmosphere.dynamics.rce_diagnostics import (
 )
 from legoesm.atmosphere.physics._shared import mixing_length
 
+from legoesm import constants
+
 _METHODS = (
     "eddy_diffusivity", "entrainment", "clubb_coefficient", "prandtl_number",
     "c_eps",
@@ -63,31 +64,56 @@ _MIN_VALID_CK_LEVELS = 3
 # column_les_realism); a campaign can tune it via ColumnLESConfig.
 _REALISM_WP2_FLOOR = 1.0e-3
 
+# Thermodynamic-drift threshold [K]: the RMS over levels of the LES HORIZONTAL-MEAN
+# θ′ (its drift from the GCM column reference θ(z) — ``theta_prime = θ − hc.theta_ref``
+# and ``hc.theta_ref`` is the GCM column θ interpolated to the LES grid, so a
+# CONSISTENT LES has mean θ′ ≈ 0). Above this the LES mean state wandered off the
+# column it represents → distrust its diagnosis. RMS (not max) is robust to a single
+# sharp inversion level while catching a broad drift. Conservative default; the
+# downstream bounds + line-search + monotonic gate backstop a marginally-bad value,
+# so erring strict (a false-reject merely keeps the background) is the safe bias.
+# Regime-sensitive (stable / convective differ) and configurable via ColumnLESConfig.
+_THETA_DRIFT_RMS_MAX_K = 3.0
 
-def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR):
+
+def _thermo_drift_rms(theta_prime: jax.Array) -> jax.Array:
+    """RMS over levels of the horizontal-mean θ′ — the LES mean's drift from the
+    GCM column reference (``mean(θ′, horizontal)`` per level, then RMS over levels)."""
+    mean_thp = jnp.mean(theta_prime, axis=(0, 1))      # (nlev,) horizontal mean
+    return jnp.sqrt(jnp.mean(mean_thp ** 2))
+
+
+def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
+                       theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K):
     """Coarse TRUST gate on a finished column LES (``docs/COMPARE_REANALYSIS.md`` §9):
-    did it develop turbulence AND stay finite?  Returns a TRACED scalar bool.
+    did it develop turbulence, stay finite, AND stay thermodynamically near the
+    column it represents?  Returns a TRACED scalar bool.
 
-    A dead/laminar LES (peak resolved ``w'²`` below ``wp2_floor``) or a blown-up
-    one (any non-finite field) carries NO trustworthy turbulence signal, so the
-    loop should keep the column's BACKGROUND coefficient rather than inject a
-    finite-but-meaningless diagnosis (which the bounds + non-finite guards would
-    not otherwise catch).
+    A dead/laminar LES (peak resolved ``w'²`` below ``wp2_floor``), a blown-up one
+    (any non-finite field), OR a DRIFTED one (its horizontal-mean θ′ wandered off
+    the GCM column reference θ(z) by more than ``theta_drift_rms_max_K``) carries no
+    trustworthy turbulence signal, so the loop keeps the column's BACKGROUND
+    coefficient rather than inject a finite-but-meaningless diagnosis (which the
+    bounds + non-finite guards would not otherwise catch).
 
-    **NECESSARY, NOT SUFFICIENT.**  This checks turbulence-liveness + finiteness,
-    NOT the full RCE realism (CWV plateau / precip ≈ 3 mm/day / MSE drift, §9) — a
-    turbulent but thermodynamically-wrong LES (bad forcing/radiation/condensation)
-    can still pass and inject a bad coefficient (a residual gap).  A legitimately
-    quiescent stable column correctly FAILS this gate (no turbulent signal ⇒ the
-    background is the right answer), which is a correct outcome, not a false
-    negative.  ``wp2_floor`` is regime-sensitive (stable / stratocumulus / deep
-    convection differ) and configurable.  Pure-JAX (a boolean mask; no NaN grad).
+    The thermodynamic term (iter 66) closes the TEMPERATURE/MSE-drift part of the
+    documented §9 gap: a turbulent + finite LES whose mean potential temperature
+    drifted off the column (bad forcing/radiation/condensation) is now rejected.
+    Still NOT the FULL RCE realism — the moisture side (CWV plateau / precip ≈
+    3 mm/day) needs the reference q threaded in (the LES tracer q is absolute, not a
+    perturbation) and remains a follow-up.  A legitimately quiescent stable column
+    correctly FAILS the turbulence term (no signal ⇒ the background is right), a
+    correct outcome, not a false negative.  Thresholds are regime-sensitive and
+    configurable.  Pure-JAX (a boolean mask; no NaN grad — ``&`` is logical-and on
+    bool scalars, and ``NaN < thr`` is ``False`` so a non-finite field still rejects).
     """
+    thp = jnp.asarray(les_state.theta_prime.data)
     wp2 = vertical_velocity_variance_plane(les_state, height_coord)
     turbulent = jnp.max(wp2) > jnp.asarray(wp2_floor, dtype=wp2.dtype)
-    finite = (jnp.all(jnp.isfinite(wp2))
-              & jnp.all(jnp.isfinite(les_state.theta_prime.data)))
-    return turbulent & finite
+    finite = jnp.all(jnp.isfinite(wp2)) & jnp.all(jnp.isfinite(thp))
+    thermo_consistent = (
+        _thermo_drift_rms(thp) < jnp.asarray(theta_drift_rms_max_K, dtype=thp.dtype))
+    return turbulent & finite & thermo_consistent
 
 
 def gate_diagnosis_realism(diagnosis, realistic):
