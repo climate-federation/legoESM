@@ -10,11 +10,15 @@ time mean, which then feeds :func:`compare_state_to_reference` as ``model``.
 The accumulator is a clean pytree carry (running field sums + a sample count), so
 it works either as a ``lax.scan`` carry over the integration *or* by folding a
 list of restart snapshots (:func:`time_mean_column_states`).  ``jax.tree``
-handles the optional ``precip_mm_day`` / ``sst_K`` fields automatically — a
-``None`` field is an empty pytree subtree, so it is preserved (never summed), and
-accumulating a state whose optional fields differ in presence raises a structure
-mismatch (loud), not a silent drop.  Pure-JAX and differentiable w.r.t. the
-accumulated states.
+handles the optional ``precip_mm_day`` / ``sst_K`` / ``u_edge`` fields
+automatically — a ``None`` field is an empty pytree subtree, so it is preserved
+(never summed), and accumulating a state whose optional fields differ in presence
+raises a structure mismatch (loud), not a silent drop.  The optional ``u_edge``
+(native MPAS edge velocity, ``nEdges`` cardinality — not a per-column field) is
+summed/meaned like any present leaf; this is CONSISTENT with the meaned cell
+``u``/``v`` because the Perot reconstruction is linear
+(``mean(reconstruct(u_edge)) == reconstruct(mean(u_edge))``).  Pure-JAX and
+differentiable w.r.t. the accumulated states.
 
 Precision: a plain running SUM is exact in float64 (the model's ``x64`` mode) for
 the sample counts of a climatology, but in float32 a long series risks

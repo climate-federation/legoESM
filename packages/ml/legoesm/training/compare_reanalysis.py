@@ -54,6 +54,17 @@ class ColumnState(NamedTuple):
     ``precip_mm_day`` is an optional ``[...]`` surface field; ``sst_K`` is the
     optional surface temperature used only for environment tagging — the
     prescribed SST under AMIP or the coupled-ocean SST under CMIP.
+
+    ``u_edge`` is NOT a per-column comparison field: it is optional NATIVE MPAS
+    metadata — the edge-normal velocity ``(nEdges, nlev)`` (a DIFFERENT cardinality
+    from the cell fields) carried so the LES-forcing extractor can compute the
+    exact native-edge divergence/ω for an MPAS worst column (the comparison itself
+    uses the cell-reconstructed ``u``/``v``).  ``None`` for cell-wind grids
+    (lat-lon / cubed-sphere) and for any ERA5 reference state.  The comparison
+    (``_validate_aligned`` / RMSE) ignores it — it checks only the named cell
+    fields — and the time-mean accumulator means it like any other present leaf
+    (consistent: Perot reconstruction is linear, so mean(reconstruct(u_edge)) ==
+    reconstruct(mean(u_edge))).
     """
 
     T: jax.Array
@@ -63,6 +74,7 @@ class ColumnState(NamedTuple):
     p_s: jax.Array
     precip_mm_day: jax.Array | None = None
     sst_K: jax.Array | None = None
+    u_edge: jax.Array | None = None
 
 
 class ColumnComparison(NamedTuple):
@@ -370,9 +382,14 @@ def column_state_from_hydrostatic(
         u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
         u_cell = jnp.asarray(u_cell, dtype=dt)
         v_cell = jnp.asarray(v_cell, dtype=dt)
+        # Carry the NATIVE edge velocity for the LES-forcing extractor (the exact
+        # divergence/ω needs the edge-normal velocity, which the cell wind cannot
+        # recover) — the comparison still uses the reconstructed cell u/v above.
+        u_edge_native = u_edge
     else:
         u_cell = jnp.asarray(_arr(atm_state.u), dtype=dt)
         v_cell = jnp.asarray(_arr(v_field), dtype=dt)
+        u_edge_native = None
     return ColumnState(
         T=T,
         q_v=jnp.asarray(q_v, dtype=dt),
@@ -380,4 +397,5 @@ def column_state_from_hydrostatic(
         v=v_cell,
         p_s=jnp.asarray(_arr(atm_state.p_s), dtype=dt),
         precip_mm_day=precip_mm_day, sst_K=sst_K,
+        u_edge=u_edge_native,
     )

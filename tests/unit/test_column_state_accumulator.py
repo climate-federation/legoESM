@@ -61,6 +61,48 @@ def test_optional_field_preserved_when_absent():
     np.testing.assert_allclose(np.asarray(mean.T), 282.0, rtol=1e-12)
 
 
+def _mpas_state(scale, *, n_cells=6, n_edges=15, nlev=5):
+    """An MPAS-like ColumnState carrying the optional native u_edge (nEdges,nlev)
+    — a DIFFERENT cardinality from the (nCells,nlev) cell fields."""
+    return ColumnState(
+        T=jnp.full((n_cells, nlev), 280.0 + scale),
+        q_v=jnp.full((n_cells, nlev), 5e-3),
+        u=jnp.full((n_cells, nlev), scale),
+        v=jnp.full((n_cells, nlev), -scale),
+        p_s=jnp.full((n_cells,), 1.0e5),
+        u_edge=jnp.full((n_edges, nlev), 3.0 + scale),
+    )
+
+
+def test_accumulator_means_optional_u_edge_array():
+    """The native MPAS u_edge (nEdges cardinality) is meaned like any present leaf
+    — the accumulator's generic tree.map handles the off-cardinality field."""
+    a, b = _mpas_state(0.0), _mpas_state(4.0)
+    mean = time_mean_column_states([a, b])
+    assert mean.u_edge is not None and mean.u_edge.shape == (15, 5)
+    np.testing.assert_allclose(np.asarray(mean.u_edge), 5.0, rtol=1e-12)   # (3+7)/2
+    np.testing.assert_allclose(np.asarray(mean.T), 282.0, rtol=1e-12)
+
+
+def test_accumulator_preserves_u_edge_none_for_cell_grids():
+    """A cell-wind (lat-lon/cubed) state has u_edge=None ⇒ preserved (not summed)."""
+    a, b = _state(1.0), _state(3.0)
+    assert a.u_edge is None
+    mean = time_mean_column_states([a, b])
+    assert mean.u_edge is None
+
+
+def test_u_edge_presence_mismatch_raises():
+    """Mixing an MPAS (u_edge present) and a cell-wind (u_edge=None) state in one
+    accumulation is a structure mismatch — raised loudly (same as precip/sst)."""
+    acc = init_column_accumulator(_mpas_state(0.0))
+    cell = ColumnState(
+        T=jnp.zeros((6, 5)), q_v=jnp.zeros((6, 5)), u=jnp.zeros((6, 5)),
+        v=jnp.zeros((6, 5)), p_s=jnp.zeros((6,)))          # u_edge=None
+    with pytest.raises(ValueError, match="structure mismatch"):
+        accumulate_column_state(acc, cell)
+
+
 def test_optional_field_structure_mismatch_raises_both_directions():
     """Accumulating a state whose optional fields differ in presence is a bug —
     the explicit treedef check raises the SAME deterministic ValueError in BOTH

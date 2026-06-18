@@ -358,6 +358,10 @@ def test_mpas_edge_state_reconstructs_cell_wind():
     np.testing.assert_allclose(np.asarray(cs.v), np.asarray(v_ref), rtol=1e-5)
     assert cs.u.dtype == cs.T.dtype          # condition-4 dtype cast
     assert np.all(np.isfinite(np.asarray(cs.u)))
+    # The NATIVE edge velocity is carried for the LES-forcing extractor (iter 76).
+    assert cs.u_edge is not None and cs.u_edge.shape == (mesh.nEdges, nlev)
+    np.testing.assert_array_equal(
+        np.asarray(cs.u_edge), np.asarray(state.u.data))
 
 
 def test_mpas_state_without_mesh_raises():
@@ -401,6 +405,7 @@ def test_latlon_state_passthrough_ignores_mesh():
     cs = column_state_from_hydrostatic(state, q_v, mesh=object())  # mesh ignored
     np.testing.assert_array_equal(np.asarray(cs.u), 7.0)
     np.testing.assert_array_equal(np.asarray(cs.v), -2.0)
+    assert cs.u_edge is None          # cell-wind grid → no native edge velocity
 
 
 def test_mpas_compare_end_to_end_flags_worst_cell():

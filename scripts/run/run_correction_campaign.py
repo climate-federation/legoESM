@@ -89,11 +89,30 @@ def make_les_diagnose_fn(
     from legoesm.atmosphere.dynamics.column_les import process_column
 
     def diagnose_fn(record: Any, model_ctx: Any) -> Any:
+        u_edge = getattr(model_ctx, "u_edge", None)
+        if u_edge is not None:
+            # MPAS: the comparison state carries the NATIVE edge-normal velocity;
+            # the Voronoi forcing extractor takes u=u_edge, v=None (iter 73).  The
+            # model grid MUST be the VoronoiMesh — guard against an accidental
+            # u_edge on a non-MPAS model_ctx (Codex) before the dispatch.
+            from legoesm.grids.voronoi import VoronoiMesh
+            if not isinstance(grid, VoronoiMesh):
+                raise ValueError(
+                    "make_les_diagnose_fn: model_ctx carries u_edge (an MPAS edge "
+                    f"velocity) but grid is {type(grid).__name__}, not a VoronoiMesh "
+                    "— grid/state mismatch."
+                )
+            return process_column(
+                record,
+                T=model_ctx.T, q_v=model_ctx.q_v, u=u_edge, v=None,
+                p_s=model_ctx.p_s,
+                grid=grid, sigma=sigma, config=les_config, run_les_fn=run_les_fn,
+            )
         if getattr(model_ctx, "u", None) is None or getattr(model_ctx, "v", None) is None:
             raise ValueError(
                 "make_les_diagnose_fn: model_ctx needs cell-centred u/v for the "
-                "column-LES forcing extraction (an MPAS edge-velocity state is "
-                "not supported)."
+                "column-LES forcing extraction (a cell-wind grid with missing "
+                "winds; an MPAS state must carry u_edge)."
             )
         return process_column(
             record,

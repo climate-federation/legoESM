@@ -121,6 +121,64 @@ def test_make_les_diagnose_fn_runs_process_column():
     assert bool(jnp.all(jnp.isfinite(out.K)))
 
 
+def test_make_les_diagnose_fn_mpas_routes_edge_velocity():
+    """An MPAS worst column spins off its LES end-to-end (iter 76): the model_ctx
+    carries the native u_edge, make_les_diagnose_fn routes it to the Voronoi
+    forcing extractor (grid=mesh, v=None), and the mock LES yields a diagnosis."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    diagnose_fn = make_les_diagnose_fn(
+        mesh, sigma, les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les)
+
+    # An MPAS ColumnState: cell T/q_v/p_s + the NATIVE edge velocity in u_edge.
+    u_edge = 6.0 * jnp.cos(jnp.asarray(mesh.angleEdge))[:, None] * jnp.ones((1, nlev))
+    mpas_ctx = ColumnState(
+        T=jnp.full((mesh.nCells, nlev), 285.0),
+        q_v=jnp.full((mesh.nCells, nlev), 6e-3),
+        u=jnp.zeros((mesh.nCells, nlev)),     # cell winds present but unused (routed)
+        v=jnp.zeros((mesh.nCells, nlev)),
+        p_s=jnp.full((mesh.nCells,), 1.0e5),
+        u_edge=u_edge)
+
+    cell = 40
+
+    class _Env:
+        cape_J_kg = 200.0  # noqa: N815
+
+    class _Rec:
+        grid_index = (cell,)                  # arity-1 cell index for MPAS
+        lat_deg = float(np.rad2deg(np.asarray(mesh.latCell)[cell]))
+        environment = _Env()
+
+    out = diagnose_fn(_Rec(), mpas_ctx)
+    assert out.K.shape == (_SMALL_RES.nlev - 1,)
+    assert bool(jnp.all(jnp.isfinite(out.K)))
+
+
+def test_make_les_diagnose_fn_mpas_u_edge_on_wrong_grid_raises():
+    """u_edge set but a non-Voronoi grid → loud grid/state mismatch (Codex)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, create_sigma_coordinate(5),
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME), run_les_fn=_mock_run_les)
+    ctx = _full_grid_state()._replace(u_edge=jnp.zeros((10, 5)))
+
+    class _Rec:
+        grid_index = (4, 8)
+        lat_deg = 20.0
+
+    with pytest.raises(ValueError, match="not a VoronoiMesh"):
+        diagnose_fn(_Rec(), ctx)
+
+
 @pytest.mark.slow
 def test_build_correction_campaign_wiring_one_round():
     """WIRING test: the whole campaign composes + runs one round with a mock
