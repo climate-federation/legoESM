@@ -52,7 +52,13 @@ def _group(rows):
             continue
         if nd <= 0 or not math.isfinite(mc) or mc <= 0:
             continue
-        mode = "strong" if r.get("mode") == "strong" else "weak"
+        raw_mode = (r.get("mode") or "").strip()
+        if raw_mode == "strong":
+            mode = "strong"
+        elif raw_mode in ("weak", "weak_band", "weak_aspect"):
+            mode = "weak"
+        else:
+            continue  # unknown/typo mode -> skip (never silently mislabel)
         key = (r.get("grid"), r.get("precision"), r.get("backend"))
         d = g[(r.get("component"), mode)][key]
         d[nd] = max(d.get(nd, 0.0), mc)
@@ -78,6 +84,7 @@ def make_figure(rows, out_dir: Path) -> Path:
     for ax, (comp, mode) in zip(axes.flat, PANELS):
         curves = g.get((comp, mode), {})
         all_n = set()
+        max_y = 1.0
         for (grid, prec, backend), nd_to_mc in sorted(curves.items()):
             pts = efficiency_curve(nd_to_mc)
             if len(pts) < 1:
@@ -85,15 +92,18 @@ def make_figure(rows, out_dir: Path) -> Path:
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
             all_n.update(xs)
+            max_y = max(max_y, max(ys))
             ax.plot(xs, ys, marker=BACK_MK.get(backend, "x"),
                     color=GRID_COLOR.get(grid, "#777777"),
                     linestyle=PREC_LS.get(prec, ":"),
                     label=f"{grid} {prec[-2:]} {backend}")
         if all_n:
-            lo, hi = min(all_n), max(all_n)
-            ax.plot([lo, hi], [1.0, 1.0], "k--", alpha=0.5, lw=1, label="ideal")
+            # axhline (not a 2-point line) so a single-device panel still draws
+            # the ideal reference; dynamic upper bound so superlinear / noisy
+            # efficiencies (>1) are not clipped (codex review).
+            ax.axhline(1.0, color="k", ls="--", alpha=0.5, lw=1, label="ideal")
             ax.set_xscale("log", base=2)
-            ax.set_ylim(0.0, 1.25)
+            ax.set_ylim(0.0, max(1.25, 1.05 * max_y))
             ax.legend(fontsize=7, ncol=2)
         else:
             ax.text(0.5, 0.5, "no data", ha="center", va="center",

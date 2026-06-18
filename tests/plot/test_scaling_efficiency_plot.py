@@ -74,3 +74,32 @@ def test_make_figure_writes_png(tmp_path):
 def test_make_figure_empty(tmp_path):
     out = plot_mod.make_figure([], tmp_path)
     assert out.exists()
+
+
+def test_group_skips_unknown_mode_keeps_weak_band():
+    """codex: unknown/typo mode must be SKIPPED (not silently -> weak);
+    weak_band/weak_aspect map to the weak panel."""
+    rows = [
+        {"component": "ocean", "grid": "latlon", "precision": "float64",
+         "mode": "weak_band", "backend": "CPU", "n_devices": "8",
+         "mcells_per_s": "9"},
+        {"component": "atm", "grid": "latlon", "precision": "float64",
+         "mode": "wek", "backend": "CPU", "n_devices": "2",   # typo -> skip
+         "mcells_per_s": "10"},
+    ]
+    g = plot_mod._group(rows)
+    assert ("ocean", "weak") in g            # weak_band -> weak
+    assert ("atm", "weak") not in g          # typo skipped, not mislabeled
+
+
+def test_make_figure_superlinear_not_clipped(tmp_path):
+    """codex: efficiency > 1.25 (superlinear/noise) must not be silently clipped
+    — make_figure renders without error for such data."""
+    rows = [
+        {"component": "ocean", "grid": "latlon", "precision": "float64",
+         "mode": "strong", "backend": "CPU", "n_devices": "8", "mcells_per_s": "10"},
+        {"component": "ocean", "grid": "latlon", "precision": "float64",
+         "mode": "strong", "backend": "CPU", "n_devices": "16", "mcells_per_s": "30"},
+    ]  # E(16) = 30*8/(16*10) = 1.5 (superlinear)
+    out = plot_mod.make_figure(rows, tmp_path)
+    assert out.exists() and out.stat().st_size > 0
