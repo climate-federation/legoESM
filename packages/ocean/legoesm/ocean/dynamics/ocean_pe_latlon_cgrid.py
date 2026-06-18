@@ -70,6 +70,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     bilaplacian_cgrid,
     laplacian_cgrid,
+    flux_divergence_bilaplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
@@ -2060,6 +2061,21 @@ def _bc_horizontal_viscosity(
     _use_flux_div = _visc_op == "flux_divergence"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
+    def _biharmonic_op(uu, vv):
+        """∇⁴ operator matched to the lateral-viscosity family: the component
+        ``flux_divergence`` biharmonic (MITgcm-faithful per-component del4, stable)
+        when ``lateral_viscosity_operator="flux_divergence"``, else the vector
+        ``grad(div)−curl(curl)`` biharmonic."""
+        if _use_flux_div:
+            return flux_divergence_bilaplacian_cgrid(
+                uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        # Thread the precomputed ``vertex_mask`` so the vector biharmonic reuses the
+        # cached vertex mask instead of recomputing it (a per-step
+        # ``compute_vertex_mask`` + N-S pole-BC halo) every call.
+        return vector_bilaplacian_cgrid(
+            uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
+
     if _use_flux_div and config.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
@@ -2106,10 +2122,9 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
         if config.B_h > 0:
-            # Biharmonic is a separate (vector-Laplacian) operator, unaffected by the
-            # A_h operator choice: ∇⁴ = ∇²_vec(∇²_vec).
-            bilap_u, bilap_v = vector_bilaplacian_cgrid(
-                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+            # Biharmonic matched to the operator family (component for
+            # flux_divergence — MITgcm-faithful + stable; vector otherwise).
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             if config.B_h_lat_scaling:
                 scale_u, scale_v = biharmonic_scaling_factor(grid)
                 diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
@@ -2246,10 +2261,7 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
     elif config.B_h > 0:
-        bilap_u, bilap_v = vector_bilaplacian_cgrid(
-            u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+        bilap_u, bilap_v = _biharmonic_op(u, v)
         if config.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).

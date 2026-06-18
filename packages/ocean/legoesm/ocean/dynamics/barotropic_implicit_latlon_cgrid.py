@@ -1354,13 +1354,22 @@ def barotropic_implicit_latlon_cgrid(
             V_old + dt_t * (-g * grad_y_eta_old + cor_v.astype(eta_dtype) + F_slow_v)
         ) * v_mask
     else:
+        # Forward-backward face-f Coriolis on the barotropic mode — UNLESS
+        # coriolis_scheme="explicit_ab2", where the planetary Coriolis already
+        # entered the 3-D du_dt (AB2-extrapolated) and its depth-mean is carried
+        # in F_slow_u/v; the solver must then NOT add its own f×U_bt again (no
+        # double count).  This mirrors the rigid-lid solver's
+        # ``add_barotropic_coriolis`` gate (ocean_model_latlon_cgrid.py) and the
+        # outer Matsuno-Coriolis skip.  _cori_fac=1.0 for every other scheme
+        # (Matsuno split / default) keeps the original FB Coriolis bit-identical.
+        _cori_fac = 0.0 if getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2" else 1.0
         # V at u-points (4-pt average over surrounding v-faces)
         V_west = jnp.roll(V_old, 1, axis=1)
         V_at_u = 0.25 * (V_old[:-1] + V_old[1:] + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
         U_pred = (
-            U_old + dt_t * (-g * grad_x_eta_old + f_u * V_at_u + F_slow_u)
+            U_old + dt_t * (-g * grad_x_eta_old + _cori_fac * f_u * V_at_u + F_slow_u)
         ) * u_mask
 
         # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
@@ -1373,7 +1382,7 @@ def barotropic_implicit_latlon_cgrid(
         U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
 
         V_pred = (
-            V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
+            V_old + dt_t * (-g * grad_y_eta_old - _cori_fac * f_v * U_pred_at_v + F_slow_v)
         ) * v_mask
 
     # ----- Step 5: build elliptic RHS and solve ------------------------

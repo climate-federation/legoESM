@@ -1161,7 +1161,13 @@ def no_slip_sidedrag_cgrid(
     v_north = vmask[1:, :]       # (n_lat, n_lon+1): north vertex
     closed_s = u_mask * (1.0 - v_south)
     closed_n = u_mask * (1.0 - v_north)
-    inv_dy2_u = 1.0 / (grid.dy_u.astype(u.dtype) ** 2)
+    # Guard 1/Δ² against zero-length faces (e.g. the polar boundary v-faces on a
+    # spherical grid where dx_v = R·cos(lat_v)·dlon → 0): those faces are masked
+    # out (closed/u_mask = 0) so the drag is zero there, but an unguarded 1/0=inf
+    # times the 0 mask is NaN.  On uniform-metric grids (beta-plane) Δ>0 so this
+    # is bit-identical.
+    _dy_u = grid.dy_u.astype(u.dtype)
+    inv_dy2_u = jnp.where(_dy_u > 0.0, 1.0 / (_dy_u ** 2), 0.0)
     du_drag = -(2.0 * A_h) * _b(closed_s + closed_n, u) * u * _b(inv_dy2_u, u)
     du_drag = du_drag * _b(u_mask, du_drag)
 
@@ -1170,7 +1176,9 @@ def no_slip_sidedrag_cgrid(
     v_east = vmask[:, 1:]        # (n_lat+1, n_lon): east vertex
     closed_w = v_mask * (1.0 - v_west)
     closed_e = v_mask * (1.0 - v_east)
-    inv_dx2_v = 1.0 / (grid.dx_v.astype(v.dtype) ** 2)
+    # Guard against zero-length v-faces (polar boundary: dx_v → 0); see the u note.
+    _dx_v = grid.dx_v.astype(v.dtype)
+    inv_dx2_v = jnp.where(_dx_v > 0.0, 1.0 / (_dx_v ** 2), 0.0)
     dv_drag = -(2.0 * A_h) * _b(closed_w + closed_e, v) * v * _b(inv_dx2_v, v)
     dv_drag = dv_drag * _b(v_mask, dv_drag)
 
@@ -1213,6 +1221,47 @@ def vector_bilaplacian_cgrid(
     bilap_u, bilap_v = vector_laplacian_cgrid(
         vlap_u, vlap_v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
         vertex_mask=vertex_mask)
+    return bilap_u, bilap_v
+
+
+def flux_divergence_bilaplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    cos_power: int = 0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""COMPONENT-WISE biharmonic ``∇⁴(u, v)`` = ``∇²(∇²(u, v))`` per component.
+
+    Applies the component harmonic friction :func:`flux_divergence_viscosity_cgrid`
+    (with unit coefficient) TWICE — the scale-selective analogue of the harmonic
+    ``flux_divergence`` Laplacian, and the FAITHFUL form of MITgcm's ``viscA4``
+    biharmonic (``useStrainTensionVisc=.FALSE.`` ⇒ a per-component ``del4``, NOT
+    the vector ``grad(div) − curl(curl)`` biharmonic of
+    :func:`vector_bilaplacian_cgrid`).  The biharmonic tendency is
+    ``∂ₜu = −B_h·∇⁴u`` (same sign convention as ``vector_bilaplacian_cgrid``).
+
+    WHY a separate operator: the vector biharmonic's ``grad(div)``/``curl(curl)``
+    composition is ill-scaled on a uniform-Cartesian / near-degenerate (1-column)
+    C-grid — it returns a value ~``dx⁴`` too large (an unphysical ``O(u)`` instead
+    of ``O(u/dx⁴)``) and blows the integration up within a few steps, whereas this
+    component form telescopes a clean 5-point ``∇²`` twice and stays at the correct
+    ``u/dx⁴`` scale (front_relax baroclinic oracle).
+
+    Reuses ``flux_divergence_viscosity_cgrid`` verbatim (its metric, masking, and
+    cos-scaling), so momentum conservation + free-slip wall handling are inherited.
+    """
+    lap_u, lap_v, _ = flux_divergence_viscosity_cgrid(
+        u, v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
+    bilap_u, bilap_v, _ = flux_divergence_viscosity_cgrid(
+        lap_u, lap_v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
     return bilap_u, bilap_v
 
 

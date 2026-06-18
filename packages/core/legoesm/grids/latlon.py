@@ -1519,6 +1519,7 @@ def create_beta_plane_cgrid_geometry(
     y_origin_m: float = 0.0,
     x_origin_m: float = 0.0,
     radius: float = constants.R_earth,
+    cartesian_pseudo_lat: bool = False,
     dtype=None,
 ) -> LatLonCGridGeometry:
     r"""Cartesian **beta-plane** C-grid geometry (an f/beta-plane closed box).
@@ -1541,10 +1542,16 @@ def create_beta_plane_cgrid_geometry(
     Boundary scope: the barotropic solvers wall the northernmost and
     southernmost v-faces (``_zero_polar_lat_ends``), so this geometry is for a
     **meridionally CLOSED** domain (basin / re-entrant-in-x channel). A domain
-    periodic in *y* is NOT supported. Validity: the legacy pseudo-``lat`` is
-    ``y_c / radius``; keep ``max|y_c| << radius`` (true for tutorial-scale boxes,
-    ``|lat| <~ 0.2 rad``) so any residual ``radius*dlon*cos(lat)`` fallback path
-    stays equal to the uniform ``dx_m`` the explicit metrics promise.
+    periodic in *y* is NOT supported.  Pass ``cartesian_pseudo_lat=True`` to pin
+    the pseudo-``lat`` at **0** (a Cartesian tangent plane has ``cos_lat ≡ 1``):
+    operators that recompute ``cos(grid.lat)`` for a metric (``divergence_cgrid``
+    v-face length, flux-form advection) then stay EXACTLY equal to the uniform
+    ``dx_m`` the explicit metrics promise — a
+    non-zero ``y_c/radius`` pseudo-lat leaves a ``1−cos(y_c/radius)`` (~1.8% at
+    ``|y_c|/radius=0.19``) grad/div metric mismatch that makes the IMPLICIT free
+    surface non-conservative and (on the marginally-resolved gyre) flips the WBC
+    turbulent.  The meridional position is carried by ``f = f0 + beta·y_c``, not
+    the pseudo-lat.
 
     Parameters
     ----------
@@ -1564,6 +1571,12 @@ def create_beta_plane_cgrid_geometry(
         Nominal sphere radius [m]; does NOT enter the (explicit) Cartesian
         metrics — only seeds the legacy pseudo-``lat``/``lon`` and the
         ``dlon``/``dlat`` consistency sentinels (``radius * dlon = dx_m``).
+    cartesian_pseudo_lat : bool
+        When ``True``, pin the pseudo-``lat`` to 0 so the operators that recompute
+        ``cos(grid.lat)`` for a metric agree with the uniform ``cos_lat=1`` metric
+        fields (required for an energy-conserving IMPLICIT free surface — see the
+        Boundary-scope note and the MITgcm gyre recipe).  Default ``False`` keeps
+        the legacy ``lat = y_c/radius``.
 
     Returns
     -------
@@ -1614,9 +1627,32 @@ def create_beta_plane_cgrid_geometry(
     cos_alpha_v = jnp.ones((n_lat + 1, n_lon), dtype=dtype)
     sin_alpha_v = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
 
-    # Legacy pseudo-coordinates (used only for diagnostics / polar filter
-    # labelling, never for the explicit Cartesian metrics above).
-    lat_1d = y_c / radius
+    # Pseudo-coordinates for diagnostics / polar-filter labelling.
+    #
+    # ``cartesian_pseudo_lat=True`` pins ``lat ≡ 0``.  Two C-grid operators
+    # (``divergence_cgrid``'s v-face length ``R·cos(lat_v)·dlon`` and the flux-form
+    # momentum advection's ``cos(lat_v)`` transport metric) RECOMPUTE
+    # ``cos(grid.lat)`` instead of reading the ``cos_lat=1`` metric field, so a
+    # non-zero ``y_c/radius`` pseudo-lat injects a ``1−cos(y_c/radius)`` (≈1.8% at
+    # ``|y_c|/radius=0.19``) mismatch between the zonal GRADIENT metric
+    # (``dx_u = R·dlon·cos_lat = dx_m``) and the DIVERGENCE v-face metric —
+    # breaking the discrete grad/div adjointness the IMPLICIT free-surface
+    # projection relies on.  On the marginally-resolved (Munk δ≈1.7-cell)
+    # wind-driven gyre that ~1% non-conservative leak flips the western-boundary
+    # current from laminar to a turbulent attractor (MITgcm tutorial_barotropic_gyre
+    # stays at |u|max≈0.031; with a non-zero pseudo-lat legoESM overshoots to
+    # 0.066+).  A Cartesian tangent plane has cos_lat≡1, so lat≡0 is the
+    # self-consistent value; the meridional position lives in ``f = f0 + beta·y_c``.
+    #
+    # DEFAULT False keeps the legacy ``lat = y_c/radius`` for backward
+    # compatibility.  (A prior latent issue — the explicit-substep barotropic
+    # solver / any vorticity-based operator blew up on a consistent-metric
+    # beta-plane because ``curl_vertex_cgrid`` recomputed the vertex area as
+    # ``R²·dlon·|Δsin(lat)|``, which collapses to 0 when ``lat≡0`` — was ROOT-CAUSED
+    # and FIXED by having the curl read the grid's stored ``area_q``; ``lat=0`` is
+    # now safe for every solver.)  Opt in (the MITgcm gyre + front_relax recipes
+    # do) for the metric-consistent implicit free-surface fidelity path.
+    lat_1d = jnp.zeros_like(y_c) if cartesian_pseudo_lat else (y_c / radius)
     lon_1d = x_c / radius
     lat_t = _c(lat_1d[:, None]) * jnp.ones((n_lat, n_lon), dtype=dtype)
     lon_t = _c(lon_1d[None, :]) * jnp.ones((n_lat, n_lon), dtype=dtype)

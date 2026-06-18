@@ -1,6 +1,42 @@
 # MITgcm barotropic-gyre oracle: the residual is the free-surface SPLIT, not the momentum scheme
 
-**Status (2026-06-17, revised):** root cause *localized by direct measurement* to the
+## RESOLVED 2026-06-18 (iteration 7): a cos-lat METRIC INCONSISTENCY in the beta-plane grid
+
+The turbulent overshoot is **fixed**. Root cause, found by a clean *dynamic operator bisect*
+(`scripts/tmp/_gyre_swap_bisect.py`) + a grid-metric audit:
+
+1. **Operators are innocent.** Swapping the production advection / Coriolis / viscosity operators
+   ONE AT A TIME into the bit-exact laminar faithful stepper (which keeps a DIRECT unsplit
+   Helmholtz free-surface solve) leaves every run laminar (|u|max 0.030 at step 6000, vs the
+   baseline 0.030). Coriolis is bit-identical (corr 1.0); advection +1.5%, viscosity ~0.8% — none
+   destabilises. So the explicit momentum operators are NOT the source.
+2. **The culprit was the beta-plane grid metric.** `create_beta_plane_cgrid_geometry` set
+   `cos_lat ≡ 1` (uniform Cartesian metric) but stored a non-zero pseudo-`lat = y_c/radius`
+   (up to 0.19 rad). `gradient_x_cgrid` uses the metric field (`dx_u = R·dlon·cos_lat = dx_m`,
+   uniform), but `divergence_cgrid` (v-face length) and the flux-form advection **recompute**
+   `R·cos(grid.lat)·dlon` — which is 0.982·dx_m at the north edge. (The viscosity operator
+   `flux_divergence_viscosity_cgrid` reads `grid.cos_lat` and is NOT affected.) That ~1.8%
+   grad↔div metric mismatch breaks the discrete adjointness the implicit free-surface projection
+   relies on → a ~1%/step non-conservative energy source. On the
+   marginally-resolved (Munk δ≈1.7-cell) gyre that flips the WBC from laminar to a turbulent
+   attractor.
+3. **Fix:** set the beta-plane pseudo-`lat ≡ 0` (a Cartesian tangent plane has `cos_lat ≡ 1`;
+   the meridional position lives in `f = f0 + beta·y_c`, untouched). Then every `cos(grid.lat)`
+   recompute returns 1, matching the explicit metrics. **Measured: the FULL production
+   `LatLonCGridOceanModel` (both the recipe-default Sadourny-Coriolis path AND the explicit-AB2
+   path) now spins up LAMINAR and monotone toward |u|max≈0.031 / |v|max≈0.084** instead of
+   overshooting to 0.066+. The earlier "free-surface split projection leaks energy" framing below
+   was right that the FS solve was the amplifier, but the *source* was the grid metric feeding it —
+   not the split structure (an unsplit production path inherits the same metric and the SAME fix
+   cures both).
+
+Decisive probes: `scripts/tmp/_gyre_swap_bisect.py` (operator bisect), `_gyre_op_compare2.py`
+(per-term + power budget), `_gyre_latzero_test.py` (lat=0 → laminar), `_gyre_prod_equil.py`
+(recipe equilibrium). Fix in `packages/core/legoesm/grids/latlon.py::create_beta_plane_cgrid_geometry`.
+
+---
+
+**Status (2026-06-17, revised) [SUPERSEDED by the RESOLVED block above]:** root cause *localized by direct measurement* to the
 **barotropic free-surface predictor–corrector projection** in legoESM's split solver. An
 earlier version of this note (commit `5ba07e726`) attributed the residual to a non-energy-
 conserving *momentum* scheme and prescribed an Arakawa/Sadourny Coriolis + enstrophy-conserving

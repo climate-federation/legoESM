@@ -117,3 +117,26 @@ def test_unknown_lateral_side_bc_raises_at_step():
     s = gyre.build_gyre_state(z)
     with pytest.raises(ValueError, match="lateral_side_bc must be one of"):
         model.step(s, gyre.DT_S, surface_forcing=gyre.build_gyre_wind())
+
+
+def test_sidedrag_finite_on_spherical_grid_with_zero_length_polar_faces():
+    """Regression: on a SPHERICAL grid the v-face zonal length
+    ``dx_v = R·cos(lat_v)·dlon`` is 0 at the polar boundary faces; the unguarded
+    ``1/dx_v²`` was inf there and ``inf·0`` (mask) → NaN, blowing up any no-slip run
+    on a non-Cartesian grid (the MITgcm baroclinic-gyre oracle).  The ``where(Δ>0)``
+    guard makes the drag finite (and zero on those masked faces).  Non-vacuous:
+    before the guard this produced NaN."""
+    from legoesm.grids.latlon import create_regional_latlon_grid, ensure_geometry
+    grid, wall = create_regional_latlon_grid(
+        30, 20, lat_south=15.0, lat_north=75.0, lon_west=0.0, lon_east=20.0)
+    g = ensure_geometry(grid)
+    assert bool((np.asarray(g.dx_v) == 0.0).any())     # polar faces ARE zero-length
+    m = np.asarray(wall)
+    # Face masks = product of the two adjacent cell masks (closed-basin walls).
+    um = np.pad(m, ((0, 0), (1, 0))) * np.pad(m, ((0, 0), (0, 1)))
+    vm = np.pad(m, ((1, 0), (0, 0))) * np.pad(m, ((0, 1), (0, 0)))
+    u = jnp.ones((g.n_lat, g.n_lon + 1))
+    v = jnp.ones((g.n_lat + 1, g.n_lon))
+    du, dv = no_slip_sidedrag_cgrid(
+        u, v, g, 5000.0, u_mask=jnp.asarray(um), v_mask=jnp.asarray(vm), mask=jnp.asarray(m))
+    assert np.all(np.isfinite(np.asarray(du))) and np.all(np.isfinite(np.asarray(dv)))

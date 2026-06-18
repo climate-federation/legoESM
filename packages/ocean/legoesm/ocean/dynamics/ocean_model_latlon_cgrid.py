@@ -1241,18 +1241,35 @@ class LatLonCGridOceanModel:
                     "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
-            if config.barotropic_solver != "rigid_lid":
+            if config.barotropic_solver not in ("rigid_lid", "implicit_cn"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'barotropic_solver="rigid_lid": the explicit Coriolis '
+                    'barotropic_solver in ("rigid_lid","implicit_cn"): the explicit Coriolis '
                     "tendency reaches the barotropic mode through its depth-mean "
                     "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
                     "vloc, the depth-integral of du including Coriolis), and the "
-                    "rigid-lid solver's own f×u_bt addition is gated off to avoid "
-                    "double-counting. The split-explicit / implicit-CN free-"
-                    "surface solvers instead sub-step the barotropic Coriolis on "
-                    "the barotropic gravity-wave clock (different physics, not "
-                    f"covered). Got barotropic_solver={config.barotropic_solver!r}.")
+                    "solver's own f×U_bt addition is gated off to avoid "
+                    "double-counting (rigid_lid: add_barotropic_coriolis=False; "
+                    "implicit_cn: _cori_fac=0 in the FB predictor). The "
+                    "explicit-substep (split-explicit) solver instead sub-steps "
+                    "the barotropic Coriolis on the gravity-wave clock (different "
+                    "physics, not covered). Got barotropic_solver="
+                    f"{config.barotropic_solver!r}.")
+            if getattr(config, "coriolis_energy_conserving", False):
+                raise ValueError(
+                    'coriolis_scheme="explicit_ab2" is incompatible with '
+                    "coriolis_energy_conserving=True: under explicit_ab2 the "
+                    "planetary Coriolis enters du_dt via the FACE-f coriolis_cgrid "
+                    "and its depth-mean is carried into the barotropic predictor "
+                    "through F_slow. The implicit_cn solver then gates its own FB "
+                    "Coriolis off (_cori_fac=0) only in the face-f branch; the "
+                    "VERTEX-f energy-conserving branch is NOT gated, so enabling it "
+                    "here would both double-count the barotropic Coriolis and mix a "
+                    "vertex-f barotropic term with a face-f du_dt term (physically "
+                    "inconsistent). Use coriolis_energy_conserving=False with "
+                    "explicit_ab2 (the MITgcm-faithful face-f form), or switch to "
+                    "the Matsuno split scheme for the vertex-f energy-conserving "
+                    "Coriolis.")
 
         # AB2 extrapolation scope (Veros-faithful dissipative placement). The
         # "advective" scope withholds the dissipative tendencies from the AB2
