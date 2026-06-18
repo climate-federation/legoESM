@@ -66,12 +66,22 @@ class _FakeGrid:
 
 
 def test_grid_lat_lon_deg_uniform_accessor():
+    import numpy as np
+
     lat = jnp.deg2rad(jnp.array([[0.0, 10.0], [20.0, 30.0]]))
     lon = jnp.deg2rad(jnp.array([[100.0, 110.0], [120.0, 130.0]]))
     grid = _FakeGrid(lat, lon)
     lat_d, lon_d = drv.grid_lat_lon_deg(grid)
-    assert float(lat_d[1, 1]) == pytest.approx(30.0, abs=1e-6)
-    assert float(lon_d[0, 1]) == pytest.approx(110.0, abs=1e-6)
+    # The accessor matches the CANONICAL rad→deg of the same inputs at the grid's
+    # NATIVE precision (float32 by default). The previous literal abs=1e-6 was tighter
+    # than the float32 deg→rad→deg roundtrip (≈1.9e-6 deg at 30°), so it passed ONLY
+    # under the x64 leak from another test file (jax_enable_x64 set at import) — an
+    # order-dependent flaky test that fails in isolation / under xdist sharding (iter 108).
+    np.testing.assert_allclose(np.asarray(lat_d), np.rad2deg(np.asarray(lat)), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(lon_d), np.rad2deg(np.asarray(lon)), rtol=1e-6)
+    # the [1,1] / [0,1] cells are 30° / 110° (float32-safe tolerance).
+    assert float(lat_d[1, 1]) == pytest.approx(30.0, abs=1e-4)
+    assert float(lon_d[0, 1]) == pytest.approx(110.0, abs=1e-4)
 
 
 class _FakeState:
@@ -147,9 +157,9 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
             T=state.T, q_v=q_v, u=state.u, v=state.v, p_s=state.p_s
         )
 
+    import legoesm.driver.restart as restart
     import legoesm.grids.factory as factory
     import legoesm.grids.vertical as vertical
-    import legoesm.driver.restart as restart
     import legoesm.training.era5_to_state as e2s
 
     monkeypatch.setattr(factory, "create_grid", fake_create_grid)
