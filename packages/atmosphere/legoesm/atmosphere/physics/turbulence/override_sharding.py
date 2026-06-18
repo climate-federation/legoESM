@@ -30,16 +30,17 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     ``layout`` is the active MPI layout (``LatLonBandLayout`` — a latitude band, or
     ``LatLon2DLayout`` — a lat×lon pencil).  Returns ``override`` UNCHANGED when no
     slicing is needed (non-clubb scheme, all-scalar fields, or per-column fields not
-    at the global column count — i.e. already rank-local).  Auto-localization is
-    lat-lon-only: under a non-lat-lon decomposition (e.g. cubed-sphere) the override
-    is passed THROUGH unchanged (honoring an advanced user who pre-sliced per rank
-    via :func:`legoesm.training.deploy_correction.slice_override_columns`); a GLOBAL
-    override there is unsupported and fails LOUDLY downstream in
-    ``broadcast_column_param`` (a length mismatch), never silently.
+    at the global column count — i.e. already rank-local).  Supports lat-lon
+    (``LatLonBandLayout`` / ``LatLon2DLayout``) AND cubed-sphere
+    (``DistributedLayout`` face-only / tiled, via the model's ``scatter``).  An
+    UNRECOGNIZED decomposition passes the override THROUGH unchanged (honoring an
+    advanced user who pre-sliced per rank via
+    :func:`legoesm.training.deploy_correction.slice_override_columns`); a GLOBAL
+    override there fails LOUDLY downstream in ``broadcast_column_param`` (a length
+    mismatch), never silently.
     """
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    from legoesm.parallel.latlon_mpi import LatLon2DLayout, LatLonBandLayout
 
     if getattr(override, "scheme", None) != "clubb_lite":
         return override  # only clubb_lite carries per-column coefficient fields
@@ -52,27 +53,21 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     if not per_column:
         return override  # all-scalar override broadcasts on every rank unchanged
 
-    if isinstance(layout, LatLon2DLayout):
-        def _slice2d(f2d):
-            return f2d[layout.lat_start:layout.lat_end,
-                       layout.lon_start:layout.lon_end]
-    elif isinstance(layout, LatLonBandLayout):
-        def _slice2d(f2d):
-            return f2d[layout.lat_start:layout.lat_end, :]  # lon not split
-    else:
-        # A non-lat-lon decomposition (e.g. cubed-sphere) has no (n_lat, n_lon)
-        # global shape to slice against — auto-localization is lat-lon-only. Pass
+    part = _layout_partition(layout)
+    if part is None:
+        # An unrecognized decomposition has no global shape to slice against. Pass
         # the override THROUGH so an advanced user who pre-sliced it per rank (the
         # `slice_override_columns` escape hatch) is honored; a GLOBAL override here
-        # is genuinely unsupported and fails LOUDLY downstream in
-        # broadcast_column_param (a global-vs-local length mismatch), never silently.
+        # fails LOUDLY downstream in broadcast_column_param (a length mismatch),
+        # never silently.
         return override
-
-    n_lat, n_lon = int(layout.n_lat_global), int(layout.n_lon_global)
-    ncol = n_lat * n_lon
+    global_shape, slice_to_local = part
+    ncol = 1
+    for dim in global_shape:
+        ncol *= int(dim)
     lengths = {int(a.shape[0]) for a in per_column.values()}
     if lengths == {ncol}:
-        sliced = {f: _slice2d(a.reshape(n_lat, n_lon)).reshape(-1)
+        sliced = {f: slice_to_local(a.reshape(global_shape)).reshape(-1)
                   for f, a in per_column.items()}
         return TurbulenceConfig(
             scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))
@@ -82,3 +77,49 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
             f"(some match the global ncol {ncol}, some do not); every corrected "
             "field must span the same global grid.")
     return override  # already rank-local (or a different grid) → leave as-is
+
+
+def _layout_partition(layout):
+    """``(global_shape, slice_to_local)`` for a supported MPI layout, else ``None``.
+
+    ``global_shape`` is the per-column field's native horizontal shape (``(n_lat,
+    n_lon)`` for lat-lon, ``(6, n, n)`` for cubed-sphere) and ``slice_to_local`` is
+    the rank's deterministic block extractor — reusing the MODEL's own partition
+    (the lat-lon band/2-D slice, or :func:`legoesm.parallel.layout.scatter` for
+    cubed-sphere face-only / tiled), so the local override lands on EXACTLY the
+    columns the rank's physics consumes.  ``None`` ⇒ an unrecognized decomposition.
+    """
+    from legoesm.parallel.comm import CommTopology
+    from legoesm.parallel.latlon_mpi import LatLon2DLayout, LatLonBandLayout
+    from legoesm.parallel.layout import (
+        DistributedLayout,
+        SingleRankLayout,
+        scatter,
+    )
+
+    if isinstance(layout, LatLon2DLayout):
+        return ((layout.n_lat_global, layout.n_lon_global),
+                lambda f: f[layout.lat_start:layout.lat_end,
+                            layout.lon_start:layout.lon_end])
+    if isinstance(layout, LatLonBandLayout):
+        return ((layout.n_lat_global, layout.n_lon_global),
+                lambda f: f[layout.lat_start:layout.lat_end, :])  # lon not split
+    if isinstance(layout, CommTopology):
+        # Cubed-sphere: get_mpi_topology() returns the halo CommTopology, but the
+        # COLUMN partition (carrying global_n) is the active DistributedLayout.
+        from legoesm.parallel.distributed import get_active_layout
+
+        layout = get_active_layout()
+        if layout is None:
+            # A cubed halo topology is active but no column layout was registered
+            # (initialize_distributed needs global_n). Fail LOUDLY + clearly here
+            # rather than passing a global override through to a cryptic downstream
+            # length error.
+            raise RuntimeError(
+                "cubed-sphere MPI is active but no DistributedLayout is registered "
+                "(call initialize_distributed(global_n=...)); cannot localize the "
+                "per-column turbulence override.")
+    if isinstance(layout, (DistributedLayout, SingleRankLayout)):  # cubed-sphere
+        n = int(layout.global_n)
+        return ((6, n, n), lambda f: scatter(f, layout))
+    return None

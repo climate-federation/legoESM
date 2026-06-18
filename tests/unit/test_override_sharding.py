@@ -85,24 +85,104 @@ def test_none_passthrough():
 
 
 # --------------------------------------------------------------------------- #
-# Loud failures.
+# Cubed-sphere: reuse the model's own `scatter` partition (face-only + tiled).
 # --------------------------------------------------------------------------- #
-class _CubedLayout:
-    """Stand-in for a non-lat-lon (cubed-sphere) distributed layout."""
+def _cubed_global_override(n):
+    ncol = 6 * n * n
+    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(
+        C_K=jnp.arange(ncol, dtype=jnp.float64) * 0.001 + 0.3))
 
 
-def test_cubed_sphere_override_passes_through():
-    # Auto-localization is lat-lon-only: a non-lat-lon layout passes the override
-    # THROUGH (honoring a pre-sliced escape-hatch override); a global one fails
-    # loudly downstream in broadcast_column_param, not here.
+@pytest.mark.parametrize("n_ranks", [1, 2, 3, 6])
+def test_cubed_sphere_face_only_reassembles(n_ranks):
+    from legoesm.parallel.layout import make_layout, scatter
+
+    n = 4
+    ov = _cubed_global_override(n)
+    global_ck = np.asarray(ov.clubb_lite.C_K)
+    rebuilt = np.full(6 * n * n, np.nan)
+    for rank in range(n_ranks):
+        layout = make_layout(rank, n_ranks, n)
+        local = np.asarray(
+            localize_turbulence_override(ov, layout).clubb_lite.C_K)
+        # The local slice must equal the model's own scatter of the global field.
+        expected = np.asarray(scatter(global_ck.reshape(6, n, n), layout)).reshape(-1)
+        np.testing.assert_allclose(local, expected)
+        # Map back to global positions to confirm a complete, non-overlapping cover.
+        gidx = np.asarray(
+            scatter(np.arange(6 * n * n).reshape(6, n, n), layout)).reshape(-1)
+        rebuilt[gidx] = local
+    np.testing.assert_allclose(rebuilt, global_ck)
+
+
+def test_cubed_sphere_tiled_slices():
+    # >6 ranks → sub-face tiling: localize must still match the model's scatter.
+    from legoesm.parallel.layout import make_layout, scatter
+
+    n, n_ranks = 4, 24            # 4 tiles/face
+    ov = _cubed_global_override(n)
+    global_ck = np.asarray(ov.clubb_lite.C_K)
+    layout = make_layout(7, n_ranks, n)
+    local = np.asarray(localize_turbulence_override(ov, layout).clubb_lite.C_K)
+    expected = np.asarray(scatter(global_ck.reshape(6, n, n), layout)).reshape(-1)
+    np.testing.assert_allclose(local, expected)
+
+
+# --------------------------------------------------------------------------- #
+# Cubed-sphere via the halo CommTopology → resolve to the active DistributedLayout.
+# --------------------------------------------------------------------------- #
+def _comm_topology(rank=0, n_processes=2):
+    from legoesm.parallel.comm import CommTopology
+    return CommTopology(
+        rank=rank, n_processes=n_processes, local_face_ids=(0, 1, 2),
+        neighbor_ranks={}, neighbor_info={}, tiling=(1, 1), tile_index=(0, 0),
+        tile_neighbors={})
+
+
+def test_comm_topology_resolves_to_active_layout():
+    # get_mpi_topology() returns a CommTopology under cubed MPI; localize must
+    # resolve it to the active DistributedLayout (carrying global_n) and slice.
+    from legoesm.parallel.distributed import set_active_layout
+    from legoesm.parallel.layout import make_layout, scatter
+
+    n = 4
+    layout = make_layout(rank=0, n_ranks=2, global_n=n)
+    set_active_layout(layout)
+    try:
+        ov = _cubed_global_override(n)
+        local = np.asarray(
+            localize_turbulence_override(ov, _comm_topology()).clubb_lite.C_K)
+        expected = np.asarray(
+            scatter(np.asarray(ov.clubb_lite.C_K).reshape(6, n, n), layout)
+        ).reshape(-1)
+        np.testing.assert_allclose(local, expected)
+    finally:
+        set_active_layout(None)
+
+
+def test_comm_topology_without_active_layout_raises():
+    from legoesm.parallel.distributed import set_active_layout
+
+    set_active_layout(None)
+    with pytest.raises(RuntimeError, match="no DistributedLayout is registered"):
+        localize_turbulence_override(_cubed_global_override(4), _comm_topology())
+
+
+# --------------------------------------------------------------------------- #
+# Unrecognized decomposition → pass-through (the escape hatch).
+# --------------------------------------------------------------------------- #
+class _UnknownLayout:
+    """A layout type the localizer does not recognize."""
+
+
+def test_unknown_layout_passes_through():
     ov = _global_override()
-    assert localize_turbulence_override(ov, _CubedLayout()) is ov
+    assert localize_turbulence_override(ov, _UnknownLayout()) is ov
 
 
-def test_cubed_sphere_scalar_override_passthrough():
-    # A scalar override under a cubed layout also passes through (nothing to slice).
+def test_unknown_layout_scalar_passthrough():
     ov = TurbulenceConfig(scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=0.7))
-    assert localize_turbulence_override(ov, _CubedLayout()) is ov
+    assert localize_turbulence_override(ov, _UnknownLayout()) is ov
 
 
 def test_inconsistent_lengths_raise():
