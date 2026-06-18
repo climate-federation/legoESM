@@ -9,6 +9,8 @@ model run + real LES are covered by iter 35/37 and iter 20 respectively).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1133,3 +1135,64 @@ def test_build_distributed_multi_rejects_duplicate_hook_kwarg():
         build_distributed_multi_correction_campaign(
             layout=layout, reference=ref, area_weights=jnp.ones(2), n_worst=1,
             valid_mask=jnp.ones(2, dtype=bool))   # duplicate of the supplied hook
+
+
+@pytest.mark.parametrize(
+    "multi, target",
+    [(False, "build_distributed_correction_campaign"),
+     (True, "build_distributed_multi_correction_campaign")])
+def test_build_distributed_mpas_campaign_wires_local_mesh(monkeypatch, multi, target):
+    """``build_distributed_mpas_campaign`` (iter 96, the one-call RUNNABLE entry point)
+    partitions the GLOBAL mesh and forwards the rank-LOCAL mesh as BOTH the campaign
+    ``grid`` and the bound ``build_base_driver`` — and dispatches to the single vs
+    multi distributed wrapper on ``multi`` (no MPI: the layout build + both wrappers
+    are monkeypatched, only the wiring is exercised)."""
+    import scripts.run.run_correction_campaign as rcc
+
+    layout = SimpleNamespace(local_mesh="LOCAL_MESH")
+    seen_global = {}
+
+    def _fake_make_layout(global_mesh, rank, n_ranks):
+        seen_global.update(global_mesh=global_mesh, rank=rank, n_ranks=n_ranks)
+        return layout
+
+    monkeypatch.setattr(
+        "legoesm.parallel.voronoi_mpi.make_voronoi_partition_layout", _fake_make_layout)
+
+    captured = {}
+
+    def _fake_wrapper(**kwargs):
+        captured.update(kwargs)
+        return "WRAPPED"
+
+    # patch BOTH wrappers; only ``target`` should actually be called.
+    for name in ("build_distributed_correction_campaign",
+                 "build_distributed_multi_correction_campaign"):
+        monkeypatch.setattr(rcc, name,
+                            _fake_wrapper if name == target else _boom_wrapper)
+
+    driver_calls = []
+
+    def _build_local_driver(cfg, local_mesh):
+        driver_calls.append((cfg, local_mesh))
+        return "DRIVER"
+
+    out = rcc.build_distributed_mpas_campaign(
+        global_mesh="GMESH", rank=0, n_ranks=1, reference="REF", area_weights="AREA",
+        n_worst=2, build_local_driver=_build_local_driver, multi=multi,
+        base_atm_config="CFG")
+
+    assert out == "WRAPPED"
+    assert seen_global == dict(global_mesh="GMESH", rank=0, n_ranks=1)
+    # the rank-LOCAL mesh (not the global one) is wired as the grid + into the driver.
+    assert captured["grid"] == "LOCAL_MESH"
+    assert captured["layout"] is layout
+    assert captured["reference"] == "REF" and captured["n_worst"] == 2
+    assert captured["base_atm_config"] == "CFG"        # campaign_kwargs pass through
+    # the bound build_base_driver binds local_mesh and forwards the user's builder.
+    assert captured["build_base_driver"]("the_cfg") == "DRIVER"
+    assert driver_calls == [("the_cfg", "LOCAL_MESH")]
+
+
+def _boom_wrapper(**kwargs):                            # the wrapper that must NOT run
+    raise AssertionError("wrong distributed wrapper dispatched")

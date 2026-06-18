@@ -36,6 +36,7 @@ from mpi4py import MPI  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
     build_distributed_correction_campaign,
+    build_distributed_mpas_campaign,
 )
 
 COMM = MPI.COMM_WORLD
@@ -156,6 +157,76 @@ def test_distributed_campaign_corrects_global_worst_on_its_owner():
     verdicts = COMM.allgather(bool(it.bias.improved))
     assert all(v == verdicts[0] for v in verdicts), f"ranks disagree: {verdicts}"
     # Exactly ONE rank owns + corrects the global-worst cell (no double-count).
+    n_owners = COMM.allreduce(1 if owns_bias else 0, op=MPI.SUM)
+    assert n_owners == 1
+    COMM.Barrier()
+
+
+@pytest.mark.timeout(300)
+def test_build_distributed_mpas_campaign_entry_point():
+    """The one-call entry point (iter 96) partitions the GLOBAL mesh internally and
+    wires the rank-local mesh as the grid + the driver builder — same end-to-end
+    result as the manual layout setup above (the global-worst cell corrected on its
+    owner), but the HPC user supplies only the global mesh + a
+    build_local_driver(cfg, local_mesh)."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+
+    nlev = 5
+    bias_cell = 100
+    bg = float(CLUBBLiteConfig().C_K)
+    global_mesh = create_voronoi_mesh(2)
+    sigma = create_sigma_coordinate(nlev)
+    reference = _global_reference(global_mesh, nlev, bias_cell, bias_dt=-12.0)
+
+    # the entry point passes layout.local_mesh here — building the model state on it
+    # PROVES the rank-local (not global) mesh is wired as the grid.
+    seen = {}
+
+    def build_local_driver(cfg, local_mesh):         # noqa: ARG001
+        # record the FULL per-cell latitude (not just nCells) so the mesh-identity
+        # check below cannot pass on a coincidentally same-size WRONG mesh.
+        seen["latCell"] = np.asarray(local_mesh.latCell)
+        return _FakeDriver(_local_model_state(local_mesh, nlev))
+
+    def extract(driver, day, dt):                    # noqa: ARG001
+        return driver.state
+
+    # NOTE: rank/n_ranks OMITTED on purpose → exercises the advertised MPI.COMM_WORLD
+    # default path (the deferred mpi4py import) instead of explicit args.
+    result = build_distributed_mpas_campaign(
+        global_mesh=global_mesh, reference=reference,
+        area_weights=jnp.asarray(global_mesh.grid_area), n_worst=1,
+        build_local_driver=build_local_driver,
+        base_atm_config=_mpas_base_config(nlev), extract_column_state=extract,
+        sigma=sigma, n_iterations=1,
+        les_config=ColumnLESConfig(
+            regime=_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, accept_only_if_improved=False)
+
+    # The entry point built the SAME layout the manual test does (deterministic); use
+    # it to locate the owner + the rank-local C_K shape.
+    layout = make_voronoi_partition_layout(global_mesh, RANK, NPROC)
+    local_cells = np.asarray(layout.partition.local_cells)
+    n_owned = int(layout.partition.n_owned_cells)
+    owns_bias = bias_cell in local_cells[:n_owned]
+    # the LOCAL mesh (exact per-cell lats) was wired — not the global mesh.
+    np.testing.assert_array_equal(seen["latCell"], np.asarray(layout.local_mesh.latCell))
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.shape == (layout.local_mesh.nCells,)
+    it = result.iterations[0]
+    if owns_bias:
+        assert it.n_diagnosed == 1
+        li = int(np.where(local_cells == bias_cell)[0][0])
+        assert not np.isclose(ck[li], bg)
+    else:
+        assert it.n_diagnosed == 0
+        np.testing.assert_allclose(ck, bg)
+    # Every rank agrees on the GLOBAL improvement verdict (collective bias) — the
+    # entry point's loop is lockstep, same as the manual capstone.
+    verdicts = COMM.allgather(bool(it.bias.improved))
+    assert all(v == verdicts[0] for v in verdicts), f"ranks disagree: {verdicts}"
+    # With np>=2 this proves no double-count; np=1 degenerates to the serial smoke
+    # path (single owner of every cell), matching the sibling test's contract.
     n_owners = COMM.allreduce(1 if owns_bias else 0, op=MPI.SUM)
     assert n_owners == 1
     COMM.Barrier()

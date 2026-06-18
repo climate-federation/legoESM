@@ -392,6 +392,55 @@ def build_distributed_multi_correction_campaign(
     )
 
 
+def build_distributed_mpas_campaign(
+    *, global_mesh: Any, reference: Any, area_weights: Any, n_worst: int,
+    build_local_driver: Callable[[Any, Any], Any], multi: bool = False,
+    base_valid_mask: Any = None, rank: int | None = None, n_ranks: int | None = None,
+    **campaign_kwargs: Any,
+):
+    """One-call RUNNABLE distributed-MPAS campaign entry point (iter 96): partition the
+    GLOBAL mesh, then run the (single- or multi-coefficient) distributed campaign on
+    the rank-local mesh.
+
+    Adds the MPI-aware SETUP on top of the iter-89/95 wrappers (which take a ready
+    ``layout``) so an HPC user supplies only the GLOBAL mesh + GLOBAL ERA5
+    ``reference``/``area_weights`` and a ``build_local_driver(config, local_mesh)``:
+
+    * ``make_voronoi_partition_layout(global_mesh, rank, n_ranks)`` → the rank's
+      partition + ``local_mesh`` (owned + halo cells);
+    * the ``local_mesh`` is wired as the campaign ``grid`` (so the manifest lat/lon +
+      ``grid_shape`` are rank-local) and ``build_local_driver(cfg, local_mesh)`` builds
+      the rank-local distributed model driver — this prevents the common mis-setup of
+      passing the GLOBAL mesh as the grid;
+    * the three distributed hooks + the rank-local reference/area slice come from
+      :func:`build_distributed_correction_campaign` (``multi=False``) /
+      :func:`build_distributed_multi_correction_campaign` (``multi=True``).
+
+    Call on EVERY rank with the SAME ``global_mesh`` + GLOBAL ``reference`` /
+    ``area_weights`` (each rank diagnoses + corrects only its owned cells; the loop
+    is collective).  ``rank``/``n_ranks`` default to ``MPI.COMM_WORLD`` (pass them
+    explicitly for testing).  ``campaign_kwargs`` are the usual campaign args MINUS
+    ``grid`` / ``build_base_driver`` / the distributed hooks (all supplied here).
+    """
+    if rank is None or n_ranks is None:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank() if rank is None else rank
+        n_ranks = comm.Get_size() if n_ranks is None else n_ranks
+
+    from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout
+
+    layout = make_voronoi_partition_layout(global_mesh, rank, n_ranks)
+    build = (build_distributed_multi_correction_campaign if multi
+             else build_distributed_correction_campaign)
+    return build(
+        layout=layout, reference=reference, area_weights=area_weights, n_worst=n_worst,
+        base_valid_mask=base_valid_mask, grid=layout.local_mesh,
+        build_base_driver=lambda cfg: build_local_driver(cfg, layout.local_mesh),
+        **campaign_kwargs,
+    )
+
+
 def build_multi_correction_campaign(
     *,
     base_atm_config: Any,
