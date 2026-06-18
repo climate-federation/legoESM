@@ -49,6 +49,114 @@ from legoesm.parallel.reductions import require_mpi_stack
 _active_topology: CommTopology | None = None
 _active_layout: DistributedLayout | SingleRankLayout | None = None
 
+# Default coordinator port for ``jax.distributed.initialize`` (the gRPC rendezvous
+# socket rank 0 binds; every other rank dials ``rank0_host:PORT``).  A module
+# constant (not a magic literal) so the SLURM launcher and any future caller agree.
+_JAX_DIST_COORDINATOR_PORT = 1234
+
+
+def _require_mpi4py():
+    """Return ``mpi4py.MPI`` or raise a clear ImportError.
+
+    The lat-lon SPMD multi-process path needs ONLY MPI rank/hostname discovery
+    (to derive the ``jax.distributed`` coordinator) — its halo + reductions run
+    through pure-JAX ``ppermute``/``psum`` inside ``shard_map`` (see
+    :mod:`legoesm.parallel.latlon_spmd`), NOT mpi4jax.  So this helper requires
+    mpi4py only, unlike :func:`legoesm.parallel.reductions.require_mpi_stack`
+    (which also requires mpi4jax for the cubed-sphere ``sendrecv`` halo).
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("mpi4py") is None:
+        raise ImportError(
+            "Multi-process jax.distributed bootstrap requires mpi4py (for rank / "
+            "hostname discovery). Install it and launch under mpirun/srun "
+            "(one process per device)."
+        )
+    from mpi4py import MPI
+
+    return MPI
+
+
+def initialize_jax_distributed_multiprocess(
+    *,
+    coordinator_port: int = _JAX_DIST_COORDINATOR_PORT,
+):
+    """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
+    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap the lat-lon
+    SPMD ocean step (``make_sharded_ocean_step_global``) uses to span GPUs across
+    several nodes.
+
+    This factors the SAME proven coordinator-discovery logic as the multi-node
+    branch of :func:`initialize_distributed` (rank 0's hostname is the coordinator;
+    every rank calls ``jax.distributed.initialize(addr, num_processes, process_id)``)
+    but:
+
+    * requires ONLY mpi4py (no mpi4jax — the SPMD halo is pure-JAX ppermute/psum);
+    * does NOT arm the MPI halo backend (the SPMD step arms its own per-call
+      ``activate_latlon_spmd_halo`` around the ``shard_map``);
+    * is a NO-OP for a single process (``MPI.COMM_WORLD`` size 1) — the default
+      single-controller path stays byte-unchanged;
+    * is idempotent — once ``jax.distributed`` is initialized (or the process is
+      single), re-calling just returns the discovered ``(rank, n_processes)``.
+
+    MUST be called BEFORE any ``jax`` array op / device query, because
+    ``jax.distributed.initialize`` reconfigures the global device set so that
+    ``jax.devices()`` returns ALL devices across ALL processes (and
+    ``jax.local_devices()`` only this process' GPUs).
+
+    Returns
+    -------
+    (rank, n_processes) : tuple[int, int]
+        This process' global rank and the total process count (from MPI).
+    """
+    MPI = _require_mpi4py()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+
+    if n_processes <= 1:
+        # Single process: the default single-controller path.  jax already sees
+        # all LOCAL devices; no coordinator needed.  Byte-unchanged.
+        return rank, n_processes
+
+    # Already initialized (idempotent re-entry): just report the topology.
+    if jax.distributed.is_initialized():
+        return rank, n_processes
+
+    import socket
+
+    my_hostname = socket.gethostname()
+    all_hostnames = comm.allgather(my_hostname)
+    coordinator_address = all_hostnames[0]
+    coordinator_bind = f"{coordinator_address}:{coordinator_port}"
+
+    try:
+        jax.distributed.initialize(
+            coordinator_address=coordinator_bind,
+            num_processes=n_processes,
+            process_id=rank,
+        )
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
+            f"with coordinator={coordinator_bind}. Ensure the coordinator port "
+            f"{coordinator_port} is free and every rank can reach "
+            f"{coordinator_address}. Original error: {e}"
+        ) from e
+
+    # Validate JAX agrees with MPI (same check as initialize_distributed).
+    jax_rank = jax.process_index()
+    jax_size = jax.process_count()
+    if jax_rank != rank or jax_size != n_processes:
+        warnings.warn(
+            f"JAX process_index/count ({jax_rank}/{jax_size}) differs from MPI "
+            f"rank/size ({rank}/{n_processes}). Using MPI values.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return rank, n_processes
+
 
 def initialize_distributed(
     *,
@@ -156,37 +264,12 @@ def initialize_distributed(
         _is_multi_node = len(set(all_hostnames)) > 1
 
     if _is_multi_node:
-        # Multi-node: initialize JAX distributed runtime with MPI-derived
-        # coordinator info.  Rank 0's hostname serves as coordinator.
-        coordinator_address = all_hostnames[0]
-        coordinator_port = 1234
-        coordinator_bind = f"{coordinator_address}:{coordinator_port}"
-
-        try:
-            jax.distributed.initialize(
-                coordinator_address=coordinator_bind,
-                num_processes=n_processes,
-                process_id=rank,
-            )
-        except RuntimeError as e:
-            raise RuntimeError(
-                f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
-                f"with coordinator={coordinator_bind}. "
-                f"Ensure the coordinator port {coordinator_port} is not in use "
-                f"and all ranks can reach {coordinator_address}. "
-                f"Original error: {e}"
-            ) from e
-
-        # Validate JAX agrees with MPI.
-        jax_rank = jax.process_index()
-        jax_size = jax.process_count()
-        if jax_rank != rank or jax_size != n_processes:
-            warnings.warn(
-                f"JAX process_index/count ({jax_rank}/{jax_size}) differs from "
-                f"MPI rank/size ({rank}/{n_processes}). Using MPI values.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # Multi-node: initialize the JAX distributed runtime with MPI-derived
+        # coordinator info (rank 0's hostname is the coordinator).  Delegate to
+        # the shared bootstrap so the discovery + initialize + MPI-vs-JAX
+        # validation live in ONE place (the lat-lon SPMD path uses the same
+        # helper); single-node MPI is handled by the elif below.
+        initialize_jax_distributed_multiprocess()
     elif n_processes > 1:
         # Single-node MPI: skip jax.distributed.initialize().
         # All ranks share the same local devices; MPI halo exchange and
