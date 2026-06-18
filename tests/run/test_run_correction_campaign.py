@@ -1207,6 +1207,7 @@ def test_build_distributed_mpas_campaign_wires_local_mesh(monkeypatch, multi, ta
     out = rcc.build_distributed_mpas_campaign(
         global_mesh="GMESH", rank=0, n_ranks=1, reference="REF", area_weights="AREA",
         n_worst=2, build_local_driver=_build_local_driver, multi=multi,
+        validate_partition=False,                    # mock layout + no MPI collective
         base_atm_config="CFG")
 
     assert out == "WRAPPED"

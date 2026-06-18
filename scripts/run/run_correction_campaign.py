@@ -419,7 +419,7 @@ def build_distributed_mpas_campaign(
     *, global_mesh: Any, reference: Any, area_weights: Any, n_worst: int,
     build_local_driver: Callable[[Any, Any], Any], multi: bool = False,
     base_valid_mask: Any = None, rank: int | None = None, n_ranks: int | None = None,
-    **campaign_kwargs: Any,
+    validate_partition: bool = True, **campaign_kwargs: Any,
 ):
     """One-call RUNNABLE distributed-MPAS campaign entry point (iter 96): partition the
     GLOBAL mesh, then run the (single- or multi-coefficient) distributed campaign on
@@ -444,6 +444,12 @@ def build_distributed_mpas_campaign(
     is collective).  ``rank``/``n_ranks`` default to ``MPI.COMM_WORLD`` (pass them
     explicitly for testing).  ``campaign_kwargs`` are the usual campaign args MINUS
     ``grid`` / ``build_base_driver`` / the distributed hooks (all supplied here).
+
+    ``validate_partition`` (default ``True``) runs a ONE-TIME collective pre-flight
+    (:func:`legoesm.training.distributed_campaign.assert_partition_covers_global`)
+    asserting the owned sets across ranks cover the global mesh EXACTLY once — a gap
+    is silently never corrected, an overlap is double-counted in the global top-k.
+    Set ``False`` only to skip the (collective) check, e.g. a non-MPI unit test.
     """
     if rank is None or n_ranks is None:
         from mpi4py import MPI
@@ -454,6 +460,11 @@ def build_distributed_mpas_campaign(
     from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout
 
     layout = make_voronoi_partition_layout(global_mesh, rank, n_ranks)
+    if validate_partition:                           # collective: every rank, before the run
+        from legoesm.training.distributed_campaign import (
+            assert_partition_covers_global,
+        )
+        assert_partition_covers_global(layout)
     build = (build_distributed_multi_correction_campaign if multi
              else build_distributed_correction_campaign)
     return build(

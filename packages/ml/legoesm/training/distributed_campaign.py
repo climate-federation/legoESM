@@ -62,6 +62,92 @@ def distributed_campaign_hooks(
     return valid_mask, manifest_reducer, global_sum_mpi
 
 
+def assert_partition_covers_global(layout: Any, *, global_reduce: Any = None) -> None:
+    """Pre-flight COLLECTIVE check that the rank partition covers EVERY global cell
+    EXACTLY ONCE — raises ``ValueError`` on a gap or an overlap.
+
+    The distributed campaign ranks each rank's OWNED cells, reduces to the GLOBAL
+    ``n_worst`` worst, and corrects them on their owners.  That is only correct if the
+    owned sets across ranks PARTITION the global mesh: a cell owned by NO rank is
+    silently NEVER ranked/corrected (a permanent bias the loop cannot see); a cell
+    owned by >1 rank is double-counted in the global top-k and double-corrected.  A
+    partitioner regression, a wrong ``n_ranks``, or a layout built against a different
+    mesh all break this invariant — and a JAX scatter would otherwise hide it.  This
+    catches it BEFORE a multi-day run instead of silently corrupting the science.
+
+    Each rank scatters a one-hot owned-count over the ``nCells_global`` global cells;
+    ``global_reduce`` (an allreduce SUM — ``global_sum_mpi`` by default; inject a
+    plain sum/identity for a single-rank unit test) sums them; every global cell must
+    end at exactly 1.  MUST be called on EVERY rank (it is collective).  A ONE-TIME
+    ``O(nCells_global)`` diagnostic (like ``gather_to_global`` for I/O) — NOT a
+    per-step op.  ``layout`` needs ``owned_mask_cells`` ``(n_local,)`` bool +
+    ``partition.local_cells`` ``(n_local,)`` + ``partition.nCells_global``.
+
+    PRECONDITION: ``partition.nCells_global`` sets the reduced vector's shape
+    (``n_global + 2``), so it MUST be present and the SAME on every rank — a rank that
+    cannot read it cannot form the matching buffer and so cannot participate in the
+    collective at all.  ``partition.local_cells`` must likewise be present (it is read
+    to build the owned ids before the collective).  Both hold by construction for a
+    layout from ``make_voronoi_partition_layout`` (the same NamedTuple on every rank).
+    Detected DATA malformations (mask shape, out-of-range id, gaps, overlaps) ARE
+    synchronized so every rank raises together (no pre-collective rank-divergent raise).
+    """
+    if global_reduce is None:
+        from legoesm.parallel.reductions import global_sum_mpi
+        global_reduce = global_sum_mpi
+
+    n_global = int(layout.partition.nCells_global)
+    local_cells = np.asarray(layout.partition.local_cells)
+    owned = np.asarray(layout.owned_mask_cells, dtype=bool)
+
+    # COLLECTIVE-SAFE structural checks: a per-rank malformation (mask-length mismatch
+    # or out-of-range owned id) is detected LOCALLY into a flag, then synchronized via
+    # the SAME allreduce as the owned counts — so EVERY rank raises together. A rank-
+    # local `raise` BEFORE the collective would hang the others inside the allreduce
+    # (Codex iter 98, HIGH). The flags ride two EXTRA slots of the reduced vector
+    # (slot n_global = #ranks with a length mismatch, n_global+1 = #ranks with an
+    # out-of-range id), so one SUM reduction carries everything (no second primitive).
+    # a non-1-D mask (or a length mismatch) is a malformed layout — fold the ndim
+    # check in so ``local_cells[owned]`` below cannot raise an IndexError BEFORE the
+    # collective on one rank only (which would hang the others).
+    mask_bad = owned.ndim != 1 or owned.shape[0] != local_cells.shape[0]
+    oob_bad = False
+    owned_global = np.empty(0, dtype=local_cells.dtype)
+    if not mask_bad:
+        owned_global = local_cells[owned]            # global ids this rank OWNS
+        if owned_global.size and (
+                int(owned_global.min()) < 0 or int(owned_global.max()) >= n_global):
+            oob_bad = True                           # skip the scatter (would clamp)
+    counts_local = jnp.zeros(n_global + 2, dtype=jnp.int32)
+    if not mask_bad and not oob_bad and owned_global.size:
+        counts_local = counts_local.at[jnp.asarray(owned_global)].add(1)
+    counts_local = counts_local.at[n_global].add(int(mask_bad))
+    counts_local = counts_local.at[n_global + 1].add(int(oob_bad))
+
+    counts_global = np.asarray(global_reduce(counts_local))
+    n_mask_bad = int(counts_global[n_global])
+    n_oob_bad = int(counts_global[n_global + 1])
+    if n_mask_bad:                                   # raised on ALL ranks (synced)
+        raise ValueError(
+            "assert_partition_covers_global: owned_mask_cells must be a 1-D mask the "
+            "same length as local_cells (one owned flag per local cell) — malformed "
+            f"on {n_mask_bad} rank(s).")
+    if n_oob_bad:
+        raise ValueError(
+            "assert_partition_covers_global: an owned global cell id is out of range "
+            f"[0, {n_global}) — the partition is malformed on {n_oob_bad} rank(s).")
+    owned_counts = counts_global[:n_global]          # how many ranks own each cell
+    gaps = np.nonzero(owned_counts == 0)[0]
+    overlaps = np.nonzero(owned_counts > 1)[0]
+    if gaps.size or overlaps.size:
+        raise ValueError(
+            "assert_partition_covers_global: the rank partition does NOT cover the "
+            f"global mesh exactly once — {gaps.size} cell(s) owned by NO rank (e.g. "
+            f"{gaps[:5].tolist()}), {overlaps.size} owned by >1 rank (e.g. "
+            f"{overlaps[:5].tolist()}). A gap is never corrected; an overlap is "
+            "double-counted in the global top-k.")
+
+
 def slice_reference_to_local(
     reference: Any, local_cells: Any, *, expected_n_cells: int | None = None
 ) -> Any:

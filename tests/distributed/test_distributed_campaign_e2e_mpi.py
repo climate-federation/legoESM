@@ -230,3 +230,56 @@ def test_build_distributed_mpas_campaign_entry_point():
     n_owners = COMM.allreduce(1 if owns_bias else 0, op=MPI.SUM)
     assert n_owners == 1
     COMM.Barrier()
+
+
+@pytest.mark.timeout(120)
+def test_assert_partition_covers_global_on_a_real_partition():
+    """The iter-98 pre-flight passes on a REAL multi-rank Voronoi partition (the owned
+    sets tile the global mesh exactly once) and FAILS LOUDLY — on EVERY rank, no
+    deadlock — when a cell is dropped from its owner so it becomes a global gap."""
+    from types import SimpleNamespace
+
+    from legoesm.training.distributed_campaign import assert_partition_covers_global
+
+    global_mesh = create_voronoi_mesh(2)
+    layout = make_voronoi_partition_layout(global_mesh, RANK, NPROC)
+    # the real partition is clean — collective check returns on all ranks.
+    assert_partition_covers_global(layout) is None
+    COMM.Barrier()
+
+    # Corrupt it: rank 0 disowns its FIRST owned cell (a partition is disjoint, so
+    # that global cell is then owned by NO rank). Every rank runs the same collective
+    # allreduce and sees the gap ⇒ every rank raises (no rank-divergent control flow).
+    owned = np.asarray(layout.owned_mask_cells).copy()
+    if RANK == 0:
+        first_owned = int(np.nonzero(owned)[0][0])
+        owned[first_owned] = False
+    corrupt = SimpleNamespace(
+        owned_mask_cells=jnp.asarray(owned), partition=layout.partition)
+    with pytest.raises(ValueError, match="does NOT cover the global mesh"):
+        assert_partition_covers_global(corrupt)
+    COMM.Barrier()
+
+
+@pytest.mark.timeout(120)
+def test_assert_partition_covers_global_synchronizes_malformed_layout():
+    """A malformation on ONE rank only (here rank 0's owned mask is the wrong length)
+    is SYNCHRONIZED through the collective so EVERY rank raises — the structural check
+    must not raise pre-allreduce and hang the healthy ranks inside it (Codex iter 98,
+    HIGH). Both ranks reaching pytest.raises without timeout proves no deadlock."""
+    if NPROC < 2:
+        pytest.skip("cross-rank malformed-layout sync needs >=2 ranks (vacuous at np=1)")
+    from types import SimpleNamespace
+
+    from legoesm.training.distributed_campaign import assert_partition_covers_global
+
+    global_mesh = create_voronoi_mesh(2)
+    layout = make_voronoi_partition_layout(global_mesh, RANK, NPROC)
+    owned = np.asarray(layout.owned_mask_cells)
+    if RANK == 0:
+        owned = owned[:-1]                           # wrong length on rank 0 ONLY
+    bad = SimpleNamespace(
+        owned_mask_cells=jnp.asarray(owned), partition=layout.partition)
+    with pytest.raises(ValueError, match="same length"):
+        assert_partition_covers_global(bad)
+    COMM.Barrier()

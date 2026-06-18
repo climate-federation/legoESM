@@ -17,16 +17,20 @@ import numpy as np
 import pytest
 from legoesm.training.compare_reanalysis import ColumnState, owned_cell_valid_mask
 from legoesm.training.distributed_campaign import (
+    assert_partition_covers_global,
     distributed_campaign_hooks,
     slice_reference_to_local,
 )
 from legoesm.training.distributed_manifest import gather_global_worst_columns
 
 
-def _layout(owned_mask, local_cells):
+def _layout(owned_mask, local_cells, n_global=None):
+    lc = np.asarray(local_cells)
+    if n_global is None:
+        n_global = int(lc.max()) + 1 if lc.size else 0
     return SimpleNamespace(
         owned_mask_cells=jnp.asarray(owned_mask),
-        partition=SimpleNamespace(local_cells=np.asarray(local_cells)),
+        partition=SimpleNamespace(local_cells=lc, nCells_global=n_global),
     )
 
 
@@ -142,3 +146,99 @@ def test_slice_reference_to_local_gathers_cells_in_order():
     np.testing.assert_array_equal(np.asarray(out.sst_K), np.asarray(ref.sst_K)[[2, 3, 1]])
     # None fields pass through unchanged (cell-wind reference has no precip/u_edge).
     assert out.precip_mm_day is None and out.u_edge is None
+
+
+# a single-rank stand-in for the allreduce SUM: with one rank the global owned-count
+# IS this rank's local count, so the identity is the correct np=1 reduction.
+def _serial_sum(x):
+    return x
+
+
+def test_assert_partition_covers_global_accepts_a_clean_partition():
+    """Owned sets that tile the global mesh EXACTLY once pass (iter 98)."""
+    # one rank owning all 4 cells (np=1 semantics) — every cell counted once.
+    assert_partition_covers_global(
+        _layout([True, True, True, True], [0, 1, 2, 3], n_global=4),
+        global_reduce=_serial_sum) is None
+
+
+def test_assert_partition_covers_global_rejects_a_gap():
+    """A global cell owned by NO rank is REJECTED — it would never be ranked or
+    corrected, a permanent bias the loop cannot see (iter 98)."""
+    # owns 0,1,3 of a 4-cell mesh ⇒ cell 2 is a gap.
+    with pytest.raises(ValueError, match="owned by NO rank.*\\[2\\]"):
+        assert_partition_covers_global(
+            _layout([True, True, True], [0, 1, 3], n_global=4),
+            global_reduce=_serial_sum)
+
+
+def test_assert_partition_covers_global_rejects_an_overlap():
+    """A global cell owned by >1 rank is REJECTED — it is double-counted in the
+    global top-k and double-corrected (iter 98)."""
+    # local_cells repeats id 2 (as if two ranks both owned it) ⇒ overlap.
+    with pytest.raises(ValueError, match="owned by >1 rank.*\\[2\\]"):
+        assert_partition_covers_global(
+            _layout([True, True, True, True], [0, 1, 2, 2], n_global=3),
+            global_reduce=_serial_sum)
+
+
+def test_assert_partition_covers_global_only_counts_owned_cells():
+    """HALO (non-owned) cells do NOT count toward coverage — only owned cells tile
+    the mesh; a halo copy of another rank's owned cell is not an overlap (iter 98)."""
+    # owns 0,1; holds 2 as a HALO (owned=False). Cell 2 would be a gap here, but a
+    # second 'rank' contributes it — emulate by summing two local count vectors.
+    rank0 = _layout([True, True, False], [0, 1, 2], n_global=3)
+    rank1 = _layout([False, True], [1, 2], n_global=3)   # owns 2; halo of 1
+
+    # compose the two ranks' contributions through the same code path. zeros_like keeps
+    # the extra structural-flag slots (the reduced vector is n_global+2 long).
+    def _other_owns(ids):
+        return lambda x: x + jnp.zeros_like(x).at[jnp.asarray(ids)].add(1)
+
+    # rank0 owns 0,1 (cell 2 is its halo); the other rank owns 2 ⇒ clean cover.
+    assert assert_partition_covers_global(
+        rank0, global_reduce=_other_owns([2])) is None
+    # rank1 owns only 2; the other rank owns 0,1 ⇒ clean cover.
+    assert assert_partition_covers_global(
+        rank1, global_reduce=_other_owns([0, 1])) is None
+
+
+def test_assert_partition_covers_global_rejects_mismatched_mask_length():
+    """owned_mask_cells and local_cells must be the same length (one flag per local
+    cell) — a mismatch is a malformed layout (iter 98)."""
+    with pytest.raises(ValueError, match="same length"):
+        assert_partition_covers_global(
+            _layout([True, True], [0, 1, 2], n_global=3), global_reduce=_serial_sum)
+
+
+def test_assert_partition_covers_global_rejects_non_1d_mask():
+    """A non-1-D owned mask is malformed — folded into the structural flag so the
+    later ``local_cells[owned]`` cannot raise an IndexError BEFORE the collective on
+    one rank only (Codex iter 98, collective-safety)."""
+    bad = SimpleNamespace(
+        owned_mask_cells=jnp.ones((3, 1), dtype=bool),       # 2-D, shape[0]==3 matches
+        partition=SimpleNamespace(local_cells=np.array([0, 1, 2]), nCells_global=3))
+    with pytest.raises(ValueError, match="1-D mask"):
+        assert_partition_covers_global(bad, global_reduce=_serial_sum)
+
+
+def test_assert_partition_covers_global_rejects_out_of_range_owned_id():
+    """An owned global id ≥ nCells_global is a malformed partition — caught (and
+    synchronized) rather than silently clamped by the scatter (iter 98)."""
+    with pytest.raises(ValueError, match="out of range"):
+        assert_partition_covers_global(
+            _layout([True, True, True], [0, 1, 5], n_global=4),
+            global_reduce=_serial_sum)             # owns id 5 of a 4-cell mesh
+
+
+def test_assert_partition_covers_global_detects_cross_rank_overlap():
+    """The REALISTIC overlap — two ranks each own the SAME global cell — is detected
+    through the collective (emulated by a mock allreduce that adds the other rank's
+    owned-count vector), proving the check sees cross-rank double-ownership (iter 98)."""
+    rank0 = _layout([True, True, True], [0, 1, 2], n_global=3)   # owns 0,1,2
+
+    def _plus_other_rank(x):                       # a second rank ALSO owns cell 2
+        return x + jnp.zeros_like(x).at[jnp.asarray([2])].add(1)
+
+    with pytest.raises(ValueError, match="owned by >1 rank.*\\[2\\]"):
+        assert_partition_covers_global(rank0, global_reduce=_plus_other_rank)
