@@ -1689,3 +1689,60 @@ def barotropic_implicit_latlon_cgrid(
         rel_final = _rel_resid(A_op, eta_new, rhs)
         return state_new, (Hu_avg, Hv_avg), rel_final
     return state_new, (Hu_avg, Hv_avg)
+
+
+def solve_unsplit_freesurface(
+    eta_old: jnp.ndarray,
+    u_star: jnp.ndarray,
+    v_star: jnp.ndarray,
+    h_u: jnp.ndarray,
+    h_v: jnp.ndarray,
+    dt: float,
+    g: float,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    *,
+    tol: float = 1.0e-10,
+    maxiter: int = 200,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """MITgcm-faithful UNSPLIT implicit free-surface solve + uniform correction.
+
+    No barotropic/baroclinic mode split: given the explicit predictor velocity
+    ``(u*, v*)`` on the FULL 3-D field, solve the implicit free surface for
+    ``eta^{n+1}`` from the depth-integrated divergence of the predictor transport,
+    then apply the SAME (vertically-uniform) surface-pressure-gradient correction
+    to every level (MITgcm ``correction_step.F``)::
+
+        eta^{n+1} - dt^2 g div(H grad eta^{n+1}) = eta^n - dt div(int u* dz)
+        u^{n+1} = u* - dt g d(eta^{n+1})/dx          (all levels)
+
+    Reuses the SAME area-weighted-adjoint Helmholtz solve as ``implicit_cn``
+    (:func:`solve_helmholtz_freesurface`), so the discrete operator and its AD are
+    identical.  The fully-implicit (theta=1) backward-Euler surface mode matches
+    MITgcm's ``implicSurfPress=1``.  Returns ``(eta_new, u_new, v_new)``.
+
+    The elliptic CG runs in float64 for conditioning (cast back to the eta dtype).
+    """
+    edt = eta_old.dtype
+
+    def f64(a):
+        return jnp.asarray(a, dtype=jnp.float64)
+
+    hu_tot = f64(jnp.maximum(jnp.sum(h_u, axis=-1), 1.0e-10) * u_mask)   # depth-integrated face H
+    hv_tot = f64(jnp.maximum(jnp.sum(h_v, axis=-1), 1.0e-10) * v_mask)
+    flux_u = jnp.sum(h_u * u_star, axis=-1) * u_mask          # depth-integrated transport
+    flux_v = jnp.sum(h_v * v_star, axis=-1) * v_mask
+    div = divergence_cgrid(flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask)
+    coeff = jnp.asarray(dt * dt * g, dtype=jnp.float64)
+    rhs = f64((eta_old - dt * div) * mask)
+    inv_diag = _helmholtz_inv_diag(hu_tot, hv_tot, coeff, grid, f64(mask))
+    eta_new = solve_helmholtz_freesurface(
+        rhs, f64(eta_old), hu_tot, hv_tot, coeff, f64(mask), f64(u_mask), f64(v_mask),
+        inv_diag, grid, tol=tol, maxiter=maxiter).astype(edt) * mask
+    grad_x = gradient_x_cgrid(eta_new, grid)[..., jnp.newaxis]
+    grad_y = gradient_y_cgrid(eta_new, grid)[..., jnp.newaxis]
+    u_new = (u_star - dt * g * grad_x) * u_mask[..., jnp.newaxis]
+    v_new = (v_star - dt * g * grad_y) * v_mask[..., jnp.newaxis]
+    return eta_new, u_new, v_new

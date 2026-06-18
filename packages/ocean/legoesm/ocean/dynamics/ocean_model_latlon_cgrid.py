@@ -1073,7 +1073,8 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
-        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid"}
+        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid",
+                          "implicit_unsplit"}
         if config.barotropic_solver not in _valid_solvers:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
@@ -1241,10 +1242,12 @@ class LatLonCGridOceanModel:
                     "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
-            if config.barotropic_solver not in ("rigid_lid", "implicit_cn"):
+            if config.barotropic_solver not in (
+                    "rigid_lid", "implicit_cn", "implicit_unsplit"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'barotropic_solver in ("rigid_lid","implicit_cn"): the explicit Coriolis '
+                    'barotropic_solver in ("rigid_lid","implicit_cn","implicit_unsplit"): '
+                    'the explicit Coriolis '
                     "tendency reaches the barotropic mode through its depth-mean "
                     "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
                     "vloc, the depth-integral of du including Coriolis), and the "
@@ -3606,7 +3609,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "config.outer_integrator must be 'forward_euler' or 'ab2', "
                 f"got {_oi!r}")
-        if _oi == "ab2":
+        if self.config.barotropic_solver == "implicit_unsplit":
+            # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
+            # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
+            # elliptic eta solve + uniform surface-pressure correction. Removes the
+            # split's grid-scale PGF/continuity adjointness violation that drives the
+            # spurious 2dx baroclinic instability (docs/ocean_fidelity/
+            # mitgcm_unsplit_freesurface_fix.md). Requires the ab2 outer integrator.
+            if _oi != "ab2":
+                raise ValueError(
+                    "barotropic_solver='implicit_unsplit' requires "
+                    "outer_integrator='ab2'.")
+            new_state = self._unsplit_ab2_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask)
+        elif _oi == "ab2":
             if self.config.tracer_time_integrator == "ab2":
                 raise ValueError(
                     "outer_integrator='ab2' double-counts with "
@@ -4153,6 +4171,105 @@ class LatLonCGridOceanModel:
         # ADVECTIVE-only increment ⇒ the carry holds ONLY the advective part
         # (Veros carries ``dtemp`` = advection only; diffusion is never lagged).
         return state_ab2._replace(
+            T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
+                              dims=state.T.dims, units=state.T.units),
+            S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
+                              dims=state.S.dims, units=state.S.units),
+            u_incr_prev=Field(data=du_n * u_mask3, name="u_incr_prev",
+                              dims=state.u.dims, units=state.u.units),
+            v_incr_prev=Field(data=dv_n * v_mask3, name="v_incr_prev",
+                              dims=state.v.dims, units=state.v.units),
+        )
+
+    def _unsplit_ab2_step(self, state: LatLonCGridOceanState, dt: float,
+                          freshwater=None, surface_forcing=None, sponge=None,
+                          *, grid=None, vertex_mask=None) -> LatLonCGridOceanState:
+        """MITgcm-faithful UNSPLIT implicit free-surface AB2 step (no mode split).
+
+        Replaces the split-explicit barotropic/baroclinic stepping (which breaks
+        the discrete PGF/continuity adjointness at the grid scale, driving the
+        spurious 2dx baroclinic instability) with MITgcm's unsplit
+        ``implicitFreeSurface`` algorithm (docs/ocean_fidelity/
+        mitgcm_unsplit_freesurface_fix.md):
+
+          1. u* = u^n + AB2(Δt·du_dt)   — the FULL explicit baroclinic tendency
+             (advection + Coriolis + baroclinic hydrostatic PGF + lateral diss;
+             planetary f×u is in du_dt under coriolis_scheme='explicit_ab2'), AB2-
+             extrapolated on the FULL 3-D velocity (NO depth-mean / barotropic split).
+          2. One implicit elliptic solve for eta^{n+1} from the depth-integrated
+             divergence of the predictor transport (``solve_unsplit_freesurface``).
+          3. u^{n+1} = u* − Δt·g·∇eta^{n+1}, the SAME surface-pressure gradient on
+             every level (the surface PGF is implicit/backward-Euler).
+          4. Implicit vertical mixing once (backward-Euler vert friction + diffusion
+             + surface wind/tracer BC) — Veros/MITgcm split-implicit convention.
+
+        Opt-in via ``barotropic_solver='implicit_unsplit'`` (requires
+        ``outer_integrator='ab2'``); the split ``implicit_cn`` path is untouched.
+        """
+        from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+            solve_unsplit_freesurface,
+        )
+        from legoesm.ocean.state import Field
+        _grid = grid if grid is not None else self.grid
+        g = self.config.g
+        eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
+        u_mask = state.u_mask.data
+        v_mask = state.v_mask.data
+        cmask = state.land_mask.data
+        u_mask3 = u_mask[..., jnp.newaxis]
+        v_mask3 = v_mask[..., jnp.newaxis]
+        mask3 = cmask[..., jnp.newaxis]
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _au3, _av3 = compute_face_masks_3d(self.z_coord.is_active, _grid)
+            u_mask3 = u_mask3 * _au3.astype(u_mask3.dtype)
+            v_mask3 = v_mask3 * _av3.astype(v_mask3.dtype)
+            mask3 = mask3 * self.z_coord.is_active.astype(mask3.dtype)
+
+        # 1. Explicit baroclinic tendency (NO surface PGF, NO implicit vmix).
+        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
+                               grid=_grid, vertex_mask=vertex_mask)
+        du_n = dt * tend.du_dt.data
+        dv_n = dt * tend.dv_dt.data
+        dT_n = dt * tend.dT_dt.data    # noqa: N806 (T = temperature, domain convention)
+        dS_n = dt * tend.dS_dt.data    # noqa: N806 (S = salinity)
+        du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
+                else jnp.zeros_like(du_n))
+        dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
+                else jnp.zeros_like(dv_n))
+        dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None  # noqa: N806
+                else jnp.zeros_like(dT_n))
+        dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None  # noqa: N806
+                else jnp.zeros_like(dS_n))
+        # 2. AB2 predictor on the FULL 3-D velocity + tracers.
+        u_star = (state.u.data + a_n * du_n - a_p * du_p) * u_mask3
+        v_star = (state.v.data + a_n * dv_n - a_p * dv_p) * v_mask3
+        T_star = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3   # noqa: N806
+        S_star = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3   # noqa: N806
+
+        # 3. UNSPLIT implicit free surface + uniform surface-pressure correction.
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        h_u = min_cell_to_uface(h_k)
+        h_v = min_cell_to_vface(h_k, _grid)
+        eta_new, u_corr, v_corr = solve_unsplit_freesurface(
+            state.eta.data, u_star, v_star, h_u, h_v, dt, g, _grid,
+            cmask, u_mask, v_mask)
+        state_corr = state._replace(
+            u=state.u.replace(data=u_corr),
+            v=state.v.replace(data=v_corr),
+            T=state.T.replace(data=T_star),
+            S=state.S.replace(data=S_star),
+            eta=state.eta.replace(data=eta_new))
+
+        # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
+        #    applies the surface wind/tracer BC + restoring internally).
+        state_new = self._apply_implicit_vertical_mixing(
+            state_corr, dt, surface_forcing, grid=_grid)
+
+        # 5. Carry the explicit increments for the next AB2 step.
+        return state_new._replace(
             T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
                               dims=state.T.dims, units=state.T.units),
             S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
