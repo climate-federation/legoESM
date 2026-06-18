@@ -204,3 +204,30 @@ so a direct per-term oracle diff *there* is structurally impossible. The residua
 nonlinear-stability difference of the under-resolved WBC, not a single faithfully-fixable term. The
 oracle stands at its strong tiers (10-step eta 0.9997 + per-term tendency match on smooth states);
 the equilibrium turbulence is documented as an open dycore-stability item.
+
+## UPDATE 2026-06-18 (iteration 4): NO advection bug; per-term match confirmed; resolution hypothesis
+
+Built a **perturbed-state MITgcm run** (write the equilibrium ± grid-scale noise as
+uVel/vVel/pSurf init files, run 1–2 steps with momentum diagnostics) to compare per-term
+tendencies on a *rough* state — and to answer "is the flux-form advection buggy on our side?"
+
+**Answer: NO bug.** legoESM's flux-form momentum advection is correct three independent ways:
+1. matches the **analytic** `−∂x(u²)` (smooth field) to corr **1.0000**, ratio 0.977 (the ~2%
+   2nd-order truncation error);
+2. matches **MITgcm's `Um_Advec`** on the **smooth** equilibrium (f=0) to corr **0.9998**, ratio 0.988;
+3. its stencil equals `mom_u_adv_uu.F`/`mom_u_adv_vu.F` term-for-term, and `xA=dyG·drF·hFacW`
+   equals legoESM's `h_u·dy_u` on the flat grid.
+
+Two red herrings cleared: (a) the "100×/anti-correlated" advection was the **MITgcm diagnostic
+bundling Coriolis** — with f, `Um_Advec ≈ Um_Cori ≈ f·v` = 134× the physical advection; killing f
+drops `|Um_Advec|` from 9e-6 to 2e-8. (b) The corr 0.57 was on a **grid-scale random** field — the
+2Δx mode where any two valid 2nd-order schemes diverge (and the half-cell bridge alignment is most
+sensitive). On resolved scales the schemes agree (0.9998).
+
+**Per-term verdict on the rough state**: wind bit-exact, Coriolis corr 0.98, dissipation comparable
+(legoESM even stronger), advection matches on resolved scales. The recipe IS MITgcm-faithful
+term-by-term. The 5× statistics gap is therefore **not a wrong operator** but the nonlinear
+amplification of the (legitimately scheme-dependent) 2Δx behaviour at the **marginally-resolved
+Munk layer** (δ≈1.7 cells): legoESM sits on the unstable side of the WBC barotropic instability,
+MITgcm on the stable side. Falsifiable prediction under test: at 2× resolution (δ≈3.4 cells,
+resolved) the gyre should go laminar.
