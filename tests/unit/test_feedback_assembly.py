@@ -297,3 +297,16 @@ def test_column_environment_grid_shapes_and_sst():
     assert bool(jnp.all(jnp.isfinite(grid_env)))
     np.testing.assert_allclose(np.asarray(grid_env[:, 0]), 295.0)  # SST predictor
     assert bool(jnp.all(length_scales > 0))
+
+
+class _CEps(NamedTuple):
+    C_eps: jax.Array
+    valid: jax.Array
+
+
+def test_reduce_c_eps_valid_mean():
+    diag = _CEps(C_eps=jnp.array([0.2, 0.4, 9.9]),
+                 valid=jnp.array([True, True, False]))
+    value, valid = reduce_column_diagnosis(diag, "c_eps")
+    assert bool(valid)
+    assert float(value) == pytest.approx(0.3)

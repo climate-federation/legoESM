@@ -29,6 +29,7 @@ from legoesm.training.feedback import build_parameter_field
 
 _METHODS = (
     "eddy_diffusivity", "entrainment", "clubb_coefficient", "prandtl_number",
+    "c_eps",
 )
 
 
@@ -66,6 +67,8 @@ def reduce_column_diagnosis(
       dimensionally-correct target for the ``clubb_lite_C_K`` promotion.
     * ``"prandtl_number"`` — the valid-level mean of the DIMENSIONLESS turbulent
       Prandtl number ``Pr_t = K_m/K_h`` (the ``clubb_lite_Pr_t`` target).
+    * ``"c_eps"`` — the valid-level mean of the DIMENSIONLESS wp2-dissipation
+      coefficient ``C_eps`` (the ``clubb_lite_C_eps`` target).
     * ``"entrainment"`` — the scalar ``w_entrainment`` and its ``valid`` flag.
 
     Raises on an unknown ``method`` (dispatch hardening).  Differentiable w.r.t.
@@ -77,6 +80,8 @@ def reduce_column_diagnosis(
         return _valid_profile_mean((diagnosis.C_K, diagnosis.valid))
     if method == "prandtl_number":
         return _valid_profile_mean((diagnosis.Pr_t, diagnosis.valid))
+    if method == "c_eps":
+        return _valid_profile_mean((diagnosis.C_eps, diagnosis.valid))
     if method == "entrainment":
         w_e = jnp.asarray(diagnosis.w_entrainment)
         return (

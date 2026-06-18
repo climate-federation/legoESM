@@ -46,6 +46,11 @@ _MIN_SHEAR_DEFAULT = 1.0e-6  # |∂U/∂z| floor [1/s]
 _MIN_DELTA_THETAV_DEFAULT = 1.0e-3  # inversion θ_v jump floor [K]
 _WP2_FLOOR_DEFAULT = 1.0e-4  # w'² floor [m²/s²] (velocity scale √wp2 ≳ 0.01 m/s)
 _KH_FLOOR_DEFAULT = 1.0e-3  # heat diffusivity floor [m²/s] (Pr_t ill-posed below)
+# C_eps sanity ceiling: a tiny-wp2 / huge-production level blows the unclipped
+# C_eps up far past its (0.06, 0.6) range — a transport-dominated / non-equilibrium
+# level whose local production≠dissipation inversion is meaningless. 10× the upper
+# bound flags such a level invalid rather than letting the clamp average it in.
+_C_EPS_SANITY_MAX_DEFAULT = 6.0
 
 
 class EddyDiffusivityDiagnosis(NamedTuple):
@@ -210,6 +215,68 @@ def prandtl_number_from_diffusivities(
     denom = jnp.where(valid, K_h, jnp.ones_like(K_h))
     Pr_t = jnp.where(valid, K_m / denom, jnp.zeros_like(K_m))
     return Pr_t, valid
+
+
+def c_eps_from_budget(
+    K_m: jax.Array,
+    K_m_valid: jax.Array,
+    K_h: jax.Array,
+    K_h_valid: jax.Array,
+    shear_sq: jax.Array,
+    N_sq: jax.Array,
+    l_mix: jax.Array,
+    wp2: jax.Array,
+    *,
+    wp2_floor: float = _WP2_FLOOR_DEFAULT,
+    c_eps_sanity_max: float = _C_EPS_SANITY_MAX_DEFAULT,
+) -> tuple[jax.Array, jax.Array]:
+    """Dimensionless wp2-dissipation coefficient ``C_eps`` from the steady-state
+    CLUBB-lite ``w'²`` budget — the inverse of ``dissipation = C_eps·√wp2/l``.
+
+    The lite ``wp2`` budget (``clubb_lite.py``) balances production against the
+    semi-implicit dissipation, so at steady state (NEGLECTING vertical transport)
+    ``P = C_eps·wp2^{3/2}/ℓ`` with the net production ``P = K_m·S² − K_h·N²``
+    (shear minus buoyancy destruction).  Inverting:
+        ``C_eps = P·ℓ / wp2^{3/2}`` .
+    Diagnosed so the GCM's equilibrium ``wp2`` tracks the LES ``w'²``, which makes
+    the iter-46 ``C_K = K_m/(ℓ·√wp2)`` transfer correct (it removes the
+    wp2-identification offset).  ``valid`` where both diffusivities are valid, ``wp2
+    > wp2_floor``, ``ℓ > 0``, the net production ``P > 0`` (a layer NOT sustaining
+    turbulence by this balance is excluded), AND the raw ``C_eps`` is below
+    ``c_eps_sanity_max`` (a tiny-wp2 / transport-dominated blow-up is flagged, not
+    averaged in).  Double-where AD-safe at ``wp2^{3/2}`` (infinite VJP at 0).
+
+    LIMITATION: this inverts the LOCAL production=dissipation balance and DROPS the
+    GCM budget's turbulent-transport term, which in a convective BL redistributes
+    ``wp2`` (so the local balance can be off near the surface / inversion).  The
+    ``P>0`` + sanity masks, the registered ``(0.06, 0.6)`` bounds clamp, and the
+    monotonic gate are the backstops — a rejected C_eps correction does no harm.
+    """
+    K_m = jnp.asarray(K_m)
+    dtype = K_m.dtype
+    K_h = jnp.asarray(K_h, dtype=dtype)
+    shear_sq = jnp.asarray(shear_sq, dtype=dtype)
+    N_sq = jnp.asarray(N_sq, dtype=dtype)
+    l_mix = jnp.asarray(l_mix, dtype=dtype)
+    wp2 = jnp.asarray(wp2, dtype=dtype)
+    floor = jnp.asarray(wp2_floor, dtype=dtype)
+
+    production = K_m * shear_sq - K_h * N_sq
+    wp2_ok = wp2 > floor
+    safe_wp2 = jnp.where(wp2_ok, wp2, jnp.ones_like(wp2))
+    wp2_32 = safe_wp2 * jnp.sqrt(safe_wp2)                  # wp2^{3/2}, finite VJP
+    base_valid = (
+        jnp.asarray(K_m_valid, dtype=bool)
+        & jnp.asarray(K_h_valid, dtype=bool)
+        & wp2_ok
+        & (l_mix > 0.0)
+        & (production > 0.0)
+    )
+    denom = jnp.where(base_valid, wp2_32, jnp.ones_like(wp2_32))
+    c_eps_raw = jnp.where(base_valid, production * l_mix / denom, jnp.zeros_like(K_m))
+    valid = base_valid & (c_eps_raw <= jnp.asarray(c_eps_sanity_max, dtype=dtype))
+    c_eps = jnp.where(valid, c_eps_raw, jnp.zeros_like(c_eps_raw))
+    return c_eps, valid
 
 
 def mixing_length_from_momentum_diffusivity(

@@ -79,12 +79,14 @@ def validate_column_les_config(config: ColumnLESConfig) -> None:
     )
     if config.diagnosis_methods is not None and len(config.diagnosis_methods) == 0:
         raise ValueError("diagnosis_methods must be a non-empty tuple (or None).")
-    if "clubb_coefficient" in active_methods and (
+    # clubb_coefficient (C_K) and c_eps both evaluate the GCM mixing length.
+    needs_lmix = {"clubb_coefficient", "c_eps"}
+    if needs_lmix.intersection(active_methods) and (
         config.clubb_l_mix_max is None or config.clubb_l_mix_max <= 0.0
     ):
         raise ValueError(
-            "the 'clubb_coefficient' diagnosis requires clubb_l_mix_max > 0 "
-            "(the GCM CLUBBLiteConfig.l_mix_max)."
+            f"the {sorted(needs_lmix.intersection(active_methods))} diagnosis "
+            "requires clubb_l_mix_max > 0 (the GCM CLUBBLiteConfig.l_mix_max)."
         )
 
 
@@ -101,6 +103,8 @@ def coefficient_value(diagnosis: Any, method: str):
         return diagnosis.C_K
     if method == "prandtl_number" and hasattr(diagnosis, "Pr_t"):
         return diagnosis.Pr_t
+    if method == "c_eps" and hasattr(diagnosis, "C_eps"):
+        return diagnosis.C_eps
     if method == "entrainment" and hasattr(diagnosis, "w_entrainment"):
         return diagnosis.w_entrainment
     raise ValueError(

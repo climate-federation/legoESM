@@ -141,3 +141,25 @@ def test_prt_promotion_registered_and_applies():
         CLUBBLiteConfig(), "clubb_lite_Pr_t", jnp.array([0.7, 0.9, 1.1]))
     assert new.Pr_t.shape == (3,)
     np.testing.assert_allclose(np.asarray(new.Pr_t), [0.7, 0.9, 1.1])
+
+
+def test_uniform_per_column_ceps_matches_scalar():
+    """A uniform (ncol,) C_eps reproduces the scalar default EXACTLY."""
+    kw = _inputs()
+    ncol = kw["T"].shape[0]
+    cfg = CLUBBLiteConfig()
+    _, wp2_scalar = clubb_lite_turbulence(**kw, config=cfg)
+    _, wp2_uniform = clubb_lite_turbulence(
+        **kw, config=cfg._replace(C_eps=jnp.full((ncol,), cfg.C_eps)))
+    np.testing.assert_array_equal(np.asarray(wp2_uniform), np.asarray(wp2_scalar))
+
+
+def test_per_column_ceps_changes_wp2_per_column():
+    """A per-column C_eps changes the wp2 dissipation per column (reaches the body)."""
+    kw = _inputs()
+    cfg = CLUBBLiteConfig()
+    _, wp2_base = clubb_lite_turbulence(**kw, config=cfg)
+    ceps = jnp.array([cfg.C_eps, 2.0 * cfg.C_eps, cfg.C_eps])  # double in col 1
+    _, wp2_pc = clubb_lite_turbulence(**kw, config=cfg._replace(C_eps=ceps))
+    np.testing.assert_array_equal(np.asarray(wp2_pc)[0], np.asarray(wp2_base)[0])
+    assert not np.allclose(np.asarray(wp2_pc)[1], np.asarray(wp2_base)[1])  # more diss

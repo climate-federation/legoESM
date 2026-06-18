@@ -151,6 +151,9 @@ def test_validate_config_rejects_bad_settings():
         # clubb_coefficient as ONE of the multi methods still needs l_mix_max.
         ColumnLESConfig(diagnosis_methods=("clubb_coefficient", "prandtl_number")),
         ColumnLESConfig(diagnosis_methods=()),   # empty multi list
+        # c_eps also needs l_mix_max (single + multi).
+        ColumnLESConfig(diagnosis_method="c_eps"),
+        ColumnLESConfig(diagnosis_methods=("c_eps", "prandtl_number")),
     ):
         with pytest.raises(ValueError):
             validate_column_les_config(bad)
@@ -178,10 +181,14 @@ def test_coefficient_value_dispatch():
     class _Prt:
         Pr_t = jnp.full((7,), 0.8)
 
+    class _CEps:
+        C_eps = jnp.full((7,), 0.3)
+
     assert coefficient_value(_K(), "eddy_diffusivity").shape == (7,)
     assert float(coefficient_value(_Ent(), "entrainment")) == pytest.approx(0.01)
     assert coefficient_value(_Ck(), "clubb_coefficient").shape == (7,)
     assert coefficient_value(_Prt(), "prandtl_number").shape == (7,)
+    assert coefficient_value(_CEps(), "c_eps").shape == (7,)
     with pytest.raises(ValueError, match="no coefficient"):
         coefficient_value(_K(), "entrainment")  # wrong pairing
     with pytest.raises(ValueError, match="no coefficient"):

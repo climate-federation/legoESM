@@ -478,6 +478,64 @@ def test_build_multi_correction_campaign_corrects_both_coefficients():
     assert float(prt.min()) >= 0.3 and float(prt.max()) <= 1.5   # Pr_t bounds
 
 
+def test_build_correction_campaign_c_eps_single_method():
+    """Single-coefficient c_eps is wired: build_correction_campaign selects the
+    clubb_lite_C_eps promotion + C_eps background + auto-populates l_mix_max."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME, diagnosis_method="c_eps"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        accept_only_if_improved=False)
+    ceps = np.asarray(result.final_config.C_eps).reshape(-1)
+    assert ceps.shape == (8 * 16,)
+    assert float(ceps.min()) >= 0.06 and float(ceps.max()) <= 0.6
+    assert jnp.ndim(jnp.asarray(result.final_config.C_K)) == 0   # C_K untouched
+
+
+def test_build_multi_correction_campaign_three_coefficients_with_c_eps():
+    """C_K + Pr_t + C_eps co-corrected from one LES run; C_eps closes the wp2-
+    identification gap. All three end up in-bounds per-column fields."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_multi_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        coefficients=("C_K", "Pr_t", "C_eps"), accept_only_if_improved=False)
+
+    assert set(result.final_fields) == {
+        "clubb_lite_C_K", "clubb_lite_Pr_t", "clubb_lite_C_eps"}
+    ceps = np.asarray(result.final_config.C_eps).reshape(-1)
+    assert ceps.shape == (8 * 16,)
+    assert float(ceps.min()) >= 0.06 and float(ceps.max()) <= 0.6   # C_eps bounds
+
+
 def test_build_multi_correction_campaign_rejects_unknown_coefficient():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate

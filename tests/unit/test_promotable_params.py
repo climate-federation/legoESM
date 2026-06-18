@@ -193,3 +193,12 @@ def test_apply_feedback_independent_slots_order_independent():
     np.testing.assert_array_equal(np.asarray(a.Pr_t), np.asarray(b.Pr_t))
     np.testing.assert_array_equal(np.asarray(a.C_K), np.asarray(f_ck))
     np.testing.assert_array_equal(np.asarray(a.Pr_t), np.asarray(f_prt))
+
+
+def test_c_eps_promotion_registered_and_clamped():
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    assert "clubb_lite_C_eps" in promotable_field_names()
+    assert PROMOTABLE_FIELDS["clubb_lite_C_eps"].field == "C_eps"
+    out = clip_field_to_promotable_bounds(
+        CLUBBLiteConfig(), "clubb_lite_C_eps", jnp.array([0.01, 1.0, 0.3]))
+    np.testing.assert_allclose(np.asarray(out), [0.06, 0.6, 0.3])  # (0.06,0.6) bounds

@@ -34,9 +34,11 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
     EntrainmentDiagnosis,
+    c_eps_from_budget,
     clubb_coefficient_from_diffusivity,
     eddy_diffusivity_from_flux,
     entrainment_velocity_from_buoyancy_flux,
+    mean_gradient_at_interfaces,
     momentum_diffusivity_from_fluxes,
     prandtl_number_from_diffusivities,
 )
@@ -48,6 +50,7 @@ from legoesm.atmosphere.physics._shared import mixing_length
 
 _METHODS = (
     "eddy_diffusivity", "entrainment", "clubb_coefficient", "prandtl_number",
+    "c_eps",
 )
 
 # Minimum number of valid interior interfaces for a trustworthy column C_K
@@ -219,6 +222,69 @@ def diagnose_prandtl_number(
     return PrandtlProfile(z_m=kh.z_m, Pr_t=Pr_t, valid=valid & enough)
 
 
+class CEpsProfile(NamedTuple):
+    """Dimensionless wp2-dissipation coefficient ``C_eps`` per interior interface."""
+
+    z_m: jax.Array     # (nlev-1,) interior-interface heights [m], ascending
+    C_eps: jax.Array   # (nlev-1,) dimensionless C_eps = P·ℓ/wp2^{3/2}
+    valid: jax.Array   # (nlev-1,) bool
+
+
+def diagnose_c_eps_coefficient(
+    les_state,
+    height_coord,
+    *,
+    l_mix_max: float,
+    qv_slot: int = 0,
+    min_valid_levels: int = _MIN_VALID_CK_LEVELS,
+) -> CEpsProfile:
+    """Diagnose the DIMENSIONLESS wp2-dissipation coefficient ``C_eps`` so the
+    GCM's equilibrium ``wp2`` tracks the LES ``w'²`` — closing the iter-46
+    ``C_K`` wp2-identification gap (when ``C_eps`` and ``C_K`` are both corrected,
+    the GCM ``wp2 → w'²_LES`` makes ``Km = C_K·ℓ·√wp2`` reproduce the LES K_m).
+
+    Inverts the steady-state lite ``w'²`` budget ``C_eps = P·ℓ/wp2^{3/2}`` with the
+    net production ``P = K_m·S² − K_h·N²``, all co-located at the ``nlev-1``
+    ascending interior interfaces (the same convention as ``C_K`` / ``Pr_t``):
+      * ``K_m`` (momentum) + ``K_h`` (heat) reuse the iter-46/47 inversions;
+      * ``S² = (∂⟨u⟩/∂z)² + (∂⟨v⟩/∂z)²`` (mean-wind shear);
+      * ``N² = (g/⟨θ_v⟩) ∂⟨θ_v⟩/∂z`` (co-located interface ``⟨θ_v⟩``, same ε
+        convention as :func:`diagnose_entrainment`);
+      * ``ℓ`` = the SAME Blackadar :func:`mixing_length`; ``wp2`` = resolved
+        ``w'²`` (interior).
+    See :func:`c_eps_from_budget` for the validity masks + the dropped-transport
+    LIMITATION.  Pure-JAX, AD-safe.
+    """
+    kh = diagnose_eddy_diffusivity(les_state, height_coord, qv_slot)  # heat K, ascending
+    fluxes = resolved_turbulent_fluxes_plane(les_state, height_coord, qv_slot)
+    wp2_half = vertical_velocity_variance_plane(les_state, height_coord)
+    u_mean = jnp.mean(les_state.u.data, axis=(0, 1))
+    v_mean = jnp.mean(les_state.v.data, axis=(0, 1))
+    z_full = jnp.asarray(height_coord.z_full)
+    # θ_v mean (same ε convention as diagnose_entrainment / compute_cape).
+    theta_total = height_coord.theta_ref + les_state.theta_prime.data
+    q_v = les_state.tracers.data[..., qv_slot]
+    coeff = 1.0 / constants.epsilon - 1.0
+    thetav_mean = jnp.mean(theta_total * (1.0 + coeff * q_v), axis=(0, 1))
+    # Reverse all to ascending, co-located at the interior interfaces.
+    u_asc, v_asc, z_asc = u_mean[::-1], v_mean[::-1], z_full[::-1]
+    thetav_asc = thetav_mean[::-1]
+    K_m, km_valid = momentum_diffusivity_from_fluxes(
+        fluxes.w_u[::-1], fluxes.w_v[::-1], u_asc, v_asc, z_asc)
+    du_dz = mean_gradient_at_interfaces(u_asc, z_asc)
+    dv_dz = mean_gradient_at_interfaces(v_asc, z_asc)
+    shear_sq = du_dz ** 2 + dv_dz ** 2
+    dthetav_dz = mean_gradient_at_interfaces(thetav_asc, z_asc)
+    thetav_iface = 0.5 * (thetav_asc[1:] + thetav_asc[:-1])          # co-located ⟨θ_v⟩
+    N_sq = constants.g * dthetav_dz / jnp.maximum(thetav_iface, 1.0)
+    z_m = fluxes.z_half_interior[::-1]
+    c_eps, valid = c_eps_from_budget(
+        K_m, km_valid, kh.K, kh.valid, shear_sq, N_sq,
+        mixing_length(z_m, l_mix_max), wp2_half[1:-1][::-1])
+    enough = jnp.sum(valid) >= int(min_valid_levels)
+    return CEpsProfile(z_m=z_m, C_eps=c_eps, valid=valid & enough)
+
+
 def diagnose_column_coefficient(
     les_state,
     height_coord,
@@ -241,13 +307,17 @@ def diagnose_column_coefficient(
         return diagnose_entrainment(les_state, height_coord, qv_slot)
     if method == "prandtl_number":
         return diagnose_prandtl_number(les_state, height_coord, qv_slot=qv_slot)
-    if method == "clubb_coefficient":
+    if method in ("clubb_coefficient", "c_eps"):
         if l_mix_max is None:
             raise ValueError(
-                "method='clubb_coefficient' requires l_mix_max (the GCM "
+                f"method={method!r} requires l_mix_max (the GCM "
                 "CLUBBLiteConfig.l_mix_max) to evaluate the mixing length."
             )
-        return diagnose_clubb_coefficient(
+        if method == "clubb_coefficient":
+            return diagnose_clubb_coefficient(
+                les_state, height_coord, l_mix_max=l_mix_max, qv_slot=qv_slot
+            )
+        return diagnose_c_eps_coefficient(
             les_state, height_coord, l_mix_max=l_mix_max, qv_slot=qv_slot
         )
     raise ValueError(

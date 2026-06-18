@@ -294,3 +294,53 @@ def test_prandtl_number_requires_both_diffusivities_valid():
         jnp.full((2,), 4.0), jnp.array([True, False]),
         jnp.full((2,), 5.0), jnp.array([True, True]))
     assert bool(valid[0]) and not bool(valid[1])   # invalid K_m ⇒ Pr_t invalid
+
+
+# --- C_eps (wp2-dissipation) from the steady-state budget -------------------
+from legoesm.atmosphere.dynamics.les_closure_diagnosis import (  # noqa: E402
+    c_eps_from_budget,
+)
+
+
+def test_c_eps_from_budget_value():
+    # C_eps = (Km*S2 - Kh*N2)*l/wp2^1.5; unstable N2<0 ⇒ buoyancy produces.
+    # P = 5*1e-4 - 7*(-1e-4) = 1.2e-3; wp2^1.5 = 0.125; C_eps = 1.2e-3*50/0.125 = 0.48
+    ce, valid = c_eps_from_budget(
+        jnp.full((3,), 5.0), jnp.ones((3,), bool),
+        jnp.full((3,), 7.0), jnp.ones((3,), bool),
+        jnp.full((3,), 1.0e-4), jnp.full((3,), -1.0e-4),
+        jnp.full((3,), 50.0), jnp.full((3,), 0.25))
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(ce), 0.48, rtol=1e-9)
+
+
+def test_c_eps_negative_production_invalid():
+    # Strongly stable (N2>0, weak shear) ⇒ net production P<0 ⇒ invalid.
+    _, valid = c_eps_from_budget(
+        jnp.full((3,), 5.0), jnp.ones((3,), bool),
+        jnp.full((3,), 7.0), jnp.ones((3,), bool),
+        jnp.full((3,), 1.0e-4), jnp.full((3,), 1.0e-3),   # N2>0, buoy destroys
+        jnp.full((3,), 50.0), jnp.full((3,), 0.25))
+    assert not bool(jnp.any(valid))
+
+
+def test_c_eps_blowup_invalid_and_ad_safe():
+    # Tiny wp2 + large production ⇒ raw C_eps explodes past the sanity ceiling
+    # ⇒ flagged invalid (not averaged in via the clamp).
+    ce, valid = c_eps_from_budget(
+        jnp.full((3,), 5.0), jnp.ones((3,), bool),
+        jnp.full((3,), 7.0), jnp.ones((3,), bool),
+        jnp.full((3,), 1.0), jnp.full((3,), -1.0e-4),
+        jnp.full((3,), 50.0), jnp.full((3,), 1.0e-3))
+    assert not bool(jnp.any(valid))
+
+    def loss(w):
+        ce, _ = c_eps_from_budget(
+            jnp.full((3,), 5.0), jnp.ones((3,), bool),
+            jnp.full((3,), 7.0), jnp.ones((3,), bool),
+            jnp.full((3,), 1.0e-4), jnp.full((3,), -1.0e-4),
+            jnp.full((3,), 50.0), w)
+        return jnp.sum(ce ** 2)
+
+    g = jax.grad(loss)(jnp.array([0.25, 1.0e-9, 0.25]))   # one below the wp2 floor
+    assert bool(jnp.all(jnp.isfinite(g)))                 # wp2^1.5 double-where AD-safe

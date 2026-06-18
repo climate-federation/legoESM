@@ -109,7 +109,19 @@ def make_les_diagnose_fn(
 _COEFFICIENT_SPEC_MAP = {
     "C_K": ("clubb_lite_C_K", "clubb_coefficient"),
     "Pr_t": ("clubb_lite_Pr_t", "prandtl_number"),
+    "C_eps": ("clubb_lite_C_eps", "c_eps"),
 }
+
+# Single-coefficient LES diagnosis method → (promotion_key, CLUBBLiteConfig field).
+# eddy_diffusivity (legacy, dimensional) targets C_K like clubb_coefficient.
+_METHOD_PROMOTION = {
+    "clubb_coefficient": ("clubb_lite_C_K", "C_K"),
+    "eddy_diffusivity": ("clubb_lite_C_K", "C_K"),
+    "prandtl_number": ("clubb_lite_Pr_t", "Pr_t"),
+    "c_eps": ("clubb_lite_C_eps", "C_eps"),
+}
+# Diagnosis methods that evaluate the GCM mixing length (need clubb_l_mix_max).
+_METHODS_NEED_LMIX = frozenset({"clubb_coefficient", "c_eps"})
 
 
 def _grid_latlon_deg(grid, lat_deg, lon_deg):
@@ -222,18 +234,18 @@ def build_correction_campaign(
             "les_config.diagnosis_method, not diagnosis_methods. For SIMULTANEOUS "
             "multi-coefficient correction use build_multi_correction_campaign.")
     diagnosis_method = les_config.diagnosis_method
-    if diagnosis_method == "prandtl_number":
-        promotion_key = "clubb_lite_Pr_t"
-        background = float(CLUBBLiteConfig().Pr_t)
-    else:
-        promotion_key = "clubb_lite_C_K"
-        background = float(CLUBBLiteConfig().C_K)
-        # clubb_coefficient needs the GCM mixing length so the diagnosed C_K
-        # matches how the GCM uses it; auto-populate it from the CLUBB config.
-        if diagnosis_method == "clubb_coefficient" and \
-                getattr(les_config, "clubb_l_mix_max", None) is None:
-            les_config = les_config._replace(
-                clubb_l_mix_max=float(clubb_cfg.l_mix_max))
+    if diagnosis_method not in _METHOD_PROMOTION:
+        raise ValueError(
+            f"unknown diagnosis_method {diagnosis_method!r}; choose from "
+            f"{tuple(_METHOD_PROMOTION)}.")
+    promotion_key, field_name = _METHOD_PROMOTION[diagnosis_method]
+    background = float(getattr(CLUBBLiteConfig(), field_name))
+    # clubb_coefficient (C_K) and c_eps evaluate the GCM mixing length; auto-
+    # populate clubb_l_mix_max from the CLUBB config so the diagnosis matches it.
+    if diagnosis_method in _METHODS_NEED_LMIX and \
+            getattr(les_config, "clubb_l_mix_max", None) is None:
+        les_config = les_config._replace(
+            clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
     compare_fn = _compose_compare_fn(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
@@ -323,7 +335,8 @@ def build_multi_correction_campaign(
     # Diagnose every coefficient's method from ONE LES run (dedup, keep order).
     methods = tuple(dict.fromkeys(s.diagnosis_method for s in specs))
     les_config = les_config._replace(diagnosis_methods=methods)
-    if "clubb_coefficient" in methods and \
+    # clubb_coefficient (C_K) and c_eps both need the GCM mixing length.
+    if {"clubb_coefficient", "c_eps"}.intersection(methods) and \
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
@@ -436,14 +449,15 @@ def _build_arg_parser():
                         "coefficient campaign. Omit for the single-coefficient "
                         "--diagnosis-method path.")
     p.add_argument("--diagnosis-method",
-                   choices=("clubb_coefficient", "prandtl_number",
+                   choices=("clubb_coefficient", "prandtl_number", "c_eps",
                             "eddy_diffusivity"),
                    default="clubb_coefficient",
-                   help="LES closure-coefficient diagnosis: clubb_coefficient "
-                        "(default) → DIMENSIONLESS C_K = K_m/(l*sqrt(wp2)); "
-                        "prandtl_number → DIMENSIONLESS Pr_t = K_m/K_h "
-                        "(clubb_lite_Pr_t); eddy_diffusivity → dimensional heat "
-                        "K [m^2/s] (legacy)")
+                   help="single-coefficient LES diagnosis: clubb_coefficient "
+                        "(default) → C_K = K_m/(l*sqrt(wp2)); prandtl_number → "
+                        "Pr_t = K_m/K_h; c_eps → C_eps = P*l/wp2^1.5 (the wp2-"
+                        "dissipation coefficient); eddy_diffusivity → dimensional "
+                        "heat K [m^2/s] (legacy). For SEVERAL at once use "
+                        "--coefficients.")
     p.add_argument("--allow-unphysical-coeff", action="store_true",
                    help="do NOT clamp the diagnosed C_K to its registered physical "
                         "bounds (default: clamp, so a degenerate LES cannot inject "
@@ -638,9 +652,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
 
     # Restart: resume from a checkpoint (corrected config + accumulated field +
     # round), so a multi-day campaign survives a job timeout (§1 restartable).
-    # The CLUBB field the diagnosis corrects (C_K for the diffusivity methods,
-    # Pr_t for prandtl_number) — so the checkpoint/output persist the right field.
-    corrected_field = "Pr_t" if args.diagnosis_method == "prandtl_number" else "C_K"
+    # The CLUBB field the diagnosis corrects (C_K / Pr_t / C_eps) — so the
+    # checkpoint/output persist the right field.
+    corrected_field = _METHOD_PROMOTION[args.diagnosis_method][1]
     initial_clubb, initial_field, start_round = None, None, 0
     if args.resume:
         with open(args.resume) as f:

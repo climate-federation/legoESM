@@ -74,6 +74,13 @@ PROMOTABLE_FIELDS: dict[str, PromotableField] = {
              "per-column field broadcasts over the vertical. Maps the LES "
              "turbulent-Prandtl-number diagnosis (Pr_t = K_m/K_h) onto the GCM.",
     ),
+    "clubb_lite_C_eps": PromotableField(
+        field="C_eps", scheme="CLUBB-lite turbulence", units="1", body_safe=True,
+        note="wp2 dissipation = C_eps·√wp2/l; the body wraps C_eps in "
+             "broadcast_column_param. Maps the LES wp2-budget diagnosis "
+             "(C_eps = P·l/wp2^1.5) onto the GCM so its equilibrium wp2 tracks the "
+             "LES w'², closing the C_K wp2-identification gap.",
+    ),
 }
 # NOTE: gray ``sfc_albedo`` is deliberately NOT registered — the driver passes a
 # per-column ``sfc_albedo`` as an explicit argument to ``gray_radiation`` that

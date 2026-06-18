@@ -17,9 +17,11 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     make_flat_plane_terrain_metric, make_rest_state,
 )
 from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    CEpsProfile,
     ClubbCoefficientProfile,
     EddyDiffusivityProfile,
     PrandtlProfile,
+    diagnose_c_eps_coefficient,
     diagnose_clubb_coefficient,
     diagnose_column_coefficient,
     diagnose_eddy_diffusivity,
@@ -228,6 +230,59 @@ def test_dispatch_prandtl_number():
     state, hc = _les_state_with_shear()
     out = diagnose_column_coefficient(state, hc, method="prandtl_number")
     assert isinstance(out, PrandtlProfile)
+
+
+def test_c_eps_matches_manual_composition():
+    """diagnose_c_eps_coefficient = c_eps_from_budget(K_m, K_h, S2, N2, l, wp2) —
+    validates the co-located reversal + the theta_v/N2 wiring."""
+    from legoesm import constants
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        c_eps_from_budget,
+        mean_gradient_at_interfaces,
+        momentum_diffusivity_from_fluxes,
+    )
+    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+        resolved_turbulent_fluxes_plane,
+        vertical_velocity_variance_plane,
+    )
+    from legoesm.atmosphere.physics._shared import mixing_length
+
+    state, hc = _les_state_with_shear()
+    l_mix_max = 100.0
+    out = diagnose_c_eps_coefficient(state, hc, l_mix_max=l_mix_max)
+    assert isinstance(out, CEpsProfile)
+    assert out.C_eps.shape == (7,) and bool(jnp.all(jnp.diff(out.z_m) > 0))
+
+    kh = diagnose_eddy_diffusivity(state, hc)
+    fluxes = resolved_turbulent_fluxes_plane(state, hc)
+    wp2_half = vertical_velocity_variance_plane(state, hc)
+    u_mean = jnp.mean(state.u.data, axis=(0, 1))[::-1]
+    v_mean = jnp.mean(state.v.data, axis=(0, 1))[::-1]
+    z_asc = jnp.asarray(hc.z_full)[::-1]
+    theta_total = hc.theta_ref + state.theta_prime.data
+    q_v = state.tracers.data[..., 0]
+    coeff = 1.0 / constants.epsilon - 1.0
+    thetav = jnp.mean(theta_total * (1.0 + coeff * q_v), axis=(0, 1))[::-1]
+    Km, kmv = momentum_diffusivity_from_fluxes(
+        fluxes.w_u[::-1], fluxes.w_v[::-1], u_mean, v_mean, z_asc)
+    shear_sq = (mean_gradient_at_interfaces(u_mean, z_asc) ** 2
+                + mean_gradient_at_interfaces(v_mean, z_asc) ** 2)
+    N_sq = (constants.g * mean_gradient_at_interfaces(thetav, z_asc)
+            / jnp.maximum(0.5 * (thetav[1:] + thetav[:-1]), 1.0))
+    z_m = fluxes.z_half_interior[::-1]
+    ce, valid = c_eps_from_budget(
+        Km, kmv, kh.K, kh.valid, shear_sq, N_sq,
+        mixing_length(z_m, l_mix_max), wp2_half[1:-1][::-1])
+    np.testing.assert_allclose(np.asarray(out.C_eps), np.asarray(ce), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(out.valid), np.asarray(valid))
+
+
+def test_dispatch_c_eps_requires_l_mix_max():
+    state, hc = _les_state_with_shear()
+    out = diagnose_column_coefficient(state, hc, method="c_eps", l_mix_max=100.0)
+    assert isinstance(out, CEpsProfile)
+    with pytest.raises(ValueError, match="requires l_mix_max"):
+        diagnose_column_coefficient(state, hc, method="c_eps")
 
 
 def test_dispatch_unknown_method_raises():

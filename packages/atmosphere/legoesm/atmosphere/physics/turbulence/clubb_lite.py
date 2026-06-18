@@ -252,8 +252,11 @@ def clubb_lite_turbulence(
     shear_prod = Km_full * S2
     buoy_prod = -Kh_full * N2  # buoyancy production (>0 when unstable)
 
-    # Dissipation coefficient: C1/tau (semi-implicit)
-    diss_wp2 = config.C_eps * sqrt_wp2 / l_mix_safe
+    # Dissipation coefficient: C1/tau (semi-implicit). ``C_eps`` may be a scalar
+    # (production, byte-identical) OR a per-column LES-informed correction (it sets
+    # the GCM's equilibrium wp2 so it tracks the LES w'² — closing the C_K
+    # wp2-identification gap); broadcast it over the vertical like C_K / Pr_t.
+    diss_wp2 = broadcast_column_param(config.C_eps, l_mix) * sqrt_wp2 / l_mix_safe
 
     # Diffuse wp2.  Pin the surface_flux dtype to the input dtype so the
     # tridiagonal solve does not silently promote the column path to f64.
