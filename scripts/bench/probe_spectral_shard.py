@@ -124,7 +124,7 @@ def main():
     sps = n_eff / elapsed
     print(f"shard={args.shard_axis}  scan={args.scan_steps:>2d}  "
           f"T{args.n_max}/{args.nlev}L  "
-          f"{n_eff} steps ({n_outer} chunks) in {elapsed:.2f}s  → {sps:.1f} steps/s")
+          f"{n_eff} steps ({n_outer} chunks) in {elapsed:.2f}s  → {sps:.4f} steps/s")
 
 
 if __name__ == "__main__":
