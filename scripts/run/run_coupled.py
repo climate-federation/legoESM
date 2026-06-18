@@ -86,6 +86,26 @@ def main():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
+    # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
+    # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
+    # (~6x faster radiation on GPU; FORWARD/inference only — NOT AD-safe).
+    # ``--no-rrtmgp-gpoint-checkpoint`` selects a plain ``lax.scan`` over
+    # g-points (one reused scan-body kernel) instead of the
+    # ``jax.checkpoint(prevent_cse=True)`` path, shrinking the compiled-code
+    # footprint (relieves the XLA-CPU LLVM-JIT code-region pressure / cuts the
+    # rrtmgp cold-compile).  The checkpoint is ONLY needed for reverse-mode AD
+    # memory, which a forward coupled run never uses.  Defaults match the
+    # global config (0 / True = current behaviour); recommended for a forward
+    # rrtmgp CMIP run: ``--rrtmgp-gpoint-batch-size 16 --no-rrtmgp-gpoint-checkpoint``.
+    parser.add_argument("--rrtmgp-gpoint-batch-size", type=int, default=0,
+                        help="RRTMGP g-point vmap block size (0=checkpointed "
+                             "scan; >0=forward-only ~6x faster radiation)")
+    parser.add_argument("--rrtmgp-gpoint-checkpoint",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Checkpoint the per-g-point two-stream scan "
+                             "(default on = AD-safe; --no-... = smaller/faster "
+                             "compile for forward-only runs)")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -318,6 +338,8 @@ def main():
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
+        rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
+        rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
