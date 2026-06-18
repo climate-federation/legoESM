@@ -148,6 +148,78 @@ def _validate_aligned(model: ColumnState, reference: ColumnState) -> None:
                 )
 
 
+class ReferenceBoundsConfig(NamedTuple):
+    """GENEROUS physical-plausibility bounds for a comparison/reference state.
+
+    These are SANITY ranges, deliberately wide — their job is to catch a gross
+    UNITS / sign error in a loaded ERA5 reference (the classic: T in °C not K, p_s
+    in hPa not Pa, q_v in g/kg not kg/kg), NOT to tightly validate physics.  A
+    units bug otherwise passes :func:`_validate_aligned` (which checks only shape)
+    and produces a massive FAKE bias that the correction loop would then "improve"
+    against garbage.  Defaults span the full Earth atmospheric range with margin.
+    """
+
+    T_min_K: float = 150.0           # < this ⇒ likely °C input (≈ −123 °C floor)
+    T_max_K: float = 350.0
+    q_v_min_kg_kg: float = -1.0e-6   # ~0: ERA5 q is non-negative (roundoff floor only;
+                                     # NOT the model's advection-overshoot tolerance)
+    q_v_max_kg_kg: float = 0.1       # > this ⇒ likely g/kg input (sat ≲ 0.04 kg/kg)
+    p_s_min_Pa: float = 3.0e4        # < this ⇒ likely hPa input (≈ 300 hPa floor)
+    p_s_max_Pa: float = 1.1e5
+    wind_abs_max_ms: float = 200.0   # |u|,|v|: generous vs ≲100 m/s jets
+    sst_min_K: float = 250.0
+    sst_max_K: float = 320.0
+    precip_min_mm_day: float = 0.0   # precip is non-negative
+    precip_max_mm_day: float = 2000.0
+
+
+def validate_reference_physical(
+    state: ColumnState, *, bounds: ReferenceBoundsConfig | None = None,
+    name: str = "reference",
+) -> None:
+    """Fail-fast pre-flight: every present field of ``state`` is finite AND within
+    its GENEROUS physical range (:class:`ReferenceBoundsConfig`) — else raise
+    ``ValueError`` naming the field, the observed min/max, and the likely units bug.
+
+    The companion to :func:`_validate_aligned` (which checks only SHAPE): a
+    units/sign error in a loaded ERA5 reference would otherwise silently produce a
+    huge fake bias the correction loop "corrects" against.  Pure host-side check on
+    a CONCRETE state (campaign-build time, never traced); call it ONCE on the
+    reference the campaign actually uses.  ``u_edge`` (native MPAS edge velocity, a
+    different cardinality) is intentionally NOT range-checked here.
+    """
+    if bounds is None:
+        bounds = ReferenceBoundsConfig()
+    checks = [
+        ("T", state.T, bounds.T_min_K, bounds.T_max_K, "K (°C input?)"),
+        ("q_v", state.q_v, bounds.q_v_min_kg_kg, bounds.q_v_max_kg_kg,
+         "kg/kg (g/kg input?)"),
+        ("u", state.u, -bounds.wind_abs_max_ms, bounds.wind_abs_max_ms, "m/s"),
+        ("v", state.v, -bounds.wind_abs_max_ms, bounds.wind_abs_max_ms, "m/s"),
+        ("p_s", state.p_s, bounds.p_s_min_Pa, bounds.p_s_max_Pa, "Pa (hPa input?)"),
+    ]
+    if state.sst_K is not None:
+        checks.append(
+            ("sst_K", state.sst_K, bounds.sst_min_K, bounds.sst_max_K, "K"))
+    if state.precip_mm_day is not None:
+        checks.append(
+            ("precip_mm_day", state.precip_mm_day, bounds.precip_min_mm_day,
+             bounds.precip_max_mm_day, "mm/day"))
+    for field, value, lo, hi, unit_hint in checks:
+        arr = jnp.asarray(value)
+        if not bool(jnp.all(jnp.isfinite(arr))):
+            raise ValueError(
+                f"validate_reference_physical: {name}.{field} has non-finite "
+                f"values — a comparison reference must be finite ({unit_hint}).")
+        if not bool(jnp.all((arr >= lo) & (arr <= hi))):
+            amin, amax = float(jnp.min(arr)), float(jnp.max(arr))
+            raise ValueError(
+                f"validate_reference_physical: {name}.{field} outside the plausible "
+                f"range [{lo}, {hi}] {unit_hint}: observed [{amin:.4g}, {amax:.4g}] "
+                "— check the reference UNITS/sign before running the campaign (a "
+                "units error produces a large FAKE bias the loop would 'correct').")
+
+
 def compare_state_to_reference(
     *,
     model: ColumnState,

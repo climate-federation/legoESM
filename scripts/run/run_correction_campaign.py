@@ -225,6 +225,7 @@ def build_correction_campaign(
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
+    validate_reference: bool = True,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -251,6 +252,9 @@ def build_correction_campaign(
     corrects ``clubb_lite_Pr_t`` (the dimensionless ``Pr_t = K_m/K_h``), otherwise
     ``clubb_lite_C_K``.
     """
+    if validate_reference:                           # fail-fast on a units/sign error
+        from legoesm.training.compare_reanalysis import validate_reference_physical
+        validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
 
@@ -319,6 +323,7 @@ def _distributed_campaign_kwargs(layout, reference, area_weights, n_worst, base_
     """
     import jax.numpy as jnp
     import numpy as np
+    from legoesm.training.compare_reanalysis import validate_reference_physical
     from legoesm.training.distributed_campaign import (
         distributed_campaign_hooks,
         slice_reference_to_local,
@@ -349,12 +354,29 @@ def _distributed_campaign_kwargs(layout, reference, area_weights, n_worst, base_
             raise ValueError(
                 "_distributed_campaign_kwargs: local_cells index out of range "
                 f"[{lo}, {hi}] for a global mesh of {n_global} cells.")
+    # COLLECTIVE-SAFE reference validation, in TWO ordered steps:
+    #  (1) a DETERMINISTIC shape check (reference cell count vs the global mesh) — this
+    #      runs FIRST so a mis-passed rank-LOCAL reference fails identically on every
+    #      rank (all raise) before the value-dependent check below;
+    #  (2) the physical (units/sign) check on the GLOBAL reference — identical on every
+    #      rank (same global reference) ⇒ all ranks raise or none, so no rank can pass
+    #      through while another raises and deadlock the campaign loop's collectives.
+    # The inner per-SLICE re-validation is disabled (``validate_reference=False`` below)
+    # so a partial defect cannot raise on only the owning ranks (iter 98 lesson).
+    ref_n = int(np.asarray(reference.T).shape[0])    # T is a required cell field
+    if ref_n != n_global:
+        raise ValueError(
+            f"_distributed_campaign_kwargs: the GLOBAL reference has {ref_n} cells but "
+            f"the partitioned mesh has {n_global} — pass the GLOBAL reference (not a "
+            "rank-local slice); it must be defined on the SAME mesh as the model run.")
+    validate_reference_physical(reference, name="global reference")
     return dict(
         reference=slice_reference_to_local(
             reference, local_cells, expected_n_cells=n_global),
         area_weights=jnp.asarray(area_np)[jnp.asarray(local_cells)],
         n_worst=n_worst, valid_mask=valid_mask,
         manifest_reducer=manifest_reducer, global_reduce=global_reduce,
+        validate_reference=False,                    # global ref already validated above
     )
 
 
@@ -507,6 +529,7 @@ def build_multi_correction_campaign(
     valid_mask: Any | None = None,
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
+    validate_reference: bool = True,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -528,6 +551,9 @@ def build_multi_correction_campaign(
 
     if not coefficients:
         raise ValueError("coefficients must be a non-empty tuple.")
+    if validate_reference:                           # fail-fast on a units/sign error
+        from legoesm.training.compare_reanalysis import validate_reference_physical
+        validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()

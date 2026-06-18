@@ -1065,10 +1065,13 @@ def _mock_layout(owned, local_cells, n_global=None):
 
 
 def _global_cell_state(ncells, nlev=4):
+    # PHYSICALLY plausible values (the distributed kwargs now pre-validate the global
+    # reference via validate_reference_physical) — distinct per cell for slice checks.
     rng = np.arange(ncells * nlev, dtype=float).reshape(ncells, nlev)
     return ColumnState(
-        T=jnp.asarray(rng), q_v=jnp.zeros((ncells, nlev)), u=jnp.zeros((ncells, nlev)),
-        v=jnp.zeros((ncells, nlev)), p_s=jnp.arange(float(ncells)),
+        T=jnp.asarray(280.0 + 0.01 * rng), q_v=jnp.full((ncells, nlev), 5.0e-3),
+        u=jnp.zeros((ncells, nlev)), v=jnp.zeros((ncells, nlev)),
+        p_s=jnp.full((ncells,), 1.0e5) + jnp.arange(float(ncells)),
         sst_K=jnp.arange(float(ncells)) + 290.0)
 
 
@@ -1095,6 +1098,34 @@ def test_distributed_campaign_kwargs_composes_hooks_and_slices():
     np.testing.assert_array_equal(
         np.asarray(kw["reference"].T), np.asarray(ref.T)[[2, 3, 1]])
     np.testing.assert_array_equal(np.asarray(kw["area_weights"]), [3.0, 4.0, 2.0])
+    # the GLOBAL reference is pre-validated here, so the inner builder skips the
+    # per-slice re-validation (collective-safe — iter 99).
+    assert kw["validate_reference"] is False
+
+
+def test_distributed_campaign_kwargs_validates_global_reference_units():
+    """``_distributed_campaign_kwargs`` pre-validates the GLOBAL reference for a
+    units/sign error (identical on every rank ⇒ collective-safe) BEFORE slicing, so a
+    distributed run fails fast instead of correcting against a fake bias (iter 99)."""
+    layout = _mock_layout([True, True, False], [2, 3, 1])
+    bad = _global_cell_state(4)._replace(
+        p_s=jnp.full((4,), 1013.0))                  # hPa, not Pa
+    with pytest.raises(ValueError, match=r"global reference.*p_s outside"):
+        _distributed_campaign_kwargs(
+            layout, bad, jnp.ones(4), n_worst=1, base_valid_mask=None)
+
+
+def test_distributed_campaign_kwargs_shape_check_precedes_physical():
+    """The DETERMINISTIC reference-shape check runs BEFORE the value-dependent physical
+    check: a mis-passed rank-LOCAL reference (wrong cell count) AND a bad physical value
+    fails on the SHAPE (identical on every rank ⇒ collective-safe), not the physical
+    bound (which could differ per rank) — iter 99 Codex ordering fix."""
+    layout = _mock_layout([True, True, False], [2, 3, 1])   # n_global defaults to 4
+    # a 3-cell reference (wrong shape) that ALSO has a units-bad p_s.
+    local_ref = _global_cell_state(3)._replace(p_s=jnp.full((3,), 1013.0))
+    with pytest.raises(ValueError, match="has 3 cells but the partitioned mesh has 4"):
+        _distributed_campaign_kwargs(
+            layout, local_ref, jnp.ones(4), n_worst=1, base_valid_mask=None)
 
 
 def test_distributed_campaign_kwargs_rejects_mesh_mismatch():
@@ -1116,8 +1147,9 @@ def test_distributed_campaign_kwargs_rejects_mesh_mismatch():
     with pytest.raises(ValueError, match="must be 1-D"):
         _distributed_campaign_kwargs(
             layout, ref5, jnp.ones((5, 2)), n_worst=1, base_valid_mask=None)
-    # reference cell-count ≠ the mesh (here a reference for 6 cells, mesh has 5).
-    with pytest.raises(ValueError, match="reference has 6 cells.*global mesh has 5"):
+    # reference cell-count ≠ the mesh (here a reference for 6 cells, mesh has 5) —
+    # caught by the deterministic shape check that precedes the physical check.
+    with pytest.raises(ValueError, match="reference has 6 cells.*partitioned mesh has 5"):
         _distributed_campaign_kwargs(
             layout, _global_cell_state(6), jnp.ones(5), n_worst=1, base_valid_mask=None)
 

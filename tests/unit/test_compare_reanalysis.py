@@ -13,12 +13,14 @@ import numpy as np
 import pytest
 from legoesm.training.compare_reanalysis import (
     ColumnState,
+    ReferenceBoundsConfig,
     build_pressure_from_sigma,
     column_state_from_carry,
     column_state_from_hydrostatic,
     compare_state_to_reference,
     owned_cell_valid_mask,
     precip_mm_day_from_accum,
+    validate_reference_physical,
 )
 
 
@@ -40,6 +42,67 @@ def _sigma(nlev):
     sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
     sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
     return sigma_full, sigma_half
+
+
+def test_validate_reference_physical_accepts_a_plausible_state():
+    """A physically-plausible reference (K, Pa, kg/kg) passes (iter 99)."""
+    ok = _uniform_state((4,), 3, T=285.0, q=6e-3, u=10.0, p_s=1.0e5, sst=290.0,
+                        precip=3.0)
+    assert validate_reference_physical(ok) is None
+
+
+def test_validate_reference_physical_catches_celsius_temperature():
+    """T in °C (≈ 12, far below 150 K) is caught with a units hint (iter 99)."""
+    bad = _uniform_state((4,), 3, T=12.0)            # °C, not K
+    with pytest.raises(ValueError, match=r"T outside.*K \(°C input\?\)"):
+        validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_catches_hpa_surface_pressure():
+    """p_s in hPa (≈ 1013, far below 3e4 Pa) is caught (iter 99)."""
+    bad = _uniform_state((4,), 3, T=285.0, p_s=1013.0)   # hPa, not Pa
+    with pytest.raises(ValueError, match=r"p_s outside.*Pa \(hPa input\?\)"):
+        validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_catches_g_per_kg_humidity():
+    """q_v in g/kg (≈ 8, far above 0.1 kg/kg) is caught (iter 99)."""
+    bad = _uniform_state((4,), 3, T=285.0, q=8.0)    # g/kg, not kg/kg
+    with pytest.raises(ValueError, match=r"q_v outside.*kg/kg \(g/kg input\?\)"):
+        validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_catches_negative_humidity():
+    """ERA5 q is non-negative — a meaningfully negative q_v (a fill/sign/loader bug)
+    is rejected (the floor is a roundoff tolerance, NOT the model overshoot one;
+    iter 99 Codex)."""
+    bad = _uniform_state((4,), 3, T=285.0, q=-5.0e-4)
+    with pytest.raises(ValueError, match="q_v outside"):
+        validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_catches_non_finite():
+    """A non-finite reference value is rejected before it can poison the bias."""
+    base = _uniform_state((4,), 3, T=285.0)
+    bad = base._replace(T=base.T.at[0, 0].set(jnp.nan))
+    with pytest.raises(ValueError, match="non-finite"):
+        validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_skips_absent_optional_fields():
+    """precip/sst absent (None) ⇒ not checked; the present fields still validate."""
+    ok = _uniform_state((4,), 3, T=285.0, q=6e-3, p_s=1.0e5)   # no precip/sst
+    assert ok.precip_mm_day is None and ok.sst_K is None
+    assert validate_reference_physical(ok) is None
+
+
+def test_validate_reference_physical_respects_custom_bounds():
+    """Custom bounds tighten/loosen the gate — a value legal by default fails a
+    tightened bound, proving the config (not a hardcoded literal) drives it."""
+    state = _uniform_state((4,), 3, T=285.0, p_s=1.0e5)
+    tight = ReferenceBoundsConfig(T_max_K=284.0)     # 285 now out of range
+    with pytest.raises(ValueError, match="T outside"):
+        validate_reference_physical(state, bounds=tight)
 
 
 def test_precip_accum_conversion():
