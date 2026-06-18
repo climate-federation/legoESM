@@ -315,6 +315,58 @@ def _gradient_cubed_3d(field_3d: jax.Array, grid: Any) -> tuple[jax.Array, jax.A
     return gradient_x_3d(field_3d, grid), gradient_y_3d(field_3d, grid)
 
 
+def _gradient_cubed_geographic_3d(
+    field_3d: jax.Array, grid: Any
+) -> tuple[jax.Array, jax.Array]:
+    """Geographic (east, north) gradient of a scalar on the cubed sphere — the
+    METRIC-CORRECT transform (iter 93), NOT a single-angle rotation.
+
+    ``_gradient_cubed_3d`` returns the COVARIANT directional derivatives
+    ``g_x = ∇Φ·ê_x``, ``g_y = ∇Φ·ê_y`` along the cubed grid-axis UNIT tangents, which
+    are NON-orthogonal on the equiangular grid (so the iter-91 naive ``grid.angle``
+    rotation — and a scalar-``c`` covariant→contravariant inverse, iter 92 — leave a
+    non-convergent ~10–17% near-edge error).  Recover the geographic components by
+    solving the exact 2×2 ``M·[g_east; g_north] = [g_x; g_y]`` with
+    ``M = [[ê_east·ê_x, ê_north·ê_x], [ê_east·ê_y, ê_north·ê_y]]``.
+
+    The grid-axis tangents ``ê_x``/``ê_y`` are the grid-axis derivative of the 3-D
+    cell position ``(x,y,z)_cart`` computed with the SAME halo-aware
+    :func:`~legoesm.core.operators_3d.gradient_x_3d`/``gradient_y_3d`` (so they are
+    correct ACROSS panel boundaries; normalizing to unit vectors makes the dx/dy
+    metric magnitude irrelevant — only the direction matters), and ``ê_east``/
+    ``ê_north`` are the standard geographic basis from ``grid.lat``/``lon``.  This
+    CONVERGES (the analytic ``Φ = C·sin φ`` north-gradient relative error ≲0.13% at
+    n=24, shrinking with resolution; ``min|det M| ≈ 0.87`` — well-conditioned).
+    """
+    from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d
+
+    gx, gy = _gradient_cubed_3d(field_3d, grid)
+    # Grid-axis unit tangents from the grid-axis derivative of the 3-D position
+    # (the 3 Cartesian components ride the trailing "level" axis → ONE 4D halo each).
+    pos = jnp.stack(
+        [jnp.asarray(grid.x_cart), jnp.asarray(grid.y_cart),
+         jnp.asarray(grid.z_cart)], axis=-1).astype(gx.dtype)
+    e_x = gradient_x_3d(pos, grid)
+    e_y = gradient_y_3d(pos, grid)
+    e_x = e_x / jnp.linalg.norm(e_x, axis=-1, keepdims=True)
+    e_y = e_y / jnp.linalg.norm(e_y, axis=-1, keepdims=True)
+    lat = jnp.asarray(grid.lat, dtype=gx.dtype)
+    lon = jnp.asarray(grid.lon, dtype=gx.dtype)
+    zero = jnp.zeros_like(lat)
+    e_east = jnp.stack([-jnp.sin(lon), jnp.cos(lon), zero], axis=-1)
+    e_north = jnp.stack(
+        [-jnp.sin(lat) * jnp.cos(lon), -jnp.sin(lat) * jnp.sin(lon), jnp.cos(lat)],
+        axis=-1)
+    a11 = jnp.sum(e_east * e_x, axis=-1)
+    a12 = jnp.sum(e_north * e_x, axis=-1)
+    a21 = jnp.sum(e_east * e_y, axis=-1)
+    a22 = jnp.sum(e_north * e_y, axis=-1)
+    inv_det = (1.0 / (a11 * a22 - a12 * a21))[..., None]
+    g_east = (a22[..., None] * gx - a12[..., None] * gy) * inv_det
+    g_north = (-a21[..., None] * gx + a11[..., None] * gy) * inv_det
+    return g_east, g_north
+
+
 def _divergence_cubed_3d(u3d: jax.Array, v3d: jax.Array, grid: Any) -> jax.Array:
     """Horizontal divergence via the **4D-native** cubed-sphere operator.
 
@@ -379,22 +431,15 @@ def extract_column_forcing_cubed_sphere(
     div_3d = _divergence_cubed_3d(u, v, grid)
     omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
 
-    # Geostrophic forcing is NOT applied on the cubed sphere (u_geo/v_geo=None → the
-    # column LES's plane Coriolis falls back to f×V, as for equatorial columns).
-    # A naive rotation of the grid-axis gradient to geographic (grid.angle +
-    # rotate_winds_grid_to_geo) is NOT sufficient (iter 91, Codex NO-SHIP): the cube
-    # gradient operators return COVARIANT directional derivatives, so on the
-    # NON-orthogonal equiangular grid the metric-inverse step is missing —
-    # ``G^x = (g_x − c·g_y)/(1 − c²)``, ``G^y = (g_y − c·g_x)/(1 − c²)`` with
-    # ``c = ê_x·ê_y`` — and the naive rotation leaves a SYSTEMATIC, non-convergent
-    # ~10–17% error near panel edges/corners (the missing c/(1−c²) cross-coupling).
-    # Unlike an advection tendency, a geostrophic REFERENCE wind feeds the LES plane
-    # Coriolis directly (a persistent f·ΔV_geo departure), so this error is NOT
-    # tolerable.  A metric-correct gradient (the contravariant inverse above; the
-    # grid must expose ê_x·ê_y) OR a calibrated orthogonality-deficit cell gate
-    # (``1 − area/(dx·dy)``) is the follow-up.  The lat-lon (ERA5-native, primary
-    # compare grid), Voronoi (iter 82) and Gaussian (iter 90) paths ARE geostrophic.
-    u_geo, v_geo = None, None
+    # Geostrophic reference wind from the cubed-sphere Φ gradient transformed to
+    # geographic east/north by the METRIC-CORRECT 2×2 basis solve (iter 93,
+    # _gradient_cubed_geographic_3d — converges, unlike the iter-91 naive grid.angle
+    # rotation / iter-92 scalar-c inverse); (None, None) within the equatorial cutoff
+    # → the LES plane Coriolis uses f×V.
+    u_geo, v_geo = _geostrophic_wind_column(
+        T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
+        grad_fn=_gradient_cubed_geographic_3d, lat_rad=lat_rad, col_index=col_index,
+    )
 
     f, i, j = int(col_index[0]), int(col_index[1]), int(col_index[2])
     return ColumnLargeScaleState(

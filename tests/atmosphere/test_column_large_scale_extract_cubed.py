@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
 from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+    _gradient_cubed_geographic_3d,
     advective_tendency,
     extract_column_forcing,
     extract_column_forcing_cubed_sphere,
@@ -23,6 +24,7 @@ from legoesm.atmosphere.dynamics.column_large_scale_extract import (
 )
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.core.operators_3d import divergence_3d, gradient_x_3d, gradient_y_3d
+from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.factory import create_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -197,23 +199,95 @@ def test_dispatch_unknown_grid_raises():
         )
 
 
-def test_extract_cubed_geostrophic_disabled_pending_metric_gradient():
-    """Geostrophic forcing stays DISABLED on the cubed sphere (u_geo/v_geo=None even
-    at extratropical latitudes): the cube gradient operators return COVARIANT
-    directional derivatives, so on the NON-orthogonal equiangular grid a naive
-    rotation to geographic (grid.angle) omits the metric-inverse step
-    ``G^x=(g_x-c*g_y)/(1-c^2)`` (c = e_x.e_y) and leaves a SYSTEMATIC non-convergent
-    ~10-17% near-edge error (iter 91, Codex NO-SHIP — a reference WIND feeds the LES
-    plane Coriolis directly, unlike an advection tendency).  A metric-correct
-    gradient OR a calibrated orthogonality-deficit cell gate is the follow-up.
-    Regression guard so geostrophic is not silently re-enabled unverified."""
+def _cubed_geo_north_relerr(n):
+    """Relative error of the metric-correct geographic north-gradient of Φ = C·sin(lat)
+    (analytic ∂Φ/∂north = (C/a)cos(lat)) on an n×n×6 cube: returns (full-grid max,
+    panel-boundary-band max, east-leakage) over all cells with |lat| < 88° (only the
+    polar singular rows excluded — INCLUDING the panel edges/corners where the iter-
+    91/92 naive rotation had its non-convergent ~10–17% error)."""
+    g = create_cubed_sphere(n)
+    lat = np.asarray(g.lat)
+    a, C = float(g.radius), 1000.0
+    phi = jnp.asarray((C * np.sin(lat))[..., None], dtype=jnp.float64)
+    ge, gn = _gradient_cubed_geographic_3d(phi, g)
+    ge, gn = np.asarray(ge)[..., 0], np.asarray(gn)[..., 0]
+    gn_an = (C / a) * np.cos(lat)
+    fin = np.abs(lat) < np.deg2rad(88.0)
+    err = np.abs(gn - gn_an) / np.max(np.abs(gn_an[fin]))
+    band = np.zeros_like(lat, bool)             # the panel boundary ring (edges+corners)
+    band[:, [0, -1], :] = True
+    band[:, :, [0, -1]] = True
+    full = float(np.max(err[fin]))
+    edge = float(np.max(err[fin & band]))
+    east_leak = float(np.max(np.abs(ge[fin])) / np.max(np.abs(gn[fin])))
+    return full, edge, east_leak
+
+
+def test_gradient_cubed_geographic_converges_including_edges():
+    """The METRIC-CORRECT geographic gradient (iter 93) CONVERGES EVERYWHERE — the
+    analytic Φ=C·sin(lat) north-gradient relative error is small AND shrinks with
+    resolution on the FULL grid INCLUDING the panel boundary band (the exact region
+    where the iter-91 naive rotation / iter-92 scalar-c inverse had a NON-convergent
+    ~10–17% error — Codex iter-93: the test must not mask the edges)."""
+    f24, e24, leak24 = _cubed_geo_north_relerr(24)
+    f48, e48, _ = _cubed_geo_north_relerr(48)
+    assert f24 < 0.01 and e24 < 0.01        # full + the EDGE BAND both < 1% at n=24
+    assert f48 < f24 and e48 < e24          # both CONVERGE with resolution
+    assert leak24 < 0.01                    # east leakage tiny (rotation not mixed)
+
+
+def _interior_midlat_column(grid, lo=15.0, hi=55.0):
+    lat = np.rad2deg(np.asarray(grid.grid_lat))
+    for f in range(6):
+        for i in range(2, _RES - 2):
+            for j in range(2, _RES - 2):
+                if lo <= abs(lat[f, i, j]) <= hi:
+                    return (f, i, j), float(np.deg2rad(lat[f, i, j]))
+    raise AssertionError("no interior mid-lat cubed column found")
+
+
+def test_extract_cubed_geostrophic_uniform_state_zero_wind():
+    """ANALYTIC ANCHOR: a horizontally-uniform state ⇒ ∇Φ = 0 EXACTLY ⇒ zero
+    geostrophic wind (the gradient of a constant is 0 regardless of the metric)."""
+    grid, sigma = _grid_and_sigma()
+    T, q_v, u, v, p_s = _uniform_state(grid)
+    col, lat_rad = _interior_midlat_column(grid)
+    ls = extract_column_forcing_cubed_sphere(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=lat_rad, col_index=col)
+    assert ls.u_geo is not None and ls.v_geo is not None
+    np.testing.assert_allclose(np.asarray(ls.u_geo), 0.0, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ls.v_geo), 0.0, atol=1e-9)
+
+
+def test_extract_cubed_geostrophic_meridional_gradient_zonal_jet():
+    """A meridional temperature (⇒ geopotential) gradient at an INTERIOR mid-latitude
+    column gives a finite, predominantly-ZONAL geostrophic wind (|u_geo| > |v_geo|) —
+    the thermal-wind signature (same anchor as Voronoi iter 82 / Gaussian iter 90)."""
+    grid, sigma = _grid_and_sigma()
+    p_s = jnp.full((6, _RES, _RES), 1.0e5)
+    p_full = p_s[..., None] * jnp.asarray(sigma.sigma_full)
+    cos2 = jnp.cos(jnp.asarray(grid.grid_lat))[..., None] ** 2
+    T = (290.0 + 30.0 * cos2) * exner_function(p_full)
+    q_v = jnp.full((6, _RES, _RES, _NLEV), 5e-3)
+    z = jnp.zeros((6, _RES, _RES, _NLEV))
+    col, lat_rad = _interior_midlat_column(grid)
+    ls = extract_column_forcing_cubed_sphere(
+        T=T, q_v=q_v, u=z, v=z, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=lat_rad, col_index=col)
+    ug, vg = np.asarray(ls.u_geo), np.asarray(ls.v_geo)
+    assert np.all(np.isfinite(ug)) and np.all(np.isfinite(vg))
+    assert float(np.max(np.abs(ug))) > 1.0                        # a real jet (m/s)
+    assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))  # predominantly zonal
+
+
+def test_extract_cubed_geostrophic_equatorial_is_none():
+    """Within the equatorial cutoff no geostrophic reference wind is supplied (f→0
+    ill-posed) — the LES plane Coriolis falls back to f×V; ω/advection still set."""
     grid, sigma = _grid_and_sigma()
     T, q_v, u, v, p_s = _nonuniform_state(grid)
     ls = extract_column_forcing_cubed_sphere(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
-        lat_rad=float(jnp.deg2rad(40.0)), col_index=_COL,  # extratropical
-    )
+        lat_rad=float(jnp.deg2rad(2.0)), col_index=_COL)   # within the 5° cutoff
     assert ls.u_geo is None and ls.v_geo is None
-    # The rest of the forcing (advection, omega) is still populated.
-    assert ls.omega.shape == (_NLEV,)
-    assert bool(jnp.all(jnp.isfinite(ls.omega)))
+    assert ls.omega.shape == (_NLEV,) and bool(jnp.all(jnp.isfinite(ls.omega)))
