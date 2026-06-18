@@ -223,15 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     # wrong checkpoint.  We then assert the loaded state matches the grid/sigma
     # we built, so a resolution/nlev mismatch fails loudly here, not as a
     # mis-shaped comparison downstream.
-    # NOTE (Codex): this one-shot CLI accepts GRID-format restarts. A spectral
-    # run's checkpoint stores SPECTRAL keys (vor_hat/div_hat/... + spectral_layout),
-    # which `load_restart` does not yet reconstruct (it hard-reads grid keys) — so
-    # `--grid-type spectral --restart <spectral_checkpoint>` fails in the loader
-    # BELOW. The WORKING spectral-compare route is the live-state campaign path
-    # (legoesm.training.run_to_column_mean, which converts driver.state via
-    # grid_winds_from_spectral); a restart-loader spectral-layout branch is the
-    # documented follow-up. The conversion here is DEFENSIVE — correct + a no-op if
-    # a grid state is returned, and ready if the loader is later made spectral-aware.
+    # This one-shot CLI accepts BOTH grid- and spectral-format restarts: `load_restart`
+    # reconstructs a spectral run's checkpoint (vor_hat/div_hat/... + spectral_layout)
+    # into a SpectralHydrostaticState (iter 92, validating the coeff shapes vs this
+    # grid/sigma under strict), and `grid_winds_from_spectral` BELOW synthesizes its
+    # grid winds (a no-op for a grid state) so the compare is grid-general.
     loaded = load_restart(args.restart, grid, sigma, strict=True)
     state, q_v = loaded[0], loaded[1]
     from legoesm.training.compare_reanalysis import grid_winds_from_spectral

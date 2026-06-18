@@ -3298,47 +3298,15 @@ class ModelDriver:
                     f"spectral checkpoint not found (or is a directory): "
                     f"{path}"
                 )
-            import jax.numpy as jnp
-            from legoesm.core.field import Field
-            d = np.load(path)
-            if "spectral_layout" not in d:
-                raise ValueError(
-                    f"{path} is not a spectral checkpoint (missing the "
-                    "spectral_layout marker) — it cannot restore a "
-                    "discretization='spectral' run."
-                )
-            s = self.state
-            new_fields = {}
-            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
-                          "phis_hat"):
-                _cur = getattr(s, _name)
-                _arr = d[_name]
-                if _arr.shape != _cur.data.shape:
-                    raise ValueError(
-                        f"spectral checkpoint {_name} shape {_arr.shape} "
-                        f"!= configured state {_cur.data.shape} "
-                        f"(resolution/nlev mismatch): {path}"
-                    )
-                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
-            tracers = None
-            if "tracer_names" in d:
-                if s.tracers is None:
-                    raise ValueError(
-                        f"spectral checkpoint {path} carries tracers "
-                        f"{[str(n) for n in d['tracer_names']]} but the "
-                        "configured run has none — refusing to silently "
-                        "drop water."
-                    )
-                tracers = {}
-                for _k in (str(n) for n in d["tracer_names"]):
-                    _cur_t = s.tracers[_k]
-                    tracers[_k] = _cur_t.replace(
-                        data=jnp.asarray(d[f"trc_{_k}"]))
-            elif s.tracers is not None:
-                tracers = s.tracers
-            self.state = s._replace(tracers=tracers, **new_fields)
-            step = int(d["step"])
-            day = float(d["day"])
+            from legoesm.atmosphere.dynamics.spectral_pe import (
+                reconstruct_spectral_state_from_npz,
+            )
+            # Shared reconstruction (template=self.state ⇒ reuse the configured Field
+            # metadata + validate shapes + refuse to drop water); the standalone
+            # ``load_restart`` uses the SAME helper with template=None (iter 92).
+            with np.load(path) as d:
+                self.state, step, day = reconstruct_spectral_state_from_npz(
+                    d, template=self.state)
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
