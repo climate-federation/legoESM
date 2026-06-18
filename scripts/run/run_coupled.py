@@ -283,18 +283,16 @@ def main():
         args.rad_update_steps = 1
         args.ocean = "slab"          # cheap single-layer slab for idealized runs
 
-    # Atmosphere IC default is GRID-AWARE (no silent degrade): ic="standard"
-    # (the realistic lapse-rate IC) is only wired for --grid latlon today, so a
-    # cube run defaults to "default".  An EXPLICIT --ic standard on cube still
-    # reaches model_driver and raises NotImplementedError loudly (not silently
-    # ignored).  Realistic coupled CMIP => --grid latlon picks "standard" here.
+    # Atmosphere IC default is GRID-AWARE: ic="standard" (the realistic
+    # lapse-rate troposphere + cold stratosphere) is wired for BOTH --grid
+    # latlon AND cubed_sphere (validated: CWV ~17/30 kg/m2, precip ~1.5/3.3
+    # mm/day, stable; vs the uniform ic="default" scaffold's CWV ~84, precip
+    # ~0).  spectral/mpas have no grid-space T Field, so they keep the uniform
+    # default.  An explicit --ic standard on an unsupported grid still raises
+    # loudly in ExperimentConfig.validate_strict (no silent degrade).
     if args.ic is None:
-        args.ic = "standard" if args.grid == "latlon" else "default"
-    if args.ic == "standard" and args.grid != "latlon":
-        logger.warning(
-            "--ic standard is only wired for --grid latlon; grid=%r will raise "
-            "in the driver. Use --grid latlon or --ic default.", args.grid,
-        )
+        args.ic = ("standard" if args.grid in ("latlon", "cubed_sphere")
+                   else "default")
 
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather

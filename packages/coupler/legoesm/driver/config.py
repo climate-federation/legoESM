@@ -595,23 +595,27 @@ class ExperimentConfig(NamedTuple):
             errors.append("ic='era5' requires ic_path to be set")
         if self.ic == "standard":
             # The standard-atmosphere IC overrides a grid-space temperature
-            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
-            # the A-grid u IS geographic-east, so the assignment is direct and
-            # correct.  Other grids need extra handling not yet wired:
-            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
-            #     geographic jet must be rotated by the grid angle first;
+            # Field AND (lat-lon only) a geographic (eastward) thermal-wind jet.
+            #   * lat-lon: the A-grid u IS geographic-east, so the realistic T/
+            #     p_s AND the balanced jet are assigned directly.
+            #   * cubed_sphere: the realistic T / p_s overlay is grid-agnostic
+            #     and IS applied; the balanced jet is SKIPPED (u/v are cube-LOCAL
+            #     components that would need a per-cell grid-angle rotation) — a
+            #     coupled climate spin-up grows its own circulation from the T
+            #     gradient (no balanced-jet IC needed, unlike a baroclinic-wave
+            #     test).  See ModelDriver._apply_standard_atmosphere_ic.
+            # Still not wired (fail early, before setup):
             #   * gaussian/spectral: temperature lives in spectral space (T_hat),
             #     no grid-space T Field;
             #   * mpas: not wired.
-            # Restrict to lat-lon here so the advertised IC is exactly the
-            # implemented+validated one — fail early, before setup.
             _gt_std = normalize_grid_type(self.grid.grid_type)
-            if _gt_std != "latlon":
+            if _gt_std not in ("latlon", "cubed_sphere"):
                 errors.append(
-                    f"ic='standard' is currently implemented only for "
-                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"ic='standard' is implemented for grid_type "
+                    f"'latlon' and 'cubed_sphere'; got "
+                    f"grid_type={self.grid.grid_type!r} "
                     f"(discretization={self.dycore.discretization!r}). "
-                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                    f"Use ic='default', or ic='era5' for spectral/mpas."
                 )
             # T_init is the equator surface temperature; the pole is
             # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A

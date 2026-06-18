@@ -724,18 +724,21 @@ class ModelDriver:
 
         cfg = self.config
         gt = cfg.grid.grid_type
-        # Lat-lon only: the A-grid u is geographic-east, so the balanced jet
-        # (a geographic eastward wind) is assigned directly.  Cubed-sphere u/v
-        # are cube-LOCAL components that would need a grid-angle rotation first,
-        # and spectral/MPAS need other handling — all rejected up front in
-        # ExperimentConfig.validate_strict, so this is defensive.
+        # Horizontal latitude in the state's native layout.  The realistic
+        # T / p_s overlay below is GRID-AGNOSTIC (standard_atmosphere_temperature
+        # accepts any lat shape); only the balanced zonal jet (step 5) is
+        # lat-lon-specific (the A-grid u is geographic-east) and is skipped on
+        # the cube.  spectral/MPAS are rejected in ExperimentConfig.validate_strict
+        # (no grid-space T Field), so the else here is defensive.
         if gt == "latlon":
             lat_h = self.grid.lat2d                   # (n_lat, n_lon)
+        elif gt == "cubed_sphere":
+            lat_h = self.grid.lat                     # (6, n, n) geographic lat [rad]
         else:
             raise NotImplementedError(
                 f"ic='standard' not yet wired for grid_type={gt!r} "
-                f"(discretization={cfg.dycore.discretization!r}); only 'latlon' "
-                "is supported. Use ic='default' or 'era5'."
+                f"(discretization={cfg.dycore.discretization!r}); 'latlon' and "
+                "'cubed_sphere' are supported. Use ic='default' or 'era5'."
             )
 
         sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
@@ -784,14 +787,29 @@ class ModelDriver:
         #     temperature gradient does not launch a geostrophic-adjustment shock
         #     at startup.  v stays zero (the balance is zonal).  Reuses the grid's
         #     own radius/rotation (constants fallback per the audit rule).
-        radius = getattr(self.grid, "radius", constants.R_earth)
-        omega = getattr(self.grid, "omega", constants.Omega)
-        u_new = standard_atmosphere_zonal_wind(
-            lat_h, sigma_full, radius, omega, sa_cfg,
-        ).astype(self.state.u.data.dtype)
-        self.state = self.state._replace(
-            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
-        )
+        #
+        #     LAT-LON ONLY: the A-grid u is geographic-east, so the balanced jet
+        #     is assigned directly.  On the cubed-sphere u/v are cube-LOCAL
+        #     components, so a geographic-east jet would need a per-cell
+        #     grid-angle rotation; a coupled CLIMATE spin-up grows its own
+        #     circulation from the realistic T gradient within a few days (damped
+        #     by hyperdiffusion), so the balanced-jet IC is not required (unlike a
+        #     baroclinic-wave test).  Keep the scaffold winds on the cube.
+        if gt == "latlon":
+            radius = getattr(self.grid, "radius", constants.R_earth)
+            omega = getattr(self.grid, "omega", constants.Omega)
+            u_new = standard_atmosphere_zonal_wind(
+                lat_h, sigma_full, radius, omega, sa_cfg,
+            ).astype(self.state.u.data.dtype)
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
+            )
+        else:
+            logger.info(
+                "  ic='standard' on %s: applied realistic T + p_s; balanced "
+                "zonal jet skipped (cube-local winds need grid-angle rotation) "
+                "— circulation spins up from the T gradient.", gt,
+            )
 
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
