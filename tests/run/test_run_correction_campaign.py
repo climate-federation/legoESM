@@ -250,9 +250,12 @@ def test_build_correction_campaign_mpas_one_round(feedback_strategy):
     """CAPSTONE (iters 73-76): the FULL MPAS pipeline composes through the REAL
     build_correction_campaign — cell compare/rank → Voronoi forcing extract (via
     the native u_edge) → mock LES → per-CELL clubb C_K feedback → re-run → finite
-    bias. Exercises both the static scatter and the environment-kernel strategy
-    (the latter runs column_environment_grid on the cell layout). Mock driver +
-    mock LES; the C_K-changes-output mechanism is iter 35/37."""
+    bias. NON-VACUOUS: a SHEARED mock LES gives a VALID clubb_coefficient
+    diagnosis, so the diagnosed C_K (clamped to bounds) actually REPLACES the
+    background at the worst cell (static) / spreads via the env regression +
+    produces a deploy kernel (environment) — not a no-op. Mock driver + mock LES;
+    the C_K-changes-MODEL-output mechanism is iter 35/37."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh
 
@@ -260,6 +263,7 @@ def test_build_correction_campaign_mpas_one_round(feedback_strategy):
     nlev = 5
     sigma = create_sigma_coordinate(nlev)
     bias_cell = 37
+    bg = float(CLUBBLiteConfig().C_K)              # production default (0.4)
     model_state = _mpas_full_state(mesh, nlev)
     # reference = model with one cold-biased cell → a deterministic worst cell.
     reference = _mpas_full_state(mesh, nlev, bias_cell=bias_cell, bias_dt=-6.0)
@@ -274,8 +278,10 @@ def test_build_correction_campaign_mpas_one_round(feedback_strategy):
         base_atm_config=_mpas_base_config(nlev), build_base_driver=build_base,
         extract_column_state=extract, reference=reference, sigma=sigma, grid=mesh,
         area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
-        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
-        run_les_fn=_mock_run_les, n_worst=1,
+        # clubb_coefficient + a SHEARED mock → a VALID, non-background C_K diagnosis.
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
         feedback_strategy=feedback_strategy,
         accept_only_if_improved=False)
 
@@ -284,9 +290,66 @@ def test_build_correction_campaign_mpas_one_round(feedback_strategy):
     assert it.n_diagnosed == 1                 # the worst CELL spun off its LES
     assert bool(np.isfinite(float(it.bias.updated_bias)))
     # A per-CELL clubb C_K reached the config (the loop closed on the 1-D cell axis).
-    ck = jnp.asarray(result.final_config.C_K)
-    assert jnp.ndim(ck) == 1 and ck.shape == (mesh.nCells,)
-    assert bool(jnp.all(jnp.isfinite(ck)))
+    ck = np.asarray(result.final_config.C_K)
+    assert ck.ndim == 1 and ck.shape == (mesh.nCells,)
+    assert np.all(np.isfinite(ck))
+    # NON-VACUOUS: the correction actually changed C_K away from the background.
+    assert not np.allclose(ck, bg), "the diagnosed C_K never reached the cells"
+    if feedback_strategy == "static":
+        # The diagnosed value landed on the worst CELL; the rest stay background.
+        assert not np.isclose(float(ck[bias_cell]), bg)
+        np.testing.assert_allclose(np.delete(ck, bias_cell), bg)
+    else:
+        # The env-strategy round produced a transferable deploy kernel (iter 70).
+        assert it.env_kernel is not None and it.env_kernel.field == "C_K"
+
+
+def test_build_correction_campaign_mpas_les_budget_clusters_cells():
+    """The LES-cost reduction (env clustering) works on the MPAS cell layout: 4
+    worst cells in 2 distinct-SST environments + les_budget=2 → only 2 LES run
+    (the cluster representatives), but all 4 cells are corrected. Exercises
+    cluster_columns_by_environment over the 1-D cell manifest."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    # 4 worst cells split into 2 SST environments (2 cells each) → 2 clusters.
+    cold_cells, warm_cells = [10, 20], [120, 130]
+    worst = cold_cells + warm_cells
+
+    def _state(*, biased):
+        temp = np.full((mesh.nCells, nlev), 285.0)
+        if biased:
+            for c in worst:
+                temp[c] -= 6.0
+        sst = np.full((mesh.nCells,), 285.0)
+        sst[warm_cells] = 300.0                    # the env tag that splits clusters
+        u_edge = 6.0 * np.cos(np.asarray(mesh.angleEdge))[:, None] * np.ones((1, nlev))
+        return ColumnState(
+            T=jnp.asarray(temp), q_v=jnp.full((mesh.nCells, nlev), 6e-3),
+            u=jnp.zeros((mesh.nCells, nlev)), v=jnp.zeros((mesh.nCells, nlev)),
+            p_s=jnp.full((mesh.nCells,), 1.0e5), sst_K=jnp.asarray(sst),
+            u_edge=jnp.asarray(u_edge))
+
+    model_state = _state(biased=False)
+    reference = _state(biased=True)               # the 4 biased cells are the worst
+
+    result = build_correction_campaign(
+        base_atm_config=_mpas_base_config(nlev),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=mesh,
+        area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+        les_config=ColumnLESConfig(
+            regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=4, les_budget=2,
+        accept_only_if_improved=False)
+
+    it = result.iterations[0]
+    assert it.n_corrected == 4                    # all 4 worst cells corrected
+    assert it.n_diagnosed == 2                    # but only 2 LES (cluster reps)
     assert np.isfinite(float(it.bias.baseline_bias))
     assert np.isfinite(float(it.bias.updated_bias))
 
