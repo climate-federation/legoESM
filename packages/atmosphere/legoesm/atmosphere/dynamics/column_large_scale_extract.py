@@ -33,11 +33,13 @@ Grids: ERA5 is lat-lon (``extract_column_forcing_latlon``), but the model's
 flagship dycore is cubed-sphere, so a worst column flagged on the *native* model
 grid needs cubed-sphere extraction (``extract_column_forcing_cubed_sphere``); the
 unstructured MPAS/Voronoi family has ``extract_column_forcing_voronoi`` (edge-
-normal velocity + Perot reconstruction).  All three share the grid-agnostic
-continuity chain (:func:`omega_from_divergence`) and advection
-(:func:`advective_tendency`); only the horizontal operators differ.
-:func:`extract_column_forcing` dispatches on the grid type (raises on an
-unsupported grid — Gaussian/spectral remains a follow-up).
+normal velocity + Perot reconstruction), and the Gaussian/spectral grid has
+``extract_column_forcing_gaussian`` (pseudospectral divergence + flux-form
+advection, reusing the dycore's SH operators).  All share the grid-agnostic
+continuity chain (:func:`omega_from_divergence`); only the horizontal operators
+differ (FD for lat-lon/cubed, TRiSK for Voronoi, spectral for Gaussian).
+:func:`extract_column_forcing` dispatches on the grid type (raises on a truly
+unsupported grid).
 """
 
 from __future__ import annotations
@@ -569,6 +571,107 @@ def extract_column_forcing_voronoi(
     )
 
 
+def _spectral_divergence_3d(u3d: jax.Array, v3d: jax.Array, grid: Any) -> jax.Array:
+    """Horizontal divergence ``∇·v`` on the Gaussian/spectral grid via the tested
+    spherical-harmonic forward transform + synthesis.
+
+    Reuses :func:`legoesm.grids.gaussian.vordiv_from_uv_3d` (the Hack & Jakob /
+    Bourke pole-safe ``oc2``/``dmu`` operators — the SAME spectral divergence the
+    dycore uses) on the PHYSICAL grid winds (NOT pre-cos-φ-weighted — the helper
+    multiplies by ``cos φ`` internally; passing ``u·cos φ`` would double-apply it),
+    then synthesizes the ``div_hat`` back to the ``(n_lat, n_lon, nlev)`` grid.
+    Also valid for the divergence of an ARBITRARY vector field ``φ·V`` (the helper
+    documents a generic ``F = (F_x, F_y)``), which the flux-form advection uses.
+    Float64 / spectral-precision required (the Gaussian path is x64-only).
+    """
+    from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
+
+    _vor_hat, div_hat = vordiv_from_uv_3d(grid, jnp.asarray(u3d), jnp.asarray(v3d))
+    return sh_synthesis_3d(grid, div_hat)
+
+
+def extract_column_forcing_gaussian(
+    *,
+    T: jax.Array,
+    q_v: jax.Array,
+    u: jax.Array,
+    v: jax.Array,
+    p_s: jax.Array,
+    grid: Any,
+    sigma_coord: Any,
+    lat_rad: float,
+    col_index: tuple[int, int],
+) -> ColumnLargeScaleState:
+    """Build a column's :class:`ColumnLargeScaleState` from a Gaussian/spectral state.
+
+    The 4th grid family's extractor (lat-lon / cubed-sphere / MPAS being the
+    others).  ``T``/``q_v``/``u``/``v`` are ``(n_lat, n_lon, nlev)`` (surface-last,
+    PHYSICAL winds — NOT pre-cos-φ-weighted), ``p_s`` ``(n_lat, n_lon)``; ``grid``
+    is the :class:`~legoesm.grids.gaussian.GaussianGrid`; ``col_index = (i_lat,
+    i_lon)`` (static Python ints from the manifest).  ``lat_rad`` is the column's
+    latitude.
+
+    Unlike the FD lat-lon / cubed-sphere extractors, the divergence + advection
+    are computed PSEUDOSPECTRALLY: ``div = ∇·v`` via the spectral
+    :func:`_spectral_divergence_3d`, and the advective tendency in FLUX form
+    ``−V·∇φ = −∇·(φV) + φ·∇·V`` (algebraically exact; the dycore's own temperature
+    tendency ``−∇·(Tv) + T·∇·v``).  This is therefore the DYCORE-CONSISTENT
+    tendency — what the spectral model actually integrated — numerically DISTINCT
+    from (not equivalent to) the FD ``advective_tendency`` the other extractors
+    estimate.  The grid-product ``φ·u`` is formed before the transform, so the
+    tendency carries the dycore's pseudospectral aliasing (no separate dealiasing
+    mask is applied — this is forcing-diagnostic consistency, not alias-free
+    exactness).  The grid-AGNOSTIC continuity (:func:`omega_from_divergence`) is
+    reused unchanged.
+
+    **Float64 required:** the spectral transforms need ``jax_enable_x64`` (the
+    Gaussian grid's machinery is float64/complex128) — the same constraint as the
+    spectral dycore.
+
+    Geostrophic forcing is DEFERRED (``u_geo``/``v_geo`` = None ⇒ the column LES
+    falls back to ``f×V``), like the cubed-sphere extractor: a metric-correct
+    spectral scalar gradient of ``Φ`` is the follow-up.
+    """
+    # x64 GATE (Codex): the SH transforms need float64; fail LOUDLY for a float32
+    # input (whether x64 is off, or float32 was passed under x64) rather than
+    # silently promoting parts of the calculation.
+    if jnp.asarray(T).dtype != jnp.float64:
+        raise TypeError(
+            "extract_column_forcing_gaussian requires float64 inputs (set "
+            f"JAX_ENABLE_X64=1); got T dtype {jnp.asarray(T).dtype} — the spectral "
+            "transforms are float64/complex128."
+        )
+    T = jnp.asarray(T)
+    q_v = jnp.asarray(q_v, dtype=T.dtype)
+    u = jnp.asarray(u, dtype=T.dtype)
+    v = jnp.asarray(v, dtype=T.dtype)
+    p_s = jnp.asarray(p_s, dtype=T.dtype)
+    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
+    p_full = p_s[..., None] * sigma_full
+
+    theta = T / exner_function(p_full)
+    div_3d = _spectral_divergence_3d(u, v, grid)               # ∇·v
+    # Advective tendency −V·∇φ = −∇·(φV) + φ·∇·V (flux form; exact cancellation for
+    # a uniform φ ⇒ zero advection to spectral precision).
+    theta_adv_3d = -_spectral_divergence_3d(theta * u, theta * v, grid) + theta * div_3d
+    qv_adv_3d = -_spectral_divergence_3d(q_v * u, q_v * v, grid) + q_v * div_3d
+
+    omega_3d = omega_from_divergence(div_3d, p_s, sigma_coord)
+
+    i, j = int(col_index[0]), int(col_index[1])
+    return ColumnLargeScaleState(
+        lat_rad=lat_rad,
+        T=T[i, j, :],
+        p_full=p_full[i, j, :],
+        q_v=q_v[i, j, :],
+        omega=omega_3d[i, j, :],
+        theta_adv=theta_adv_3d[i, j, :],
+        qv_adv=qv_adv_3d[i, j, :],
+        u_geo=None,
+        v_geo=None,
+    )
+
+
 def extract_column_forcing(
     *,
     T: jax.Array,
@@ -584,11 +687,12 @@ def extract_column_forcing(
     """Dispatch column-forcing extraction on the grid type (raises on unknown).
 
     Routes a flagged column to the lat-lon (``col_index = (i_lat, i_lon)``),
-    cubed-sphere (``col_index = (face, i, j)``), or MPAS/Voronoi
-    (``col_index = (cell,)``) extractor, validating the ``col_index`` arity for the
-    grid so a mismatched index fails LOUDLY instead of mis-gathering.  An
-    unsupported grid (Gaussian/spectral — a follow-up) raises :class:`ValueError`
-    (dispatch hardening, CLAUDE.md) rather than silently falling through.
+    cubed-sphere (``col_index = (face, i, j)``), MPAS/Voronoi
+    (``col_index = (cell,)``), or Gaussian/spectral (``col_index = (i_lat,
+    i_lon)``) extractor, validating the ``col_index`` arity for the grid so a
+    mismatched index fails LOUDLY instead of mis-gathering.  A truly unsupported
+    grid raises :class:`ValueError` (dispatch hardening, CLAUDE.md) rather than
+    silently falling through.
 
     **Voronoi velocity convention:** MPAS stores the EDGE-NORMAL velocity (there is
     no cell ``v``), so for a :class:`~legoesm.grids.voronoi.VoronoiMesh` the ``u``
@@ -597,6 +701,7 @@ def extract_column_forcing(
     caller passing cell winds for MPAS would otherwise mis-extract).
     """
     from legoesm.grids.cubed_sphere import CubedSphereGrid
+    from legoesm.grids.gaussian import GaussianGrid
     from legoesm.grids.latlon import LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
 
@@ -645,8 +750,32 @@ def extract_column_forcing(
                 f"cubed-sphere col_index must be (face, i, j); got {col_index!r}."
             )
         return extract_column_forcing_cubed_sphere(col_index=col_index, **kwargs)
+    if isinstance(grid, GaussianGrid):
+        if len(col_index) != 2:
+            raise ValueError(
+                f"Gaussian col_index must be (i_lat, i_lon); got {col_index!r}."
+            )
+        n_lat, n_lon = int(grid.n_lat), int(grid.n_lon)
+        t_shape = tuple(jnp.asarray(T).shape)
+        if t_shape[:2] != (n_lat, n_lon):
+            raise ValueError(
+                f"Gaussian fields must be (n_lat={n_lat}, n_lon={n_lon}, nlev); got "
+                f"T leading dims {t_shape[:2]}."
+            )
+        for name, arr in (("q_v", q_v), ("u", u), ("v", v)):
+            if tuple(jnp.asarray(arr).shape) != t_shape:
+                raise ValueError(
+                    f"Gaussian `{name}` must match T's shape {t_shape}; got "
+                    f"{tuple(jnp.asarray(arr).shape)}."
+                )
+        if tuple(jnp.asarray(p_s).shape) != (n_lat, n_lon):
+            raise ValueError(
+                f"Gaussian `p_s` must be (n_lat={n_lat}, n_lon={n_lon}); got "
+                f"{tuple(jnp.asarray(p_s).shape)}."
+            )
+        return extract_column_forcing_gaussian(col_index=col_index, **kwargs)
     raise ValueError(
         f"extract_column_forcing: unsupported grid type {type(grid).__name__}; "
-        f"only LatLonGrid, CubedSphereGrid and VoronoiMesh (MPAS) are supported "
-        f"(Gaussian/spectral is a follow-up)."
+        f"only LatLonGrid, CubedSphereGrid, VoronoiMesh (MPAS) and GaussianGrid "
+        f"(spectral) are supported."
     )
