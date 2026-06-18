@@ -57,6 +57,47 @@ _METHODS = (
 # (a single anomalous-shear interface should not define the whole column).
 _MIN_VALID_CK_LEVELS = 3
 
+# "Turbulence developed" threshold [m²/s²] (velocity scale √floor ≈ 0.03 m/s): a
+# finished LES whose peak resolved w'² is below this never developed turbulence,
+# so it carries no trustworthy turbulence diagnosis.  Regime-sensitive (see
+# column_les_realism); a campaign can tune it via ColumnLESConfig.
+_REALISM_WP2_FLOOR = 1.0e-3
+
+
+def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR):
+    """Coarse TRUST gate on a finished column LES (``docs/COMPARE_REANALYSIS.md`` §9):
+    did it develop turbulence AND stay finite?  Returns a TRACED scalar bool.
+
+    A dead/laminar LES (peak resolved ``w'²`` below ``wp2_floor``) or a blown-up
+    one (any non-finite field) carries NO trustworthy turbulence signal, so the
+    loop should keep the column's BACKGROUND coefficient rather than inject a
+    finite-but-meaningless diagnosis (which the bounds + non-finite guards would
+    not otherwise catch).
+
+    **NECESSARY, NOT SUFFICIENT.**  This checks turbulence-liveness + finiteness,
+    NOT the full RCE realism (CWV plateau / precip ≈ 3 mm/day / MSE drift, §9) — a
+    turbulent but thermodynamically-wrong LES (bad forcing/radiation/condensation)
+    can still pass and inject a bad coefficient (a residual gap).  A legitimately
+    quiescent stable column correctly FAILS this gate (no turbulent signal ⇒ the
+    background is the right answer), which is a correct outcome, not a false
+    negative.  ``wp2_floor`` is regime-sensitive (stable / stratocumulus / deep
+    convection differ) and configurable.  Pure-JAX (a boolean mask; no NaN grad).
+    """
+    wp2 = vertical_velocity_variance_plane(les_state, height_coord)
+    turbulent = jnp.max(wp2) > jnp.asarray(wp2_floor, dtype=wp2.dtype)
+    finite = (jnp.all(jnp.isfinite(wp2))
+              & jnp.all(jnp.isfinite(les_state.theta_prime.data)))
+    return turbulent & finite
+
+
+def gate_diagnosis_realism(diagnosis, realistic):
+    """AND a scalar LES-realism flag into a diagnosis's ``valid`` mask (the value
+    is left as-is — the reduce already double-where-masks invalid values, so an
+    unrealistic/blown-up column reduces to invalid ⇒ the loop keeps the background)."""
+    return diagnosis._replace(
+        valid=jnp.asarray(diagnosis.valid, dtype=bool) & realistic
+    )
+
 
 class EddyDiffusivityProfile(NamedTuple):
     """Down-gradient eddy diffusivity ``K`` per interior interface (ascending z)."""

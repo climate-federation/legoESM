@@ -305,3 +305,61 @@ def test_entrainment_jit():
         lambda s: diagnose_entrainment(s, hc).w_entrainment
     )(state)
     assert jnp.isfinite(out)
+
+
+def test_column_les_realism_turbulent_vs_dead():
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    # The sheared/turbulent fixture (checkerboard w) → realistic.
+    state, hc = _les_state_with_shear()
+    assert bool(column_les_realism(state, hc))
+    # A rest state (w≡0 ⇒ wp2≈0) → NOT realistic (no turbulence developed).
+    dead = state._replace(w=state.w.replace(data=jnp.zeros_like(state.w.data)))
+    assert not bool(column_les_realism(dead, hc))
+
+
+def test_column_les_realism_nonfinite_is_unrealistic():
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import column_les_realism
+    state, hc = _les_state_with_shear()
+    blown = state._replace(
+        theta_prime=state.theta_prime.replace(
+            data=state.theta_prime.data.at[0, 0, 0].set(jnp.nan)))
+    assert not bool(column_les_realism(blown, hc))
+
+
+def test_gate_diagnosis_realism_invalidates():
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
+    prof = ClubbCoefficientProfile(
+        z_m=jnp.array([1.0, 2.0, 3.0]), C_K=jnp.array([0.4, 0.5, 0.6]),
+        valid=jnp.array([True, True, True]))
+    assert bool(jnp.all(gate_diagnosis_realism(prof, jnp.asarray(True)).valid))
+    assert not bool(jnp.any(gate_diagnosis_realism(prof, jnp.asarray(False)).valid))
+
+
+def test_realism_gate_nan_diagnosis_contained_to_finite_field():
+    """Codex top-trap: a blown-up LES gives NaN diagnosis values; with the realism
+    gate firing (valid all-False) the ASSEMBLED field is FINITE (background), for
+    BOTH a profile (masked-sum) and the scalar entrainment (assemble masks invalid)."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import gate_diagnosis_realism
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import EntrainmentDiagnosis
+    from legoesm.training.feedback_assembly import assemble_feedback_field
+
+    class _Rec:
+        flat_index = 0
+
+    nan = jnp.asarray(jnp.nan)
+    prof = ClubbCoefficientProfile(
+        z_m=jnp.array([1.0, 2.0]), C_K=jnp.array([nan, nan]),
+        valid=jnp.array([True, True]))
+    gated_prof = gate_diagnosis_realism(prof, jnp.asarray(False))
+    f1 = assemble_feedback_field([_Rec()], [gated_prof], (2, 2),
+                                 method="clubb_coefficient", background=0.4)
+    assert bool(jnp.all(jnp.isfinite(f1))) and bool(jnp.allclose(f1, 0.4))
+
+    ent = EntrainmentDiagnosis(
+        inversion_index=jnp.asarray(0), z_inversion=nan,
+        entrainment_buoyancy_flux=nan, delta_thetav=nan,
+        w_entrainment=nan, valid=jnp.asarray(True))
+    gated_ent = gate_diagnosis_realism(ent, jnp.asarray(False))
+    f2 = assemble_feedback_field([_Rec()], [gated_ent], (2, 2),
+                                 method="entrainment", background=0.5)
+    assert bool(jnp.all(jnp.isfinite(f2))) and bool(jnp.allclose(f2, 0.5))

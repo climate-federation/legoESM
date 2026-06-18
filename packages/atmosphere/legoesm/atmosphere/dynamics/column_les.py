@@ -30,7 +30,9 @@ from legoesm.atmosphere.column_forcing import (
     coriolis_f_c,
 )
 from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    column_les_realism,
     diagnose_column_coefficient,
+    gate_diagnosis_realism,
 )
 from legoesm.atmosphere.dynamics.les_regime import (
     LESRegimeConfig,
@@ -59,6 +61,12 @@ class ColumnLESConfig(NamedTuple):
     # ``process_column`` returns ``{method: diagnosis}``; overrides
     # ``diagnosis_method``.  ``None`` ⇒ the single-coefficient ``diagnosis_method``.
     diagnosis_methods: tuple[str, ...] | None = None
+    # LES-realism TRUST gate (§9): a dead/blown-up LES has its diagnosis
+    # invalidated (the column keeps its background) instead of injecting a
+    # meaningless coefficient.  ``les_realism_wp2_floor=None`` ⇒ the diagnosis
+    # module's default "turbulence developed" threshold.
+    gate_les_realism: bool = True
+    les_realism_wp2_floor: float | None = None
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -226,6 +234,8 @@ def run_column_les_pipeline(
     methods: list[str] | tuple[str, ...] | None = None,
     qv_slot: int = 0,
     l_mix_max: float | None = None,
+    gate_realism: bool = True,
+    realism_wp2_floor: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
@@ -241,21 +251,38 @@ def run_column_les_pipeline(
     diagnosed from the SAME final state — returning ``{method: diagnosis}`` (vs a
     single diagnosis for the scalar ``method`` path).  This lets a multi-coefficient
     correction (e.g. ``C_K`` AND ``Pr_t``) share one spin-off LES per column.
+
+    **Realism trust gate** (``gate_realism``, default on, §9): the LES is checked
+    ONCE with :func:`~legoesm.atmosphere.dynamics.column_les_diagnosis.column_les_realism`
+    (developed turbulence + finite); a dead / blown-up LES has its diagnosis
+    INVALIDATED (the loop then keeps the column's background coefficient) rather
+    than injecting a finite-but-meaningless value.  The same realism flag gates
+    every method in the diagnose-many path.
     """
     final_state = run_les_fn(setup)
+    # realism_wp2_floor=None ⇒ column_les_realism uses its own (module-default) floor.
+    realism_kw = {} if realism_wp2_floor is None else {"wp2_floor": realism_wp2_floor}
+    realistic = (
+        column_les_realism(final_state, setup.height_coord, **realism_kw)
+        if gate_realism else jnp.asarray(True)
+    )
     if methods is not None:
         if len(methods) == 0:
             raise ValueError("methods must be a non-empty list (or None).")
         return {
-            m: diagnose_column_coefficient(
-                final_state, setup.height_coord, method=m, qv_slot=qv_slot,
-                l_mix_max=l_mix_max,
+            m: gate_diagnosis_realism(
+                diagnose_column_coefficient(
+                    final_state, setup.height_coord, method=m, qv_slot=qv_slot,
+                    l_mix_max=l_mix_max),
+                realistic,
             )
             for m in methods
         }
-    return diagnose_column_coefficient(
-        final_state, setup.height_coord, method=method, qv_slot=qv_slot,
-        l_mix_max=l_mix_max,
+    return gate_diagnosis_realism(
+        diagnose_column_coefficient(
+            final_state, setup.height_coord, method=method, qv_slot=qv_slot,
+            l_mix_max=l_mix_max),
+        realistic,
     )
 
 
@@ -410,5 +437,7 @@ def process_column(
     return run_column_les_pipeline(
         setup, run_les_fn, method=config.diagnosis_method,
         methods=config.diagnosis_methods, l_mix_max=config.clubb_l_mix_max,
+        gate_realism=config.gate_les_realism,
+        realism_wp2_floor=config.les_realism_wp2_floor,
     )
 

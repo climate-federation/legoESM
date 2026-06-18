@@ -235,6 +235,36 @@ def test_run_pipeline_runs_and_diagnoses():
         run_column_les_pipeline(setup, fake_run, method="bogus")
 
 
+def test_run_pipeline_realism_gate_invalidates_dead_les():
+    """A DEAD LES (rest state, no turbulence) has its diagnosis INVALIDATED by the
+    realism gate (default on) so the loop keeps the background; toggling the gate
+    off leaves the (vacuous) diagnosis ungated; a turbulent LES stays valid."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+
+    def dead_run(s):                       # zero w ⇒ wp2 ≈ 0 ⇒ not realistic
+        st = _synthetic_plane_state(s.grid, s.height_coord)
+        return st._replace(w=st.w.replace(data=jnp.zeros_like(st.w.data)))
+
+    # Dead LES + gate on (default) ⇒ the whole diagnosis is invalidated.
+    dead = run_column_les_pipeline(setup, dead_run, method="eddy_diffusivity")
+    assert not bool(jnp.any(dead.valid))
+    # Gate OFF on the SAME dead LES ⇒ the K=0 (zero-flux) diagnosis keeps its own
+    # per-level validity at gradient levels — so the realism gate is provably what
+    # invalidated the gated run above (not the K-diagnosis itself).
+    dead_nogate = run_column_les_pipeline(
+        setup, dead_run, method="eddy_diffusivity", gate_realism=False)
+    assert bool(jnp.any(dead_nogate.valid))
+    # The multi path gates EVERY method from the shared realism flag.
+    dead_multi = run_column_les_pipeline(
+        setup, dead_run, methods=["clubb_coefficient", "prandtl_number"],
+        l_mix_max=100.0)
+    assert not bool(jnp.any(dead_multi["clubb_coefficient"].valid))
+    assert not bool(jnp.any(dead_multi["prandtl_number"].valid))
+
+
 def test_run_pipeline_diagnose_many_shares_one_les_run():
     """`methods` runs the LES ONCE and diagnoses every method from the same final
     state — the shared spin-off for multi-coefficient correction."""
