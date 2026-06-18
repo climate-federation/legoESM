@@ -165,11 +165,68 @@ def build_correction_campaign(
     )
 
 
+def make_base_driver_builder(
+    mode: str, *, coupled_preset: Any = None, ocean_grid: Any = None
+):
+    """Return ``(build_base_driver, extract_column_state)`` for the run ``mode``.
+
+    * ``"amip"`` → a :class:`ModelDriver` (prescribed SST) + ``amip_column_state``.
+    * ``"cmip"`` → a :class:`CoupledESMDriver` (interactive ocean; ``coupled_preset``
+      required) + ``cmip_column_state``.  ``ocean_grid=None`` (the default) makes
+      the coupled driver use its OWN atmosphere grid for the ocean — same-grid
+      coupling with an identity remap (and the ocean SST lands on the atm column
+      shape).  Pass an explicit ``ocean_grid`` only for a genuinely different
+      ocean grid.
+
+    Each ``build_base_driver(cfg)`` constructs + ``setup()``-s the driver.  Raises
+    on an unknown mode (dispatch hardening) or a ``"cmip"`` call missing
+    ``coupled_preset`` — so a typo selects nothing silently.
+    """
+    from legoesm.training.run_to_column_mean import (
+        amip_column_state,
+        cmip_column_state,
+    )
+
+    if mode == "amip":
+        from legoesm.driver.model_driver import ModelDriver
+
+        def build_amip(cfg: Any) -> Any:
+            driver = ModelDriver(cfg)
+            driver.setup()
+            return driver
+
+        return build_amip, amip_column_state
+
+    if mode == "cmip":
+        if coupled_preset is None:
+            raise ValueError(
+                "make_base_driver_builder: mode='cmip' requires coupled_preset."
+            )
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+        def build_cmip(cfg: Any) -> Any:
+            # ocean_grid=None ⇒ the coupled driver uses its own atm grid (same
+            # object ⇒ identity remap; ocean SST on the atm column shape).
+            driver = CoupledESMDriver(cfg, coupled_preset, ocean_grid=ocean_grid)
+            driver.setup()
+            return driver
+
+        return build_cmip, cmip_column_state
+
+    raise ValueError(
+        f"make_base_driver_builder: unknown mode {mode!r}; choose 'amip' or 'cmip'."
+    )
+
+
 def _build_arg_parser():
     import argparse
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, help="base ExperimentConfig JSON")
+    p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
+                   help="AMIP (prescribed SST) or CMIP (coupled ocean)")
+    p.add_argument("--coupled-preset", default="aquaplanet",
+                   help="coupled_config preset name (CMIP mode)")
     p.add_argument("--era5-zarr", required=True, help="ERA5 zarr (reference)")
     p.add_argument("--era5-cache", default=None, help="ERA5 local cache dir")
     p.add_argument("--era5-time-idx", type=int, default=0)
@@ -206,14 +263,15 @@ def _area_weights(grid):  # pragma: no cover - HPC path
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
-    """CLI (AMIP): load a base config + an ERA5 reference, run the campaign, write
-    the corrected ``clubb_lite`` config + a per-round bias report.
+    """CLI: load a base config + an ERA5 reference, run the campaign, write the
+    corrected ``clubb_lite`` config + a per-round bias report.
 
-    Heavy I/O (ERA5, the AMIP driver, the LES) is imported lazily here so the
-    composition helpers above stay importable + unit-testable without it.  Reuses
-    the ERA5→model-grid regrid of ``scripts/validate/compare_amip_era5.py``.  The
-    CMIP path swaps ``build_base_driver``/``extract_column_state`` for the coupled
-    driver + ``cmip_column_state`` (a documented extension).
+    ``--mode amip`` (prescribed SST) or ``--mode cmip`` (coupled ocean on the same
+    grid, ``--coupled-preset``) — the mode selects the driver + SST source via
+    :func:`make_base_driver_builder`.  Heavy I/O (ERA5, the driver, the LES) is
+    imported lazily here so the composition helpers above stay importable +
+    unit-testable without it.  Reuses the ERA5→model-grid regrid of
+    ``scripts/validate/compare_amip_era5.py``.
 
     Advanced :func:`build_correction_campaign` knobs (``env_scales`` for the
     clustering metric, ``initial_clubb`` to warm-start from a saved corrected
@@ -228,7 +286,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.compare_reanalysis import column_state_from_carry
     from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
-    from legoesm.training.run_to_column_mean import amip_column_state
 
     from scripts.validate.compare_amip_era5 import (
         canonical_grid_type,
@@ -238,11 +295,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     args = _build_arg_parser().parse_args(argv)
     with open(args.config) as f:
         base_cfg = experiment_config_from_dict(json.load(f))
-
-    def build_base_driver(cfg):
-        driver = ModelDriver(cfg)
-        driver.setup()
-        return driver
 
     # Grid + vertical coordinate the EXACT way the run builds them (so the ERA5
     # regrid + LES forcing extraction match the run's grid and vertical coord —
@@ -256,6 +308,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _probe._create_grid()
     grid, sigma = _probe.grid, _probe.sigma
 
+    # Run mode: AMIP (prescribed SST) or CMIP (coupled ocean on the SAME grid as
+    # the atmosphere — ocean_grid=None lets the coupled driver use its own atm
+    # grid, an identity remap, so the ocean SST lands on the atm column shape).
+    coupled_preset = None
+    if args.mode == "cmip":
+        from legoesm.driver.coupled_config import PRESETS
+        if args.coupled_preset not in PRESETS:
+            raise SystemExit(
+                f"unknown --coupled-preset {args.coupled_preset!r}; "
+                f"choose from {sorted(PRESETS)}")
+        coupled_preset = PRESETS[args.coupled_preset]()
+    build_base_driver, extract_fn = make_base_driver_builder(
+        args.mode, coupled_preset=coupled_preset, ocean_grid=None)
+
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).
     canon = canonical_grid_type(base_cfg.grid.grid_type)
@@ -267,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
-        extract_column_state=amip_column_state, reference=reference, sigma=sigma,
+        extract_column_state=extract_fn, reference=reference, sigma=sigma,
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(), n_worst=args.n_worst,
         les_budget=args.les_budget,

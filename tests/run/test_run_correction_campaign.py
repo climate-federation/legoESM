@@ -25,6 +25,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
     build_correction_campaign,
+    make_base_driver_builder,
     make_clubb_build_driver,
     make_les_diagnose_fn,
 )
@@ -158,3 +159,69 @@ def test_build_correction_campaign_wiring_one_round():
     assert result.final_config.C_K.shape == (8 * 16,)
     assert np.isfinite(float(it.bias.baseline_bias))
     assert np.isfinite(float(it.bias.updated_bias))
+
+
+def test_make_base_driver_builder_dispatch():
+    """The run-mode dispatch returns the right SST extractor + raises on a bad
+    mode / a CMIP call missing the coupled pieces (dispatch hardening, iter 40)."""
+    from legoesm.training.run_to_column_mean import (
+        amip_column_state,
+        cmip_column_state,
+    )
+
+    _build_amip, extract_amip = make_base_driver_builder("amip")
+    assert extract_amip is amip_column_state
+    assert callable(_build_amip)
+
+    # cmip needs ONLY coupled_preset; ocean_grid is optional (None ⇒ the coupled
+    # driver uses its own atm grid, same-grid coupling).
+    _build_cmip, extract_cmip = make_base_driver_builder(
+        "cmip", coupled_preset=object())
+    assert extract_cmip is cmip_column_state
+    assert callable(_build_cmip)
+
+    with pytest.raises(ValueError, match="unknown mode"):
+        make_base_driver_builder("xyz")
+    with pytest.raises(ValueError, match="requires coupled_preset"):
+        make_base_driver_builder("cmip")  # missing coupled_preset
+
+
+@pytest.mark.slow
+def test_make_base_driver_builder_amip_builds_real_driver():
+    """The AMIP builder constructs + sets up a real ModelDriver (the campaign's
+    build_base_driver path that main() uses)."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    build_amip, _ = make_base_driver_builder("amip")
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray", turbulence="clubb_lite")
+    driver = build_amip(cfg)
+    assert isinstance(driver, ModelDriver)
+    assert driver.grid is not None and driver.sigma is not None
+
+
+@pytest.mark.slow
+def test_make_base_driver_builder_cmip_builds_real_driver():
+    """The CMIP builder constructs + sets up a real CoupledESMDriver with
+    ocean_grid=None (same-grid coupling: ocean on the atm grid), exposing the
+    state/q_v/ocean_state that cmip_column_state reads."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.coupled_config import PRESETS
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    build_cmip, _ = make_base_driver_builder(
+        "cmip", coupled_preset=PRESETS["aquaplanet"](), ocean_grid=None)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray", turbulence="clubb_lite")
+    driver = build_cmip(cfg)
+    assert isinstance(driver, CoupledESMDriver)
+    # cmip_column_state reads these; same-grid ⇒ SST on the atm column shape.
+    assert driver.state is not None and driver.q_v is not None
+    assert tuple(driver.ocean_state.T_sfc.data.shape) == (8, 16)
