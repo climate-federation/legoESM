@@ -1,57 +1,72 @@
 """Multi-PROCESS jax.distributed equivalence VALIDATION for the lat-band SPMD ocean
 step — the multi-node correctness gate for ``make_sharded_ocean_step_global``.
 
-This runs as a STANDALONE script under an MPI launcher (NOT pytest): the root
-``tests/conftest.py`` calls ``ensure_metal_or_fallback()`` -> ``jax.default_backend()``
-at collection, which initializes the XLA backend BEFORE a test module could call
-``jax.distributed.initialize()`` (which must precede backend init).  A standalone
-script bootstraps jax.distributed FIRST, with no conftest in the way (codex HIGH).
+Runs STANDALONE (not pytest): the root ``tests/conftest.py`` initializes the XLA
+backend (``ensure_metal_or_fallback`` -> ``jax.default_backend()``) at collection,
+before a test module could call ``jax.distributed.initialize()`` (which must
+precede backend init).  A standalone script bootstraps jax.distributed FIRST.
 
-What it proves (CLAUDE.md "single-rank -> smallest distributed"): launch
-``mpirun -np 2``; each process forces 2 CPU devices
-(``--xla_force_host_platform_device_count=2``) so there are 4 CPU devices GLOBALLY
-(2 local per process).  The bootstrap initializes jax.distributed (rank-0 hostname
-coordinator); ``jax.devices()`` then spans all 4.  The gathered lat-band SPMD step
-must match the SERIAL single-device step to the FP-reassociation floor (the same
-tolerance the single-process gate uses — the residual is the split-explicit
-barotropic ppermute/psum re-association, not a bug), AND the gathered state must be
-bitwise-identical across both processes (so the OMIP host loop stays consistent).
+TWO-PHASE design (the SERIAL reference cannot run under jax.distributed):
+``model.step`` (the single-device reference) runs OUTSIDE any ``shard_map``, so its
+eta-floor mass-redistribution reduction (``eta_floor._global_sum_pair``) sees the
+"local" halo backend and falls to the ``is_multi_process()`` branch ->
+``batch_allreduce_mpi`` -> mpi4jax, which is NOT installed (the SPMD path is
+pure-JAX psum, never mpi4jax).  So the reference is computed in PHASE 1 (single
+process, no jax.distributed -> ``is_multi_process()`` is False -> the reduction is
+the trivial local sum, no MPI) and PHASE 2 (mpirun) only runs the SPMD step (whose
+in-``shard_map`` reductions route through the armed "spmd" psum backend) and
+compares to the saved reference.  This mirrors the PRODUCTION ``--distributed``
+path, where ``model.step`` is never called (the host loop calls the SPMD step).
 
-Run (the sbatch ``_run_multiprocess_cpu_equiv.sbatch`` wraps this)::
+* ``--phase ref --out PATH`` (single process, 4 CPU devices): compute the serial
+  single-device reference + the single-process 4-device SPMD result; assert they
+  agree to the FP-reassociation floor (this is the existing single-process gate);
+  save the serial reference (u/v/eta/T/S) to ``PATH`` (.npz).
+* ``--phase mp --ref PATH`` (mpirun -np 2, 4 global devices): bootstrap
+  jax.distributed, run the MULTI-PROCESS SPMD step, and assert it matches the saved
+  reference to the FP floor AND the gathered state is bitwise-replicated across the
+  two processes (LAND-reduced verdict).  ``--tripole`` builds an active-north-fold
+  synthetic tripole (eORCA025 is a tripole; the fold lands on the north = a REMOTE
+  band).
 
+Run (the sbatch ``run_multiprocess_cpu_equiv.sbatch`` wraps both phases)::
+
+    # phase 1 (single process):
+    env JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+        JAX_ENABLE_X64=1 python <this> --phase ref --out /tmp/ref.npz
+    # phase 2 (multi-process):
     mpirun -np 2 env JAX_PLATFORMS=cpu \
-      XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=1 \
-      python scripts/validate/validate_latlon_ocean_spmd_multiprocess.py
+        XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=1 \
+        python <this> --phase mp --ref /tmp/ref.npz
 
-Exit code 0 = PASS on every rank; non-zero = a rank failed (the launcher aborts).
-A direct pytest wrapper (``tests/parallel/test_latlon_ocean_spmd_multiprocess.py``)
-subprocess-launches this under mpirun for CI coverage.
+Exit 0 = PASS; non-zero = a phase failed (the launcher aborts).
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
-# Two CPU devices PER PROCESS -> 4 global under ``mpirun -np 2``.  Must be set
-# before jax initializes its backend.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
+# JAX backend knobs — set before jax initializes.  Phase 1 forces 4 CPU devices in
+# ONE process; phase 2 forces 2 per process (4 global under mpirun -np 2).  The
+# launcher sets XLA_FLAGS explicitly; these are only fallback defaults.
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
 
-# n_lat divisible by the global device / band count (4).  Module-level so the
-# pytest wrapper can import them without launching MPI.
+# Grid / run sizing (module-level so the pytest wrapper can import without MPI).
 N_LAT, N_LON, NLEV = 48, 96, 10
 DT, N_STEPS = 600.0, 3
 ATOL, RTOL = 2.0e-4, 1.0e-3
+_FIELDS = ("u", "v", "eta", "T", "S")
 
 
 def _build_perturbed_state(grid, z_coord):
     """Rest state + small deterministic (seed-0) u/v/T/eta perturbations so the
     step exercises advection / Coriolis / PGF — identical to the single-process
     gate's fixture (so the serial reference matches) and identical on every
-    process (the host loop runs the same Python everywhere)."""
+    process (the SPMD body runs the same program everywhere)."""
     import jax.numpy as jnp
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 
@@ -73,17 +88,94 @@ def _build_perturbed_state(grid, z_coord):
         T=state.T.replace(data=jnp.asarray(T)))
 
 
-def main(tripole: bool = False) -> int:
-    # mpi4py FIRST (rank/size), then the jax.distributed bootstrap, then any jax
-    # device query / array op.  NOTE: importing ``legoesm.parallel.distributed``
-    # imports the ``jax`` MODULE, but that is not a backend/device query — the
-    # backend only initializes on the first ``jax.devices()`` / array op, which is
-    # AFTER ``initialize_jax_distributed_multiprocess`` here.  So the requirement
-    # "jax.distributed.initialize before the first JAX device query/array op" holds.
+def _build_model(tripole: bool):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    if tripole:
+        grid = create_synthetic_tripole(N_LAT, N_LON)
+        assert grid.fold.is_active, "synthetic tripole must carry an active fold"
+    else:
+        grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
+    z_coord = create_ocean_z_star(n_levels=NLEV, H_max=4000.0)
+    model = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig())
+    return model, grid, z_coord
+
+
+def _spmd_step_result(model, state0, n_dev):
+    """Run N SPMD steps over an ``n_dev``-band lat mesh (global devices), gather."""
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        make_sharded_ocean_step_global,
+    )
+    dev = create_latlon_mesh(n_devices=n_dev)
+    assert dev.mesh.devices.size == n_dev, dev.mesh.devices.size
+    model._ensure_vertex_mask(state0)
+    step = make_sharded_ocean_step_global(model, dev.mesh)
+    ss = state0
+    for _ in range(N_STEPS):
+        ss = step(ss, DT)
+    return ss
+
+
+def _phase_ref(tripole: bool, out_path: str) -> int:
+    """PHASE 1 (single process, 4 CPU devices, NO jax.distributed): compute the
+    serial single-device reference + the single-process 4-device SPMD result,
+    assert they agree to the FP floor (the established single-process gate), and
+    save the serial reference for phase 2."""
+    import jax
+
+    if jax.device_count() < 4:
+        print(f"[SKIP] phase ref needs 4 local devices, have "
+              f"{jax.device_count()} (set "
+              "XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+        return 0
+
+    model, _grid, _z = _build_model(tripole)
+    state0 = _build_perturbed_state(model.grid, _z)
+
+    # serial single-device reference (is_multi_process() is False here -> the
+    # eta-floor reduction is the trivial local sum, NO mpi4jax).
+    s = state0
+    for _ in range(N_STEPS):
+        s = model.step(s, DT)
+
+    # single-process 4-device SPMD result (psum inside the shard_map; one process
+    # -> no cross-process collective).
+    ss = _spmd_step_result(model, state0, 4)
+
+    ok = True
+    for nm in _FIELDS:
+        a = np.asarray(getattr(s, nm).data)
+        b = np.asarray(getattr(ss, nm).data)
+        try:
+            np.testing.assert_allclose(b, a, atol=ATOL, rtol=RTOL)
+        except AssertionError as e:
+            ok = False
+            print(f"[FAIL ref] single-process SPMD {nm} != serial: "
+                  f"{str(e).splitlines()[0]}")
+
+    # Save the SERIAL reference (the source of truth phase 2 compares to).
+    ref = {nm: np.asarray(getattr(s, nm).data) for nm in _FIELDS}
+    np.savez(out_path, **ref)
+    g = "tripole" if tripole else "latlon"
+    print(f"[{'PASS' if ok else 'FAIL'} ref] single-process SPMD ({g}) == serial "
+          f"to FP floor; saved serial reference -> {out_path}", flush=True)
+    return 0 if ok else 1
+
+
+def _phase_mp(tripole: bool, ref_path: str) -> int:
+    """PHASE 2 (mpirun, 4 global devices): bootstrap jax.distributed, run the
+    MULTI-PROCESS SPMD step, compare to the phase-1 serial reference + assert the
+    gathered state is bitwise-replicated across processes."""
     try:
         from mpi4py import MPI
     except ImportError:
-        print("[SKIP] mpi4py not installed — cannot run the multi-process gate.")
+        print("[SKIP] mpi4py not installed — cannot run the multi-process phase.")
         return 0
 
     from legoesm.parallel.distributed import (
@@ -91,8 +183,8 @@ def main(tripole: bool = False) -> int:
     )
     rank, nproc = initialize_jax_distributed_multiprocess()
     if nproc < 2:
-        print("[SKIP] launched single-process (MPI size 1); the multi-process "
-              "gate needs mpirun -np 2 (the cross-process path is the point).")
+        print("[SKIP] phase mp launched single-process (MPI size 1); needs "
+              "mpirun -np 2 (the cross-process path is the point).")
         return 0
 
     import jax
@@ -101,64 +193,29 @@ def main(tripole: bool = False) -> int:
     if jax.device_count() < 4:
         if rank == 0:
             print(f"[SKIP] only {jax.device_count()} global devices; need 4 "
-                  "(2 per process x np 2 via "
-                  "--xla_force_host_platform_device_count=2).")
+                  "(2 per process x np 2).")
         return 0
 
-    from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.grids.tripole import create_synthetic_tripole
-    from legoesm.ocean.vertical import create_ocean_z_star
-    from legoesm.ocean.state import LatLonCGridOceanConfig
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-    )
-    from legoesm.parallel.mesh import create_latlon_mesh
-    from legoesm.ocean.dynamics.sharded_ocean_step import (
-        make_sharded_ocean_step_global,
-    )
+    ref = np.load(ref_path)             # serial reference from phase 1
+    model, _grid, _z = _build_model(tripole)
+    state0 = _build_perturbed_state(model.grid, _z)
 
     if rank == 0:
         print(f"[setup] {nproc} processes, {jax.device_count()} global devices "
               f"({jax.local_device_count()} local/proc), "
               f"grid={'tripole' if tripole else 'latlon'}", flush=True)
 
-    # TRIPOLE variant (--tripole): the bipolar north fold is selected on the NORTH
-    # band (axis_index==N-1), which under multi-process is a REMOTE process.  This
-    # is the only case that exercises the north-fold band placed on another process
-    # IN the same shard_map program as the cross-process ppermute/psum (codex MED:
-    # the regular-grid multi-process case + the single-process tripole case don't
-    # individually cover it).  eORCA025 is a tripole, so this is the faithful path.
-    if tripole:
-        grid = create_synthetic_tripole(N_LAT, N_LON)
-        assert grid.fold.is_active, "synthetic tripole must carry an active fold"
-    else:
-        grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
-    z_coord = create_ocean_z_star(n_levels=NLEV, H_max=4000.0)
-    model = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig())
-    state0 = _build_perturbed_state(grid, z_coord)
+    # MULTI-PROCESS SPMD step: the lat mesh spans the GLOBAL device set (all 4
+    # across both processes); the band halo + barotropic reductions cross the
+    # process boundary via ppermute/psum (the "spmd" backend armed per-call inside
+    # make_sharded_ocean_step).  Exactly the run_omip_core2 --distributed step.
+    ss = _spmd_step_result(model, state0, 4)
 
-    # The lat-band mesh spans the GLOBAL device set (all 4 across both processes
-    # under jax.distributed) — the exact call run_omip_core2 --distributed makes.
-    dev = create_latlon_mesh(n_devices=4)
-    assert dev.mesh.devices.size == 4, dev.mesh.devices.size
-
-    # serial single-device reference (host-side; identical on every process).
-    s = state0
-    for _ in range(N_STEPS):
-        s = model.step(s, DT)
-
-    # global-in/global-out SPMD step (scatter -> cross-process band step -> gather).
-    model._ensure_vertex_mask(state0)
-    step = make_sharded_ocean_step_global(model, dev.mesh)
-    ss = state0
-    for _ in range(N_STEPS):
-        ss = step(ss, DT)            # cross-process ppermute/psum + all-gather
-
-    # (1) gathered SPMD step matches the serial reference to the FP floor.
     local_ok = True
     msgs = []
-    for nm in ("u", "v", "eta", "T", "S"):
-        a = np.asarray(getattr(s, nm).data)
+    # (1) gathered SPMD step matches the phase-1 serial reference to the FP floor.
+    for nm in _FIELDS:
+        a = ref[nm]
         b = np.asarray(getattr(ss, nm).data)
         try:
             np.testing.assert_allclose(b, a, atol=ATOL, rtol=RTOL)
@@ -166,45 +223,57 @@ def main(tripole: bool = False) -> int:
             local_ok = False
             msgs.append(f"{nm}: {str(e).splitlines()[0]}")
 
-    # (2) gathered shapes are GLOBAL (full domain, not a band) — the host loop
-    #     must see the whole grid.
+    # (2) gathered shapes are GLOBAL (full domain, not a band).
     T_g = np.asarray(ss.T.data)
     if T_g.shape != (N_LAT, N_LON, NLEV):
         local_ok = False
-        msgs.append(f"gathered T shape {T_g.shape} != global ({N_LAT},{N_LON},{NLEV})")
+        msgs.append(f"gathered T shape {T_g.shape} != ({N_LAT},{N_LON},{NLEV})")
     if np.asarray(ss.v.data).shape != (N_LAT + 1, N_LON, NLEV):
         local_ok = False
-        msgs.append(f"gathered v shape {np.asarray(ss.v.data).shape} not n_lat+1 rows")
+        msgs.append(f"gathered v shape {np.asarray(ss.v.data).shape} not n_lat+1")
 
-    # (3) gathered state is bitwise-identical across processes (the replicated
-    #     all-gather gives every process the same array -> consistent host BCs).
+    # (3) gathered state bitwise-identical across processes (replicated all-gather
+    #     -> every process' host loop sees the same state).
     T_rank0 = comm.bcast(T_g if rank == 0 else None, root=0)
     if not np.array_equal(T_g, T_rank0):
         local_ok = False
-        d = float(np.max(np.abs(T_g - T_rank0)))
-        msgs.append(f"gathered T differs across processes (max|d|={d:.3e})")
+        msgs.append(f"gathered T differs across processes "
+                    f"(max|d|={float(np.max(np.abs(T_g - T_rank0))):.3e})")
 
     if not local_ok:
         print(f"[FAIL rank {rank}/{nproc}] " + " | ".join(msgs), flush=True)
 
-    # All ranks must pass — reduce the boolean so the launcher's exit code reflects
-    # the WHOLE job (a single-rank failure fails the gate).
+    # All ranks must pass — LAND-reduce so the exit code is the WHOLE-job verdict.
     all_ok = comm.allreduce(local_ok, op=MPI.LAND)
-    _g = "tripole" if tripole else "latlon"
+    g = "tripole" if tripole else "latlon"
     if rank == 0:
         if all_ok:
-            print(f"[PASS] multi-process SPMD ({_g}) == serial to FP floor "
-                  f"(atol={ATOL}, rtol={RTOL}); gather replicated bitwise across "
-                  f"{nproc} processes.", flush=True)
+            print(f"[PASS] multi-process SPMD ({g}) == serial reference to FP "
+                  f"floor (atol={ATOL}, rtol={RTOL}); gather replicated bitwise "
+                  f"across {nproc} processes.", flush=True)
         else:
-            print(f"[FAIL] multi-process SPMD ({_g}) equivalence gate FAILED (see "
-                  "per-rank messages above).", flush=True)
+            print(f"[FAIL] multi-process SPMD ({g}) equivalence gate FAILED.",
+                  flush=True)
     return 0 if all_ok else 1
 
 
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--phase", choices=["ref", "mp"], required=True,
+                   help="ref = single-process serial+SPMD reference (writes --out); "
+                        "mp = multi-process SPMD vs the saved reference (reads --ref)")
+    p.add_argument("--out", default="/tmp/_spmd_mp_ref.npz",
+                   help="(phase ref) where to write the serial reference .npz")
+    p.add_argument("--ref", default="/tmp/_spmd_mp_ref.npz",
+                   help="(phase mp) the serial reference .npz from phase ref")
+    p.add_argument("--tripole", action="store_true",
+                   help="active-north-fold synthetic tripole (eORCA025 is tripole; "
+                        "the fold lands on the north band = a remote process)")
+    args = p.parse_args(argv)
+    if args.phase == "ref":
+        return _phase_ref(args.tripole, args.out)
+    return _phase_mp(args.tripole, args.ref)
+
+
 if __name__ == "__main__":
-    # --tripole runs the bipolar-north-fold variant (the fold lands on the north
-    # band = a remote process).  Default = regular lat-lon.  Both are launched by
-    # the CPU-equiv sbatch so multi-node coverage includes the eORCA025 fold path.
-    _tripole = "--tripole" in sys.argv[1:]
-    sys.exit(main(tripole=_tripole))
+    sys.exit(main())

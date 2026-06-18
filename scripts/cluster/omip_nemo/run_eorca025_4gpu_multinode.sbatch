@@ -35,32 +35,25 @@ echo "=== ALLOC ==="; date
 echo "nodes: $SLURM_JOB_NODELIST  ntasks: $SLURM_NTASKS  gpus/node: 2"
 scontrol show hostnames "$SLURM_JOB_NODELIST"
 
-# Per-process GPU pinning: each task pins CUDA_VISIBLE_DEVICES to its LOCAL rank so
-# every process owns exactly ONE distinct GPU (jax.distributed expects one local
-# device per process; run_omip_core2 --distributed asserts n_gpus==jax.device_count(),
-# so >1 visible GPU per process would trip the guard).  A small wrapper sets it from
-# SLURM_LOCALID under srun.  On a 2-GPU node the physical IDs are 0,1 == local ranks
-# 0,1, so this maps directly; if a site allocates non-0/1 physical GPU IDs, add
-# `--gpu-bind=single:1` to the srun and set CUDA_VISIBLE_DEVICES=0 instead.
-cat > /tmp/_e025_mn_launch_$SLURM_JOB_ID.sh <<'WRAP'
-#!/bin/bash
-export CUDA_VISIBLE_DEVICES=${SLURM_LOCALID}
-export JAX_PLATFORMS=cuda
-export JAX_ENABLE_X64=1
-echo "[rank ${SLURM_PROCID} local ${SLURM_LOCALID} @ $(hostname)] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-exec "$@"
-WRAP
-chmod +x /tmp/_e025_mn_launch_$SLURM_JOB_ID.sh
+# Per-process GPU pinning: ``--gpu-bind=single:1`` makes SLURM expose exactly ONE
+# GPU to each task (re-indexed to 0), so every process owns one distinct GPU and
+# jax sees a single local device -- run_omip_core2 --distributed asserts
+# n_gpus==jax.device_count(), so >1 visible GPU per process would trip the guard.
+# We deliberately do NOT write a node-local /tmp wrapper to set CUDA_VISIBLE_DEVICES
+# (an earlier version did, and it broke: /tmp is per-node, so the wrapper existed
+# only on the batch node and the second node's ranks could not exec it -> PMIx
+# collective hang).  gpu-bind is the SLURM-native, multi-node-safe equivalent.
+LOG=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/e025_4gpu_mn_${SLURM_JOB_ID}_full.log
 
 # srun launches one process per task (4 total, 2 per node).  jax.distributed
 # discovers rank/coordinator from MPI (mpi4py reads the SLURM PMI env); the SPMD
-# halo is pure-JAX ppermute/psum across processes (no mpi4jax).  tee the full log
-# so we can capture the REAL srun rc (the `| tail` would otherwise mask it) AND
-# scan for the success/abort markers.
-LOG=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/e025_4gpu_mn_${SLURM_JOB_ID}_full.log
-# The DRIVER script itself (with the --distributed edits) lives in the WORKTREE;
-# cwd is MAIN only for the relative data/ paths.
-srun --mpi=pmix /tmp/_e025_mn_launch_$SLURM_JOB_ID.sh \
+# halo is pure-JAX ppermute/psum across processes (no mpi4jax).  Env is passed
+# inline via `env` (no wrapper file).  tee the full log so we capture the REAL srun
+# rc (the `| tail` would mask it) AND scan for the success/abort markers.  The
+# DRIVER script (with the --distributed edits) lives in the WORKTREE; cwd is MAIN
+# only for the relative data/ paths.
+srun --mpi=pmix --gpu-bind=single:1 \
+  env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
   $PY "$WT/scripts/run/run_omip_core2.py" \
     --grid tripole \
     --mesh data/grids/eORCA025_mesh_mask.nc \
@@ -69,7 +62,6 @@ srun --mpi=pmix /tmp/_e025_mn_launch_$SLURM_JOB_ID.sh \
     --smoke --dt 600 --diag-every-days 2 \
     --output results/omip_nemo/e025_4gpu_multinode_smoke 2>&1 | tee "$LOG" | tail -120
 rc=${PIPESTATUS[0]}
-rm -f /tmp/_e025_mn_launch_$SLURM_JOB_ID.sh
 
 echo "e025_4gpu_mn_rc=${rc}"
 echo "=== smoke verdict ==="

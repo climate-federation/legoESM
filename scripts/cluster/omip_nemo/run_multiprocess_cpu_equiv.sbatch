@@ -31,39 +31,50 @@ echo "=== HOST ==="; hostname; date
 echo "=== mpi4py / jax versions ==="
 $PY -c "import mpi4py,jax; print('mpi4py',mpi4py.__version__,'jax',jax.__version__)"
 
-# One process per task; each forces 2 CPU devices -> 4 global across np=2.  Force
-# the CPU platform (no GPU on this short-CPU job) and x64 (ocean is fp64).  Run the
-# STANDALONE validation script (NOT pytest): the root tests/conftest.py initializes
-# the XLA backend at collection, before jax.distributed.initialize() could run.
+SCRIPT=scripts/validate/validate_latlon_ocean_spmd_multiprocess.py
 
-# Run one variant under mpirun, capture the REAL rc (the script LAND-reduces all
-# ranks), tee to a log, and REQUIRE a real [PASS] (a [SKIP] would mean the 4-device
-# setup did not materialize -> treat as failure, not green).  Returns 0 only on
-# [PASS] + rc 0.  No `set -e`/`pipefail` reliance: we capture PIPESTATUS explicitly.
-run_variant () {  # $1 = label, $2.. = extra args to the script
+# TWO PHASES per variant (the SERIAL reference cannot run under jax.distributed --
+# its eta-floor reduction would hit batch_allreduce_mpi -> mpi4jax, which is NOT
+# installed; the SPMD path is pure-JAX psum).  Phase 1 (single process, 4 CPU
+# devices, NO jax.distributed): compute the serial reference + single-process
+# 4-device SPMD, assert equal, save the reference.  Phase 2 (mpirun -np 2, 4 global
+# devices): run the MULTI-process SPMD step and compare to the saved reference +
+# assert the gather is replicated bitwise across processes.  Each phase tees to a
+# log, captures the REAL rc through the pipe, and REQUIRES a real [PASS] (a [SKIP]
+# means the device setup did not materialize -> treated as failure, not green).
+run_variant () {  # $1 = label, $2.. = extra script args (e.g. --tripole)
   local label="$1"; shift
-  local log="/tmp/_mpequiv_${label}_$SLURM_JOB_ID.log"
-  echo "=== ${label} multi-process equivalence ==="
-  "$MPIRUN" -np 2 env \
-    JAX_PLATFORMS=cpu \
-    XLA_FLAGS=--xla_force_host_platform_device_count=2 \
+  local ref="/tmp/_spmd_ref_${label}_$SLURM_JOB_ID.npz"
+  local rlog="/tmp/_mpequiv_ref_${label}_$SLURM_JOB_ID.log"
+  local mlog="/tmp/_mpequiv_mp_${label}_$SLURM_JOB_ID.log"
+
+  echo "--- [${label} phase 1/2] single-process serial + 4-device SPMD reference ---"
+  env JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
     JAX_ENABLE_X64=1 \
-    $PY scripts/validate/validate_latlon_ocean_spmd_multiprocess.py "$@" 2>&1 | tee "$log" | tail -40
-  local rc=${PIPESTATUS[0]}
-  echo "${label}_rc=${rc}"
-  if [ "$rc" -ne 0 ] || ! grep -q "\[PASS\]" "$log"; then
-    echo "[GATE-FAIL] ${label}: rc=${rc}, [PASS] present=$(grep -c '\[PASS\]' "$log")"
-    rm -f "$log"
-    return 1
+    $PY "$SCRIPT" --phase ref --out "$ref" "$@" 2>&1 | tee "$rlog" | tail -25
+  local rc1=${PIPESTATUS[0]}
+
+  echo "--- [${label} phase 2/2] multi-process (mpirun -np 2) SPMD vs reference ---"
+  "$MPIRUN" -np 2 env JAX_PLATFORMS=cpu \
+    XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=1 \
+    $PY "$SCRIPT" --phase mp --ref "$ref" "$@" 2>&1 | tee "$mlog" | tail -25
+  local rc2=${PIPESTATUS[0]}
+
+  echo "${label}_ref_rc=${rc1}  ${label}_mp_rc=${rc2}"
+  local bad=0
+  if [ "$rc1" -ne 0 ] || ! grep -q "\[PASS ref\]" "$rlog"; then bad=1; fi
+  if [ "$rc2" -ne 0 ] || ! grep -q "\[PASS\]" "$mlog"; then bad=1; fi
+  if [ "$bad" -ne 0 ]; then
+    echo "[GATE-FAIL] ${label}: ref_rc=${rc1}, mp_rc=${rc2}"
   fi
-  rm -f "$log"
-  return 0
+  rm -f "$ref" "$rlog" "$mlog"
+  return $bad
 }
 
 rc_all=0
 run_variant "latlon"  || rc_all=1
 run_variant "tripole" --tripole || rc_all=1
-echo "(rc 0 = PASS on every rank for BOTH variants; non-zero = a gate failed)"
+echo "(rc 0 = both phases PASS for BOTH variants; non-zero = a gate failed)"
 echo "mpequiv_overall_rc=${rc_all}"
 echo "=== DONE ==="
 exit ${rc_all}

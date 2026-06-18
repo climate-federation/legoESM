@@ -92,11 +92,14 @@ def initialize_jax_distributed_multiprocess(
     every rank calls ``jax.distributed.initialize(addr, num_processes, process_id)``)
     but:
 
-    * requires ONLY mpi4py (no mpi4jax — the SPMD halo is pure-JAX ppermute/psum);
+    * requires ONLY mpi4py for the MULTI-rank path (no mpi4jax — the SPMD halo is
+      pure-JAX ppermute/psum); a genuinely single-process run (no MPI/PMI/SLURM
+      launcher reporting >1 task) returns ``(0, 1)`` WITHOUT importing mpi4py, so
+      the default single-controller path never depends on the optional dep;
     * does NOT arm the MPI halo backend (the SPMD step arms its own per-call
       ``activate_latlon_spmd_halo`` around the ``shard_map``);
-    * is a NO-OP for a single process (``MPI.COMM_WORLD`` size 1) — the default
-      single-controller path stays byte-unchanged;
+    * is a NO-OP for a single process — the default single-controller path stays
+      byte-unchanged;
     * is idempotent — once ``jax.distributed`` is initialized (or the process is
       single), re-calling just returns the discovered ``(rank, n_processes)``.
 
@@ -110,14 +113,34 @@ def initialize_jax_distributed_multiprocess(
     (rank, n_processes) : tuple[int, int]
         This process' global rank and the total process count (from MPI).
     """
+    import os
+
+    # Fast single-process short-circuit WITHOUT importing mpi4py: when no MPI/PMI/
+    # SLURM launcher reports >1 task, this is a plain single-process run -> return
+    # (0, 1) and do not even require mpi4py (the default path must not depend on an
+    # optional dep).  Covers Open MPI (OMPI_COMM_WORLD_SIZE), MPICH/PMI
+    # (PMI_SIZE), and bare srun (SLURM_NTASKS / SLURM_STEP_NUM_TASKS).
+    _launcher_size = None
+    for _var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                 "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS"):
+        _v = os.environ.get(_var)
+        if _v:
+            try:
+                _launcher_size = int(_v)
+            except ValueError:
+                _launcher_size = None
+            break
+    if _launcher_size is not None and _launcher_size <= 1:
+        return 0, 1
+
     MPI = _require_mpi4py()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
 
     if n_processes <= 1:
-        # Single process: the default single-controller path.  jax already sees
-        # all LOCAL devices; no coordinator needed.  Byte-unchanged.
+        # Single process under a launcher (e.g. mpirun -np 1): the default single-
+        # controller path.  jax sees all LOCAL devices; no coordinator needed.
         return rank, n_processes
 
     # Already initialized (idempotent re-entry): just report the topology.
