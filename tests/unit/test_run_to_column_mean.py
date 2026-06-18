@@ -133,6 +133,35 @@ def test_amip_prescribed_sst_threaded_through_segments():
     # (A day-0-only bug would give 290.0.)
 
 
+def test_cmip_column_state_mpas_reconstructs_winds_and_carries_u_edge():
+    """The CMIP (coupled) × MPAS path: cmip_column_state reconstructs the cell
+    wind from the native edge velocity (driver.grid is the VoronoiMesh, via the
+    iter-74 CoupledESMDriver.grid property), carries u_edge for the LES extractor,
+    and uses the COUPLED-ocean SST — the only mode×grid combo not yet covered."""
+    from legoesm.grids.voronoi import create_voronoi_mesh, reconstruct_cell_velocity
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 4
+    u_edge = 6.0 * jnp.cos(jnp.asarray(mesh.angleEdge))[:, None] * jnp.ones((1, nlev))
+    # MPAS prognostic state: edge velocity in u, NO cell v (the MPAS marker).
+    state = SimpleNamespace(
+        T=jnp.full((mesh.nCells, nlev), 285.0), u=u_edge, v=None,
+        p_s=jnp.full((mesh.nCells,), 1.0e5))
+    coupled = SimpleNamespace(
+        state=state, q_v=jnp.full((mesh.nCells, nlev), 6e-3),
+        ocean_state=SimpleNamespace(T_sfc=jnp.full((mesh.nCells,), 301.0)),
+        grid=mesh)                                   # the CoupledESMDriver.grid property
+
+    cs = cmip_column_state(coupled)
+    assert cs.u.shape == (mesh.nCells, nlev) and cs.v.shape == (mesh.nCells, nlev)
+    assert cs.u_edge is not None and cs.u_edge.shape == (mesh.nEdges, nlev)
+    u_ref, v_ref = reconstruct_cell_velocity(
+        jnp.asarray(u_edge, dtype=cs.T.dtype), mesh)
+    np.testing.assert_allclose(np.asarray(cs.u), np.asarray(u_ref), rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(cs.v), np.asarray(v_ref), rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(cs.sst_K), 301.0)   # the COUPLED ocean SST
+
+
 def test_make_run_fn_builds_driver_from_config_and_means():
     """make_run_fn(config) builds a fresh driver from the config each call and
     returns the time mean — the run_amip_fn/run_cmip_fn make_compare_fn expects."""
