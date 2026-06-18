@@ -64,6 +64,8 @@ class CorrectionResult(NamedTuple):
     n_corrected: int                   # number of worst columns corrected (all flagged)
     n_diagnosed: int = 0               # number of LES diagnoses run (= n_corrected, or
     #                                    K representatives when clustering w/ les_budget)
+    step_fraction: float = 1.0         # the accepted line-search step toward the raw
+    #                                    diagnosis (1.0 = full; 0.0 = no-op round)
 
 
 class CampaignResult(NamedTuple):
@@ -95,6 +97,7 @@ def run_correction_campaign(
     feedback_strategy: str = "static",
     env_grid_fn: Callable[[Any], tuple] | None = None,
     accept_only_if_improved: bool = False,
+    step_fractions: Sequence[float] | None = None,
 ) -> CampaignResult:
     """Run the offline iterative correction loop for ``n_iterations`` rounds.
 
@@ -128,6 +131,13 @@ def run_correction_campaign(
     records the per-round decision.  Default false preserves the unconditional
     accumulation used by the existing callers/tests.
 
+    ``step_fractions`` is forwarded to each round's
+    :func:`run_correction_iteration` line search (backtracking the correction
+    magnitude toward the raw LES diagnosis); ``None`` ⇒ the full single-step
+    correction.  It composes with the gate: the line search first finds the largest
+    improving sub-step, and a round that cannot improve at any fraction is then
+    rejected by ``accept_only_if_improved``.
+
     Returns the final config + every round's :class:`CorrectionResult`.
     ``final_config``/``final_field`` are the LAST ACCEPTED state (not necessarily
     ``iterations[-1]``, which is retained for logging even if rejected).  With the
@@ -151,6 +161,7 @@ def run_correction_campaign(
             expected_ncol=expected_ncol,
             les_budget=les_budget, env_scales=env_scales,
             feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
+            step_fractions=step_fractions,
         )
         # Monotonic acceptance: keep the round only if it lowered the global bias.
         # A no-op round (no flagged columns) changes nothing → vacuously accepted.
@@ -239,6 +250,26 @@ def make_compare_fn(
     return compare_fn
 
 
+def _validate_step_fractions(
+    step_fractions: Sequence[float] | None,
+) -> tuple[float, ...]:
+    """Normalize ``step_fractions`` for the line search: ``None`` ⇒ ``(1.0,)``;
+    else each must be in ``(0, 1]``, deduplicated and sorted DESCENDING so the
+    backtracking search tries the largest correction first.  Raises on an empty
+    sequence or an out-of-range fraction (dispatch hardening)."""
+    if step_fractions is None:
+        return (1.0,)
+    fracs = [float(s) for s in step_fractions]
+    if not fracs:
+        raise ValueError(
+            "step_fractions must be non-empty (or None for the full step)."
+        )
+    for s in fracs:
+        if not (0.0 < s <= 1.0):
+            raise ValueError(f"step_fractions must lie in (0, 1]; got {s}.")
+    return tuple(sorted(set(fracs), reverse=True))
+
+
 def run_correction_iteration(
     baseline_config: Any,
     *,
@@ -253,6 +284,7 @@ def run_correction_iteration(
     env_scales: Sequence[float] | None = None,
     feedback_strategy: str = "static",
     env_grid_fn: Callable[[Any], tuple] | None = None,
+    step_fractions: Sequence[float] | None = None,
 ) -> CorrectionResult:
     """Run one diagnose→correct→verify iteration; report the bias change.
 
@@ -272,9 +304,21 @@ def run_correction_iteration(
     ``n_corrected`` columns are still corrected but only ``n_diagnosed = K`` LES
     run.  ``les_budget=None`` (default) diagnoses every worst column.
 
+    **Line search** (``step_fractions``): the LES-diagnosed coefficient is an
+    estimate from a *different* model (the LES↔GCM gap is the method's central
+    challenge, §9), so the raw value can overshoot the bias-minimising GCM
+    coefficient.  ``step_fractions`` (e.g. ``(1.0, 0.5, 0.25)``) backtracks the
+    correction magnitude: the injected field is ``base + s·(raw − base)`` for the
+    LARGEST ``s`` (tried in descending order) whose re-run lowers the global bias;
+    the search stops at the first improving ``s`` (Armijo-style, ≤ one re-run per
+    fraction).  If none improve, the largest ``s`` is reported with
+    ``improved=False`` (so the monotonic gate rejects it, exactly as the single-shot
+    path would).  ``step_fractions=None`` (default) ⇒ ``(1.0,)`` — the full-step,
+    single-re-run behaviour.  The accepted ``s`` is ``CorrectionResult.step_fraction``.
+
     A grid with no flagged worst columns short-circuits to a no-op correction
-    (baseline config unchanged, zero feedback, ``improved=False``) without a
-    second AMIP run or a config change.
+    (baseline config unchanged, zero feedback, ``improved=False``, ``step_fraction=0``)
+    without a second AMIP run or a config change.
 
     ``compare_fn`` MUST be deterministic across the two calls — same ERA5
     reference, grid, masks and (seeded) stochastic state — so the measured
@@ -319,6 +363,7 @@ def run_correction_iteration(
             feedback_field=noop_field,
             n_corrected=0,
             n_diagnosed=0,
+            step_fraction=0.0,
         )
 
     if les_budget is not None and int(les_budget) < len(records):
@@ -349,20 +394,47 @@ def run_correction_iteration(
                 "-> (grid_env, length_scales)."
             )
         grid_env, length_scales = env_grid_fn(baseline.model_ctx)
-    field = assemble_feedback_field(
+    raw_field = assemble_feedback_field(
         records, diagnoses, grid_shape,
         method=diagnosis_method, background=background,
         strategy=feedback_strategy, grid_env=grid_env, length_scales=length_scales,
     )
-    updated_config = apply_feedback_to_scheme(
-        baseline_config, promotion_key, field, expected_ncol=ncol
+    # Line search over the correction magnitude. ``base`` (the prior accepted
+    # field) is broadcast to the grid so the blend ``base + s·(raw − base)`` is a
+    # partial step from the current state toward the raw diagnosis; at columns the
+    # round did not touch ``raw == base`` so the blend is the identity for any ``s``.
+    fractions = _validate_step_fractions(step_fractions)
+    # Build base_field at raw_field's dtype: assemble_feedback_field writes the
+    # SAME background into raw_field's untouched columns at that dtype, so this
+    # makes raw_field − base_field EXACTLY zero there (the blend is the identity
+    # for any step) and keeps the full-step (frac==1) and partial paths in one dtype.
+    bg = jnp.asarray(background, dtype=raw_field.dtype)
+    base_field = (
+        jnp.full(grid_shape, bg) if bg.ndim == 0 else bg.reshape(grid_shape)
     )
 
-    updated = compare_fn(updated_config)
-    improvement = bias_improvement(
-        baseline.combined_score, updated.combined_score,
-        baseline.area_weights, valid_mask=baseline.valid_mask,
-    )
+    chosen = None
+    fallback = None
+    for k, frac in enumerate(fractions):           # descending: largest step first
+        field = raw_field if frac == 1.0 else base_field + frac * (raw_field - base_field)
+        cfg = apply_feedback_to_scheme(
+            baseline_config, promotion_key, field, expected_ncol=ncol
+        )
+        upd = compare_fn(cfg)
+        imp = bias_improvement(
+            baseline.combined_score, upd.combined_score,
+            baseline.area_weights, valid_mask=baseline.valid_mask,
+        )
+        candidate = (float(frac), field, cfg, upd, imp)
+        if k == 0:
+            fallback = candidate                   # largest configured step
+        if bool(imp.improved):
+            chosen = candidate                     # first (largest) improving step
+            break
+    if chosen is None:                             # none improved → report full step
+        chosen = fallback                          # (improved=False ⇒ the gate rejects)
+
+    frac, field, updated_config, updated, improvement = chosen
     worst_idx = jnp.asarray([int(r.flat_index) for r in records], dtype=jnp.int32)
     worst_change = worst_column_bias_change(
         baseline.combined_score, updated.combined_score, worst_idx
@@ -374,4 +446,5 @@ def run_correction_iteration(
         feedback_field=field,
         n_corrected=len(records),
         n_diagnosed=n_diagnosed,
+        step_fraction=frac,
     )

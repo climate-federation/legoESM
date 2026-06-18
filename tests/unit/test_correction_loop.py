@@ -808,3 +808,116 @@ def test_campaign_checkpoint_field_is_accepted_not_rejected_config():
     # it must NOT contain the rejected 5.0, or resume would desync.
     assert not np.any(np.isclose(field.reshape(-1), 5.0))
     np.testing.assert_allclose(field, dck)
+
+
+def _line_search_setup(diag_value, target):
+    """2x2 grid; combined_score[col] = |C_K[col] - target|; the single worst
+    column is flagged and diagnosed `diag_value`. Choosing target/diag relative to
+    the (0.4) background controls whether the full step overshoots while a smaller
+    step still lands closer to target — the line-search knob."""
+    nlat, nlon = 2, 2
+    area_w = jnp.ones((nlat, nlon))
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        ck2d = (jnp.broadcast_to(ck, (nlat, nlon)) if ck.ndim == 0
+                else ck.reshape((nlat, nlon)))
+        score = jnp.abs(ck2d - target)
+        flat = np.asarray(score).reshape(-1)
+        worst = [int(i) for i in np.argsort(-flat)[:1] if flat[i] > 1e-9]
+        manifest = [_Rec(flat_index=i, lat_deg=0.0, environment=_Env(0.0))
+                    for i in worst]
+        return CompareResult(combined_score=score, manifest=manifest,
+                             area_weights=area_w, model_ctx=None)
+
+    def diagnose(record, ctx):
+        return _Eddy(K=jnp.array([diag_value]), valid=jnp.array([True]))
+
+    return compare_fn, diagnose
+
+
+def test_validate_step_fractions():
+    from legoesm.training.correction_loop import _validate_step_fractions
+    assert _validate_step_fractions(None) == (1.0,)
+    # deduplicated + sorted DESCENDING (backtrack largest-first).
+    assert _validate_step_fractions([0.25, 1.0, 0.5, 0.5]) == (1.0, 0.5, 0.25)
+    with pytest.raises(ValueError, match="non-empty"):
+        _validate_step_fractions([])
+    with pytest.raises(ValueError, match=r"\(0, 1\]"):
+        _validate_step_fractions([1.5])
+    with pytest.raises(ValueError, match=r"\(0, 1\]"):
+        _validate_step_fractions([0.0])
+
+
+def test_iteration_line_search_picks_largest_improving_step():
+    # Full step (C_K->2.0) overshoots target 1.0 and WORSENS; half step (->1.2)
+    # improves. The search tries 1.0 first (rejected) then 0.5 (kept).
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=2.0, target=1.0)
+    seen_ck = []
+
+    def logged_compare(config):                   # record the worst-column C_K per call
+        ck = np.asarray(config.C_K)
+        seen_ck.append(float(ck.reshape(-1)[0]) if ck.ndim else float(ck))
+        return compare_fn(config)
+
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=logged_compare, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        step_fractions=(1.0, 0.5))
+    assert res.step_fraction == pytest.approx(0.5)
+    assert bool(res.bias.improved)
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    assert ck[0] == pytest.approx(1.2)            # 0.4 + 0.5*(2.0-0.4)
+    # Non-vacuity: the FULL step (2.0) was actually tried + rejected BEFORE the
+    # half step (1.2); exactly baseline + 2 candidate re-runs (no extra/skipped).
+    assert seen_ck == pytest.approx([dck, 2.0, 1.2])
+
+
+def test_iteration_line_search_takes_full_step_when_it_improves():
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=1.0, target=1.0)  # full lands on target
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        step_fractions=(1.0, 0.5, 0.25))
+    assert res.step_fraction == pytest.approx(1.0)   # largest improving step
+    assert bool(res.bias.improved)
+
+
+def test_iteration_line_search_none_improve_reports_full_step():
+    # Diagnosis moves AWAY from target at every fraction → no improvement; the
+    # largest configured step is reported with improved=False (gate then rejects).
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=5.0, target=0.0)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        step_fractions=(1.0, 0.5, 0.25))
+    assert res.step_fraction == pytest.approx(1.0)
+    assert not bool(res.bias.improved)
+    ck = np.asarray(res.updated_config.C_K).reshape(-1)
+    assert ck[0] == pytest.approx(5.0)               # full-step value reported
+
+
+def test_campaign_line_search_rescues_round_the_gate_would_reject():
+    # Composition: with the gate ON, the full-step round WORSENS and is rejected;
+    # adding step_fractions lets the line search find the improving half step, so
+    # the round is ACCEPTED at fraction 0.5 — strictly more progress than the gate alone.
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=2.0, target=1.0)
+    rescued = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True, step_fractions=(1.0, 0.5))
+    assert rescued.accepted == (True,)
+    assert rescued.iterations[0].step_fraction == pytest.approx(0.5)
+    assert np.asarray(rescued.final_config.C_K).reshape(-1)[0] == pytest.approx(1.2)
+
+    # Same round, full step only (step_fractions=None) → rejected, no progress.
+    bare = run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=1, compare_fn=compare_fn,
+        diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
+        background=dck, accept_only_if_improved=True)
+    assert bare.accepted == (False,)
+    assert jnp.ndim(jnp.asarray(bare.final_config.C_K)) == 0   # unchanged default

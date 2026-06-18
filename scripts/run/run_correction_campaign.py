@@ -127,6 +127,7 @@ def build_correction_campaign(
     checkpoint_callback: Any | None = None,
     feedback_strategy: str = "static",
     accept_only_if_improved: bool = True,
+    step_fractions: Any | None = None,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -144,6 +145,9 @@ def build_correction_campaign(
     ``accept_only_if_improved`` (default true here — the bias-reduction campaign
     SHOULD be monotonic) keeps a round only if it lowered the global bias, so the
     accumulated ``clubb_lite.C_K`` field never regresses (the done-criterion).
+    ``step_fractions`` (e.g. ``[1.0, 0.5, 0.25]``) enables the per-round line
+    search over the correction magnitude toward the LES diagnosis (robust to the
+    LES↔GCM overshoot); ``None`` ⇒ the full single step.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -188,6 +192,7 @@ def build_correction_campaign(
         checkpoint_callback=checkpoint_callback,
         feedback_strategy=feedback_strategy, env_grid_fn=env_grid_fn,
         accept_only_if_improved=accept_only_if_improved,
+        step_fractions=step_fractions,
     )
 
 
@@ -267,6 +272,11 @@ def _build_arg_parser():
     p.add_argument("--keep-worsening-rounds", action="store_true",
                    help="accumulate every round unconditionally (default: keep a "
                         "round only if it lowered the global bias — monotonic)")
+    p.add_argument("--step-fractions", default=None,
+                   help="comma-separated line-search step fractions in (0,1] "
+                        "(e.g. '1.0,0.5,0.25'): backtrack the correction magnitude "
+                        "toward the LES diagnosis, keeping the largest improving "
+                        "step (default: full single step)")
     p.add_argument("--les-dt", type=float, default=1.0, help="LES timestep [s]")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
     p.add_argument("--out", default="corrected_clubb_config.json")
@@ -409,18 +419,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         feedback_strategy=args.feedback_strategy,
         accept_only_if_improved=not args.keep_worsening_rounds,
+        step_fractions=(
+            [float(s) for s in args.step_fractions.split(",")]
+            if args.step_fractions else None),
     )
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
     accepted = list(result.accepted)
+    steps = [float(it.step_fraction) for it in result.iterations]
     for i, (b0, b1, imp) in enumerate(biases):
         kept = accepted[i] if i < len(accepted) else True
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
-              f"({'IMPROVED' if imp else 'no improvement'}; "
+              f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
     with open(args.out, "w") as f:
         json.dump({"C_K": np.asarray(result.final_config.C_K).tolist(),
-                   "biases": biases, "accepted": accepted}, f, indent=2)
+                   "biases": biases, "accepted": accepted,
+                   "step_fractions": steps}, f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     return 0
 

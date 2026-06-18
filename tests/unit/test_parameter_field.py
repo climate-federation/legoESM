@@ -110,6 +110,30 @@ def test_kernel_field_array_background_row_major_ordering():
     np.testing.assert_allclose(np.asarray(field), expected, atol=1e-6)
 
 
+def test_kernel_field_array_background_preserves_float64():
+    # An accumulated float64 background must NOT be downcast to the float32 env/
+    # sample dtype at no-neighbor fallback columns — else it diverges from the same
+    # background used by the line-search base and partial steps drift untouched
+    # columns. Requires x64 to express the mixed precision.
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("requires JAX_ENABLE_X64=1 to exercise mixed precision")
+    grid_env = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
+    sample_env = jnp.array([[1.0e6, 1.0e6]], dtype=jnp.float32)  # far ⇒ no neighbor
+    sample_values = jnp.array([0.5], dtype=jnp.float32)
+    L = jnp.array([1.0, 1.0], dtype=jnp.float32)
+    bg = jnp.asarray([0.123456789012345], dtype=jnp.float64)    # not exact in f32
+    field = environment_kernel_field(
+        grid_env, sample_env, sample_values, length_scales=L, background=bg)
+    assert field.dtype == jnp.float64
+    np.testing.assert_array_equal(np.asarray(field), np.asarray(bg))  # exact, no downcast
+    # ...while a scalar (weakly-typed) background does NOT spuriously promote the
+    # common-case float32 kernel to float64 (locks the result_type neutrality).
+    assert jnp.result_type(jnp.float32, 0.0) == jnp.float32
+    f32_field = environment_kernel_field(
+        grid_env, sample_env, sample_values, length_scales=L, background=0.0)
+    assert f32_field.dtype == jnp.float32
+
+
 def test_kernel_field_array_background_size_mismatch_raises():
     grid_env = jnp.array([[300.0, 1000.0], [0.0, 0.0]])
     sample_env = jnp.array([[300.0, 1000.0]])

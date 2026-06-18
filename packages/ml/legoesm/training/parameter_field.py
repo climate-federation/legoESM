@@ -121,7 +121,14 @@ def environment_kernel_field(
     ``grid_env`` (AD-safe: the normalizer is masked before division).  Returns
     ``(ncol,)``.
     """
-    dtype = jnp.result_type(grid_env, sample_env, sample_values, jnp.float32)
+    # Include ``background`` in the dtype: an ACCUMULATED array background (the
+    # round-k field, possibly float64) must not be silently downcast at
+    # no-neighbor fallback columns, or it diverges from the same background used
+    # elsewhere (e.g. the line-search base) and the partial step drifts untouched
+    # columns.  A scalar Python-float background stays weakly typed (no change).
+    dtype = jnp.result_type(
+        grid_env, sample_env, sample_values, background, jnp.float32
+    )
     grid_env = jnp.asarray(grid_env, dtype=dtype)
     sample_env = jnp.asarray(sample_env, dtype=dtype)
     sample_values = jnp.asarray(sample_values, dtype=dtype)
