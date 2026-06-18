@@ -166,13 +166,19 @@ def test_coefficient_value_dispatch():
     class _Ck:
         C_K = jnp.full((7,), 0.3)
 
+    class _Prt:
+        Pr_t = jnp.full((7,), 0.8)
+
     assert coefficient_value(_K(), "eddy_diffusivity").shape == (7,)
     assert float(coefficient_value(_Ent(), "entrainment")) == pytest.approx(0.01)
     assert coefficient_value(_Ck(), "clubb_coefficient").shape == (7,)
+    assert coefficient_value(_Prt(), "prandtl_number").shape == (7,)
     with pytest.raises(ValueError, match="no coefficient"):
         coefficient_value(_K(), "entrainment")  # wrong pairing
     with pytest.raises(ValueError, match="no coefficient"):
         coefficient_value(_K(), "clubb_coefficient")  # K has no C_K
+    with pytest.raises(ValueError, match="no coefficient"):
+        coefficient_value(_K(), "prandtl_number")  # K has no Pr_t
 
 
 def test_build_setup_deep_regime_by_cape():

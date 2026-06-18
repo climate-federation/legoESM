@@ -19,10 +19,12 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
 from legoesm.atmosphere.dynamics.column_les_diagnosis import (
     ClubbCoefficientProfile,
     EddyDiffusivityProfile,
+    PrandtlProfile,
     diagnose_clubb_coefficient,
     diagnose_column_coefficient,
     diagnose_eddy_diffusivity,
     diagnose_entrainment,
+    diagnose_prandtl_number,
 )
 from legoesm.atmosphere.dynamics.les_closure_diagnosis import EntrainmentDiagnosis
 from legoesm.grids.plane import create_plane_grid
@@ -192,6 +194,40 @@ def test_dispatch_clubb_coefficient_requires_l_mix_max():
     assert isinstance(out, ClubbCoefficientProfile)
     with pytest.raises(ValueError, match="requires l_mix_max"):
         diagnose_column_coefficient(state, hc, method="clubb_coefficient")
+
+
+def test_prandtl_number_matches_manual_composition():
+    """diagnose_prandtl_number = K_m/K_h from the momentum + heat inversions,
+    co-located — validates the wiring (heat K reused, momentum reversed)."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        momentum_diffusivity_from_fluxes,
+        prandtl_number_from_diffusivities,
+    )
+    from legoesm.atmosphere.dynamics.rce_diagnostics import (
+        resolved_turbulent_fluxes_plane,
+    )
+
+    state, hc = _les_state_with_shear()
+    out = diagnose_prandtl_number(state, hc)
+    assert isinstance(out, PrandtlProfile)
+    assert out.Pr_t.shape == (7,) and bool(jnp.all(jnp.diff(out.z_m) > 0))
+
+    kh = diagnose_eddy_diffusivity(state, hc)
+    fluxes = resolved_turbulent_fluxes_plane(state, hc)
+    u_mean = jnp.mean(state.u.data, axis=(0, 1))
+    v_mean = jnp.mean(state.v.data, axis=(0, 1))
+    z_full = jnp.asarray(hc.z_full)
+    Km, km_v = momentum_diffusivity_from_fluxes(
+        fluxes.w_u[::-1], fluxes.w_v[::-1], u_mean[::-1], v_mean[::-1], z_full[::-1])
+    Pr, valid = prandtl_number_from_diffusivities(Km, km_v, kh.K, kh.valid)
+    np.testing.assert_allclose(np.asarray(out.Pr_t), np.asarray(Pr), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(out.valid), np.asarray(valid))
+
+
+def test_dispatch_prandtl_number():
+    state, hc = _les_state_with_shear()
+    out = diagnose_column_coefficient(state, hc, method="prandtl_number")
+    assert isinstance(out, PrandtlProfile)
 
 
 def test_dispatch_unknown_method_raises():

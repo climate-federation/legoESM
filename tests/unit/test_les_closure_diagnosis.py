@@ -252,3 +252,45 @@ def test_clubb_coefficient_low_wp2_invalid_and_ad_safe():
 
     g = jax.grad(loss)(wp2)
     assert bool(jnp.all(jnp.isfinite(g)))    # sqrt(wp2) double-where is AD-safe
+
+
+def test_prandtl_number_ratio():
+    # Pr_t = Km/Kh = 4/5 = 0.8.
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+    Pr, valid = prandtl_number_from_diffusivities(
+        jnp.full((3,), 4.0), jnp.ones((3,), bool),
+        jnp.full((3,), 5.0), jnp.ones((3,), bool))
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(Pr), 0.8, rtol=1e-12)
+
+
+def test_prandtl_number_low_kh_invalid_and_ad_safe():
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+    Km = jnp.full((3,), 4.0)
+    Kh = jnp.array([5.0, 1.0e-9, 5.0])         # middle below the floor
+    Pr, valid = prandtl_number_from_diffusivities(
+        Km, jnp.ones((3,), bool), Kh, jnp.ones((3,), bool))
+    assert bool(valid[0]) and not bool(valid[1]) and bool(valid[2])
+    assert float(Pr[1]) == 0.0
+
+    def loss(kh):
+        Pr, _ = prandtl_number_from_diffusivities(
+            Km, jnp.ones((3,), bool), kh, jnp.ones((3,), bool))
+        return jnp.sum(Pr ** 2)
+
+    g = jax.grad(loss)(Kh)
+    assert bool(jnp.all(jnp.isfinite(g)))      # masked-denominator division is AD-safe
+
+
+def test_prandtl_number_requires_both_diffusivities_valid():
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+    _, valid = prandtl_number_from_diffusivities(
+        jnp.full((2,), 4.0), jnp.array([True, False]),
+        jnp.full((2,), 5.0), jnp.array([True, True]))
+    assert bool(valid[0]) and not bool(valid[1])   # invalid K_m ⇒ Pr_t invalid

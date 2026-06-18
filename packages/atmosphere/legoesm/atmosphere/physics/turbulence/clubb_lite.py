@@ -205,7 +205,10 @@ def clubb_lite_turbulence(
     # keeps the scalar path byte-identical and reshapes a per-column field to
     # broadcast over the vertical axis. See docs/COMPARE_REANALYSIS.md.
     Km_full = broadcast_column_param(config.C_K, l_mix) * l_mix * sqrt_wp2  # (ncol, nlev)
-    Kh_full = Km_full / config.Pr_t
+    # ``Pr_t`` likewise may be a scalar (production, byte-identical) OR a
+    # per-column LES-informed correction (the turbulent Prandtl number
+    # Pr_t = K_m/K_h diagnosed from the LES); broadcast it over the vertical too.
+    Kh_full = Km_full / broadcast_column_param(config.Pr_t, l_mix)
 
     Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])  # (ncol, nlev-1)
     Kh_half = 0.5 * (Kh_full[:, :-1] + Kh_full[:, 1:])

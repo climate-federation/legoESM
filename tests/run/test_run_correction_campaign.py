@@ -209,6 +209,40 @@ def test_build_correction_campaign_clubb_coefficient_method():
     assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2
 
 
+def test_build_correction_campaign_prandtl_number_method():
+    """The prandtl_number diagnosis is wired end-to-end: the campaign selects the
+    clubb_lite_Pr_t promotion + Pr_t background by method, the LES diagnoses a
+    DIMENSIONLESS Pr_t, and an in-bounds per-column Pr_t is produced."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    bias = np.zeros((8, 16))
+    bias[4, 8] = 6.0
+    reference = model_state._replace(T=model_state.T - jnp.asarray(bias)[:, :, None])
+
+    result = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        reference=reference, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="prandtl_number"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        accept_only_if_improved=False)
+
+    # The corrected coefficient is Pr_t (not C_K); C_K stays the scalar default.
+    prt = np.asarray(result.final_config.Pr_t).reshape(-1)
+    assert prt.shape == (8 * 16,)
+    assert float(prt.min()) >= 0.3 and float(prt.max()) <= 1.5   # Pr_t bounds
+    assert jnp.ndim(jnp.asarray(result.final_config.C_K)) == 0   # C_K untouched
+    assert result.final_config.C_K == CLUBBLiteConfig().C_K
+
+
 def test_build_correction_campaign_default_gate_rejects_non_improving():
     """build_correction_campaign defaults the monotonic gate ON: the mock driver
     returns a fixed state regardless of C_K, so the round does not lower the bias

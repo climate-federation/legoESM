@@ -38,6 +38,7 @@ from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
     eddy_diffusivity_from_flux,
     entrainment_velocity_from_buoyancy_flux,
     momentum_diffusivity_from_fluxes,
+    prandtl_number_from_diffusivities,
 )
 from legoesm.atmosphere.dynamics.rce_diagnostics import (
     resolved_turbulent_fluxes_plane,
@@ -45,7 +46,9 @@ from legoesm.atmosphere.dynamics.rce_diagnostics import (
 )
 from legoesm.atmosphere.physics._shared import mixing_length
 
-_METHODS = ("eddy_diffusivity", "entrainment", "clubb_coefficient")
+_METHODS = (
+    "eddy_diffusivity", "entrainment", "clubb_coefficient", "prandtl_number",
+)
 
 # Minimum number of valid interior interfaces for a trustworthy column C_K
 # (a single anomalous-shear interface should not define the whole column).
@@ -174,6 +177,48 @@ def diagnose_clubb_coefficient(
     return ClubbCoefficientProfile(z_m=z_m, C_K=C_K, valid=valid)
 
 
+class PrandtlProfile(NamedTuple):
+    """Turbulent Prandtl number ``Pr_t = K_m/K_h`` per interior interface."""
+
+    z_m: jax.Array     # (nlev-1,) interior-interface heights [m], ascending
+    Pr_t: jax.Array    # (nlev-1,) dimensionless Pr_t = K_m/K_h
+    valid: jax.Array   # (nlev-1,) bool
+
+
+def diagnose_prandtl_number(
+    les_state,
+    height_coord,
+    *,
+    qv_slot: int = 0,
+    min_valid_levels: int = _MIN_VALID_CK_LEVELS,
+) -> PrandtlProfile:
+    """Diagnose the DIMENSIONLESS turbulent Prandtl number ``Pr_t = K_m/K_h``.
+
+    The ratio of the LES MOMENTUM diffusivity ``K_m`` (shear-projected, from
+    ``⟨w'u'⟩,⟨w'v'⟩``) to the HEAT diffusivity ``K_h`` (from ``⟨w'θ'⟩``), both at
+    the same interior interfaces — the inverse of the GCM ``K_h = K_m/Pr_t``.
+    Being a pure ratio, ``Pr_t`` carries NO wp2-identification assumption (unlike
+    ``C_K``), so it transfers cleanly.  ``K_h`` reuses
+    :func:`diagnose_eddy_diffusivity` (ascending, co-located with the momentum
+    interfaces).  Fewer than ``min_valid_levels`` valid interfaces ⇒ the column
+    is flagged invalid.  Pure-JAX, AD-safe.
+    """
+    kh = diagnose_eddy_diffusivity(les_state, height_coord, qv_slot)  # heat K, ascending
+    fluxes = resolved_turbulent_fluxes_plane(les_state, height_coord, qv_slot)
+    u_mean = jnp.mean(les_state.u.data, axis=(0, 1))
+    v_mean = jnp.mean(les_state.v.data, axis=(0, 1))
+    z_full = jnp.asarray(height_coord.z_full)
+    K_m, km_valid = momentum_diffusivity_from_fluxes(
+        fluxes.w_u[::-1], fluxes.w_v[::-1],
+        u_mean[::-1], v_mean[::-1], z_full[::-1],
+    )
+    Pr_t, valid = prandtl_number_from_diffusivities(
+        K_m, km_valid, kh.K, kh.valid
+    )
+    enough = jnp.sum(valid) >= int(min_valid_levels)
+    return PrandtlProfile(z_m=kh.z_m, Pr_t=Pr_t, valid=valid & enough)
+
+
 def diagnose_column_coefficient(
     les_state,
     height_coord,
@@ -186,13 +231,16 @@ def diagnose_column_coefficient(
 
     Returns an :class:`EddyDiffusivityProfile` for ``"eddy_diffusivity"``, an
     :class:`~legoesm.atmosphere.dynamics.les_closure_diagnosis.EntrainmentDiagnosis`
-    for ``"entrainment"``, or a :class:`ClubbCoefficientProfile` for
-    ``"clubb_coefficient"`` (which requires the GCM ``l_mix_max``).
+    for ``"entrainment"``, a :class:`ClubbCoefficientProfile` for
+    ``"clubb_coefficient"`` (which requires the GCM ``l_mix_max``), or a
+    :class:`PrandtlProfile` for ``"prandtl_number"``.
     """
     if method == "eddy_diffusivity":
         return diagnose_eddy_diffusivity(les_state, height_coord, qv_slot)
     if method == "entrainment":
         return diagnose_entrainment(les_state, height_coord, qv_slot)
+    if method == "prandtl_number":
+        return diagnose_prandtl_number(les_state, height_coord, qv_slot=qv_slot)
     if method == "clubb_coefficient":
         if l_mix_max is None:
             raise ValueError(

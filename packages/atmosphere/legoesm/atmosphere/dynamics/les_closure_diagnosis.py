@@ -45,6 +45,7 @@ _MIN_ABS_GRADIENT_DEFAULT = 1.0e-12  # |∂⟨φ⟩/∂z| floor (φ-units per me
 _MIN_SHEAR_DEFAULT = 1.0e-6  # |∂U/∂z| floor [1/s]
 _MIN_DELTA_THETAV_DEFAULT = 1.0e-3  # inversion θ_v jump floor [K]
 _WP2_FLOOR_DEFAULT = 1.0e-4  # w'² floor [m²/s²] (velocity scale √wp2 ≳ 0.01 m/s)
+_KH_FLOOR_DEFAULT = 1.0e-3  # heat diffusivity floor [m²/s] (Pr_t ill-posed below)
 
 
 class EddyDiffusivityDiagnosis(NamedTuple):
@@ -182,6 +183,33 @@ def clubb_coefficient_from_diffusivity(
     denom_safe = jnp.where(valid, denom, jnp.ones_like(denom))
     C_K = jnp.where(valid, K_m / denom_safe, jnp.zeros_like(K_m))
     return C_K, valid
+
+
+def prandtl_number_from_diffusivities(
+    K_m: jax.Array,
+    K_m_valid: jax.Array,
+    K_h: jax.Array,
+    K_h_valid: jax.Array,
+    *,
+    kh_floor: float = _KH_FLOOR_DEFAULT,
+) -> tuple[jax.Array, jax.Array]:
+    """Turbulent Prandtl number ``Pr_t = K_m/K_h`` — the inverse of the GCM
+    relation ``K_h = K_m/Pr_t`` (``clubb_lite.py``).
+
+    A DIMENSIONLESS ratio of the LES momentum (``K_m``) and heat (``K_h``)
+    diffusivities at the same interfaces; unlike ``C_K`` it needs no velocity
+    scale, so it carries NO wp2-identification assumption.  ``valid`` where both
+    diffusivities are valid AND ``K_h > kh_floor`` (the ratio is ill-posed for a
+    near-zero heat diffusivity).  AD-safe (denominator masked before division).
+    """
+    K_m = jnp.asarray(K_m)
+    K_h = jnp.asarray(K_h, dtype=K_m.dtype)
+    floor = jnp.asarray(kh_floor, dtype=K_m.dtype)
+    kh_ok = jnp.asarray(K_h_valid, dtype=bool) & (K_h > floor)
+    valid = jnp.asarray(K_m_valid, dtype=bool) & kh_ok
+    denom = jnp.where(valid, K_h, jnp.ones_like(K_h))
+    Pr_t = jnp.where(valid, K_m / denom, jnp.zeros_like(K_m))
+    return Pr_t, valid
 
 
 def mixing_length_from_momentum_diffusivity(

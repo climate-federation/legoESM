@@ -68,6 +68,12 @@ PROMOTABLE_FIELDS: dict[str, PromotableField] = {
              "so a per-column field broadcasts over the vertical. PHYSICALLY "
              "maps the LES eddy-diffusivity diagnosis onto the GCM diffusivity.",
     ),
+    "clubb_lite_Pr_t": PromotableField(
+        field="Pr_t", scheme="CLUBB-lite turbulence", units="1", body_safe=True,
+        note="K_h = K_m/Pr_t; the body wraps Pr_t in broadcast_column_param so a "
+             "per-column field broadcasts over the vertical. Maps the LES "
+             "turbulent-Prandtl-number diagnosis (Pr_t = K_m/K_h) onto the GCM.",
+    ),
 }
 # NOTE: gray ``sfc_albedo`` is deliberately NOT registered — the driver passes a
 # per-column ``sfc_albedo`` as an explicit argument to ``gray_radiation`` that

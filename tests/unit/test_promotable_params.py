@@ -162,3 +162,15 @@ def test_param_field_bounds_resolves_ck():
     from legoesm.training.feedback import param_field_bounds
     assert param_field_bounds(CLUBBLiteConfig(), "C_K") == (0.1, 1.2)
     assert param_field_bounds(CLUBBLiteConfig(), "nonexistent_field") is None
+
+
+def test_prandtl_promotion_registered_and_clamped():
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    assert "clubb_lite_Pr_t" in promotable_field_names()
+    assert PROMOTABLE_FIELDS["clubb_lite_Pr_t"].field == "Pr_t"
+    # Pr_t registered bounds (0.3, 1.5) ⇒ an out-of-range diagnosis is clamped.
+    out = clip_field_to_promotable_bounds(
+        CLUBBLiteConfig(), "clubb_lite_Pr_t", jnp.array([0.1, 2.0, 0.7]))
+    np.testing.assert_allclose(np.asarray(out), [0.3, 1.5, 0.7])
+    # the per-column Pr_t body wiring (uniform == scalar; per-column changes Kh)
+    # is tested in tests/atmosphere/test_clubb_lite_ck_promotion.py.

@@ -105,6 +105,19 @@ def test_reduce_clubb_coefficient_valid_mean():
     assert float(value) == pytest.approx(0.3)
 
 
+class _Prt(NamedTuple):
+    Pr_t: jax.Array
+    valid: jax.Array
+
+
+def test_reduce_prandtl_number_valid_mean():
+    diag = _Prt(Pr_t=jnp.array([0.7, 0.9, 9.9]),
+               valid=jnp.array([True, True, False]))
+    value, valid = reduce_column_diagnosis(diag, "prandtl_number")
+    assert bool(valid)
+    assert float(value) == pytest.approx(0.8)
+
+
 def test_reduce_clubb_coefficient_all_invalid_keeps_background():
     diag = _Ck(C_K=jnp.array([0.5, 0.6]), valid=jnp.array([False, False]))
     _, valid = reduce_column_diagnosis(diag, "clubb_coefficient")

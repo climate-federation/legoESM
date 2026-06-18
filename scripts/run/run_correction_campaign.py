@@ -3,7 +3,8 @@
 Composes the full loop (``docs/COMPARE_REANALYSIS.md``) into a runnable campaign:
 
     run AMIP/CMIP → time-mean → compare to ERA5 → rank worst columns
-      → (cluster) → LES-diagnose → correct ``clubb_lite.C_K`` → RE-RUN → repeat.
+      → (cluster) → LES-diagnose → correct a ``clubb_lite`` coefficient
+      (``C_K`` or ``Pr_t``, by ``--diagnosis-method``) → RE-RUN → repeat.
 
 Everything below the comparison is the already-tested training package; this
 module supplies the two composition pieces that turn it into a runnable campaign:
@@ -149,8 +150,11 @@ def build_correction_campaign(
     ``step_fractions`` (e.g. ``[1.0, 0.5, 0.25]``) enables the per-round line
     search over the correction magnitude toward the LES diagnosis (robust to the
     LES↔GCM overshoot); ``None`` ⇒ the full single step.  ``clip_to_bounds``
-    (default true) clamps the diagnosed ``C_K`` to its registered physical bounds
-    so a degenerate LES cannot inject an unphysical value.
+    (default true) clamps the diagnosed coefficient to its registered physical
+    bounds so a degenerate LES cannot inject an unphysical value.  The promotable
+    coefficient is selected by ``les_config.diagnosis_method``: ``prandtl_number``
+    corrects ``clubb_lite_Pr_t`` (the dimensionless ``Pr_t = K_m/K_h``), otherwise
+    ``clubb_lite_C_K``.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -162,15 +166,24 @@ def build_correction_campaign(
     if lon_deg is None:
         lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
 
-    # Keep the loop's reduction in lock-step with the LES diagnosis, and for the
-    # dimensionless clubb_coefficient method auto-populate l_mix_max (the GCM
-    # mixing length) so the diagnosed C_K matches how the GCM uses it.
+    # Keep the loop's reduction in lock-step with the LES diagnosis, and select
+    # the promotable coefficient + its production default by method:
+    #   prandtl_number              → clubb_lite_Pr_t (K_m/K_h)
+    #   clubb_coefficient / eddy_*  → clubb_lite_C_K
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
     diagnosis_method = les_config.diagnosis_method
-    if diagnosis_method == "clubb_coefficient" and \
-            getattr(les_config, "clubb_l_mix_max", None) is None:
-        les_config = les_config._replace(
-            clubb_l_mix_max=float(clubb_cfg.l_mix_max))
+    if diagnosis_method == "prandtl_number":
+        promotion_key = "clubb_lite_Pr_t"
+        background = float(CLUBBLiteConfig().Pr_t)
+    else:
+        promotion_key = "clubb_lite_C_K"
+        background = float(CLUBBLiteConfig().C_K)
+        # clubb_coefficient needs the GCM mixing length so the diagnosed C_K
+        # matches how the GCM uses it; auto-populate it from the CLUBB config.
+        if diagnosis_method == "clubb_coefficient" and \
+                getattr(les_config, "clubb_l_mix_max", None) is None:
+            les_config = les_config._replace(
+                clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
     build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
     run_fn = make_run_fn(build_driver, extract_column_state)
@@ -194,12 +207,11 @@ def build_correction_campaign(
         from legoesm.training.feedback_assembly import column_environment_grid
         env_grid_fn = _partial(column_environment_grid, sigma=sigma)
 
-    background = float(CLUBBLiteConfig().C_K)
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
         int(n_iterations),
         compare_fn=compare_fn, diagnose_fn=diagnose_fn,
-        promotion_key="clubb_lite_C_K", grid_shape=grid_shape,
+        promotion_key=promotion_key, grid_shape=grid_shape,
         diagnosis_method=diagnosis_method,
         background=background, les_budget=les_budget, env_scales=env_scales,
         initial_field=initial_field, start_round=start_round,
@@ -292,12 +304,14 @@ def _build_arg_parser():
                         "toward the LES diagnosis, keeping the largest improving "
                         "step (default: full single step)")
     p.add_argument("--diagnosis-method",
-                   choices=("clubb_coefficient", "eddy_diffusivity"),
+                   choices=("clubb_coefficient", "prandtl_number",
+                            "eddy_diffusivity"),
                    default="clubb_coefficient",
                    help="LES closure-coefficient diagnosis: clubb_coefficient "
-                        "(default) diagnoses the DIMENSIONLESS C_K = K_m/(l*sqrt(wp2)) "
-                        "consistent with the GCM; eddy_diffusivity diagnoses the "
-                        "dimensional heat K [m^2/s] (legacy)")
+                        "(default) → DIMENSIONLESS C_K = K_m/(l*sqrt(wp2)); "
+                        "prandtl_number → DIMENSIONLESS Pr_t = K_m/K_h "
+                        "(clubb_lite_Pr_t); eddy_diffusivity → dimensional heat "
+                        "K [m^2/s] (legacy)")
     p.add_argument("--allow-unphysical-coeff", action="store_true",
                    help="do NOT clamp the diagnosed C_K to its registered physical "
                         "bounds (default: clamp, so a degenerate LES cannot inject "
@@ -406,16 +420,28 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # round), so a multi-day campaign survives a job timeout (§1 restartable).
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    # The CLUBB field the diagnosis corrects (C_K for the diffusivity methods,
+    # Pr_t for prandtl_number) — so the checkpoint/output persist the right field.
+    corrected_field = "Pr_t" if args.diagnosis_method == "prandtl_number" else "C_K"
     initial_clubb, initial_field, start_round = None, None, 0
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
+        # Guard against resuming a checkpoint for a DIFFERENT corrected coefficient
+        # (e.g. a Pr_t checkpoint with --diagnosis-method=clubb_coefficient) — the
+        # field would be silently loaded into the wrong config slot.
+        ckpt_field = ckpt.get("corrected_field")
+        if ckpt_field is not None and ckpt_field != corrected_field:
+            raise SystemExit(
+                f"checkpoint corrects {ckpt_field!r} but --diagnosis-method "
+                f"requests {corrected_field!r}; resume with the matching method.")
         initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
         # The accumulated FIELD is the single source of truth for the accepted
-        # state; the per-column C_K is exactly its flattened form (the
+        # state; the per-column coefficient is exactly its flattened form (the
         # column-ordering contract). Rebuilding the config FROM the field cannot
         # desync from initial_field, even after a rejected-round checkpoint.
-        initial_clubb = CLUBBLiteConfig(C_K=initial_field.reshape(-1))
+        initial_clubb = CLUBBLiteConfig(
+            **{corrected_field: initial_field.reshape(-1)})
         start_round = int(ckpt["round"]) + 1
         print(f"[campaign] resuming from {args.resume} at round {start_round}")
 
@@ -425,11 +451,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             # Persist the ACCEPTED accumulated `field` (post-gate base), NOT
             # res.updated_config — under the monotonic gate a rejected round's
             # updated_config is discarded while `field` stays the accepted state.
-            # C_K is stored for inspection only; resume reconstructs it from field.
+            # The coefficient is stored under its real name (C_K or Pr_t) for
+            # inspection + the resume-method guard; resume reconstructs from `field`.
             flat = np.asarray(field).reshape(-1)
             with open(args.checkpoint, "w") as f:
                 json.dump({"round": int(round_idx),
-                           "C_K": flat.tolist(),
+                           "corrected_field": corrected_field,
+                           corrected_field: flat.tolist(),
                            "field": np.asarray(field).tolist()}, f)
 
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
@@ -460,7 +488,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
               f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
     with open(args.out, "w") as f:
-        json.dump({"C_K": np.asarray(result.final_config.C_K).tolist(),
+        json.dump({corrected_field: np.asarray(
+                       getattr(result.final_config, corrected_field)).tolist(),
                    "biases": biases, "accepted": accepted,
                    "step_fractions": steps}, f, indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")

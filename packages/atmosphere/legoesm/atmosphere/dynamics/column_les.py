@@ -86,6 +86,8 @@ def coefficient_value(diagnosis: Any, method: str):
         return diagnosis.K
     if method == "clubb_coefficient" and hasattr(diagnosis, "C_K"):
         return diagnosis.C_K
+    if method == "prandtl_number" and hasattr(diagnosis, "Pr_t"):
+        return diagnosis.Pr_t
     if method == "entrainment" and hasattr(diagnosis, "w_entrainment"):
         return diagnosis.w_entrainment
     raise ValueError(
