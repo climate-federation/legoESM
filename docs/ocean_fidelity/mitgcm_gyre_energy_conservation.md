@@ -183,3 +183,24 @@ python scripts/data/generate_mitgcm_barotropic_gyre_reference.py --ref-root <ref
 #   _gyre_dt_scaling.py               growth converges as dt→0  => spatial source
 #   _gyre_semidiscrete_budget.py      dE/dt byte-identical across advection => free-surface split
 ```
+
+## UPDATE 2026-06-18 (iteration 3b): per-term diff at spin-up states — the limitation
+
+Ran the per-term comparison against MITgcm's own `momU`/`momV` diagnostic dumps (which bundle
+UVEL/VVEL/ETAN + Um_Advec/Cori/Diss/dPhiX/USidDrag at iters 5000…70000 — the spin-up):
+- **TOTAL advection energy power** `∫(u·advU + v·advV)`: MITgcm **1e-13** (machine zero), legoESM
+  **2.4e-10** — both essentially conserving on these smooth states (the earlier U-only −1e-6 was
+  just the U↔V transfer, balanced by V).
+- **Coriolis power**: machine-zero in both. legoESM's Coriolis values match MITgcm's exactly.
+- Raw per-term *value* diff hits the known **baroclinic-vs-barotropic trap** (legoESM's direct
+  `_bc_..._advection` is the ~0 baroclinic-perturbation part; the barotropic advection flows through
+  the depth-mean `F_slow`), so a naive value-correlation is not meaningful (ratio 0.001, anti-corr).
+
+**Conclusion / honest limitation**: on every *comparable* (smooth, laminar) state MITgcm visits, the
+per-term tendencies match and conserve energy in both models — there is no isolable "wrong operator".
+legoESM's excess energy only manifests once its trajectory develops grid-scale structure at the
+marginally-resolved (Munk δ≈1.7 cell) western boundary current, an attractor **MITgcm never enters**,
+so a direct per-term oracle diff *there* is structurally impossible. The residual is a subtle
+nonlinear-stability difference of the under-resolved WBC, not a single faithfully-fixable term. The
+oracle stands at its strong tiers (10-step eta 0.9997 + per-term tendency match on smooth states);
+the equilibrium turbulence is documented as an open dycore-stability item.
