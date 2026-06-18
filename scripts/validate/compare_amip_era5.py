@@ -28,17 +28,17 @@ from __future__ import annotations
 
 import argparse
 import warnings
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax.numpy as jnp
-
+from legoesm.training.column_manifest import write_manifest
 from legoesm.training.compare_reanalysis import (
     ColumnComparison,
     ColumnState,
     column_state_from_carry,
     compare_state_to_reference,
 )
-from legoesm.training.column_manifest import write_manifest
 
 # Canonical grid-type tokens → aliases.  Anything else is a hard error.
 _GRID_TYPE_ALIASES = {
@@ -116,6 +116,7 @@ def model_state_from_restart(
     *,
     sst_K: jnp.ndarray | None = None,
     precip_mm_day: jnp.ndarray | None = None,
+    mesh: Any = None,
 ) -> ColumnState:
     """Build a model :class:`ColumnState` from a loaded restart ``state`` + ``q_v``.
 
@@ -130,7 +131,7 @@ def model_state_from_restart(
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
 
     return column_state_from_hydrostatic(
-        state, q_v, sst_K=sst_K, precip_mm_day=precip_mm_day
+        state, q_v, sst_K=sst_K, precip_mm_day=precip_mm_day, mesh=mesh
     )
 
 
@@ -193,9 +194,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Deferred heavy imports (kept out of module import so the unit-tested
     # helpers above load without the grid factory / ERA5 / restart machinery).
+    from legoesm.driver.restart import load_restart
     from legoesm.grids.factory import create_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.driver.restart import load_restart
     from legoesm.training.era5_to_state import (
         TrainingERA5Config,
         load_era5_slice,

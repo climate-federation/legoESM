@@ -122,6 +122,9 @@ def cmip_column_state(
         coupled_driver.state,
         coupled_driver.q_v,
         sst_K=_sst_array(coupled_driver.ocean_state.T_sfc),
+        # MPAS coupled run: the cell wind is reconstructed from the edge velocity
+        # (driver.grid is the VoronoiMesh); ignored for lat-lon / cubed (v set).
+        mesh=getattr(coupled_driver, "grid", None),
     )
 
 
@@ -140,4 +143,7 @@ def amip_column_state(
         atm_driver.state,
         atm_driver.q_v,
         sst_K=_sst_array(sst),
+        # MPAS atm run: reconstruct the cell wind from the edge velocity
+        # (driver.grid is the VoronoiMesh); ignored for lat-lon / cubed (v set).
+        mesh=getattr(atm_driver, "grid", None),
     )

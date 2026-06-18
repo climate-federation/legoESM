@@ -29,7 +29,6 @@ from typing import Any, NamedTuple
 import jax  # noqa: F401  (used in string annotations under `from __future__`)
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.training.column_era5_metrics import (
     ColumnErrorConfig,
     ColumnErrorFields,
@@ -291,6 +290,7 @@ def column_state_from_hydrostatic(
     *,
     sst_K: jax.Array | None = None,
     precip_mm_day: jax.Array | None = None,
+    mesh: Any = None,
 ) -> ColumnState:
     """Build a :class:`ColumnState` from a driver atmosphere state + ``q_v``.
 
@@ -309,24 +309,75 @@ def column_state_from_hydrostatic(
 
     The driver state stores ``u``/``v``/``T``/``p_s`` as :class:`Field` wrappers,
     so they are unwrapped to raw arrays (raw arrays also pass through).
-    ``atm_state.v`` must be a cell-centred wind — an MPAS edge-velocity state
-    (``v is None``) is rejected.
+
+    **MPAS / Voronoi (``v is None``).**  An MPAS state stores the EDGE-NORMAL
+    velocity in ``u`` ``(nEdges, nlev)`` and has no cell ``v`` (``v is None``); pass
+    the run's ``mesh`` (the :class:`~legoesm.grids.voronoi.VoronoiMesh`, i.e.
+    ``driver.grid``) and the cell-centered geographic ``(u_east, v_north)``
+    ``(nCells, nlev)`` are reconstructed via the Perot
+    :func:`~legoesm.grids.voronoi.reconstruct_cell_velocity` — the SAME diagnostic
+    wind MPAS uses, and frame-consistent with an ERA5 reference regridded to the
+    cells (geographic east/north).  ``mesh=None`` with ``v is None`` raises (the
+    edge→cell reconstruction needs the mesh).  Lat-lon / cubed states (``v`` set)
+    pass through unchanged and ignore ``mesh``.
+
+    **Scope (single-rank / full mesh):** ``reconstruct_cell_velocity`` runs on the
+    supplied mesh; for a serial / global mesh that is the whole grid (matching the
+    column extractor + ERA5 regrid scope).  A DISTRIBUTED MPAS run (``driver.grid``
+    = the rank-local mesh) would reconstruct rank-local cell winds and needs an
+    owned-cell ``valid_mask`` (or gather-to-global) before ranking — a follow-up.
     """
     def _arr(x):
         return x.data if hasattr(x, "data") else x
 
-    if getattr(atm_state, "v", None) is None:
-        raise ValueError(
-            "column_state_from_hydrostatic: atm_state.v is None — the comparison "
-            "needs cell-centred u/v (an MPAS edge-velocity state is not supported)."
-        )
     T = jnp.asarray(_arr(atm_state.T))
     dt = T.dtype
+    v_field = getattr(atm_state, "v", None)
+    if v_field is None:
+        # MPAS edge-velocity state: reconstruct the cell-centered geographic wind.
+        if mesh is None:
+            raise ValueError(
+                "column_state_from_hydrostatic: atm_state.v is None (an MPAS "
+                "edge-velocity state) — pass mesh= (the run's VoronoiMesh, e.g. "
+                "driver.grid) so the cell-centered (u_east, v_north) can be "
+                "reconstructed from the edge-normal velocity."
+            )
+        from legoesm.grids.voronoi import VoronoiMesh, reconstruct_cell_velocity
+        if not isinstance(mesh, VoronoiMesh):
+            raise ValueError(
+                "column_state_from_hydrostatic: atm_state.v is None but mesh is "
+                f"{type(mesh).__name__}, not a VoronoiMesh — cannot reconstruct the "
+                "cell wind from an MPAS edge-velocity state."
+            )
+        u_edge = jnp.asarray(_arr(atm_state.u), dtype=dt)
+        # Guard a mismatched-but-same-rank mesh: a wrong mesh would otherwise
+        # reconstruct physically WRONG winds silently (Codex). nEdges/nCells are
+        # static, so these host-side checks are jit-safe.
+        n_edges = int(mesh.nEdges)
+        if u_edge.shape[0] != n_edges:
+            raise ValueError(
+                f"column_state_from_hydrostatic: edge velocity leading dim "
+                f"{u_edge.shape[0]} != mesh.nEdges {n_edges} — wrong mesh for this "
+                "MPAS state."
+            )
+        n_cells = int(mesh.nCells)
+        if T.shape[0] != n_cells:
+            raise ValueError(
+                f"column_state_from_hydrostatic: cell field leading dim "
+                f"{T.shape[0]} != mesh.nCells {n_cells} — wrong mesh for this "
+                "MPAS state."
+            )
+        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+        u_cell = jnp.asarray(u_cell, dtype=dt)
+        v_cell = jnp.asarray(v_cell, dtype=dt)
+    else:
+        u_cell = jnp.asarray(_arr(atm_state.u), dtype=dt)
+        v_cell = jnp.asarray(_arr(v_field), dtype=dt)
     return ColumnState(
         T=T,
         q_v=jnp.asarray(q_v, dtype=dt),
-        u=jnp.asarray(_arr(atm_state.u), dtype=dt),
-        v=jnp.asarray(_arr(atm_state.v), dtype=dt),
+        u=u_cell,
+        v=v_cell,
         p_s=jnp.asarray(_arr(atm_state.p_s), dtype=dt),
         precip_mm_day=precip_mm_day, sst_K=sst_K,
     )

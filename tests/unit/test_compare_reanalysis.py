@@ -11,7 +11,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.training.compare_reanalysis import (
     ColumnState,
     build_pressure_from_sigma,
@@ -317,3 +316,116 @@ def test_column_state_from_hydrostatic_rejects_none_v():
     atm = _hydro_state((2, 2), 4)._replace(v=None)  # MPAS edge-velocity state
     with pytest.raises(ValueError, match="atm_state.v is None"):
         column_state_from_hydrostatic(atm, jnp.zeros((2, 2, 4)))
+
+
+# --------------------------------------------------------------------------- #
+# MPAS/Voronoi compare-side handoff (iter 74): an edge-velocity state is
+# reconstructed to cell-centered geographic winds so an MPAS run is rankable.
+# --------------------------------------------------------------------------- #
+def _mpas_state(mesh, nlev, *, bias_cell=None, bias_dT=0.0):
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    # θ uniform across cells (via exner-free constant T) except an optional cold
+    # bias at one cell; u is the EDGE-normal velocity, v is None (the MPAS marker).
+    T = np.full((mesh.nCells, nlev), 250.0)
+    if bias_cell is not None:
+        T[bias_cell] = 250.0 + bias_dT
+    u_edge = (np.asarray(mesh.angleEdge)[:, None]
+              * np.ones((1, nlev)))            # some non-uniform edge field
+    u_edge = 6.0 * np.cos(u_edge)
+    state = HydrostaticState(
+        u=Field(data=jnp.asarray(u_edge)),
+        T=Field(data=jnp.asarray(T)),
+        p_s=Field(data=jnp.full((mesh.nCells,), 1.0e5)),
+        phis=Field(data=jnp.zeros((mesh.nCells,))),
+        v=None,
+    )
+    q_v = jnp.full((mesh.nCells, nlev), 1.0e-3)
+    return state, q_v
+
+
+def test_mpas_edge_state_reconstructs_cell_wind():
+    from legoesm.grids.voronoi import create_voronoi_mesh, reconstruct_cell_velocity
+    mesh = create_voronoi_mesh(2)
+    nlev = 4
+    state, q_v = _mpas_state(mesh, nlev)
+    cs = column_state_from_hydrostatic(state, q_v, mesh=mesh)
+    # Cell-centered geographic winds, (nCells, nlev), matching the Perot diagnostic.
+    assert cs.u.shape == (mesh.nCells, nlev) and cs.v.shape == (mesh.nCells, nlev)
+    u_ref, v_ref = reconstruct_cell_velocity(
+        jnp.asarray(state.u.data, dtype=cs.T.dtype), mesh)
+    np.testing.assert_allclose(np.asarray(cs.u), np.asarray(u_ref), rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(cs.v), np.asarray(v_ref), rtol=1e-5)
+    assert cs.u.dtype == cs.T.dtype          # condition-4 dtype cast
+    assert np.all(np.isfinite(np.asarray(cs.u)))
+
+
+def test_mpas_state_without_mesh_raises():
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(2)
+    state, q_v = _mpas_state(mesh, 4)
+    with pytest.raises(ValueError, match="pass mesh="):
+        column_state_from_hydrostatic(state, q_v)             # mesh omitted
+
+
+def test_mpas_state_wrong_mesh_type_raises():
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(2)
+    state, q_v = _mpas_state(mesh, 4)
+    with pytest.raises(ValueError, match="not a VoronoiMesh"):
+        column_state_from_hydrostatic(state, q_v, mesh=object())
+
+
+def test_mpas_state_mismatched_mesh_size_raises():
+    """A DIFFERENT-size Voronoi mesh would reconstruct wrong winds silently —
+    rejected by the nEdges/nCells shape guards (Codex)."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh2, mesh3 = create_voronoi_mesh(2), create_voronoi_mesh(3)
+    state, q_v = _mpas_state(mesh2, 4)              # built for the level-2 mesh
+    with pytest.raises(ValueError, match="nEdges|nCells"):
+        column_state_from_hydrostatic(state, q_v, mesh=mesh3)  # wrong mesh
+
+
+def test_latlon_state_passthrough_ignores_mesh():
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    nlev = 4
+    state = HydrostaticState(
+        u=Field(data=jnp.full((2, 3, nlev), 7.0)),
+        T=Field(data=jnp.full((2, 3, nlev), 260.0)),
+        p_s=Field(data=jnp.full((2, 3), 1.0e5)),
+        phis=Field(data=jnp.zeros((2, 3))),
+        v=Field(data=jnp.full((2, 3, nlev), -2.0)),
+    )
+    q_v = jnp.full((2, 3, nlev), 2.0e-3)
+    cs = column_state_from_hydrostatic(state, q_v, mesh=object())  # mesh ignored
+    np.testing.assert_array_equal(np.asarray(cs.u), 7.0)
+    np.testing.assert_array_equal(np.asarray(cs.v), -2.0)
+
+
+def test_mpas_compare_end_to_end_flags_worst_cell():
+    """The compare machinery is grid-AGNOSTIC over the 1-D cell axis: an MPAS
+    model state (reconstructed cell winds) vs a synthetic reference on the SAME
+    mesh ranks the biased cell — so an MPAS run is rankable (the ERA5->MPAS-cell
+    REGRIDDER for real reference data is the documented next step)."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    bias_cell = 37
+    model_state, q_v = _mpas_state(mesh, nlev, bias_cell=bias_cell, bias_dT=-12.0)
+    model = column_state_from_hydrostatic(model_state, q_v, mesh=mesh)
+    # Synthetic reference: identical but UNBIASED (the regridder would supply ERA5).
+    ref_state, q_v_ref = _mpas_state(mesh, nlev)
+    reference = column_state_from_hydrostatic(ref_state, q_v_ref, mesh=mesh)
+    sigma_full, sigma_half = _sigma(nlev)
+    rad2deg = 180.0 / np.pi
+    result = compare_state_to_reference(
+        model=model, reference=reference,
+        sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=jnp.asarray(mesh.latCell) * rad2deg,
+        lon_deg=jnp.asarray(mesh.lonCell) * rad2deg,
+        time_index=0, n_worst=1,
+    )
+    assert len(result.manifest) == 1
+    assert result.manifest[0].grid_index == (bias_cell,)   # the biased cell ranked
+    assert result.manifest[0].T_rmse_K == pytest.approx(12.0, abs=1e-4)

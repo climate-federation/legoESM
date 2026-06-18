@@ -18,12 +18,12 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
-from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
+from legoesm.driver.model_driver import ModelDriver
+
+from legoesm import constants
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
@@ -185,6 +185,17 @@ class CoupledESMDriver:
     def output_dir(self) -> Path:
         return self._atm.output_dir
 
+    @property
+    def grid(self):
+        """The atmosphere grid (delegates to the atm driver).
+
+        Exposes the same public ``grid`` as :class:`ModelDriver` so a coupled
+        (CMIP) run is grid-introspectable like an atm-only run — e.g. the column
+        comparison reconstructs the MPAS cell wind from ``driver.grid`` (the
+        ``VoronoiMesh``) for both AMIP and CMIP.
+        """
+        return self._atm.grid
+
     # ==================================================================
     # Setup
     # ==================================================================
@@ -222,8 +233,8 @@ class CoupledESMDriver:
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
-        from legoesm.ocean.simple_ocean import make_ocean, init_slab_state
         from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        from legoesm.ocean.simple_ocean import init_slab_state, make_ocean
 
         cfg = self.coupled_cfg
         # The ocean may live on a DIFFERENT grid than the atmosphere.  Build the
@@ -281,14 +292,15 @@ class CoupledESMDriver:
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
         from legoesm.ocean.init_latlon_cgrid import (
-            rest_state_latlon_cgrid_ocean, idealized_bathymetry_latlon_cgrid,
+            idealized_bathymetry_latlon_cgrid,
+            rest_state_latlon_cgrid_ocean,
         )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
 
         cfg = self.coupled_cfg
         # Accept EITHER a regular lat-lon ocean grid (co-located with the
@@ -637,12 +649,12 @@ class CoupledESMDriver:
 
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
-        from legoesm.coupler.coupler import make_coupler, init_surface_state
-        from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig, MultiLayerLandConfig
-        from legoesm.ice.config import SeaIceConfig
-        from legoesm.coupler.lake.config import LakeConfig
         from legoesm.core.precision import get_policy
+        from legoesm.coupler.config import CouplerConfig, TileConfig
+        from legoesm.coupler.coupler import init_surface_state, make_coupler
+        from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.land.config import LandConfig, MultiLayerLandConfig
 
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
@@ -847,6 +859,7 @@ class CoupledESMDriver:
         ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
         reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
+
         from legoesm.land.param_providers import PFTParamProvider
 
         lat = self._atm._grid_lat
@@ -986,7 +999,8 @@ class CoupledESMDriver:
             return
 
         from legoesm.forcing.surface_utils import (
-            blend_surface_property, blend_surface_temperature,
+            blend_surface_property,
+            blend_surface_temperature,
         )
 
         def _seed_blend(day):
@@ -1377,11 +1391,12 @@ class CoupledESMDriver:
         which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
         ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
         aquaplanet Phase-1 run has no ice tile."""
-        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.grid_remap import remap_field
-        from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.freshwater import FreshwaterForcing
+        from legoesm.ocean.state import OceanSurfaceForcing
+
         from legoesm import constants
 
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
