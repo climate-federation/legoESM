@@ -1457,10 +1457,17 @@ def barotropic_implicit_latlon_cgrid(
     from legoesm.ocean.dynamics.barotropic_common import (
         HelmholtzSolveDiagnostics,
         global_rel_residual as _rel_resid,
+        precision_aware_rel_tol,
         solve_helmholtz_implicit,
     )
     _area_eta = grid.area.astype(eta_dtype)
-    _residual_tol = config.barotropic_implicit_pcg_residual_tol
+    # Floor the relative-residual tolerance to what the working dtype can
+    # reach (f64: 1e-10 default unchanged; f32: raised above ~1.2e-4 since a
+    # 1e-10 rel-residual is unreachable below f32 machine epsilon).  Keeps the
+    # converged diagnostic meaningful and the stock-CG while_loop terminating.
+    _residual_tol = precision_aware_rel_tol(
+        config.barotropic_implicit_pcg_residual_tol, eta_dtype,
+    )
     # ``force_pcg`` selects the fixed-M PCG body even single-rank
     # (solver-matched parity references + the faster-single-rank
     # option, job 8458701); its global dots reduce locally when not
@@ -1497,8 +1504,11 @@ def barotropic_implicit_latlon_cgrid(
                 "faster single-rank solver, job 8458701) or use "
                 "preconditioner='jacobi'."
             )
-        pcg_tol = jnp.asarray(
-            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        # f32: a 1e-10 rel-tol is unreachable, so stock CG would run to
+        # maxiter every step — floor it to the f32-reachable value (f64
+        # unchanged).
+        pcg_tol = precision_aware_rel_tol(
+            config.barotropic_implicit_pcg_tol, eta_dtype,
         )
         eta_new = solve_helmholtz_freesurface(
             rhs, eta_old, H_u_old, H_v_old, coeff, mask, u_mask, v_mask,

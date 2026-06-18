@@ -37,7 +37,17 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import jax
-jax.config.update("jax_enable_x64", True)
+
+# Precision: the OMIP run is float64 (x64) by DEFAULT — the scientific
+# reference.  ``--fp32`` (single-precision, GPU-memory mode: eORCA025 ¼° fits
+# the lat-band SPMD step on a 48 GB GPU in fp32 where f64 OOMs) must leave JAX
+# x64 OFF so device arrays default to float32; the matching all-fp32
+# ``PrecisionPolicy`` is set from ``args`` in ``main`` (after argparse).  x64
+# has to be decided BEFORE any JAX op runs, so the flag is sniffed from argv
+# here (a cheap pre-parse; argparse still owns the real flag + validation).
+_FP32 = "--fp32" in sys.argv[1:]
+if not _FP32:
+    jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
@@ -499,8 +509,14 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     if min_levels and int(min_levels) > 1:
         msg += f" ({n_masked_shallow} masked for <{int(min_levels)} active levels)"
     print(msg)
+    # Storage dtype follows the active precision policy (f64 by default;
+    # float32 under --fp32, where an explicit dtype=float64 would warn-and-
+    # truncate). resolve_dtype clamps f64->f32 when x64 is off, so this is the
+    # one device array the partial-cell coord builds in the run-wide dtype.
+    from legoesm.core.precision import resolve_dtype as _resolve_dtype
+    _coord_dtype = _resolve_dtype(None, "storage")
     zc = create_partial_cell_coordinate(
-        z_coord, jnp.asarray(H_snapped, dtype=jnp.float64),
+        z_coord, jnp.asarray(H_snapped, dtype=_coord_dtype),
     )
     return zc, H_snapped, lm_out
 
@@ -2174,13 +2190,34 @@ def _record_final_state_digest(manifest_path, state) -> None:
 
 
 def main() -> int:
+    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
+    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
+    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
+    # while x64 was already enabled, tripping the consistency guard below.
+    # All sbatch wrappers already use full flag names, so this is behaviour-
+    # preserving for existing callers.
     p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                allow_abbrev=False)
     p.add_argument("--years", type=float, default=5.0)
     p.add_argument("--smoke", action="store_true",
                    help="Short 10-day benchmark run (reports steps/s).")
     p.add_argument("--dt", type=float, default=3600.0,
                    help="Timestep [s] (default 3600 = NEMO ORCA1).")
+    p.add_argument("--fp32", action="store_true",
+                   help="Single-precision (float32) ocean run: leave JAX x64 OFF "
+                        "(device arrays default float32) and set the all-fp32 "
+                        "PrecisionPolicy. Halves GPU memory (~37 GB/GPU vs ~75 GB "
+                        "in f64 for eORCA025 ¼°), so the lat-band SPMD step fits a "
+                        "48 GB GPU at N=2 where f64 OOMs. Default (flag absent) = "
+                        "f64 reference, byte-unchanged. Validated for the "
+                        "tripole / latlon_bathy C-grid path (the SPMD fixed-iter "
+                        "barotropic PCG + wright EOS + adcroft/smc03 PGF are "
+                        "fp32-safe); mpas / cubed_sphere are NOT fp32-validated "
+                        "(carry f64-only / fp32-unvalidated numerics) and are "
+                        "rejected. NOTE: do "
+                        "NOT also export JAX_ENABLE_X64=1 — that would re-enable "
+                        "x64 and silently defeat the fp32 memory saving.")
     p.add_argument("--nlev", type=int, default=20)
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--nemo-vertical", action="store_true",
@@ -2708,8 +2745,46 @@ def main() -> int:
                 "pulls ocean SST to the host each step (like SSS restoring / "
                 "ice-thermo), so it is host-loop only. Set --scan-block 0.")
 
+    # Precision policy. The all-fp32 policy is set when --fp32 is given; the
+    # module-level argv sniff (``_FP32``) already kept JAX x64 OFF so device
+    # arrays default to float32. Defend against a stale/mismatched argv sniff
+    # (e.g. --fp32 passed via an args namespace that argv didn't see): the
+    # parsed flag is authoritative for the policy, and x64 MUST agree with it.
+    if bool(args.fp32) != _FP32:
+        raise SystemExit(
+            "internal: --fp32 argparse flag disagrees with the module-level "
+            f"argv sniff (_FP32={_FP32}, args.fp32={args.fp32}). The x64 toggle "
+            "is decided from argv at import; pass --fp32 on the command line.")
+    if args.fp32:
+        # fp32 is only VALIDATED for the C-grid latlon/tripole SPMD path
+        # (the audited dtype-safe OMIP path).  The MPAS / cube backends carry
+        # f64-only or fp32-unvalidated numerics internally (e.g. the
+        # density-Jacobian analytic-pressure PGF hardcodes float64 to protect
+        # an O(5.8e8) cancellation with no x64 fallback) and were not validated
+        # in single precision — fail loud rather than silently mis-run them.
+        if args.grid not in ("tripole", "latlon_bathy"):
+            raise SystemExit(
+                f"--fp32 is only validated for --grid tripole / latlon_bathy "
+                f"(the SPMD C-grid OMIP path: fixed-iteration barotropic PCG + "
+                f"wright EOS + adcroft/smc03 PGF are all fp32-safe). --grid "
+                f"{args.grid!r} carries f64-only / fp32-unvalidated numerics "
+                f"(density-Jacobian PGF islands, etc.) and is NOT fp32-"
+                f"validated. Drop --fp32 or use --grid tripole / latlon_bathy.")
+        if jax.config.jax_enable_x64:
+            # Belt-and-suspenders: something (e.g. JAX_ENABLE_X64=1 in the env,
+            # or an earlier import) re-enabled x64, which would silently keep
+            # arrays in float64 and defeat the whole point of --fp32.
+            raise SystemExit(
+                "--fp32 requires JAX x64 DISABLED, but jax_enable_x64 is True "
+                "(likely JAX_ENABLE_X64=1 is exported, or x64 was enabled "
+                "before this run). Unset JAX_ENABLE_X64 so float32 is the "
+                "default device dtype.")
+
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp32() if args.fp32 else PrecisionPolicy.fp64())
+    if args.fp32:
+        print("[setup] PRECISION: float32 (JAX x64 OFF, PrecisionPolicy.fp32) "
+              "— GPU-memory mode; the f64 reference is the default (no --fp32).")
     from legoesm.ocean.forcing import load_core2_nyf
     from legoesm.ocean.coupler import (
         compute_omip2_surface_forcing,
