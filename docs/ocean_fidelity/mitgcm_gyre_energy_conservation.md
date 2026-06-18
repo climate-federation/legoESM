@@ -267,3 +267,31 @@ instability differs at the ~1% level that decides laminar-vs-turbulent here.
 This is a known sensitive regime (wind-driven-gyre WBC instability). The oracle stands at its strong
 tiers (10-step eta 0.9997 + per-term tendency + inviscid-energy match); the equilibrium laminar/
 turbulent selection is a marginal-stability difference of two valid schemes, documented as open.
+
+## RESOLUTION 2026-06-18 (iteration 6): MITgcm-faithful integrator matches laminar 0.031
+
+Built a bit-exact MITgcm `tutorial_barotropic_gyre` stepper
+(`packages/ocean/legoesm/ocean/fidelity/mitgcm_gyre_faithful.py`, `GyreFaithfulModel`):
+unsplit explicit-Coriolis momentum tendency → AB2(abEps=0.01) → predictor → implicit
+free-surface elliptic solve → ∇η correction, in MITgcm (ny,nx) convention. Every operator
+CALIBRATED to corr≈1.0 against MITgcm's `momU`/`momV` diagnostic dumps (advection 0.9998;
+Coriolis/wind/PGF/viscosity/sidedrag 1.0). **It reproduces MITgcm's laminar equilibrium
+`|u|max≈0.031, |v|max≈0.084`, steady, at BOTH 1× and 2× resolution** (the canonical split
+`LatLonCGridOceanModel` runs the same gyre turbulent, 0.15–0.37). Tested:
+`tests/ocean/fidelity/test_mitgcm_gyre_faithful.py` (laminar equilibrium + steady-not-growing).
+
+Bug found + fixed during the port: a **v-viscosity hFacZ/m mask-swap** that under-damped the WBC
+(0.057 → 0.031). Confirmed legoESM's own `flux_divergence_viscosity_cgrid` v-component is correct
+(corr 0.99985 vs `Vm_Diss−VSidDrag`), so the canonical operators are fine — the canonical model's
+turbulence is the SPLIT machinery (barotropic/baroclinic split + forward-backward-Coriolis
+predictor), confirmed by: `explicit_ab2` (unsplit-equivalent config on the canonical model) is
+*also* turbulent (0.29), so it is not a config fix; the split predictor-corrector itself, on the
+marginally-resolved (Munk δ≈1.7-cell) gyre, sits on the unstable side of the WBC barotropic
+instability where the unsplit MITgcm sequencing is stable.
+
+The gyre oracle therefore matches MITgcm at all tiers: 10-step eta 0.9997 + per-tendency (canonical
+split model, `build_gyre_recipe`) AND the multi-year laminar equilibrium (the faithful integrator,
+`build_gyre_faithful_model`). The faithful integrator is mimicry harness glue per
+`oracle_recipe_strategy.md`. Making the canonical split solver itself laminar at this marginal
+resolution remains a separate open dycore item (an energy/stability-consistent unsplit single-layer
+path in the production model).
