@@ -35,6 +35,40 @@ laminar, no overshoot. legoESM at the same wall-clock is already 0.064 → 0.107
 | **Centered advection** | instantaneous power `∫u·adv` | **machine-zero** (`P=1e-13`); legoESM's centered flux-form is energy-neutral |
 | **Time integration** | inviscid `E(T)/E0` vs `dt` (1200→150 s) | growth **converges** to +20.5% as `dt→0` → spatial, not a time-truncation error |
 
+## UPDATE 2026-06-18 (iteration 3): the leak is OPERATOR-LEVEL, not the split structure
+
+Per the user's request, a **bit-faithful MITgcm UNSPLIT single-layer stepper** was built and run
+(`scripts/tmp/_gyre_unsplit_mitgcm_faithful.py`): explicit ``Gu`` = advection(centered) +
+Coriolis(face-f) + flux-divergence viscosity + no-slip sidedrag + wind (NO η-PGF) → AB2(abEps=0.01)
+→ ``u* = u+Δt·Gu`` → implicit Helmholtz η-solve → ``u^{n+1}=u*−gΔt∇η``. **It also goes turbulent**
+(|u|max 0.026→0.14 by 0.38yr), tracking MITgcm *exactly* at 0.1yr (0.0256 vs 0.026) then diverging.
+AB2 vs forward-Euler made NO difference (byte-identical trajectory). So:
+
+> **The split predictor-corrector velocity inconsistency was NOT the cause** — a clean unsplit
+> single-velocity scheme leaks the same. Both legoESM schemes (split *and* faithful unsplit) run
+> the gyre turbulent; MITgcm at the same A_h=400 stays laminar at 0.031. The discrepancy is
+> therefore at the **OPERATOR** level (an energy source legoESM's discretization has that
+> MITgcm's lacks), present regardless of time scheme or split/unsplit structure.
+
+Further eliminations (iteration 3):
+- **Viscosity operator is not the lever**: ``vector_laplacian`` (= MITgcm's grad(div)−curl(curl)
+  default) gives a trajectory *identical* to ``flux_divergence`` (0.064 vs 0.064 at 0.38yr) — as
+  expected for the near-non-divergent gyre.
+- **It is a source-vs-dissipation balance**: 4× viscosity (A_h=1600) on the unsplit stepper makes
+  it laminar (|u|max≈0.024, stable) — i.e. ~3× more dissipation than A_h=400 is needed to absorb
+  legoESM's spurious source, whereas MITgcm's A_h=400 suffices. (4×A_h is masking, not faithful.)
+
+Net: every targeted single-change fix has been falsified by measurement — vertex-f Coriolis, AB2,
+unsplit structure, viscosity operator, and all default knobs. The +12 % inviscid leak is real,
+first-order, dt-independent, advection-independent, and lives in the operator *composition* in a way
+that none of the isolated-operator tests (all energy-neutral/adjoint) capture. **STILL OPEN.**
+
+**Recommended rigorous next step** (the definitive "oracle as reference" approach, not yet done):
+generate a MITgcm reference at a *rough mid-spin-up* state (not the smooth equilibrium, where the
+earlier per-term diff already matched) and compare per-term momentum tendencies legoESM-vs-MITgcm
+at that state — the term that diverges there is the source. This needs MITgcm intermediate dumps
+(a fresh reference run), so it is scoped as the next investigation rather than another quick toggle.
+
 ## UPDATE 2026-06-17 (iteration 2): the "Coriolis" attribution below is WRONG
 
 A clean **same-state f-toggle** (one rough gyre state, scale the grid ``f`` by 0/0.5/1.0)
