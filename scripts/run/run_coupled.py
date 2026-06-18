@@ -210,6 +210,28 @@ def main():
                              "remap, using the OMIP-validated cold-start recipe. "
                              "The land mask + bathymetry come from this file.")
 
+    # Atmosphere initial condition.  CRITICAL for realism: the bare
+    # ExperimentConfig default ic="default" is a UNIFORM T_init (~isothermal
+    # ~300 K) scaffold — convectively dead-stable (no lapse rate => convection
+    # never triggers), warm everywhere (huge q_sat => CWV ~80 kg/m2, ~3x
+    # Earth), and warm aloft (OLR ~390 W/m2).  A coupled run from this IC spends
+    # many days spinning up before it precipitates.  ic="standard" overlays a
+    # realistic constant-lapse-rate troposphere + cold isothermal stratosphere +
+    # equator-pole gradient (CWV ~15-30 kg/m2, convectively active, OLR ~240).
+    # NOTE: ic="standard" is currently wired for --grid latlon ONLY (the cube
+    # path needs the balanced-jet component rotation); the default below is
+    # grid-aware so a cube run still works.
+    parser.add_argument("--ic", default=None,
+                        choices=["default", "standard", "era5"],
+                        help="Atmosphere initial condition (default: 'standard' "
+                             "on --grid latlon, 'default' on cube). 'standard' = "
+                             "realistic lapse-rate troposphere + cold "
+                             "stratosphere (Earth-like CWV/OLR, fast spin-up to "
+                             "a precipitating state); 'default' = uniform T_init "
+                             "scaffold; 'era5' = ERA5 reanalysis (needs --ic-path)")
+    parser.add_argument("--ic-path", default="",
+                        help="ERA5 Zarr path when --ic era5")
+
     # Carbon
     parser.add_argument("--co2-init", type=float, default=415.0,
                         help="Initial CO2 concentration [ppmv]")
@@ -260,6 +282,19 @@ def main():
         args.unfused_radiation = False
         args.rad_update_steps = 1
         args.ocean = "slab"          # cheap single-layer slab for idealized runs
+
+    # Atmosphere IC default is GRID-AWARE (no silent degrade): ic="standard"
+    # (the realistic lapse-rate IC) is only wired for --grid latlon today, so a
+    # cube run defaults to "default".  An EXPLICIT --ic standard on cube still
+    # reaches model_driver and raises NotImplementedError loudly (not silently
+    # ignored).  Realistic coupled CMIP => --grid latlon picks "standard" here.
+    if args.ic is None:
+        args.ic = "standard" if args.grid == "latlon" else "default"
+    if args.ic == "standard" and args.grid != "latlon":
+        logger.warning(
+            "--ic standard is only wired for --grid latlon; grid=%r will raise "
+            "in the driver. Use --grid latlon or --ic default.", args.grid,
+        )
 
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather
@@ -340,6 +375,8 @@ def main():
         unfused_radiation=args.unfused_radiation,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        ic=args.ic,
+        ic_path=args.ic_path,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
