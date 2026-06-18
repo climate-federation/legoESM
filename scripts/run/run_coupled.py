@@ -108,11 +108,14 @@ def main():
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
                         help="Cloud-fraction scheme (default: sundqvist)")
-    parser.add_argument("--microphysics", default="kessler",
-                        help="Microphysics scheme (default: kessler — closes the "
-                             "water budget so convective condensate precipitates; "
-                             "microphysics='none' with active convection gives "
-                             "pr=0 and a cloud-water trap)")
+    parser.add_argument("--microphysics", default="morrison",
+                        help="Microphysics scheme (default: morrison — the "
+                             "ice-capable double-moment scheme; warm-rain-only "
+                             "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
+                             "(no freeze->snow->precip sink), which drives the TOA "
+                             "cold drift in coupled CMIP runs. Use --microphysics "
+                             "kessler for the cheap warm-rain path; 'none' with "
+                             "active convection gives pr=0 and a cloud-water trap)")
     parser.add_argument(
         "--minimal-physics", action="store_true",
         help="Override the full-physics defaults to a cheap idealized "
