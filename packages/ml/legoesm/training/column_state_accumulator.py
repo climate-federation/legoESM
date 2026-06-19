@@ -20,10 +20,12 @@ summed/meaned like any present leaf; this is CONSISTENT with the meaned cell
 (``mean(reconstruct(u_edge)) == reconstruct(mean(u_edge))``).  Pure-JAX and
 differentiable w.r.t. the accumulated states.
 
-Precision: a plain running SUM is exact in float64 (the model's ``x64`` mode) for
-the sample counts of a climatology, but in float32 a long series risks
-accumulation error; run the accumulation in float64 (or switch to a Welford mean)
-if time-meaning a float32 state over very many samples.
+Precision: the running SUMS are FLOAT64 (``init_column_accumulator`` forces it),
+exact for a climatology's sample counts.  This matters when the model STATE is
+float32 (an FV dycore — x64 loop + float32 dynamics, iter 208): a float32 running
+sum of a long series loses its low bits (a spurious time-mean bias vs the float64
+ERA5 reference), so the accumulator promotes to float64 in the ``s + x`` add.  With
+``x64`` disabled the promotion is a harmless no-op (JAX keeps float32).
 """
 
 from __future__ import annotations
@@ -49,8 +51,13 @@ def init_column_accumulator(template: ColumnState) -> ColumnStateAccumulator:
     ``count`` starts at 0; the optional ``precip_mm_day`` / ``sst_K`` fields stay
     ``None`` if absent in ``template`` (a ``None`` is an empty pytree subtree, so
     ``zeros_like`` is never applied to it).
+
+    The running sums are FLOAT64 (the precision guard — see the module docstring):
+    ``zeros_like(x, dtype=float64)`` forces it under ``x64`` so a float32 state (an
+    FV dycore) promotes in the ``s + x`` add and a long climatology time-mean does
+    not lose its low bits; with ``x64`` disabled JAX keeps float32 (no-op, no error).
     """
-    sum_state = jax.tree.map(jnp.zeros_like, template)
+    sum_state = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=jnp.float64), template)
     return ColumnStateAccumulator(sum_state=sum_state, count=jnp.asarray(0, dtype=jnp.int32))
 
 

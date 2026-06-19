@@ -54,6 +54,34 @@ def test_arithmetic_mean_including_optional_fields():
         np.testing.assert_allclose(np.asarray(getattr(mean, name)), expected, rtol=1e-12)
 
 
+def test_accumulator_sums_in_float64_so_a_float32_state_does_not_drift():
+    """Under x64 the running sums are FLOAT64 (iter 259), so a float32 model state
+    (an FV dycore — x64 loop + float32 dynamics) time-meaned over a long climatology
+    window does NOT lose its low bits.  Demonstrated with a base whose 0.5 fractional
+    part a float32 running sum DROPS once the partial sum exceeds float32 resolution —
+    the spurious time-mean bias vs the float64 ERA5 reference that the promotion avoids."""
+    val = 1.0e6 + 0.5            # float32 holds it (ulp ~0.12) but its N-fold sum cannot
+    s32 = ColumnState(
+        T=jnp.full((1, 1, 1), val, dtype=jnp.float32),
+        q_v=jnp.full((1, 1, 1), 5e-3, dtype=jnp.float32),
+        u=jnp.zeros((1, 1, 1), dtype=jnp.float32),
+        v=jnp.zeros((1, 1, 1), dtype=jnp.float32),
+        p_s=jnp.full((1, 1), 1.0e5, dtype=jnp.float32))
+    acc = init_column_accumulator(s32)
+    assert acc.sum_state.T.dtype == jnp.float64          # the running sum is promoted
+    n = 256
+    for _ in range(n):
+        acc = accumulate_column_state(acc, s32)
+    mean = float(np.asarray(mean_column_state(acc).T).reshape(-1)[0])
+    assert mean == pytest.approx(float(np.float32(val)), abs=1e-3)  # float64 keeps the 0.5
+    # CONTRAST: a naive float32 running sum drops the 0.5 (partial sum >> float32 ulp),
+    # biasing the mean by ~0.5 — exactly the drift the float64 accumulation avoids.
+    p32 = np.float32(0.0)
+    for _ in range(n):
+        p32 = np.float32(p32 + np.float32(val))
+    assert abs(float(p32) / n - float(np.float32(val))) > 0.1
+
+
 def test_optional_field_preserved_when_absent():
     a, b = _state(1.0, with_optional=False), _state(3.0, with_optional=False)
     mean = time_mean_column_states([a, b])
