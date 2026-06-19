@@ -117,14 +117,22 @@ def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
     silent fallthrough would emit a wrong-shaped / mis-unit coordinate).
     """
     if grid_type == "cubed_sphere":
+        # Per-cell lat/lon (already 2-D-per-face, e.g. (6, n, n)).
         return (np.rad2deg(np.asarray(grid.lat)),
                 np.rad2deg(np.asarray(grid.lon)))
     if grid_type == "mpas":
+        # Voronoi cell centres: 1-D (nCells,); the scorer flattens any source.
         return (np.rad2deg(np.asarray(grid.latCell)),
                 np.rad2deg(np.asarray(grid.lonCell)))
-    if grid_type in ("latlon", "tripole"):
+    if grid_type == "tripole":
+        # Curvilinear tracer points are genuinely 2-D.
         return (np.rad2deg(np.asarray(grid.lat_T)),
                 np.rad2deg(np.asarray(grid.lon_T)))
+    if grid_type == "latlon":
+        # Regular grid: 1-D radian axes -> 2-D degree meshgrid (n_lat, n_lon).
+        lon2d, lat2d = np.meshgrid(np.rad2deg(np.asarray(grid.lon)),
+                                   np.rad2deg(np.asarray(grid.lat)))
+        return lat2d, lon2d
     raise ValueError(
         f"grid_lat2d_lon2d_deg: unknown grid_type {grid_type!r} "
         "(expected one of: latlon, tripole, cubed_sphere, mpas)")

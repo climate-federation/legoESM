@@ -1,11 +1,14 @@
-"""Direct unit test for ``ocean.restart.save_mld_snapshot``.
+"""Direct unit test for ``ocean.restart.save_mld_snapshot`` + the shared
+``grid_lat2d_lon2d_deg`` coordinate extractor.
 
-The shared snapshot writer for the offline mixed-layer-depth scorers
+The snapshot writer for the offline mixed-layer-depth scorers
 (``scripts/validate/compare_mld_dbm.py`` / ``compare_omip_nemo.py``).  Asserts
 the written ``.npz`` carries exactly the contract those scorers consume:
-``T``/``S``/``land_mask``/``H_bathy`` + ``lat_T``/``lon_T`` + a positive-down
-``z_center_ref`` of length nlev, and that the snapshot drives the canonical
-``ocean.diagnostics.mixed_layer_depth`` end-to-end (the real consumer path).
+``T``/``S``/``land_mask``/``H_bathy`` + ``lat_T``/``lon_T`` (in DEGREES) + a
+positive-down strictly-increasing ``z_center_ref`` of length nlev, that the
+snapshot drives the canonical ``ocean.diagnostics.mixed_layer_depth`` end-to-end
+(the real consumer path), and that the writer fails LOUD on a missing
+consumer-required field.
 """
 from __future__ import annotations
 
@@ -16,10 +19,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
-
-import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -41,15 +43,18 @@ def _state_and_geom(n_lat=8, n_lon=16, nlev=10, H_max=4000.0):
 
 
 def test_grid_lat2d_lon2d_deg_units():
-    """The extractor returns DEGREES (grid stores radians) + raises on
-    an unknown grid_type (dispatch hardening)."""
+    """The extractor returns 2-D DEGREES (LatLonGrid stores 1-D radian axes)
+    + raises on an unknown grid_type (dispatch hardening)."""
     grid = create_latlon_grid(n_lat=8, n_lon=16)
     lat2d, lon2d = grid_lat2d_lon2d_deg(grid, "latlon")
-    assert lat2d.shape == np.asarray(grid.lat_T).shape
+    assert lat2d.shape == (grid.n_lat, grid.n_lon)
+    assert lon2d.shape == (grid.n_lat, grid.n_lon)
     assert np.all(np.abs(lat2d) <= 90.0 + 1e-6)      # degrees, not radians
     assert np.all((lon2d >= -1e-6) & (lon2d <= 360.0 + 1e-6))
-    # rad2deg of the stored radian field.
-    assert np.allclose(lat2d, np.rad2deg(np.asarray(grid.lat_T)))
+    # Matches the meshgrid of the rad->deg 1-D axes.
+    lon_chk, lat_chk = np.meshgrid(np.rad2deg(np.asarray(grid.lon)),
+                                   np.rad2deg(np.asarray(grid.lat)))
+    assert np.allclose(lat2d, lat_chk) and np.allclose(lon2d, lon_chk)
     with pytest.raises(ValueError, match="unknown grid_type"):
         grid_lat2d_lon2d_deg(grid, "klein_bottle")
 
@@ -57,6 +62,7 @@ def test_grid_lat2d_lon2d_deg_units():
 def test_save_mld_snapshot_contract(tmp_path):
     grid, z_coord, state = _state_and_geom()
     nlev = z_coord.n_levels
+    shape2d = (grid.n_lat, grid.n_lon)
     out = tmp_path / "snap.npz"
     lat2d, lon2d = grid_lat2d_lon2d_deg(grid, "latlon")
     ret = save_mld_snapshot(
@@ -78,8 +84,8 @@ def test_save_mld_snapshot_contract(tmp_path):
     assert np.all(np.diff(zc) > 0.0)
     # Geometry shapes line up with the field arrays.
     assert s["T"].shape[-1] == nlev
-    assert s["H_bathy"].shape == np.asarray(grid.lat_T).shape
-    assert s["lat_T"].shape == np.asarray(grid.lat_T).shape
+    assert s["H_bathy"].shape == shape2d
+    assert s["lat_T"].shape == shape2d
     # lat_T stored in DEGREES (the scorer convention), not radians.
     assert np.all(np.abs(np.asarray(s["lat_T"])) <= 90.0 + 1e-6)
     # Provenance scalars.
@@ -90,6 +96,7 @@ def test_snapshot_drives_mixed_layer_depth(tmp_path):
     """The written snapshot feeds the canonical MLD diagnostic exactly the way
     compare_mld_dbm._load_snapshot_mld does: wet = z_center_ref < H_bathy."""
     grid, z_coord, state = _state_and_geom()
+    shape2d = (grid.n_lat, grid.n_lon)
     out = tmp_path / "snap.npz"
     lat2d, lon2d = grid_lat2d_lon2d_deg(grid, "latlon")
     save_mld_snapshot(state, out, z_coord=z_coord, lat2d=lat2d, lon2d=lon2d)
@@ -102,7 +109,7 @@ def test_snapshot_drives_mixed_layer_depth(tmp_path):
            & (mask2d[..., None] > 0.5)).astype(np.float64)
     mld = np.asarray(mixed_layer_depth(
         T, S, z_c, delta_sigma=0.03, wet_mask=wet, bottom_depth=Hb))
-    assert mld.shape == np.asarray(grid.lat_T).shape
+    assert mld.shape == shape2d
     # Wet columns give a finite, non-negative MLD bounded by the sea floor.
     wet_col = mask2d > 0.5
     assert np.all(np.isfinite(mld[wet_col]))
