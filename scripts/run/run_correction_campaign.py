@@ -1097,6 +1097,15 @@ def _les_n_steps(les_hours: float, les_dt: float) -> int:
     health verdict at the end).  Catch the misconfiguration at LAUNCH instead.  Shared
     by the campaign + perfect-model OSSE CLIs.
     """
+    import math
+
+    # A non-positive (or NaN) dt/duration is a clean fail-loud, not a bare
+    # ZeroDivisionError (les_dt==0) or a confusing negative-step message (les_dt<0): both
+    # are misconfigurations the launch must reject (``not (x > 0)`` also catches NaN).
+    if not (les_dt > 0.0) or math.isnan(les_dt):
+        raise SystemExit(f"--les-dt {les_dt} must be > 0 (the LES timestep [s]).")
+    if not (les_hours > 0.0) or math.isnan(les_hours):
+        raise SystemExit(f"--les-hours {les_hours} must be > 0 (the LES duration [h]).")
     n = int(les_hours * 3600.0 / les_dt)
     if n < 1:
         raise SystemExit(

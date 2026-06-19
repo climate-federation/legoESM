@@ -520,6 +520,14 @@ def test_les_n_steps_guards_zero():
     assert rcc._les_n_steps(0.0003, 0.5) == 2            # tiny but ≥ 1 step
     with pytest.raises(SystemExit, match="LES steps"):
         rcc._les_n_steps(0.0001, 0.5)                    # 0.72 → 0 steps → fail loud
+    # A non-positive / NaN dt or duration is a CLEAN fail-loud, not a ZeroDivisionError
+    # (les_dt==0) or a confusing negative-step message (iter 250).
+    for dt in (0.0, -0.5, float("nan")):
+        with pytest.raises(SystemExit, match=r"--les-dt .* must be > 0"):
+            rcc._les_n_steps(2.0, dt)
+    for hrs in (0.0, -2.0, float("nan")):
+        with pytest.raises(SystemExit, match=r"--les-hours .* must be > 0"):
+            rcc._les_n_steps(hrs, 0.5)
 
 
 def test_atomic_write_json(tmp_path):
