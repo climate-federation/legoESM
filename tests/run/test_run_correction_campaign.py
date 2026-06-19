@@ -28,8 +28,11 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 from scripts.run.run_correction_campaign import (  # noqa: E402
     _build_arg_parser,
     _campaign_knobs_from_args,
+    _capture_initial_record,
     _distributed_campaign_kwargs,
     _format_per_variable_bias,
+    _per_variable_bias_dict,
+    _per_variable_bias_from_dict,
     _per_variable_to_json,
     build_campaign_output_dict,
     build_correction_campaign,
@@ -41,6 +44,64 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
+
+
+def test_per_variable_bias_dict_roundtrip():
+    """The raw-PerVariableBias (campaign-start baseline) checkpoint serializer round-trips
+    losslessly, with NaN precip <-> JSON null (preserving precip-not-compared)."""
+    import json
+
+    from legoesm.training.bias_metrics import PerVariableBias
+
+    assert _per_variable_bias_dict(None) is None
+    assert _per_variable_bias_from_dict(None) is None
+    pv = PerVariableBias(jnp.asarray(4.0), jnp.asarray(1e-3), jnp.asarray(2.0),
+                         jnp.asarray(float("nan")))
+    d = _per_variable_bias_dict(pv)
+    assert d["T_rmse_K"] == pytest.approx(4.0)
+    assert d["precip_err_mm_day"] is None              # NaN -> null
+    json.loads(json.dumps(d, allow_nan=False))         # valid strict JSON
+    back = _per_variable_bias_from_dict(d)
+    assert float(back.global_T_rmse_K) == pytest.approx(4.0)
+    assert float(back.global_wind_rmse_m_s) == pytest.approx(2.0)
+    assert bool(jnp.isnan(back.global_precip_err_mm_day))   # null -> NaN
+
+
+def test_capture_initial_record():
+    """_capture_initial_record: the FIRST fresh round captures the campaign-start
+    baseline (combined + per-variable); later/resumed rounds PRESERVE it; a non-finite
+    baseline is NOT stored (it must not poison every future resume's reported start)."""
+    from types import SimpleNamespace
+
+    from legoesm.training.bias_metrics import (
+        BiasImprovement,
+        PerVariableBias,
+        compare_per_variable_bias,
+    )
+
+    def _res(base, t_base):
+        bias = BiasImprovement(
+            baseline_bias=jnp.asarray(base), updated_bias=jnp.asarray(base * 0.9),
+            absolute_reduction=jnp.asarray(0.0), fractional_improvement=jnp.asarray(0.0),
+            improved=jnp.asarray(True))
+        pvb = compare_per_variable_bias(
+            PerVariableBias(jnp.asarray(t_base), jnp.asarray(1e-3), jnp.asarray(2.0),
+                            jnp.asarray(float("nan"))),
+            PerVariableBias(jnp.asarray(1.0), jnp.asarray(1e-3), jnp.asarray(2.0),
+                            jnp.asarray(float("nan"))))
+        return SimpleNamespace(bias=bias, per_variable_bias=pvb)
+
+    box = {"initial_bias": None, "initial_per_variable": None}
+    _capture_initial_record(box, _res(5.0, 8.0))       # first fresh round captures
+    assert box["initial_bias"] == pytest.approx(5.0)
+    assert box["initial_per_variable"]["T_rmse_K"] == pytest.approx(8.0)
+    _capture_initial_record(box, _res(0.6, 3.0))       # later round PRESERVES the original
+    assert box["initial_bias"] == pytest.approx(5.0)
+    assert box["initial_per_variable"]["T_rmse_K"] == pytest.approx(8.0)
+    # A non-finite baseline is NOT stored (the next round retries) — never poison resumes.
+    box2 = {"initial_bias": None, "initial_per_variable": None}
+    _capture_initial_record(box2, _res(float("nan"), 8.0))
+    assert box2["initial_bias"] is None
 
 
 def test_per_variable_to_json_nan_precip_is_null():

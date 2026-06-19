@@ -818,12 +818,10 @@ def _campaign_knobs_from_args(args) -> dict:
     )
 
 
-def _per_variable_to_json(pv):
-    """JSON form of a CampaignSummary.per_variable (PerVariableBiasImprovement) — the
-    round-0→final per-variable global bias.  ``None`` when the campaign carried no
-    error_fields; a NaN precip (precip not compared) serializes as ``null`` (valid
-    JSON), never a misleading ``0`` or ``NaN`` token."""
-    if pv is None:
+def _per_variable_bias_dict(pvb):
+    """JSON form of a raw :class:`PerVariableBias` (the 4 global RMSEs) — a NaN precip
+    (precip not compared) serializes as ``null``, never a misleading ``0``/``NaN``."""
+    if pvb is None:
         return None
     import math
 
@@ -831,16 +829,56 @@ def _per_variable_to_json(pv):
         v = float(x)
         return None if math.isnan(v) else v
 
-    b, u = pv.baseline, pv.updated
+    return {"T_rmse_K": _f(pvb.global_T_rmse_K),
+            "qv_rmse_kg_kg": _f(pvb.global_qv_rmse_kg_kg),
+            "wind_rmse_m_s": _f(pvb.global_wind_rmse_m_s),
+            "precip_err_mm_day": _f(pvb.global_precip_err_mm_day)}
+
+
+def _per_variable_bias_from_dict(d):
+    """Reconstruct a :class:`PerVariableBias` from :func:`_per_variable_bias_dict` —
+    ``null`` precip → ``NaN`` (preserving the precip-not-compared semantics).  ``None``
+    passes through.  Used to restore the ORIGINAL round-0 baseline on a campaign resume
+    so the summary's per-variable trajectory is CUMULATIVE."""
+    if d is None:
+        return None
+    import jax.numpy as jnp
+    from legoesm.training.bias_metrics import PerVariableBias
+
+    def _v(x):
+        return jnp.asarray(float("nan") if x is None else float(x))
+
+    return PerVariableBias(_v(d["T_rmse_K"]), _v(d["qv_rmse_kg_kg"]),
+                           _v(d["wind_rmse_m_s"]), _v(d["precip_err_mm_day"]))
+
+
+def _capture_initial_record(box, res):
+    """Capture the campaign-START baseline (combined + per-variable) into ``box`` on the
+    FIRST round of a FRESH run — for the CUMULATIVE bias trajectory across job-timeout
+    resumes.  Later rounds (and all resumed rounds, where ``box`` was pre-seeded from the
+    checkpoint) PRESERVE the original.  A non-finite baseline is NOT stored (it would
+    poison every later resume's reported trajectory — Codex); the next round retries."""
+    import math
+
+    if box.get("initial_bias") is None:
+        b = float(res.bias.baseline_bias)
+        if math.isfinite(b):
+            box["initial_bias"] = b
+            pv = getattr(res, "per_variable_bias", None)
+            box["initial_per_variable"] = (
+                _per_variable_bias_dict(pv.baseline) if pv is not None else None)
+
+
+def _per_variable_to_json(pv):
+    """JSON form of a CampaignSummary.per_variable (PerVariableBiasImprovement) — the
+    round-0→final per-variable global bias.  ``None`` when the campaign carried no
+    error_fields; a NaN precip (precip not compared) serializes as ``null`` (valid
+    JSON), never a misleading ``0`` or ``NaN`` token."""
+    if pv is None:
+        return None
     return {
-        "baseline": {"T_rmse_K": _f(b.global_T_rmse_K),
-                     "qv_rmse_kg_kg": _f(b.global_qv_rmse_kg_kg),
-                     "wind_rmse_m_s": _f(b.global_wind_rmse_m_s),
-                     "precip_err_mm_day": _f(b.global_precip_err_mm_day)},
-        "final": {"T_rmse_K": _f(u.global_T_rmse_K),
-                  "qv_rmse_kg_kg": _f(u.global_qv_rmse_kg_kg),
-                  "wind_rmse_m_s": _f(u.global_wind_rmse_m_s),
-                  "precip_err_mm_day": _f(u.global_precip_err_mm_day)},
+        "baseline": _per_variable_bias_dict(pv.baseline),
+        "final": _per_variable_bias_dict(pv.updated),
         "improved": {"T": bool(pv.T_improved), "qv": bool(pv.qv_improved),
                      "wind": bool(pv.wind_improved), "precip": bool(pv.precip_improved)},
     }
@@ -974,6 +1012,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     }
     gshape = grid.grid_shape_2d
     initial_clubb, initial_fields, start_round = None, None, 0
+    # Cumulative-trajectory record across resumes (see the single-coefficient main()).
+    init_box = {"initial_bias": None, "initial_per_variable": None}
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
@@ -989,16 +1029,21 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
             for k, v in ckpt["fields"].items()}
         initial_clubb = CLUBBLiteConfig(**overrides)
         start_round = int(ckpt["round"]) + 1
+        init_box["initial_bias"] = ckpt.get("initial_bias")
+        init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
         print(f"[campaign] resuming multi from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
     if args.checkpoint:
-        def checkpoint_callback(round_idx, res, fields):  # noqa: ARG001
+        def checkpoint_callback(round_idx, res, fields):
+            _capture_initial_record(init_box, res)
             with open(args.checkpoint, "w") as f:
                 json.dump({"round": int(round_idx),
                            "coefficients": list(coefficients),
                            "fields": {k: np.asarray(v).reshape(-1).tolist()
-                                      for k, v in fields.items()}}, f)
+                                      for k, v in fields.items()},
+                           "initial_bias": init_box["initial_bias"],
+                           "initial_per_variable": init_box["initial_per_variable"]}, f)
 
     result = build_multi_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1027,7 +1072,12 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         campaign_health,
         summarize_campaign,
     )
-    summary = summarize_campaign(result)
+    summary = summarize_campaign(
+        result,
+        initial_bias_override=init_box["initial_bias"],
+        initial_per_variable_override=_per_variable_bias_from_dict(
+            init_box["initial_per_variable"]),
+    )
     health = campaign_health(summary)
     with open(args.out, "w") as f:
         json.dump(build_campaign_output_dict(
@@ -1211,6 +1261,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # checkpoint/output persist the right field.
     corrected_field = METHOD_PROMOTION[args.diagnosis_method][1]
     initial_clubb, initial_field, start_round = None, None, 0
+    # Cumulative-trajectory record across job-timeout resumes (the campaign-START
+    # baseline): seeded from the checkpoint on resume so the final summary reports the
+    # TRUE start→final reduction, not just the last resumed segment.
+    init_box = {"initial_bias": None, "initial_per_variable": None}
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
@@ -1230,22 +1284,29 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         initial_clubb = CLUBBLiteConfig(
             **{corrected_field: initial_field.reshape(-1)})
         start_round = int(ckpt["round"]) + 1
+        # Restore the ORIGINAL campaign-start baseline (absent in pre-iter-137
+        # checkpoints ⇒ None ⇒ falls back to the segment baseline, the old behaviour).
+        init_box["initial_bias"] = ckpt.get("initial_bias")
+        init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
         print(f"[campaign] resuming from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
     if args.checkpoint:
-        def checkpoint_callback(round_idx, res, field):  # noqa: ARG001
+        def checkpoint_callback(round_idx, res, field):
             # Persist the ACCEPTED accumulated `field` (post-gate base), NOT
             # res.updated_config — under the monotonic gate a rejected round's
             # updated_config is discarded while `field` stays the accepted state.
             # The coefficient is stored under its real name (C_K or Pr_t) for
             # inspection + the resume-method guard; resume reconstructs from `field`.
+            _capture_initial_record(init_box, res)
             flat = np.asarray(field).reshape(-1)
             with open(args.checkpoint, "w") as f:
                 json.dump({"round": int(round_idx),
                            "corrected_field": corrected_field,
                            corrected_field: flat.tolist(),
-                           "field": np.asarray(field).tolist()}, f)
+                           "field": np.asarray(field).tolist(),
+                           "initial_bias": init_box["initial_bias"],
+                           "initial_per_variable": init_box["initial_per_variable"]}, f)
 
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1274,7 +1335,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         summarize_campaign,
     )
     promotion_key = METHOD_PROMOTION[args.diagnosis_method][0]
-    summary = summarize_campaign(result, promotion_key=promotion_key)
+    summary = summarize_campaign(
+        result, promotion_key=promotion_key,
+        initial_bias_override=init_box["initial_bias"],
+        initial_per_variable_override=_per_variable_bias_from_dict(
+            init_box["initial_per_variable"]),
+    )
     health = campaign_health(summary)
     with open(args.out, "w") as f:
         json.dump(build_campaign_output_dict(

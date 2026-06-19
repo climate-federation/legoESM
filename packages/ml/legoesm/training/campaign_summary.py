@@ -129,7 +129,13 @@ def _coefficient_summary(promotion_key: str, field, config: Any) -> CoefficientS
     )
 
 
-def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> CampaignSummary:
+def summarize_campaign(
+    result: Any,
+    *,
+    promotion_key: str | None = None,
+    initial_bias_override: float | None = None,
+    initial_per_variable_override: Any = None,
+) -> CampaignSummary:
     """Roll a campaign result up into a :class:`CampaignSummary`.
 
     Accepts a :class:`~legoesm.training.correction_loop.MultiCampaignResult` (the
@@ -139,6 +145,16 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
     The bias trajectory is ``iterations[0].bias.baseline_bias`` (the uncorrected
     bias) → the LAST ACCEPTED round's ``updated_bias`` (the achieved bias; the gate
     means rejected rounds did not change the state).
+
+    ``initial_bias_override`` / ``initial_per_variable_override`` (RESUME): after a
+    job-timeout resume, ``result.iterations`` holds ONLY the post-resume rounds, so
+    ``iterations[0]`` is the resume-point — not the true campaign start.  Passing the
+    ORIGINAL round-0 baseline (persisted in the checkpoint) makes the REPORTED
+    ``initial_bias`` + reduction CUMULATIVE (true start → final) rather than only the
+    last segment.  ``None`` (a fresh run) keeps the ``iterations[0]`` baseline.  The
+    override only changes the REPORTED initial; ``final_bias`` is ALWAYS the last
+    ACCEPTED ``updated_bias`` of THIS segment (falling back to the segment baseline
+    when every post-resume round was rejected — never the override).
     """
     iters = result.iterations
     n_rounds = len(iters)
@@ -148,8 +164,13 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
     stop_reason = getattr(result, "stop_reason", "max_iterations")
 
     if n_rounds:
-        initial_bias = float(iters[0].bias.baseline_bias)
-        final_bias = initial_bias
+        segment_initial = float(iters[0].bias.baseline_bias)
+        # REPORTED initial = the override (cumulative start) when resuming, else this
+        # segment's baseline.  final_bias starts from the SEGMENT baseline (NOT the
+        # override) so an all-rejected post-resume segment reports no spurious change.
+        initial_bias = (float(initial_bias_override)
+                        if initial_bias_override is not None else segment_initial)
+        final_bias = segment_initial
         for it, a in zip(iters, accepted):
             if a:
                 final_bias = float(it.bias.updated_bias)
@@ -160,14 +181,18 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
         absolute_reduction / initial_bias if initial_bias != 0.0 else 0.0
     )
 
-    # Per-variable trajectory (same round-0-baseline → last-accepted-updated logic as
-    # the combined bias): the round-0 baseline PerVariableBias → the final accepted
-    # round's updated PerVariableBias. None when the loop carried no error_fields.
+    # Per-variable trajectory (same start→last-accepted logic as the combined bias):
+    # the round-0 baseline PerVariableBias → the final accepted round's updated
+    # PerVariableBias.  None when the loop carried no error_fields.  On RESUME the
+    # override supplies the ORIGINAL round-0 baseline (cumulative); final_pv falls
+    # back to the SEGMENT baseline (not the override) for an all-rejected segment.
     per_variable = None
     if n_rounds and getattr(iters[0], "per_variable_bias", None) is not None:
         from legoesm.training.bias_metrics import compare_per_variable_bias
-        initial_pv = iters[0].per_variable_bias.baseline
-        final_pv = initial_pv
+        segment_initial_pv = iters[0].per_variable_bias.baseline
+        initial_pv = (initial_per_variable_override
+                      if initial_per_variable_override is not None else segment_initial_pv)
+        final_pv = segment_initial_pv
         for it, a in zip(iters, accepted):
             if a and getattr(it, "per_variable_bias", None) is not None:
                 final_pv = it.per_variable_bias.updated

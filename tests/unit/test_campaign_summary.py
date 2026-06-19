@@ -153,6 +153,54 @@ def test_summarize_per_variable_none_without_error_fields():
     assert s.per_variable is None
 
 
+def test_summarize_initial_bias_override_makes_trajectory_cumulative():
+    """RESUME: with initial_bias_override (the persisted campaign START), the reported
+    initial_bias + reduction are CUMULATIVE (start→final), not just the post-resume
+    segment; final_bias is still the segment's last-accepted updated."""
+    result = CampaignResult(            # a POST-RESUME segment (start 0.6, not 1.0)
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres(0.6, 0.45), _cres(0.45, 0.3)),
+        final_field=jnp.full((2, 2), 0.4), accepted=(True, True))
+    seg = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    assert seg.initial_bias == pytest.approx(0.6)        # segment-only (the bug)
+    cum = summarize_campaign(result, promotion_key="clubb_lite_C_K",
+                             initial_bias_override=1.0)
+    assert cum.initial_bias == pytest.approx(1.0)        # the TRUE campaign start
+    assert cum.final_bias == pytest.approx(0.3)          # segment last-accepted, unchanged
+    assert cum.absolute_reduction == pytest.approx(0.7)  # cumulative, NOT the segment 0.3
+    assert cum.fractional_reduction == pytest.approx(0.7)
+
+
+def test_summarize_override_all_rejected_segment_final_is_segment_baseline():
+    """An all-REJECTED post-resume segment: final_bias = the SEGMENT baseline (no new
+    progress this segment), NOT the override — the cumulative reduction is the PRIOR
+    segments' gain (Codex condition: never seed final_bias from the override)."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres(0.6, 0.6),),               # rejected (no change)
+        final_field=jnp.full((2, 2), 0.4), accepted=(False,))
+    cum = summarize_campaign(result, promotion_key="clubb_lite_C_K",
+                             initial_bias_override=1.0)
+    assert cum.initial_bias == pytest.approx(1.0)
+    assert cum.final_bias == pytest.approx(0.6)          # segment baseline, NOT 1.0
+    assert cum.absolute_reduction == pytest.approx(0.4)  # prior segments' gain
+
+
+def test_summarize_per_variable_override_cumulative():
+    """initial_per_variable_override makes the per-variable trajectory cumulative too:
+    the round-0 baseline is the ORIGINAL start, the final is the segment's last-accepted
+    updated."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres_pv(0.6, 0.3, 3.0, 1.0),),  # segment: T 3->1
+        final_field=jnp.full((2, 2), 0.4), accepted=(True,))
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K",
+                           initial_per_variable_override=_pv(8.0))   # original start T=8
+    assert float(s.per_variable.baseline.global_T_rmse_K) == pytest.approx(8.0)
+    assert float(s.per_variable.updated.global_T_rmse_K) == pytest.approx(1.0)
+    assert bool(s.per_variable.T_improved)
+
+
 from legoesm.training.campaign_summary import campaign_health  # noqa: E402
 
 
