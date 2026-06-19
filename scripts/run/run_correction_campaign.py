@@ -895,20 +895,17 @@ def _campaign_knobs_from_args(args) -> dict:
 
 
 def _per_variable_bias_dict(pvb):
-    """JSON form of a raw :class:`PerVariableBias` (the 4 global RMSEs) — a NaN precip
-    (precip not compared) serializes as ``null``, never a misleading ``0``/``NaN``."""
+    """JSON form of a raw :class:`PerVariableBias` (the 4 global RMSEs) — a non-finite
+    metric (NaN precip 'not compared', or a ±inf RMSE from a blown-up/overflowed model)
+    serializes as ``null``, never a misleading ``0`` or a non-standard ``NaN``/``Infinity``
+    token.  Uses the shared :func:`_json_finite` so ALL four fields are sanitized for both
+    NaN AND ±inf (a NaN-only guard would leak an ``Infinity`` from an overflow — iter 246)."""
     if pvb is None:
         return None
-    import math
-
-    def _f(x):
-        v = float(x)
-        return None if math.isnan(v) else v
-
-    return {"T_rmse_K": _f(pvb.global_T_rmse_K),
-            "qv_rmse_kg_kg": _f(pvb.global_qv_rmse_kg_kg),
-            "wind_rmse_m_s": _f(pvb.global_wind_rmse_m_s),
-            "precip_err_mm_day": _f(pvb.global_precip_err_mm_day)}
+    return {"T_rmse_K": _json_finite(pvb.global_T_rmse_K),
+            "qv_rmse_kg_kg": _json_finite(pvb.global_qv_rmse_kg_kg),
+            "wind_rmse_m_s": _json_finite(pvb.global_wind_rmse_m_s),
+            "precip_err_mm_day": _json_finite(pvb.global_precip_err_mm_day)}
 
 
 def _per_variable_bias_from_dict(d):

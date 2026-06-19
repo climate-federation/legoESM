@@ -94,6 +94,23 @@ def test_per_variable_bias_dict_roundtrip():
     assert bool(jnp.isnan(back.global_precip_err_mm_day))   # null -> NaN
 
 
+def test_per_variable_bias_dict_sanitizes_inf_not_just_nan():
+    """A blown-up / OVERFLOWED model can produce a ±inf RMSE (overflow precedes NaN), so
+    the serializer must map ±inf to ``null`` too — a NaN-ONLY guard would leak a
+    non-standard ``Infinity`` token into the output FILE, breaking the plotters / deploy
+    reader's ``json.load`` (iter 246; same class as the iter-245 trajectory bug)."""
+    import json
+
+    from legoesm.training.bias_metrics import PerVariableBias
+
+    pv = PerVariableBias(jnp.asarray(float("inf")), jnp.asarray(1e-3),
+                         jnp.asarray(float("-inf")), jnp.asarray(5.0))
+    d = _per_variable_bias_dict(pv)
+    assert d["T_rmse_K"] is None and d["wind_rmse_m_s"] is None   # ±inf -> null
+    assert d["qv_rmse_kg_kg"] == pytest.approx(1e-3)              # a finite RMSE survives
+    json.loads(json.dumps(d), parse_constant=_reject_nonstandard)  # strict JSON, no Infinity token
+
+
 def test_capture_initial_record():
     """_capture_initial_record: the FIRST fresh round captures the campaign-start
     baseline (combined + per-variable); later/resumed rounds PRESERVE it; a non-finite
