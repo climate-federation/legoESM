@@ -16,10 +16,21 @@ def test_extract_coefficient_fields_single_and_multi():
     assert extract_coefficient_fields({"grid": {}}) == {}          # none present
 
 
+def test_grid_caption_names_the_grid_or_empty():
+    """The field-map panel names WHICH grid the per-column coefficients index (iter 272):
+    a per-column field is meaningless without it. Absent grid → '' (a mock still renders)."""
+    from scripts.plot.plot_corrected_coefficient_field import _grid_caption
+
+    assert _grid_caption({}) == ""
+    assert _grid_caption({"grid_type": "latlon", "shape_2d": [8, 16]}) == "  —  latlon (8, 16)"
+    assert _grid_caption({"grid_type": "mpas", "ncol": 162}) == "  —  mpas 162 cols"
+
+
 def test_plot_corrected_coefficient_field_2d_single(tmp_path):
     from scripts.plot.plot_corrected_coefficient_field import plot_corrected_coefficient_field
 
-    out = {"C_K": [0.4 + 0.001 * i for i in range(128)], "grid": {"shape_2d": [8, 16]}}
+    out = {"C_K": [0.4 + 0.001 * i for i in range(128)],
+           "grid": {"shape_2d": [8, 16], "grid_type": "latlon"}}
     png = tmp_path / "c.png"
     plot_corrected_coefficient_field(out, str(png))
     assert png.exists() and png.stat().st_size > 0

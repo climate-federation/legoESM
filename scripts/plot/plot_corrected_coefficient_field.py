@@ -35,10 +35,26 @@ def extract_coefficient_fields(output: dict) -> dict:
     return {f: output[f] for f in _COEFF_FIELDS if f in output}
 
 
+def _grid_caption(grid: dict) -> str:
+    """A short 'which grid the coefficients live on' caption from the output's ``grid``
+    provenance block, or ``""`` when absent.  The field-map shows the SPATIAL pattern of
+    the correction, so naming the grid (type + shape/ncol) makes the panel self-describing
+    — a per-column field is meaningless without knowing the grid it indexes."""
+    if not grid:
+        return ""
+    gt = grid.get("grid_type")
+    shape = grid.get("shape_2d")
+    ncol = grid.get("ncol") or grid.get("n_columns")
+    where = f"{tuple(shape)}" if shape else (f"{int(ncol)} cols" if ncol else "")
+    parts = [p for p in (gt, where) if p]
+    return ("  —  " + " ".join(str(p) for p in parts)) if parts else ""
+
+
 def plot_corrected_coefficient_field(output: dict, out_png: str) -> str:
     """Render one panel per corrected coefficient; returns ``out_png``."""
     coeffs = extract_coefficient_fields(output)
-    shape_2d = ((output.get("grid") or {}).get("shape_2d"))
+    grid = output.get("grid") or {}
+    shape_2d = grid.get("shape_2d")
     n = max(len(coeffs), 1)
     fig, axes = plt.subplots(1, n, figsize=(5.2 * n, 4.0), squeeze=False)
     if not coeffs:
@@ -59,7 +75,8 @@ def plot_corrected_coefficient_field(output: dict, out_png: str) -> str:
             ax.set_xlabel("column (flat index)")
             ax.set_ylabel(label)
         ax.set_title(f"{label}  (mean {arr.mean():.4g})")
-    fig.suptitle("Corrected per-column clubb_lite coefficient(s)", fontsize=11)
+    fig.suptitle("Corrected per-column clubb_lite coefficient(s)" + _grid_caption(grid),
+                 fontsize=11)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
