@@ -14,8 +14,18 @@ the CLI.  The heavy run/LES are injected so the wiring is unit-testable with moc
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+# Run-as-a-script bootstrap (iter 321): a direct ``python scripts/validate/...`` invocation puts
+# the script's OWN directory on ``sys.path``, not the repo root, so the module-level
+# ``from scripts.run... import`` below would raise ``ModuleNotFoundError``. Add the repo root (it
+# already worked via ``-m`` / pytest, which put the CWD on path). MUST precede the ``scripts.*``
+# import, so the following imports trip E402 (module-import-not-at-top) — exempt in pyproject.
+if str(Path(__file__).resolve().parents[2]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from legoesm.training.run_to_column_mean import make_run_fn
 

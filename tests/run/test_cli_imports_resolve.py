@@ -98,6 +98,40 @@ def test_cli_from_imports_resolve(rel, lineno, module_name, symbol):
         "import that would crash the CLI at launch (cf. the iter-103 OSSE bug).")
 
 
+# The compare-reanalysis WORKFLOW CLIs the operator runs AS SCRIPTS (``python scripts/.../X.py``,
+# per the sbatch + runbook), NOT via ``-m`` / pytest. A direct script run puts the script's OWN
+# dir on sys.path, not the repo root, so a ``from scripts.* import`` needs an in-file sys.path
+# bootstrap. The AST guard above runs UNDER pytest (repo root already on path) so it CANNOT catch
+# a missing bootstrap — only a subprocess replicating the script invocation can (iter 321: the
+# campaign + OSSE were MISSING the bootstrap that smoke + deploy-check had → ModuleNotFoundError).
+_SCRIPT_CLIS = (
+    "scripts/run/run_correction_campaign.py",
+    "scripts/validate/run_perfect_model_osse.py",
+    "scripts/experiment/smoke_compare_reanalysis.py",
+    "scripts/experiment/check_campaign_deploy.py",
+)
+
+
+@pytest.mark.parametrize("rel", _SCRIPT_CLIS)
+def test_workflow_cli_runs_as_a_script(rel):
+    """Run each workflow CLI AS A SCRIPT (``python scripts/.../X.py --help``) in a CLEAN env (no
+    repo root on PYTHONPATH), so ONLY the in-file sys.path bootstrap can make ``scripts.*``
+    resolvable — exactly the iter-321 production-launch bug the AST test (pytest path) masks.
+    ``--help`` exits 0 only if the module loads + the ``from scripts...`` import resolves (no
+    ``ModuleNotFoundError: No module named 'scripts'``)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, rel, "--help"], cwd=str(_REPO_ROOT),
+                       env=env, capture_output=True, text=True, timeout=180)
+    assert "No module named 'scripts'" not in r.stderr, (
+        f"{rel} run as a script cannot resolve `scripts.*` — add a sys.path bootstrap "
+        f"(parents[2] → repo root) BEFORE the `from scripts...` import:\n{r.stderr[-500:]}")
+    assert r.returncode == 0, f"{rel} --help failed (rc={r.returncode}):\n{r.stderr[-500:]}"
+
+
 def test_guard_detects_a_stale_import():
     """Non-vacuity: the resolver REJECTS a name a module does not export, so the
     guard above genuinely catches a regression rather than passing blindly. (The

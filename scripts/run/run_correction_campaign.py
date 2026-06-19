@@ -28,8 +28,10 @@ the campaign.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm.atmosphere.physics.turbulence.config import (
@@ -38,6 +40,14 @@ from legoesm.atmosphere.physics.turbulence.config import (
 )
 from legoesm.training.correction_loop import make_compare_fn, run_correction_campaign
 from legoesm.training.run_to_column_mean import make_run_fn
+
+# Run-as-a-script bootstrap (iter 321): a direct ``python scripts/run/run_correction_campaign.py``
+# invocation — the sbatch + runbook way — puts the script's OWN directory on ``sys.path``, NOT the
+# repo root, so the ``from scripts.validate.compare_amip_era5 import`` inside ``main`` would raise
+# ``ModuleNotFoundError: No module named 'scripts'``. Add the repo root so the documented
+# script-path invocation works (it already worked via ``-m`` / pytest, which put the CWD on path).
+if str(Path(__file__).resolve().parents[2]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def make_clubb_build_driver(
