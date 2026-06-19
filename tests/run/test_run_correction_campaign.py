@@ -355,6 +355,24 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_main_cmip_rejects_unknown_coupled_preset(monkeypatch):
+    """--mode cmip with an unknown --coupled-preset fails LOUD at launch (a typo'd preset)
+    with the valid choices, NOT a cryptic KeyError deeper in the coupled-driver build.
+    Fires before the reference loading, so only load_base_config_and_grid is stubbed."""
+    from types import SimpleNamespace
+
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(
+        rcc, "load_base_config_and_grid",
+        lambda path: (SimpleNamespace(
+            grid=SimpleNamespace(grid_type="latlon", resolution=8, nlev=5)),
+            object(), object()))
+    with pytest.raises(SystemExit, match="unknown --coupled-preset"):
+        rcc.main(["--config", "c.json", "--era5-zarr", "z", "--mode", "cmip",
+                  "--coupled-preset", "not_a_preset"])
+
+
 def test_main_resume_rejects_mismatched_corrected_field(tmp_path, monkeypatch):
     """The HOT resume path (multi-day SLURM restarts): resuming a checkpoint whose
     corrected coefficient (Pr_t) differs from --diagnosis-method's field (C_K) fails LOUD
