@@ -13,8 +13,11 @@ existing entry points on cheap synthetic data, in seconds:
 
 A green run means the config generator, ERA5 ingest, and campaign validation are
 wired correctly in this environment; only then is the expensive real-ERA5 run worth
-launching (swap the synthetic store for a real ERA5 zarr and drop ``--dry-run``).
-This is NOT a science result -- the data is synthetic.
+launching (drop ``--dry-run``).  Pass ``--era5-zarr <path>`` to validate the
+operator's OWN real ERA5 store instead of synthetic — the dry-run still loads +
+regrids + vertically-interpolates it, so it catches a store-specific ingest problem
+(variable names, levels, lat ordering) before the multi-day job.  With synthetic
+data this is NOT a science result.
 
 See ``docs/COMPARE_REANALYSIS.md`` for the full empirical-demonstration workflow.
 """
@@ -37,44 +40,56 @@ if str(_REPO_ROOT) not in sys.path:
 def run_smoke(
     workdir: str,
     *,
+    era5_zarr: str | None = None,
+    mode: str = "amip",
     resolution: int = 8,
     nlev: int = 5,
     era5_nlat: int = 8,
     era5_nlon: int = 16,
 ) -> int:
-    """Generate a config + synthetic ERA5, then dry-run the campaign in ``workdir``.
+    """Generate a config (+ synthetic ERA5 unless ``era5_zarr`` is given), then dry-run.
+
+    ``era5_zarr=None`` (default) generates a synthetic ERA5 store — a pure
+    environment smoke.  Passing a REAL ERA5 zarr instead validates the operator's
+    OWN ingest (variable-name resolution, levels, lat ordering, the regrid) against
+    the actual store, since the campaign loads + regrids + vertically-interpolates
+    the reference even in ``--dry-run`` (lines 64-67 of the campaign main).  ``mode``
+    selects AMIP vs CMIP.
 
     Returns the campaign main's exit code (0 = the whole preamble validated).  The
-    three sub-mains are invoked programmatically (not via a shell) so a failure at
-    any stage propagates a non-zero code.  Raises ``RuntimeError`` if the config or
-    ERA5 generation step fails (those must succeed before the campaign can be dry-run).
+    sub-mains are invoked programmatically (not via a shell) so a failure at any
+    stage propagates a non-zero code.  Raises ``RuntimeError`` if the config or
+    synthetic-ERA5 generation step fails (those must succeed before the dry-run).
     """
-    from scripts.data.make_synthetic_era5 import main as era5_main
     from scripts.experiment.write_amip_clubb_lite_config import main as config_main
     from scripts.run.run_correction_campaign import main as campaign_main
 
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)
     config_path = work / "amip_clubb_lite.json"
-    era5_path = work / "synthetic_era5.zarr"
 
     rc = config_main(
         [str(config_path), "--resolution", str(resolution), "--nlev", str(nlev)])
     if rc != 0:
         raise RuntimeError(f"config generation failed (exit {rc})")
 
-    rc = era5_main(
-        [str(era5_path), "--nlat", str(era5_nlat), "--nlon", str(era5_nlon),
-         "--ntime", "1"])
-    if rc != 0:
-        raise RuntimeError(f"synthetic ERA5 generation failed (exit {rc})")
+    if era5_zarr is None:
+        from scripts.data.make_synthetic_era5 import main as era5_main
+        era5_path = str(work / "synthetic_era5.zarr")
+        rc = era5_main(
+            [era5_path, "--nlat", str(era5_nlat), "--nlon", str(era5_nlon),
+             "--ntime", "1"])
+        if rc != 0:
+            raise RuntimeError(f"synthetic ERA5 generation failed (exit {rc})")
+    else:
+        era5_path = era5_zarr   # the operator's REAL store — validate its actual ingest
 
-    # The REAL campaign main, --dry-run: validates config + ERA5 ingest + grid +
-    # scheme/method WITHOUT the multi-day run (the iter-183 preflight).
+    # The REAL campaign main, --dry-run: validates config + ERA5 ingest (load +
+    # regrid + vertical interp) + grid + scheme/method WITHOUT the multi-day run.
     return campaign_main([
         "--config", str(config_path),
-        "--era5-zarr", str(era5_path),
-        "--mode", "amip",
+        "--era5-zarr", era5_path,
+        "--mode", mode,
         "--dry-run",
     ])
 
@@ -87,14 +102,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resolution", type=int, default=8,
                    help="lat-lon model resolution (n_lat; grid is n_lat x 2*n_lat)")
     p.add_argument("--nlev", type=int, default=5, help="vertical levels")
+    p.add_argument(
+        "--era5-zarr", default=None,
+        help="validate the operator's REAL ERA5 store's ingest instead of generating "
+             "synthetic (the dry-run still loads + regrids it); default: synthetic")
+    p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
+                   help="AMIP (prescribed SST) or CMIP (coupled); default amip")
     args = p.parse_args(argv)
 
     def _go(wd: str) -> int:
-        rc = run_smoke(wd, resolution=args.resolution, nlev=args.nlev)
+        rc = run_smoke(wd, era5_zarr=args.era5_zarr, mode=args.mode,
+                       resolution=args.resolution, nlev=args.nlev)
+        era5_kind = "REAL ERA5" if args.era5_zarr else "synthetic ERA5"
         if rc == 0:
-            print("[smoke] PASS: config -> synthetic ERA5 -> campaign dry-run all "
-                  "validated. The turnkey chain is wired; swap in a real ERA5 zarr "
-                  "and drop --dry-run for the empirical run.")
+            print(f"[smoke] PASS: config -> {era5_kind} -> campaign --dry-run "
+                  f"({args.mode}) all validated. The turnkey chain (config load + "
+                  "ERA5 ingest + grid + scheme/method) is wired; drop --dry-run for "
+                  "the empirical run.")
         else:
             print(f"[smoke] FAIL: campaign dry-run returned {rc}.")
         return rc

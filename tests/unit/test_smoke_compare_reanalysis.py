@@ -30,6 +30,27 @@ def test_main_with_explicit_workdir_returns_zero(tmp_path, capsys):
     assert "PASS" in capsys.readouterr().out                # the green operator message
 
 
+def test_run_smoke_uses_operator_provided_era5_store(tmp_path):
+    """``era5_zarr=<path>`` validates the operator's OWN ERA5 ingest: the provided
+    store is used directly (NOT regenerated) and the dry-run loads/regrids it.
+
+    A synthetic store stands in for a 'real' one — the point is the operator-provided
+    PATH branch (so a store-specific ingest problem surfaces in the preflight, not the
+    multi-day job)."""
+    from scripts.data.make_synthetic_era5 import main as era5_main
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    provided = tmp_path / "operator_era5.zarr"
+    assert era5_main([str(provided), "--nlat", "10", "--nlon", "20", "--ntime", "1"]) == 0
+
+    work = tmp_path / "work"
+    rc = run_smoke(str(work), era5_zarr=str(provided), resolution=8, nlev=5)
+    assert rc == 0
+    # The provided store was used directly — the smoke did NOT regenerate synthetic.
+    assert not (work / "synthetic_era5.zarr").exists()
+    assert provided.exists()
+
+
 def test_run_smoke_raises_loudly_if_config_generation_fails(tmp_path, monkeypatch):
     """A failure in an EARLY stage (config gen) must abort with a clear error rather
     than silently dry-running against a missing/garbage config."""
