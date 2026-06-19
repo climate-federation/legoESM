@@ -39,6 +39,39 @@ if str(_REPO_ROOT) not in sys.path:
 _CLUBB_FIELDS = ("C_K", "Pr_t", "C_eps")
 
 
+def build_deployed_config(
+    base_config_path: str,
+    campaign_output_path: str,
+    *,
+    allow_unverified_grid: bool = False,
+):
+    """Load the base config + campaign output -> a DEPLOYED ``ExperimentConfig`` + grid.
+
+    Returns ``(deployed_config, grid)``: the base config with ``turbulence_override``
+    set to the GRID-VERIFIED per-column correction, ``validate_strict``-checked and
+    ready to feed a production driver.  Because the override is a RUNTIME pytree leaf
+    (it does NOT serialize -- iters 205-207), this is the canonical way to USE a
+    campaign output in a fresh run::
+
+        cfg, grid = build_deployed_config(base_json, campaign_out_json)
+        build_driver, _ = make_base_driver_builder("amip")   # or "cmip"
+        driver = build_driver(cfg); driver.run(...)          # the LES-corrected run
+
+    Raises on a grid mismatch (``corrected_turbulence_override``), a non-``clubb_lite``
+    base, or any ``validate_strict`` failure.
+    """
+    from legoesm.training.deploy_correction import corrected_turbulence_override
+
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    base_cfg, grid, _sigma = load_base_config_and_grid(base_config_path)
+    override = corrected_turbulence_override(
+        campaign_output_path, grid=grid, allow_unverified_grid=allow_unverified_grid)
+    deployed = base_cfg._replace(turbulence_override=override)
+    deployed.validate_strict()   # full deployed config schema-sound (base is clubb_lite, …)
+    return deployed, grid
+
+
 def check_deploy(
     base_config_path: str,
     campaign_output_path: str,
@@ -53,18 +86,12 @@ def check_deploy(
     abort the production run AFTER it started.
     """
     import numpy as np
-    from legoesm.training.deploy_correction import corrected_turbulence_override
 
-    from scripts.run.run_correction_campaign import load_base_config_and_grid
+    deployed, grid = build_deployed_config(
+        base_config_path, campaign_output_path,
+        allow_unverified_grid=allow_unverified_grid)
 
-    base_cfg, grid, _sigma = load_base_config_and_grid(base_config_path)
-    override = corrected_turbulence_override(
-        campaign_output_path, grid=grid, allow_unverified_grid=allow_unverified_grid)
-    # The full deployed config must be schema-sound (base turbulence == clubb_lite, …).
-    deployed = base_cfg._replace(turbulence_override=override)
-    deployed.validate_strict()
-
-    clubb = override.clubb_lite
+    clubb = deployed.turbulence_override.clubb_lite
     corrected: dict = {}
     n_columns = 0
     for field in _CLUBB_FIELDS:

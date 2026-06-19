@@ -62,6 +62,49 @@ def test_main_returns_zero_and_prints_ok(tmp_path, capsys):
     assert "OK" in captured and "C_K" in captured
 
 
+def test_build_deployed_config_carries_the_override_and_validates(tmp_path):
+    """``build_deployed_config`` returns a runnable deployed config: the base config
+    with ``turbulence_override`` set to the per-column correction (the canonical way
+    to USE a campaign output, since the override does not serialize)."""
+    from scripts.experiment.check_campaign_deploy import build_deployed_config
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+    out = _campaign_output(tmp_path, base_cfg, grid, lo=0.31, hi=0.59)
+
+    deployed, dgrid = build_deployed_config(cfg, out)
+    # The deployed config carries the per-column override (a real GCM driver would
+    # then inject it) — base had a scalar default; deployed has the (128,) field.
+    assert deployed.turbulence_override is not None
+    ck = np.asarray(deployed.turbulence_override.clubb_lite.C_K)
+    assert ck.shape == (128,)
+    assert ck.min() == pytest.approx(0.31) and ck.max() == pytest.approx(0.59)
+    assert tuple(dgrid.grid_shape_2d) == (8, 16)
+
+
+def test_allow_unverified_grid_is_the_escape_hatch_but_keeps_the_length_check(tmp_path):
+    """``allow_unverified_grid`` is the escape hatch for a campaign output that PREDATES
+    grid provenance (no 'grid' block): refused by default (no provenance to verify),
+    deployed on the array-LENGTH check alone when the flag is set — but a WRONG-LENGTH
+    field still fails even then."""
+    from scripts.experiment.check_campaign_deploy import check_deploy
+
+    cfg = _base_config(tmp_path)                         # base 8x16 = 128 cols
+    nogrid = tmp_path / "nogrid.json"                    # NO grid-provenance block
+    nogrid.write_text(json.dumps({"C_K": list(np.linspace(0.3, 0.6, 128))}))
+
+    with pytest.raises((ValueError, SystemExit)):        # default: provenance required
+        check_deploy(cfg, str(nogrid))
+    stats = check_deploy(cfg, str(nogrid), allow_unverified_grid=True)   # escape hatch
+    assert stats["n_columns"] == 128
+
+    bad_len = tmp_path / "badlen.json"
+    bad_len.write_text(json.dumps({"C_K": list(np.linspace(0.3, 0.6, 64))}))  # 64 != 128
+    with pytest.raises((ValueError, SystemExit)):        # length check survives the bypass
+        check_deploy(cfg, str(bad_len), allow_unverified_grid=True)
+
+
 def test_check_deploy_refuses_a_different_grid_of_the_same_column_count(tmp_path):
     """The grid fingerprint must refuse a correction learned on a DIFFERENT grid even
     when the column count matches (8x16 vs 16x8 are both 128) — else the per-column
