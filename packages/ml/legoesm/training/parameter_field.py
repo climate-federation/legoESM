@@ -148,6 +148,17 @@ def environment_kernel_field(
         sample_env = jnp.where(valid[:, None], sample_env, jnp.zeros_like(sample_env))
         sample_values = jnp.where(valid, sample_values, jnp.zeros_like(sample_values))
 
+    # Sanitize a NON-FINITE grid column (e.g. a NaN SST over land in the full-grid
+    # env predictors) the SAME way as an invalid sample: replace its env with a
+    # finite dummy BEFORE the kernel arithmetic so a NaN can neither contaminate the
+    # weights nor leak a NaN adjoint (0·NaN) into ``sample_values``, then force it to
+    # the background fallback below (``grid_finite`` ANDed into ``has_neighbor``) so
+    # the FORWARD value is unchanged (bg) — the grid-side analog of the AD-safety the
+    # invalid-sample mask already provides, and symmetric with the fail-loud
+    # sample-side guard in ``assemble_feedback_field``.
+    grid_finite = jnp.all(jnp.isfinite(grid_env), axis=-1)        # (ncol,)
+    grid_env = jnp.where(grid_finite[:, None], grid_env, jnp.zeros_like(grid_env))
+
     # (ncol, nsamp, npred) normalized differences.
     diff = (grid_env[:, None, :] - sample_env[None, :, :]) / length_scales[None, None, :]
     dist_sq = jnp.sum(diff**2, axis=-1)          # (ncol, nsamp)
@@ -157,7 +168,7 @@ def environment_kernel_field(
 
     total = jnp.sum(weights, axis=-1)            # (ncol,)
     weighted = jnp.sum(weights * sample_values[None, :], axis=-1)  # (ncol,)
-    has_neighbor = total >= jnp.asarray(min_total_weight, dtype=dtype)
+    has_neighbor = (total >= jnp.asarray(min_total_weight, dtype=dtype)) & grid_finite
     denom = jnp.where(has_neighbor, total, jnp.ones_like(total))
     # background may be a scalar (uniform base) OR a grid-shaped / flat (ncol,)
     # array — the accumulated round-k field, so a column with no environmentally

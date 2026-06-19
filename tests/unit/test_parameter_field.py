@@ -157,6 +157,35 @@ def test_kernel_field_background_when_no_neighbor():
     assert float(field[0]) == pytest.approx(-9.0)
 
 
+def test_kernel_field_nonfinite_grid_column_is_bg_and_ad_safe():
+    """A NON-FINITE grid column (e.g. a NaN SST over land in the full-grid env
+    predictors) must (a) fall back to background in the FORWARD field and (b) NOT leak
+    a NaN adjoint into sample_values. Before the grid_finite sanitization the NaN
+    kernel weights gave d(field)/d(values) = 0·NaN = NaN even though the forward value
+    was correctly bg — breaking the docstring's AD-safety-w.r.t.-grid_env claim. The
+    grid-side analog of the invalid-SAMPLE mask + the fail-loud sample-side guard in
+    assemble_feedback_field (iter 179)."""
+    grid_env = jnp.array([[280.0, 100.0, 2.0], [jnp.nan, 100.0, 2.0]])  # col 1 NaN env
+    sample_env = jnp.array([[280.0, 100.0, 2.0]])
+    L = jnp.array([5.0, 50.0, 2.0])
+
+    def field_of(v):
+        return environment_kernel_field(
+            grid_env, sample_env, v, length_scales=L,
+            valid=jnp.array([True]), background=0.4)
+
+    field = field_of(jnp.array([10.0]))
+    assert float(field[0]) == pytest.approx(10.0, abs=1e-6)   # valid col regressed
+    assert float(field[1]) == pytest.approx(0.4)              # NaN-env col → background
+    g = jax.grad(lambda v: jnp.sum(field_of(v)))(jnp.array([10.0]))
+    assert bool(jnp.all(jnp.isfinite(g)))                     # no 0·NaN gradient leak
+    # The coverage mask reports the NaN-env column as a fallback (not covered).
+    _, cov = environment_kernel_field(
+        grid_env, sample_env, jnp.array([10.0]), length_scales=L,
+        valid=jnp.array([True]), background=0.4, return_coverage=True)
+    assert bool(cov[0]) and not bool(cov[1])
+
+
 def test_kernel_field_weighted_between_two_samples():
     # Two samples; a column equidistant in env space ⇒ average of the two.
     grid_env = jnp.array([[0.0]])
