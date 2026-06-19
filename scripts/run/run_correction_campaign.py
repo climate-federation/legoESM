@@ -1077,6 +1077,36 @@ def _assert_output_path_writable(path: str, *, flag: str) -> None:
             f"permissions or choose a writable path before launching.")
 
 
+def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> None:
+    """Write ``obj`` as JSON to ``path`` ATOMICALLY: serialize to a temp file in the
+    SAME directory, flush + ``fsync``, then ``os.replace`` it onto ``path``.
+
+    A crash / SLURM-kill mid-write therefore leaves the PREVIOUS file intact — a
+    partial write can never corrupt the checkpoint a multi-day resume depends on
+    (``json.load`` on a half-written file would otherwise abort the restart). The
+    temp file shares ``path``'s directory so ``os.replace`` stays on ONE filesystem
+    (where it is atomic); a failed write unlinks the temp rather than leaking it.
+    """
+    import json
+    import os
+    import tempfile
+
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tmp_campaign_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:
     """Human-readable one-block summary of a successful ``--dry-run`` pre-flight: the
     campaign CONSTRUCTED (config/units/grid/scheme/method all validated), here is what
@@ -1185,17 +1215,17 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     if args.checkpoint:
         def checkpoint_callback(round_idx, res, fields):
             _capture_initial_record(init_box, res)
-            with open(args.checkpoint, "w") as f:
-                json.dump({"round": int(round_idx),
-                           "coefficients": list(coefficients),
-                           "fields": {k: np.asarray(v).reshape(-1).tolist()
-                                      for k, v in fields.items()},
-                           "initial_bias": init_box["initial_bias"],
-                           "initial_per_variable": init_box["initial_per_variable"],
-                           "n_diagnosed_total": (init_box["n_diagnosed_prior"]
-                                                 + init_box.get("n_diag_seg", 0)),
-                           "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
-                                                       + init_box.get("n_valid_seg", 0))}, f)
+            _atomic_write_json(args.checkpoint, {
+                "round": int(round_idx),
+                "coefficients": list(coefficients),
+                "fields": {k: np.asarray(v).reshape(-1).tolist()
+                           for k, v in fields.items()},
+                "initial_bias": init_box["initial_bias"],
+                "initial_per_variable": init_box["initial_per_variable"],
+                "n_diagnosed_total": (init_box["n_diagnosed_prior"]
+                                      + init_box.get("n_diag_seg", 0)),
+                "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
+                                            + init_box.get("n_valid_seg", 0))})
 
     result = build_multi_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1236,11 +1266,9 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         n_diagnoses_valid_prior=init_box["n_diagnoses_valid_prior"],
     )
     health = campaign_health(summary)
-    with open(args.out, "w") as f:
-        json.dump(build_campaign_output_dict(
-            result, grid_provenance=_grid_provenance(base_cfg, grid),
-            summary=summary, health=health, coefficients=coefficients),
-            f, indent=2)
+    _atomic_write_json(args.out, build_campaign_output_dict(
+        result, grid_provenance=_grid_provenance(base_cfg, grid),
+        summary=summary, health=health, coefficients=coefficients), indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -1474,17 +1502,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             # inspection + the resume-method guard; resume reconstructs from `field`.
             _capture_initial_record(init_box, res)
             flat = np.asarray(field).reshape(-1)
-            with open(args.checkpoint, "w") as f:
-                json.dump({"round": int(round_idx),
-                           "corrected_field": corrected_field,
-                           corrected_field: flat.tolist(),
-                           "field": np.asarray(field).tolist(),
-                           "initial_bias": init_box["initial_bias"],
-                           "initial_per_variable": init_box["initial_per_variable"],
-                           "n_diagnosed_total": (init_box["n_diagnosed_prior"]
-                                                 + init_box.get("n_diag_seg", 0)),
-                           "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
-                                                       + init_box.get("n_valid_seg", 0))}, f)
+            _atomic_write_json(args.checkpoint, {
+                "round": int(round_idx),
+                "corrected_field": corrected_field,
+                corrected_field: flat.tolist(),
+                "field": np.asarray(field).tolist(),
+                "initial_bias": init_box["initial_bias"],
+                "initial_per_variable": init_box["initial_per_variable"],
+                "n_diagnosed_total": (init_box["n_diagnosed_prior"]
+                                      + init_box.get("n_diag_seg", 0)),
+                "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
+                                            + init_box.get("n_valid_seg", 0))})
 
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1526,11 +1554,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         n_diagnoses_valid_prior=init_box["n_diagnoses_valid_prior"],
     )
     health = campaign_health(summary)
-    with open(args.out, "w") as f:
-        json.dump(build_campaign_output_dict(
-            result, grid_provenance=_grid_provenance(base_cfg, grid),
-            summary=summary, health=health, corrected_field=corrected_field),
-            f, indent=2)
+    _atomic_write_json(args.out, build_campaign_output_dict(
+        result, grid_provenance=_grid_provenance(base_cfg, grid),
+        summary=summary, health=health, corrected_field=corrected_field), indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -1569,8 +1595,6 @@ def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
     the iter-69 deploy library: the saved JSON deploys on a DIFFERENT-resolution
     grid via :func:`deploy_correction.apply_env_kernel_override`.
     """
-    import json
-
     from legoesm.training.correction_loop import last_accepted_env_kernel
     from legoesm.training.deploy_correction import env_kernel_to_dict
 
@@ -1585,8 +1609,7 @@ def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
             print(f"[campaign] WARNING: {note}")
         return
     out = f"{args.out}.env_kernel.json"
-    with open(out, "w") as f:
-        json.dump(env_kernel_to_dict(kernel), f, indent=2)
+    _atomic_write_json(out, env_kernel_to_dict(kernel), indent=2)
     print(f"[campaign] wrote RAW environment kernel (cross-resolution deploy) to {out}")
     print(
         "[campaign] deploy on ANY grid with: apply_env_kernel_override("

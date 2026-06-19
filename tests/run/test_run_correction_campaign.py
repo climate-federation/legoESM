@@ -29,6 +29,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     CampaignDryRun,
     _area_weights,
     _assert_output_path_writable,
+    _atomic_write_json,
     _build_arg_parser,
     _campaign_knobs_from_args,
     _capture_initial_record,
@@ -326,6 +327,30 @@ def test_dry_run_flag_parsed():
     base = ["--config", "c.json", "--era5-zarr", "z"]
     assert p.parse_args(base).dry_run is False           # default off
     assert p.parse_args([*base, "--dry-run"]).dry_run is True
+
+
+def test_atomic_write_json(tmp_path):
+    """_atomic_write_json writes valid JSON, REPLACES an existing file, leaves no temp
+    behind, and on a serialization FAILURE preserves the previous file (no corruption)
+    + leaks no temp — the crash-safety a multi-day SLURM-resumable checkpoint relies on
+    (a half-written checkpoint would otherwise abort the restart)."""
+    import json
+    import os
+
+    p = tmp_path / "ckpt.json"
+    _atomic_write_json(str(p), {"round": 0, "x": [1.0, 2.0]}, indent=2)
+    assert json.loads(p.read_text()) == {"round": 0, "x": [1.0, 2.0]}
+    _atomic_write_json(str(p), {"round": 1}, indent=2)          # per-round re-checkpoint
+    assert json.loads(p.read_text()) == {"round": 1}            # atomically replaced
+    assert not [f for f in os.listdir(tmp_path) if f.startswith(".tmp_campaign_")]
+
+    class _Bad:                                                 # not JSON-serializable
+        pass
+
+    with pytest.raises(TypeError):
+        _atomic_write_json(str(p), {"bad": _Bad()})
+    assert json.loads(p.read_text()) == {"round": 1}           # PREVIOUS content intact
+    assert not [f for f in os.listdir(tmp_path) if f.startswith(".tmp_campaign_")]  # no leak
 
 
 def test_assert_output_path_writable(tmp_path, monkeypatch):
