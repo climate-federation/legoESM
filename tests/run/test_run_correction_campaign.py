@@ -355,6 +355,50 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_maybe_write_env_kernel_writes_when_kernel_present(tmp_path, monkeypatch, capsys):
+    """``_maybe_write_env_kernel`` exports the RAW env-kernel JSON (the grid-AGNOSTIC
+    cross-resolution deploy PRODUCER) when the last ACCEPTED round produced one — the
+    write/skip glue was untested (its components are)."""
+    import json
+    from types import SimpleNamespace
+
+    import legoesm.training.correction_loop as cl
+    import legoesm.training.deploy_correction as dc
+
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(cl, "last_accepted_env_kernel", lambda result: "KERNEL")
+    monkeypatch.setattr(dc, "env_kernel_to_dict", lambda k: {"field": "C_K", "k": k})
+    out = str(tmp_path / "camp.json")
+    rcc._maybe_write_env_kernel(
+        SimpleNamespace(out=out, feedback_strategy="environment"), object())
+    with open(f"{out}.env_kernel.json") as f:
+        assert json.load(f) == {"field": "C_K", "k": "KERNEL"}     # last-accepted kernel serialized
+    assert "wrote RAW environment kernel" in capsys.readouterr().out
+
+
+def test_maybe_write_env_kernel_skips_and_warns_when_no_kernel(tmp_path, monkeypatch, capsys):
+    """No kernel (a rejected/no-op round) → NO file; an 'environment'-strategy campaign
+    that produced none WARNS (the cross-grid artifact the user expected is absent), while
+    'static' is SILENT (it has no env→coefficient regression to transfer)."""
+    import os
+    from types import SimpleNamespace
+
+    import legoesm.training.correction_loop as cl
+
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(cl, "last_accepted_env_kernel", lambda result: None)
+    out = str(tmp_path / "camp.json")
+    rcc._maybe_write_env_kernel(
+        SimpleNamespace(out=out, feedback_strategy="environment"), object())
+    assert not os.path.exists(f"{out}.env_kernel.json")            # nothing written
+    assert "WARNING" in capsys.readouterr().out                    # env-strategy + no kernel ⇒ warn
+    rcc._maybe_write_env_kernel(
+        SimpleNamespace(out=out, feedback_strategy="static"), object())
+    assert "WARNING" not in capsys.readouterr().out                # static ⇒ silent
+
+
 def test_print_deploy_hint_verifies_output_deploys_on_own_grid(tmp_path, capsys):
     """``_print_deploy_hint`` round-trips the JUST-WRITTEN campaign output through the
     production deploy loader WITH its own grid, so a non-deployable / grid-inconsistent
