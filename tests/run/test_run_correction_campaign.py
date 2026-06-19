@@ -134,6 +134,57 @@ def test_capture_initial_record():
     assert box2["initial_bias"] is None
 
 
+def test_resume_accumulates_diagnosis_counts_across_segments():
+    """The cumulative-trajectory invariant across a SLURM-resume boundary (iters 137/138):
+    _capture_initial_record accumulates each SEGMENT's diagnosis counts, the checkpoint
+    persists prior+seg as the running total, and _load_single_resume restores it as the
+    NEXT segment's prior — so the final reported count is the TRUE start→end sum, not just
+    the last resumed segment. Locks the COMPOSITION (capture starts each segment fresh; the
+    resume seed carries the prior) that the per-helper tests don't cover together."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.training.bias_metrics import BiasImprovement
+
+    import scripts.run.run_correction_campaign as rcc
+
+    def _res(n_diag, n_valid):
+        bias = BiasImprovement(
+            baseline_bias=jnp.asarray(1.0), updated_bias=jnp.asarray(0.9),
+            absolute_reduction=jnp.asarray(0.1), fractional_improvement=jnp.asarray(0.1),
+            improved=jnp.asarray(True))
+        return SimpleNamespace(bias=bias, per_variable_bias=None,
+                               n_diagnosed=n_diag, n_diagnoses_valid=n_valid)
+
+    # Segment 1 (fresh): two rounds diagnose 2 then 3 (valid 1, 2).
+    box = {"initial_bias": None, "initial_per_variable": None,
+           "n_diagnosed_prior": 0, "n_diagnoses_valid_prior": 0}
+    _capture_initial_record(box, _res(2, 1))
+    _capture_initial_record(box, _res(3, 2))
+    total1 = box["n_diagnosed_prior"] + box["n_diag_seg"]          # the checkpoint arithmetic
+    valid1 = box["n_diagnoses_valid_prior"] + box["n_valid_seg"]
+    assert total1 == 5 and valid1 == 3
+
+    # Resume from a checkpoint carrying those running totals.
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    ckpt = {"round": 0, "grid": rcc._grid_provenance(_base_config(), grid),
+            "corrected_field": "C_K",
+            "field": np.asarray(jnp.full((8, 16), 0.4)).tolist(),
+            "n_diagnosed_total": total1, "n_diagnoses_valid_total": valid1}
+    _f, _c, _sr, seed = rcc._load_single_resume(ckpt, grid, "C_K")
+    box2 = {"initial_bias": None, "initial_per_variable": None,
+            "n_diagnosed_prior": 0, "n_diagnoses_valid_prior": 0}
+    box2.update(seed)
+    assert box2["n_diagnosed_prior"] == 5    # restored as the NEXT segment's prior
+
+    # Segment 2: one round diagnoses 4 (valid 4). Cumulative = 2+3+4 = 9 (valid 1+2+4 = 7).
+    _capture_initial_record(box2, _res(4, 4))
+    total2 = box2["n_diagnosed_prior"] + box2["n_diag_seg"]
+    valid2 = box2["n_diagnoses_valid_prior"] + box2["n_valid_seg"]
+    assert total2 == 9 and valid2 == 7       # NOT reset to the last segment, NOT double-counted
+
+
 def test_json_finite_maps_nonfinite_to_none():
     """_json_finite: finite floats pass through; NaN AND ±inf map to None (valid JSON
     null), None passes through. Non-vacuous: covers the ±inf fractional_reduction case
