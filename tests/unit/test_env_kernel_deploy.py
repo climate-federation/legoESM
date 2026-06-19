@@ -97,6 +97,37 @@ def test_apply_out_of_hull_falls_back_and_warns():
     assert coverage["fraction_in_hull"] == 0.0
 
 
+def test_covered_but_out_of_hull_diagnostics_diverge():
+    """``fraction_covered`` and ``fraction_in_hull`` are INDEPENDENT diagnostics and
+    must diverge in the soft domain-shift boundary zone.
+
+    The two existing tests only hit the degenerate cases where they coincide (both
+    1.0 all-in-hull, both 0.0 far-away), so a regression that made ``in_hull`` track
+    coverage (e.g. deriving the hull from the length-scales instead of the sample
+    bounding box) would pass them.  Here one deploy column sits JUST below the SST
+    hull (297 K < the 298 K sample minimum) but only 0.5 SST-length-scales from
+    sample 0, so it is COVERED (has a kernel neighbor) yet OUT of hull; a second
+    column equals sample 1 exactly (covered AND in hull).  So ``fraction_covered``
+    (1.0) must exceed ``fraction_in_hull`` (0.5) — the boundary-zone warning the
+    in-hull diagnostic exists to surface (a low fraction_in_hull at full coverage
+    means the deploy grid is extrapolating just past the sampled envelope).
+    """
+    k = _kernel()
+    # col 0: covered (≈ sample 0) but SST below the hull min ⇒ out of hull.
+    # col 1: identical to sample 1 ⇒ covered AND in hull.
+    env = jnp.asarray([(297.0, 100.0, 5.0), (300.0, 1500.0, 12.0)])
+    override, coverage = apply_env_kernel_override(k, env)
+    assert coverage["fraction_covered"] == 1.0       # BOTH have a kernel neighbor
+    assert coverage["fraction_in_hull"] == 0.5       # only the sample-1 column
+    assert coverage["fraction_covered"] > coverage["fraction_in_hull"]  # diverge
+    # The covered-but-out-of-hull column still gets a BOUNDED blend (NW kernel never
+    # extrapolates beyond the sampled values) — not background, not a wild value.
+    ck = np.asarray(override.clubb_lite.C_K)
+    assert np.all(np.isfinite(ck))
+    assert np.all((ck >= 0.30 - 1e-6) & (ck <= 0.62 + 1e-6))  # within sample range
+    assert ck[0] != pytest.approx(k.background)      # NOT the background fallback
+
+
 def test_apply_min_fraction_covered_fails_loud_on_no_op_deploy():
     """Opt-in fail-loud: an (near-)all-background deploy (grid outside the sampled
     environments ⇒ NO-OP correction) RAISES when ``min_fraction_covered`` is set,
