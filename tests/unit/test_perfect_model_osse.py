@@ -177,6 +177,31 @@ def test_verdict_recovered_is_ok():
     assert osse_verdict(_result()).ok
 
 
+def test_verdict_diverged_on_non_finite_bias():
+    """A non-finite OSSE bias (a twin model blow-up from an unstable coefficient) is
+    flagged 'diverged' (not ok), NOT silently mislabelled no_change/bias_only — the
+    go/no-go must not green-light a diverged twin. (NaN > x and NaN < x are both False,
+    so without the guard it would fall through.)"""
+    v = osse_verdict(_result(final_bias=float("nan")))
+    assert v.status == "diverged" and not v.ok
+    assert "DIVERGED" in v.message
+    assert osse_verdict(_result(initial_bias=float("inf"))).status == "diverged"
+
+
+def test_multi_verdict_diverged_on_non_finite_bias():
+    """multi_osse_verdict flags a non-finite multi-coefficient bias 'diverged' too
+    (same shared guard as the single verdict)."""
+    res = _run_multi(_TRUE, n_iterations=1)._replace(final_bias=float("nan"))
+    assert multi_osse_verdict(res).status == "diverged"
+
+
+def test_cross_res_verdict_diverged_on_non_finite_bias():
+    """cross_res_osse_verdict flags a non-finite fine-grid bias 'diverged' BEFORE the
+    coverage/out_of_hull check — a twin blow-up is a blow-up regardless of coverage."""
+    res = _cross_res(_FINE_ENV, (2, 4))._replace(fine_bias_corrected=float("nan"))
+    assert cross_res_osse_verdict(res).status == "diverged"
+
+
 # --------------------------------------------------------------------------- #
 # Input guards (non-vacuousness + self-consistency).
 # --------------------------------------------------------------------------- #

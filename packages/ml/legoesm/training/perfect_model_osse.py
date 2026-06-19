@@ -27,6 +27,7 @@ and stays unit-testable with synthetic runners.  The real-driver wiring lives in
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -68,8 +69,8 @@ class CoefRecovery(NamedTuple):
 
 
 class OSSEVerdict(NamedTuple):
-    # same-grid: recovered | bias_only | no_change | worsened
-    # cross-resolution: transferred | no_transfer | out_of_hull
+    # same-grid: recovered | bias_only | no_change | worsened | diverged
+    # cross-resolution: transferred | no_transfer | out_of_hull | diverged
     status: str
     message: str
 
@@ -199,6 +200,24 @@ def run_perfect_model_osse(
     )
 
 
+def _diverged_verdict(*biases: float) -> OSSEVerdict | None:
+    """A ``diverged`` verdict if ANY OSSE bias is non-finite, else ``None``.
+
+    A NaN/inf bias means the twin MODEL blew up (an unstable true/biased coefficient
+    → NaN state) or the run is broken: ``NaN > initial`` and ``NaN < initial`` are
+    both ``False``, so without this guard the verdict would silently fall through to
+    ``no_change``/``bias_only`` — a misleading go for a diverged twin.  Checked FIRST
+    in every verdict so a blow-up is surfaced loudly (``diverged`` is not ``.ok``).
+    """
+    if not all(math.isfinite(float(b)) for b in biases):
+        return OSSEVerdict(
+            "diverged",
+            f"non-finite OSSE bias {tuple(float(b) for b in biases)} — the twin model "
+            "DIVERGED (an unstable true/biased coefficient → NaN state) or the run is "
+            "broken; the recovery/transfer verdict is NOT trustworthy.")
+    return None
+
+
 def osse_verdict(result: OSSEResult) -> OSSEVerdict:
     """Classify a perfect-model OSSE into a go/no-go verdict for the real campaign.
 
@@ -211,7 +230,11 @@ def osse_verdict(result: OSSEResult) -> OSSEVerdict:
     * ``worsened`` — final bias ABOVE initial: cannot happen with the monotonic
       gate ON (the harness default), so it signals either a disabled gate
       (``accept_only_if_improved=False``) or a bias-accounting bug; surfaced loudly.
+    * ``diverged`` — a non-finite bias (the twin model blew up): not trustworthy.
     """
+    diverged = _diverged_verdict(result.initial_bias, result.final_bias)
+    if diverged is not None:
+        return diverged
     if result.final_bias > result.initial_bias + _REL_TOL * max(
             abs(result.initial_bias), _REL_TOL):
         return OSSEVerdict(
@@ -440,6 +463,10 @@ def cross_res_osse_verdict(result: CrossResOSSEResult) -> OSSEVerdict:
       untrustworthy (a fall here likely reflects background/mean regression, not
       learning).  The message reports whether the bias happened to fall.
     """
+    diverged = _diverged_verdict(
+        result.fine_bias_uncorrected, result.fine_bias_corrected)
+    if diverged is not None:
+        return diverged
     covered = (result.fraction_in_hull >= result.coverage_threshold
                and result.fraction_covered >= result.coverage_threshold)
     if not covered:
@@ -565,6 +592,9 @@ def multi_osse_verdict(result: MultiOSSEResult) -> OSSEVerdict:
     AND every coefficient moved toward its truth; ``bias_only`` reports how many of
     the N coefficients recovered.
     """
+    diverged = _diverged_verdict(result.initial_bias, result.final_bias)
+    if diverged is not None:
+        return diverged
     n = len(result.per_coefficient)
     n_rec = sum(c.param_error_reduced for c in result.per_coefficient.values())
     if result.final_bias > result.initial_bias + _REL_TOL * max(
