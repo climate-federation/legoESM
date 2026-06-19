@@ -233,6 +233,55 @@ def test_resolve_fine_resolution_validates_positive_and_distinct():
         _resolve_fine_resolution(16, 16)                 # degenerate same-grid
 
 
+def test_run_cross_resolution_main_exit_code_gates_on_transfer(monkeypatch):
+    """The --fine-resolution mode is exit-code-gateable (iter 287-290 automation contract):
+    exit 0 ONLY when the kernel TRANSFERRED (well-covered AND the fine bias fell); a
+    below-threshold-coverage 'out_of_hull' verdict exits non-zero so a chained pipeline
+    (smoke && osse --fine-resolution && ...) HALTS on an untrustworthy transfer.  Stubs only
+    the heavy pieces (fine-grid build, phis, the OSSE run) — the real _resolve_fine_resolution
+    + cross_res_osse_verdict + exit logic are exercised."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.perfect_model_osse import CrossResOSSEResult
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.run_perfect_model_osse as rpo
+
+    coarse_grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    # The fn imports these from run_correction_campaign at call time → patch the source.
+    monkeypatch.setattr(rcc, "_build_grid_for_config",
+                        lambda *a, **k: (create_latlon_grid(16, 32, dtype=jnp.float64),
+                                         create_sigma_coordinate(5)))
+    monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda *a, **k: None)
+
+    def _result(in_hull, reduced, unc=1.0, corr=0.5):
+        return CrossResOSSEResult(
+            coarse_initial_bias=1.0, coarse_final_bias=0.6, coarse_bias_reduced=True,
+            fine_bias_uncorrected=unc, fine_bias_corrected=corr,
+            fine_bias_reduction=unc - corr, fine_bias_reduced=reduced,
+            fraction_covered=in_hull, fraction_in_hull=in_hull,
+            coverage_threshold=0.8, n_fine_columns=512, kernel_field="C_K")
+
+    args = rpo._build_argparser().parse_args(
+        ["--config", "c.json", "--true-ck", "0.9", "--biased-ck", "0.4",
+         "--fine-resolution", "16"])
+    base_cfg = _base_config()           # grid.resolution == 8, distinct from fine 16
+    common = dict(base_cfg=base_cfg, coarse_grid=coarse_grid, coarse_sigma=sigma,
+                  build_base_driver=lambda *a, **k: None, extract_fn=lambda *a, **k: None,
+                  run_les=lambda *a, **k: None, phis_coarse=None)
+
+    # well-covered + the fine bias fell -> transferred -> exit 0
+    monkeypatch.setattr(rpo, "build_cross_resolution_osse",
+                        lambda **kw: _result(in_hull=1.0, reduced=True))
+    assert rpo._run_cross_resolution_main(args, **common) == 0
+
+    # coverage below threshold -> out_of_hull -> exit 1 (untrustworthy; halt the pipeline)
+    monkeypatch.setattr(rpo, "build_cross_resolution_osse",
+                        lambda **kw: _result(in_hull=0.1, reduced=True, corr=0.9))
+    assert rpo._run_cross_resolution_main(args, **common) == 1
+
+
 def test_build_cross_resolution_osse_rejects_multi_method():
     """The cross-res builder deploys ONE env->coefficient kernel (single-coefficient): a
     diagnosis_methods list is rejected loudly, mirroring build_perfect_model_osse."""
