@@ -150,6 +150,19 @@ def test_apply_min_fraction_covered_fails_loud_on_no_op_deploy():
         apply_env_kernel_override(k, good, min_fraction_covered=1.5)
 
 
+def test_apply_rejects_negative_min_total_weight():
+    """A NEGATIVE min_total_weight silently disables the background fallback (every
+    column reads ``total >= a_negative_floor`` = True ⇒ a 'neighbor', none falls back),
+    the opposite of the intended protection — so it fails loud at the call (iter 265)."""
+    k = _kernel()
+    good = jnp.asarray([(300.0, 1500.0, 12.0), (298.5, 150.0, 5.5)])
+    with pytest.raises(ValueError, match=r"min_total_weight must be >= 0"):
+        apply_env_kernel_override(k, good, min_total_weight=-0.1)
+    # 0.0 (any nonzero similarity counts) is accepted — only NEGATIVE is rejected.
+    override, _ = apply_env_kernel_override(k, good, min_total_weight=0.0)
+    assert np.all(np.isfinite(np.asarray(override.clubb_lite.C_K)))
+
+
 def test_json_round_trip(tmp_path):
     import json
     k = _kernel()

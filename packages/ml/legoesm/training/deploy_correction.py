@@ -528,6 +528,16 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
 
     if kernel.field not in _CLUBB_FIELDS:
         raise ValueError(f"kernel.field {kernel.field!r} not in {_CLUBB_FIELDS}.")
+    # Range-guard the min_total_weight floor (min_fraction_covered is already range-
+    # checked where it is applied below). A NEGATIVE weight floor silently disables the
+    # background fallback: ``total >= a_negative_floor`` is ALWAYS True, so EVERY column
+    # reads as having an environmentally-similar neighbour and none falls back to
+    # ``background`` — the opposite of the intended protection. Fail loud at the call.
+    if min_total_weight is not None and min_total_weight < 0.0:
+        raise ValueError(
+            f"min_total_weight must be >= 0 (a similarity-weight floor); got "
+            f"{min_total_weight}. A negative floor makes every column a 'neighbor' "
+            "(no background fallback) — the opposite of the intended protection.")
     grid_env = jnp.asarray(new_grid_env)
     npred = jnp.asarray(kernel.sample_env).shape[1]
     if grid_env.ndim != 2 or grid_env.shape[1] != npred:
