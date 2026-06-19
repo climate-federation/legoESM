@@ -30,6 +30,8 @@ Usage::
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -224,9 +226,19 @@ def save_mld_snapshot(state, path: str | Path, *,
         save_kw["_step"] = np.asarray(int(step))
     # Atomic write: a killed process (or two runs sharing an output dir) must
     # not leave a partial/corrupt npz that a later scorer silently mis-reads.
-    tmp_path = out_path.with_name(out_path.name + ".tmp.npz")
-    np.savez_compressed(str(tmp_path), **save_kw)
-    tmp_path.replace(out_path)
+    # A UNIQUE temp file (mkstemp) — not a fixed ".tmp.npz" name — so two
+    # writers targeting the same out_path can't truncate each other's temp.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(out_path.parent), prefix=out_path.name + ".", suffix=".tmp.npz",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            np.savez_compressed(fh, **save_kw)
+        tmp_path.replace(out_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return out_path
 
 
