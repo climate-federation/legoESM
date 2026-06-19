@@ -185,8 +185,16 @@ def build_baroclinic_gyre_config(grid: LatLonGrid) -> LatLonCGridOceanConfig:
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
         tracer_advection="centered",
-        # Implicit free surface, fully backward-Euler; MITgcm unsplit AB2 path.
-        barotropic_solver="implicit_cn",
+        # MITgcm-faithful UNSPLIT implicit free surface (theta=1, backward-Euler
+        # surface mode = MITgcm implicSurfPress=1). NO barotropic/baroclinic mode
+        # split — one 3D predictor + one elliptic eta solve + uniform correction,
+        # matching MITgcm's implicitFreeSurface (audited: no barotropic sub-cycle,
+        # no barotropic-velocity prognostic). The split implicit_cn breaks the
+        # discrete PGF/continuity adjointness at the grid scale and grows a spurious
+        # 2dx baroclinic instability (the long-run velocity checkerboard, zig~1.4);
+        # the unsplit solver keeps it smooth (zig~0.2) at the FAITHFUL viscAh=5000.
+        # docs/ocean_fidelity/mitgcm_unsplit_freesurface_fix.md.
+        barotropic_solver="implicit_unsplit",
         barotropic_implicit_theta_eta=1.0,
         barotropic_implicit_theta_pgf=1.0,
         coriolis_scheme="explicit_ab2",
