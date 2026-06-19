@@ -33,6 +33,8 @@ REPO="${LEGOESM_REPO:-$PWD}"
 cd "$REPO" || { echo "cannot cd to REPO=$REPO"; exit 2; }
 PY="${LEGOESM_PY:-.venv/bin/python}"
 CONFIG="${CONFIG:-configs/amip_clubb_lite.json}"   # base ExperimentConfig (turbulence=clubb_lite)
+# Create a starter CONFIG with:
+#   python scripts/experiment/write_amip_clubb_lite_config.py "$CONFIG" --resolution 8 --nlev 10
 ERA5="${ERA5:-/path/to/era5.zarr}"                 # ERA5 reanalysis zarr store
 OUT="${OUT:-results/compare_reanalysis/corrected_clubb.json}"
 CKPT="${CKPT:-results/compare_reanalysis/campaign.ckpt.json}"
