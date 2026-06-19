@@ -50,6 +50,26 @@ def test_reduce_eddy_diffusivity_all_invalid():
     assert float(value) == 0.0
 
 
+def test_reduce_all_invalid_has_finite_gradient():
+    """_valid_profile_mean is documented differentiable; the all-invalid (n=0) reduction
+    guards the division with jnp.maximum(n, 1), so the value is finite even when NO level is
+    valid — and so the GRADIENT w.r.t. the diagnosed profile stays finite. A naive sum/n would
+    be 0/0 → NaN gradient that still PASSES the forward 'value==0' test above but breaks
+    training (the SFNO+dycore / neural-GCM modes differentiate through the diagnosis). Locks
+    the AD-guard, parallel to the bias_metrics all-excluded gradient lock (iter 299)."""
+    import jax
+
+    valid = jnp.array([False, False, False])
+
+    def loss(K):  # noqa: N803 (K = eddy diffusivity, physics symbol)
+        value, _ = reduce_column_diagnosis(_Eddy(K=K, valid=valid), "eddy_diffusivity")
+        return value
+
+    g = jax.grad(loss)(jnp.array([5.0, 6.0, 7.0]))
+    assert bool(jnp.all(jnp.isfinite(g)))                       # finite, not 0/0 NaN
+    np.testing.assert_allclose(np.asarray(g), [0.0, 0.0, 0.0])  # all-invalid ⇒ zero gradient
+
+
 def test_reduce_entrainment():
     diag = _Ent(w_entrainment=jnp.asarray(0.02), valid=jnp.asarray(True))
     value, valid = reduce_column_diagnosis(diag, "entrainment")
