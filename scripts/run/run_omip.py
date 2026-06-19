@@ -3697,6 +3697,26 @@ def run_omip_single(grid_type: str, args) -> dict:
         blowup_info=blowup_info,
     )
 
+    # Final MLD-diagnostic snapshot (de Boyer Montegut / Treguier 2023): the
+    # shared writer emits the T/S + geometry contract that
+    # scripts/validate/compare_mld_dbm.py and compare_omip_nemo.py consume so
+    # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
+    # additive output; a diagnostic must never abort the run.
+    try:
+        from legoesm.ocean.restart import save_mld_snapshot
+        lat2d = getattr(grid, "lat_T", None)
+        lon2d = getattr(grid, "lon_T", None)
+        if (lat2d is not None and lon2d is not None
+                and getattr(state, "land_mask", None) is not None):
+            snap = save_mld_snapshot(
+                state, output_dir / "snapshot_final.npz", z_coord=z_coord,
+                lat2d=np.asarray(lat2d), lon2d=np.asarray(lon2d),
+                time_s=float(args.days) * 86400.0, step=int(n_steps),
+            )
+            print(f"  MLD snapshot: {snap}")
+    except Exception as e:  # diagnostic snapshot must never crash the run
+        print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
+
     ALL_RESULTS.append(results)
     return results
 

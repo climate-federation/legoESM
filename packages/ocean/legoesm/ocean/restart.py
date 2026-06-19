@@ -104,6 +104,76 @@ def load_restart(path: str | Path, template_state) -> tuple:
     return template_state._replace(**replace_kw)
 
 
+def save_mld_snapshot(state, path: str | Path, *,
+                      z_coord,
+                      lat2d: np.ndarray,
+                      lon2d: np.ndarray,
+                      time_s: float | None = None,
+                      step: int | None = None) -> Path:
+    """Write a compact ocean snapshot for the offline mixed-layer-depth scorers.
+
+    Unlike :func:`save_restart` (every prognostic field, for a bit-exact
+    restart), this writes ONLY what the de Boyer Montegut / Treguier (2023)
+    MLD diagnostic and the OMIP-NEMO comparison consume: ``T``, ``S``,
+    ``land_mask`` and ``H_bathy`` from the state, the horizontal grid
+    (``lat_T``, ``lon_T``), and the reference level-centre depths
+    (``z_center_ref``, positive-down) the scorers use to build the per-level
+    wet mask ``z_center_ref < H_bathy``.  ``u``/``v``/``eta`` are included
+    when present (``v`` is absent on MPAS; ``eta`` lets a run restart from the
+    snapshot without a barotropic-adjustment shock).
+
+    Shared writer for the snapshot contract read by
+    ``scripts/validate/compare_mld_dbm.py`` and ``compare_omip_nemo.py``; the
+    OMIP drivers (``run_omip`` / ``run_omip_core2``) call this so all three
+    grids emit a single, identical snapshot format.
+
+    Parameters
+    ----------
+    state : ocean state NamedTuple
+        Must expose ``T``/``S``/``land_mask`` (and usually ``H_bathy``) Fields.
+    path : str or Path
+        Output ``.npz`` path.
+    z_coord : ocean vertical coordinate
+        Provides ``z_half_ref`` (nlev+1, <=0) -> reference centre depths.
+    lat2d, lon2d : array, shape (n_lat, n_lon)
+        Tracer-point latitudes/longitudes [deg].
+    time_s, step : optional provenance scalars.
+
+    Returns
+    -------
+    Path
+        The resolved path of the written archive.
+    """
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    save_kw: dict[str, np.ndarray] = {
+        "T": np.asarray(state.T.data),
+        "S": np.asarray(state.S.data),
+        "land_mask": np.asarray(state.land_mask.data),
+        "lat_T": np.asarray(lat2d),
+        "lon_T": np.asarray(lon2d),
+    }
+    # u/v/eta when present (MPAS lacks a separate v; eta enables shock-free
+    # --restart-from). The MLD scorer reads only T/S/land_mask/geometry.
+    for opt in ("u", "v", "eta"):
+        fld = getattr(state, opt, None)
+        if fld is not None and hasattr(fld, "data"):
+            save_kw[opt] = np.asarray(fld.data)
+    H_bathy = getattr(state, "H_bathy", None)
+    if H_bathy is not None and hasattr(H_bathy, "data"):
+        save_kw["H_bathy"] = np.asarray(H_bathy.data)
+    zh_ref = getattr(z_coord, "z_half_ref", None)
+    if zh_ref is not None:
+        zh = np.asarray(zh_ref)                                  # (nlev+1,), <=0
+        save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))  # (nlev,) +down
+    if time_s is not None:
+        save_kw["_time_s"] = np.asarray(float(time_s))
+    if step is not None:
+        save_kw["_step"] = np.asarray(int(step))
+    np.savez_compressed(out_path, **save_kw)
+    return out_path
+
+
 def restart_metadata(path: str | Path) -> dict[str, Any]:
     """Return ``{time_s, step, sha}`` (any present) from the archive."""
     in_path = Path(path)
@@ -121,4 +191,6 @@ def restart_metadata(path: str | Path) -> dict[str, Any]:
     return out
 
 
-__all__ = ["save_restart", "load_restart", "restart_metadata"]
+__all__ = [
+    "save_restart", "load_restart", "restart_metadata", "save_mld_snapshot",
+]
