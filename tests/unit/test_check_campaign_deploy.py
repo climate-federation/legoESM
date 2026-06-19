@@ -52,6 +52,34 @@ def test_check_deploy_validates_and_reports_stats(tmp_path):
     assert stats["corrected"]["C_K"]["max"] == pytest.approx(0.6)
 
 
+def test_check_deploy_flags_an_out_of_bounds_coefficient(tmp_path, capsys):
+    """A deployed coefficient OUTSIDE its calibratable (param-spec) range is FLAGGED (iter
+    309): the campaign clips to bounds by default, so an out-of-range deploy means
+    --allow-unphysical-coeff was used OR the output is corrupted, and the production physics
+    uses the value RAW (no deploy-time clip) — so check_deploy reports in_bounds=False and
+    main() prints a WARNING. Non-vacuous: an in-bounds deploy reports in_bounds=True + no
+    warning (C_K calibratable range is (0.1, 1.2))."""
+    from scripts.experiment.check_campaign_deploy import check_deploy, main
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+
+    # An absurd C_K (≈100) is far outside the (0.1, 1.2) calibratable range.
+    bad = _campaign_output(tmp_path, base_cfg, grid, name="oob.json", lo=100.0, hi=100.0)
+    ck = check_deploy(cfg, bad)["corrected"]["C_K"]
+    assert ck.get("bounds") is not None and ck["in_bounds"] is False
+    main(["--base-config", cfg, "--campaign-output", bad])
+    msg = capsys.readouterr().out
+    assert "OUTSIDE the calibratable range" in msg and "C_K" in msg
+
+    # An in-bounds deploy: in_bounds True + no out-of-range warning (the contrast).
+    ok = _campaign_output(tmp_path, base_cfg, grid, name="ok.json", lo=0.3, hi=0.6)
+    assert check_deploy(cfg, ok)["corrected"]["C_K"]["in_bounds"] is True
+    main(["--base-config", cfg, "--campaign-output", ok])
+    assert "OUTSIDE" not in capsys.readouterr().out
+
+
 def test_check_deploy_surfaces_averaging_provenance_for_the_deployer(tmp_path, capsys):
     """The deploy-check surfaces the SOURCE climate (iter 277) so the deployer — possibly
     a different person weeks later — confirms a snapshot-trained vs climatology-trained

@@ -91,6 +91,8 @@ def check_deploy(
         base_config_path, campaign_output_path,
         allow_unverified_grid=allow_unverified_grid)
 
+    from legoesm.training.feedback import param_field_bounds
+
     clubb = deployed.turbulence_override.clubb_lite
     corrected: dict = {}
     n_columns = 0
@@ -98,8 +100,17 @@ def check_deploy(
         arr = np.asarray(getattr(clubb, field))
         if arr.ndim >= 1:                                   # a per-column field => corrected
             n_columns = int(arr.reshape(-1).shape[0])
-            corrected[field] = {
-                "min": float(arr.min()), "max": float(arr.max())}
+            entry = {"min": float(arr.min()), "max": float(arr.max())}
+            # Flag a deployed coefficient outside its calibratable (param-spec) range. The
+            # campaign CLIPS to bounds by default, so an out-of-range deploy means either
+            # --allow-unphysical-coeff was used OR the output was hand-edited/corrupted — and
+            # the production physics uses the value RAW (no deploy-time clip), so surface it.
+            bounds = param_field_bounds(clubb, field)
+            if bounds is not None:
+                lo, hi = bounds
+                entry["bounds"] = [lo, hi]
+                entry["in_bounds"] = bool(entry["min"] >= lo and entry["max"] <= hi)
+            corrected[field] = entry
     # The averaging-window provenance (iter 267): the DEPLOYER (possibly a different
     # person, weeks after the campaign) confirms the SOURCE climate before deploying a
     # saved correction — a snapshot-trained correction is a different quantity than a
@@ -141,7 +152,20 @@ def main(argv: list[str] | None = None) -> int:
           f"corrected {sorted(fields)}. The deploy is grid-compatible and "
           "validate_strict-sound; inject it at runtime via corrected_turbulence_override.")
     for field, rng in sorted(fields.items()):
-        print(f"    {field}: [{rng['min']:.4g}, {rng['max']:.4g}]")
+        line = f"    {field}: [{rng['min']:.4g}, {rng['max']:.4g}]"
+        if rng.get("bounds") is not None:
+            lo, hi = rng["bounds"]
+            line += f" (calibratable range [{lo:.4g}, {hi:.4g}])"
+            if rng.get("in_bounds") is False:
+                line += "  ** OUTSIDE the calibratable range **"
+        print(line)
+    oob = sorted(f for f, rng in fields.items() if rng.get("in_bounds") is False)
+    if oob:                                                 # not a hard fail: see message
+        print(f"[deploy-check] WARNING: {oob} deploy coefficient(s) lie OUTSIDE their "
+              "calibratable range — expected ONLY if the campaign used "
+              "--allow-unphysical-coeff; otherwise suspect a hand-edited / corrupted output. "
+              "The production physics uses the value RAW (no deploy-time clip), so an "
+              "unphysical coefficient may DESTABILIZE the run.")
     av = stats.get("averaging")
     if av:                                                  # source-climate provenance (267)
         n = int(av.get("era5_n_times", 1))
