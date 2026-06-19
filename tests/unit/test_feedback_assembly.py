@@ -227,6 +227,44 @@ def test_assemble_field_differentiable():
     np.testing.assert_allclose(np.asarray(g0), [3.0, 3.0], rtol=1e-12)
 
 
+def test_reduce_grad_finite_through_all_invalid_and_mixed_columns():
+    """``_valid_profile_mean``'s gradient must stay FINITE through a column with
+    NO valid levels (n=0) and route only to VALID levels in a mixed column.
+
+    The existing differentiability test only exercises ALL-valid diagnoses.  The
+    n=0 reduction is the classic ``jnp.where`` NaN-gradient hazard: the mean is
+    ``jnp.where(n>0, Σ.../jnp.maximum(n,1), 0)`` and its grad-safety rests ENTIRELY
+    on the ``jnp.maximum(n, 1)`` floor — a plausible "simplify" back to ``/n`` would
+    leave the unselected ``n>0`` branch computing ``0/0`` and leak a NaN adjoint
+    into the diagnosed values (the forward value would still read 0 via the where,
+    so the forward-only all-invalid tests would NOT catch it).  A laminar column
+    where the LES resolved no turbulence anywhere is a real occurrence, and its
+    feedback must flow zero — not NaN — gradient so a downstream ``jax.grad`` of a
+    loss over the assembled field stays finite.
+    """
+    # All levels invalid (n=0): the reduced value is 0 and the gradient is finite 0.
+    def loss_all_invalid(k):
+        v, _ = reduce_column_diagnosis(
+            _Eddy(K=k, valid=jnp.array([False, False])), "eddy_diffusivity")
+        return v ** 2
+
+    g = jax.grad(loss_all_invalid)(jnp.array([2.0, 4.0]))
+    assert bool(jnp.all(jnp.isfinite(g)))               # NOT NaN (the 0/0 hazard)
+    np.testing.assert_array_equal(np.asarray(g), [0.0, 0.0])  # no valid level ⇒ zero
+
+    # Mixed column: the gradient routes ONLY to the valid level (the invalid level's
+    # diagnosed value never influences the reduced mean, so its adjoint is exactly 0).
+    def loss_mixed(k):
+        v, _ = reduce_column_diagnosis(
+            _Eddy(K=k, valid=jnp.array([True, False])), "eddy_diffusivity")
+        return v ** 2
+
+    gm = jax.grad(loss_mixed)(jnp.array([3.0, 99.0]))
+    assert bool(jnp.all(jnp.isfinite(gm)))
+    # value = mean over 1 valid level = 3; d(9)/dK_valid = 6; invalid level ⇒ 0.
+    np.testing.assert_allclose(np.asarray(gm), [6.0, 0.0], rtol=1e-12)
+
+
 # --- environment-kernel generalization (iter 42) ----------------------------
 
 from legoesm.training.column_manifest import (  # noqa: E402
