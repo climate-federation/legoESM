@@ -245,6 +245,30 @@ class ERA5Slice(NamedTuple):
     plev_Pa: np.ndarray    # (n_plev,) pressure levels [Pa], ascending
 
 
+def _assert_required_era5_vars(ds_t, ds) -> None:
+    """Upfront preflight: report ALL missing REQUIRED ERA5 variables in ONE error.
+
+    The per-field loaders (``_get_3d`` / ``_get_2d``) each raise on the FIRST unresolvable
+    required variable, so an operator preparing a real-ERA5 zarr with several mis-named
+    fields would iterate error-by-error.  This lists every missing required variable (with
+    its accepted alias) at once, so the whole naming pass is fixed in one go.  Required =
+    the 3D state T/u/v/q + the surface pressure; SST + surface geopotential stay OPTIONAL
+    (zero-filled if absent, so they are NOT flagged here).
+    """
+    required = ("temperature", "u_component_of_wind", "v_component_of_wind",
+                "specific_humidity", "surface_pressure")
+    missing = [n for n in required
+               if resolve_var(ds_t, n) is None and resolve_var(ds, n) is None]
+    if missing:
+        listed = ", ".join(
+            f"{n!r} (alias {_ERA5_VAR_ALIASES.get(n, '—')!r})" for n in missing)
+        raise ValueError(
+            f"load_era5_slice: REQUIRED ERA5 variable(s) {listed} not found in the "
+            f"store; available variables: {sorted(map(str, ds_t.data_vars))}. Provide "
+            "them (or an accepted alias) in --era5-zarr — a missing required field must "
+            "NOT silently load as zeros (it would corrupt the whole compare).")
+
+
 def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
@@ -263,6 +287,10 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
 
     # Select time
     ds_t = ds.isel(time=time_idx)
+
+    # Fail loud + COMPLETE on a mis-prepared store: report every missing required variable
+    # at once (the per-field _get_* below still raise as a backstop / on other errors).
+    _assert_required_era5_vars(ds_t, ds)
 
     # Extract lat/lon
     lat = np.deg2rad(ds_t.lat.values.astype(np.float64))

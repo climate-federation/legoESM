@@ -29,6 +29,13 @@ scheme/method validation. Use `--era5-zarr` to validate **your real** ERA5 store
 ingest (variable names, levels, lat ordering); omit it for a pure environment smoke.
 `--mode cmip` preflights the coupled driver.
 
+**Required ERA5 variables** (the loader resolves common aliases, e.g. `temperature`↔`t`):
+the 3D state `temperature`, `u_component_of_wind`, `v_component_of_wind`,
+`specific_humidity` plus the 2D `surface_pressure` are **required** — a store missing any
+of these fails loud listing *all* missing ones at once (it must not silently load as zeros
+and corrupt the bias). `skin_temperature` (SST) and `geopotential_at_surface` are optional
+(zero-filled if absent; supply SST for accurate worst-column environment tags + `--mode cmip`).
+
 ```bash
 # environment smoke (synthetic ERA5):
 $PY scripts/experiment/smoke_compare_reanalysis.py

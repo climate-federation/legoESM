@@ -213,6 +213,23 @@ def test_load_era5_slice_missing_required_surface_pressure_raises(monkeypatch):
         load_era5_slice(_config(), 0)
 
 
+def test_load_era5_slice_reports_all_missing_required_at_once(monkeypatch):
+    """The upfront preflight (iter 306) lists EVERY missing required variable in ONE error
+    (not one-per-failed-load), so an operator preparing a real-ERA5 zarr fixes the whole
+    variable-naming pass at once. Two dropped required fields → a single raise naming BOTH
+    (with aliases). Non-vacuous: before the preflight, the first _get_3d raised on
+    'temperature' alone and 'specific_humidity' never appeared in the message."""
+    monkeypatch.setattr(
+        e2s, "open_era5_zarr",
+        lambda store: _synthetic_era5("long",
+                                      drop=("temperature", "specific_humidity")))
+    with pytest.raises(ValueError) as exc:
+        load_era5_slice(_config(), 0)
+    msg = str(exc.value)
+    assert "temperature" in msg and "specific_humidity" in msg   # BOTH listed at once
+    assert "REQUIRED" in msg and "not found" in msg              # the documented contract
+
+
 def test_load_era5_slice_missing_optional_zero_fills(monkeypatch):
     """An OPTIONAL surface field (skin_temperature) absent → zero-filled, not raised
     (an IC missing it still loads)."""
