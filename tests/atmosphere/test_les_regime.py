@@ -6,10 +6,9 @@ unknown), per-regime resolution, and the stretched-grid validity guard.
 
 from __future__ import annotations
 
-import pytest
-
 import math
 
+import pytest
 from legoesm.atmosphere.dynamics.les_regime import (
     LESRegimeConfig,
     LESResolutionConfig,
@@ -75,6 +74,32 @@ def test_resolution_for_column_dispatch():
 def test_validate_resolution_accepts_defaults():
     validate_les_resolution(les_resolution_for_regime("shallow"))
     validate_les_resolution(les_resolution_for_regime("deep"))
+
+
+def test_production_les_domain_spans_the_boundary_layer_for_flux_convergence():
+    """The PRODUCTION LES domain (``nx·dx``) must be at least as wide as it is tall
+    (``domain_top_m``) so the horizontal-mean resolved flux — diagnosed from a single
+    final SNAPSHOT (``run_forced_les`` returns the final state) — converges over
+    several boundary-layer eddies rather than a single under-resolved one.  The config
+    comment claims the domain 'contains several of the regime's largest eddies'; this
+    PINS that requirement on the shipped defaults (shallow 6.4 km vs 4 km top = 1.6×;
+    deep 51.2 km vs 20 km top = 2.56×) so a future edit shrinking ``nx`` below the
+    eddy scale — which would make the single-snapshot diagnosis spatially noisy and
+    the LES-informed correction unreliable — fails CI.  (Runtime ``validate_les_
+    resolution`` does NOT enforce this: the deliberately-tiny unit-test domains must
+    still run; the requirement is on PRODUCTION fidelity, so it is pinned here.)
+
+    Complements ``test_default_domains_contain_regime_eddies`` (which pins the ABSOLUTE
+    width 6/50 km): this pins the SCALE-RELATIVE width ≥ depth ratio (catching a deeper
+    ``domain_top`` not matched by a wider domain, which the absolute floor would miss)
+    plus horizontal isotropy."""
+    for regime in ("shallow", "deep"):
+        res = les_resolution_for_regime(regime)
+        domain_width_m = res.nx * res.dx_m
+        assert domain_width_m >= res.domain_top_m, (
+            f"{regime} LES domain {domain_width_m} m is narrower than its depth "
+            f"{res.domain_top_m} m — cannot contain a boundary-layer eddy")
+        assert res.nx == res.ny            # an isotropic horizontal domain
 
 
 def test_validate_resolution_rejects_nonpositive():
