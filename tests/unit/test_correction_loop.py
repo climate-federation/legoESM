@@ -107,6 +107,40 @@ def test_loop_detects_improvement():
     assert jnp.ndim(jnp.asarray(result.updated_config.tau_equator)) == 1
 
 
+def test_loop_iteration_is_deterministic_end_to_end():
+    """The whole correction iteration (rank → diagnose → assemble feedback → apply →
+    re-compare) must be BIT-reproducible: identical inputs ⇒ identical corrected
+    field + bias.
+
+    Composes the per-stage determinism locks (ranking tie-break iter 212, clustering
+    tie-break iter 224, feedback assembly) into an END-TO-END guarantee.  A
+    composition-level non-determinism — a ``set``/``dict`` iteration order or a
+    Python hash-order leak threaded through the manifest→feedback chain — would slip
+    past the per-stage tests yet make a resumed/re-run campaign drift; running the
+    SAME iteration twice and demanding bit-identical output catches it.
+    """
+    baseline = [[2.0, 1.0], [1.0, 2.0]]
+    corrected = [[1.0, 1.0], [1.0, 1.0]]
+
+    def _run():
+        return run_correction_iteration(
+            GrayRadiationConfig(),
+            compare_fn=_make_compare_fn(
+                baseline_score=baseline, corrected_score=corrected),
+            diagnose_fn=_diagnose,
+            promotion_key="gray_tau_equator", grid_shape=(2, 2), background=7.2,
+        )
+
+    r1, r2 = _run(), _run()
+    np.testing.assert_array_equal(
+        np.asarray(r1.updated_config.tau_equator),
+        np.asarray(r2.updated_config.tau_equator))
+    assert float(r1.bias.baseline_bias) == float(r2.bias.baseline_bias)
+    assert float(r1.bias.updated_bias) == float(r2.bias.updated_bias)
+    assert float(r1.worst_column_change) == float(r2.worst_column_change)
+    assert r1.n_corrected == r2.n_corrected == 2
+
+
 def test_loop_reports_worsening():
     baseline = [[1.0, 1.0], [1.0, 1.0]]
     corrected = [[2.0, 1.0], [1.0, 2.0]]  # got worse
