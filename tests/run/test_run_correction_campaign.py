@@ -2473,6 +2473,42 @@ def test_campaign_output_dict_single_round_trips_into_deploy():
     assert loaded["grid"]["grid_type"] == "latlon"
 
 
+def test_campaign_output_dict_diverged_run_is_strict_json():
+    """The WHOLE build_campaign_output_dict for a DIVERGED run (NaN bias) must be standard
+    JSON — no NaN/Infinity tokens anywhere.
+
+    `test_summary_to_json_diverged_biases_serialize_as_null` covers the summary COMPONENT;
+    this locks the actual on-disk ARTIFACT (summary + health + corrected field + grid) an
+    operator's plotters / deploy reader will `json.load`.  A non-finite metric leaking
+    through ANY branch would make that file unparseable under the strict parser — caught
+    here end-to-end (the corrected field is finite by construction; the NaN risk is the
+    bias/stat branches)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+
+    field = jnp.array([0.42, 0.55, 0.61, 0.73])               # the field is finite by construction
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(5.0, float("nan")),   # DIVERGED: NaN final bias
+            worst_column_change=jnp.asarray(float("nan")),
+            feedback_field=field.reshape(2, 2),
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=0),),
+        final_field=field.reshape(2, 2), accepted=(False,), stop_reason="max_iterations")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    health = campaign_health(summary)
+    assert not health.ok                                      # the diverged run is not 'improved'
+
+    out = build_campaign_output_dict(
+        res, grid_provenance={"grid_type": "latlon", "n_columns": 4},
+        summary=summary, health=health, corrected_field="C_K")
+    # The strict parser raises on ANY NaN/Infinity token anywhere in the artifact.
+    json.loads(json.dumps(out), parse_constant=_reject_nonstandard)
+
+
 def test_campaign_output_dict_multi_round_trips_into_deploy():
     """The multi-coefficient ``"fields"`` shape round-trips into corrected_clubb_config
     recovering BOTH C_K and Pr_t per column (iter 105)."""

@@ -1028,7 +1028,11 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
         raise ValueError(
             "build_campaign_output_dict: pass EXACTLY one of corrected_field "
             "(single-coefficient) or coefficients (multi-coefficient).")
-    biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
+    # Sanitize the per-round bias trajectory: a DIVERGED round (NaN/±inf bias) would
+    # otherwise emit a non-standard ``NaN``/``Infinity`` token here, making the whole
+    # output FILE unparseable by the plotters / deploy reader (``json.load``) — the
+    # same hazard ``_json_finite`` already guards in ``_summary_to_json`` (iter 245).
+    biases = [(_json_finite(it.bias.baseline_bias), _json_finite(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
     accepted = list(result.accepted)
     steps = [float(it.step_fraction) for it in result.iterations]
