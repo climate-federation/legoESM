@@ -512,6 +512,23 @@ def test_cross_resolution_out_of_hull_is_untrusted():
     assert v.status == "out_of_hull" and not v.ok
 
 
+def test_cross_res_out_of_hull_takes_precedence_over_a_bias_drop():
+    """The coverage gate OUTRANKS a bias reduction (iter 286): a deploy that LOWERED the
+    fine-grid bias but lies OUTSIDE the coarse env hull is 'out_of_hull' (untrustworthy),
+    NOT 'transferred'.  A regression checking ``fine_bias_reduced`` before the coverage
+    gate would falsely green-light an extrapolating deploy.  The existing _FAR_ENV test
+    can't pin this — its out-of-hull bias typically does NOT fall (the kernel no-ops), so
+    it can't distinguish the two orderings; this constructs bias-fell + out-of-hull."""
+    base = _cross_res(_FINE_ENV, (2, 4))
+    res = base._replace(                                       # bias FELL 5 -> 2 ...
+        fine_bias_uncorrected=5.0, fine_bias_corrected=2.0, fine_bias_reduced=True,
+        fraction_in_hull=0.1, fraction_covered=0.1)           # ... but only 10% in-hull
+    assert res.fraction_in_hull < res.coverage_threshold      # genuinely out of hull
+    v = cross_res_osse_verdict(res)
+    assert v.status == "out_of_hull" and not v.ok             # NOT 'transferred'
+    assert "untrustworthy" in v.message
+
+
 def test_cross_resolution_rejects_mismatched_field():
     import pytest
     with pytest.raises(ValueError, match="does not match"):
