@@ -97,6 +97,21 @@ def test_multi_output_partial_fields():
     assert float(cfg.Pr_t) == float(CLUBBLiteConfig().Pr_t)
 
 
+def test_multi_output_inconsistent_lengths_rejected_at_build():
+    """A corrupted MULTI output whose per-column fields span DIFFERENT column counts
+    (C_K len 2 vs Pr_t len 3) fails loud at BUILD time — independent of the optional grid
+    check (which is SKIPPED when grid=None), so a grid-less deploy cannot silently
+    mis-broadcast mismatched coefficients into production (iter 303). Before the fix
+    corrected_clubb_config built a CLUBBLiteConfig with the mismatched fields, no raise."""
+    bad = _multi_output({"clubb_lite_C_K": [0.5, 0.6],
+                         "clubb_lite_Pr_t": [0.4, 0.5, 0.6]})
+    with pytest.raises(ValueError, match="inconsistent column counts"):
+        corrected_clubb_config(bad)
+    # And through the grid-less public entry point (no grid ⇒ no compatibility check).
+    with pytest.raises(ValueError, match="inconsistent column counts"):
+        corrected_turbulence_override(bad)
+
+
 # --------------------------------------------------------------------------- #
 # corrected_turbulence_override — dict / path / file
 # --------------------------------------------------------------------------- #

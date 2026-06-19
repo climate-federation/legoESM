@@ -79,6 +79,10 @@ def corrected_clubb_config(data: dict):
         raise ValueError(
             "no corrected CLUBB-lite coefficient field found in the campaign "
             "output (expected a 'fields' dict or a C_K/Pr_t/C_eps array).")
+    # Multi-field internal consistency, independent of the optional grid check (which is
+    # skipped when grid=None): a corrupted output mixing column counts must fail loud at
+    # BUILD time, not silently mis-broadcast in production.
+    _assert_consistent_ncol(overrides)
     return CLUBBLiteConfig(**overrides)
 
 
@@ -104,6 +108,25 @@ def _clean_field_array(field: str, vals: Any, defaults):
     if not bool(jnp.all(jnp.isfinite(arr))):
         raise ValueError(f"corrected '{field}' field has non-finite values.")
     return arr
+
+
+def _assert_consistent_ncol(per_column: dict[str, Any]) -> None:
+    """Every per-column corrected field must span the SAME column count (one grid).
+
+    A mismatch — a hand-edited / corrupted MULTI output with e.g. ``C_K`` length 128
+    but ``Pr_t`` length 64 — would otherwise build a ``CLUBBLiteConfig`` whose fields
+    index DIFFERENT columns, a silent ``jnp.take`` OOB-fill in the physics.  Shared by
+    the deploy BUILD (:func:`corrected_clubb_config`, which previously only validated
+    each field individually) and the distributed SLICE (:func:`_per_column_clubb_fields`)
+    so the consistency rule lives in ONE place.
+    """
+    import jax.numpy as jnp
+
+    lengths = {int(jnp.asarray(a).shape[0]) for a in per_column.values()}
+    if len(lengths) > 1:
+        raise ValueError(
+            f"corrected per-column fields have inconsistent column counts {lengths}; "
+            "every corrected field must span the same grid (one ncol).")
 
 
 def corrected_turbulence_override(
@@ -300,11 +323,7 @@ def _per_column_clubb_fields(override):
         per_column[field] = arr
     # All per-column fields share ONE column count (the global ncol) — else an
     # index valid for one field would be OOB for another (silent jnp.take fill).
-    lengths = {int(a.shape[0]) for a in per_column.values()}
-    if len(lengths) > 1:
-        raise ValueError(
-            f"per-column override fields have inconsistent column counts {lengths}; "
-            "every corrected field must span the same global grid.")
+    _assert_consistent_ncol(per_column)
     return clubb, per_column
 
 
