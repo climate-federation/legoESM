@@ -188,6 +188,21 @@ def test_extract_voronoi_shapes_and_finite():
         assert np.all(np.isfinite(arr)), name
 
 
+def test_extract_voronoi_is_surface_flux_free():
+    """The voronoi/MPAS extractor produces NO surface BC (prescribe='none', no
+    T_s/w_th_s/w_qv_s) — the cross-dispatch invariant matching iter-148's
+    build_column_les_setup guard (a surface flux wired into ANY extractor without the
+    LES surface-flux bottom BC would make that guard reject the column)."""
+    mesh, sigma = _mesh_sigma()
+    T, q_v, p_s = _state(mesh, theta_const=False)
+    u_edge = _uniform_edge_flow(mesh, 6.0, 0.0)
+    out = extract_column_forcing_voronoi(
+        T=T, q_v=q_v, u_edge=u_edge, p_s=p_s, mesh=mesh,
+        sigma_coord=sigma, lat_rad=float(mesh.latCell[_CELL]), col_index=(_CELL,))
+    assert out.prescribe == "none"
+    assert out.T_s is None and out.w_th_s is None and out.w_qv_s is None
+
+
 def test_extract_voronoi_divergent_flow_gives_nonzero_omega():
     """A DIVERGENT edge-normal velocity ⇒ non-zero cell divergence ⇒ non-zero ω
     (the continuity chain is genuinely exercised, not vacuously zero)."""

@@ -78,6 +78,21 @@ def test_extract_gaussian_shapes_and_finite():
     assert out.u_geo is None and out.v_geo is None
 
 
+def test_extract_gaussian_is_surface_flux_free():
+    """The gaussian/spectral extractor produces NO surface BC (prescribe='none', no
+    T_s/w_th_s/w_qv_s) — the cross-dispatch invariant matching iter-148's
+    build_column_les_setup guard (a surface flux wired into ANY extractor without the
+    LES surface-flux bottom BC would make that guard reject the column). This completes
+    the surface-flux-free lock across ALL 4 grid families (cubed/latlon/voronoi/gaussian)."""
+    grid, sigma = _grid_sigma()
+    T, q_v, p_s, u, v = _state(grid, theta_const=False, wind="divergent")
+    out = extract_column_forcing_gaussian(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(grid.lat[_COL[0]]), col_index=_COL)
+    assert out.prescribe == "none"
+    assert out.T_s is None and out.w_th_s is None and out.w_qv_s is None
+
+
 def test_extract_gaussian_constant_theta_zero_advection_nonvacuous_moisture():
     """Uniform θ ⇒ the flux-form advection cancels (−∇·(θV)+θ·∇·V = 0) to spectral
     precision; a lon-VARYING q_v + zonal wind ⇒ NON-zero moisture advection."""
