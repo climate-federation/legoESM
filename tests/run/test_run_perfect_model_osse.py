@@ -326,3 +326,36 @@ def test_osse_main_returns_nonzero_when_not_recovered(monkeypatch):
         n_rounds=2, n_accepted=0, summary=None))
     rc = osse_cli.main(["--config", "c.json", "--true-ck", "0.9", "--biased-ck", "0.4"])
     assert rc == 1
+
+
+def test_production_loop_defaults_matches_production():
+    """The OSSE twin must use the SAME loop defaults as the production campaign so the
+    go/no-go is not FALSELY OPTIMISTIC: clip_to_bounds defaults True (production clips a
+    diagnosed coefficient to its registered bounds) and env_grid_fn is wired for
+    'environment' (else the loop raises on a None). Crucially setdefault must NOT override
+    an EXPLICIT value (an explicit no-clip twin must stay no-clip)."""
+    from functools import partial
+
+    from legoesm.training.feedback_assembly import column_environment_grid
+
+    import scripts.validate.run_perfect_model_osse as osse
+
+    # Default static campaign: clip ON, no env grid.
+    kw = {}
+    osse._production_loop_defaults(kw, sigma=object())
+    assert kw["clip_to_bounds"] is True
+    assert kw["env_grid_fn"] is None
+
+    # 'environment' strategy → env_grid_fn is the producer bound to sigma.
+    sigma = object()
+    kw2 = {"feedback_strategy": "environment"}
+    osse._production_loop_defaults(kw2, sigma=sigma)
+    assert isinstance(kw2["env_grid_fn"], partial)
+    assert kw2["env_grid_fn"].func is column_environment_grid
+    assert kw2["env_grid_fn"].keywords.get("sigma") is sigma
+
+    # setdefault must NOT override an EXPLICIT clip_to_bounds / env_grid_fn.
+    kw3 = {"clip_to_bounds": False, "env_grid_fn": "EXPLICIT"}
+    osse._production_loop_defaults(kw3, sigma=object())
+    assert kw3["clip_to_bounds"] is False
+    assert kw3["env_grid_fn"] == "EXPLICIT"
