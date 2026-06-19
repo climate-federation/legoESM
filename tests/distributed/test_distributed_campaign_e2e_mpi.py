@@ -30,8 +30,10 @@ from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
 )
 from legoesm.grids.vertical import create_sigma_coordinate  # noqa: E402
 from legoesm.grids.voronoi import create_voronoi_mesh  # noqa: E402
+from legoesm.parallel.reductions import global_sum_mpi  # noqa: E402
 from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
+from legoesm.training.distributed_campaign import assemble_global_field  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
@@ -161,6 +163,16 @@ def test_distributed_campaign_corrects_global_worst_on_its_owner():
     # Exactly ONE rank owns + corrects the global-worst cell (no double-count).
     n_owners = COMM.allreduce(1 if owns_bias else 0, op=MPI.SUM)
     assert n_owners == 1
+
+    # PERSIST step (iter 253): assemble the rank-local C_K into the GLOBAL field under
+    # the REAL allreduce. The global-worst cell is corrected at its GLOBAL id (on
+    # whichever rank owns it); every other global cell keeps the background bg. This
+    # proves assemble_global_field is the correct forward-inverse of the reference
+    # slice under the actual collective, not just single-process.
+    global_ck = assemble_global_field(layout, ck, global_reduce=global_sum_mpi)
+    assert global_ck.shape == (global_mesh.nCells,)
+    assert not np.isclose(global_ck[bias_cell], bg), "global-worst cell not corrected"
+    np.testing.assert_allclose(np.delete(global_ck, bias_cell), bg)  # all others bg
     COMM.Barrier()
 
 

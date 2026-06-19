@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 from legoesm.training.compare_reanalysis import ColumnState, owned_cell_valid_mask
 from legoesm.training.distributed_campaign import (
+    assemble_global_field,
     assert_partition_covers_global,
     distributed_campaign_hooks,
     slice_reference_to_local,
@@ -229,6 +230,65 @@ def test_assert_partition_covers_global_rejects_out_of_range_owned_id():
         assert_partition_covers_global(
             _layout([True, True, True], [0, 1, 5], n_global=4),
             global_reduce=_serial_sum)             # owns id 5 of a 4-cell mesh
+
+
+# --- assemble_global_field: the FORWARD inverse of slice_reference_to_local (iter 253).
+def test_assemble_global_field_single_rank_round_trips_by_global_id():
+    """One rank owning every cell: the assembled global field places each LOCAL value
+    at its GLOBAL id (reordered out of local order), the exact inverse of a slice."""
+    # local order is NOT global order: local cell k holds global id local_cells[k].
+    layout = _layout([True, True, True, True], [2, 0, 3, 1], n_global=4)
+    local_field = jnp.asarray([0.5, 1.5, 2.5, 3.5])   # value for local cell k
+    g = assemble_global_field(layout, local_field, global_reduce=_serial_sum)
+    # global id 0 got local-1's value 1.5; id 1 <- local-3 3.5; id 2 <- local-0 0.5; ...
+    np.testing.assert_array_equal(np.asarray(g), [1.5, 3.5, 0.5, 2.5])
+
+
+def test_assemble_global_field_gathers_across_ranks_and_ignores_halo():
+    """Two ranks tiling the mesh: each contributes ONLY its owned cells; a rank's HALO
+    copy of another rank's cell (owned=False, garbage value) must NOT leak."""
+    # rank0 owns global 0,1 and holds 2 as a halo with a GARBAGE value (must be ignored).
+    rank0 = _layout([True, True, False], [0, 1, 2], n_global=3)
+    field0 = jnp.asarray([0.25, 0.75, 999.0])         # 999.0 is the halo (non-owned)
+    # the OTHER rank owns global 2 with value 0.5 — compose its scattered contribution.
+    # verify_coverage=False isolates the GATHER here (the gate is exercised separately);
+    # the single closure cannot serve both the gate's int32 COUNT buffer and this float
+    # VALUE buffer, and coverage IS clean (rank0 owns 0,1; the other owns 2).
+    def _other(x):
+        return x + jnp.zeros_like(x).at[2].add(0.5)
+    g = assemble_global_field(rank0, field0, global_reduce=_other, verify_coverage=False)
+    np.testing.assert_array_equal(np.asarray(g), [0.25, 0.75, 0.5])  # halo 999 gone
+
+
+def test_assemble_global_field_rejects_misaligned_local_field():
+    """A local_field whose length ≠ local_cells is folded into the SAME reduction's
+    sentinel slot so EVERY rank raises together (no pre-collective rank-local crash)."""
+    layout = _layout([True, True, True], [0, 1, 2], n_global=3)
+    with pytest.raises(ValueError, match="same length as local_cells"):
+        assemble_global_field(layout, jnp.asarray([0.5, 0.5]),  # 2 ≠ 3 cells
+                              global_reduce=_serial_sum)
+
+
+def test_assemble_global_field_rejects_out_of_range_owned_id():
+    """An owned global id ≥ nCells_global would clamp in the scatter — caught + synced
+    via the second sentinel slot instead."""
+    layout = _layout([True, True, True], [0, 1, 5], n_global=4)   # owns id 5 of 4
+    with pytest.raises(ValueError, match="out of range"):
+        assemble_global_field(layout, jnp.asarray([0.1, 0.2, 0.3]),
+                              global_reduce=_serial_sum)
+
+
+def test_assemble_global_field_verify_coverage_rejects_a_gap():
+    """verify_coverage (default) re-runs the canonical coverage gate, so an UNVERIFIED
+    caller still fails loudly on a gap rather than silently returning a 0 at that cell."""
+    layout = _layout([True, True, True], [0, 1, 3], n_global=4)   # cell 2 is a gap
+    with pytest.raises(ValueError, match="owned by NO rank"):
+        assemble_global_field(layout, jnp.asarray([0.1, 0.2, 0.3]),
+                              global_reduce=_serial_sum)
+    # with the gate disabled the same call no longer raises (caller vouches for cover).
+    g = assemble_global_field(layout, jnp.asarray([0.1, 0.2, 0.3]),
+                              global_reduce=_serial_sum, verify_coverage=False)
+    assert np.asarray(g)[2] == 0.0                   # the un-contributed gap cell
 
 
 def test_assert_partition_covers_global_detects_cross_rank_overlap():

@@ -223,3 +223,94 @@ def slice_reference_to_local(
     return reference._replace(
         **{f: _slice(getattr(reference, f)) for f in reference._fields}
     )
+
+
+def assemble_global_field(
+    layout: Any, local_field: Any, *, global_reduce: Any = None,
+    verify_coverage: bool = True,
+) -> np.ndarray:
+    """Re-assemble a rank-local corrected coefficient field into the GLOBAL field.
+
+    The exact FORWARD inverse of :func:`slice_reference_to_local`: that cuts a global
+    per-cell field DOWN to a rank's local cells before the run; this gathers each
+    rank's OWNED-cell corrected values back UP into one ``(nCells_global,)`` global
+    field after the run, so the multi-day distributed campaign's result can be
+    persisted (or compared) as a single global array.  Without it a user composing an
+    MPI driver from :func:`build_distributed_mpas_campaign` has only a rank-LOCAL
+    ``result.final_field`` (each rank corrected only its owned cells); writing that
+    per rank races on the path AND each file holds a PARTIAL field.
+
+    Mechanics mirror :func:`assert_partition_covers_global`: each rank scatters its
+    OWNED cells' values over a ``nCells_global``-length vector by GLOBAL id (non-owned
+    halo cells are ignored), and ``global_reduce`` (an allreduce SUM —
+    ``global_sum_mpi`` by default; inject a plain identity/sum for a single-rank unit
+    test) sums them.  Because the owned sets PARTITION the global mesh (every cell
+    owned by exactly one rank), each global cell receives exactly one contribution, so
+    the SUM reproduces the value with no double-count.  That partition invariant is the
+    precondition; with ``verify_coverage`` (default) it is re-checked up front via
+    :func:`assert_partition_covers_global` (the canonical gate — NOT re-derived here),
+    so an unverified caller still fails LOUDLY on a gap/overlap instead of silently
+    summing a doubled value.
+
+    ``local_field`` is the rank-local corrected field (``result.final_field``); it is
+    flattened to ``(n_local,)`` and MUST align with ``partition.local_cells`` /
+    ``owned_mask_cells`` (a length mismatch, like an out-of-range owned id, is folded
+    into the SAME reduction's two sentinel slots so EVERY rank raises together — never
+    a rank-local raise that would hang the others inside the collective, Codex iter 98).
+
+    A ONE-TIME ``O(nCells_global)`` collective (like ``gather_to_global`` for I/O), NOT
+    a per-step op.  Runs in float64 (the summed coefficients) — enable ``x64`` (the
+    campaign does); MUST be called on EVERY rank.  Returns the global field identically
+    on every rank (allreduce); write it on rank 0 ONLY (e.g. ``if rank == 0:
+    _atomic_write_json(...)``) so the persist does not race.
+    """
+    if global_reduce is None:
+        from legoesm.parallel.reductions import global_sum_mpi
+        global_reduce = global_sum_mpi
+    if verify_coverage:
+        assert_partition_covers_global(layout, global_reduce=global_reduce)
+
+    n_global = int(layout.partition.nCells_global)
+    local_cells = np.asarray(layout.partition.local_cells)
+    owned = np.asarray(layout.owned_mask_cells, dtype=bool)
+    field_flat = np.asarray(local_field).reshape(-1)
+
+    # Per-rank structural defects crash the scatter LOCALLY on one rank only (which
+    # would hang the others in the allreduce), so detect them into flags and ride two
+    # EXTRA reduced slots — one SUM carries the values AND the flags (mirrors the
+    # owned-count gate). A non-1-D / mis-length owned mask OR a field that does not
+    # align with local_cells is malformed; an owned global id out of range would clamp.
+    mask_bad = (
+        owned.ndim != 1
+        or owned.shape[0] != local_cells.shape[0]
+        or field_flat.shape[0] != local_cells.shape[0]
+    )
+    oob_bad = False
+    owned_global = np.empty(0, dtype=local_cells.dtype)
+    owned_vals = np.empty(0, dtype=np.float64)
+    if not mask_bad:
+        owned_global = local_cells[owned]
+        owned_vals = field_flat[owned].astype(np.float64)
+        if owned_global.size and (
+                int(owned_global.min()) < 0 or int(owned_global.max()) >= n_global):
+            oob_bad = True                           # skip the scatter (would clamp)
+
+    buf = jnp.zeros(n_global + 2, dtype=jnp.float64)
+    if not mask_bad and not oob_bad and owned_global.size:
+        buf = buf.at[jnp.asarray(owned_global)].add(jnp.asarray(owned_vals))
+    buf = buf.at[n_global].add(float(mask_bad))
+    buf = buf.at[n_global + 1].add(float(oob_bad))
+
+    red = np.asarray(global_reduce(buf))
+    n_mask_bad = int(round(float(red[n_global])))
+    n_oob_bad = int(round(float(red[n_global + 1])))
+    if n_mask_bad:                                   # raised on ALL ranks (synced)
+        raise ValueError(
+            "assemble_global_field: owned_mask_cells / local_field must be 1-D and the "
+            "same length as local_cells (one value + owned flag per local cell) — "
+            f"malformed on {n_mask_bad} rank(s).")
+    if n_oob_bad:
+        raise ValueError(
+            "assemble_global_field: an owned global cell id is out of range "
+            f"[0, {n_global}) — the partition is malformed on {n_oob_bad} rank(s).")
+    return red[:n_global]
