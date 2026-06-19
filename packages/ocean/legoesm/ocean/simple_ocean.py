@@ -20,6 +20,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.core.bulk_flux import apply_gustiness
 
 
 # ============================================================================
@@ -40,7 +41,14 @@ class SimpleOceanConfig(NamedTuple):
     emissivity_ocean: float = 0.97
     Cd_ocean: float = 1.5e-3         # Drag coefficient
     Ch_ocean: float = 1.5e-3         # Heat transfer coefficient
-    U_min: float = 1.0               # Smooth wind floor [m/s]
+    U_min: float = 1.0               # Numerical wind floor [m/s]
+    # Sub-grid convective gustiness floor [m/s] for the air-sea bulk fluxes:
+    # |U|_eff = sqrt(|U|^2 + gustiness^2).  The resolved grid-mean wind misses
+    # boundary-layer convective gustiness, which dominates the surface
+    # evaporation in light-wind/convective regions; a ~1 m/s floor starves the
+    # hydrological cycle (coupled hfls ~35 vs ~80 W/m^2).  5 m/s = Wing (2018)
+    # RCEMIP1, matching the SCM rce_surface_flux gustiness; subsumes U_min.
+    gustiness: float = 5.0
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
@@ -119,8 +127,8 @@ def _slab_step(
     T_sfc = state.T_sfc.data
 
     # Smooth wind floor
-    wind = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+    wind = apply_gustiness(
+        forcing.u_lowest, forcing.v_lowest, config.gustiness,
     )
 
     # Surface humidity: saturated
@@ -179,8 +187,8 @@ def _two_layer_step(
     T_deep = state.T_deep.data
 
     # Smooth wind floor
-    wind = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+    wind = apply_gustiness(
+        forcing.u_lowest, forcing.v_lowest, config.gustiness,
     )
 
     # Surface humidity: saturated

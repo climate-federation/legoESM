@@ -16,7 +16,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.precision import get_policy
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.core.bulk_flux import (
+    simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+)
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
@@ -234,9 +236,12 @@ def ocean_tile_response(
             n_iter=config.bulk_n_iter,
         )
     else:
-        # Constant neutral coefficients (original behavior)
-        wind_speed = jnp.sqrt(
-            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+        # Constant neutral coefficients (original behavior).  Sub-grid
+        # convective gustiness floor (Wing 2018) on the effective wind so
+        # light-wind/convective columns evaporate realistically (the dry-column
+        # / weak-hydrological-cycle fix); subsumes the U_min numerical floor.
+        wind_speed = apply_gustiness(
+            forcing.u_lowest, forcing.v_lowest, config.gustiness,
         )
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
