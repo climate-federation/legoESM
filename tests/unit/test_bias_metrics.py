@@ -8,16 +8,82 @@ and AD/jit safety.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.training.bias_metrics import (
     aggregate_combined_bias,
+    aggregate_per_variable_bias,
     bias_improvement,
     worst_column_bias_change,
 )
+
+
+class _ErrFields(NamedTuple):
+    T_rmse_K: jnp.ndarray
+    qv_rmse_kg_kg: jnp.ndarray
+    wind_rmse_m_s: jnp.ndarray
+    precip_err_mm_day: jnp.ndarray
+    combined_score: jnp.ndarray
+
+
+def _err_fields(t, qv, wind, precip):
+    shp = jnp.asarray(t).shape
+    return _ErrFields(T_rmse_K=jnp.asarray(t), qv_rmse_kg_kg=jnp.asarray(qv),
+                      wind_rmse_m_s=jnp.asarray(wind),
+                      precip_err_mm_day=jnp.asarray(precip),
+                      combined_score=jnp.zeros(shp))
+
+
+def test_per_variable_bias_is_quadrature_global_rmse():
+    """T/qv/wind aggregate in MSE-space: global RMSE = sqrt(area_mean(rmse²)),
+    NOT the linear mean of per-column RMSEs (they combine in quadrature)."""
+    t = jnp.array([3.0, 4.0])          # uniform weights ⇒ sqrt((9+16)/2)=sqrt(12.5)
+    pvb = aggregate_per_variable_bias(
+        _err_fields(t, 2.0 * t, 0.5 * t, jnp.zeros(2)),
+        jnp.ones(2), have_precip=False)
+    assert float(pvb.global_T_rmse_K) == pytest.approx(np.sqrt(12.5))
+    assert float(pvb.global_qv_rmse_kg_kg) == pytest.approx(np.sqrt(4 * 12.5))
+    assert float(pvb.global_wind_rmse_m_s) == pytest.approx(np.sqrt(0.25 * 12.5))
+    # ≠ the (wrong) linear mean 3.5 — proves quadrature, not arithmetic mean.
+    assert float(pvb.global_T_rmse_K) != pytest.approx(3.5)
+
+
+def test_per_variable_bias_area_weighted():
+    """The MSE mean is AREA-weighted: a heavily-weighted column dominates."""
+    t = jnp.array([2.0, 8.0])
+    w = jnp.array([3.0, 1.0])           # sqrt((3·4 + 1·64)/4) = sqrt(19)
+    pvb = aggregate_per_variable_bias(
+        _err_fields(t, t, t, jnp.zeros(2)), w, have_precip=False)
+    assert float(pvb.global_T_rmse_K) == pytest.approx(np.sqrt(19.0))
+
+
+def test_per_variable_bias_precip_nan_unless_have_precip():
+    """precip → NaN when not compared (an all-zero precip field must NOT read as a
+    perfect 0); the area-weighted MEAN absolute error when have_precip."""
+    ef = _err_fields(jnp.ones(2), jnp.ones(2), jnp.ones(2), jnp.array([1.0, 3.0]))
+    assert bool(jnp.isnan(aggregate_per_variable_bias(
+        ef, jnp.ones(2), have_precip=False).global_precip_err_mm_day))
+    got = aggregate_per_variable_bias(ef, jnp.ones(2), have_precip=True)
+    assert float(got.global_precip_err_mm_day) == pytest.approx(2.0)   # mean(|1|,|3|)
+
+
+def test_per_variable_bias_global_reduce_doubling_preserves_rmse():
+    """global_reduce sums the NUMERATOR Σw·rmse² AND the DENOMINATOR Σw before the
+    divide: a DOUBLING reducer leaves the RMSE UNCHANGED (2·num / 2·den → same ratio
+    → same sqrt), proving it reached BOTH sums (not just the numerator)."""
+    t = jnp.array([3.0, 4.0, 0.0, 5.0])
+    ef = _err_fields(t, t, t, jnp.zeros(4))
+    local = float(aggregate_per_variable_bias(
+        ef, jnp.ones(4), have_precip=False).global_T_rmse_K)
+    assert local == pytest.approx(np.sqrt((9 + 16 + 0 + 25) / 4))   # sqrt(mean of squares)
+    doubled = float(aggregate_per_variable_bias(
+        ef, jnp.ones(4), have_precip=False,
+        global_reduce=lambda x: 2.0 * x).global_T_rmse_K)
+    assert doubled == pytest.approx(local)        # both sums scaled ⇒ RMSE unchanged
 
 
 def test_aggregate_uniform_weights_is_mean():

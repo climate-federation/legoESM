@@ -277,6 +277,25 @@ def main(argv: list[str] | None = None) -> int:
         f"[compare_amip_era5] wrote {len(result.manifest)} worst columns to "
         f"{args.out} (grid={canon}, N={args.resolution}, nlev={args.nlev})."
     )
+    # Per-variable GLOBAL bias (physical units) — the interpretable companion to
+    # the dimensionless worst-column score: run this on a baseline AND a corrected
+    # snapshot to see WHICH variables a correction improves vs trades off. Weighted
+    # by the grid's true cell areas (the public GridProtocol `grid_area`).
+    from legoesm.training.bias_metrics import aggregate_per_variable_bias
+
+    have_precip = (getattr(model, "precip_mm_day", None) is not None
+                   and getattr(reference, "precip_mm_day", None) is not None)
+    pvb = aggregate_per_variable_bias(
+        result.error_fields, jnp.asarray(grid.grid_area), have_precip=have_precip)
+    precip_str = (f"{float(pvb.global_precip_err_mm_day):.4g} mm/day"
+                  if have_precip else "N/A (precip not compared)")
+    print(
+        "[compare_amip_era5] global area-weighted bias: "
+        f"T_rmse={float(pvb.global_T_rmse_K):.4g} K, "
+        f"qv_rmse={float(pvb.global_qv_rmse_kg_kg):.4g} kg/kg, "
+        f"wind_rmse={float(pvb.global_wind_rmse_m_s):.4g} m/s, "
+        f"precip_err={precip_str}"
+    )
     return 0
 
 

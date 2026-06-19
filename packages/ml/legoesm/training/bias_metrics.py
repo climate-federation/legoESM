@@ -23,7 +23,7 @@ contaminate the sum.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +42,52 @@ class BiasImprovement(NamedTuple):
     improved: jax.Array            # bool scalar: updated < baseline
 
 
+def _area_weighted_mean(
+    field: jax.Array,
+    area_weights: jax.Array,
+    *,
+    valid_mask: jax.Array | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
+) -> jax.Array:
+    """Area-weighted global mean ``Σ field·w / Σ w`` of a per-column field.
+
+    The shared, guarded reduction core behind :func:`aggregate_combined_bias`
+    (combined-score bias) and :func:`aggregate_per_variable_bias` (per-variable
+    bias).  ``area_weights`` (broadcastable to ``field``) is the per-column
+    quadrature weight; ``valid_mask`` (same shape) excludes columns by zeroing
+    their weight AND sanitising any non-finite value there (so a masked NaN cannot
+    leak into the sum).  An all-excluded field yields ``0`` rather than ``0/0``.
+
+    ``global_reduce`` (DISTRIBUTED, optional): a SUM reduction across MPI ranks
+    (e.g. :func:`legoesm.parallel.reductions.global_sum_mpi`).  When given, the
+    NUMERATOR ``Σ field·w`` and DENOMINATOR ``Σ w`` are each reduced across ranks
+    BEFORE the division, so a rank-local slice yields the SAME GLOBAL mean on every
+    rank (the basis for a deadlock-free accept/reject + line-search, iter 88).
+    AD-safe: the denominator is masked before division.
+    """
+    field = jnp.asarray(field)
+    weights = jnp.asarray(area_weights)
+    dtype = jnp.result_type(field, weights, jnp.float32)
+    field = field.astype(dtype)
+    w = jnp.broadcast_to(weights.astype(dtype), field.shape)
+    if valid_mask is not None:
+        m = jnp.asarray(valid_mask, dtype=bool)
+        w = jnp.where(m, w, jnp.zeros_like(w))
+        field = jnp.where(m, field, jnp.zeros_like(field))
+    numerator = jnp.sum(field * w)
+    total = jnp.sum(w)
+    if global_reduce is not None:
+        numerator = global_reduce(numerator)
+        total = global_reduce(total)
+    floor = jnp.asarray(_BIAS_FLOOR, dtype=dtype)
+    has_weight = total > floor
+    # Guarded denominator: never 0/0 in either where-branch, so the reverse-mode
+    # gradient stays finite even when every column is excluded.
+    safe_total = jnp.where(has_weight, total, jnp.ones_like(total))
+    mean = numerator / safe_total
+    return jnp.where(has_weight, mean, jnp.zeros_like(mean))
+
+
 def aggregate_combined_bias(
     combined_score: jax.Array,
     area_weights: jax.Array,
@@ -58,37 +104,13 @@ def aggregate_combined_bias(
     a scalar; an all-excluded field yields ``0`` rather than ``0/0``.
 
     ``global_reduce`` (DISTRIBUTED, optional): a SUM reduction across MPI ranks
-    (e.g. :func:`legoesm.parallel.reductions.global_sum_mpi`).  When given, the
-    weighted NUMERATOR ``Σ score·w`` and the DENOMINATOR ``Σ w`` are each reduced
-    across ranks BEFORE the division, so a rank-local slice (e.g. an MPAS rank's
-    owned cells under the iter-86 owned mask) yields the SAME GLOBAL area-weighted
-    bias on every rank — the basis for an identical (deadlock-free) accept/reject
-    and line-search decision across ranks (iter 88).  ``None`` (single-process
-    default) keeps the purely-local sum, byte-identical to the prior behaviour.
+    yields the SAME GLOBAL area-weighted bias on every rank — the basis for an
+    identical (deadlock-free) accept/reject and line-search decision across ranks
+    (iter 88).  ``None`` (single-process default) keeps the purely-local sum.
     """
-    score = jnp.asarray(combined_score)
-    weights = jnp.asarray(area_weights)
-    dtype = jnp.result_type(score, weights, jnp.float32)
-    score = score.astype(dtype)
-    w = jnp.broadcast_to(weights.astype(dtype), score.shape)
-    if valid_mask is not None:
-        m = jnp.asarray(valid_mask, dtype=bool)
-        w = jnp.where(m, w, jnp.zeros_like(w))
-        score = jnp.where(m, score, jnp.zeros_like(score))
-    numerator = jnp.sum(score * w)
-    total = jnp.sum(w)
-    if global_reduce is not None:
-        # Reduce the SUMS (not the ratio) across ranks, then divide — the global
-        # weighted mean of a partitioned field.  Both reductions share the dtype.
-        numerator = global_reduce(numerator)
-        total = global_reduce(total)
-    floor = jnp.asarray(_BIAS_FLOOR, dtype=dtype)
-    has_weight = total > floor
-    # Guarded denominator: never 0/0 in either where-branch, so the reverse-mode
-    # gradient stays finite even when every column is excluded.
-    safe_total = jnp.where(has_weight, total, jnp.ones_like(total))
-    mean = numerator / safe_total
-    return jnp.where(has_weight, mean, jnp.zeros_like(mean))
+    return _area_weighted_mean(
+        combined_score, area_weights,
+        valid_mask=valid_mask, global_reduce=global_reduce)
 
 
 def bias_improvement(
@@ -122,6 +144,67 @@ def bias_improvement(
         absolute_reduction=reduction,
         fractional_improvement=frac,
         improved=upd < base,
+    )
+
+
+class PerVariableBias(NamedTuple):
+    """Per-VARIABLE area-weighted global bias (physical units), the interpretable
+    companion to the single :func:`aggregate_combined_bias` dimensionless score.
+
+    ``global_T_rmse_K`` / ``global_qv_rmse_kg_kg`` / ``global_wind_rmse_m_s`` are
+    the GLOBAL RMSE — ``sqrt(area_weighted_mean(per_column_rmse²))`` (the per-column
+    fields are ALREADY vertical RMSEs, so they combine in QUADRATURE, not linearly,
+    to the true global RMSE).  ``global_precip_err_mm_day`` is the area-weighted
+    mean ABSOLUTE precip error (precip is an absolute, not RMS, error); it is
+    ``NaN`` when precipitation was not compared (``have_precip=False``), so a
+    not-compared precip is never reported as a spurious ``0``.  These names are
+    GLOBAL scalars — distinct from the per-column ``ColumnErrorFields``.
+    """
+
+    global_T_rmse_K: jax.Array
+    global_qv_rmse_kg_kg: jax.Array
+    global_wind_rmse_m_s: jax.Array
+    global_precip_err_mm_day: jax.Array
+
+
+def aggregate_per_variable_bias(
+    error_fields: Any,
+    area_weights: jax.Array,
+    *,
+    have_precip: bool = False,
+    valid_mask: jax.Array | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
+) -> PerVariableBias:
+    """Per-variable global bias from a :class:`ColumnErrorFields`.
+
+    The combined score can improve via a TRADE-OFF (better T, worse wind); this
+    exposes each physical variable so a correction's effect is interpretable
+    per-variable (the done-criterion: "improve the biases", plural).  T / q_v /
+    wind aggregate in MSE-space — ``sqrt(area_weighted_mean(rmse²))`` (the true
+    GLOBAL RMSE, since the inputs are per-column RMSEs); precip aggregates linearly
+    (mean absolute error) and is ``NaN`` unless ``have_precip`` (a flat-zero precip
+    field for a not-compared run would otherwise read as a perfect ``0``).
+    ``valid_mask`` / ``global_reduce`` behave as in :func:`aggregate_combined_bias`
+    (the same shared :func:`_area_weighted_mean` core).
+    """
+    from legoesm.training.scm_rce_metrics import safe_sqrt
+
+    def _global_rmse(field):
+        ms = _area_weighted_mean(
+            jnp.asarray(field) ** 2, area_weights,
+            valid_mask=valid_mask, global_reduce=global_reduce)
+        return safe_sqrt(ms)
+
+    precip = _area_weighted_mean(
+        error_fields.precip_err_mm_day, area_weights,
+        valid_mask=valid_mask, global_reduce=global_reduce)
+    if not have_precip:
+        precip = jnp.full_like(jnp.asarray(precip), jnp.nan)
+    return PerVariableBias(
+        global_T_rmse_K=_global_rmse(error_fields.T_rmse_K),
+        global_qv_rmse_kg_kg=_global_rmse(error_fields.qv_rmse_kg_kg),
+        global_wind_rmse_m_s=_global_rmse(error_fields.wind_rmse_m_s),
+        global_precip_err_mm_day=precip,
     )
 
 
