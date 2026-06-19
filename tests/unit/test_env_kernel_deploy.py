@@ -343,6 +343,20 @@ def test_from_dict_rejects_mislabelled_artifact():
     env_kernel_from_dict(no_tag)   # back-compat: missing tag OK
 
 
+def test_from_dict_rejects_mismatched_hull_bound_length():
+    """A corrupted/hand-edited kernel JSON with a wrong-length ``env_lo``/``env_hi`` is
+    rejected on deserialize (iter 284) — the validator's per-field length loop guards
+    all 5 fields but only ``length_scales`` was tested.  ``env_lo``/``env_hi`` are the
+    HULL bounds (the deploy trust region, iter 217); a length-1 ``env_lo`` would silently
+    BROADCAST and corrupt the in-hull domain-shift check, so it must fail LOUD."""
+    d = env_kernel_to_dict(_kernel())                            # 3-predictor kernel
+    for field in ("env_lo", "env_hi"):
+        bad = dict(d)
+        bad[field] = [1.0, 2.0]                                  # length 2, not npred=3
+        with pytest.raises(ValueError, match=rf"env kernel '{field}' length"):
+            env_kernel_from_dict(bad)
+
+
 def test_apply_rejects_wrong_grid_env_shape():
     k = _kernel()
     with pytest.raises(ValueError, match=r"must be \(ncol"):
