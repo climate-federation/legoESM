@@ -282,6 +282,25 @@ def test_run_cross_resolution_main_exit_code_gates_on_transfer(monkeypatch):
     assert rpo._run_cross_resolution_main(args, **common) == 1
 
 
+def test_assert_pseudo_truth_finite_gates_on_columnstate():
+    """_assert_pseudo_truth_finite (iter 302) fails loud on a DIVERGED ColumnState pseudo-truth
+    (run_fn(true_config) blew up → NaN), but SKIPS a non-ColumnState reference (the analytic
+    ARRAY run_fns the unit tests use) so they are unaffected — the OSSE analog of the iter-301
+    baseline divergence guard."""
+    import pytest
+    from legoesm.training.perfect_model_osse import _assert_pseudo_truth_finite
+
+    # Non-ColumnState references (an analytic grid array; None) are skipped — no raise.
+    assert _assert_pseudo_truth_finite(jnp.ones((4, 3)), "x") is None
+    assert _assert_pseudo_truth_finite(None, "x") is None
+    # A finite ColumnState pseudo-truth passes; a NaN one raises with the DIVERGED hint.
+    finite = _full_grid_state(jnp.full((8, 16, 5), 285.0))
+    assert _assert_pseudo_truth_finite(finite, "pseudo-truth run") is None
+    diverged = _full_grid_state(jnp.full((8, 16, 5), 285.0).at[0, 0, 0].set(jnp.nan))
+    with pytest.raises(ValueError, match=r"pseudo-truth run.*DIVERGED"):
+        _assert_pseudo_truth_finite(diverged, "pseudo-truth run")
+
+
 def test_build_cross_resolution_osse_rejects_multi_method():
     """The cross-res builder deploys ONE env->coefficient kernel (single-coefficient): a
     diagnosis_methods list is rejected loudly, mirroring build_perfect_model_osse."""

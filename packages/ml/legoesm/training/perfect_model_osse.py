@@ -38,6 +38,25 @@ from legoesm.training.correction_loop import run_correction_campaign
 _REL_TOL = 1e-6
 
 
+def _assert_pseudo_truth_finite(reference: Any, name: str) -> None:
+    """Fail loud if a pseudo-truth model run (``run_fn(true_config)``) DIVERGED.
+
+    The OSSE analog of the iter-301 baseline guard: the pseudo-reanalysis IS a model
+    run, so a NaN/inf from a blown-up true-config run would make the whole twin compare
+    against garbage (a meaningless recovery verdict).  Gated on :class:`ColumnState` so
+    the analytic-ARRAY ``run_fn``s of the unit tests (which return a plain grid array,
+    not a state) are unaffected — only the real CLI driver/LES harness produces a
+    ``ColumnState`` pseudo-truth.
+    """
+    from legoesm.training.compare_reanalysis import (
+        ColumnState,
+        assert_model_state_finite,
+    )
+
+    if isinstance(reference, ColumnState):
+        assert_model_state_finite(reference, name=name)
+
+
 class OSSEResult(NamedTuple):
     """Outcome of a perfect-model OSSE: bias trajectory + parameter recovery."""
 
@@ -168,6 +187,7 @@ def run_perfect_model_osse(
 
     # The pseudo-reanalysis: the model's OWN time mean under the known true config.
     reference = run_fn(true_config)
+    _assert_pseudo_truth_finite(reference, "OSSE pseudo-truth (true_config) run")
     compare_fn = build_compare_fn(reference)
 
     # Uncorrected columns hold the biased start (round-0 base) unless overridden.
@@ -369,6 +389,7 @@ def run_cross_resolution_osse(
 
     # ===== LEARN on the coarse grid (env strategy ⇒ the campaign emits a kernel). =====
     reference_coarse = coarse_run_fn(true_config)
+    _assert_pseudo_truth_finite(reference_coarse, "cross-res COARSE pseudo-truth run")
     compare_coarse = coarse_build_compare_fn(reference_coarse)
     biased_flat = jnp.asarray(getattr(biased_config, coefficient_field)).reshape(-1)
     campaign_kwargs.setdefault("background", float(jnp.mean(biased_flat)))
@@ -393,6 +414,7 @@ def run_cross_resolution_osse(
 
     # ===== DEPLOY on the fine grid + measure the paired bias change. =====
     reference_fine = fine_run_fn(true_config)
+    _assert_pseudo_truth_finite(reference_fine, "cross-res FINE pseudo-truth run")
     compare_fine = fine_build_compare_fn(reference_fine)
     fine_baseline = compare_fine(biased_config)
 
@@ -557,6 +579,7 @@ def run_multi_perfect_model_osse(
                 f"choose from {tuple(PROMOTABLE_FIELDS)}.")
 
     reference = run_fn(true_config)
+    _assert_pseudo_truth_finite(reference, "OSSE pseudo-truth (true_config) run")
     compare_fn = build_compare_fn(reference)
     result = run_multi_correction_campaign(
         biased_config, n_iterations, specs,
