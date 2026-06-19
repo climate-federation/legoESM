@@ -139,3 +139,53 @@ def test_campaign_sbatch_flags_are_valid_cli_options():
     assert not unknown, (
         f"the campaign sbatch passes flag(s) the CLI does not define: {unknown} — a "
         "renamed/removed CLI option would break the production launch at argparse.")
+
+
+# Detect a top-level OR function-scope ``from scripts.* import`` / ``import scripts.*``.
+_IMPORTS_SCRIPTS_RE = re.compile(r"^\s*(?:from\s+scripts[.\s]|import\s+scripts\b)", re.M)
+
+
+def test_runbook_workflow_scripts_run_as_scripts_have_the_path_bootstrap():
+    """Static audit-as-a-test for the iter-321 launch bug class, comprehensively.
+
+    A runbook command run AS A SCRIPT (``python scripts/X/Y.py``, the sbatch/runbook way)
+    puts the script's OWN directory on ``sys.path`` — NOT the repo root — so any ``from
+    scripts.* import`` raises ``ModuleNotFoundError: No module named 'scripts'`` at launch
+    unless the file adds the repo root to ``sys.path`` first.  iter 321 found the campaign +
+    OSSE were missing the bootstrap that smoke + deploy-check already had; the subprocess test
+    in ``test_cli_imports_resolve`` confirms it at runtime for the 4 main CLIs.  This locks the
+    invariant STATICALLY for EVERY workflow ``.py`` the runbook cites (plus the campaign the
+    .sbatch wraps): a file importing ``scripts.*`` MUST carry a ``sys.path.insert`` bootstrap.
+    Future-proofs a NEW runbook script (e.g. a plotter that later imports ``scripts.*``) —
+    the subprocess test's curated list would not cover it; this audit does."""
+    scripts = set(_referenced_scripts(_runbook_text()))
+    scripts.add(_CAMPAIGN_CLI)                       # wrapped by the .sbatch, not a direct .py ref
+    py_scripts = sorted(s for s in scripts if s.endswith(".py"))
+    assert py_scripts, "no .py workflow scripts parsed from the runbook (regex/file broken?)"
+
+    offenders = []
+    for rel in py_scripts:
+        src = (_REPO / rel).read_text()
+        if _IMPORTS_SCRIPTS_RE.search(src) and "sys.path.insert" not in src:
+            offenders.append(rel)
+    assert not offenders, (
+        f"workflow script(s) import `scripts.*` but lack a sys.path bootstrap: {offenders} — "
+        "they raise `ModuleNotFoundError: No module named 'scripts'` when run as a script (the "
+        "documented invocation).  Add before the `from scripts...` import:\n"
+        "    if str(Path(__file__).resolve().parents[2]) not in sys.path:\n"
+        "        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))\n"
+        "(cf. iter 321).")
+
+
+def test_path_bootstrap_audit_is_non_vacuous():
+    """Non-vacuity: the audit's predicate (imports-scripts AND no-bootstrap) actually FIRES
+    on the iter-321 failure shape, so a green result means the invariant holds — not that the
+    check never triggers.  Synthetic sources, no file I/O."""
+    bug = "from scripts.run.run_correction_campaign import x\nprint('hi')\n"
+    fixed = ("import sys\nfrom pathlib import Path\n"
+             "sys.path.insert(0, str(Path(__file__).resolve().parents[2]))\n"
+             "from scripts.run.run_correction_campaign import x\n")
+    clean = "import numpy as np\nprint('no scripts import here')\n"
+    assert _IMPORTS_SCRIPTS_RE.search(bug) and "sys.path.insert" not in bug      # flagged
+    assert _IMPORTS_SCRIPTS_RE.search(fixed) and "sys.path.insert" in fixed       # passes
+    assert not _IMPORTS_SCRIPTS_RE.search(clean)                                  # not applicable
