@@ -923,9 +923,15 @@ def test_maybe_write_env_kernel_writes_when_kernel_present(tmp_path, monkeypatch
     monkeypatch.setattr(dc, "env_kernel_to_dict", lambda k: {"field": "C_K", "k": k})
     out = str(tmp_path / "camp.json")
     rcc._maybe_write_env_kernel(
-        SimpleNamespace(out=out, feedback_strategy="environment"), object())
+        SimpleNamespace(out=out, feedback_strategy="environment",
+                        era5_time_idx=12, era5_n_times=30), object())
     with open(f"{out}.env_kernel.json") as f:
-        assert json.load(f) == {"field": "C_K", "k": "KERNEL"}     # last-accepted kernel serialized
+        written = json.load(f)
+    # the kernel dict PLUS the iter-269 averaging-window provenance stamp (locks the
+    # write-site stamp, not just the codec tolerance — the gap that let iter 269 break
+    # this test undetected for several iters).
+    assert written == {"field": "C_K", "k": "KERNEL",
+                       "averaging": {"era5_time_idx": 12, "era5_n_times": 30}}
     assert "wrote RAW environment kernel" in capsys.readouterr().out
 
 
