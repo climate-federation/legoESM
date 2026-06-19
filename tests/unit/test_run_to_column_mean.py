@@ -323,6 +323,36 @@ def test_model_phis_from_driver_none_for_flat_model():
     assert model_phis_from_driver(driver) is None
 
 
+def test_model_phis_from_driver_none_for_zero_topography():
+    """A real flat ModelDriver initialises phis = zeros(...) (NOT absent), so an
+    identically-zero field must ALSO map to None — the honest "None for flat"
+    contract. Otherwise the orographic term would activate with zero topography
+    (breaking exact flat-path parity) and a 'terrain required but flat' fail-loud
+    that checks `is None` would silently pass. Both Field-wrapped and raw zeros."""
+    from legoesm.core.field import Field
+
+    zeros = jnp.zeros((8, 16))
+    driver_field = SimpleNamespace(
+        state=SimpleNamespace(phis=Field(zeros)), grid=None, sigma=None)
+    assert model_phis_from_driver(driver_field) is None
+    driver_raw = SimpleNamespace(
+        state=SimpleNamespace(phis=np.zeros((8, 16))), grid=None, sigma=None)
+    assert model_phis_from_driver(driver_raw) is None
+
+
+def test_model_phis_from_driver_keeps_partially_zero_topography():
+    """A field with ANY non-zero element (e.g. land beside ocean at sea level) is
+    REAL terrain — returned unchanged, NOT None. Only an IDENTICALLY-zero field is
+    'flat'; a coastline (∇phis ≠ 0) must keep the orographic term ON."""
+    from legoesm.core.field import Field
+
+    arr = jnp.zeros((4, 8)).at[1, 2].set(3000.0)   # one mountain cell, rest sea level
+    driver = SimpleNamespace(state=SimpleNamespace(phis=Field(arr)), grid=None, sigma=None)
+    out = model_phis_from_driver(driver)
+    assert out is not None
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(arr))
+
+
 def test_model_phis_from_driver_none_when_no_state():
     """A driver with no `state` attribute ⇒ None (no crash)."""
     assert model_phis_from_driver(SimpleNamespace()) is None

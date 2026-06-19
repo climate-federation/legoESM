@@ -165,13 +165,18 @@ def model_phis_from_driver(driver: Any) -> Any:
     Pass the result as ``make_les_diagnose_fn(..., phis=…)`` / a campaign builder's
     ``phis=`` so the orographic correction uses the model's OWN topography (guaranteed
     CONSISTENT with the AMIP/CMIP run that produced the comparison state — no
-    mismatched-field footgun).  Returns ``None`` when the state carries no ``phis``
-    (a flat/aquaplanet model), so the orographic term then correctly stays OFF.
+    mismatched-field footgun).  Returns ``None`` for a flat/aquaplanet model — BOTH
+    when the state carries no ``phis`` AND when ``phis`` is identically zero (a flat
+    ``ModelDriver`` initialises ``phis = zeros(...)`` rather than leaving it absent),
+    so the orographic term correctly stays OFF: exact flat-path parity (an all-zero
+    ``∇phis`` contributes nothing anyway) plus no wasted gradient work, and a fail-loud
+    "terrain required but model is flat" check can rely on ``None``.
     ``phis`` is STATIC (config-independent topography), so build ONE driver and reuse
     the result across campaign rounds.  Spectral states are synthesized to a grid
     state first (the same ``grid_winds_from_spectral`` the compare uses); grid/MPAS
     states pass through.  The ``Field`` wrapper is unwrapped to a raw array.
     """
+    import jax.numpy as jnp
     from legoesm.core.field import Field
     state = grid_winds_from_spectral(
         getattr(driver, "state", None), getattr(driver, "grid", None),
@@ -181,4 +186,12 @@ def model_phis_from_driver(driver: Any) -> Any:
         return None
     # Unwrap ONLY a Field (isinstance, not hasattr "data" — a raw NumPy array also
     # has a `.data` MEMORYVIEW that would be returned by mistake; Codex).
-    return phis.data if isinstance(phis, Field) else phis
+    arr = phis.data if isinstance(phis, Field) else phis
+    # A flat ModelDriver sets phis = zeros(...), NOT absent (model_driver.py
+    # _create_topography), so treat an identically-zero field as "effectively flat"
+    # → None (honest "None for flat" contract; the orographic term stays OFF). This
+    # is a launch-time EAGER call on a concrete array (build ONE driver, reuse), so a
+    # Python bool from jnp.all is fine — NOT a traced hot-loop path.
+    if bool(jnp.all(jnp.asarray(arr) == 0)):
+        return None
+    return arr
