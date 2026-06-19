@@ -355,6 +355,41 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_main_resume_rejects_mismatched_corrected_field(tmp_path, monkeypatch):
+    """The HOT resume path (multi-day SLURM restarts): resuming a checkpoint whose
+    corrected coefficient (Pr_t) differs from --diagnosis-method's field (C_K) fails LOUD
+    at launch, NOT silently loading the field into the WRONG config slot (a garbage
+    correction). Drives main() with the heavy preamble stubbed up to the resume guard."""
+    import json
+    from types import SimpleNamespace
+
+    import legoesm.training.compare_reanalysis as cr
+    import legoesm.training.era5_to_state as e2s
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.compare_amip_era5 as cae
+
+    fake_cfg = SimpleNamespace(
+        grid=SimpleNamespace(grid_type="latlon", resolution=8, nlev=5))
+    fake_grid = SimpleNamespace(grid_shape_2d=(2, 3))
+    monkeypatch.setattr(rcc, "load_base_config_and_grid",
+                        lambda path: (fake_cfg, fake_grid, object()))
+    monkeypatch.setattr(
+        rcc, "make_base_driver_builder",
+        lambda mode, coupled_preset=None, ocean_grid=None: ((lambda c: None),
+                                                            (lambda d, day, dt: None)))
+    monkeypatch.setattr(e2s, "load_era5_time_mean", lambda cfg, idx: object())
+    monkeypatch.setattr(cae, "select_era5_regrid", lambda canon: (lambda slc, g, s: object()))
+    monkeypatch.setattr(cr, "column_state_from_carry", lambda carry: object())
+    monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda forcing, provider: None)
+
+    ckpt = tmp_path / "ckpt.json"
+    ckpt.write_text(json.dumps({"corrected_field": "Pr_t", "field": [[0.4]], "round": 0}))
+    with pytest.raises(SystemExit, match="checkpoint corrects"):
+        rcc.main(["--config", "c.json", "--era5-zarr", "z", "--resume", str(ckpt),
+                  "--diagnosis-method", "clubb_coefficient"])    # corrected_field "C_K" != "Pr_t"
+
+
 def test_maybe_write_env_kernel_writes_when_kernel_present(tmp_path, monkeypatch, capsys):
     """``_maybe_write_env_kernel`` exports the RAW env-kernel JSON (the grid-AGNOSTIC
     cross-resolution deploy PRODUCER) when the last ACCEPTED round produced one — the
