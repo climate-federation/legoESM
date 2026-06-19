@@ -260,6 +260,81 @@ def test_campaign_health_no_rounds():
     assert h.status == "no_rounds"
 
 
+def _pv_tw(t_rmse, wind_rmse):
+    from legoesm.training.bias_metrics import PerVariableBias
+    return PerVariableBias(jnp.asarray(t_rmse), jnp.asarray(1.0e-3),
+                           jnp.asarray(wind_rmse), jnp.asarray(float("nan")))
+
+
+def _cres_pv_tw(base, upd, pv_base, pv_upd):
+    from legoesm.training.bias_metrics import compare_per_variable_bias
+    return _cres(base, upd)._replace(
+        per_variable_bias=compare_per_variable_bias(pv_base, pv_upd))
+
+
+def _health_for(pv_base, pv_upd):
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres_pv_tw(1.0, 0.6, pv_base, pv_upd),),  # combined 1.0->0.6 (40%)
+        final_field=jnp.full((2, 2), 0.4), accepted=(True,))
+    return campaign_health(summarize_campaign(result, promotion_key="clubb_lite_C_K"))
+
+
+def test_health_flags_per_variable_tradeoff():
+    """Combined bias improved (40%) but WIND RMSE worsened (2->5) while T improved
+    (4->3): status stays 'improved' (.ok) — the combined target fell — but the message
+    NOTES the per-variable trade-off naming wind (the metric-gaming case)."""
+    h = _health_for(_pv_tw(4.0, 2.0), _pv_tw(3.0, 5.0))
+    assert h.status == "improved" and h.ok          # combined improved ⇒ still ok
+    assert "trade-off" in h.message and "wind" in h.message and "WORSENED" in h.message
+    assert "T" not in h.message.split("WORSENED")[0].split("but")[1]  # T not flagged
+
+
+def test_health_no_tradeoff_when_all_variables_improve():
+    """Combined + every variable improved ⇒ NO trade-off note."""
+    h = _health_for(_pv_tw(4.0, 5.0), _pv_tw(3.0, 2.0))   # T 4->3, wind 5->2, both down
+    assert h.status == "improved" and "trade-off" not in h.message
+
+
+def test_health_tradeoff_ignores_fp_noise():
+    """A sub-threshold RMSE increase is NOT a trade-off (FP/noise-safe)."""
+    h = _health_for(_pv_tw(4.0, 2.0), _pv_tw(3.0, 2.01))  # wind +0.5% < 5% default
+    assert "trade-off" not in h.message
+
+
+def test_health_tradeoff_default_threshold_5pct():
+    """The default trade-off threshold is 5% (decoupled from the 2% improvement
+    threshold): a 3% wind regression is NOT flagged, a 10% one IS — and the threshold
+    is tunable via tradeoff_fraction_warn."""
+    s3 = summarize_campaign(
+        CampaignResult(final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+                       iterations=(_cres_pv_tw(1.0, 0.6, _pv_tw(4.0, 2.0),
+                                               _pv_tw(3.0, 2.06)),),   # wind +3%
+                       final_field=jnp.full((2, 2), 0.4), accepted=(True,)),
+        promotion_key="clubb_lite_C_K")
+    assert "trade-off" not in campaign_health(s3).message            # 3% < 5% default
+    assert "trade-off" in campaign_health(s3, tradeoff_fraction_warn=0.02).message  # tunable
+    s10 = summarize_campaign(
+        CampaignResult(final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+                       iterations=(_cres_pv_tw(1.0, 0.6, _pv_tw(4.0, 2.0),
+                                               _pv_tw(3.0, 2.2)),),   # wind +10%
+                       final_field=jnp.full((2, 2), 0.4), accepted=(True,)),
+        promotion_key="clubb_lite_C_K")
+    assert "trade-off" in campaign_health(s10).message               # 10% >= 5% default
+
+
+def test_per_variable_tradeoff_note_direct():
+    """The helper: None -> ''; a >=threshold worsening -> note; equal/sub-threshold -> ''."""
+    from legoesm.training.bias_metrics import compare_per_variable_bias
+    from legoesm.training.campaign_summary import _per_variable_tradeoff_note
+
+    assert _per_variable_tradeoff_note(None, 0.02) == ""
+    worse = compare_per_variable_bias(_pv_tw(4.0, 2.0), _pv_tw(3.0, 5.0))
+    assert "wind" in _per_variable_tradeoff_note(worse, 0.02)
+    same = compare_per_variable_bias(_pv_tw(4.0, 2.0), _pv_tw(3.0, 2.0))   # wind unchanged
+    assert _per_variable_tradeoff_note(same, 0.02) == ""
+
+
 def test_coefficient_clamp_fraction():
     ck = jnp.array([0.1, 1.2, 0.5, 0.6])          # 1 lo + 1 hi of 4 = 0.5
     s = summarize_campaign(_multi_result(ck.reshape(2, 2), [(1.0, 0.5)], (True,)))

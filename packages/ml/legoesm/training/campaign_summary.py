@@ -204,6 +204,10 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
 # above which it is "clamp-limited".
 _MIN_FRACTIONAL_REDUCTION = 0.02
 _CLAMP_FRACTION_WARN = 0.2
+# A per-variable RMSE that ROSE by ≥ this fraction (while the combined bias fell) is
+# flagged as a trade-off.  Decoupled from (and higher than) the improvement threshold
+# so a CLEARLY-meaningful physical regression is flagged, not FP/reanalysis noise.
+_TRADEOFF_FRACTION_WARN = 0.05
 
 
 class CampaignHealth(NamedTuple):
@@ -217,18 +221,52 @@ class CampaignHealth(NamedTuple):
         return self.status == "improved"
 
 
+def _per_variable_tradeoff_note(per_variable, min_fractional_reduction: float) -> str:
+    """A trade-off NOTE for the 'improved' verdict: the variables whose GLOBAL RMSE
+    WORSENED by ≥ ``min_fractional_reduction`` (the same fraction that counts as a
+    combined improvement — symmetric, FP-noise-safe) while the COMBINED score improved.
+
+    This is the metric-gaming case the per-variable data (the campaign summary's
+    ``per_variable``) exists to expose: a correction can lower the dimensionless
+    combined score by improving T while WORSENING wind.  Returns ``""`` when no
+    per-variable data or nothing worsened.  precip is excluded (often not compared ⇒
+    ``NaN``; ``NaN > x`` is ``False`` so it would never flag anyway)."""
+    if per_variable is None:
+        return ""
+    b, u = per_variable.baseline, per_variable.updated
+    worsened = [
+        name
+        for name, bv, uv in (
+            ("T", float(b.global_T_rmse_K), float(u.global_T_rmse_K)),
+            ("qv", float(b.global_qv_rmse_kg_kg), float(u.global_qv_rmse_kg_kg)),
+            ("wind", float(b.global_wind_rmse_m_s), float(u.global_wind_rmse_m_s)),
+        )
+        if uv > bv and (bv <= 0.0 or (uv - bv) / bv >= min_fractional_reduction)
+    ]
+    if not worsened:
+        return ""
+    return (f" Note: combined bias improved but {','.join(worsened)} RMSE WORSENED "
+            f"by >={min_fractional_reduction:.0%} (a per-variable trade-off — verify "
+            "the correction is not gaming the combined score).")
+
+
 def campaign_health(
     summary: CampaignSummary,
     *,
     min_fractional_reduction: float = _MIN_FRACTIONAL_REDUCTION,
     clamp_fraction_warn: float = _CLAMP_FRACTION_WARN,
+    tradeoff_fraction_warn: float = _TRADEOFF_FRACTION_WARN,
 ) -> CampaignHealth:
     """Classify a :class:`CampaignSummary` into an actionable verdict.
 
-    * ``"improved"`` — the area-weighted bias fell by ≥ ``min_fractional_reduction``.
-      A genuinely-improving run is reported "improved" (``.ok``) EVEN IF the clamp is
-      binding — the clamp is then surfaced as a NOTE in the message (the in-range
-      correction still helped, but the LES wanted more).
+    * ``"improved"`` — the area-weighted (combined) bias fell by ≥
+      ``min_fractional_reduction``.  A genuinely-improving run is reported "improved"
+      (``.ok``) EVEN IF the clamp is binding OR a per-variable RMSE worsened — both are
+      surfaced as NOTES in the message (the in-range correction still lowered the target
+      score, but the LES wanted more / a physical variable was traded off).  The
+      per-variable trade-off note (:func:`_per_variable_tradeoff_note`) flags variables
+      whose GLOBAL RMSE rose by ≥ ``tradeoff_fraction_warn`` while the combined fell —
+      the metric-gaming case the per-variable summary exists to expose.
     * ``"no_valid_diagnoses"`` — the bias did NOT improve AND LES ran but EVERY
       diagnosis was rejected by the realism gate (``n_diagnoses_valid_total == 0`` with
       ``n_diagnosed_total > 0``): no column was corrected, so the root cause is the LES
@@ -262,7 +300,13 @@ def campaign_health(
         note = (f" Note: {worst_clamp:.0%} of columns pinned at {clamp_key} bounds "
                 "(the LES wants a value outside its calibratable range)."
                 if clamp_binding else "")
-        return CampaignHealth("improved", f"Bias reduced {red} ({acc}).{note}")
+        # The combined target improved (so .ok stays True — improvement judged first,
+        # as with the clamp note), but flag any per-variable RMSE that WORSENED so a
+        # combined gain that hid a physical regression is surfaced, not silent.
+        tradeoff = _per_variable_tradeoff_note(
+            summary.per_variable, tradeoff_fraction_warn)
+        return CampaignHealth(
+            "improved", f"Bias reduced {red} ({acc}).{note}{tradeoff}")
     if summary.n_diagnosed_total > 0 and summary.n_diagnoses_valid_total == 0:
         return CampaignHealth(
             "no_valid_diagnoses",
