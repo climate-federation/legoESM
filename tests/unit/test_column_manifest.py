@@ -104,6 +104,54 @@ def test_compute_column_environment_shapes_and_cape_sign():
     assert float(jnp.max(env.cape_J_kg)) > 0.0
 
 
+def test_compute_column_environment_places_each_columns_tags_at_its_own_cell():
+    """``compute_column_environment`` must place each column's CAPE/shear at THAT
+    column's grid cell — the per-column reshape correspondence.
+
+    The shapes/sign test above uses a UNIFORM (broadcast) field — every column
+    identical — so a column-mixing bug in the ``reshape(-1, nlev) → reshape(lead)``
+    round-trip (or an i↔j transpose) could not be caught.  This is the computation
+    analog of the iter-221 manifest-gather lock (different function, different
+    reshape).  Here exactly ONE cell of a NON-SQUARE 3×4 grid — (1,2), non-origin
+    and non-diagonal — carries an unstable, sheared profile and the rest are stable
+    + windless, so the CAPE and bulk-shear fields must peak at (1,2) and be ~0
+    elsewhere; a transpose (→(2,1)) or F-order flatten (→(0,2)) would misplace them.
+    """
+    nlat, nlon, nlev = 3, 4, 6
+    flat = 1 * nlon + 2                                   # the (1,2) cell, row-major
+    sigma = jnp.linspace(0.05, 0.98, nlev)
+    p_s = 1.0e5
+    p_full = jnp.broadcast_to(sigma * p_s, (nlat, nlon, nlev))
+    sigma_half = jnp.concatenate(
+        [jnp.array([0.0]), 0.5 * (sigma[1:] + sigma[:-1]), jnp.array([1.0])])
+    p_half = jnp.broadcast_to(sigma_half * p_s, (nlat, nlon, nlev + 1))
+    # Stable everywhere (surface-cold inversion), dry, windless …
+    T = jnp.broadcast_to(jnp.linspace(300.0, 260.0, nlev), (nlat, nlon, nlev))
+    q_v = jnp.broadcast_to(jnp.full(nlev, 1e-6), (nlat, nlon, nlev))
+    u = jnp.zeros((nlat, nlon, nlev))
+    v = jnp.zeros((nlat, nlon, nlev))
+    # … except the single (1,2) cell: warm-humid-surface (positive CAPE) + sheared.
+    T = T.at[1, 2, :].set(jnp.linspace(220.0, 300.0, nlev))
+    q_v = q_v.at[1, 2, :].set(jnp.linspace(1e-5, 1.6e-2, nlev))
+    u = u.at[1, 2, :].set(jnp.linspace(25.0, 0.0, nlev))   # top→surface wind gradient
+    sst = 290.0 + jnp.arange(nlat * nlon, dtype=jnp.float64).reshape(nlat, nlon)
+
+    env = compute_column_environment(
+        T=T, q_v=q_v, u=u, v=v, p_full=p_full, p_half=p_half,
+        sst=sst, sigma_full=sigma)
+
+    cape = np.asarray(env.cape_J_kg).reshape(-1)
+    shear = np.asarray(env.bulk_shear_m_s).reshape(-1)
+    # CAPE + shear peak at (1,2) and vanish elsewhere → the per-column tags landed
+    # at the right cell (not a transposed/F-order one).
+    assert int(np.argmax(cape)) == flat and cape[flat] > 100.0
+    assert np.allclose(np.delete(cape, flat), 0.0)
+    assert int(np.argmax(shear)) == flat and shear[flat] > 1.0
+    assert np.allclose(np.delete(shear, flat), 0.0)
+    # SST passes through per-cell (no reshape, but lock it isn't transposed).
+    assert float(np.asarray(env.sst_K)[1, 2]) == pytest.approx(290.0 + flat)
+
+
 def test_build_manifest_selects_worst_and_tags():
     combined = jnp.array([[0.1, 0.9], [0.5, 0.2]])
     errs = _make_error_fields(combined)
