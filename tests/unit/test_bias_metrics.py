@@ -378,6 +378,24 @@ def test_worst_column_all_invalid_mask_is_zero():
     assert float(out) == 0.0
 
 
+def test_worst_column_all_invalid_has_finite_gradient():
+    """worst_column_bias_change guards its masked mean with jnp.maximum(n_valid, 1.0), so the
+    all-invalid case is finite AND its GRADIENT stays finite — completing the bias_metrics
+    module's AD-safety alongside the _area_weighted_mean all-excluded lock (iter 299). A naive
+    total/n_valid would be 0/0 → NaN gradient that passes the forward 'value==0' test above but
+    breaks a differentiated worst-column diagnostic (iter 317)."""
+    base = jnp.array([1.0, 2.0, 3.0])
+    idx = jnp.array([0, 1, 2])
+    mask = jnp.array([False, False, False])           # all padded / invalid
+
+    def loss(updated):
+        return worst_column_bias_change(base, updated, idx, valid=mask)
+
+    g = jax.grad(loss)(jnp.array([0.5, 1.0, 1.5]))
+    assert bool(jnp.all(jnp.isfinite(g)))                       # finite, not 0/0 NaN
+    np.testing.assert_allclose(np.asarray(g), [0.0, 0.0, 0.0])  # all-invalid ⇒ zero gradient
+
+
 def test_worst_column_valid_mask_only_checks_valid_indices_in_range():
     """Bounds check applies to the slots that actually contribute: a padded slot
     whose index is masked out is not range-checked and never contributes (it is
