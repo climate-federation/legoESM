@@ -134,6 +134,52 @@ def test_owned_subset_of_global_top_k_splits_across_ranks():
     assert a_ids | b_ids == {0, 3}
 
 
+def test_owned_subset_cross_rank_tie_is_partition_invariant_work_split():
+    """A CROSS-RANK tie at the selection boundary must produce a partition-INVARIANT
+    work assignment: the SAME global cells are diagnosed (iter 213), each on exactly
+    its owner, with no double-count and no drop — regardless of how the tied cells
+    are distributed across ranks.
+
+    This is the work-assignment-level completion of the iter-213 selection fix.  The
+    existing split test uses DISTINCT scores; here all four cells tie for the worst
+    score with only 2 global slots, so WHICH two are diagnosed rests entirely on the
+    (now gid-ascending) tie-break, and the per-rank split rests on owned_subset
+    routing each selected gid to its owner.  The lowest two gids {0,1} must win in
+    BOTH partitions; only which rank does the work changes.
+    """
+    n_worst = 2
+    tied = [9.0, 9.0]  # two owned cells per rank, all tied
+
+    # Partition 1: the tied gids {0,1} straddle the two ranks (0→A, 1→B).
+    a1 = owned_subset_of_global_top_k(
+        [9.0, 9.0, 9.0, 9.0], [0, 2, 1, 3], [1, 1, 1, 1],
+        [_rec(0, tied[0]), _rec(1, tied[1])], np.array([0, 2]), n_worst)
+    b1 = owned_subset_of_global_top_k(
+        [9.0, 9.0, 9.0, 9.0], [0, 2, 1, 3], [1, 1, 1, 1],
+        [_rec(0, tied[0]), _rec(1, tied[1])], np.array([1, 3]), n_worst)
+    a1_ids = {int(np.array([0, 2])[r.flat_index]) for r in a1}
+    b1_ids = {int(np.array([1, 3])[r.flat_index]) for r in b1}
+    assert a1_ids == {0} and b1_ids == {1}        # each diagnoses exactly its owned winner
+    assert a1_ids.isdisjoint(b1_ids)               # no double-count
+    assert a1_ids | b1_ids == {0, 1}               # complete: the global top-2
+
+    # Partition 2: BOTH tied winners {0,1} now live on rank A (2→? no: A owns 0,1).
+    a2 = owned_subset_of_global_top_k(
+        [9.0, 9.0, 9.0, 9.0], [0, 1, 2, 3], [1, 1, 1, 1],
+        [_rec(0, tied[0]), _rec(1, tied[1])], np.array([0, 1]), n_worst)
+    b2 = owned_subset_of_global_top_k(
+        [9.0, 9.0, 9.0, 9.0], [0, 1, 2, 3], [1, 1, 1, 1],
+        [_rec(0, tied[0]), _rec(1, tied[1])], np.array([2, 3]), n_worst)
+    a2_ids = {int(np.array([0, 1])[r.flat_index]) for r in a2}
+    b2_ids = {int(np.array([2, 3])[r.flat_index]) for r in b2}
+    assert a2_ids == {0, 1} and b2_ids == set()    # rank A does all the work it owns
+    assert a2_ids | b2_ids == {0, 1}               # SAME selected set as partition 1
+
+    # The decisive invariant: the SET of diagnosed cells is identical across the two
+    # partitions even though the per-rank work split differs — partition-invariant.
+    assert (a1_ids | b1_ids) == (a2_ids | b2_ids)
+
+
 def test_gather_global_worst_columns_single_rank_is_local_top_k(monkeypatch):
     """With one rank, allgather is the identity (leading axis size 1), so the
     reducer returns this rank's own worst-k unchanged — the documented single-rank
