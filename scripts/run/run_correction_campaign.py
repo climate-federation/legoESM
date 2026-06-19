@@ -635,6 +635,15 @@ def build_multi_correction_campaign(
 
     if not coefficients:
         raise ValueError("coefficients must be a non-empty tuple.")
+    if len(set(coefficients)) != len(coefficients):
+        # A DUPLICATE (e.g. ``--coefficients C_K,C_K``, a typo) silently doubles the LES
+        # cost single-rank and is a confusing ``TypeError`` in the distributed hooks
+        # (the spec→key map collides); fail loud at construction (caught by --dry-run).
+        dups = sorted({c for c in coefficients if list(coefficients).count(c) > 1})
+        raise ValueError(
+            f"coefficients has duplicate(s) {dups}: each coefficient is corrected ONCE — "
+            "a duplicate doubles the (expensive) LES cost and breaks the distributed path. "
+            "Pass each of C_K/Pr_t/C_eps at most once.")
     if validate_reference:                           # fail-fast on a units/sign error
         from legoesm.training.compare_reanalysis import validate_reference_physical
         validate_reference_physical(reference, name="reference")

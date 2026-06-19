@@ -1997,6 +1997,10 @@ def test_build_multi_correction_campaign_rejects_unknown_and_empty_coefficients(
         build_multi_correction_campaign(**common, coefficients=("C_K", "bogus"))
     with pytest.raises(ValueError, match="non-empty tuple"):
         build_multi_correction_campaign(**common, coefficients=())
+    # A DUPLICATE (e.g. --coefficients C_K,C_K, a typo) doubles the LES cost / breaks the
+    # distributed path → fail loud at construction (iter 251). The empty guard fires first.
+    with pytest.raises(ValueError, match=r"duplicate\(s\) \['C_K'\]"):
+        build_multi_correction_campaign(**common, coefficients=("C_K", "Pr_t", "C_K"))
 
 
 def test_build_multi_correction_campaign_corrects_both_coefficients():
