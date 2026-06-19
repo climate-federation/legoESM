@@ -906,6 +906,23 @@ def _area_weights(grid):  # pragma: no cover - HPC path
     return jnp.cos(jnp.deg2rad(jnp.asarray(np.asarray(grid.grid_lat))))
 
 
+def _format_per_variable_bias(pvb) -> str:
+    """One-line per-VARIABLE RMSE baseline→updated + which variables improved, for a
+    round's ``per_variable_bias`` (a ``PerVariableBiasImprovement``), or ``""`` when the
+    round carried none.  Surfaces a round that lowered the COMBINED score by trading
+    variables off (e.g. better T, worse wind).  precip is omitted (campaign compares
+    have no ERA5 precip ⇒ NaN)."""
+    if pvb is None:
+        return ""
+    b, u = pvb.baseline, pvb.updated
+    vals = (f"T {float(b.global_T_rmse_K):.4g}->{float(u.global_T_rmse_K):.4g}K "
+            f"qv {float(b.global_qv_rmse_kg_kg):.4g}->{float(u.global_qv_rmse_kg_kg):.4g} "
+            f"wind {float(b.global_wind_rmse_m_s):.4g}->{float(u.global_wind_rmse_m_s):.4g}m/s")
+    imp = [n for n, f in (("T", pvb.T_improved), ("qv", pvb.qv_improved),
+                          ("wind", pvb.wind_improved)) if bool(f)]
+    return f"    per-var RMSE {vals} | improved: {','.join(imp) if imp else 'none'}"
+
+
 def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
                     extract_fn, run_les, *, phis=None):  # pragma: no cover - heavy I/O
     """Multi-coefficient campaign entry (``--coefficients``): a dict checkpoint /
@@ -974,6 +991,9 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
               f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
+        pv_line = _format_per_variable_bias(result.iterations[i].per_variable_bias)
+        if pv_line:
+            print(pv_line)
     from legoesm.training.campaign_summary import (
         campaign_health,
         summarize_campaign,
@@ -1217,6 +1237,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
               f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
               f"{'kept' if kept else 'REJECTED'})")
+        pv_line = _format_per_variable_bias(result.iterations[i].per_variable_bias)
+        if pv_line:
+            print(pv_line)
     from legoesm.training.campaign_summary import (
         campaign_health,
         summarize_campaign,

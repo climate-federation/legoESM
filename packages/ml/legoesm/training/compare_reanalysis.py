@@ -83,6 +83,7 @@ class ColumnComparison(NamedTuple):
     error_fields: ColumnErrorFields
     environment: ColumnEnvironmentFields
     manifest: list[ColumnRecord]
+    have_precip: bool = False   # both states carried precip (precip entered the score)
 
 
 def precip_mm_day_from_accum(
@@ -343,7 +344,8 @@ def compare_state_to_reference(
         time_index=time_index, n=n_worst, valid_mask=valid_mask,
     )
     return ColumnComparison(
-        error_fields=error_fields, environment=environment, manifest=manifest
+        error_fields=error_fields, environment=environment, manifest=manifest,
+        have_precip=bool(have_both_precip),
     )
 
 

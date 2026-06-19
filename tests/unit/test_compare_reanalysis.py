@@ -185,6 +185,17 @@ def test_precip_dropped_when_only_one_side_has_it():
         lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
     )
     assert float(jnp.max(jnp.abs(result.error_fields.precip_err_mm_day))) == 0.0
+    # have_precip is the precip-availability flag the campaign threads to the
+    # per-variable bias (so a not-compared precip reads as NaN, not a spurious 0).
+    assert result.have_precip is False
+    # When BOTH states carry precip, the flag flips True (precip enters the score).
+    ref_with_precip = _uniform_state(shape, nlev, precip=2.0)
+    both = compare_state_to_reference(
+        model=model, reference=ref_with_precip,
+        sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
+    )
+    assert both.have_precip is True
 
 
 def test_misaligned_states_raise():

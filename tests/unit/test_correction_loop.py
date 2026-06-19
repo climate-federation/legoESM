@@ -681,6 +681,57 @@ def test_les_budget_nonpositive_raises():
         )
 
 
+def _ef_compare_fn(shape=(2, 3)):
+    """A compare_fn whose CompareResult carries per-variable error_fields: the
+    CORRECTED config lowers the combined score AND T_rmse but RAISES wind_rmse (a
+    trade-off the combined score hides)."""
+    from legoesm.training.column_era5_metrics import ColumnErrorFields
+
+    def _ef(t_rmse, wind_rmse):
+        return ColumnErrorFields(
+            T_rmse_K=jnp.full(shape, t_rmse), qv_rmse_kg_kg=jnp.full(shape, 1.0e-3),
+            wind_rmse_m_s=jnp.full(shape, wind_rmse), precip_err_mm_day=jnp.zeros(shape),
+            combined_score=jnp.full(shape, t_rmse))
+
+    def compare_fn(config):
+        corrected = _is_corrected(config)
+        ef = _ef(1.0, 5.0) if corrected else _ef(4.0, 2.0)   # T 4->1 down, wind 2->5 UP
+        return CompareResult(
+            combined_score=jnp.full(shape, 1.0 if corrected else 2.0),
+            manifest=_CLUSTER_WORST, area_weights=jnp.ones(shape),
+            model_ctx=None, error_fields=ef, have_precip=False)
+
+    return compare_fn
+
+
+def test_run_correction_iteration_computes_per_variable_bias():
+    """When compare_fn carries per-variable error_fields, the round result exposes a
+    PerVariableBiasImprovement: T improved (4->1, global RMSE) but wind WORSENED (2->5)
+    — the trade-off the combined score hides; precip is NaN (no precip compared)."""
+    from legoesm.training.bias_metrics import PerVariableBiasImprovement
+
+    res = run_correction_iteration(
+        GrayRadiationConfig(), compare_fn=_ef_compare_fn(),
+        diagnose_fn=_diagnose_by_cape, promotion_key="gray_tau_equator",
+        grid_shape=(2, 3), background=7.2)
+    pvb = res.per_variable_bias
+    assert isinstance(pvb, PerVariableBiasImprovement)
+    assert float(pvb.baseline.global_T_rmse_K) == pytest.approx(4.0)   # uniform ⇒ RMSE=value
+    assert float(pvb.updated.global_T_rmse_K) == pytest.approx(1.0)
+    assert bool(pvb.T_improved) and not bool(pvb.wind_improved)        # trade-off exposed
+    assert bool(jnp.isnan(pvb.baseline.global_precip_err_mm_day))      # precip not compared
+
+
+def test_run_correction_iteration_per_variable_bias_none_without_error_fields():
+    """A mock compare_fn that omits error_fields ⇒ per_variable_bias is None (graceful;
+    backward-compat for the loop's mock-driven tests)."""
+    res = run_correction_iteration(
+        GrayRadiationConfig(), compare_fn=_cluster_compare_fn(),
+        diagnose_fn=_diagnose_by_cape, promotion_key="gray_tau_equator",
+        grid_shape=(2, 3), background=7.2)
+    assert res.per_variable_bias is None
+
+
 # --- restartable campaign: checkpoint + resume (iter 41) --------------------
 
 def _accum_campaign_fns(nlat=2, nlon=2):

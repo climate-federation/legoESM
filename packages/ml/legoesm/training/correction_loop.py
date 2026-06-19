@@ -77,6 +77,8 @@ class CompareResult(NamedTuple):
     area_weights: jax.Array            # per-column quadrature weights
     model_ctx: Any = None              # opaque state handed to diagnose_fn
     valid_mask: jax.Array | None = None  # optional column validity for aggregation
+    error_fields: Any = None           # per-variable ColumnErrorFields (None for mocks)
+    have_precip: bool = False          # both states carried precip (precip in the score)
 
 
 class CorrectionResult(NamedTuple):
@@ -103,6 +105,10 @@ class CorrectionResult(NamedTuple):
     #   None for static/non-CLUBB/no-op rounds. RAW = full-step, unclipped, scalar
     #   background: deploy re-applies it fresh and runs its OWN line search + gate,
     #   so it is NOT this round's post-line-search/clipped/accumulated feedback_field.
+    per_variable_bias: Any = None      # PerVariableBiasImprovement (T/q_v/wind/precip
+    #   baseline→updated in physical units + per-variable improved flags) — exposes a
+    #   round that lowered the COMBINED score by trading variables off. None when the
+    #   compare_fn carried no error_fields (a mock).
 
 
 class CampaignResult(NamedTuple):
@@ -168,6 +174,7 @@ class MultiCorrectionResult(NamedTuple):
     #                                    the largest accepted per-coefficient fraction
     step_fractions_by_key: dict | None = None  # sequential mode: per-coefficient
     #                                            accepted fraction (0.0 = rejected)
+    per_variable_bias: Any = None      # PerVariableBiasImprovement (see CorrectionResult)
 
 
 class MultiCampaignResult(NamedTuple):
@@ -428,6 +435,8 @@ def make_compare_fn(
             area_weights=area_weights,
             model_ctx=model,
             valid_mask=valid_mask,
+            error_fields=comparison.error_fields,
+            have_precip=comparison.have_precip,
         )
 
     return compare_fn
@@ -581,6 +590,24 @@ def _global_count(n_local: int, global_reduce) -> int:
     return int(global_reduce(jnp.asarray(int(n_local), dtype=jnp.int32)))
 
 
+def _maybe_per_variable_bias(baseline, updated, global_reduce):
+    """Per-variable global-bias improvement (baseline→updated) for the round, or
+    ``None`` when the ``compare_fn`` carried no per-variable ``error_fields`` (a mock
+    that returns only the combined score).  Uses the SAME ``area_weights`` /
+    ``valid_mask`` / ``global_reduce`` as the combined :class:`BiasImprovement` and
+    the compare's ``have_precip`` (so precip is reported only when both states carried
+    it, else ``NaN``).  A no-op round passes ``updated=baseline`` (all variables equal,
+    not improved — mirroring the combined no-op bias)."""
+    if getattr(baseline, "error_fields", None) is None or \
+            getattr(updated, "error_fields", None) is None:
+        return None
+    from legoesm.training.bias_metrics import per_variable_bias_improvement
+    return per_variable_bias_improvement(
+        baseline.error_fields, updated.error_fields, baseline.area_weights,
+        have_precip=bool(baseline.have_precip),
+        valid_mask=baseline.valid_mask, global_reduce=global_reduce)
+
+
 def run_correction_iteration(
     baseline_config: Any,
     *,
@@ -708,6 +735,7 @@ def run_correction_iteration(
             n_corrected=0,
             n_diagnosed=0,
             step_fraction=0.0,
+            per_variable_bias=_maybe_per_variable_bias(baseline, baseline, global_reduce),
         )
 
     diagnoses, n_diagnosed, run_diagnoses = _diagnose_columns(
@@ -770,6 +798,7 @@ def run_correction_iteration(
         n_diagnoses_valid=n_diagnoses_valid,
         step_fraction=frac,
         env_kernel=env_kernel,
+        per_variable_bias=_maybe_per_variable_bias(baseline, updated, global_reduce),
     )
 
 
@@ -900,6 +929,7 @@ def run_multi_correction_iteration(
             updated_config=baseline_config, bias=noop_bias,
             worst_column_change=jnp.asarray(0.0, dtype=dtype),
             feedback_fields=fields, n_corrected=0, n_diagnosed=0, step_fraction=0.0,
+            per_variable_bias=_maybe_per_variable_bias(baseline, baseline, global_reduce),
         )
 
     diagnoses, n_diagnosed, run_diagnoses = _diagnose_columns(
@@ -1014,6 +1044,7 @@ def run_multi_correction_iteration(
         n_corrected=len(records), n_diagnosed=n_diagnosed,
         n_diagnoses_valid=n_diagnoses_valid, step_fraction=frac,
         step_fractions_by_key=fracs_out,
+        per_variable_bias=_maybe_per_variable_bias(baseline, updated, global_reduce),
     )
 
 

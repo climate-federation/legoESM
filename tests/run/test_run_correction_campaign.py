@@ -29,6 +29,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _build_arg_parser,
     _campaign_knobs_from_args,
     _distributed_campaign_kwargs,
+    _format_per_variable_bias,
     build_campaign_output_dict,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
@@ -39,6 +40,29 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
+
+
+def test_format_per_variable_bias():
+    """The per-round per-variable line: None -> '' (mock round); a real
+    PerVariableBiasImprovement -> baseline->updated per variable + which improved."""
+    from legoesm.training.bias_metrics import (
+        PerVariableBias,
+        PerVariableBiasImprovement,
+    )
+
+    assert _format_per_variable_bias(None) == ""
+    base = PerVariableBias(jnp.asarray(4.0), jnp.asarray(1e-3), jnp.asarray(2.0),
+                           jnp.asarray(float("nan")))
+    upd = PerVariableBias(jnp.asarray(1.0), jnp.asarray(1e-3), jnp.asarray(5.0),
+                          jnp.asarray(float("nan")))
+    pvb = PerVariableBiasImprovement(
+        baseline=base, updated=upd,
+        T_improved=jnp.asarray(True), qv_improved=jnp.asarray(False),
+        wind_improved=jnp.asarray(False), precip_improved=jnp.asarray(False))
+    line = _format_per_variable_bias(pvb)
+    assert "per-var RMSE" in line
+    assert "T 4->1K" in line and "wind 2->5m/s" in line
+    assert "improved: T" in line and "wind" not in line.split("improved:")[1]
 
 
 def test_resolve_orographic_phis_off_skips_provider():
