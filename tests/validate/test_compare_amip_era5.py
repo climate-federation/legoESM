@@ -249,6 +249,39 @@ def test_main_before_after_baseline_restart(tmp_path, monkeypatch, capsys):
     assert "WORSE/same" in printed
 
 
+def test_held_out_verify_exits_zero_when_the_correction_improves(
+        tmp_path, monkeypatch, capsys):
+    """Complement of the no-improvement case (iter 288/289): when the CORRECTED model is
+    closer to the held-out ERA5 than the BASELINE (combined bias FELL), the held-out
+    verify EXITS 0 — so a deploy&verify workflow proceeds ONLY on a correction that
+    GENERALIZED. The iter-288 test pins rc=1; this pins rc=0 so a 'return 1 always'
+    regression is caught (both exit codes locked)."""
+    import legoesm.driver.restart as restart
+
+    nlev = 4
+    shape = (2, 2)
+    _grid, _calls = _stub_main_io(monkeypatch, nlev=nlev)
+    good = _FakeState(shape, nlev)               # T=250 == the stub reference (fake_regrid)
+    bad = _FakeState(shape, nlev)
+    bad.T = good.T - 8.0                          # an 8 K cold bias vs the reference
+    q_v = jnp.full(shape + (nlev,), 1e-3)
+
+    def path_dependent_load(path, g, s, strict=True):  # noqa: ARG001
+        st = bad if "baseline" in path else good     # corrected matches ref; baseline biased
+        return (st, q_v, 0, 0.0, None, None, None, None, None, None)
+
+    monkeypatch.setattr(restart, "load_restart", path_dependent_load)
+    out = str(tmp_path / "m.json")
+    with pytest.warns(UserWarning, match="surface air temperature"):
+        rc = drv.main([
+            "--restart", "corrected.npz", "--baseline-restart", "baseline.npz",
+            "--grid-type", "gaussian", "--resolution", "8", "--nlev", str(nlev),
+            "--era5-zarr", "gs://x", "--n-worst", "1", "--out", out])
+    assert rc == 0                               # corrected (0 bias) < baseline (8 K) ⇒ improved
+    printed = capsys.readouterr().out
+    assert "COMBINED bias" in printed and "improved" in printed
+
+
 def test_compare_and_write_end_to_end(tmp_path):
     nlev = 5
     shape = (2, 2)
