@@ -22,6 +22,7 @@ from legoesm.training.run_to_column_mean import (  # noqa: E402
     cmip_column_state,
     make_run_fn,
     model_phis_from_driver,
+    phis_or_none_if_flat,
     run_to_column_mean,
 )
 
@@ -338,6 +339,19 @@ def test_model_phis_from_driver_none_for_zero_topography():
     driver_raw = SimpleNamespace(
         state=SimpleNamespace(phis=np.zeros((8, 16))), grid=None, sigma=None)
     assert model_phis_from_driver(driver_raw) is None
+
+
+def test_phis_or_none_if_flat():
+    """The shared flat-detection predicate (reused by model_phis_from_driver AND the
+    CLI's resolve_orographic_phis): None→None, identically-zero→None (effectively
+    flat), ANY non-zero→passthrough unchanged."""
+    assert phis_or_none_if_flat(None) is None
+    assert phis_or_none_if_flat(jnp.zeros((4, 8))) is None
+    assert phis_or_none_if_flat(np.zeros((4, 8))) is None        # raw numpy zeros too
+    arr = jnp.zeros((4, 8)).at[2, 1].set(1500.0)                 # one non-zero cell
+    out = phis_or_none_if_flat(arr)
+    assert out is not None
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(arr))
 
 
 def test_model_phis_from_driver_keeps_partially_zero_topography():

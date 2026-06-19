@@ -71,6 +71,41 @@ def make_clubb_build_driver(
     return build_driver
 
 
+def resolve_orographic_phis(orographic_mode: str, phis_provider: Callable[[], Any]) -> Any:
+    """Resolve the orographic LES-forcing topography ``phis`` from the
+    ``--orographic-forcing`` mode + a deferred ``phis_provider``.
+
+    * ``"off"`` → ``None`` (flat; legacy behaviour).  ``phis_provider`` is NOT called.
+    * ``"auto"`` → the model's OWN static ``phis`` (via the provider), mapped to
+      ``None`` when the model is flat (:func:`...run_to_column_mean.phis_or_none_if_flat`)
+      — so a flat/aquaplanet model stays flat and passing ``auto`` is always safe.
+    * ``"on"`` → as ``auto`` but FAILS LOUD (``SystemExit``) if the model is flat —
+      the user explicitly requested terrain forcing, so a silent flat run (which
+      would hide the missing orography) is refused.
+
+    ``phis_provider`` is a zero-arg callable that BUILDS the model's static
+    topography (e.g. ``ModelDriver(base_cfg).static_topography_phis()`` — no
+    filesystem writes); deferring it means ``"off"`` constructs nothing.  Unknown
+    mode raises ``ValueError`` (dispatch hardening; ``argparse choices=`` already
+    constrains the CLI, so this is defense-in-depth).
+    """
+    if orographic_mode == "off":
+        return None
+    if orographic_mode not in ("auto", "on"):
+        raise ValueError(
+            f"unknown orographic_forcing mode {orographic_mode!r}; choose "
+            "auto/on/off.")
+    from legoesm.training.run_to_column_mean import phis_or_none_if_flat
+    phis = phis_or_none_if_flat(phis_provider())
+    if orographic_mode == "on" and phis is None:
+        raise SystemExit(
+            "--orographic-forcing=on requires model topography, but the model "
+            "exposes none (flat/aquaplanet: phis is identically zero). Use "
+            "--orographic-forcing=auto for a flat model, or supply a base config "
+            "with real topography.")
+    return phis
+
+
 def make_les_diagnose_fn(
     grid: Any,
     sigma: Any,
@@ -742,6 +777,13 @@ def _build_arg_parser():
                         "at the shallow-regime dx=50 m (n_acoustic=6); a larger dt is "
                         "rejected by run_forced_les' acoustic-CFL pre-flight.")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
+    p.add_argument("--orographic-forcing", choices=("auto", "on", "off"),
+                   default="auto",
+                   help="orographic geostrophic LES-forcing term over terrain. "
+                        "'auto' (default): use the model's OWN static topography if "
+                        "it has any (a flat/aquaplanet model stays flat — always "
+                        "safe). 'on': REQUIRE terrain (error if the model is flat). "
+                        "'off': force flat (legacy; no orographic term).")
     p.add_argument("--out", default="corrected_clubb_config.json")
     p.add_argument("--checkpoint", default=None,
                    help="write a per-round checkpoint JSON (restartable campaign)")
@@ -865,9 +907,12 @@ def _area_weights(grid):  # pragma: no cover - HPC path
 
 
 def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
-                    extract_fn, run_les):  # pragma: no cover - heavy I/O
+                    extract_fn, run_les, *, phis=None):  # pragma: no cover - heavy I/O
     """Multi-coefficient campaign entry (``--coefficients``): a dict checkpoint /
-    resume / output for the per-coefficient accumulated fields."""
+    resume / output for the per-coefficient accumulated fields.  ``phis`` (the
+    model's static orographic topography, resolved once in :func:`main`) is
+    forwarded to the multi-coefficient campaign builder so the orographic
+    LES-forcing term activates identically to the single-coefficient path."""
     import json
 
     import jax.numpy as jnp
@@ -914,7 +959,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma, grid=grid,
         area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(), coefficients=coefficients,
-        run_les_fn=run_les,
+        run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_fields=initial_fields,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         sequential=args.staged,
@@ -1094,10 +1139,22 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
 
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
+
+    # Orographic LES-forcing topography: the model's OWN static phis (so it is
+    # CONSISTENT with the AMIP/CMIP run that produces the comparison state), built
+    # via a SIDE-EFFECT-FREE probe (ModelDriver.static_topography_phis — no manifest
+    # / output-dir writes). Resolved ONCE here and threaded into BOTH the single-
+    # and multi-coefficient paths. base_cfg is the atm config for both modes, so the
+    # probe's topography equals the CMIP coupled driver's atm topography too.
+    from legoesm.driver.model_driver import ModelDriver
+    phis = resolve_orographic_phis(
+        args.orographic_forcing,
+        lambda: ModelDriver(base_cfg).static_topography_phis())
+
     if args.coefficients is not None:
         return _run_multi_main(
             args, base_cfg, grid, sigma, reference, build_base_driver, extract_fn,
-            run_les)
+            run_les, phis=phis)
 
     # Restart: resume from a checkpoint (corrected config + accumulated field +
     # round), so a multi-day campaign survives a job timeout (§1 restartable).
@@ -1146,7 +1203,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         extract_column_state=extract_fn, reference=reference, sigma=sigma,
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
-        run_les_fn=run_les,
+        run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         **_campaign_knobs_from_args(args),

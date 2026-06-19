@@ -37,7 +37,58 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     make_clubb_build_driver,
     make_les_diagnose_fn,
     refuse_unsupported_multirank,
+    resolve_orographic_phis,
 )
+
+
+def test_resolve_orographic_phis_off_skips_provider():
+    """'off' returns None WITHOUT calling the provider (so no driver/probe is built
+    — the legacy flat path constructs nothing)."""
+    calls = []
+
+    def provider():
+        calls.append(1)
+        return jnp.full((4, 8), 5000.0)
+
+    assert resolve_orographic_phis("off", provider) is None
+    assert calls == []                                   # provider NOT called for 'off'
+
+
+def test_resolve_orographic_phis_auto_terrain_and_flat():
+    """'auto' returns the model's terrain when present, and None (safe) when the
+    model is flat (identically-zero phis) — passing 'auto' is always safe."""
+    terrain = jnp.zeros((4, 8)).at[1, 1].set(3000.0)
+    out = resolve_orographic_phis("auto", lambda: terrain)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(terrain))
+    assert resolve_orographic_phis("auto", lambda: jnp.zeros((4, 8))) is None
+
+
+def test_resolve_orographic_phis_on_requires_terrain():
+    """'on' returns terrain when present but FAILS LOUD (SystemExit) on a flat model
+    — an explicit terrain request must not silently run flat."""
+    terrain = jnp.full((4, 8), 2000.0)
+    np.testing.assert_array_equal(
+        np.asarray(resolve_orographic_phis("on", lambda: terrain)),
+        np.asarray(terrain))
+    with pytest.raises(SystemExit, match="requires model topography"):
+        resolve_orographic_phis("on", lambda: jnp.zeros((4, 8)))
+
+
+def test_resolve_orographic_phis_unknown_mode_raises():
+    """Dispatch hardening: an unknown mode raises ValueError (argparse choices=
+    constrains the CLI, but the helper must not silently accept a typo)."""
+    with pytest.raises(ValueError, match="unknown orographic_forcing mode"):
+        resolve_orographic_phis("terrain", lambda: jnp.zeros((4, 8)))
+
+
+def test_orographic_forcing_flag_parsed():
+    """The --orographic-forcing flag parses to the expected choices (default auto)."""
+    p = _build_arg_parser()
+    base = ["--config", "c.json", "--era5-zarr", "z"]
+    assert p.parse_args(base).orographic_forcing == "auto"
+    assert p.parse_args(base + ["--orographic-forcing", "on"]).orographic_forcing == "on"
+    with pytest.raises(SystemExit):                       # argparse rejects bad choice
+        p.parse_args(base + ["--orographic-forcing", "terrain"])
 
 
 def test_refuse_unsupported_multirank_guards_cli():

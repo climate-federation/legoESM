@@ -388,6 +388,33 @@ class ModelDriver:
         self._save_config()
         self._setup_parallel()
 
+    def static_topography_phis(self):
+        """The model's STATIC surface geopotential ``phis = g·z_s`` on the model
+        grid, built WITHOUT running the full :meth:`setup` — NO filesystem writes
+        (no output dir, run manifest, or ``experiment_config.json``).
+
+        Runs only the minimal construction chain ``validate_strict → runtime
+        bootstrap → grid → topography`` needed to populate the topography field;
+        it does NOT build the dycore, state, physics, or parallel halos.  This
+        exposes the model's OWN orographic field cheaply — e.g. as the CONSISTENT
+        ``phis`` source for the orographic LES-forcing term — so a launch-time
+        probe need not write a phantom run directory.
+
+        Idempotent: returns the already-built field if :meth:`setup` (or a prior
+        call) ran.  A flat model yields ``jnp.zeros(grid_shape_2d)`` (the caller
+        decides whether all-zero means "no orography").
+
+        NOTE: not purely side-effect-free — ``_bootstrap_runtime`` sets the global
+        precision/runtime singleton (the same one the subsequent run uses), so the
+        probe MUST be built from the SAME config that drives the run.
+        """
+        if self._phis_data is None:
+            self.config.validate_strict()
+            self._bootstrap_runtime()
+            self._create_grid()
+            self._create_topography()
+        return self._phis_data
+
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid

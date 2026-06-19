@@ -158,6 +158,27 @@ def amip_column_state(
     )
 
 
+def phis_or_none_if_flat(phis: Any) -> Any:
+    """Map a static surface-geopotential field to ``None`` when it is absent OR
+    identically zero (an effectively-flat / aquaplanet model), else return it.
+
+    A flat ``ModelDriver`` initialises ``phis = zeros(...)`` rather than leaving it
+    absent (``model_driver.py`` ``_create_topography``), so an all-zero field means
+    "flat": the orographic LES-forcing term then correctly stays OFF — exact
+    flat-path parity (an all-zero ``∇phis`` contributes nothing anyway), no wasted
+    gradient work — and a fail-loud "terrain required but model is flat" check can
+    rely on ``None``.  A coastline with ANY non-zero cell is REAL terrain (kept).
+
+    Launch-time EAGER call on a concrete array (build ONE driver, reuse the result
+    across campaign rounds), so the Python ``bool`` from ``jnp.all`` is fine — this
+    is NOT a traced hot-loop path.
+    """
+    if phis is None:
+        return None
+    import jax.numpy as jnp
+    return None if bool(jnp.all(jnp.asarray(phis) == 0)) else phis
+
+
 def model_phis_from_driver(driver: Any) -> Any:
     """The model's STATIC surface geopotential ``phis = g·z_s`` on the full grid —
     the input to the orographic geostrophic LES-forcing term (iter 117).
@@ -166,32 +187,20 @@ def model_phis_from_driver(driver: Any) -> Any:
     ``phis=`` so the orographic correction uses the model's OWN topography (guaranteed
     CONSISTENT with the AMIP/CMIP run that produced the comparison state — no
     mismatched-field footgun).  Returns ``None`` for a flat/aquaplanet model — BOTH
-    when the state carries no ``phis`` AND when ``phis`` is identically zero (a flat
-    ``ModelDriver`` initialises ``phis = zeros(...)`` rather than leaving it absent),
-    so the orographic term correctly stays OFF: exact flat-path parity (an all-zero
-    ``∇phis`` contributes nothing anyway) plus no wasted gradient work, and a fail-loud
-    "terrain required but model is flat" check can rely on ``None``.
+    when the state carries no ``phis`` AND when ``phis`` is identically zero
+    (:func:`phis_or_none_if_flat`).
     ``phis`` is STATIC (config-independent topography), so build ONE driver and reuse
     the result across campaign rounds.  Spectral states are synthesized to a grid
     state first (the same ``grid_winds_from_spectral`` the compare uses); grid/MPAS
     states pass through.  The ``Field`` wrapper is unwrapped to a raw array.
     """
-    import jax.numpy as jnp
     from legoesm.core.field import Field
     state = grid_winds_from_spectral(
         getattr(driver, "state", None), getattr(driver, "grid", None),
         getattr(driver, "sigma", None))
     phis = getattr(state, "phis", None)
-    if phis is None:
-        return None
     # Unwrap ONLY a Field (isinstance, not hasattr "data" — a raw NumPy array also
-    # has a `.data` MEMORYVIEW that would be returned by mistake; Codex).
+    # has a `.data` MEMORYVIEW that would be returned by mistake; Codex). A None phis
+    # falls through unchanged (isinstance(None, Field) is False).
     arr = phis.data if isinstance(phis, Field) else phis
-    # A flat ModelDriver sets phis = zeros(...), NOT absent (model_driver.py
-    # _create_topography), so treat an identically-zero field as "effectively flat"
-    # → None (honest "None for flat" contract; the orographic term stays OFF). This
-    # is a launch-time EAGER call on a concrete array (build ONE driver, reuse), so a
-    # Python bool from jnp.all is fine — NOT a traced hot-loop path.
-    if bool(jnp.all(jnp.asarray(arr) == 0)):
-        return None
-    return arr
+    return phis_or_none_if_flat(arr)
