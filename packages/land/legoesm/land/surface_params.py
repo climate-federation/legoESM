@@ -133,6 +133,14 @@ def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
     )
 
 
+def read_spatial_param(lp, name: str, fallback):
+    """Read field ``name`` from spatial :class:`LandSurfaceParams` ``lp`` when
+    present, else return the config scalar ``fallback``.  Shared by the slab
+    and multilayer land step modules (both wire trainable per-column surface
+    params the same way)."""
+    return getattr(lp, name) if lp is not None else fallback
+
+
 def array_to_params(arr: jnp.ndarray, param_names: tuple[str, ...] | None = None) -> LandSurfaceParams:
     """Slice columns of ``(ncol, n_params)`` array into a LandSurfaceParams.
 

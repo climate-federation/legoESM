@@ -786,6 +786,7 @@ class RRTMGP:
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 5. Solve SW ---
@@ -807,6 +808,7 @@ class RRTMGP:
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---

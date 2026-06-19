@@ -99,11 +99,11 @@ scoping SS C — "= global_flexible row-for-row EXCEPT tke_mxl_choice=1"):
 INERT with ``enable_idemix=False`` (4deg-verified) — unmapped.  The file's
 ``tidal_energy``/``wind_energy`` fields are idemix-only — unread.
 
-DEDUP NOTE: :func:`veros_mit_tau_shift_1deg`, the shape-generic layout
-bridges and :func:`veros_area_t_1deg` are the same constructions as the
-NOT-YET-MERGED global_flexible recipe carries (``/tmp`` worktree at the
-time of writing); whichever lands second must factor them into ONE shared
-fidelity helper module (this build stands alone on origin/main).
+DEDUP NOTE: the shape-generic layout bridges are now FACTORED into the
+shared :mod:`legoesm.ocean.fidelity.veros_layout` (re-exported here under
+the ``_1deg`` names).  :func:`veros_mit_tau_shift_1deg` and
+:func:`veros_area_t_1deg` remain the same constructions as the
+global_flexible recipe carries and are still candidates to factor next.
 """
 
 from __future__ import annotations
@@ -127,6 +127,15 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     T_REST_S,
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
+)
+
+# Shape-generic layout bridges, shared via fidelity.veros_layout (DEDUP NOTE
+# resolved); re-exported under the recipe's ``_1deg`` names (scripts/tests use them).
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xy_to_legoesm as veros_xy_to_legoesm_1deg,
+)
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xyz_to_legoesm as veros_xyz_to_legoesm_1deg,
 )
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
 from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
@@ -352,25 +361,6 @@ def kbot_to_mask_and_h_bathy_1deg(
 # ---------------------------------------------------------------------------
 # Layout bridges + forcing prep helpers (pure; see module DEDUP NOTE)
 # ---------------------------------------------------------------------------
-
-
-def veros_xyz_to_legoesm_1deg(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_1deg(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
 
 
 def veros_mit_tau_shift_1deg(taux_xym: np.ndarray,

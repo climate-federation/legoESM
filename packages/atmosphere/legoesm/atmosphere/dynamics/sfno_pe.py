@@ -334,13 +334,12 @@ class SFNOPrimitiveEquationModel:
         p_s_new = jnp.exp(lnps_new)
         p_s_old = jnp.exp(lnps_old)
 
-        if self.config.correct_mass:
-            p_s_new = correct_dry_air_mass(p_s_new, p_s_old, grid)
-            lnps_new = jnp.log(jnp.maximum(p_s_new, 1.0))
-            lnps_hat = sh_analysis(grid, lnps_new.astype(jnp.float64))
-            new_state = new_state._replace(
-                lnps_hat=new_state.lnps_hat.replace(data=lnps_hat)
-            )
+        p_s_new = correct_dry_air_mass(p_s_new, p_s_old, grid)
+        lnps_new = jnp.log(jnp.maximum(p_s_new, 1.0))
+        lnps_hat = sh_analysis(grid, lnps_new.astype(jnp.float64))
+        new_state = new_state._replace(
+            lnps_hat=new_state.lnps_hat.replace(data=lnps_hat)
+        )
 
         return new_state
 

@@ -90,9 +90,10 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         units="K",
         status="entrenched",
         aliases=("T_surface", "Ts"),
-        note="CLAUDE.md open debt: T_sfc (184) vs T_surface (~15) vs Ts. "
-             "Coupler/land/ice carry T_surface. Dedicated cleanup PR — not "
-             "ratcheted here.",
+        note="T_sfc is now the only surface-temperature identifier in source: "
+             "T_surface has been fully migrated out (0 identifier sites; one "
+             "stray comment remains), and `Ts` persists only as SCM-accumulator "
+             "locals. Aliases retained for provenance; not ratcheted here.",
     ),
     ConceptDef(
         concept="Seawater specific heat capacity",

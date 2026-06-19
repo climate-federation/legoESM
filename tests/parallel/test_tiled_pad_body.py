@@ -35,6 +35,7 @@ from legoesm.grids.halo import pad_halo_local, compute_halo_interp_offsets
 from legoesm.parallel.cubesphere_exchange import (
     _make_exchange_ppermute_tiled,
     make_tiled_pad_body,
+    make_tiled_pad_vector_body,
 )
 
 KT = 2
@@ -151,3 +152,83 @@ def test_ndim4_body_matches_ndim3_per_level(mesh):
         np.testing.assert_array_equal(
             np.asarray(out4)[..., k], np.asarray(out3),
             err_msg=f"ndim=4 halo level {k} != ndim=3 halo of that level")
+
+
+def test_ndim4_vector_body_matches_ndim3_per_level(mesh):
+    """The 4D in-stage ROTATING VECTOR halo (ndim=4) — needed by the tiled
+    ``center_to_dgrid_vector`` lift (the section-12c ``_vert_adv_uv_d``
+    contribution to the hydrostatic momentum capstone) — must equal the proven
+    ndim=3 vector halo applied INDEPENDENTLY per vertical level (the grid->geo
+    rotation is purely horizontal, so the cos/sin angle metrics broadcast over
+    the trailing nlev axis).  Pins the never-before-exercised ndim=4 path of
+    ``make_tiled_pad_vector_body`` (the 3D-PE momentum stage used only SCALAR
+    halos, so the angle-broadcast over the channel axis was untested).  C=3 (>1)
+    catches a trailing-axis broadcast bug a C=1 lane would hide."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("local")
+    g = create_cubed_sphere_cdgrid(create_cubed_sphere(N)).base
+    assert g.duogrid is None, "base cut is non-duogrid"
+    C = 3
+    rng = np.random.default_rng(4)
+    u4 = jnp.asarray(rng.standard_normal((6, N, N, C)))
+    v4 = jnp.asarray(rng.standard_normal((6, N, N, C)))
+    offs = jnp.asarray(g.halo_interp_offsets)
+    ca, sa = g.cos_angle, g.sin_angle
+    cap, sap = g.cos_angle_padded, g.sin_angle_padded   # (6, N+2, N+2)
+
+    vbody4 = make_tiled_pad_vector_body(mesh, ndim=4, halo=1, with_offsets=True)
+    vbody3 = make_tiled_pad_vector_body(mesh, ndim=3, halo=1, with_offsets=True)
+
+    fw4 = P("face", "tile_i", "tile_j", None)
+    fw3 = P("face", "tile_i", "tile_j")
+    fo = P("face", None, None)                          # angles face-repl, sliced per tile
+
+    def _tile_slice(arr, a_i, a_j, si, sj):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw4, fw4, fo, fo, fo, fo, P()),
+             out_specs=(fw4, fw4), check_vma=False)
+    def _stage4(u, v, ca_, sa_, cap_, sap_, o):
+        a_i = jax.lax.axis_index("tile_i") * NL
+        a_j = jax.lax.axis_index("tile_j") * NL
+        ca_t = _tile_slice(ca_, a_i, a_j, NL, NL)[0]
+        sa_t = _tile_slice(sa_, a_i, a_j, NL, NL)[0]
+        cap_t = _tile_slice(cap_, a_i, a_j, NL + 2, NL + 2)[0]
+        sap_t = _tile_slice(sap_, a_i, a_j, NL + 2, NL + 2)[0]
+        up, vp = vbody4(u[0], v[0], ca_t, sa_t, cap_t, sap_t, o)
+        return up[None], vp[None]
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw3, fw3, fo, fo, fo, fo, P()),
+             out_specs=(fw3, fw3), check_vma=False)
+    def _stage3(u, v, ca_, sa_, cap_, sap_, o):
+        a_i = jax.lax.axis_index("tile_i") * NL
+        a_j = jax.lax.axis_index("tile_j") * NL
+        ca_t = _tile_slice(ca_, a_i, a_j, NL, NL)[0]
+        sa_t = _tile_slice(sa_, a_i, a_j, NL, NL)[0]
+        cap_t = _tile_slice(cap_, a_i, a_j, NL + 2, NL + 2)[0]
+        sap_t = _tile_slice(sap_, a_i, a_j, NL + 2, NL + 2)[0]
+        up, vp = vbody3(u[0], v[0], ca_t, sa_t, cap_t, sap_t, o)
+        return up[None], vp[None]
+
+    sh4 = NamedSharding(mesh, fw4)
+    sh3 = NamedSharding(mesh, fw3)
+    sho = NamedSharding(mesh, fo)
+    ca_d, sa_d = jax.device_put(ca, sho), jax.device_put(sa, sho)
+    cap_d, sap_d = jax.device_put(cap, sho), jax.device_put(sap, sho)
+    out4u, out4v = _stage4(jax.device_put(u4, sh4), jax.device_put(v4, sh4),
+                           ca_d, sa_d, cap_d, sap_d, offs)
+    out_blk = NL + 2
+    assert np.asarray(out4u).shape == (6, KT * out_blk, KT * out_blk, C)
+    for k in range(C):
+        o3u, o3v = _stage3(jax.device_put(u4[..., k], sh3),
+                           jax.device_put(v4[..., k], sh3),
+                           ca_d, sa_d, cap_d, sap_d, offs)
+        np.testing.assert_array_equal(
+            np.asarray(out4u)[..., k], np.asarray(o3u),
+            err_msg=f"ndim=4 vector u halo level {k} != ndim=3")
+        np.testing.assert_array_equal(
+            np.asarray(out4v)[..., k], np.asarray(o3v),
+            err_msg=f"ndim=4 vector v halo level {k} != ndim=3")

@@ -950,17 +950,6 @@ def test_make_coupler_rejects_invalid_config(kwargs, match):
         make_coupler(CouplerConfig(**kwargs), LandConfig(), SeaIceConfig(), LakeConfig())
 
 
-def test_make_coupler_warns_for_unused_blend_sharpness():
-    """Non-default blend_sharpness should surface an explicit warning."""
-    with pytest.warns(RuntimeWarning, match="blend_sharpness"):
-        make_coupler(
-            CouplerConfig(blend_sharpness=10.0),
-            LandConfig(),
-            SeaIceConfig(),
-            LakeConfig(),
-        )
-
-
 def test_coupler_step_validates_dt():
     """Coupler step should reject non-positive dt."""
     step_fn = make_coupler(CouplerConfig(), LandConfig(), SeaIceConfig(), LakeConfig())

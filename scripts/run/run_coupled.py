@@ -86,6 +86,26 @@ def main():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
+    # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
+    # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
+    # (~6x faster radiation on GPU; FORWARD/inference only — NOT AD-safe).
+    # ``--no-rrtmgp-gpoint-checkpoint`` selects a plain ``lax.scan`` over
+    # g-points (one reused scan-body kernel) instead of the
+    # ``jax.checkpoint(prevent_cse=True)`` path, shrinking the compiled-code
+    # footprint (relieves the XLA-CPU LLVM-JIT code-region pressure / cuts the
+    # rrtmgp cold-compile).  The checkpoint is ONLY needed for reverse-mode AD
+    # memory, which a forward coupled run never uses.  Defaults match the
+    # global config (0 / True = current behaviour); recommended for a forward
+    # rrtmgp CMIP run: ``--rrtmgp-gpoint-batch-size 16 --no-rrtmgp-gpoint-checkpoint``.
+    parser.add_argument("--rrtmgp-gpoint-batch-size", type=int, default=0,
+                        help="RRTMGP g-point vmap block size (0=checkpointed "
+                             "scan; >0=forward-only ~6x faster radiation)")
+    parser.add_argument("--rrtmgp-gpoint-checkpoint",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Checkpoint the per-g-point two-stream scan "
+                             "(default on = AD-safe; --no-... = smaller/faster "
+                             "compile for forward-only runs)")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -108,11 +128,14 @@ def main():
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
                         help="Cloud-fraction scheme (default: sundqvist)")
-    parser.add_argument("--microphysics", default="kessler",
-                        help="Microphysics scheme (default: kessler — closes the "
-                             "water budget so convective condensate precipitates; "
-                             "microphysics='none' with active convection gives "
-                             "pr=0 and a cloud-water trap)")
+    parser.add_argument("--microphysics", default="morrison",
+                        help="Microphysics scheme (default: morrison — the "
+                             "ice-capable double-moment scheme; warm-rain-only "
+                             "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
+                             "(no freeze->snow->precip sink), which drives the TOA "
+                             "cold drift in coupled CMIP runs. Use --microphysics "
+                             "kessler for the cheap warm-rain path; 'none' with "
+                             "active convection gives pr=0 and a cloud-water trap)")
     parser.add_argument(
         "--minimal-physics", action="store_true",
         help="Override the full-physics defaults to a cheap idealized "
@@ -141,6 +164,22 @@ def main():
                         choices=["cubed_sphere", "latlon"],
                         help="Atmosphere grid (default cubed_sphere); 'latlon' "
                              "is required for --ocean dynamic (shared grid)")
+    parser.add_argument("--couple-surface-radiation",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Feed the coupler's tile-blended (land+ocean) skin "
+                             "T/albedo back to atmosphere radiation (--ocean-ic "
+                             "woa). Default on; the slab-land skin feedback is "
+                             "stiff — turn off (--no-couple-surface-radiation) "
+                             "to trade land-radiation realism for stability.")
+    parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Fourier polar filter for the lat-lon C-grid "
+                             "(default on for --grid latlon; ignored on cube). "
+                             "Truncates the high-wavenumber lon modes that "
+                             "violate the pole-cell CFL, so dt is set by the "
+                             "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
+                             "being clamped to ~5s. Without it a 2deg lat-lon "
+                             "run is ~80x more steps and infeasible.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -149,6 +188,49 @@ def main():
                              "coupling_dt (never step the 3D ocean at 3600 s)")
     parser.add_argument("--ocean-H-max", type=float, default=5500.0,
                         help="Max ocean depth [m] (--ocean dynamic)")
+    parser.add_argument("--ocean-ic", default="rest",
+                        choices=["rest", "woa"],
+                        help="3D ocean initial condition (--ocean dynamic): "
+                             "'rest' = idealized aquaplanet rest state; 'woa' = "
+                             "WOA18 reanalysis T/S + WOA-derived continents "
+                             "(realistic cold start; f_land co-derived from the "
+                             "same ocean mask, land tile enabled)")
+    parser.add_argument("--woa-t-path",
+                        default="data/woa18/woa18_decav_t00_01.nc",
+                        help="WOA18 temperature file (--ocean-ic woa)")
+    parser.add_argument("--woa-s-path",
+                        default="data/woa18/woa18_decav_s00_01.nc",
+                        help="WOA18 salinity file (--ocean-ic woa)")
+    parser.add_argument("--tripole-mesh", default=None,
+                        help="NEMO eORCA mesh_mask file (e.g. "
+                             "data/grids/eORCA1.2_mesh_mask.nc).  When set with "
+                             "--ocean dynamic, the 3D ocean runs on the TRIPOLE "
+                             "grid (a DIFFERENT grid from the lat-lon atmosphere) "
+                             "coupled via the Phase-2 cross-grid conservative "
+                             "remap, using the OMIP-validated cold-start recipe. "
+                             "The land mask + bathymetry come from this file.")
+
+    # Atmosphere initial condition.  CRITICAL for realism: the bare
+    # ExperimentConfig default ic="default" is a UNIFORM T_init (~isothermal
+    # ~300 K) scaffold — convectively dead-stable (no lapse rate => convection
+    # never triggers), warm everywhere (huge q_sat => CWV ~80 kg/m2, ~3x
+    # Earth), and warm aloft (OLR ~390 W/m2).  A coupled run from this IC spends
+    # many days spinning up before it precipitates.  ic="standard" overlays a
+    # realistic constant-lapse-rate troposphere + cold isothermal stratosphere +
+    # equator-pole gradient (CWV ~15-30 kg/m2, convectively active, OLR ~240).
+    # NOTE: ic="standard" is currently wired for --grid latlon ONLY (the cube
+    # path needs the balanced-jet component rotation); the default below is
+    # grid-aware so a cube run still works.
+    parser.add_argument("--ic", default=None,
+                        choices=["default", "standard", "era5"],
+                        help="Atmosphere initial condition (default: 'standard' "
+                             "on --grid latlon, 'default' on cube). 'standard' = "
+                             "realistic lapse-rate troposphere + cold "
+                             "stratosphere (Earth-like CWV/OLR, fast spin-up to "
+                             "a precipitating state); 'default' = uniform T_init "
+                             "scaffold; 'era5' = ERA5 reanalysis (needs --ic-path)")
+    parser.add_argument("--ic-path", default="",
+                        help="ERA5 Zarr path when --ic era5")
 
     # Carbon
     parser.add_argument("--co2-init", type=float, default=415.0,
@@ -200,6 +282,17 @@ def main():
         args.unfused_radiation = False
         args.rad_update_steps = 1
         args.ocean = "slab"          # cheap single-layer slab for idealized runs
+
+    # Atmosphere IC default is GRID-AWARE: ic="standard" (the realistic
+    # lapse-rate troposphere + cold stratosphere) is wired for BOTH --grid
+    # latlon AND cubed_sphere (validated: CWV ~17/30 kg/m2, precip ~1.5/3.3
+    # mm/day, stable; vs the uniform ic="default" scaffold's CWV ~84, precip
+    # ~0).  spectral/mpas have no grid-space T Field, so they keep the uniform
+    # default.  An explicit --ic standard on an unsupported grid still raises
+    # loudly in ExperimentConfig.validate_strict (no silent degrade).
+    if args.ic is None:
+        args.ic = ("standard" if args.grid in ("latlon", "cubed_sphere")
+                   else "default")
 
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather
@@ -265,6 +358,10 @@ def main():
             # cube-only.  Cube keeps the default cdgrid.
             discretization=("latlon_cgrid" if args.grid == "latlon"
                             else "cdgrid"),
+            # Fourier polar filter (lat-lon only): lets the factory/CFL clamp dt
+            # by the equatorial CFL instead of the ~60x-smaller pole-cell dx, so
+            # a 2deg run uses dt~450s (5760 steps/30d) not dt~5.6s (460k steps).
+            use_polar_filter=(args.grid == "latlon" and args.polar_filter),
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
@@ -274,6 +371,10 @@ def main():
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
+        rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
+        rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        ic=args.ic,
+        ic_path=args.ic_path,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
@@ -292,19 +393,58 @@ def main():
     # ocean physics the coupled slab supports.  Every preset holds a
     # SimpleOceanConfig, so replacing it is type-safe.
     overrides = {}
+    ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     if args.ocean == "dynamic":
-        # Prognostic 3D LatLonCGridOceanModel on the SHARED lat-lon grid.
+        # Prognostic 3D LatLonCGridOceanModel.  Two grid configurations:
+        #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
+        #     lat-lon grid (no remap).  Requires --grid latlon.
+        #   * TRIPOLE (--tripole-mesh): the ocean runs on the eORCA tripole grid
+        #     (a DIFFERENT grid from the lat-lon atm), coupled via the Phase-2
+        #     cross-grid conservative remap (coupler.grid_remap).
         from legoesm.ocean.state import LatLonCGridOceanConfig
         if args.grid != "latlon":
             raise SystemExit(
-                "--ocean dynamic requires --grid latlon (the 3D ocean shares "
-                "the atmosphere's lat-lon grid; cube-atm + tripole-ocean needs "
-                "the deferred cross-grid remap).")
+                "--ocean dynamic requires --grid latlon (the atmosphere is "
+                "lat-lon; the 3D ocean is either co-located lat-lon or, with "
+                "--tripole-mesh, the tripole grid coupled by the cross-grid "
+                "remap).  Cube-atm + tripole-ocean needs the deferred "
+                "cross-family remap.")
         overrides["ocean_mode"] = "dynamic"
         overrides["ocean_config"] = LatLonCGridOceanConfig()
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
+        overrides["ocean_ic"] = args.ocean_ic
+        if args.tripole_mesh:
+            # Build the tripole geometry from the NEMO mesh and pass it as a
+            # DISTINCT ocean grid (make_grid_remapper builds the atm<->tripole
+            # cross-grid remap; _init_tripole_dynamic_ocean clones the OMIP
+            # cold-start recipe and reads mask+bathy from this same mesh).
+            from legoesm.grids.tripole import create_tripole_grid
+            ocean_grid_obj = create_tripole_grid(args.tripole_mesh)
+            overrides["tripole_mesh_path"] = args.tripole_mesh
+            logger.info(f"  Ocean grid: TRIPOLE from {args.tripole_mesh} "
+                        f"({ocean_grid_obj.n_lat}x{ocean_grid_obj.n_lon}); "
+                        f"atm lat-lon -> tripole cross-grid remap")
+        if args.ocean_ic == "woa":
+            # Realistic WOA cold start: observed T/S + WOA-derived continents.
+            from legoesm.land.config import LandConfig
+            overrides["woa_t_path"] = args.woa_t_path
+            overrides["woa_s_path"] = args.woa_s_path
+            # Co-derive the atmosphere land fraction from the SAME ocean mask
+            # and enable a slab land tile over the continents (f_land>0 with
+            # land_mode='none' would try to run an unused land model).
+            overrides["f_land_mode"] = "from_ocean"
+            overrides["land_mode"] = "slab"
+            overrides["land_config"] = LandConfig()
+            # With real continents the atmospheric radiative surface boundary
+            # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
+            # ocean SST everywhere (else land cells radiate at the dynamic-ocean
+            # SST; codex MED).  But the slab-land skin temperature is a stiff
+            # radiative feedback that can destabilise the coarse coupled run, so
+            # it is gated by --couple-surface-radiation (default on; turn off to
+            # trade land-radiation realism for stability).
+            overrides["couple_surface_radiation"] = args.couple_surface_radiation
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
@@ -325,7 +465,8 @@ def main():
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
     driver = CoupledESMDriver(
-        atm_config, coupled_cfg, output_dir=args.output,
+        atm_config, coupled_cfg, ocean_grid=ocean_grid_obj,
+        output_dir=args.output,
     )
 
     t0 = time.time()
@@ -344,10 +485,20 @@ def main():
     logger.info(f"  Per sim-day: {t_run / max(args.days, 1):.1f}s")
 
     # Final SST: slab stores T_sfc [K]; the dynamic 3D ocean stores top-level T
-    # [degC] -> convert.  Use the driver's grid-agnostic accessor.
-    sst = driver._ocean_surface_KuvC()[0]
-    logger.info(f"  SST final: mean={float(sst.mean()):.1f}K, "
-                f"range=[{float(sst.min()):.1f}, {float(sst.max()):.1f}]K")
+    # [degC] -> convert.  Use the driver's grid-agnostic accessor.  For the
+    # dynamic ocean with a realistic land mask, reduce over OCEAN cells only
+    # (land cells carry an inert abyssal-fill T that would cold-bias the mean).
+    import numpy as _np
+    sst = _np.asarray(driver._ocean_surface_KuvC()[0])
+    _omask = getattr(driver, "_ocean_land_mask", None)  # 1=ocean, 0=land
+    if _omask is not None:
+        _wet = _np.asarray(_omask) > 0.5
+        sst_red = sst[_wet] if _wet.any() else sst
+    else:
+        sst_red = sst
+    logger.info(f"  SST final (ocean): mean={float(_np.nanmean(sst_red)):.1f}K, "
+                f"range=[{float(_np.nanmin(sst_red)):.1f}, "
+                f"{float(_np.nanmax(sst_red)):.1f}]K")
 
     if driver.coupled_diagnostics:
         d0 = driver.coupled_diagnostics[0]

@@ -77,11 +77,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
-
-from legoesm.parallel.mesh import DeviceConfig, N_FACES
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
 from legoesm.grids.halo import pad_halo, pad_halo_4d
+from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1294,8 +1294,8 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """
     import numpy as np
     from legoesm.parallel.voronoi_partition import (
-        VoronoiPartition,
         HaloCommSchedule,
+        VoronoiPartition,
         build_local_mesh,
         compute_halo_cells,
     )
@@ -1544,8 +1544,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         send_edge_idx, recv_edge_pos, halo_cells_per_round,
         halo_edges_per_round.
     """
-    import numpy as np
     from collections import defaultdict
+
+    import numpy as np
 
     # ------------------------------------------------------------------
     # 1. For each device pair, find which cells/edges cross the boundary
@@ -1778,11 +1779,8 @@ def make_voronoi_sharded_step(
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
         return model.step
 
-    try:
-        from jax import shard_map  # JAX >= 0.8 exposes it at top level
-    except ImportError:  # JAX < 0.8 fallback
-        from jax.experimental.shard_map import shard_map
     from legoesm.core.state import MPASHydrostaticState
+    from legoesm.parallel.shard_map_compat import shard_map
 
     n_dev = dev_config.n_devices
     voronoi_dims = dev_config.voronoi_dims

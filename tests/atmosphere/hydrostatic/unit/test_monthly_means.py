@@ -136,6 +136,29 @@ class TestMonthlyAccumulator3D:
         valid = ~np.isnan(profile)
         npt.assert_allclose(profile[valid], 260.0, atol=1e-10)
 
+    def test_cloud_water_profile(self):
+        """A 'q_c' 3D field must yield a 'profile_q_c' of the same
+        (n_months, n_lat_bins, nlev) shape as any other profile.
+
+        Covers the cloud-water vertical-profile diagnostic added to
+        ``diagnostics.collect`` (q_c/q_i emitted via ``add_3d``): the
+        accumulator is generic over field name, so q_c/q_i route through
+        the same path as T/u/q_v and become ``profile_<name>``.
+        """
+        accum = MonthlyAccumulator(nlev=5, n_lat_bins=18)
+        lat = np.linspace(-80, 80, 6 * 4 * 4).reshape(6, 4, 4)
+        # q_c already in g/kg (the driver scales *1000 before add_3d).
+        q_c = np.full((6, 4, 4, 5), 0.12)
+        accum.add_3d(15.0, 0, {'q_c': q_c}, lat)
+
+        result = accum.finalize()
+        assert 'profile_q_c' in result
+        assert result['profile_q_c'].shape == (1, 18, 5)
+        profile = result['profile_q_c'][0]
+        valid = ~np.isnan(profile)
+        assert np.any(valid)
+        npt.assert_allclose(profile[valid], 0.12, atol=1e-10)
+
 
 class TestMonthlyAccumulatorScalar:
     """Tests for scalar accumulation."""

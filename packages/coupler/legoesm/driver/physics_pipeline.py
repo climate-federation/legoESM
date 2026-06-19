@@ -558,6 +558,9 @@ class PhysicsPipeline:
         dN_r_dt = jnp.zeros(shape_3d, dtype=_sd)
         dN_i_dt = jnp.zeros(shape_3d, dtype=_sd)
         precip_micro = jnp.zeros(shape_2d, dtype=_sd)
+        # Isolated saturation-adjustment condensation (q_v->q_c) for the joint
+        # vapour donor clamp below; None unless the micro scheme exposes it.
+        _micro_dq_v_to_qc = None
 
         if micro_out_ml is not None:
             dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
@@ -674,6 +677,16 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+            _c = micro_out.dq_v_to_qc_dt
+            _micro_dq_v_to_qc = (
+                ad.unflatten_3d(_c) if _c is not None else None)
+
+        # NOTE: the JOINT vapour donor clamp (codex cycle-3) is applied later,
+        # AFTER convection + turbulence + GWD are summed into the total
+        # tendencies (see "JOINT vapour donor clamp" just before the
+        # PhysicsOutput return).  It must see EVERY same-step vapour sink —
+        # convection AND turbulence drying (codex#4 round-2 HIGH) — not just
+        # convection, so it can only be applied on the assembled totals.
 
         # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
         # schemes, ``detrains_to_cloud``) adds convective condensate to the
@@ -856,6 +869,44 @@ class PhysicsPipeline:
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(gwd_out.dT_dt)
+
+        # JOINT vapour donor clamp (codex cycle-3, applied on ASSEMBLED totals).
+        # Kessler reports the saturation condensation it performed
+        # (_micro_dq_v_to_qc), computed from the PRE-physics q_v.  But the same
+        # summed step also removes vapour via convection AND turbulence drying
+        # (TurbulenceOutput.dq_v_dt is signed and CAN dry a level).  If the
+        # combined sink drives q_v below 0 the state update floors q_v to 0 but
+        # KEEPS the q_c increment -> q_c created from vapour that was floored
+        # away (the ~1 kg/kg impossible cloud water -> planetary-albedo runaway
+        # / OLR collapse, the coupled cold drift).
+        #
+        # Applying it HERE (after convection+turbulence+GWD are summed) is what
+        # lets it see every same-step vapour sink, closing the turbulence-drying
+        # hole that an earlier convection-only placement left (codex#4 round-2
+        # HIGH).  ``dq_v_dt`` already CONTAINS ``-_sink_cond``, so
+        # ``dq_v_dt + _sink_cond`` is the vapour tendency from all OTHER
+        # processes; the condensation may consume at most the vapour that
+        # survives them.  Reverting un-suppliable condensation is a mass/energy-
+        # exact triple for Kessler: vapour kept (dq_v_dt += cond_lost), cloud not
+        # formed (dq_c_dt -= cond_lost), latent heat not released
+        # (dT_dt -= L_v*cond_lost/c_pd).  Convective + turbulent tendencies are
+        # left UNTOUCHED (codex#4 round-1 HIGH x2): scaling convective drying
+        # creates water for detraining schemes and breaks SBM/Kuo column-MSE
+        # closure.  No-op (scale=1) whenever vapour is sufficient.
+        if _micro_dq_v_to_qc is not None:
+            _sink_cond = jnp.maximum(_micro_dq_v_to_qc, 0.0)  # [kg/kg/s] >= 0
+            # Vapour available to the saturation condensation after every OTHER
+            # same-step vapour process (dq_v_dt holds -_sink_cond; add it back).
+            _q_v_for_cond = jnp.clip(q_v + dt * (dq_v_dt + _sink_cond), 0.0)
+            # AD-safe donor scale min(1, q/(sink·dt)): the floored divisor bounds
+            # the VJP under fp32 exactly as _warm_rain.donor_clamp_scale does
+            # (inlined to avoid a cross-package private-module import).
+            _sink_dt = jnp.maximum(dt * _sink_cond, 1.0e-15)
+            _scale = jnp.minimum(1.0, _q_v_for_cond / _sink_dt)
+            _cond_lost = _sink_cond * (1.0 - _scale)  # vapour couldn't supply
+            dq_v_dt = dq_v_dt + _cond_lost            # keep the vapour
+            dq_c_dt = dq_c_dt - _cond_lost            # do not form the cloud
+            dT_dt = dT_dt - constants.L_v * _cond_lost / constants.c_pd
 
         return PhysicsOutput(
             dT_dt=dT_dt,
@@ -1458,6 +1509,7 @@ def _build_rrtmgp_radiation_fn(config):
         S_0=S_0,
         use_scan=_exp_use_scan,
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
+        gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 

@@ -100,7 +100,15 @@ class CloudConfig(NamedTuple):
         so any resolved cloud with ``q_cond ≳ 0.1 g/kg`` gives cf ≈ 1).
     """
     scheme: str = "none"
-    rh_crit: float = 0.7
+    # 0.8 (standard Sundqvist/ECHAM) matches the microphysics
+    # SundqvistConfig.rh_crit=0.8.  At 0.7 the cloud-FRACTION diagnostic (used
+    # for the RRTMGP cloud-radiative effect) onset 0.1 RH BELOW where the
+    # microphysics condenses, so the 0.70-0.80 RH band produced radiative cloud
+    # with no matching condensate.  Because cf = 1 - sqrt((1-RH)/(1-rh_crit))
+    # multiplies the cloud optical depth (both LW + SW), that mismatch fed a
+    # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
+    # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
+    rh_crit: float = 0.8
     alpha_xr: float = 100.0
     p_xr: float = 0.25
     gamma_xr: float = 0.49

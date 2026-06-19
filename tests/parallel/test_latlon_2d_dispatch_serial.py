@@ -160,13 +160,36 @@ def test_zero_polar_lat_ends_2d_zeros_both_poles(layout_1x1):
     np.testing.assert_array_equal(out[1:-1], np.asarray(field)[1:-1])
 
 
-def test_step_refuses_longitude_split():
-    """``make_latlon_2d_mpi_step`` must refuse proc_lon>1 LOUDLY (the
-    operators' local lon rolls are not yet 2-D-dispatched) — proc_lon>1 is
-    checked before the model is touched, so a stub model is fine."""
+def test_step_refuses_tripolar_longitude_split():
+    """``make_latlon_2d_mpi_step`` must refuse proc_lon>1 on a TRIPOLAR grid
+    LOUDLY — the curl tripolar-cap fold keeps a local lon roll (the 180° fold
+    under a lon split needs the lat-pencil transpose).  Keyed on
+    ``fold.is_active`` ALONE (grid-global, so all ranks raise together — NOT
+    ``fold_j``, which is rank-local and would deadlock).  Regular / wall-pole
+    proc_lon>1 is now WIRED (validated by the 2-D dycore conservation gate
+    ``tests/distributed/test_latlon_2d_mpi_step.py``)."""
+    from types import SimpleNamespace
     layout_1x2 = make_latlon_2d_layout(0, 1, 2, N_LAT, N_LON)
-    with pytest.raises(NotImplementedError, match="proc_lon>1"):
-        make_latlon_2d_mpi_step(object(), layout_1x2)
+    # fold active, NO fold_j attr -> the is_active-alone guard must still fire.
+    tri = SimpleNamespace(
+        grid=SimpleNamespace(fold=SimpleNamespace(is_active=True)),
+        config=SimpleNamespace(use_polar_filter=False))
+    with pytest.raises(NotImplementedError, match="TRIPOLAR"):
+        make_latlon_2d_mpi_step(tri, layout_1x2)
+
+
+def test_step_refuses_polar_filter_longitude_split():
+    """``make_latlon_2d_mpi_step`` must refuse proc_lon>1 with
+    ``use_polar_filter=True`` — the polar filter rfft's the rank-local
+    longitude block (wrong under a lon split; needs a lon-gather FFT).
+    Regular grid (no fold), so only the polar-filter guard can fire."""
+    from types import SimpleNamespace
+    layout_1x2 = make_latlon_2d_layout(0, 1, 2, N_LAT, N_LON)
+    m = SimpleNamespace(
+        grid=SimpleNamespace(fold=None),
+        config=SimpleNamespace(use_polar_filter=True))
+    with pytest.raises(NotImplementedError, match="polar filter"):
+        make_latlon_2d_mpi_step(m, layout_1x2)
 
 
 def test_pad_with_pole_bc_lat_refuses_fold_seam_on_2d(layout_1x1):

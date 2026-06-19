@@ -24,7 +24,15 @@
 > different *algorithm* (split-explicit) and a different *precision* (mixed). Both
 > are opt-in + codex-clean; production-uptake gated by full-OMIP long-run
 > validation. Remaining f32 extensions (baroclinic EOS/PGF, tracer-advection
-> limiters) are large, science-risky careful-numerics, deferred.
+> limiters) are large, science-risky careful-numerics. **PURSUED 2026-06-18 (see
+§2): precision-VIABLE (offline experiment 8520588: f32-anomaly PGF relRMS 8e-5 —
+the fp64-EOS policy rule is overcautious for the ρ′~O(1) anomaly path) and now
+SHIPPED opt-in** (`LEGOESM_BAROCLINIC_F32`): a `wright_eos` `compute_dtype`
+override runs the EOS polynomial in f32 for the PGF path only (scope-gated to the 3
+PE callers), default OFF = byte-identical. Marginal (1.10× EOS-kernel A/B under
+fp64, GPU larger) but real + codex-clean (v3). With this, the SOTA-extension
+space the addendum opened is harvested — the campaign is fully converged for the
+current hardware.
 
 **Verdict: the production step-kernel scaling surface is exhausted on Ginsburg
 hardware.** Across ocean (lat-lon C-grid), atmosphere (cubed-sphere FV3, lat-lon
@@ -78,6 +86,7 @@ measured roofline), never to efficiency ratios alone.
 | Ocean WEAK multinode at production tile | ocean | **0.97** near-flat (np8→16, ~590k cells/rank) | 8489559 |
 | MPAS batched union-neighbor halo (default flip) | icosahedral | **+4.6 %** np8, +3.5 % np16 | 8488023 |
 | `ln_ps`/`hybrid_factor`/`div_v` ride the cube-PE stage pack | cube SPMD | −3 collectives/RK3-substep (count-cut, bit-identical) | 8481480 |
+| Mixed-precision **f32-EOS baroclinic** (opt-in `LEGOESM_BAROCLINIC_F32`) | ocean PGF | **1.10×** EOS-kernel A/B under fp64 policy (CPU; GPU larger, RTX8000 f64=1/32 f32). f32 EOS polynomial / f64 state; anomaly-safe (PGF relRMS 8e-5, job 8520588); `wright_eos` compute_dtype override, scope-gated to the 3 PE callers; default OFF = byte-identical. codex v3 CLEAN | 8520646 |
 
 ---
 
@@ -91,9 +100,11 @@ measured roofline), never to efficiency ratios alone.
 | Banded multigrid barotropic (wall-time) | converges (M12→1e-6) but **6–9× SLOWER** — zonal-line V-cycle compute ≫ jacobi diagonal; reductions weren't the bottleneck | 8488551 |
 | Cube np>6 (sub-face tiling speedup) | anti-scales on Gloo/TCP+PCIe → capability only, not speedup | 8482583 |
 | Spectral multi-GPU global transform | all-to-all dominated on PCIe; local GEMM is the right lever | (roofline) |
+| Spectral **level-axis sharding** (multi-device) | MEASURED anti-scaling: T85 **0.74×** @4dev, T42 flat — the semi-implicit (nlev,nlev)/wavenumber solve all-gathers levels + SH transforms emit no collectives ⇒ single-device by design (`_valid_gpu_counts→[1]`). Both spectral multi-device schemes (level-shard AND transpose all-to-all) are now dead on this HW | 8520392 (`spectral_level_shard_cliff.md`, 2026-06-18) |
 | CUDA-aware MPI rebuild | conda mpi4py shadows the cuda-aware libmpi → segfault; full-stack rebuild not worth it (prod already 0.92–0.95) | 8486212 |
 | MPAS METIS partitioning | +2.6 % np16 (rank-growing, opt-in, pymetis dep) — real but "not a new mechanism" | 8491002 |
 | Field-batched voronoi halo (the "18× regression") | was I5/f32/stale-code; batched actually WINS at I6/f64 (now default) | 8488023 |
+| Mixed-precision baroclinic EOS/PGF (f32 work) | NOT dead — initially assessed not-worth-it, then user-green-lit and **SHIPPED opt-in 2026-06-18 (see §2)**. A `wright_eos` `compute_dtype` override runs the EOS polynomial in f32 for the anomaly-safe PGF path only (the fp64 policy's blanket EOS-f64 rule is overcautious for ρ′~O(1); experiment 8520588 PGF relRMS 8e-5). Marginal but real (1.10× kernel, GPU larger); codex caught a v1 no-op + a scope leak en route. | see §2 / 8520646 |
 
 ---
 

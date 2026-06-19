@@ -2133,8 +2133,11 @@ class TestPackedHaloDuogrid:
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo_4d
-        from legoesm.parallel.halo_exchange import _apply_duogrid_4d as apply_mpi
-        from legoesm.parallel.cubesphere_exchange import _apply_duogrid_4d as apply_spmd
+        # MPI (halo_exchange) and SPMD (cubesphere_exchange) now share the one
+        # legoesm.grids.duogrid.apply_duogrid_4d, so drift between them is
+        # structurally impossible; both names bind to that helper here.
+        from legoesm.grids.duogrid import apply_duogrid_4d
+        apply_mpi = apply_spmd = apply_duogrid_4d
 
         n, nlev = 8, 3
         grid = create_cubed_sphere(n, use_duogrid=True)
@@ -2165,7 +2168,7 @@ class TestPackedHaloDuogrid:
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo_4d
-        from legoesm.parallel.halo_exchange import _apply_duogrid_4d
+        from legoesm.grids.duogrid import apply_duogrid_4d
 
         n, nlev = 8, 2
         grid = create_cubed_sphere(n, use_duogrid=True)
@@ -2173,7 +2176,7 @@ class TestPackedHaloDuogrid:
         rng = np.random.default_rng(1)
         f = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
         pre = pad_halo_4d(f)
-        post = _apply_duogrid_4d(pre, dg, halo=1)
+        post = apply_duogrid_4d(pre, dg, halo=1)
         # The interior is preserved
         np.testing.assert_array_equal(pre[:, 1:-1, 1:-1, :], post[:, 1:-1, 1:-1, :])
         # Halo cells must have changed somewhere

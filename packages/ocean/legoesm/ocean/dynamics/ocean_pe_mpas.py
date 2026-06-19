@@ -180,6 +180,7 @@ def mpas_ocean_baroclinic_tendencies(
         is_active_3d=_is_active_3d,
         h_actual=_h_for_pgf,
         rho_ref_z_static=_rho_ref_z_static,
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     # Fill land cells in p_prime before gradient_edge so the 2-cell

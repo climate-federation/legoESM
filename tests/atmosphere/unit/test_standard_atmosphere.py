@@ -333,6 +333,59 @@ class TestDriverStandardIC:
         umax = float(jnp.max(jnp.abs(drv.state.u.data)))
         assert 10.0 < umax < 60.0, f"standard-IC jet {umax:.1f} m/s not wired"
 
+    def _build_cube(self, ic):
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig,
+        )
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=20),
+            dycore=DycoreConfig(model_type="hydrostatic",
+                                discretization="cdgrid", dt=300.0),
+            dataset="analytical", radiation="gray", ic=ic,
+        )
+        drv = ModelDriver(cfg)
+        drv.setup()
+        return drv
+
+    def test_standard_ic_on_cube_earthlike_lapse_and_cwv(self):
+        """ic='standard' on the cubed-sphere applies the GRID-AGNOSTIC realistic
+        T / p_s overlay (cold stratosphere + equator-pole surface gradient +
+        Earth-like CWV) — the same fix that on the uniform ic='default' scaffold
+        was missing (isothermal ~300 K column, CWV ~80).  The balanced jet is
+        skipped on the cube (cube-local winds), which must NOT crash."""
+        drv = self._build_cube("standard")
+        T = drv.state.T.data            # (6, n, n, nlev)
+        assert bool(jnp.all(jnp.isfinite(T)))
+        # Cold stratosphere aloft — NOT the isothermal ~300 K default scaffold.
+        assert float(jnp.min(T)) < 230.0
+        # A real lapse rate: surface much warmer than the column top.
+        assert float(jnp.mean(T[..., -1])) > float(jnp.mean(T[..., 0])) + 30.0
+        # Imposed equator-pole surface gradient (uses geographic cube latitude).
+        lat = np.asarray(drv.grid.lat)          # (6, n, n)
+        Tsfc = np.asarray(T[..., -1])
+        eq = np.abs(lat) < np.deg2rad(15.0)
+        pole = np.abs(lat) > np.deg2rad(60.0)
+        assert Tsfc[eq].mean() > Tsfc[pole].mean() + 8.0
+        # Earth-like CWV (the uniform ic='default' scaffold gave ~80 kg/m^2).
+        cwv = column_water_vapor(
+            drv.tracers["q_v"], drv.state.p_s.data, drv.sigma.dsigma)
+        assert 5.0 < float(jnp.mean(cwv)) < 40.0
+
+    def test_standard_ic_cube_accepted_by_validation(self):
+        """validate_strict ACCEPTS ic='standard' on cubed_sphere (the extension);
+        the T/p_s overlay is grid-agnostic and the jet is skipped."""
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig,
+        )
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=20),
+            dycore=DycoreConfig(model_type="hydrostatic",
+                                discretization="cdgrid", dt=300.0),
+            ic="standard",
+        )
+        cfg.validate_strict()   # must not raise
+
     def test_standard_rejected_for_spectral_at_validation(self):
         """ic='standard' must fail fast in validate_strict for spectral/Gaussian
         (SpectralHydrostaticState has T_hat, no grid-space T to override) — not
@@ -346,7 +399,7 @@ class TestDriverStandardIC:
                                 discretization="spectral", dt=600.0),
             ic="standard",
         )
-        with pytest.raises(ValueError, match="grid_type='latlon'"):
+        with pytest.raises(ValueError, match="grid_type"):
             cfg.validate_strict()
 
     def test_standard_accepted_for_latlon(self):

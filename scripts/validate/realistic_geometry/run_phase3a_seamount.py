@@ -69,7 +69,7 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+from legoesm.ocean.bathymetry import laplacian_smooth_2d
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
 
@@ -102,7 +102,7 @@ def _build_seamount_bathymetry(grid, smoothing_passes,
     seamount = height_m * np.exp(-r2 / (2 * sigma_deg ** 2))
     H_bathy = H_MAX - seamount
     if smoothing_passes > 0:
-        H_bathy = _laplacian_smooth_2d(H_bathy, smoothing_passes,
+        H_bathy = laplacian_smooth_2d(H_bathy, smoothing_passes,
                                          is_cubed=False)
     return jnp.asarray(H_bathy)
 

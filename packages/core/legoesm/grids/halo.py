@@ -180,47 +180,9 @@ def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
         the true fractional index on the (possibly reversed) neighbour
         strip is ``j + δ``.  Edge indices: 0=WEST, 1=EAST, 2=SOUTH, 3=NORTH.
     """
-    dalpha = np.pi / (2 * n)
-    alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
-
-    edges = [WEST, EAST, SOUTH, NORTH]
-    offsets = np.zeros((6, 4, n), dtype=np.float64)
-
-    for face in range(6):
-        for edge_idx, edge in enumerate(edges):
-            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-
-            for j in range(n):
-                # ---- halo cell position on extended gnomonic grid ----
-                if edge == WEST:
-                    ax_h, ay_h = -np.pi / 4 - dalpha / 2, alpha[j]
-                elif edge == EAST:
-                    ax_h, ay_h = np.pi / 4 + dalpha / 2, alpha[j]
-                elif edge == SOUTH:
-                    ax_h, ay_h = alpha[j], -np.pi / 4 - dalpha / 2
-                else:  # NORTH
-                    ax_h, ay_h = alpha[j], np.pi / 4 + dalpha / 2
-
-                xyz_h = _face_to_xyz_np(face, ax_h, ay_h)
-
-                # ---- map to neighbour-face gnomonic coordinates ----
-                ax_n, ay_n = _xyz_to_gnomonic_np(
-                    nbr_face, xyz_h[0], xyz_h[1], xyz_h[2],
-                )
-
-                # ---- fractional index along the strip ----
-                # The strip varies along the "transverse" gnomonic axis.
-                if nbr_edge in (WEST, EAST):
-                    frac = (ay_n - alpha[0]) / dalpha
-                else:  # SOUTH, NORTH
-                    frac = (ax_n - alpha[0]) / dalpha
-
-                if is_reversed:
-                    frac = (n - 1) - frac
-
-                offsets[face, edge_idx, j] = frac - j
-
-    return jnp.array(offsets, dtype=jnp.float64)
+    # halo=1 is the depth-0 slice of the general N-depth precomputation
+    # (mirrors compute_halo_interp_offsets_ed → _compute_halo_interp_offsets_ed_hN).
+    return _compute_halo_interp_offsets_hN(n, 1)[:, :, 0, :]
 
 
 def _ed_indomain_boundary_strip(arr, edge, n, ext):

@@ -560,6 +560,8 @@ def baroclinic_wave_init_spectral(
     grid,
     sigma_coord: SigmaCoordinate,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ):
     """Initialize Jablonowski-Williamson baroclinic wave in spectral space.
 
@@ -574,6 +576,14 @@ def baroclinic_wave_init_spectral(
         Vertical sigma coordinate.
     perturbed : bool
         If True, add the exponential perturbation to trigger instability.
+    moist : bool
+        If True, attach grid-space ``q_v``/``q_c``/``q_r`` tracers for a moist
+        baroclinic wave (passive at t=0; ``make_kessler_forcing_spectral``
+        condenses/precipitates). ``q_v`` uses the same RH-tapered formula as the
+        MPAS / cubed-sphere moist init: ``q_v = rh · q_sat(T, p) · σ²`` capped at
+        saturation; ``q_c = q_r = 0``.
+    rh_init : float
+        Surface relative humidity for the ``q_v`` taper when ``moist=True``.
 
     Returns
     -------
@@ -670,10 +680,32 @@ def baroclinic_wave_init_spectral(
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
 
+    # Moist tracers: same RH-tapered q_v init as baroclinic_wave_init_mpas (and
+    # the cubed-sphere / lat-lon moist inits) so the balanced state is identical
+    # across grids. q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
+    # Grid-space, passive at t=0; make_kessler_forcing_spectral drives the
+    # condensation/precipitation. p is hydrostatic on the uniform p_s=P0 column.
+    tracers = None
+    if moist:
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] * P0
+        q_sat = saturation_mixing_ratio(T_jax, p_full)
+        sigma2 = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] ** 2
+        q_v_data = jnp.minimum(rh_init * q_sat * sigma2, q_sat)
+        q_zero = jnp.zeros_like(q_v_data)
+        tdims = ("lat", "lon", "level")
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v", dims=tdims, units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c", dims=tdims, units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r", dims=tdims, units="kg/kg"),
+        }
+
     return SpectralHydrostaticState(
         vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )

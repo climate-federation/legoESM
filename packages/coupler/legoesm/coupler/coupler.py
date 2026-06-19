@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 from typing import Any, NamedTuple
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -106,12 +105,6 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
         raise ValueError(f"Cd_ocean must be >= 0, got {config.Cd_ocean!r}")
     if config.Ch_ocean < 0.0:
         raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
-    if config.blend_sharpness != CouplerConfig._field_defaults["blend_sharpness"]:
-        warnings.warn(
-            "CouplerConfig.blend_sharpness is currently unused in blend_tiles().",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
 
 def init_surface_state(

@@ -205,7 +205,14 @@ class TestKessler:
         eager = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0)
         jit_fn = jax.jit(lambda qv: kessler_microphysics(
             T, qv, hyd, p_full, p_half, rho, dz, 1200.0).dT_dt)
-        np.testing.assert_allclose(jit_fn(q_v), eager.dT_dt, rtol=1e-12)
+        # rtol=1e-10: the psychrometric saturation-adjustment chain divides by
+        # 1 + (L_v/c_pd) dq_sat/dT and the supersaturation excess (q_v - q_sat)
+        # is a catastrophic-cancellation subtraction, so XLA's fused (JIT) vs
+        # eager FP reassociation legitimately differs at ~4e-12 relative on
+        # dT_dt (measured f64; ~1 ulp absolute, amplified by the small dT_dt
+        # magnitude).  1e-12 was below that floor; 1e-10 keeps ~24x margin while
+        # still catching any real JIT/eager divergence.
+        np.testing.assert_allclose(jit_fn(q_v), eager.dT_dt, rtol=1e-10)
 
 
 # ======================================================================

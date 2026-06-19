@@ -306,6 +306,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         n_iter=2, hi_precision_pressure=True,
         h_actual=(z_coord.h_partial if is_partial else None),
         is_active_3d=(active_3d if is_partial else None),
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     # --- 4. Convert to D-grid ---

@@ -991,6 +991,30 @@ def sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
 
 
+def _sh_analysis_weighted_3d(
+    grid: GaussianGrid, field_3d: jax.Array, weight_matrix: jax.Array,
+) -> jax.Array:
+    """Batched forward SH analysis weighted by ``weight_matrix`` (n_lat, n_sh).
+
+    rfft over longitude → slice m≤n_max → gather to n_sh → ``2π·Σ_lat
+    (weight·f_m)``, trailing-axis chunked.  Shared non-GEMM kernel for the
+    ``wPnm_oc2`` (1/cos²) and ``wDnm`` (dPnm/dμ) weighted variants — the
+    only difference between them was the weight matrix.  (``sh_analysis_3d``
+    keeps its own kernel because it also carries the optional GEMM branch.)
+    """
+    n_max = grid.n_max
+
+    def _kernel(field):
+        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
+        f_m = f_hat_lon[:, :n_max + 1, :]
+        f_m_gathered = f_m[:, grid.ms, :]
+        return 2.0 * jnp.pi * jnp.sum(
+            weight_matrix[:, :, None] * f_m_gathered, axis=0,
+        )
+
+    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+
+
 def sh_analysis_oc2_3d(
     grid: GaussianGrid, field_3d: jax.Array,
 ) -> jax.Array:
@@ -1001,17 +1025,7 @@ def sh_analysis_oc2_3d(
     the trailing level axis.  Trailing-axis chunking via
     ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
-    n_max = grid.n_max
-
-    def _kernel(field):
-        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]
-        f_m_gathered = f_m[:, grid.ms, :]
-        return 2.0 * jnp.pi * jnp.sum(
-            grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
-        )
-
-    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+    return _sh_analysis_weighted_3d(grid, field_3d, grid.wPnm_oc2)
 
 
 def sh_analysis_dmu_3d(
@@ -1023,17 +1037,7 @@ def sh_analysis_dmu_3d(
     the trailing level axis.  Trailing-axis chunking via
     ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
-    n_max = grid.n_max
-
-    def _kernel(field):
-        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]
-        f_m_gathered = f_m[:, grid.ms, :]
-        return 2.0 * jnp.pi * jnp.sum(
-            grid.wDnm[:, :, None] * f_m_gathered, axis=0,
-        )
-
-    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+    return _sh_analysis_weighted_3d(grid, field_3d, grid.wDnm)
 
 
 def sh_analysis_oc2_dmu_3d(

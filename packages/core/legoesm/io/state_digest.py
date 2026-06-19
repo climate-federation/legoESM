@@ -41,8 +41,6 @@ def pytree_state_digest(*trees) -> str:
     leaf moving keys, or a ``None`` slot appearing/disappearing — cannot collide
     with the original even when the surviving array leaves are identical.
     """
-    import numpy as _np
-
     h = hashlib.sha256()
     for tree in trees:
         leaves, treedef = jax.tree_util.tree_flatten(tree)
@@ -50,7 +48,7 @@ def pytree_state_digest(*trees) -> str:
         h.update(str(treedef).encode("utf-8"))
         host = jax.device_get(leaves)  # single batched device->host transfer
         for arr in host:
-            a = _np.asarray(arr)
+            a = np.asarray(arr)
             h.update(str(a.shape).encode("utf-8"))
             h.update(str(a.dtype).encode("utf-8"))
             h.update(a.tobytes())

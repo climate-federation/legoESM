@@ -184,5 +184,83 @@ class TestRemapSurfaceFields(unittest.TestCase):
         self.assertFalse(jnp.allclose(g, 0.0))
 
 
+class TestTpointCurrentRotation(unittest.TestCase):
+    """``rotate_tpoint_currents_to_geographic`` — grid-aligned ocean currents
+    to geographic east/north for the tripole bipolar cap.
+
+    Truth invariants (tier-0): identity outside the cap (regular lat-lon
+    byte-exact), magnitude preservation (a rotation cannot change |v|), and a
+    known 90-degree rotation.  Plus differentiability (the o2a coupling must
+    stay grad-connected to the ocean velocity)."""
+
+    def _angles(self, n_lat, n_lon, cos_val, sin_val):
+        cos_a_u = jnp.full((n_lat, n_lon + 1), cos_val, dtype=jnp.float64)
+        sin_a_u = jnp.full((n_lat, n_lon + 1), sin_val, dtype=jnp.float64)
+        return cos_a_u, sin_a_u
+
+    def test_identity_below_cap(self):
+        """cosα=1, sinα=0 (regular lat-lon / sub-cap) -> exact pass-through."""
+        from legoesm.coupler.grid_remap import (
+            rotate_tpoint_currents_to_geographic,
+        )
+        n_lat, n_lon = 4, 6
+        rng = np.random.default_rng(0)
+        u_c = jnp.asarray(rng.standard_normal((n_lat, n_lon)))
+        v_c = jnp.asarray(rng.standard_normal((n_lat, n_lon)))
+        cos_a_u, sin_a_u = self._angles(n_lat, n_lon, 1.0, 0.0)
+        u_g, v_g = rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
+        np.testing.assert_allclose(np.asarray(u_g), np.asarray(u_c), atol=0, rtol=0)
+        np.testing.assert_allclose(np.asarray(v_g), np.asarray(v_c), atol=0, rtol=0)
+
+    def test_ninety_degree_rotation(self):
+        """cosα=0, sinα=1 -> u_east=-v, v_north=+u."""
+        from legoesm.coupler.grid_remap import (
+            rotate_tpoint_currents_to_geographic,
+        )
+        n_lat, n_lon = 3, 5
+        u_c = jnp.ones((n_lat, n_lon)) * 2.0
+        v_c = jnp.ones((n_lat, n_lon)) * 5.0
+        cos_a_u, sin_a_u = self._angles(n_lat, n_lon, 0.0, 1.0)
+        u_g, v_g = rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
+        np.testing.assert_allclose(np.asarray(u_g), -np.asarray(v_c), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(v_g), np.asarray(u_c), atol=1e-12)
+
+    def test_magnitude_preserved_arbitrary_angle(self):
+        """A rotation preserves |(u, v)| for any angle (incl. after the
+        average-and-renormalise of non-uniform u-face angles)."""
+        from legoesm.coupler.grid_remap import (
+            rotate_tpoint_currents_to_geographic,
+        )
+        n_lat, n_lon = 4, 6
+        rng = np.random.default_rng(1)
+        u_c = jnp.asarray(rng.standard_normal((n_lat, n_lon)))
+        v_c = jnp.asarray(rng.standard_normal((n_lat, n_lon)))
+        # Non-uniform u-face angles (different per face) on the unit circle so
+        # the average-then-renormalise path is exercised.
+        theta = jnp.asarray(rng.uniform(0.0, 2 * np.pi, (n_lat, n_lon + 1)))
+        cos_a_u, sin_a_u = jnp.cos(theta), jnp.sin(theta)
+        u_g, v_g = rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
+        mag_in = np.asarray(jnp.sqrt(u_c ** 2 + v_c ** 2))
+        mag_out = np.asarray(jnp.sqrt(u_g ** 2 + v_g ** 2))
+        np.testing.assert_allclose(mag_out, mag_in, atol=1e-12)
+
+    def test_grad_flows(self):
+        from legoesm.coupler.grid_remap import (
+            rotate_tpoint_currents_to_geographic,
+        )
+        n_lat, n_lon = 3, 4
+        cos_a_u, sin_a_u = self._angles(n_lat, n_lon, 0.0, 1.0)
+        v_c = jnp.ones((n_lat, n_lon))
+
+        def loss(u_c):
+            u_g, v_g = rotate_tpoint_currents_to_geographic(
+                u_c, v_c, cos_a_u, sin_a_u)
+            return jnp.sum(u_g ** 2 + v_g ** 2)
+
+        g = jax.grad(loss)(jnp.ones((n_lat, n_lon)) * 0.7)
+        self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+        self.assertFalse(jnp.allclose(g, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
