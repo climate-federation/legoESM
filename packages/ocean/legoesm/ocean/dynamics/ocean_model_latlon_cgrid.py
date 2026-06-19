@@ -974,6 +974,7 @@ class LatLonCGridOceanModel:
         # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
+            VALID_TRACER_ADVECTION,
             VALID_MOMENTUM_FLUX_SCHEME,
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
