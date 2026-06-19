@@ -176,7 +176,13 @@ def compare_and_write(
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compare AMIP snapshot to ERA5.")
     p.add_argument("--restart", required=True,
-                   help="AMIP restart checkpoint (.npz/.zarr)")
+                   help="AMIP restart checkpoint (.npz/.zarr) — the run to score "
+                        "(e.g. the LES-corrected deploy)")
+    p.add_argument("--baseline-restart", default="",
+                   help="Optional SECOND restart (the UNcorrected baseline) on the "
+                        "same grid: when given, the per-variable global bias of "
+                        "baseline-vs-corrected is reported (the clause-5 'did it "
+                        "improve the biases' before/after check)")
     p.add_argument("--grid-type", required=True,
                    choices=sorted(_GRID_TYPE_ALIASES))
     p.add_argument("--resolution", type=int, required=True,
@@ -200,6 +206,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None):
+    """Load a restart checkpoint into a comparison :class:`ColumnState`.
+
+    Loads the restart, synthesizes grid winds (a no-op for a grid state; the MPAS
+    branch reconstructs cell winds via ``mesh=grid``), shape/level-checks against
+    the grid, and builds the model state.  Shared by the scored ``--restart`` and
+    the optional ``--baseline-restart`` so both are loaded IDENTICALLY (same grid,
+    sigma, SST source) — the before/after bias is then comparable.
+    """
+    from legoesm.driver.restart import load_restart
+    from legoesm.training.compare_reanalysis import grid_winds_from_spectral
+
+    loaded = load_restart(restart_path, grid, sigma, strict=True)
+    state, q_v = loaded[0], loaded[1]
+    state = grid_winds_from_spectral(state, grid, sigma)
+    expected_cols = tuple(grid.grid_shape_2d)
+    if tuple(state.T.shape[:-1]) != expected_cols:
+        raise ValueError(
+            f"restart column shape {tuple(state.T.shape[:-1])} != grid "
+            f"{expected_cols}; --grid-type/--resolution must match the run.")
+    if int(state.T.shape[-1]) != int(nlev):
+        raise ValueError(f"restart nlev {state.T.shape[-1]} != --nlev {nlev}.")
+    return model_state_from_restart(state, q_v, sst_K=sst_K, mesh=grid)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: load AMIP snapshot + ERA5, regrid, compare, write manifest."""
     args = _build_arg_parser().parse_args(argv)
@@ -207,7 +238,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Deferred heavy imports (kept out of module import so the unit-tested
     # helpers above load without the grid factory / ERA5 / restart machinery).
-    from legoesm.driver.restart import load_restart
     from legoesm.grids.factory import create_grid
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.training.era5_to_state import (
@@ -228,21 +258,6 @@ def main(argv: list[str] | None = None) -> int:
     # into a SpectralHydrostaticState (iter 92, validating the coeff shapes vs this
     # grid/sigma under strict), and `grid_winds_from_spectral` BELOW synthesizes its
     # grid winds (a no-op for a grid state) so the compare is grid-general.
-    loaded = load_restart(args.restart, grid, sigma, strict=True)
-    state, q_v = loaded[0], loaded[1]
-    from legoesm.training.compare_reanalysis import grid_winds_from_spectral
-    state = grid_winds_from_spectral(state, grid, sigma)
-    expected_cols = tuple(grid.grid_shape_2d)
-    if tuple(state.T.shape[:-1]) != expected_cols:
-        raise ValueError(
-            f"restart column shape {tuple(state.T.shape[:-1])} != grid "
-            f"{expected_cols}; --grid-type/--resolution must match the run."
-        )
-    if int(state.T.shape[-1]) != int(args.nlev):
-        raise ValueError(
-            f"restart nlev {state.T.shape[-1]} != --nlev {args.nlev}."
-        )
-
     if args.sst_npz:
         import numpy as np
 
@@ -257,9 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             "follow-up (docs/COMPARE_REANALYSIS.md).",
             stacklevel=2,
         )
-    # state is already grid-synthesized above; mesh=grid lets the MPAS branch
-    # reconstruct cell winds if this is an MPAS edge-velocity restart.
-    model = model_state_from_restart(state, q_v, sst_K=sst_K, mesh=grid)
+    model = load_model_from_restart(args.restart, grid, sigma, args.nlev, sst_K=sst_K)
 
     era5_cfg = TrainingERA5Config(
         zarr_store=args.era5_zarr,
@@ -296,6 +309,38 @@ def main(argv: list[str] | None = None) -> int:
         f"wind_rmse={float(pvb.global_wind_rmse_m_s):.4g} m/s, "
         f"precip_err={precip_str}"
     )
+
+    # Before/after deploy verification: with a baseline restart, report the
+    # per-variable global-bias CHANGE (the clause-5 "improve the biases" check —
+    # exposes a correction that lowers the combined score by trading variables off).
+    if args.baseline_restart:
+        from legoesm.training.bias_metrics import per_variable_bias_improvement
+
+        baseline_model = load_model_from_restart(
+            args.baseline_restart, grid, sigma, args.nlev, sst_K=sst_K)
+        # out_path=None ⇒ compare only (no manifest write) against the SAME reference.
+        baseline_cmp = compare_and_write(
+            model=baseline_model, reference=reference, sigma=sigma, grid=grid,
+            time_index=args.time_index, n_worst=args.n_worst, out_path=None)
+        pvi = per_variable_bias_improvement(
+            baseline_cmp.error_fields, result.error_fields,
+            jnp.asarray(grid.grid_area), have_precip=have_precip)
+
+        def _line(name, unit, base_v, upd_v, improved):
+            mark = "improved" if bool(improved) else "WORSE/same"
+            return (f"  {name}: {float(base_v):.4g} -> {float(upd_v):.4g} {unit} "
+                    f"({mark})")
+
+        print("[compare_amip_era5] per-variable bias baseline -> corrected:")
+        print(_line("T_rmse", "K", pvi.baseline.global_T_rmse_K,
+                    pvi.updated.global_T_rmse_K, pvi.T_improved))
+        print(_line("qv_rmse", "kg/kg", pvi.baseline.global_qv_rmse_kg_kg,
+                    pvi.updated.global_qv_rmse_kg_kg, pvi.qv_improved))
+        print(_line("wind_rmse", "m/s", pvi.baseline.global_wind_rmse_m_s,
+                    pvi.updated.global_wind_rmse_m_s, pvi.wind_improved))
+        if have_precip:
+            print(_line("precip_err", "mm/day", pvi.baseline.global_precip_err_mm_day,
+                        pvi.updated.global_precip_err_mm_day, pvi.precip_improved))
     return 0
 
 

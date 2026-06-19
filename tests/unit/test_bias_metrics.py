@@ -18,6 +18,7 @@ from legoesm.training.bias_metrics import (
     aggregate_combined_bias,
     aggregate_per_variable_bias,
     bias_improvement,
+    per_variable_bias_improvement,
     worst_column_bias_change,
 )
 
@@ -84,6 +85,36 @@ def test_per_variable_bias_global_reduce_doubling_preserves_rmse():
         ef, jnp.ones(4), have_precip=False,
         global_reduce=lambda x: 2.0 * x).global_T_rmse_K)
     assert doubled == pytest.approx(local)        # both sums scaled ⇒ RMSE unchanged
+
+
+def test_per_variable_bias_improvement_exposes_per_variable_tradeoff():
+    """The per-variable improvement EXPOSES a trade-off the combined score hides:
+    a correction that LOWERS T-rmse but RAISES wind-rmse → T_improved, NOT
+    wind_improved (the whole point — 'improve the biases' is per-variable)."""
+    base = _err_fields(jnp.array([4.0, 4.0]), jnp.array([1.0, 1.0]),
+                       jnp.array([2.0, 2.0]), jnp.zeros(2))
+    upd = _err_fields(jnp.array([1.0, 1.0]),   # T improved (4→1)
+                      jnp.array([1.0, 1.0]),   # qv unchanged
+                      jnp.array([5.0, 5.0]),   # wind WORSE (2→5)
+                      jnp.zeros(2))
+    pvi = per_variable_bias_improvement(base, upd, jnp.ones(2), have_precip=False)
+    assert float(pvi.baseline.global_T_rmse_K) == pytest.approx(4.0)
+    assert float(pvi.updated.global_T_rmse_K) == pytest.approx(1.0)
+    assert bool(pvi.T_improved) and not bool(pvi.wind_improved)
+    assert not bool(pvi.qv_improved)              # strictly-less ⇒ unchanged is NOT improved
+
+
+def test_per_variable_bias_improvement_precip_not_improved_when_absent():
+    """precip_improved is False when precip wasn't compared (both NaN ⇒ NaN<NaN is
+    False) — a not-compared variable never reads as 'improved'."""
+    base = _err_fields(jnp.ones(2), jnp.ones(2), jnp.ones(2), jnp.array([2.0, 2.0]))
+    upd = _err_fields(jnp.ones(2), jnp.ones(2), jnp.ones(2), jnp.array([1.0, 1.0]))
+    pvi = per_variable_bias_improvement(base, upd, jnp.ones(2), have_precip=False)
+    assert not bool(pvi.precip_improved)
+    assert bool(jnp.isnan(pvi.baseline.global_precip_err_mm_day))
+    # With have_precip the precip improvement IS detected (2.0 → 1.0).
+    pvi2 = per_variable_bias_improvement(base, upd, jnp.ones(2), have_precip=True)
+    assert bool(pvi2.precip_improved)
 
 
 def test_aggregate_uniform_weights_is_mean():

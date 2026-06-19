@@ -208,6 +208,58 @@ def aggregate_per_variable_bias(
     )
 
 
+class PerVariableBiasImprovement(NamedTuple):
+    """Baseline-vs-updated per-variable global bias — the physical, per-variable
+    companion to :class:`BiasImprovement` (which compares the single combined score).
+
+    ``baseline`` / ``updated`` are the :class:`PerVariableBias` of each run; the
+    ``*_improved`` bools are ``updated < baseline`` PER VARIABLE, so a correction
+    that lowers the combined score by IMPROVING T while WORSENING wind is exposed
+    (``T_improved=True`` but ``wind_improved=False``).  ``precip_improved`` is
+    ``False`` when precipitation was not compared (both biases ``NaN`` ⇒ ``NaN <
+    NaN`` is ``False``) — a not-compared variable never reads as "improved".
+    """
+
+    baseline: PerVariableBias
+    updated: PerVariableBias
+    T_improved: jax.Array
+    qv_improved: jax.Array
+    wind_improved: jax.Array
+    precip_improved: jax.Array
+
+
+def per_variable_bias_improvement(
+    baseline_error_fields: Any,
+    updated_error_fields: Any,
+    area_weights: jax.Array,
+    *,
+    have_precip: bool = False,
+    valid_mask: jax.Array | None = None,
+    global_reduce: Callable[[jax.Array], jax.Array] | None = None,
+) -> PerVariableBiasImprovement:
+    """Per-variable global bias of a baseline vs an updated run + per-variable
+    improved flags — the interpretable "did the correction improve the biases"
+    (plural) check, beyond the single combined-score :func:`bias_improvement`.
+
+    Both ``*_error_fields`` are :class:`ColumnErrorFields` on the SAME grid scored
+    against the SAME reference (so ``area_weights`` / ``valid_mask`` apply to both).
+    Reuses :func:`aggregate_per_variable_bias` (MSE-space global RMSE for T/q_v/wind,
+    mean absolute error for precip).  ``global_reduce`` (DISTRIBUTED) makes each
+    per-variable bias the GLOBAL value before the comparison.
+    """
+    kw = dict(have_precip=have_precip, valid_mask=valid_mask, global_reduce=global_reduce)
+    base = aggregate_per_variable_bias(baseline_error_fields, area_weights, **kw)
+    upd = aggregate_per_variable_bias(updated_error_fields, area_weights, **kw)
+    return PerVariableBiasImprovement(
+        baseline=base,
+        updated=upd,
+        T_improved=upd.global_T_rmse_K < base.global_T_rmse_K,
+        qv_improved=upd.global_qv_rmse_kg_kg < base.global_qv_rmse_kg_kg,
+        wind_improved=upd.global_wind_rmse_m_s < base.global_wind_rmse_m_s,
+        precip_improved=upd.global_precip_err_mm_day < base.global_precip_err_mm_day,
+    )
+
+
 def worst_column_bias_change(
     baseline_score: jax.Array,
     updated_score: jax.Array,

@@ -105,27 +105,24 @@ def test_model_state_from_restart():
     assert cs.precip_mm_day is None
 
 
-def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
-    """Drive main() with all live I/O stubbed; assert the wiring contract.
+def _stub_main_io(monkeypatch, *, nlev=4, shape=(2, 2)):
+    """Stub all of main()'s live I/O (grid factory, sigma, restart, ERA5, regrid)
+    and return ``(grid, calls)``.  ``calls['n_load_restart']`` counts restart loads
+    (the before/after path loads TWO).  Shared by the wiring + before/after tests."""
+    from types import SimpleNamespace
 
-    Verifies the factory token mapping (spectral->gaussian), create_sigma_coord
-    nlev, load_restart strict=True + correct unpack, regrid call order
-    (slice, grid, sigma), and that the manifest is written.
-    """
-    nlev = 4
-    shape = (2, 2)
     sig = _FakeSigma(nlev)
     lat = jnp.deg2rad(jnp.array([[0.0, 0.0], [1.0, 1.0]]))
     lon = jnp.deg2rad(jnp.array([[0.0, 1.0], [0.0, 1.0]]))
 
     class _Grid(_FakeGrid):
         grid_shape_2d = shape
+        grid_area = jnp.ones(shape)   # real grids expose grid_area (GridProtocol)
 
     grid = _Grid(lat, lon)
     state = _FakeState(shape, nlev)
     q_v = jnp.full(shape + (nlev,), 1e-3)
-
-    calls = {}
+    calls = {"n_load_restart": 0}
 
     def fake_create_grid(token, resolution=None):
         calls["create_grid"] = (token, resolution)
@@ -137,6 +134,7 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
 
     def fake_load_restart(path, g, s, strict=True):
         calls["load_restart"] = (path, strict)
+        calls["n_load_restart"] += 1
         # 10-tuple: (state, q_v, step, day, config, diag, q_c, q_r, meta, aux)
         return (state, q_v, 0, 0.0, None, None, None, None, None, None)
 
@@ -150,12 +148,7 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
 
     def fake_regrid(slice_obj, g, s):
         calls["regrid"] = (slice_obj, g is grid, s is sig)
-        # Return a carry-like object with the model fields.
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            T=state.T, q_v=q_v, u=state.u, v=state.v, p_s=state.p_s
-        )
+        return SimpleNamespace(T=state.T, q_v=q_v, u=state.u, v=state.v, p_s=state.p_s)
 
     import legoesm.driver.restart as restart
     import legoesm.grids.factory as factory
@@ -168,6 +161,18 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
     monkeypatch.setattr(e2s, "TrainingERA5Config", _FakeERA5Cfg)
     monkeypatch.setattr(e2s, "load_era5_slice", fake_load_slice)
     monkeypatch.setattr(drv, "select_era5_regrid", lambda gt: fake_regrid)
+    return grid, calls
+
+
+def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
+    """Drive main() with all live I/O stubbed; assert the wiring contract.
+
+    Verifies the factory token mapping (spectral->gaussian), create_sigma_coord
+    nlev, load_restart strict=True + correct unpack, regrid call order
+    (slice, grid, sigma), and that the manifest is written.
+    """
+    nlev = 4
+    _grid, calls = _stub_main_io(monkeypatch, nlev=nlev)
 
     out = str(tmp_path / "m.json")
     with pytest.warns(UserWarning, match="surface air temperature"):
@@ -181,11 +186,37 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
     assert calls["create_grid"] == ("gaussian", 8)  # spectral -> gaussian token
     assert calls["nlev"] == nlev
     assert calls["load_restart"][1] is True  # strict=True
+    assert calls["n_load_restart"] == 1      # no baseline ⇒ single load
     assert calls["era5_time_idx"] == 3
     assert calls["regrid"] == ("ERA5SLICE", True, True)  # (slice, grid, sigma)
     with open(out) as f:
         dicts = json.load(f)
     assert len(dicts) == 1
+
+
+def test_main_before_after_baseline_restart(tmp_path, monkeypatch, capsys):
+    """--baseline-restart drives the per-variable before/after path: a SECOND restart
+    is loaded and the per-variable global-bias change is printed (clause-5 check).
+    The stub returns the SAME state for both, so baseline==corrected and the print
+    reports no improvement — the wiring (two loads + per_variable_bias_improvement +
+    the print loop) runs end-to-end."""
+    nlev = 4
+    _grid, calls = _stub_main_io(monkeypatch, nlev=nlev)
+
+    out = str(tmp_path / "m.json")
+    with pytest.warns(UserWarning, match="surface air temperature"):
+        rc = drv.main([
+            "--restart", "corrected.npz", "--baseline-restart", "baseline.npz",
+            "--grid-type", "gaussian", "--resolution", "8", "--nlev", str(nlev),
+            "--era5-zarr", "gs://x", "--n-worst", "1", "--out", out,
+        ])
+    assert rc == 0
+    assert calls["n_load_restart"] == 2      # corrected + baseline both loaded
+    printed = capsys.readouterr().out
+    assert "per-variable bias baseline -> corrected" in printed
+    assert "T_rmse" in printed and "wind_rmse" in printed
+    # baseline == corrected (same stub state) ⇒ equal bias ⇒ NOT improved.
+    assert "WORSE/same" in printed
 
 
 def test_compare_and_write_end_to_end(tmp_path):
