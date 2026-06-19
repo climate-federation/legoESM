@@ -1785,3 +1785,17 @@ def test_campaign_patience_must_be_positive_with_bias_tol():
             CLUBBLiteConfig(), n_iterations=3, compare_fn=compare_fn,
             diagnose_fn=diagnose, promotion_key="clubb_lite_C_K", grid_shape=(2, 2),
             background=dck, bias_tol=1e-9, patience=0)
+
+
+def test_clubb_field_for_promotion_key_resolves_clubb_only():
+    """_clubb_field_for_promotion_key resolves a clubb_lite_* key to its field but returns
+    None for a REGISTERED NON-CLUBB key (gray radiation) AND an unregistered key -- the
+    cross-resolution env-kernel is a CLUBB deploy artifact, so a non-CLUBB campaign must
+    NOT fabricate one. Resolves via the PROMOTABLE_FIELDS registry, not string-stripping
+    (which would wrongly fabricate 'tau_equator' for the gray key)."""
+    from legoesm.training.correction_loop import _clubb_field_for_promotion_key
+
+    assert _clubb_field_for_promotion_key("clubb_lite_C_K") == "C_K"
+    assert _clubb_field_for_promotion_key("clubb_lite_C_eps") == "C_eps"
+    assert _clubb_field_for_promotion_key("gray_tau_equator") is None    # registered, non-CLUBB
+    assert _clubb_field_for_promotion_key("nonexistent_key") is None     # unregistered
