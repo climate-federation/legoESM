@@ -404,7 +404,10 @@ def test_extract_gcm_column():
     q_v = jnp.full(shape, 5e-3)
     u = jnp.full(shape, 10.0)
     v = jnp.zeros(shape)
-    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+    # SPATIALLY-VARYING p_s with a DISTINCT (4,8) column value (0.9e5 vs 1.0e5
+    # elsewhere) — so the θ check below proves the col_index gather selected (4,8),
+    # not just that the conversion is right (a uniform p_s would not distinguish).
+    p_s = jnp.full((n_lat, n_lon), 1.0e5).at[4, 8].set(0.9e5)
     gcm_z, gcm_theta, ls = extract_gcm_column(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
         col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)),
@@ -412,9 +415,29 @@ def test_extract_gcm_column():
     assert gcm_z.shape == (nlev,)
     assert gcm_theta.shape == (nlev,)
     assert isinstance(ls, ColumnLargeScaleState)
-    # heights are non-negative; potential temperature increases with height
-    # (θ = T/exner, exner decreases upward).
     assert bool(jnp.all(gcm_z >= 0.0))
+    # gcm_z is a STRICTLY MONOTONIC hydrostatic height profile stored TOP-DOWN (index
+    # 0 = highest level) — the LES interpolation + the build_top_relaxation
+    # top-within-column guard rely on a clean monotonic column (a kink would mean a
+    # bad height integral).
+    assert bool(jnp.all(jnp.diff(gcm_z) < 0.0))        # strictly descending in index
+    # gcm_z magnitude sanity: for p_top ≈ 0.0925·0.9e5 ≈ 83 hPa the column top is tens
+    # of km — catches a GROSS hydrostatic-integral error (wrong R_d / g / sign) without
+    # brittly replicating the discretized scheme (the per-layer Δz differs ~18% from the
+    # simple isothermal form, so a tight analytic match is not meaningful here).
+    assert 8_000.0 < float(gcm_z[0]) < 40_000.0
+    # gcm_theta is θ = T/exner(p_full) for the (4,8) column's p_s — LOCK it to an
+    # INDEPENDENT analytic value (a wrong exner/p_full conversion, OR a wrong column
+    # index, fails); θ INCREASES with height (exner decreases upward ⇒ descending in
+    # the top-down index).
+    from legoesm.atmosphere.physics._shared import exner_function
+    p_full_48 = 0.9e5 * jnp.asarray(sigma.sigma_full)         # the (4,8) column's p_full
+    np.testing.assert_allclose(
+        np.asarray(gcm_theta), np.asarray(280.0 / exner_function(p_full_48)), rtol=1e-12)
+    # A WRONG column (p_s=1.0e5 elsewhere) would give a DIFFERENT θ — proves the gather.
+    wrong_col = np.asarray(280.0 / exner_function(1.0e5 * jnp.asarray(sigma.sigma_full)))
+    assert not np.allclose(np.asarray(gcm_theta), wrong_col)
+    assert bool(jnp.all(jnp.diff(gcm_theta) < 0.0))    # θ increases with height
 
 
 def test_extract_gcm_column_orographic_phis_activates_geostrophic_term():
