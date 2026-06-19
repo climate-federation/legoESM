@@ -31,7 +31,13 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.config import CATKEConfig
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    compute_N2,
+    tridiag_thomas,
+    vertical_shear_squared,
+)
 
 __physics_contract__ = {
     "units": {
@@ -217,3 +223,152 @@ def catke_surface_tke_flux(u_star, w_convective_cubed, cfg: CATKEConfig):
         (``(Jb * mixed-layer depth)`` style; 0 in stably-forced columns).
     """
     return -cfg.c_w_ustar * u_star ** 3 - cfg.c_w_conv * w_convective_cubed
+
+
+def _catke_solve_backward_euler(e_old, K_e, omega, P_s, buoy_sink_rate,
+                                buoy_source, dz_half, surface_injection, dt,
+                                minimum_tke):
+    """One backward-Euler implicit step for the CATKE TKE budget.
+
+    Solves ``(e_new - e_old)/dt = d/dz(K_e d/dz e_new) + P_s + buoy_source
+    - (omega + buoy_sink_rate)*e_new`` with a surface TKE-flux injection at the
+    top interface, via the shared tridiagonal Thomas solve.  ``P_s`` (shear,
+    >=0) and ``buoy_source`` (convective buoyancy production, >=0) are explicit;
+    the dissipation ``omega`` and the stable buoyancy sink ``buoy_sink_rate``
+    are implicit on the diagonal (keeps it >= 1).  The ``d/dz(K_e d/dz)``
+    discretization matches the legacy TKE solve
+    (``tke._solve_tke_backward_euler``, non-Veros-slot path).
+    """
+    # Dtype hygiene (mirror tke._solve_tke_backward_euler): under JAX_ENABLE_X64
+    # the TKE field may run at the storage policy's f32 while Jb / u_star (→
+    # surface_injection) and dt-scaled forcing promote to f64.  Cast the forcing
+    # to e_old's dtype so the tridiagonal scatter-add / solve stays consistent
+    # (no implicit-downcast FutureWarning); no numeric change when dtypes match.
+    _dt_e = e_old.dtype
+    surface_injection = jnp.asarray(surface_injection, dtype=_dt_e)
+
+    N = e_old.shape[-1]                          # number of interfaces
+    K_face = 0.5 * (K_e[..., :-1] + K_e[..., 1:])  # (..., N-1)
+    dz_face = jnp.maximum(dz_half[..., :N - 1], _EPS_LEN)
+
+    a_diff = jnp.zeros_like(e_old)
+    c_diff = jnp.zeros_like(e_old)
+    b_diff = jnp.zeros_like(e_old)
+    if N >= 3:
+        coef = K_face / dz_face                  # (..., N-1)
+        # Effective cell thickness around interface k (avg adjacent faces).
+        dz_int_eff = jnp.where(
+            jnp.arange(N) == 0, dz_face[..., :1],
+            jnp.concatenate([dz_face[..., :1], dz_face], axis=-1)[..., :N],
+        )
+        a_inter = dt * coef / jnp.maximum(dz_int_eff[..., 1:N], _EPS_LEN)
+        a_diff = jnp.concatenate(
+            [jnp.zeros_like(a_inter[..., :1]), -a_inter], axis=-1)
+        c_inter = dt * coef / jnp.maximum(dz_int_eff[..., :N - 1], _EPS_LEN)
+        c_diff = jnp.concatenate(
+            [-c_inter, jnp.zeros_like(c_inter[..., :1])], axis=-1)
+        b_diff = -(a_diff + c_diff)
+
+    diag = 1.0 + dt * (omega + buoy_sink_rate) + b_diff
+    rhs = e_old + dt * (P_s + buoy_source)
+    # Surface TKE-flux injection at the top interface over the surface volume.
+    inj_vol = jnp.maximum(dz_half[..., 0], _EPS_LEN)
+    rhs = rhs.at[..., 0].add((dt * surface_injection / inj_vol).astype(_dt_e))
+
+    # Solve in e_old's dtype (cast the assembled bands; Jb/u_star-driven
+    # promotion above is absorbed here without an implicit downcast).
+    e_new = tridiag_thomas(
+        a_diff.astype(_dt_e), diag.astype(_dt_e),
+        c_diff.astype(_dt_e), rhs.astype(_dt_e))
+    return jnp.maximum(e_new, minimum_tke)
+
+
+def catke_vertical_mixing(
+    u_cell, v_cell, T_cell, S_cell, rho_cell, dz_half,
+    depth_iface, height_above_bottom_iface, H_col, *,
+    tke_old, Jb, u_star, dt, cfg: CATKEConfig,
+    rho_0, g=constants.g, w_convective_cubed=None,
+    p_cell=None, dz_ref=None, jacobian=None, eos_fn=None,
+    n2_mode="insitu_signed", n_iterations=1,
+):
+    """Prognostic CATKE column solve: advance TKE one backward-Euler step and
+    return the eddy viscosity / tracer diffusivity.
+
+    Mirrors :func:`...tke.tke_vertical_mixing` for the CATKE closure: compute
+    N^2 (SIGNED — convection trigger) + shear, then iterate diffusivities
+    (:func:`catke_diffusivities`) and dissipation (:func:`catke_dissipation_rate`)
+    with one implicit TKE step (:func:`_catke_solve_backward_euler`) per
+    iteration.  Reuses the shared ``compute_N2`` / ``vertical_shear_squared`` /
+    ``tridiag_thomas`` primitives.
+
+    Parameters
+    ----------
+    u_cell, v_cell, T_cell, S_cell, rho_cell : (..., nlev) cell-centre fields.
+    dz_half : (..., nlev-1) cell-centre spacing.
+    depth_iface, height_above_bottom_iface : (..., nlev-1) interface geometry
+        [m] (depth below surface; height above the sea floor).
+    H_col : (...) column depth [m].
+    tke_old : (..., nlev-1) carried TKE [m^2/s^2], or None (cold start at floor).
+    Jb : (...) surface buoyancy flux [m^2/s^3] (>0 destabilising).
+    u_star : (...) friction velocity [m/s] = sqrt(|tau|/rho_0).
+    dt : float — momentum timestep [s].
+    cfg : CATKEConfig.
+    rho_0, g : reference density / gravity.
+    w_convective_cubed : (...) or None — convective velocity scale cubed
+        [m^3/s^3] for the surface TKE flux; default ``max(Jb,0)*depth_iface[0]``
+        (Deardorff ``w*^3 = Jb*h`` over the top interface).
+    p_cell, dz_ref, jacobian, eos_fn : only needed for ``n2_mode="adiabatic"``.
+    n2_mode : "insitu_signed" (default — signed in-situ N^2, the cheap
+        convection trigger) / "adiabatic" (Veros parcel displacement) /
+        "insitu" (clipped >=0; convection never fires — not recommended).
+    n_iterations : implicit sub-iterations (1 = prognostic single step).
+
+    Returns
+    -------
+    (K_M, K_H, tke_new) : each (..., nlev-1) — momentum viscosity (= K_u),
+        tracer diffusivity (= K_c), and the updated TKE.
+    """
+    S2 = vertical_shear_squared(u_cell, v_cell, dz_half)
+    N2 = compute_N2(
+        rho_cell, dz_half, rho_0, g,
+        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn, n2_mode=n2_mode,
+    )
+    # Shallower-neighbour N^2 for the entrainment branch (interface k-1; the
+    # top interface uses itself — no shallower neighbour).
+    N2_above = jnp.concatenate([N2[..., :1], N2[..., :-1]], axis=-1)
+
+    if tke_old is None:
+        tke_old = jnp.full(
+            rho_cell.shape[:-1] + (rho_cell.shape[-1] - 1,),
+            cfg.minimum_tke, dtype=rho_cell.dtype,
+        )
+
+    # Surface TKE-flux injection (>=0 into the column) = -Q_e.
+    wconv3 = (jnp.maximum(Jb, 0.0) * depth_iface[..., 0]
+              if w_convective_cubed is None else w_convective_cubed)
+    surface_injection = -catke_surface_tke_flux(u_star, wconv3, cfg)
+
+    e = tke_old
+    for _ in range(max(1, int(n_iterations))):
+        K_u, K_c, K_e = catke_diffusivities(
+            e, N2, N2_above, S2, depth_iface, height_above_bottom_iface,
+            H_col, Jb, cfg)
+        omega = catke_dissipation_rate(
+            e, N2, N2_above, S2, depth_iface, height_above_bottom_iface,
+            H_col, Jb, cfg)
+        P_s = K_u * S2
+        # Sign-aware buoyancy P_b = -K_c*N^2: stable (N^2>0) sink linearised
+        # implicitly (rate K_c*N^2/e on the diagonal); unstable (N^2<0) source
+        # explicit (convective PE -> TKE).
+        e_lin = jnp.maximum(e, cfg.minimum_tke)
+        buoy_sink_rate = jnp.where(N2 > 0.0, K_c * N2 / e_lin, 0.0)
+        buoy_source = jnp.where(N2 < 0.0, -K_c * N2, 0.0)
+        e = _catke_solve_backward_euler(
+            e, K_e, omega, P_s, buoy_sink_rate, buoy_source, dz_half,
+            surface_injection, dt, cfg.minimum_tke)
+
+    K_u, K_c, _ = catke_diffusivities(
+        e, N2, N2_above, S2, depth_iface, height_above_bottom_iface, H_col,
+        Jb, cfg)
+    return K_u, K_c, e

@@ -70,12 +70,16 @@ def compute_N2(
     -------
     N2 : (..., nlev-1). Clipped >= 0 for ``"insitu"``; signed for ``"adiabatic"``.
     """
-    if n2_mode == "insitu":
+    if n2_mode in ("insitu", "insitu_signed"):
         dz_safe = jnp.maximum(dz_half, _EPS)
         # drho/dz with z positive upward — negative for stable stratification.
         drho_dz = (rho_cell[..., :-1] - rho_cell[..., 1:]) / dz_safe
         N2 = -g / rho_0 * drho_dz
-        return jnp.maximum(N2, 0.0)
+        # "insitu": clipped >= 0 (in-situ contrast is biased too stable; sign is
+        # not a reliable convection trigger — TKE's default).  "insitu_signed":
+        # SIGNED (N2<0 marks static instability), the cheap convection trigger
+        # for convection-aware closures (CATKE) without the adiabatic EOS call.
+        return N2 if n2_mode == "insitu_signed" else jnp.maximum(N2, 0.0)
     if n2_mode == "adiabatic":
         if (T_cell is None or S_cell is None or p_cell is None
                 or dz_ref is None or jacobian is None):
@@ -91,7 +95,8 @@ def compute_N2(
             dz_half=dz_half if adiabatic_over_dz_half else None,
         )
     raise ValueError(
-        f"Unknown n2_mode={n2_mode!r}; expected 'insitu' or 'adiabatic'."
+        f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed' "
+        f"or 'adiabatic'."
     )
 
 

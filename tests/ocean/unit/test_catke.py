@@ -146,3 +146,69 @@ def test_differentiable_through_convective_branches():
     ge, gN2 = jax.grad(loss, argnums=(0, 1))(e, N2)
     assert jnp.all(jnp.isfinite(ge)), "non-finite grad wrt e (masked-branch trap)"
     assert jnp.all(jnp.isfinite(gN2)), "non-finite grad wrt N2 (masked-branch trap)"
+
+
+# ---------------------------------------------------------------------------
+# Prognostic column solve (catke_vertical_mixing)
+# ---------------------------------------------------------------------------
+
+
+def _solver_column(rho_top, rho_bot, Jb=0.0, n=11):
+    """Uniform column for catke_vertical_mixing (cell-centre fields length n;
+    interface arrays length n-1). rho_top < rho_bot => stable stratification."""
+    import legoesm.constants as _const
+    rho = jnp.linspace(rho_top, rho_bot, n)
+    u = jnp.linspace(0.0, 0.2, n)            # weak shear
+    v = jnp.zeros((n,))
+    T = jnp.linspace(15.0, 5.0, n)
+    S = jnp.full((n,), 35.0)
+    dz_half = jnp.full((n - 1,), 10.0)
+    depth = jnp.linspace(5.0, 95.0, n - 1)
+    hab = jnp.linspace(95.0, 5.0, n - 1)
+    H = 100.0
+    return dict(u_cell=u, v_cell=v, T_cell=T, S_cell=S, rho_cell=rho,
+                dz_half=dz_half, depth_iface=depth,
+                height_above_bottom_iface=hab, H_col=H, Jb=Jb,
+                u_star=0.01, dt=3600.0, rho_0=float(_const.rho_ocean))
+
+
+def test_vertical_mixing_advances_tke():
+    cfg = CATKEConfig()
+    col = _solver_column(1025.0, 1027.0)     # stable
+    K_M, K_H, e_new = C.catke_vertical_mixing(tke_old=None, cfg=cfg, **col)
+    assert K_M.shape == (10,) and K_H.shape == (10,) and e_new.shape == (10,)
+    for arr in (K_M, K_H, e_new):
+        assert jnp.all(jnp.isfinite(arr))
+        assert jnp.all(arr >= 0.0)
+    assert jnp.all(e_new >= cfg.minimum_tke - 1e-30)
+
+
+def test_vertical_mixing_convective_vs_stratified():
+    """Convective column (denser on top, Jb>0) -> larger TKE + viscosity than a
+    stably stratified, unforced column."""
+    cfg = CATKEConfig()
+    # Seed a realistic TKE so w*=sqrt(e) is non-trivial (at the 1e-9 cold-start
+    # floor the Deardorff length ~w*^3 is ~0 and convection can't kick in one
+    # step — the chicken-and-egg of a prognostic closure).
+    seed = jnp.full((10,), 1.0e-4)
+    conv = _solver_column(1027.0, 1025.0, Jb=1.0e-7)   # unstable, forced
+    strat = _solver_column(1025.0, 1027.0, Jb=0.0)     # stable, unforced
+    K_M_conv, _, e_conv = C.catke_vertical_mixing(tke_old=seed, cfg=cfg, **conv)
+    K_M_strat, _, e_strat = C.catke_vertical_mixing(tke_old=seed, cfg=cfg, **strat)
+    assert jnp.max(e_conv) > jnp.max(e_strat)
+    assert jnp.max(K_M_conv) > jnp.max(K_M_strat)
+
+
+def test_vertical_mixing_differentiable():
+    cfg = CATKEConfig()
+    col = _solver_column(1027.0, 1025.0, Jb=1.0e-7)
+    rho0 = col.pop("rho_cell")
+    e0 = jnp.full((10,), 1.0e-3)
+
+    def loss(rho_in, e_in):
+        K_M, K_H, e_new = C.catke_vertical_mixing(
+            rho_cell=rho_in, tke_old=e_in, cfg=cfg, **col)
+        return jnp.sum(K_M ** 2 + K_H ** 2 + e_new ** 2)
+
+    grho, ge = jax.grad(loss, argnums=(0, 1))(rho0, e0)
+    assert jnp.all(jnp.isfinite(grho)) and jnp.all(jnp.isfinite(ge))
