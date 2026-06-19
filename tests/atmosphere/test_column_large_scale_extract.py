@@ -236,6 +236,32 @@ def test_geostrophic_wind_from_gradients_lnps_term():
     np.testing.assert_allclose(np.asarray(u_g), 0.0, atol=1e-12)
 
 
+def test_geostrophic_wind_southern_hemisphere_reverses_sign():
+    """In the SOUTHERN hemisphere ``f < 0``, so the SAME pressure gradient yields the
+    OPPOSITE geostrophic wind — hemisphere antisymmetry.
+
+    The NH test (``f>0``) cannot catch an ``abs(f)`` / sign bug in the ``/f``
+    division: ``geostrophic_wind_from_gradients`` divides by the SIGNED column
+    Coriolis (caller computes ``f = 2Ω sin(lat)``, negative south of the equator), so
+    for ``Φ`` decreasing northward the NH gets a WESTERLY (u_g>0) and the SH an
+    EASTERLY (u_g<0) geostrophic wind of equal magnitude.  A mishandled sign would
+    give a physically backwards SH forcing while the NH test stayed green.
+    """
+    T_v = jnp.full((4,), 280.0)
+    dphi_dy = jnp.full((4,), -1.0e-2)   # Φ down toward north (same gradient as the NH test)
+    dphi_dx = jnp.full((4,), 3.0e-3)
+    zero = jnp.zeros((4,))
+    f_nh = 1.0e-4
+    f_sh = -1.0e-4                       # same |f|, southern hemisphere
+    u_nh, v_nh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_nh)
+    u_sh, v_sh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_sh)
+    # Exact value from the signed-f formula, and the antisymmetry u_sh = -u_nh.
+    np.testing.assert_allclose(np.asarray(u_sh), 1.0e-2 / f_sh, rtol=1e-12)  # -100
+    assert bool(jnp.all(u_sh < 0.0))                    # EASTERLY in the SH
+    np.testing.assert_allclose(np.asarray(u_sh), -np.asarray(u_nh), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(v_sh), -np.asarray(v_nh), rtol=1e-12)
+
+
 def test_extract_populates_geostrophic_wind_extratropics():
     """An extratropical column (|lat| ≥ cutoff) gets a finite (nlev,) u_geo/v_geo."""
     grid, sigma, T, q_v, u, v, p_s = _latlon_state()
