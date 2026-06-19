@@ -1,29 +1,29 @@
 #!/usr/bin/env python
 """Build the harmonized ``legoesm_surfdata`` NetCDF from primary sources.
 
-End-to-end producer driver — the single command for rebuilding
-``data/legoesm_surfdata_v1.nc`` (or any future version) from raw inputs:
+Requires the following datasets:
+    https://www.fao.org/soils-portal/data-hub/soil-maps-and-databases/harmonized-world-soil-database-v20/en/
+*   **HWSD2 raster**: The Harmonized World Soil Database version 2.0 (HWSD2) raster data.
+*   **HWSD2 attribute table**: The attribute database for the HWSD2 raster: HWSD2.mdb 
+*   **CLM5 surfdata**: A CLM5 surfdata NetCDF file.
+
+``builds data/legoesm_surfdata_cYYMMDD.nc`` from raw inputs:
 
   1. **HWSD2 raster + attribute table -> 0.25 deg soil intermediate.**  Streams
      the 30 arc-sec ``HWSD2.bil`` (~1.86 GB) through the SHARE-weighted SMU
      lookup and ``cos(lat)`` area-aggregates to a regular lat-lon target
      (default 0.25 deg, conservative).  Runs ``aggregate_hwsd2_soil`` ->
      ``write_surfdata`` via :func:`build_hwsd2_surfdata`.
+
   2. **0.25 deg soil + CLM5 cover/PFT/LAI -> CLM-grid harmonized v1 surfdata.**
      Regrids the 0.25 deg HWSD soil onto the CLM5 grid (conservative,
      NaN-aware), combines with the CLM5-reconstructed cover/PFT/LAI from
      :func:`read_clm5_cover_veg`, and writes one NetCDF via
-     :func:`build_v1_surfdata`.
+     :func:`build_surfdata`.
 
-The 0.25 deg intermediate is kept on disk by default (saves repeating step 1
-if you only change the CLM input).  The output NetCDF is consumed at run
+The 0.25 deg intermediate is kept on disk by default. The output NetCDF is consumed at run
 time by :func:`legoesm.land.global_surface_data.load_global_surface_data`
 under the ``"legoesm_surfdata"`` preset.
-
-v2 / future-higher-resolution: once a 0.25 deg CLM-equivalent cover/PFT/LAI
-file is available, this driver can target a 0.25 deg final grid by passing
-that file in step 2 (the assembler will simply regrid HWSD onto whatever
-lat/lon the CLM-side file provides).
 
 Inputs (paths required)
 -----------------------
@@ -50,9 +50,6 @@ Usage
       --hwsd-bil ~/Downloads/HWSD2_RASTER/HWSD2.bil \\
       --hwsd-attr ~/Downloads/HWSD2_LAYERS.csv \\
       --clm-surfdata ~/Desktop/surfdata_1.9x2.5_SSP3-7.0_2015_16pfts_c250612.nc
-
-Step 1 is ~6 min on a laptop; step 2 is fast (< 30 s).  Re-running with
-``--skip-hwsd`` after the intermediate exists takes only ~30 s.
 """
 
 from __future__ import annotations
