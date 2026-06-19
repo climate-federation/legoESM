@@ -69,19 +69,26 @@ def test_moist_state_has_tracers():
 
 def test_sharded_moist_equals_serial():
     """1-device sharded step with Kessler == serial step_with_physics, leaf for
-    leaf, over several steps (the cs-spmd moist wiring is faithful)."""
-    grid, model, state = _build()
+    leaf, over several steps (the cs-spmd moist wiring is faithful).
+
+    INDEPENDENT model instances for serial vs sharded: a model can lazily
+    populate ``_target_mass`` on its first step, so sharing one model would let
+    the serial warm-up seed the sharded run and mask the fresh-model behavior
+    that ``_build_cubed_sphere_spmd`` actually exercises (codex)."""
     phys = make_kessler_forcing_cube(_DT)
 
-    # Serial reference.
-    s_ref = state
+    # Serial reference (its own model).
+    _, model_ref, state_ref = _build()
+    s_ref = state_ref
     for _ in range(_NSTEPS):
-        s_ref = model.step_with_physics(s_ref, _DT, phys)
+        s_ref = model_ref.step_with_physics(s_ref, _DT, phys)
 
-    # 1-device sharded path (exactly what _build_cubed_sphere_spmd builds).
+    # 1-device sharded path with a FRESH model (exactly what
+    # _build_cubed_sphere_spmd builds: a never-stepped model).
+    _, model_sh, state_sh = _build()
     mesh = create_device_mesh(n_devices=1)
-    sharded_step = make_sharded_step(model, mesh, n=_RES, nlev=_NLEV)
-    s_shard = shard_pytree(state, mesh)
+    sharded_step = make_sharded_step(model_sh, mesh, n=_RES, nlev=_NLEV)
+    s_shard = shard_pytree(state_sh, mesh)
     for _ in range(_NSTEPS):
         s_shard = sharded_step(s_shard, _DT, physics_fn=phys)
 
@@ -101,16 +108,22 @@ def test_sharded_moist_equals_serial():
 def test_dry_path_unaffected():
     """physics_level='none' equivalent: sharded dry step still matches serial
     (guard against the moist wiring perturbing the dry path)."""
-    grid, model, state_moist = _build()
-    # Dry init (no tracers) — the cs-spmd dry path.
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sigma = create_sigma_coordinate(_NLEV)
-    state = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True, moist=False), cdgrid)
-    s_ref = model.step(state, _DT)
+    # Dry init (no tracers) — the cs-spmd dry path. INDEPENDENT models so the
+    # serial step can't seed the sharded model's lazy target mass (codex).
+    def _dry():
+        grid, model, _ = _build()
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(_NLEV)
+        state = hydrostatic_to_fv3(
+            baroclinic_wave_init(grid, sigma, perturbed=True, moist=False),
+            cdgrid)
+        return model, state
+    model_ref, state = _dry()
+    s_ref = model_ref.step(state, _DT)
+    model_sh, state_sh = _dry()
     mesh = create_device_mesh(n_devices=1)
-    sharded_step = make_sharded_step(model, mesh, n=_RES, nlev=_NLEV)
-    s_shard = sharded_step(shard_pytree(state, mesh), _DT)
+    sharded_step = make_sharded_step(model_sh, mesh, n=_RES, nlev=_NLEV)
+    s_shard = sharded_step(shard_pytree(state_sh, mesh), _DT)
     md = 0.0
     for a, b in zip(jax.tree_util.tree_leaves(s_ref),
                     jax.tree_util.tree_leaves(s_shard)):
