@@ -257,6 +257,8 @@ class CampaignDryRun(NamedTuple):
     n_worst: int
     feedback_strategy: str
     coefficients: tuple[str, ...]   # the corrected clubb_lite field name(s)
+    n_iterations: int               # rounds the real run would execute
+    les_per_round: int              # LES spun off per round (les_budget, else n_worst)
 
 
 def build_correction_campaign(
@@ -369,7 +371,9 @@ def build_correction_campaign(
         # WITHOUT the (multi-day) run. The launch pre-flight.
         return CampaignDryRun(
             grid_shape=grid_shape, n_worst=int(n_worst),
-            feedback_strategy=feedback_strategy, coefficients=(field_name,))
+            feedback_strategy=feedback_strategy, coefficients=(field_name,),
+            n_iterations=int(n_iterations),
+            les_per_round=int(les_budget) if les_budget is not None else int(n_worst))
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -671,7 +675,9 @@ def build_multi_correction_campaign(
         # method-union LES, the C_K/c_eps l_mix_max auto-populate) WITHOUT running.
         return CampaignDryRun(
             grid_shape=grid_shape, n_worst=int(n_worst),
-            feedback_strategy=feedback_strategy, coefficients=tuple(coefficients))
+            feedback_strategy=feedback_strategy, coefficients=tuple(coefficients),
+            n_iterations=int(n_iterations),
+            les_per_round=int(les_budget) if les_budget is not None else int(n_worst))
 
     return run_multi_correction_campaign(
         clubb_cfg, int(n_iterations), specs,
@@ -1080,6 +1086,8 @@ def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:
         f"  mode={mode}  grid_shape={tuple(dry.grid_shape)}  n_worst={dry.n_worst}\n"
         f"  coefficients={tuple(dry.coefficients)}  "
         f"feedback_strategy={dry.feedback_strategy}\n"
+        f"  would run ≤ {dry.n_iterations} rounds × ≤ {dry.les_per_round} LES/round "
+        f"(≤ {dry.n_iterations * dry.les_per_round} LES total)\n"
         f"  would write → {out}\n"
         "  (re-run without --dry-run to execute the multi-day campaign.)"
     )

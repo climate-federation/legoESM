@@ -299,6 +299,8 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
     assert isinstance(res, CampaignDryRun)
     assert tuple(res.grid_shape) == (2, 3) and res.n_worst == 4
     assert res.coefficients == ("C_K",)             # clubb_coefficient → clubb_lite C_K
+    assert res.n_iterations == 5                     # compute estimate: rounds…
+    assert res.les_per_round == 4                    # …× LES/round (no les_budget → n_worst)
     # dry_run STILL validates: a non-clubb base config fails LOUD (the pre-flight's point).
     with pytest.raises(ValueError, match="clubb_lite"):
         build_correction_campaign(
@@ -310,11 +312,13 @@ def test_dry_run_report_formats():
     """_dry_run_report renders the assembled metadata + the would-write path."""
     rep = _dry_run_report(
         CampaignDryRun(grid_shape=(6, 8), n_worst=12, feedback_strategy="environment",
-                       coefficients=("C_K", "Pr_t")),
+                       coefficients=("C_K", "Pr_t"), n_iterations=10, les_per_round=8),
         mode="cmip", out="/scratch/run/corrected.json")
     assert "DRY-RUN OK" in rep and "grid_shape=(6, 8)" in rep and "n_worst=12" in rep
     assert "('C_K', 'Pr_t')" in rep and "cmip" in rep
     assert "/scratch/run/corrected.json" in rep
+    # compute estimate (10 rounds × 8 LES = 80 LES total) — the launch decision input.
+    assert "10 rounds" in rep and "8 LES/round" in rep and "80 LES total" in rep
 
 
 def test_dry_run_flag_parsed():
