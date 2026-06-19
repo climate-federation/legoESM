@@ -63,6 +63,31 @@ def test_per_variable_bias_area_weighted():
     assert float(pvb.global_T_rmse_K) == pytest.approx(np.sqrt(19.0))
 
 
+def test_per_variable_bias_forwards_valid_mask_to_every_variable():
+    """The per-variable RMSE must FORWARD ``valid_mask`` to all four variables (the
+    DISTRIBUTED owned-only mask under MPI, or an ocean/land mask).  Iter 254 locks the
+    shared `_area_weighted_mean` core directly; this locks the per-variable WIRING — a
+    regression dropping `valid_mask=valid_mask` in `_global_rmse`/precip would silently
+    include halo/masked columns, giving a per-variable verdict INCONSISTENT with the
+    (locked) combined bias.  The masked column carries a large finite garbage so its
+    inclusion vs exclusion is unambiguous (column 1 = halo on another rank, or land)."""
+    ef = _err_fields(jnp.array([3.0, 999.0]), jnp.array([4.0, 999.0]),
+                     jnp.array([5.0, 999.0]), jnp.array([2.0, 999.0]))
+    w = jnp.array([1.0, 1.0])
+    mask = jnp.array([True, False])      # column 1 is the masked (halo / land) column
+    pvb = aggregate_per_variable_bias(ef, w, have_precip=True, valid_mask=mask)
+    # only column 0 survives ⇒ each RMSE is exactly its own value (sqrt(v²)=v).
+    assert float(pvb.global_T_rmse_K) == pytest.approx(3.0)
+    assert float(pvb.global_qv_rmse_kg_kg) == pytest.approx(4.0)
+    assert float(pvb.global_wind_rmse_m_s) == pytest.approx(5.0)
+    assert float(pvb.global_precip_err_mm_day) == pytest.approx(2.0)
+    # sanity: WITHOUT the mask the 999 garbage dominates every variable — exactly the
+    # halo/land contamination the forwarded mask prevents.
+    poisoned = aggregate_per_variable_bias(ef, w, have_precip=True)
+    assert float(poisoned.global_T_rmse_K) > 100.0
+    assert float(poisoned.global_precip_err_mm_day) > 100.0
+
+
 def test_per_variable_bias_precip_nan_unless_have_precip():
     """precip → NaN when not compared (an all-zero precip field must NOT read as a
     perfect 0); the area-weighted MEAN absolute error when have_precip."""
