@@ -692,6 +692,49 @@ def test_les_budget_counts_valid_over_runs_not_columns():
     assert f[4] == pytest.approx(7.2) and f[5] == pytest.approx(7.2)    # invalid → bg
 
 
+def test_les_budget_exceeding_distinct_environments_early_stops():
+    """les_budget > the number of DISTINCT environments ⇒ clustering early-stops to the
+    actual distinct count (2 here, not the requested 3) rather than emitting duplicate
+    representatives, and the consumer (_diagnose_columns) still expands EVERY worst column
+    from the K'<budget reps WITHOUT an index error (rep[label] with labels in 0..K'-1).
+    Locks the early-stop <-> expansion integration boundary the budget==distinct tests miss:
+    a regression producing labels that assume the REQUESTED budget would IndexError here."""
+    # 4 worst columns but only 2 DISTINCT environments (exact env-duplicate pairs), so a
+    # budget of 3 cannot find a 3rd distinct representative → clustering stops early at 2.
+    worst = [
+        _crec(0, 2.0, 280.0, 100.0, 2.0),
+        _crec(1, 1.5, 280.0, 100.0, 2.0),    # exact env-duplicate of col 0 (low CAPE)
+        _crec(4, 1.8, 302.0, 3000.0, 25.0),
+        _crec(5, 1.4, 302.0, 3000.0, 25.0),  # exact env-duplicate of col 4 (high CAPE)
+    ]
+    baseline = jnp.asarray([[2.0, 2.0, 1.0], [1.0, 2.0, 2.0]])
+
+    def compare_fn(config):
+        score = jnp.ones((2, 3)) if _is_corrected(config) else baseline
+        return CompareResult(combined_score=score, manifest=worst,
+                             area_weights=jnp.ones((2, 3)), model_ctx=None)
+
+    n_calls = {"n": 0}
+
+    def diag(rec, ctx):
+        n_calls["n"] += 1
+        return _diagnose_by_cape(rec, ctx)
+
+    result = run_correction_iteration(
+        GrayRadiationConfig(),
+        compare_fn=compare_fn, diagnose_fn=diag,
+        promotion_key="gray_tau_equator", grid_shape=(2, 3),
+        background=7.2, les_budget=3,        # > the 2 distinct environments present
+    )
+    assert result.n_corrected == 4           # all worst columns still corrected
+    assert result.n_diagnosed == 2           # EARLY STOP: 2 distinct envs, not the asked 3
+    assert n_calls["n"] == 2                  # no duplicate-representative LES run
+    f = np.asarray(result.feedback_field).reshape(-1)
+    assert f[0] == pytest.approx(10.0) and f[1] == pytest.approx(10.0)   # low-CAPE group A
+    assert f[4] == pytest.approx(20.0) and f[5] == pytest.approx(20.0)   # high-CAPE group B
+    assert f[2] == pytest.approx(7.2) and f[3] == pytest.approx(7.2)     # non-worst → bg
+
+
 def test_les_budget_none_diagnoses_every_worst_column():
     n_calls = {"n": 0}
 
