@@ -156,3 +156,29 @@ def amip_column_state(
         sst_K=_sst_array(sst),
         mesh=getattr(atm_driver, "grid", None),
     )
+
+
+def model_phis_from_driver(driver: Any) -> Any:
+    """The model's STATIC surface geopotential ``phis = g·z_s`` on the full grid —
+    the input to the orographic geostrophic LES-forcing term (iter 117).
+
+    Pass the result as ``make_les_diagnose_fn(..., phis=…)`` / a campaign builder's
+    ``phis=`` so the orographic correction uses the model's OWN topography (guaranteed
+    CONSISTENT with the AMIP/CMIP run that produced the comparison state — no
+    mismatched-field footgun).  Returns ``None`` when the state carries no ``phis``
+    (a flat/aquaplanet model), so the orographic term then correctly stays OFF.
+    ``phis`` is STATIC (config-independent topography), so build ONE driver and reuse
+    the result across campaign rounds.  Spectral states are synthesized to a grid
+    state first (the same ``grid_winds_from_spectral`` the compare uses); grid/MPAS
+    states pass through.  The ``Field`` wrapper is unwrapped to a raw array.
+    """
+    from legoesm.core.field import Field
+    state = grid_winds_from_spectral(
+        getattr(driver, "state", None), getattr(driver, "grid", None),
+        getattr(driver, "sigma", None))
+    phis = getattr(state, "phis", None)
+    if phis is None:
+        return None
+    # Unwrap ONLY a Field (isinstance, not hasattr "data" — a raw NumPy array also
+    # has a `.data` MEMORYVIEW that would be returned by mistake; Codex).
+    return phis.data if isinstance(phis, Field) else phis

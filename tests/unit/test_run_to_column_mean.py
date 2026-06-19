@@ -21,6 +21,7 @@ from legoesm.training.run_to_column_mean import (  # noqa: E402
     amip_column_state,
     cmip_column_state,
     make_run_fn,
+    model_phis_from_driver,
     run_to_column_mean,
 )
 
@@ -299,3 +300,61 @@ def test_make_compare_fn_real_cmip_run_to_mean():
     runner_up = float(others.max())
     assert biased > 0.0
     assert runner_up < 0.5 * biased  # biased column ≥ 2× any other column
+
+
+def test_model_phis_from_driver_extracts_topography():
+    """The model's STATIC topography (g·z_s) is extracted from the built driver's
+    state and UNWRAPPED to a raw array — the consistent-topography source for the
+    orographic geostrophic term (iter 117/122), avoiding a mismatched-phis footgun."""
+    from legoesm.core.field import Field
+
+    phis_arr = jnp.full((8, 16), 5000.0)            # an arbitrary g·z_s [m²/s²]
+    # A non-spectral grid state (grid_winds_from_spectral passes it through unchanged).
+    driver = SimpleNamespace(
+        state=SimpleNamespace(phis=Field(phis_arr)), grid=None, sigma=None)
+    out = model_phis_from_driver(driver)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(phis_arr))   # Field unwrapped
+
+
+def test_model_phis_from_driver_none_for_flat_model():
+    """A flat/aquaplanet model (state carries no phis) ⇒ None, so the orographic
+    term correctly stays OFF (the geostrophic forcing falls back to above-surface)."""
+    driver = SimpleNamespace(state=SimpleNamespace(), grid=None, sigma=None)
+    assert model_phis_from_driver(driver) is None
+
+
+def test_model_phis_from_driver_none_when_no_state():
+    """A driver with no `state` attribute ⇒ None (no crash)."""
+    assert model_phis_from_driver(SimpleNamespace()) is None
+
+
+def test_model_phis_from_driver_routes_spectral_state(monkeypatch):
+    """A SPECTRAL driver's state is routed through grid_winds_from_spectral (which
+    synthesizes the grid `phis`) WITH the driver's grid + sigma — so the spectral
+    path is reached; the synthesis itself is covered by grid_winds_from_spectral's
+    own tests. Confirms the helper delegates correctly + unwraps the result."""
+    import legoesm.training.run_to_column_mean as rtcm
+    from legoesm.core.field import Field
+
+    seen = {}
+
+    def spy_grid_winds(state, grid, sigma):
+        seen["args"] = (state, grid, sigma)
+        return SimpleNamespace(phis=Field(jnp.full((4, 8), 3000.0)))  # synthesized phis
+
+    monkeypatch.setattr(rtcm, "grid_winds_from_spectral", spy_grid_winds)
+    driver = SimpleNamespace(state="SPECTRAL_STATE", grid="GAUSS_GRID", sigma="SIGMA")
+    out = model_phis_from_driver(driver)
+    assert seen["args"] == ("SPECTRAL_STATE", "GAUSS_GRID", "SIGMA")   # grid+sigma passed
+    np.testing.assert_array_equal(np.asarray(out), 3000.0)            # synthesized phis unwrapped
+
+
+def test_model_phis_from_driver_raw_array_passthrough():
+    """A state whose `phis` is already a RAW array (not a Field) passes through
+    UNCHANGED — the isinstance(Field) guard must NOT unwrap a numpy array's `.data`
+    memoryview buffer (the hasattr-'data' footgun Codex flagged)."""
+    raw = np.full((4, 8), 4200.0)                 # numpy array HAS a .data memoryview
+    driver = SimpleNamespace(state=SimpleNamespace(phis=raw), grid=None, sigma=None)
+    out = model_phis_from_driver(driver)
+    assert isinstance(out, np.ndarray)            # NOT a memoryview
+    np.testing.assert_array_equal(out, raw)

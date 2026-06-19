@@ -91,7 +91,11 @@ def make_les_diagnose_fn(
     full grid, co-located with the state's ``p_s``) activates the orographic
     geostrophic-forcing term for TERRAIN worst-columns (iter 117); ``None``
     (default) keeps the flat/ocean behaviour.  It is a static topography field
-    (closed over here), NOT carried on the per-step ``model_ctx``.
+    (closed over here), NOT carried on the per-step ``model_ctx``.  For a TERRAIN
+    campaign, derive the CONSISTENT field from the model with
+    :func:`legoesm.training.run_to_column_mean.model_phis_from_driver` (it returns
+    ``None`` for a flat model, so passing it is always safe) rather than a separate
+    file that could mismatch the run's topography.
     """
     from legoesm.atmosphere.dynamics.column_les import process_column
 
