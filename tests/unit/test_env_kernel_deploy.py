@@ -163,6 +163,41 @@ def test_json_round_trip(tmp_path):
         np.asarray(o1.clubb_lite.C_K), np.asarray(o2.clubb_lite.C_K))
 
 
+def test_json_round_trip_preserves_every_field_exactly():
+    """The env-kernel JSON (the cross-grid deploy persistence artifact) must
+    round-trip ALL fields bit-exactly — the env-kernel analog of the iter-214
+    checkpoint-field lock.
+
+    ``test_json_round_trip`` above checks only behavioural equivalence via the
+    deployed ``C_K``, which does NOT depend on ``env_lo``/``env_hi`` (they feed only
+    the ``fraction_in_hull`` domain-shift diagnostic).  So a corruption / mis-order
+    of the hull bounds — or a flatten of the ``(nsamp, 3)`` ``sample_env`` — would
+    pass that test yet silently break the deploy's domain-shift warning on the
+    production grid.  This asserts each field is preserved exactly, including the
+    2-D ``sample_env`` shape.
+    """
+    import json
+
+    k = _kernel()
+    k2 = env_kernel_from_dict(json.loads(json.dumps(env_kernel_to_dict(k))))
+    # The 2-D sample_env keeps its (nsamp, 3) shape (not flattened/transposed) …
+    assert np.asarray(k2.sample_env).shape == np.asarray(k.sample_env).shape
+    np.testing.assert_allclose(
+        np.asarray(k2.sample_env), np.asarray(k.sample_env), rtol=1e-12)
+    # … and every other field round-trips exactly — env_lo/env_hi are the ones the
+    # behavioural C_K test cannot reach.
+    np.testing.assert_allclose(
+        np.asarray(k2.sample_values), np.asarray(k.sample_values), rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(k2.length_scales), np.asarray(k.length_scales), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(k2.env_lo), np.asarray(k.env_lo), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(k2.env_hi), np.asarray(k.env_hi), rtol=1e-12)
+    np.testing.assert_array_equal(
+        np.asarray(k2.valid, dtype=bool), np.asarray(k.valid, dtype=bool))
+    assert k2.field == k.field
+    assert float(k2.background) == pytest.approx(float(k.background))
+
+
 def test_deployed_override_passes_validate_strict():
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     k = _kernel()
