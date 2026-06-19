@@ -73,6 +73,53 @@ def test_kernel_field_recovers_value_at_sample():
     assert float(field[1]) == pytest.approx(-9.0)
 
 
+def test_kernel_covered_columns_are_convex_combinations_within_sample_range():
+    """A COVERED column's value is ``Σ wⱼ vⱼ / Σ wⱼ`` — a true convex combination of
+    the sample values (weights ≥ 0), so it is GUARANTEED within
+    ``[min(sample_values), max(sample_values)]`` and the ``background`` is NEVER
+    blended into it (the ``jnp.where`` is a HARD switch, not a soft blend).
+
+    This is a load-bearing physical guarantee for the cross-grid deploy: a deployed
+    closure coefficient must never leave the range actually diagnosed from the LES.
+    A plausible future "smooth the boundary" change — folding the background into the
+    numerator, e.g. ``(Σw·v + ε·bg)/(Σw + ε)`` — would silently pull covered columns
+    toward ``background`` and outside the diagnosed range.  Setting ``background`` FAR
+    outside the sample range (100.0 vs samples in [0.2, 0.8]) makes any such leak
+    impossible to miss: a contaminated column would jump toward 100, not stay ≤ 0.8.
+    """
+    sample_env = jnp.array([[300.0, 1000.0], [310.0, 2000.0]])
+    sample_values = jnp.array([0.2, 0.8])
+    L = jnp.array([5.0, 500.0])
+    lo, hi = 0.2, 0.8
+    # Sweep the segment between the two samples — every column is covered (≤ ~1.4σ
+    # from each sample, well above the 3σ floor) and blends BOTH samples.
+    grid_env = jnp.array([
+        [300.0, 1000.0],   # == sample 0 → the lower endpoint
+        [302.5, 1250.0],
+        [305.0, 1500.0],   # midpoint → ~0.5
+        [307.5, 1750.0],
+        [310.0, 2000.0],   # == sample 1 → the upper endpoint
+    ])
+    field, has_neighbor = environment_kernel_field(
+        grid_env, sample_env, sample_values, length_scales=L,
+        background=100.0, return_coverage=True)
+    f = np.asarray(field)
+    assert bool(np.all(np.asarray(has_neighbor)))     # every swept column is covered
+    # Convex-combination invariant: strictly within the sampled value range …
+    assert np.all((f >= lo - 1e-6) & (f <= hi + 1e-6))
+    # … and DECISIVELY far from the background (no leak): a contaminated column
+    # would be pulled toward 100, not stay ≤ 0.8.
+    assert np.all(f < 1.0)
+    # Endpoints sit NEAR their own sample but are pulled slightly inward by the
+    # other sample's (small) weight — the hallmark of a genuine convex blend, not
+    # an exact interpolation: f[0] just above lo, f[-1] just below hi.
+    assert lo < f[0] < lo + 0.05
+    assert hi - 0.05 < f[-1] < hi
+    assert f[2] == pytest.approx(0.5, abs=1e-6)        # symmetric midpoint blend
+    # Monotone along the segment (a convex combination shifting weight sample0→1).
+    assert np.all(np.diff(f) > 0)
+
+
 def test_kernel_field_array_background_per_column_fallback():
     # Array background (accumulated round-k field): a column with NO env-similar
     # diagnosis this round retains its prior per-column value, while a column
