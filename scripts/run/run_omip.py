@@ -100,6 +100,11 @@ def build_vertical_mixing_config_from_args(
 ) -> VerticalMixingConfig:
     """Resolve the OMIP vertical-mixing CLI flags into the physics config."""
     scheme = args.vertical_mixing_scheme or default_scheme
+    if scheme == "catke":
+        # CATKE (Wagner 2025) uses its own VerticalMixingConfig.catke defaults
+        # (calibrated); the kpp-tuning CLI flags don't apply.  Implicit-only.
+        from legoesm.ocean.physics.vertical_mixing.config import CATKEConfig
+        return VerticalMixingConfig(scheme="catke", catke=CATKEConfig())
     return VerticalMixingConfig(
         scheme=scheme,
         kpp=KPPConfig(
