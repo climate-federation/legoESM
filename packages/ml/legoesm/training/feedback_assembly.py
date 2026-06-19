@@ -249,7 +249,9 @@ def column_environment_grid(
     ``p_full``/``p_half`` (both-or-neither; default pure sigma ``p = σ·p_s``).
     Pass the same ``env_config``/pressure the manifest (``make_compare_fn``) used
     for a hybrid-coordinate or custom-config run.  ``sst`` falls back to the
-    surface-level temperature when the state carries no SST.
+    surface-level air temperature when the state carries no SST (WARNS once per
+    session — iter 281 — so the operator learns the env-kernel grid tags are
+    approximate, symmetric with :func:`compare_reanalysis.compare_state_to_reference`).
     """
     from legoesm.training.column_manifest import (
         EnvironmentConfig,
@@ -267,8 +269,22 @@ def column_environment_grid(
     if p_full is None:
         p_full = p_s[..., None] * sigma_full
         p_half = p_s[..., None] * sigma_half
-    sst = model.sst_K if getattr(model, "sst_K", None) is not None \
-        else jnp.asarray(model.T)[..., -1]
+    if getattr(model, "sst_K", None) is not None:
+        sst = model.sst_K
+    else:
+        # The SECOND SST-fallback path (the env-kernel GRID env, iter 128) — warn for
+        # symmetry with compare_state_to_reference (iter 280): a silent air-temp tag here
+        # degrades the cross-resolution deploy's similarity matching. Structural branch
+        # (sst_K None-ness is not data-dependent), so this fires once per trace/call and
+        # Python dedups it to once per session — no per-column noise (iter 281).
+        import warnings
+
+        warnings.warn(
+            "column_environment_grid: model.sst_K is None — using the lowest-level air "
+            "temperature as the SST environment tag for the env-kernel grid (the "
+            "cross-resolution deploy's env-similarity matching is APPROXIMATE). Supply "
+            "the prescribed/coupled SST for accurate tags.", stacklevel=2)
+        sst = jnp.asarray(model.T)[..., -1]
     fields = compute_column_environment(
         T=jnp.asarray(model.T), q_v=jnp.asarray(model.q_v),
         u=jnp.asarray(model.u), v=jnp.asarray(model.v),

@@ -373,6 +373,27 @@ def test_column_environment_grid_shapes_and_sst():
     assert bool(jnp.all(length_scales > 0))
 
 
+def test_column_environment_grid_warns_on_sst_fallback():
+    """The SECOND SST-fallback path (iter 281, symmetric with the compare path): when
+    sst_K is None the env-kernel grid SST tag falls back to lowest-level AIR TEMPERATURE
+    and WARNS, so the operator learns the cross-resolution deploy's similarity matching
+    is approximate (the surface T_295 becomes the SST predictor, not a crash/NaN)."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import ColumnState
+
+    nlat, nlon, nlev = 2, 2, 5
+    sigma = create_sigma_coordinate(nlev)
+    # surface-last T: top 220 K, surface 295 K — the fallback must use the surface (295).
+    t_profile = jnp.linspace(220.0, 295.0, nlev)
+    model = ColumnState(
+        T=jnp.broadcast_to(t_profile, (nlat, nlon, nlev)),
+        q_v=jnp.full((nlat, nlon, nlev), 5e-3), u=jnp.full((nlat, nlon, nlev), 5.0),
+        v=jnp.zeros((nlat, nlon, nlev)), p_s=jnp.full((nlat, nlon), 1.0e5), sst_K=None)
+    with pytest.warns(UserWarning, match="model.sst_K is None"):
+        grid_env, _ = column_environment_grid(model, sigma)
+    np.testing.assert_allclose(np.asarray(grid_env[:, 0]), 295.0)  # surface air T, not top
+
+
 def test_column_environment_grid_matches_manifest_sample_env():
     """CROSS-PATH CONSISTENCY (Codex iter-42, the env-kernel deploy invariant): the
     kernel's grid predictors (``column_environment_grid``) MUST equal the manifest's
