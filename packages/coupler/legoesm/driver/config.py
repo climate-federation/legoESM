@@ -270,6 +270,12 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # Optional harmonized surface-data NetCDF (legoesm_surfdata_*.nc).  When
+    # set together with land_mask_path, the static land albedo field is taken
+    # from the surfdata (per-column soil-colour + PFT-vegetation blend, glacier
+    # override) instead of the latitude-only land_vegetation_albedo() curve;
+    # empty → latitude-only land albedo (unchanged behaviour).
+    surfdata_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -768,6 +774,7 @@ class ExperimentConfig(NamedTuple):
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
+            surfdata_path=getattr(amip_cfg, 'surfdata_path', ''),
             T_init=amip_cfg.T_init,
             rh_init=amip_cfg.rh_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
