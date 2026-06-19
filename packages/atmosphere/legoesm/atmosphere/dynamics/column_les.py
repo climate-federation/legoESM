@@ -20,6 +20,7 @@ manifest lives in ``scripts/run/run_column_les.py`` (imports this module).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -262,6 +263,19 @@ def build_column_les_setup(
     if forcing.prescribe == "fluxes":
         w_theta_sfc = None if forcing.w_th_s is None else float(forcing.w_th_s(0.0))
         w_qv_sfc = None if forcing.w_qv_s is None else float(forcing.w_qv_s(0.0))
+        # Fail LOUD on a non-finite surface flux: validate_forcing only checks the
+        # flux callables are PRESENT (state-blind), not their VALUES. A NaN/inf flux
+        # (e.g. from a future SST→bulk-flux extractor div-by-zero) would silently
+        # poison the LES surface cell → a blown-up run + invalid diagnosis, caught
+        # only late by the realism gate. Catch it here at setup.
+        for _name, _val in (("w_th_s", w_theta_sfc), ("w_qv_s", w_qv_sfc)):
+            if _val is not None and not math.isfinite(_val):
+                raise ValueError(
+                    f"build_column_les_setup: prescribed surface flux {_name}={_val} "
+                    "is non-finite — a NaN/inf surface flux would poison the LES "
+                    "surface cell (blow up the run, invalidate the diagnosis). Check "
+                    "the surface-flux source."
+                )
 
     forcing_physics = make_plane_ls_forcing_physics(
         hc,

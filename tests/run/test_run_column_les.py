@@ -369,6 +369,20 @@ def test_build_setup_applies_prescribed_surface_fluxes():
     np.testing.assert_array_equal(np.asarray(t_flux.dw_dt.data), np.asarray(t_none.dw_dt.data))
 
 
+def test_build_setup_rejects_nonfinite_surface_flux():
+    """A NON-FINITE prescribed surface flux fails LOUD at setup (validate_forcing only
+    checks the callables are present, not their VALUES) — a NaN/inf flux would poison
+    the LES surface cell and blow up the run; catch it before that."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    for bad in (ls._replace(prescribe="fluxes", w_th_s=float("nan"), w_qv_s=2e-5),
+                ls._replace(prescribe="fluxes", w_th_s=0.05, w_qv_s=float("inf"))):
+        with pytest.raises(ValueError, match="non-finite"):
+            build_column_les_setup(
+                cape_J_kg=200.0, lat_rad=0.3,
+                gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=bad, config=_CONFIG,
+            )
+
+
 def test_build_setup_raises_when_les_top_above_column():
     gcm_z, gcm_theta, ls = _gcm_column()
     # Column top only 1500 m < LES top 2000 m -> flat-extrapolation guard.
