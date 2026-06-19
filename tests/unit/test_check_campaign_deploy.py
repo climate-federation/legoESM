@@ -105,6 +105,37 @@ def test_allow_unverified_grid_is_the_escape_hatch_but_keeps_the_length_check(tm
         check_deploy(cfg, str(bad_len), allow_unverified_grid=True)
 
 
+def test_deployed_config_drives_a_real_driver_with_the_per_column_correction(tmp_path):
+    """The runbook's step-5 deploy snippet must COMPOSE end-to-end: build_deployed_config
+    → make_base_driver_builder → a REAL ModelDriver whose turbulence config carries the
+    per-column LES-corrected C_K.
+
+    This is what makes the operator's deployed run actually USE the correction (not the
+    scalar default).  The AMIP-path analog of the iter-37 CMIP capstone, but through the
+    OPERATOR's documented ``build_deployed_config`` + ``make_base_driver_builder``
+    composition — no existing test covers that exact path (iter 205-207 wired
+    ``corrected_turbulence_override`` → ``build_physics_pipeline`` directly).
+    """
+    from scripts.experiment.check_campaign_deploy import build_deployed_config
+    from scripts.run.run_correction_campaign import (
+        load_base_config_and_grid,
+        make_base_driver_builder,
+    )
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+    ck_lo, ck_hi = 0.31, 0.59
+    out = _campaign_output(tmp_path, base_cfg, grid, lo=ck_lo, hi=ck_hi)
+
+    deployed, _ = build_deployed_config(cfg, out)
+    build_driver, _ = make_base_driver_builder("amip")
+    driver = build_driver(deployed)                      # constructs + setup()s the real driver
+    drv_ck = np.asarray(driver.physics.turbulence_config.C_K)
+    # The per-column correction reached the RUNNING driver's turbulence kernel config.
+    assert drv_ck.shape == (128,)
+    assert drv_ck.min() == pytest.approx(ck_lo) and drv_ck.max() == pytest.approx(ck_hi)
+
+
 def test_check_deploy_refuses_a_different_grid_of_the_same_column_count(tmp_path):
     """The grid fingerprint must refuse a correction learned on a DIFFERENT grid even
     when the column count matches (8x16 vs 16x8 are both 128) — else the per-column
