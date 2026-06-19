@@ -89,6 +89,29 @@ def test_validate_reference_physical_catches_out_of_range_sst():
         _uniform_state((4,), 3, T=285.0, sst=290.0)) is None
 
 
+def test_validate_reference_physical_catches_absurd_wind():
+    """A gross wind units/loader error (|u| or |v| far above the generous 200 m/s bound)
+    is caught — the u/v check the other validate tests don't cover (iter 283)."""
+    for bad in (_uniform_state((4,), 3, T=285.0, u=900.0),     # 900 m/s — a units bug
+                _uniform_state((4,), 3, T=285.0, v=-900.0)):   # the v axis too
+        with pytest.raises(ValueError, match=r"[uv] outside"):
+            validate_reference_physical(bad)
+
+
+def test_validate_reference_physical_catches_out_of_range_precip():
+    """An out-of-range reference precip is caught — a NEGATIVE rate (a -999 fill / sign
+    bug) or an absurd rate (mm/hr-as-mm/day or an accumulation, not a rate) — the precip
+    check the other validate tests don't cover (iter 283)."""
+    neg = _uniform_state((4,), 3, T=285.0, precip=-999.0)      # a fill-value / sign bug
+    with pytest.raises(ValueError, match="precip_mm_day outside"):
+        validate_reference_physical(neg)
+    absurd = _uniform_state((4,), 3, T=285.0, precip=5000.0)   # >> 2000 mm/day
+    with pytest.raises(ValueError, match="precip_mm_day outside"):
+        validate_reference_physical(absurd)
+    assert validate_reference_physical(                        # a plausible 3 mm/day passes
+        _uniform_state((4,), 3, T=285.0, precip=3.0)) is None
+
+
 def test_validate_reference_physical_catches_negative_humidity():
     """ERA5 q is non-negative — a meaningfully negative q_v (a fill/sign/loader bug)
     is rejected (the floor is a roundoff tolerance, NOT the model overshoot one;
