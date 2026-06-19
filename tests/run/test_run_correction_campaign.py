@@ -41,9 +41,12 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     build_distributed_multi_correction_campaign,
     build_multi_correction_campaign,
     compose_compare_fn,
+    grid_latlon_deg,
+    load_base_config_and_grid,
     make_base_driver_builder,
     make_clubb_build_driver,
     make_les_diagnose_fn,
+    maybe_env_grid_fn,
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
@@ -301,6 +304,55 @@ def _base_config():
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence="clubb_lite")
+
+
+def test_grid_latlon_deg_defaults_to_grid_centre_degrees():
+    """grid_latlon_deg defaults lat/lon to the grid's centre coords CONVERTED to
+    DEGREES (radians·180/π); explicit values pass through UNCHANGED (no double
+    conversion). A dropped rad2deg would tag the manifest with radian 'latitudes'."""
+    from types import SimpleNamespace
+
+    grid = SimpleNamespace(grid_lat=np.array([0.0, np.pi / 2]),
+                           grid_lon=np.array([0.0, np.pi]))
+    lat, lon = grid_latlon_deg(grid, None, None)
+    np.testing.assert_allclose(np.asarray(lat), [0.0, 90.0])
+    np.testing.assert_allclose(np.asarray(lon), [0.0, 180.0])
+    # Explicit values pass through (caller already supplied degrees).
+    lat2, lon2 = grid_latlon_deg(grid, jnp.array([12.0]), jnp.array([34.0]))
+    np.testing.assert_array_equal(np.asarray(lat2), [12.0])
+    np.testing.assert_array_equal(np.asarray(lon2), [34.0])
+
+
+def test_load_base_config_and_grid_roundtrip(tmp_path):
+    """load_base_config_and_grid loads the ExperimentConfig JSON + builds the SAME grid
+    + vertical coord the run uses (latlon res 8, nlev 5), WITHOUT the heavy setup() —
+    the config-loading entry shared by the campaign CLI AND the OSSE CLI, so a
+    regression here breaks both launches."""
+    import json
+
+    from legoesm.driver.config import experiment_config_to_dict
+
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(experiment_config_to_dict(_base_config())))
+    cfg, grid, sigma = load_base_config_and_grid(str(p))
+    assert cfg.grid.grid_type == "latlon" and cfg.grid.resolution == 8
+    assert cfg.turbulence == "clubb_lite"             # the campaign-required scheme survives
+    assert grid is not None and hasattr(grid, "grid_lat")
+    assert int(np.asarray(sigma.sigma_full).shape[0]) == 5   # nlev levels built
+
+
+def test_maybe_env_grid_fn_dispatch():
+    """maybe_env_grid_fn returns the env-grid producer ONLY for 'environment' (else
+    None — the static-scatter feedback needs no env grid), with ``sigma`` bound."""
+    from legoesm.training.feedback_assembly import column_environment_grid
+
+    sigma = object()
+    fn = maybe_env_grid_fn("environment", sigma)
+    assert callable(fn)
+    assert fn.func is column_environment_grid        # partial of the right producer
+    assert fn.keywords.get("sigma") is sigma         # sigma bound into the partial
+    assert maybe_env_grid_fn("static", sigma) is None
+    assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
 def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
