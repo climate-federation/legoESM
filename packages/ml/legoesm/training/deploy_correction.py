@@ -461,7 +461,8 @@ def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
 
 
 def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
-                              min_total_weight: float | None = None):
+                              min_total_weight: float | None = None,
+                              min_fraction_covered: float | None = None):
     """Evaluate an :class:`EnvKernel` on a NEW grid's environment → an override.
 
     ``new_grid_env`` ``(ncol_new, 3)`` from :func:`column_environment_grid` on the
@@ -470,6 +471,16 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
     similar diagnosis vs fell back to ``background``, and the fraction WITHIN the
     sampled env hull — a LOW ``fraction_covered`` warns the deploy grid's climate
     lies outside the campaign's sampled environments (Codex iter-69).
+
+    ``min_fraction_covered`` (opt-in, default ``None`` = the original return-and-let-
+    the-caller-decide behaviour) FAILS LOUD when ``fraction_covered`` falls below it:
+    a deploy grid whose columns (near-)all lie outside the sampled environments yields
+    an (near-)all-``background`` override — a silent NO-OP correction — so a production
+    user can assert a minimum coverage and catch a misconfigured cross-grid deploy
+    BEFORE a multi-day run rather than discover it did nothing afterwards.  The OSSE
+    go/no-go (:mod:`perfect_model_osse`) gates the SAME way externally.  (Passing
+    ``0.0`` is accepted but never fires — ``fraction_covered`` is always ≥ 0 — so use
+    a strictly-positive threshold for real protection.)
     """
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.turbulence.config import (
@@ -500,6 +511,19 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
         "fraction_covered": float(jnp.mean(has_neighbor)),
         "fraction_in_hull": float(jnp.mean(in_hull)),
     }
+    if min_fraction_covered is not None:
+        if not 0.0 <= min_fraction_covered <= 1.0:
+            raise ValueError(
+                f"min_fraction_covered must be in [0, 1]; got {min_fraction_covered}.")
+        if coverage["fraction_covered"] < min_fraction_covered:
+            raise ValueError(
+                f"env-kernel deploy coverage fraction_covered="
+                f"{coverage['fraction_covered']:.3g} is below the required "
+                f"min_fraction_covered={min_fraction_covered:.3g}: most deploy-grid "
+                "columns lie OUTSIDE the campaign's sampled environments, so the "
+                "override is (near-)all background — a NO-OP correction. Sample more "
+                "diverse environments in the campaign, deploy on a closer grid/climate, "
+                "or lower min_fraction_covered to proceed knowingly.")
     override = TurbulenceConfig(
         scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(**{kernel.field: field}))
     return override, coverage

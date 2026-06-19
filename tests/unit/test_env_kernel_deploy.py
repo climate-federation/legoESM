@@ -97,6 +97,28 @@ def test_apply_out_of_hull_falls_back_and_warns():
     assert coverage["fraction_in_hull"] == 0.0
 
 
+def test_apply_min_fraction_covered_fails_loud_on_no_op_deploy():
+    """Opt-in fail-loud: an (near-)all-background deploy (grid outside the sampled
+    environments ⇒ NO-OP correction) RAISES when ``min_fraction_covered`` is set,
+    so a misconfigured cross-grid deploy is caught before a multi-day run."""
+    k = _kernel()
+    far = jnp.asarray([(250.0, 5e4, 200.0), (255.0, 6e4, 250.0)])  # coverage 0.0
+    # Default (None) preserves the original behaviour: NO raise even at 0 coverage.
+    _override, cov = apply_env_kernel_override(k, far)
+    assert cov["fraction_covered"] == 0.0
+    # Opt-in guard fires on the no-op deploy.
+    with pytest.raises(ValueError, match="below the required min_fraction_covered"):
+        apply_env_kernel_override(k, far, min_fraction_covered=0.5)
+    # A well-covered deploy passes the same guard (coverage 1.0 >= 0.5).
+    good = jnp.asarray([(300.0, 1500.0, 12.0), (298.5, 150.0, 5.5)])
+    override, cov_ok = apply_env_kernel_override(k, good, min_fraction_covered=0.5)
+    assert cov_ok["fraction_covered"] >= 0.5
+    assert np.all(np.isfinite(np.asarray(override.clubb_lite.C_K)))
+    # An out-of-range threshold itself fails loud.
+    with pytest.raises(ValueError, match=r"min_fraction_covered must be in \[0, 1\]"):
+        apply_env_kernel_override(k, good, min_fraction_covered=1.5)
+
+
 def test_json_round_trip(tmp_path):
     import json
     k = _kernel()
