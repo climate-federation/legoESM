@@ -346,8 +346,12 @@ def build_reentrant_channel_config(
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
         tracer_advection="centered",
-        # Implicit free surface, fully backward-Euler; MITgcm unsplit AB2 path.
-        barotropic_solver="implicit_cn",
+        # MITgcm-faithful UNSPLIT implicit free surface (MITgcm implicitFreeSurface is
+        # unsplit; audited). GM/Redi is threaded through the unsplit step. The ACC case
+        # does not develop the 2dx baroclinic checkerboard (GM/Redi removes the
+        # grid-scale APE), so cn and unsplit are equivalent here (|u|max 0.231 vs 0.235
+        # over 30 d) — unsplit is the faithful choice.
+        barotropic_solver="implicit_unsplit",
         barotropic_implicit_theta_eta=1.0,
         barotropic_implicit_theta_pgf=1.0,
         coriolis_scheme="explicit_ab2",
