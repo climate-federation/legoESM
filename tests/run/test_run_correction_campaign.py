@@ -357,6 +357,20 @@ def test_format_per_variable_bias():
     assert "improved: T" in line and "wind" not in line.split("improved:")[1]
 
 
+def test_format_round_line_surfaces_les_validity():
+    """The per-round console line distinguishes a no-turbulence LES round (0/N valid —
+    a forcing/setup issue) from a correction-didn't-help round (N/N valid but no
+    improvement — a science result); both would otherwise read as 'no improvement;
+    REJECTED' (iter 266)."""
+    from scripts.run.run_correction_campaign import _format_round_line
+
+    no_turb = _format_round_line(3, 0.5, 0.5, False, False, 1.0, 0, 4)
+    assert "round 3" in no_turb and "0/4 LES valid" in no_turb
+    assert "no improvement" in no_turb and "REJECTED" in no_turb
+    good = _format_round_line(2, 1.0, 0.4, True, True, 0.5, 3, 4)
+    assert "3/4 LES valid" in good and "IMPROVED" in good and "kept" in good
+
+
 def test_resolve_orographic_phis_off_skips_provider():
     """'off' returns None WITHOUT calling the provider (so no driver/probe is built
     — the legacy flat path constructs nothing)."""

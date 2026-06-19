@@ -1297,6 +1297,21 @@ def _area_weights(grid):
     return jnp.cos(jnp.asarray(np.asarray(grid.grid_lat)))  # grid_lat is [rad]
 
 
+def _format_round_line(round_idx: int, b0: float, b1: float, imp: bool, kept: bool,
+                       step: float, n_valid: int, n_diagnosed: int) -> str:
+    """One-line per-round campaign progress for the operator's multi-day-run console.
+
+    Surfaces the LES-diagnosis VALIDITY (``n_valid/n_diagnosed``) alongside the bias
+    move so a round that made NO correction because the spin-off LES developed no
+    turbulence (``0/N`` valid — a forcing/setup issue) is distinguishable from one where
+    the correction simply did not lower the bias (``N/N`` valid but ``no improvement`` —
+    a science result).  Without it both read identically as 'no improvement; REJECTED'.
+    """
+    return (f"[campaign] round {round_idx}: bias {b0:.5g} -> {b1:.5g} "
+            f"(step {step:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
+            f"{'kept' if kept else 'REJECTED'}; {n_valid}/{n_diagnosed} LES valid)")
+
+
 def _format_per_variable_bias(pvb) -> str:
     """One-line per-VARIABLE RMSE baseline→updated + which variables improved, for a
     round's ``per_variable_bias`` (a ``PerVariableBiasImprovement``), or ``""`` when the
@@ -1382,9 +1397,10 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     steps = [float(it.step_fraction) for it in result.iterations]
     for i, (b0, b1, imp) in enumerate(biases):
         kept = accepted[i] if i < len(accepted) else True
-        print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
-              f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
-              f"{'kept' if kept else 'REJECTED'})")
+        it_i = result.iterations[i]
+        print(_format_round_line(
+            start_round + i, b0, b1, imp, kept, steps[i],
+            getattr(it_i, "n_diagnoses_valid", 0), getattr(it_i, "n_diagnosed", 0)))
         pv_line = _format_per_variable_bias(result.iterations[i].per_variable_bias)
         if pv_line:
             print(pv_line)
@@ -1763,9 +1779,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     steps = [float(it.step_fraction) for it in result.iterations]
     for i, (b0, b1, imp) in enumerate(biases):
         kept = accepted[i] if i < len(accepted) else True
-        print(f"[campaign] round {start_round + i}: bias {b0:.5g} -> {b1:.5g} "
-              f"(step {steps[i]:.3g}; {'IMPROVED' if imp else 'no improvement'}; "
-              f"{'kept' if kept else 'REJECTED'})")
+        it_i = result.iterations[i]
+        print(_format_round_line(
+            start_round + i, b0, b1, imp, kept, steps[i],
+            getattr(it_i, "n_diagnoses_valid", 0), getattr(it_i, "n_diagnosed", 0)))
         pv_line = _format_per_variable_bias(result.iterations[i].per_variable_bias)
         if pv_line:
             print(pv_line)
