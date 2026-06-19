@@ -225,6 +225,23 @@ def test_rank_caps_at_n_columns():
     assert idx.shape == (3,)
 
 
+def test_rank_worst_columns_nan_score_never_selected():
+    """A NaN combined_score (a degenerate column from a partial blow-up) is routed to
+    -inf: NEVER selected as 'worst' (top_k ordering of NaN is backend-undefined — it
+    could otherwise rank highest and waste an LES on a garbage column), and if it fills
+    a padded slot it is flagged INVALID. Parallel to the distributed select_global_top_k
+    NaN guard (which IS tested) — this locks the single-rank analog."""
+    score = jnp.array([[5.0, float("nan")], [9.0, 2.0]])   # NaN at flat index 1
+    idx, vals, valid = rank_worst_columns(score, 2)
+    # The 2 worst are 9.0 (flat 2) then 5.0 (flat 0); the NaN (flat 1) is NOT selected.
+    assert 1 not in [int(i) for i in idx]
+    assert {int(i) for i in idx} == {2, 0}
+    # n > finite count: the NaN slot fills a trailing slot but is flagged invalid.
+    idx2, _vals2, valid2 = rank_worst_columns(score, 4)
+    nan_slot = [k for k, i in enumerate(idx2) if int(i) == 1]
+    assert nan_slot and not bool(valid2[nan_slot[0]])      # the NaN column is not a real worst
+
+
 def test_rank_flags_padded_slots_when_n_exceeds_valid_count():
     """n > number of valid columns → trailing slots flagged invalid."""
     score = jnp.array([[0.1, 0.9], [0.5, 0.2]])
