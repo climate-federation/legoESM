@@ -90,6 +90,29 @@ def test_select_global_top_k_tie_break_is_partition_invariant():
     assert select_global_top_k([9.0, 9.0, 9.0, 9.0], [3, 2, 1, 0], [1, 1, 1, 1], 2) == [0, 1]
 
 
+def test_select_global_top_k_partition_invariance_property_many_orders():
+    """PROPERTY strengthening of the iter-213 fix: the global worst-SET under ties is
+    invariant to the gather order (= the MPI decomposition) for MANY random orders, not
+    just the 3 hand-crafted ones above.
+
+    The gather order encodes which rank contributed each candidate, so permuting it is
+    exactly re-partitioning the global mesh.  Four cells (gids 0-3) tie for the worst
+    score with only 2 global slots; the partition-invariant + serial-consistent
+    tie-break (ascending gid) must select the two lowest gids ``{0,1}`` for EVERY
+    permutation.  A regression to any gather-order-dependent tie-break would fail for
+    some order — a property the 3 fixed cases can miss.
+    """
+    rng = np.random.default_rng(0)
+    scores = np.array([9.0, 9.0, 9.0, 9.0, 5.0, 5.0, 5.0, 5.0])   # gids 0-3 tied worst
+    gids = np.arange(8)
+    valid = np.ones(8, dtype=bool)
+    for _ in range(128):
+        order = rng.permutation(8)
+        selected = select_global_top_k(
+            scores[order], gids[order], valid[order], 2)
+        assert set(selected) == {0, 1}, f"order {order.tolist()} -> {selected}"
+
+
 def test_select_global_top_k_shape_mismatch_raises():
     with pytest.raises(ValueError, match="must share shape"):
         select_global_top_k([1.0, 2.0], [0, 1, 2], [1, 1, 1], 2)
