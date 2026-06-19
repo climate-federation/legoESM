@@ -259,6 +259,19 @@ def test_build_rejects_bad_length_scales():
         build_env_kernel(recs, diags, "clubb_coefficient", length_scales=[1.0, 2.0])
 
 
+def test_build_rejects_nonpositive_length_scales():
+    """A length_scale is a similarity-distance DIVISOR; it must be strictly positive.
+    A ZERO yields a 0/0=NaN or inf distance, a NEGATIVE is silently squared to its
+    magnitude — both are caught at construction (the production floor is 1e-6), not
+    deferred to a confusing 'non-finite coefficients' during cross-grid evaluation."""
+    recs = [_Rec(ColumnEnvironment(*_ENVS[0]))]
+    diags = [_Diag(C_K=jnp.array([0.3]), valid=jnp.array([True]))]
+    for bad in ([2.0, 0.0, 8.0], [2.0, -1200.0, 8.0]):   # one zero / one negative scale
+        with pytest.raises(ValueError, match="strictly POSITIVE"):
+            build_env_kernel(recs, diags, "clubb_coefficient", length_scales=bad,
+                             field="C_K")
+
+
 def test_from_dict_rejects_mislabelled_artifact():
     # A wrong/foreign artifact tag fails loudly; a missing tag is tolerated
     # (pre-tag iter-69 kernels still deserialize).

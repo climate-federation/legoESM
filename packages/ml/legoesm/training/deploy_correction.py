@@ -473,6 +473,21 @@ def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
                 f"env kernel '{name}' has a non-finite (NaN/inf) value — a worst column's "
                 "environment tag is undefined (e.g. a NaN SST over land). Mask such columns "
                 "from the comparison (valid_mask) before building the env kernel.")
+    # length_scales are per-predictor SIMILARITY SCALES (divisors in the kernel
+    # distance ``((env-sample)/ls)²``); they MUST be strictly positive. The campaign
+    # floors them at 1e-6 (``feedback_assembly._env_grid_predictors``), but a directly-
+    # built or hand-edited/deserialized kernel is unchecked: a ZERO scale makes the
+    # distance ``0/0=NaN`` for a sample matching the new env (caught only later as a
+    # confusing 'non-finite coefficients' far from the cause) or ``inf`` (a silent
+    # background-only degradation of that predictor); a NEGATIVE scale is silently
+    # SQUARED to its magnitude (``x²/ls²``), a silent misconfiguration. Fail loud here.
+    ls = jnp.asarray(kernel.length_scales, dtype=float)
+    if not bool(jnp.all(ls > 0.0)):
+        raise ValueError(
+            "env kernel 'length_scales' must be strictly POSITIVE (each is a per-predictor "
+            "similarity scale; the campaign floors them at 1e-6). A zero scale yields a "
+            "0/0=NaN or inf similarity distance; a negative scale is silently squared to "
+            f"its magnitude. Got {jnp.asarray(kernel.length_scales).reshape(-1).tolist()}.")
     return kernel
 
 
