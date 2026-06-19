@@ -113,6 +113,35 @@ def test_deterministic():
     assert a == b
 
 
+def test_farthest_first_tie_break_is_lowest_index_deterministic():
+    """When two candidates are EQUIDISTANT from the chosen representatives, the
+    farthest-first step must pick the LOWEST-index one, reproducibly.
+
+    ``test_deterministic`` uses WELL-SEPARATED groups (no ties), so it cannot catch
+    a non-deterministic tie-break.  But the clustering re-derives each round from the
+    checkpointed manifest, so a tie-break that varied (random, or argmax-from-the-end)
+    would make the SAME manifest spin off a DIFFERENT LES representative across re-runs
+    — diagnosing a different coefficient and breaking campaign reproducibility (the
+    clustering analog of the iter-212 ranking tie-break lock).  The k-center uses
+    ``np.argmax(min_dist)``, which resolves ties to the lowest index.  Here two
+    candidates sit at IDENTICAL distance (±10 K SST) on either side of the anchor, so
+    the second representative must be the lower-index one.
+    """
+    # idx0: SST 310 (10 K from anchor); idx1: anchor (worst score); idx2: SST 290
+    # (also 10 K) — idx0 and idx2 are exactly equidistant from the anchor.
+    records = [
+        _record(10, 0.5, 310.0, 1000.0, 10.0),
+        _record(11, 9.0, 300.0, 1000.0, 10.0),   # anchor: highest combined_score
+        _record(12, 0.5, 290.0, 1000.0, 10.0),
+    ]
+    out = cluster_columns_by_environment(records, n_clusters=2, env_scales=(1.0, 1.0, 1.0))
+    # Anchor (idx 1) then the LOWER-index tied candidate (idx 0) — NOT idx 2.
+    assert out.representative_indices == (1, 0)
+    # Reproducible across calls (a fresh process re-deriving from the same manifest).
+    again = cluster_columns_by_environment(records, n_clusters=2, env_scales=(1.0, 1.0, 1.0))
+    assert again.representative_indices == out.representative_indices
+
+
 def test_labels_in_range_and_reps_distinct():
     records = _two_separated_groups()
     out = cluster_columns_by_environment(records, n_clusters=3)
