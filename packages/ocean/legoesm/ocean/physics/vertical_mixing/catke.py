@@ -65,6 +65,22 @@ _EPS_S2 = 1.0e-20      # shear floor so Ri = N2/S2 is finite at rest
 _EPS_LEN = 1.0e-20     # length floor so 1/l is finite
 
 
+def _bcast_to_levels(x, ref):
+    """Append trailing singleton axes so a per-column scalar / ``(...)`` array
+    broadcasts against the per-interface ``ref`` (shape ``(..., n_iface)``).
+
+    The surface buoyancy flux ``Jb`` and the column depth ``H`` are one value
+    per column; on a 3-D ocean state they arrive as ``(n_lat, n_lon)`` while the
+    interface fields are ``(n_lat, n_lon, n_iface)``.  Right-aligned NumPy
+    broadcasting would mis-align ``n_lon`` with ``n_iface``; appending a trailing
+    axis fixes it.  Scalars (and already-per-interface arrays) pass through.
+    """
+    x = jnp.asarray(x)
+    if x.ndim < ref.ndim:
+        x = x.reshape(x.shape + (1,) * (ref.ndim - x.ndim))
+    return x
+
+
 def _turbulent_velocity(e, minimum_tke):
     """w* = sqrt(max(e, e_min)).  The floor gives a background mixing rate."""
     return jnp.sqrt(jnp.maximum(e, minimum_tke))
@@ -164,6 +180,8 @@ def catke_diffusivities(e, N2, N2_above, S2, depth, height_above_bottom, H, Jb,
     (K_u, K_c, K_e) : each ``(..., n_iface)`` [m^2/s] — momentum viscosity,
         tracer diffusivity, TKE diffusivity.  Each clamped at its config cap.
     """
+    H = _bcast_to_levels(H, N2)        # per-column -> broadcast over interfaces
+    Jb = _bcast_to_levels(Jb, N2)
     w_star = _turbulent_velocity(e, cfg.minimum_tke)
     Ri = _richardson(N2, S2)
 
@@ -191,6 +209,8 @@ def catke_dissipation_rate(e, N2, N2_above, S2, depth, height_above_bottom, H,
     with the ``c_*_diss`` regime coefficients.  For e<0 (oscillatory advection
     undershoot) returns the numerical damping rate 1/negative_tke_damping.
     """
+    H = _bcast_to_levels(H, N2)        # per-column -> broadcast over interfaces
+    Jb = _bcast_to_levels(Jb, N2)
     w_star = _turbulent_velocity(e, cfg.minimum_tke)
     Ri = _richardson(N2, S2)
 
