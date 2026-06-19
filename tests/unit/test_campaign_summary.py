@@ -251,6 +251,30 @@ def test_campaign_health_stalled():
     assert "not improving" in h.message
 
 
+def test_campaign_health_improved_threshold_is_inclusive():
+    """The 'improved' verdict uses ``fractional_reduction >= min_fractional_reduction``
+    (INCLUSIVE): a campaign sitting EXACTLY at the threshold is 'improved', not
+    'stalled'.
+
+    The existing improved/stalled tests sit well above / well below the threshold,
+    so they don't pin the boundary operator.  A future change from ``>=`` to a
+    strict ``>`` would silently demote an exactly-at-threshold campaign to 'stalled'
+    ("check the diagnosis") — debugging a run that actually met the bar.  Passing the
+    threshold EQUAL to the run's own achieved reduction tests the inclusive boundary
+    bit-exactly; one ULP above must just-miss → 'stalled'.
+    """
+    import numpy as np
+
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])             # in-bounds (no clamp interference)
+    s = summarize_campaign(_multi_result(ck, [(1.0, 0.95)], (True,)))
+    thr = float(s.fractional_reduction)                  # the EXACT reduction achieved
+    # threshold == achieved reduction → >= is True → improved (a strict > would stall).
+    assert campaign_health(s, min_fractional_reduction=thr).status == "improved"
+    # threshold one ULP above the achieved reduction → just-missed → stalled.
+    just_above = float(np.nextafter(thr, np.inf))
+    assert campaign_health(s, min_fractional_reduction=just_above).status == "stalled"
+
+
 def test_campaign_health_non_finite_bias_flags_divergence():
     """A non-finite (NaN) bias — a MODEL blow-up (NaN state → NaN bias) or corrupt
     reference — is flagged 'non_finite_bias' (not ok), NOT mislabelled 'stalled': NaN >=
