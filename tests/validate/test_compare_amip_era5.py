@@ -164,6 +164,32 @@ def _stub_main_io(monkeypatch, *, nlev=4, shape=(2, 2)):
     return grid, calls
 
 
+def test_load_model_from_restart_shape_and_nlev_guards(monkeypatch):
+    """load_model_from_restart fails LOUD when the restart's column shape OR nlev don't
+    match the requested grid / --nlev (a wrong --grid-type/--resolution/--nlev) — not a
+    silent garbage compare against ERA5. (grid_winds_from_spectral passes a non-spectral
+    state through, so only load_restart is mocked.)"""
+    from types import SimpleNamespace
+
+    import legoesm.driver.restart as restart_mod
+
+    grid = SimpleNamespace(grid_shape_2d=(2, 3))      # expect (2, 3) = 6 columns
+
+    def _fake_restart(shape):
+        def f(path, g, s, strict):                    # noqa: ARG001
+            return (SimpleNamespace(T=jnp.zeros(shape)), jnp.zeros(shape))
+        return f
+
+    # Wrong column shape: (3, 3) != (2, 3).
+    monkeypatch.setattr(restart_mod, "load_restart", _fake_restart((3, 3, 5)))
+    with pytest.raises(ValueError, match="column shape"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5)
+    # Right columns, wrong nlev: 7 != 5.
+    monkeypatch.setattr(restart_mod, "load_restart", _fake_restart((2, 3, 7)))
+    with pytest.raises(ValueError, match="restart nlev"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5)
+
+
 def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
     """Drive main() with all live I/O stubbed; assert the wiring contract.
 
