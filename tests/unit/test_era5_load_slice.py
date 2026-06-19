@@ -190,6 +190,21 @@ def test_load_era5_time_mean(monkeypatch):
         load_era5_time_mean(cfg, [])
 
 
+def test_load_era5_time_mean_out_of_range_fails_loud(monkeypatch):
+    """An out-of-range time index (the window exceeds the store's times) FAILS LOUD with
+    a clear, actionable error naming the CLI flags — NOT a cryptic xarray IndexError
+    mid-load on a multi-day HPC launch."""
+    from legoesm.training.era5_to_state import load_era5_time_mean
+
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5_multitime())
+    cfg = _config()                                  # the synthetic store has only 2 times
+    with pytest.raises(ValueError, match="out of range.*--era5-n-times"):
+        load_era5_time_mean(cfg, [0, 5])             # index 5 exceeds the 2-time store
+    # The single-index fast path also fails loud (not a cryptic IndexError).
+    with pytest.raises(ValueError, match="out of range"):
+        load_era5_time_mean(cfg, [9])
+
+
 def test_load_era5_slice_missing_required_surface_pressure_raises(monkeypatch):
     monkeypatch.setattr(
         e2s, "open_era5_zarr",

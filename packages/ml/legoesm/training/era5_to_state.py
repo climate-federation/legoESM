@@ -361,17 +361,30 @@ def load_era5_time_mean(config: TrainingERA5Config, time_indices) -> ERA5Slice:
     over many times (a monthly/seasonal climatology) does not OOM.  The sum is float64
     (no float32 precision loss over many times); each field is divided by ``N`` and cast
     BACK to the first slice's dtype.  Reuses ``load_era5_slice`` per time (a one-time
-    campaign-start load).  Empty ``time_indices`` ⇒ raise."""
+    campaign-start load).  An OUT-OF-RANGE time index (the requested window exceeds the
+    store's times) FAILS LOUD with a clear, actionable error (vs a cryptic xarray
+    ``IndexError`` mid-load).  Empty ``time_indices`` ⇒ raise."""
     indices = list(time_indices)
     if not indices:
         raise ValueError("load_era5_time_mean: time_indices must be non-empty.")
+
+    def _load(i):
+        try:
+            return load_era5_slice(config, int(i))
+        except IndexError as e:
+            raise ValueError(
+                f"load_era5_time_mean: ERA5 time index {int(i)} is out of range — the "
+                "requested time window exceeds the store's available times (campaign "
+                "CLI: lower --era5-n-times or --era5-time-idx). "
+                f"Underlying: {e}") from e
+
     if len(indices) == 1:
-        return load_era5_slice(config, indices[0])
+        return _load(indices[0])
     data_fields = ("T", "u", "v", "q", "p_s", "sst", "phis")
     first = None
     acc = None
     for i in indices:
-        sl = load_era5_slice(config, int(i))
+        sl = _load(i)
         if acc is None:
             first = sl
             acc = {name: getattr(sl, name).astype(np.float64) for name in data_fields}
