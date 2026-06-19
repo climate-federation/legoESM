@@ -35,6 +35,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _per_variable_bias_dict,
     _per_variable_bias_from_dict,
     _per_variable_to_json,
+    _resolve_era5_n_times,
     build_campaign_output_dict,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
@@ -216,6 +217,33 @@ def test_orographic_forcing_flag_parsed():
     assert p.parse_args(base + ["--orographic-forcing", "on"]).orographic_forcing == "on"
     with pytest.raises(SystemExit):                       # argparse rejects bad choice
         p.parse_args(base + ["--orographic-forcing", "terrain"])
+
+
+def test_era5_time_mean_flags_parsed():
+    """The iter-140 time-mean reference flags parse to the expected defaults+values
+    (wiring guard: a rename/removal of --era5-n-times / --era5-time-idx is caught)."""
+    p = _build_arg_parser()
+    base = ["--config", "c.json", "--era5-zarr", "z"]
+    d = p.parse_args(base)
+    assert d.era5_time_idx == 0           # default: first time
+    assert d.era5_n_times == 1            # default: a single snapshot (old behaviour)
+    v = p.parse_args(base + ["--era5-time-idx", "12", "--era5-n-times", "30"])
+    assert v.era5_time_idx == 12
+    assert v.era5_n_times == 30
+
+
+def test_resolve_era5_n_times_validates_loudly():
+    """--era5-n-times must be >= 1; a value < 1 fails LOUDLY (no silent max(1,...)
+    clamp that would mask a fat-fingered 0 / negative) — CLAUDE.md fail-loud."""
+    assert _resolve_era5_n_times(1) == 1          # the default single-snapshot window
+    assert _resolve_era5_n_times(30) == 30        # a real climatology window
+    assert _resolve_era5_n_times(2.0) == 2        # int-coerces a clean whole float
+    for bad in (0, -1, -7):
+        with pytest.raises(SystemExit, match=r"--era5-n-times must be >= 1"):
+            _resolve_era5_n_times(bad)
+    # a non-integral float is rejected too (no silent truncation 2.9 -> 2).
+    with pytest.raises(SystemExit, match=r"must be a whole number"):
+        _resolve_era5_n_times(2.9)
 
 
 def test_refuse_unsupported_multirank_guards_cli():

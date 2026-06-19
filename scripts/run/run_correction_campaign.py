@@ -707,6 +707,33 @@ def make_base_driver_builder(
     )
 
 
+def _resolve_era5_n_times(n_times: int) -> int:
+    """Validate the ``--era5-n-times`` averaging window LOUDLY, returning the int.
+
+    ``n_times`` is the number of consecutive ERA5 times averaged into the reference
+    climatology (see :func:`legoesm.training.era5_to_state.load_era5_time_mean`); it
+    must be ``>= 1`` (you cannot average fewer than one time).  A value ``< 1`` (e.g.
+    a fat-fingered ``--era5-n-times 0`` or a negative) is a USER ERROR: the old
+    ``max(1, int(...))`` silently clamped it to 1, MASKING the typo (CLAUDE.md
+    fail-loud / no-silent-coerce doctrine).  Raise a clear, actionable
+    ``SystemExit`` (the campaign's established CLI-error pattern) instead.
+    """
+    # argparse passes an int (type=int), but a direct Python caller could pass a
+    # non-integral float; truncating it (2.9 -> 2) would be exactly the silent
+    # coerce this validator exists to forbid, so reject it too.
+    if isinstance(n_times, float) and not n_times.is_integer():
+        raise SystemExit(
+            f"--era5-n-times must be a whole number (got {n_times}): it counts ERA5 "
+            "times to average — a fractional window is meaningless.")
+    n = int(n_times)
+    if n < 1:
+        raise SystemExit(
+            f"--era5-n-times must be >= 1 (got {n}): it is the number of consecutive "
+            "ERA5 times (starting at --era5-time-idx) averaged into the reference "
+            "climatology. Use 1 for a single snapshot (the default).")
+    return n
+
+
 def _build_arg_parser():
     import argparse
 
@@ -1257,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # Time-MEAN ERA5 reference over --era5-n-times consecutive times (N=1 ⇒ a single
     # slice, the old behaviour): compares the time-mean model to a time-mean ERA5
     # climatology, not a single synoptic snapshot.
-    n_times = max(1, int(args.era5_n_times))
+    n_times = _resolve_era5_n_times(args.era5_n_times)
     era5_slice = load_era5_time_mean(
         TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
         range(args.era5_time_idx, args.era5_time_idx + n_times))
