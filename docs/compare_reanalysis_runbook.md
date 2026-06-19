@@ -71,6 +71,14 @@ MODE=cmip COUPLED_PRESET=aquaplanet CONFIG=... ERA5=... \
 The launcher runs its own `--dry-run` preflight first, then the campaign, writing the
 corrected-coefficient JSON to `$OUT` and a per-round bias trajectory to the `.out` log.
 
+> **First-round startup (not a hang):** the first round JIT-compiles the dycore + the
+> spin-off LES (XLA), so expect **several minutes with no `.out` progress** before the first
+> `[campaign] round 1/N …` line appears — compilation, not a stall (subsequent rounds reuse the
+> compiled code and the per-round line prints as each completes). For a *quick* check that
+> skips the model run, use the synthetic smoke (§1) or a campaign `--dry-run` (both return in
+> seconds). A coarse real-data run is dominated by this compile + the realistic spin-off LES
+> (`--les-hours`, default 2 h); scale `--les-hours` down only for a smoke, not production.
+
 ## 3. Read the result
 
 The output JSON is **self-describing**: a `health` block (`improved` / `stalled` /
