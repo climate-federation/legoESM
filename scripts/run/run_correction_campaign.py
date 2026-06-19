@@ -373,7 +373,7 @@ def build_correction_campaign(
             grid_shape=grid_shape, n_worst=int(n_worst),
             feedback_strategy=feedback_strategy, coefficients=(field_name,),
             n_iterations=int(n_iterations),
-            les_per_round=int(les_budget) if les_budget is not None else int(n_worst))
+            les_per_round=_les_per_round_estimate(les_budget, n_worst))
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -686,7 +686,7 @@ def build_multi_correction_campaign(
             grid_shape=grid_shape, n_worst=int(n_worst),
             feedback_strategy=feedback_strategy, coefficients=tuple(coefficients),
             n_iterations=int(n_iterations),
-            les_per_round=int(les_budget) if les_budget is not None else int(n_worst))
+            les_per_round=_les_per_round_estimate(les_budget, n_worst))
 
     return run_multi_correction_campaign(
         clubb_cfg, int(n_iterations), specs,
@@ -1229,6 +1229,22 @@ def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> Non
         except OSError:
             pass
         raise
+
+
+def _les_per_round_estimate(les_budget: int | None, n_worst: int) -> int:
+    """Upper-bound LES/round for the ``--dry-run`` compute estimate.
+
+    Clustering picks ``les_budget`` REPRESENTATIVES but is CAPPED at the number of
+    worst columns (``cluster_columns_by_environment`` returns ``min(les_budget,
+    len(records))`` reps — never duplicates), and there are at most ``n_worst`` worst
+    columns.  So the true upper bound is ``min(les_budget, n_worst)``, not
+    ``les_budget``: a ``--les-budget 50 --n-worst 20`` run spins off ≤ 20 LES/round,
+    and the pre-flight must not over-state the multi-day compute by 2.5×.  With no
+    budget (no clustering) it is one LES per worst column, ``n_worst``.
+    """
+    if les_budget is None:
+        return int(n_worst)
+    return min(int(les_budget), int(n_worst))
 
 
 def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:

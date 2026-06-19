@@ -434,6 +434,18 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
             les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
 
 
+def test_dry_run_les_per_round_caps_budget_at_n_worst():
+    """The --dry-run LES/round estimate is min(les_budget, n_worst): clustering yields
+    at most n_worst representatives, so a budget ABOVE n_worst must NOT over-state the
+    multi-day compute (iter 260). Below n_worst the budget caps it; None → n_worst."""
+    from scripts.run.run_correction_campaign import _les_per_round_estimate
+
+    assert _les_per_round_estimate(50, 20) == 20     # budget > n_worst → capped at n_worst
+    assert _les_per_round_estimate(8, 20) == 8       # budget < n_worst → the budget
+    assert _les_per_round_estimate(20, 20) == 20     # equal
+    assert _les_per_round_estimate(None, 20) == 20   # no clustering → one LES per column
+
+
 def test_dry_run_report_formats():
     """_dry_run_report renders the assembled metadata + the would-write path."""
     rep = _dry_run_report(
