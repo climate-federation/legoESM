@@ -155,6 +155,27 @@ def test_multi_deploy_output_reaches_fv_pipeline_all_three_coefficients():
     np.testing.assert_allclose(np.asarray(tc.C_eps), ceps)
 
 
+def test_on_disk_deploy_artifact_reaches_fv_pipeline(tmp_path):
+    """The REAL on-disk deploy path: the campaign writes ``--out`` to a JSON FILE, and
+    deploying reads THAT FILE via ``corrected_turbulence_override(path)`` and injects it at
+    RUNTIME — because ``turbulence_override`` is intentionally NOT serialized into a config
+    (``config.py:995``, a runtime-only injection), so the campaign-output JSON is the
+    persistent deploy artifact, NOT a serialized deployed config. The file's per-column C_K
+    reaches the model's turbulence kernel."""
+    import json
+
+    from legoesm.training.deploy_correction import corrected_turbulence_override
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    ck_field = np.linspace(0.35, 0.85, 8 * 16)
+    out_file = tmp_path / "corrected_clubb.json"
+    out_file.write_text(json.dumps({"C_K": ck_field.tolist()}))   # the campaign --out, on disk
+    over = corrected_turbulence_override(str(out_file))           # deploy reads the FILE path
+    pipe = build_physics_pipeline(grid, sigma, _config(override=over))
+    np.testing.assert_allclose(np.asarray(pipe.turbulence_config.C_K), ck_field)
+
+
 def test_validate_strict_rejects_non_turbulenceconfig_override():
     """A non-TurbulenceConfig override (e.g. a bare string) is rejected — it would
     otherwise crash later inside get_turbulence_fn (Codex iter-35)."""
