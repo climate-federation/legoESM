@@ -176,6 +176,27 @@ def test_json_round_trip(tmp_path):
         np.asarray(o1.clubb_lite.C_K), np.asarray(o2.clubb_lite.C_K))
 
 
+def test_from_dict_ignores_extra_averaging_provenance_block():
+    """The env-kernel write site stamps an iter-269 ``averaging`` provenance block
+    (snapshot vs climatology the kernel was trained against) alongside the kernel keys;
+    ``env_kernel_from_dict`` reads only the kernel keys, so the extra block is INERT on
+    reload — the kernel reconstructs bit-identically. Locks that the write-site stamp
+    cannot break the cross-resolution deploy round-trip."""
+    import json
+
+    k = _kernel()
+    d = env_kernel_to_dict(k)
+    d["averaging"] = {"era5_time_idx": 12, "era5_n_times": 30}     # the write-site stamp
+    k2 = env_kernel_from_dict(json.loads(json.dumps(d)))
+    np.testing.assert_array_equal(
+        np.asarray(k2.length_scales), np.asarray(k.length_scales))
+    new_env = jnp.asarray([(300.0, 1500.0, 12.0), (298.5, 150.0, 5.5)])
+    o1, _ = apply_env_kernel_override(k, new_env)
+    o2, _ = apply_env_kernel_override(k2, new_env)
+    np.testing.assert_allclose(
+        np.asarray(o1.clubb_lite.C_K), np.asarray(o2.clubb_lite.C_K))   # inert extra block
+
+
 def test_json_round_trip_preserves_every_field_exactly():
     """The env-kernel JSON (the cross-grid deploy persistence artifact) must
     round-trip ALL fields bit-exactly — the env-kernel analog of the iter-214

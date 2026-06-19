@@ -1874,7 +1874,14 @@ def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
             print(f"[campaign] WARNING: {note}")
         return
     out = f"{args.out}.env_kernel.json"
-    _atomic_write_json(out, env_kernel_to_dict(kernel), indent=2)
+    # Stamp the SAME averaging-window provenance as the per-column --out (iter 269): a
+    # cross-resolution deploy lands this kernel on a DIFFERENT grid, where knowing the
+    # source climate it was trained against (a snapshot vs an N-time climatology) matters
+    # MORE than the same-grid case. env_kernel_from_dict reads only the kernel keys, so
+    # the extra block is inert on reload (round-trip locked).
+    kernel_dict = env_kernel_to_dict(kernel)
+    kernel_dict["averaging"] = _averaging_provenance(args)
+    _atomic_write_json(out, kernel_dict, indent=2)
     print(f"[campaign] wrote RAW environment kernel (cross-resolution deploy) to {out}")
     print(
         "[campaign] deploy on ANY grid with: apply_env_kernel_override("
