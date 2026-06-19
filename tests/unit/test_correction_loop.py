@@ -289,6 +289,20 @@ def test_make_compare_fn_uses_real_comparison_in_loop():
     assert float(result.bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
     assert float(result.bias.baseline_bias) > 0.0
     assert result.n_corrected == 4
+    # END-TO-END per-variable wiring (iter 131): the REAL make_compare_fn ⇒
+    # compose_compare_fn must populate CompareResult.error_fields + have_precip so the
+    # loop computes result.per_variable_bias — a regression that dropped error_fields
+    # (mocks supply them directly, so the unit tests would NOT catch it) makes the
+    # per-variable trajectory silently None in real campaigns.  The corrected model
+    # matches ERA5, so the T-RMSE falls from a real bias to 0 ⇒ T_improved.
+    pv = result.per_variable_bias
+    assert pv is not None
+    assert float(pv.baseline.global_T_rmse_K) > 0.0
+    assert float(pv.updated.global_T_rmse_K) == pytest.approx(0.0, abs=1e-9)
+    assert bool(pv.T_improved)
+    # have_precip THREADED through the real path: no precip in the states ⇒ precip is
+    # NaN (not a spurious 0) — locks the iter-131 have_precip plumbing end-to-end.
+    assert bool(jnp.isnan(pv.baseline.global_precip_err_mm_day))
 
 
 def test_make_compare_fn_real_compare_not_improved():
