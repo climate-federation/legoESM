@@ -134,6 +134,27 @@ def test_extract_cubed_constant_scalar_nonzero_wind_zero_advection():
     np.testing.assert_allclose(np.asarray(ls.qv_adv), 0.0, atol=1e-12)
 
 
+def test_extract_cubed_is_surface_flux_free():
+    """The extractor produces NO surface boundary condition (prescribe='none', no
+    T_s / w_th_s / w_qv_s) — the surface-flux-free design the forced LES requires.
+
+    This is the EXTRACTOR-side guard rail matching iter-148's build_column_les_setup
+    check: that guard FAILS LOUD if a forcing requests a surface BC the LES can't yet
+    apply. So if a future developer wires the GCM column's SST into the extractor as a
+    surface flux (prescribe='fluxes') to improve convective columns, build_column_les_
+    setup would suddenly reject EVERY such column — this test catches that here, at the
+    extractor, pointing the implementer to also add the LES surface-flux bottom BC and
+    relax the guard before shipping it."""
+    grid, sigma = _grid_and_sigma()
+    T, q_v, u, v, p_s = _nonuniform_state(grid)
+    ls = extract_column_forcing_cubed_sphere(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=0.3, col_index=_COL,
+    )
+    assert ls.prescribe == "none"
+    assert ls.T_s is None and ls.w_th_s is None and ls.w_qv_s is None
+
+
 def test_extract_cubed_jit():
     grid, sigma = _grid_and_sigma()
     T, q_v, u, v, p_s = _nonuniform_state(grid)

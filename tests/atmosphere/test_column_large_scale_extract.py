@@ -124,6 +124,21 @@ def test_extract_uniform_state_zero_forcing():
     np.testing.assert_allclose(np.asarray(ls.omega), 0.0, atol=1e-8)
 
 
+def test_extract_latlon_is_surface_flux_free():
+    """The latlon extractor produces NO surface boundary condition (prescribe='none',
+    no T_s / w_th_s / w_qv_s) — matching the cubed-sphere lock and iter-148's
+    build_column_les_setup guard: wiring a surface flux into ANY extractor (to improve
+    convective columns) without also adding the LES surface-flux bottom BC would make
+    that guard reject the column, so the invariant is locked across the dispatch."""
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(jnp.deg2rad(20.0)), col_index=(4, 8),
+    )
+    assert ls.prescribe == "none"
+    assert ls.T_s is None and ls.w_th_s is None and ls.w_qv_s is None
+
+
 def test_extract_nonuniform_gives_finite_forcing():
     grid, sigma, T, q_v, u, v, p_s = _latlon_state()
     # Impose a zonal temperature gradient (warmer to the east).
