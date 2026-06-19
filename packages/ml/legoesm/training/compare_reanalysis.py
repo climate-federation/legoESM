@@ -221,6 +221,41 @@ def validate_reference_physical(
                 "units error produces a large FAKE bias the loop would 'correct').")
 
 
+def assert_model_state_finite(state: ColumnState, *, name: str = "model run") -> None:
+    """Fail-fast: every present field of a MODEL run's time-mean ``state`` is finite.
+
+    The model-side companion to :func:`validate_reference_physical` (which range-checks
+    the loaded ERA5 REFERENCE for a units bug).  Here the concern is DIVERGENCE: a model
+    run that blew up (CFL / instability) yields NaN/inf in T/q_v/u/v, which would
+    otherwise flow silently into :func:`compare_state_to_reference`'s ``score_columns``
+    (NaN-masked per level) and produce a GARBAGE bias the campaign cannot improve —
+    wasting a multi-day HPC run while looking like the correction merely failing.
+
+    Finiteness ONLY (no physical bounds: a model's units are correct by construction,
+    unlike a loaded reanalysis).  Pure host-side check on a CONCRETE state; raises
+    ``ValueError`` naming the field + the non-finite count + the divergence hint.  Use
+    on the BASELINE (current-config) run — a diverged CANDIDATE/line-search run is
+    instead handled by the monotonic gate (its non-finite bias is never ``< baseline``,
+    so it is REJECTED, not fatal; raising there would crash the campaign on one bad step).
+    """
+    fields = [("T", state.T), ("q_v", state.q_v), ("u", state.u), ("v", state.v),
+              ("p_s", state.p_s)]
+    if state.sst_K is not None:
+        fields.append(("sst_K", state.sst_K))
+    if state.precip_mm_day is not None:
+        fields.append(("precip_mm_day", state.precip_mm_day))
+    for field, value in fields:
+        arr = jnp.asarray(value)
+        finite = jnp.isfinite(arr)
+        if not bool(jnp.all(finite)):
+            n_bad = int(jnp.sum(~finite))
+            raise ValueError(
+                f"assert_model_state_finite: {name}.{field} has {n_bad}/{arr.size} "
+                "non-finite value(s) — the model run likely DIVERGED (CFL / instability). "
+                "Fix the model stability (timestep / resolution / config) before "
+                "correcting; the LES-informed correction cannot improve a blown-up run.")
+
+
 def compare_state_to_reference(
     *,
     model: ColumnState,

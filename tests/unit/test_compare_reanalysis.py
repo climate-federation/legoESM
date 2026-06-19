@@ -14,6 +14,7 @@ import pytest
 from legoesm.training.compare_reanalysis import (
     ColumnState,
     ReferenceBoundsConfig,
+    assert_model_state_finite,
     build_pressure_from_sigma,
     column_state_from_carry,
     column_state_from_hydrostatic,
@@ -143,6 +144,37 @@ def test_validate_reference_physical_respects_custom_bounds():
     tight = ReferenceBoundsConfig(T_max_K=284.0)     # 285 now out of range
     with pytest.raises(ValueError, match="T outside"):
         validate_reference_physical(state, bounds=tight)
+
+
+def test_assert_model_state_finite_accepts_a_finite_run():
+    """A finite model run passes — no false positive on the common case (iter 301)."""
+    ok = _uniform_state((4,), 3, T=285.0, q=6e-3, u=10.0, sst=290.0, precip=3.0)
+    assert assert_model_state_finite(ok) is None
+
+
+def test_assert_model_state_finite_catches_a_diverged_run():
+    """A NaN in the model T (a blown-up run) raises with the DIVERGED hint + the
+    non-finite count — so a diverged BASELINE fails loud instead of flowing a garbage
+    bias into the campaign and wasting a multi-day HPC run (iter 301). Finiteness ONLY:
+    no physical-range check (the model's units are correct by construction)."""
+    bad = _uniform_state((4,), 3)._replace(
+        T=jnp.full((4, 3), 285.0).at[0, 0].set(jnp.nan))
+    with pytest.raises(ValueError,
+                       match=r"baseline model run\.T has 1/12 non-finite.*DIVERGED"):
+        assert_model_state_finite(bad, name="baseline model run")
+
+
+def test_assert_model_state_finite_checks_optional_fields_and_skips_absent():
+    """An inf in an OPTIONAL present field (sst_K) is caught; absent optionals (sst/precip
+    None) are skipped — symmetry with validate_reference_physical's optional handling."""
+    bad = _uniform_state((4,), 3, sst=290.0)._replace(
+        sst_K=jnp.full((4,), 290.0).at[1].set(jnp.inf))
+    with pytest.raises(ValueError, match=r"sst_K has 1/4 non-finite"):
+        assert_model_state_finite(bad)
+    # absent sst/precip ⇒ not checked (no spurious raise on the no-optional state).
+    plain = _uniform_state((4,), 3)
+    assert plain.sst_K is None and plain.precip_mm_day is None
+    assert assert_model_state_finite(plain) is None
 
 
 def test_precip_accum_conversion():

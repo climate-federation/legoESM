@@ -38,6 +38,7 @@ from legoesm.training.bias_metrics import (
 from legoesm.training.column_clustering import cluster_columns_by_environment
 from legoesm.training.compare_reanalysis import (
     ColumnState,
+    assert_model_state_finite,
     compare_state_to_reference,
 )
 from legoesm.training.feedback_assembly import (
@@ -700,6 +701,13 @@ def run_correction_iteration(
         )
 
     baseline = compare_fn(baseline_config)
+    # Fail loud if the BASELINE (current-config) run DIVERGED — a non-finite model state
+    # would otherwise flow into compare's score_columns (NaN-masked per level) and produce a
+    # garbage bias the campaign cannot improve, wasting a multi-day HPC run. A diverged
+    # CANDIDATE/line-search run is handled by the gate instead (its non-finite bias is never
+    # < baseline → rejected, not fatal).
+    if isinstance(baseline.model_ctx, ColumnState):
+        assert_model_state_finite(baseline.model_ctx, name="baseline model run")
     records = list(baseline.manifest)
 
     if _global_count(len(records), global_reduce) == 0:
@@ -907,6 +915,13 @@ def run_multi_correction_iteration(
         raise ValueError(f"expected_ncol {expected_ncol} != prod(grid_shape) {ncol}.")
 
     baseline = compare_fn(baseline_config)
+    # Fail loud if the BASELINE (current-config) run DIVERGED — a non-finite model state
+    # would otherwise flow into compare's score_columns (NaN-masked per level) and produce a
+    # garbage bias the campaign cannot improve, wasting a multi-day HPC run. A diverged
+    # CANDIDATE/line-search run is handled by the gate instead (its non-finite bias is never
+    # < baseline → rejected, not fatal).
+    if isinstance(baseline.model_ctx, ColumnState):
+        assert_model_state_finite(baseline.model_ctx, name="baseline model run")
     records = list(baseline.manifest)
 
     if _global_count(len(records), global_reduce) == 0:

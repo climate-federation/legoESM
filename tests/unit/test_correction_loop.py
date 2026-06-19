@@ -735,6 +735,28 @@ def test_les_budget_exceeding_distinct_environments_early_stops():
     assert f[2] == pytest.approx(7.2) and f[3] == pytest.approx(7.2)     # non-worst → bg
 
 
+def test_baseline_diverged_run_fails_loud():
+    """run_correction_iteration FAILS LOUD when the BASELINE (current-config) model run is
+    non-finite — a diverged/blown-up run — instead of flowing a garbage NaN-masked bias into
+    the gate and wasting a multi-day HPC round (iter 301). A diverged CANDIDATE/line-search
+    run is gate-rejected (NaN bias never < baseline), but a diverged BASELINE is fatal: there
+    is nothing finite to correct against. The guard only fires for a real ColumnState
+    model_ctx, so the mock tests above (model_ctx=None) are unaffected."""
+    def _nan_model_compare(*_a, **_k):
+        nan_state = ColumnState(
+            T=jnp.full((2, 3, 4), jnp.nan), q_v=jnp.zeros((2, 3, 4)),
+            u=jnp.zeros((2, 3, 4)), v=jnp.zeros((2, 3, 4)), p_s=jnp.full((2, 3), 1.0e5))
+        return CompareResult(
+            combined_score=jnp.ones((2, 3)), manifest=[],
+            area_weights=jnp.ones((2, 3)), model_ctx=nan_state)
+
+    with pytest.raises(ValueError, match=r"baseline model run.*DIVERGED"):
+        run_correction_iteration(
+            GrayRadiationConfig(), compare_fn=_nan_model_compare,
+            diagnose_fn=lambda *_a: None, promotion_key="gray_tau_equator",
+            grid_shape=(2, 3))
+
+
 def test_les_budget_none_diagnoses_every_worst_column():
     n_calls = {"n": 0}
 
