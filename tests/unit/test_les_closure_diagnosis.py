@@ -30,6 +30,45 @@ def test_mean_gradient_linear_profile():
     np.testing.assert_allclose(np.asarray(grad), 0.5, rtol=1e-12)
 
 
+def test_mean_gradient_nonuniform_spacing():
+    """Per-interface ``dz`` on a STRETCHED grid (the realistic LES vertical: fine
+    near the surface/inversion, coarse aloft) — NOT a uniform-spacing assumption.
+
+    Non-vacuity: the existing linear/linspace tests use UNIFORM z, so a regression
+    to a constant ``dz = z[1]-z[0]`` would still pass them while silently mis-scaling
+    every diagnosed K on a stretched grid.  Here ``dz = [50, 150, 300]``; a constant
+    ``dz=50`` bug would give ``[0.2, 0.3, 0.9]`` and FAIL the interface-1/2 asserts."""
+    z = jnp.array([0.0, 50.0, 200.0, 500.0])      # dz = 50, 150, 300 (non-uniform)
+    phi = jnp.array([10.0, 20.0, 35.0, 80.0])
+    grad = mean_gradient_at_interfaces(phi, z)
+    # (20-10)/50, (35-20)/150, (80-35)/300 — rtol 1e-5 is fp32-DETERMINISTIC (exact
+    # integer diffs ÷ exact divisors ⇒ ~1e-7 error) yet a const-dz=50 bug gives
+    # [0.2, 0.3, 0.9] (interface-1/2 relative error ~2.0), so it still fails LOUD.
+    np.testing.assert_allclose(np.asarray(grad), [0.2, 0.1, 0.15], rtol=1e-5)
+
+
+def test_eddy_diffusivity_recovers_K0_nonuniform_grid():
+    """K recovery on a STRETCHED grid with a flux built from the HAND-computed true
+    gradient (constant slope), NOT from ``mean_gradient_at_interfaces`` — so the
+    flux is independent of the function under test.  A constant-``dz`` regression
+    would compute an internal gradient ``slope·dz_actual/dz_const`` that varies per
+    interface, giving ``K = K0·dz_const/dz_actual ≠ K0`` and FAILING here (the
+    self-constructed-flux version would be vacuous: same bug cancels in -flux/grad)."""
+    z = jnp.array([0.0, 40.0, 120.0, 280.0, 600.0])   # stretched
+    slope = -0.01                                      # K/m (stable θ gradient)
+    phi = 290.0 + slope * z                            # exactly linear ⇒ true grad = slope
+    K0 = 5.0
+    flux = jnp.full((4,), -K0 * slope)                 # true down-gradient flux (constant)
+    diag = eddy_diffusivity_from_flux(flux, phi, z)
+    # rtol 1e-3 is fp32-DETERMINISTIC here: the θ≈290 linear profile loses ~2-3 digits
+    # to fp32 cancellation in phi[k+1]-phi[k] (~2e-5 noise), so the file's usual 1e-5
+    # is too tight — but a const-dz=40 bug gives K = K0·40/dz[k] = [5,2.5,1.25,0.625]
+    # (relative error up to 0.875), caught with a ~900× margin. (The self-constructed-
+    # flux form would pass at 1e-12 but is VACUOUS: the same grad cancels in -flux/grad.)
+    np.testing.assert_allclose(np.asarray(diag.K), K0, rtol=1e-3)
+    assert bool(jnp.all(diag.valid))
+
+
 def test_eddy_diffusivity_recovers_K0():
     """flux = -K0 · ∂φ/∂z on a linear profile ⇒ diagnosed K == K0."""
     z = jnp.linspace(0.0, 400.0, 5)
