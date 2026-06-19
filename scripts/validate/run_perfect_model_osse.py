@@ -321,6 +321,28 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
     return p
 
 
+def _resolve_fine_resolution(fine_resolution: int, coarse_resolution: int) -> int:
+    """Validate ``--fine-resolution`` for a cross-resolution OSSE: a POSITIVE grid
+    resolution DIFFERENT from ``--config``'s.
+
+    Both failures are fail-loud (``SystemExit``), not a silent obscure crash / no-op:
+    a non-positive resolution would crash deep in grid construction, and ``fine ==
+    coarse`` is the SAME grid — the coarse-learned kernel would trivially 'transfer' to
+    itself and report a falsely-reassuring ``transferred``.  For a same-grid go/no-go,
+    run the plain OSSE WITHOUT ``--fine-resolution``.  Returns the validated int.
+    """
+    if fine_resolution <= 0:
+        raise SystemExit(
+            f"--fine-resolution must be a positive grid resolution (got {fine_resolution}).")
+    if fine_resolution == coarse_resolution:
+        raise SystemExit(
+            f"--fine-resolution {fine_resolution} equals --config's resolution: that is the "
+            f"SAME grid, so the coarse-learned kernel would trivially 'transfer' to itself "
+            f"(a falsely-reassuring no-op). Run the same-grid OSSE WITHOUT --fine-resolution, "
+            f"or choose a different resolution.")
+    return fine_resolution
+
+
 def _run_cross_resolution_main(
     args, *, base_cfg, coarse_grid, coarse_sigma, build_base_driver, extract_fn,
     run_les, phis_coarse,
@@ -341,8 +363,8 @@ def _run_cross_resolution_main(
     )
 
     field = METHOD_PROMOTION[args.diagnosis_method][1]
-    fine_cfg = base_cfg._replace(
-        grid=base_cfg.grid._replace(resolution=args.fine_resolution))
+    fine_res = _resolve_fine_resolution(args.fine_resolution, base_cfg.grid.resolution)
+    fine_cfg = base_cfg._replace(grid=base_cfg.grid._replace(resolution=fine_res))
     fine_grid, fine_sigma = _build_grid_for_config(fine_cfg)
     # The fine grid's OWN static topography (the fine run's forcing), resolved the
     # identical 'auto'/'on'/'off' way as the coarse phis.

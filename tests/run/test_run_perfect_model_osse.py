@@ -215,6 +215,24 @@ def test_build_cross_resolution_osse_wiring(monkeypatch):
     assert captured["clip_to_bounds"] is True       # coarse campaign clips (production parity)
 
 
+def test_resolve_fine_resolution_validates_positive_and_distinct():
+    """_resolve_fine_resolution (iter 297) fail-louds the two --fine-resolution misuses:
+    a non-positive resolution (would crash deep in grid construction) and fine == coarse
+    (the SAME grid — the kernel trivially 'transfers' to itself, a falsely-reassuring
+    no-op). A distinct positive resolution passes through unchanged."""
+    import pytest
+
+    from scripts.validate.run_perfect_model_osse import _resolve_fine_resolution
+
+    assert _resolve_fine_resolution(32, 16) == 32        # finer, distinct -> ok
+    assert _resolve_fine_resolution(8, 16) == 8          # coarser but distinct -> ok
+    for bad in (0, -4):
+        with pytest.raises(SystemExit, match="positive grid resolution"):
+            _resolve_fine_resolution(bad, 16)
+    with pytest.raises(SystemExit, match="SAME grid"):
+        _resolve_fine_resolution(16, 16)                 # degenerate same-grid
+
+
 def test_build_cross_resolution_osse_rejects_multi_method():
     """The cross-res builder deploys ONE env->coefficient kernel (single-coefficient): a
     diagnosis_methods list is rejected loudly, mirroring build_perfect_model_osse."""
