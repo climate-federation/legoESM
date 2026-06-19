@@ -128,6 +128,33 @@ def test_deploy_output_reaches_fv_pipeline_with_per_column_ck():
     np.testing.assert_allclose(np.asarray(pipe.turbulence_config.C_K), ck_field)
 
 
+def test_multi_deploy_output_reaches_fv_pipeline_all_three_coefficients():
+    """The SIMULTANEOUS multi-coefficient deploy reaches the kernel for ALL THREE
+    coefficients — not just C_K. A multi campaign `--out` ('fields' keyed by
+    promotion_key) → corrected_turbulence_override → the FV pipeline's turbulence config
+    carries the per-column C_K AND Pr_t AND C_eps (the single test above only locked C_K;
+    a pipeline that dropped Pr_t/C_eps would silently deploy a partial correction)."""
+    import json
+
+    from legoesm.training.deploy_correction import corrected_turbulence_override
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    ncol = 8 * 16
+    ck = np.linspace(0.30, 0.90, ncol)
+    prt = np.linspace(0.50, 1.50, ncol)
+    ceps = np.linspace(0.10, 0.60, ncol)
+    output = json.loads(json.dumps({
+        "coefficients": ["C_K", "Pr_t", "C_eps"],
+        "fields": {"clubb_lite_C_K": ck.tolist(), "clubb_lite_Pr_t": prt.tolist(),
+                   "clubb_lite_C_eps": ceps.tolist()}}))
+    over = corrected_turbulence_override(output)
+    tc = build_physics_pipeline(grid, sigma, _config(override=over)).turbulence_config
+    np.testing.assert_allclose(np.asarray(tc.C_K), ck)
+    np.testing.assert_allclose(np.asarray(tc.Pr_t), prt)
+    np.testing.assert_allclose(np.asarray(tc.C_eps), ceps)
+
+
 def test_validate_strict_rejects_non_turbulenceconfig_override():
     """A non-TurbulenceConfig override (e.g. a bare string) is rejected — it would
     otherwise crash later inside get_turbulence_fn (Codex iter-35)."""
