@@ -229,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
 
     from scripts.run.run_correction_campaign import (
         _area_weights,
+        _les_n_steps,
         load_base_config_and_grid,
         make_base_driver_builder,
         resolve_orographic_phis,
@@ -238,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
     build_base_driver, extract_fn = make_base_driver_builder(
         args.mode, coupled_preset=args.coupled_preset)
-    n_steps = int(args.les_hours * 3600.0 / args.les_dt)
+    n_steps = _les_n_steps(args.les_hours, args.les_dt)
     run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
 
     # Orographic LES-forcing topography: resolved the SAME way as the real campaign

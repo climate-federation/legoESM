@@ -435,6 +435,19 @@ def test_enable_line_buffered_stdout(monkeypatch):
     rcc._enable_line_buffered_stdout()
 
 
+def test_les_n_steps_guards_zero():
+    """n_steps = int(les_hours·3600/les_dt); a too-short --les-hours (or too-large
+    --les-dt) yields 0 LES steps — the forced LES would develop NO turbulence and
+    diagnose nothing, silently correcting nothing over a multi-day run — so it FAILS
+    LOUD at launch. A normal duration and a tiny-but-≥1 case pass through."""
+    import scripts.run.run_correction_campaign as rcc
+
+    assert rcc._les_n_steps(2.0, 0.5) == 14400           # default: 2 h / 0.5 s
+    assert rcc._les_n_steps(0.0003, 0.5) == 2            # tiny but ≥ 1 step
+    with pytest.raises(SystemExit, match="LES steps"):
+        rcc._les_n_steps(0.0001, 0.5)                    # 0.72 → 0 steps → fail loud
+
+
 def test_atomic_write_json(tmp_path):
     """_atomic_write_json writes valid JSON, REPLACES an existing file, leaves no temp
     behind, and on a serialization FAILURE preserves the previous file (no corruption)

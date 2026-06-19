@@ -1073,6 +1073,25 @@ def _warn_if_ignored_diagnosis_method(coefficients, diagnosis_method: str) -> No
             stacklevel=2)
 
 
+def _les_n_steps(les_hours: float, les_dt: float) -> int:
+    """LES step count from ``--les-hours`` / ``--les-dt``, with a fail-loud guard.
+
+    ``n = int(les_hours·3600 / les_dt)``.  A too-short ``--les-hours`` (or too-large
+    ``--les-dt``) yields ``n < 1`` ⇒ ``run_forced_les``'s ``for _ in range(n)`` runs
+    ZERO steps, the column LES develops NO turbulence, every diagnosis is invalid, and
+    the multi-day campaign silently corrects NOTHING (only a ``no_valid_diagnoses``
+    health verdict at the end).  Catch the misconfiguration at LAUNCH instead.  Shared
+    by the campaign + perfect-model OSSE CLIs.
+    """
+    n = int(les_hours * 3600.0 / les_dt)
+    if n < 1:
+        raise SystemExit(
+            f"--les-hours {les_hours} / --les-dt {les_dt} ⇒ {n} LES steps; the forced "
+            "LES needs ≥ 1 step (it would otherwise develop no turbulence and diagnose "
+            "nothing). Increase --les-hours or decrease --les-dt.")
+    return n
+
+
 def _enable_line_buffered_stdout() -> None:
     """Line-buffer stdout so a multi-day SLURM run's per-round progress appears in the
     job log in REAL TIME.
@@ -1569,7 +1588,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         range(args.era5_time_idx, args.era5_time_idx + n_times))
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
-    n_steps = int(args.les_hours * 3600.0 / args.les_dt)
+    n_steps = _les_n_steps(args.les_hours, args.les_dt)
     run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
 
     # Orographic LES-forcing topography: the model's OWN static phis (so it is
