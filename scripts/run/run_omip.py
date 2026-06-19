@@ -75,7 +75,7 @@ GRID_DEFAULTS: dict[str, dict] = {
 
 ALL_RESULTS: list[dict] = []
 
-_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "richardson", "constant", "none")
+_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
 
 
@@ -3580,7 +3580,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                 return str(obj)
         return obj
 
-    run_config = {
+    run_config_json = {
         "grid_type": grid_type,
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
@@ -3595,7 +3595,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     config_path = config_dir / "run_config.json"
     try:
         with open(config_path, "w") as f:
-            json.dump(run_config, f, indent=2, default=str)
+            json.dump(run_config_json, f, indent=2, default=str)
         print(f"  Config saved: {config_path}")
     except Exception as e:
         print(f"  Warning: could not save config: {e}")
