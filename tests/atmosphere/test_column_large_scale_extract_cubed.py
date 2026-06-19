@@ -281,6 +281,27 @@ def test_extract_cubed_geostrophic_meridional_gradient_zonal_jet():
     assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))  # predominantly zonal
 
 
+def test_extract_cubed_geostrophic_orographic_phis_runs():
+    """The optional orographic ``phis`` threads through the cubed-sphere 4D-native
+    geographic gradient (a single-LEVEL surface field): terrain gives a finite,
+    NON-zero, σ-independent geostrophic wind where the flat uniform state gives 0."""
+    from legoesm import constants
+    grid, sigma = _grid_and_sigma()
+    T, q_v, u, v, p_s = _uniform_state(grid)
+    col, lat_rad = _interior_midlat_column(grid)
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+              lat_rad=lat_rad, col_index=col)
+    flat = extract_column_forcing_cubed_sphere(**kw)
+    phis = constants.g * (800.0 * jnp.sin(2.0 * jnp.asarray(grid.grid_lat)))
+    oro = extract_column_forcing_cubed_sphere(**kw, phis=phis)
+    assert bool(jnp.all(jnp.isfinite(oro.u_geo))) and bool(jnp.all(jnp.isfinite(oro.v_geo)))
+    du = np.asarray(oro.u_geo) - np.asarray(flat.u_geo)
+    dv = np.asarray(oro.v_geo) - np.asarray(flat.v_geo)
+    assert float(np.max(np.abs(du)) + np.max(np.abs(dv))) > 1e-3   # terrain moved the wind
+    np.testing.assert_allclose(du, du[0], atol=1e-10)              # σ-independent
+    np.testing.assert_allclose(dv, dv[0], atol=1e-10)
+
+
 def test_extract_cubed_geostrophic_equatorial_is_none():
     """Within the equatorial cutoff no geostrophic reference wind is supplied (f→0
     ill-posed) — the LES plane Coriolis falls back to f×V; ω/advection still set."""

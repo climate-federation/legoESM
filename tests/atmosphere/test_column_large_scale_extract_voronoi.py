@@ -139,6 +139,29 @@ def test_extract_voronoi_geostrophic_meridional_gradient_zonal_jet():
     assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))  # predominantly zonal
 
 
+def test_extract_voronoi_geostrophic_orographic_phis_runs():
+    """The optional orographic ``phis`` threads through the Voronoi Perot
+    cell-gradient (a single-LEVEL surface field): terrain gives a finite, NON-zero,
+    σ-independent geostrophic wind where the flat uniform state gives 0."""
+    from legoesm import constants
+    mesh, sigma = _mesh_sigma()
+    p_s = jnp.full((mesh.nCells,), 1.0e5)
+    T = 290.0 * exner_function(p_s[:, None] * jnp.asarray(sigma.sigma_full))
+    q_v = jnp.full((mesh.nCells, _NLEV), 0.01)
+    u_edge = _uniform_edge_flow(mesh, 6.0, 0.0)
+    kw = dict(T=T, q_v=q_v, u_edge=u_edge, p_s=p_s, mesh=mesh, sigma_coord=sigma,
+              lat_rad=float(mesh.latCell[42]), col_index=(42,))
+    flat = extract_column_forcing_voronoi(**kw)
+    phis = constants.g * (800.0 * jnp.sin(2.0 * jnp.asarray(mesh.latCell)))
+    oro = extract_column_forcing_voronoi(**kw, phis=phis)
+    assert bool(jnp.all(jnp.isfinite(oro.u_geo))) and bool(jnp.all(jnp.isfinite(oro.v_geo)))
+    du = np.asarray(oro.u_geo) - np.asarray(flat.u_geo)
+    dv = np.asarray(oro.v_geo) - np.asarray(flat.v_geo)
+    assert float(np.max(np.abs(du)) + np.max(np.abs(dv))) > 1e-3
+    np.testing.assert_allclose(du, du[0], atol=1e-9)               # σ-independent
+    np.testing.assert_allclose(dv, dv[0], atol=1e-9)
+
+
 def test_extract_voronoi_geostrophic_equatorial_cell_is_none():
     """Within _MIN_GEOSTROPHIC_LAT_DEG of the equator (f → 0) the geostrophic wind
     is None ⇒ the column LES falls back to f×V — NEVER worse than the previous

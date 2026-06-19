@@ -152,8 +152,9 @@ def _geopotential_full_grid(
     (:func:`compute_heights_from_sigma`) over a flattened column axis, then
     reshapes back.  ``z`` is height ABOVE the surface, so ``Φ`` is the
     above-surface geopotential — exact for a flat/ocean surface (``z_s = 0``, the
-    LES worst-column use case); the orographic surface-geopotential gradient
-    ``g·∇z_s`` is a documented follow-up for terrain.
+    LES worst-column use case).  Over terrain the orographic surface-geopotential
+    gradient ``g·∇z_s`` is added in :func:`_geostrophic_wind_column` when the
+    extractor is given ``phis`` (the surface geopotential ``= g·z_s``).
     """
     spatial = T.shape[:-1]
     nlev = T.shape[-1]
@@ -178,6 +179,7 @@ def _geostrophic_wind_column(
     grad_fn,
     lat_rad: float,
     col_index: tuple[int, ...],
+    phis: jax.Array | None = None,
 ) -> tuple[jax.Array | None, jax.Array | None]:
     """Diagnose one column's geostrophic wind (``u_geo``/``v_geo``) or ``(None, None)``.
 
@@ -189,17 +191,33 @@ def _geostrophic_wind_column(
     geostrophic balance is ill-posed) — no geostrophic reference wind is supplied
     there, so the column LES's plane Coriolis falls back to ``f×V``.
 
+    **Orography (``phis``).**  ``_geopotential_full_grid`` returns the
+    ABOVE-SURFACE geopotential (``z`` measured from the surface), so the geostrophic
+    balance is exact only over a flat/ocean surface (``z_s = 0``).  Over terrain the
+    full geopotential of a pressure surface is ``Φ_total = Φ_s + Φ_above`` with the
+    surface geopotential ``Φ_s = g·z_s`` (``= phis``); since ``phis`` is
+    σ-independent, ``∇_σ Φ_total = ∇phis + ∇_σ Φ_above`` and the SAME σ→p correction
+    (``+R_d·T_v·∇ln p_s``) then applies — i.e. the orographic term is exactly
+    ``∇phis`` added to the above-surface geopotential gradient.  Pass ``phis``
+    (``(...)`` surface field, m²/s², co-located with ``p_s``) to include it; omit it
+    (``None``) for the flat/ocean case (unchanged behaviour).
+
     **Precondition** — ``grad_fn``'s ``(x, y)`` axes must be **geographic**
     (east/north), because geostrophic balance is applied directly in that frame.
-    This holds for the lat-lon operator; the cubed-sphere operators return
-    grid-axis derivatives on a non-orthogonal grid, so the cubed-sphere extractor
-    does NOT call this (it supplies no geostrophic reference wind pending a
-    metric-correct rotation; the plane Coriolis then falls back to f×V).
+    This holds for the lat-lon, Gaussian, and (iter 93) the metric-correct
+    cubed-sphere/Voronoi geographic operators the extractors pass in.
     """
     if abs(math.degrees(float(lat_rad))) < _MIN_GEOSTROPHIC_LAT_DEG:
         return None, None
     phi = _geopotential_full_grid(T, q_v, p_s, sigma_coord)
     dphi_dx, dphi_dy = grad_fn(phi, grid)
+    if phis is not None:
+        # Orographic surface-geopotential gradient ∇(g·z_s): σ-independent, so take
+        # its gradient on one level and broadcast-add to every level's Φ gradient.
+        phis_lev = jnp.asarray(phis, dtype=T.dtype)[..., None]   # (..., 1)
+        dphis_dx, dphis_dy = grad_fn(phis_lev, grid)
+        dphi_dx = dphi_dx + dphis_dx
+        dphi_dy = dphi_dy + dphis_dy
     ln_ps = jnp.log(jnp.clip(jnp.asarray(p_s, dtype=T.dtype), 1.0, None))[..., None]
     dlnps_dx, dlnps_dy = grad_fn(ln_ps, grid)
     T_v = virtual_temperature(T, q_v)
@@ -244,6 +262,7 @@ def extract_column_forcing_latlon(
     sigma_coord: Any,
     lat_rad: float,
     col_index: tuple[int, int],
+    phis: jax.Array | None = None,
 ) -> ColumnLargeScaleState:
     """Build a column's :class:`ColumnLargeScaleState` from a lat-lon GCM state.
 
@@ -282,6 +301,7 @@ def extract_column_forcing_latlon(
     u_geo, v_geo = _geostrophic_wind_column(
         T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
         grad_fn=_gradient_latlon_3d, lat_rad=lat_rad, col_index=col_index,
+        phis=phis,
     )
 
     i, j = int(col_index[0]), int(col_index[1])
@@ -391,6 +411,7 @@ def extract_column_forcing_cubed_sphere(
     sigma_coord: Any,
     lat_rad: float,
     col_index: tuple[int, int, int],
+    phis: jax.Array | None = None,
 ) -> ColumnLargeScaleState:
     """Build a column's :class:`ColumnLargeScaleState` from a cubed-sphere state.
 
@@ -439,6 +460,7 @@ def extract_column_forcing_cubed_sphere(
     u_geo, v_geo = _geostrophic_wind_column(
         T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
         grad_fn=_gradient_cubed_geographic_3d, lat_rad=lat_rad, col_index=col_index,
+        phis=phis,
     )
 
     f, i, j = int(col_index[0]), int(col_index[1]), int(col_index[2])
@@ -501,6 +523,7 @@ def extract_column_forcing_voronoi(
     sigma_coord: Any,
     lat_rad: float,
     col_index: tuple[int],
+    phis: jax.Array | None = None,
 ) -> ColumnLargeScaleState:
     """Build a column's :class:`ColumnLargeScaleState` from an MPAS/Voronoi state.
 
@@ -606,6 +629,7 @@ def extract_column_forcing_voronoi(
     u_geo, v_geo = _geostrophic_wind_column(
         T=T, q_v=q_v, p_s=p_s, grid=mesh, sigma_coord=sigma_coord,
         grad_fn=_gradient_voronoi_3d, lat_rad=lat_rad, col_index=col_index,
+        phis=phis,
     )
 
     c = int(col_index[0])
@@ -665,6 +689,7 @@ def extract_column_forcing_gaussian(
     sigma_coord: Any,
     lat_rad: float,
     col_index: tuple[int, int],
+    phis: jax.Array | None = None,
 ) -> ColumnLargeScaleState:
     """Build a column's :class:`ColumnLargeScaleState` from a Gaussian/spectral state.
 
@@ -729,6 +754,7 @@ def extract_column_forcing_gaussian(
     u_geo, v_geo = _geostrophic_wind_column(
         T=T, q_v=q_v, p_s=p_s, grid=grid, sigma_coord=sigma_coord,
         grad_fn=_gradient_gaussian_3d, lat_rad=lat_rad, col_index=col_index,
+        phis=phis,
     )
 
     i, j = int(col_index[0]), int(col_index[1])
@@ -756,6 +782,7 @@ def extract_column_forcing(
     sigma_coord: Any,
     lat_rad: float,
     col_index: tuple[int, ...],
+    phis: jax.Array | None = None,
 ) -> ColumnLargeScaleState:
     """Dispatch column-forcing extraction on the grid type (raises on unknown).
 
@@ -805,11 +832,12 @@ def extract_column_forcing(
         return extract_column_forcing_voronoi(
             T=T, q_v=q_v, u_edge=u, p_s=p_s, mesh=grid,
             sigma_coord=sigma_coord, lat_rad=lat_rad, col_index=col_index,
+            phis=phis,
         )
 
     kwargs = dict(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid,
-        sigma_coord=sigma_coord, lat_rad=lat_rad,
+        sigma_coord=sigma_coord, lat_rad=lat_rad, phis=phis,
     )
     if isinstance(grid, LatLonGrid):
         if len(col_index) != 2:

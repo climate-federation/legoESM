@@ -238,6 +238,27 @@ def test_extract_gaussian_geostrophic_meridional_gradient_zonal_jet():
     assert float(np.max(np.abs(ug))) > float(np.max(np.abs(vg)))   # predominantly zonal
 
 
+def test_extract_gaussian_geostrophic_orographic_phis_runs():
+    """The optional orographic ``phis`` threads through the Gaussian spectral
+    gradient (a single-LEVEL surface field through SH analysis): terrain gives a
+    finite, NON-zero, σ-independent geostrophic wind where the flat state gives 0."""
+    from legoesm import constants
+    grid, sigma = _grid_sigma()
+    T, q_v, p_s = _uniform_geo_state(grid)
+    kw = dict(T=T, q_v=q_v, u=jnp.zeros_like(T), v=jnp.zeros_like(T), p_s=p_s,
+              grid=grid, sigma_coord=sigma,
+              lat_rad=float(grid.lat[_MIDLAT_COL[0]]), col_index=_MIDLAT_COL)
+    flat = extract_column_forcing_gaussian(**kw)
+    phis = constants.g * (800.0 * jnp.sin(2.0 * jnp.asarray(grid.grid_lat)))
+    oro = extract_column_forcing_gaussian(**kw, phis=phis)
+    assert bool(jnp.all(jnp.isfinite(oro.u_geo))) and bool(jnp.all(jnp.isfinite(oro.v_geo)))
+    du = np.asarray(oro.u_geo) - np.asarray(flat.u_geo)
+    dv = np.asarray(oro.v_geo) - np.asarray(flat.v_geo)
+    assert float(np.max(np.abs(du)) + np.max(np.abs(dv))) > 1e-3
+    np.testing.assert_allclose(du, du[0], atol=1e-9)               # σ-independent
+    np.testing.assert_allclose(dv, dv[0], atol=1e-9)
+
+
 def test_extract_gaussian_geostrophic_equatorial_is_none():
     """Within the equatorial cutoff (lat[11] ≈ 4°) no geostrophic reference wind is
     supplied (f → 0 is ill-posed) — the LES plane Coriolis falls back to f×V."""

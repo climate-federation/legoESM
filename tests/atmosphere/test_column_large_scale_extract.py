@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.column_forcing import (
     ColumnLargeScaleState,
     build_column_scm_forcing,
@@ -234,6 +233,49 @@ def test_extract_populates_geostrophic_wind_extratropics():
     assert ls.u_geo.shape == (nlev,) and ls.v_geo.shape == (nlev,)
     assert bool(jnp.all(jnp.isfinite(ls.u_geo)))
     assert bool(jnp.all(jnp.isfinite(ls.v_geo)))
+
+
+def test_extract_geostrophic_orographic_term_from_phis():
+    """Over terrain, passing ``phis`` (surface geopotential = g·z_s) adds the
+    orographic gradient ∇phis to the geostrophic geopotential gradient: the
+    u_geo/v_geo delta equals ∓∇phis/f (computed via the SAME grad operator), is
+    σ-independent (phis does not vary with level), and is NON-zero. Flat/ocean
+    (phis=None) is unchanged (covered by the tests above)."""
+    import math
+
+    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+        _gradient_latlon_3d,
+    )
+
+    from legoesm import constants
+
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()
+    col, lat_deg = (6, 8), 35.0
+    # Smooth terrain g·z_s with BOTH lat and lon structure (∂x and ∂y nonzero).
+    lat2d = jnp.asarray(grid.lat)[:, None]       # radians (n_lat, 1)
+    lon2d = jnp.asarray(grid.lon)[None, :]       # (1, n_lon)
+    phis = constants.g * (800.0 * jnp.cos(lat2d) * jnp.sin(lon2d))   # m²/s², ~800 m
+
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+              lat_rad=float(jnp.deg2rad(lat_deg)), col_index=col)
+    ls_flat = extract_column_forcing_latlon(**kw)
+    ls_oro = extract_column_forcing_latlon(**kw, phis=phis)
+
+    # Expected orographic delta via the SAME operator: Δv = +∂phis/∂x / f,
+    # Δu = -∂phis/∂y / f, gathered at the column, constant across levels.
+    f_c = 2.0 * constants.Omega * math.sin(math.radians(lat_deg))
+    dphis_dx, dphis_dy = _gradient_latlon_3d(phis[..., None], grid)
+    exp_dv = float(np.asarray(dphis_dx)[col + (0,)]) / f_c
+    exp_du = -float(np.asarray(dphis_dy)[col + (0,)]) / f_c
+    du = np.asarray(ls_oro.u_geo) - np.asarray(ls_flat.u_geo)
+    dv = np.asarray(ls_oro.v_geo) - np.asarray(ls_flat.v_geo)
+    np.testing.assert_allclose(du, exp_du, rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(dv, exp_dv, rtol=1e-6, atol=1e-9)
+    # non-vacuous: the orographic term actually moves the geostrophic wind
+    assert abs(exp_dv) > 1e-3 or abs(exp_du) > 1e-3
+    # σ-independent: the delta is the same at every level
+    np.testing.assert_allclose(du, du[0], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(dv, dv[0], rtol=1e-9, atol=1e-12)
 
 
 def test_extract_no_geostrophic_wind_near_equator():
