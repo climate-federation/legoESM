@@ -992,12 +992,15 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
             "health": {"status": health.status, "message": health.message}}
 
 
-def _area_weights(grid):  # pragma: no cover - HPC path
+def _area_weights(grid):
     """Per-column quadrature weights for the bias aggregation.
 
     Prefers the grid's true cell areas (``grid_area`` — incl. Gaussian quadrature
     weights — or ``area``); falls back to cos-latitude (a lat-lon proxy) with a
-    warning if the grid exposes neither.
+    warning if the grid exposes neither.  ``grid.grid_lat`` is stored in RADIANS
+    across every grid family (lat-lon/cubed-sphere/Gaussian/Voronoi/plane), so the
+    cos-latitude weight reads it directly — NO ``deg2rad`` (applying it would
+    shrink the angle ~57x and collapse the weights to a near-uniform ≈1).
     """
     import warnings
 
@@ -1011,7 +1014,7 @@ def _area_weights(grid):  # pragma: no cover - HPC path
     warnings.warn(
         "run_correction_campaign: grid exposes no cell-area weights; using "
         "cos-latitude (a lat-lon proxy) for the bias aggregation.", stacklevel=2)
-    return jnp.cos(jnp.deg2rad(jnp.asarray(np.asarray(grid.grid_lat))))
+    return jnp.cos(jnp.asarray(np.asarray(grid.grid_lat)))  # grid_lat is [rad]
 
 
 def _format_per_variable_bias(pvb) -> str:

@@ -26,6 +26,7 @@ from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
+    _area_weights,
     _build_arg_parser,
     _campaign_knobs_from_args,
     _capture_initial_record,
@@ -211,6 +212,33 @@ def test_resolve_orographic_phis_unknown_mode_raises():
     constrains the CLI, but the helper must not silently accept a typo)."""
     with pytest.raises(ValueError, match="unknown orographic_forcing mode"):
         resolve_orographic_phis("terrain", lambda: jnp.zeros((4, 8)))
+
+
+def test_area_weights_prefers_true_cell_areas():
+    """_area_weights returns the grid's TRUE cell areas: grid_area first, then area
+    (the bias quadrature must use real areas — incl. Gaussian weights — when present,
+    not a cos-lat proxy). Dispatch order: grid_area wins over area."""
+    both = SimpleNamespace(grid_area=jnp.array([[1.0, 2.0], [3.0, 4.0]]),
+                           area=jnp.zeros((2, 2)), grid_lat=jnp.zeros((2, 2)))
+    np.testing.assert_array_equal(
+        np.asarray(_area_weights(both)), [[1.0, 2.0], [3.0, 4.0]])  # grid_area preferred
+    area_only = SimpleNamespace(area=jnp.array([[5.0, 6.0]]), grid_lat=jnp.zeros((1, 2)))
+    np.testing.assert_array_equal(np.asarray(_area_weights(area_only)), [[5.0, 6.0]])
+
+
+def test_area_weights_coslat_fallback_uses_radian_latitude():
+    """When the grid exposes NEITHER grid_area NOR area, _area_weights warns and
+    falls back to cos-latitude. grid_lat is stored in RADIANS across every grid
+    family, so the weight is cos(lat_rad) DIRECTLY — non-vacuous: a deg2rad
+    regression (treating radians as degrees) would shrink the angle ~57x and return
+    ≈1 everywhere instead of the true cos-latitude profile."""
+    lat_rad = jnp.array([[0.0, jnp.pi / 3.0]])  # equator + 60N, in radians
+    g = SimpleNamespace(grid_lat=lat_rad)        # no grid_area / area attrs
+    with pytest.warns(UserWarning, match="no cell-area weights"):
+        w = _area_weights(g)
+    np.testing.assert_allclose(np.asarray(w), [[1.0, 0.5]], atol=1e-6)  # cos(0)=1, cos(60°)=0.5
+    # The buggy deg2rad path would have given cos(deg2rad(π/3)) ≈ 0.99985, not 0.5.
+    assert abs(float(w[0, 1]) - 0.5) < 1e-6
 
 
 def test_orographic_forcing_flag_parsed():
