@@ -52,6 +52,30 @@ def test_generated_config_loads_through_campaign_loader(tmp_path):
     assert len(sigma.sigma_full) == 10                  # nlev levels
 
 
+def test_generated_config_drives_cmip_coupled_driver(tmp_path):
+    """The done-criterion's SECOND mode: the SAME generated config drives CMIP too.
+    Build a REAL CoupledESMDriver from the generator's output via the campaign's
+    make_base_driver_builder('cmip', preset), and confirm the fields cmip_column_state
+    reads (state / q_v / ocean SST on the atm column shape) are present. So the one
+    turnkey config runs AMIP (test above) AND CMIP."""
+    from legoesm.driver.config import experiment_config_from_dict
+    from legoesm.driver.coupled_config import PRESETS
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    from scripts.experiment.write_amip_clubb_lite_config import main
+    from scripts.run.run_correction_campaign import make_base_driver_builder
+
+    out = tmp_path / "cfg.json"
+    assert main([str(out), "--resolution", "8", "--nlev", "5"]) == 0
+    cfg = experiment_config_from_dict(json.loads(out.read_text()))
+    build_cmip, _extract = make_base_driver_builder(
+        "cmip", coupled_preset=PRESETS["aquaplanet"](), ocean_grid=None)
+    driver = build_cmip(cfg)                              # constructs + setup()s the coupled driver
+    assert isinstance(driver, CoupledESMDriver)
+    assert driver.state is not None and driver.q_v is not None
+    assert tuple(driver.ocean_state.T_sfc.data.shape) == (8, 16)  # same-grid: SST on atm shape
+
+
 def test_non_clubb_config_is_rejected_by_launcher():
     """Non-vacuity: a NON-clubb config is exactly what make_clubb_build_driver rejects,
     so the generator's clubb_lite guarantee is load-bearing (not a no-op)."""

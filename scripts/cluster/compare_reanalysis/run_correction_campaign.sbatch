@@ -23,10 +23,12 @@
 # in this .out log (iter 191).
 #
 # CUSTOMIZE: the #SBATCH account/partition/gres/time above, the REPO/PY/CONFIG/
-# ERA5 paths below, and the campaign knobs in COMMON (--mode amip|cmip,
-# --diagnosis-method clubb_coefficient|prandtl_number|c_eps OR --coefficients
-# C_K,Pr_t for the simultaneous multi-coefficient path, --iterations, --n-worst,
-# --les-budget). Re-submit the SAME script to resume after a timeout.
+# ERA5 paths below, and the campaign knobs in COMMON. Both done-criterion modes:
+#   AMIP (default):  sbatch <this>
+#   CMIP (coupled):  MODE=cmip COUPLED_PRESET=aquaplanet sbatch <this>
+# Other knobs: --diagnosis-method clubb_coefficient|prandtl_number|c_eps OR
+# --coefficients C_K,Pr_t (simultaneous multi-coefficient), --iterations, --n-worst,
+# --les-budget. Re-submit the SAME script to resume after a timeout.
 # ---------------------------------------------------------------------------
 set +e
 REPO="${LEGOESM_REPO:-$PWD}"
@@ -40,9 +42,13 @@ OUT="${OUT:-results/compare_reanalysis/corrected_clubb.json}"
 CKPT="${CKPT:-results/compare_reanalysis/campaign.ckpt.json}"
 mkdir -p "$(dirname "$OUT")" "$(dirname "$CKPT")"
 
-COMMON=(--config "$CONFIG" --era5-zarr "$ERA5" --mode amip
+MODE="${MODE:-amip}"                               # amip (prescribed SST) | cmip (coupled ocean)
+COMMON=(--config "$CONFIG" --era5-zarr "$ERA5" --mode "$MODE"
         --diagnosis-method clubb_coefficient --iterations 10 --n-worst 64
         --les-budget 8 --orographic-forcing auto --out "$OUT")
+# CMIP needs a coupled-ocean preset (aquaplanet|full_coupled|slab_simple|slab_richards|
+# slab_pft|slab_carbon). Run CMIP with:  MODE=cmip COUPLED_PRESET=aquaplanet sbatch <this>
+if [ "$MODE" = "cmip" ]; then COMMON+=(--coupled-preset "${COUPLED_PRESET:-aquaplanet}"); fi
 
 echo "=== HOST ==="; hostname; date
 
