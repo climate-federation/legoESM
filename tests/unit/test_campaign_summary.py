@@ -251,6 +251,18 @@ def test_campaign_health_stalled():
     assert "not improving" in h.message
 
 
+def test_campaign_health_non_finite_bias_flags_divergence():
+    """A non-finite (NaN) bias — a MODEL blow-up (NaN state → NaN bias) or corrupt
+    reference — is flagged 'non_finite_bias' (not ok), NOT mislabelled 'stalled': NaN >=
+    thr is False, so without the guard the blow-up falls through to the non-improving
+    branches ('check the diagnosis') — debugging the wrong thing."""
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])
+    s = summarize_campaign(_multi_result(ck, [(float("nan"), float("nan"))], (True,)))
+    h = campaign_health(s)
+    assert h.status == "non_finite_bias" and not h.ok
+    assert "DIVERGED" in h.message
+
+
 def test_campaign_health_clamp_limited_when_not_improving():
     # Bias barely moved (1%) AND half the C_K columns pinned at the upper bound →
     # "clamp_limited" (the clamp is the likely cause of the non-improvement).

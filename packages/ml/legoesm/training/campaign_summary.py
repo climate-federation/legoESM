@@ -249,7 +249,8 @@ _TRADEOFF_FRACTION_WARN = 0.05
 class CampaignHealth(NamedTuple):
     """A one-look verdict on whether the corrections are working + why/why not."""
 
-    status: str     # "improved" | "stalled" | "clamp_limited" | "no_rounds"
+    status: str     # improved | stalled | clamp_limited | no_valid_diagnoses |
+                    # non_finite_bias | no_rounds
     message: str    # actionable one-line explanation
 
     @property
@@ -316,6 +317,11 @@ def campaign_health(
       clamp is the cause, so the corrections are not improving the bias (check the
       LES↔GCM transfer or config).
     * ``"no_rounds"`` — the campaign ran no rounds.
+    * ``"non_finite_bias"`` — the reported initial or final bias is NaN/inf: the MODEL
+      RUN almost certainly DIVERGED (numerical blow-up → NaN state → NaN bias) or the
+      reference is corrupt.  Checked FIRST among the non-``no_rounds`` statuses so a
+      blow-up is surfaced loudly, never mislabelled ``"stalled"`` (``NaN >= thr`` is
+      ``False``, so without this it would fall through to the non-improving branches).
 
     Improvement is judged FIRST: a strongly-improving run is never demoted to a
     warning status just because the clamp is binding (it is noted instead).  Among the
@@ -325,6 +331,18 @@ def campaign_health(
     """
     if summary.n_rounds == 0:
         return CampaignHealth("no_rounds", "Campaign ran no rounds.")
+    # A non-finite bias means the MODEL RUN diverged (NaN/inf state → NaN bias) or the
+    # reference is corrupt. Surface it LOUDLY before the improved/stalled logic: NaN >=
+    # min_fractional_reduction is False, so a blow-up would otherwise fall through and
+    # be mislabelled "stalled" ("check the diagnosis") — debugging the wrong thing.
+    if not (bool(np.isfinite(summary.initial_bias))
+            and bool(np.isfinite(summary.final_bias))):
+        return CampaignHealth(
+            "non_finite_bias",
+            f"Non-finite bias (initial={summary.initial_bias}, "
+            f"final={summary.final_bias}) — the model run likely DIVERGED (numerical "
+            "blow-up: check the base-config CFL/stability) or the reference is corrupt; "
+            "the bias-reduction verdict is NOT trustworthy.")
     worst_clamp, clamp_key = 0.0, None
     for c in summary.coefficients:
         if c.clamp_fraction > worst_clamp:
