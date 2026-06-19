@@ -111,3 +111,31 @@ def test_runbook_automated_gating_clis_are_exit_code_gateable():
         assert basename in text, f"runbook gating section no longer cites {basename}"
         main = getattr(importlib.import_module(mod_name), "main", None)
         assert callable(main), f"{mod_name} lost its gateable main()"
+
+
+def test_campaign_sbatch_flags_are_valid_cli_options():
+    """The production SLURM launcher passes campaign-CLI flags (--config, --era5-zarr,
+    --mode, --diagnosis-method, --iterations, --n-worst, --les-budget, --orographic-forcing,
+    --out, --coupled-preset, --dry-run, --checkpoint, --resume) to run_correction_campaign.py.
+    A flag RENAMED/REMOVED in the CLI would break the production launch at argparse with NO
+    test catching it — the runbook test above pins the RUNBOOK's flags, not the sbatch's own.
+    Lock the sbatch↔CLI contract.  SLURM directives (#SBATCH) and the config-gen comment
+    examples are excluded (comment lines start with #) (iter 308)."""
+    from scripts.run.run_correction_campaign import _build_arg_parser
+
+    sbatch = _REPO / "scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch"
+    assert sbatch.is_file(), f"missing campaign launcher at {sbatch}"
+    # Campaign flags = --xxx on NON-comment lines (excludes #SBATCH SLURM directives + the
+    # config-generator comment examples — both of which begin with #).
+    campaign_flags: set[str] = set()
+    for line in sbatch.read_text().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        campaign_flags.update(_FLAG_RE.findall(line))
+    assert campaign_flags, "no campaign flags parsed from the sbatch (regex/file broken?)"
+
+    valid = {opt for action in _build_arg_parser()._actions for opt in action.option_strings}
+    unknown = sorted(f for f in campaign_flags if f not in valid)
+    assert not unknown, (
+        f"the campaign sbatch passes flag(s) the CLI does not define: {unknown} — a "
+        "renamed/removed CLI option would break the production launch at argparse.")

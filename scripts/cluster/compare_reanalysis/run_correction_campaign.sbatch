@@ -28,7 +28,10 @@
 # progress in this .out log (iter 191).
 #
 # CUSTOMIZE: the #SBATCH account/partition/gres/time above, the REPO/PY/CONFIG/
-# ERA5 paths below, and the campaign knobs in COMMON. Both done-criterion modes:
+# ERA5 paths below, and the campaign knobs in COMMON. NOTE: create the --output log dir
+# (results/compare_reanalysis/) BEFORE the first submission — SLURM opens the .out log at
+# job start, before this script's `mkdir -p` runs, so a fresh checkout would lose the first
+# job's log (`mkdir -p results/compare_reanalysis && sbatch <this>`). Both done-criterion modes:
 #   AMIP (default):  sbatch <this>
 #   CMIP (coupled):  MODE=cmip COUPLED_PRESET=aquaplanet sbatch <this>
 # Other knobs: --diagnosis-method clubb_coefficient|prandtl_number|c_eps OR
