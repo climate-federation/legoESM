@@ -21,6 +21,25 @@ def test_build_amip_clubb_lite_config_is_clubb_and_parameterized():
     assert cfg.dycore.dt == 300.0
 
 
+def test_days_climatology_window_is_exposed_and_defaults_to_a_real_window(tmp_path):
+    """--days (iter 311) exposes the run length = the CLIMATOLOGY WINDOW the model time-mean
+    is computed over + compared to the matched ERA5 mean, completing the production-scaling
+    knobs (resolution/nlev/dt/days). The default (200) is a REAL window (≈40 samples at the
+    5-day cadence), not a toy run; a custom value threads through the CLI to the config."""
+    from legoesm.driver.config import experiment_config_from_dict
+
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+        main,
+    )
+
+    assert build_amip_clubb_lite_config().days == 200            # a real default climatology
+    out = tmp_path / "long.json"
+    assert main([str(out), "--resolution", "8", "--nlev", "5", "--days", "3650"]) == 0
+    cfg = experiment_config_from_dict(json.loads(out.read_text()))
+    assert cfg.days == 3650          # a 10-year window threads through CLI -> JSON -> config
+
+
 def test_config_round_trips_and_launcher_accepts_it(tmp_path):
     """The emitted JSON loads back into an ExperimentConfig AND make_clubb_build_driver
     accepts it — the exact contract the campaign ``--config`` path requires."""

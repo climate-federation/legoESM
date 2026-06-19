@@ -26,6 +26,9 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.j
 > below — the generator prints a NOTE reminding you to scale `--resolution` / `--nlev` **up**
 > for a production ERA5 comparison, and to lower `--dt` with resolution (a too-large `dt` at
 > higher resolution diverges; the baseline-divergence guard would then fail the run loud).
+> `--days` (default 200) sets the **climatology window** the model time-mean is computed over
+> — keep it long enough for a stable mean and **aligned to the ERA5 window** (§6); start from a
+> spun-up restart (or run long enough) so the initial transient does not bias the mean.
 
 ## 1. Preflight the SETUP (seconds, no model run)
 

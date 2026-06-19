@@ -39,14 +39,19 @@ _STARTER_RESOLUTION_MAX = 16
 
 
 def build_amip_clubb_lite_config(
-    *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray"
+    *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray",
+    days: int = 200,
 ) -> ExperimentConfig:
     """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
 
     ``turbulence`` is fixed to ``"clubb_lite"`` (the campaign's requirement); the
-    grid (lat-lon), vertical resolution, timestep, and radiation are exposed so the
-    starter can be scaled toward a production run.  Hydrostatic finite-volume dycore
-    — the AMIP default the comparison + LES spin-off were built against.
+    grid (lat-lon), vertical resolution, timestep, radiation, and run length are
+    exposed so the starter can be scaled toward a production run.  ``days`` is the
+    run length, i.e. the CLIMATOLOGY WINDOW the model time-mean is computed over and
+    compared to the (matched) ERA5 mean — keep it long enough for a stable mean (the
+    200-day default ≈ 40 samples at the 5-day diagnostic cadence) and aligned to the
+    ERA5 window (runbook §6). Hydrostatic finite-volume dycore — the AMIP default the
+    comparison + LES spin-off were built against.
     """
     return ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=int(resolution), nlev=int(nlev)),
@@ -54,6 +59,7 @@ def build_amip_clubb_lite_config(
             dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
         radiation=radiation,
         turbulence="clubb_lite",
+        days=int(days),
     )
 
 
@@ -64,13 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--nlev", type=int, default=10, help="vertical levels (default 10)")
     p.add_argument("--dt", type=float, default=600.0, help="dycore timestep [s] (default 600)")
     p.add_argument("--radiation", default="gray", help="radiation scheme (default gray)")
+    p.add_argument("--days", type=int, default=200,
+                   help="run length = the CLIMATOLOGY WINDOW the time-mean is computed over "
+                        "(default 200; keep it long + aligned to the ERA5 window)")
     args = p.parse_args(argv)
     cfg = build_amip_clubb_lite_config(
-        resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation)
+        resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation,
+        days=args.days)
     with open(args.out, "w") as f:
         json.dump(experiment_config_to_dict(cfg), f, indent=2)
     print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "
-          f"latlon {args.resolution} L{args.nlev}) to {args.out}")
+          f"latlon {args.resolution} L{args.nlev}, {args.days}-day climatology) to {args.out}")
     if args.resolution <= _STARTER_RESOLUTION_MAX:
         print(
             f"[config] NOTE: latlon resolution {args.resolution} is a COARSE STARTER "
