@@ -355,6 +355,40 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_grid_provenance_produces_deploy_compatible_fingerprint():
+    """``_grid_provenance`` is the campaign-side deploy grid-identity fingerprint PRODUCER
+    embedded in the output JSON; the deploy CONSUMER (``assert_deploy_compatible``) is
+    tested but the producer was NOT (a private helper the def-vs-test sweep skips). Lock
+    (a) the recorded metadata, (b) the producer→consumer ROUND-TRIP (a provenanced output
+    deploys onto its OWN grid), and (c) non-vacuity (a DIFFERENT grid → DIFFERENT coord
+    fingerprint) — so a producer regression cannot silently break the grid-safety guard
+    that stops per-column coefficients landing on the wrong cells (clause-6 deploy)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.training.deploy_correction import (
+        assert_deploy_compatible,
+        corrected_turbulence_override,
+    )
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    base_cfg = _base_config()                           # latlon, resolution 8, nlev 5
+    prov = rcc._grid_provenance(base_cfg, grid)
+    assert prov["grid_type"] == "latlon"
+    assert prov["resolution"] == 8 and prov["nlev"] == 5
+    assert "coord_sha256" in prov                       # the coordinate fingerprint
+
+    output = {"C_K": [0.4] * (8 * 16), "grid": prov}
+    assert_deploy_compatible(output, grid)              # PRODUCER → CONSUMER round-trip OK
+    assert corrected_turbulence_override(output, grid=grid).scheme == "clubb_lite"
+
+    # Non-vacuity: a DIFFERENT grid yields a DIFFERENT coord fingerprint (so the guard
+    # would catch a cross-grid deploy — the consumer's tested job; here we prove the
+    # PRODUCER distinguishes grids rather than emitting a constant).
+    other = create_latlon_grid(4, 8, dtype=jnp.float64)
+    assert rcc._grid_provenance(base_cfg, other)["coord_sha256"] != prov["coord_sha256"]
+
+
 def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
     """compose_compare_fn must pass ``valid_mask`` + ``manifest_reducer`` THROUGH to
     make_compare_fn, so an ocean/land mask or the distributed owned-cell mask actually
