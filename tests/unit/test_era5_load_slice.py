@@ -128,6 +128,68 @@ def test_load_era5_slice_missing_required_raises(monkeypatch):
         load_era5_slice(_config(), 0)
 
 
+def _synthetic_era5_multitime():
+    """A 2-time ERA5-like store where p_s + T VARY by time (so the mean is non-trivial),
+    sst has a NaN 'land' cell every time, and phis is STATIC."""
+    import xarray as xr
+
+    nt, nlat, nlon, nlev = 2, 5, 6, 3
+    t_prof = np.array([300.0, 250.0, 200.0], dtype=np.float32)        # per level (hPa order)
+    temp = np.stack([                                                # +0 at t0, +20 at t1
+        np.broadcast_to((t_prof + off)[:, None, None], (nlev, nlat, nlon))
+        for off in (0.0, 20.0)]).astype(np.float32)
+    ps = np.stack([np.full((nlat, nlon), v, dtype=np.float32)         # 1e5, 1.1e5
+                   for v in (1.0e5, 1.1e5)])
+    sst = np.full((nt, nlat, nlon), 290.0, dtype=np.float32)
+    sst[:, 0, 0] = np.nan                                            # consistent 'land' NaN
+    phis = np.full((nt, nlat, nlon), 100.0, dtype=np.float32)        # STATIC
+    u = np.full((nt, nlev, nlat, nlon), 10.0, dtype=np.float32)
+    v = np.full((nt, nlev, nlat, nlon), 2.0, dtype=np.float32)
+    q = np.full((nt, nlev, nlat, nlon), 5e-3, dtype=np.float32)
+    coords = {"time": list(range(nt)), "level": list(_LEVELS),
+              "lat": np.linspace(90.0, -90.0, nlat), "lon": np.linspace(0.0, 300.0, nlon)}
+    return xr.Dataset(
+        {"temperature": (("time", "level", "lat", "lon"), temp),
+         "u_component_of_wind": (("time", "level", "lat", "lon"), u),
+         "v_component_of_wind": (("time", "level", "lat", "lon"), v),
+         "specific_humidity": (("time", "level", "lat", "lon"), q),
+         "surface_pressure": (("time", "lat", "lon"), ps),
+         "skin_temperature": (("time", "lat", "lon"), sst),
+         "geopotential_at_surface": (("time", "lat", "lon"), phis)},
+        coords=coords)
+
+
+def test_load_era5_time_mean(monkeypatch):
+    """load_era5_time_mean averages each field over the times (the climatology); coords
+    + static phis unchanged; NaN propagates (land sst); dtype preserved; a single index
+    is byte-identical to load_era5_slice; empty raises (Codex design conditions)."""
+    from legoesm.training.era5_to_state import load_era5_time_mean
+
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5_multitime())
+    cfg = _config()
+    mean = load_era5_time_mean(cfg, [0, 1])
+    s0 = load_era5_slice(cfg, 0)
+    # p_s time-mean = (1e5 + 1.1e5)/2; T mean = ascending-P [200,250,300] + (0+20)/2.
+    np.testing.assert_allclose(mean.p_s, 1.05e5, rtol=1e-5)
+    np.testing.assert_allclose(mean.T[0, 0, :], [210.0, 260.0, 310.0])
+    # coords + static phis unchanged.
+    np.testing.assert_array_equal(mean.lat, s0.lat)
+    np.testing.assert_allclose(mean.plev_Pa, s0.plev_Pa)
+    np.testing.assert_allclose(mean.phis, s0.phis)            # static ⇒ mean is a no-op
+    # NaN-propagating land sst; ocean cell averaged.
+    assert np.isnan(mean.sst[0, 0])
+    np.testing.assert_allclose(mean.sst[1, 1], 290.0)
+    # dtype PRESERVED (np.mean upcasts float32→float64 without the cast).
+    assert mean.T.dtype == np.float32 and mean.p_s.dtype == np.float32
+    # SINGLE index ⇒ load_era5_slice unchanged (byte-identical, the old behaviour).
+    one = load_era5_time_mean(cfg, [0])
+    np.testing.assert_array_equal(one.T, s0.T)
+    np.testing.assert_array_equal(one.p_s, s0.p_s)
+    # EMPTY ⇒ raise.
+    with pytest.raises(ValueError, match="non-empty"):
+        load_era5_time_mean(cfg, [])
+
+
 def test_load_era5_slice_missing_required_surface_pressure_raises(monkeypatch):
     monkeypatch.setattr(
         e2s, "open_era5_zarr",

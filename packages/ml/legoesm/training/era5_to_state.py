@@ -343,6 +343,37 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     )
 
 
+def load_era5_time_mean(config: TrainingERA5Config, time_indices) -> ERA5Slice:
+    """Time-MEAN ERA5 reference: the element-wise average over ``time_indices`` of each
+    field, so the time-mean MODEL state (``run_to_column_mean``) is compared to a
+    time-mean ERA5 CLIMATOLOGY rather than a single synoptic snapshot (which injects
+    weather noise into the bias).
+
+    Coords (``lat``/``lon``/``plev_Pa``) are identical across times (kept from the
+    first slice).  A SINGLE index returns :func:`load_era5_slice` unchanged
+    (byte-identical to the old single-time behaviour).  NaN-PROPAGATING (``np.mean``,
+    not ``nanmean``) — consistent with the raw single-slice extraction: an SST-over-land
+    cell is NaN in every slice, so the mean is NaN there too, no worse than a single
+    slice.  Each averaged field is cast back to the first slice's dtype (``np.mean``
+    upcasts ``float32``→``float64``).  Reuses ``load_era5_slice`` per time (a one-time
+    campaign-start load).  Empty ``time_indices`` ⇒ raise."""
+    indices = list(time_indices)
+    if not indices:
+        raise ValueError("load_era5_time_mean: time_indices must be non-empty.")
+    if len(indices) == 1:
+        return load_era5_slice(config, indices[0])
+    slices = [load_era5_slice(config, int(i)) for i in indices]
+    first = slices[0]
+
+    def _mean(name):
+        return np.mean([getattr(s, name) for s in slices], axis=0).astype(
+            getattr(first, name).dtype)
+
+    return first._replace(
+        T=_mean("T"), u=_mean("u"), v=_mean("v"), q=_mean("q"),
+        p_s=_mean("p_s"), sst=_mean("sst"), phis=_mean("phis"))
+
+
 def era5_to_spectral_carry(
     era5: ERA5Slice,
     grid,

@@ -719,6 +719,12 @@ def _build_arg_parser():
     p.add_argument("--era5-zarr", required=True, help="ERA5 zarr (reference)")
     p.add_argument("--era5-cache", default=None, help="ERA5 local cache dir")
     p.add_argument("--era5-time-idx", type=int, default=0)
+    p.add_argument("--era5-n-times", type=int, default=1,
+                   help="Average this many consecutive ERA5 times (starting at "
+                        "--era5-time-idx) into a time-MEAN reference CLIMATOLOGY — so "
+                        "the time-mean model is compared to a time-mean ERA5, not a "
+                        "single synoptic snapshot (which injects weather noise into the "
+                        "bias). Default 1 = a single time (the old behaviour).")
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--bias-tol", type=float, default=None,
                    help="convergence tolerance: stop early once --patience "
@@ -1217,7 +1223,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     import numpy as np
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
     from legoesm.training.compare_reanalysis import column_state_from_carry
-    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+    from legoesm.training.era5_to_state import (
+        TrainingERA5Config,
+        load_era5_time_mean,
+    )
 
     from scripts.validate.compare_amip_era5 import (
         canonical_grid_type,
@@ -1245,9 +1254,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).
     canon = canonical_grid_type(base_cfg.grid.grid_type)
-    era5_slice = load_era5_slice(
+    # Time-MEAN ERA5 reference over --era5-n-times consecutive times (N=1 ⇒ a single
+    # slice, the old behaviour): compares the time-mean model to a time-mean ERA5
+    # climatology, not a single synoptic snapshot.
+    n_times = max(1, int(args.era5_n_times))
+    era5_slice = load_era5_time_mean(
         TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
-        args.era5_time_idx)
+        range(args.era5_time_idx, args.era5_time_idx + n_times))
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
     import jax.numpy as jnp
