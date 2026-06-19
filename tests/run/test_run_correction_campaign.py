@@ -795,18 +795,25 @@ def test_print_round_progress_emits_a_real_time_line(capsys):
 
     res = SimpleNamespace(
         bias=SimpleNamespace(baseline_bias=1.0, updated_bias=0.6, improved=True),
-        n_corrected=5, n_diagnoses_valid=3)
+        n_corrected=5, n_diagnoses_valid=3, step_fraction=1.0)
     _print_round_progress(round_idx=2, res=res, total_rounds=10)
     out = capsys.readouterr().out
     assert "round 3/10" in out                              # 1-based display of round_idx 2
     assert "1 -> 0.6" in out and "kept" in out
     assert "5 cols corrected" in out and "3 valid LES" in out
+    assert "step" not in out                                # full step ⇒ no step annotation
     # a non-improving round is labelled 'rejected' (the monotonic gate discarded it).
     res_rej = SimpleNamespace(
         bias=SimpleNamespace(baseline_bias=0.6, updated_bias=0.6, improved=False),
-        n_corrected=0, n_diagnoses_valid=0)
+        n_corrected=0, n_diagnoses_valid=0, step_fraction=0.5)
     _print_round_progress(round_idx=3, res=res_rej, total_rounds=10)
     assert "rejected" in capsys.readouterr().out
+    # a KEPT round at a BACKTRACKED step surfaces the line-search activity (iter 319).
+    res_step = SimpleNamespace(
+        bias=SimpleNamespace(baseline_bias=1.0, updated_bias=0.8, improved=True),
+        n_corrected=5, n_diagnoses_valid=5, step_fraction=0.5)
+    _print_round_progress(round_idx=0, res=res_step, total_rounds=10)
+    assert "kept, step 0.5" in capsys.readouterr().out
 
 
 def test_area_weights_prefers_true_cell_areas():

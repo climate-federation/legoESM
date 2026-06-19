@@ -1282,11 +1282,20 @@ def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:
     :func:`_enable_line_buffered_stdout`'s real-time-progress promise needs something printed
     PER ROUND (iter 318).  Lets the operator tell a running campaign from a hung one and watch
     the bias fall live.  Works for the single + multi result (both carry ``bias`` /
-    ``n_corrected`` / ``n_diagnoses_valid``)."""
+    ``n_corrected`` / ``n_diagnoses_valid`` / ``step_fraction``)."""
     b = res.bias
-    kept = "kept" if bool(b.improved) else "rejected"
+    step = float(getattr(res, "step_fraction", 1.0))
+    if not bool(b.improved):
+        status = "rejected"
+    elif step < 1.0 - 1e-9:
+        # The line search BACKTRACKED the full LES step — the raw diagnosis was too
+        # aggressive (the full step did not improve, a partial one did): a signal about
+        # the LES↔GCM closure transfer the operator wants live.
+        status = f"kept, step {step:.2g}"
+    else:
+        status = "kept"
     print(f"[campaign] round {int(round_idx) + 1}/{int(total_rounds)}: bias "
-          f"{float(b.baseline_bias):.5g} -> {float(b.updated_bias):.5g} ({kept}); "
+          f"{float(b.baseline_bias):.5g} -> {float(b.updated_bias):.5g} ({status}); "
           f"{int(res.n_corrected)} cols corrected, "
           f"{int(res.n_diagnoses_valid)} valid LES diagnoses")
 
