@@ -254,6 +254,45 @@ def test_rank_flags_padded_slots_when_n_exceeds_valid_count():
     assert int(idx[0]) == 0  # flat index of (0,0), score 0.1, the only valid
 
 
+def test_rank_tie_breaking_is_deterministic_lowest_index_wins():
+    """Exact score TIES must rank by ascending flat index, deterministically.
+
+    The resumable HPC campaign (``run_correction_campaign.py``) stores the
+    worst-column manifest by flat_index in its checkpoint; a RESUMED run
+    re-derives the manifest from the same scores and must select the SAME
+    columns as the original or it would diagnose a different set of columns
+    than the checkpoint was built for.  When several columns share the worst
+    score (common on idealized/aquaplanet runs with zonal symmetry), that
+    reproducibility rests entirely on ``jax.lax.top_k``'s tie-breaking being
+    deterministic and order-stable (ascending index).  This locks that XLA
+    contract so a future top_k tie-break change fails LOUDLY here rather than
+    silently making a resumed campaign pick different worst columns.
+    """
+    # All 16 columns exactly tied → the 5 worst must be flat indices 0..4.
+    all_tied = jnp.ones((4, 4))
+    idx, _vals, valid = rank_worst_columns(all_tied, 5)
+    assert [int(i) for i in idx] == [0, 1, 2, 3, 4]
+    assert bool(jnp.all(valid))
+
+    # A partial tie: three columns share the worst score; they come back in
+    # ascending flat-index order (the deterministic tie-break), not arbitrarily.
+    import numpy as np  # noqa: PLC0415 — local: only the tie-array builder needs it
+
+    s = np.zeros((3, 3))
+    s[0, 1] = s[1, 2] = s[2, 0] = 9.0  # flat indices 1, 5, 6 — the tied worst
+    idx3, vals3, valid3 = rank_worst_columns(jnp.asarray(s), 3)
+    assert [int(i) for i in idx3] == [1, 5, 6]
+    assert bool(jnp.all(valid3))
+    assert all(float(v) == pytest.approx(9.0) for v in vals3)
+
+    # Determinism: repeated calls AND jit vs eager give bit-identical indices
+    # (resume re-derives the manifest in a fresh process, possibly under jit).
+    again, _, _ = rank_worst_columns(all_tied, 5)
+    jitted, _, _ = jax.jit(lambda x: rank_worst_columns(x, 5))(all_tied)
+    assert [int(i) for i in again] == [int(i) for i in idx]
+    assert [int(i) for i in jitted] == [int(i) for i in idx]
+
+
 def test_score_columns_raises_on_partial_precip():
     nlev = 3
     w = normalized_mass_weights(jnp.ones((nlev,)))
