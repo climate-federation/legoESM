@@ -500,6 +500,28 @@ def test_checkpoint_common_keys_and_sanitization(monkeypatch):
     json.loads(json.dumps(d))                             # strict JSON: no NaN token
 
 
+def test_checkpoint_resume_count_roundtrip(monkeypatch):
+    """_checkpoint_common (write, 293) + _resume_seed (read, 294) round-trip the cumulative
+    diagnosis counts: the write's ``n_*_total`` becomes the read's ``n_*_prior``, so a
+    resumed campaign keeps a cumulative bias trajectory + LES-validity across a SLURM
+    timeout (iter 137/138) — the write/read symmetry the no-duplication factoring locks."""
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(rcc, "_grid_provenance", lambda bc, g: {"grid_type": "stub"})
+    init_box = {"initial_bias": 4.0, "initial_per_variable": {"T_rmse_K": 2.0},
+                "n_diagnosed_prior": 3, "n_diag_seg": 2,
+                "n_diagnoses_valid_prior": 1, "n_valid_seg": 1}
+    written = rcc._checkpoint_common(7, object(), object(), init_box)
+    assert written["n_diagnosed_total"] == 5 and written["n_diagnoses_valid_total"] == 2
+    seed = rcc._resume_seed(written)                 # read it back as the resume seed
+    assert seed["n_diagnosed_prior"] == 5            # write total → read prior
+    assert seed["n_diagnoses_valid_prior"] == 2
+    assert seed["initial_bias"] == 4.0 and seed["initial_per_variable"] == {"T_rmse_K": 2.0}
+    # an older checkpoint without the counts → 0 priors (no crash).
+    bare = rcc._resume_seed({"initial_bias": None})
+    assert bare["n_diagnosed_prior"] == 0 and bare["initial_bias"] is None
+
+
 def test_build_campaign_harness_returns_the_shared_wiring():
     """_build_campaign_harness (iter 292) factors the compare/diagnose/env-grid wiring that
     was BYTE-IDENTICAL in the single + multi campaign builders: a callable compare_fn +

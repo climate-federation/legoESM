@@ -1603,6 +1603,20 @@ def _assert_resume_grid_matches(ckpt: dict, grid: Any) -> None:
                 "SAME grid the campaign used.")
 
 
+def _resume_seed(ckpt: dict) -> dict:
+    """The ``init_box`` seed read from a checkpoint on resume — the READ counterpart of
+    :func:`_checkpoint_common` (iter 294): the cumulative diagnosis counts (the write's
+    ``n_*_total`` → the read's ``n_*_prior``) plus the campaign-start bias / per-variable,
+    so the trajectory + LES-validity counts stay CUMULATIVE across a SLURM-timeout resume
+    (iter 137/138).  Shared by both resume loaders (CLAUDE.md: no duplicate wiring)."""
+    return {
+        "initial_bias": ckpt.get("initial_bias"),
+        "initial_per_variable": ckpt.get("initial_per_variable"),
+        "n_diagnosed_prior": int(ckpt.get("n_diagnosed_total", 0)),
+        "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
+    }
+
+
 def _load_single_resume(ckpt: dict, grid: Any, corrected_field: str):
     """Reconstruct the SINGLE-coefficient resume state from a checkpoint dict.
 
@@ -1636,12 +1650,7 @@ def _load_single_resume(ckpt: dict, grid: Any, corrected_field: str):
     initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
     initial_clubb = CLUBBLiteConfig(**{corrected_field: initial_field.reshape(-1)})
     start_round = int(ckpt["round"]) + 1
-    init_seed = {
-        "initial_bias": ckpt.get("initial_bias"),
-        "initial_per_variable": ckpt.get("initial_per_variable"),
-        "n_diagnosed_prior": int(ckpt.get("n_diagnosed_total", 0)),
-        "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
-    }
+    init_seed = _resume_seed(ckpt)
     return initial_field, initial_clubb, start_round, init_seed
 
 
@@ -1671,12 +1680,7 @@ def _load_multi_resume(ckpt: dict, grid: Any, coefficients, gshape, promo_to_fie
         for k, v in ckpt["fields"].items()}
     initial_clubb = CLUBBLiteConfig(**overrides)
     start_round = int(ckpt["round"]) + 1
-    init_seed = {
-        "initial_bias": ckpt.get("initial_bias"),
-        "initial_per_variable": ckpt.get("initial_per_variable"),
-        "n_diagnosed_prior": int(ckpt.get("n_diagnosed_total", 0)),
-        "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
-    }
+    init_seed = _resume_seed(ckpt)
     return initial_clubb, initial_fields, start_round, init_seed
 
 
