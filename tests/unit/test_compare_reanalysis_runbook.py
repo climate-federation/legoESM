@@ -86,3 +86,28 @@ def test_runbook_distributed_section_symbols_are_importable():
     for name in ("build_distributed_mpas_campaign", "assemble_global_campaign_result",
                  "build_campaign_output_dict", "return_layout"):
         assert name in text, f"runbook §7 no longer mentions {name}"
+
+
+def test_runbook_automated_gating_clis_are_exit_code_gateable():
+    """The 'Automated gating' section (iter 290) promises every workflow CLI exits 0 only on
+    success so the pipeline chains with ``&&``.  Pin that contract: each of the 5 cited CLIs
+    exposes a ``main(argv)`` entry point (the gateable surface) — a regression removing one,
+    or the runbook citing a non-CLI, breaks the documented automation."""
+    import importlib
+
+    text = _runbook_text()
+    assert "## Automated gating (exit codes)" in text, "runbook lost the gating section"
+    clis = {
+        "scripts.experiment.smoke_compare_reanalysis",
+        "scripts.validate.run_perfect_model_osse",
+        "scripts.run.run_correction_campaign",
+        "scripts.experiment.check_campaign_deploy",
+        "scripts.validate.compare_amip_era5",
+    }
+    for mod_name in clis:
+        # the CLI basename must be cited in the gating section (the table uses basenames;
+        # the campaign is invoked via its .sbatch wrapper) AND expose a callable main(argv).
+        basename = mod_name.rsplit(".", 1)[-1] + ".py"
+        assert basename in text, f"runbook gating section no longer cites {basename}"
+        main = getattr(importlib.import_module(mod_name), "main", None)
+        assert callable(main), f"{mod_name} lost its gateable main()"

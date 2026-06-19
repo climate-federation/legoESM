@@ -131,6 +131,28 @@ $PY scripts/validate/compare_amip_era5.py \
 It reports the per-variable global bias **before vs after** — the clause-5
 "did updating the parameters improve the biases" answer on held-out data.
 
+## Automated gating (exit codes)
+
+Every step exits **0 only on success**, so the whole workflow chains with `&&` (or a
+SLURM dependency) and stops at the first genuine failure:
+
+| step | exit 0 (proceed) | non-zero (stop) |
+|---|---|---|
+| `smoke_compare_reanalysis.py` | the turnkey chain validated | a config/ERA5/dry-run failure |
+| `run_perfect_model_osse.py` | `recovered` / `transferred` | `bias_only` / `no_change` / `out_of_hull` / `diverged` |
+| `run_correction_campaign.py` | health `improved` | `stalled` / `no_change` / `no_valid_diagnoses` / `non_finite_bias` |
+| `check_campaign_deploy.py` | a real per-column correction | a no-op (all-default) output |
+| `compare_amip_era5.py --baseline-restart` | the held-out **combined** bias fell | the correction did not generalize |
+
+```bash
+$PY .../smoke_compare_reanalysis.py && $PY .../run_perfect_model_osse.py … \
+  && sbatch .../run_correction_campaign.sbatch   # the .sbatch already gates on its own dry-run
+  # then, after the run: check_campaign_deploy && deploy && compare_amip_era5 --baseline-restart
+```
+
+The deployable JSON is written even on a non-zero campaign exit (the `health` block records
+why); only the exit *status* gates — a workflow reading the JSON is unaffected.
+
 ---
 
 **Cross-resolution deploy:** run the campaign with `--feedback-strategy environment`
