@@ -1274,6 +1274,23 @@ def _enable_line_buffered_stdout() -> None:
         sys.stdout.reconfigure(line_buffering=True)
 
 
+def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:
+    """Print a per-round progress line to (line-buffered) stdout DURING the run.
+
+    The campaign loop is otherwise SILENT until it returns (the per-round bias table prints
+    only at the end), so a multi-day SLURM run's ``.out`` log showed NO progress —
+    :func:`_enable_line_buffered_stdout`'s real-time-progress promise needs something printed
+    PER ROUND (iter 318).  Lets the operator tell a running campaign from a hung one and watch
+    the bias fall live.  Works for the single + multi result (both carry ``bias`` /
+    ``n_corrected`` / ``n_diagnoses_valid``)."""
+    b = res.bias
+    kept = "kept" if bool(b.improved) else "rejected"
+    print(f"[campaign] round {int(round_idx) + 1}/{int(total_rounds)}: bias "
+          f"{float(b.baseline_bias):.5g} -> {float(b.updated_bias):.5g} ({kept}); "
+          f"{int(res.n_corrected)} cols corrected, "
+          f"{int(res.n_diagnoses_valid)} valid LES diagnoses")
+
+
 def _assert_output_path_writable(path: str, *, flag: str) -> None:
     """Fail LOUD up front if an output ``path``'s parent directory is missing or not
     writable.
@@ -1528,9 +1545,9 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         init_box.update(_seed)
         print(_format_resume_line(args.resume, start_round, _seed, multi=True))
 
-    checkpoint_callback = None
+    _ckpt_write = None
     if args.checkpoint:
-        def checkpoint_callback(round_idx, res, fields):
+        def _ckpt_write(round_idx, res, fields):
             _capture_initial_record(init_box, res)
             # field finiteness asserted (NaN ⇒ unparseable checkpoint / corrupt resume) —
             # the checkpoint analog of the iter-270/245 output guards; the round/grid/
@@ -1541,6 +1558,14 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
                 "fields": {k: _assert_corrected_field_finite(k, np.asarray(v)).reshape(-1).tolist()
                            for k, v in fields.items()},
             })
+
+    # Per-round hook: ALWAYS print real-time progress (iter 318); checkpoint only if requested.
+    _total_rounds = start_round + int(args.iterations)
+
+    def checkpoint_callback(round_idx, res, fields):
+        _print_round_progress(round_idx, res, _total_rounds)
+        if _ckpt_write is not None:
+            _ckpt_write(round_idx, res, fields)
 
     result = build_multi_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1928,9 +1953,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         init_box.update(_seed)
         print(_format_resume_line(args.resume, start_round, _seed))
 
-    checkpoint_callback = None
+    _ckpt_write = None
     if args.checkpoint:
-        def checkpoint_callback(round_idx, res, field):
+        def _ckpt_write(round_idx, res, field):
             # Persist the ACCEPTED accumulated `field` (post-gate base), NOT
             # res.updated_config — under the monotonic gate a rejected round's
             # updated_config is discarded while `field` stays the accepted state.
@@ -1948,6 +1973,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
                 corrected_field: flat.tolist(),
                 "field": arr.tolist(),
             })
+
+    # Per-round hook: ALWAYS print real-time progress (iter 318); checkpoint only if requested.
+    _total_rounds = start_round + int(args.iterations)
+
+    def checkpoint_callback(round_idx, res, field):
+        _print_round_progress(round_idx, res, _total_rounds)
+        if _ckpt_write is not None:
+            _ckpt_write(round_idx, res, field)
 
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,

@@ -785,6 +785,30 @@ def test_assert_output_path_writable(tmp_path, monkeypatch):
         _assert_output_path_writable(str(tmp_path / "ckpt.json"), flag="checkpoint")
 
 
+def test_print_round_progress_emits_a_real_time_line(capsys):
+    """The per-round progress line (iter 318) prints DURING the run (line-buffered) so a
+    multi-day SLURM .out log shows LIVE progress instead of silence until the end — the
+    operator can tell a running campaign from a hung one and watch the bias fall. It always
+    fires (independent of --checkpoint, via the wrapper), off the bias / n_corrected /
+    n_diagnoses_valid every per-round result (single + multi) carries."""
+    from scripts.run.run_correction_campaign import _print_round_progress
+
+    res = SimpleNamespace(
+        bias=SimpleNamespace(baseline_bias=1.0, updated_bias=0.6, improved=True),
+        n_corrected=5, n_diagnoses_valid=3)
+    _print_round_progress(round_idx=2, res=res, total_rounds=10)
+    out = capsys.readouterr().out
+    assert "round 3/10" in out                              # 1-based display of round_idx 2
+    assert "1 -> 0.6" in out and "kept" in out
+    assert "5 cols corrected" in out and "3 valid LES" in out
+    # a non-improving round is labelled 'rejected' (the monotonic gate discarded it).
+    res_rej = SimpleNamespace(
+        bias=SimpleNamespace(baseline_bias=0.6, updated_bias=0.6, improved=False),
+        n_corrected=0, n_diagnoses_valid=0)
+    _print_round_progress(round_idx=3, res=res_rej, total_rounds=10)
+    assert "rejected" in capsys.readouterr().out
+
+
 def test_area_weights_prefers_true_cell_areas():
     """_area_weights returns the grid's TRUE cell areas: grid_area first, then area
     (the bias quadrature must use real areas — incl. Gaussian weights — when present,
