@@ -1383,6 +1383,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     return 0
 
 
+def _env_kernel_export_note(feedback_strategy, has_kernel):
+    """The user-facing note for the env-kernel export decision, or ``None``.
+
+    ``None`` when the kernel IS exported (``has_kernel``) OR a ``static`` / non-CLUBB
+    campaign correctly has none to transfer.  Returns a WARNING string ONLY when an
+    ``environment``-strategy campaign produced NO transferable kernel (every round was
+    no-op or rejected ⇒ no env→coefficient regression) — so a user who ran
+    ``--feedback-strategy environment`` expecting ``<out>.env_kernel.json`` learns WHY
+    it is absent (rather than silently finding no cross-resolution artifact)."""
+    if has_kernel or feedback_strategy != "environment":
+        return None
+    return ("--feedback-strategy environment requested but NO transferable "
+            "env→coefficient kernel was produced (every round was no-op or rejected, so "
+            "there is no regression to export) — no <out>.env_kernel.json written; "
+            "check the LES-diagnosis validity (the campaign health verdict).")
+
+
 def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
     """Export the RAW environment kernel (the grid-AGNOSTIC cross-resolution deploy
     artifact) when the campaign used ``--feedback-strategy environment``.
@@ -1406,6 +1423,10 @@ def _maybe_write_env_kernel(args, result):  # pragma: no cover - HPC path
     # accepted per-column --out). None ⇒ static / non-CLUBB / no-op campaign.
     kernel = last_accepted_env_kernel(result)
     if kernel is None:
+        note = _env_kernel_export_note(
+            getattr(args, "feedback_strategy", "static"), has_kernel=False)
+        if note is not None:
+            print(f"[campaign] WARNING: {note}")
         return
     out = f"{args.out}.env_kernel.json"
     with open(out, "w") as f:

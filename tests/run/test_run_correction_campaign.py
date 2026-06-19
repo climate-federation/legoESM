@@ -30,6 +30,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _campaign_knobs_from_args,
     _capture_initial_record,
     _distributed_campaign_kwargs,
+    _env_kernel_export_note,
     _format_per_variable_bias,
     _per_variable_bias_dict,
     _per_variable_bias_from_dict,
@@ -44,6 +45,20 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
+
+
+def test_env_kernel_export_note():
+    """The env-kernel export note: WARN only when --feedback-strategy environment
+    produced NO kernel; silent (None) when a kernel exists or for static/non-CLUBB."""
+    # Kernel produced ⇒ no note (it gets written).
+    assert _env_kernel_export_note("environment", has_kernel=True) is None
+    # static campaign with no kernel ⇒ silent (correctly has nothing to transfer).
+    assert _env_kernel_export_note("static", has_kernel=False) is None
+    # environment-strategy with NO kernel ⇒ a WARNING explaining the absent artifact.
+    note = _env_kernel_export_note("environment", has_kernel=False)
+    assert note is not None
+    assert "feedback-strategy environment" in note
+    assert "no <out>.env_kernel.json" in note.lower() or "env_kernel.json" in note
 
 
 def test_per_variable_bias_dict_roundtrip():
