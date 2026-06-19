@@ -1512,7 +1512,10 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
     _print_deploy_hint(args.out, grid)
-    return 0
+    # Exit code = the health verdict (iter 287): 0 only when the run IMPROVED, non-zero
+    # otherwise, so an HPC workflow gating on `run_campaign && deploy` does NOT deploy a
+    # no-op/diverged correction. The deployable JSON is written either way.
+    return _campaign_exit_code(health)
 
 
 def _grid_provenance(base_cfg, grid) -> dict:
@@ -1642,6 +1645,14 @@ def _load_multi_resume(ckpt: dict, grid: Any, coefficients, gshape, promo_to_fie
         "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
     }
     return initial_clubb, initial_fields, start_round, init_seed
+
+
+def _campaign_exit_code(health) -> int:
+    """CLI exit status from the campaign health verdict (iter 287): 0 when the run
+    IMPROVED (``health.ok``), 1 otherwise (stalled / no_change / no_valid_diagnoses /
+    non_finite_bias).  Mirrors the OSSE go/no-go so an HPC workflow can gate ``run_campaign
+    && deploy`` on a real improvement instead of deploying a no-op or diverged run."""
+    return 0 if health.ok else 1
 
 
 def _print_deploy_hint(out_path: str, grid) -> None:
@@ -1902,7 +1913,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(f"[campaign] {health.status.upper()}: {health.message}")
     _print_deploy_hint(args.out, grid)
     _maybe_write_env_kernel(args, result)
-    return 0
+    # Exit code = the health verdict (iter 287, mirrors the OSSE go/no-go + the multi
+    # main): 0 only when the run IMPROVED, non-zero otherwise, so a launch workflow does
+    # not deploy a no-op/diverged correction. The deployable JSON is written either way.
+    return _campaign_exit_code(health)
 
 
 def _env_kernel_export_note(feedback_strategy, has_kernel):

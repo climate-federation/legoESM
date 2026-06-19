@@ -464,6 +464,20 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
             les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
 
 
+def test_campaign_exit_code_reflects_health_verdict():
+    """The campaign CLI exit code is the health verdict (iter 287, mirrors the OSSE
+    go/no-go): 0 ONLY when the run IMPROVED, non-zero for every other status — so an HPC
+    workflow gating `run_campaign && deploy` does NOT deploy a no-op (no_change /
+    no_valid_diagnoses / stalled) or diverged (non_finite_bias) correction."""
+    from types import SimpleNamespace
+
+    from scripts.run.run_correction_campaign import _campaign_exit_code
+
+    assert _campaign_exit_code(SimpleNamespace(ok=True, status="improved")) == 0
+    for status in ("stalled", "no_change", "no_valid_diagnoses", "non_finite_bias"):
+        assert _campaign_exit_code(SimpleNamespace(ok=False, status=status)) == 1
+
+
 def test_build_correction_campaign_rejects_unknown_diagnosis_method():
     """Dispatch hardening (iter 285): an unknown ``diagnosis_method`` RAISES (no silent
     default).  The method→coefficient resolution fires BEFORE any run (and before the
