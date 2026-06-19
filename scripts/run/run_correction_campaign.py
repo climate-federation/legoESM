@@ -1010,6 +1010,30 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
             "health": {"status": health.status, "message": health.message}}
 
 
+def _assert_output_path_writable(path: str, *, flag: str) -> None:
+    """Fail LOUD up front if an output ``path``'s parent directory is missing or not
+    writable.
+
+    The campaign opens ``--out`` only at the very END of the (multi-day) run, so a
+    typo'd or unwritable directory would otherwise crash ``json.dump`` AFTER burning
+    the whole run.  This millisecond pre-flight catches it at launch instead.  The
+    parent dir is NOT auto-created (a missing dir is far more likely a typo than the
+    user's intent — surfacing it is safer than silently scattering output).
+    """
+    import os
+
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    if not os.path.isdir(parent):
+        raise SystemExit(
+            f"--{flag} {path!r}: parent directory {parent!r} does not exist — create "
+            f"it or fix the path before launching (the campaign writes --{flag} only "
+            f"at the END of the multi-day run).")
+    if not os.access(parent, os.W_OK):
+        raise SystemExit(
+            f"--{flag} {path!r}: parent directory {parent!r} is not writable — fix "
+            f"permissions or choose a writable path before launching.")
+
+
 def _area_weights(grid):
     """Per-column quadrature weights for the bias aggregation.
 
@@ -1283,6 +1307,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
 
     refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
+    # Pre-flight: fail in milliseconds (not after a multi-day run) on an unwritable
+    # output path — --out is opened only at the very end, --checkpoint each round.
+    _assert_output_path_writable(args.out, flag="out")
+    if args.checkpoint:
+        _assert_output_path_writable(args.checkpoint, flag="checkpoint")
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
 
     # Run mode: AMIP (prescribed SST) or CMIP (coupled ocean on the SAME grid as

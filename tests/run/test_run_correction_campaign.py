@@ -27,6 +27,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
     _area_weights,
+    _assert_output_path_writable,
     _build_arg_parser,
     _campaign_knobs_from_args,
     _capture_initial_record,
@@ -266,6 +267,24 @@ def test_resolve_orographic_phis_unknown_mode_raises():
     constrains the CLI, but the helper must not silently accept a typo)."""
     with pytest.raises(ValueError, match="unknown orographic_forcing mode"):
         resolve_orographic_phis("terrain", lambda: jnp.zeros((4, 8)))
+
+
+def test_assert_output_path_writable(tmp_path, monkeypatch):
+    """The launch pre-flight fails LOUD (in ms) on an unwritable --out/--checkpoint so
+    a multi-day run never crashes at the final json.dump: a writable existing dir is
+    accepted; a MISSING parent dir raises 'does not exist'; a non-writable parent (here
+    via a patched os.access) raises 'not writable'. The flag name is surfaced."""
+    import os
+
+    # Writable existing directory → no raise.
+    _assert_output_path_writable(str(tmp_path / "out.json"), flag="out")
+    # Missing parent directory → fail loud (more likely a typo than intent).
+    with pytest.raises(SystemExit, match="does not exist"):
+        _assert_output_path_writable(str(tmp_path / "nope" / "out.json"), flag="out")
+    # Non-writable parent (the dir exists but W_OK is denied) → fail loud.
+    monkeypatch.setattr(os, "access", lambda p, mode: False)
+    with pytest.raises(SystemExit, match="not writable"):
+        _assert_output_path_writable(str(tmp_path / "ckpt.json"), flag="checkpoint")
 
 
 def test_area_weights_prefers_true_cell_areas():
