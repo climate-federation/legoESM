@@ -299,7 +299,7 @@ def test_osse_main_wiring_monkeypatched(monkeypatch):
     monkeypatch.setattr(rcc, "load_base_config_and_grid",
                         lambda path: (object(), object(), object()))
     monkeypatch.setattr(rcc, "make_base_driver_builder",
-                        lambda mode, coupled_preset=None: ((lambda c: None),
+                        lambda mode, coupled_preset=None, ocean_grid=None: ((lambda c: None),  # noqa: ARG005
                                                            (lambda d, day, dt: None)))
     monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones((1, 1)))
     monkeypatch.setattr(rcc, "resolve_orographic_phis",
@@ -336,7 +336,7 @@ def test_osse_main_returns_nonzero_when_not_recovered(monkeypatch):
     monkeypatch.setattr(rcc, "load_base_config_and_grid",
                         lambda path: (object(), object(), object()))
     monkeypatch.setattr(rcc, "make_base_driver_builder",
-                        lambda mode, coupled_preset=None: ((lambda c: None),
+                        lambda mode, coupled_preset=None, ocean_grid=None: ((lambda c: None),  # noqa: ARG005
                                                            (lambda d, day, dt: None)))
     monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones((1, 1)))
     monkeypatch.setattr(rcc, "resolve_orographic_phis",

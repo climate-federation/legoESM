@@ -232,38 +232,20 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: build the real driver, run the OSSE, print the recovery verdict."""
-    from functools import partial
-
-    from legoesm.atmosphere.dynamics.column_les import (
-        ColumnLESConfig,
-        run_forced_les,  # the only module that defines it (rce_diagnostics never did)
-    )
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
-    from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.perfect_model_osse import osse_verdict
 
-    from scripts.run.run_correction_campaign import (
-        _area_weights,
-        _les_n_steps,
-        load_base_config_and_grid,
-        make_base_driver_builder,
-        resolve_orographic_phis,
-    )
+    from scripts.run.run_correction_campaign import _area_weights, _build_run_setup
 
     args = _build_argparser().parse_args(argv)
-    base_cfg, grid, sigma = load_base_config_and_grid(args.config)
-    build_base_driver, extract_fn = make_base_driver_builder(
-        args.mode, coupled_preset=args.coupled_preset)
-    n_steps = _les_n_steps(args.les_hours, args.les_dt)
-    run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
-
-    # Orographic LES-forcing topography: resolved the SAME way as the real campaign
-    # CLI (iter 126) via the side-effect-free probe, so this go/no-go OSSE uses the
-    # identical forcing the campaign will — otherwise a terrain run's pre-flight
-    # would not predict the real run. base_cfg is the atm config for both modes.
-    phis = resolve_orographic_phis(
-        args.orographic_forcing,
-        lambda: ModelDriver(base_cfg).static_topography_phis())
+    # Shared run-setup preamble (iter 295): config/grid/sigma + driver builder (with the
+    # RESOLVED coupled preset — the OSSE previously passed the RAW --coupled-preset name to
+    # make_base_driver_builder, the iter-240 'str' has no attribute ocean_mode crash in
+    # CMIP mode) + the CFL-checked LES runner + the orographic phis (identical to the real
+    # campaign's, so this go/no-go predicts the real run — iter 126/127).
+    base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
+        args)
 
     field = METHOD_PROMOTION[args.diagnosis_method][1]
     result = build_perfect_model_osse(

@@ -522,6 +522,26 @@ def test_checkpoint_resume_count_roundtrip(monkeypatch):
     assert bare["n_diagnosed_prior"] == 0 and bare["initial_bias"] is None
 
 
+def test_resolve_coupled_preset_resolves_not_passes_raw_name():
+    """_resolve_coupled_preset (iter 295) returns the RESOLVED CoupledConfig for --mode
+    cmip — make_base_driver_builder reads ``preset.ocean_mode``, so the raw --coupled-preset
+    NAME string crashes ('str' has no attribute ocean_mode, iter 240); the OSSE CLI had that
+    latent bug (passed the raw name). AMIP → None; an unknown preset → a fail-loud SystemExit."""
+    from types import SimpleNamespace
+
+    from legoesm.driver.coupled_config import PRESETS
+
+    from scripts.run.run_correction_campaign import _resolve_coupled_preset
+
+    assert _resolve_coupled_preset(SimpleNamespace(mode="amip", coupled_preset=None)) is None
+    name = sorted(PRESETS)[0]
+    resolved = _resolve_coupled_preset(SimpleNamespace(mode="cmip", coupled_preset=name))
+    assert not isinstance(resolved, str) and resolved is not None  # resolved object, NOT name
+    assert hasattr(resolved, "ocean_mode")          # the attr make_base_driver_builder reads
+    with pytest.raises(SystemExit, match="unknown --coupled-preset"):
+        _resolve_coupled_preset(SimpleNamespace(mode="cmip", coupled_preset="bogus_preset"))
+
+
 def test_build_campaign_harness_returns_the_shared_wiring():
     """_build_campaign_harness (iter 292) factors the compare/diagnose/env-grid wiring that
     was BYTE-IDENTICAL in the single + multi campaign builders: a callable compare_fn +

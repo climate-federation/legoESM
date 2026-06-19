@@ -785,6 +785,52 @@ def make_base_driver_builder(
     )
 
 
+def _resolve_coupled_preset(args):
+    """The RESOLVED coupled preset object for ``--mode cmip`` (``None`` for AMIP).
+
+    ``make_base_driver_builder`` needs a RESOLVED ``CoupledConfig`` (it reads
+    ``preset.ocean_mode`` …), NOT the ``--coupled-preset`` NAME string — passing the raw
+    name is the iter-240 ``'str' has no attribute ocean_mode`` crash.  Validated against
+    ``PRESETS`` with a fail-loud ``SystemExit`` on an unknown name.  Shared by the campaign
+    + OSSE CLIs so the OSSE CMIP go/no-go uses the SAME resolution the campaign does (it
+    previously passed the raw name — a latent bug in the untested ``pragma:no-cover`` main).
+    """
+    if args.mode != "cmip":
+        return None
+    from legoesm.driver.coupled_config import PRESETS
+
+    if args.coupled_preset not in PRESETS:
+        raise SystemExit(
+            f"unknown --coupled-preset {args.coupled_preset!r}; "
+            f"choose from {sorted(PRESETS)}")
+    return PRESETS[args.coupled_preset]()
+
+
+def _build_run_setup(args):
+    """The run-setup preamble SHARED by the campaign + OSSE CLIs (CLAUDE.md: no duplicate
+    wiring): load the base config/grid/sigma, build the mode-specific driver builder +
+    column extractor (with the RESOLVED coupled preset — :func:`_resolve_coupled_preset`),
+    the CFL-checked forced-LES runner, and the orographic ``phis`` (the model's OWN static
+    topography via the side-effect-free probe, so the OSSE go/no-go uses the IDENTICAL
+    forcing the real campaign will — iter 126/127).  Returns ``(base_cfg, grid, sigma,
+    build_base_driver, extract_fn, run_les, phis)``; the campaign adds the ERA5 reference,
+    the OSSE adds the pseudo-truth.
+    """
+
+    from legoesm.atmosphere.dynamics.column_les import run_forced_les
+    from legoesm.driver.model_driver import ModelDriver
+
+    base_cfg, grid, sigma = load_base_config_and_grid(args.config)
+    build_base_driver, extract_fn = make_base_driver_builder(
+        args.mode, coupled_preset=_resolve_coupled_preset(args), ocean_grid=None)
+    n_steps = _les_n_steps(args.les_hours, args.les_dt)
+    run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
+    phis = resolve_orographic_phis(
+        args.orographic_forcing,
+        lambda: ModelDriver(base_cfg).static_topography_phis())
+    return base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis
+
+
 def _resolve_era5_n_times(n_times: int) -> int:
     """Validate the ``--era5-n-times`` averaging window LOUDLY, returning the int.
 
@@ -1784,7 +1830,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     import json
 
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
     from legoesm.training.compare_reanalysis import column_state_from_carry
     from legoesm.training.era5_to_state import (
         TrainingERA5Config,
@@ -1805,21 +1851,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _assert_output_path_writable(args.out, flag="out")
     if args.checkpoint:
         _assert_output_path_writable(args.checkpoint, flag="checkpoint")
-    base_cfg, grid, sigma = load_base_config_and_grid(args.config)
-
-    # Run mode: AMIP (prescribed SST) or CMIP (coupled ocean on the SAME grid as
-    # the atmosphere — ocean_grid=None lets the coupled driver use its own atm
-    # grid, an identity remap, so the ocean SST lands on the atm column shape).
-    coupled_preset = None
-    if args.mode == "cmip":
-        from legoesm.driver.coupled_config import PRESETS
-        if args.coupled_preset not in PRESETS:
-            raise SystemExit(
-                f"unknown --coupled-preset {args.coupled_preset!r}; "
-                f"choose from {sorted(PRESETS)}")
-        coupled_preset = PRESETS[args.coupled_preset]()
-    build_base_driver, extract_fn = make_base_driver_builder(
-        args.mode, coupled_preset=coupled_preset, ocean_grid=None)
+    # Run-setup preamble (config/grid/sigma + driver builder with the RESOLVED coupled
+    # preset + the CFL-checked LES runner + the orographic phis) — shared with the OSSE
+    # CLI via _build_run_setup (iter 295).
+    base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
+        args)
 
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).
@@ -1832,20 +1868,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
         range(args.era5_time_idx, args.era5_time_idx + n_times))
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
-
-    n_steps = _les_n_steps(args.les_hours, args.les_dt)
-    run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
-
-    # Orographic LES-forcing topography: the model's OWN static phis (so it is
-    # CONSISTENT with the AMIP/CMIP run that produces the comparison state), built
-    # via a SIDE-EFFECT-FREE probe (ModelDriver.static_topography_phis — no manifest
-    # / output-dir writes). Resolved ONCE here and threaded into BOTH the single-
-    # and multi-coefficient paths. base_cfg is the atm config for both modes, so the
-    # probe's topography equals the CMIP coupled driver's atm topography too.
-    from legoesm.driver.model_driver import ModelDriver
-    phis = resolve_orographic_phis(
-        args.orographic_forcing,
-        lambda: ModelDriver(base_cfg).static_topography_phis())
 
     if args.coefficients is not None:
         return _run_multi_main(
