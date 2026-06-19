@@ -21,15 +21,18 @@ def _base_config(tmp_path, resolution=8, nlev=5):
 
 
 def _campaign_output(tmp_path, base_cfg, grid, *, name="out.json", field="C_K",
-                     lo=0.3, hi=0.6, grid_for_provenance=None):
+                     lo=0.3, hi=0.6, grid_for_provenance=None, averaging=None):
     from scripts.run.run_correction_campaign import _grid_provenance
 
     ncol = int(np.prod(grid.grid_shape_2d))
     out = tmp_path / name
+    payload = {field: list(np.linspace(lo, hi, ncol)),
+               "grid": _grid_provenance(base_cfg, grid_for_provenance or grid),
+               "biases": [1.0, 0.5], "accepted": [True]}
+    if averaging is not None:
+        payload["averaging"] = averaging
     with open(out, "w") as f:
-        json.dump({field: list(np.linspace(lo, hi, ncol)),
-                   "grid": _grid_provenance(base_cfg, grid_for_provenance or grid),
-                   "biases": [1.0, 0.5], "accepted": [True]}, f)
+        json.dump(payload, f)
     return str(out)
 
 
@@ -47,6 +50,38 @@ def test_check_deploy_validates_and_reports_stats(tmp_path):
     assert set(stats["corrected"]) == {"C_K"}            # only C_K was corrected
     assert stats["corrected"]["C_K"]["min"] == pytest.approx(0.3)
     assert stats["corrected"]["C_K"]["max"] == pytest.approx(0.6)
+
+
+def test_check_deploy_surfaces_averaging_provenance_for_the_deployer(tmp_path, capsys):
+    """The deploy-check surfaces the SOURCE climate (iter 277) so the deployer — possibly
+    a different person weeks later — confirms a snapshot-trained vs climatology-trained
+    correction before deploying. Absent → no source line (back-compat); snapshot → a
+    confirm-intent note."""
+    from scripts.experiment.check_campaign_deploy import check_deploy, main
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+
+    # absent averaging (a pre-267 output) → stats key is None, no source line printed.
+    out0 = _campaign_output(tmp_path, base_cfg, grid, name="no_av.json")
+    assert check_deploy(cfg, out0)["averaging"] is None
+    main(["--base-config", cfg, "--campaign-output", out0])
+    assert "source:" not in capsys.readouterr().out
+
+    # climatology → the source line names it; snapshot → adds the confirm-intent note.
+    clim = _campaign_output(tmp_path, base_cfg, grid, name="clim.json",
+                            averaging={"era5_n_times": 30, "era5_time_idx": 12})
+    assert check_deploy(cfg, clim)["averaging"] == {"era5_n_times": 30, "era5_time_idx": 12}
+    main(["--base-config", cfg, "--campaign-output", clim])
+    o = capsys.readouterr().out
+    assert "30-time ERA5 climatology @ idx 12" in o and "confirm this matches" not in o
+
+    snap = _campaign_output(tmp_path, base_cfg, grid, name="snap.json",
+                            averaging={"era5_n_times": 1, "era5_time_idx": 5})
+    main(["--base-config", cfg, "--campaign-output", snap])
+    o = capsys.readouterr().out
+    assert "SINGLE ERA5 snapshot @ idx 5" in o and "confirm this matches your deploy" in o
 
 
 def test_main_returns_zero_and_prints_ok(tmp_path, capsys):

@@ -100,10 +100,20 @@ def check_deploy(
             n_columns = int(arr.reshape(-1).shape[0])
             corrected[field] = {
                 "min": float(arr.min()), "max": float(arr.max())}
+    # The averaging-window provenance (iter 267): the DEPLOYER (possibly a different
+    # person, weeks after the campaign) confirms the SOURCE climate before deploying a
+    # saved correction — a snapshot-trained correction is a different quantity than a
+    # climatology-trained one. Re-read the raw output (build_deployed_config consumed it
+    # for the field; this picks up the metadata it does not need).
+    import json
+
+    with open(campaign_output_path) as f:
+        averaging = json.load(f).get("averaging")
     return {
         "n_columns": n_columns,
         "corrected": corrected,
         "grid_shape": tuple(int(d) for d in getattr(grid, "grid_shape_2d", ())),
+        "averaging": averaging,
     }
 
 
@@ -132,6 +142,14 @@ def main(argv: list[str] | None = None) -> int:
           "validate_strict-sound; inject it at runtime via corrected_turbulence_override.")
     for field, rng in sorted(fields.items()):
         print(f"    {field}: [{rng['min']:.4g}, {rng['max']:.4g}]")
+    av = stats.get("averaging")
+    if av:                                                  # source-climate provenance (267)
+        n = int(av.get("era5_n_times", 1))
+        idx = av.get("era5_time_idx")
+        kind = "a SINGLE ERA5 snapshot" if n == 1 else f"an {n}-time ERA5 climatology"
+        note = ("  (a snapshot-trained correction — confirm this matches your deploy "
+                "intent)") if n == 1 else ""
+        print(f"    source: corrected against {kind} @ idx {idx}{note}")
     return 0
 
 
