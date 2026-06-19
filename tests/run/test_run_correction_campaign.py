@@ -33,10 +33,12 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _distributed_campaign_kwargs,
     _env_kernel_export_note,
     _format_per_variable_bias,
+    _json_finite,
     _per_variable_bias_dict,
     _per_variable_bias_from_dict,
     _per_variable_to_json,
     _resolve_era5_n_times,
+    _summary_to_json,
     build_campaign_output_dict,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
@@ -126,6 +128,46 @@ def test_capture_initial_record():
     box2 = {"initial_bias": None, "initial_per_variable": None}
     _capture_initial_record(box2, _res(float("nan"), 8.0))
     assert box2["initial_bias"] is None
+
+
+def test_json_finite_maps_nonfinite_to_none():
+    """_json_finite: finite floats pass through; NaN AND ±inf map to None (valid JSON
+    null), None passes through. Non-vacuous: covers the ±inf fractional_reduction case
+    (initial_bias==0) that math.isnan alone would have missed."""
+    assert _json_finite(1.5) == pytest.approx(1.5)
+    assert _json_finite(0.0) == 0.0
+    assert _json_finite(float("nan")) is None
+    assert _json_finite(float("inf")) is None
+    assert _json_finite(float("-inf")) is None
+    assert _json_finite(None) is None
+
+
+def test_summary_to_json_diverged_biases_serialize_as_null():
+    """A DIVERGED run (the iter-161 non_finite_bias case) has a NaN final_bias and a
+    ±inf fractional_reduction; _summary_to_json must serialize them as JSON null (not a
+    non-standard NaN/Infinity token) so the output file is STANDARD JSON and consistent
+    with the per-variable convention. The finite initial_bias survives unchanged."""
+    import json
+    from types import SimpleNamespace
+
+    summary = SimpleNamespace(
+        n_rounds=2, n_accepted=0, acceptance_rate=0.0, stop_reason="max_iterations",
+        initial_bias=5.0, final_bias=float("nan"),
+        absolute_reduction=float("nan"), fractional_reduction=float("inf"),
+        n_diagnosed_total=4, n_diagnoses_valid_total=2, per_variable=None,
+        coefficients=())
+    out = _summary_to_json(summary)
+    assert out["initial_bias"] == pytest.approx(5.0)         # finite survives
+    assert out["final_bias"] is None                          # NaN -> null
+    assert out["absolute_reduction"] is None
+    assert out["fractional_reduction"] is None                # +inf -> null
+    # The dict is STANDARD JSON (no NaN/Infinity tokens) under the strict parser.
+    reparsed = json.loads(json.dumps(out), parse_constant=_reject_nonstandard)
+    assert reparsed["final_bias"] is None
+
+
+def _reject_nonstandard(token):  # pragma: no cover - only fires on a regression
+    raise AssertionError(f"non-standard JSON token {token!r} in summary output")
 
 
 def test_per_variable_to_json_nan_precip_is_null():

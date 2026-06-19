@@ -925,14 +925,32 @@ def _per_variable_to_json(pv):
     }
 
 
-def _summary_to_json(summary):  # pragma: no cover - HPC path
+def _json_finite(x):
+    """A float-or-``None`` for JSON: a non-finite metric (NaN/±inf) serializes as
+    ``null`` (valid JSON), never a non-standard ``NaN``/``Infinity`` token.
+
+    Matches the per-variable convention (:func:`_per_variable_bias_dict`) so a
+    DIVERGED run's biases (the iter-161 ``non_finite_bias`` health case — NaN
+    ``final_bias``, or a ±inf ``fractional_reduction`` when ``initial_bias==0``)
+    write consistently as ``null`` across the whole output dict.  ``None`` passes
+    through unchanged."""
+    import math
+
+    if x is None:
+        return None
+    v = float(x)
+    return v if math.isfinite(v) else None
+
+
+def _summary_to_json(summary):
     """JSON-serializable form of a :class:`CampaignSummary` for the output file."""
     return {
         "n_rounds": summary.n_rounds, "n_accepted": summary.n_accepted,
         "acceptance_rate": summary.acceptance_rate, "stop_reason": summary.stop_reason,
-        "initial_bias": summary.initial_bias, "final_bias": summary.final_bias,
-        "absolute_reduction": summary.absolute_reduction,
-        "fractional_reduction": summary.fractional_reduction,
+        "initial_bias": _json_finite(summary.initial_bias),
+        "final_bias": _json_finite(summary.final_bias),
+        "absolute_reduction": _json_finite(summary.absolute_reduction),
+        "fractional_reduction": _json_finite(summary.fractional_reduction),
         "n_diagnosed_total": summary.n_diagnosed_total,
         "n_diagnoses_valid_total": summary.n_diagnoses_valid_total,
         "per_variable_bias": _per_variable_to_json(summary.per_variable),
