@@ -72,6 +72,23 @@ def test_validate_reference_physical_catches_g_per_kg_humidity():
         validate_reference_physical(bad)
 
 
+def test_validate_reference_physical_catches_out_of_range_sst():
+    """An out-of-range reference SST is caught (iter 282) — the SST-bounds check the
+    other validate tests (T/p_s/q_v) don't cover.  This is the safety net for the
+    ``era5_to_state`` loader's ZERO-FILL of a MISSING ERA5 skin_temperature: a 0 K SST
+    (far below sst_min 250 K) fails LOUD here instead of a 0 K env tag silently driving
+    the comparison.  Also catches a Celsius SST (20 °C read as 20 K)."""
+    zero = _uniform_state((4,), 3, T=285.0, sst=0.0)       # the era5 zero-fill (no SST)
+    with pytest.raises(ValueError, match=r"sst_K outside.*K"):
+        validate_reference_physical(zero)
+    celsius = _uniform_state((4,), 3, T=285.0, sst=20.0)   # 20 °C as 20 K, << 250 K
+    with pytest.raises(ValueError, match=r"sst_K outside.*K"):
+        validate_reference_physical(celsius)
+    # a plausible SST (290 K) passes — the bound is not over-tight.
+    assert validate_reference_physical(
+        _uniform_state((4,), 3, T=285.0, sst=290.0)) is None
+
+
 def test_validate_reference_physical_catches_negative_humidity():
     """ERA5 q is non-negative — a meaningfully negative q_v (a fill/sign/loader bug)
     is rejected (the floor is a roundoff tolerance, NOT the model overshoot one;
