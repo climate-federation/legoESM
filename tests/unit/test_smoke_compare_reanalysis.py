@@ -51,6 +51,23 @@ def test_run_smoke_uses_operator_provided_era5_store(tmp_path):
     assert provided.exists()
 
 
+def test_run_smoke_cmip_mode_validates_the_coupled_driver(tmp_path):
+    """The CMIP path must also preflight — both done-criterion modes (AMIP + CMIP),
+    not just the AMIP default.
+
+    ``mode='cmip'`` threads ``--mode cmip`` to the campaign, which builds a
+    ``CoupledESMDriver`` (interactive ocean) via the ``--coupled-preset aquaplanet``
+    default during the dry-run construction.  A regression in the coupled-driver
+    preflight (or a removed coupled-preset default) would otherwise slip past the
+    AMIP-only tests.
+    """
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    rc = run_smoke(str(tmp_path), mode="cmip", resolution=8, nlev=5,
+                   era5_nlat=8, era5_nlon=16)
+    assert rc == 0                                          # coupled-driver dry-run validated
+
+
 def test_run_smoke_raises_loudly_if_config_generation_fails(tmp_path, monkeypatch):
     """A failure in an EARLY stage (config gen) must abort with a clear error rather
     than silently dry-running against a missing/garbage config."""
