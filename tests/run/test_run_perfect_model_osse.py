@@ -124,6 +124,60 @@ def test_build_perfect_model_osse_wiring():
     assert osse_verdict(res).status in {"recovered", "bias_only", "no_change"}
 
 
+def test_build_perfect_model_osse_threads_phis(monkeypatch):
+    """iter-120 symmetry with the campaign (iter 118): BOTH OSSE builders
+    (single + multi) forward the optional static topography `phis` to
+    make_les_diagnose_fn, so the OSSE go/no-go can use real terrain.
+    make_les_diagnose_fn is stubbed (raising to short-circuit the heavy OSSE run)
+    to pin ONLY the phis threading; the default forwards None (flat)."""
+    import pytest
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.validate.run_perfect_model_osse as ro
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def fake_make(grid, sigma, *, les_config, run_les_fn, phis=None):  # noqa: ARG001
+        captured["phis"] = phis
+        raise _StopError  # short-circuit before the heavy OSSE run
+
+    monkeypatch.setattr(ro, "make_les_diagnose_fn", fake_make)
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    common = dict(
+        base_atm_config=_base_config(), build_base_driver=_ck_sensitive_base,
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        sigma=sigma, grid=grid, area_weights=jnp.ones((8, 16)),
+        true_clubb=CLUBBLiteConfig(C_K=0.9), biased_clubb=CLUBBLiteConfig(C_K=0.4),
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1)
+
+    phis_grid = jnp.zeros((8, 16))
+    with pytest.raises(_StopError):
+        build_perfect_model_osse(**common, phis=phis_grid)
+    assert captured["phis"] is phis_grid          # forwarded to make_les_diagnose_fn
+    with pytest.raises(_StopError):
+        build_perfect_model_osse(**common)        # default → None (flat)
+    assert captured["phis"] is None
+
+    # build_multi_perfect_model_osse threads phis identically (Codex coverage).
+    captured.clear()
+    multi = {**common,
+             "true_clubb": CLUBBLiteConfig(C_K=0.9, Pr_t=0.5, C_eps=0.3),
+             "biased_clubb": CLUBBLiteConfig(C_K=0.4, Pr_t=0.33, C_eps=0.1),
+             "les_config": ColumnLESConfig(regime=_SMALL_REGIME)}
+    with pytest.raises(_StopError):
+        build_multi_perfect_model_osse(
+            **multi, coefficients=("C_K", "Pr_t", "C_eps"), phis=phis_grid)
+    assert captured["phis"] is phis_grid
+
+
 def test_build_multi_perfect_model_osse_wiring():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate

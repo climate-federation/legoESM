@@ -57,6 +57,7 @@ def build_perfect_model_osse(
     n_iterations: int,
     lat_deg: Any | None = None,
     lon_deg: Any | None = None,
+    phis: Any | None = None,
     **osse_kwargs: Any,
 ):
     """Wire the real driver/LES and run a perfect-model OSSE.
@@ -98,7 +99,7 @@ def build_perfect_model_osse(
             lat_deg=lat_deg, lon_deg=lon_deg)
 
     diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
     _production_loop_defaults(osse_kwargs, sigma)
 
@@ -128,6 +129,7 @@ def build_multi_perfect_model_osse(
     sequential: bool = False,
     lat_deg: Any | None = None,
     lon_deg: Any | None = None,
+    phis: Any | None = None,
     **osse_kwargs: Any,
 ):
     """Wire the real driver/LES and run a SIMULTANEOUS multi-coefficient OSSE.
@@ -172,7 +174,7 @@ def build_multi_perfect_model_osse(
             lat_deg=lat_deg, lon_deg=lon_deg)
 
     diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
     _production_loop_defaults(osse_kwargs, sigma)
 
