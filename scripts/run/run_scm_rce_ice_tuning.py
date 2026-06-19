@@ -43,6 +43,9 @@ import jax.numpy as jnp
 _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+_SCRIPTS_RUN = str(Path(__file__).resolve().parent)  # for run_scm_rce_campaign
+if _SCRIPTS_RUN not in sys.path:
+    sys.path.insert(0, _SCRIPTS_RUN)
 
 from legoesm import constants
 from legoesm.atmosphere.physics import (
@@ -54,8 +57,8 @@ from legoesm.atmosphere.physics import (
     GravityWaveDragConfig,
 )
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
-from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics.microphysics.config import (
+    MorrisonConfig,
     __param_spec__ as _MICRO_PARAM_SPEC,
 )
 from legoesm.atmosphere.scm import SingleColumnModel
@@ -119,68 +122,83 @@ def build_initial_profiles(nlev: int, T_sfc: float):
     return T, q_v
 
 
-def make_cfg(overrides: dict, *, rad_interval: int) -> PhysicsConfig:
-    """rrtmgp (resolved clouds) + morrison + mass-flux convection + Louis BL.
+def _radiation_cfg(radiation: str, rad_interval: int) -> RadiationConfig:
+    """Radiation deck for the sweep.
 
-    ``overrides`` splices traced leaves into a NEW MorrisonConfig via ``_replace``
-    (production MorrisonConfig() defaults are untouched)."""
-    _assert_in_bounds(overrides)
-    morrison = MorrisonConfig()._replace(**{k: float(v) for k, v in overrides.items()})
-    return PhysicsConfig(
-        radiation=RadiationConfig(
+    'rrtmgp' = the LEAN rrtmgp deck (resolved clouds + include_clouds) — the
+    physically faithful cloud-radiative feedback, but its CPU LLVM codegen is
+    memory-fragile (fails ~dylib_9) and on GPU each trial RECOMPILES the heavy
+    graph (~tens of min x N trials).  'gray' = a cheap deck that compiles in
+    seconds: NO cloud-radiative feedback, but the ICE-BUDGET RANKING (relative
+    supercooled-liquid fraction across levers) is MICROPHYSICS-driven, so gray
+    gives the valid lever ranking quickly; use rrtmgp for a few anchor points."""
+    if radiation == "gray":
+        return RadiationConfig(scheme="gray", diurnal_cycle=False,
+                               update_interval_steps=rad_interval)
+    if radiation == "rrtmgp":
+        return RadiationConfig(
             scheme="rrtmgp", cloud_scheme="resolved",
-            # include_clouds=True so the resolved q_c/q_i cloud optics are
-            # honoured by the RRTMGP solver (the cloud-radiation gate rejects
-            # cloud_scheme='resolved' with the default include_clouds=False).
-            rrtmgp=RRTMGPConfig(include_clouds=True),
-            update_interval_steps=rad_interval, diurnal_cycle=False,
-        ),
-        convection=ConvectionConfig(scheme="mass_flux"),
+            # FORWARD rrtmgp deck for CPU/GPU/TPU. gpoint_batch_size=16 = the
+            # vmap-over-blocks g-point path (no prevent_cse checkpoint, ~15
+            # batched kernels). Combined with the optics-table
+            # optimization_barriers (gas_optics.py + cloud_optics.py) that stop
+            # XLA constant-folding the per-band/g-point table slices into the
+            # kernels, this keeps the rrtmgp executable under the XLA-CPU
+            # LLVM-JIT code-region limit and speeds GPU/TPU compile.
+            rrtmgp=RRTMGPConfig(include_clouds=True, gpoint_batch_size=16),
+            update_interval_steps=rad_interval, diurnal_cycle=False)
+    raise ValueError(f"radiation must be 'rrtmgp' or 'gray', got {radiation!r}")
+
+
+def make_cfg(overrides: dict, *, rad_interval: int,
+             radiation: str = "rrtmgp",
+             convection: str = "mass_flux") -> PhysicsConfig:
+    """rrtmgp (resolved clouds, include_clouds) or gray + morrison + convection +
+    Louis BL, with the ice-budget ``overrides`` spliced into a NEW MorrisonConfig
+    via ``_replace`` (production defaults untouched).
+
+    DELIBERATELY a LEAN rrtmgp deck, NOT the campaign's full RCEMIP deck
+    (``make_physics_config``: MLS ozone + SAM ocean albedo + RCEMIP insolation).
+    That fuller deck reliably FAILS CPU LLVM codegen — ``JaxRuntimeError:
+    Failed to materialize symbols`` in ``two_stream.solve_sw`` at ~the 4th JIT
+    dylib (the SW solver's lax.cond fusions exceed the host codegen budget) —
+    whereas this lean deck compiles + runs (smoke-verified).  The ICE-BUDGET
+    RANKING is the RELATIVE supercooled-liquid fraction across levers that ALL
+    share this SAME deck, so it is robust to the absolute radiation climate; the
+    lean deck is the right tool for the ranking objective (the full RCEMIP deck
+    is for absolute-realism scoring, out of scope here)."""
+    _assert_in_bounds(overrides)
+    morrison = MorrisonConfig()._replace(
+        **{k: float(v) for k, v in overrides.items()})
+    return PhysicsConfig(
+        radiation=_radiation_cfg(radiation, rad_interval),
+        convection=ConvectionConfig(scheme=convection),
         turbulence=TurbulenceConfig(scheme="louis"),
         microphysics=MicrophysicsConfig(scheme="morrison", morrison=morrison),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
 
 
-def run_column(overrides: dict, *, nlev: int, dt: float, days: float,
-               T_sfc: float, lat: float, rad_interval: int) -> dict:
-    """Equilibrate one column; return per-level T/q_c/q_i + the supercooled-
-    liquid fraction (mass-weighted q_c at T<T_freeze / total q_c) and column
-    LWP/IWP."""
-    T0, qv0 = build_initial_profiles(nlev, T_sfc)
-    cfg = make_cfg(overrides, rad_interval=rad_interval)
-    nsteps = max(1, int(days * 86400.0 / dt))
-    scm = SingleColumnModel.create(
-        physics_config=cfg, nlev=nlev, dt=dt,
-        T_profile=T0, q_v_profile=qv0, latitude_deg=lat,
-        time_integrator="forward_euler",
-    )
-    final, _hist = scm.run(nsteps=nsteps, save_every=max(1, nsteps // 10))
-
-    T = np.asarray(final.T.data[0, 0, 0])                       # (nlev,)
-    tr = final.tracers
+def _column_diag(state, dsigma, nlev: int) -> dict:
+    """Per-level T/q_c/q_i + the supercooled-liquid fraction (mass-weighted q_c
+    at T<T_freeze / total q_c) + column LWP/IWP, from a column state."""
+    T = np.asarray(state.T.data[0, 0, 0])
+    tr = state.tracers or {}
     q_c = np.asarray(tr["q_c"].data[0, 0, 0]) if "q_c" in tr else np.zeros(nlev)
     q_i = np.asarray(tr["q_i"].data[0, 0, 0]) if "q_i" in tr else np.zeros(nlev)
-    p_s = float(final.p_s.data[0, 0, 0])
-    dsig = np.asarray(scm.sigma_coord.dsigma)                   # (nlev,)
-    dp = dsig * p_s                                             # [Pa]
-
+    p_s = float(state.p_s.data[0, 0, 0])
+    dp = np.asarray(dsigma) * p_s
     cold = T < constants.T_freeze
     qc_mass = q_c * dp
-    qi_mass = q_i * dp
     tot_qc = float(qc_mass.sum())
-    supercooled_frac = float(qc_mass[cold].sum() / tot_qc) if tot_qc > 1e-20 else 0.0
-    lwp_col = float((q_c * dp / constants.g).sum())            # [kg/m^2]
-    iwp_col = float((q_i * dp / constants.g).sum())
-    ice_frac = iwp_col / max(lwp_col + iwp_col, 1e-20)         # frozen fraction
+    sc_frac = float(qc_mass[cold].sum() / tot_qc) if tot_qc > 1e-20 else 0.0
+    lwp = float((q_c * dp / constants.g).sum())
+    iwp = float((q_i * dp / constants.g).sum())
     return {
-        "overrides": {k: float(v) for k, v in overrides.items()},
-        "supercooled_liquid_frac": supercooled_frac,
-        "frozen_condensate_frac": ice_frac,
-        "lwp_col_kg_m2": lwp_col,
-        "iwp_col_kg_m2": iwp_col,
-        "T_sfc_K": float(T[-1]),
-        "T_top_K": float(T[0]),
+        "supercooled_liquid_frac": sc_frac,
+        "frozen_condensate_frac": iwp / max(lwp + iwp, 1e-20),
+        "lwp_col_kg_m2": lwp, "iwp_col_kg_m2": iwp,
+        "T_sfc_K": float(T[-1]), "T_top_K": float(T[0]),
         "T_profile_K": T.tolist(),
         "q_c_profile_kg_kg": q_c.tolist(),
         "q_i_profile_kg_kg": q_i.tolist(),
@@ -189,36 +207,94 @@ def run_column(overrides: dict, *, nlev: int, dt: float, days: float,
     }
 
 
-def sweep(*, nlev: int, dt: float, days: float, T_sfc: float, lat: float,
-          rad_interval: int) -> list[dict]:
-    """Baseline (morrison defaults) + one-at-a-time per-lever sweep + a combined
-    'max-ice' trial.  Ranked by supercooled-liquid fraction (lower = better)."""
-    trials = [{}]  # baseline = all defaults
+def run_column(overrides: dict, *, nlev: int, dt: float, days: float,
+               T_sfc: float, lat: float, rad_interval: int,
+               radiation: str = "rrtmgp", tail_days: float = 10.0) -> dict:
+    """Equilibrate one column under FIXED SST (prescribed T_s, so each ice-lever
+    trial sees the SAME surface boundary — not a free-running, lever-dependent
+    drift), then report per-level q_c/q_i + the supercooled-liquid fraction.  A
+    convergence check compares the fraction before and after a final ``tail_days``
+    window (``converged`` if it moved < 0.05) so a transient does not mis-rank a
+    lever; the reported fraction is the tail (more-equilibrated) value."""
+    import os
+    from legoesm.atmosphere.scm_forcing import SCMForcing
+    T0, qv0 = build_initial_profiles(nlev, T_sfc)
+    cfg = make_cfg(overrides, rad_interval=rad_interval, radiation=radiation)
+    _Ts = float(T_sfc)
+    # Debug isolation toggle: skip the prescribed-SST forcing (free-running) to
+    # test whether the forcing graph is what tips the CPU JIT mmap over.
+    forcing = (None if os.environ.get("LEGOESM_SCM_NO_FORCING")
+               else SCMForcing(prescribe="T_s", T_s=lambda _t: _Ts))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=nlev, dt=dt,
+        T_profile=T0, q_v_profile=qv0, latitude_deg=lat,
+        time_integrator="forward_euler", forcing=forcing,
+    )
+    n_tail = max(1, int(tail_days * 86400.0 / dt))
+    n_main = max(1, int(max(days - tail_days, 0.0) * 86400.0 / dt))
+    dsig = np.asarray(scm.sigma_coord.dsigma)
+    if n_main > 0:
+        spinup, _ = scm.run(nsteps=n_main, save_every=n_main)
+        frac_pre = _column_diag(spinup, dsig, nlev)["supercooled_liquid_frac"]
+    else:
+        frac_pre = float("nan")
+    final, _ = scm.run(nsteps=n_tail, save_every=n_tail)
+    diag = _column_diag(final, dsig, nlev)
+    diag["overrides"] = {k: float(v) for k, v in overrides.items()}
+    diag["supercooled_frac_pre_tail"] = frac_pre
+    diag["converged"] = bool(
+        np.isfinite(frac_pre)
+        and abs(diag["supercooled_liquid_frac"] - frac_pre) < 0.05)
+    return diag
+
+
+def trial_list() -> list[dict]:
+    """The sweep trials: baseline (morrison defaults) + one-at-a-time per-lever +
+    a combined 'max-ice' trial pushing every primary lever to its strongest."""
+    trials = [{}]
     for name, (_default, values) in ICE_LEVERS.items():
         for v in values:
             trials.append({name: v})
-    # Combined 'max-ice' trial: push every primary lever to its strongest value.
     trials.append({
         "homogeneous_freeze_T": 240.0, "cooper_a": 0.9,
         "N_i0": 50.0, "rime_coeff": 2.0,
     })
-    out = []
-    for i, ov in enumerate(trials):
-        rec = run_column(ov, nlev=nlev, dt=dt, days=days, T_sfc=T_sfc,
-                         lat=lat, rad_interval=rad_interval)
-        label = "baseline" if not ov else ",".join(f"{k}={v}" for k, v in ov.items())
-        rec["label"] = label
-        print(f"[{i+1}/{len(trials)}] {label:55s} "
-              f"supercooled_frac={rec['supercooled_liquid_frac']:.3f} "
-              f"frozen_frac={rec['frozen_condensate_frac']:.3f} "
-              f"T_sfc={rec['T_sfc_K']:.1f}K finite={rec['finite']}")
-        out.append(rec)
+    return trials
+
+
+def _override_str(ov: dict) -> str:
+    return "baseline" if not ov else ",".join(f"{k}={v}" for k, v in ov.items())
+
+
+def _parse_override(s: str) -> dict:
+    s = (s or "").strip()
+    if not s or s == "baseline":
+        return {}
+    out = {}
+    for tok in s.split(","):
+        k, _, v = tok.partition("=")
+        out[k.strip()] = float(v)
     return out
+
+
+def _safe(label: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in label)
+
+
+# NOTE: each distinct MorrisonConfig is baked STATIC into the SCM graph, so each
+# trial RECOMPILES the full rrtmgp+morrison graph.  Running many trials in ONE
+# process exhausts the XLA-CPU JIT dylib space ("Failed to materialize symbols"
+# / OOM at trial ~10), so the sweep is driven as ONE PROCESS PER TRIAL (the
+# sbatch loops emit-trials -> single -> aggregate).  A single trial compiles
+# cleanly (smoke-verified).
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--mode", choices=["single", "sweep"], default="sweep")
+    p.add_argument("--mode", choices=["single", "emit-trials", "aggregate"],
+                   default="single")
+    p.add_argument("--override", type=str, default="",
+                   help="single-trial knob string, e.g. 'homogeneous_freeze_T=240,N_i0=50'")
     p.add_argument("--days", type=float, default=40.0)
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--nlev", type=int, default=40)
@@ -226,36 +302,53 @@ def main(argv=None) -> int:
     p.add_argument("--latitude-deg", type=float, default=0.0)
     p.add_argument("--rad-interval", type=int, default=12,
                    help="radiation update interval [steps] (amortise rrtmgp)")
+    p.add_argument("--radiation", choices=["rrtmgp", "gray"], default="rrtmgp",
+                   help="gray = fast valid lever ranking; rrtmgp = faithful but compile-heavy")
     p.add_argument("--out", type=str, default="results/scm_rce_ice_tuning")
     args = p.parse_args(argv)
+
+    if args.mode == "emit-trials":
+        for ov in trial_list():
+            print(_override_str(ov))
+        return 0
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == "single":
-        recs = [run_column({}, nlev=args.nlev, dt=args.dt, days=args.days,
-                           T_sfc=args.T_sfc, lat=args.latitude_deg,
-                           rad_interval=args.rad_interval)]
-        recs[0]["label"] = "baseline"
-        print(f"[single] supercooled_frac="
-              f"{recs[0]['supercooled_liquid_frac']:.3f} "
-              f"frozen_frac={recs[0]['frozen_condensate_frac']:.3f}")
-    else:
-        recs = sweep(nlev=args.nlev, dt=args.dt, days=args.days,
-                     T_sfc=args.T_sfc, lat=args.latitude_deg,
-                     rad_interval=args.rad_interval)
+    if args.mode == "aggregate":
+        recs = [json.loads(f.read_text()) for f in sorted(outdir.glob("trial_*.json"))]
+        if not recs:
+            print(f"[aggregate] no trial_*.json under {outdir}")
+            return 1
         ranked = sorted(recs, key=lambda r: r["supercooled_liquid_frac"])
         print("\n=== ranked by supercooled-liquid fraction (lower = better) ===")
         for r in ranked:
             print(f"  {r['supercooled_liquid_frac']:.3f}  "
-                  f"frozen={r['frozen_condensate_frac']:.3f}  {r['label']}")
-        base = next(r for r in recs if r["label"] == "baseline")
+                  f"frozen={r['frozen_condensate_frac']:.3f}  "
+                  f"conv={r.get('converged')}  {r['label']}")
+        base = next((r for r in recs if r["label"] == "baseline"), None)
         best = ranked[0]
-        print(f"\nbaseline supercooled_frac={base['supercooled_liquid_frac']:.3f}"
-              f" -> best={best['supercooled_liquid_frac']:.3f} ({best['label']})")
+        if base is not None:
+            print(f"\nbaseline supercooled_frac="
+                  f"{base['supercooled_liquid_frac']:.3f} -> "
+                  f"best={best['supercooled_liquid_frac']:.3f} ({best['label']})")
+        (outdir / "ice_tuning_summary.json").write_text(json.dumps(ranked, indent=1))
+        print(f"wrote {outdir/'ice_tuning_summary.json'}")
+        return 0
 
-    (outdir / "ice_tuning.json").write_text(json.dumps(recs, indent=1))
-    print(f"wrote {outdir/'ice_tuning.json'}")
+    # mode == single
+    ov = _parse_override(args.override)
+    rec = run_column(ov, nlev=args.nlev, dt=args.dt, days=args.days,
+                     T_sfc=args.T_sfc, lat=args.latitude_deg,
+                     rad_interval=args.rad_interval, radiation=args.radiation)
+    rec["label"] = _override_str(ov)
+    print(f"[trial {rec['label']}] supercooled_frac="
+          f"{rec['supercooled_liquid_frac']:.3f} "
+          f"frozen_frac={rec['frozen_condensate_frac']:.3f} "
+          f"T_sfc={rec['T_sfc_K']:.1f}K converged={rec['converged']} "
+          f"finite={rec['finite']}")
+    (outdir / f"trial_{_safe(rec['label'])}.json").write_text(json.dumps(rec, indent=1))
+    print(f"wrote {outdir/('trial_'+_safe(rec['label'])+'.json')}")
     return 0
 
 

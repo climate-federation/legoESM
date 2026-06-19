@@ -66,6 +66,26 @@ def test_make_cfg_applies_override_without_mutating_default():
     assert default_T != pytest.approx(240.0)
 
 
+def test_trial_list_has_baseline_and_levers():
+    trials = rt.trial_list()
+    assert {} in trials  # baseline
+    # every lever value appears as a single-knob trial
+    for name, (_d, vals) in rt.ICE_LEVERS.items():
+        for v in vals:
+            assert {name: v} in trials
+    # combined max-ice trial present
+    assert any(len(t) == 4 for t in trials)
+
+
+def test_override_roundtrip():
+    assert rt._parse_override("") == {}
+    assert rt._parse_override("baseline") == {}
+    assert rt._parse_override("homogeneous_freeze_T=240,N_i0=50") == {
+        "homogeneous_freeze_T": 240.0, "N_i0": 50.0}
+    assert rt._override_str({}) == "baseline"
+    assert rt._override_str({"N_i0": 50.0}) == "N_i0=50.0"
+
+
 def test_build_initial_profiles_shape_and_monotone():
     import numpy as np
     T, qv = rt.build_initial_profiles(40, 300.0)

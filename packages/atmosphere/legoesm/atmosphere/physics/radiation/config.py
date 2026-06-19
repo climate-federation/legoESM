@@ -238,6 +238,17 @@ class RRTMGPConfig(NamedTuple):
     #         of ~16-32 recovers most of the parallelism while bounding peak
     #         memory at high resolution.  Default 0 = byte-for-byte legacy.
     gpoint_batch_size: int = 0
+    # Wrap the per-g-point scan step in jax.checkpoint(prevent_cse=True) for
+    # reverse-mode AD memory (recompute one g-point per backward step).  True =
+    # byte-for-byte legacy (required for high-res rrtmgp training).  Set False
+    # for FORWARD/inference: prevent_cse=True disables CSE and forces XLA to
+    # emit a distinct compiled body per g-point, inflating the executable code
+    # ~Ng-fold — that overflows the XLA-CPU LLVM-JIT contiguous executable
+    # region (rrtmgp CPU "Failed to materialize symbols") and bloats GPU/TPU
+    # compile.  A plain scan (False) compiles ONE reused body; answer-identical
+    # (no AD-memory benefit, which forward runs do not need).  Only applies to
+    # the scan path (gpoint_batch_size<=0).
+    gpoint_checkpoint: bool = True
     # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
     # The dycore needs fp64, but radiation (a flux calculation) does not —
     # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of
