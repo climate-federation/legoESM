@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import pytest
 
 
-def _real_output():
+def _real_output(averaging=None):
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.bias_metrics import (
         BiasImprovement,
@@ -48,7 +48,7 @@ def _real_output():
     health = campaign_health(summary)
     out = build_campaign_output_dict(
         res, grid_provenance={"grid_type": "latlon", "shape_2d": [2, 2], "ncol": 4},
-        summary=summary, health=health, corrected_field="C_K")
+        summary=summary, health=health, corrected_field="C_K", averaging=averaging)
     return json.loads(json.dumps(out))               # the REAL on-disk JSON round-trip
 
 
@@ -66,6 +66,32 @@ def test_real_campaign_output_feeds_bias_trajectory_plotter(tmp_path):
     png = tmp_path / "t.png"
     plot_campaign_bias_trajectory(out, str(png))
     assert png.exists() and png.stat().st_size > 0
+
+
+def test_real_averaging_block_flows_producer_to_every_consumer(tmp_path):
+    """PRODUCER→CONSUMER contract for the iter-267 ``averaging`` block (iter 278): a REAL
+    ``build_campaign_output_dict(averaging=…)`` output, after a JSON round-trip, must feed
+    the bias-plotter caption AND surface in the deploy-check — proactively catching the
+    drift class that broke ``_maybe_write_env_kernel`` (iter 276) when a new key landed.
+    Absent ``averaging`` must NOT add the key (back-compat with the deploy round-trip)."""
+    from scripts.plot.plot_campaign_bias_trajectory import (
+        _averaging_caption,
+        extract_campaign_trajectory,
+    )
+
+    # back-compat: no averaging passed ⇒ no key (the deploy/round-trip contract).
+    assert "averaging" not in _real_output()
+
+    out = _real_output(averaging={"era5_n_times": 30, "era5_time_idx": 12})
+    assert out["averaging"] == {"era5_n_times": 30, "era5_time_idx": 12}
+    # bias-plotter reads it through the REAL output → the climatology caption.
+    tr = extract_campaign_trajectory(out)
+    assert tr["averaging"] == {"era5_n_times": 30, "era5_time_idx": 12}
+    assert _averaging_caption(tr["averaging"]) == "vs 30-time ERA5 climatology @ idx 12"
+    # a snapshot output drives the snapshot caption (the weather-vs-climate flag).
+    snap = _real_output(averaging={"era5_n_times": 1, "era5_time_idx": 5})
+    assert _averaging_caption(
+        extract_campaign_trajectory(snap)["averaging"]) == "vs ERA5 snapshot @ idx 5"
 
 
 def test_real_campaign_output_feeds_coefficient_map_plotter(tmp_path):
