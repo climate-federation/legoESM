@@ -380,6 +380,27 @@ def test_dry_run_flag_parsed():
     assert p.parse_args([*base, "--dry-run"]).dry_run is True
 
 
+def test_main_dry_run_end_to_end_on_synthetic_era5(tmp_path):
+    """The FIRST test to drive the REAL campaign main() end-to-end on real (synthetic)
+    data with NO stubbing: generate a base config + a synthetic ERA5 zarr (the turnkey
+    smoke-test workflow), then main([--config --era5-zarr --dry-run …]) exercises config
+    load → ERA5 time-mean load → REGRID to the model grid → reference physical-validation
+    → campaign construction → the dry-run report → exit 0. Covers main()'s heavy-I/O
+    preamble (otherwise pragma:no-cover) for REAL, not stubbed."""
+    from scripts.data.make_synthetic_era5 import main as make_era5
+    from scripts.experiment.write_amip_clubb_lite_config import main as make_cfg
+    from scripts.run.run_correction_campaign import main as campaign_main
+
+    zp = str(tmp_path / "syn.zarr")
+    cfg = str(tmp_path / "cfg.json")
+    out = str(tmp_path / "out.json")
+    assert make_era5([zp, "--nlat", "12", "--nlon", "24", "--ntime", "2"]) == 0
+    assert make_cfg([cfg, "--resolution", "8", "--nlev", "8"]) == 0
+    rc = campaign_main(["--config", cfg, "--era5-zarr", zp, "--mode", "amip",
+                        "--n-worst", "4", "--iterations", "1", "--out", out, "--dry-run"])
+    assert rc == 0                       # full construction validated on synthetic data
+
+
 def test_warn_if_ignored_diagnosis_method():
     """--coefficients silently overrides --diagnosis-method (the multi path ignores it);
     a NON-default method alongside --coefficients warns so the user is not surprised. The
