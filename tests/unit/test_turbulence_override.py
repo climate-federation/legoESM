@@ -108,6 +108,26 @@ def test_validate_strict_accepts_no_override():
     _config(override=None).validate_strict()  # no raise
 
 
+def test_deploy_output_reaches_fv_pipeline_with_per_column_ck():
+    """Clause-6 END-TO-END (the literal 'update the parameters in the AMIP/CMIP
+    simulation'): a SAVED campaign output JSON → ``corrected_turbulence_override`` → the
+    FV physics pipeline's turbulence-kernel config carries the PER-COLUMN corrected C_K.
+    The deploy→override and override→pipeline halves are each tested; THIS locks the
+    whole deploy-artifact → model-input chain as ONE flow (a regression in either the
+    deploy loader or the pipeline injection that breaks the hand-off fails here)."""
+    import json
+
+    from legoesm.training.deploy_correction import corrected_turbulence_override
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    ck_field = np.linspace(0.35, 0.85, 8 * 16)                # per-column corrected C_K
+    output = json.loads(json.dumps({"C_K": ck_field.tolist()}))  # the real on-disk --out shape
+    over = corrected_turbulence_override(output)             # the DEPLOY artifact → override
+    pipe = build_physics_pipeline(grid, sigma, _config(override=over))
+    np.testing.assert_allclose(np.asarray(pipe.turbulence_config.C_K), ck_field)
+
+
 def test_validate_strict_rejects_non_turbulenceconfig_override():
     """A non-TurbulenceConfig override (e.g. a bare string) is rejected — it would
     otherwise crash later inside get_turbulence_fn (Codex iter-35)."""
