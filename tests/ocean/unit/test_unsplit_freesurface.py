@@ -108,6 +108,29 @@ def test_implicit_unsplit_rejects_unsupported_physics():
             LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
 
 
+def test_implicit_unsplit_threads_gm_redi():
+    """The unsplit step threads GM/Redi (isopycnal+skew tracer mixing + K33) so the
+    ACC reentrant_channel (which uses GM/Redi) runs unsplit — finite, T bounded.
+    Non-vacuous: GM/Redi is NOT in self.tendencies(); without the threading the
+    isopycnal mixing would be silently dropped (or the guard would reject it)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity import mitgcm_reentrant_channel_recipe as rc
+    r = rc.build_reentrant_channel_recipe()
+    assert r.config.gm_redi is not None     # the recipe really uses GM/Redi
+    cfg = r.config._replace(barotropic_solver="implicit_unsplit")
+    m = LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)   # builds = GM/Redi accepted
+    s = r.state
+    sp = getattr(r, "sponge", None)
+    kw = {"sponge": sp} if sp is not None else {}
+    for _ in range(5):
+        s = m.step(s, r.dt_s, surface_forcing=r.wind_forcing, **kw)
+    assert np.all(np.isfinite(np.asarray(s.u.data)))
+    assert -2.1 < float(np.asarray(s.T.data).min())
+    assert float(np.asarray(s.T.data).max()) < 15.0
+
+
 def test_implicit_unsplit_runs_finite():
     """The unsplit path dispatches + runs a few steps finite, stratification bounded."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (

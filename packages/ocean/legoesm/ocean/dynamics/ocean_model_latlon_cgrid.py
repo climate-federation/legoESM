@@ -1088,8 +1088,12 @@ class LatLonCGridOceanModel:
             # hardening / "no silent coerce").  The freshwater step-arg is gated in
             # _unsplit_ab2_step itself.
             _unsupported = []
-            if getattr(config, "gm_redi", None) is not None:
-                _unsupported.append("gm_redi (isopycnal/skew tracer mixing)")
+            # Standard GM/Redi (isopycnal + skew tracer mixing, incl. implicit_K33)
+            # IS supported by _unsplit_ab2_step; only the prognostic-EKE-coupled GM
+            # path (gm_redi.eke) is not yet threaded.
+            if (getattr(config, "gm_redi", None) is not None
+                    and getattr(config.gm_redi, "eke", None) is not None):
+                _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
             if getattr(config, "ab2_scope", "total") == "advective":
                 _unsupported.append('ab2_scope="advective" (withheld dissipation)')
             if getattr(config, "surface_forcing_implicit", False):
@@ -4269,6 +4273,39 @@ class LatLonCGridOceanModel:
         dv_n = dt * tend.dv_dt.data
         dT_n = dt * tend.dT_dt.data    # noqa: N806 (T = temperature, domain convention)
         dS_n = dt * tend.dS_dt.data    # noqa: N806 (S = salinity)
+
+        # GM/Redi isopycnal + skew (bolus) TRACER mixing — not in self.tendencies()
+        # (it lives in _step_impl).  Evaluated at u^n and added to the explicit tracer
+        # increment so it AB2-extrapolates with the rest (ab2_scope="total").  GM/Redi
+        # is a tracer-only scheme (skew flux), so it does NOT touch the momentum.  The
+        # vertical isoneutral diagonal K33 (when implicit_K33) is computed from the
+        # same density/slopes and folded into the implicit vertical-mixing solve.
+        k33_iso = None
+        if self.config.gm_redi is not None:
+            gm_cfg = self.config.gm_redi
+            _gm_dj = None
+            if gm_cfg.implicit_K33:
+                _gm_dj = gm_redi_density_and_jacobian(
+                    state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                    _grid, self.z_coord, eos=self.config.eos,
+                    eos_linear=self.config.eos_linear, mask=cmask,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g)
+            dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(  # noqa: N806
+                state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                _grid, self.z_coord, gm_cfg, eos=self.config.eos,
+                eos_linear=self.config.eos_linear, mask=cmask,
+                u_mask=u_mask, v_mask=v_mask,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                density_jacobian=_gm_dj)
+            dT_n = dT_n + dt * dT_gm    # noqa: N806
+            dS_n = dS_n + dt * dS_gm    # noqa: N806
+            if gm_cfg.implicit_K33:
+                k33_iso = compute_isoneutral_K33_latlon(
+                    state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                    _grid, self.z_coord, gm_cfg, eos=self.config.eos,
+                    eos_linear=self.config.eos_linear, mask=cmask,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    density_jacobian=_gm_dj)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
@@ -4302,7 +4339,7 @@ class LatLonCGridOceanModel:
         # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
         #    applies the surface wind/tracer BC + restoring internally).
         state_new = self._apply_implicit_vertical_mixing(
-            state_corr, dt, surface_forcing, grid=_grid)
+            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid)
 
         # 5. Carry the explicit increments for the next AB2 step.
         return state_new._replace(
