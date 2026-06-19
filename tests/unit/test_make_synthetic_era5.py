@@ -39,3 +39,38 @@ def test_synthetic_store_loads_via_campaign_era5_loader(tmp_path):
     assert tuple(sl.p_s.shape) == (10, 20)
     assert bool(np.all(np.isfinite(sl.T))) and bool(np.all(np.isfinite(sl.p_s)))
     assert np.all(np.diff(sl.plev_Pa) > 0)            # ascending Pa (sorted from hPa-descending)
+
+
+def test_synthetic_load_preserves_field_to_level_correspondence(tmp_path):
+    """The descending→ascending level reorder must keep each field value tied to its
+    OWN pressure level — the silent-catastrophic-bug surface of the ERA5 ingest.
+
+    ``era5_to_state`` ``np.sort``s the levels to ascending Pa AND reverses the field
+    axis (``data[..., ::-1]``) when the source levels are descending (the ERA5/WB2
+    convention).  The sort and the reverse are INDEPENDENT operations: if the field
+    reversal regressed (or were dropped) the loaded ``plev_Pa`` would STILL come out
+    ascending — so the existing ``np.all(diff(plev_Pa) > 0)`` check would pass — while
+    the T/u/v/q values would sit at the WRONG levels, silently comparing model-top
+    against ERA5-surface and corrupting every column bias.  The synthetic T profile is
+    ``220 + 70·(p/1000)^0.3`` — monotonically WARMER at higher pressure (≈290 K at the
+    1000 hPa surface, ≈248 K at 50 hPa aloft).  So after load the level-mean T MUST
+    increase with ``plev_Pa``; a broken reversal would leave the 290 K surface value at
+    the 5000 Pa (50 hPa) slot and make it DECREASE — a decisive, non-vacuous catch.
+    """
+    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+
+    from scripts.data.make_synthetic_era5 import main
+
+    zp = tmp_path / "syn_order.zarr"
+    assert main([str(zp), "--nlat", "6", "--nlon", "8", "--ntime", "1"]) == 0
+    sl = load_era5_slice(TrainingERA5Config(zarr_store=str(zp)), 0)
+
+    plev = np.asarray(sl.plev_Pa)
+    t_profile = np.asarray(sl.T).mean(axis=(0, 1))    # level-mean T (n_lev,)
+    assert plev[0] < plev[-1]                          # ascending: top (50 hPa) → surface
+    # The coldest air sits at the LOWEST pressure (aloft); the warmest at the HIGHEST
+    # (surface) — i.e. the field rode the reorder with its level, not against it.
+    assert np.all(np.diff(t_profile) > 0)             # strictly warmer with pressure
+    assert 244.0 < t_profile[0] < 252.0               # ~248 K at 50 hPa (NOT the 290 K sfc)
+    assert 288.0 < t_profile[-1] < 291.0              # ~290 K at 1000 hPa surface
+    assert t_profile[-1] - t_profile[0] > 30.0        # decisive surface-aloft contrast
