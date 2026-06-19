@@ -478,6 +478,34 @@ def test_campaign_exit_code_reflects_health_verdict():
         assert _campaign_exit_code(SimpleNamespace(ok=False, status=status)) == 1
 
 
+def test_build_campaign_harness_returns_the_shared_wiring():
+    """_build_campaign_harness (iter 292) factors the compare/diagnose/env-grid wiring that
+    was BYTE-IDENTICAL in the single + multi campaign builders: a callable compare_fn +
+    diagnose_fn, and the env_grid_fn (None for 'static', a callable for 'environment') — so
+    the harness lives in ONE place, not the copy-paste CLAUDE.md forbids."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+
+    from scripts.run.run_correction_campaign import _build_campaign_harness
+
+    def boom(*a, **k):
+        raise AssertionError("the harness builds fns; it must not run them")
+
+    common = dict(
+        base_atm_config=_base_config(), build_base_driver=boom, extract_column_state=boom,
+        reference=object(), sigma=_dry_run_sigma(), grid=object(),
+        area_weights=jnp.ones((2, 3)), n_worst=4, lat_deg=jnp.zeros((2, 3)),
+        lon_deg=jnp.zeros((2, 3)), valid_mask=None, manifest_reducer=None,
+        les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"),
+        run_les_fn=boom, phis=None)
+    compare_fn, diagnose_fn, env_grid_fn = _build_campaign_harness(
+        **common, feedback_strategy="static")
+    assert callable(compare_fn) and callable(diagnose_fn)
+    assert env_grid_fn is None                       # static ⇒ no env grid
+    # 'environment' strategy ⇒ a real env_grid_fn (the cross-resolution kernel predictors).
+    _, _, env_fn = _build_campaign_harness(**common, feedback_strategy="environment")
+    assert callable(env_fn)
+
+
 def test_build_correction_campaign_rejects_unknown_diagnosis_method():
     """Dispatch hardening (iter 285): an unknown ``diagnosis_method`` RAISES (no silent
     default).  The method→coefficient resolution fires BEFORE any run (and before the

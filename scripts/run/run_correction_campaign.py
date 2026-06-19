@@ -261,6 +261,33 @@ class CampaignDryRun(NamedTuple):
     les_per_round: int              # LES spun off per round (les_budget, else n_worst)
 
 
+def _build_campaign_harness(
+    *, base_atm_config, build_base_driver, extract_column_state, reference, sigma, grid,
+    area_weights, n_worst, lat_deg, lon_deg, valid_mask, manifest_reducer, les_config,
+    run_les_fn, phis, feedback_strategy,
+):
+    """The compare/diagnose/env-grid harness SHARED by the single- + multi-coefficient
+    campaign builders (parallel to ``_build_osse_harness``): the ERA5 ``compare_fn`` (via
+    :func:`compose_compare_fn`, which itself factors the run→time-mean ``run_fn``), the LES
+    ``diagnose_fn``, and the env-grid fn for ``feedback_strategy='environment'``.  The
+    single-vs-multi difference is ONLY the ``les_config`` (``diagnosis_method`` vs
+    ``diagnosis_methods``), resolved by the caller — so the wiring lives in ONE place, not
+    copy-pasted (CLAUDE.md: no duplicate harness wiring).  Returns
+    ``(compare_fn, diagnose_fn, env_grid_fn)``.
+    """
+    compare_fn = compose_compare_fn(
+        base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, reference=reference, sigma=sigma,
+        area_weights=area_weights, n_worst=n_worst,
+        lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
+        manifest_reducer=manifest_reducer,
+    )
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
+    env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
+    return compare_fn, diagnose_fn, env_grid_fn
+
+
 def build_correction_campaign(
     *,
     base_atm_config: Any,
@@ -354,16 +381,13 @@ def build_correction_campaign(
         les_config = les_config._replace(
             clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
-    compare_fn = compose_compare_fn(
+    compare_fn, diagnose_fn, env_grid_fn = _build_campaign_harness(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
-        area_weights=area_weights, n_worst=n_worst,
-        lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
-        manifest_reducer=manifest_reducer,
-    )
-    diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
-    env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
+        grid=grid, area_weights=area_weights, n_worst=n_worst, lat_deg=lat_deg,
+        lon_deg=lon_deg, valid_mask=valid_mask, manifest_reducer=manifest_reducer,
+        les_config=les_config, run_les_fn=run_les_fn, phis=phis,
+        feedback_strategy=feedback_strategy)
 
     if dry_run:
         # Everything CONSTRUCTED (reference validated, clubb build-driver +
@@ -677,16 +701,13 @@ def build_multi_correction_campaign(
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(clubb_l_mix_max=float(clubb_cfg.l_mix_max))
 
-    compare_fn = compose_compare_fn(
+    compare_fn, diagnose_fn, env_grid_fn = _build_campaign_harness(
         base_atm_config=base_atm_config, build_base_driver=build_base_driver,
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
-        area_weights=area_weights, n_worst=n_worst,
-        lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
-        manifest_reducer=manifest_reducer,
-    )
-    diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
-    env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
+        grid=grid, area_weights=area_weights, n_worst=n_worst, lat_deg=lat_deg,
+        lon_deg=lon_deg, valid_mask=valid_mask, manifest_reducer=manifest_reducer,
+        les_config=les_config, run_les_fn=run_les_fn, phis=phis,
+        feedback_strategy=feedback_strategy)
 
     if dry_run:
         # Constructed every per-coefficient spec + the compare/diagnose fns (the
