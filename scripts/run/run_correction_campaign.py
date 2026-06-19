@@ -818,6 +818,34 @@ def _campaign_knobs_from_args(args) -> dict:
     )
 
 
+def _per_variable_to_json(pv):
+    """JSON form of a CampaignSummary.per_variable (PerVariableBiasImprovement) — the
+    round-0→final per-variable global bias.  ``None`` when the campaign carried no
+    error_fields; a NaN precip (precip not compared) serializes as ``null`` (valid
+    JSON), never a misleading ``0`` or ``NaN`` token."""
+    if pv is None:
+        return None
+    import math
+
+    def _f(x):
+        v = float(x)
+        return None if math.isnan(v) else v
+
+    b, u = pv.baseline, pv.updated
+    return {
+        "baseline": {"T_rmse_K": _f(b.global_T_rmse_K),
+                     "qv_rmse_kg_kg": _f(b.global_qv_rmse_kg_kg),
+                     "wind_rmse_m_s": _f(b.global_wind_rmse_m_s),
+                     "precip_err_mm_day": _f(b.global_precip_err_mm_day)},
+        "final": {"T_rmse_K": _f(u.global_T_rmse_K),
+                  "qv_rmse_kg_kg": _f(u.global_qv_rmse_kg_kg),
+                  "wind_rmse_m_s": _f(u.global_wind_rmse_m_s),
+                  "precip_err_mm_day": _f(u.global_precip_err_mm_day)},
+        "improved": {"T": bool(pv.T_improved), "qv": bool(pv.qv_improved),
+                     "wind": bool(pv.wind_improved), "precip": bool(pv.precip_improved)},
+    }
+
+
 def _summary_to_json(summary):  # pragma: no cover - HPC path
     """JSON-serializable form of a :class:`CampaignSummary` for the output file."""
     return {
@@ -828,6 +856,7 @@ def _summary_to_json(summary):  # pragma: no cover - HPC path
         "fractional_reduction": summary.fractional_reduction,
         "n_diagnosed_total": summary.n_diagnosed_total,
         "n_diagnoses_valid_total": summary.n_diagnoses_valid_total,
+        "per_variable_bias": _per_variable_to_json(summary.per_variable),
         "coefficients": [
             {"promotion_key": c.promotion_key, "n_columns": c.n_columns,
              "field_min": c.field_min, "field_max": c.field_max,

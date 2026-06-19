@@ -30,6 +30,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _campaign_knobs_from_args,
     _distributed_campaign_kwargs,
     _format_per_variable_bias,
+    _per_variable_to_json,
     build_campaign_output_dict,
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
@@ -40,6 +41,29 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
+
+
+def test_per_variable_to_json_nan_precip_is_null():
+    """The persisted per-variable JSON: None->None; a NaN precip (not compared)
+    serializes as JSON null (valid JSON, round-trips), NEVER a misleading 0/NaN."""
+    import json
+
+    from legoesm.training.bias_metrics import (
+        PerVariableBias,
+        compare_per_variable_bias,
+    )
+
+    assert _per_variable_to_json(None) is None
+    b = PerVariableBias(jnp.asarray(4.0), jnp.asarray(1e-3), jnp.asarray(2.0),
+                        jnp.asarray(float("nan")))
+    u = PerVariableBias(jnp.asarray(1.0), jnp.asarray(1e-3), jnp.asarray(5.0),
+                        jnp.asarray(float("nan")))
+    d = _per_variable_to_json(compare_per_variable_bias(b, u))
+    assert d["baseline"]["T_rmse_K"] == pytest.approx(4.0)
+    assert d["final"]["wind_rmse_m_s"] == pytest.approx(5.0)
+    assert d["baseline"]["precip_err_mm_day"] is None     # NaN -> null, not 0
+    assert d["improved"] == {"T": True, "qv": False, "wind": False, "precip": False}
+    json.loads(json.dumps(d, allow_nan=False))            # valid strict JSON (no NaN token)
 
 
 def test_format_per_variable_bias():

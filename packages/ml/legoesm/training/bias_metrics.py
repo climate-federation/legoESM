@@ -250,13 +250,28 @@ def per_variable_bias_improvement(
     kw = dict(have_precip=have_precip, valid_mask=valid_mask, global_reduce=global_reduce)
     base = aggregate_per_variable_bias(baseline_error_fields, area_weights, **kw)
     upd = aggregate_per_variable_bias(updated_error_fields, area_weights, **kw)
+    return compare_per_variable_bias(base, upd)
+
+
+def compare_per_variable_bias(
+    baseline: PerVariableBias, updated: PerVariableBias
+) -> PerVariableBiasImprovement:
+    """Assemble a :class:`PerVariableBiasImprovement` from two already-aggregated
+    :class:`PerVariableBias` (``*_improved`` = ``updated < baseline`` per variable).
+
+    The shared core of :func:`per_variable_bias_improvement` (which aggregates each
+    run's ColumnErrorFields first) AND the CAMPAIGN summary (which compares the
+    round-0 baseline ``PerVariableBias`` to the final-accepted ``PerVariableBias``
+    across rounds — already-aggregated, no error_fields to re-aggregate).
+    ``precip_improved`` is ``False`` when precip was not compared (both ``NaN`` ⇒
+    ``NaN < NaN`` is ``False``)."""
     return PerVariableBiasImprovement(
-        baseline=base,
-        updated=upd,
-        T_improved=upd.global_T_rmse_K < base.global_T_rmse_K,
-        qv_improved=upd.global_qv_rmse_kg_kg < base.global_qv_rmse_kg_kg,
-        wind_improved=upd.global_wind_rmse_m_s < base.global_wind_rmse_m_s,
-        precip_improved=upd.global_precip_err_mm_day < base.global_precip_err_mm_day,
+        baseline=baseline,
+        updated=updated,
+        T_improved=updated.global_T_rmse_K < baseline.global_T_rmse_K,
+        qv_improved=updated.global_qv_rmse_kg_kg < baseline.global_qv_rmse_kg_kg,
+        wind_improved=updated.global_wind_rmse_m_s < baseline.global_wind_rmse_m_s,
+        precip_improved=updated.global_precip_err_mm_day < baseline.global_precip_err_mm_day,
     )
 
 

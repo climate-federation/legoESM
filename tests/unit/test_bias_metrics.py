@@ -18,6 +18,7 @@ from legoesm.training.bias_metrics import (
     aggregate_combined_bias,
     aggregate_per_variable_bias,
     bias_improvement,
+    compare_per_variable_bias,
     per_variable_bias_improvement,
     worst_column_bias_change,
 )
@@ -115,6 +116,24 @@ def test_per_variable_bias_improvement_precip_not_improved_when_absent():
     # With have_precip the precip improvement IS detected (2.0 → 1.0).
     pvi2 = per_variable_bias_improvement(base, upd, jnp.ones(2), have_precip=True)
     assert bool(pvi2.precip_improved)
+
+
+def test_compare_per_variable_bias_builds_improved_flags():
+    """compare_per_variable_bias (the shared core of per_variable_bias_improvement AND
+    the campaign summary): *_improved = updated < baseline per variable; precip NaN<NaN
+    is False."""
+    from legoesm.training.bias_metrics import PerVariableBias
+
+    def _pv(t, w, p):
+        return PerVariableBias(jnp.asarray(t), jnp.asarray(1e-3), jnp.asarray(w),
+                               jnp.asarray(p))
+
+    out = compare_per_variable_bias(_pv(4.0, 2.0, float("nan")),
+                                    _pv(1.0, 5.0, float("nan")))   # T down, wind UP
+    assert bool(out.T_improved) and not bool(out.wind_improved)
+    assert not bool(out.qv_improved)              # equal qv ⇒ not strictly improved
+    assert not bool(out.precip_improved)          # NaN<NaN ⇒ False (not compared)
+    assert out.baseline.global_T_rmse_K == 4.0 and out.updated.global_T_rmse_K == 1.0
 
 
 def test_aggregate_uniform_weights_is_mean():

@@ -99,6 +99,58 @@ def test_summarize_no_rounds_safe():
     s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
     assert s.n_rounds == 0 and s.fractional_reduction == 0.0
     assert s.coefficients[0].field_std == pytest.approx(0.0)   # uniform = no correction
+    assert s.per_variable is None                              # no rounds ⇒ no per-variable
+
+
+def _pv(t_rmse):
+    from legoesm.training.bias_metrics import PerVariableBias
+    return PerVariableBias(jnp.asarray(t_rmse), jnp.asarray(1.0e-3),
+                           jnp.asarray(2.0), jnp.asarray(float("nan")))
+
+
+def _cres_pv(base, upd, t_base, t_upd):
+    from legoesm.training.bias_metrics import compare_per_variable_bias
+    return _cres(base, upd)._replace(
+        per_variable_bias=compare_per_variable_bias(_pv(t_base), _pv(t_upd)))
+
+
+def test_summarize_per_variable_trajectory_round0_to_last_accepted():
+    """The campaign per-variable bias is round-0 BASELINE → LAST-ACCEPTED updated (the
+    SAME accepted-gate logic as the combined bias), and reported."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres_pv(1.0, 0.6, 4.0, 3.0), _cres_pv(0.6, 0.3, 3.0, 1.0)),
+        final_field=jnp.full((2, 2), 0.4), accepted=(True, True), stop_reason="converged")
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    pv = s.per_variable
+    assert pv is not None
+    assert float(pv.baseline.global_T_rmse_K) == pytest.approx(4.0)   # round-0 baseline
+    assert float(pv.updated.global_T_rmse_K) == pytest.approx(1.0)    # round-1 (accepted) updated
+    assert bool(pv.T_improved)
+    rep = s.report()
+    assert "Per-variable RMSE" in rep and "T 4->1K" in rep
+
+
+def test_summarize_per_variable_uses_last_accepted_not_rejected():
+    """A REJECTED final round must NOT set the per-variable final (mirrors the combined
+    final_bias): final per-variable = the last ACCEPTED round's updated."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres_pv(2.0, 1.0, 4.0, 2.0),       # accepted
+                    _cres_pv(1.0, 1.0, 2.0, 9.9)),      # rejected (T would jump to 9.9)
+        final_field=jnp.full((2, 2), 0.4), accepted=(True, False))
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    assert float(s.per_variable.updated.global_T_rmse_K) == pytest.approx(2.0)  # NOT 9.9
+
+
+def test_summarize_per_variable_none_without_error_fields():
+    """A campaign whose rounds carried no per_variable_bias ⇒ per_variable None."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres(1.0, 0.6),), final_field=jnp.full((2, 2), 0.4),
+        accepted=(True,))
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    assert s.per_variable is None
 
 
 from legoesm.training.campaign_summary import campaign_health  # noqa: E402

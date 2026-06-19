@@ -72,6 +72,10 @@ class CampaignSummary(NamedTuple):
     n_diagnoses_valid_total: int = 0  # of those, how many were VALID (≥1 valid level +
     #   finite). 0 with n_diagnosed_total>0 ⇒ EVERY LES spin-off was rejected by the
     #   realism gate (e.g. too short to develop turbulence) — no column was corrected.
+    per_variable: Any = None        # PerVariableBiasImprovement: round-0 baseline →
+    #   final-accepted per-variable global RMSE (T/q_v/wind, precip when compared) +
+    #   per-variable improved flags. None when the campaign carried no error_fields
+    #   (a mock); surfaces a combined-bias gain that hid a per-variable regression.
 
     def report(self) -> str:
         """A concise human-readable multi-line report."""
@@ -92,6 +96,17 @@ class CampaignSummary(NamedTuple):
                 line += (f"; {c.n_at_lower_bound} at lo, {c.n_at_upper_bound} at hi"
                          " (clamp binding)")
             lines.append(line)
+        if self.per_variable is not None:
+            pv = self.per_variable
+            b, u = pv.baseline, pv.updated
+            imp = [n for n, f in (("T", pv.T_improved), ("qv", pv.qv_improved),
+                                  ("wind", pv.wind_improved)) if bool(f)]
+            lines.append(
+                f"Per-variable RMSE (init -> final): "
+                f"T {float(b.global_T_rmse_K):.4g}->{float(u.global_T_rmse_K):.4g}K, "
+                f"qv {float(b.global_qv_rmse_kg_kg):.4g}->{float(u.global_qv_rmse_kg_kg):.4g}, "
+                f"wind {float(b.global_wind_rmse_m_s):.4g}->{float(u.global_wind_rmse_m_s):.4g}m/s "
+                f"| improved: {','.join(imp) if imp else 'none'}")
         return "\n".join(lines)
 
 
@@ -145,6 +160,19 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
         absolute_reduction / initial_bias if initial_bias != 0.0 else 0.0
     )
 
+    # Per-variable trajectory (same round-0-baseline → last-accepted-updated logic as
+    # the combined bias): the round-0 baseline PerVariableBias → the final accepted
+    # round's updated PerVariableBias. None when the loop carried no error_fields.
+    per_variable = None
+    if n_rounds and getattr(iters[0], "per_variable_bias", None) is not None:
+        from legoesm.training.bias_metrics import compare_per_variable_bias
+        initial_pv = iters[0].per_variable_bias.baseline
+        final_pv = initial_pv
+        for it, a in zip(iters, accepted):
+            if a and getattr(it, "per_variable_bias", None) is not None:
+                final_pv = it.per_variable_bias.updated
+        per_variable = compare_per_variable_bias(initial_pv, final_pv)
+
     config = result.final_config
     if hasattr(result, "final_fields"):          # MultiCampaignResult
         fields = result.final_fields
@@ -167,6 +195,7 @@ def summarize_campaign(result: Any, *, promotion_key: str | None = None) -> Camp
         fractional_reduction=fractional_reduction, coefficients=coefficients,
         n_diagnosed_total=n_diagnosed_total,
         n_diagnoses_valid_total=n_diagnoses_valid_total,
+        per_variable=per_variable,
     )
 
 
