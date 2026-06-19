@@ -143,6 +143,39 @@ def test_compare_identical_states_zero_score():
     assert float(jnp.max(jnp.abs(result.environment.sst_K - 300.0))) == 0.0
 
 
+def test_compare_sst_fallback_uses_surface_air_temperature_when_sst_absent():
+    """In CMIP/uncoupled runs the driver may not thread an SST; the env SST tag
+    then falls back to the SURFACE-air temperature ``model.T[..., -1]``.
+
+    The documented fallback (`compare_reanalysis.py`) is a LIVE branch — every
+    other compare test passes an explicit ``sst``, so the ``sst_K is None`` path is
+    otherwise unexercised.  A bug there (using ``T[..., 0]`` = the model TOP, or
+    crashing on ``None``) would silently mis-tag the CMIP environment SST and so
+    mis-cluster / mis-deploy by climate.  A NON-uniform T profile (surface 295 K,
+    top 220 K) makes the surface-vs-top choice decisive: the tag must be 295, the
+    surface level, NOT 220, the top.
+    """
+    nlev = 5
+    shape = (2, 2)
+    sigma_full, sigma_half = _sigma(nlev)
+    # Surface-last profile: T[..., 0] = 220 K (top), T[..., -1] = 295 K (surface).
+    t_profile = jnp.linspace(220.0, 295.0, nlev)
+    T = jnp.broadcast_to(t_profile, shape + (nlev,))
+    model = _uniform_state(shape, nlev, sst=None)._replace(T=T)   # sst_K is None
+    assert model.sst_K is None
+    lat = jnp.array([0.0, 1.0])
+    lon = jnp.array([0.0, 1.0])
+    result = compare_state_to_reference(
+        model=model, reference=model,                            # identical → zero score
+        sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
+    )
+    # The fallback used the SURFACE-air temperature (295 K), not the top (220 K).
+    assert result.environment.sst_K.shape == shape
+    np.testing.assert_allclose(np.asarray(result.environment.sst_K), 295.0, atol=1e-5)
+    assert result.manifest[0].environment.sst_K == pytest.approx(295.0, abs=1e-5)
+
+
 def test_compare_flags_biased_column():
     nlev = 5
     shape = (2, 2)
