@@ -121,6 +121,19 @@ def test_labels_in_range_and_reps_distinct():
     assert len(out.labels) == len(records)
 
 
+def test_each_representative_labels_to_own_cluster():
+    """Each representative belongs to ITS OWN cluster: labels[reps[j]] == j (a rep is
+    at distance 0 from itself in normalised env space, so it is its own nearest rep).
+    A bug in the rep-ordering ↔ label-index mapping (or the dist_to_reps matrix) would
+    put a representative in another cluster — invisible to the in-range / distinctness
+    checks, caught here. Also confirms every cluster is non-empty (each j is used)."""
+    records = _two_separated_groups()
+    out = cluster_columns_by_environment(records, n_clusters=3)
+    for j, rep in enumerate(out.representative_indices):
+        assert out.labels[rep] == j, (j, rep, out.labels[rep])
+    assert set(out.labels) == set(range(len(out.representative_indices)))
+
+
 def test_env_scales_changes_representative():
     """env_scales re-weights the axes ⇒ a DIFFERENT 2nd representative — proving
     the override is load-bearing, not ignored.  Anchor (worst score) = rec 0."""
