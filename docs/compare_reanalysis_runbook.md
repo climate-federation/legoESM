@@ -91,9 +91,16 @@ from scripts.experiment.check_campaign_deploy import build_deployed_config
 from scripts.run.run_correction_campaign import make_base_driver_builder
 
 cfg, grid = build_deployed_config("configs/amip_clubb_lite.json", "OUT.json")
-build_driver, _ = make_base_driver_builder("amip")   # or "cmip", coupled_preset=...
+build_driver, _ = make_base_driver_builder("amip")   # AMIP (prescribed SST)
 driver = build_driver(cfg)
 driver.run(...)        # the LES-corrected production run; save a restart for step 6
+```
+
+For **CMIP** (coupled ocean), pass a RESOLVED preset *object* (not the name string):
+
+```python
+from legoesm.driver.coupled_config import PRESETS
+build_driver, _ = make_base_driver_builder("cmip", coupled_preset=PRESETS["aquaplanet"]())
 ```
 
 ## 6. Verify on a HELD-OUT window (the rigorous check)

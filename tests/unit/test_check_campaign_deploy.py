@@ -136,6 +136,37 @@ def test_deployed_config_drives_a_real_driver_with_the_per_column_correction(tmp
     assert drv_ck.min() == pytest.approx(ck_lo) and drv_ck.max() == pytest.approx(ck_hi)
 
 
+def test_cmip_deployed_config_drives_the_coupled_driver_with_the_correction(tmp_path):
+    """The CMIP deploy path through the operator's documented composition: the runbook's
+    ``make_base_driver_builder("cmip", coupled_preset=PRESETS[...]())`` must build a
+    CoupledESMDriver carrying the per-column LES-corrected C_K.
+
+    Both done-criterion modes' deploy paths are thus locked (AMIP in the sibling test).
+    NOTE the preset must be a RESOLVED OBJECT (``PRESETS["aquaplanet"]()``), not the name
+    string — the runbook calls this out, and this test guards it.
+    """
+    from legoesm.driver.coupled_config import PRESETS
+
+    from scripts.experiment.check_campaign_deploy import build_deployed_config
+    from scripts.run.run_correction_campaign import (
+        load_base_config_and_grid,
+        make_base_driver_builder,
+    )
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+    ck_lo, ck_hi = 0.32, 0.58
+    out = _campaign_output(tmp_path, base_cfg, grid, lo=ck_lo, hi=ck_hi)
+
+    deployed, _ = build_deployed_config(cfg, out)
+    build_driver, _ = make_base_driver_builder(
+        "cmip", coupled_preset=PRESETS["aquaplanet"]())
+    driver = build_driver(deployed)                      # constructs + setup()s the coupled driver
+    drv_ck = np.asarray(driver._atm.physics.turbulence_config.C_K)  # coupled-driver attribute
+    assert drv_ck.shape == (128,)
+    assert drv_ck.min() == pytest.approx(ck_lo) and drv_ck.max() == pytest.approx(ck_hi)
+
+
 def test_check_deploy_refuses_a_different_grid_of_the_same_column_count(tmp_path):
     """The grid fingerprint must refuse a correction learned on a DIFFERENT grid even
     when the column count matches (8x16 vs 16x8 are both 128) — else the per-column
