@@ -1052,7 +1052,15 @@ class ModelDriver:
         _, land_params, gsd = init_land_surface_data(
             surfdata_path, self.grid, land_cfg, float(self.config.start_day),
         )
-        land_params = fill_land_param_gaps(land_params, gsd)
+        # Reconcile to the driver's AUTHORITATIVE land mask (not surfdata's own
+        # cover): surfdata properties are kept only where _f_land > 0, so the
+        # land params never disagree with the ocean tile (weighted by 1-f_land)
+        # or preexisting AMIP runs.  Ravel matches the loader's column order
+        # since grid_shape_2d == grid_lat.shape (verified for latlon/gaussian/
+        # cubed-sphere).
+        land_params = fill_land_param_gaps(
+            land_params, gsd, f_land=jnp.asarray(self._f_land).reshape(-1),
+        )
 
         albedo_col = jnp.asarray(land_params.albedo_veg)          # (ncol,)
         grid_shape = tuple(int(s) for s in jnp.asarray(self.grid.grid_lat).shape)

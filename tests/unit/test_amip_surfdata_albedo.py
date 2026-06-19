@@ -122,11 +122,13 @@ def test_surfdata_albedo_column_grid_mismatch_raises(tmp_path):
 
     # Real grid geometry (so the loader runs) but a mismatched reshape target:
     # grid_lat is (4, 4) = 16, while the loader produces 128-column params.
+    # _f_land matches the loader's 128 columns so the f_land reconciliation
+    # passes and the failure surfaces at the albedo->grid reshape guard.
     bad_grid = SimpleNamespace(
         lat2d=grid.lat2d, lon2d=grid.lon2d, grid_area=grid.grid_area,
         grid_lat=jnp.zeros((4, 4)),
     )
-    bad = SimpleNamespace(grid=bad_grid, _f_land=jnp.ones((4, 4)),
+    bad = SimpleNamespace(grid=bad_grid, _f_land=jnp.ones((8, 16)),
                           config=SimpleNamespace(start_day=196.0))
     with pytest.raises(ValueError, match="column/grid layout mismatch"):
         ModelDriver._surfdata_land_albedo(bad, p, lat_albedo)
