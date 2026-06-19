@@ -137,6 +137,50 @@ def test_make_les_diagnose_fn_runs_process_column():
     assert bool(jnp.all(jnp.isfinite(out.K)))
 
 
+def test_make_les_diagnose_fn_threads_phis_to_process_column(monkeypatch):
+    """iter-118 wiring: make_les_diagnose_fn(phis=...) forwards the static model
+    topography to process_column (→ the orographic geostrophic term); the default
+    forwards None (flat). The forcing extraction inside process_column is stubbed so
+    the test pins ONLY the phis threading."""
+    import legoesm.atmosphere.dynamics.column_les as cl
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    captured = {}
+
+    def fake_process_column(record, **kw):
+        captured["phis"] = kw.get("phis", "MISSING")
+        return "DIAG"
+
+    # make_les_diagnose_fn imports process_column at call time (function-scope), so
+    # patch the module attribute BEFORE building the diagnose_fn.
+    monkeypatch.setattr(cl, "process_column", fake_process_column)
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+
+    class _Env:
+        cape_J_kg = 200.0  # noqa: N815
+
+    class _Rec:
+        grid_index = (4, 8)
+        lat_deg = 20.0
+        environment = _Env()
+
+    phis_grid = jnp.zeros((8, 16))
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les, phis=phis_grid)
+    assert diagnose_fn(_Rec(), _full_grid_state()) == "DIAG"
+    assert captured["phis"] is phis_grid          # forwarded to process_column
+
+    diagnose_flat = make_les_diagnose_fn(
+        grid, sigma, les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les)                 # no phis → flat
+    diagnose_flat(_Rec(), _full_grid_state())
+    assert captured["phis"] is None
+
+
 def test_make_les_diagnose_fn_mpas_routes_edge_velocity():
     """An MPAS worst column spins off its LES end-to-end (iter 76): the model_ctx
     carries the native u_edge, make_les_diagnose_fn routes it to the Voronoi

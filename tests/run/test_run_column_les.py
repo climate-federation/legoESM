@@ -381,6 +381,37 @@ def test_extract_gcm_column():
     assert bool(jnp.all(gcm_z >= 0.0))
 
 
+def test_extract_gcm_column_orographic_phis_activates_geostrophic_term():
+    """iter-118 driver wiring: passing ``phis`` to extract_gcm_column threads the
+    orographic surface-geopotential term (iter 117) into the geostrophic forcing —
+    the returned ls_state's u_geo/v_geo differ from the flat (phis=None) case over
+    terrain; ``phis=None`` (the default) is bit-identical to omitting it."""
+    from legoesm import constants
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    T = jnp.full(shape, 280.0)
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 10.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+              col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)))
+    _, _, ls_flat = extract_gcm_column(**kw)
+    lat2d = jnp.asarray(grid.lat)[:, None]
+    lon2d = jnp.asarray(grid.lon)[None, :]
+    phis = constants.g * (700.0 * jnp.cos(lat2d) * jnp.sin(lon2d))   # ~700 m terrain
+    _, _, ls_oro = extract_gcm_column(**kw, phis=phis)
+    assert ls_flat.u_geo is not None and ls_oro.u_geo is not None
+    du = np.asarray(ls_oro.u_geo) - np.asarray(ls_flat.u_geo)
+    dv = np.asarray(ls_oro.v_geo) - np.asarray(ls_flat.v_geo)
+    assert float(np.max(np.abs(du)) + np.max(np.abs(dv))) > 1e-3   # orographic ACTIVATED
+    # phis=None default is bit-identical to the flat case (unchanged production path)
+    _, _, ls_none = extract_gcm_column(**kw, phis=None)
+    np.testing.assert_array_equal(np.asarray(ls_none.u_geo), np.asarray(ls_flat.u_geo))
+
+
 def test_process_column_end_to_end_with_mock_run():
     n_lat, n_lon, nlev = 8, 16, 6
     grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)

@@ -77,6 +77,7 @@ def make_les_diagnose_fn(
     *,
     les_config: Any,
     run_les_fn: Callable[[Any], Any],
+    phis: Any | None = None,
 ) -> Callable[[Any, Any], Any]:
     """``diagnose_fn(record, model_ctx)`` that spins off + diagnoses a column LES.
 
@@ -85,6 +86,12 @@ def make_les_diagnose_fn(
     column's GCM large-scale forcing, runs the plane LES (``run_les_fn``), and
     diagnoses the closure coefficient.  ``grid`` / ``sigma`` are the model grid +
     vertical coordinate the forcing extractor needs.
+
+    ``phis`` (optional, the model's STATIC surface geopotential ``g·z_s`` on the
+    full grid, co-located with the state's ``p_s``) activates the orographic
+    geostrophic-forcing term for TERRAIN worst-columns (iter 117); ``None``
+    (default) keeps the flat/ocean behaviour.  It is a static topography field
+    (closed over here), NOT carried on the per-step ``model_ctx``.
     """
     from legoesm.atmosphere.dynamics.column_les import process_column
 
@@ -107,6 +114,7 @@ def make_les_diagnose_fn(
                 T=model_ctx.T, q_v=model_ctx.q_v, u=u_edge, v=None,
                 p_s=model_ctx.p_s,
                 grid=grid, sigma=sigma, config=les_config, run_les_fn=run_les_fn,
+                phis=phis,
             )
         if getattr(model_ctx, "u", None) is None or getattr(model_ctx, "v", None) is None:
             raise ValueError(
@@ -119,6 +127,7 @@ def make_les_diagnose_fn(
             T=model_ctx.T, q_v=model_ctx.q_v, u=model_ctx.u,
             v=model_ctx.v, p_s=model_ctx.p_s,
             grid=grid, sigma=sigma, config=les_config, run_les_fn=run_les_fn,
+            phis=phis,
         )
 
     return diagnose_fn
@@ -209,6 +218,7 @@ def build_correction_campaign(
     run_les_fn: Callable[[Any], Any],
     n_worst: int,
     les_budget: int | None = None,
+    phis: Any | None = None,
     env_scales: Any | None = None,
     initial_clubb: Any | None = None,
     lat_deg: Any | None = None,
@@ -294,7 +304,7 @@ def build_correction_campaign(
         manifest_reducer=manifest_reducer,
     )
     diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
 
     return run_correction_campaign(
@@ -515,6 +525,7 @@ def build_multi_correction_campaign(
     n_worst: int,
     coefficients: tuple[str, ...] = ("C_K", "Pr_t"),
     les_budget: int | None = None,
+    phis: Any | None = None,
     env_scales: Any | None = None,
     initial_clubb: Any | None = None,
     lat_deg: Any | None = None,
@@ -587,7 +598,7 @@ def build_multi_correction_campaign(
         manifest_reducer=manifest_reducer,
     )
     diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn)
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
 
     return run_multi_correction_campaign(

@@ -437,6 +437,7 @@ def extract_gcm_column(
     sigma: Any,
     col_index: tuple[int, ...],
     lat_rad: float,
+    phis: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, ColumnLargeScaleState]:
     """Extract one column's heights, θ profile, and large-scale forcing state.
 
@@ -460,7 +461,7 @@ def extract_gcm_column(
 
     ls_state = extract_column_forcing(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
-        lat_rad=lat_rad, col_index=col_index,
+        lat_rad=lat_rad, col_index=col_index, phis=phis,
     )
     idx = tuple(int(c) for c in col_index)
     sigma_full = jnp.asarray(sigma.sigma_full)
@@ -490,17 +491,23 @@ def process_column(
     sigma: Any,
     config: ColumnLESConfig,
     run_les_fn: Callable[[ColumnLESSetup], Any],
+    phis: jax.Array | None = None,
 ):
     """Full per-column pipeline: extract → setup → run (injected) → diagnose.
 
     ``record`` is a manifest :class:`~legoesm.training.column_manifest.ColumnRecord`
     (provides ``grid_index``, ``lat_deg``, ``environment.cape_J_kg``).  Returns the
     diagnosed closure-coefficient object.
+
+    ``phis`` (optional, the model's STATIC surface geopotential ``g·z_s`` on the
+    full grid, co-located with ``p_s``) activates the orographic geostrophic-forcing
+    term for TERRAIN columns (iter 117); ``None`` (default) keeps the flat/ocean
+    behaviour (geostrophic wind from the above-surface geopotential only).
     """
     lat_rad = float(jnp.deg2rad(record.lat_deg))
     gcm_z, gcm_theta, ls_state = extract_gcm_column(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
-        col_index=tuple(record.grid_index), lat_rad=lat_rad,
+        col_index=tuple(record.grid_index), lat_rad=lat_rad, phis=phis,
     )
     setup = build_column_les_setup(
         cape_J_kg=record.environment.cape_J_kg, lat_rad=lat_rad,
