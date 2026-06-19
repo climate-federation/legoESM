@@ -269,6 +269,36 @@ def test_score_columns_raises_on_partial_precip():
         )
 
 
+def test_score_columns_nan_precip_obs_does_not_exclude_bad_column():
+    """A NaN precip OBSERVATION (precip globally compared, but missing at one column)
+    must NOT poison that column's combined_score and silently exclude it from
+    worst-column selection: precip_score_jax masks a non-finite precip to 0, so the
+    column is still ranked on its (valid) T/qv/wind errors. Locks the cross-function
+    invariant score_columns ∘ precip_score_jax ∘ rank_worst_columns — a missing precip
+    obs degrades gracefully (precip term → 0), it does NOT veto a genuinely-bad column.
+    Corollary: precip_err is NEVER NaN in production (masked to 0 here AND set to 0 when
+    precip is absent), so a 'valid worst column with NaN precip' cannot actually arise."""
+    nlev = 4
+    w = normalized_mass_weights(jnp.ones((nlev,)))
+    shape = (1, 2, nlev)
+    T = jnp.full(shape, 250.0)
+    qv = jnp.full(shape, 1e-3)
+    z = jnp.zeros(shape)
+    # Column (0,0): big T error AND a NaN precip obs; column (0,1): perfect.
+    T_model = T.at[0, 0].add(20.0)
+    fields = score_columns(
+        T_model=T_model, qv_model=qv, u_model=z, v_model=z,
+        T_ref=T, qv_ref=qv, u_ref=z, v_ref=z, mass_weights=w,
+        precip_model_mm_day=jnp.zeros((1, 2)),
+        precip_ref_mm_day=jnp.array([[jnp.nan, 0.0]]),   # NaN precip obs at the bad column
+    )
+    cs = fields.combined_score.reshape(-1)
+    assert bool(jnp.all(jnp.isfinite(cs)))           # NaN precip did NOT poison the score
+    assert float(fields.precip_err_mm_day.reshape(-1)[0]) == 0.0  # masked to 0, never NaN
+    idx, _scores, valid = rank_worst_columns(fields.combined_score, 1)
+    assert bool(valid[0]) and int(idx[0]) == 0       # the bad column IS still selected
+
+
 def test_all_nan_column_is_finite_zero_with_finite_grad():
     """A fully-masked column must yield finite zero RMSE and finite gradient."""
     nlev = 4

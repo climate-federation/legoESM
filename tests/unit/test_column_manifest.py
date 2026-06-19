@@ -187,13 +187,15 @@ def test_manifest_json_round_trip(tmp_path):
 
 
 def test_manifest_round_trip_preserves_nan_precip(tmp_path):
-    """The COMMON ERA5 case has no precip reference, so a VALID worst column carries
-    ``precip_err_mm_day = NaN`` (selection ranks on the finite combined_score). The
-    manifest must round-trip that NaN FAITHFULLY — write→read keeps precip NaN while
-    every other field is exactly equal; it must NOT silently coerce NaN→0 or drop the
-    column. The equality-based round-trip test above can't cover this (NaN != NaN), so
-    this locks the routine NaN path explicitly. Forward-compatible with a future
-    JSON-standard null↔NaN codec change (the round-trip VALUE stays NaN either way)."""
+    """DEFENSIVE codec lock: the manifest must round-trip a non-finite field FAITHFULLY
+    — write→read keeps a NaN precip NaN while every other field is exactly equal; it
+    must NOT silently coerce NaN→0 or drop the column. (NB in PRODUCTION precip_err is
+    NEVER NaN — score_columns masks a missing precip obs to 0 and sets 0 when precip is
+    absent; see test_score_columns_nan_precip_obs_does_not_exclude_bad_column — so a
+    valid worst column with NaN precip cannot actually arise. This guards the JSON codec
+    against ANY future non-finite leaf, which the equality-based round-trip above can't
+    cover since NaN != NaN.) Forward-compatible with a future null↔NaN codec change
+    (the round-trip VALUE stays NaN either way)."""
     import math
 
     combined = jnp.array([[0.1, 0.9], [0.5, 0.2]])
