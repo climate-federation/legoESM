@@ -1053,6 +1053,26 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
             "health": {"status": health.status, "message": health.message}}
 
 
+def _warn_if_ignored_diagnosis_method(coefficients, diagnosis_method: str) -> None:
+    """Warn when ``--coefficients`` is given ALONGSIDE a NON-default ``--diagnosis-method``.
+
+    The ``--coefficients`` (multi-coefficient) path corrects EXACTLY those coefficients
+    and IGNORES ``--diagnosis-method`` — so a user who set a specific method expecting it
+    to apply would otherwise be silently surprised (e.g. ``--coefficients C_K,Pr_t
+    --diagnosis-method c_eps`` corrects C_K + Pr_t, NOT c_eps).  ``clubb_coefficient`` is
+    the default, so it cannot be told apart from 'unset' — only a non-default method is
+    flagged (avoids a spurious warning on every multi run).
+    """
+    import warnings
+
+    if coefficients is not None and diagnosis_method != "clubb_coefficient":
+        warnings.warn(
+            f"--diagnosis-method={diagnosis_method!r} is IGNORED because --coefficients "
+            f"was given; the multi-coefficient campaign corrects exactly "
+            f"{coefficients!r}. Drop one of the two to remove this ambiguity.",
+            stacklevel=2)
+
+
 def _enable_line_buffered_stdout() -> None:
     """Line-buffer stdout so a multi-day SLURM run's per-round progress appears in the
     job log in REAL TIME.
@@ -1515,6 +1535,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _enable_line_buffered_stdout()   # real-time per-round progress in the SLURM log
     refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
+    _warn_if_ignored_diagnosis_method(args.coefficients, args.diagnosis_method)
     # Pre-flight: fail in milliseconds (not after a multi-day run) on an unwritable
     # output path — --out is opened only at the very end, --checkpoint each round.
     _assert_output_path_writable(args.out, flag="out")

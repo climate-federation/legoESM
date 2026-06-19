@@ -380,6 +380,23 @@ def test_dry_run_flag_parsed():
     assert p.parse_args([*base, "--dry-run"]).dry_run is True
 
 
+def test_warn_if_ignored_diagnosis_method():
+    """--coefficients silently overrides --diagnosis-method (the multi path ignores it);
+    a NON-default method alongside --coefficients warns so the user is not surprised. The
+    default method (indistinguishable from unset) and the single-coefficient path (no
+    --coefficients) do NOT warn."""
+    import warnings
+
+    import scripts.run.run_correction_campaign as rcc
+
+    with pytest.warns(UserWarning, match="is IGNORED because --coefficients"):
+        rcc._warn_if_ignored_diagnosis_method("C_K,Pr_t", "c_eps")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                       # any warning would fail
+        rcc._warn_if_ignored_diagnosis_method("C_K,Pr_t", "clubb_coefficient")  # default→silent
+        rcc._warn_if_ignored_diagnosis_method(None, "c_eps")                    # single→silent
+
+
 def test_enable_line_buffered_stdout(monkeypatch):
     """The helper line-buffers stdout (real-time SLURM-log progress for a multi-day run),
     and is a SAFE no-op when stdout cannot be reconfigured (a captured/replaced stream)."""
