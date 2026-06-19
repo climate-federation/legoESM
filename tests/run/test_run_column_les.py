@@ -383,6 +383,34 @@ def test_build_setup_rejects_nonfinite_surface_flux():
             )
 
 
+@pytest.mark.slow
+def test_prescribed_surface_flux_warms_les_surface_real_dycore():
+    """END-TO-END in the REAL plane dycore: a prescribed POSITIVE surface heat flux
+    WARMS the LES SURFACE cell vs an identical no-flux run (same fixed θ' seed,
+    PRNGKey(0)), and the run stays FINITE — the iter-151 injection does the right thing
+    through the actual compressible-Euler integration, not just the forcing tendency
+    (a wrong-cell or wrong-sign bug would fail: the surface would not warm). Heavy
+    (real LES, two dycore compiles) ⇒ slow."""
+    import numpy as np
+    from legoesm.atmosphere.dynamics.column_les import run_forced_les
+
+    gcm_z, gcm_theta, ls = _gcm_column()
+    common = dict(cape_J_kg=200.0, lat_rad=0.3, gcm_z=gcm_z, gcm_theta=gcm_theta,
+                  config=_CONFIG)
+    s_none = build_column_les_setup(ls_state=ls, **common)
+    s_flux = build_column_les_setup(
+        ls_state=ls._replace(prescribe="fluxes", w_th_s=0.5, w_qv_s=0.0), **common)
+    fin_none = run_forced_les(s_none, dt_s=0.1, n_steps=20)
+    fin_flux = run_forced_les(s_flux, dt_s=0.1, n_steps=20)
+    tp_none = np.asarray(fin_none.theta_prime.data)
+    tp_flux = np.asarray(fin_flux.theta_prime.data)
+    assert np.all(np.isfinite(tp_none)) and np.all(np.isfinite(tp_flux))  # no blow-up
+    # Surface = the LAST level (top-to-bottom storage); domain-mean θ' there.
+    sfc_none = float(np.mean(tp_none[:, :, -1]))
+    sfc_flux = float(np.mean(tp_flux[:, :, -1]))
+    assert sfc_flux > sfc_none + 1e-3            # the surface flux WARMED the surface cell
+
+
 def test_build_setup_raises_when_les_top_above_column():
     gcm_z, gcm_theta, ls = _gcm_column()
     # Column top only 1500 m < LES top 2000 m -> flat-extrapolation guard.
