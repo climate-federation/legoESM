@@ -503,152 +503,21 @@ def compute_mixing_lengths(
 # ---------------------------------------------------------------------------
 
 
-def _vertical_shear_squared(
-    u_cell: jnp.ndarray, v_cell: jnp.ndarray, dz_half: jnp.ndarray,
-) -> jnp.ndarray:
-    """Compute ``|du/dz|^2 + |dv/dz|^2`` at interfaces.
-
-    Parameters
-    ----------
-    u_cell, v_cell : (..., nlev) — cell-centre velocities.
-    dz_half : (..., nlev-1) — distance between cell centres.
-
-    Returns
-    -------
-    S2 : (..., nlev-1) — squared vertical shear at interfaces.
-    """
-    dz_safe = jnp.maximum(dz_half, _EPS)
-    du = (u_cell[..., 1:] - u_cell[..., :-1]) / dz_safe
-    dv = (v_cell[..., 1:] - v_cell[..., :-1]) / dz_safe
-    return du * du + dv * dv
-
-
-def _compute_N2(
-    rho_cell: jnp.ndarray, dz_half: jnp.ndarray, rho_0: float,
-    g: float = constants.g,
-    *,
-    T_cell: jnp.ndarray | None = None,
-    S_cell: jnp.ndarray | None = None,
-    p_cell: jnp.ndarray | None = None,
-    dz_ref: jnp.ndarray | None = None,
-    jacobian: jnp.ndarray | None = None,
-    eos_fn=None,
-    n2_mode: str = "insitu",
-    adiabatic_over_dz_half: bool = False,
-) -> jnp.ndarray:
-    """N^2 at interfaces.
-
-    ``n2_mode="insitu"`` (default, BIT-IDENTICAL legacy): from cell-centre
-    *in-situ* density, ``N^2 = -(g/rho_0) drho/dz`` with z positive upward.
-    legoESM's cell index k = 0 is the surface (top) and k = nlev-1 is the
-    bottom, so z is decreasing with k. Discretely, between cell centres k
-    and k+1 a distance ``dz_half[k]`` apart::
-
-        drho/dz = (rho[k] - rho[k+1]) / dz_half[k]
-
-    For stable stratification this is negative (light water on top), so
-    ``N^2 = -g/rho_0 * drho/dz > 0``. The result is **clipped >= 0**: the
-    in-situ density difference carries compressibility and is biased too
-    stable, so its sign is not a reliable convection trigger — the
-    unstable case is handled by a separate convective-adjustment scheme.
-
-    ``n2_mode="adiabatic"``: the **true static stability** via adiabatic
-    parcel displacement to the upper cell's pressure (Veros
-    thermodynamics.py:99-103), delegating to the shared
-    :func:`legoesm.ocean.eos.compute_buoyancy_frequency_adiabatic` (no
-    duplicate numerics). The result is **SIGNED** (not clipped) — N^2 < 0
-    marks a statically unstable interface, which is exactly the convection
-    trigger the TKE closure needs. Requires ``T_cell``, ``S_cell``,
-    ``p_cell`` (cell-centre pressure [Pa]), the reference layer thickness
-    ``dz_ref`` (shape ``(nlev,)``) and the ``jacobian`` (shape ``(...)``)
-    so the shared helper's interface thickness
-    ``0.5*(dz_ref*J)[k] + 0.5*(dz_ref*J)[k+1]`` reproduces ``dz_half[k]``
-    exactly, plus an ``eos_fn``.
-
-    ``adiabatic_over_dz_half=True`` (the ``TKEConfig.veros_dz_slots``
-    metric fix) instead divides the adiabatic density contrast by the
-    CALLER'S ``dz_half`` — the Veros ``dzw`` slot (thermodynamics.py:99),
-    which on a stretched u_centered coordinate is NOT the midpoint
-    interface spacing the shared helper would reconstruct. ``False``
-    (default) is BIT-IDENTICAL legacy (midpoint reconstruction).
-
-    Returns
-    -------
-    N2 : (..., nlev-1). Clipped >= 0 for ``"insitu"``; signed for
-        ``"adiabatic"``.
-    """
-    if n2_mode == "insitu":
-        dz_safe = jnp.maximum(dz_half, _EPS)
-        # drho/dz with z positive upward — negative for stable stratification.
-        drho_dz = (rho_cell[..., :-1] - rho_cell[..., 1:]) / dz_safe
-        N2 = -g / rho_0 * drho_dz
-        return jnp.maximum(N2, 0.0)
-    if n2_mode == "adiabatic":
-        if (T_cell is None or S_cell is None or p_cell is None
-                or dz_ref is None or jacobian is None):
-            raise ValueError(
-                "n2_mode='adiabatic' requires T_cell, S_cell, p_cell "
-                "(cell-centre pressure [Pa]), dz_ref and jacobian to "
-                "displace parcels through the EOS."
-            )
-        from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
-        return compute_buoyancy_frequency_adiabatic(
-            T_cell, S_cell, p_cell, dz_ref, jacobian,
-            eos_fn=eos_fn, rho_ref=rho_0, g=g,
-            dz_half=dz_half if adiabatic_over_dz_half else None,
-        )
-    raise ValueError(
-        f"Unknown n2_mode={n2_mode!r}; expected 'insitu' or 'adiabatic'."
-    )
+# N²/shear/tridiagonal primitives are shared with CATKE — promoted to
+# ``_shared`` (public) and imported here under the historical private names so
+# the TKE call sites + behaviour stay bit-identical (no cross-module private
+# import; one implementation of the column kernels).
+from legoesm.ocean.physics.vertical_mixing._shared import (  # noqa: E402
+    compute_N2 as _compute_N2,
+    tridiag_thomas as _tridiag_thomas,
+    vertical_shear_squared as _vertical_shear_squared,
+)
 
 
 # ---------------------------------------------------------------------------
 # Prognostic TKE backward-Euler step
+# (``_compute_N2`` / ``_tridiag_thomas`` now imported from ``_shared``.)
 # ---------------------------------------------------------------------------
-
-
-def _tridiag_thomas(a, b, c, d):
-    """Solve a tridiagonal system A x = d via the Thomas algorithm.
-
-    a, b, c, d each have shape ``(..., N)`` and ``a[..., 0]``,
-    ``c[..., -1]`` are unused (left as zero by the caller). Returns
-    ``x`` of shape ``(..., N)``.
-    """
-    N = b.shape[-1]
-
-    def step(carry, k):
-        c_prev, d_prev = carry
-        denom = b[..., k] - a[..., k] * c_prev
-        denom_safe = jnp.where(jnp.abs(denom) > _EPS, denom, _EPS)
-        cp = c[..., k] / denom_safe
-        dp = (d[..., k] - a[..., k] * d_prev) / denom_safe
-        return (cp, dp), (cp, dp)
-
-    # Forward sweep
-    init_c = jnp.zeros_like(b[..., 0])
-    init_d = jnp.zeros_like(d[..., 0])
-    _, (cp_all, dp_all) = jax.lax.scan(
-        step, (init_c, init_d), jnp.arange(N),
-    )
-    # cp_all, dp_all have shape (N, ...); transpose so trailing axis is N.
-    cp_all = jnp.moveaxis(cp_all, 0, -1)
-    dp_all = jnp.moveaxis(dp_all, 0, -1)
-
-    # Back substitution
-    def back(carry, k_rev):
-        x_next = carry
-        k = N - 1 - k_rev
-        x = jnp.where(
-            k_rev == 0, dp_all[..., k],
-            dp_all[..., k] - cp_all[..., k] * x_next,
-        )
-        return x, x
-
-    x_init = jnp.zeros_like(b[..., 0])
-    _, x_rev = jax.lax.scan(back, x_init, jnp.arange(N))
-    x_rev = jnp.moveaxis(x_rev, 0, -1)
-    # Reverse the back-sub output to get x in natural index order.
-    return x_rev[..., ::-1]
 
 
 def _solve_tke_backward_euler(
