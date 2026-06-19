@@ -130,6 +130,71 @@ def test_score_columns_precip_optional_drops_term():
     assert float(jnp.max(jnp.abs(fields.precip_err_mm_day))) == 0.0
 
 
+def test_combined_score_commensurable_across_variables():
+    """The per-variable normalization makes T/qv/wind COMMENSURABLE: an absolute
+    PHYSICAL error of one normalization scale in any single variable yields the SAME
+    combined score.
+
+    NON-VACUOUS against a mis-set *_norm: the errors below are HARD-CODED absolute
+    magnitudes (not ``cfg.*_norm``, which would cancel the divisor), and the locked
+    default scales are asserted first — so a drift in any default makes the assert
+    (or the resulting term≠1) fail, which is exactly the regression that would make
+    a variable invisible to worst-column ranking."""
+    cfg = ColumnErrorConfig()
+    # Default normalization scales this test is calibrated to (drift fails loudly).
+    t_scale, qv_scale, wind_scale = 3.0, 1.5e-3, 5.0
+    assert cfg.T_norm_K == pytest.approx(t_scale)
+    assert cfg.qv_norm_kg_kg == pytest.approx(qv_scale)
+    assert cfg.wind_norm_m_s == pytest.approx(wind_scale)
+    w = normalized_mass_weights(jnp.ones((4,)))
+    zero = jnp.zeros((3, 4))
+    # absolute one-scale error per variable (hard-coded, so the ratio does NOT cancel)
+    fields = score_columns(
+        T_model=zero.at[0].set(t_scale),
+        qv_model=zero.at[1].set(qv_scale),
+        u_model=zero.at[2].set(wind_scale),
+        v_model=zero, T_ref=zero, qv_ref=zero, u_ref=zero, v_ref=zero,
+        mass_weights=w, config=cfg,
+    )
+    cs = fields.combined_score
+    # each is exactly one normalized unit ⇒ combined = sqrt((1·1²)/3) for all three
+    expected = (1.0 / 3.0) ** 0.5
+    for c in range(3):
+        assert float(cs[c]) == pytest.approx(expected, abs=1e-6)
+    # and they are EQUAL to each other (the commensurability invariant)
+    assert float(jnp.max(cs) - jnp.min(cs)) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_qv_and_wind_errors_drive_ranking():
+    """A qv-only and a wind-only error column each outrank a column with a tiny
+    T error — proving qv and wind actually PARTICIPATE in worst-column selection
+    (the RANKING here catches a FORMULA regression that drops a variable from the
+    combine — e.g. ``w_qv`` forced to 0 → column 1 scores ~0 → not in the worst-two).
+
+    Constant-drift in a *_norm is caught by the explicit value-lock assert below
+    (the ranking alone only flips for a large >~50× drift); the two guards are
+    complementary. Errors are hard-coded absolute magnitudes (not cfg-relative,
+    which would cancel the divisor)."""
+    cfg = ColumnErrorConfig()
+    assert (cfg.T_norm_K, cfg.qv_norm_kg_kg, cfg.wind_norm_m_s) == pytest.approx(
+        (3.0, 1.5e-3, 5.0))
+    w = normalized_mass_weights(jnp.ones((4,)))
+    zero = jnp.zeros((3, 4))
+    # col 0: tiny T error (0.1·3 K); col 1: large qv error (5·1.5e-3); col 2: large wind (5·5)
+    fields = score_columns(
+        T_model=zero.at[0].set(0.3),
+        qv_model=zero.at[1].set(7.5e-3),
+        u_model=zero.at[2].set(25.0),
+        v_model=zero, T_ref=zero, qv_ref=zero, u_ref=zero, v_ref=zero,
+        mass_weights=w, config=cfg,
+    )
+    idx, vals, valid = rank_worst_columns(fields.combined_score, 2)
+    worst_two = set(int(i) for i in idx)
+    assert worst_two == {1, 2}, f"qv/wind columns must rank worst, got {worst_two}"
+    # the tiny-T column (0) is the LEAST bad
+    assert int(jnp.argmin(fields.combined_score)) == 0
+
+
 def test_rank_worst_columns_selects_highest():
     score = jnp.array([[0.1, 0.9], [0.5, 0.2]])
     idx, vals, valid = rank_worst_columns(score, 2)
