@@ -104,6 +104,32 @@ def load_restart(path: str | Path, template_state) -> tuple:
     return template_state._replace(**replace_kw)
 
 
+def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
+    """Tracer-point latitude/longitude in DEGREES for any production grid.
+
+    The grids store coordinates in RADIANS (lat-lon ``grid.lat_T``/``lon_T``,
+    cubed-sphere ``grid.lat``/``lon``, MPAS ``grid.latCell``/``lonCell``); the
+    offline MLD / OMIP-NEMO scorers consume DEGREES.  This is the single
+    radian->degree extraction used by the snapshot writer so every grid emits
+    the same ``lat_T``/``lon_T`` (degrees) convention.
+
+    Raises ``ValueError`` on an unknown ``grid_type`` (dispatch hardening: a
+    silent fallthrough would emit a wrong-shaped / mis-unit coordinate).
+    """
+    if grid_type == "cubed_sphere":
+        return (np.rad2deg(np.asarray(grid.lat)),
+                np.rad2deg(np.asarray(grid.lon)))
+    if grid_type == "mpas":
+        return (np.rad2deg(np.asarray(grid.latCell)),
+                np.rad2deg(np.asarray(grid.lonCell)))
+    if grid_type in ("latlon", "tripole"):
+        return (np.rad2deg(np.asarray(grid.lat_T)),
+                np.rad2deg(np.asarray(grid.lon_T)))
+    raise ValueError(
+        f"grid_lat2d_lon2d_deg: unknown grid_type {grid_type!r} "
+        "(expected one of: latlon, tripole, cubed_sphere, mpas)")
+
+
 def save_mld_snapshot(state, path: str | Path, *,
                       z_coord,
                       lat2d: np.ndarray,
@@ -116,7 +142,7 @@ def save_mld_snapshot(state, path: str | Path, *,
     restart), this writes ONLY what the de Boyer Montegut / Treguier (2023)
     MLD diagnostic and the OMIP-NEMO comparison consume: ``T``, ``S``,
     ``land_mask`` and ``H_bathy`` from the state, the horizontal grid
-    (``lat_T``, ``lon_T``), and the reference level-centre depths
+    (``lat_T``, ``lon_T`` in DEGREES), and the reference level-centre depths
     (``z_center_ref``, positive-down) the scorers use to build the per-level
     wet mask ``z_center_ref < H_bathy``.  ``u``/``v``/``eta`` are included
     when present (``v`` is absent on MPAS; ``eta`` lets a run restart from the
@@ -124,19 +150,22 @@ def save_mld_snapshot(state, path: str | Path, *,
 
     Shared writer for the snapshot contract read by
     ``scripts/validate/compare_mld_dbm.py`` and ``compare_omip_nemo.py``; the
-    OMIP drivers (``run_omip`` / ``run_omip_core2``) call this so all three
-    grids emit a single, identical snapshot format.
+    OMIP drivers (``run_omip`` / ``run_omip_core2``) call this so all four
+    grids emit a single, identical snapshot format.  ``H_bathy`` and
+    ``z_center_ref`` are REQUIRED by the consumers, so they are required here
+    too (a clear write-time error beats a cryptic ``SystemExit`` at read).
 
     Parameters
     ----------
     state : ocean state NamedTuple
-        Must expose ``T``/``S``/``land_mask`` (and usually ``H_bathy``) Fields.
+        Must expose ``T``/``S``/``land_mask``/``H_bathy`` Fields.
     path : str or Path
         Output ``.npz`` path.
     z_coord : ocean vertical coordinate
-        Provides ``z_half_ref`` (nlev+1, <=0) -> reference centre depths.
-    lat2d, lon2d : array, shape (n_lat, n_lon)
-        Tracer-point latitudes/longitudes [deg].
+        Must provide ``z_half_ref`` (nlev+1, <=0) -> reference centre depths.
+    lat2d, lon2d : array
+        Tracer-point latitudes/longitudes in DEGREES (use
+        :func:`grid_lat2d_lon2d_deg`).
     time_s, step : optional provenance scalars.
 
     Returns
@@ -159,18 +188,37 @@ def save_mld_snapshot(state, path: str | Path, *,
         fld = getattr(state, opt, None)
         if fld is not None and hasattr(fld, "data"):
             save_kw[opt] = np.asarray(fld.data)
+    # H_bathy + z_center_ref are part of the consumer contract -> required.
     H_bathy = getattr(state, "H_bathy", None)
-    if H_bathy is not None and hasattr(H_bathy, "data"):
-        save_kw["H_bathy"] = np.asarray(H_bathy.data)
+    if H_bathy is None or not hasattr(H_bathy, "data"):
+        raise ValueError(
+            "save_mld_snapshot: state has no H_bathy Field, but the MLD "
+            "scorers require it (per-level wet mask z_center_ref < H_bathy).")
+    save_kw["H_bathy"] = np.asarray(H_bathy.data)
     zh_ref = getattr(z_coord, "z_half_ref", None)
-    if zh_ref is not None:
-        zh = np.asarray(zh_ref)                                  # (nlev+1,), <=0
-        save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))  # (nlev,) +down
+    if zh_ref is None:
+        raise ValueError(
+            "save_mld_snapshot: z_coord has no z_half_ref, required to build "
+            "z_center_ref for the MLD scorers.")
+    zh = np.asarray(zh_ref)                                      # (nlev+1,), <=0
+    z_center_ref = np.abs(0.5 * (zh[:-1] + zh[1:]))             # (nlev,) +down
+    # mixed_layer_depth assumes strictly-increasing positive-down centres; a
+    # malformed coordinate that violates this would silently corrupt the MLD.
+    if not (z_center_ref.ndim == 1 and z_center_ref.shape[0] >= 1
+            and np.all(np.diff(z_center_ref) > 0.0)):
+        raise ValueError(
+            "save_mld_snapshot: z_center_ref is not strictly increasing "
+            f"positive-down (got {z_center_ref}); check z_coord.z_half_ref.")
+    save_kw["z_center_ref"] = z_center_ref
     if time_s is not None:
         save_kw["_time_s"] = np.asarray(float(time_s))
     if step is not None:
         save_kw["_step"] = np.asarray(int(step))
-    np.savez_compressed(out_path, **save_kw)
+    # Atomic write: a killed process (or two runs sharing an output dir) must
+    # not leave a partial/corrupt npz that a later scorer silently mis-reads.
+    tmp_path = out_path.with_name(out_path.name + ".tmp.npz")
+    np.savez_compressed(str(tmp_path), **save_kw)
+    tmp_path.replace(out_path)
     return out_path
 
 
@@ -193,4 +241,5 @@ def restart_metadata(path: str | Path) -> dict[str, Any]:
 
 __all__ = [
     "save_restart", "load_restart", "restart_metadata", "save_mld_snapshot",
+    "grid_lat2d_lon2d_deg",
 ]
