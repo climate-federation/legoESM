@@ -17,15 +17,23 @@ handled downstream by the Sundqvist / Xu-Randall cloud scheme.
 
 Budget (full levels, semi-implicit dissipation) — AS ACTUALLY INTEGRATED:
 
-  d(wp2)/dt = Km*S^2 - Kh*N^2 - C_eps*sqrt(wp2)/l + diff(wp2)
+  d(wp2)/dt = Km*S^2 - Kh*N^2 - C_eps*wp2^(3/2)/l + diff(wp2)
+
+The sink is written ``C_eps*wp2^(3/2)/l`` because the semi-implicit update
+``wp2_new = (wp2 + dt*P)/(1 + dt*diss_wp2)`` with ``diss_wp2 = C_eps*sqrt(wp2)/l``
+is the discretisation of ``d(wp2)/dt = P - diss_wp2*wp2 = P - C_eps*wp2^(3/2)/l``;
+the linearised rate ``diss_wp2`` multiplies ``wp2``, so the budget term carries
+the full ``wp2^(3/2)`` power (see ``c_eps_from_budget`` in
+``dynamics/les_closure_diagnosis.py``, the exact inverse of this balance).
 
 NOTE on faithfulness: the canonical CLUBB w'^2 *variance* budget carries a
 factor of 2 on the production terms, a buoyancy production
 ``2*(g/theta_v)*w'theta_v'`` and a ``C1*wp2/tau`` dissipation.  This lite
 version instead integrates a TKE-scaled magnitude: shear production
 ``Km*S^2`` (no factor 2), a down-gradient buoyancy surrogate ``-Kh*N^2``
-(in place of ``2*(g/theta_v)*w'theta_v'``), and a ``C_eps*sqrt(wp2)/l``
-dissipation.  ``wp2`` is therefore a TKE-like scale used only to set the
+(in place of ``2*(g/theta_v)*w'theta_v'``), and a ``C_eps*wp2^(3/2)/l``
+dissipation (linearised rate ``C_eps*sqrt(wp2)/l`` times ``wp2``).  ``wp2`` is
+therefore a TKE-like scale used only to set the
 mixing time scale and the down-gradient diffusivities, NOT a strict second
 moment.  (The ``CLUBBLiteConfig`` C1/C4/C5 fields are legacy and unused by
 this reduced budget.)

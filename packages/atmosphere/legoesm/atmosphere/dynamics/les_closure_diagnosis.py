@@ -173,7 +173,14 @@ def clubb_coefficient_from_diffusivity(
     equilibrium wp2 departs from the LES ``w'²`` (e.g. deep convection) the
     diagnosed ``C_K`` carries an O(1) offset; the loop's iter-43 gate / iter-44
     line search and the bias monitor are the safeguards.  Co-tuning ``C_eps`` to
-    align the GCM wp2 with the LES truth would remove the assumption (follow-up).
+    align the GCM wp2 with the LES truth — the assumption-relaxing step — IS
+    implemented in :func:`c_eps_from_budget`: it inverts the clubb_lite *local
+    no-transport* steady-state wp2 balance, so the diagnosed ``C_eps`` drives the
+    GCM equilibrium wp2 toward the LES ``w'²`` wherever vertical transport of
+    ``wp2`` is small relative to local production/dissipation (it does not fully
+    cancel the offset where ``diff(wp2)`` dominates).  The SIMULTANEOUS
+    multi-coefficient correction (``CorrectionSpec`` with ``C_K`` + ``C_eps``)
+    applies both together.
     """
     K_m = jnp.asarray(K_m)
     l_mix = jnp.asarray(l_mix, dtype=K_m.dtype)

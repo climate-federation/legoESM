@@ -179,6 +179,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # (sst_K) read clearer than snake_case. N815 covers the ColumnState.sst_K field.
 "packages/ml/legoesm/training/compare_reanalysis.py" = ["N803", "N806", "N815"]
 "tests/unit/test_compare_reanalysis.py" = ["N803", "N806"]
+# LES-closure diagnosis tests: physical symbol names (Km, Kh, S2, N2, P, C_K,
+# Pr_t) match the clubb_lite budget + diagnosis kernels they exercise.
+"tests/unit/test_les_closure_diagnosis.py" = ["N803", "N806"]
 "scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
 # ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
 # field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the

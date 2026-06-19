@@ -354,6 +354,34 @@ def test_c_eps_from_budget_value():
     np.testing.assert_allclose(np.asarray(ce), 0.48, rtol=1e-5)
 
 
+def test_c_eps_budget_inverts_clubb_lite_steady_state_wp2():
+    """CO-TUNING round-trip: c_eps_from_budget is the exact inverse of clubb_lite's
+    *local no-transport* steady-state w'² balance, so injecting the diagnosed C_eps
+    drives the GCM equilibrium wp2 toward the LES w'² wherever vertical transport of
+    wp2 is small (closing the C_K wp2-identification offset; it does not fully cancel
+    the offset where diff(wp2) dominates).
+
+    clubb_lite linearises the wp2 sink as ``diss = C_eps·√wp2/ℓ`` and applies it
+    semi-implicitly (clubb_lite.py), so the budget sink RATE is ``diss·wp2 =
+    C_eps·wp2^{3/2}/ℓ``; at steady state (transport neglected) ``C_eps·wp2^{3/2}/ℓ = P``
+    (production balances dissipation) ⇒ the equilibrium ``wp2_ss = (P·ℓ/C_eps)^{2/3}``.
+    Build that wp2_ss from a KNOWN C_eps + production
+    (independently of c_eps_from_budget's ^{3/2} formula — using the inverse ^{2/3}),
+    and c_eps_from_budget recovers the C_eps exactly.  A change to EITHER the
+    diagnosis exponent OR the documented steady-state relationship breaks this."""
+    Km, Kh, S2, N2, l_mix = 5.0, 7.0, 1.0e-4, -1.0e-4, 50.0   # unstable ⇒ buoyancy produces
+    P = Km * S2 - Kh * N2                                     # net production > 0
+    c_eps_true = 0.4
+    wp2_ss = (P * l_mix / c_eps_true) ** (2.0 / 3.0)          # clubb_lite equilibrium wp2
+    ce, valid = c_eps_from_budget(
+        jnp.full((3,), Km), jnp.ones((3,), bool),
+        jnp.full((3,), Kh), jnp.ones((3,), bool),
+        jnp.full((3,), S2), jnp.full((3,), N2),
+        jnp.full((3,), l_mix), jnp.full((3,), wp2_ss))
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(ce), c_eps_true, rtol=1e-6)
+
+
 def test_c_eps_negative_production_invalid():
     # Strongly stable (N2>0, weak shear) ⇒ net production P<0 ⇒ invalid.
     _, valid = c_eps_from_budget(
