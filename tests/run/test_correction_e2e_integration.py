@@ -71,6 +71,7 @@ def _run_tiny_latlon_coupled(days=1, n_lat=8, nlev=5):
 
 
 @pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 208/210: no f64->f32 scatter
 def test_full_pipeline_real_model_and_les():
     from legoesm.atmosphere.dynamics.column_les import (
         ColumnLESConfig,

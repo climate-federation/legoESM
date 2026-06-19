@@ -81,6 +81,7 @@ def _build_driver(clubb_cfg):
 
 
 @pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 208/210: no f64->f32 scatter
 def test_full_correction_loop_real_rerun_with_injected_ck():
     from legoesm.training.compare_reanalysis import compare_state_to_reference
 
