@@ -1089,6 +1089,7 @@ def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> Non
     """
     import json
     import os
+    import stat
     import tempfile
 
     parent = os.path.dirname(os.path.abspath(path)) or "."
@@ -1098,6 +1099,17 @@ def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> Non
             json.dump(obj, f, indent=indent)
             f.flush()
             os.fsync(f.fileno())
+        # mkstemp creates 0o600; ``os.replace`` swaps the inode, so without this the
+        # output/checkpoint would silently become owner-only (vs ``open(path,"w")``'s
+        # umask default — a shared-HPC reader would be locked out). Preserve an existing
+        # file's mode (the per-round re-checkpoint), else the umask default for a new one.
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            cur_umask = os.umask(0)
+            os.umask(cur_umask)
+            mode = 0o666 & ~cur_umask
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:

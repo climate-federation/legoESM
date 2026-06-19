@@ -352,6 +352,19 @@ def test_atomic_write_json(tmp_path):
     assert json.loads(p.read_text()) == {"round": 1}           # PREVIOUS content intact
     assert not [f for f in os.listdir(tmp_path) if f.startswith(".tmp_campaign_")]  # no leak
 
+    # Permissions match open(path,"w") — NOT mkstemp's owner-only 0o600 (which would
+    # silently lock out a shared-HPC reader): a NEW file gets the umask default, and an
+    # EXISTING file keeps its mode across the atomic replace.
+    import stat
+    new = tmp_path / "fresh.json"
+    ref = tmp_path / "ref.json"
+    ref.write_text("{}")                                       # open(w)-equivalent reference
+    _atomic_write_json(str(new), {"k": 1})
+    assert stat.S_IMODE(new.stat().st_mode) == stat.S_IMODE(ref.stat().st_mode)
+    os.chmod(new, 0o640)                                       # existing file's mode…
+    _atomic_write_json(str(new), {"k": 2})                     # …survives the re-checkpoint
+    assert stat.S_IMODE(new.stat().st_mode) == 0o640
+
 
 def test_assert_output_path_writable(tmp_path, monkeypatch):
     """The launch pre-flight fails LOUD (in ms) on an unwritable --out/--checkpoint so
