@@ -373,12 +373,11 @@ def test_main_cmip_rejects_unknown_coupled_preset(monkeypatch):
                   "--coupled-preset", "not_a_preset"])
 
 
-def test_main_resume_rejects_mismatched_corrected_field(tmp_path, monkeypatch):
-    """The HOT resume path (multi-day SLURM restarts): resuming a checkpoint whose
-    corrected coefficient (Pr_t) differs from --diagnosis-method's field (C_K) fails LOUD
-    at launch, NOT silently loading the field into the WRONG config slot (a garbage
-    correction). Drives main() with the heavy preamble stubbed up to the resume guard."""
-    import json
+def _stub_campaign_main_io(monkeypatch):
+    """Stub the campaign main()'s heavy preamble — config/grid load, driver builder, ERA5
+    reference loading (load_era5_time_mean → regrid → column_state_from_carry), orographic
+    phis — on their SOURCE modules (function-scoped-import-safe), up to the resume/dispatch
+    logic. Returns the fake grid. Shared by the main() launch-guard tests."""
     from types import SimpleNamespace
 
     import legoesm.training.compare_reanalysis as cr
@@ -400,12 +399,42 @@ def test_main_resume_rejects_mismatched_corrected_field(tmp_path, monkeypatch):
     monkeypatch.setattr(cae, "select_era5_regrid", lambda canon: (lambda slc, g, s: object()))
     monkeypatch.setattr(cr, "column_state_from_carry", lambda carry: object())
     monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda forcing, provider: None)
+    return fake_grid
 
+
+def test_main_resume_rejects_mismatched_corrected_field(tmp_path, monkeypatch):
+    """The HOT resume path (multi-day SLURM restarts): resuming a checkpoint whose
+    corrected coefficient (Pr_t) differs from --diagnosis-method's field (C_K) fails LOUD
+    at launch, NOT silently loading the field into the WRONG config slot (a garbage
+    correction). Drives main() with the heavy preamble stubbed up to the resume guard."""
+    import json
+
+    import scripts.run.run_correction_campaign as rcc
+
+    _stub_campaign_main_io(monkeypatch)
     ckpt = tmp_path / "ckpt.json"
     ckpt.write_text(json.dumps({"corrected_field": "Pr_t", "field": [[0.4]], "round": 0}))
     with pytest.raises(SystemExit, match="checkpoint corrects"):
         rcc.main(["--config", "c.json", "--era5-zarr", "z", "--resume", str(ckpt),
                   "--diagnosis-method", "clubb_coefficient"])    # corrected_field "C_K" != "Pr_t"
+
+
+def test_main_multi_resume_rejects_mismatched_coefficients(tmp_path, monkeypatch):
+    """The MULTI-coefficient resume guard (parallel to the single-coefficient one): the
+    simultaneous campaign also resumes after a SLURM timeout, and resuming a checkpoint
+    whose coefficient SET differs from --coefficients fails LOUD, not silently loading the
+    wrong per-coefficient fields. --coefficients dispatches main() into _run_multi_main."""
+    import json
+
+    import scripts.run.run_correction_campaign as rcc
+
+    _stub_campaign_main_io(monkeypatch)
+    ckpt = tmp_path / "ckpt.json"
+    ckpt.write_text(json.dumps(
+        {"coefficients": ["C_K", "Pr_t"], "fields": {}, "round": 0}))
+    with pytest.raises(SystemExit, match="checkpoint coefficients"):
+        rcc.main(["--config", "c.json", "--era5-zarr", "z", "--resume", str(ckpt),
+                  "--coefficients", "C_K,C_eps"])     # set {C_K,C_eps} != ckpt {C_K,Pr_t}
 
 
 def test_maybe_write_env_kernel_writes_when_kernel_present(tmp_path, monkeypatch, capsys):
