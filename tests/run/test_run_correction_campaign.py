@@ -357,6 +357,22 @@ def test_format_per_variable_bias():
     assert "improved: T" in line and "wind" not in line.split("improved:")[1]
 
 
+def test_format_resume_line_surfaces_checkpointed_progress():
+    """On resume the console shows the invested work (cumulative LES count + start bias)
+    from the checkpoint seed, so an operator restarting after a SLURM timeout sees real
+    progress, not a cold start at round N (iter 274). A null start bias → 'unknown'."""
+    from scripts.run.run_correction_campaign import _format_resume_line
+
+    seed = {"initial_bias": 5.0, "n_diagnosed_prior": 42}
+    line = _format_resume_line("ckpt.json", 7, seed)
+    assert "resuming from ckpt.json" in line and "at round 7" in line
+    assert "start bias 5" in line and "42 LES diagnoses" in line
+    # multi flag + a null start bias (a diverged/uncaptured initial) → 'unknown', count 0.
+    multi = _format_resume_line("c.json", 3, {"initial_bias": None}, multi=True)
+    assert "resuming multi from c.json" in multi
+    assert "start bias unknown" in multi and "0 LES diagnoses" in multi
+
+
 def test_format_round_line_surfaces_les_validity():
     """The per-round console line distinguishes a no-turbulence LES round (0/N valid —
     a forcing/setup issue) from a correction-didn't-help round (N/N valid but no

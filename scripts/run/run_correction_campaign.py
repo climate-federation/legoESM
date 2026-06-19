@@ -1341,6 +1341,21 @@ def _area_weights(grid):
     return jnp.cos(jnp.asarray(np.asarray(grid.grid_lat)))  # grid_lat is [rad]
 
 
+def _format_resume_line(resume_path: str, start_round: int, seed: dict,
+                        *, multi: bool = False) -> str:
+    """Resume console line surfacing the CHECKPOINTED PROGRESS, so an operator restarting
+    a multi-day run after a SLURM timeout sees the invested work (the cumulative LES count
+    + the campaign-start bias) — confirming a valid resume picking up real progress, not a
+    cold start at round N.  Both metrics are already in the checkpoint seed (iters 137/138)
+    but were discarded at the resume print (iter 274)."""
+    ib = seed.get("initial_bias")
+    nd = int(seed.get("n_diagnosed_prior", 0))
+    bias = f"start bias {float(ib):.4g}" if ib is not None else "start bias unknown"
+    mode = "multi " if multi else ""
+    return (f"[campaign] resuming {mode}from {resume_path} at round {start_round} "
+            f"({bias}; {nd} LES diagnoses done so far)")
+
+
 def _format_round_line(round_idx: int, b0: float, b1: float, imp: bool, kept: bool,
                        step: float, n_valid: int, n_diagnosed: int) -> str:
     """One-line per-round campaign progress for the operator's multi-day-run console.
@@ -1402,7 +1417,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         initial_clubb, initial_fields, start_round, _seed = _load_multi_resume(
             ckpt, grid, coefficients, gshape, promo_to_field)
         init_box.update(_seed)
-        print(f"[campaign] resuming multi from {args.resume} at round {start_round}")
+        print(_format_resume_line(args.resume, start_round, _seed, multi=True))
 
     checkpoint_callback = None
     if args.checkpoint:
@@ -1783,7 +1798,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         initial_field, initial_clubb, start_round, _seed = _load_single_resume(
             ckpt, grid, corrected_field)
         init_box.update(_seed)
-        print(f"[campaign] resuming from {args.resume} at round {start_round}")
+        print(_format_resume_line(args.resume, start_round, _seed))
 
     checkpoint_callback = None
     if args.checkpoint:
