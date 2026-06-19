@@ -33,6 +33,7 @@ from legoesm.land.soil_hydraulics import (
     hydraulic_conductivity,
     moisture_capacity,
     interblock_K,
+    slice_layer,
 )
 from legoesm.land.tridiag import thomas_solve_batch
 
@@ -124,7 +125,11 @@ def solve_richards(
     # producing artificially-enhanced infiltration.  Using ``abs(psi)``
     # would always increase the capacity, which is wrong for ponded
     # cells (Codex GPT-5 review caught the sign).
-    K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], hydro_config)
+    # ``slice_layer`` collapses any per-(col,layer) param fields to the top
+    # layer so the result stays ``(ncol,)`` — without it, a ``(ncol, 1)``
+    # theta_sat would broadcast against ``theta[:, 0]`` (shape ``(ncol,)``) to
+    # ``(ncol, ncol)`` and silently corrupt the infiltration capacity.
+    K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], slice_layer(hydro_config, 0))
     head_grad = psi[:, 0] / (0.5 * dz[0])
     infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
 
@@ -240,7 +245,8 @@ def solve_richards(
 
     # Subsurface runoff: gravitational drainage at bottom
     if richards_config.bottom_bc == "free_drainage":
-        K_bot = hydraulic_conductivity(psi_final[:, -1], theta_final[:, -1], hydro_config)
+        K_bot = hydraulic_conductivity(
+            psi_final[:, -1], theta_final[:, -1], slice_layer(hydro_config, -1))
         runoff_subsurface = K_bot  # [m/s]
     else:
         runoff_subsurface = jnp.zeros(ncol)

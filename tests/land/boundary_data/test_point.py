@@ -5,7 +5,7 @@ import pytest
 
 xr = pytest.importorskip("xarray")
 
-from legoesm.land.surface_data.point import surface_params_at_point
+from legoesm.land.boundary_data import surface_params_at_point
 from legoesm.land.surface_data.schema import write_surfdata
 from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
 

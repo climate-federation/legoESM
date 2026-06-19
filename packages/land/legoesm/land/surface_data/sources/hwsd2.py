@@ -39,7 +39,10 @@ import numpy as np
 
 from legoesm.land.surface_data.raster import open_bil_memmap
 from legoesm.land.surface_data.aggregate import aggregate_raster_streaming
-from legoesm.land.surface_data.schema import write_surfdata, HWSD2_LAYER_DZ
+from legoesm.land.surface_data.schema import write_surfdata
+
+# FAO HWSD v2.0 fixed depth layers D1..D7 thicknesses [m] (0-20-40-60-80-100-150-200 cm).
+HWSD2_LAYER_DZ = np.array([0.20, 0.20, 0.20, 0.20, 0.20, 0.50, 0.50], dtype=np.float64)
 
 # HWSD2 encodes special map units as NEGATIVE property codes whose WRB2 group
 # names the unit.  Several are *real soils* with no measured texture (their

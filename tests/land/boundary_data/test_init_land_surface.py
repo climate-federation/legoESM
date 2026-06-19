@@ -12,7 +12,7 @@ import pytest
 xr = pytest.importorskip("xarray")
 
 from legoesm.land.surface_data.schema import write_surfdata
-from legoesm.land.surface_data.land_inputs import init_land_surface_data
+from legoesm.land.boundary_data import init_land_surface_data
 from legoesm.land.surface_params import N_PFT_CLM5, LandSurfaceParams
 from legoesm.land.canopy.config import CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig, LandConfig
