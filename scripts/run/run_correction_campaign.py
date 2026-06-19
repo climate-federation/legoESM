@@ -1193,6 +1193,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
+        _assert_resume_grid_matches(ckpt, grid)   # wrong-cell guard (same hazard as deploy)
         if sorted(ckpt.get("coefficients", [])) != sorted(coefficients):
             raise SystemExit(
                 f"checkpoint coefficients {ckpt.get('coefficients')} != requested "
@@ -1217,6 +1218,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
             _capture_initial_record(init_box, res)
             _atomic_write_json(args.checkpoint, {
                 "round": int(round_idx),
+                "grid": _grid_provenance(base_cfg, grid),
                 "coefficients": list(coefficients),
                 "fields": {k: np.asarray(v).reshape(-1).tolist()
                            for k, v in fields.items()},
@@ -1289,6 +1291,43 @@ def _grid_provenance(base_cfg, grid) -> dict:
     gc = base_cfg.grid
     prov.update(grid_type=gc.grid_type, resolution=gc.resolution, nlev=gc.nlev)
     return prov
+
+
+def _assert_resume_grid_matches(ckpt: dict, grid: Any) -> None:
+    """Fail LOUD on a RESUME whose checkpoint was written on a DIFFERENT grid than the
+    current run.
+
+    The accumulated per-column field is reshaped onto ``grid.grid_shape_2d``; a
+    different-SHAPE-but-same-SIZE grid (e.g. ``(6,8)`` vs ``(8,6)``) would reshape
+    SUCCESSFULLY yet scramble the field onto the WRONG cells — the exact silent-
+    wrong-cell hazard the deploy guard catches with a coordinate fingerprint.  Compares
+    the checkpoint's recorded grid fingerprint (``ncol``/``shape_2d``/``coord_sha256``)
+    to the current grid's.  A checkpoint predating provenance (no ``"grid"`` block) only
+    WARNS — the field-length reshape stays the fallback size check.
+    """
+    import warnings
+
+    from legoesm.training.deploy_correction import grid_fingerprint
+
+    rec = ckpt.get("grid")
+    if not isinstance(rec, dict) or not rec.get("coord_sha256"):
+        warnings.warn(
+            "resume: checkpoint has no grid fingerprint (an older checkpoint) — the "
+            "grid identity cannot be verified, relying on the per-column field length "
+            "alone. Resume on the SAME grid the campaign used.", stacklevel=2)
+        return
+    cur = grid_fingerprint(grid)
+    for key in ("ncol", "shape_2d", "coord_sha256"):
+        rv = rec.get(key)
+        cv = cur[key]
+        if key == "shape_2d" and rv is not None:
+            rv = list(rv)
+        if rv is not None and rv != cv:
+            raise SystemExit(
+                f"resume grid mismatch on {key!r}: checkpoint recorded {rv!r} but the "
+                f"current grid has {cv!r}. The accumulated per-column field was built on "
+                "a DIFFERENT grid and would resume onto the WRONG cells; resume on the "
+                "SAME grid the campaign used.")
 
 
 def _print_deploy_hint(out_path: str, grid) -> None:
@@ -1467,6 +1506,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
+        _assert_resume_grid_matches(ckpt, grid)   # wrong-cell guard (same hazard as deploy)
         # Guard against resuming a checkpoint for a DIFFERENT corrected coefficient
         # (e.g. a Pr_t checkpoint with --diagnosis-method=clubb_coefficient) — the
         # field would be silently loaded into the wrong config slot.
@@ -1504,6 +1544,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             flat = np.asarray(field).reshape(-1)
             _atomic_write_json(args.checkpoint, {
                 "round": int(round_idx),
+                "grid": _grid_provenance(base_cfg, grid),
                 "corrected_field": corrected_field,
                 corrected_field: flat.tolist(),
                 "field": np.asarray(field).tolist(),

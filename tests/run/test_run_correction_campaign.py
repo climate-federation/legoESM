@@ -726,6 +726,30 @@ def test_grid_provenance_produces_deploy_compatible_fingerprint():
     assert rcc._grid_provenance(base_cfg, other)["coord_sha256"] != prov["coord_sha256"]
 
 
+def test_assert_resume_grid_matches():
+    """The RESUME wrong-cell guard (partner to the iter-185 atomic checkpoint): a
+    checkpoint written on a DIFFERENT grid fails LOUD before its per-column field is
+    reshaped onto the current grid. The dangerous case is a SAME-column-count but
+    different-SHAPE grid — (8,16) vs (16,8), both 128 cells — which would reshape
+    SUCCESSFULLY yet scramble the field onto the wrong cells (same hazard as the deploy
+    guard). The SAME grid passes; an older checkpoint with no fingerprint only WARNS
+    (the field-length reshape stays the fallback)."""
+    from legoesm.grids.latlon import create_latlon_grid
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    prov = rcc._grid_provenance(_base_config(), grid)
+    rcc._assert_resume_grid_matches({"grid": prov}, grid)          # same grid → no raise
+    # Same ncol (128) but TRANSPOSED shape → reshape would scramble silently → fail loud.
+    other = create_latlon_grid(16, 8, dtype=jnp.float64)
+    with pytest.raises(SystemExit, match="resume grid mismatch"):
+        rcc._assert_resume_grid_matches({"grid": prov}, other)
+    # An older checkpoint without a fingerprint only WARNS (no hard fail).
+    with pytest.warns(UserWarning, match="no grid fingerprint"):
+        rcc._assert_resume_grid_matches({"round": 3}, grid)
+
+
 def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
     """compose_compare_fn must pass ``valid_mask`` + ``manifest_reducer`` THROUGH to
     make_compare_fn, so an ocean/land mask or the distributed owned-cell mask actually
