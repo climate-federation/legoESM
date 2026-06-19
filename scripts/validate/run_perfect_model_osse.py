@@ -41,6 +41,37 @@ def _production_loop_defaults(osse_kwargs: dict, sigma: Any) -> None:
     osse_kwargs.setdefault("env_grid_fn", maybe_env_grid_fn(strategy, sigma))
 
 
+def _build_osse_harness(
+    *, base_atm_config: Any, build_base_driver: Callable[[Any], Any],
+    extract_column_state: Callable[..., Any], sigma: Any, grid: Any, area_weights: Any,
+    les_config: Any, run_les_fn: Callable[[Any], Any], n_worst: int,
+    lat_deg: Any, lon_deg: Any, phis: Any,
+):
+    """The driver/LES harness SHARED by the single- + multi-coefficient OSSE builders
+    (and reusable for a per-grid cross-resolution build): the corrected-config build
+    driver, the run→time-mean ``run_fn``, the reference→``compare_fn`` closure, the LES
+    ``diagnose_fn``, and the ``grid_shape``.  The single-vs-multi difference is ONLY the
+    ``les_config`` (``diagnosis_method`` vs ``diagnosis_methods``) which the caller
+    resolves BEFORE this — so the harness wiring lives in ONE place, not copy-pasted
+    (CLAUDE.md: no duplicate harness wiring).  Returns
+    ``(run_fn, build_compare_fn, diagnose_fn, grid_shape)``.
+    """
+    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
+    run_fn = make_run_fn(build_driver, extract_column_state)
+
+    def build_compare_fn(reference):
+        return compose_compare_fn(
+            base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+            extract_column_state=extract_column_state, reference=reference,
+            sigma=sigma, area_weights=area_weights, n_worst=n_worst,
+            lat_deg=lat_deg, lon_deg=lon_deg)
+
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
+    grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
+    return run_fn, build_compare_fn, diagnose_fn, grid_shape
+
+
 def build_perfect_model_osse(
     *,
     base_atm_config: Any,
@@ -88,19 +119,11 @@ def build_perfect_model_osse(
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(clubb_l_mix_max=float(biased_clubb.l_mix_max))
 
-    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
-    run_fn = make_run_fn(build_driver, extract_column_state)
-
-    def build_compare_fn(reference):
-        return compose_compare_fn(
-            base_atm_config=base_atm_config, build_base_driver=build_base_driver,
-            extract_column_state=extract_column_state, reference=reference,
-            sigma=sigma, area_weights=area_weights, n_worst=n_worst,
-            lat_deg=lat_deg, lon_deg=lon_deg)
-
-    diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
-    grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
+    run_fn, build_compare_fn, diagnose_fn, grid_shape = _build_osse_harness(
+        base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, sigma=sigma, grid=grid,
+        area_weights=area_weights, les_config=les_config, run_les_fn=run_les_fn,
+        n_worst=n_worst, lat_deg=lat_deg, lon_deg=lon_deg, phis=phis)
     _production_loop_defaults(osse_kwargs, sigma)
 
     return run_perfect_model_osse(
@@ -163,19 +186,11 @@ def build_multi_perfect_model_osse(
             getattr(les_config, "clubb_l_mix_max", None) is None:
         les_config = les_config._replace(clubb_l_mix_max=float(biased_clubb.l_mix_max))
 
-    build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
-    run_fn = make_run_fn(build_driver, extract_column_state)
-
-    def build_compare_fn(reference):
-        return compose_compare_fn(
-            base_atm_config=base_atm_config, build_base_driver=build_base_driver,
-            extract_column_state=extract_column_state, reference=reference,
-            sigma=sigma, area_weights=area_weights, n_worst=n_worst,
-            lat_deg=lat_deg, lon_deg=lon_deg)
-
-    diagnose_fn = make_les_diagnose_fn(
-        grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
-    grid_shape = tuple(int(s) for s in grid.grid_shape_2d)
+    run_fn, build_compare_fn, diagnose_fn, grid_shape = _build_osse_harness(
+        base_atm_config=base_atm_config, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, sigma=sigma, grid=grid,
+        area_weights=area_weights, les_config=les_config, run_les_fn=run_les_fn,
+        n_worst=n_worst, lat_deg=lat_deg, lon_deg=lon_deg, phis=phis)
     _production_loop_defaults(osse_kwargs, sigma)
 
     return run_multi_perfect_model_osse(

@@ -104,6 +104,29 @@ def test_orographic_forcing_flag_parsed():
         p.parse_args(base + ["--orographic-forcing", "terrain"])
 
 
+def test_build_osse_harness_returns_the_shared_wiring():
+    """_build_osse_harness (iter 291) factors the driver/LES harness shared by the single
+    + multi OSSE builders (byte-identical before): a callable run_fn / build_compare_fn /
+    diagnose_fn + the grid_shape, so the wiring lives in ONE place — not the copy-paste
+    CLAUDE.md forbids (and reusable per-grid for a future cross-resolution build)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    from scripts.validate.run_perfect_model_osse import _build_osse_harness
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    run_fn, build_compare_fn, diagnose_fn, grid_shape = _build_osse_harness(
+        base_atm_config=_base_config(), build_base_driver=_ck_sensitive_base,
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        sigma=sigma, grid=grid, area_weights=jnp.ones((8, 16)),
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, lat_deg=None, lon_deg=None, phis=None)
+    assert callable(run_fn) and callable(build_compare_fn) and callable(diagnose_fn)
+    assert grid_shape == (8, 16)
+
+
 def test_build_perfect_model_osse_wiring():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
