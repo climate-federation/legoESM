@@ -351,27 +351,36 @@ def load_era5_time_mean(config: TrainingERA5Config, time_indices) -> ERA5Slice:
 
     Coords (``lat``/``lon``/``plev_Pa``) are identical across times (kept from the
     first slice).  A SINGLE index returns :func:`load_era5_slice` unchanged
-    (byte-identical to the old single-time behaviour).  NaN-PROPAGATING (``np.mean``,
+    (byte-identical to the old single-time behaviour).  NaN-PROPAGATING (a running SUM,
     not ``nanmean``) — consistent with the raw single-slice extraction: an SST-over-land
     cell is NaN in every slice, so the mean is NaN there too, no worse than a single
-    slice.  Each averaged field is cast back to the first slice's dtype (``np.mean``
-    upcasts ``float32``→``float64``).  Reuses ``load_era5_slice`` per time (a one-time
+    slice.
+
+    Memory: an INCREMENTAL running sum (float64) holds only ~ONE slice's worth + the
+    current slice, NOT all ``N`` slices at once — so averaging a full-res global ERA5
+    over many times (a monthly/seasonal climatology) does not OOM.  The sum is float64
+    (no float32 precision loss over many times); each field is divided by ``N`` and cast
+    BACK to the first slice's dtype.  Reuses ``load_era5_slice`` per time (a one-time
     campaign-start load).  Empty ``time_indices`` ⇒ raise."""
     indices = list(time_indices)
     if not indices:
         raise ValueError("load_era5_time_mean: time_indices must be non-empty.")
     if len(indices) == 1:
         return load_era5_slice(config, indices[0])
-    slices = [load_era5_slice(config, int(i)) for i in indices]
-    first = slices[0]
-
-    def _mean(name):
-        return np.mean([getattr(s, name) for s in slices], axis=0).astype(
-            getattr(first, name).dtype)
-
-    return first._replace(
-        T=_mean("T"), u=_mean("u"), v=_mean("v"), q=_mean("q"),
-        p_s=_mean("p_s"), sst=_mean("sst"), phis=_mean("phis"))
+    data_fields = ("T", "u", "v", "q", "p_s", "sst", "phis")
+    first = None
+    acc = None
+    for i in indices:
+        sl = load_era5_slice(config, int(i))
+        if acc is None:
+            first = sl
+            acc = {name: getattr(sl, name).astype(np.float64) for name in data_fields}
+        else:
+            for name in data_fields:
+                acc[name] = acc[name] + getattr(sl, name)   # running sum (slice discarded)
+    n = float(len(indices))
+    return first._replace(**{
+        name: (acc[name] / n).astype(getattr(first, name).dtype) for name in data_fields})
 
 
 def era5_to_spectral_carry(
