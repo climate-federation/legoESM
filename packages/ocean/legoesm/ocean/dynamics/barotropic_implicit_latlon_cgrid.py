@@ -71,6 +71,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    coriolis_cgrid_energy_conserving,
     fold_is_local,
     divergence_cgrid,
     fold_vface_row,
@@ -1335,27 +1336,54 @@ def barotropic_implicit_latlon_cgrid(
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)
     grad_y_eta_old = gradient_y_cgrid(eta_old, grid).astype(eta_dtype)
 
-    # V at u-points (4-pt average over surrounding v-faces)
-    V_west = jnp.roll(V_old, 1, axis=1)
-    V_at_u = 0.25 * (V_old[:-1] + V_old[1:] + V_west[:-1] + V_west[1:])
-    V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
+    if getattr(config, "coriolis_energy_conserving", False):
+        # Sadourny energy-conserving Coriolis with the SHARED VERTEX f, kept in
+        # forward-backward order: cor_u from V_old (forward), cor_v from U_pred
+        # (backward).  cor_v already carries the -f sign.  This removes the
+        # β-plane energy leak of the face-f form (f_u != f_v).
+        cor_u, _ = coriolis_cgrid_energy_conserving(
+            U_old, V_old, grid, u_mask=u_mask, v_mask=v_mask,
+        )
+        U_pred = (
+            U_old + dt_t * (-g * grad_x_eta_old + cor_u.astype(eta_dtype) + F_slow_u)
+        ) * u_mask
+        _, cor_v = coriolis_cgrid_energy_conserving(
+            U_pred, V_old, grid, u_mask=u_mask, v_mask=v_mask,
+        )
+        V_pred = (
+            V_old + dt_t * (-g * grad_y_eta_old + cor_v.astype(eta_dtype) + F_slow_v)
+        ) * v_mask
+    else:
+        # Forward-backward face-f Coriolis on the barotropic mode — UNLESS
+        # coriolis_scheme="explicit_ab2", where the planetary Coriolis already
+        # entered the 3-D du_dt (AB2-extrapolated) and its depth-mean is carried
+        # in F_slow_u/v; the solver must then NOT add its own f×U_bt again (no
+        # double count).  This mirrors the rigid-lid solver's
+        # ``add_barotropic_coriolis`` gate (ocean_model_latlon_cgrid.py) and the
+        # outer Matsuno-Coriolis skip.  _cori_fac=1.0 for every other scheme
+        # (Matsuno split / default) keeps the original FB Coriolis bit-identical.
+        _cori_fac = 0.0 if getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2" else 1.0
+        # V at u-points (4-pt average over surrounding v-faces)
+        V_west = jnp.roll(V_old, 1, axis=1)
+        V_at_u = 0.25 * (V_old[:-1] + V_old[1:] + V_west[:-1] + V_west[1:])
+        V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
-    U_pred = (
-        U_old + dt_t * (-g * grad_x_eta_old + f_u * V_at_u + F_slow_u)
-    ) * u_mask
+        U_pred = (
+            U_old + dt_t * (-g * grad_x_eta_old + _cori_fac * f_u * V_at_u + F_slow_u)
+        ) * u_mask
 
-    # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
-    # shared cell-pad-first helper (partition-cut faces average the
-    # neighbour rank's true U row; wall/fold conventions bit-identical
-    # to the old interior-then-pad_ns_vector_u serial path).
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        interp_u_to_vface_4pt,
-    )
-    U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
+        # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
+        # shared cell-pad-first helper (partition-cut faces average the
+        # neighbour rank's true U row; wall/fold conventions bit-identical
+        # to the old interior-then-pad_ns_vector_u serial path).
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_u_to_vface_4pt,
+        )
+        U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
 
-    V_pred = (
-        V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
-    ) * v_mask
+        V_pred = (
+            V_old + dt_t * (-g * grad_y_eta_old - _cori_fac * f_v * U_pred_at_v + F_slow_v)
+        ) * v_mask
 
     # ----- Step 5: build elliptic RHS and solve ------------------------
     theta_eta = jnp.asarray(config.barotropic_implicit_theta_eta, dtype=eta_dtype)
@@ -1661,3 +1689,60 @@ def barotropic_implicit_latlon_cgrid(
         rel_final = _rel_resid(A_op, eta_new, rhs)
         return state_new, (Hu_avg, Hv_avg), rel_final
     return state_new, (Hu_avg, Hv_avg)
+
+
+def solve_unsplit_freesurface(
+    eta_old: jnp.ndarray,
+    u_star: jnp.ndarray,
+    v_star: jnp.ndarray,
+    h_u: jnp.ndarray,
+    h_v: jnp.ndarray,
+    dt: float,
+    g: float,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    *,
+    tol: float = 1.0e-10,
+    maxiter: int = 200,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """MITgcm-faithful UNSPLIT implicit free-surface solve + uniform correction.
+
+    No barotropic/baroclinic mode split: given the explicit predictor velocity
+    ``(u*, v*)`` on the FULL 3-D field, solve the implicit free surface for
+    ``eta^{n+1}`` from the depth-integrated divergence of the predictor transport,
+    then apply the SAME (vertically-uniform) surface-pressure-gradient correction
+    to every level (MITgcm ``correction_step.F``)::
+
+        eta^{n+1} - dt^2 g div(H grad eta^{n+1}) = eta^n - dt div(int u* dz)
+        u^{n+1} = u* - dt g d(eta^{n+1})/dx          (all levels)
+
+    Reuses the SAME area-weighted-adjoint Helmholtz solve as ``implicit_cn``
+    (:func:`solve_helmholtz_freesurface`), so the discrete operator and its AD are
+    identical.  The fully-implicit (theta=1) backward-Euler surface mode matches
+    MITgcm's ``implicSurfPress=1``.  Returns ``(eta_new, u_new, v_new)``.
+
+    The elliptic CG runs in float64 for conditioning (cast back to the eta dtype).
+    """
+    edt = eta_old.dtype
+
+    def f64(a):
+        return jnp.asarray(a, dtype=jnp.float64)
+
+    hu_tot = f64(jnp.maximum(jnp.sum(h_u, axis=-1), 1.0e-10) * u_mask)   # depth-integrated face H
+    hv_tot = f64(jnp.maximum(jnp.sum(h_v, axis=-1), 1.0e-10) * v_mask)
+    flux_u = jnp.sum(h_u * u_star, axis=-1) * u_mask          # depth-integrated transport
+    flux_v = jnp.sum(h_v * v_star, axis=-1) * v_mask
+    div = divergence_cgrid(flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask)
+    coeff = jnp.asarray(dt * dt * g, dtype=jnp.float64)
+    rhs = f64((eta_old - dt * div) * mask)
+    inv_diag = _helmholtz_inv_diag(hu_tot, hv_tot, coeff, grid, f64(mask))
+    eta_new = solve_helmholtz_freesurface(
+        rhs, f64(eta_old), hu_tot, hv_tot, coeff, f64(mask), f64(u_mask), f64(v_mask),
+        inv_diag, grid, tol=tol, maxiter=maxiter).astype(edt) * mask
+    grad_x = gradient_x_cgrid(eta_new, grid)[..., jnp.newaxis]
+    grad_y = gradient_y_cgrid(eta_new, grid)[..., jnp.newaxis]
+    u_new = (u_star - dt * g * grad_x) * u_mask[..., jnp.newaxis]
+    v_new = (v_star - dt * g * grad_y) * v_mask[..., jnp.newaxis]
+    return eta_new, u_new, v_new

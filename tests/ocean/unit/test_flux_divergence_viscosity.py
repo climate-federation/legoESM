@@ -33,6 +33,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    flux_divergence_bilaplacian_cgrid,
     flux_divergence_viscosity_cgrid,
     vector_laplacian_cgrid,
     _cos_lat_uv,
@@ -482,3 +483,47 @@ def test_acc_recipe_selects_flux_divergence():
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     assert cfg.gm_redi.eke.kdiss_h_flux_form is True
     assert cfg.gm_redi.eke.source_kdiss_h is True
+
+
+# ---------------------------------------------------------------------------
+# Component biharmonic (flux_divergence applied twice) — the MITgcm-faithful
+# per-component del4 (useStrainTensionVisc=.FALSE.), stable where the vector
+# grad(div)-curl(curl) biharmonic is ill-scaled (front_relax baroclinic oracle).
+# ---------------------------------------------------------------------------
+def test_component_biharmonic_equals_flux_divergence_twice():
+    """By definition ∇⁴ = ∇²(∇²): the operator IS flux_divergence_viscosity_cgrid
+    applied twice with unit coefficient."""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    lu, lv, _ = flux_divergence_viscosity_cgrid(u, v, grid, 1.0, mask=m, u_mask=um, v_mask=vm)
+    cu, cv, _ = flux_divergence_viscosity_cgrid(lu, lv, grid, 1.0, mask=m, u_mask=um, v_mask=vm)
+    np.testing.assert_allclose(np.asarray(bu), np.asarray(cu), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(bv), np.asarray(cv), rtol=0, atol=0)
+
+
+def test_component_biharmonic_momentum_conserving():
+    """∇⁴ telescopes: the area-weighted domain integral of each component is
+    machine-zero on a metric-free closed basin (no spurious momentum source)."""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    area_u, area_v = _area_uv(grid)
+    wbu = np.asarray(bu) * area_u
+    wbv = np.asarray(bv) * area_v
+    assert abs(float(np.sum(wbu))) < 1e-9 * float(np.abs(wbu).sum() + 1e-30)
+    assert abs(float(np.sum(wbv))) < 1e-9 * float(np.abs(wbv).sum() + 1e-30)
+
+
+def test_component_biharmonic_correct_dimensional_scale():
+    """The component ∇⁴ is at the correct ``~u/dx⁴`` dimensional scale (a clean
+    5-point ∇² telescoped twice), finite everywhere. (The vector
+    grad(div)-curl(curl) biharmonic is ADDITIONALLY ill-scaled on a
+    uniform-Cartesian / near-degenerate C-grid — orders of magnitude too large,
+    the front_relax instability — but that is grid-specific; the end-to-end
+    stability of the faithful biharmonic is gated by the front_relax @slow test.)"""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    assert np.all(np.isfinite(np.asarray(bu))) and np.all(np.isfinite(np.asarray(bv)))
+    dx = float(grid.radius * grid.dlon * grid.cos_lat[_NLAT // 2])
+    scale = 0.3 / dx ** 4                            # |u|~0.3, ∇⁴ ~ u/dx⁴
+    assert float(np.abs(bu).max()) < 1e4 * scale    # right ballpark (not u-scale)
+    assert float(np.abs(bu).max()) > 0.0            # genuinely non-trivial

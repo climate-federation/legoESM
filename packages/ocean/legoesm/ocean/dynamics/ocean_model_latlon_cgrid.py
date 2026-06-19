@@ -1074,11 +1074,47 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
-        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid"}
+        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid",
+                          "implicit_unsplit"}
         if config.barotropic_solver not in _valid_solvers:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        if config.barotropic_solver == "implicit_unsplit":
+            # The unsplit step (_unsplit_ab2_step) integrates self.tendencies()
+            # (the baroclinic tendencies) + one implicit free-surface solve +
+            # _apply_implicit_vertical_mixing.  It does NOT yet thread the extra
+            # physics the split _step_impl/_ab2_step path carries, so REJECT configs
+            # that use them rather than silently dropping them (CLAUDE.md dispatch-
+            # hardening / "no silent coerce").  The freshwater step-arg is gated in
+            # _unsplit_ab2_step itself.
+            _unsupported = []
+            # Standard GM/Redi (isopycnal + skew tracer mixing, incl. implicit_K33)
+            # IS supported by _unsplit_ab2_step; only the prognostic-EKE-coupled GM
+            # path (gm_redi.eke) is not yet threaded.
+            if (getattr(config, "gm_redi", None) is not None
+                    and getattr(config.gm_redi, "eke", None) is not None):
+                _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
+            if getattr(config, "ab2_scope", "total") == "advective":
+                _unsupported.append('ab2_scope="advective" (withheld dissipation)')
+            if getattr(config, "surface_forcing_implicit", False):
+                _unsupported.append("surface_forcing_implicit")
+            if getattr(config, "sponge_forcing_implicit", False):
+                _unsupported.append("sponge_forcing_implicit")
+            if getattr(config, "momentum_friction_additive", False):
+                _unsupported.append("momentum_friction_additive")
+            _vm = getattr(getattr(config, "physics", None), "vertical_mixing", None)
+            if (_vm is not None and getattr(_vm, "scheme", None) == "tke"
+                    and getattr(getattr(_vm, "tke", None), "prognostic", False)):
+                _unsupported.append("prognostic TKE")
+            if _unsupported:
+                raise ValueError(
+                    'barotropic_solver="implicit_unsplit" does not yet support: '
+                    + ", ".join(_unsupported)
+                    + ". The unsplit free-surface step carries only the baroclinic "
+                    "tendencies + implicit FS + implicit vertical mixing; these "
+                    "features are threaded by the split implicit_cn path only. Use "
+                    'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine"}
         if config.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
@@ -1258,18 +1294,37 @@ class LatLonCGridOceanModel:
                     "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
-            if config.barotropic_solver != "rigid_lid":
+            if config.barotropic_solver not in (
+                    "rigid_lid", "implicit_cn", "implicit_unsplit"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'barotropic_solver="rigid_lid": the explicit Coriolis '
+                    'barotropic_solver in ("rigid_lid","implicit_cn","implicit_unsplit"): '
+                    'the explicit Coriolis '
                     "tendency reaches the barotropic mode through its depth-mean "
                     "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
                     "vloc, the depth-integral of du including Coriolis), and the "
-                    "rigid-lid solver's own f×u_bt addition is gated off to avoid "
-                    "double-counting. The split-explicit / implicit-CN free-"
-                    "surface solvers instead sub-step the barotropic Coriolis on "
-                    "the barotropic gravity-wave clock (different physics, not "
-                    f"covered). Got barotropic_solver={config.barotropic_solver!r}.")
+                    "solver's own f×U_bt addition is gated off to avoid "
+                    "double-counting (rigid_lid: add_barotropic_coriolis=False; "
+                    "implicit_cn: _cori_fac=0 in the FB predictor). The "
+                    "explicit-substep (split-explicit) solver instead sub-steps "
+                    "the barotropic Coriolis on the gravity-wave clock (different "
+                    "physics, not covered). Got barotropic_solver="
+                    f"{config.barotropic_solver!r}.")
+            if getattr(config, "coriolis_energy_conserving", False):
+                raise ValueError(
+                    'coriolis_scheme="explicit_ab2" is incompatible with '
+                    "coriolis_energy_conserving=True: under explicit_ab2 the "
+                    "planetary Coriolis enters du_dt via the FACE-f coriolis_cgrid "
+                    "and its depth-mean is carried into the barotropic predictor "
+                    "through F_slow. The implicit_cn solver then gates its own FB "
+                    "Coriolis off (_cori_fac=0) only in the face-f branch; the "
+                    "VERTEX-f energy-conserving branch is NOT gated, so enabling it "
+                    "here would both double-count the barotropic Coriolis and mix a "
+                    "vertex-f barotropic term with a face-f du_dt term (physically "
+                    "inconsistent). Use coriolis_energy_conserving=False with "
+                    "explicit_ab2 (the MITgcm-faithful face-f form), or switch to "
+                    "the Matsuno split scheme for the vertex-f energy-conserving "
+                    "Coriolis.")
 
         # AB2 extrapolation scope (Veros-faithful dissipative placement). The
         # "advective" scope withholds the dissipative tendencies from the AB2
@@ -3621,7 +3676,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "config.outer_integrator must be 'forward_euler' or 'ab2', "
                 f"got {_oi!r}")
-        if _oi == "ab2":
+        if self.config.barotropic_solver == "implicit_unsplit":
+            # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
+            # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
+            # elliptic eta solve + uniform surface-pressure correction. Removes the
+            # split's grid-scale PGF/continuity adjointness violation that drives the
+            # spurious 2dx baroclinic instability (docs/ocean_fidelity/
+            # mitgcm_unsplit_freesurface_fix.md). Requires the ab2 outer integrator.
+            if _oi != "ab2":
+                raise ValueError(
+                    "barotropic_solver='implicit_unsplit' requires "
+                    "outer_integrator='ab2'.")
+            new_state = self._unsplit_ab2_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask)
+        elif _oi == "ab2":
             if self.config.tracer_time_integrator == "ab2":
                 raise ValueError(
                     "outer_integrator='ab2' double-counts with "
@@ -4168,6 +4238,143 @@ class LatLonCGridOceanModel:
         # ADVECTIVE-only increment ⇒ the carry holds ONLY the advective part
         # (Veros carries ``dtemp`` = advection only; diffusion is never lagged).
         return state_ab2._replace(
+            T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
+                              dims=state.T.dims, units=state.T.units),
+            S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
+                              dims=state.S.dims, units=state.S.units),
+            u_incr_prev=Field(data=du_n * u_mask3, name="u_incr_prev",
+                              dims=state.u.dims, units=state.u.units),
+            v_incr_prev=Field(data=dv_n * v_mask3, name="v_incr_prev",
+                              dims=state.v.dims, units=state.v.units),
+        )
+
+    def _unsplit_ab2_step(self, state: LatLonCGridOceanState, dt: float,
+                          freshwater=None, surface_forcing=None, sponge=None,
+                          *, grid=None, vertex_mask=None) -> LatLonCGridOceanState:
+        """MITgcm-faithful UNSPLIT implicit free-surface AB2 step (no mode split).
+
+        Replaces the split-explicit barotropic/baroclinic stepping (which breaks
+        the discrete PGF/continuity adjointness at the grid scale, driving the
+        spurious 2dx baroclinic instability) with MITgcm's unsplit
+        ``implicitFreeSurface`` algorithm (docs/ocean_fidelity/
+        mitgcm_unsplit_freesurface_fix.md):
+
+          1. u* = u^n + AB2(Δt·du_dt)   — the FULL explicit baroclinic tendency
+             (advection + Coriolis + baroclinic hydrostatic PGF + lateral diss;
+             planetary f×u is in du_dt under coriolis_scheme='explicit_ab2'), AB2-
+             extrapolated on the FULL 3-D velocity (NO depth-mean / barotropic split).
+          2. One implicit elliptic solve for eta^{n+1} from the depth-integrated
+             divergence of the predictor transport (``solve_unsplit_freesurface``).
+          3. u^{n+1} = u* − Δt·g·∇eta^{n+1}, the SAME surface-pressure gradient on
+             every level (the surface PGF is implicit/backward-Euler).
+          4. Implicit vertical mixing once (backward-Euler vert friction + diffusion
+             + surface wind/tracer BC) — Veros/MITgcm split-implicit convention.
+
+        Opt-in via ``barotropic_solver='implicit_unsplit'`` (requires
+        ``outer_integrator='ab2'``); the split ``implicit_cn`` path is untouched.
+        """
+        from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+            solve_unsplit_freesurface,
+        )
+        from legoesm.ocean.state import Field
+        if freshwater is not None:
+            raise ValueError(
+                'barotropic_solver="implicit_unsplit" does not yet support the '
+                "freshwater argument (E-P-R free-surface forcing + virtual-salt "
+                'flux); use barotropic_solver="implicit_cn".')
+        _grid = grid if grid is not None else self.grid
+        g = self.config.g
+        eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
+        u_mask = state.u_mask.data
+        v_mask = state.v_mask.data
+        cmask = state.land_mask.data
+        u_mask3 = u_mask[..., jnp.newaxis]
+        v_mask3 = v_mask[..., jnp.newaxis]
+        mask3 = cmask[..., jnp.newaxis]
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _au3, _av3 = compute_face_masks_3d(self.z_coord.is_active, _grid)
+            u_mask3 = u_mask3 * _au3.astype(u_mask3.dtype)
+            v_mask3 = v_mask3 * _av3.astype(v_mask3.dtype)
+            mask3 = mask3 * self.z_coord.is_active.astype(mask3.dtype)
+
+        # 1. Explicit baroclinic tendency (NO surface PGF, NO implicit vmix).
+        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
+                               grid=_grid, vertex_mask=vertex_mask)
+        du_n = dt * tend.du_dt.data
+        dv_n = dt * tend.dv_dt.data
+        dT_n = dt * tend.dT_dt.data    # noqa: N806 (T = temperature, domain convention)
+        dS_n = dt * tend.dS_dt.data    # noqa: N806 (S = salinity)
+
+        # GM/Redi isopycnal + skew (bolus) TRACER mixing — not in self.tendencies()
+        # (it lives in _step_impl).  Evaluated at u^n and added to the explicit tracer
+        # increment so it AB2-extrapolates with the rest (ab2_scope="total").  GM/Redi
+        # is a tracer-only scheme (skew flux), so it does NOT touch the momentum.  The
+        # vertical isoneutral diagonal K33 (when implicit_K33) is computed from the
+        # same density/slopes and folded into the implicit vertical-mixing solve.
+        k33_iso = None
+        if self.config.gm_redi is not None:
+            gm_cfg = self.config.gm_redi
+            _gm_dj = None
+            if gm_cfg.implicit_K33:
+                _gm_dj = gm_redi_density_and_jacobian(
+                    state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                    _grid, self.z_coord, eos=self.config.eos,
+                    eos_linear=self.config.eos_linear, mask=cmask,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g)
+            dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(  # noqa: N806
+                state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                _grid, self.z_coord, gm_cfg, eos=self.config.eos,
+                eos_linear=self.config.eos_linear, mask=cmask,
+                u_mask=u_mask, v_mask=v_mask,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                density_jacobian=_gm_dj)
+            dT_n = dT_n + dt * dT_gm    # noqa: N806
+            dS_n = dS_n + dt * dS_gm    # noqa: N806
+            if gm_cfg.implicit_K33:
+                k33_iso = compute_isoneutral_K33_latlon(
+                    state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                    _grid, self.z_coord, gm_cfg, eos=self.config.eos,
+                    eos_linear=self.config.eos_linear, mask=cmask,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    density_jacobian=_gm_dj)
+        du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
+                else jnp.zeros_like(du_n))
+        dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
+                else jnp.zeros_like(dv_n))
+        dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None  # noqa: N806
+                else jnp.zeros_like(dT_n))
+        dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None  # noqa: N806
+                else jnp.zeros_like(dS_n))
+        # 2. AB2 predictor on the FULL 3-D velocity + tracers.
+        u_star = (state.u.data + a_n * du_n - a_p * du_p) * u_mask3
+        v_star = (state.v.data + a_n * dv_n - a_p * dv_p) * v_mask3
+        T_star = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3   # noqa: N806
+        S_star = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3   # noqa: N806
+
+        # 3. UNSPLIT implicit free surface + uniform surface-pressure correction.
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        h_u = min_cell_to_uface(h_k)
+        h_v = min_cell_to_vface(h_k, _grid)
+        eta_new, u_corr, v_corr = solve_unsplit_freesurface(
+            state.eta.data, u_star, v_star, h_u, h_v, dt, g, _grid,
+            cmask, u_mask, v_mask)
+        state_corr = state._replace(
+            u=state.u.replace(data=u_corr),
+            v=state.v.replace(data=v_corr),
+            T=state.T.replace(data=T_star),
+            S=state.S.replace(data=S_star),
+            eta=state.eta.replace(data=eta_new))
+
+        # 4. Implicit vertical mixing once (recomputes K_v/A_v from state_corr;
+        #    applies the surface wind/tracer BC + restoring internally).
+        state_new = self._apply_implicit_vertical_mixing(
+            state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid)
+
+        # 5. Carry the explicit increments for the next AB2 step.
+        return state_new._replace(
             T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
                               dims=state.T.dims, units=state.T.units),
             S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
