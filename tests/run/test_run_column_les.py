@@ -861,3 +861,50 @@ def test_run_forced_les_warming_margin_rejects_marginal_dt():
     assert 1.0 / _LES_ACOUSTIC_WARMING_MARGIN < 0.97 < 1.0   # genuinely in the band
     with pytest.raises(ValueError, match="warming margin"):
         run_forced_les(setup, dt_s=dt_marginal, n_steps=1)
+
+
+def test_column_les_cli_main_wiring_monkeypatched(tmp_path, monkeypatch):
+    """Drive the column-LES CLI main() with all heavy I/O stubbed: it loads the manifest
+    + AMIP restart, runs process_column PER worst column (the clause-4 'spin off an LES
+    for each worst column'), and SAVES the diagnosed coefficient per column. main() was
+    untested (heavy I/O); a wiring regression (the per-record loop, the process_column
+    call, or the np.savez key/format) would surface only at launch."""
+    from types import SimpleNamespace
+
+    import legoesm.atmosphere.dynamics.column_les as cl
+    import legoesm.driver.restart as restart_mod
+    import legoesm.grids.factory as gf
+    import legoesm.grids.vertical as gv
+    import legoesm.training.column_manifest as cm
+
+    import scripts.run.run_column_les as cli
+
+    fake_state = SimpleNamespace(
+        T=jnp.zeros((1, 1, 5)), u=jnp.zeros((1, 1, 5)),
+        v=jnp.zeros((1, 1, 5)), p_s=jnp.zeros((1, 1)))
+    monkeypatch.setattr(gf, "create_grid", lambda gt, resolution: object())
+    monkeypatch.setattr(gv, "create_sigma_coordinate", lambda nlev: object())
+    monkeypatch.setattr(restart_mod, "load_restart",
+                        lambda path, g, s, strict: (fake_state, jnp.zeros((1, 1, 5))))
+    recs = [SimpleNamespace(grid_index=(0, 0)), SimpleNamespace(grid_index=(1, 2))]
+    monkeypatch.setattr(cm, "read_manifest", lambda path: recs)
+
+    seen = []
+
+    def fake_process_column(rec, **kwargs):           # noqa: ARG001
+        seen.append(rec.grid_index)
+        return ("diag", rec.grid_index)
+
+    monkeypatch.setattr(cl, "process_column", fake_process_column)
+    monkeypatch.setattr(cl, "coefficient_value",
+                        lambda diag, method: np.asarray([1.5, 2.5]))
+
+    out = str(tmp_path / "coef.npz")
+    rc = cli.main(["--manifest", "m.json", "--restart", "r.npz",
+                   "--resolution", "8", "--nlev", "5", "--out", out,
+                   "--method", "clubb_coefficient"])
+    assert rc == 0
+    assert seen == [(0, 0), (1, 2)]                   # process_column run per worst column
+    loaded = np.load(out)
+    assert set(loaded.files) == {"(0, 0)", "(1, 2)"}  # one saved coefficient per column
+    np.testing.assert_allclose(loaded["(0, 0)"], [1.5, 2.5])
