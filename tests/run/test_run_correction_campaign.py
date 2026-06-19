@@ -1450,6 +1450,35 @@ def test_build_correction_campaign_environment_strategy():
     assert np.all(np.isfinite(ck))
 
 
+def test_build_multi_correction_campaign_rejects_unknown_and_empty_coefficients():
+    """build_multi_correction_campaign fails LOUD on an UNKNOWN (typo'd) or EMPTY
+    --coefficients (dispatch hardening) — a bad coefficient name is NOT silently dropped,
+    so the simultaneous campaign corrects EXACTLY the requested set or refuses. The
+    validation fires BEFORE the heavy build, so minimal fake args suffice. (Confirms the
+    iter-173 'silent filter' concern was a FALSE alarm: _run_multi_main passes the FULL
+    tuple — typo included — to this builder, which validates it.)"""
+    from types import SimpleNamespace
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+
+    # The unknown-coefficient guard fires AFTER grid_shape (reference.T.shape) and the
+    # lat/lon defaulting, so the fake reference exposes .T.shape and lat_deg/lon_deg are
+    # passed explicitly (skipping grid.grid_lat). validate_reference=False skips the
+    # default-on physical check. The empty-tuple guard fires FIRST, before any of these.
+    fake_ref = SimpleNamespace(T=SimpleNamespace(shape=(2, 3, 5)))
+    common = dict(
+        base_atm_config=_base_config(), build_base_driver=(lambda c: None),
+        extract_column_state=(lambda d, day, dt: None), reference=fake_ref,
+        sigma=object(), grid=object(), area_weights=jnp.ones((1, 1)),
+        run_les_fn=(lambda s: None), n_iterations=1,
+        les_config=ColumnLESConfig(), n_worst=1, validate_reference=False,
+        lat_deg=jnp.zeros((2, 3)), lon_deg=jnp.zeros((2, 3)))
+    with pytest.raises(ValueError, match="unknown coefficient"):
+        build_multi_correction_campaign(**common, coefficients=("C_K", "bogus"))
+    with pytest.raises(ValueError, match="non-empty tuple"):
+        build_multi_correction_campaign(**common, coefficients=())
+
+
 def test_build_multi_correction_campaign_corrects_both_coefficients():
     """build_multi_correction_campaign co-corrects C_K AND Pr_t from ONE LES run
     per column: it sets diagnosis_methods, auto-populates l_mix_max, and the multi
