@@ -150,20 +150,32 @@ def test_summary_to_json_diverged_biases_serialize_as_null():
     import json
     from types import SimpleNamespace
 
+    # A blown-up run can also leave NaN per-coefficient field stats — those go
+    # through the coefficients block, so they must be sanitized too (else the dict
+    # is still non-standard JSON via that branch).
+    coeff = SimpleNamespace(
+        promotion_key="clubb_lite_C_K", n_columns=4,
+        field_min=float("nan"), field_max=float("nan"),
+        field_mean=float("nan"), field_std=float("nan"),
+        n_at_lower_bound=0, n_at_upper_bound=0, bounds=(0.0, 1.0))
     summary = SimpleNamespace(
         n_rounds=2, n_accepted=0, acceptance_rate=0.0, stop_reason="max_iterations",
         initial_bias=5.0, final_bias=float("nan"),
         absolute_reduction=float("nan"), fractional_reduction=float("inf"),
         n_diagnosed_total=4, n_diagnoses_valid_total=2, per_variable=None,
-        coefficients=())
+        coefficients=(coeff,))
     out = _summary_to_json(summary)
     assert out["initial_bias"] == pytest.approx(5.0)         # finite survives
     assert out["final_bias"] is None                          # NaN -> null
     assert out["absolute_reduction"] is None
     assert out["fractional_reduction"] is None                # +inf -> null
-    # The dict is STANDARD JSON (no NaN/Infinity tokens) under the strict parser.
+    c0 = out["coefficients"][0]
+    assert c0["field_min"] is None and c0["field_std"] is None  # coeff stats -> null
+    assert c0["bounds"] == [0.0, 1.0]                         # finite metadata intact
+    # The WHOLE dict is STANDARD JSON (no NaN/Infinity tokens) under the strict parser.
     reparsed = json.loads(json.dumps(out), parse_constant=_reject_nonstandard)
     assert reparsed["final_bias"] is None
+    assert reparsed["coefficients"][0]["field_mean"] is None
 
 
 def _reject_nonstandard(token):  # pragma: no cover - only fires on a regression

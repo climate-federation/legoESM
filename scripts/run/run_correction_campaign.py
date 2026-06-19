@@ -956,8 +956,8 @@ def _summary_to_json(summary):
         "per_variable_bias": _per_variable_to_json(summary.per_variable),
         "coefficients": [
             {"promotion_key": c.promotion_key, "n_columns": c.n_columns,
-             "field_min": c.field_min, "field_max": c.field_max,
-             "field_mean": c.field_mean, "field_std": c.field_std,
+             "field_min": _json_finite(c.field_min), "field_max": _json_finite(c.field_max),
+             "field_mean": _json_finite(c.field_mean), "field_std": _json_finite(c.field_std),
              "n_at_lower_bound": c.n_at_lower_bound,
              "n_at_upper_bound": c.n_at_upper_bound,
              "bounds": list(c.bounds) if c.bounds is not None else None}
