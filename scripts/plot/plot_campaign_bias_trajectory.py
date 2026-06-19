@@ -52,7 +52,21 @@ def extract_campaign_trajectory(output: dict) -> dict:
         "pv_baseline": pv.get("baseline"),
         "pv_final": pv.get("final"),
         "health": output.get("health", {}) or {},
+        "averaging": output.get("averaging") or {},
     }
+
+
+def _averaging_caption(averaging: dict) -> str:
+    """A one-line 'what the bias was measured against' caption from the iter-267
+    ``averaging`` block, or ``""`` when absent (a pre-267 output / mock).  A single
+    ERA5 time is a SNAPSHOT; N>1 is a climatology — the bias means different things."""
+    n = averaging.get("era5_n_times")
+    if n is None:
+        return ""
+    idx = averaging.get("era5_time_idx")
+    kind = "ERA5 snapshot" if int(n) == 1 else f"{int(n)}-time ERA5 climatology"
+    at = "" if idx is None else f" @ idx {int(idx)}"
+    return f"vs {kind}{at}"
 
 
 _PV_KEYS = (("T_rmse_K", "T"), ("qv_rmse_kg_kg", "q_v"), ("wind_rmse_m_s", "wind"))
@@ -99,8 +113,11 @@ def plot_campaign_bias_trajectory(output: dict, out_png: str) -> str:
         ax1.set_axis_off()
 
     status = (tr["health"] or {}).get("status")
-    if status:
-        fig.suptitle(f"campaign health: {status}", fontsize=10)
+    caption = _averaging_caption(tr["averaging"])
+    title = " — ".join(p for p in (
+        f"campaign health: {status}" if status else "", caption) if p)
+    if title:
+        fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
