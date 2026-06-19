@@ -329,6 +329,23 @@ def test_dry_run_flag_parsed():
     assert p.parse_args([*base, "--dry-run"]).dry_run is True
 
 
+def test_enable_line_buffered_stdout(monkeypatch):
+    """The helper line-buffers stdout (real-time SLURM-log progress for a multi-day run),
+    and is a SAFE no-op when stdout cannot be reconfigured (a captured/replaced stream)."""
+    import sys
+    from types import SimpleNamespace
+
+    import scripts.run.run_correction_campaign as rcc
+
+    calls = {}
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(reconfigure=lambda **k: calls.update(k)))
+    rcc._enable_line_buffered_stdout()
+    assert calls == {"line_buffering": True}
+    # No reconfigure attribute → no-op (must NOT raise).
+    monkeypatch.setattr(sys, "stdout", object())
+    rcc._enable_line_buffered_stdout()
+
+
 def test_atomic_write_json(tmp_path):
     """_atomic_write_json writes valid JSON, REPLACES an existing file, leaves no temp
     behind, and on a serialization FAILURE preserves the previous file (no corruption)

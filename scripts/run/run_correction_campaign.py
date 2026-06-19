@@ -1053,6 +1053,21 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
             "health": {"status": health.status, "message": health.message}}
 
 
+def _enable_line_buffered_stdout() -> None:
+    """Line-buffer stdout so a multi-day SLURM run's per-round progress appears in the
+    job log in REAL TIME.
+
+    When stdout is redirected to a file (the SLURM log), Python BLOCK-buffers it, so the
+    per-round bias prints would otherwise stay invisible until the buffer fills (many
+    rounds) or the job exits — a user could not tell a 3-day run apart from a hung one.
+    No-op when stdout lacks ``reconfigure`` (e.g. a captured / replaced stream).
+    """
+    import sys
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
+
 def _assert_output_path_writable(path: str, *, flag: str) -> None:
     """Fail LOUD up front if an output ``path``'s parent directory is missing or not
     writable.
@@ -1497,6 +1512,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         select_era5_regrid,
     )
 
+    _enable_line_buffered_stdout()   # real-time per-round progress in the SLURM log
     refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
     # Pre-flight: fail in milliseconds (not after a multi-day run) on an unwritable
