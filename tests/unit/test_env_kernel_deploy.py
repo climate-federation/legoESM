@@ -214,6 +214,22 @@ def test_deployed_override_passes_validate_strict():
 # --------------------------------------------------------------------------- #
 # Hardening guards.
 # --------------------------------------------------------------------------- #
+def test_build_rejects_non_finite_environment_tag():
+    """A worst column whose environment tag is non-finite (e.g. a NaN SST over land)
+    must FAIL LOUD — not silently build a kernel whose ``env_lo``/``env_hi`` = min/max
+    propagate the NaN AND whose `<out>.env_kernel.json` carries a non-standard
+    ``NaN``/``Infinity`` token (unparseable by the cross-grid deploy reader). Consistent
+    with the iter-179 clustering/feedback fail-loud convention (iter 247)."""
+    recs = [_Rec(ColumnEnvironment(sst_K=float("nan"), cape_J_kg=1500.0,
+                                   bulk_shear_m_s=10.0)),
+            _Rec(ColumnEnvironment(*_ENVS[1]))]
+    diags = [_Diag(C_K=jnp.array([0.4, 0.4]), valid=jnp.array([True, True]))
+             for _ in recs]
+    with pytest.raises(ValueError, match="non-finite"):
+        build_env_kernel(recs, diags, "clubb_coefficient",
+                         length_scales=_LENGTH_SCALES, field="C_K")
+
+
 def test_build_rejects_bad_field():
     recs = [_Rec(ColumnEnvironment(*_ENVS[0]))]
     diags = [_Diag(C_K=jnp.array([0.3]), valid=jnp.array([True]))]

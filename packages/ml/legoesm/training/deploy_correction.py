@@ -457,6 +457,22 @@ def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
                 f"{int(jnp.asarray(arr).reshape(-1).shape[0])} != {n}.")
     if nsamp == 0 or not bool(jnp.any(jnp.asarray(kernel.valid, bool))):
         raise ValueError("env kernel has no VALID samples — it would be empty.")
+    # Every numeric leaf must be FINITE: a non-finite sample_env (e.g. a worst column
+    # with a NaN SST tag over land — the iter-179 fail-loud convention the clustering +
+    # feedback paths share) or a corrupted deserialize would otherwise (a) propagate a
+    # NaN through ``env_lo``/``env_hi`` = min/max(sample_env) and the similarity kernel,
+    # and (b) write a non-standard ``NaN``/``Infinity`` token into ``<out>.env_kernel.json``
+    # ⇒ unparseable by the cross-grid deploy reader (iter 247). Mask land/invalid columns
+    # from the comparison (``valid_mask``) before building the kernel.
+    for name, arr in (("sample_env", kernel.sample_env),
+                      ("sample_values", kernel.sample_values),
+                      ("length_scales", kernel.length_scales),
+                      ("env_lo", kernel.env_lo), ("env_hi", kernel.env_hi)):
+        if not bool(jnp.all(jnp.isfinite(jnp.asarray(arr, dtype=float)))):
+            raise ValueError(
+                f"env kernel '{name}' has a non-finite (NaN/inf) value — a worst column's "
+                "environment tag is undefined (e.g. a NaN SST over land). Mask such columns "
+                "from the comparison (valid_mask) before building the env kernel.")
     return kernel
 
 
