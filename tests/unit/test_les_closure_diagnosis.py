@@ -116,8 +116,13 @@ def test_entrainment_velocity_from_crafted_inversion():
     assert int(diag.inversion_index) == 2
     assert bool(diag.valid)
     # w_e = -(-0.02)/2.0 = 0.01 m/s
-    assert float(diag.w_entrainment) == pytest.approx(0.01, rel=1e-12)
-    assert float(diag.delta_thetav) == pytest.approx(2.0, rel=1e-12)
+    # fp32-safe tolerances: this file lives in CI's fp32-by-default unit tier (no
+    # JAX_ENABLE_X64), where these analytic inverses recover to ~1e-8 relative.
+    # rel/rtol=1e-5 is deterministic at fp32 AND x64 yet still catches any real
+    # (≥0.001%) bug; the prior 1e-12/1e-9 passed ONLY via the session-wide x64 leak
+    # from a test_correction_loop import (order-dependent / xdist-fragile).
+    assert float(diag.w_entrainment) == pytest.approx(0.01, rel=1e-5)
+    assert float(diag.delta_thetav) == pytest.approx(2.0, rel=1e-5)
     assert float(diag.z_inversion) == pytest.approx(600.0)
 
 
@@ -190,7 +195,7 @@ def test_momentum_diffusivity_recovers_km():
     w_u = jnp.full((3,), -km0 * s0)
     Km, valid = momentum_diffusivity_from_fluxes(w_u, jnp.zeros((3,)), u, v, z)
     assert bool(jnp.all(valid))
-    np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-9)
+    np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-5)
 
 
 def test_momentum_diffusivity_projects_misaligned_flux():
@@ -234,7 +239,7 @@ def test_clubb_coefficient_dimensionless_value():
     CK, valid = clubb_coefficient_from_diffusivity(
         Km, jnp.ones((3,), bool), jnp.full((3,), 50.0), jnp.full((3,), 0.25))
     assert bool(jnp.all(valid))
-    np.testing.assert_allclose(np.asarray(CK), 0.2, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(CK), 0.2, rtol=1e-5)
 
 
 def test_clubb_coefficient_exact_inverse_of_gcm_forward():
@@ -256,7 +261,7 @@ def test_clubb_coefficient_exact_inverse_of_gcm_forward():
     ck_rec, valid = clubb_coefficient_from_diffusivity(
         km, jnp.ones_like(km, bool), l_mix, wp2)
     assert bool(jnp.all(valid))
-    np.testing.assert_allclose(np.asarray(ck_rec), ck_true, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(ck_rec), ck_true, rtol=1e-5)
 
     # (2) Per-column array C_K — the LES-informed per-column correction (2 columns).
     l2 = jnp.broadcast_to(l_mix, (2, 4))
@@ -269,7 +274,7 @@ def test_clubb_coefficient_exact_inverse_of_gcm_forward():
     # Each column's recovered C_K equals its injected per-column value at every level.
     np.testing.assert_allclose(
         np.asarray(ck_rec2),
-        np.broadcast_to(np.asarray(ck_col)[:, None], (2, 4)), rtol=1e-12)
+        np.broadcast_to(np.asarray(ck_col)[:, None], (2, 4)), rtol=1e-5)
 
 
 def test_clubb_coefficient_low_wp2_invalid_and_ad_safe():
@@ -298,7 +303,7 @@ def test_prandtl_number_ratio():
         jnp.full((3,), 4.0), jnp.ones((3,), bool),
         jnp.full((3,), 5.0), jnp.ones((3,), bool))
     assert bool(jnp.all(valid))
-    np.testing.assert_allclose(np.asarray(Pr), 0.8, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(Pr), 0.8, rtol=1e-5)
 
 
 def test_prandtl_number_low_kh_invalid_and_ad_safe():
@@ -346,7 +351,7 @@ def test_c_eps_from_budget_value():
         jnp.full((3,), 1.0e-4), jnp.full((3,), -1.0e-4),
         jnp.full((3,), 50.0), jnp.full((3,), 0.25))
     assert bool(jnp.all(valid))
-    np.testing.assert_allclose(np.asarray(ce), 0.48, rtol=1e-9)
+    np.testing.assert_allclose(np.asarray(ce), 0.48, rtol=1e-5)
 
 
 def test_c_eps_negative_production_invalid():

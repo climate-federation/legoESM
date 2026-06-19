@@ -48,7 +48,10 @@ def test_constant_offset_recovers_offset():
     ref = jnp.zeros((2, 2, nlev))
     model = ref + 2.5
     rmse = per_column_weighted_rmse(model, ref, w)
-    assert float(jnp.max(jnp.abs(rmse - 2.5))) == pytest.approx(0.0, abs=1e-10)
+    # abs=1e-5 is fp32-safe (the constant-offset RMSE recovers 2.5 to ~2e-7 at
+    # float32, the unit tier's default precision) yet still catches a real
+    # weighting/RMSE bug; the prior 1e-10 passed ONLY via the session-wide x64 leak.
+    assert float(jnp.max(jnp.abs(rmse - 2.5))) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_per_column_matches_scm_rce_weighted_rmse():
