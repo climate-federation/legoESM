@@ -71,6 +71,12 @@ from . import munk_gyre
 from . import held_larichev
 from . import neverworld2_lite
 from . import isomip_plus
+from .recipe_map import (
+    EXPERIMENT_RECIPES,
+    recipe_for,
+    recipe_setup_grid,
+    setups_for_recipe,
+)
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -120,4 +126,8 @@ __all__ = [
     "neverworld2_lite",
     "isomip_plus",
     "AVAILABLE_EXPERIMENTS",
+    "EXPERIMENT_RECIPES",
+    "recipe_for",
+    "recipe_setup_grid",
+    "setups_for_recipe",
 ]

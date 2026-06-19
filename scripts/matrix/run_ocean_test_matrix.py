@@ -8197,6 +8197,38 @@ def main():
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
 
+    # --- Summary by RECIPE (the recipe x setup grid, #490) ---
+    # The ~21 experiments are really a handful of dycore recipes x many setups;
+    # group the results so that structure is visible instead of 21 flat rows.
+    try:
+        from legoesm.ocean.experiments.recipe_map import EXPERIMENT_RECIPES
+    except Exception:
+        EXPERIMENT_RECIPES = {}
+
+    def _recipe_for_case(case):
+        if case in EXPERIMENT_RECIPES:
+            return EXPERIMENT_RECIPES[case]
+        for exp in sorted(EXPERIMENT_RECIPES, key=len, reverse=True):
+            if case.startswith(exp + "_") or exp in case:
+                return EXPERIMENT_RECIPES[exp]
+        return "(untagged)"
+
+    if EXPERIMENT_RECIPES:
+        by_recipe = {}
+        for r in ALL_RESULTS:
+            by_recipe.setdefault(_recipe_for_case(r["test"]), []).append(r)
+        print("\n" + "=" * 78)
+        print("  SUMMARY BY RECIPE  (recipe x setup grid, #490)")
+        print("=" * 78)
+        for rec in sorted(by_recipe):
+            rs = by_recipe[rec]
+            p = sum(1 for x in rs if x["status"] == "PASS")
+            print(f"  [{rec}]  {p}/{len(rs)} PASS  ({len(rs)} setups)")
+            for x in sorted(rs, key=lambda z: z["test"]):
+                print(f"      {x['status']:5}  {x['test']:<28} "
+                      f"{x['grid']:<12} {x['resolution']}")
+        print("=" * 78)
+
     # Save summary
     output_base.mkdir(parents=True, exist_ok=True)
     with open(output_base / "summary.json", "w") as f:
