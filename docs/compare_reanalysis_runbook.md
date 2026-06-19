@@ -132,3 +132,42 @@ environmental similarity (a cheap low-res campaign deploys on a high-res run).
 **Controlled go/no-go before real ERA5:** `scripts/validate/run_perfect_model_osse.py`
 runs the loop in an identical-twin (the model's own run with a KNOWN coefficient is
 the pseudo-truth) and checks it both lowers the bias and recovers the known parameter.
+
+---
+
+## 7. Distributed / HPC-scale (very large MPAS meshes)
+
+For a mesh too large for one rank, run the campaign under MPI: each rank owns a slice
+of the global mesh, diagnoses + corrects only its owned cells, and the loop reduces
+the bias/verdict collectively. Call the **same code on every rank**; the partition,
+the rank-local model wiring, and the collective hooks are all set up internally:
+
+```python
+from mpi4py import MPI
+from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+from legoesm.training.distributed_campaign import assemble_global_campaign_result
+from scripts.run.run_correction_campaign import (
+    build_campaign_output_dict, build_distributed_mpas_campaign,
+)
+
+# 1. run on every rank — return_layout=True hands back the partition for the persist:
+result, layout = build_distributed_mpas_campaign(
+    global_mesh=mesh, reference=era5_ref, area_weights=mesh.grid_area, n_worst=64,
+    build_local_driver=build_local_driver,        # (cfg, local_mesh) -> rank-local driver
+    base_atm_config=base_cfg, extract_column_state=extract, sigma=sigma,
+    n_iterations=10, return_layout=True)
+
+# 2. assemble the rank-local corrected field into the GLOBAL field (collective):
+gres = assemble_global_campaign_result(result, layout, corrected_field="C_K")
+
+# 3. write the deployable JSON on rank 0 ONLY (same format as the single-process OUT.json):
+if MPI.COMM_WORLD.Get_rank() == 0:
+    summary = summarize_campaign(gres, promotion_key="clubb_lite_C_K")
+    out = build_campaign_output_dict(
+        gres, grid_provenance={"grid_type": "mpas", "ncol": int(mesh.nCells)},
+        summary=summary, health=campaign_health(summary), corrected_field="C_K")
+    # _atomic_write_json("OUT.json", out)   -> deploy exactly like steps 4–6 above.
+```
+
+The output is the **same** deployable artifact as the single-process path, so the
+deploy + held-out verify (steps 4–6) are unchanged.

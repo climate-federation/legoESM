@@ -522,7 +522,8 @@ def build_distributed_mpas_campaign(
     *, global_mesh: Any, reference: Any, area_weights: Any, n_worst: int,
     build_local_driver: Callable[[Any, Any], Any], multi: bool = False,
     base_valid_mask: Any = None, rank: int | None = None, n_ranks: int | None = None,
-    validate_partition: bool = True, **campaign_kwargs: Any,
+    validate_partition: bool = True, return_layout: bool = False,
+    **campaign_kwargs: Any,
 ):
     """One-call RUNNABLE distributed-MPAS campaign entry point (iter 96): partition the
     GLOBAL mesh, then run the (single- or multi-coefficient) distributed campaign on
@@ -553,6 +554,13 @@ def build_distributed_mpas_campaign(
     asserting the owned sets across ranks cover the global mesh EXACTLY once — a gap
     is silently never corrected, an overlap is double-counted in the global top-k.
     Set ``False`` only to skip the (collective) check, e.g. a non-MPI unit test.
+
+    ``return_layout`` (default ``False``) returns ``(result, layout)`` instead of just
+    ``result``: the rank's partition ``layout`` is built INTERNALLY here, but the
+    rank-local → GLOBAL persist step
+    (:func:`legoesm.training.distributed_campaign.assemble_global_campaign_result`)
+    NEEDS it, so a turnkey driver passes ``return_layout=True`` and feeds the ``layout``
+    straight into the persist — without rebuilding the partition itself.
     """
     if rank is None or n_ranks is None:
         from mpi4py import MPI
@@ -570,12 +578,13 @@ def build_distributed_mpas_campaign(
         assert_partition_covers_global(layout)
     build = (build_distributed_multi_correction_campaign if multi
              else build_distributed_correction_campaign)
-    return build(
+    result = build(
         layout=layout, reference=reference, area_weights=area_weights, n_worst=n_worst,
         base_valid_mask=base_valid_mask, grid=layout.local_mesh,
         build_base_driver=lambda cfg: build_local_driver(cfg, layout.local_mesh),
         **campaign_kwargs,
     )
+    return (result, layout) if return_layout else result
 
 
 def build_multi_correction_campaign(

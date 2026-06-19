@@ -56,3 +56,33 @@ def test_runbook_documented_flags_are_real():
     unreal = [f for f in flags if f not in sources]
     assert not unreal, (
         f"runbook documents flag(s) absent from every referenced script: {unreal}")
+
+
+def test_runbook_distributed_section_symbols_are_importable():
+    """§7 (distributed / HPC) documents a Python code block calling specific helpers; a
+    rename would silently break the operator's copy-pasted driver.  Pin that every cited
+    symbol still imports from where the runbook imports it (iter 263)."""
+    text = _runbook_text()
+    assert "## 7. Distributed / HPC-scale" in text, "runbook lost its distributed section"
+    # the §7 block uses return_layout=True on the entry point — pin that kwarg exists.
+    import inspect
+
+    from legoesm.training.campaign_summary import (  # noqa: F401
+        campaign_health,
+        summarize_campaign,
+    )
+    from legoesm.training.distributed_campaign import (  # noqa: F401
+        assemble_global_campaign_result,
+    )
+
+    from scripts.run.run_correction_campaign import (  # noqa: F401
+        build_campaign_output_dict,
+        build_distributed_mpas_campaign,
+    )
+
+    sig = inspect.signature(build_distributed_mpas_campaign)
+    assert "return_layout" in sig.parameters, "runbook §7 uses return_layout= (now missing)"
+    # and the symbols the block calls by name must actually appear in the doc text.
+    for name in ("build_distributed_mpas_campaign", "assemble_global_campaign_result",
+                 "build_campaign_output_dict", "return_layout"):
+        assert name in text, f"runbook §7 no longer mentions {name}"

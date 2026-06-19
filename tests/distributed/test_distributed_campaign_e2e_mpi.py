@@ -228,19 +228,23 @@ def test_build_distributed_mpas_campaign_entry_point():
 
     # NOTE: rank/n_ranks OMITTED on purpose → exercises the advertised MPI.COMM_WORLD
     # default path (the deferred mpi4py import) instead of explicit args.
-    result = build_distributed_mpas_campaign(
+    # return_layout=True (iter 263) hands back the partition the entry point built
+    # INTERNALLY, so a turnkey driver can feed it straight into the persist step
+    # (assemble_global_campaign_result) without rebuilding make_voronoi_partition_layout.
+    result, layout = build_distributed_mpas_campaign(
         global_mesh=global_mesh, reference=reference,
         area_weights=jnp.asarray(global_mesh.grid_area), n_worst=1,
         build_local_driver=build_local_driver,
         base_atm_config=_mpas_base_config(nlev), extract_column_state=extract,
-        sigma=sigma, n_iterations=1,
+        sigma=sigma, n_iterations=1, return_layout=True,
         les_config=ColumnLESConfig(
             regime=_REGIME, diagnosis_method="clubb_coefficient"),
         run_les_fn=_mock_run_les_sheared, accept_only_if_improved=False)
 
-    # The entry point built the SAME layout the manual test does (deterministic); use
-    # it to locate the owner + the rank-local C_K shape.
-    layout = make_voronoi_partition_layout(global_mesh, RANK, NPROC)
+    # the returned layout IS the deterministic partition (identical to a manual build).
+    np.testing.assert_array_equal(
+        np.asarray(layout.partition.local_cells),
+        np.asarray(make_voronoi_partition_layout(global_mesh, RANK, NPROC).partition.local_cells))
     local_cells = np.asarray(layout.partition.local_cells)
     n_owned = int(layout.partition.n_owned_cells)
     owns_bias = bias_cell in local_cells[:n_owned]
