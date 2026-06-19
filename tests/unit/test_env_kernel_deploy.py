@@ -261,15 +261,39 @@ def test_build_rejects_bad_length_scales():
 
 def test_build_rejects_nonpositive_length_scales():
     """A length_scale is a similarity-distance DIVISOR; it must be strictly positive.
-    A ZERO yields a 0/0=NaN or inf distance, a NEGATIVE is silently squared to its
-    magnitude — both are caught at construction (the production floor is 1e-6), not
-    deferred to a confusing 'non-finite coefficients' during cross-grid evaluation."""
+    The evaluator floors any scale at 1e-30 (so it never divides by zero — no NaN), but
+    that means a ZERO or NEGATIVE scale is silently floored to ~0, collapsing that
+    predictor to an exact-match-only kernel ⇒ a silent near-all-background no-op deploy.
+    Reject it at construction (the production scales come from the per-predictor std)."""
     recs = [_Rec(ColumnEnvironment(*_ENVS[0]))]
     diags = [_Diag(C_K=jnp.array([0.3]), valid=jnp.array([True]))]
     for bad in ([2.0, 0.0, 8.0], [2.0, -1200.0, 8.0]):   # one zero / one negative scale
         with pytest.raises(ValueError, match="strictly POSITIVE"):
             build_env_kernel(recs, diags, "clubb_coefficient", length_scales=bad,
                              field="C_K")
+
+
+def test_kernel_field_nonpositive_scale_is_exact_match_only_not_nan():
+    """Lock the ACTUAL degenerate behavior the construction guard prevents: the
+    lower-level ``environment_kernel_field`` FLOORS a non-positive scale at 1e-30, so a
+    ZERO (and, identically, a NEGATIVE) scale yields a FINITE exact-match-only field (a
+    grid column matching a sample keeps its value; a non-matching one → background) —
+    NOT a NaN.  This is why the iter-257 guard fails loud on a silent no-op, not a crash.
+    """
+    from legoesm.training.parameter_field import environment_kernel_field
+
+    grid = jnp.array([[298.0], [305.0]])        # col 0 matches sample 0; col 1 matches none
+    senv = jnp.array([[298.0], [300.0]])
+    svals = jnp.array([0.3, 0.45])
+    valid = jnp.array([True, True])
+    zero = environment_kernel_field(grid, senv, svals, length_scales=jnp.array([0.0]),
+                                    background=99.0, valid=valid)
+    neg = environment_kernel_field(grid, senv, svals, length_scales=jnp.array([-5.0]),
+                                   background=99.0, valid=valid)
+    assert bool(jnp.all(jnp.isfinite(zero)))                  # floored to 1e-30 — no NaN
+    assert float(zero[0]) == pytest.approx(0.3)               # exact match keeps its value
+    assert float(zero[1]) == pytest.approx(99.0)              # no match → background no-op
+    np.testing.assert_allclose(np.asarray(neg), np.asarray(zero))  # negative ≡ zero (floored)
 
 
 def test_from_dict_rejects_mislabelled_artifact():

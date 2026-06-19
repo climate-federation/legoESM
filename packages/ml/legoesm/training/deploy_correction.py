@@ -475,19 +475,25 @@ def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
                 "from the comparison (valid_mask) before building the env kernel.")
     # length_scales are per-predictor SIMILARITY SCALES (divisors in the kernel
     # distance ``((env-sample)/ls)²``); they MUST be strictly positive. The campaign
-    # floors them at 1e-6 (``feedback_assembly._env_grid_predictors``), but a directly-
-    # built or hand-edited/deserialized kernel is unchecked: a ZERO scale makes the
-    # distance ``0/0=NaN`` for a sample matching the new env (caught only later as a
-    # confusing 'non-finite coefficients' far from the cause) or ``inf`` (a silent
-    # background-only degradation of that predictor); a NEGATIVE scale is silently
-    # SQUARED to its magnitude (``x²/ls²``), a silent misconfiguration. Fail loud here.
+    # already floors them at the per-predictor std (≥1e-6, ``feedback_assembly.
+    # _env_grid_predictors``), so a non-positive scale only reaches here from a directly-
+    # built or hand-edited/deserialized kernel — a misconfiguration. ``environment_
+    # kernel_field`` floors any scale at a tiny ``_LENGTH_SCALE_FLOOR=1e-30`` (so the
+    # eval never DIVIDES by zero — no NaN), but that means a ZERO or NEGATIVE scale is
+    # silently floored to ~0, collapsing that predictor to an EXACT-MATCH-ONLY kernel:
+    # every grid column that does not (near-)exactly match a sample in that predictor
+    # falls back to ``background``, i.e. a SILENT near-all-background NO-OP deploy
+    # (empirically: ls=0 and ls<0 give the IDENTICAL exact-match-only field). Reject it
+    # at construction so the misconfiguration fails LOUD instead of deploying nothing.
     ls = jnp.asarray(kernel.length_scales, dtype=float)
     if not bool(jnp.all(ls > 0.0)):
         raise ValueError(
             "env kernel 'length_scales' must be strictly POSITIVE (each is a per-predictor "
-            "similarity scale; the campaign floors them at 1e-6). A zero scale yields a "
-            "0/0=NaN or inf similarity distance; a negative scale is silently squared to "
-            f"its magnitude. Got {jnp.asarray(kernel.length_scales).reshape(-1).tolist()}.")
+            "similarity scale; the campaign sets them from the per-predictor std). A "
+            "non-positive scale is floored to ~0 by the evaluator, collapsing that "
+            "predictor to an exact-match-only kernel ⇒ most grid columns fall back to "
+            "background (a silent near-no-op deploy). Got "
+            f"{jnp.asarray(kernel.length_scales).reshape(-1).tolist()}.")
     return kernel
 
 
