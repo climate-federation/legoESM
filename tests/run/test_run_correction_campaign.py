@@ -355,6 +355,32 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_print_deploy_hint_verifies_output_deploys_on_own_grid(tmp_path, capsys):
+    """``_print_deploy_hint`` round-trips the JUST-WRITTEN campaign output through the
+    production deploy loader WITH its own grid, so a non-deployable / grid-inconsistent
+    output fails LOUD at WRITE time — not silently when the HPC user deploys it days
+    later. A valid output passes + prints the deploy hint; an output verified against a
+    DIFFERENT grid raises (the deploy guard's rejection, propagated not swallowed)."""
+    import json
+
+    from legoesm.grids.latlon import create_latlon_grid
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    output = {"C_K": [0.4] * (8 * 16),
+              "grid": rcc._grid_provenance(_base_config(), grid)}
+    path = str(tmp_path / "out.json")
+    with open(path, "w") as f:
+        json.dump(output, f)
+    rcc._print_deploy_hint(path, grid)                  # deploys onto its OWN grid → no raise
+    assert "deploy into a production run" in capsys.readouterr().out
+    # An output verified against a DIFFERENT grid fails LOUD at write-time.
+    other = create_latlon_grid(4, 8, dtype=jnp.float64)
+    with pytest.raises(ValueError):
+        rcc._print_deploy_hint(path, other)
+
+
 def test_grid_provenance_produces_deploy_compatible_fingerprint():
     """``_grid_provenance`` is the campaign-side deploy grid-identity fingerprint PRODUCER
     embedded in the output JSON; the deploy CONSUMER (``assert_deploy_compatible``) is
