@@ -385,11 +385,11 @@ def test_build_setup_rejects_nonfinite_surface_flux():
 
 @pytest.mark.slow
 def test_prescribed_surface_flux_warms_les_surface_real_dycore():
-    """END-TO-END in the REAL plane dycore: a prescribed POSITIVE surface heat flux
-    WARMS the LES SURFACE cell vs an identical no-flux run (same fixed θ' seed,
+    """END-TO-END in the REAL plane dycore: prescribed POSITIVE surface θ AND q_v fluxes
+    WARM + MOISTEN the LES SURFACE cell vs an identical no-flux run (same fixed θ' seed,
     PRNGKey(0)), and the run stays FINITE — the iter-151 injection does the right thing
-    through the actual compressible-Euler integration, not just the forcing tendency
-    (a wrong-cell or wrong-sign bug would fail: the surface would not warm). Heavy
+    through the actual compressible-Euler integration, not just the forcing tendency (a
+    wrong-cell or wrong-sign bug would fail: the surface would not warm/moisten). Heavy
     (real LES, two dycore compiles) ⇒ slow."""
     import numpy as np
     from legoesm.atmosphere.dynamics.column_les import run_forced_les
@@ -399,16 +399,19 @@ def test_prescribed_surface_flux_warms_les_surface_real_dycore():
                   config=_CONFIG)
     s_none = build_column_les_setup(ls_state=ls, **common)
     s_flux = build_column_les_setup(
-        ls_state=ls._replace(prescribe="fluxes", w_th_s=0.5, w_qv_s=0.0), **common)
+        ls_state=ls._replace(prescribe="fluxes", w_th_s=0.5, w_qv_s=2e-5), **common)
     fin_none = run_forced_les(s_none, dt_s=0.1, n_steps=20)
     fin_flux = run_forced_les(s_flux, dt_s=0.1, n_steps=20)
     tp_none = np.asarray(fin_none.theta_prime.data)
     tp_flux = np.asarray(fin_flux.theta_prime.data)
+    qv_none = np.asarray(fin_none.tracers.data)[:, :, -1, 0]   # surface cell q_v (slot 0)
+    qv_flux = np.asarray(fin_flux.tracers.data)[:, :, -1, 0]
     assert np.all(np.isfinite(tp_none)) and np.all(np.isfinite(tp_flux))  # no blow-up
-    # Surface = the LAST level (top-to-bottom storage); domain-mean θ' there.
-    sfc_none = float(np.mean(tp_none[:, :, -1]))
-    sfc_flux = float(np.mean(tp_flux[:, :, -1]))
-    assert sfc_flux > sfc_none + 1e-3            # the surface flux WARMED the surface cell
+    assert np.all(np.isfinite(qv_none)) and np.all(np.isfinite(qv_flux))
+    # Surface = the LAST level (top-to-bottom storage); domain-mean there.
+    assert float(np.mean(tp_flux[:, :, -1])) > float(np.mean(tp_none[:, :, -1])) + 1e-3
+    # The q_v flux MOISTENS the surface (signal ~8e-7 kg/kg; margin well below it).
+    assert float(np.mean(qv_flux)) > float(np.mean(qv_none)) + 1e-8
 
 
 def test_build_setup_raises_when_les_top_above_column():
