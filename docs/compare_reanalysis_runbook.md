@@ -105,8 +105,13 @@ build_driver, _ = make_base_driver_builder("cmip", coupled_preset=PRESETS["aquap
 
 ## 6. Verify on a HELD-OUT window (the rigorous check)
 
-Run the baseline and the deployed model, then compare both to ERA5 on a **different**
-time window than training (no overfitting to the training period):
+Produce two restarts on a time window **not used for training**:
+- **deployed_restart** — step 5 (`build_deployed_config` → run), the LES-corrected config;
+- **baseline_restart** — the SAME run with the *un-corrected base* config
+  (`build_driver(base_cfg)` instead of the deployed `cfg`), so the comparison isolates
+  the correction's effect.
+
+Then compare both to ERA5 on that held-out window (no overfitting to the training period):
 
 ```bash
 $PY scripts/validate/compare_amip_era5.py \
