@@ -249,8 +249,9 @@ def compare_state_to_reference(
     Precipitation enters the score only when **both** states carry it (ERA5
     precip is often unavailable); otherwise the precip term is dropped.  SST for
     the environment tag is taken from ``model.sst_K`` when present, else
-    approximated by the model's lowest-level air temperature with a warning-free
-    fallback (documented; the driver should supply the prescribed SST).
+    approximated by the model's lowest-level air temperature (the driver SHOULD
+    supply the prescribed SST; the fallback WARNS once per session — iter 280 — so
+    the operator learns the clustering / env-kernel tags are approximate).
     """
     _validate_aligned(model, reference)
     sigma_full = jnp.asarray(sigma_full)
@@ -328,7 +329,18 @@ def compare_state_to_reference(
     else:
         # Documented fallback: surface-air-temperature proxy when the driver did
         # not thread the prescribed SST.  CAPE/shear are unaffected; only the
-        # SST environment tag is approximate in this branch.
+        # SST environment tag is approximate in this branch.  WARN (once per session
+        # — Python dedups identical warnings, so no per-round noise) so the empirical-
+        # run operator learns the env tags are approximate: the docstring's "the driver
+        # SHOULD supply SST" is a config issue worth surfacing, not silently degrading
+        # the clustering / env-kernel by climate (iter 280).
+        import warnings
+
+        warnings.warn(
+            "compare_state_to_reference: model.sst_K is None — using the lowest-level "
+            "air temperature as the SST environment tag (the worst-column clustering + "
+            "env-kernel tags are APPROXIMATE). Supply the prescribed/coupled SST via the "
+            "driver for accurate environment tags.", stacklevel=2)
         sst = model.T[..., -1]
 
     environment = compute_column_environment(

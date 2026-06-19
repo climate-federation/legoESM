@@ -165,11 +165,13 @@ def test_compare_sst_fallback_uses_surface_air_temperature_when_sst_absent():
     assert model.sst_K is None
     lat = jnp.array([0.0, 1.0])
     lon = jnp.array([0.0, 1.0])
-    result = compare_state_to_reference(
-        model=model, reference=model,                            # identical → zero score
-        sigma_full=sigma_full, sigma_half=sigma_half,
-        lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
-    )
+    # The fallback WARNS (iter 280) so the operator learns the env tag is approximate.
+    with pytest.warns(UserWarning, match="model.sst_K is None"):
+        result = compare_state_to_reference(
+            model=model, reference=model,                        # identical → zero score
+            sigma_full=sigma_full, sigma_half=sigma_half,
+            lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
+        )
     # The fallback used the SURFACE-air temperature (295 K), not the top (220 K).
     assert result.environment.sst_K.shape == shape
     np.testing.assert_allclose(np.asarray(result.environment.sst_K), 295.0, atol=1e-5)
