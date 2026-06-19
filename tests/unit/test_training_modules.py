@@ -255,6 +255,71 @@ class TestVerticalInterp:
 
 
 # ---------------------------------------------------------------------------
+# 1b. era5 horizontal regrid — latitude ordering (no N/S hemisphere flip)
+# ---------------------------------------------------------------------------
+
+class TestEra5HorizontalRegrid:
+    """ERA5 stores latitude 90→-90 DESCENDING.  The regrid feeds that descending
+    axis straight into ``scipy.interpolate.RegularGridInterpolator``, which requires
+    a strictly-MONOTONIC axis (modern scipy accepts descending; older scipy raises).
+    The silent-catastrophe failure mode is a hemisphere FLIP — model-North paired
+    with ERA5-South — which makes every column bias compare the wrong latitude.
+    Using ``field == latitude`` (a linear field that linear interp reproduces
+    EXACTLY) catches a flip decisively: a correct regrid returns each target lat's
+    own value; a flip returns its negation."""
+
+    class _Grid:
+        def __init__(self, lat, lon):
+            self.lat = lat
+            self.lon = lon
+
+    def test_regrid_2d_to_gaussian_preserves_hemisphere(self):
+        from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+        era5_lat = np.deg2rad(np.linspace(90.0, -90.0, 19))      # DESCENDING (ERA5)
+        era5_lon = np.deg2rad(np.linspace(0.0, 360.0, 24, endpoint=False))
+        field = np.broadcast_to(era5_lat[:, None], (19, 24)).astype(np.float64)  # f = lat
+        # Target Gaussian grid: ASCENDING interior latitudes (no extrapolation).
+        gauss_lat = np.deg2rad(np.array([-60.0, -20.0, 0.0, 30.0, 75.0]))
+        gauss_lon = np.deg2rad(np.array([10.0, 100.0, 250.0]))
+        out = np.asarray(regrid_2d_to_gaussian(
+            field, era5_lat, era5_lon, self._Grid(gauss_lat, gauss_lon)))
+        # f == lat ⇒ regridded value at each target lat is THAT lat (exact for a
+        # linear field), identical across lon.  A hemisphere flip would yield
+        # -gauss_lat instead (e.g. +75° → -75°) — caught by the sign + value.
+        for i, gl in enumerate(gauss_lat):
+            np.testing.assert_allclose(out[i, :], gl, atol=1e-5)
+        assert np.all(np.diff(out[:, 0]) > 0)                    # increases N-ward, not flipped
+
+    def test_regrid_latlon_to_gaussian_preserves_hemisphere(self):
+        # The 3D production path (T/u/v/q) uses the SAME descending-lat interp.
+        from legoesm.training.era5_to_state import (
+            ERA5Slice,
+            regrid_latlon_to_gaussian,
+        )
+
+        nlat, nlon, nlev = 19, 24, 3
+        era5_lat = np.deg2rad(np.linspace(90.0, -90.0, nlat))    # DESCENDING
+        era5_lon = np.deg2rad(np.linspace(0.0, 360.0, nlon, endpoint=False))
+        lat_field = np.broadcast_to(
+            era5_lat[:, None, None], (nlat, nlon, nlev)).astype(np.float64)  # f = lat
+        ps = np.broadcast_to(era5_lat[:, None], (nlat, nlon)).astype(np.float64)
+        era5 = ERA5Slice(
+            T=lat_field, u=lat_field, v=lat_field, q=lat_field, p_s=ps,
+            sst=ps, phis=ps, lat=era5_lat, lon=era5_lon,
+            plev_Pa=np.linspace(5000.0, 100000.0, nlev))
+        gauss_lat = np.deg2rad(np.array([-50.0, 0.0, 65.0]))
+        gauss_lon = np.deg2rad(np.array([30.0, 200.0]))
+        t_g, _u, _v, _q, ps_g = regrid_latlon_to_gaussian(
+            era5, self._Grid(gauss_lat, gauss_lon))
+        t_g = np.asarray(t_g)
+        # Each regridded level reproduces the target latitude (no flip), and p_s too.
+        for i, gl in enumerate(gauss_lat):
+            np.testing.assert_allclose(t_g[i, :, :], gl, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(ps_g)[i, :], gl, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
 # 2. losses
 # ---------------------------------------------------------------------------
 
