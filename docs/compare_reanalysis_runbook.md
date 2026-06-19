@@ -222,3 +222,12 @@ if MPI.COMM_WORLD.Get_rank() == 0:
 
 The output is the **same** deployable artifact as the single-process path, so the
 deploy + held-out verify (steps 4–6) are unchanged.
+
+> **MPI version requirement (correctness):** the collective reductions need a compatible
+> JAX / mpi4jax stack (legoESM tests `jax>=0.8,<0.10` + `mpi4jax>=0.8,<0.9`). A version outside
+> that range emits a runtime WARNING from `legoesm.parallel.reductions` and **may produce
+> incorrect MPI results** — mpi4jax 0.8.x's custom-call API was deprecated in JAX 0.9 and
+> removed in JAX 0.10. Pin `jax<0.10` for the distributed campaign and confirm with a tiny
+> `mpirun -np 2 … -m pytest tests/distributed/` before a multi-day job (set
+> `LEGOESM_MPI_STRICT_COMPAT=1` to make the version mismatch a hard error). The single-process
+> path does not use MPI and is unaffected.
