@@ -474,6 +474,18 @@ def test_run_pipeline_realism_gate_invalidates_dead_les():
     assert not bool(jnp.any(dead_multi["prandtl_number"].valid))
 
 
+def test_realism_gate_defaults_on_so_production_is_protected():
+    """The LES realism TRUST gate defaults ON in ColumnLESConfig. The production campaign
+    builds ``ColumnLESConfig()`` (the campaign CLI exposes NO gate-disable flag, verified
+    iter 305), so the 'parameters estimated from LES' quality control is structurally
+    always-on — a dead / blown-up / drifted LES never injects a meaningless coefficient into
+    a multi-day HPC run. Lock the DEFAULT: a regression flipping it to False would silently
+    disable that control in production, and no other test would catch it (the gate-behaviour
+    tests above pass ``gate_realism`` EXPLICITLY, and ``run_column_les_pipeline``'s own arg
+    default is a SEPARATE default from the config field the campaign actually uses)."""
+    assert ColumnLESConfig().gate_les_realism is True
+
+
 def test_run_pipeline_optin_rh_cap_threads_and_invalidates():
     """iter 68: the OPT-IN supersaturation cap threads config → pipeline → gate. The
     synthetic LES carries the (unphysical) uniform q=0.01, grossly supersaturated
