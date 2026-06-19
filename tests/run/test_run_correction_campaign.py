@@ -1006,6 +1006,13 @@ def test_load_single_resume_roundtrip():
     # Wrong-SLOT guard: a Pr_t checkpoint resumed as C_K fails loud.
     with pytest.raises(SystemExit, match="checkpoint corrects"):
         rcc._load_single_resume({**ckpt, "corrected_field": "Pr_t"}, grid, "C_K")
+    # Wrong-MODE guard (iter 252): a MULTI checkpoint ('fields' dict, no single 'field')
+    # resumed as single (forgot --coefficients) fails loud with a fix, not a bare KeyError —
+    # symmetric with the multi path's coefficient-set guard.
+    multi_like = {k: v for k, v in ckpt.items() if k != "field"}
+    multi_like["fields"] = {"clubb_lite_C_K": list(range(128))}
+    with pytest.raises(SystemExit, match=r"has no 'field'.*--coefficients"):
+        rcc._load_single_resume(multi_like, grid, "C_K")
     # Wrong-CELL guard: a transposed-shape grid fails loud.
     with pytest.raises(SystemExit, match="resume grid mismatch"):
         rcc._load_single_resume(ckpt, create_latlon_grid(16, 8, dtype=jnp.float64), "C_K")

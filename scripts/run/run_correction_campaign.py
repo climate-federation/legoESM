@@ -1453,6 +1453,16 @@ def _load_single_resume(ckpt: dict, grid: Any, corrected_field: str):
     import jax.numpy as jnp
 
     _assert_resume_grid_matches(ckpt, grid)            # wrong-cell guard (same as deploy)
+    if "field" not in ckpt:
+        # A MULTI-coefficient checkpoint carries a ``"fields"`` dict, not a single
+        # ``"field"`` — resuming it as single (forgot --coefficients) would otherwise be a
+        # bare ``KeyError``; fail loud with the fix, symmetric with the multi path's
+        # coefficient-set guard (iter 252).
+        hint = (" (it has a 'fields' dict — resume WITH the SAME --coefficients)"
+                if "fields" in ckpt else "")
+        raise SystemExit(
+            f"single-coefficient resume: checkpoint has no 'field'{hint}; resume the run "
+            "in the mode it was written (single-coefficient: no --coefficients).")
     ckpt_field = ckpt.get("corrected_field")
     if ckpt_field is not None and ckpt_field != corrected_field:
         raise SystemExit(
