@@ -346,6 +346,28 @@ def test_extract_no_geostrophic_wind_near_equator():
     assert forcing.u_geo is None  # geostrophic relaxation disabled
 
 
+def test_extract_geostrophic_cutoff_is_exclusive_at_the_boundary():
+    """The equatorial cutoff ``abs(lat_deg) < _MIN_GEOSTROPHIC_LAT_DEG`` is STRICT
+    (``<``): a column EXACTLY at the cutoff latitude still gets a geostrophic wind;
+    only columns strictly INSIDE the band are excluded.
+
+    The existing equator test sits at HALF the cutoff (well inside → None), so it
+    doesn't pin the boundary operator.  A future ``<``→``<=`` change would silently
+    drop the boundary column's geostrophic relaxation (or vice-versa) — the
+    geostrophic analog of the iter-225 campaign-health inclusive-threshold lock.
+    """
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+        lat_rad=float(jnp.deg2rad(_MIN_GEOSTROPHIC_LAT_DEG)),  # EXACTLY at the cutoff
+        col_index=(4, 8),
+    )
+    # |lat| == cutoff is NOT < cutoff ⇒ geostrophic balance IS supplied (finite),
+    # not None (which a strictly-inside column would get).
+    assert ls.u_geo is not None and ls.v_geo is not None
+    assert bool(jnp.all(jnp.isfinite(ls.u_geo))) and bool(jnp.all(jnp.isfinite(ls.v_geo)))
+
+
 def test_extract_geostrophic_thermal_wind_westerly():
     """Warm equator / cold pole (Φ decreasing poleward) ⇒ westerly (u_geo>0)
     geostrophic wind at an NH column — the thermal-wind midlatitude westerlies."""
