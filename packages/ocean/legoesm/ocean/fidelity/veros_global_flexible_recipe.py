@@ -97,24 +97,9 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_stretched_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-from legoesm.ocean.physics.combined import OceanPhysicsConfig
-from legoesm.ocean.physics.convection.config import OceanConvectionConfig
-from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-from legoesm.ocean.physics.surface_forcing.config import (
-    FluxFeedbackConfig, SurfaceForcingConfig,
-)
-from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
-from legoesm.ocean.vertical import (
-    OceanZStarCoordinate,
-    create_partial_cell_coordinate,
-)
 
 # Shared canonical blocks from the matched recipes (factored, not copied):
 # the ACCRecipe container, the global_4deg TKE/EKE/GM blocks this setup
@@ -129,7 +114,32 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
 )
+
+# Shape-generic layout bridges, shared via fidelity.veros_layout (the 1deg
+# recipe's DEDUP NOTE); re-exported under the recipe's ``_flex`` names.
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xy_to_legoesm as veros_xy_to_legoesm_flex,
+)
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xyz_to_legoesm as veros_xyz_to_legoesm_flex,
+)
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+from legoesm.ocean.physics.combined import OceanPhysicsConfig
+from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+from legoesm.ocean.physics.surface_forcing.config import (
+    FluxFeedbackConfig,
+    SurfaceForcingConfig,
+)
+from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    create_partial_cell_coordinate,
+)
 
 __all__ = (
     "DT_MOM_RATIO",
@@ -332,7 +342,7 @@ def veros_interpolate(coords, var, interp_coords, kind: str = "linear",
     """``veros.tools.interpolate`` for the global_flexible uses (regular
     1-D coords, no missing_value): ``scipy.interpolate.interpn`` with NaN
     fill outside the hull, then nearest-value in-painting."""
-    import scipy.interpolate   # setup-time data prep only
+    import scipy.interpolate  # setup-time data prep only
 
     if len(coords) != len(interp_coords) or len(coords) != var.ndim:
         raise ValueError("Dimensions of coordinates and values do not match")
@@ -461,7 +471,7 @@ def prepare_global_flexible_topography(
     ≥ −1 m, shift the longitude axis to start at the model's western edge,
     nearest-interpolate (no fill) to the interior centres.  Returns
     ``z_interp`` (nx, ny)."""
-    import scipy.ndimage    # setup-time data prep only
+    import scipy.ndimage  # setup-time data prep only
 
     topo_z = np.minimum(np.asarray(topo_z, dtype=np.float64), 0.0)
     gaussian_sigma = (0.5 * len(topo_x) / nx, 0.5 * len(topo_y) / ny)
@@ -504,7 +514,7 @@ def replicate_veros_kbot_flexible(
     :func:`prepare_global_flexible_topography`.  Returns 1-based interior
     ``kbot`` (nx, ny); 0 = land.  Bit-target: the live oracle's ``vs.kbot``
     (asserted by the harness, the proven 4deg gate)."""
-    import scipy.ndimage    # setup-time data prep only
+    import scipy.ndimage  # setup-time data prep only
 
     nx, ny = z_interp_xy.shape
     dzt_veros = global_flexible_dzt_veros(nz)
@@ -552,26 +562,6 @@ def kbot_to_mask_and_h_bathy_flexible(
 # ---------------------------------------------------------------------------
 # Layout bridges + forcing prep helpers (pure)
 # ---------------------------------------------------------------------------
-
-
-def veros_xyz_to_legoesm_flex(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic twin of the 4deg
-    bridge — sizes derived from the input)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_flex(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
 
 
 def veros_mit_tau_shift(taux_xym: np.ndarray,
@@ -743,12 +733,10 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_FLEX_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 8 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.25 @72°
+        # Shared bundle via veros_stepping.veros_faithful_stepping (#433);
+        # dt_mom_ratio=DT_MOM_RATIO=8 (dt arg IS dt_tracer; |f|·dt_mom ≈ 0.25 @72°).
+        **veros_faithful_stepping(with_surface_forcing=True,
+                                  dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_flexible_physics_config(),
     )
 

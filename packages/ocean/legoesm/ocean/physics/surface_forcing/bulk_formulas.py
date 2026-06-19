@@ -39,7 +39,13 @@ def bulk_formula_surface_forcing(
     dtype = T.dtype
 
     T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
-    q_sat = saturation_specific_humidity(T_s, jnp.full_like(T_s, constants.p_atm_std))
+    # Surface saturation humidity over SALINE ocean water: Large & Yeager (2004)
+    # / OMIP prescribe q_s = 0.98 * q_sat(SST, p) (~2% reduction of saturation
+    # vapour pressure over seawater).  Omitting it biases the latent heat flux
+    # (and evaporative freshwater) high.
+    q_sat = cfg.q_sat_salinity_factor * saturation_specific_humidity(
+        T_s, jnp.full_like(T_s, constants.p_atm_std)
+    )
 
     # Upward longwave from a grey surface: surface emission PLUS the
     # reflected component of the incident longwave.  An earlier form
@@ -94,10 +100,18 @@ def bulk_formula_surface_forcing(
     # Net heat flux (positive into ocean)
     Q_net = cfg.SW_down - Q_lw_up + cfg.LW_down - Q_sh - Q_lh
 
-    # Convert to top-layer tendencies
+    # Convert to top-layer tendencies.  Mask land columns (jacobian = 0):
+    # without it ``1/max(dz_0, 1e-10)`` yields ~1e7-scale heat/momentum
+    # tendencies on dry cells that contaminate neighbouring ocean faces when
+    # interpolated.  Mirrors the ``is_ocean`` guard in ``prescribed.py`` /
+    # ``external.py`` (codex review, finding #5).
     dz_0 = z_coord.dz_ref[0] * jacobian
-    inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
-    inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
+    is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
+    dz_safe = jnp.maximum(dz_0, 1e-10)
+    inv_rho_dz = jnp.where(is_ocean, 1.0 / (rho_0_ref * dz_safe), 0.0)
+    inv_rho_csw_dz = jnp.where(
+        is_ocean, 1.0 / (rho_0_ref * c_sw * dz_safe), 0.0,
+    )
 
     # Pad with zero on trailing axis instead of alloc-zeros +
     # scatter — single Pad HLO op per field.  Same pattern as the

@@ -47,6 +47,11 @@ H_MAX_M: float = 5500.0
 NX: int = 30   # 10 deg / 30 = 1/3 deg in lon
 NY: int = 30   # 18 deg / 30 = 0.6 deg in lat
 NZ: int = 20   # 275 m uniform vertical resolution
+# Timesteps: conservative at dx~30km (NX=30). Patch DOWN for finer grids
+# (CFL ~ dt*sqrt(g*H)/dx for the barotropic mode) so a fine-res Veros
+# CONTROL run is dt-matched and fair (e.g. NX=120 -> dt ~ 1800*30/120).
+DT_MOM_S: float = 1800.0
+DT_TRACER_S: float = 1800.0
 
 # Physics — match legoESM choices
 N_BV: float = 1.2e-3            # buoyancy frequency [1/s]
@@ -112,8 +117,8 @@ def _build_eady_uniform_setup_class():
             # Conservative timesteps: dx ~ 30 km, U_max ~ 0.8 m/s => CFL OK
             # at dt = 1800 s. Tracer can step at the same rate (we want the
             # baroclinic adjustment to remain coherent on short timescales).
-            settings.dt_mom = 1800.0
-            settings.dt_tracer = 1800.0
+            settings.dt_mom = DT_MOM_S
+            settings.dt_tracer = DT_TRACER_S
             settings.runlen = DEFAULT_RUNLEN_S
 
             settings.coord_degree = True

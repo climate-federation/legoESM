@@ -86,6 +86,7 @@ import numpy as np
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -561,12 +562,10 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
         gm_redi=GLOBAL4_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
         # ---- Veros-faithful time stepping (matched-ACC stack, baked in) ----
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 48 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @78°
+        # Shared bundle via veros_stepping.veros_faithful_stepping (#433);
+        # dt_mom_ratio=DT_MOM_RATIO=48 (dt arg IS dt_tracer; |f|·dt_mom ≈ 0.26 @78°).
+        **veros_faithful_stepping(with_surface_forcing=True,
+                                  dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_4deg_physics_config(),
     )
 

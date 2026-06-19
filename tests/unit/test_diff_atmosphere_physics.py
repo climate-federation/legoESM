@@ -193,6 +193,28 @@ class TestConvectionGrad:
         conv_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
 
+        # Canonical Kuo (1965) is QUIESCENT without a large-scale
+        # moisture-convergence source: its tendency is
+        # ``cvgu/zint·(tc−t)`` with ``cvgu = Σ max(0, −∇·(q_v u)) dp/g``.
+        # The bridge derives ``cvgu`` from the prognostic winds, so the
+        # shared zero-wind fixture leaves Kuo correctly OFF
+        # (``cvgu ≡ 0`` ⇒ zero tendency ⇒ zero ∂(dT/dt)/∂T).  That is the
+        # documented physically-correct behavior (see
+        # ``convection/kuo.py`` module docstring), NOT a gradient bug, so
+        # we supply a divergent wind field that produces real moisture
+        # convergence and exercises the active Kuo branch.  Verified
+        # directly: the Kuo leaf with a positive ``moisture_convergence``
+        # yields a 75-80% non-zero ∂(dT/dt)/∂T.
+        if scheme == "kuo":
+            n, nlev = state.T.data.shape[1], state.T.data.shape[3]
+            k1, k2 = jax.random.split(jax.random.PRNGKey(7))
+            u_data = 8.0 * jax.random.normal(k1, (6, n, n, nlev))
+            v_data = 8.0 * jax.random.normal(k2, (6, n, n, nlev))
+            state = state._replace(
+                u=state.u.replace(data=u_data),
+                v=state.v.replace(data=v_data),
+            )
+
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
             tend, _ = conv_fn(s, self.grid, self.sigma)
@@ -467,3 +489,119 @@ class TestCombinedPhysicsGrad:
 
         grad = jax.grad(loss)(state.T.data)
         assert_gradient_ok(grad, "Combined physics w.r.t. T")
+
+
+# ============================================================================
+# 2g  PhysicsPipeline.build_step_unified()
+# ============================================================================
+
+class TestPhysicsPipelineUnifiedGrad:
+    """Gradient through the registry-driven unified physics step.
+
+    ``PhysicsPipeline.build_step_unified()`` is the JIT-compiled column
+    physics step used by the production driver / ``build_segment_fn``.
+    With ``static_need_rad=None`` it contains a data-dependent
+    ``jax.lax.cond`` that selects between the radiation sub-cycle branch
+    (``need_rad=True``, recompute SW/LW heating) and the held-radiation
+    branch (``need_rad=False``, reuse the cached ``held_dT_rad``).  We
+    verify ``jax.grad`` flows through BOTH cond branches and through the
+    full physics chain (gray radiation + SBM convection + Smagorinsky
+    turbulence) — the cond is the differentiability hotspot called out in
+    the agent spec (radiation sub-cycling boundary).
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import build_physics_pipeline
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+
+        self.n, self.nlev = 4, 5
+        self.grid = create_cubed_sphere(self.n)
+        self.sigma = create_sigma_coordinate(self.nlev)
+        # Gray radiation (cheap, fully differentiable) + SBM convection +
+        # Smagorinsky turbulence — a complete column physics chain.
+        config = ExperimentConfig(
+            radiation="gray",
+            convection="sbm",
+            turbulence="smagorinsky",
+            microphysics="none",
+            diurnal_cycle=False,
+        )
+        config.validate_strict()
+        self.pipeline = build_physics_pipeline(self.grid, self.sigma, config)
+
+        ad = self.pipeline.adapter
+        self.shape_2d = ad.shape_2d
+        self.shape_3d = (*self.shape_2d, self.nlev)
+        self.ncol = ad.ncol
+
+    def _make_inputs(self):
+        from legoesm import constants
+        n, nlev = self.n, self.nlev
+        shape_2d, shape_3d, ncol = self.shape_2d, self.shape_3d, self.ncol
+        # Conditionally-unstable, near-saturated column so SBM convection
+        # is active and contributes to ∂(dT/dt)/∂T.
+        sigma_full = self.sigma.sigma_full
+        T_profile = 300.0 - 60.0 * sigma_full[::-1]
+        T = jnp.broadcast_to(T_profile, shape_3d)
+        p_s = jnp.full(shape_2d, 1.0e5)
+        q_v = jnp.full(shape_3d, 8e-3)
+        q_c = jnp.zeros(shape_3d)
+        q_r = jnp.zeros(shape_3d)
+        conv_prog = jnp.zeros((ncol,), dtype=T.dtype)
+        u = jnp.full(shape_3d, 5.0)
+        v = jnp.zeros(shape_3d)
+        sst = jnp.full(shape_2d, 300.0)
+        sic = jnp.zeros(shape_2d)
+        lat = jnp.asarray(self.grid.grid_lat)
+        lon = jnp.asarray(self.grid.grid_lon)
+        held_3d = jnp.zeros(shape_3d)
+        held_2d = jnp.zeros(shape_2d)
+        solar_w = jnp.array([])
+        o3 = jnp.zeros((ncol, nlev))
+        aerosol = jnp.zeros((ncol, nlev))
+        return dict(
+            T=T, p_s=p_s, q_v=q_v, q_c=q_c, q_r=q_r, conv_prog=conv_prog,
+            u=u, v=v, sst=sst, sic=sic, lat=lat, lon=lon,
+            day_of_year=jnp.asarray(80.0), seconds_of_day=jnp.asarray(43200.0),
+            dt=jnp.asarray(300.0), solar_w=solar_w, s_0=constants.S_0,
+            o3=o3, aerosol=aerosol,
+            held_dT_rad=held_3d, held_sw_net_sfc=held_2d,
+            held_lw_net_sfc=held_2d, held_sw_up_toa=held_2d,
+            held_lw_up_toa=held_2d, held_sw_down_toa=held_2d,
+        )
+
+    def _grad_for_need_rad(self, need_rad):
+        step_fn = self.pipeline.build_step_unified()
+        a = self._make_inputs()
+        T0 = a["T"]
+
+        def loss(T_data):
+            phys_out, _held, _T_land = step_fn(
+                jnp.bool_(need_rad),
+                T_data, a["p_s"], a["q_v"], a["q_c"], a["q_r"],
+                a["conv_prog"], a["u"], a["v"], a["sst"], a["sic"],
+                a["lat"], a["lon"],
+                a["day_of_year"], a["seconds_of_day"], a["dt"],
+                a["solar_w"], a["s_0"], a["o3"], a["aerosol"],
+                a["held_dT_rad"], a["held_sw_net_sfc"], a["held_lw_net_sfc"],
+                a["held_sw_up_toa"], a["held_lw_up_toa"], a["held_sw_down_toa"],
+            )
+            return jnp.sum(phys_out.dT_dt ** 2)
+
+        return jax.grad(loss)(T0)
+
+    def test_grad_need_rad_true(self):
+        """Radiation sub-cycle branch: gradient flows through the gray
+        radiation heating recompute."""
+        grad = self._grad_for_need_rad(True)
+        assert_gradient_ok(grad, "PhysicsPipeline unified (need_rad=True) w.r.t. T")
+
+    def test_grad_need_rad_false(self):
+        """Held-radiation branch: radiation heating is the cached
+        ``held_dT_rad`` (independent of T), but convection + turbulence
+        still depend on T, so the gradient is finite and non-zero."""
+        grad = self._grad_for_need_rad(False)
+        assert_gradient_ok(grad, "PhysicsPipeline unified (need_rad=False) w.r.t. T")

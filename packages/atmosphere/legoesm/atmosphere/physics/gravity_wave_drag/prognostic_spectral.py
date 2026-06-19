@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     PrognosticSpectralConfig,
 )
@@ -57,21 +58,8 @@ def prognostic_spectral_gwd(
     n_az = config.n_azimuths
     n_wn = config.n_wavenumbers
 
-    # Brunt-Väisälä frequency
-    theta = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    dz_full = jnp.abs(z_full[:, :-1] - z_full[:, 1:])
-    dz_full = jnp.clip(dz_full, 1.0, None)
-    dtheta_dz = (theta[:, :-1] - theta[:, 1:]) / dz_full
-    theta_bar = 0.5 * (theta[:, :-1] + theta[:, 1:])
-    N2_half = (constants.g / jnp.clip(theta_bar, 1.0, None)) * dtheta_dz
-    N2_half = jnp.clip(N2_half, 1e-8, None)
-    N_half = jnp.sqrt(N2_half)
-
-    N_full = jnp.concatenate([
-        N_half[:, :1],
-        0.5 * (N_half[:, :-1] + N_half[:, 1:]),
-        N_half[:, -1:],
-    ], axis=1)  # (ncol, nlev)
+    # Brunt-Väisälä frequency at full levels
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)  # (ncol, nlev)
 
     # Wavenumber grid (log-spaced)
     k_grid = jnp.exp(jnp.linspace(
@@ -119,7 +107,7 @@ def prognostic_spectral_gwd(
         c_phase_t[:, None, :, :]     # (ncol, 1, n_wn, nlev)
         - U_proj[:, :, None, :]       # (ncol, n_az, 1, nlev)
     )
-    intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)
+    intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)  # coeff-ok: intrinsic-freq floor
 
     wavelength = 2.0 * jnp.pi / jnp.clip(k_grid, 1e-10, None)  # (n_wn,)
     N_4d = N_full[:, None, None, :]  # (ncol, 1, 1, nlev)
@@ -190,6 +178,8 @@ def prognostic_spectral_gwd(
 
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
+    if not config.thermal_tendency:
+        dT_dt = jnp.zeros_like(dT_dt)
 
     # Column dissipation (positive-definite: KE lost by the mean flow)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)

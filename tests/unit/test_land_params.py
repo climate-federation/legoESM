@@ -27,6 +27,7 @@ from legoesm.land.surface_params import (
     clm5_pft_table,
     CLM5_PFT_NAMES,
     N_PFT_CLM5,
+    read_spatial_param,
 )
 from legoesm.land.param_providers import (
     ConstantParamProvider,
@@ -383,3 +384,19 @@ class TestFactory:
     def test_missing_key(self, land_config):
         with pytest.raises(ValueError, match="key"):
             create_land_param_provider("neural", NCOL, land_config)
+
+
+class TestReadSpatialParam:
+    """read_spatial_param: the shared slab/multilayer spatial-param accessor
+    (deduped from per-module _get helpers, ponytail 2026-06-17)."""
+
+    def test_none_returns_fallback(self):
+        assert read_spatial_param(None, "albedo_veg", 0.25) == 0.25
+
+    def test_present_returns_field(self):
+        ncol = 4
+        lp = default_land_surface_params(ncol, None) if False else None
+        # Build a minimal params object exposing the requested field.
+        params = array_to_params(jnp.ones((ncol, N_PARAMS)) * 0.3)
+        out = read_spatial_param(params, PARAM_NAMES[0], -1.0)
+        assert jnp.allclose(out, 0.3)

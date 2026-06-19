@@ -23,12 +23,17 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
+from legoesm import constants
 from legoesm.driver.config import (
     DycoreConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
 )
+
+_DYCORE_DEFAULTS = DycoreConfig()
+_OUTPUT_DEFAULTS = OutputConfig()
+_EXPERIMENT_DEFAULTS = ExperimentConfig()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -167,11 +172,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--diag-days", type=int, default=5)
+    parser.add_argument("--hyperdiff-scale", type=float,
+                        default=_DYCORE_DEFAULTS.hyperdiff_scale,
+                        help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--div-damp-scale", type=float,
+                        default=_DYCORE_DEFAULTS.div_damp_scale,
+                        help="Dycore divergence-damping multiplier")
+    parser.add_argument("--conservation-fixer",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.conservation_fixer,
+                        help="Enable/disable the dycore conservation fixer")
+    parser.add_argument("--fix-mass",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.fix_mass,
+                        help="Enable/disable global mass correction")
 
     # Output
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
     parser.add_argument("--restart-from", type=str, default=None)
+    parser.add_argument("--checkpoint-format", type=str,
+                        default=_OUTPUT_DEFAULTS.checkpoint_format,
+                        choices=["npz", "zarr"],
+                        help="Restart checkpoint serialization format")
+    parser.add_argument("--max-wallclock-seconds", type=float,
+                        default=_OUTPUT_DEFAULTS.max_wallclock_seconds,
+                        help="Wallclock budget [s] for clean checkpoint+exit")
+    parser.add_argument("--restart-buffer-seconds", type=float,
+                        default=_OUTPUT_DEFAULTS.restart_buffer_seconds,
+                        help="Wallclock buffer [s] reserved for restart writes")
 
     # Initial atmospheric state
     parser.add_argument("--t-init", type=float, default=None,
@@ -197,6 +226,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # when the user did not provide a value.  Resolved to ``1`` after
     # production-profile processing.
     parser.add_argument("--rad-update-steps", type=int, default=None)
+    parser.add_argument("--unfused-radiation", action="store_true", default=False,
+                        help="Run radiation outside the compiled segment scan")
+    parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
+                        help="RRTMGP g-point batch size (0 = auto/checkpointed)")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -229,6 +263,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--co2-ppmv", type=float, default=415.0)
     parser.add_argument("--ch4-ppbv", type=float, default=1900.0)
     parser.add_argument("--n2o-ppbv", type=float, default=332.0)
+    parser.add_argument("--solar-s0", type=float, default=constants.S_0,
+                        help="Total solar irradiance [W/m^2]")
+    parser.add_argument("--tau-equator", type=float,
+                        default=_EXPERIMENT_DEFAULTS.tau_equator,
+                        help="Gray-radiation equatorial optical depth")
+    parser.add_argument("--tau-pole", type=float,
+                        default=_EXPERIMENT_DEFAULTS.tau_pole,
+                        help="Gray-radiation polar optical depth")
     parser.add_argument("--ozone-source", type=str, default="standard",
                         choices=["standard", "analytical", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
@@ -311,6 +353,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(matching the Kinne multi-band aerosol convention)."
         ))
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
+    parser.add_argument("--volcanic-aerosol-lw", action="store_true",
+                        default=False,
+                        help="Load and apply volcanic longwave aerosol optical depth")
 
     # Subgrid physics
     parser.add_argument("--convection", type=str, default="sbm",
@@ -355,6 +400,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the constant Nc_0.  Requires "
                              "--aerosol-forcing external and "
                              "--microphysics morrison.")
+    parser.add_argument("--nc-from-aerosol", action="store_true",
+                        dest="aerosol_ccn",
+                        help="Alias for --aerosol-ccn")
 
     # Topography
     parser.add_argument("--topography", type=str, default="flat")
@@ -367,13 +415,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
+    parser.add_argument("--t-ice-k", type=float,
+                        default=constants.T_freeze_ocean,
+                        help="SST floor / sea-ice ramp threshold [K]")
+    parser.add_argument("--albedo-ice", type=float,
+                        default=_EXPERIMENT_DEFAULTS.albedo_ice)
+    parser.add_argument("--albedo-ocean", type=float,
+                        default=_EXPERIMENT_DEFAULTS.albedo_ocean)
+    parser.add_argument("--sfc-emissivity", type=float,
+                        default=_EXPERIMENT_DEFAULTS.sfc_emissivity)
+    parser.add_argument("--emissivity-ice", type=float,
+                        default=_EXPERIMENT_DEFAULTS.emissivity_ice)
+    parser.add_argument("--k-bl-max-per-day", type=float,
+                        default=_EXPERIMENT_DEFAULTS.k_BL_max_per_day)
+    parser.add_argument("--k-free-per-day", type=float,
+                        default=_EXPERIMENT_DEFAULTS.k_free_per_day)
 
     # Moisture conservation
     parser.add_argument("--fix-moisture", action="store_true", default=False)
+    # Issue #323: opt-in moist-static-energy-conserving q_v floor.  Removes
+    # the latent heat of the clipped vapour sink so the per-step max(q_v, 0)
+    # floor stops injecting spurious condensation heat under organised
+    # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
+    parser.add_argument("--energy-consistent-moisture-clip",
+                        action="store_true", default=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
     parser.add_argument("--start-year", type=int, default=1979)
+    parser.add_argument("--forcing-update-days", type=float,
+                        default=_EXPERIMENT_DEFAULTS.forcing_update_days,
+                        help="Host-side forcing update cadence [days]")
+    parser.add_argument("--seed", type=int, default=_EXPERIMENT_DEFAULTS.seed,
+                        help="Master RNG seed for reproducibility")
     parser.add_argument("--cmip-output", action="store_true", default=False)
     parser.add_argument("--clear-sky-diag", action="store_true", default=False)
 
@@ -451,6 +525,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
+        hyperdiff_scale=args.hyperdiff_scale,
+        div_damp_scale=args.div_damp_scale,
+        conservation_fixer=args.conservation_fixer,
+        fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
         implicit_grav_wave_damping=args.implicit_grav_wave_damping,
         # Stage 3-E: polar filter for lat-lon C-grid pole-CFL relief.
@@ -468,6 +546,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
+        checkpoint_format=args.checkpoint_format,
+        max_wallclock_seconds=args.max_wallclock_seconds,
+        restart_buffer_seconds=args.restart_buffer_seconds,
     )
 
     return ExperimentConfig(
@@ -488,11 +569,16 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sic_scale=args.sic_scale or 1.0,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
+        unfused_radiation=args.unfused_radiation,
         rrtmgp_use_scan=args.rrtmgp_use_scan,
+        rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         diurnal_cycle=args.diurnal_cycle,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,
+        S_0=args.solar_s0,
+        tau_equator=args.tau_equator,
+        tau_pole=args.tau_pole,
         ozone_source=args.ozone_source,
         ozone_forcing=args.ozone_forcing,
         ozone_file=args.ozone_file,
@@ -508,6 +594,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         aerosol_reference_aod=args.aerosol_reference_aod,
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
+        volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         cloud_scheme=args.clouds,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
@@ -515,13 +602,23 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
         fix_moisture=args.fix_moisture,
+        energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         dynamic_albedo=args.dynamic_albedo,
+        T_ice=args.t_ice_k,
+        albedo_ice=args.albedo_ice,
+        albedo_ocean=args.albedo_ocean,
+        sfc_emissivity=args.sfc_emissivity,
+        emissivity_ice=args.emissivity_ice,
+        k_BL_max_per_day=args.k_bl_max_per_day,
+        k_free_per_day=args.k_free_per_day,
         experiment=args.experiment,
         start_year=args.start_year,
+        forcing_update_days=args.forcing_update_days,
+        seed=args.seed,
         sbm_tau_c=args.sbm_tau_c,
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,

@@ -492,6 +492,7 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        q_i=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -503,6 +504,9 @@ class DiagnosticCollector:
             Absolute simulation day.
         state : HydrostaticState
         q_v, q_c, q_r : jax.Array
+        q_i : jax.Array, optional
+            Cloud-ice mixing ratio [kg/kg]; ``None`` for warm-rain-only
+            microphysics (e.g. kessler) that carries no ice tracer.
         sst, sic : jax.Array
         precip_total : jax.Array
             Total precipitation [kg/m2/s].
@@ -628,11 +632,20 @@ class DiagnosticCollector:
                 'lw_net_sfc': np.asarray(lw_net_sfc),
             }
             self.monthly_accum.add_2d(doy, year, fields_2d, lat_deg_grid)
-            self.monthly_accum.add_3d(doy, year, {
+            fields_3d = {
                 'T': np.asarray(state.T.data),
                 'u': np.asarray(state.u.data),
                 'q_v': np.asarray(q_v) * 1000.0,
-            }, lat_deg_grid)
+            }
+            # Cloud-water profiles (g/kg). Guarded: kessler carries q_c but
+            # no q_i (None); morrison carries both. Only emit a field when
+            # its tracer is present so warm-rain runs don't fabricate a
+            # zero q_i profile.
+            if q_c is not None:
+                fields_3d['q_c'] = np.asarray(q_c) * 1000.0
+            if q_i is not None:
+                fields_3d['q_i'] = np.asarray(q_i) * 1000.0
+            self.monthly_accum.add_3d(doy, year, fields_3d, lat_deg_grid)
             self.monthly_accum.add_scalar(doy, year, {
                 'T_atm': mean_T,
                 'T_low': mean_T_low,
@@ -670,6 +683,23 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(sw_down_toa)
             if r is not None:
                 fields_2d['rsdt'] = r
+
+            # tos / siconc: sea-surface temperature [K] (CMOR Omon) and
+            # sea-ice area fraction [%] (CMOR SImon).  sst/sic already arrive
+            # on the model grid (prescribed for AMIP; from the coupler /
+            # get_sst_sic override for a coupled run), so the same regridder
+            # used for atmosphere fields applies.  tos is in K (matching the
+            # repo CMOR table units), so no conversion; siconc is fraction*100.
+            # NOTE: emitted UNMASKED.  The coupled driver is slab-ocean today
+            # (no land/sea mask is in collect()'s scope), so these are not yet
+            # masked to "where sea" per the CMOR cell_methods.  Mask them when a
+            # prognostic ocean + land mask is wired through the coupled driver.
+            r = self._regrid_to_latlon_2d(sst)
+            if r is not None:
+                fields_2d['tos'] = r
+            r = self._regrid_to_latlon_2d(np.asarray(sic) * 100.0)
+            if r is not None:
+                fields_2d['siconc'] = r
 
             # NOTE: rsds/rlds (surface downwelling) are NOT computed here.
             # The runtime only provides sw_net_sfc/lw_net_sfc (net fluxes),

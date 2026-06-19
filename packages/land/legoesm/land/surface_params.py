@@ -78,6 +78,13 @@ class LandSurfaceParams(NamedTuple):
 # Helpers
 # =====================================================================
 
+# Default land-surface parameter fallbacks (mirror LandConfig defaults; used
+# when a passed config lacks the attribute).
+_THETA_WP_DEFAULT = 0.15   # wilting-point water content [m3/m3]
+_THETA_FC_DEFAULT = 0.30   # field-capacity water content [m3/m3]
+_W_MAX_DEFAULT = 150.0     # bucket capacity [kg/m2]
+_C_SOIL_DEFAULT = 2.0e6    # soil volumetric heat capacity [J/m3/K]
+
 def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
     """Broadcast config scalars to ``(ncol,)`` arrays.
 
@@ -99,16 +106,16 @@ def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
     # MultiLayerLandConfig has root_depth/theta_wp/theta_fc directly;
     # LandConfig does not, so use sensible defaults.
     root_depth = getattr(config, "root_depth", 1.0)
-    theta_wp = getattr(config, "theta_wp", 0.15)
-    theta_fc = getattr(config, "theta_fc", 0.30)
+    theta_wp = getattr(config, "theta_wp", _THETA_WP_DEFAULT)
+    theta_fc = getattr(config, "theta_fc", _THETA_FC_DEFAULT)
     d_soil = getattr(config, "d_soil", 1.0)
-    W_max = getattr(config, "W_max", 150.0)
+    W_max = getattr(config, "W_max", _W_MAX_DEFAULT)
     # C_soil is top-level on LandConfig but in thermal sub-config on MultiLayer
     if hasattr(config, "C_soil"):
         C_soil = config.C_soil
     else:
         C_soil = getattr(config, "thermal", None)
-        C_soil = C_soil.C_soil if C_soil is not None else 2.0e6
+        C_soil = C_soil.C_soil if C_soil is not None else _C_SOIL_DEFAULT
 
     return LandSurfaceParams(
         albedo_veg=_bc(config.albedo_land),
@@ -124,6 +131,14 @@ def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
         LCMA=_bc(config.carbon.LCMA),
         g1=_bc(config.stomata.g1_bb),
     )
+
+
+def read_spatial_param(lp, name: str, fallback):
+    """Read field ``name`` from spatial :class:`LandSurfaceParams` ``lp`` when
+    present, else return the config scalar ``fallback``.  Shared by the slab
+    and multilayer land step modules (both wire trainable per-column surface
+    params the same way)."""
+    return getattr(lp, name) if lp is not None else fallback
 
 
 def array_to_params(arr: jnp.ndarray, param_names: tuple[str, ...] | None = None) -> LandSurfaceParams:

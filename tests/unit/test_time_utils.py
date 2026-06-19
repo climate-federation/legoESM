@@ -11,18 +11,17 @@ Covers:
 from __future__ import annotations
 
 import pytest
-
 from legoesm.forcing.time_utils import (
     NOLEAP_DAYS_PER_MONTH,
     NOLEAP_DAYS_PER_YEAR,
     NOLEAP_MONTH_STARTS,
+    daily_forcing_bucket,
     date_to_day,
     day_to_calendar,
     day_to_date,
     is_feb_29,
     noleap_day_of_year,
 )
-
 
 # ============================================================================
 # Calendar table constants — sanity
@@ -40,6 +39,40 @@ def test_noleap_month_starts_consistent_with_days_per_month():
         cum += days
     # Sentinel at index 12 == 365.
     assert NOLEAP_MONTH_STARTS[12] == 365
+
+
+# ============================================================================
+# daily_forcing_bucket — floor (not int) semantics pin
+# ============================================================================
+
+@pytest.mark.parametrize(
+    "day,bucket",
+    [
+        (0.0, 0),
+        (0.997, 0),
+        (1.0, 1),
+        (1.5, 1),
+        # The discriminating cases: int() truncation-toward-zero would
+        # return 0 for these, putting a negative fractional day (restart
+        # chain crossing day 0, pre-reference epoch) in the WRONG daily
+        # bucket and sampling a different seasonal SST/ozone than the
+        # straight run (FIX_RESTART_TIME; the chain-consistency
+        # integration tests CANNOT distinguish floor from int because
+        # straight and chained runs bucket identically either way —
+        # this unit pin is the only test that bites on the semantics).
+        (-0.003, -1),
+        (-0.5, -1),
+        (-1.0, -1),
+        (-1.0000001, -2),
+    ],
+)
+def test_daily_forcing_bucket_floor_semantics(day, bucket):
+    got = daily_forcing_bucket(day)
+    assert got == bucket, (
+        f"daily_forcing_bucket({day}) = {got}, want {bucket} "
+        f"(floor, not truncation-toward-zero)"
+    )
+    assert isinstance(got, int)
 
 
 # ============================================================================

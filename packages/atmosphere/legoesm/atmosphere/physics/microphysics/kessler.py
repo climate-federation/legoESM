@@ -33,6 +33,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Kessler accretion exponent + density floor (fixed).
+_KESSLER_ACCR_EXP = 0.875
+_RHO_FLOOR = 0.1
+
 def kessler_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -79,17 +83,32 @@ def kessler_microphysics(
     q_sat = saturation_mixing_ratio(T, p_full)
 
     # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s].
-    # The evaporation branch (negative ``condensation``) is donor-clamped
-    # against the available ``q_c`` so a subsaturated clear-air column
-    # (q_v < q_sat, q_c = 0) cannot drive ``q_c`` below zero (Codex audit
-    # cycle 2: "subsaturated clear air can create negative cloud water").
-    # Same pattern as ``_warm_rain.saturation_adjustment``.
+    # Adopts the ``_warm_rain.saturation_adjustment`` psychrometric form and
+    # EXTENDS its donor clamp to both branches:
+    #   (a) PSYCHROMETRIC correction — condensing the full ``q_v - q_sat(T_old)``
+    #       ignores the latent warming that raises ``q_sat``, over-condensing each
+    #       call; divide by ``1 + (L_v/c_pd) dq_sat/dT`` (small-error dry-air
+    #       mixing-ratio approximation, same as the shared helper).
+    #   (b) Donor-clamp BOTH branches: evaporation (negative ``condensation``) by
+    #       the available ``q_c`` (a subsaturated clear-air column cannot drive
+    #       ``q_c`` < 0 — this is the only branch ``_warm_rain`` itself clamps),
+    #       AND — the previously MISSING bound — condensation (positive) by the
+    #       available ``q_v``.  Without the positive clamp the coupled driver
+    #       floors ``q_v`` independently while keeping the full ``q_c`` increment,
+    #       so saturation adjustment created cloud water from vapour that was
+    #       floored away → ``q_c`` accumulated to physically impossible ~1 kg/kg
+    #       (opaque clouds, planetary-albedo runaway, the coupled cold drift /
+    #       OLR collapse).
+    _dt_safe = jnp.maximum(dt, 1e-10)
     excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt  # [kg/kg/s]
+    condensation = cond_frac * excess / (_dt_safe * psychrometric)  # [kg/kg/s]
     q_c_avail = jnp.clip(q_c, 0.0, None)
-    condensation = jnp.maximum(
-        condensation, -q_c_avail / jnp.maximum(dt, 1e-10),
+    q_v_avail = jnp.clip(q_v, 0.0, None)
+    condensation = jnp.clip(
+        condensation, -q_c_avail / _dt_safe, q_v_avail / _dt_safe,
     )
 
     dq_v_sat = -condensation
@@ -107,7 +126,7 @@ def kessler_microphysics(
 
     # 3. Accretion: cloud collected by rain.  Fractional powers of q_r
     # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
-    accretion = config.accretion_coeff * q_c * safe_pow(q_r, 0.875)
+    accretion = config.accretion_coeff * q_c * safe_pow(q_r, _KESSLER_ACCR_EXP)
 
     # 4. Evaporation of rain (q_r^0.525) via the shared donor-limited
     # helper — bounds ``evap·dt ≤ q_r`` so one explicit step can't
@@ -149,7 +168,7 @@ def kessler_microphysics(
     # 5. Rain sedimentation
     rho_sfc = rho[:, -1:]
     V_t = config.rain_fall_speed * jnp.sqrt(
-        rho_sfc / jnp.clip(rho, 0.1)
+        rho_sfc / jnp.clip(rho, _RHO_FLOOR)
     )
     # Joint q_r donor cap: pass evaporation as ``extra_sink`` so the
     # sedimentation flux limiter accounts for the rain evaporation that
@@ -182,7 +201,6 @@ def kessler_microphysics(
     # the unused-tendency placeholders to f64 under x64 mode.
     _dtype = T.dtype
     z = jnp.zeros((ncol, nlev), dtype=_dtype)
-    jnp.zeros((ncol,), dtype=_dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
@@ -195,4 +213,7 @@ def kessler_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=precipitation,
+        # Positive saturation-adjustment condensation (the q_v sink that becomes
+        # cloud water) for the coupled pipeline's joint vapour donor clamp.
+        dq_v_to_qc_dt=jnp.maximum(dq_c_sat, 0.0),
     )

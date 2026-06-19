@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm.ocean.simple_ocean import SimpleOceanConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.richards import RichardsConfig  # noqa: F401 (used in docstring)
@@ -53,9 +54,45 @@ class CoupledConfig(NamedTuple):
     coupling_dt : float
         Surface coupling interval [s].
     """
-    # Ocean
+    # Ocean.  ``ocean_mode`` ∈ {"slab", "two_layer", "fixed", "dynamic"}.
+    #   slab/two_layer/fixed  -> thermodynamic SimpleOceanConfig (make_ocean).
+    #   dynamic               -> the prognostic 3D LatLonCGridOceanModel
+    #     (T,S,u,v,eta; KPP/implicit vertical mixing, split-explicit barotropic,
+    #     EOS, baroclinic dynamics) stepped by the coupler on a SHARED lat-lon
+    #     grid with the atmosphere (no cross-grid remap).  Pair with a
+    #     LatLonCGridOceanConfig and the ocean_nlev/ocean_dt_s/ocean_H_max_m
+    #     fields below; the coupled cold-start uses the OMIP-validated stable
+    #     stack (rk3 momentum + implicit_cn barotropic + implicit vmix + smc03
+    #     PGF), forced in CoupledESMDriver._init_ocean.  See
+    #     docs/coupled_3d_ocean_plan.md.
     ocean_mode: str = "slab"
-    ocean_config: SimpleOceanConfig = SimpleOceanConfig(mode="slab")
+    ocean_config: SimpleOceanConfig | LatLonCGridOceanConfig = SimpleOceanConfig(
+        mode="slab")
+    # Dynamic (3D) ocean knobs — consumed only when ocean_mode=="dynamic"
+    # (defaults keep slab/two_layer runs byte-identical).
+    ocean_nlev: int = 20            # vertical levels (20 = OMIP production)
+    ocean_dt_s: float = 300.0       # ocean SUBSTEP dt [s]; the coupler substeps
+    # the 3D ocean at this dt within each coupling_dt (NEVER step the ocean at
+    # coupling_dt=3600 s — it violates the legoESM ocean CFL; OMIP runs 300 s
+    # at 1°).
+    ocean_H_max_m: float = 5500.0   # max ocean depth [m]
+    # Dynamic-ocean initial condition (ocean_mode=="dynamic" only).
+    #   "rest" (default): idealized rest state (exponential T, uniform S,
+    #           all-ocean aquaplanet bathy) — byte-identical Phase-1 behaviour.
+    #   "woa":  WOA18 reanalysis T/S climatology (observed stratification,
+    #           avoids the long cold-start spin-up) + a WOA-derived realistic
+    #           land mask (continents).  Requires woa_t_path / woa_s_path.
+    ocean_ic: str = "rest"
+    woa_t_path: str | None = None   # WOA18 temperature file (ocean_ic=="woa")
+    woa_s_path: str | None = None   # WOA18 salinity    file (ocean_ic=="woa")
+    # NEMO eORCA tripole mesh_mask file. When the dynamic-ocean grid is a
+    # tripole (active-fold) geometry — a DIFFERENT grid from the lat-lon
+    # atmosphere, coupled via the Phase-2 cross-grid conservative remap — the
+    # land mask + bathymetry are read from THIS file (the same file the tripole
+    # geometry was built from), via the OMIP-validated cold-start recipe
+    # (adcroft PGF + implicit_cn barotropic + implicit vmix + C_smag_lap=0.33).
+    # Required when ocean_mode=="dynamic" and the ocean grid is tripole.
+    tripole_mesh_path: str | None = None
     # Land
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()
@@ -66,7 +103,11 @@ class CoupledConfig(NamedTuple):
     carbon_ocean: bool = False
     co2_tracer: bool = False
     co2_ppmv_init: float = 415.0
-    # Tile fractions
+    # Tile fractions.  f_land_mode ∈ {"zero", "analytical", "from_ocean"}.
+    #   "from_ocean": f_land = 1 - (dynamic-ocean WOA-derived ocean mask), so
+    #   the atmosphere land fraction and the 3D-ocean wet mask come from one
+    #   source on the shared grid (no flux leak).  Requires ocean_mode=
+    #   "dynamic" + ocean_ic="woa".
     f_land_mode: str = "analytical"
     # Coupling
     coupling_dt: float = 3600.0

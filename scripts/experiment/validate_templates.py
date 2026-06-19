@@ -116,7 +116,13 @@ def validate_template(path: Path) -> TemplateReport:
         # templates use a different complexity vocabulary, so this atmosphere-
         # specific cross-check only applies to atmosphere modes.
         complexity = str(meta.get("complexity", ""))
-        if (experiment_registry.is_atmosphere_mode(mode)
+        # A ``setup:`` template (#388) names an idealized matrix case and does
+        # NOT resolve a dycore from a recipe, so the complexity↔model_type
+        # cross-check does not apply (its `complexity` describes the matrix
+        # case, not a recipe-resolved dycore).
+        is_setup_template = bool(getattr(cfg, "get", lambda *_: None)("setup"))
+        if (not is_setup_template
+                and experiment_registry.is_atmosphere_mode(mode)
                 and complexity in _ATM_RUNGS):
             model_type = cfg.to_experiment_config().dycore.model_type
             if model_type != complexity:

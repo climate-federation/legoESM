@@ -72,6 +72,7 @@ from legoesm.atmosphere.physics.convection.config import (
     DCAConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection._triggers import cape_trigger
 from legoesm.atmosphere.physics.convection.mass_flux import (
     stratosphere_mass_flux_gate,
 )
@@ -314,9 +315,9 @@ def _manabe_dca_convection(
     cape = compute_cape(T, T_adj, p_full, p_half)
 
     # Gate tendencies by CAPE: only adjust where CAPE exceeds threshold.
-    # Smooth sigmoid gating preserves differentiability.
-    cape_gate = jax.nn.sigmoid(
-        config.cape_sharpness * (cape - config.cape_threshold)
+    # cape_trigger == sigmoid(sharpness * (CAPE - threshold)) — differentiable.
+    cape_gate = cape_trigger(
+        cape, config.cape_threshold, config.cape_sharpness
     )  # (ncol,)
 
     # Convert to tendencies, gated by CAPE (a per-column scalar, so it
@@ -561,7 +562,7 @@ def _a_si(cfg: AhmedNeelinDCAConfig) -> float:
     """
     rho_w = constants.rho_water  # density of liquid water [kg/m³]
     # 1 mm/h of rain = (rho_w * 1e-3 m) / 3600 s = rho_w / 3.6e6 kg/m²/s
-    return cfg.a_mm_per_hr * rho_w / 3.6e6
+    return cfg.a_mm_per_hr * rho_w / 3.6e6  # coeff-ok: mm/hr -> kg/m^2/s
 
 
 def _precip_from_BL(

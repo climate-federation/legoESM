@@ -174,7 +174,7 @@ def holtslag_boville_turbulence(
     # ``betas`` and the bulk-Ri critical number ``ricr``) are recomputed from
     # ``config`` inside :func:`hb_diffusivities` (lines ~309-318), where they
     # are actually consumed: the nonlocal K-profile, the countergradient term
-    # ``gamma_theta_half`` (applied in :func:`_diffuse_theta_with_countergradient`)
+    # ``gamma_theta_half`` (applied in :func:`diffuse_theta_with_countergradient`)
     # and the bulk-Richardson PBL height (:func:`_pbl_height` via ``ricr``).
     # They are NOT needed in this driver, which only assembles inputs and runs
     # the implicit diffusion, so they are not duplicated here.
@@ -241,7 +241,7 @@ def holtslag_boville_turbulence(
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = _diffuse_theta_with_countergradient(
+    T_new = diffuse_theta_with_countergradient(
         T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
         gamma_theta_half,
     )
@@ -581,7 +581,7 @@ def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
     return num / den
 
 
-def _diffuse_theta_with_countergradient(
+def diffuse_theta_with_countergradient(
     T, Kh_half, rho, dz, dz_half, p_full, dt, surface_flux_T, gamma_theta_half,
 ):
     """Implicit theta diffusion with the HB nonlocal countergradient.

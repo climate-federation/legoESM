@@ -35,6 +35,10 @@ _P_MAX = 2.0e7          # [Pa]
 # full atmosphere.physics package.  Re-exported here for backward compatibility.
 from legoesm.thermo import saturation_mixing_ratio as saturation_mixing_ratio  # noqa: F401
 from legoesm.thermo import saturation_mixing_ratio_ice as saturation_mixing_ratio_ice  # noqa: F401
+# Bolton (1980) LCL-temperature formula constants (fixed).
+_LCL_T_OFFSET_K = 55.0
+_LCL_BOLTON_DENOM = 2840.0
+
 
 
 def temperature_from_theta(
@@ -209,9 +213,9 @@ def _bolton_lcl_temperature(
     from legoesm.thermo import saturation_mixing_ratio as _q_sat
 
     q_sat_base = _q_sat(T_base, p_base)
-    RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)
-    T_minus_55 = jnp.maximum(T_base - 55.0, 1.0)
-    return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0
+    RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)  # coeff-ok: RH floor
+    T_minus_55 = jnp.maximum(T_base - _LCL_T_OFFSET_K, 1.0)
+    return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
 
 
 def compute_moist_adiabat(
@@ -339,7 +343,7 @@ def compute_moist_adiabat(
         ) ** constants.kappa
 
         T_new = below_lcl_k * T_dry + (1.0 - below_lcl_k) * T_moist
-        T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)
+        T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)  # coeff-ok: physical T clip [K]
         return (T_new, p_k.astype(_dtype)), T_new
 
     init = (T_base, p_base)

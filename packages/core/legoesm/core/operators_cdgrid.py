@@ -46,6 +46,13 @@ def _pad_halo_auto_h2(field, cdgrid):
     return pad_halo_4d(field, halo=2, interp_offsets=offsets, duogrid=dg)
 
 
+# Public alias of the halo=2 cc pad (companion to the public ``pad_halo_auto``):
+# the sub-face tiled stage (legoesm.parallel.tiled_production_cdgrid) needs it
+# cross-package for the deep-h mass pre-pad, and the no-private-cross-import CI
+# ratchet forbids importing the ``_``-prefixed name.
+pad_halo_auto_h2 = _pad_halo_auto_h2
+
+
 def _broadcast_metric(metric, field):
     """Broadcast a 2D metric (6, ...) to match field's trailing nlev dim."""
     if field.ndim > metric.ndim:
@@ -412,20 +419,36 @@ def cubed_to_latlon(u_d, v_d, cdgrid):
 # D-grid -> C-grid interpolation (d2a2c)
 # ==============================================================================
 
-def dgrid_to_cgrid(u_d, v_d, cdgrid):
-    """D-grid corner → C-grid edge-normal. u_c = u_d*sin(α) - v_d*cos(α); v_c = v_d (e_perp = y-normal)."""
-    # x-face (at constant i): average along j, then project onto face normal
+def dgrid_to_cgrid_core(u_d, v_d, cosa_u_metric):
+    """Pure-array core of :func:`dgrid_to_cgrid` — D-grid corner -> C-grid
+    edge-normal with the ``cosa_u`` metric passed explicitly.  Leading-axis-
+    agnostic and PURELY LOCAL (x-face = j-avg of adjacent corners + the face-
+    normal projection; y-face = i-avg), so it is shared by the global wrapper
+    AND the sub-face tile kernel
+    (``legoesm.parallel.tiled_production_cdgrid.dgrid_to_cgrid_tile_2d``) — no
+    halo, no cross-face rotation (within-face projection).  Shapes (``...``
+    leading + optional trailing nlev): ``u_d``/``v_d`` ``(F, A+1, B+1)`` corners;
+    ``cosa_u_metric`` ``(F, A+1, B)``; returns ``u_c`` ``(F, A+1, B)`` (x-face) +
+    ``v_c`` ``(F, A, B+1)`` (y-face)."""
     _u = u_d.data if hasattr(u_d, 'data') else u_d
     _v = v_d.data if hasattr(v_d, 'data') else v_d
     u_avg = 0.5 * (_u[:, :, :-1] + _u[:, :, 1:])    # (6, n+1, n[, nlev])
     v_avg_x = 0.5 * (_v[:, :, :-1] + _v[:, :, 1:])  # (6, n+1, n[, nlev])
-    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
+    cosa_u = _broadcast_metric(cosa_u_metric, u_avg)
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     u_c = u_avg * sina_u - v_avg_x * cosa_u
 
     # y-face (at constant j): e_perp is the outward normal, so v_c = v_d
     v_c = 0.5 * (_v[:, :-1, :] + _v[:, 1:, :])      # (6, n, n+1[, nlev])
     return u_c, v_c
+
+
+def dgrid_to_cgrid(u_d, v_d, cdgrid):
+    """D-grid corner → C-grid edge-normal. u_c = u_d*sin(α) - v_d*cos(α); v_c = v_d (e_perp = y-normal).
+
+    Thin wrapper over :func:`dgrid_to_cgrid_core` (the tile kernel reuses the
+    core with a per-tile ``cosa_u`` slice — no dup numerics)."""
+    return dgrid_to_cgrid_core(u_d, v_d, cdgrid.cosa_u)
 
 
 def cgrid_to_dgrid(u_c, v_c, cdgrid):
@@ -452,12 +475,18 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
 # D-grid vorticity (circulation form)
 # ==============================================================================
 
-def dgrid_vorticity(u_d, v_d, cdgrid):
-    """Relative vorticity at cc from D-grid corners via exact circulation (avoids Hollingsworth-Kallberg).
+def dgrid_vorticity_core(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area):
+    """Pure-array core of :func:`dgrid_vorticity` — relative vorticity at cc
+    from D-grid corner winds via exact circulation, with the RAW metrics passed
+    explicitly (``cosa_corner``/``dx_edge_y``/``dy_edge_x``/``area``).  Shared by
+    the global wrapper and the sub-face tile kernel
+    (:func:`legoesm.parallel.tiled_production_cdgrid.dgrid_vorticity_tile_2d`)
+    so the circulation numerics are NOT duplicated.  Purely local: cc cell
+    ``(i,j)`` reads only the 2x2 corner block ``[i:i+2, j:j+2]``.
 
     Non-orthogonality: j-edges use v.e_j = u_d*cos(α) + v_d*sin(α).
     """
-    cosa = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    cosa = _broadcast_metric(cosa_corner, u_d)
     sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, _EPS))
 
     # South edge (i-direction): v . e_i = u_d
@@ -479,32 +508,68 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     sina_west = 0.5 * (sina[:, :-1, :-1] + sina[:, :-1, 1:])
     v_cov_west = u_west_raw * cosa_west + v_west_raw * sina_west
 
-    dx_south = _broadcast_metric(cdgrid.dx_edge_y[:, :, :-1], u_d)
-    dx_north = _broadcast_metric(cdgrid.dx_edge_y[:, :, 1:], u_d)
-    dy_west = _broadcast_metric(cdgrid.dy_edge_x[:, :-1, :], u_d)
-    dy_east = _broadcast_metric(cdgrid.dy_edge_x[:, 1:, :], u_d)
+    dx_south = _broadcast_metric(dx_edge_y[:, :, :-1], u_d)
+    dx_north = _broadcast_metric(dx_edge_y[:, :, 1:], u_d)
+    dy_west = _broadcast_metric(dy_edge_x[:, :-1, :], u_d)
+    dy_east = _broadcast_metric(dy_edge_x[:, 1:, :], u_d)
 
     circ = (u_south * dx_south + v_cov_east * dy_east
             - u_north * dx_north - v_cov_west * dy_west)
 
-    area = _broadcast_metric(cdgrid.base.area, u_d)
-    return circ / area
+    area_b = _broadcast_metric(area, u_d)
+    return circ / area_b
+
+
+def dgrid_vorticity(u_d, v_d, cdgrid):
+    """Relative vorticity at cc from D-grid corners via exact circulation
+    (avoids Hollingsworth-Kallberg).  Thin wrapper over
+    :func:`dgrid_vorticity_core` with the cdgrid metrics."""
+    return dgrid_vorticity_core(
+        u_d, v_d, cdgrid.cosa_corner, cdgrid.dx_edge_y, cdgrid.dy_edge_x,
+        cdgrid.base.area)
 
 
 # ==============================================================================
 # C-grid divergence
 # ==============================================================================
 
-def cgrid_divergence(u_c, v_c, cdgrid):
-    """Exact flux-form divergence at cell centres. 2D and 3D."""
-    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
-    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
+def cgrid_divergence_local(u_c, v_c, dy_edge_x, dx_edge_y, area):
+    """Exact flux-form divergence — leading-axis-agnostic CORE.
+
+    Operates on whatever leading structure the caller supplies: the
+    global ``(6, n, n)`` cube (``cgrid_divergence``) OR a SINGLE
+    ``(nl, nl)`` tile inside the tiled ``shard_map`` stage (P4
+    phase-1b), where the staggered ``u_c (nl+1, nl)`` / ``v_c (nl,
+    nl+1)`` blocks already carry the tile's boundary faces (duplicated
+    shared face, Pace layout) so NO halo exchange is needed — flux-form
+    divergence reads only a cell's own four surrounding faces.
+
+    Shapes (``...`` = leading axes; last two are horizontal, trailing
+    optional vertical):
+      u_c        (..., A+1, B[, nlev])   x-face normal velocity
+      v_c        (..., A,   B+1[, nlev]) y-face normal velocity
+      dy_edge_x  (..., A+1, B)   x-face length
+      dx_edge_y  (..., A,   B+1) y-face length
+      area       (..., A,   B)   cell area
+    Returns div (..., A, B[, nlev]).
+    """
+    dy = _broadcast_metric(dy_edge_x, u_c)
+    dx = _broadcast_metric(dx_edge_y, v_c)
     flux_x = u_c * dy
     flux_y = v_c * dx
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
-    area = _broadcast_metric(cdgrid.base.area, net_x)
-    return (net_x + net_y) / area
+    area_b = _broadcast_metric(area, net_x)
+    return (net_x + net_y) / area_b
+
+
+def cgrid_divergence(u_c, v_c, cdgrid):
+    """Exact flux-form divergence at cell centres. 2D and 3D.
+
+    Thin wrapper over :func:`cgrid_divergence_local` (one shared body —
+    the tiled stage calls the local core with per-tile metrics)."""
+    return cgrid_divergence_local(
+        u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, cdgrid.base.area)
 
 
 def cgrid_wet_face_masks(wet_cc, cdgrid):
@@ -550,24 +615,112 @@ def cgrid_wet_face_masks(wet_cc, cdgrid):
 # C-grid compact gradient (cell centre → edge midpoints)
 # ==============================================================================
 
-def cgrid_gradient_2d(eta, cdgrid):
-    """Compact C-grid gradient cc → edge midpoints (FV3 Bernoulli stencil using dxc/dyc)."""
-    eta_pad = pad_halo_auto(eta, cdgrid)
-    # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
+def cgrid_gradient_2d_local(eta_pad, rdxc, rdyc):
+    """Compact C-grid gradient CORE — leading-axis-agnostic.
 
-    # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
-    # In padded coords: interior is [1:-1, 1:-1], so u-faces run 0..n
-    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+    Takes an ALREADY-halo-padded ``eta_pad`` (..., A+2, B+2) and the
+    inverse edge lengths; differences cc -> edge midpoints.  Shared by
+    the global cube (:func:`cgrid_gradient_2d`, which pads the whole
+    (6,n,n) then calls this) and a single (1, nl+2, nl+2) tile inside
+    the tiled ``shard_map`` stage (P4 phase-1b), where ``eta_pad`` is
+    the tile's padded block from ``make_tiled_pad_body`` (the halo is a
+    scalar pad — eta is a scalar field, so no rotation).
 
-    # y-gradient at v-points: (eta[i,j] - eta[i,j-1]) / dyc
-    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
-
+      eta_pad (..., A+2, B+2)
+      rdxc    (..., A+1, B)   1/dxc at u-faces
+      rdyc    (..., A,   B+1) 1/dyc at v-faces
+    Returns ``(deta_dx (..., A+1, B), deta_dy (..., A, B+1))``.
+    """
+    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * rdxc
+    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * rdyc
     return deta_dx, deta_dy
+
+
+def cgrid_gradient_2d(eta, cdgrid):
+    """Compact C-grid gradient cc → edge midpoints (FV3 Bernoulli stencil using dxc/dyc).
+
+    Thin wrapper over :func:`cgrid_gradient_2d_local` (one shared body —
+    the tiled stage calls the local core with per-tile metrics)."""
+    eta_pad = pad_halo_auto(eta, cdgrid)  # (6, n+2, n+2)
+    return cgrid_gradient_2d_local(eta_pad, cdgrid.rdxc, cdgrid.rdyc)
 
 
 # ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
+
+def cgrid_ppm_fluxes_core(
+    h_pad, u_c, v_c, dy, dx, n_local, *, halo_in=2,
+    effective_xppm_boundary=False,
+    fortran_faithful_ppm_left=False,
+    fortran_faithful_ppm_right=False,
+):
+    """Pure-array PPM upwind C-grid fluxes from an ALREADY-padded ``h``.
+
+    Operates on 3D ``(F, X, Y)`` blocks (F = the 6-face leading axis on the
+    global path, 1 per device in the tiled stage, or the vmapped 6-face block
+    per level on the 4D path).  Core shared by the global wrapper
+    (:func:`_cgrid_ppm_fluxes_2d_no_sync`, ``halo_in=2``, the production
+    halo=2 pad) and the sub-face tile kernel
+    (:func:`legoesm.parallel.tiled_production_cdgrid.cgrid_mass_divergence_tile_2d`,
+    ``halo_in=3`` — one deeper ring) so the PPM reconstruction + upwind
+    numerics are NOT duplicated.
+
+    ``halo_in`` is the cell-halo depth of ``h_pad`` on EACH axis
+    (``h_pad`` is ``(..., n_local+2*halo_in, n_local+2*halo_in)``).  The
+    used reconstruction faces are ``q_R[..., halo_in-1 : halo_in-1+n_local+1]``
+    (left-of-face cell's right value) and ``q_L[..., halo_in : ...+1]``
+    (right-of-face cell's left value), which collapse to the historical
+    ``[1:n+2]`` / ``[2:n+3]`` at ``halo_in=2`` — bit-identical to the
+    pre-factor global path.
+
+    Why the tile needs ``halo_in=3`` while the global gets away with
+    ``halo_in=2``: PPM reconstruction of the boundary cell (local ``-1``)
+    reads cells ``[-3..1]``; in the GLOBAL face that ``-3`` is the cube
+    edge (the internal ``mode='edge'`` pad supplies it, as on a real
+    boundary), but at an INTERIOR tile cut ``-3`` is a real neighbour
+    cell, so the tile must carry it — one ring deeper.  The deeper pad's
+    outermost ring is itself edge-extended from the halo=2 pad, so a
+    FACE-edge tile reproduces the global's ``mode='edge'`` value exactly.
+
+    Shapes (``...`` leading): ``h_pad (..., L, L)`` with
+    ``L=n_local+2*halo_in``; ``u_c (..., n_local+1, n_local)``;
+    ``v_c (..., n_local, n_local+1)``; ``dy (..., n_local+1, n_local)``
+    (x-face length); ``dx (..., n_local, n_local+1)`` (y-face length).
+    Returns ``flux_x (..., n_local+1, n_local)``,
+    ``flux_y (..., n_local, n_local+1)``.
+    """
+    n = n_local
+    h = halo_in
+    # x-faces: keep the full x-halo, trim y to the cc extent.
+    h_x_strips = h_pad[:, :, h:-h]
+    q_L_x, q_R_x = _ppm_reconstruct_1d(
+        h_x_strips, axis=1,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
+    )
+    q_R_left = q_R_x[:, h - 1:h - 1 + n + 1, :]
+    q_L_right = q_L_x[:, h:h + n + 1, :]
+    h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)
+
+    h_y_strips = h_pad[:, h:-h, :]
+    q_L_y, q_R_y = _ppm_reconstruct_1d(
+        h_y_strips, axis=2,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
+    )
+    q_R_bottom = q_R_y[:, :, h - 1:h - 1 + n + 1]
+    q_L_top = q_L_y[:, :, h:h + n + 1]
+    h_face_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
+
+    flux_x = h_face_x * u_c * dy
+    flux_y = h_face_y * v_c * dx
+    return flux_x, flux_y
+
 
 def _cgrid_ppm_fluxes_2d_no_sync(
     h, u_c, v_c, h_pad, cdgrid,
@@ -581,41 +734,21 @@ def _cgrid_ppm_fluxes_2d_no_sync(
     fluxes inside ``jax.vmap``.  The 4D entry then synchronizes the
     stacked 4D fluxes (one MPI sendrecv exchange total, vs ``nlev``
     inside vmap which mpi4jax's batch-axis rule refuses).
+
+    Thin wrapper over :func:`cgrid_ppm_fluxes_core` (``halo_in=2``); no
+    dup numerics (the tiled stage reuses the core with ``halo_in=3``).
     """
-    n = cdgrid.n
-    dy = cdgrid.dy_edge_x
-    dx = cdgrid.dx_edge_y
     effective_xppm_boundary = (
         apply_fortran_xppm_boundary
         and not cdgrid.base.bounded_domain
     )
-    h_x_strips = h_pad[:, :, 2:-2]
-    q_L_x, q_R_x = _ppm_reconstruct_1d(
-        h_x_strips, axis=1,
-        apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n,
+    return cgrid_ppm_fluxes_core(
+        h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, cdgrid.n,
+        halo_in=2,
+        effective_xppm_boundary=effective_xppm_boundary,
         fortran_faithful_ppm_left=fortran_faithful_ppm_left,
         fortran_faithful_ppm_right=fortran_faithful_ppm_right,
     )
-    q_R_left = q_R_x[:, 1:n + 2, :]
-    q_L_right = q_L_x[:, 2:n + 3, :]
-    h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)
-
-    h_y_strips = h_pad[:, 2:-2, :]
-    q_L_y, q_R_y = _ppm_reconstruct_1d(
-        h_y_strips, axis=2,
-        apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
-    )
-    q_R_bottom = q_R_y[:, :, 1:n + 2]
-    q_L_top = q_L_y[:, :, 2:n + 3]
-    h_face_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
-
-    flux_x = h_face_x * u_c * dy
-    flux_y = h_face_y * v_c * dx
-    return flux_x, flux_y
 
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
@@ -681,8 +814,6 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     if h_pad is None:
         h_pad = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
 
-    dy = cdgrid.dy_edge_x   # (6, n+1, n)
-    dx = cdgrid.dx_edge_y   # (6, n, n+1)
     n = cdgrid.n
 
     # iter-889b: gate Fortran xppm boundary on .not.(bounded_domain.or.duogrid) per tp_core.F90:357
@@ -690,38 +821,15 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
         apply_fortran_xppm_boundary
         and not cdgrid.base.bounded_domain)
 
-    # --- X-direction PPM (axis=1 for i-strip; iter-508 explicit axis prevents iter-505 silent bug) ---
-    h_x_strips = h_pad[:, :, 2:-2]                  # (6, n+4, n)
-    q_L_x, q_R_x = _ppm_reconstruct_1d(
-        h_x_strips, axis=1,
-        apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n,
+    # PPM upwind C-grid fluxes via the shared core (halo_in=2 = the
+    # production halo=2 pad; the sub-face tile kernel reuses the SAME core
+    # with halo_in=3).  Bit-identical to the prior inline x/y reconstruction.
+    flux_x, flux_y = cgrid_ppm_fluxes_core(
+        h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, n,
+        halo_in=2,
+        effective_xppm_boundary=effective_xppm_boundary,
         fortran_faithful_ppm_left=fortran_faithful_ppm_left,
         fortran_faithful_ppm_right=fortran_faithful_ppm_right)
-
-    # Face index f→ left padded (f+1), right padded (f+2). Upwind: q_R(left) or q_L(right)
-    q_R_left = q_R_x[:, 1:n+2, :]    # (6, n+1, n)
-    q_L_right = q_L_x[:, 2:n+3, :]   # (6, n+1, n)
-
-    h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)
-
-    # --- Y-direction PPM (axis=2 per iter-509 contract) ---
-    h_y_strips = h_pad[:, 2:-2, :]  # (6, n, n+4)
-    q_L_y, q_R_y = _ppm_reconstruct_1d(
-        h_y_strips, axis=2,
-        apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
-
-    q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)
-    q_L_top = q_L_y[:, :, 2:n+3]      # (6, n, n+1)
-
-    h_face_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
-
-    # --- Flux divergence ---
-    flux_x = h_face_x * u_c * dy
-    flux_y = h_face_y * v_c * dx
 
     # Duogrid flux sync: avg boundary fluxes for mass conservation (FV3 dyn_core.F90:853-900).
     # NOT for non-duogrid: PPM boundary asymmetry is a feature; sync gives 110x W2 regression.
@@ -928,6 +1036,34 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
+def _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Apply the precomputed 2x2 (3D Cartesian -> face-local) A-L gradient
+    matrix to the raw 4-pt finite differences.  Shared by every
+    arakawa_lamb_gradient branch + the sub-face tile kernel (no dup numerics)."""
+    c00 = _broadcast_metric(grad_c00, dB_raw_x)
+    c01 = _broadcast_metric(grad_c01, dB_raw_x)
+    c10 = _broadcast_metric(grad_c10, dB_raw_x)
+    c11 = _broadcast_metric(grad_c11, dB_raw_x)
+    return c00 * dB_raw_x + c01 * dB_raw_y, c10 * dB_raw_x + c11 * dB_raw_y
+
+
+def arakawa_lamb_gradient_core(B_pad, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Default-path Arakawa-Lamb corner gradient (NO cube-vertex specials): the
+    2x2 box 4-pt finite-diff + :func:`_al_grad_matrix`.  ``B_pad[:, :-1, :-1]``
+    keeps the trailing axis so this is ndim-agnostic (3D + 4D — bit-identical to
+    the old explicit ``B.ndim`` branch).  Shared by the global wrapper
+    (default + a2b branches) and the sub-face tile kernel
+    (``tiled_production_cdgrid.arakawa_lamb_gradient_tile_2d``)."""
+    B_sw = B_pad[:, :-1, :-1]
+    B_se = B_pad[:, 1:, :-1]
+    B_nw = B_pad[:, :-1, 1:]
+    B_ne = B_pad[:, 1:, 1:]
+    dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)   # east - west
+    dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)   # north - south
+    return _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10,
+                           grad_c11)
+
+
 def arakawa_lamb_gradient(B, cdgrid, padded=None,
                            fortran_dir_aware_corners=False,
                            fortran_a2b_corner_avg=False):
@@ -1007,32 +1143,14 @@ def arakawa_lamb_gradient(B, cdgrid, padded=None,
             B_nw_y = p2[:, :-1, 1:, :];  B_ne_y = p2[:, 1:, 1:, :]
         dB_raw_x = (B_se_x + B_ne_x) - (B_sw_x + B_nw_x)
         dB_raw_y = (B_nw_y + B_ne_y) - (B_sw_y + B_se_y)
-    else:
-        if B.ndim == 3:
-            B_sw = B_pad[:, :-1, :-1]
-            B_se = B_pad[:, 1:, :-1]
-            B_nw = B_pad[:, :-1, 1:]
-            B_ne = B_pad[:, 1:, 1:]
-        else:
-            B_sw = B_pad[:, :-1, :-1, :]
-            B_se = B_pad[:, 1:, :-1, :]
-            B_nw = B_pad[:, :-1, 1:, :]
-            B_ne = B_pad[:, 1:, 1:, :]
+        return _al_grad_matrix(
+            dB_raw_x, dB_raw_y, cdgrid.grad_c00, cdgrid.grad_c01,
+            cdgrid.grad_c10, cdgrid.grad_c11)
 
-        # Raw 4-point finite-difference quantities
-        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
-        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
-
-    # Precomputed 2×2 gradient matrix (3D Cartesian → face-local)
-    c00 = _broadcast_metric(cdgrid.grad_c00, dB_raw_x)
-    c01 = _broadcast_metric(cdgrid.grad_c01, dB_raw_x)
-    c10 = _broadcast_metric(cdgrid.grad_c10, dB_raw_x)
-    c11 = _broadcast_metric(cdgrid.grad_c11, dB_raw_x)
-
-    dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
-    dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
-
-    return dB_dx, dB_dy_perp
+    # Default path (no cube-vertex specials; a2b pre-mutated B_pad above).
+    return arakawa_lamb_gradient_core(
+        B_pad, cdgrid.grad_c00, cdgrid.grad_c01, cdgrid.grad_c10,
+        cdgrid.grad_c11)
 
 
 # ==============================================================================
@@ -1384,6 +1502,27 @@ def fv3_d2cc(u_d, v_d, cdgrid):
     return u_cc, v_cc
 
 
+def fv3_cc2c_core(u_pad, v_pad, cosa_u_metric):
+    """Pure-array core of :func:`fv3_cc2c` — the cc -> C-face avg + non-orthogonality
+    projection on the ALREADY vector-halo-padded cc winds.  Shared by the global
+    wrapper + the sub-face tile kernel
+    (``tiled_production_cdgrid.fv3_cc2c_tile_2d``); no dup numerics.
+
+    ``u_pad``/``v_pad`` ``(F, W, W[, nlev])`` (W=n+2 full, or nl+2 per tile —
+    the ``[1:-1]`` j-trim makes the same window slice tile cleanly);
+    ``cosa_u_metric`` ``(F, W-1, W-2)``.  Returns ``u_c`` ``(F, W-1, W-2)``
+    (x-face) + ``v_c`` ``(F, W-2, W-1)`` (y-face)."""
+    # cc -> C-face avg with non-orthogonality projection (matches dgrid_to_cgrid)
+    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])
+    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
+    cosa_u = _broadcast_metric(cosa_u_metric, u_avg)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    u_c = u_avg * sina_u - v_at_u * cosa_u
+
+    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])
+    return u_c, v_c
+
+
 def fv3_cc2c(u_cc, v_cc, cdgrid):
     """cc → C-grid edge-normal. Vector halo + 2nd-order interp; duogrid scalar remap if active."""
     grid = cdgrid.base
@@ -1396,14 +1535,7 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
         interp_offsets=offsets, duogrid=dg,
     )
 
-    # cc → C-face avg with non-orthogonality projection (matches dgrid_to_cgrid corner D-grid)
-    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
-    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    u_c = u_avg * sina_u - v_at_u * cosa_u
-
-    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    u_c, v_c = fv3_cc2c_core(u_pad, v_pad, cdgrid.cosa_u)  # (6,n+1,n) / (6,n,n+1)
 
     # iter-839: u_c face-normal projection / v_c plain avg asymmetry is LOAD-BEARING.
     # Symmetric v_c projection caused 230× W2 regression (test_boundary_fix_is_load_bearing_for_w2_l2 failure).

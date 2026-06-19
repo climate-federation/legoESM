@@ -160,6 +160,19 @@ class MPASOceanModel:
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {self.config.barotropic_solver!r}"
             )
+        _valid_time_filters = ("box", "cosine")
+        if self.config.barotropic_time_filter not in _valid_time_filters:
+            raise ValueError(
+                f"barotropic_time_filter must be one of {_valid_time_filters}, "
+                f"got {self.config.barotropic_time_filter!r}"
+            )
+        _valid_fw = ("none", "virtual_salt_flux")
+        if self.config.freshwater_closure not in _valid_fw:
+            raise ValueError(
+                f"freshwater_closure must be one of {_valid_fw}, got "
+                f"{self.config.freshwater_closure!r} (the MPAS path implements "
+                "only virtual_salt_flux; real_freshwater is not available here)"
+            )
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.
@@ -464,6 +477,22 @@ class MPASOceanModel:
             )
             T_new = T_new + dt * dT_gm * active_3d
             S_new = S_new + dt * dS_gm * active_3d
+
+        # 2c. Fox-Kemper MLE submesoscale restratification (forward-Euler
+        # bolus tracer tendency, same additive pattern as GM/Redi above).
+        # Voronoi port of NEMO nn_mle=1 — see mle_mpas.py / the plan doc.
+        if config.mle is not None:
+            from legoesm.ocean.physics.lateral_mixing.mle_mpas import (
+                mle_tracer_tendency_mpas,
+            )
+            dT_mle, dS_mle = mle_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.mle,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            T_new = T_new + dt * dT_mle * active_3d
+            S_new = S_new + dt * dS_mle * active_3d
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no

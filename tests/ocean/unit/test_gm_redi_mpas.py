@@ -25,7 +25,7 @@ from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
     _visbeck_kappa_gm_mpas,
-    _voronoi_neumann_fill,
+    voronoi_neumann_fill,
     compute_isopycnal_slopes_mpas,
     gm_redi_tracer_tendency_centered_mpas,
     gm_redi_tracer_tendency_mpas,
@@ -198,7 +198,7 @@ def test_neumann_fill_propagates_ocean_into_isolated_land(mesh):
     neighbour mean within one pass."""
     f = jnp.full((mesh.nCells,), 1.0, dtype=jnp.float64).at[0].set(0.0)
     mask = jnp.ones((mesh.nCells,), dtype=jnp.float64).at[0].set(0.0)
-    filled = _voronoi_neumann_fill(f, mask, mesh)
+    filled = voronoi_neumann_fill(f, mask, mesh)
     # All ocean neighbours have value 1.0, so the land cell should be 1.0.
     assert float(filled[0]) == pytest.approx(1.0, abs=1e-12)
     # Other cells unchanged.
@@ -517,7 +517,7 @@ def test_top_level_with_visbeck_matches_explicit_call(mesh, z_coord):
     em = _edge_mask(mesh, mask)
     jac = compute_ocean_jacobian(eta, H_bathy, z_coord)
     eos_fn = make_eos_fn("linear", None)
-    fill = lambda f: _voronoi_neumann_fill(f, mask, mesh)
+    fill = lambda f: voronoi_neumann_fill(f, mask, mesh)
     rho, _, _ = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill, eos_fn,
         z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,

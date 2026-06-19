@@ -17,6 +17,12 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 
+# Fixed calendar / radiation constants (not tunable).
+_PAR_FRACTION_OF_SW = 0.48     # photosynthetically-active fraction of shortwave
+_DAYS_PER_YEAR = 365.25        # Julian year length [days]
+_HALF_YEAR_OFFSET_DAYS = 182.5  # half-year phenology phase offset [days]
+_SEASONAL_YEAR_DAYS = 365.0    # year length for the NEE seasonal phase [days]
+
 # ---------------------------------------------------------------------------
 # Unit conversions
 # ---------------------------------------------------------------------------
@@ -65,7 +71,7 @@ def compute_gpp(
     gpp : Instantaneous GPP [gC/m2/s].
     """
     # PAR = 48 % of SW, convert W/m2 -> MJ/m2/s
-    PAR_MJ = 0.48 * sw_down * 1e-6
+    PAR_MJ = _PAR_FRACTION_OF_SW * sw_down * 1e-6
 
     # Absorbed fraction (Beer's law)
     fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
@@ -120,7 +126,7 @@ def compute_phenology(
     lrf : Labile release fraction [day^-1].
     lff : Leaf fall fraction [day^-1].
     """
-    sf = 365.25 / jnp.pi
+    sf = _DAYS_PER_YEAR / jnp.pi
     inv_sqrt_pi = 2.0 / jnp.sqrt(jnp.pi)
     sqrt2_half = jnp.sqrt(2.0) / 2.0
 
@@ -151,7 +157,7 @@ def compute_phenology(
     if config.hemisphere_aware:
         doy_eff = jnp.where(
             lat < 0,
-            jnp.mod(doy_arr + 182.5, 365.25),
+            jnp.mod(doy_arr + _HALF_YEAR_OFFSET_DAYS, _DAYS_PER_YEAR),
             doy_arr,
         )
     else:
@@ -396,7 +402,7 @@ def seasonal_co2_flux(
     -------
     co2_flux : kgCO2/m2/s, positive up (source to atmosphere).
     """
-    phase = 2.0 * jnp.pi * (doy - config.nee_peak_day) / 365.0
+    phase = 2.0 * jnp.pi * (doy - config.nee_peak_day) / _SEASONAL_YEAR_DAYS
 
     # -cos peaks at phase=0  -->  uptake maximum at nee_peak_day
     seasonal = -jnp.cos(phase)

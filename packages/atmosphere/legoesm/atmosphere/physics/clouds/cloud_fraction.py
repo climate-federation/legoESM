@@ -2,8 +2,11 @@
 
 Implements two cloud fraction schemes:
 
-1. **Sundqvist (1988)**: RH-based, simple and robust.
-   ``cf = clamp((RH - RH_crit) / (1 - RH_crit), 0, 1)``
+1. **Sundqvist, Berge & Kristjansson (1989)**: RH-based, simple and robust.
+   The sqrt-form ``(1 − b)² = (1 − RH)/(1 − RH_crit)``, i.e.
+   ``cf = 1 − sqrt((1 − RH)/(1 − RH_crit))`` for RH ≥ RH_crit, else 0
+   (clamped to [0, 1]).  See ``sundqvist_cloud_fraction`` for the
+   AD-safe double-``where`` implementation.
 
 2. **Xu-Randall (1996)**: RH + condensate-based, more physical.
    ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s))]``
@@ -31,6 +34,11 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
+# Cloud-optics defaults (fixed): effective-radius bounds.
+_CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
+_R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
+_R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
+
 
 
 class CloudProperties(NamedTuple):
@@ -289,8 +297,7 @@ def compute_cloud_properties(
         # Where the prognostic droplet number is 0/garbage (SAM specified-Nc
         # Morrison, dopredictNc=.false., keeps the Nc slot at 0), fall back to the
         # specified Nc_default so r_eff is the SAM constant-Nc value, not 35 um.
-        n_cloud = jnp.where(n_cloud > 1.0, n_cloud,
-                            getattr(config, "Nc_default", 1.0e8))
+        n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
@@ -301,11 +308,11 @@ def compute_cloud_properties(
         cons26 = jnp.pi * constants.rho_water / 6.0
         q_c_pos = jnp.maximum(jnp.clip(q_c, 0.0), 1.0e-15)
         nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)
-                      / jnp.maximum(rho_air, 0.1))
+                      / jnp.maximum(rho_air, 0.1))  # coeff-ok: density floor [kg/m^3]
         lamc = (cons26 * nc_permass * (pgam + 1.0) * (pgam + 2.0) * (pgam + 3.0)
                 / q_c_pos) ** (1.0 / 3.0)
         # SAM LAMMIN/LAMMAX (1-60 µm DIAMETER, :1697-1698) bound LAMC ⇒ reffc.
-        lamc = jnp.clip(lamc, (pgam + 1.0) / 60.0e-6, (pgam + 1.0) / 1.0e-6)
+        lamc = jnp.clip(lamc, (pgam + 1.0) / _CLOUD_R_EFF_MAX_M, (pgam + 1.0) / 1.0e-6)
         r_eff_liq_psd = (pgam + 3.0) / (2.0 * lamc)
         has_liq = jnp.clip(q_c, 0.0) > 1.0e-14            # SAM QSMALL
         r_eff_liq = jnp.where(
@@ -332,9 +339,9 @@ def compute_cloud_properties(
         q_i_pos = jnp.maximum(jnp.clip(q_i, 0.0), 1.0e-15)
         n_i_pos = jnp.maximum(jnp.clip(n_ice, 0.0), 1.0e-15)
         lami = (cons12 * n_i_pos / q_i_pos) ** (1.0 / 3.0)
-        r_eff_ice_psd = 1.5 / jnp.clip(lami, 1.0e-30)
+        r_eff_ice_psd = _R_EFF_ICE_PSD_COEFF / jnp.clip(lami, 1.0e-30)
         has_ice = jnp.clip(q_i, 0.0) > 1.0e-14            # SAM QSMALL
-        r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, 25.0e-6)
+        r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, _R_EFF_ICE_DEFAULT_M)
     else:
         r_eff_ice = jnp.broadcast_to(
             jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,

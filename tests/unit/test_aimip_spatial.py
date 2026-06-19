@@ -419,3 +419,152 @@ def test_spectral_rollout_rad_gating_one_step():
         out_combined.T_hat.data, out_gated.T_hat.data,
         atol=1.0e-2, rtol=1.0e-5,
     ), "Gated rollout should agree with combined at step 1 to substage-rad tolerance"
+
+
+def test_rrtmgp_spectral_pe_sfc_albedo_override_consumed_and_differentiable():
+    """Truly-tunable RRTMGP surface path (2026-06-13).
+
+    A build-time ``sfc_albedo_override`` (AIMIP's trained spatial ``(ncol,)``
+    field) must (1) reach the RRTMGP heating through
+    ``make_radiation_physics("spectral_pe", sfc_albedo_override=...)`` ->
+    ``_call_radiation_backend`` -> ``_resolve_surface_field`` and (2) be
+    reverse-mode differentiable -- WITHOUT ever being written into
+    ``RRTMGPConfig.sfc_*`` (RRTMGP's Python solver-cache key). This is the
+    plumbing that lets the AIMIP RRTMGP surface knobs be genuinely trainable
+    instead of riding the config cache key by tracer/array identity.
+    """
+    import numpy as np
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+    from legoesm.atmosphere.physics.radiation.config import (
+        RadiationConfig,
+        RRTMGPConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+    ncol = grid.n_lat * grid.n_lon
+    cfg = RadiationConfig(scheme="rrtmgp", diurnal_cycle=False)
+
+    def heating_sum(alb):
+        # Rebuilt inside the differentiated fn (the AIMIP pattern): the override
+        # is captured in the radiation closure while the config stays default.
+        fn = make_radiation_physics(cfg, "spectral_pe", sfc_albedo_override=alb)
+        out = fn(state, grid, sigma)
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    lo = float(heating_sum(jnp.full((ncol,), 0.1)))
+    hi = float(heating_sum(jnp.full((ncol,), 0.8)))
+    assert np.isfinite(lo) and np.isfinite(hi)
+    # SW absorption depends on surface albedo -> heating must respond.
+    assert abs(lo - hi) > 0.0, "RRTMGP heating did not respond to sfc_albedo override"
+
+    g = jax.grad(heating_sum)(jnp.full((ncol,), 0.3))
+    g = np.asarray(g)
+    assert g.shape == (ncol,)
+    assert np.all(np.isfinite(g)), "non-finite gradient through sfc_albedo override"
+    assert np.any(g != 0.0), "sfc_albedo override has zero gradient (not trainable)"
+
+    # The override path must NOT have mutated the config surface fields: the
+    # RRTMGP instance-cache key stays keyed on the concrete default, never a
+    # traced array.
+    assert float(cfg.rrtmgp.sfc_albedo) == float(RRTMGPConfig().sfc_albedo)
+
+
+def test_make_physics_threads_sfc_override_combined_path():
+    """The combined (split_rad=False) path: make_physics must thread
+    sfc_albedo_override through _make_spectral_pe_combined ->
+    make_radiation_physics to the RRTMGP solve, so the heating responds to the
+    override without it touching RRTMGPConfig.sfc_*. Mirrors the split_rad path
+    (which calls make_radiation_physics directly, covered by the grad test)."""
+    import numpy as np
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+    ncol = grid.n_lat * grid.n_lon
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="rrtmgp", diurnal_cycle=False),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+
+    def t_tend_sum(alb):
+        fn = make_physics(
+            cfg, model_type="spectral_pe", dt=1800.0, sfc_albedo_override=alb,
+        )
+        out = fn(state, grid, sigma)
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    lo = float(t_tend_sum(jnp.full((ncol,), 0.1)))
+    hi = float(t_tend_sum(jnp.full((ncol,), 0.8)))
+    assert np.isfinite(lo) and np.isfinite(hi)
+    assert abs(lo - hi) > 0.0, "make_physics combined path dropped the sfc_albedo override"
+
+
+def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
+    """Non-spatial (default) AIMIP RRTMGP: the SCALAR rrtmgp_sfc_albedo knob must
+    be genuinely trainable. With no spatial_surface, the builder routes the
+    trained scalar (params.as_dict()['rrtmgp_sfc_albedo']) as a per-call override
+    -> a finite nonzero gradient must reach its raw leaf. Guards against the knob
+    silently becoming a dead leaf (the failure codex flagged) -- a regression
+    here cannot hide behind the lower-level make_radiation_physics override
+    tests."""
+    import numpy as np
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams,
+        make_aimip_classical_spectral_physics,
+    )
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+
+    params = AIMIPClassicalParams.from_defaults()  # spatial_surface=False
+    assert params.spatial_surface is None
+
+    def loss(p):
+        fn = make_aimip_classical_spectral_physics(
+            p, grid, dt=1800.0, radiation="rrtmgp",
+            convection_scheme="none", turbulence_scheme="none",
+            gwd_scheme="none", microphysics_scheme="none", cloud_scheme="none",
+        )
+        out = fn(state, grid, sigma)
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    val, grads = eqx.filter_value_and_grad(loss)(params)
+    assert np.isfinite(float(val))
+    g = np.asarray(grads.raw_values["rrtmgp_sfc_albedo"])
+    assert np.all(np.isfinite(g)), "non-finite gradient on the scalar rrtmgp_sfc_albedo"
+    assert np.any(g != 0.0), "rrtmgp_sfc_albedo is a dead leaf in the non-spatial RRTMGP path"

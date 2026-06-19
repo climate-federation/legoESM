@@ -37,6 +37,16 @@ from legoesm.land.surface_params import (
 # 1. Constant / Prescribed
 # =====================================================================
 
+# Neural-provider feature-normalization scales + default architecture sizes
+# (structural; not physics-tunable).
+_NORM_ELEVATION_M = 5000.0    # elevation normalization scale [m]
+_NORM_PRECIP = 5.0e-5         # mean-precip normalization scale [kg/m2/s]
+_NORM_TEMP_OFFSET_K = 273.0   # temperature normalization offset [K]
+_NORM_TEMP_RANGE_K = 40.0     # temperature normalization range [K]
+_NORM_FOREST_AGE_YR = 200.0   # forest-age normalization scale [yr]
+_DEFAULT_N_INPUT = 20         # default neural input feature count
+_DEFAULT_HIDDEN_DIM = 48      # default neural hidden width
+
 class ConstantParamProvider(eqx.Module):
     """Return fixed (possibly per-pixel) parameter arrays.
 
@@ -153,8 +163,8 @@ class NeuralParamProvider(eqx.Module):
         self,
         *,
         key: jax.Array,
-        n_input: int = 20,
-        hidden_dim: int = 48,
+        n_input: int = _DEFAULT_N_INPUT,
+        hidden_dim: int = _DEFAULT_HIDDEN_DIM,
         n_hidden: int = 3,
         param_bounds: list[tuple[float, float]] | None = None,
         param_names: tuple[str, ...] | None = None,
@@ -259,22 +269,22 @@ def build_land_features(
 
     # Climate / age features (normalized)
     if elevation is not None:
-        parts.append((elevation / 5000.0)[:, None])
+        parts.append((elevation / _NORM_ELEVATION_M)[:, None])
     else:
         parts.append(jnp.zeros((ncol, 1)))
 
     if mean_precip is not None:
-        parts.append((mean_precip / 5e-5)[:, None])
+        parts.append((mean_precip / _NORM_PRECIP)[:, None])
     else:
         parts.append(jnp.zeros((ncol, 1)))
 
     if mean_temp is not None:
-        parts.append(((mean_temp - 273.0) / 40.0)[:, None])
+        parts.append(((mean_temp - _NORM_TEMP_OFFSET_K) / _NORM_TEMP_RANGE_K)[:, None])
     else:
         parts.append(jnp.zeros((ncol, 1)))
 
     if forest_age is not None:
-        parts.append((forest_age / 200.0)[:, None])
+        parts.append((forest_age / _NORM_FOREST_AGE_YR)[:, None])
     else:
         parts.append(jnp.zeros((ncol, 1)))
 
@@ -293,8 +303,8 @@ def create_land_param_provider(
     pft_fractions: jax.Array | None = None,
     prescribed_arrays: dict[str, jax.Array] | None = None,
     key: jax.Array | None = None,
-    n_input: int = 20,
-    hidden_dim: int = 48,
+    n_input: int = _DEFAULT_N_INPUT,
+    hidden_dim: int = _DEFAULT_HIDDEN_DIM,
     n_hidden: int = 3,
 ):
     """Create a land parameter provider.

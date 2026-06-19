@@ -43,6 +43,15 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Diffusivity + Cooper nucleation + fall-speed caps (fixed).
+_RHO_FLOOR = 0.1
+_DV_PREFACTOR = 8.794e-5
+_DV_T_EXP = 1.81
+_COOPER_EXP_CAP = 80.0
+_VT_CLIP_FROZEN = 5.0
+_VT_CLIP_GRAUPEL = 30.0
+_VT_CLIP_RAIN = 20.0
+
 def _gamma_ratio(mu):
     """Gamma(mu+4)/Gamma(mu+1) = (mu+3)(mu+2)(mu+1) for integer-like mu."""
     return (mu + 3.0) * (mu + 2.0) * (mu + 1.0)
@@ -142,10 +151,10 @@ def thompson_microphysics(
     # finite cap. Mirrors ``morrison.py`` (which has always capped here).
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
-            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)
+            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)
         ),
         config.N_i_nuc_max,
-    ) / jnp.clip(rho, 0.1)
+    ) / jnp.clip(rho, _RHO_FLOOR)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # === Ice depositional growth / sublimation ===
@@ -157,7 +166,7 @@ def thompson_microphysics(
     #   ABI = 1 + (dq_sat_i/dT)·L_s/c_p  psychrometric correction
     #   CONS12 = ρ_ci·π  (mass–size for spherical ice, m = (ρ_ci·π/6)·D³)
     cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
-    dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)
+    dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXP) / jnp.clip(p_full, 1.0)
     dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
     abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
     if config.ice_growth_scheme == "capacitance":
@@ -364,7 +373,15 @@ def thompson_microphysics(
     qv_avail = jnp.clip(q_v, 0.0)
     qv_scale = donor_clamp_scale(qv_avail, qv_sink_total, dt)
     condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
-    dq_i_dep = dq_i_dep * qv_scale
+    # Scale ONLY the depositional (positive, vapour-limited) branch of dq_i_dep;
+    # the sublimation (negative) branch is a vapour SOURCE, not a sink — it is
+    # already donor-clamped to q_i in the q_i clamp above and must NOT be scaled
+    # by qv_scale. In exactly-dry air (q_v=0) qv_scale=0, so the previous
+    # unconditional ``dq_i_dep *= qv_scale`` zeroed legitimate ice sublimation
+    # (no vapour source, no sublimation cooling) — codex round 1 finding 2.
+    # This now matches the positive-branch ``where`` already used for
+    # condensation and prds.
+    dq_i_dep = jnp.where(dq_i_dep > 0.0, dq_i_dep * qv_scale, dq_i_dep)
     # Scale only the depositional (positive, vapour-limited) branch of prds;
     # sublimation (negative) is already snow-limited inside the snow module.
     prds = jnp.where(prds > 0.0, prds * qv_scale, prds)
@@ -373,11 +390,11 @@ def thompson_microphysics(
     # Marshall-Palmer fall speeds use fractional exponents (b_v_x in
     # [0.25, 0.5]); guard the AD path with safe_pow.
     rho_sfc = rho[:, -1:]
-    rho_ratio = rho / jnp.clip(rho_sfc, 0.1)
+    rho_ratio = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
     V_t_r = config.a_v_r * safe_pow(jnp.clip(q_r, 0.0) * rho_ratio, config.b_v_r)
-    V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+    V_t_r = jnp.clip(V_t_r, 0.0, _VT_CLIP_RAIN)
     V_t_i = config.a_v_i * safe_pow(jnp.clip(q_i, 0.0) * rho_ratio, config.b_v_i)
-    V_t_i = jnp.clip(V_t_i, 0.0, 5.0)
+    V_t_i = jnp.clip(V_t_i, 0.0, _VT_CLIP_FROZEN)
     if config.snow_scheme == "thompson2008":
         # FAITHFUL Thompson-2008 mass-weighted snow fall speed from the bimodal
         # PSD (Field-2005 moments + density correction) — replaces the capped
@@ -386,9 +403,9 @@ def thompson_microphysics(
         V_t_s = _thompson_snow_fall_speed(q_s, rho, T)
     else:
         V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
-        V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
+        V_t_s = jnp.clip(V_t_s, 0.0, _VT_CLIP_FROZEN)
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
-    V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
+    V_t_g = jnp.clip(V_t_g, 0.0, _VT_CLIP_GRAUPEL)
 
     # Joint donor caps: each `extra_sink` is the in-column sink that
     # shares the same explicit-Euler step as sedimentation.  Without
@@ -401,13 +418,21 @@ def thompson_microphysics(
         return_surface_flux=True,
         extra_sink=evaporation,
     )
+    # The post-clamp ice/snow SUBLIMATION (negative deposition branch) is also
+    # an in-column q_i / q_s sink sharing this explicit step — it must be in the
+    # sed ``extra_sink`` budget too.  Omitting it let sublimation + sedimentation
+    # each draw up to q/dt and drove q_i / q_s negative on a subsaturated
+    # sedimenting column even at the standard dt=300 s (physics-validator probe).
+    ice_subl_post = jnp.maximum(-dq_i_dep, 0.0)
+    snow_subl_post = jnp.maximum(-prds, 0.0)
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
-        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i,
+        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i
+        + ice_subl_post,
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
-        extra_sink=melt_snow + rime_to_graupel_from_s,
+        extra_sink=melt_snow + rime_to_graupel_from_s + snow_subl_post,
     )
     sed_g, precip_g = sedimentation_tendency(
         q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,

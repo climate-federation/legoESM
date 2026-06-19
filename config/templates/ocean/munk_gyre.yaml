@@ -1,0 +1,22 @@
+# legoESM experiment template — Munk western-boundary-layer gyre.
+#
+# Names the procedural `munk_gyre` experiment via `setup:` (#388 Ask#2).
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: regional
+  maturity: structurally_validated
+  description: >
+    Munk gyre: lateral-friction western boundary layer sets the gyre transport
+    and boundary-current width — a regional wind-driven-circulation benchmark
+    distinct from the Stommel (bottom-friction) closure.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-munk-gyre"
+  type: ocean_only
+setup:
+  name: munk_gyre
+  grid: latlon_regional
+output:
+  path: output/ocean/munk_gyre/

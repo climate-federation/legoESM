@@ -15,6 +15,30 @@ from __future__ import annotations
 from typing import NamedTuple
 
 
+__param_spec__ = {
+    "SDMConfig": {
+        "scheme_key": "atm.sdm.SDMConfig",
+        "excluded": {
+            "adaptive_cfl": "numerics: adaptive-substep CFL (dt = cfl/|tau|), solver control",
+            "adaptive_stol": "numerics: ERF steady-state exit tolerance (solver convergence)",
+            "newton_atol": "numerics: Newton absolute-residual exit tolerance",
+            "newton_rtol": "numerics: Newton relative-residual exit tolerance",
+            "newton_stol": "numerics: Newton step-size exit tolerance (solver convergence)",
+            "column_n_rain_floor": "numerics: fallback rain number when reconstructed Nr<=0 (degenerate-case floor, not a closure)",
+            "r_cloud": "diagnostic: activated-cloud size cutoff for the Eulerian q_c output of the advected Lagrangian path (measurement convention, not a physics closure; total water is conserved regardless)",
+        },
+        "params": {
+            "cdnc": {"units": "1/m^3", "bounds": (33000000.0, 300000000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "droplet_number", "reference": "Shima et al. (2009) prescribed cloud-droplet number", "shape": None},
+            "golovin_b": {"units": "1/s", "bounds": (495.0, 4500.0), "tunable_tier": 1, "transform": "sigmoid", "category": "collision_coalescence", "reference": "Golovin (1963) additive coalescence kernel coefficient", "shape": None},
+            "r_rain": {"units": "m", "bounds": (1.32e-05, 0.00012), "tunable_tier": 2, "transform": "sigmoid", "category": "size_threshold", "reference": "cloud/rain droplet-radius partition (40 um)", "shape": None},
+            "r_min_reconstruct": {"units": "m", "bounds": (3.3e-07, 3e-06), "tunable_tier": 3, "transform": "sigmoid", "category": "size_reconstruction", "reference": "minimum reconstructed mean-droplet radius", "shape": None},
+            "solute_ionization": {"units": "1", "bounds": (0.66, 6.0), "tunable_tier": 3, "transform": "sigmoid", "category": "kohler", "reference": "van 't Hoff factor i (NaCl=2)", "shape": None},
+            "solute_molar_mass": {"units": "kg/mol", "bounds": (0.0192852, 0.17532), "tunable_tier": 3, "transform": "sigmoid", "category": "kohler", "reference": "aerosol solute molar mass (NaCl=0.05844)", "shape": None},
+        },
+    },
+}
+
+
 class SDMConfig(NamedTuple):
     """Super-Droplet Method configuration.
 
@@ -92,6 +116,18 @@ class SDMConfig(NamedTuple):
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
+    r_cloud : float
+        Minimum activated-droplet radius [m] counted as diagnostic Eulerian
+        cloud water by the advected Lagrangian SDM path. Smaller wet aerosol
+        and haze still carry liquid mass, exchange vapor/heat, collide, and
+        conserve total water, but are not written to ``q_c`` where they would
+        make clear air appear cloudy.
+    lagrangian_diagnostic_assignment : str
+        Particle-to-mesh assignment used when the advected Lagrangian LES path
+        bins particles back to diagnostic Eulerian ``q_c/q_r``. ``"cic"`` is
+        conservative cell-centred cloud-in-cell deposition and avoids
+        nearest-cell Monte-Carlo speckle; ``"nearest"`` preserves the original
+        cell-bin diagnostic for tests and debugging.
     column_do_coalescence : bool
         Opt-in stateless Eulerian column adapter mode. False (default) keeps
         the legacy condensation-only mean-droplet closure. True reconstructs a
@@ -156,3 +192,5 @@ class SDMConfig(NamedTuple):
     column_n_rain_floor: float = 1.0e6   # [1/m^3] fallback rain number
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius
+    r_cloud: float = 2.0e-6             # [m] activated-cloud diagnostic threshold
+    lagrangian_diagnostic_assignment: str = "cic"

@@ -21,6 +21,9 @@ from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
 
+# Fraction of net surface SW that penetrates below the skin (Paulson-Simpson).
+_SW_PENETRATION_FRACTION = 0.94
+
 def make_mpas_ocean_physics(
     config,
     implicit_vertical_mixing: bool = False,
@@ -252,7 +255,7 @@ def make_mpas_ocean_physics(
                     # SW is reflected/lost here.  Any SURFACE ALBEDO is applied
                     # UPSTREAM in compute_omip2_surface_forcing (--ice-albedo),
                     # which reduces sw_down -> sw_net in BOTH q_net and this field.
-                    sw_absorbed = _sf_sw * 0.94  # 94% penetrates; 6% surface skin
+                    sw_absorbed = _sf_sw * _SW_PENETRATION_FRACTION  # 94% penetrates; 6% surface skin
                     q_nonsolar = _sf_q_net - sw_absorbed
 
                     # Non-solar part: surface cell only

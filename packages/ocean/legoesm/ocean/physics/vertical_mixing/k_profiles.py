@@ -169,7 +169,8 @@ def compute_vertical_K_profiles(
                 "KPP own convective momentum, or choose a non-KPP "
                 "vertical_mixing scheme."
             )
-        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv)
+        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
+                                               eos_fn=eos_fn)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -460,19 +461,27 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
     return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
 
 
-def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig):
+def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
+                          eos_fn=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
     independent momentum viscosity (``convective_νz``) at interfaces,
     bit-identical to the explicit ``enhanced_diffusion_convection`` path.
+
+    ``eos_fn`` (optional) overrides the density EOS used for the convective
+    N² trigger so it matches the dynamical core — the SAME contract the
+    vmix branch honours.  ``None`` -> Wright 1997 (bit-identical legacy).
+    Without threading it here the documented "convective trigger consistent
+    with the dynamical core" promise of :func:`compute_vertical_K_profiles`
+    was silently violated for non-Wright EOSs (codex review, finding #3).
     """
     from legoesm.ocean.physics.convection.enhanced_diffusion import (
         convective_K_A_flag,
     )
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = _compute_rho(state, z_coord, J)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);

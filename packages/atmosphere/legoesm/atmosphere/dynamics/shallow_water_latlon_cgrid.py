@@ -42,6 +42,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    pad_lon_cgrid,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.grids.latlon import LatLonGrid
@@ -183,12 +184,16 @@ def absolute_vorticity_coriolis(
     eta_at_u = 0.5 * (eta[:-1] + eta[1:])  # (n_lat, n_lon+1[, nlev])
 
     # --- Average v to u-faces (4-point, same as coriolis_cgrid) ---
-    v_west = jnp.roll(v, 1, axis=1)
-    v_avg = 0.25 * (v[:-1] + v[1:] + v_west[:-1] + v_west[1:])
-    if is_3d:
-        v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1, :]], axis=1)
-    else:
-        v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1]], axis=1)
+    # v sits on lat-faces, cell-aligned in lon; the u-face 4-pt average needs
+    # v's lon WEST-neighbour cell, so pad-then-average through the dispatched
+    # lon halo (local wrap / 2-D ring) -> the full n_lon+1 u-faces directly.
+    # Bit-identical to ``roll(v,1)`` + wrap-column concat at proc_lon==1, and
+    # spans lon partition cuts under a 2-D split (THIS local roll was the
+    # missed lon op that made the 2-D u-momentum decomposition-dependent).
+    v_pad = pad_lon_cgrid(v, halo=1)
+    ve = v_pad[:, 1:]    # cell j   bordering u-face j
+    vw = v_pad[:, :-1]   # cell j-1 bordering u-face j
+    v_at_u = 0.25 * (ve[:-1] + ve[1:] + vw[:-1] + vw[1:])  # (n_lat, n_lon+1)
 
     # --- Average η to v-faces ---
     # v-face[i, j] is flanked by vertex[i, j] (west) and vertex[i, j+1] (east)

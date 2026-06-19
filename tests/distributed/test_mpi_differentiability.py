@@ -11,8 +11,8 @@ Verifies that ``jax.grad`` flows correctly through:
 - ``pad_halo_4d`` with MPI backend
 - Conservation fixers (``fix_mass_hydrostatic``) under MPI
 - The Voronoi/MPAS halo exchange on BOTH state-exchange paths: the
-  DEFAULT per-entity path (``VoronoiHaloExchange`` -> ``_exchange_mpi``)
-  and the opt-in ``batched_halo_exchange`` union-neighbor path (both
+  DEFAULT ``batched_halo_exchange`` union-neighbor path and the opt-OUT
+  per-entity path (``VoronoiHaloExchange`` -> ``_exchange_mpi``) (both
   sendrecv with custom_vjp; per-neighbor send/recv counts differ,
   exercising the asymmetric-shape backward template)
 
@@ -316,12 +316,12 @@ class TestVoronoiHaloMPIGrad:
     ``voronoi_mpi.make_voronoi_mpi_step`` (selected there at import by
     ``LEGOESM_VORONOI_BATCHED_HALO`` / ``_USE_BATCHED_HALO``):
 
-    - ``per_entity_legacy`` — the DEFAULT model-step path
+    - ``per_entity_legacy`` — the opt-OUT model-step path
       (``VoronoiHaloExchange`` -> ``_exchange_mpi`` ->
       ``get_sendrecv_vjp``), composed exactly as the legacy
       ``_exchange_mpas_state`` packs fields (u edge; T+p_s packed cell;
       tracers stacked cell);
-    - ``batched`` — the opt-in union-neighbor exchange
+    - ``batched`` — the DEFAULT union-neighbor exchange
       (``batched_halo_exchange``), called as a direct closure (no env
       var needed).  Its UNEQUAL per-neighbor send/recv counts also gate
       the asymmetric-shape backward recv template in ``_sendrecv_vjp``

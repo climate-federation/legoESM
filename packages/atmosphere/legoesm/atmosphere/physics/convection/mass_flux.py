@@ -70,6 +70,10 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 # =============================================================================
 
 
+# --- pspec autoblock
+_P_MIN_CONVECTION_PA = 10_000.0
+_P_GATE_SHARPNESS_PA = 500.0
+
 def compute_column_geometry(
     T: jax.Array,
     p_full: jax.Array,
@@ -169,8 +173,8 @@ def _compute_subsidence_gradients(
 
 def stratosphere_mass_flux_gate(
     p_full: jax.Array,
-    p_min_convection: float = 10_000.0,
-    p_gate_sharpness: float = 1_500.0,
+    p_min_convection: float = _P_MIN_CONVECTION_PA,
+    p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
 ) -> jax.Array:
     """Smooth sigmoid factor in [0, 1] that vanishes above the
     tropopause (low ``p``) and equals one in the troposphere.
@@ -180,12 +184,11 @@ def stratosphere_mass_flux_gate(
     where the small mass per unit area (Δp/g) would amplify modest
     heating into unphysical spikes (>400 K observed in 1-year RCE).
 
-    Defaults: cutoff at 100 hPa (canonical tropical tropopause) with
-    a 15-hPa transition width.  This gives factor ≈ 0.013 at the
-    model top (35 hPa), 0.034 at 50 hPa, 0.5 at 100 hPa, 0.91 at
-    130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is *actually
-    closed* (not merely attenuated) in the deep stratosphere while
-    leaving the upper troposphere unaffected.  ``p_gate_sharpness``
+    Defaults: cutoff at 100 hPa with a 5-hPa transition width.  This
+    gives factor ≈ 4.5e-5 at 50 hPa, 2.5e-3 at 70 hPa, 0.5 at 100 hPa,
+    0.998 at 130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is
+    closed in the stratosphere while leaving the upper troposphere
+    unaffected.  ``p_gate_sharpness``
     must be << ``p_min_convection`` for the sigmoid to saturate
     within the integration range; sharpness ≥ p_min only attenuates.
 
@@ -209,8 +212,8 @@ def apply_mass_flux_kernel(
     rho: jax.Array,
     delta_0: float,
     M_u_max: float,
-    p_min_convection: float = 10_000.0,
-    p_gate_sharpness: float = 1_500.0,
+    p_min_convection: float = _P_MIN_CONVECTION_PA,
+    p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Mass-flux core kernel: compensating subsidence + detrainment.
 
@@ -247,7 +250,7 @@ def apply_mass_flux_kernel(
     Unit check: (1/m) * (kg/m²/s) * (kg/kg) / (kg/m³) = 1/s × kg/kg.
     """
     dT_dz, dq_dz = _compute_subsidence_gradients(T, q_v, z)
-    rho_safe = jnp.clip(rho, 0.01, None)
+    rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
 
     # Per-level mass-flux cap.  The plume integrator can yield ``M_u``
     # that grows with height when ``epsilon > delta`` (entraining

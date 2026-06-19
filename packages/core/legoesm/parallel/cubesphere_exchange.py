@@ -54,10 +54,7 @@ from legoesm.grids.halo import (
 
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
-try:
-    from jax import shard_map  # JAX >= 0.8 exposes it at top level
-except ImportError:
-    from jax.experimental.shard_map import shard_map  # older JAX fallback
+from legoesm.parallel.shard_map_compat import shard_map
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
@@ -1262,8 +1259,17 @@ def _interp_strip_guarded(seg_padded, offsets_seg, g, n_loc, seg_start, n):
     ).astype(seg_padded.dtype)
 
 
-def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
-    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
+def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
+    """Shared tiled-pad builder — validate + static tables + the
+    body-side pad function.  Returns ``(_pad_body, in_sp, in_sp_data)``.
+
+    ``_pad_body(tile, offsets)`` pads a SINGLE device's local tile via
+    ``lax.ppermute`` over (face, tile_i, tile_j) — valid inside ANY
+    shard_map over those axes, so both the wrapped exchange and the
+    unwrapped tiled tendency stage share this ONE body (zero
+    duplication / parity drift).
+
+    Original tiled exchange semantics — halo 1/2.
 
     One tile per device on mesh axes ("face", "tile_i", "tile_j").
     Schedule: 4 strip ppermute rounds (every tile edge is remote) +
@@ -1309,16 +1315,8 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
     pos_j = jnp.asarray(tables.offs_pos)
     n_rounds = len(tables.perms)
 
-    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=in_sp_data,
-             check_vma=False)
-    def _exchange(*args):
-        if with_offsets:
-            local_shard, offsets = args
-        else:
-            (local_shard,) = args
-            offsets = None
-
-        tile = local_shard[0]              # (n_loc, n_loc[, C])
+    def _pad_body(tile, offsets):
+        # tile: (n_loc, n_loc[, C]) — a SINGLE device's local block.
         n_loc = tile.shape[0]
         n = kt * n_loc
         fi = jax.lax.axis_index("face")
@@ -1514,9 +1512,102 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
                     ),
                 )
                 padded = padded.at[rs, cs].set(blk)
-        return padded[None]
+        return padded
+
+    return _pad_body, in_sp, in_sp_data
+
+
+def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
+    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
+
+    Wraps the shared body-side pad (:func:`_build_tiled_pad`) in a
+    ``shard_map`` over (face, tile_i, tile_j); bit-identical serial
+    parity (0.0 vs pad_halo_local/pad_halo, h1+h2 x offsets+raw, job
+    8464648).
+    """
+    _pad_body, in_sp, in_sp_data = _build_tiled_pad(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=in_sp_data,
+             check_vma=False)
+    def _exchange(*args):
+        if with_offsets:
+            local_shard, offsets = args
+        else:
+            (local_shard,) = args
+            offsets = None
+        return _pad_body(local_shard[0], offsets)[None]
 
     return _exchange
+
+
+def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
+    """Unwrapped tiled pad body for use INSIDE an outer shard_map over
+    the same (face, tile_i, tile_j) axes — the tiled FV3 tendency
+    stage.
+
+    Takes one device's local ``(n_loc, n_loc[, C])`` tile plus optional
+    replicated ``offsets`` and returns the ``(n_loc+2h, ...)`` padded
+    block via ``lax.ppermute`` directly.  A nested ``shard_map`` (what
+    the operators' ``explicit_pad_halo`` SPMD branch does) is illegal
+    inside an outer ``shard_map``, so the stage routes its metric/state
+    pads through THIS body instead.  Bit-identical to the wrapped
+    :func:`_make_exchange_ppermute_tiled` body (same code).
+    """
+    _pad_body, _in_sp, _out_sp = _build_tiled_pad(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+    return _pad_body
+
+
+def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
+    """Tiled VECTOR halo pad for use inside the tiled tendency stage.
+
+    Grid-aligned wind components rotate across cube-face seams, so a
+    SCALAR tiled pad of (u, v) would be wrong at panel boundaries.
+    Mirrors :func:`legoesm.grids.halo.pad_halo_vector` (orthogonal
+    rotation): (1) rotate grid→geographic with the tile's
+    ``cos/sin_angle`` (geographic components are continuous across
+    seams), (2) scalar-pad each via the shared :func:`make_tiled_pad_body`
+    (serial-exact for scalars), (3) rotate back with the tile's
+    ``cos/sin_angle_padded`` (the per-tile padded angle slice).
+
+    Returns ``_vbody(u_tile, v_tile, cos_angle, sin_angle,
+    cos_angle_padded, sin_angle_padded, offsets)`` ->
+    ``(u_pad, v_pad)``, each ``(n_loc+2h, n_loc+2h[, C])``.  All metric
+    args are this device's tile blocks (cos/sin_angle: (n_loc,n_loc)
+    interior; *_padded: (n_loc+2h,...) via mesh.tiled_padded_block) —
+    supplied by the stage from the stacked metrics.  Orthogonal
+    rotation only (no duogrid / non-orthogonality) for the first cut.
+    """
+    scalar_body = make_tiled_pad_body(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+
+    def _vbody(u_tile, v_tile, cos_angle, sin_angle,
+               cos_angle_padded, sin_angle_padded, offsets):
+        # The angle metrics are 2D tile blocks (interior (n_loc,n_loc); padded
+        # (n_loc+2h, n_loc+2h)).  A 4D global wind (ndim=4) leaves a trailing
+        # channel/level axis on the per-device tile (n_loc, n_loc, C), so the
+        # rotation must broadcast the angle over that axis.  ndim=3 (SW): the
+        # wind tile is 2D == the angle rank -> no reshape (path unchanged).
+        if u_tile.ndim == cos_angle.ndim + 1:
+            cos_angle = cos_angle[..., None]
+            sin_angle = sin_angle[..., None]
+        # 1. grid -> geographic (east, north): continuous across seams.
+        u_east = cos_angle * u_tile - sin_angle * v_tile
+        v_north = sin_angle * u_tile + cos_angle * v_tile
+        # 2. scalar tiled pad of each geographic component.
+        u_east_pad = scalar_body(u_east, offsets)
+        v_north_pad = scalar_body(v_north, offsets)
+        # 3. geographic -> grid with the PADDED angle (inverse of step 1).
+        cap, sap = cos_angle_padded, sin_angle_padded
+        if u_east_pad.ndim == cap.ndim + 1:
+            cap = cap[..., None]
+            sap = sap[..., None]
+        u_pad = cap * u_east_pad + sap * v_north_pad
+        v_pad = -sap * u_east_pad + cap * v_north_pad
+        return u_pad, v_pad
+
+    return _vbody
 
 
 def _make_exchange_ppermute_multiface(mesh, ndim, halo=1, with_offsets=False):
@@ -2115,6 +2206,7 @@ def packed_pad_halo_4d(
                 f"FV3_3D.md iter-1072."
             )
 
+    from legoesm.grids.duogrid import apply_duogrid_4d
     if len(fields) == 1:
         out = explicit_pad_halo_4d(
             fields[0], mesh, halo=halo, interp_offsets=interp_offsets,
@@ -2124,7 +2216,7 @@ def packed_pad_halo_4d(
         # `packed_pad_halo_4d(f, duogrid=dg)` silently returned a nearest-copy
         # halo while the unpacked `pad_halo_4d(f, duogrid=dg)` applied the remap).
         if duogrid is not None:
-            out = _apply_duogrid_4d(out, duogrid, halo=halo)
+            out = apply_duogrid_4d(out, duogrid, halo=halo)
         return [out]
 
     # Use plain Python ints for split indices so JAX treats them as
@@ -2139,26 +2231,8 @@ def packed_pad_halo_4d(
     )
     pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
-        pieces = [_apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
+        pieces = [apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
     return pieces
-
-
-def _apply_duogrid_4d(padded, duogrid, halo):
-    """Apply duogrid kinked-to-extended remap + corner fill to a 4D
-    padded field, level-by-level via ``jax.vmap``.  Mirrors the
-    post-processing loop inside ``halo.pad_halo_4d``.
-    """
-    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
-    import jax
-
-    def _remap_level(level_slice):
-        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-        level_slice = fill_corner_region(level_slice, duogrid, halo)
-        return level_slice
-
-    padded_t = jnp.transpose(padded, (3, 0, 1, 2))
-    padded_t = jax.vmap(_remap_level)(padded_t)
-    return jnp.transpose(padded_t, (1, 2, 3, 0))
 
 
 # ===================================================================

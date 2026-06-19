@@ -85,6 +85,31 @@ def test_emanuel_outputs_finite():
         assert jnp.all(jnp.isfinite(arr))
 
 
+def test_emanuel_cbmf_relaxes_positive_from_rest():
+    """The CONVECT DTMA/ALPHA/DAMP closure can spin CBMF up from zero.
+
+    A moist, weakly unstable tropical column should not be permanently
+    zero-locked when the prognostic CBMF carry starts at rest; the
+    relaxed carry in ``[:, -1]`` becomes positive and remains AD-finite
+    through the ALPHA coefficient.
+    """
+    T, q, pf, ph = _column(ncol=1, nlev=30, T_sfc=300.0, q_sfc=22e-3, lapse_rate=6.5)
+    cpp = jnp.zeros_like(T)
+    out, cpp_new = emanuel_convection(T, q, pf, ph, cpp, dt=600.0)
+    assert float(out.cape[0]) > 0.0
+    assert float(cpp_new[0, -1]) > 0.0
+
+    def carry_for_alpha(alpha):
+        _, cpp_alpha = emanuel_convection(
+            T, q, pf, ph, cpp, dt=600.0,
+            config=EmanuelConfig(alpha_closure=alpha),
+        )
+        return cpp_alpha[0, -1]
+
+    g = jax.grad(carry_for_alpha)(jnp.asarray(0.2))
+    assert jnp.isfinite(g)
+
+
 def test_emanuel_no_cmt():
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
@@ -137,7 +162,9 @@ def test_emanuel_genuine_mixing_detrainment_structure():
     sort redistributes the heating)."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
+    # Seed Emanuel's prognostic CBMF memory so this test isolates the
+    # mixing matrix structure rather than the DTMA trigger-from-rest.
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
     out_genuine, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
         config=EmanuelConfig(use_genuine_mixing=True),
@@ -163,7 +190,9 @@ def test_emanuel_genuine_mixing_matrix_tunable_changes_tendency():
     not a dead parameter."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
+    # Seed the prognostic CBMF memory; the test is about the SIJ gate
+    # wiring, not whether this synthetic sounding fires from rest.
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
     out_a, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
         config=EmanuelConfig(sij_gate_sharpness=40.0),
@@ -221,7 +250,9 @@ def test_emanuel_downdraft_toggle_changes_subcloud_dT():
     layers."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
+    # The downdraft branch needs active convective condensate. Seed the
+    # prognostic CBMF carry so the toggle is exercised on this fixture.
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
     out_off, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
         config=EmanuelConfig(enable_unsaturated_downdraft=False),
@@ -319,19 +350,18 @@ def test_emanuel_orchestrator_one_step_finite():
 # Column conservation (oracle-faithful): vapor-side enthalpy + total water
 # ---------------------------------------------------------------------------
 
-def test_emanuel_vapor_side_enthalpy_conserved():
+def test_emanuel_vapor_side_enthalpy_residual_small():
     """Oracle-faithful invariant (convect43c.f ENTS pass, lines 969-984):
-    the column-integrated vapor-side moist enthalpy tendency
-    ``c_p ∫dT + L_v ∫dq_v dp/g`` vanishes to machine precision.
+    the vapor-side moist enthalpy tendency is corrected over the active
+    1..INB convective layer, not by cooling the whole column.
 
     Physically: convection condenses vapor into cloud water
     (``dq_c_conv`` → microphysics) and the latent heat of that
     condensation is released as convective heating, so
-    ``c_p ∫dT = L_v ∫dq_c`` and the vapor-side enthalpy is exactly
-    conserved.  The detrained-condensate term is intentionally EXCLUDED
-    from this invariant — its latent heat is already in ``dT`` — which is
-    why the older ``c_p ∫dT + L_v ∫(dq_v + dq_c)`` residual is non-zero
-    and equals the (physical) condensation heating ``L_v ∫dq_c``."""
+    ``c_p ∫dT = L_v ∫dq_c`` to truncation error.  The full-column
+    residual is small, but not forced to machine zero, because CONVECT's
+    ENTS pass divides by ``PH(1)-PH(INB+1)`` and does not apply a uniform
+    correction in quiescent levels above the diagnosed convection top."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
@@ -340,27 +370,41 @@ def test_emanuel_vapor_side_enthalpy_conserved():
         conv_prog_profile=cpp, dt=1800.0,
     )
     dp = ph[:, 1:] - ph[:, :-1]
-    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
-    Qv = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel = abs(H + Qv) / (abs(H) + abs(Qv) + 1e-10)
-    assert rel < 1e-8, (
-        f"Emanuel vapor-side enthalpy residual {H+Qv:.3e} W/m^2 "
+    cpn = constants.c_pd * (1.0 - q) + constants.c_pv * q
+    lv_eff = constants.L_v - (EmanuelConfig().c_l_emanuel - constants.c_pv) * (
+        T - constants.T_freeze
+    )
+    residual = float(
+        jnp.sum((cpn * out.dT_dt + lv_eff * out.dq_v_dt) * dp / constants.g, axis=1)
+        .mean()
+    )
+    total = float(
+        jnp.sum(
+            (jnp.abs(cpn * out.dT_dt) + jnp.abs(lv_eff * out.dq_v_dt))
+            * dp
+            / constants.g,
+            axis=1,
+        ).mean()
+    )
+    rel = abs(residual) / (total + 1e-10)
+    assert rel < 1e-2, (
+        f"Emanuel vapor-side enthalpy residual {residual:.3e} W/m^2 "
         f"({rel:.2e} of total)"
     )
 
 
 def test_emanuel_total_water_nearly_conserved():
-    """Convection moves water from vapor to cloud condensate within the
-    column (nothing precipitates in-scheme — microphysics owns precip),
-    so ``∫(dq_v + dq_c_conv) dp/g`` should be small relative to the
-    column water flux on a CAPE-positive sounding.  The small residual
-    is the ``max(., 0)`` floor on the condensate channel."""
+    """The legacy kernel surrogate conserves vapor+cloud water because it has
+    no explicit Emanuel precipitation split.  The genuine mixer is different:
+    EP·CLW is precipitating condensate and is intentionally not reinserted as
+    retained cloud water."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     out, _ = emanuel_convection(
         T=T, q_v=q, p_full=pf, p_half=ph,
         conv_prog_profile=cpp, dt=1800.0,
+        config=EmanuelConfig(use_genuine_mixing=False),
     )
     dp = ph[:, 1:] - ph[:, :-1]
     net = jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp / constants.g, axis=1)

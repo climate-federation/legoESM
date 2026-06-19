@@ -88,6 +88,72 @@ def pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return padded
 
 
+def _try_spmd_latlon_pad(data: jnp.ndarray, halo: int, negate: bool):
+    """Route a lat-lon halo through the band SPMD ppermute body if the ``spmd``
+    backend + a ``"lat"`` mesh are active; else return ``None`` (caller falls
+    through to mpi/local).  Used by every ``pad_halo_latlon*`` dispatcher so the
+    ocean/atm lat-lon step is backend-oblivious — same pattern as the cube.
+    Handles 2-D and 3-D (the body's lon-pad is ndim-agnostic)."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or "lat" not in getattr(mesh, "axis_names", ()):
+        return None
+    from legoesm.parallel.latlon_spmd import make_latlon_band_pad_body
+    return make_latlon_band_pad_body(mesh, halo=halo, negate=negate)(data)
+
+
+def _spmd_lat_mesh():
+    """Return the armed lat-band SPMD mesh, or ``None`` if the ``spmd`` backend
+    is not active (caller falls through to the mpi/local branch).  Shared by the
+    wall-pad / pole-zero SPMD routing so they key on the backend the same way as
+    :func:`_try_spmd_latlon_pad`."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or "lat" not in getattr(mesh, "axis_names", ()):
+        return None
+    return mesh
+
+
+def _dispatch_latlon_2d_fold(data, topology, halo, *, is_vector_v):
+    """Fold-family ``pad_halo_latlon*`` dispatch for a ``LatLon2DLayout``.
+
+    ``proc_lon == 1`` is a pure latitude band (every rank owns the full lon
+    circle), so the 180-deg pole fold is LOCAL — reuse the validated band
+    fold (:func:`legoesm.parallel.latlon_mpi.pad_halo_latlon_mpi` on the
+    equivalent :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`),
+    which is bit-identical to the serial fold and correct for EVERY scalar
+    caller (incl. the A-grid operators that read the pole ghost directly).
+    This is why the global ``pad_halo_latlon`` 2-D dispatch is SAFE — it
+    does not silently swap pole-fold for a wall-zero ghost at proc_lon==1.
+
+    ``proc_lon > 1`` splits longitude, so the fold's 180-deg shift needs the
+    lat-pencil transpose (not yet wired) — fall back to the labeled
+    wall-pole benchmark pad (``pad_halo_latlon_2d(pole_bc="wall")``).  Only
+    reachable by explicitly building a >1 longitude split;
+    :func:`legoesm.parallel.latlon_mpi.make_latlon_2d_mpi_step` refuses
+    ``proc_lon>1``, so no atmospheric step reaches a wall pole through here.
+    Handles 2-D and 3-D (the level axis rides through both backends).
+    """
+    from legoesm.parallel.latlon_mpi import (
+        make_latlon_band_layout,
+        pad_halo_latlon_2d,
+        pad_halo_latlon_mpi,
+    )
+    if topology.proc_lon == 1:
+        band = make_latlon_band_layout(
+            topology.proc_row, topology.proc_lat,
+            topology.n_lat_global, topology.n_lon_global,
+            fold=topology.fold,
+        )
+        return pad_halo_latlon_mpi(
+            data, band, halo=halo, is_vector_v=is_vector_v)
+    return pad_halo_latlon_2d(data, topology, halo=halo, pole_bc="wall")
+
+
 def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar field with halo cells using pole-folding.
 
@@ -127,12 +193,19 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
         # back to the local serial path rather than crashing in the
         # MPI dispatch with an opaque error.
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, pad_halo_latlon_mpi,
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=False,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_local(data, halo)
 
 
@@ -174,12 +247,19 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, pad_halo_latlon_mpi,
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=True,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_vector_local(data, halo)
 
 
@@ -243,12 +323,19 @@ def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, pad_halo_latlon_mpi,
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=False,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_3d_local(data, halo)
 
 
@@ -269,12 +356,19 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, pad_halo_latlon_mpi,
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=True,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_vector_3d_local(data, halo)
 
 
@@ -348,11 +442,26 @@ def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
     -------
     jax.Array : same shape as ``field``.
     """
+    # SPMD lat-band backend (single-controller multi-GPU): zero index 0 only on
+    # the south band, index -1 only on the north band; interior band cuts keep
+    # their cross-band gradient (the analogue of the MPI pole-touch test).
+    _spmd_mesh = _spmd_lat_mesh()
+    if _spmd_mesh is not None:
+        from legoesm.parallel.latlon_spmd import zero_polar_lat_ends_band_spmd
+        return zero_polar_lat_ends_band_spmd(field, _spmd_mesh)
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import LatLonBandLayout
-        if isinstance(topology, LatLonBandLayout):
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout, LatLonBandLayout,
+        )
+        # Band AND 2-D pencil share the pole-touch test: a rank zeros its
+        # south end only if it OWNS the south pole (``south_rank is None``)
+        # and its north end only if it owns the north pole.  In the 2-D
+        # pencil this is the proc_row-0 / proc_row-last test (the riskiest
+        # 2-D bug — an interior proc row must NOT wall its lat cut, or the
+        # cross-cut gradient sendrecv'd from the neighbour is destroyed).
+        if isinstance(topology, (LatLonBandLayout, LatLon2DLayout)):
             out = field
             if topology.south_rank is None:
                 out = out.at[0].set(jnp.zeros_like(out[0]))
@@ -437,6 +546,26 @@ def pad_with_pole_bc_lat(
     # 3D u-face-with-levels, etc.).
     pad_widths = ((halo, halo),) + ((0, 0),) * (interior.ndim - 1)
 
+    # SPMD lat-band backend (single-controller multi-GPU): interior band cuts
+    # must read the NEIGHBOUR band's edge row (ppermute), not a constant wall;
+    # only the PHYSICAL pole end bands get the south/north wall constant.  The
+    # local jnp.pad below would wall EVERY band's boundary (wrong cut rows).
+    _spmd_mesh = _spmd_lat_mesh()
+    if _spmd_mesh is not None:
+        if north_fold or is_vector_u or is_vector_v:
+            # The wall band body handles the regular-grid wall BC only; the
+            # tripolar fold seam (sign-flipped permutation across the north
+            # boundary) is a follow-up.  Fail loud rather than silently wall it.
+            raise NotImplementedError(
+                "pad_with_pole_bc_lat SPMD: tripolar north fold / vector-sign "
+                "flags are a follow-up (the regular-grid wall BC is wired). "
+                "north_fold=%r is_vector_u=%r is_vector_v=%r"
+                % (north_fold, is_vector_u, is_vector_v))
+        from legoesm.parallel.latlon_spmd import make_latlon_band_wall_pad_body
+        return make_latlon_band_wall_pad_body(
+            _spmd_mesh, halo=halo,
+            south_value=south_value, north_value=north_value)(interior)
+
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
     if get_halo_backend() != "mpi":
         # Symmetric constants → single Pad HLO via ``constant_values``
@@ -452,9 +581,29 @@ def pad_with_pole_bc_lat(
     # if the active backend is MPI but for a different grid, fall
     # back to the local serial pad.
     from legoesm.parallel.latlon_mpi import (
+        LatLon2DLayout,
         LatLonBandLayout,
+        pad_with_pole_bc_lat_2d,
         pad_with_pole_bc_lat_mpi,
     )
+    if isinstance(topology, LatLon2DLayout):
+        # 2-D pencil: lat-axis-ONLY wall pad (interior lat cut sendrecv +
+        # pole wall constant).  Longitude is left untouched — the band path
+        # never split lon, so its wall-BC pad is lat-only; the 2-D path
+        # keeps that contract and the operator adds lon ghosts through its
+        # own dispatched lon halo.  The tripolar north fold / vector-u sign
+        # seam needs the lat-pencil transpose (the wall-pole 2-D benchmark
+        # excludes it) — fail loud rather than silently wall a fold seam.
+        if north_fold or is_vector_u:
+            raise NotImplementedError(
+                "pad_with_pole_bc_lat 2-D pencil: tripolar north_fold / "
+                "is_vector_u need the lat-pencil transpose (wall-pole 2-D "
+                f"only). north_fold={north_fold!r} is_vector_u={is_vector_u!r}"
+            )
+        return pad_with_pole_bc_lat_2d(
+            interior, topology, halo=halo,
+            south_value=south_value, north_value=north_value,
+        )
     if not isinstance(topology, LatLonBandLayout):
         return jnp.pad(
             interior, pad_widths,
@@ -546,9 +695,13 @@ def pad_with_pole_bc_lat_multi(
                 fields, topology, halo=halo,
                 south_values=south_values, north_values=north_values,
             )
-    # Local backend / non-latlon topology / fused-off: per-field pads
-    # (bit-identical semantics; under MPI this is the legacy
-    # one-sendrecv-pair-per-field schedule).
+    # Local backend / non-latlon topology / 2-D pencil / fused-off:
+    # per-field pads (bit-identical semantics; under band MPI this is the
+    # legacy one-sendrecv-pair-per-field schedule).  The 2-D pencil routes
+    # HERE on purpose — the fused path above is keyed to LatLonBandLayout,
+    # so each field re-enters ``pad_with_pole_bc_lat`` and takes its
+    # lat-only ``pad_with_pole_bc_lat_2d`` branch (fusing the 2-D lat
+    # sendrecv is a later perf increment, not a correctness gap).
     return tuple(
         pad_with_pole_bc_lat(
             f, halo=halo,

@@ -41,6 +41,13 @@ _ZARR_DIR = Path(__file__).parent.parent.parent.parent / "data" / "zarr"
 _NC_DIR = Path(__file__).parent / "optics" / "rrtmgp_data"
 
 
+# Idealized ozone Gaussian profile + well-mixed gas mole fractions (fixed).
+_O3_SIGMA_TROP = 0.9
+_O3_SIGMA_STRAT = 1.5
+_O3_PEAK_VMR = 9.0e-6
+_O2_MOLE_FRACTION = 0.20948
+_N2_MOLE_FRACTION = 0.78084
+
 def _default_data_path(basename_nc: str) -> str:
     """Return path to Zarr store if available, else fall back to NetCDF."""
     zarr_path = _ZARR_DIR / basename_nc.replace(".nc", ".zarr")
@@ -112,11 +119,11 @@ def _standard_o3_profile(p_full):
     p_hPa = p_full / 100.0
     log_p = jnp.log(p_hPa)
     log_p_peak = jnp.log(10.0)
-    sigma_trop = 0.9
-    sigma_strat = 1.5
+    sigma_trop = _O3_SIGMA_TROP
+    sigma_strat = _O3_SIGMA_STRAT
     sigma = jnp.where(log_p > log_p_peak, sigma_trop, sigma_strat)
     arg = (log_p - log_p_peak) / sigma
-    o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
+    o3_gauss = _O3_PEAK_VMR * jnp.exp(-0.5 * arg * arg)
     # 20 ppb tropospheric background (US Std Atm 1976 surface value).
     o3_background = 2.0e-8
     o3 = jnp.maximum(o3_gauss, o3_background)
@@ -354,8 +361,8 @@ class RRTMGP:
               "co2": config.co2_ppmv * 1.0e-6,
               "ch4": config.ch4_ppbv * 1.0e-9,
               "n2o": config.n2o_ppbv * 1.0e-9,
-              "o2": 0.20948,
-              "n2": 0.78084,
+              "o2": _O2_MOLE_FRACTION,
+              "n2": _N2_MOLE_FRACTION,
               "co": 1.5e-7,
               "ccl4": 7.5e-11,
               "cfc11": 2.2e-10,
@@ -594,14 +601,20 @@ class RRTMGP:
       # enough — the halo cells are passed straight to the RRTMGP
       # solve.  Codex iter-79 stop-time review.
       q_v_3d = _add_halos(q_v[:, None, ::-1])
-      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
+      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)  # coeff-ok: specific-humidity cap
 
       # --- 2. Build VMR fields ---
       mol_ratio = constants.R_V / constants.R_D
       h2o_vmr = mol_ratio * q_v_3d / (1.0 - q_v_3d)
 
       if o3_vmr is not None:
-          o3_3d = _add_halos(jnp.clip(o3_vmr, 1.0e-10, None)[:, None, ::-1])
+          # Clip AFTER ``_add_halos``: linear halo extrapolation of a steep
+          # boundary ozone profile (e.g. [1e-5, 1e-10]) can extrapolate to a
+          # NEGATIVE halo VMR (2·1e-10 − 1e-5 < 0), which is an unphysical
+          # absorber concentration in the optics lookup.  Same fix class as
+          # the q_v post-clip above (codex atm-radiation review).
+          o3_3d = _add_halos(o3_vmr[:, None, ::-1])
+          o3_3d = jnp.clip(o3_3d, 1.0e-10, None)
       else:
           o3_3d = _standard_o3_profile(p_3d)
 
@@ -694,29 +707,50 @@ class RRTMGP:
           _cpi = cloud_path_ice if cloud_path_ice is not None else _zero
           _crl = cloud_r_eff_liq if cloud_r_eff_liq is not None else _r_min
           _cri = cloud_r_eff_ice if cloud_r_eff_ice is not None else _r_min
-          cpl_3d = _add_halos(jnp.clip(_cpl, 0.0, None)[:, None, ::-1])
-          cpi_3d = _add_halos(jnp.clip(_cpi, 0.0, None)[:, None, ::-1])
-          crl_3d = _add_halos(jnp.clip(_crl, 1.0e-6, None)[:, None, ::-1])
-          cri_3d = _add_halos(jnp.clip(_cri, 1.0e-6, None)[:, None, ::-1])
+          # Clip AFTER ``_add_halos`` (same fix class as q_v / o3 / cf):
+          # linear halo extrapolation of a boundary cloud-water step can
+          # produce a NEGATIVE halo water path / sub-floor halo radius,
+          # which becomes a negative cloud optical depth in the halo layer
+          # (optics.py scales τ by these paths).  The halo flux is stripped
+          # but its optics feed the interior recurrence — so re-floor the
+          # halo-expanded fields, not just the interior.
+          cpl_3d = jnp.clip(_add_halos(_cpl[:, None, ::-1]), 0.0, None)
+          cpi_3d = jnp.clip(_add_halos(_cpi[:, None, ::-1]), 0.0, None)
+          crl_3d = jnp.clip(_add_halos(_crl[:, None, ::-1]), 1.0e-6, None)
+          cri_3d = jnp.clip(_add_halos(_cri[:, None, ::-1]), 1.0e-6, None)
           if cloud_fraction is not None:
-              cf_3d = _add_halos(jnp.clip(cloud_fraction, 0.0, 1.0)[:, None, ::-1])
+              # Clip AFTER ``_add_halos``: linear halo extrapolation of a
+              # boundary cloud-fraction step (e.g. [0, 1]) produces halo
+              # values OUTSIDE [0, 1] (2·0 − 1 = −1, or 2·1 − 0 = 2).  The
+              # halo layer's optical depth is scaled by cf in optics.py
+              # (``optical_depth * cloud_fraction``); a NEGATIVE halo cf
+              # injects an unphysical negative cloud optical depth into the
+              # two-stream recurrence that feeds the interior fluxes (the
+              # halo flux itself is stripped, but its optics are not).  Same
+              # post-clip fix class as q_v / o3 above (codex review).
+              cf_3d = _add_halos(cloud_fraction[:, None, ::-1])
+              cf_3d = jnp.clip(cf_3d, 0.0, 1.0)
           else:
               cf_3d = None
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
-      # Optional aerosol optical depth (shortwave)
+      # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
+      # (same fix class as q_v / o3 / cf / cloud paths): linear halo
+      # extrapolation can drive a boundary aerosol OD negative, which is an
+      # unphysical (negative) optical depth feeding the interior recurrence.
       if aerosol_optical_depth is not None:
-          aerosol_od_3d = _add_halos(
-              jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
+          aerosol_od_3d = jnp.clip(
+              _add_halos(aerosol_optical_depth[:, None, ::-1]), 0.0, None,
           )
       else:
           aerosol_od_3d = None
 
       # Optional aerosol optical depth (longwave, pure absorber)
       if aerosol_absorption_optical_depth_lw is not None:
-          aerosol_od_lw_3d = _add_halos(
-              jnp.clip(aerosol_absorption_optical_depth_lw, 0.0, None)[:, None, ::-1],
+          aerosol_od_lw_3d = jnp.clip(
+              _add_halos(aerosol_absorption_optical_depth_lw[:, None, ::-1]),
+              0.0, None,
           )
       else:
           aerosol_od_lw_3d = None
@@ -752,6 +786,7 @@ class RRTMGP:
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 5. Solve SW ---
@@ -773,6 +808,7 @@ class RRTMGP:
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---

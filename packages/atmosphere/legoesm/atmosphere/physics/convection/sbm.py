@@ -38,6 +38,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection._triggers import cape_trigger
 from legoesm.atmosphere.physics._shared import safe_divide
 
 
@@ -132,9 +133,9 @@ def sbm_convection(
     # Reference moisture at converged temperature
     q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
 
-    # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
-    trigger = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * (cape - CAPE_threshold)
+    # 6. Smooth trigger: cape_trigger == sigmoid(sharpness * (CAPE - threshold))
+    trigger = cape_trigger(
+        cape, CAPE_threshold, config.smooth_trigger_sharpness
     )  # (ncol,)
 
     # 7. Relaxation tendencies — only within the convective (cloud) layer

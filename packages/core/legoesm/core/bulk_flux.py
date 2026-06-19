@@ -219,6 +219,14 @@ def compute_most_fluxes(
     ustar : array
         Friction velocity [m/s].
     """
+    # Dispatch hardening (CLAUDE.md): ``scheme`` is a static Python string
+    # resolved at trace time. Validate it at function entry so a typo'd name
+    # (e.g. ``"coar3"``) fails LOUDLY instead of silently falling through the
+    # ``else`` branch below to the constant-roughness MOST path and running the
+    # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
+    # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
+    validate_bulk_scheme(scheme)
+
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to
     # z_ref so that single-height callers (lake, idealized adapter,
@@ -567,7 +575,11 @@ def compute_sam_oceflx_fluxes(
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
             / jnp.maximum(u_star ** 2, 1e-12)
         )
-        hol = jnp.sign(hol) * jnp.minimum(jnp.abs(hol), 10.0)
+        # jnp.clip (not sign*min(abs)) clamps hol to [-10, 10] with the SAME
+        # forward values but a SMOOTH, nonzero gradient in (-10, 10): the old
+        # sign*min(abs) form has a zero-gradient flat spot at hol=0 (neutral)
+        # that severs d(flux)/d(state) sensitivity there under jax.grad.
+        hol = jnp.clip(hol, -10.0, 10.0)
         stable = jnp.where(hol >= 0.0, 1.0, 0.0)
         xsq = jnp.maximum(jnp.sqrt(jnp.abs(1.0 - 16.0 * hol)), 1.0)
         xqq = jnp.sqrt(xsq)

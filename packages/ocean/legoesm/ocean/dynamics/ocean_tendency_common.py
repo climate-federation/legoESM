@@ -34,6 +34,7 @@ These helpers are pure and pytree-friendly: they accept and return
 
 from __future__ import annotations
 
+import os
 from typing import Callable, Optional, Tuple
 
 import jax.numpy as jnp
@@ -43,6 +44,22 @@ from legoesm.ocean.freshwater import (
     virtual_salt_flux,
     normalized_virtual_salt_flux,
 )
+
+
+def _baroclinic_f32_enabled(dtype) -> bool:
+    """Mixed-precision opt-in (``LEGOESM_BAROCLINIC_F32=1``, f64-state-gated): pass
+    ``compute_dtype=float32`` to the EOS in the baroclinic anomaly iteration so the
+    EOS polynomial runs in f32 WORK while rho is RETURNED in the f64 STATE dtype and
+    the downstream rho' / pressure / PGF stay f64 — the Oceananigans / NeuralGCM
+    "f32 work, f64 state" pattern, mirroring the vmix ``LEGOESM_VMIX_F32_SOLVE``
+    lever and SCOPED to the baroclinic EOS call ONLY (N^2 / diagnostics keep the
+    policy dtype, since their full-density vertical differences are NOT anomaly-
+    safe in f32).  Precision-safe here via the density ANOMALY rho'~O(1) (offline
+    experiment 8520588: PGF relRMS ~8e-5, spurious |v| ~1 mm/s/day).  GPU-only
+    benefit (RTX8000 f64 = 1/32 f32); CPU f32 ~flat/slowdown — OPT-IN, default
+    OFF.  Requires a ``make_eos_fn``-built eos_fn (accepts ``compute_dtype``)."""
+    return (dtype == jnp.float64
+            and os.environ.get("LEGOESM_BAROCLINIC_F32", "0") == "1")
 
 
 def iterate_eos_and_pressure_anomaly(
@@ -61,6 +78,7 @@ def iterate_eos_and_pressure_anomaly(
     use_depth_dependent_ref: bool = False,
     is_active_3d: jnp.ndarray | None = None,
     rho_ref_z_static: jnp.ndarray | None = None,
+    allow_baroclinic_f32: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -136,13 +154,24 @@ def iterate_eos_and_pressure_anomaly(
     J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
     eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
 
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
+    # f32-EOS lever (default OFF -> byte-identical): pass compute_dtype=f32 so the
+    # EOS polynomial runs in f32 WORK; rho is returned in the f64 STATE dtype
+    # (T_filled is f64), so the hydrostatic iteration, rho', cumsum and PGF below
+    # all stay f64 — only the polynomial is f32.  Gated by BOTH the env AND the
+    # caller's explicit ``allow_baroclinic_f32`` so it fires ONLY for the true
+    # baroclinic-PGF dynamics callers (where the anomaly rho'~O(1) makes f32 safe)
+    # — NOT for the GM/Redi/MLE/N^2/init callers that also use this helper but
+    # whose density gradients are not anomaly-safe in f32 (codex review).
+    eos_kw = ({"compute_dtype": jnp.float32}
+              if (allow_baroclinic_f32 and _baroclinic_f32_enabled(T.dtype))
+              else {})
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T), **eos_kw)
     for _ in range(n_iter):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_ref, dz_ref, J_ref, rho_0, g,
             h_actual=h_actual,
         )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
 
     if rho_ref_z_static is not None:
         # STATIC reference profile (preferred): a frozen-at-init

@@ -101,14 +101,7 @@ def compute_heights_from_sigma(T, p_half, q_v=None):
     z_half : array (ncol, nlev+1)
         Height at half levels [m] (surface = 0).
     """
-    ncol, nlev = T.shape
-
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    T_eff = T if q_v is None else virtual_temperature(T, q_v)
-    dz = jnp.abs(
-        constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
-    )
+    dz = compute_layer_dz(T, p_half, q_v)
 
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
     # surface (z=0) boundary instead of allocating a fresh
@@ -148,6 +141,46 @@ def compute_layer_dz(T, p_half, q_v=None):
     return jnp.abs(
         constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
+
+
+def brunt_vaisala_n_full(T, p_full, z_full):
+    """Brunt-Väisälä frequency ``N`` on full levels for column GWD schemes.
+
+    Computes ``θ = T·(p_ref/p)^κ``, the half-level ``N`` from the potential-
+    temperature gradient (``N² = (g/θ̄)·dθ/dz``, floored at 1e-8 s⁻² for
+    AD/√ safety), then maps the ``nlev-1`` half-level values back to ``nlev``
+    full levels by interior averaging with edge replication.  Shared by the
+    Hines / Lindzen / McFarlane / prognostic-spectral GWD backends, which all
+    consume only ``N`` on full levels (the layer-thickness floor of 1 m keeps
+    ``dθ/dz`` finite on degenerate columns).
+
+    Parameters
+    ----------
+    T : array (ncol, nlev)
+        Temperature at full levels [K].
+    p_full : array (ncol, nlev)
+        Pressure at full levels [Pa].
+    z_full : array (ncol, nlev)
+        Geometric height at full levels [m].
+
+    Returns
+    -------
+    N_full : array (ncol, nlev)
+        Brunt-Väisälä frequency [s⁻¹] at full levels.
+    """
+    theta = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    dz_full = jnp.abs(z_full[:, :-1] - z_full[:, 1:])
+    dz_full = jnp.clip(dz_full, 1.0, None)
+    dtheta_dz = (theta[:, :-1] - theta[:, 1:]) / dz_full
+    theta_bar = 0.5 * (theta[:, :-1] + theta[:, 1:])
+    N2_half = (constants.g / jnp.clip(theta_bar, 1.0, None)) * dtheta_dz
+    N2_half = jnp.clip(N2_half, 1e-8, None)
+    N_half = jnp.sqrt(N2_half)
+    return jnp.concatenate([
+        N_half[:, :1],
+        0.5 * (N_half[:, :-1] + N_half[:, 1:]),
+        N_half[:, -1:],
+    ], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -514,4 +547,4 @@ def diagnose_grid_w_from_omega(
         eps = R_d / constants.R_v
         T_v = T * (1.0 + (1.0 / eps - 1.0) * q_v)
     rho = p_full / (R_d * jnp.clip(T_v, 1.0, None))
-    return -omega / jnp.clip(rho * g, 1e-3, None)
+    return -omega / jnp.clip(rho * g, 1e-3, None)  # coeff-ok: rho*g floor for w-from-omega

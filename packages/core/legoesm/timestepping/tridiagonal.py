@@ -438,10 +438,22 @@ def thomas_solve_batched(
     # Backend selection priority (post iter-72):
     #   1. env LEGOESM_TRIDIAG=pcr      -> pure-JAX PCR (default on GPU)
     #   2. env LEGOESM_TRIDIAG=cusparse -> jax.lax.linalg.tridiagonal_solve (custom_call)
-    #   3. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
-    #   4. CUDA backend                  -> PCR (new default; +51% throughput
+    #   3. env LEGOESM_TRIDIAG=lapack   -> jax.lax.linalg.tridiagonal_solve on ANY
+    #                                       backend (CPU LAPACK ``gtsv`` / GPU
+    #                                       cuSPARSE); the CPU win over the
+    #                                       fori_loop legacy (~2000x). Opt-in
+    #                                       (scaling review 2026-06-13 lever #8).
+    #   4. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
+    #   5. CUDA backend                  -> PCR (new default; +51% throughput
     #                                       over cuSPARSE at peak via XLA fusion)
-    #   5. Else                          -> legacy fori_loop
+    #   6. Else                          -> legacy fori_loop
+    #
+    # The FFI primitive is AD-safe: jax registers a JVP + transpose +
+    # batching rule for ``tridiagonal_solve_p`` (reverse-mode differentiable,
+    # vmap-able).  Kept OPT-IN (not the CPU default) because the CPU LAPACK
+    # ``gtsv_ffi`` lowering requires a recent jaxlib (>= 0.4.35); the
+    # fori_loop legacy stays the universal, version-independent default so a
+    # contributor on an older jax is never broken by a missing lowering.
     #
     # NOTE: the env var is read at JIT trace time and baked into the
     # compiled graph; changing the env var after JIT compile has no
@@ -451,6 +463,8 @@ def thomas_solve_batched(
     forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
     if forced == "pcr":
         return pcr_solve_batched(a, b, c, d)
+    if forced == "lapack":
+        return _ffi_tridiagonal_solve(a, b, c, d)
     if forced == "cusparse":
         try:
             from jax.lax.linalg import tridiagonal_solve  # noqa: F401
@@ -458,7 +472,7 @@ def thomas_solve_batched(
         except (ImportError, AttributeError):
             on_gpu = False
         if on_gpu:
-            return _cusparse_solve(a, b, c, d)
+            return _ffi_tridiagonal_solve(a, b, c, d)
         return _thomas_solve_batched_legacy(a, b, c, d)
     if forced == "legacy":
         return _thomas_solve_batched_legacy(a, b, c, d)
@@ -475,17 +489,28 @@ def thomas_solve_batched(
     return _thomas_solve_batched_legacy(a, b, c, d)
 
 
-def _cusparse_solve(
+def _ffi_tridiagonal_solve(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
 ) -> jax.Array:
-    """Batched cuSPARSE tridiagonal solve via jax.lax.linalg.tridiagonal_solve.
+    """Batched tridiagonal solve via ``jax.lax.linalg.tridiagonal_solve``.
 
-    Lowering: single batched cuSPARSE invocation via the natively-batched
-    primitive. Same numerical behavior as :func:`pcr_solve_batched` and
-    :func:`_thomas_solve_batched_legacy` to machine epsilon.
+    Backend-agnostic FFI primitive: lowers to LAPACK ``gtsv`` on CPU and to
+    cuSPARSE ``gtsv2`` on CUDA — both single, natively-batched invocations.
+    Same numerical behavior as :func:`pcr_solve_batched` and
+    :func:`_thomas_solve_batched_legacy` to machine epsilon (LAPACK ``gtsv``
+    uses partial pivoting, so it is at least as stable as the plain Thomas
+    sweep for well-conditioned vertical operators).
+
+    AD-safe: ``tridiagonal_solve_p`` carries a JVP + transpose rule, so this
+    is reverse-mode differentiable (``jax.grad``) and vmap-able.
+
+    Diagonal convention (matches :func:`thomas_solve_batched`): ``a`` is the
+    sub-diagonal (``a[...,0]`` unused), ``b`` the main diagonal, ``c`` the
+    super-diagonal (``c[...,-1]`` unused), ``d`` the RHS — passed as
+    ``tridiagonal_solve(dl=a, d=b, du=c, b=d)``.
     """
     from jax.lax.linalg import tridiagonal_solve
     import math
@@ -493,7 +518,11 @@ def _cusparse_solve(
     orig_shape = a.shape
     spatial_shape = orig_shape[:-1]
     n_sys = orig_shape[-1]
-    n_cols = max(1, math.prod(spatial_shape))
+    # ``math.prod(())`` is 1 (the scalar-leading 1D case reshapes to
+    # (1, n_sys)); a zero-size leading batch must stay 0, NOT be clamped to
+    # 1 — ``max(1, ...)`` tried to reshape a size-0 array into (1, n_sys)
+    # and crashed, unlike the legacy path (codex 2026-06-13 MED).
+    n_cols = math.prod(spatial_shape)
 
     a_flat = a.reshape(n_cols, n_sys)
     b_flat = b.reshape(n_cols, n_sys)
@@ -527,3 +556,63 @@ def _thomas_solve_batched_legacy(
     d_flat = d.reshape(n_cols, n_sys)
     x_flat = jax.vmap(thomas_solve)(a_flat, b_flat, c_flat, d_flat)
     return x_flat.reshape(orig_shape)
+
+
+def cyclic_thomas_batched(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Batched PERIODIC (cyclic) tridiagonal solve via Sherman–Morrison.
+
+    Solves ``C x = d`` where ``C`` is tridiagonal with periodic wrap
+    terms: row ``0`` couples ``x[n-1]`` with coefficient ``a[..., 0]``
+    (the wrapped sub-diagonal) and row ``n-1`` couples ``x[0]`` with
+    coefficient ``c[..., -1]`` (the wrapped super-diagonal) — the
+    natural convention for a zonally periodic stencil where ``a[i]``
+    multiplies ``x[i-1 mod n]`` and ``c[i]`` multiplies ``x[i+1 mod n]``.
+
+    Standard Sherman–Morrison rank-1 reduction (Numerical Recipes §2.7):
+    two :func:`thomas_solve_batched` solves of the same modified
+    tridiagonal system plus a rank-1 correction.  Pure ``jnp`` ops —
+    JIT/scan/vmap/AD-safe; cost = 2 Thomas solves per call.
+
+    Parameters mirror :func:`thomas_solve_batched` (system on the LAST
+    axis, leading axes batched), except ``a[..., 0]`` and ``c[..., -1]``
+    are USED (the periodic wrap coefficients).  Requires ``n_sys >= 3``.
+    Diagonal dominance of the underlying operator keeps the modified
+    system (``b[...,0] - gamma``, ``b[...,-1] - a0*c_last/gamma`` with
+    ``gamma = -b[...,0]``) safely factorizable for the Helmholtz-class
+    matrices this serves (diag > 0, off-diag <= 0).
+    """
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"cyclic_thomas_batched expects a/b/c/d to share shape; got "
+            f"a={a.shape}, b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.shape[-1] < 3:
+        raise ValueError(
+            f"cyclic_thomas_batched requires n_sys >= 3 on the trailing "
+            f"axis; got n_sys={a.shape[-1]}"
+        )
+    alpha = c[..., -1]            # row n-1 -> col 0 (wrapped super-diag)
+    beta = a[..., 0]              # row 0 -> col n-1 (wrapped sub-diag)
+    gamma = -b[..., 0]            # NR convention (avoids zero pivot)
+
+    b_mod = b.at[..., 0].add(-gamma)
+    b_mod = b_mod.at[..., -1].add(-alpha * beta / gamma)
+    # Zero the (unused-by-Thomas but validated) wrap entries.
+    a_mod = a.at[..., 0].set(0.0)
+    c_mod = c.at[..., -1].set(0.0)
+
+    y = thomas_solve_batched(a_mod, b_mod, c_mod, d)
+    u = jnp.zeros_like(d)
+    u = u.at[..., 0].set(gamma)
+    u = u.at[..., -1].set(alpha)
+    z = thomas_solve_batched(a_mod, b_mod, c_mod, u)
+
+    vy = y[..., 0] + beta * y[..., -1] / gamma
+    vz = z[..., 0] + beta * z[..., -1] / gamma
+    factor = vy / (1.0 + vz)
+    return y - z * factor[..., None]

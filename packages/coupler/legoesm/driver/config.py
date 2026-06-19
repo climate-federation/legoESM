@@ -168,6 +168,12 @@ class OutputConfig(NamedTuple):
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
+    # Wallclock-aware mid-job checkpointing for long (century-scale) HPC chains.
+    # ``max_wallclock_seconds=0`` disables it (default); set it to the SLURM
+    # ``--time`` budget so the run checkpoints and exits cleanly with
+    # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
+    max_wallclock_seconds: float = 0.0
+    restart_buffer_seconds: float = 600.0
 
 
 class ExperimentConfig(NamedTuple):
@@ -202,6 +208,15 @@ class ExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"
     rad_update_steps: int = 1
+    # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
+    # compile).  Static Python gate (NOT trainable); default OFF keeps
+    # every existing run byte-identical.  When True AND
+    # ``rad_update_steps > 1`` the PRODUCTION ``_run_compiled`` path lifts
+    # the radiation-cycle loop from XLA to the host so rrtmgp and the
+    # dynamics+physics scan compile as TWO SEPARATE executables (a jit
+    # placed inside a ``lax.scan`` is inlined by XLA, not a distinct
+    # compile unit — only a host-level jit is its own executable).
+    unfused_radiation: bool = False
     diurnal_cycle: bool = False
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
@@ -220,6 +235,13 @@ class ExperimentConfig(NamedTuple):
     # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
     # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
     rrtmgp_gpoint_batch_size: int = 0
+    # G-point checkpointing in the RRTMGP two-stream scan (see
+    # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
+    # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for
+    # reverse-mode AD / training.  False = plain ``lax.scan`` (no prevent_cse):
+    # smaller compiled footprint / faster cold compile for FORWARD/inference
+    # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
+    rrtmgp_gpoint_checkpoint: bool = True
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -243,6 +265,11 @@ class ExperimentConfig(NamedTuple):
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): when True, ALSO
+    # load the ``ext_earth`` LW band from ``volcanic_aerosol_file`` and
+    # thread it into RRTMGP as the LW absorption optical depth.  Default
+    # OFF ⇒ no LW aerosol (byte-identical; zeros LW od is a solver no-op).
+    volcanic_aerosol_lw: bool = False
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
@@ -261,6 +288,11 @@ class ExperimentConfig(NamedTuple):
 
     # Conservation
     fix_moisture: bool = False
+    # Issue #323: make the per-step ``max(q_v, 0)`` floor on the physics
+    # tracer update moist-static-energy-conserving (remove the latent heat
+    # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
+    # default off => bit-identical.
+    energy_consistent_moisture_clip: bool = False
 
     # Topography
     topography: str = "flat"
@@ -333,8 +365,32 @@ class ExperimentConfig(NamedTuple):
     # reproducible from the seed recorded in the run manifest.
     seed: int = 0
 
+    # Segment/forcing cadence when NO host cadence exists (diag_days=0 AND
+    # checkpoint_days=0 — e.g. distributed_mode='spmd' milestone-1): the
+    # compiled-segment fallback length, which is ALSO how often
+    # time-varying forcing (SST/SIC, solar, ozone/aerosol, coupler
+    # overrides) is re-sampled — forcing updates only at segment
+    # boundaries.  Ignored whenever diagnostics or checkpoints set a
+    # finer cadence.  Without a fallback the segment collapses to 1 step
+    # and every step pays a host boundary (multi-controller: a
+    # cross-process rendezvous per step — the production-SPMD
+    # anti-scaling, job 8471423).
+    forcing_update_days: float = 1.0
+
     # Distributed
     distributed: bool = False
+    # How multi-process runs federate (read only when distributed=True):
+    #   "mpi"  — mpi4jax halo backend: replicated cubed-sphere dynamics
+    #            (full 6-face state per rank, physics-only scatter),
+    #            lat-lon band, or Voronoi cell partition.  Legacy default.
+    #   "spmd" — multi-controller jax.distributed: ONE global device
+    #            mesh, true cubed-sphere domain decomposition (the bench
+    #            --cs-spmd path productionised; shard-local parity
+    #            6.7e-10 @5 steps, job 8462928).  Cubed-sphere only;
+    #            mpi4jax is NEVER armed in this mode — mpi4jax and
+    #            jax.distributed collectives in one program is the
+    #            documented mixed-stack deadlock.
+    distributed_mode: str = "mpi"
     ensemble_size: int = 1
     n_devices: int | str = "auto"  # number of GPUs, or "auto" for all visible
     # Issue #273 follow-up: opt-in horizontal-column sharding for the
@@ -399,10 +455,52 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        _valid_distributed_modes = ("mpi", "spmd")
+        if self.distributed_mode not in _valid_distributed_modes:
+            errors.append(
+                f"distributed_mode must be one of {_valid_distributed_modes}, "
+                f"got {self.distributed_mode!r}"
+            )
+        if (self.distributed and self.distributed_mode == "spmd"
+                and g.grid_type != "cubed_sphere"):
+            errors.append(
+                "distributed_mode='spmd' supports only "
+                "grid.grid_type='cubed_sphere' (got "
+                f"{g.grid_type!r}): the lat-lon/MPAS distributed paths "
+                "arm the mpi4jax halo backend, which must never coexist "
+                "with jax.distributed collectives in one program"
+            )
+        if self.distributed and self.distributed_mode == "spmd":
+            # Milestone-1 limitation (codex review MAJOR): checkpoint and
+            # diagnostics writers assume a single process or an mpi4jax
+            # topology — under multi-controller SPMD every process would
+            # hit the same output path (concurrent clobber) or call
+            # device_get on non-fully-addressable global arrays.  Refuse
+            # LOUDLY until the gathered root-only writers are wired.
+            if self.output.checkpoint_days > 0:
+                errors.append(
+                    "distributed_mode='spmd' does not support "
+                    "checkpointing yet (output.checkpoint_days="
+                    f"{self.output.checkpoint_days}); set "
+                    "checkpoint_days=0 — gathered root-only restart "
+                    "writes are a follow-up"
+                )
+            if self.output.diag_days > 0:
+                errors.append(
+                    "distributed_mode='spmd' does not support the "
+                    "diagnostics writer yet (output.diag_days="
+                    f"{self.output.diag_days}); set diag_days=0 — "
+                    "gathered root-only diagnostics are a follow-up"
+                )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
             errors.append(f"seed must be >= 0, got {self.seed}")
+        if self.forcing_update_days <= 0:
+            errors.append(
+                f"forcing_update_days must be > 0, got "
+                f"{self.forcing_update_days}"
+            )
         if self.sbm_cape_threshold < 0:
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
@@ -475,6 +573,14 @@ class ExperimentConfig(NamedTuple):
                 f"gravity_wave_drag must be one of {_valid_gwd}, "
                 f"got {self.gravity_wave_drag!r}"
             )
+        # Checkpoint serialization format (mirror the io/restart writer set so a
+        # typo fails here instead of silently writing the wrong format).
+        _valid_checkpoint_format = ("npz", "zarr")
+        if self.output.checkpoint_format not in _valid_checkpoint_format:
+            errors.append(
+                f"checkpoint_format must be one of {_valid_checkpoint_format}, "
+                f"got {self.output.checkpoint_format!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(
@@ -489,23 +595,27 @@ class ExperimentConfig(NamedTuple):
             errors.append("ic='era5' requires ic_path to be set")
         if self.ic == "standard":
             # The standard-atmosphere IC overrides a grid-space temperature
-            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
-            # the A-grid u IS geographic-east, so the assignment is direct and
-            # correct.  Other grids need extra handling not yet wired:
-            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
-            #     geographic jet must be rotated by the grid angle first;
+            # Field AND (lat-lon only) a geographic (eastward) thermal-wind jet.
+            #   * lat-lon: the A-grid u IS geographic-east, so the realistic T/
+            #     p_s AND the balanced jet are assigned directly.
+            #   * cubed_sphere: the realistic T / p_s overlay is grid-agnostic
+            #     and IS applied; the balanced jet is SKIPPED (u/v are cube-LOCAL
+            #     components that would need a per-cell grid-angle rotation) — a
+            #     coupled climate spin-up grows its own circulation from the T
+            #     gradient (no balanced-jet IC needed, unlike a baroclinic-wave
+            #     test).  See ModelDriver._apply_standard_atmosphere_ic.
+            # Still not wired (fail early, before setup):
             #   * gaussian/spectral: temperature lives in spectral space (T_hat),
             #     no grid-space T Field;
             #   * mpas: not wired.
-            # Restrict to lat-lon here so the advertised IC is exactly the
-            # implemented+validated one — fail early, before setup.
             _gt_std = normalize_grid_type(self.grid.grid_type)
-            if _gt_std != "latlon":
+            if _gt_std not in ("latlon", "cubed_sphere"):
                 errors.append(
-                    f"ic='standard' is currently implemented only for "
-                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"ic='standard' is implemented for grid_type "
+                    f"'latlon' and 'cubed_sphere'; got "
+                    f"grid_type={self.grid.grid_type!r} "
                     f"(discretization={self.dycore.discretization!r}). "
-                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                    f"Use ic='default', or ic='era5' for spectral/mpas."
                 )
             # T_init is the equator surface temperature; the pole is
             # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
@@ -596,6 +706,12 @@ class ExperimentConfig(NamedTuple):
                 "column unstable.  Disable --fix-moisture or replace it "
                 "with a fix_total_water path that tracks precipitation."
             )
+        _valid_perf_modes = ("auto", "always", "never")
+        if self.output.diagnostics_perf_mode not in _valid_perf_modes:
+            raise ValueError(
+                f"diagnostics_perf_mode must be one of {_valid_perf_modes}, "
+                f"got {self.output.diagnostics_perf_mode!r}"
+            )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):
             warns.append(
@@ -672,6 +788,7 @@ class ExperimentConfig(NamedTuple):
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
+            unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
             ch4_ppbv=amip_cfg.ch4_ppbv,
@@ -692,12 +809,15 @@ class ExperimentConfig(NamedTuple):
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
+            volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),
             turbulence=getattr(amip_cfg, 'turbulence', 'none'),
             gravity_wave_drag=getattr(amip_cfg, 'gravity_wave_drag', 'none'),
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
+            energy_consistent_moisture_clip=getattr(
+                amip_cfg, 'energy_consistent_moisture_clip', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
@@ -802,6 +922,7 @@ class ExperimentConfig(NamedTuple):
             turbulence=self.turbulence,
             gravity_wave_drag=self.gravity_wave_drag,
             fix_moisture=self.fix_moisture,
+            energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,

@@ -1,0 +1,22 @@
+# legoESM experiment template — Maykut-Untersteiner equilibrium thickness.
+#
+# Names the `maykut_untersteiner` sea-ice matrix case via `setup:` (#388).
+experiment:
+  tier: tier2
+  complexity: thermodynamic
+  extent: column
+  maturity: structurally_validated
+  description: >
+    Maykut-Untersteiner (1971): seasonal sea-ice thermodynamics equilibrate to
+    the observed ~3 m perennial thickness — the standard column thermodynamic
+    equilibrium benchmark.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "sea-ice-maykut-untersteiner"
+  type: sea_ice_only
+setup:
+  name: maykut_untersteiner
+  grid: column
+output:
+  path: output/sea_ice/maykut_untersteiner/

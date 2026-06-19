@@ -208,6 +208,44 @@ def _global_dot_batch(
     PCG and differentiating straight through these reductions is AD-safe.
     """
     local = [jnp.sum(a * b) for (a, b) in pairs]
+    # SPMD (single-controller shard_map, route-B multi-GPU — no mpi4jax)
+    # path: each ``local`` sum is a PARTIAL sum over this device's shard
+    # (one latitude band) and must be summed across the mesh shard axis
+    # with ``jax.lax.psum``.  Checked FIRST because ``is_multi_process()``
+    # is FALSE under one process — otherwise the partial sum would be
+    # silently returned as the "global" dot and every band would converge
+    # to its own sub-system (the MPAS analogue of this bug was job
+    # 8460616).  Backend is ``"spmd"`` ONLY when armed by
+    # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
+    # branch is inert for the serial and MPI paths.  ``psum`` is
+    # self-transposing => AD-safe, same as ``allreduce(SUM)``.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            # backend armed "spmd" but no mesh set: an invalid state
+            # reachable only via the public set_halo_backend("spmd")
+            # without a matching set_spmd_mesh.  FAIL FAST rather than
+            # silently return unreduced partial sums inside a sharded
+            # solve (codex LOW) — the supported activators
+            # (activate_latlon_spmd_halo / the cube equivalent) always set
+            # the mesh together with the backend.
+            raise RuntimeError(
+                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
+                "is set; arm it via activate_latlon_spmd_halo(mesh).")
+        # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
+        # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
+        # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
+        # ``("face", ...)`` mesh; in a coupled run that mesh could be armed
+        # while this ocean barotropic PCG runs, and psum'ing over a
+        # non-lat (or replicated) axis would multiply the dots by the
+        # device count or crash (codex HIGH).  When the armed SPMD mesh is
+        # not the lat-band one, fall through to the MPI/local logic below
+        # (ocean fields are never cube-sharded, so the local/allreduce sum
+        # is the correct reduction there).
+        if "lat" in tuple(mesh.axis_names):
+            from legoesm.parallel.reductions import batch_psum_spmd
+            return batch_psum_spmd(local, "lat")
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (
@@ -481,7 +519,7 @@ def _fixed_iteration_pcg_single_reduce(
     return final.x, final.rr
 
 
-def _global_rel_residual(
+def global_rel_residual(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     x: jnp.ndarray,
     b: jnp.ndarray,
@@ -513,9 +551,6 @@ def solve_helmholtz_implicit(
     stock_cg_maxiter: int,
     pcg_variant: str = "standard",
     dot_weight: jnp.ndarray | None = None,
-    inv_area_weight: jnp.ndarray | None = None,  # accepted for API
-    # stability; unused (the unrolled distributed path needs no area
-    # weight — see the module note on why custom_linear_solve was dropped).
 ) -> tuple[jnp.ndarray, HelmholtzSolveDiagnostics]:
     """Solve ``A eta = rhs`` for the implicit free-surface step.
 
@@ -558,10 +593,6 @@ def solve_helmholtz_implicit(
         (diagnostic only; never loop control).
     stock_cg_tol, stock_cg_maxiter :
         Single-rank stock-CG tolerance / iteration cap.
-    inv_area_weight : jax.Array or None
-        Accepted for API stability; unused (the unrolled path needs no
-        area weighting — only the dropped ``custom_linear_solve``
-        transpose did).
 
     Returns
     -------
@@ -574,7 +605,7 @@ def solve_helmholtz_implicit(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
             maxiter=int(stock_cg_maxiter), M=M_inv,
         )
-        rel = _global_rel_residual(A_op, eta_new, rhs)
+        rel = global_rel_residual(A_op, eta_new, rhs)
         return eta_new, HelmholtzSolveDiagnostics(
             rel_residual=rel, converged=rel <= residual_tol,
         )

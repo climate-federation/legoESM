@@ -38,10 +38,18 @@ def _default_qv_profile():
 
 
 def test_make_column_state_shapes():
+    u_profile = jnp.linspace(-8.0, 2.0, NLEV)
+    v_profile = jnp.linspace(1.0, 4.0, NLEV)
     state = make_column_state(
-        NLEV, T_profile=_default_T_profile(), q_v_profile=_default_qv_profile()
+        NLEV,
+        T_profile=_default_T_profile(),
+        q_v_profile=_default_qv_profile(),
+        u=u_profile,
+        v=v_profile,
     )
     assert state.T.data.shape == (1, 1, 1, NLEV)
+    assert jnp.allclose(state.u.data[0, 0, 0], u_profile)
+    assert state.v is not None and jnp.allclose(state.v.data[0, 0, 0], v_profile)
     assert state.p_s.data.shape == (1, 1, 1)
     assert state.v is not None and state.v.data.shape == (1, 1, 1, NLEV)
     assert state.tracers is not None and "q_v" in state.tracers
@@ -51,6 +59,8 @@ def test_make_column_state_shapes():
 def test_make_column_state_rejects_wrong_profile_shape():
     with pytest.raises(ValueError):
         make_column_state(NLEV, T_profile=jnp.zeros(NLEV + 1))
+    with pytest.raises(ValueError):
+        make_column_state(NLEV, T_profile=_default_T_profile(), u=jnp.zeros(NLEV + 1))
 
 
 def test_scm_grid_attrs():

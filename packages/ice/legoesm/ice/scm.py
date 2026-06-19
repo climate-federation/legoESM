@@ -40,8 +40,8 @@ def cold_polar_forcing(
     ncol: int = 1,
     *,
     sw_down: float = 0.0,
-    lw_down: float = 200.0,
-    T_lowest: float = 250.0,  # noqa: N803 (physical symbol, project T_ convention)
+    lw_down: float = 200.0,  # coeff-ok: polar-night idealized forcing [W/m^2]
+    T_lowest: float = 250.0,  # noqa: N803 (physical symbol) — coeff-ok: idealized forcing [K]
     u_lowest: float = 6.0,
 ) -> AtmToSurface:
     """A cold, dark (polar-night) :class:`AtmToSurface` over ``ncol`` ice cells.
@@ -57,10 +57,10 @@ def cold_polar_forcing(
 
     return AtmToSurface(
         sw_down=full(sw_down), lw_down=full(lw_down), precip_total=full(0.0),
-        precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(1e-3),
-        u_lowest=full(u_lowest), v_lowest=full(0.0), p_lowest=full(9.7e4),
-        p_surface=full(1.0e5), rho_lowest=full(1.3), cos_zenith=full(0.0),
-        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(1e-3),  # coeff-ok: idealized polar-night forcing
+        u_lowest=full(u_lowest), v_lowest=full(0.0), p_lowest=full(9.7e4),  # coeff-ok: idealized polar-night forcing
+        p_surface=full(1.0e5), rho_lowest=full(1.3), cos_zenith=full(0.0),  # coeff-ok: idealized polar-night forcing
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),  # coeff-ok: idealized forcing
         has_precipitation=jnp.asarray(1.0),
     )
 
@@ -100,8 +100,8 @@ class IceColumnModel:
         ncol: int = 1,
         dt: float = 3600.0,
         h_ice_init: float = 0.5,
-        concentration_init: float = 0.9,
-        T_ice_init: float = 260.0,  # noqa: N803 (physical symbol, project T_ convention)
+        concentration_init: float = 0.9,  # coeff-ok: SCM initial condition
+        T_ice_init: float = 260.0,  # noqa: N803 (physical symbol) — coeff-ok: SCM initial condition [K]
         ocean_sst: float = constants.T_freeze_ocean,
         u_min: float = 1.0,
     ) -> IceColumnModel:

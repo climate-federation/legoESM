@@ -137,6 +137,15 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
         # Voronoi/MPAS: dcEdge is the cell-to-cell distance along each edge
         dx_min = float(jnp.min(jnp.asarray(grid.dcEdge)))
     elif hasattr(grid, 'dx'):
+        # Lat-lon: min(dx)/2 is the POLE-cell spacing.  This bounds the scalar
+        # Laplacian A_h to be CFL-stable at the pole (A_h = 0.05*dx_pole^2/dt);
+        # an equatorial-dx A_h is ~3000x larger and makes the EXPLICIT diffusion
+        # operator CFL-UNSTABLE at the pole (the polar filter truncates wave
+        # modes, not the diffusion stencil) -> immediate blow-up.  NOTE: this
+        # pole-bounded scalar A_h is too weak to damp midlatitude grid-scale
+        # noise at fine (<=2deg) resolution; a latitude-dependent viscosity
+        # (A_h ~ local dx^2) or biharmonic hyperdiffusion in the latlon_cgrid
+        # dycore is needed for stable 2deg global runs (TODO).
         dx_min = float(jnp.min(jnp.asarray(grid.dx))) / 2.0
     else:
         dx_min = 1e5

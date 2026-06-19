@@ -45,6 +45,7 @@ from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import vreman_nu_t as _vreman_core
 from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig, split_explicit_step)
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 
 # --------------------------------------------------------------------------- #
@@ -991,7 +992,7 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     c = c.at[..., 0].set(jnp.where(sing, 0.0, c[..., 0]))
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
-    phi_h = _thomas_complex(a, b, c, rhs)
+    phi_h = thomas_solve(a, b, c, rhs)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
     phi = _ifft(phi_h, g)
     u_new = u_s - dt * ddx(phi, g)
@@ -1000,27 +1001,6 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     w_new = w_s - dt * dphidz_f
     w_new = w_new.at[..., 0].set(0.0).at[..., -1].set(0.0)
     return u_new, v_new, w_new
-
-
-def _thomas_complex(a, b, c, d):
-    """Thomas tridiagonal solve along the LAST axis (complex RHS, real coeffs).
-
-    Static Python loop over ``n`` (= nz, small) so it fully unrolls under JIT —
-    robust (no scan-reconstruction indexing) and exact for the projection."""
-    n = d.shape[-1]
-    cp = [None] * n
-    dp = [None] * n
-    cp[0] = c[..., 0] / b[..., 0]
-    dp[0] = d[..., 0] / b[..., 0]
-    for k in range(1, n):
-        m = b[..., k] - a[..., k] * cp[k - 1]
-        cp[k] = c[..., k] / m
-        dp[k] = (d[..., k] - a[..., k] * dp[k - 1]) / m
-    x = [None] * n
-    x[n - 1] = dp[n - 1]
-    for k in range(n - 2, -1, -1):
-        x[k] = dp[k] - cp[k] * x[k + 1]
-    return jnp.stack(x, axis=-1)
 
 
 # --------------------------------------------------------------------------- #

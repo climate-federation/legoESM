@@ -63,7 +63,7 @@ from legoesm.ice.state import (
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 
-def _grid_supports_ice_dynamics(grid) -> bool:
+def grid_supports_ice_dynamics(grid) -> bool:
     """True when ``grid`` has implemented sea-ice dynamics/transport ops.
 
     Sea-ice dynamics (EVP/mEVP via ``strain_rates`` + ``stress_divergence``)
@@ -74,11 +74,19 @@ def _grid_supports_ice_dynamics(grid) -> bool:
     would otherwise crash with an ``AttributeError`` deep inside the EVP /
     FV kernels.  Function-scoped imports keep ``legoesm.ice`` importable in
     isolation (no eager ``legoesm.grids`` dependency at module load).
+
+    Public so an external coupler driver can pick a supported dynamics scheme
+    (or fall back to ``free_drift``) before calling :func:`step_sea_ice`.
     """
     from legoesm.grids.cubed_sphere import CubedSphereGrid
     from legoesm.grids.latlon import LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
+
+
+# Backward-compatible private alias (internal call sites below + any importer
+# predating the public promotion).
+_grid_supports_ice_dynamics = grid_supports_ice_dynamics
 
 
 def _base_spatial_ndim(grid):
@@ -206,6 +214,11 @@ def step_sea_ice(
         raise ValueError(
             f"dynamics={config.dynamics!r} requires a grid argument. "
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
+        )
+    if config.transport not in ("none", "advect"):
+        raise ValueError(
+            f"Unknown sea-ice transport scheme: {config.transport!r}. "
+            "Expected one of: 'none', 'advect'."
         )
     if config.transport == "advect" and grid is None:
         raise ValueError(
@@ -644,6 +657,7 @@ def _step_dynamic(
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm,
             C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "mevp" and grid is not None:
@@ -665,6 +679,7 @@ def _step_dynamic(
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm,
             C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "free_drift":
@@ -2173,6 +2188,7 @@ def _step_dynamic_v2(
             rho_ice=config.rho_ice, rho_air=config.rho_air_ref,
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm, C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "mevp" and grid is not None:
@@ -2189,6 +2205,7 @@ def _step_dynamic_v2(
             rho_ice=config.rho_ice, rho_air=config.rho_air_ref,
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm, C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "free_drift":
@@ -2532,17 +2549,35 @@ def _step_dynamic_v2(
         config.emissivity_ice * constants.sigma_sb * T_agg ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
-    # Aggregate albedo (use compute_ice_sw on aggregated state for
-    # diagnostic — matches what the atmosphere will see).
-    sw_agg = compute_ice_sw(
-        forcing.sw_down, T_agg, h_agg,
-        jnp.sum(h_snow * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else h_snow,
-        jnp.sum(pond_area * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else pond_area,
-        jnp.sum(pond_depth * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else pond_depth,
-        scheme=config.shortwave_scheme,
-        albedo_const=config.albedo_ice,
-    )
-    alpha_resp = sw_agg.albedo_eff
+    # Tile albedo the atmosphere sees.  ``maykut_untersteiner`` and
+    # ``delta_eddington`` are NONLINEAR in thickness / snow / pond state, so
+    # evaluating the albedo on the AREA-AGGREGATED state (α(mean state)) is NOT
+    # the area-mean albedo (mean(α_k)) in multi-category mode — a thin+thick mix
+    # biased the tile albedo by tens of W/m² (e.g. 0.5/0.5 area, h=[0.05, 2.0]:
+    # MU 0.700 vs the correct 0.461 → ~72 W/m² at SW=300; codex finding).
+    # Compute the SW kernel PER CATEGORY and area-weight the resulting albedo so
+    # the coupler's f_ice blend receives the physically correct mean reflectance.
+    # The ``constant`` scheme is linear in state so per-cat == aggregate (the
+    # weighted mean of a constant is the constant); this fix is exact for it too.
+    if is_multicat:
+        sw_cat = compute_ice_sw(
+            forcing.sw_down[..., None], T_ice, h,
+            h_snow, pond_area, pond_depth,
+            scheme=config.shortwave_scheme,
+            albedo_const=config.albedo_ice,
+        )
+        alpha_resp = (
+            jnp.sum(sw_cat.albedo_eff * conc, axis=-1)
+            / jnp.maximum(conc_agg, 1e-12)
+        )
+    else:
+        sw_agg = compute_ice_sw(
+            forcing.sw_down, T_agg, h_agg,
+            h_snow, pond_area, pond_depth,
+            scheme=config.shortwave_scheme,
+            albedo_const=config.albedo_ice,
+        )
+        alpha_resp = sw_agg.albedo_eff
 
     # Ice → ocean back-reaction stress.  Per-ice-tile (no ``* conc_agg``):
     # blend_tiles applies the single area weight ``f_ice``.  F11.

@@ -38,7 +38,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 # Test infrastructure
 # ============================================================================
 
-class TestResult:
+class _CheckResult:
     def __init__(self, name):
         self.name = name
         self.passed = True
@@ -120,7 +120,7 @@ def compute_dual_areas(grid):
 # ============================================================================
 
 def test_discrete_adjoint():
-    result = TestResult("Test 1: Discrete Adjoint Identity")
+    result = _CheckResult("Test 1: Discrete Adjoint Identity")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     area_h = grid.area
@@ -296,7 +296,7 @@ def test_discrete_adjoint():
 # ============================================================================
 
 def test_vector_laplacian_equivalence():
-    result = TestResult("Test 2: Vector Laplacian Equivalence")
+    result = _CheckResult("Test 2: Vector Laplacian Equivalence")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     n_lon = grid.n_lon
@@ -354,7 +354,7 @@ def test_vector_laplacian_equivalence():
 # ============================================================================
 
 def test_monotone_dissipation():
-    result = TestResult("Test 3: Monotone Dissipation")
+    result = _CheckResult("Test 3: Monotone Dissipation")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     area_u_dual, area_v_dual = compute_dual_areas(grid)
@@ -396,7 +396,7 @@ def test_monotone_dissipation():
 # ============================================================================
 
 def test_boundary_behavior():
-    result = TestResult("Test 4: Boundary Behavior")
+    result = _CheckResult("Test 4: Boundary Behavior")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     area_u_dual, area_v_dual = compute_dual_areas(grid)
@@ -461,7 +461,7 @@ def test_boundary_behavior():
 # ============================================================================
 
 def test_euler_step_stability():
-    result = TestResult("Test 5: Single Euler Step Stability")
+    result = _CheckResult("Test 5: Single Euler Step Stability")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
 
@@ -505,7 +505,7 @@ def test_euler_step_stability():
 # ============================================================================
 
 def test_3d_consistency():
-    result = TestResult("Test 6: 3D Consistency")
+    result = _CheckResult("Test 6: 3D Consistency")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     n_lat = grid.n_lat
@@ -557,7 +557,7 @@ def test_3d_consistency():
 # ============================================================================
 
 def test_wrap_column_consistency():
-    result = TestResult("Test 7: D_S Wrap Column Consistency")
+    result = _CheckResult("Test 7: D_S Wrap Column Consistency")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     n_lon = grid.n_lon
@@ -595,7 +595,7 @@ def test_wrap_column_consistency():
 # ============================================================================
 
 def test_tendency_periodicity():
-    result = TestResult("Test 8: Tendency Wrap Column Periodicity")
+    result = _CheckResult("Test 8: Tendency Wrap Column Periodicity")
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     n_lon = grid.n_lon
@@ -647,7 +647,7 @@ def main():
             r = test_fn()
             results.append(r)
         except Exception as e:
-            r = TestResult(name)
+            r = _CheckResult(name)
             r.passed = False
             r.details.append(("FAIL", f"Exception: {e}"))
             r.details.append(("INFO", traceback.format_exc()))

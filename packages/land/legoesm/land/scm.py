@@ -41,14 +41,14 @@ from legoesm.core.coupling_fields import AtmToSurface
 def constant_land_forcing(
     ncol: int = 1,
     *,
-    sw_down: float = 200.0,
-    lw_down: float = 300.0,
-    precip_total: float = 1e-5,
-    T_lowest: float = 280.0,  # noqa: N803 (physical symbol, project T_ convention)
-    q_lowest: float = 5e-3,
+    sw_down: float = 200.0,  # coeff-ok: SCM idealized forcing [W/m^2]
+    lw_down: float = 300.0,  # coeff-ok: SCM idealized forcing [W/m^2]
+    precip_total: float = 1e-5,  # coeff-ok: SCM idealized forcing [kg/m^2/s]
+    T_lowest: float = 280.0,  # noqa: N803 — coeff-ok: SCM forcing [K]
+    q_lowest: float = 5e-3,  # coeff-ok: SCM idealized forcing [kg/kg]
     u_lowest: float = 3.0,
     v_lowest: float = 0.0,
-    p_surface: float = 1.0e5,
+    p_surface: float = 1.0e5,  # coeff-ok: SCM idealized forcing [Pa]
 ) -> AtmToSurface:
     """A spatially-uniform, time-constant :class:`AtmToSurface` over ``ncol`` columns.
 
@@ -64,9 +64,9 @@ def constant_land_forcing(
     return AtmToSurface(
         sw_down=full(sw_down), lw_down=full(lw_down), precip_total=full(precip_total),
         precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(q_lowest),
-        u_lowest=full(u_lowest), v_lowest=full(v_lowest), p_lowest=full(0.95 * p_surface),
-        p_surface=full(p_surface), rho_lowest=full(1.15), cos_zenith=full(0.5),
-        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        u_lowest=full(u_lowest), v_lowest=full(v_lowest), p_lowest=full(0.95 * p_surface),  # coeff-ok: idealized forcing
+        p_surface=full(p_surface), rho_lowest=full(1.15), cos_zenith=full(0.5),  # coeff-ok: idealized forcing
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),  # coeff-ok: idealized forcing
         has_precipitation=jnp.asarray(1.0),
     )
 
@@ -109,8 +109,8 @@ class LandColumnModel:
         config=None,
         ncol: int = 1,
         dt: float = 3600.0,
-        T_soil_init: float = 280.0,  # noqa: N803 (physical symbol, project T_ convention)
-        W_bucket_init: float = 75.0,  # noqa: N803
+        T_soil_init: float = 280.0,  # noqa: N803 — coeff-ok: SCM initial condition [K]
+        W_bucket_init: float = 75.0,  # noqa: N803 — coeff-ok: SCM initial condition [kg/m^2]
         u_min: float = 1.0,
         lat=None,
         start_day_of_year: float = 0.0,

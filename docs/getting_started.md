@@ -94,7 +94,7 @@ your install and JAX backend are working.
 ### b. A radiative-convective equilibrium column (SCM)
 
 ```bash
-JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/run_scm_rce.py --days 50
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/matrix/run_scm_test_matrix.py rce --days 50
 ```
 
 A 50-day RCE single-column run with gray radiation, Louis turbulence,

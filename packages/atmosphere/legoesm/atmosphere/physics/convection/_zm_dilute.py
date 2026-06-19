@@ -100,6 +100,13 @@ _NIT_LHEAT = 2
 _NEWTON_ITERS = 20
 
 
+# --- pspec autoblock
+_LAUNCH_SMOOTH_SHARPNESS = 8.0
+_VIRTUAL_T_COEFF = 1.608
+_DMPDZ_DEFAULT = -1.0e-3
+_PBL_TOP_PA_DEFAULT = 7.0e4
+_LAUNCH_SHARPNESS_DEFAULT = 5.0e-4
+
 class DiluteParcel(NamedTuple):
     """Dilute-parcel diagnostics, surface-last ``(ncol, nlev)``.
 
@@ -174,7 +181,7 @@ def _invert_entropy(
     practice).  ``T`` is clipped to a physical range each step to keep
     the iteration bounded.
     """
-    dT = 0.01
+    dT = 0.01  # coeff-ok: FD temperature perturbation [K]
     _dtype = T_first_guess.dtype
 
     def body(_, T):
@@ -194,7 +201,7 @@ def _invert_entropy(
         fp_safe = jnp.where(jnp.abs(fp) > 1.0e-6, fp, 1.0e-6)
         T_new = T - f / fp_safe
         # Pin to input precision (fori_loop carry dtype invariant).
-        return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)
+        return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)  # coeff-ok: physical T clip [K]
 
     return jax.lax.fori_loop(0, _NEWTON_ITERS, body, T_first_guess)
 
@@ -206,12 +213,12 @@ def dilute_parcel_cape(
     p_half: jax.Array,
     z_full: jax.Array,
     *,
-    dmpdz: float = -1.0e-3,
+    dmpdz: float = _DMPDZ_DEFAULT,
     tiedke_add: float = 0.5,
     tp_fac: float = 0.0,
     tpert: jax.Array | float = 0.0,
-    pbl_top_pa: float = 7.0e4,
-    launch_sharpness: float = 5.0e-4,
+    pbl_top_pa: float = _PBL_TOP_PA_DEFAULT,
+    launch_sharpness: float = _LAUNCH_SHARPNESS_DEFAULT,
 ) -> DiluteParcel:
     """Dilute entraining-plume CAPE (FAITHFUL to ZM ``buoyan_dilute``).
 
@@ -261,7 +268,7 @@ def dilute_parcel_cape(
     in_pbl = jax.nn.sigmoid((p_full - pbl_top_pa) / 1.0e3)  # ~1 in PBL, 0 aloft
     # Mask MSE outside the PBL with a large negative offset so the softmax
     # never selects an aloft level (whose geopotential term inflates MSE).
-    LARGE = jnp.asarray(1.0e9, dtype=_dtype)
+    LARGE = jnp.asarray(1.0e9, dtype=_dtype)  # coeff-ok: large sentinel
     h_masked = h_mse - LARGE * (1.0 - in_pbl)
     launch_w = jax.nn.softmax(launch_sharpness * h_masked, axis=-1)  # (ncol,nlev)
     levels = jnp.arange(nlev, dtype=_dtype)
@@ -422,7 +429,7 @@ def dilute_parcel_cape(
     #   level = k_launch − 1 → sigmoid(8·0)  = 0.5   (first above: ramp)
     #   level = k_launch − 2 → sigmoid(8·1)  ≈ 1.0   (fully active)
     strict_above_launch = jax.nn.sigmoid(
-        8.0 * (k_launch_smooth[:, None] - 1.0 - levels[None, :])
+        _LAUNCH_SMOOTH_SHARPNESS * (k_launch_smooth[:, None] - 1.0 - levels[None, :])
     )
     strict_r2 = jnp.moveaxis(strict_above_launch[:, ::-1].astype(_dtype), 1, 0)
     # Environmental q at the launch (for the launch-level qstp init).
@@ -522,7 +529,7 @@ def dilute_parcel_cape(
 
         # Retained vapor (qstp): above launch = qs if super-saturated else
         # new_q; at/below launch = q_env (oracle qstp(mx)=q(mx)).
-        supersat = jax.nn.sigmoid(1.0e4 * (new_q - qs_mix_k))
+        supersat = jax.nn.sigmoid(1.0e4 * (new_q - qs_mix_k))  # coeff-ok: supersat gate smoothing
         qstp_above = supersat * qs_mix_k + (1.0 - supersat) * new_q
         qstp = sabv * qstp_above + (1.0 - sabv) * q_e
 
@@ -550,11 +557,11 @@ def dilute_parcel_cape(
     #   tpv = (tp + tp_fac·tpert)·(1 + 1.608·qstp)/(1 + new_q)
     Tpv = (
         (Tp + tp_fac * tpert_arr[:, None])
-        * (1.0 + 1.608 * qstp)
+        * (1.0 + _VIRTUAL_T_COEFF * qstp)
         / (1.0 + newq)
     )
     # Environment virtual temperature (oracle convention 1.608, vapor/dry).
-    Tv_env = T_env * (1.0 + 1.608 * q_v_env) / (1.0 + q_v_env)
+    Tv_env = T_env * (1.0 + _VIRTUAL_T_COEFF * q_v_env) / (1.0 + q_v_env)
 
     # Buoyancy (oracle ``buoy(k) = tpv − tv + tiedke_add`` for k<=mx).  Do
     # NOT pre-multiply by ``above_launch`` here — the CAPE integral applies

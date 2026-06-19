@@ -42,9 +42,9 @@ _GridT = Union[CubedSphereGrid, LatLonGrid]
 
 
 def ocean_global_sum(local_value):
-    """MPI-aware global sum for scalar or vector reductions.
+    """MPI- AND SPMD-aware global sum for scalar or vector reductions.
 
-    NOTE: this gates only on ``is_distributed()`` (the mpi4jax/sharded flag),
+    NOTE: the MPI gate keys on ``is_distributed()`` (the mpi4jax/sharded flag),
     whereas the MPAS twin :func:`legoesm.parallel.reductions.global_sum_if_distributed`
     also reduces when ``jax.process_count() > 1`` (JAX multi-host).  Under the
     ocean's actual MPI usage the two are identical (``is_distributed`` is set,
@@ -53,7 +53,32 @@ def ocean_global_sum(local_value):
     canonical helper is deliberately deferred until that path can be validated
     (single-rank vs MPI vs sharded), to avoid a silent reduction-semantics change
     in the conservation fixers.
+
+    SPMD (single-controller lat-band shard_map, route-B multi-GPU — no mpi4jax):
+    under the armed SPMD halo backend ``local_value`` is a PARTIAL sum over this
+    device's latitude band and MUST be reduced across the ``"lat"`` mesh axis
+    with ``jax.lax.psum`` — checked FIRST because ``is_distributed()`` is FALSE
+    for the SPMD ``DeviceConfig`` (it keeps ``is_distributed=False``), so the MPI
+    gate below would otherwise return each band's partial sum as the "global"
+    total and the conservation/eta-drift fixers (``fix_eta_drift``,
+    ``fix_volume``/``fix_heat``/``fix_salt``) would apply a per-band-wrong
+    correction (the same class of bug as the barotropic PCG's
+    ``_global_dot_batch``).  Keyed on the ``"lat"`` axis BY NAME so a coupled
+    cube-atm SPMD mesh (``("face", …)``, also backend=="spmd") falls through to
+    the MPI/local logic — ocean fields are never cube-sharded.  ``psum`` is
+    self-transposing ⇒ AD-safe, like ``allreduce(SUM)`` (CLAUDE.md).  The branch
+    is inert for the serial, MPI, and cube paths.
     """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            raise RuntimeError(
+                "ocean_global_sum: halo backend is 'spmd' but no SPMD mesh is "
+                "set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(mesh.axis_names):
+            import jax
+            return jax.lax.psum(local_value, "lat")
     if is_distributed():
         return global_sum_mpi(local_value)
     return local_value

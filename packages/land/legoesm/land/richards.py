@@ -37,6 +37,18 @@ from legoesm.land.soil_hydraulics import (
 from legoesm.land.tridiag import thomas_solve_batch
 
 
+__param_spec__ = {
+    "RichardsConfig": {
+        "scheme_key": "land.richards",
+        "excluded": {
+            "theta_tol": "numerics: Newton convergence tolerance",
+        },
+        "params": {
+        },
+    },
+}
+
+
 class RichardsConfig(NamedTuple):
     """Configuration for the Richards equation solver.
 
@@ -122,6 +134,12 @@ def solve_richards(
     # runoff before deeper layers can absorb the infiltrating water.
     flux_infiltrated = jnp.minimum(flux_top, infil_capacity)
     runoff_surface = jnp.maximum(flux_top - flux_infiltrated, 0.0)
+
+    if richards_config.bottom_bc not in ("free_drainage", "zero_flux"):
+        raise ValueError(
+            f"Unknown Richards bottom_bc {richards_config.bottom_bc!r}; "
+            "expected one of: 'free_drainage', 'zero_flux'."
+        )
 
     # --- Picard iteration ---
     psi_m = psi  # iterate

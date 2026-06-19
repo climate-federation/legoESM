@@ -1355,12 +1355,13 @@ def packed_pad_halo_mpi_4d(
         )
     if not fields:
         return []
+    from legoesm.grids.duogrid import apply_duogrid_4d
     if len(fields) == 1:
         padded = pad_halo_mpi_4d(
             fields[0], topology, halo, interp_offsets=interp_offsets,
         )
         if duogrid is not None:
-            padded = _apply_duogrid_4d(padded, duogrid, halo)
+            padded = apply_duogrid_4d(padded, duogrid, halo)
         return [padded]
 
     splits = [f.shape[-1] for f in fields]
@@ -1372,23 +1373,5 @@ def packed_pad_halo_mpi_4d(
     split_indices = list(_np.cumsum(splits[:-1]))
     pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
-        pieces = [_apply_duogrid_4d(p, duogrid, halo) for p in pieces]
+        pieces = [apply_duogrid_4d(p, duogrid, halo) for p in pieces]
     return pieces
-
-
-def _apply_duogrid_4d(padded, duogrid, halo):
-    """Apply the duogrid kinked-to-extended remap + corner fill to a 4D
-    padded field, level-by-level via ``jax.vmap``.  Mirrors the
-    post-processing loop inside ``halo.pad_halo_4d``.
-    """
-    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
-    import jax
-
-    def _remap_level(level_slice):
-        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-        level_slice = fill_corner_region(level_slice, duogrid, halo)
-        return level_slice
-
-    padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
-    padded_t = jax.vmap(_remap_level)(padded_t)
-    return jnp.transpose(padded_t, (1, 2, 3, 0))

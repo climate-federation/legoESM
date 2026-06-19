@@ -30,6 +30,16 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
   - Column integrals: `legoesm.diagnostics.column_integrals` (`column_water_vapor`). No inline `jnp.sum(q*p_s*dsigma)/g`.
   - Losses: `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`).
   - Optimizer: `ml/training.create_optimizer()` (warmup+cosine+clip).
+  - SCM-RCE gradient tuning: reuse `scripts/run/run_scm_rce_campaign.py` for CRM
+    reference extraction / SCM evaluation and `legoesm.training.scm_rce_metrics`
+    for the normalized profile score. No duplicated RCE profile numerics.
+  - SCM-RCE param training defaults to MUON via `ml.training.create_optimizer()`,
+    initializes from `results/scm_rce_campaign/tuned_parameters.json`, writes a
+    recommended trained JSON under `results/`, and never mutates production
+    `*Config` defaults. Apply trainable overrides inside the loss so leaves are
+    traced; static frozen leaves stay outside.
+  - Every new `.py`, including `scripts/run/*.py` drivers, gets a direct test.
+    Scheme/factory dispatch must raise on unknown selections.
   - Atm column (h, ρ, virtual T): `atmosphere.physics._shared`.
   - Ocean EOS/pressure: `ocean.eos` (`compute_ocean_rho`, `compute_ocean_rho_and_pressure`).
   - SFNO: `ml/sfno.py`. No new neural op archs in training.
@@ -72,7 +82,14 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Mimicry-only glue (halo strip, axis transpose, time-level handling) lives in the fidelity harness, never the model. Test: "would a user with a different goal ever select this?" No → harness.
 - Conventions handled only in the bridge, verified by equivariance tests (`physics(φ(x))=φ(physics(x))` to tol); a "convention" that changes the wet domain/answers is physics → config, not bridge.
 - Constants are config (`ConstantsConfig`), not module-global monkey-patches (no `override_constants` in shippable paths); defaults reference `legoesm.constants`; base only, derived (κ,ε) recomputed.
-- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2).
+- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2). MACHINE-ENFORCED (#388 Ask#4): `ocean/fidelity/precedence.py::evaluate_precedence` LOCKS oracle tiers (≥3) on any truth-tier (0–2) failure; surfaced + exit-gated by `scripts/validate/ocean_fidelity/build_fidelity_scorecard.py` (the one generated scorecard).
+
+## Recipe×Setup template adapters (#388)
+- **One shared selector, never re-implemented.** Every component YAML experiment adapter exposing a `setup:` block (atmosphere `Config`, ocean `OceanExperimentConfig`, sea-ice `SeaIceExperimentConfig`, …) MUST route validation + command-building + signature through `legoesm.core.setup_selector` (`MatrixRunnerSpec` + `validate_setup`/`build_matrix_command`/`setup_signature`/`require_positive_finite`). Per-component CLI differences (case flag `--only`/`--test`, exact-match `exact_prefix`, which `--levels`/`--dt`/`--days`/`--resolution` flags exist) are a `MatrixRunnerSpec`, NOT a copy-pasted `parts=[...]` builder or private `_SETUP_KEYS`/`_validate_setup`. Component-specific case-name validation goes through the `known_names=` kwarg. A re-implemented selector is REJECTED in review. Factory naming: `_<component>_matrix_spec()`. FOLLOW-UP: dedup `OceanExperimentConfig`'s inline selector onto the shared helper once PR #465 + the shared-helper PR both land on main (the inline copy predates the extraction).
+- **Every setup template's `(name, grid)` MUST be a real matrix case**, enforced by a catalog-backed test (`run_<comp>_test_matrix._build_test_matrix()` → assert the pair exists) so `--test/--only =<name> --grid <grid>` never selects nothing. New template without this gate → REJECTED.
+- **An exact case selector matching nothing is a hard error** (`raise SystemExit`) in every matrix-runner mode — never a silent no-op (dispatch-hardening). MPI-safe: key the guard off the global pre-slice match count; empty-slice ranks fall through to the barrier.
+- **New `experiment_registry` mode → same-PR `get_adapter` test** in `test_experiment_registry.test_get_adapter_resolves_classes` (a template test importing the class directly does NOT cover the dispatch).
+- Land has no standalone idealized-case surface (no registry/matrix runner) → recipe×setup is N/A there; do not invent one to match the pattern. Truth-tier precedence stays ocean-scoped per `oracle_recipe_strategy.md`; use `TRUTH_TIERS`/`ORACLE_TIER_FLOOR` by name (no hardcoded `3`).
 
 ## Validation
 - Narrowest test after edits. Numerical changes: analytical/benchmark > unit tests alone. `JAX_ENABLE_X64=1` unless float32/Metal task.
@@ -87,6 +104,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 ## Domain Architect vs Syntax Engine (AI guardrails)
 See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the human dictates the *logic* (units, signs, conserved qty, valid scheme sets, references, acceptance criteria); AI fills the *body*; every declared invariant is checked **mechanically** so violations fail LOUDLY. Each gate is a **tripwire, not a proof** and ships a synthetic-violation self-test (provably non-vacuous). NON-NEGOTIABLE harness (extend, never weaken; budgets/TODOs shrink only):
 - **Spec-first physics contracts**: every physics scheme module declares `__physics_contract__` (units/signs/conserves/differentiable/reference/idealized_test); `tests/test_physics_contracts.py` partitions all `*/physics/*.py` into EXCLUDED / CONTRACT_TODO(shrink-only) / annotated — a NEW physics file must ship a contract or be classified. Author the contract + acceptance test BEFORE the body.
+- **Atmospheric parameterization edits are high-risk**: run codex adversarial review, #477 truth-tier tendency validators, conservation tests, and the equilibrium-SCM-RCE realism harness before merge. A NEW scheme must pass the RCE realism gate or enter its shrink-only TODO partition with a reason.
 - **CI ratchets** (AST + self-test, via shared `tests/_ratchet_audit.py`): `test_no_hardcoded_constants` (constants only from `legoesm.constants`), `test_no_saturation_reimpl` (saturation only from `thermo`), `test_dispatch_hardening` (no scheme guard silently deleted), `test_validate_strict_coverage` (no scheme field skips fail-early validation). Escape: real `# const-ok:`/`# satcurve-ok:` comment.
 - **Local hooks** (`.claude/hooks/`, wired in `settings.json`): PreToolUse blocks an edit adding a banned constant/saturation prefactor to a `.py` (fail-open); Stop reminds (once/session) to run the mandatory codex review on uncommitted numerics/physics. CI remains authoritative (a `Bash` heredoc bypasses the hook, not CI).
 - **Best coding practices = use the existing system**, not a parallel one: ruff/mypy, import-linter (`alerting="error"`), inline-import budgets, pre-impl grep + shared utilities (no re-derivation), every new `.py` gets a unit test, slopbuster sweeps, iterate-with-codex on substantial changes.
@@ -98,7 +116,7 @@ See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the hum
 - Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py`
 - Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py`
 - AMIP: `.venv/bin/python scripts/run/run_amip.py`
-- Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
+- Dycore progression: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py` (SW -> hydrostatic -> non-hydrostatic ladder; `--only sw|hydro|nh`). The old `tests/validation/run_dycore_progression_suite.py` is superseded — its per-case child scripts were removed.
 - GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
 - Scripts reorganized into buckets: `scripts/{run,matrix,bench,plot,validate,data,experiment,cluster}/`; debug in `scripts/tmp/`. See `scripts/README.md` + `## File Layout` below.
 - MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
@@ -124,6 +142,7 @@ See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the hum
 ## Hygiene/Imports/Tests (audit)
 - Every new `.py` ≥1 direct unit test importing+exercising leaf module (tendencies for physics schemes — not just integration via factory). No `__init__.py` re-export / `supported_matrix.py` / factory dispatch add without same-PR test. Block PRs growing untested-LIVE count.
 - New config dispatch (Literal + factory in `integration.py`): test via public config.
+- **New user-tunable config field → same-PR CLI flag in every affected run script.** Rule applies to `ExperimentConfig`/`DycoreConfig`/`OutputConfig` fields in `run_amip.py`, `OceanExperimentConfig`/`KPPConfig`/`VerticalMixingConfig` in `run_omip.py`, and `MultiLayerLandConfig` sub-configs in `run_lmip.py`. "User-tunable" = any float/int/str/bool field a user would reasonably change for a sensitivity run (excludes: internal-only flags such as `debug_precision`/`diagnostics_perf_mode`, unimplemented stubs like `carbon_cycle` in AMIP, and parallel-milestone-gated fields like `distributed_mode=spmd`). Each new flag also needs: (1) wiring in `build_config_from_args` / the equivalent config-builder, (2) a round-trip test in the corresponding `tests/unit/test_run_*_cli.py`, and (3) a `validate_strict` membership check if it is a scheme Literal. The open debt is tracked in the GitHub issue "CLI flag gaps in run_amip / run_omip / run_lmip".
 - Removing module: also remove `__init__.py` re-export, `supported_matrix.py` entry, dispatch, test file, `__pycache__`.
 - No deprecated backward-compat wrappers — update call sites. No thin dispatch-only wrappers (`X_utils.py` re-exporting `X.py`) — inline/factor. Real branching across callers (`land/stomata_utils.py`) legit. Grid variants legit when genuinely different numerics; indexing-only copy-paste forbidden.
 - **No top-level cross-package imports from `core/` to `runtime/`/`parallel/`/`driver/`/`training/`/`experiments/`.** Why: `from legoesm.runtime.backend import ...` at top of `core/precision.py` triggered `runtime/__init__.py` → `runtime.precision` → `core.precision` mid-init, breaking isolated pytest. Use function-scope deferred imports.
@@ -142,6 +161,20 @@ See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the hum
 - **Tests+scripts+plotters same rule.** `from legoesm import constants`. No `9.80616`, `7.292e-5`, `6.371e6` literals.
 - **Sigmoid sharpness/transition widths in JAX hot loops forbidden as magic numbers.** Inside `scan_step`/`cond`: fn kwarg with doc default OR scheme `*Config` field. Ex: `compute_moist_adiabat(lcl_sigmoid_width_pa=100.0)`, `PlumeConfig.active_sigmoid_sharpness=1e4`, DM95 `transition_width_frac=0.1` on `dm95_taper`/`dm95_taper_scalar`/`_triad_taper`.
 - **Saturation re-impl in forcing modules forbidden.** Use `legoesm.thermo.saturation_mixing_ratio`/`saturation_vapor_pressure`.
+
+### Parameter hygiene — declare per category at file top + machine-readable tunable/fixed split (gated)
+Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `tests/test_no_inline_physics_coeffs.py` (+`_inline_coeff_baseline.py`) and `tests/test_param_specs.py` (+`_param_spec_baseline.py`).
+- **No inline empirical coefficient in a physics function body OR signature default.** Across `*/physics/*`, `land/`, `ice/`, `coupler/`: every float literal (and int `|v|>16`) inside a function scope is flagged. Move it to (a) a scheme `*Config` NamedTuple field if tunable/scheme-defining, (b) a module-level `_UPPER_SNAKE` constant/table block (published fits/tables: Sutherland, Hall-Pruppacher, Morel-Berthon, Jerlov, KK2000) with a provenance comment if a fixed published constant, or (c) a real `# coeff-ok: <reason>` (reason REQUIRED) for a genuine numerics one-off. Exempt: math {0,0.25,0.5,1,2,3,4,6}, exact conversions, `|v|<=1e-6` floors, `|v|>=1e20` guards, subscript indices, Pow exponents, small ints (indices/counts).
+- **Per-file layout (consistent placement):** docstring → imports → `__physics_contract__` → `__param_spec__` → fixed `_UPPER_SNAKE` constant/table blocks (under `# --- <category> (<reference>) ---` comments) → `*Config` NamedTuple(s) with fields grouped by the same category comments (snake_case + unit suffixes) → functions whose bodies read ONLY `cfg.<field>` / `constants.*` / exempt math. Kwarg-default literals → reference a module constant or config field (a Name in the signature, not a literal).
+- **Every physics scheme `*Config` declares `__param_spec__`** (module-level pure dict literal next to the NamedTuple). Per float field: `units`, `bounds (lo,hi)`, `tunable_tier`, `transform` (sigmoid/softplus/none), `category`, `reference`, `shape` (None or dim key like `n_pft` for variable-size array params), optional `legacy_name`. A NEW config module must ship a spec or be classified in `PARAM_SPEC_TODO` (shrink-only). Inclusion is computed: only `:float`-annotated fields are spec-eligible.
+- **Tunable/fixed split (the continuum), classify the SAME way every time:**
+  - `tunable_tier 1` (**core**) = params already trained in practice / well-posed (surface albedos, ice strength `P_star`, gray optical depths, bulk exchange `C_H`/`C_E`).
+  - `tunable_tier 2` (**extended**) = clear closure knobs with literature bounds (relaxation timescales τ, entrainment/drag/autoconv rate coefficients, thresholds, emissivity, roughness).
+  - `tunable_tier 0` / `excluded` (with a reason string) = NOT trainable: numerics floors/caps/regularisers, smoothing widths, measurement conventions (e.g. MOST 10 m), and anything **iteration-coupled** (mEVP `alpha`/`beta`, EVP `T_evp` couple to the subcycle count).
+  - The collector selects tiers `1..N` (`build_trainable_params(config, tier="core"/"extended"/"aggressive", include=, exclude=)`); flip a param's status with a 1-line `tunable_tier` edit. See [[param-hygiene-spec-effort]].
+- **Loop-iteration COUNTS are never config/trainable** → module constant (e.g. `_N_EVP_DEFAULT = 120`), not a config field, not a kwarg-default literal. Structurally guaranteed: ints are not spec-eligible, so an iteration count can never reach the trainable collector. See [[loop-counts-never-trainable]].
+- **A tunable closure whose default is a `constants.X` reference** (e.g. `S_ice_new = constants.S_ice_bulk_default`) is *eligible* (may be a `__param_spec__` param with explicit bounds + tier) though not *required* (the AST gate won't force it). Expose genuine calibratable closures; keep environmental references (ocean salinity) fixed/excluded.
+- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `param_collector.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
 
 ## Naming
 - Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.

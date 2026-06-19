@@ -200,8 +200,8 @@ def build_bathymetry(grid, config: TierConfig):
 
     # Apply smoothing
     if config.smoothing_passes > 0 and config.bathymetry_type != "flat":
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d
-        H_bathy = _laplacian_smooth_2d(H_bathy, config.smoothing_passes,
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d
+        H_bathy = laplacian_smooth_2d(H_bathy, config.smoothing_passes,
                                         is_cubed=False)
 
     return jnp.asarray(H_bathy), jnp.asarray(land_mask)

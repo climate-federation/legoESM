@@ -61,6 +61,9 @@ VALID_ADJOINT_STABILIZATION = frozenset(
 )
 
 
+# Default GM/Redi taper transition width (fraction of taper range).
+_DEFAULT_TAPER_WIDTH_FRAC = 0.1
+
 def validate_adjoint_stabilization(mode: str) -> None:
     """Fail-fast on an unknown ``adjoint_stabilization`` literal.
 
@@ -80,7 +83,7 @@ def dm95_taper(
     S_y: jnp.ndarray,
     S_max: float,
     eps: float = EPS,
-    transition_width_frac: float = 0.1,
+    transition_width_frac: float = _DEFAULT_TAPER_WIDTH_FRAC,
     stop_gradient_taper: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Apply Danabasoglu & McWilliams (1995) smooth slope tapering.
@@ -127,7 +130,7 @@ def dm95_taper_scalar(
     S: jnp.ndarray,
     S_max: float,
     eps: float = EPS,
-    transition_width_frac: float = 0.1,
+    transition_width_frac: float = _DEFAULT_TAPER_WIDTH_FRAC,
     stop_gradient_taper: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-component variant of :func:`dm95_taper`.

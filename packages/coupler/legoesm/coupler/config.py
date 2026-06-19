@@ -8,6 +8,47 @@ import jax
 
 from legoesm.surface_albedo import OceanAlbedoConfig
 
+__param_spec__ = {
+    "CouplerConfig": {
+        "scheme_key": "coupler.surface",
+        "excluded": {
+            "U_min": "numerics: minimum wind-speed floor for bulk fluxes [m/s]",
+            "co2_ppmv_default": "forcing: default atmospheric CO2 [ppmv]",
+            "coupling_dt": "numerics: coupling timestep [s]",
+            "z_q_atm": "convention: humidity measurement reference height [m]",
+            "z_ref": "convention: reference height [m]",
+            "z_t_atm": "convention: temperature measurement reference height [m]",
+        },
+        "params": {
+            "Cd_ocean": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ocean-atmosphere momentum drag coefficient", "shape": None,
+            },
+            "Ch_ocean": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ocean-atmosphere heat transfer coefficient", "shape": None,
+            },
+            "ocean_albedo": {
+                "units": "1", "bounds": (0.03, 0.15), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "open-ocean broadband albedo", "shape": None,
+            },
+            "ocean_emissivity": {
+                "units": "1", "bounds": (0.9, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "open-ocean longwave emissivity", "shape": None,
+            },
+            "ocean_z0": {
+                "units": "m", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "open-ocean aerodynamic roughness length", "shape": None,
+            },
+        },
+    },
+}
+
 
 class TileConfig(NamedTuple):
     """Surface tile fraction configuration.
@@ -28,7 +69,6 @@ class CouplerConfig(NamedTuple):
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]
     co2_ppmv_default: float = 400.0   # Default CO2 concentration
-    blend_sharpness: float = 20.0     # Sigmoid sharpness for tile blending
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"

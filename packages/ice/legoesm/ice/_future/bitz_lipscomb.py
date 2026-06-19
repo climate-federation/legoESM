@@ -169,7 +169,7 @@ def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, dt):
     """
     n = q_layers.shape[-1]
     S_b = jnp.broadcast_to(S[..., None] if S.ndim == h.ndim else S, q_layers.shape)
-    dz = jnp.maximum(h, 1e-3) / n                          # layer thickness [m]
+    dz = jnp.maximum(h, 1e-3) / n  # coeff-ok: min ice-thickness floor for layer division [m]
     dz_e = dz[..., None]
 
     T_old = ice_temperature_from_enthalpy(q_layers, S_b)   # (..., n) [K]

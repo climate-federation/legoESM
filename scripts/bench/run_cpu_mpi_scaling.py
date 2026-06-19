@@ -77,14 +77,62 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Pin each MPI rank to a single CPU thread
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
-        xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
-    os.environ["XLA_FLAGS"] = xla_flags
+    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
+    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
+    # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
+    # its allocated cores -- fewer ranks means fewer halo messages, the codex
+    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(_v, str(n_thr))
+    if n_thr <= 1:
+        xla_flags = os.environ.get("XLA_FLAGS", "")
+        if "--xla_cpu_multi_thread_eigen=false" not in xla_flags:
+            xla_flags = f"{xla_flags} --xla_cpu_multi_thread_eigen=false".strip()
+        os.environ["XLA_FLAGS"] = xla_flags
+
+
+def _configure_jax_gpu(precision: str) -> None:
+    """Pin THIS MPI rank to one local GPU and run JAX on cuda (route-A).
+
+    Single-node multi-GPU via mpi4jax (the SAME mpi4jax halo machinery as the
+    CPU path — make_latlon_mpi_step / cube — just on cuda devices over the
+    PCIe pair).  Must run BEFORE any JAX import.  Local rank from the launcher
+    env (OpenMPI / SLURM).  Mirrors the ocean harness ``_configure_jax_gpu``
+    (bench_ocean_mpi_scaling.py) so the atm lat-lon dycore gets a 2-GPU
+    number via the proven overlay-venv route-A (cuda jax + CUDA-built
+    mpi4jax)."""
+    # RESPECT an EXPLICIT CUDA_VISIBLE_DEVICES (set by the launcher's per-task
+    # binding, or deliberately e.g. "0,1" for a single-process MULTI-GPU SPMD
+    # run): re-deriving it from the local rank would either DOUBLE-restrict a
+    # per-task binding (hiding the bound GPU -> "no supported devices for CUDA")
+    # or pin a single-process run to one GPU (the documented eff=0.5 bug). Only
+    # auto-pin from the local rank when CVD was NOT explicitly provided. NOTE:
+    # the warning below about SLURM_LOCALID is about AUTO-pinning, not an
+    # explicit CVD, so honoring an explicit CVD here is safe.
+    # (JAX_PLATFORMS / x64 / prealloc below run either way.)
+    _existing_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not _existing_cvd:
+        local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+                 or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+        if local is None:
+            # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
+            # srun); pinning on it THERE hides all but GPU 0 from a single-
+            # process multi-GPU run (the documented silent eff=0.5 bug, jobs
+            # 8454397/8454737). Only honor it for a genuine multi-task launch.
+            slid = os.environ.get("SLURM_LOCALID")
+            _nt = os.environ.get("SLURM_NTASKS", "1")
+            if slid is not None and _nt.isdigit() and int(_nt) > 1:
+                local = slid
+        if local is None:
+            local = "0"
+        os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU per rank
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    if precision == "float64":
+        os.environ["JAX_ENABLE_X64"] = "1"
+    # Two ranks share the node; do not let the allocator grab the whole GPU.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
 def _init_mpi() -> tuple[int, int]:
@@ -122,6 +170,11 @@ class TimingResult:
     cells_per_rank: int
     mcells_per_s: float
     scaling_efficiency: float = 1.0
+    # Lat-lon decomposition: "band" (1-D latitude band, default) or "2d"
+    # (proc_lat x proc_lon pencil).  Lets the collector/plotter separate the
+    # 2-D-pencil curve from the 1-D band laggard.  N/A for other grids ("band"
+    # is a harmless default they never key on).
+    decomposition: str = "band"
 
 
 @dataclass
@@ -144,7 +197,7 @@ class ScalingReport:
 # ===========================================================================
 
 GRID_CHOICES = ("cubed-sphere", "latlon", "icosahedral", "spectral")
-PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
+PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full", "moist")
 
 # Grid/physics support matrix.  Moist tiers require tracer storage
 # that MPAS and spectral states do not have today.
@@ -158,8 +211,17 @@ _SUPPORTED_PHYSICS = {
     # benchmark dycore-only with the moist-physics label.
     "cubed-sphere": {"none", "held_suarez"},
     "latlon": {"none", "held_suarez"},
-    "icosahedral": {"none", "held_suarez"},
-    "spectral": {"none", "held_suarez"},
+    # "moist" = moisture (q_v/q_c/q_r) + Kessler warm-rain condensation,
+    # NO radiation: the moist baroclinic-wave case.  Only wired for
+    # icosahedral/MPAS, the sole multi-rank grid here — Kessler is
+    # column-local so it adds NO horizontal halo coupling beyond the
+    # dycore's tracer exchange, and the dycore already advects tracers
+    # mass-consistently (so moist scales on the same ladder as dry).
+    "icosahedral": {"none", "held_suarez", "moist"},
+    # spectral "moist" = q_v/q_c/q_r + Kessler warm-rain (no radiation), the
+    # moist baroclinic wave, via make_kessler_forcing_spectral.  Single-device
+    # (spectral has no MPI path) — a physics-capability case, not a scaling one.
+    "spectral": {"none", "held_suarez", "moist"},
 }
 
 
@@ -331,6 +393,7 @@ def _build_amip_step(
     physics_level: str,
     dt: float | None = None,
     cs_spmd: bool = False,
+    latlon_2d: bool = False,
 ):
     """Build a step function + initial state for one benchmark case.
 
@@ -362,7 +425,7 @@ def _build_amip_step(
                                   physics_level, _cast)
     elif grid_type == "latlon":
         return _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                             physics_level, _cast)
+                             physics_level, _cast, latlon_2d=latlon_2d)
     elif grid_type == "icosahedral":
         return _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
                                   physics_level, _cast)
@@ -462,10 +525,16 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
         )
     gdev = jax.devices()
     n_global = len(gdev)
-    if 6 % n_global != 0:
+    _ok = (6 % n_global == 0) if n_global <= 6 else (
+        n_global % 6 == 0
+        and (round((n_global // 6) ** 0.5)) ** 2 == n_global // 6
+    )
+    if not _ok:
         raise ValueError(
-            f"--cs-spmd needs a global device count dividing 6, got "
-            f"{n_global} (launch with srun -n 1|2|3|6)."
+            f"--cs-spmd needs a device count dividing 6 or 6*kt^2 "
+            f"(sub-face tiling), got {n_global} (srun -n "
+            f"1|2|3|6|24|54|...).  np=24 parity receipt: 4.4e-10 "
+            f"@5 steps, job 8465445."
         )
 
     cfg_mesh = create_device_mesh(n_devices=n_global, devices=gdev)
@@ -498,8 +567,44 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     return step_fn, state, dt, total_cells, cells_per_rank
 
 
+def _factor_2d_latlon(n_ranks, n_lat, n_lon, min_lat=2, min_lon=2):
+    """Factor ``n_ranks`` into ``(proc_lat, proc_lon)`` for the 2-D pencil,
+    MINIMISING the per-rank halo perimeter ``n_lat/proc_lat + n_lon/proc_lon``
+    (the whole point of 2-D vs the 1-D band).
+
+    Constraints: each block keeps ``>= min_lat`` latitude rows (the halo=2
+    PPM/biharmonic exchange) and ``>= min_lon`` longitude columns.  Raises if
+    no valid factorisation exists (e.g. too many ranks for the resolution),
+    rather than silently building a degenerate block.
+
+    Returns the min-perimeter pair; ties broken toward the more balanced
+    block (smaller ``|n_lat/pl - n_lon/pc|``).
+    """
+    best = None  # (perimeter, imbalance, proc_lat, proc_lon)
+    for pl in range(1, n_ranks + 1):
+        if n_ranks % pl:
+            continue
+        pc = n_ranks // pl
+        blat, blon = n_lat // pl, n_lon // pc
+        if blat < min_lat or blon < min_lon:
+            continue
+        perim = n_lat / pl + n_lon / pc
+        imbal = abs(n_lat / pl - n_lon / pc)
+        key = (perim, imbal)
+        if best is None or key < best[0]:
+            best = (key, pl, pc)
+    if best is None:
+        raise ValueError(
+            f"_factor_2d_latlon: no 2-D factorisation of n_ranks={n_ranks} "
+            f"keeps >= {min_lat} lat rows AND >= {min_lon} lon cols per block "
+            f"for n_lat={n_lat}, n_lon={n_lon}.  Reduce ranks or raise "
+            f"resolution."
+        )
+    return best[1], best[2]
+
+
 def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                   physics_level, cast_fn):
+                   physics_level, cast_fn, latlon_2d=False):
     import jax
     import jax.numpy as jnp
 
@@ -538,6 +643,36 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     total_cells = n_lat * n_lon * nlev
 
     physics_fn = _build_physics_fn(physics_level, "latlon")
+
+    if n_ranks > 1 and latlon_2d:
+        # 2-D pencil (proc_lat x proc_lon) decomposition — the SOTA fix for
+        # the 1-D band's high-rank halo-perimeter starvation.  Wall poles
+        # (regular grid; use_polar_filter already False above).  Same
+        # build shape as the band: global cell-centred -> global C-grid
+        # (serial) -> 2-D layout -> rank-local block model -> scatter ->
+        # make_latlon_2d_mpi_step (which arms the MPI halo backend + sets the
+        # rank-aware pole_v_bc + allreduced total_area itself).
+        from legoesm.parallel.latlon_mpi import (
+            make_latlon_2d_layout,
+            make_latlon_2d_mpi_step,
+            scatter_state_latlon_2d,
+            slice_latlon_grid_to_block_2d,
+        )
+        proc_lat, proc_lon = _factor_2d_latlon(n_ranks, n_lat, n_lon)
+        cgrid_global = hydrostatic_to_cgrid(state, grid)
+        layout2d = make_latlon_2d_layout(
+            rank, proc_lat, proc_lon, n_lat, n_lon,
+        )
+        block_grid = slice_latlon_grid_to_block_2d(grid, layout2d)
+        local_model = CGridLatLonPrimitiveEquationModel(
+            block_grid, sigma, config, dt=dt,
+        )
+        state = scatter_state_latlon_2d(cgrid_global, layout2d)
+        step_fn = make_latlon_2d_mpi_step(
+            local_model, layout2d, physics_fn=physics_fn,
+        )
+        cells_per_rank = layout2d.n_lat_local * layout2d.n_lon_local * nlev
+        return step_fn, state, dt, total_cells, cells_per_rank
 
     if n_ranks > 1:
         # Latitude-band MPI (mirrors the multi-rank icosahedral path):
@@ -619,20 +754,49 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     )
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
-    mesh = create_voronoi_mesh(subdivision_level=resolution)
+    # Build the SCVT mesh ONCE on rank 0 (which populates the disk cache),
+    # barrier, then every other rank LOADS it (~0.02 s) instead of all ranks
+    # rebuilding the ~105 s mesh concurrently and contending for cores -- the
+    # cause of the multi-node setup stall at np>=64.  Without this coordination
+    # the cold cache would let all ranks start building at once (thundering
+    # herd), so the disk cache alone is not enough; the single-build barrier is.
+    if n_ranks > 1:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        mesh = None
+        if rank == 0:
+            mesh = create_voronoi_mesh(subdivision_level=resolution)  # build + cache
+        comm.Barrier()                                                # others wait
+        if mesh is None:
+            mesh = create_voronoi_mesh(subdivision_level=resolution)  # load from cache
+    else:
+        mesh = create_voronoi_mesh(subdivision_level=resolution)
+    # Mass fixer adds one global allreduce per step (267.8 us latency floor on
+    # Ginsburg/Gloo). LEGOESM_NO_MASS_FIX=1 disables it for a scaling ABLATION
+    # that isolates the dynamics+halo cost from the conservation allreduce
+    # (codex MPI-improve #3). Production keeps it ON (conservation).
+    _fix_mass = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     config = MPASPrimitiveEquationConfig(
         nu_del4=0.0,
         nu_del4_ps=0.0,
-        fix_mass=True,
+        fix_mass=_fix_mass,
         time_integrator="ssp_rk3",
     )
     model = MPASPrimitiveEquationModel(mesh, sigma, config)
-    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = mesh.nCells * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "icosahedral")
+    if _moist:
+        # Kessler warm-rain forcing bound to this step's dt (the dycore's
+        # operator-split physics_fn convention passes no timestep).  Column-
+        # local ⇒ no extra halo; applied once per step over dt.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_mpas
+        physics_fn = make_kessler_forcing_mpas(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
         # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
@@ -646,7 +810,11 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             scatter_state_voronoi,
             make_voronoi_mpi_step,
         )
-        layout = make_voronoi_partition_layout(mesh, rank, n_ranks)
+        # Partition method A/B (audit #3): LEGOESM_VORONOI_PARTITION =
+        # "geometric" (RCB, default) | "metis" (pymetis k-way edge-cut min).
+        _pmethod = os.environ.get("LEGOESM_VORONOI_PARTITION", "geometric")
+        layout = make_voronoi_partition_layout(mesh, rank, n_ranks,
+                                               method=_pmethod)
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(
             model, layout, sigma, config, physics_fn=physics_fn,
@@ -682,12 +850,19 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
         time_integrator="ssp_rk3",
     )
     model = SpectralPrimitiveEquationModel(grid, sigma, config)
-    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True, moist=_moist)
     state = jax.tree.map(cast_fn, state)
 
     total_cells = grid.n_lat * grid.n_lon * nlev
 
-    physics_fn = _build_physics_fn(physics_level, "spectral")
+    if _moist:
+        # Kessler warm-rain bound to this step's dt (the physics_fn convention
+        # passes no timestep); column-local, so no halo (spectral is 1 device).
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_spectral
+        physics_fn = make_kessler_forcing_spectral(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "spectral")
     if physics_fn is not None:
         _phys = physics_fn
         step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
@@ -715,6 +890,7 @@ def run_single_benchmark(
     n_timing: int,
     dt: float | None = None,
     cs_spmd: bool = False,
+    latlon_2d: bool = False,
 ) -> TimingResult:
     """Run a single benchmark case and return timing."""
     _validate_physics(grid_type, physics_level)
@@ -732,7 +908,13 @@ def run_single_benchmark(
         physics_level=physics_level,
         dt=dt,
         cs_spmd=cs_spmd,
+        latlon_2d=latlon_2d,
     )
+    # "2d" only for a genuine multi-rank lat-lon pencil; everything else
+    # (band, single-rank, other grids) is the default "band".
+    decomposition = "2d" if (
+        latlon_2d and grid_type == "latlon" and n_ranks > 1
+    ) else "band"
 
     if grid_type == "spectral":
         res_label = f"T{resolution}"
@@ -771,9 +953,17 @@ def run_single_benchmark(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
     @jax.jit
-    def _scan_run(st, dt_val):
+    def _scan_run(st):
+        # ``dt_used`` is closed over as a STATIC Python float, NOT passed as a
+        # jit argument.  As an argument it becomes a tracer, and the spectral PE
+        # dycore caches its integrator/filter matrices keyed on a CONCRETE dt
+        # (``_ensure_tracer_filter`` / ``_ensure_si_data`` compare ``self._..._dt
+        # == dt``) -> a traced dt raised TracerBoolConversionError on the moist
+        # spectral path.  dt is constant per benchmark, so closing over it is
+        # correct and lets every dycore (including spectral) trace cleanly; the
+        # other grids are unaffected (dt was only used in jnp ops).
         def _body(carry, _):
-            new = step_fn(carry, dt_val)
+            new = step_fn(carry, dt_used)
             new = jax.tree.map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -789,7 +979,7 @@ def run_single_benchmark(
     # XLA still warms compile + caches against identical layout but
     # ``state`` keeps its original (post-warmup) trajectory.
     _precompile_state = jax.tree.map(lambda x: x, state)
-    _precompile_out = _scan_run(_precompile_state, dt_used)
+    _precompile_out = _scan_run(_precompile_state)
     jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
@@ -802,7 +992,7 @@ def run_single_benchmark(
         pass
 
     t0 = time.perf_counter()
-    state = _scan_run(state, dt_used)
+    state = _scan_run(state)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # MPI barrier after timing
@@ -828,8 +1018,15 @@ def run_single_benchmark(
             flush=True,
         )
 
+    # cs-spmd shards over the jax DEVICE mesh (n_global = jax.device_count()),
+    # but n_ranks is the PROCESS count (1 for a single-process multi-GPU run).
+    # Record the device count so a single-process 2-GPU run lands as n=2 (not
+    # n=1) in the CSV + JSON filename. cells_per_rank already used n_global on
+    # this path; the multi-controller cs-spmd path has n_ranks == device_count
+    # (one process per device), so this is a no-op there.
+    _record_ndev = jax.device_count() if cs_spmd else n_ranks
     return TimingResult(
-        n_ranks=n_ranks,
+        n_ranks=_record_ndev,
         resolution=resolution,
         n_levels=nlev,
         precision=precision,
@@ -847,6 +1044,7 @@ def run_single_benchmark(
         total_cells=total_cells,
         cells_per_rank=cells_per_rank,
         mcells_per_s=mcells_per_s,
+        decomposition=decomposition,
     )
 
 
@@ -922,13 +1120,34 @@ def generate_sweep_cases(
 def write_result_json(result: TimingResult, output_dir: Path) -> None:
     """Write a single result as a JSON file."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Tag a non-default (2-D) decomposition into the filename so a 2-D-pencil
+    # run never overwrites the band run at the same grid/res/np (the payload
+    # also carries ``decomposition`` for the collector).
+    _dtag = "" if result.decomposition == "band" else f"_{result.decomposition}"
     fname = (
-        f"{result.grid_type}_{result.physics_level}_{result.mode}_"
+        f"{result.grid_type}{_dtag}_{result.physics_level}_{result.mode}_"
         f"r{result.resolution}_n{result.n_ranks}_{result.precision}.json"
     )
     path = output_dir / fname
+    payload = asdict(result)
+    # Record the actual JAX backend so downstream aggregation does not have to
+    # infer CPU-vs-GPU from the output-dir name (codex review): cpu/gpu/tpu.
+    try:
+        import jax
+        payload["backend"] = jax.default_backend()
+    except Exception:
+        payload["backend"] = ""
+    # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
+    # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
+    # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    payload["cpus_per_task"] = _cpt
+    payload["n_cores"] = result.n_ranks * _cpt
+    # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
+    # with / is mislabeled as a production (mass-conserving) run (codex audit).
+    payload["fix_mass"] = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(asdict(result), f, indent=2)
+        json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
 
 
@@ -972,6 +1191,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--precision", choices=["float32", "float64"], default="float64",
         help="Floating-point precision.",
     )
+    p.add_argument(
+        "--device", choices=["cpu", "gpu"], default="cpu",
+        help="cpu (default, CPU-MPI) or gpu (route-A: pin each rank to one "
+             "local GPU, run the SAME mpi4jax dycore on the PCIe pair). "
+             "Needs the overlay venv (cuda jax + CUDA-built mpi4jax).",
+    )
     p.add_argument("--n-levels", type=int, default=26)
     p.add_argument("--n-warmup", type=int, default=5)
     p.add_argument("--n-timing", type=int, default=50)
@@ -985,6 +1210,17 @@ def build_parser() -> argparse.ArgumentParser:
              "never armed in this mode (mixed stacks deadlock).  "
              "Parity receipt: scripts/tmp/_probe_spmd_cube_parity.py "
              "(shard-local vs serial = 6.7e-10 @5 steps, job 8462928).",
+    )
+    p.add_argument(
+        "--latlon-2d", action="store_true",
+        help="Lat-lon C-grid 2-D pencil decomposition (proc_lat x proc_lon "
+             "factored from the rank count to minimise the per-rank halo "
+             "perimeter) instead of the 1-D latitude band.  WALL POLES only "
+             "(regular grid; use_polar_filter off) — a labeled throughput "
+             "benchmark, NOT the atmosphere's 180-deg pole fold.  Targets the "
+             "band's high-rank starvation (weak-E ~0.05).  Validated by "
+             "tests/distributed/test_latlon_2d_mpi_step.py (mass<1e-12 + "
+             "2x2==1x4).  --grid latlon only.",
     )
     p.add_argument(
         "--output-dir", type=str, default="results/cpu_scaling",
@@ -1008,6 +1244,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
 
+    # --latlon-2d does not propagate through the sweep/--case round-trip yet
+    # (CaseSpec carries no decomposition field), so a ``--sweep --latlon-2d``
+    # would silently emit band cases and the launcher would run the BAND path.
+    # Fail loud — use a direct ``--resolution N --latlon-2d`` invocation (the
+    # measurement sbatch does) until the sweep threads the flag (codex).
+    if args.sweep and args.latlon_2d:
+        print(
+            "ERROR: --latlon-2d is not threaded through --sweep yet (CaseSpec "
+            "has no decomposition field), so the swept cases would silently "
+            "run the 1-D band.  Use a direct '--grid latlon --resolution N "
+            "--latlon-2d' run (one per rank count) instead.",
+            flush=True,
+        )
+        return 2
+
     # --- Sweep mode: just print cases and exit ---
     if args.sweep:
         # Iter 41: validate the grid+physics combo *before* the
@@ -1026,8 +1277,14 @@ def main() -> int:
             print(json.dumps(asdict(c)))
         return 0
 
-    # --- Configure JAX for CPU ---
-    _configure_jax_cpu(args.precision)
+    # --- Configure JAX for the target device (ENV only; no backend init) ---
+    # The GPU "is the backend really CUDA?" assertion is DEFERRED to after the
+    # --cs-spmd jax.distributed.initialize() below: that init must precede ANY
+    # call that brings up the XLA backend, and jax.default_backend() does.
+    if getattr(args, "device", "cpu") == "gpu":
+        _configure_jax_gpu(args.precision)
+    else:
+        _configure_jax_cpu(args.precision)
 
     # --- A1 SPMD mode: federate processes into ONE multi-controller JAX
     # program BEFORE any other JAX use.  jax.distributed only — the
@@ -1063,6 +1320,22 @@ def main() -> int:
             "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
         if _nproc > 1:
             _jax.distributed.initialize()
+
+    # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
+    # Now safe to touch the backend: jax.distributed.initialize() (if any) has
+    # run.  Fail LOUD on CUDA fallback so a GPU job that silently ran on CPU
+    # (CUDA init failed / not bound) can never record CPU numbers labeled GPU
+    # (the original g1..g16-ran-on-CPU bug).  Applies to single-GPU and cs-spmd.
+    if getattr(args, "device", "cpu") == "gpu":
+        import jax as _jax_bk
+        _bk = _jax_bk.default_backend()
+        if _bk != "gpu":
+            raise SystemExit(
+                f"--device gpu requested but JAX default backend is {_bk!r} "
+                f"(CUDA unavailable / not bound). Refusing to record "
+                f"CPU-fallback numbers as GPU. Check CUDA_VISIBLE_DEVICES / "
+                f"the cuda jax plugin on this node."
+            )
 
     # --- MPI init ---
     rank, n_ranks = _init_mpi()
@@ -1147,7 +1420,17 @@ def main() -> int:
     # biharmonic exchange (``pad_halo_latlon_mpi`` raises when
     # ``halo > n_lat_local``).  Refuse undersized configurations
     # up-front with a clear message instead of a mid-build traceback.
-    if grid_type == "latlon" and n_ranks > 1 and resolution // n_ranks < 2:
+    if args.latlon_2d and grid_type != "latlon":
+        if is_rank0:
+            print("ERROR: --latlon-2d applies only to --grid latlon.",
+                  flush=True)
+        return 2
+    # The >=2-lat-rows-per-rank guard is for the 1-D BAND (all ranks split
+    # lat).  The 2-D pencil splits lat over proc_lat (< n_ranks), so its own
+    # _factor_2d_latlon validates the per-block rows/cols — skip the band
+    # guard for --latlon-2d.
+    if (grid_type == "latlon" and not args.latlon_2d
+            and n_ranks > 1 and resolution // n_ranks < 2):
         if is_rank0:
             print(
                 f"ERROR: lat-lon band MPI needs >=2 lat rows per rank "
@@ -1183,6 +1466,7 @@ def main() -> int:
         n_warmup=args.n_warmup,
         n_timing=args.n_timing,
         cs_spmd=bool(args.cs_spmd),
+        latlon_2d=bool(args.latlon_2d),
     )
 
     if is_rank0:

@@ -42,16 +42,18 @@ from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import MultiLayerLandState
+from legoesm.land.surface_params import read_spatial_param as _get
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
-
-def _get(lp, name: str, fallback):
-    """Read from spatial LandSurfaceParams if available, else config scalar."""
-    return getattr(lp, name) if lp is not None else fallback
+# Perturbation [K] for the one-sided finite-difference linearisation of the
+# turbulent surface fluxes when building the semi-implicit surface conductance
+# (see step_multilayer_land). Small enough for an accurate slope, large enough
+# to stay well above bulk-flux round-off.
+_SURFACE_LIN_DT_K = 0.1
 
 
 def step_multilayer_land(
@@ -138,14 +140,14 @@ def step_multilayer_land(
     # ``beta_root ∈ [0, 1]``.  Audit finding #6.
     if lp is not None:
         denom = jnp.maximum(
-            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,  # coeff-ok: theta-range divide-safety floor
         )
         beta_root = jnp.clip(
             (theta - theta_wp[:, None]) / denom,
             0.0, 1.0,
         )
     else:
-        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)
+        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)  # coeff-ok: theta-range divide-safety floor
         beta_root = jnp.clip(
             (theta - theta_wp) / denom,
             0.0, 1.0,
@@ -377,10 +379,67 @@ def step_multilayer_land(
     # --- Soil thermal diffusion: update soil temperature ---
     # Excess energy from water-limited evaporation warms the soil
     G_surface = G_surface + evap_excess_energy
+
+    # --- Semi-implicit surface conductance lambda = -dG/dT_sfc (>= 0) ---
+    # Folding lambda into the soil thermal solve (Robin BC) linearises the
+    # T_sfc-dependence of the surface energy balance, removing the explicit-
+    # coupling instability that diverges (NaN) for a large dt + thin top layer
+    # under a stiff surface (high roughness / high insolation).  Three parts:
+    #   * longwave (analytic):  -d(LW_net)/dT_sfc = 4*eps*sigma*T_sfc^3
+    #   * sensible (finite difference, scheme-agnostic): d(SH)/dT_sfc, the bulk
+    #     SH re-evaluated at T_sfc + _SURFACE_LIN_DT_K.
+    #   * latent: d(LH)/dT_sfc from the same FD, but the flux that ACTUALLY
+    #     reaches the soil is the water/snow-LIMITED ``lhflx_actual``, not the
+    #     demand ``lhflx``.  When evaporation is supply-limited the latent flux
+    #     is ~insensitive to T_sfc, so scale the latent slope by the realised
+    #     fraction lhflx_actual/lhflx (-> 0 when the limiter binds; 1 for
+    #     unlimited evaporation, and for dew/condensation where lhflx <= 0).
+    # All slopes are clamped >= 0 so lambda can only ADD damping.
+    T_sfc_lin = T_sfc + _SURFACE_LIN_DT_K
+    q_sfc_lin = beta_effective * jnp.where(
+        has_snow,
+        saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
+        saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
+    )
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_sfc_lin, q_sfc_lin, rho,
+            z_ref=config.z_ref,
+            z0_init=z0,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+            L_latent=L_eff,
+        )
+    else:
+        _, _, shflx_lin, lhflx_lin = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_sfc_lin, q_sfc_lin, rho, wind_speed,
+            config.Cd_land, config.Ch_land,
+            L_latent=L_eff,
+        )
+    lambda_lw = 4.0 * emissivity * constants.sigma_sb * T_sfc ** 3
+    lambda_sh = jnp.maximum((shflx_lin - shflx) / _SURFACE_LIN_DT_K, 0.0)
+    # Realised-evaporation fraction in [0, 1]: the latent flux entering the soil
+    # is supply-limited, so its T_sfc slope shrinks toward 0 as the limiter
+    # binds.  ``lhflx <= 0`` is dew/condensation (never supply-limited) -> 1.
+    latent_realised_frac = jnp.where(
+        lhflx > 0.0,
+        jnp.clip(lhflx_actual / jnp.where(lhflx > 0.0, lhflx, 1.0), 0.0, 1.0),
+        1.0,
+    )
+    lambda_lh = jnp.maximum(
+        (lhflx_lin - lhflx) / _SURFACE_LIN_DT_K, 0.0
+    ) * latent_realised_frac
+    surface_conductance = lambda_lw + lambda_sh + lambda_lh
+
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
         G_surface, dt,
+        surface_conductance=surface_conductance,
     )
 
     # --- Build new state ---
@@ -424,14 +483,14 @@ def step_multilayer_land(
     theta_new = richards_out.theta_new
     if lp is not None:
         denom_new = jnp.maximum(
-            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,  # coeff-ok: theta-range divide-safety floor
         )
         beta_root_new = jnp.clip(
             (theta_new - theta_wp[:, None]) / denom_new,
             0.0, 1.0,
         )
     else:
-        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)
+        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)  # coeff-ok: theta-range divide-safety floor
         beta_root_new = jnp.clip(
             (theta_new - theta_wp) / denom_new,
             0.0, 1.0,
@@ -507,7 +566,7 @@ def step_multilayer_land(
 def init_multilayer_land_state(
     ncol: int,
     config: MultiLayerLandConfig,
-    T_init: float = 280.0,
+    T_init: float = 280.0,  # coeff-ok: initial soil temperature [K]
     theta_init: float | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.

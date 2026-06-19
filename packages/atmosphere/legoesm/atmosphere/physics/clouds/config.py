@@ -11,6 +11,43 @@ from typing import NamedTuple
 from legoesm import constants
 
 
+__param_spec__ = {
+    "CloudConfig": {
+        "scheme_key": "atm.clouds.CloudConfig",
+        "excluded": {
+            # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
+            # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet
+            # spectral-width, not a tunable closure coefficient. Paired with
+            # the pgam_max cap (Morrison module_mp_mg.F90).
+            "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
+        },
+        "params": {
+            # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
+            "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            # --- cloud_fraction: Xu-Randall (1996) cf = RH^p_xr * (1 - exp(-alpha*q_c/((1-RH)q_sat)^gamma)) ---
+            "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
+            "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.0e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
+            "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
+            # --- ice_fraction: temperature below which all condensate is ice [K] ---
+            "T_ice_only": {"units": "K", "bounds": (220.0, 268.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_fraction", "reference": "linear ice-fraction ramp scheme default", "shape": None},
+            # --- optical_radius: fixed-fallback effective radii [m] for RRTMGP cloud optics ---
+            "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
+            "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
+            # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
+            "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
+            "martin_pgam_slope": {"units": "cm^3", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
+            "martin_pgam_intercept": {"units": "1", "bounds": (0.1, 0.8), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
+            "pgam_max": {"units": "1", "bounds": (4.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison module_mp_mg.F90 (gamma-PSD shape cap)", "shape": None},
+            # --- microphysics_density: M2005 cloud-ice bulk density [kg/m^3] for ice r_eff PSD ---
+            "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "microphysics_density", "reference": "Morrison et al. (2005) M2005 (RHOI)", "shape": None},
+        },
+    },
+}
+
+
 class CloudConfig(NamedTuple):
     """Configuration for diagnostic cloud fraction and cloud-radiation coupling.
 
@@ -63,7 +100,15 @@ class CloudConfig(NamedTuple):
         so any resolved cloud with ``q_cond ≳ 0.1 g/kg`` gives cf ≈ 1).
     """
     scheme: str = "none"
-    rh_crit: float = 0.7
+    # 0.8 (standard Sundqvist/ECHAM) matches the microphysics
+    # SundqvistConfig.rh_crit=0.8.  At 0.7 the cloud-FRACTION diagnostic (used
+    # for the RRTMGP cloud-radiative effect) onset 0.1 RH BELOW where the
+    # microphysics condenses, so the 0.70-0.80 RH band produced radiative cloud
+    # with no matching condensate.  Because cf = 1 - sqrt((1-RH)/(1-rh_crit))
+    # multiplies the cloud optical depth (both LW + SW), that mismatch fed a
+    # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
+    # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
+    rh_crit: float = 0.8
     alpha_xr: float = 100.0
     p_xr: float = 0.25
     gamma_xr: float = 0.49

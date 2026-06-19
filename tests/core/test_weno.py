@@ -151,6 +151,43 @@ class TestPolynomialExactness:
         assert abs(fm - exact) < tol, f"degree {degree}: right err = {abs(fm - exact)}"
 
 
+class TestPointToCellAvgConversion:
+    """point_to_cellavg_periodic must convert point values to cell averages
+    exactly for polynomials below its formal order (4/6/8)."""
+
+    @pytest.mark.parametrize("order,max_deg", [(4, 2), (6, 4), (8, 6)])
+    def test_periodic_exact_for_polynomials(self, order, max_deg):
+        from legoesm.core.weno import point_to_cellavg_periodic
+        N, dx = 64, 2 * np.pi / 64
+        xc = np.array([dx * (i + 0.5) for i in range(N)])  # cell centres
+        for deg in range(0, max_deg + 1):
+            f_pt = xc ** deg                                # point values at centres
+            # True cell average over [xc-dx/2, xc+dx/2] of x^deg.
+            xl, xr = xc - dx / 2, xc + dx / 2
+            true_avg = (xr ** (deg + 1) - xl ** (deg + 1)) / ((deg + 1) * dx)
+            got = np.asarray(point_to_cellavg_periodic(
+                jnp.asarray(f_pt), axis=0, order=order))
+            # Periodic wrap pollutes the boundary cells; check the interior.
+            sl = slice(order, N - order)
+            err = float(np.max(np.abs(got[sl] - true_avg[sl])))
+            assert err < 1e-9, f"order {order} deg {deg}: err {err}"
+
+    def test_order8_beats_order6_on_smooth(self):
+        """The 7-point (order-8) conversion is strictly more accurate than the
+        5-point (order-6) one on a smooth field — the property W9V relies on."""
+        from legoesm.core.weno import point_to_cellavg_periodic
+        N, dx = 48, 2 * np.pi / 48
+        xc = np.array([dx * (i + 0.5) for i in range(N)])
+        f_pt = np.sin(xc)
+        xl, xr = xc - dx / 2, xc + dx / 2
+        true_avg = (-np.cos(xr) + np.cos(xl)) / dx
+        e6 = float(np.max(np.abs(np.asarray(point_to_cellavg_periodic(
+            jnp.asarray(f_pt), axis=0, order=6)) - true_avg)))
+        e8 = float(np.max(np.abs(np.asarray(point_to_cellavg_periodic(
+            jnp.asarray(f_pt), axis=0, order=8)) - true_avg)))
+        assert e8 < e6, f"order-8 err {e8} not better than order-6 {e6}"
+
+
 # ---------------------------------------------------------------
 #  3. AD Taylor test
 # ---------------------------------------------------------------

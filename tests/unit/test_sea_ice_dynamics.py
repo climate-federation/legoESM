@@ -400,6 +400,35 @@ class TestEVPSolver:
         assert jnp.all(jnp.isfinite(u_new))
         assert jnp.all(jnp.isfinite(v_new))
 
+    def test_h_ice_min_threads_into_evp_and_mevp(self):
+        """The configured ice-thickness floor reaches the dynamics mass floor:
+        thin ice with a larger h_ice_min is heavier (m = rho_ice*max(h, floor))
+        and so accelerates less under the same wind. Guards the codex finding
+        that EVP/mEVP previously ignored a custom SeaIceConfig.h_ice_min."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        z = jnp.zeros(shape)
+        # Ice thinner than both floors so max(h, floor) == floor governs the mass;
+        # both floors are well above h (heavy, numerically stable) and differ 10x.
+        thin = jnp.full(shape, 0.02)
+        kw = dict(
+            h_ice=thin, concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, 5.0), wind_v=z,
+            ocean_u=z, ocean_v=z, grid=grid, dt=600.0,
+            P_star=0.0, differentiable=False,
+        )
+        u_light, _, _, _, _ = evp_solver(z, z, z, z, z, N_evp=10, h_ice_min=0.1, **kw)
+        u_heavy, _, _, _, _ = evp_solver(z, z, z, z, z, N_evp=10, h_ice_min=1.0, **kw)
+        assert jnp.all(jnp.isfinite(u_light)) and jnp.all(jnp.isfinite(u_heavy))
+        # Heavier floor -> more mass -> strictly slower acquired velocity.
+        assert jnp.max(jnp.abs(u_heavy)) < jnp.max(jnp.abs(u_light))
+        # mEVP accepts and uses the same kwarg.
+        u_m_light, _, _, _, _ = mevp_solver(z, z, z, z, z, N_mevp=10, h_ice_min=0.1, **kw)
+        u_m_heavy, _, _, _, _ = mevp_solver(z, z, z, z, z, N_mevp=10, h_ice_min=1.0, **kw)
+        assert jnp.all(jnp.isfinite(u_m_heavy))
+        assert jnp.max(jnp.abs(u_m_heavy)) < jnp.max(jnp.abs(u_m_light))
+
     def test_high_strength_resists_motion(self):
         """With higher P_star, ice velocity should be smaller."""
         grid = _make_grid()

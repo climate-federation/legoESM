@@ -15,6 +15,20 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 
+__param_spec__ = {
+    "SoilGridConfig": {
+        "scheme_key": "land.soil_grid",
+        "excluded": {
+            "dz_top": "grid: top-layer thickness [m]",
+            "growth_factor": "grid: layer growth factor",
+            "total_depth": "grid: total soil depth [m] (0 = auto)",
+        },
+        "params": {
+        },
+    },
+}
+
+
 class SoilGridConfig(NamedTuple):
     """Configuration for the vertical soil grid.
 

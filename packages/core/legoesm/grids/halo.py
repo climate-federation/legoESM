@@ -180,47 +180,9 @@ def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
         the true fractional index on the (possibly reversed) neighbour
         strip is ``j + δ``.  Edge indices: 0=WEST, 1=EAST, 2=SOUTH, 3=NORTH.
     """
-    dalpha = np.pi / (2 * n)
-    alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
-
-    edges = [WEST, EAST, SOUTH, NORTH]
-    offsets = np.zeros((6, 4, n), dtype=np.float64)
-
-    for face in range(6):
-        for edge_idx, edge in enumerate(edges):
-            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-
-            for j in range(n):
-                # ---- halo cell position on extended gnomonic grid ----
-                if edge == WEST:
-                    ax_h, ay_h = -np.pi / 4 - dalpha / 2, alpha[j]
-                elif edge == EAST:
-                    ax_h, ay_h = np.pi / 4 + dalpha / 2, alpha[j]
-                elif edge == SOUTH:
-                    ax_h, ay_h = alpha[j], -np.pi / 4 - dalpha / 2
-                else:  # NORTH
-                    ax_h, ay_h = alpha[j], np.pi / 4 + dalpha / 2
-
-                xyz_h = _face_to_xyz_np(face, ax_h, ay_h)
-
-                # ---- map to neighbour-face gnomonic coordinates ----
-                ax_n, ay_n = _xyz_to_gnomonic_np(
-                    nbr_face, xyz_h[0], xyz_h[1], xyz_h[2],
-                )
-
-                # ---- fractional index along the strip ----
-                # The strip varies along the "transverse" gnomonic axis.
-                if nbr_edge in (WEST, EAST):
-                    frac = (ay_n - alpha[0]) / dalpha
-                else:  # SOUTH, NORTH
-                    frac = (ax_n - alpha[0]) / dalpha
-
-                if is_reversed:
-                    frac = (n - 1) - frac
-
-                offsets[face, edge_idx, j] = frac - j
-
-    return jnp.array(offsets, dtype=jnp.float64)
+    # halo=1 is the depth-0 slice of the general N-depth precomputation
+    # (mirrors compute_halo_interp_offsets_ed → _compute_halo_interp_offsets_ed_hN).
+    return _compute_halo_interp_offsets_hN(n, 1)[:, :, 0, :]
 
 
 def _ed_indomain_boundary_strip(arr, edge, n, ext):
@@ -526,6 +488,25 @@ def get_mpi_topology():
     grid's halo-pad dispatch checks the type before consuming it.
     """
     return _mpi_topology
+
+
+def get_spmd_mesh():
+    """Return the active SPMD ``jax.sharding.Mesh`` (or ``None``).
+
+    Set by the per-grid SPMD activators (cube
+    :func:`parallel.cubesphere_exchange.activate_spmd_halo_backend`; lat-lon
+    :func:`parallel.latlon_spmd.activate_latlon_spmd_halo`).  The per-grid
+    ``pad_halo*`` dispatch reads it when ``get_halo_backend() == "spmd"`` and
+    routes to the matching shard_map ppermute body (cube: face/tile axes;
+    lat-lon: a ``"lat"`` band axis)."""
+    return _spmd_mesh
+
+
+def set_spmd_mesh(mesh) -> None:
+    """Set/clear the active SPMD mesh (``None`` clears).  Public setter so the
+    SPMD activators need not write the private module global cross-package."""
+    global _spmd_mesh
+    _spmd_mesh = mesh
 
 
 # ==============================================================================
@@ -1826,67 +1807,33 @@ def fill_corners_h2(padded: jax.Array) -> jax.Array:
         # reduction) remains active.
         pass  # fall through to legacy avg path
 
-    # Legacy inside-out 2-point average path.
-    for f in range(6):
-        # --- SW corner (rows 0-1, cols 0-1) ---
-        # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled
-        padded = padded.at[f, 1, 1].set(
-            0.5 * (padded[f, 1, 2] + padded[f, 2, 1])
-        )
-        # (0,1): adjacent to (0,2) [WEST halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 0, 1].set(
-            0.5 * (padded[f, 0, 2] + padded[f, 1, 1])
-        )
-        # (1,0): adjacent to (2,0) [SOUTH halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 1, 0].set(
-            0.5 * (padded[f, 2, 0] + padded[f, 1, 1])
-        )
-        # Outer corner (0,0)
-        padded = padded.at[f, 0, 0].set(
-            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
-        )
-
-        # --- SE corner (rows n+2..n+3, cols 0-1) ---
-        padded = padded.at[f, -2, 1].set(
-            0.5 * (padded[f, -2, 2] + padded[f, -3, 1])
-        )
-        padded = padded.at[f, -1, 1].set(
-            0.5 * (padded[f, -1, 2] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -2, 0].set(
-            0.5 * (padded[f, -3, 0] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -1, 0].set(
-            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
-        )
-
-        # --- NW corner (rows 0-1, cols n+2..n+3) ---
-        padded = padded.at[f, 1, -2].set(
-            0.5 * (padded[f, 1, -3] + padded[f, 2, -2])
-        )
-        padded = padded.at[f, 0, -2].set(
-            0.5 * (padded[f, 0, -3] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 1, -1].set(
-            0.5 * (padded[f, 2, -1] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 0, -1].set(
-            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
-        )
-
-        # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
-        padded = padded.at[f, -2, -2].set(
-            0.5 * (padded[f, -2, -3] + padded[f, -3, -2])
-        )
-        padded = padded.at[f, -1, -2].set(
-            0.5 * (padded[f, -1, -3] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -2, -1].set(
-            0.5 * (padded[f, -3, -1] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -1, -1].set(
-            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
-        )
+    # Legacy inside-out 2-point average path — VECTORISED over the 6-face axis.
+    # Was a ``for f in range(6)`` loop = 96 serialised ``.at[f,i,j]`` scatters;
+    # now 16 batched ``.at[:,i,j]`` scatters (bit-identical: each face reads
+    # ONLY its own cells so the faces are independent, and the inner->outer
+    # dependency WITHIN each corner is preserved by the statement order).
+    # Mirrors the already-vectorised fv3_agrid_xdir branch above (per-device
+    # kernel-count reduction; deep-dive 2026-06-14 lever #1).
+    # --- SW corner (rows 0-1, cols 0-1) --- inner (1,1) first, then outward.
+    padded = padded.at[:, 1, 1].set(0.5 * (padded[:, 1, 2] + padded[:, 2, 1]))
+    padded = padded.at[:, 0, 1].set(0.5 * (padded[:, 0, 2] + padded[:, 1, 1]))
+    padded = padded.at[:, 1, 0].set(0.5 * (padded[:, 2, 0] + padded[:, 1, 1]))
+    padded = padded.at[:, 0, 0].set(0.5 * (padded[:, 0, 1] + padded[:, 1, 0]))
+    # --- SE corner (rows n+2..n+3, cols 0-1) ---
+    padded = padded.at[:, -2, 1].set(0.5 * (padded[:, -2, 2] + padded[:, -3, 1]))
+    padded = padded.at[:, -1, 1].set(0.5 * (padded[:, -1, 2] + padded[:, -2, 1]))
+    padded = padded.at[:, -2, 0].set(0.5 * (padded[:, -3, 0] + padded[:, -2, 1]))
+    padded = padded.at[:, -1, 0].set(0.5 * (padded[:, -1, 1] + padded[:, -2, 0]))
+    # --- NW corner (rows 0-1, cols n+2..n+3) ---
+    padded = padded.at[:, 1, -2].set(0.5 * (padded[:, 1, -3] + padded[:, 2, -2]))
+    padded = padded.at[:, 0, -2].set(0.5 * (padded[:, 0, -3] + padded[:, 1, -2]))
+    padded = padded.at[:, 1, -1].set(0.5 * (padded[:, 2, -1] + padded[:, 1, -2]))
+    padded = padded.at[:, 0, -1].set(0.5 * (padded[:, 0, -2] + padded[:, 1, -1]))
+    # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
+    padded = padded.at[:, -2, -2].set(0.5 * (padded[:, -2, -3] + padded[:, -3, -2]))
+    padded = padded.at[:, -1, -2].set(0.5 * (padded[:, -1, -3] + padded[:, -2, -2]))
+    padded = padded.at[:, -2, -1].set(0.5 * (padded[:, -3, -1] + padded[:, -2, -2]))
+    padded = padded.at[:, -1, -1].set(0.5 * (padded[:, -1, -2] + padded[:, -2, -1]))
 
     return padded
 
@@ -2834,22 +2781,37 @@ def synchronize_bgrid_ne_corner_geo(u, v, z11, z12, z21, z22, n):
     -------
     u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
     """
-    _EPS = float(jnp.finfo(jnp.float32).eps)
-    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0, frame-consistent
-    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
-
-    # Exact non-orthogonal local → geographic
-    u_east = (z11 * u + z21 * v) * inv
-    u_north = (z12 * u + z22 * v) * inv
-
-    # Sync geo components independently (each is a frame-invariant scalar)
+    # Pointwise local→geo, cross-face scalar sync, pointwise geo→local.  The
+    # two pointwise conversions are factored (bgrid_ne_corner_to_geo /
+    # _from_geo) so a sub-face tiled corner-sync stage can run them PER TILE
+    # (approach-C) around the cross-tile scalar sync (task #3 cube tiling
+    # U3e); this global path is bit-identical (pure extraction).
+    u_east, u_north = bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22)
     u_east = synchronize_corner_scalar(u_east, n)
     u_north = synchronize_corner_scalar(u_north, n)
+    return bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22)
 
-    # Exact inverse (adjugate of M; the det cancels the forward 1/det)
+
+def bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22):
+    """Pointwise exact non-orthogonal local→geographic corner conversion
+    (the forward half of :func:`synchronize_bgrid_ne_corner_geo`, factored
+    for sub-face tiling — task #3 U3e).  ``u_east = (z11·u + z21·v)/detM``,
+    ``u_north = (z12·u + z22·v)/detM`` with ``detM = z11·z22 − z21·z12``.
+    Shape-generic (global ``(6,n+1,n+1)`` or a per-tile corner block); each
+    corner reads ONLY its own ``(u,v,z*)`` → tiles with no halo."""
+    _EPS = float(jnp.finfo(jnp.float32).eps)
+    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0
+    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
+    return (z11 * u + z21 * v) * inv, (z12 * u + z22 * v) * inv
+
+
+def bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22):
+    """Pointwise exact geo→local corner conversion (the inverse half;
+    adjugate of M, the det cancels the forward 1/det).  ``u_sync =
+    z22·u_east − z21·u_north``, ``v_sync = −z12·u_east + z11·u_north``.
+    Shape-generic; no halo (per-corner)."""
     u_sync = z22 * u_east - z21 * u_north
     v_sync = -z12 * u_east + z11 * u_north
-
     return u_sync, v_sync
 
 

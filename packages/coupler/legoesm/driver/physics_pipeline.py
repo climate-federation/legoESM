@@ -10,9 +10,12 @@ native grid layout and ``(ncol, nlev)`` column format is handled by a
 """
 from __future__ import annotations
 
+import logging
 
 import jax
 import jax.numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
@@ -555,6 +558,9 @@ class PhysicsPipeline:
         dN_r_dt = jnp.zeros(shape_3d, dtype=_sd)
         dN_i_dt = jnp.zeros(shape_3d, dtype=_sd)
         precip_micro = jnp.zeros(shape_2d, dtype=_sd)
+        # Isolated saturation-adjustment condensation (q_v->q_c) for the joint
+        # vapour donor clamp below; None unless the micro scheme exposes it.
+        _micro_dq_v_to_qc = None
 
         if micro_out_ml is not None:
             dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
@@ -671,14 +677,45 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+            _c = micro_out.dq_v_to_qc_dt
+            _micro_dq_v_to_qc = (
+                ad.unflatten_3d(_c) if _c is not None else None)
 
-        # Convection→microphysics coupling: detrained convective
-        # condensate is added to the cloud-water tendency. Microphysics
-        # processes the augmented bucket on the next step (operator
-        # splitting), giving proper autoconversion / sedimentation /
-        # evaporation for convective rain instead of the previous
-        # instant-fall assumption.
-        dq_c_dt = dq_c_dt + dq_c_dt_conv
+        # NOTE: the JOINT vapour donor clamp (codex cycle-3) is applied later,
+        # AFTER convection + turbulence + GWD are summed into the total
+        # tendencies (see "JOINT vapour donor clamp" just before the
+        # PhysicsOutput return).  It must see EVERY same-step vapour sink —
+        # convection AND turbulence drying (codex#4 round-2 HIGH) — not just
+        # convection, so it can only be applied on the assembled totals.
+
+        # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
+        # schemes, ``detrains_to_cloud``) adds convective condensate to the
+        # cloud-water tendency; microphysics processes the augmented bucket on
+        # the next step (operator splitting), giving proper autoconversion /
+        # sedimentation / evaporation for convective rain.
+        #
+        # An ADJUSTMENT scheme (Betts-Miller sbm / dca / Kuo) instead produces a
+        # column-net DRYING that is convective PRECIPITATION, not lingering
+        # grid-scale cloud water.  Routing it into q_c let q_c accumulate ~100x
+        # (in-cloud LWP -> tens of kg/m2, planetary albedo ~0.85, net TOA loss
+        # ~-190 W/m2, runaway cold drift / OLR collapse) because Kessler
+        # autoconversion cannot rain out a convective-precip-rate source.  So
+        # precipitate the column-integrated convective condensate DIRECTLY: the
+        # latent heat is already in ``dT_dt_conv`` (energy-neutral) and the
+        # column water removed equals the added precip (mass-conserving).
+        if _ctr.detrains_to_cloud:
+            dq_c_dt = dq_c_dt + dq_c_dt_conv
+        else:
+            # Convective precip = the column-net VAPOUR sink of the convective
+            # tendency (mass-EXACT for every adjustment scheme: water removed
+            # from q_v == surface precip, independent of how a scheme defines
+            # its dq_c_conv_dt — sbm/dca rescale it to this, but Kuo's
+            # heating-derived condensate does not equal it exactly).
+            _dp = p_s[..., None] * (self.sigma_half[1:] - self.sigma_half[:-1])
+            precip_conv = jnp.maximum(
+                -jnp.sum(dq_v_dt_conv * _dp / constants.g, axis=-1),
+                0.0)  # (..., n, n) kg/m2/s
+            precip = precip + precip_conv
 
         # Boundary layer surface exchange (grid-agnostic: uses [..., -1] indexing).
         #
@@ -833,6 +870,44 @@ class PhysicsPipeline:
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(gwd_out.dT_dt)
 
+        # JOINT vapour donor clamp (codex cycle-3, applied on ASSEMBLED totals).
+        # Kessler reports the saturation condensation it performed
+        # (_micro_dq_v_to_qc), computed from the PRE-physics q_v.  But the same
+        # summed step also removes vapour via convection AND turbulence drying
+        # (TurbulenceOutput.dq_v_dt is signed and CAN dry a level).  If the
+        # combined sink drives q_v below 0 the state update floors q_v to 0 but
+        # KEEPS the q_c increment -> q_c created from vapour that was floored
+        # away (the ~1 kg/kg impossible cloud water -> planetary-albedo runaway
+        # / OLR collapse, the coupled cold drift).
+        #
+        # Applying it HERE (after convection+turbulence+GWD are summed) is what
+        # lets it see every same-step vapour sink, closing the turbulence-drying
+        # hole that an earlier convection-only placement left (codex#4 round-2
+        # HIGH).  ``dq_v_dt`` already CONTAINS ``-_sink_cond``, so
+        # ``dq_v_dt + _sink_cond`` is the vapour tendency from all OTHER
+        # processes; the condensation may consume at most the vapour that
+        # survives them.  Reverting un-suppliable condensation is a mass/energy-
+        # exact triple for Kessler: vapour kept (dq_v_dt += cond_lost), cloud not
+        # formed (dq_c_dt -= cond_lost), latent heat not released
+        # (dT_dt -= L_v*cond_lost/c_pd).  Convective + turbulent tendencies are
+        # left UNTOUCHED (codex#4 round-1 HIGH x2): scaling convective drying
+        # creates water for detraining schemes and breaks SBM/Kuo column-MSE
+        # closure.  No-op (scale=1) whenever vapour is sufficient.
+        if _micro_dq_v_to_qc is not None:
+            _sink_cond = jnp.maximum(_micro_dq_v_to_qc, 0.0)  # [kg/kg/s] >= 0
+            # Vapour available to the saturation condensation after every OTHER
+            # same-step vapour process (dq_v_dt holds -_sink_cond; add it back).
+            _q_v_for_cond = jnp.clip(q_v + dt * (dq_v_dt + _sink_cond), 0.0)
+            # AD-safe donor scale min(1, q/(sink·dt)): the floored divisor bounds
+            # the VJP under fp32 exactly as _warm_rain.donor_clamp_scale does
+            # (inlined to avoid a cross-package private-module import).
+            _sink_dt = jnp.maximum(dt * _sink_cond, 1.0e-15)
+            _scale = jnp.minimum(1.0, _q_v_for_cond / _sink_dt)
+            _cond_lost = _sink_cond * (1.0 - _scale)  # vapour couldn't supply
+            dq_v_dt = dq_v_dt + _cond_lost            # keep the vapour
+            dq_c_dt = dq_c_dt - _cond_lost            # do not form the cloud
+            dT_dt = dT_dt - constants.L_v * _cond_lost / constants.c_pd
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -871,6 +946,7 @@ class PhysicsPipeline:
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
+                               aerosol_lw_od_precomputed=None,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
@@ -1074,6 +1150,7 @@ class PhysicsPipeline:
             emis_col = _shard(emis_col)
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
+            aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
             if cloud_kwargs:
                 cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
 
@@ -1086,6 +1163,7 @@ class PhysicsPipeline:
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
             ghg_vmr_override=ghg_vmr_override,
+            aerosol_lw_od_col=aerosol_lw_od_precomputed,
             **cloud_kwargs,
         )
 
@@ -1158,6 +1236,7 @@ class PhysicsPipeline:
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
+                         aerosol_lw_od=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
@@ -1168,7 +1247,7 @@ class PhysicsPipeline:
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
-                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1184,6 +1263,7 @@ class PhysicsPipeline:
                         T, p_s, q_v, sst, sic, lat, lon,
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
+                        aerosol_lw_od_precomputed=aerosol_lw_od,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
@@ -1229,7 +1309,7 @@ class PhysicsPipeline:
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
-                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1270,7 +1350,7 @@ class PhysicsPipeline:
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
-                    solar_weights, s_0, o3_vmr, aerosol_od,
+                    solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1318,9 +1398,11 @@ def _build_none_radiation_fn(config):
                      solar_weights, s_0=0.0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
+        del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -1363,10 +1445,12 @@ def _build_gray_radiation_fn(config):
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
+        del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
@@ -1425,6 +1509,7 @@ def _build_rrtmgp_radiation_fn(config):
         S_0=S_0,
         use_scan=_exp_use_scan,
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
+        gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -1437,6 +1522,7 @@ def _build_rrtmgp_radiation_fn(config):
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
@@ -1475,6 +1561,7 @@ def _build_rrtmgp_radiation_fn(config):
             sfc_emissivity=emis_col,
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
+            aerosol_absorption_optical_depth_lw=aerosol_lw_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
@@ -1615,6 +1702,43 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
 _PIPELINE_UNSUPPORTED_MICROPHYSICS = frozenset()
 
 
+def required_microphysics_tracer_slots(
+    scheme_name: str,
+    scheme_config=None,
+) -> int:
+    """Return the canonical minimum global tracer slots for a scheme."""
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        min_tracer_slots,
+    )
+
+    try:
+        return int(min_tracer_slots(scheme_name, scheme_config))
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown microphysics scheme {scheme_name!r}; cannot determine "
+            "required tracer slots."
+        ) from exc
+
+
+def validate_microphysics_tracer_slots(
+    scheme_name: str,
+    have_slots: int,
+    *,
+    context: str,
+    scheme_config=None,
+) -> int:
+    """Fail loudly if a global tracer state cannot hold scheme tendencies."""
+    need_slots = required_microphysics_tracer_slots(scheme_name, scheme_config)
+    if have_slots < need_slots:
+        raise ValueError(
+            f"{context} has too few tracer slots for microphysics scheme "
+            f"{scheme_name!r}: have={have_slots}, need={need_slots}. "
+            "Slot layout is [0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, "
+            "[4]=q_s, [5]=q_g, [6]=N_c, [7]=N_r, [8]=N_i."
+        )
+    return need_slots
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
@@ -1642,6 +1766,7 @@ def _resolve_microphysics(config):
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
+    required_microphysics_tracer_slots(scheme, micro_config)
 
     # Aerosol-CCN coupling (Andreae 2009 AOD->CCN): only meaningful for
     # schemes whose warm rain consumes a droplet number through
@@ -1801,6 +1926,44 @@ def build_physics_pipeline(grid, sigma, config):
 
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)
+
+    # Water-budget closure guard (root cause of the coarse-CMIP6 pr=0 +
+    # corrupted-TOA-flux bug, 2026-06-15).  Convection no longer surfaces its
+    # own precipitation: it detrains condensate into the cloud-water bucket
+    # (``dq_c_conv_dt``) and surface precip is owned by
+    # ``micro_out.precipitation`` (see ``physics_step_no_rad``).  With
+    # ``microphysics='none'`` that convective condensate has NO sink, so:
+    #   (a) surface precipitation is identically zero (CMOR ``pr`` = 0), and
+    #   (b) ``q_c`` accumulates without bound — and if a cloud scheme is
+    #       active, the unbounded ``q_c`` drives the cloud optics to
+    #       optically-thick/garbage values, corrupting the radiation
+    #       (TOA SW/LW fluxes diverged: rsut->470, rlut->8 W/m^2).
+    # Idealized dry/moist-adjustment tests legitimately run convection with no
+    # microphysics, so this is a loud WARNING (not a hard error); a realistic
+    # coupled run must enable a microphysics scheme (e.g. 'kessler') to close
+    # the water budget.  ADJUSTMENT schemes (sbm/dca/kuo, ``detrains_to_cloud=
+    # False``) are EXEMPT — they precipitate their convective drying DIRECTLY
+    # (the TOA-drift fix), so they close the budget without microphysics and
+    # never trap q_c; only TRUE-detrainment schemes (which feed q_c, whose only
+    # sink is microphysics) hit this trap.
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits as _cst,
+    )
+    if (config.convection != "none" and config.microphysics == "none"
+            and _cst(config.convection).detrains_to_cloud):
+        _extra = (
+            " AND cloud_scheme=%r is active, so the unbounded cloud water "
+            "will also corrupt the cloud-radiation optics" % config.cloud_scheme
+            if getattr(config, "cloud_scheme", "none") != "none" else ""
+        )
+        logger.warning(
+            "convection=%r with microphysics='none': convective condensate "
+            "detrains into q_c with no precipitation sink, so surface "
+            "precipitation is identically ZERO and cloud water accumulates "
+            "unbounded (water trap)%s. Enable a microphysics scheme "
+            "(e.g. --microphysics kessler) to close the water budget.",
+            config.convection, _extra,
+        )
 
     # Resolve turbulence
     turb_fn, turb_config = _resolve_turbulence(config)

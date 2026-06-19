@@ -52,13 +52,13 @@ from legoesm.ocean.vertical import (
     compute_centroid_depth,
 )
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig,
     create_forcings,
     create_eos_config,
     create_gm_redi_config,
+    global_overturning_model_config,
 )
 
 
@@ -182,9 +182,10 @@ def main():
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
 
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
+        # OMIP dissipation stack + partial-cell dycore on top of the shared base.
+        # A_h here comes from the module constants, not config.A_h.
         A_h=A_H_GLOBAL,
         A_h_lat_scaling=A_H_LAT_SCALING,
         A_h_floor=A_H_FLOOR,
@@ -193,14 +194,8 @@ def main():
         B_h=B_H,
         C_smag=0.2,                 # biharmonic Smagorinsky (OMIP stack)
         slope_foot_alpha=3.0,       # slope-foot viscosity enhancement (OMIP stack)
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
         bottom_drag_bbl_thickness=100.0,
         bottom_drag_bg_velocity=0.1, # quadratic-with-floor drag (OMIP stack)
-        eos="linear",
-        eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
         pgf_scheme="smc03",
         momentum_advection="vector_invariant",
         barotropic_solver="implicit_cn",

@@ -73,6 +73,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection._triggers import smooth_step
 
 
 __all__ = ("kuo_convection",)
@@ -87,6 +88,10 @@ _VT_COEFF = 1.0 / constants.epsilon - 1.0
 # ----------------------------------------------------------------------------
 # Thermodynamic helpers (legoesm constants + thermo; no re-derived saturation)
 # ----------------------------------------------------------------------------
+
+# --- pspec autoblock
+_MAGNUS_A = 17.67
+_MAGNUS_B = 243.5
 
 def _latent_heat(T: jax.Array) -> jax.Array:
     """Temperature-dependent latent heat of vaporization [J/kg].
@@ -126,14 +131,9 @@ def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
     """
     e_sat = saturation_vapor_pressure(T)
     T_c = T - constants.T_freeze
-    desat_dT = e_sat * (17.67 * 243.5) / (T_c + 243.5) ** 2
+    desat_dT = e_sat * (_MAGNUS_A * _MAGNUS_B) / (T_c + _MAGNUS_B) ** 2
     denom = jnp.maximum(p - e_sat, 1.0) ** 2
     return constants.epsilon * p * desat_dT / denom
-
-
-def _smooth_gt(x: jax.Array, sharpness: float) -> jax.Array:
-    """Smooth ``x > 0`` indicator (sigmoid), differentiable in [0, 1]."""
-    return jax.nn.sigmoid(sharpness * x)
 
 
 # ----------------------------------------------------------------------------
@@ -247,8 +247,8 @@ def _parcel_ascent(
         # Arguments normalised to O(1) so a single dimensionless sharpness
         # gives a crisp Heaviside.
         cond_gate = (
-            _smooth_gt((qv1 - qsat_k) / config.supersat_scale, sharp)
-            * _smooth_gt((qv1 - config.qv_min) / config.qv_min, sharp)
+            smooth_step((qv1 - qsat_k) / config.supersat_scale, sharp)
+            * smooth_step((qv1 - config.qv_min) / config.qv_min, sharp)
         )
 
         # In-cloud values: condensing → (t2, qsat); else dry → (t1, qv1).
@@ -258,7 +258,7 @@ def _parcel_ascent(
 
         # Virtual cloud temperature with water loading.
         tvc = t_cloud * (1.0 + _VT_COEFF * qv_cloud - qc)
-        buoyant = _smooth_gt((tvc - tve_k) / config.buoyancy_scale_K, sharp)
+        buoyant = smooth_step((tvc - tve_k) / config.buoyancy_scale_K, sharp)
 
         # ``w_lcl`` captured at the FIRST condensing level (oracle:
         # icond(k)==0 .and. icond(k+1)==0 → w_lcl = w(k)).  Smoothly:
@@ -268,7 +268,7 @@ def _parcel_ascent(
         w_lcl_new = first_lcl * w_k + (1.0 - first_lcl) * w_lcl
 
         # icond==2: condensing AND buoyant AND w_lcl > 0.
-        w_pos = _smooth_gt(w_lcl_new, sharp)
+        w_pos = smooth_step(w_lcl_new, sharp)
         icond2 = cond_gate * buoyant * w_pos
 
         # Advance carry: new MSE from the condensing branch (oracle uses
@@ -443,7 +443,7 @@ def kuo_convection(
     # column down to its exponential tail, not 0.5 at the cloud top.
     # ``ptenq_sign_floor`` (1e-30) is a pure division-by-zero guard.
     pq_sign = ptenq / (jnp.abs(ptenq) + config.ptenq_sign_floor)
-    pq_gate = _smooth_gt(pq_sign, config.icond_sharpness)
+    pq_gate = smooth_step(pq_sign, config.icond_sharpness)
     active = icond2 * pq_gate                    # (ncol, nlev) in [0,1]
     dpg = dp / g                                 # mass / area per layer
 

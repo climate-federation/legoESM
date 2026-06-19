@@ -14,8 +14,10 @@ identical real droplets it stands for). The processes are:
   integrators (the opt-in ERF adaptive ``rk4_adaptive`` mode is jit-only,
   not reverse-mode differentiable).
 * **collision-coalescence** — Shima's Monte-Carlo algorithm
-  (``coalescence.py``); stochastic, pure function of an explicit PRNG key, not
-  differentiable.
+  (``coalescence.py``); stochastic by default, pure function of an explicit
+  PRNG key. ``SDMConfig(collision_mode="deterministic")`` is an opt-in
+  mean-field expected-increment path for reverse-mode sensitivities with fixed
+  candidate-pair membership.
 * **collision kernels + terminal velocities** (``kernels.py``).
 * **particle <-> grid coupling** — deposition, latent heating, total-water
   closure (``coupling.py``).
@@ -68,6 +70,8 @@ from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
 )
 from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
     coalescence_step,
+    coalescence_step_pairs,
+    coalescence_step_pairs_deterministic,
     represented_number,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.coupling import (
@@ -133,6 +137,8 @@ __all__ = [
     "terminal_velocity_atlas_ulbrich",
     "terminal_velocity_cloud_rain_shima",
     "coalescence_step",
+    "coalescence_step_pairs",
+    "coalescence_step_pairs_deterministic",
     "represented_number",
     "liquid_water_content",
     "cloud_rain_mixing_ratios",

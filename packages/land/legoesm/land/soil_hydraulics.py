@@ -36,11 +36,46 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+# Fixed hydraulic-fit coefficients (not tunable).
+_GAMMA_VAL_OFFSET = 0.75   # macroscopic capillary gamma offset
+_B0_LOG10_COEFF = 0.1      # Campbell b-exponent log10 slope
+
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Floor for denominators (~1.18e-38).
 # This is used as a static guard against division by zero.  It is safe
 # for both float32 and float64 because it is only ever compared to
 # absolute values — float64 tiny is *smaller*, so the float32 constant
 # is a conservative (larger) floor that works in both precisions.
+
+
+__param_spec__ = {
+    "SoilHydraulicsConfig": {
+        "scheme_key": "land.soil_hydraulics",
+        "excluded": {
+            "S_s": "numerics: specific storage regulariser",
+        },
+        "params": {
+            "K_sat": {"units": "1", "bounds": (9.537e-07, 8.67e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "alpha_vg": {"units": "1", "bounds": (1.188, 10.8), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "b_ch": {"units": "1", "bounds": (1.7787, 16.17), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "c_film": {"units": "1", "bounds": (4.455e-09, 4.05e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h0_pdi": {"units": "1", "bounds": (20790.0, 189000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_a": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_cav": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_crit": {"units": "1", "bounds": (0.0198, 0.18), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "lambda_bc": {"units": "1", "bounds": (0.06138, 0.558), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "n_a": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "n_vg": {"units": "1", "bounds": (1.05, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "omega_pdi": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_b": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_sat": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "sigma_cav": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "tau_s": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_a": {"units": "1", "bounds": (0.0066, 0.06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_r": {"units": "1", "bounds": (0.02574, 0.234), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_sat": {"units": "1", "bounds": (0.1419, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+        },
+    },
+}
 
 
 class SoilHydraulicsConfig(NamedTuple):
@@ -226,7 +261,7 @@ def _pdi_ha(config: SoilHydraulicsConfig) -> float:
     m = 1.0 - 1.0 / config.n_vg
     Gamma_h0 = _pdi_Gamma(jnp.array(config.h0_pdi), config)
     # gamma = 0.75*(1 - Gamma(h0)) + Gamma(h0) = 0.75 + 0.25*Gamma(h0)
-    gamma_val = 0.75 + 0.25 * Gamma_h0
+    gamma_val = _GAMMA_VAL_OFFSET + 0.25 * Gamma_h0
     # ha = alpha^{-1} * (gamma^{-1/m} - 1)^{1/n}
     ha = (1.0 / config.alpha_vg) * (gamma_val ** (-1.0 / m) - 1.0) ** (1.0 / config.n_vg)
     return ha
@@ -255,7 +290,7 @@ def _pdi_Snc(h: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     # Smoothing parameter b (Iden & Durner 2014)
     theta_range = config.theta_sat - config.theta_r + _TINY
     b1 = (config.theta_r / theta_range) ** 2
-    b0 = 0.1 * jnp.log(10.0)
+    b0 = _B0_LOG10_COEFF * jnp.log(10.0)
     b = b0 * (1.0 + 2.0 * (1.0 - jnp.exp(-b1 * config.n_vg ** 2)))
 
     h_safe = jnp.clip(h, 1e-10, h0)
@@ -351,7 +386,7 @@ def pdi_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 def pdi_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """PDI specific moisture capacity dtheta/dpsi (finite difference)."""
-    eps = 1e-4
+    eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
     theta_p = pdi_theta(psi + eps, config)
     theta_m = pdi_theta(psi - eps, config)
     return (theta_p - theta_m) / (2.0 * eps)
@@ -445,7 +480,7 @@ def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 def lu_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """Lu (2016) specific moisture capacity (finite difference)."""
-    eps = 1e-4
+    eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
     theta_p = lu_theta(psi + eps, config)
     theta_m = lu_theta(psi - eps, config)
     return (theta_p - theta_m) / (2.0 * eps)
@@ -524,7 +559,7 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
         C = lu_C(psi, config)
     else:
         # Brooks-Corey: use finite difference approximation
-        eps = 1e-4
+        eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
         theta_p = theta_from_psi(psi + eps, config)
         theta_m = theta_from_psi(psi - eps, config)
         C = (theta_p - theta_m) / (2.0 * eps)

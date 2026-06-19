@@ -1,0 +1,26 @@
+# legoESM experiment template — idealized global overturning.
+#
+# Names the procedural `global_overturning` experiment via the `setup:`
+# selector (#388 Ask#2): an idealized global basin with a simplified continent
+# mask, exponential stratification, prescribed wind, and surface restoring that
+# spins up a meridional overturning circulation. Cubed-sphere excluded
+# (face-boundary instability, #100). Routed to run_ocean_test_matrix.py.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Idealized global overturning: simplified-continent basin with exponential
+    stratification, prescribed wind, and T/S restoring spinning up a meridional
+    overturning circulation. Optional GM/Redi mesoscale closure.
+  data: []
+  conservation_gates: [volume, heat]
+model:
+  name: "ocean-global-overturning"
+  type: ocean_only
+setup:
+  name: global_overturning
+  grid: latlon
+output:
+  path: output/ocean/global_overturning/

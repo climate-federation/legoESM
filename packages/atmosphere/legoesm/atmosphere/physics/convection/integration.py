@@ -130,6 +130,15 @@ class ConvectionSchemeTraits(NamedTuple):
     is_stochastic: bool          # carries conv_stoch_state (+ optional PRNG key)
     is_mc_consumer: bool         # consumes large-scale moisture convergence
     is_simple_mc_consumer: bool  # stateless MC-driven leaf (canonical Kuo)
+    detrains_to_cloud: bool      # convective condensate is true DETRAINMENT into
+    # the q_c cloud bucket (plume / mass-flux schemes).  False = an ADJUSTMENT
+    # scheme (Betts-Miller sbm / dca / Kuo) whose column-net drying is convective
+    # PRECIPITATION, not lingering grid-scale cloud water: routing it into q_c
+    # let q_c accumulate ~100x (opaque clouds, ~0.85 planetary albedo, runaway
+    # cold drift / OLR collapse) since Kessler autoconversion cannot rain out a
+    # convective-precip-rate source.  When False the pipeline precipitates the
+    # convective condensate directly (energy-neutral: latent heat is already in
+    # dT_dt_conv; mass-conserving: column water removed = precip).
 
 
 def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
@@ -153,6 +162,14 @@ def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
         is_stochastic=scheme_name in ("bechtold",),
         is_mc_consumer=scheme_name in ("tiedtke", "bechtold"),
         is_simple_mc_consumer=scheme_name in ("kuo",),
+        # Plume / mass-flux schemes genuinely detrain condensate into q_c; the
+        # adjustment schemes (sbm Betts-Miller / dca / kuo) produce convective
+        # PRECIPITATION (their drying falls out), so their condensate is routed
+        # to precip rather than the q_c cloud bucket.
+        detrains_to_cloud=scheme_name in (
+            "mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
+            "emanuel", "tiedtke", "bechtold",
+        ),
     )
 
 
@@ -223,7 +240,7 @@ def diagnose_w_grid_columns_hydrostatic(
 def make_convection_physics(
     convection_config: ConvectionConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
 ) -> Callable:
     """Create a physics function for convection matching a model's signature.
 
@@ -502,7 +519,7 @@ def _make_hydrostatic_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None
@@ -600,6 +617,15 @@ def _make_hydrostatic_convection(
         # picks it up by name (``q_c``) and applies it alongside the
         # microphysics tendency on the next step. Models without a
         # ``q_c`` tracer simply ignore the entry.
+        # NOTE (TOA-drift fix): for an ADJUSTMENT scheme (sbm/dca/kuo,
+        # ``detrains_to_cloud=False``) this column-net drying is convective
+        # PRECIPITATION, not lingering cloud water — routing it to q_c is what
+        # overwhelmed microphysics and drove the coupled cold drift.  The
+        # ``PhysicsPipeline`` (coupled production) path now precipitates it
+        # directly; this standalone dycore-integrated bridge has no surface-
+        # precip accumulator so it RETAINS the q_c route (fine for idealized /
+        # AMIP, where the implied precip simply leaves the prescribed surface;
+        # a convective-precip path here is a tracked follow-up).
         tracer_tends = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
@@ -872,7 +898,7 @@ def _make_nonhydrostatic_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None
@@ -966,6 +992,11 @@ def _make_nonhydrostatic_convection(
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 0].set(dq_v_dt)
         if n_tracers > 1:
+            # See the hydrostatic-bridge TOA-drift note: an adjustment scheme's
+            # (sbm/dca/kuo) convective drying is precipitation, not cloud water;
+            # the PhysicsPipeline path precipitates it directly.  This bridge
+            # retains the q_c route (no surface-precip accumulator here — an
+            # AMIP/idealized follow-up).
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
@@ -1192,7 +1223,7 @@ def _make_spectral_pe_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None

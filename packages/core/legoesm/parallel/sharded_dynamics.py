@@ -77,11 +77,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
-
-from legoesm.parallel.mesh import DeviceConfig, N_FACES
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
 from legoesm.grids.halo import pad_halo, pad_halo_4d
+from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +324,17 @@ def create_output_shardings(state, config: DeviceConfig, grid_type: str = "cubed
         if grid_type == "cubed_sphere":
             if leaf.ndim >= 1 and leaf.shape[0] == N_FACES:
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
+                    # Staggered D-grid leaves (n+1 on a horizontal
+                    # axis) cannot take tile specs (IndivisibleError;
+                    # P4 phase-1 policy matches mesh.shard_pytree):
+                    # face-only sharding, body-side block slicing via
+                    # staggered_tile_block.
+                    tx, ty = config.tiling
+                    if (leaf.shape[1] % tx != 0
+                            or leaf.shape[2] % ty != 0):
+                        pspec = P("face",
+                                  *([None] * (leaf.ndim - 1)))
+                        return NamedSharding(mesh, pspec)
                     pspec = spec.tiled_3d if leaf.ndim >= 4 else spec.tiled_2d
                     if pspec is not None:
                         return NamedSharding(mesh, pspec)
@@ -735,6 +746,19 @@ def make_sharded_step(
     # therefore EXPERIMENTAL and opt-in only; the P4 milestone
     # (tile-aware consumers + staggered-leaf ownership layout) flips
     # the default.
+    # UPDATE (2026-06-14): the tile-aware CONSUMERS now EXIST and are
+    # bit-identity-validated standalone — the full tiled production SW
+    # tendency ``make_tiled_fv3_sw_tendencies_stage_2d`` (momentum + mass-PPM,
+    # in-stage scalar/vector halos + deep-h pre-pad, staggered-leaf
+    # lower-owns-shared reassembly) passes np24 (kt=2) + np54 (kt=3)
+    # bit-identity vs the global op AND a 2-node multi-controller run
+    # (``scripts/validate/validate_tiled_fv3_sw_multinode.py``, rel=0.0).  What
+    # remains for the default-flip is WIRING that stage into THIS step (this
+    # function still calls the full-face operators); the 3D
+    # ``fv3_hydrostatic_tendencies`` tiling is in progress (dgrid_vorticity
+    # 4D-tiled).  See ``tiled_production_cdgrid.py`` +
+    # ``docs/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
+    # (np>6 anti-scales on Gloo-TCP/PCIe) — future-HW capability.
     import os as _os
     _tiled_ok = (
         _os.environ.get("LEGOESM_TILED_SPMD", "0") == "1"
@@ -1270,8 +1294,8 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """
     import numpy as np
     from legoesm.parallel.voronoi_partition import (
-        VoronoiPartition,
         HaloCommSchedule,
+        VoronoiPartition,
         build_local_mesh,
         compute_halo_cells,
     )
@@ -1520,8 +1544,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         send_edge_idx, recv_edge_pos, halo_cells_per_round,
         halo_edges_per_round.
     """
-    import numpy as np
     from collections import defaultdict
+
+    import numpy as np
 
     # ------------------------------------------------------------------
     # 1. For each device pair, find which cells/edges cross the boundary
@@ -1754,11 +1779,8 @@ def make_voronoi_sharded_step(
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
         return model.step
 
-    try:
-        from jax import shard_map  # JAX >= 0.8 exposes it at top level
-    except ImportError:  # JAX < 0.8 fallback
-        from jax.experimental.shard_map import shard_map
     from legoesm.core.state import MPASHydrostaticState
+    from legoesm.parallel.shard_map_compat import shard_map
 
     n_dev = dev_config.n_devices
     voronoi_dims = dev_config.voronoi_dims

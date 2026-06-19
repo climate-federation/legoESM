@@ -789,6 +789,19 @@ def shard_pytree(pytree, config: DeviceConfig):
                 if config.tiling != (1, 1) and leaf.ndim < 3:
                     sharding = tiled_face_only or config.face_sharding
                     return jax.device_put(leaf, sharding)
+                if config.tiling != (1, 1) and leaf.ndim >= 3:
+                    # STAGGERED face-plane leaves — D-grid winds
+                    # (6, n+1, n, ...) / (6, n, n+1, ...) — cannot
+                    # shard over the tile axes (IndivisibleError, P4
+                    # discovery probe job 8464703).  Phase-1: face-only
+                    # sharding (spatial replicated across a face's kt^2
+                    # tile devices); the tiled shard_map stage slices
+                    # its LOCAL duplicated-shared-row block body-side
+                    # (Pace layout) via staggered_face_to_tile_blocks.
+                    tx, ty = config.tiling
+                    if leaf.shape[1] % tx != 0 or leaf.shape[2] % ty != 0:
+                        sharding = tiled_face_only or config.face_sharding
+                        return jax.device_put(leaf, sharding)
                 return jax.device_put(leaf, config.face_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 
@@ -833,6 +846,183 @@ def shard_pytree(pytree, config: DeviceConfig):
         return jax.device_put(leaf, config.replicated_sharding)
 
     return jax.tree.map(_shard_leaf, pytree)
+
+
+# ==============================================================================
+# Tiled staggered-leaf layout (P4 phase-1) — Pace-style duplicated rows
+# ==============================================================================
+# D-grid staggered face arrays (n+1 cells on one horizontal axis) cannot
+# shard evenly over a (face, tile_i, tile_j) mesh.  The tiled shard_map
+# stage instead works on PER-TILE BLOCKS that DUPLICATE the shared
+# staggered row/col between neighbouring tiles (each tile holds nl+1
+# entries on the staggered axis), exactly the FV3/Pace rank layout.
+# These pure helpers define that layout once — body-side slicing and
+# the canonical-owner inverse — so shard/gather and the parity tests
+# share a single source of truth.  Canonical ownership: the LOWER tile
+# owns the shared boundary entry (tile ti contributes its rows
+# 1..nl for ti > 0; tile 0 contributes rows 0..nl).
+
+
+def classify_face_metric(arr, n: int):
+    """Classify a cubed-sphere metric array for tiled (6*kt^2) layout.
+
+    The tiled shard_map tendency stage (P4 phase-1b) needs every metric
+    as a PER-TILE block.  How a field becomes one depends on its
+    horizontal extents relative to the face resolution ``n``:
+
+    Returns one of
+      ("sliceable", None)  both horiz axes in {n, n+1} — host-slice
+          per tile with :func:`tiled_face_block` (centered cell /
+          staggered corner / edge metrics).
+      ("padded", h)        a horiz axis is n+2h (h>=1) — the global
+          array holds only the outer FACE ring; an interior tile's
+          local ring is NOT a slice, so it must be produced by running
+          the tiled halo exchange ONCE at setup on the unpadded metric
+          (codex P4 metric design).
+      ("table", None)      exchange-helper offset table (6, 4, m) — an
+          exchange internal, not a per-tile spatial metric.
+      ("scalar", None)     0-d / non-face-leading array.
+      ("other", None)      face-leading but unrecognised extent — must
+          be classified before it can ride the tiled stage (ratchet).
+
+    Pure / shape-only; no device or mesh needed.
+    """
+    import numpy as _np
+
+    if not hasattr(arr, "shape") or arr.ndim < 1 or arr.shape[0] != N_FACES:
+        return ("scalar", None)
+    if arr.ndim < 3:
+        # (6, m) face-leading vector — e.g. nothing spatial in 2 dims.
+        return ("scalar", None)
+    # Exchange-helper offset tables are (6, 4, ...) — the size-4 edge
+    # axis is the unambiguous signature (h1 (6,4,n); h2/h3 (6,4,2,n)),
+    # distinct from any spatial metric at a tiled scale (n >= 12).
+    # Checked BEFORE the horizontal-extent logic: an h1 table is
+    # (6, 4, n), whose b == n would otherwise read as a spatial axis.
+    if arr.shape[1] == 4:
+        return ("table", None)
+    a, b = arr.shape[1], arr.shape[2]
+    horiz = {n, n + 1}
+
+    def _pad_h(x):
+        d = x - n
+        return (d // 2) if (d > 0 and d % 2 == 0) else None
+
+    if a in horiz and b in horiz:
+        return ("sliceable", None)
+    ha, hb = _pad_h(a), _pad_h(b)
+    hs = [h for h in (ha if a not in horiz else None,
+                      hb if b not in horiz else None) if h]
+    if (a in horiz or ha) and (b in horiz or hb) and hs:
+        return ("padded", max(hs))
+    return ("other", None)
+
+
+def tiled_face_block(face_arr, ti: int, tj: int, nl: int, kt: int):
+    """Slice tile (ti, tj)'s block from ANY single-face metric array,
+    inferring per-axis staggering from the shape.
+
+    A cdgrid carries cell (n, n), corner (n+1, n+1), and edge
+    (n, n+1)/(n+1, n) face arrays.  Each horizontal axis is either
+    CENTERED (size kt*nl) -> nl local cells, or STAGGERED (size
+    kt*nl+1) -> nl+1 local cells DUPLICATING the shared boundary entry
+    between neighbouring tiles (Pace layout).  The single source of
+    truth for slicing every metric the tiled shard_map stage needs.
+
+    face_arr : (A, B, ...) with A, B in {kt*nl, kt*nl+1}.
+    Returns the (a, b, ...) tile block (a = nl[+1], b = nl[+1]).
+    """
+    a, b = face_arr.shape[0], face_arr.shape[1]
+    if a == kt * nl:
+        i0, i1 = ti * nl, (ti + 1) * nl
+    elif a == kt * nl + 1:
+        i0, i1 = ti * nl, ti * nl + nl + 1
+    else:
+        raise ValueError(
+            f"axis 0 size {a} is neither kt*nl={kt * nl} (centered) nor "
+            f"kt*nl+1={kt * nl + 1} (staggered) for kt={kt}, nl={nl}.")
+    if b == kt * nl:
+        j0, j1 = tj * nl, (tj + 1) * nl
+    elif b == kt * nl + 1:
+        j0, j1 = tj * nl, tj * nl + nl + 1
+    else:
+        raise ValueError(
+            f"axis 1 size {b} is neither kt*nl={kt * nl} (centered) nor "
+            f"kt*nl+1={kt * nl + 1} (staggered) for kt={kt}, nl={nl}.")
+    return face_arr[i0:i1, j0:j1]
+
+
+def tiled_padded_block(face_arr, ti: int, tj: int, nl: int, kt: int):
+    """Slice tile (ti, tj)'s nl+2h padded block from a PRECOMPUTED
+    padded face metric (n+2h on each horizontal axis).
+
+    Key fact (codex P4 padded-metric design): a cubed-sphere padded
+    angle metric (``cos_angle_padded`` etc.) already encodes the
+    RECEIVER-face extended-gnomonic-geometry halo for the whole face
+    (``angle = angle_padded[:, 1:-1, 1:-1]``; cubed_sphere.py:360).  A
+    tile's local nl+2h ring is therefore a contiguous SUB-WINDOW of
+    that global padded array — interior tiles pick up neighbouring
+    same-face interior cells, edge tiles pick up the receiver-geometry
+    outer ring — so the per-tile padded metric is a plain strided
+    slice, NOT a halo exchange (a scalar exchange of the UNpadded
+    cos_angle would carry the neighbour basis = wrong at face seams).
+
+    face_arr : (n+2h, n+2h, ...) precomputed padded metric (single
+        face).  h is inferred per axis from the extent.
+    Returns the (nl+2h, nl+2h, ...) tile block.
+    """
+    ha = face_arr.shape[0] - kt * nl
+    hb = face_arr.shape[1] - kt * nl
+    if ha <= 0 or ha % 2 or hb <= 0 or hb % 2:
+        raise ValueError(
+            f"axes {face_arr.shape[:2]} are not kt*nl+2h padded for "
+            f"kt={kt}, nl={nl}.")
+    ha, hb = ha // 2, hb // 2
+    return face_arr[ti * nl: ti * nl + nl + 2 * ha,
+                    tj * nl: tj * nl + nl + 2 * hb]
+
+
+def staggered_tile_block(face_arr, ti: int, tj: int, nl: int,
+                         stag_axis: int):
+    """Slice tile (ti, tj)'s duplicated-row staggered block.
+
+    face_arr : (n+1, n, ...) when ``stag_axis == 0``, (n, n+1, ...)
+        when ``stag_axis == 1`` (single face, no leading face axis).
+    Returns (nl+1, nl, ...) / (nl, nl+1, ...): the shared boundary
+    entry appears in BOTH adjacent tiles' blocks.
+    """
+    if stag_axis == 0:
+        return face_arr[ti * nl: ti * nl + nl + 1,
+                        tj * nl: (tj + 1) * nl]
+    return face_arr[ti * nl: (ti + 1) * nl,
+                    tj * nl: tj * nl + nl + 1]
+
+
+def staggered_blocks_to_face(blocks, kt: int, stag_axis: int):
+    """Inverse of per-tile slicing: canonical (n+1, ...) face array.
+
+    blocks : nested list ``blocks[ti][tj]`` of (nl+1, nl, ...) /
+        (nl, nl+1, ...) arrays in tile-row-major order.
+    Shared entries must agree between neighbouring blocks (the tiled
+    exchange maintains this); the LOWER tile's copy is taken
+    (canonical owner), so a disagreement is silently resolved — the
+    parity tests assert agreement separately.
+    """
+    import jax.numpy as jnp
+
+    if stag_axis == 0:
+        rows = []
+        for ti in range(kt):
+            row = jnp.concatenate([blocks[ti][tj] for tj in range(kt)],
+                                  axis=1)
+            rows.append(row if ti == 0 else row[1:])
+        return jnp.concatenate(rows, axis=0)
+    cols = []
+    for tj in range(kt):
+        col = jnp.concatenate([blocks[ti][tj] for ti in range(kt)],
+                              axis=0)
+        cols.append(col if tj == 0 else col[:, 1:])
+    return jnp.concatenate(cols, axis=1)
 
 
 def shard_latlon(pytree, config: DeviceConfig):
@@ -902,3 +1092,74 @@ def replicate_pytree(pytree, config: DeviceConfig):
         return jax.device_put(leaf, config.replicated_sharding)
 
     return jax.tree.map(_replicate_leaf, pytree)
+
+
+# ==============================================================================
+# Tiled cdgrid sliceable-metric assembly (P4 phase-1b)
+# ==============================================================================
+
+def stack_tiled_sliceable_metrics(cdgrid, kt: int):
+    """Stack per-tile blocks of every per-tile-SLICEABLE cdgrid metric
+    over the (face, tile_i, tile_j) device order.
+
+    Two metric classes are pure per-tile slices and both are stacked:
+      * ``"sliceable"`` (axes in {n, n+1} — cell / corner / edge) via
+        :func:`tiled_face_block`;
+      * ``"padded"`` (precomputed n+2h angle metrics) via
+        :func:`tiled_padded_block` — the global padded array already
+        holds the receiver-geometry halo for the whole face, so a
+        tile's nl+2h ring is a strided slice, NOT a halo exchange
+        (codex P4 padded design).
+    The result is ``(6*kt^2, *block)`` per metric where device
+    ``d = (f*kt + ti)*kt + tj`` holds its own tile block — the
+    cubed-sphere analogue of the voronoi ``stacked_meshes`` pattern the
+    tiled ``shard_map`` tendency stage indexes by ``axis_index``.
+
+    Returns ``(stacks, deferred)``: ``deferred`` is now ONLY the
+    non-spatial fields — exchange offset ``table`` arrays (consumed by
+    the tiled state exchange, not per-tile metrics) and ``scalar``
+    fields (``n`` becomes ``nl`` for the local grid).  Pure host-side
+    slicing; no device placement.
+    """
+    import jax.numpy as jnp
+
+    n = cdgrid.base.n
+    if n % kt != 0:
+        raise ValueError(
+            f"face resolution n={n} not divisible by kt={kt}")
+    nl = n // kt
+
+    def _walk(obj, prefix=""):
+        fields = getattr(obj, "_fields", None)
+        if fields is None:
+            return
+        for fname in fields:
+            val = getattr(obj, fname)
+            if hasattr(val, "_fields"):
+                yield from _walk(val, prefix=f"{prefix}{fname}.")
+            elif hasattr(val, "shape"):
+                yield (f"{prefix}{fname}", val)
+
+    stacks = {}
+    deferred = []
+    for name, arr in _walk(cdgrid):
+        kind, h = classify_face_metric(arr, n)
+        if kind == "sliceable":
+            _blk = tiled_face_block
+        elif kind == "padded":
+            # Padded metrics are ALSO a pure per-tile slice (the global
+            # padded array already holds the receiver-geometry halo for
+            # the whole face — codex P4 padded design); h2 padded angle
+            # metrics ride a strided nl+2h window, no exchange.
+            _blk = tiled_padded_block
+        else:
+            deferred.append((name, kind if h is None else f"{kind}:h{h}"))
+            continue
+        blocks = []
+        for f in range(6):
+            for ti in range(kt):
+                for tj in range(kt):
+                    blocks.append(_blk(arr[f], ti, tj, nl, kt))
+        stacks[name] = jnp.stack(blocks, axis=0)
+    deferred.sort()
+    return stacks, deferred
