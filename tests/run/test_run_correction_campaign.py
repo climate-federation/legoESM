@@ -542,6 +542,17 @@ def test_atomic_write_json(tmp_path):
     assert stat.S_IMODE(new.stat().st_mode) == 0o640
 
 
+def test_fsync_dir_is_best_effort(tmp_path):
+    """_fsync_dir makes the atomic-rename crash-DURABLE (the directory entry survives a
+    crash, so the last checkpoint round is not lost), but is BEST-EFFORT: a filesystem
+    that cannot fsync a directory must not break an otherwise-successful write.  A
+    non-existent path (os.open raises OSError) is swallowed, not raised."""
+    import scripts.run.run_correction_campaign as rcc
+
+    rcc._fsync_dir(str(tmp_path))                              # a real dir: succeeds, no raise
+    rcc._fsync_dir(str(tmp_path / "does_not_exist"))          # OSError swallowed (best-effort)
+
+
 def test_assert_output_path_writable(tmp_path, monkeypatch):
     """The launch pre-flight fails LOUD (in ms) on an unwritable --out/--checkpoint so
     a multi-day run never crashes at the final json.dump: a writable existing dir is

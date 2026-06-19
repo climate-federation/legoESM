@@ -1131,9 +1131,29 @@ def _assert_output_path_writable(path: str, *, flag: str) -> None:
             f"permissions or choose a writable path before launching.")
 
 
+def _fsync_dir(parent: str) -> None:
+    """Best-effort ``fsync`` of a directory so a rename within it is crash-durable.
+
+    Some filesystems (or platforms) do not support a directory ``fsync``; swallow that
+    ``OSError`` rather than fail an otherwise-successful atomic write.  Used by
+    :func:`_atomic_write_json` after ``os.replace`` to persist the directory ENTRY.
+    """
+    import os
+
+    try:
+        dir_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> None:
-    """Write ``obj`` as JSON to ``path`` ATOMICALLY: serialize to a temp file in the
-    SAME directory, flush + ``fsync``, then ``os.replace`` it onto ``path``.
+    """Write ``obj`` as JSON to ``path`` ATOMICALLY + DURABLY: serialize to a temp file
+    in the SAME directory, flush + ``fsync``, ``os.replace`` it onto ``path``, then
+    ``fsync`` the parent directory so the rename survives a crash.
 
     A crash / SLURM-kill mid-write therefore leaves the PREVIOUS file intact — a
     partial write can never corrupt the checkpoint a multi-day resume depends on
@@ -1165,6 +1185,12 @@ def _atomic_write_json(path: str, obj: Any, *, indent: int | None = None) -> Non
             mode = 0o666 & ~cur_umask
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+        # Durably persist the RENAME, not just the file's data: ``os.replace`` is
+        # atomic (the path never points at a half-written inode), but the directory
+        # ENTRY change is not crash-durable until the PARENT directory is fsynced.
+        # Without this a crash/SLURM-kill right after the replace can revert to the
+        # PREVIOUS checkpoint, losing the last completed (expensive) round.
+        _fsync_dir(parent)
     except BaseException:
         try:
             os.unlink(tmp)
