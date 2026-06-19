@@ -212,9 +212,23 @@ def _geostrophic_wind_column(
     phi = _geopotential_full_grid(T, q_v, p_s, sigma_coord)
     dphi_dx, dphi_dy = grad_fn(phi, grid)
     if phis is not None:
+        # ``phis`` must be co-located with ``p_s`` (same spatial grid shape); a
+        # mis-SIZED or wrong-RANK field (e.g. a transpose on a NON-square grid)
+        # would otherwise silently broadcast-add the WRONG orography. (A transpose
+        # on a SQUARE grid keeps the shape, so shape-equality cannot catch THAT —
+        # it needs axis-aware metadata; out of scope.) Static-shape check ⇒
+        # jit-safe, fails LOUDLY at trace time (CLAUDE.md: no silent coerce).
+        phis_arr = jnp.asarray(phis, dtype=T.dtype)
+        p_s_shape = tuple(jnp.asarray(p_s).shape)
+        if tuple(phis_arr.shape) != p_s_shape:
+            raise ValueError(
+                "phis (surface geopotential) must be co-located with p_s — the "
+                f"SAME spatial shape; got phis {tuple(phis_arr.shape)} vs p_s "
+                f"{p_s_shape}."
+            )
         # Orographic surface-geopotential gradient ∇(g·z_s): σ-independent, so take
         # its gradient on one level and broadcast-add to every level's Φ gradient.
-        phis_lev = jnp.asarray(phis, dtype=T.dtype)[..., None]   # (..., 1)
+        phis_lev = phis_arr[..., None]   # (..., 1)
         dphis_dx, dphis_dy = grad_fn(phis_lev, grid)
         dphi_dx = dphi_dx + dphis_dx
         dphi_dy = dphi_dy + dphis_dy

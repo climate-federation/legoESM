@@ -278,6 +278,19 @@ def test_extract_geostrophic_orographic_term_from_phis():
     np.testing.assert_allclose(dv, dv[0], rtol=1e-9, atol=1e-12)
 
 
+def test_extract_geostrophic_orographic_phis_shape_mismatch_raises():
+    """A ``phis`` not co-located with ``p_s`` (wrong spatial shape) FAILS LOUDLY
+    rather than silently broadcast-adding the wrong orography. The 8×16 grid makes
+    a transposed 16×8 field detectably wrong (a square grid would hide it)."""
+    grid, sigma, T, q_v, u, v, p_s = _latlon_state()   # p_s is (8, 16)
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=sigma,
+              lat_rad=float(jnp.deg2rad(35.0)), col_index=(6, 8))
+    with pytest.raises(ValueError, match="co-located with p_s"):
+        extract_column_forcing_latlon(**kw, phis=jnp.zeros((16, 8)))   # transposed
+    with pytest.raises(ValueError, match="co-located with p_s"):
+        extract_column_forcing_latlon(**kw, phis=jnp.zeros((8,)))      # wrong rank
+
+
 def test_extract_no_geostrophic_wind_near_equator():
     """Within the equatorial cutoff, geostrophic balance is ill-posed ⇒ None
     (so build_column_scm_forcing disables geostrophic relaxation there)."""
