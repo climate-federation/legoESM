@@ -87,6 +87,42 @@ def test_build_setup_shapes_and_relaxation():
     assert bool(jnp.all(setup.q_v_init >= 0.0))
 
 
+def test_relaxation_target_equals_theta_ref_so_sponge_damps_perturbation():
+    """SPONGE CONSISTENCY (run_forced_les correctness): the top-relaxation target is the
+    SAME GCM-θ interpolation onto hc.z_full as hc.theta_ref, so the sponge damps the
+    perturbation toward the GCM reference (tend = -rate·θ'), NOT toward a divergent
+    target (which would inject a SPURIOUS tendency -rate·(θ_ref-target) in the
+    relaxation layer and contaminate the LES near the top). gcm_theta varies (300→320),
+    so target==theta_ref is a non-trivial profile match, and the damping assertion would
+    FAIL if a future change built the target or theta_ref differently."""
+    from legoesm.atmosphere.dynamics.les_vertical_mapping import relaxation_tendency
+
+    gcm_z, gcm_theta, ls = _gcm_column()
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=float(jnp.deg2rad(20.0)),
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG,
+    )
+    target = np.asarray(setup.relax_theta_target)
+    theta_ref = np.asarray(setup.height_coord.theta_ref)
+    # theta_ref IS the GCM-θ interpolation onto hc.z_full — pin it to an INDEPENDENT
+    # interpolation so a coordinated refactor to a DIFFERENT-but-mutually-equal profile
+    # (which the target==theta_ref check alone would miss) still fails (Codex).
+    expected = np.asarray(
+        interpolate_column_to_les(gcm_z, gcm_theta, setup.height_coord.z_full))
+    np.testing.assert_allclose(theta_ref, expected, rtol=1e-12, atol=1e-12)
+    # The relaxation target is the SAME interpolation of gcm_theta onto hc.z_full.
+    np.testing.assert_allclose(target, theta_ref, rtol=1e-12, atol=1e-12)
+    assert not np.allclose(theta_ref, theta_ref[0])   # non-vacuous: θ_ref VARIES with z
+    # Downstream: target==theta_ref ⇒ a uniform θ' is damped toward 0 (tend = -rate·θ'),
+    # with NO spurious offset. A target≠theta_ref mismatch would add -rate·(θ_ref-target).
+    theta_prime = 0.7
+    tend = relaxation_tendency(
+        jnp.asarray(theta_ref) + theta_prime, setup.relax_theta_target, setup.relax_rate)
+    np.testing.assert_allclose(
+        np.asarray(tend), -np.asarray(setup.relax_rate) * theta_prime,
+        rtol=1e-12, atol=1e-12)
+
+
 def test_forcing_profiles_interpolated_to_les_grid():
     """Nonconstant GCM forcing must be interpolated onto the LES grid before
     make_plane_ls_forcing_physics (which expects nlev_LES profiles)."""
