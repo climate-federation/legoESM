@@ -161,6 +161,37 @@ def test_clip_field_no_bounds_returns_unchanged():
     np.testing.assert_allclose(np.asarray(out), np.asarray(field))
 
 
+def test_every_promotable_param_resolves_a_clampable_scalar_bound():
+    """clip_field_to_promotable_bounds is the safety guard that stops an out-of-range LES
+    diagnosis from injecting an UNPHYSICAL coefficient into a multi-day run. param_field_bounds
+    returns None for a per-element (tuple) bound (feedback.py:175 TODO) → a SILENT no-clamp.
+    Lock that EVERY registered promotable param resolves a clampable SCALAR (lo, hi) bound, so
+    none silently loses its safety clamp — a future array-shaped param (tuple bound) or a
+    mis-specified scalar→tuple bound fails HERE, forcing the param_field_bounds extension rather
+    than a silent safety hole. Systematic coverage beyond the C_K + gray-tau spot checks above;
+    a NEW promotable scheme must also be added to the config map (iter 314)."""
+    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.feedback import param_field_bounds
+    from legoesm.training.promotable_params import PROMOTABLE_FIELDS
+
+    config_for_scheme = {
+        "gray radiation": GrayRadiationConfig(),
+        "CLUBB-lite turbulence": CLUBBLiteConfig(),
+    }
+    for key, pf in PROMOTABLE_FIELDS.items():
+        config = config_for_scheme.get(pf.scheme)
+        assert config is not None, (
+            f"{key}: scheme {pf.scheme!r} is not in the test config map — a NEW promotable "
+            "scheme must be added here AND confirmed clampable (don't skip the safety check).")
+        bounds = param_field_bounds(config, pf.field)
+        assert bounds is not None, (
+            f"{key} ({pf.field}) resolves NO scalar bound — clip_field_to_promotable_bounds "
+            "silently skips it (feedback.py:175), disabling the safety clamp on its diagnosis.")
+        lo, hi = bounds
+        assert lo < hi, f"{key} bound [{lo}, {hi}] is not a valid (lo < hi) range."
+
+
 def test_param_field_bounds_resolves_ck():
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.feedback import param_field_bounds
