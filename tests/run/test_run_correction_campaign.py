@@ -40,6 +40,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     build_correction_campaign,
     build_distributed_multi_correction_campaign,
     build_multi_correction_campaign,
+    compose_compare_fn,
     make_base_driver_builder,
     make_clubb_build_driver,
     make_les_diagnose_fn,
@@ -300,6 +301,41 @@ def _base_config():
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence="clubb_lite")
+
+
+def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
+    """compose_compare_fn must pass ``valid_mask`` + ``manifest_reducer`` THROUGH to
+    make_compare_fn, so an ocean/land mask or the distributed owned-cell mask actually
+    restricts the worst-column ranking. A dropped pass-through would silently rank +
+    correct masked (e.g. non-owned halo / land) cells — otherwise caught ONLY by the
+    MPI e2e tests (which do not run in the default fast suite)."""
+    from types import SimpleNamespace
+
+    import scripts.run.run_correction_campaign as rcc
+
+    captured = {}
+
+    def fake_make_compare_fn(**kwargs):
+        captured.update(kwargs)
+        return lambda config: None
+
+    def reducer(manifest):                           # the distributed top-k post-processor
+        return manifest
+
+    monkeypatch.setattr(rcc, "make_compare_fn", fake_make_compare_fn)
+    vm = jnp.array([True, False, True])
+    sigma = SimpleNamespace(sigma_full=jnp.zeros(5), sigma_half=jnp.zeros(6))
+    compose_compare_fn(
+        base_atm_config=_base_config(),          # turbulence="clubb_lite" (required)
+        build_base_driver=(lambda cfg: object()),
+        extract_column_state=(lambda d, day, dt: None),
+        reference=object(), sigma=sigma, area_weights=jnp.ones(3), n_worst=2,
+        lat_deg=jnp.zeros(3), lon_deg=jnp.zeros(3),
+        valid_mask=vm, manifest_reducer=reducer,
+    )
+    assert captured["valid_mask"] is vm              # the mask is threaded, not dropped
+    assert captured["manifest_reducer"] is reducer   # the distributed top-k reducer too
+    assert captured["n_worst"] == 2                  # (sanity: other args also threaded)
 
 
 def test_make_clubb_build_driver_injects_override():
