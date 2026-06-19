@@ -233,6 +233,28 @@ def _multi_result(ck_field, bias_pair, accepted, *, n_diagnosed=1, n_diagnoses_v
         accepted=accepted, stop_reason="max_iterations")
 
 
+def test_summarize_multi_reads_stats_from_final_fields_not_config():
+    """The per-coefficient STATS (min/max/mean/std) come from ``result.final_fields``,
+    NOT ``result.final_config`` — the cross-module assumption ``assemble_global_campaign_
+    result`` (iter 256) relies on for the DISTRIBUTED persist: it replaces ``final_fields``
+    with the GLOBAL field but leaves the rank-local ``final_config`` (config is read only
+    for resolution-independent BOUNDS).  A regression reading per-column values from config
+    would silently emit RANK-LOCAL stats for a multi distributed result.  Pinned by making
+    config carry a DIFFERENT C_K that must be ignored."""
+    fields_ck = jnp.array([[0.40, 0.50], [0.60, 0.70]])   # the GLOBAL field, mean 0.55
+    prt = jnp.full(fields_ck.shape, 0.8)
+    bogus_config = CLUBBLiteConfig(C_K=jnp.full((4,), 99.0), Pr_t=prt.reshape(-1))
+    result = MultiCampaignResult(
+        final_config=bogus_config, iterations=(_mres(1.0, 0.4),),
+        final_fields={"clubb_lite_C_K": fields_ck, "clubb_lite_Pr_t": prt},
+        accepted=(True,), stop_reason="max_iterations")
+    s = summarize_campaign(result)
+    ck = next(c for c in s.coefficients if c.promotion_key == "clubb_lite_C_K")
+    assert ck.field_mean == pytest.approx(0.55)           # from final_fields, NOT 99.0
+    assert ck.field_max == pytest.approx(0.70)            # NOT the config's 99.0
+    assert ck.field_min == pytest.approx(0.40)
+
+
 def test_campaign_health_improved():
     # In-bounds C_K, 60% bias reduction → "improved".
     ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])
