@@ -2381,6 +2381,27 @@ def test_campaign_knobs_from_args_maps_flags():
     assert flagged["feedback_strategy"] == "environment"
 
 
+def test_campaign_knobs_reject_degenerate_counts():
+    """A non-positive --n-worst (ranks NOTHING) or --les-budget (runs NO LES) must FAIL
+    LOUD at construction — caught by the launch dry-run, not after a multi-day no-op run
+    (the iter-201 / iter-388 'no silent no-op' convention; iter 249).  ``--les-budget``
+    unset (None = no cap) stays valid."""
+    parser = _build_arg_parser()
+
+    def _knobs(extra):
+        return _campaign_knobs_from_args(
+            parser.parse_args(["--config", "x", "--era5-zarr", "z", *extra]))
+
+    for bad in (["--n-worst", "0"], ["--n-worst", "-3"]):
+        with pytest.raises(SystemExit, match=r"--n-worst .* must be >= 1"):
+            _knobs(bad)
+    with pytest.raises(SystemExit, match=r"--les-budget .* must be >= 1"):
+        _knobs(["--les-budget", "0"])
+    # the valid defaults (n_worst=20, les_budget unset) and an explicit positive budget pass.
+    assert _knobs([])["n_worst"] == 20
+    assert _knobs(["--n-worst", "1", "--les-budget", "1"])["les_budget"] == 1
+
+
 def test_campaign_knobs_are_valid_kwargs_for_both_builders():
     """Every knob the CLI maps MUST be a real kwarg of BOTH builders — so a renamed /
     removed builder param fails LOUDLY here, not silently on an HPC launch (this is

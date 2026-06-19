@@ -880,6 +880,19 @@ def _campaign_knobs_from_args(args) -> dict:
     DRIFT: a forgotten / inverted flag is a silent bug that would only surface on a
     multi-day HPC launch.  Pure (no I/O), so it is unit-tested directly.
     """
+    # FAIL LOUD on degenerate counts (caught by the launch dry-run, not after hours):
+    # a non-positive --n-worst ranks NOTHING and a non-positive --les-budget runs NO
+    # LES, so the whole multi-day campaign would silently correct nothing (the same
+    # class as the iter-201 zero-LES-steps guard / the iter-388 "no silent no-op" rule).
+    if int(args.n_worst) < 1:
+        raise SystemExit(
+            f"--n-worst {args.n_worst} must be >= 1: it is the number of worst columns "
+            "ranked + LES-diagnosed each round; < 1 ranks nothing, so the campaign would "
+            "correct NOTHING (a silent multi-day no-op).")
+    if args.les_budget is not None and int(args.les_budget) < 1:
+        raise SystemExit(
+            f"--les-budget {args.les_budget} must be >= 1 (or unset for no cap): it caps "
+            "the LES runs per round; < 1 runs no LES, so nothing is diagnosed or corrected.")
     return dict(
         n_worst=args.n_worst,
         les_budget=args.les_budget,
