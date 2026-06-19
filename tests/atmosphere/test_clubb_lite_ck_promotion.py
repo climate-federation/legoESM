@@ -236,6 +236,37 @@ def test_uniform_per_column_ceps_matches_scalar():
     np.testing.assert_array_equal(np.asarray(wp2_uniform), np.asarray(wp2_scalar))
 
 
+def test_per_column_ceps_leaves_current_tendencies_invariant():
+    """SOUNDNESS GUARD for the conservation gate's C_eps EXCLUSION: C_eps controls
+    the PROGNOSTIC wp2 dissipation (next-step wp2), NOT the current-step eddy-diffusion
+    tendencies, so test_per_column_ck_prt_conserves_column_integrals correctly omits
+    it.  A strongly-varying per-column C_eps changes wp2_new but leaves dq_v_dt /
+    du_dt / dv_dt / dT_dt EXACTLY unchanged.  If a future change coupled C_eps to the
+    current tendencies (e.g. using the C_eps-modified wp2 for K WITHIN the step), the
+    gate's C_eps exclusion would silently become unsound and a per-column C_eps deploy
+    could leak — this pins the decoupling so that regression fails LOUDLY."""
+    kw = _inputs()
+    cfg = CLUBBLiteConfig()
+    out0, wp2_0 = clubb_lite_turbulence(**kw, config=cfg)
+    ncol = kw["T"].shape[0]
+    # strongly-varying per-column C_eps (robust to any ncol via linspace, Codex).
+    ceps = jnp.linspace(0.5, 2.0, ncol) * cfg.C_eps
+    out1, wp2_1 = clubb_lite_turbulence(**kw, config=cfg._replace(C_eps=ceps))
+    for name, t0, t1 in [("dq_v_dt", out0.dq_v_dt, out1.dq_v_dt),
+                         ("du_dt", out0.du_dt, out1.du_dt),
+                         ("dv_dt", out0.dv_dt, out1.dv_dt),
+                         ("dT_dt", out0.dT_dt, out1.dT_dt)]:
+        np.testing.assert_array_equal(
+            np.asarray(t1), np.asarray(t0),
+            err_msg=f"a per-column C_eps changed the current-step {name} — the "
+                    f"conservation gate's C_eps exclusion is no longer sound.")
+    # NON-VACUOUS, PER-COLUMN: each column's C_eps reached its OWN wp2_new (so the
+    # bit-identical-tendencies result is meaningful, not C_eps being ignored).
+    per_col_dwp2 = np.max(np.abs(np.asarray(wp2_1) - np.asarray(wp2_0)), axis=1)
+    assert bool(np.all(per_col_dwp2 > 1e-10))     # every column changed
+    assert float(np.std(per_col_dwp2)) > 1e-12    # by DIFFERENT amounts ⇒ per-column
+
+
 def test_per_column_ceps_changes_wp2_per_column():
     """A per-column C_eps changes the wp2 dissipation per column (reaches the body)."""
     kw = _inputs()
