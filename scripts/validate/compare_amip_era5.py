@@ -314,7 +314,10 @@ def main(argv: list[str] | None = None) -> int:
     # per-variable global-bias CHANGE (the clause-5 "improve the biases" check —
     # exposes a correction that lowers the combined score by trading variables off).
     if args.baseline_restart:
-        from legoesm.training.bias_metrics import per_variable_bias_improvement
+        from legoesm.training.bias_metrics import (
+            bias_improvement,
+            per_variable_bias_improvement,
+        )
 
         baseline_model = load_model_from_restart(
             args.baseline_restart, grid, sigma, args.nlev, sst_K=sst_K)
@@ -341,7 +344,19 @@ def main(argv: list[str] | None = None) -> int:
         if have_precip:
             print(_line("precip_err", "mm/day", pvi.baseline.global_precip_err_mm_day,
                         pvi.updated.global_precip_err_mm_day, pvi.precip_improved))
-    return 0
+        # The COMBINED area-weighted bias is the campaign's objective + the done-criterion
+        # "improve the biases" verdict. Gate the exit code on it (iter 288, mirrors the
+        # campaign/OSSE go/no-go): 0 only when the correction LOWERS the held-out combined
+        # bias, 1 otherwise — so an automated `deploy && verify` workflow detects a
+        # correction that did NOT generalize to the held-out window (overfit the training
+        # period) instead of silently reporting success.
+        combined = bias_improvement(
+            baseline_cmp.error_fields.combined_score, result.error_fields.combined_score,
+            jnp.asarray(grid.grid_area))
+        print(_line("COMBINED bias", "", combined.baseline_bias,
+                    combined.updated_bias, combined.improved))
+        return 0 if bool(combined.improved) else 1
+    return 0       # no --baseline-restart: informational bias report only, no verdict
 
 
 if __name__ == "__main__":  # pragma: no cover

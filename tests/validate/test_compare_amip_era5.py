@@ -236,11 +236,15 @@ def test_main_before_after_baseline_restart(tmp_path, monkeypatch, capsys):
             "--grid-type", "gaussian", "--resolution", "8", "--nlev", str(nlev),
             "--era5-zarr", "gs://x", "--n-worst", "1", "--out", out,
         ])
-    assert rc == 0
+    # baseline == corrected (same stub state) ⇒ equal COMBINED bias ⇒ NOT improved ⇒ the
+    # held-out verify EXITS NON-ZERO (iter 288): an automated deploy&verify workflow must
+    # detect a correction that did not generalize, not silently report success.
+    assert rc == 1
     assert calls["n_load_restart"] == 2      # corrected + baseline both loaded
     printed = capsys.readouterr().out
     assert "per-variable bias baseline -> corrected" in printed
     assert "T_rmse" in printed and "wind_rmse" in printed
+    assert "COMBINED bias" in printed        # the combined verdict the exit code gates on
     # baseline == corrected (same stub state) ⇒ equal bias ⇒ NOT improved.
     assert "WORSE/same" in printed
 
@@ -261,7 +265,7 @@ def test_compare_and_write_end_to_end(tmp_path):
     # Reference identical except a cold bias in one column.
     import numpy as np
 
-    T_ref = np.full(shape + (nlev,), 250.0)
+    T_ref = np.full(shape + (nlev,), 250.0)  # noqa: N806 (T = temperature, physics symbol)
     T_ref[1, 0] = 245.0  # 5 K bias at (1,0)
     reference = model._replace(T=jnp.asarray(T_ref), sst_K=None)
 
