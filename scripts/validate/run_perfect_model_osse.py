@@ -205,6 +205,13 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
                    help="LES timestep [s]. Default 0.5 keeps the acoustic Courant < 1 "
                         "at the shallow-regime dx=50 m; a larger dt is rejected by "
                         "run_forced_les' acoustic-CFL pre-flight.")
+    p.add_argument("--orographic-forcing", choices=("auto", "on", "off"),
+                   default="auto",
+                   help="orographic geostrophic LES-forcing term over terrain — MUST "
+                        "match the real campaign's setting so the OSSE go/no-go "
+                        "faithfully predicts it. 'auto' (default): use the model's OWN "
+                        "static topography if any (flat models stay flat). 'on': "
+                        "REQUIRE terrain (error if flat). 'off': force flat.")
     return p
 
 
@@ -217,12 +224,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         run_forced_les,  # the only module that defines it (rce_diagnostics never did)
     )
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.perfect_model_osse import osse_verdict
 
     from scripts.run.run_correction_campaign import (
         _area_weights,
         load_base_config_and_grid,
         make_base_driver_builder,
+        resolve_orographic_phis,
     )
 
     args = _build_argparser().parse_args(argv)
@@ -232,6 +241,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
 
+    # Orographic LES-forcing topography: resolved the SAME way as the real campaign
+    # CLI (iter 126) via the side-effect-free probe, so this go/no-go OSSE uses the
+    # identical forcing the campaign will — otherwise a terrain run's pre-flight
+    # would not predict the real run. base_cfg is the atm config for both modes.
+    phis = resolve_orographic_phis(
+        args.orographic_forcing,
+        lambda: ModelDriver(base_cfg).static_topography_phis())
+
     field = METHOD_PROMOTION[args.diagnosis_method][1]
     result = build_perfect_model_osse(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -240,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         true_clubb=CLUBBLiteConfig(**{field: args.true_ck}),
         biased_clubb=CLUBBLiteConfig(**{field: args.biased_ck}),
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
-        run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations)
+        run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations,
+        phis=phis)
 
     verdict = osse_verdict(result)
     print(f"[osse] true={result.true_value:.4g} biased={result.initial_value:.4g} "

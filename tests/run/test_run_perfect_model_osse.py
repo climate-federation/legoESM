@@ -27,6 +27,7 @@ from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 from legoesm.training.perfect_model_osse import osse_verdict  # noqa: E402
 
 from scripts.validate.run_perfect_model_osse import (  # noqa: E402
+    _build_argparser,
     build_multi_perfect_model_osse,
     build_perfect_model_osse,
 )
@@ -88,6 +89,19 @@ def _base_config():
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence="clubb_lite")
+
+
+def test_orographic_forcing_flag_parsed():
+    """The OSSE CLI exposes --orographic-forcing (default auto) so a terrain
+    go/no-go uses the SAME forcing the real campaign does (iter 126 parity)."""
+    import pytest
+
+    p = _build_argparser()
+    base = ["--config", "c.json", "--true-ck", "0.2", "--biased-ck", "0.1"]
+    assert p.parse_args(base).orographic_forcing == "auto"
+    assert p.parse_args(base + ["--orographic-forcing", "off"]).orographic_forcing == "off"
+    with pytest.raises(SystemExit):                       # argparse rejects bad choice
+        p.parse_args(base + ["--orographic-forcing", "terrain"])
 
 
 def test_build_perfect_model_osse_wiring():
