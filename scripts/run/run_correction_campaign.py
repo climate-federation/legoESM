@@ -1412,9 +1412,13 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
                 "round": int(round_idx),
                 "grid": _grid_provenance(base_cfg, grid),
                 "coefficients": list(coefficients),
-                "fields": {k: np.asarray(v).reshape(-1).tolist()
+                # field finiteness asserted (NaN ⇒ unparseable checkpoint / corrupt
+                # resume) + initial_bias sanitized to null (a diverged initial is a
+                # recorded metric, not a bug) — the checkpoint analog of the iter-270 /
+                # iter-245 output guards, so a resume artifact stays parseable + finite.
+                "fields": {k: _assert_corrected_field_finite(k, np.asarray(v)).reshape(-1).tolist()
                            for k, v in fields.items()},
-                "initial_bias": init_box["initial_bias"],
+                "initial_bias": _json_finite(init_box["initial_bias"]),
                 "initial_per_variable": init_box["initial_per_variable"],
                 "n_diagnosed_total": (init_box["n_diagnosed_prior"]
                                       + init_box.get("n_diag_seg", 0)),
@@ -1790,14 +1794,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             # The coefficient is stored under its real name (C_K or Pr_t) for
             # inspection + the resume-method guard; resume reconstructs from `field`.
             _capture_initial_record(init_box, res)
-            flat = np.asarray(field).reshape(-1)
+            # field finiteness asserted (NaN ⇒ unparseable checkpoint / corrupt resume) +
+            # initial_bias sanitized to null (a diverged initial is a recorded metric, not
+            # a bug) — the checkpoint analog of the iter-270 / iter-245 output guards.
+            arr = _assert_corrected_field_finite(corrected_field, np.asarray(field))
+            flat = arr.reshape(-1)
             _atomic_write_json(args.checkpoint, {
                 "round": int(round_idx),
                 "grid": _grid_provenance(base_cfg, grid),
                 "corrected_field": corrected_field,
                 corrected_field: flat.tolist(),
-                "field": np.asarray(field).tolist(),
-                "initial_bias": init_box["initial_bias"],
+                "field": arr.tolist(),
+                "initial_bias": _json_finite(init_box["initial_bias"]),
                 "initial_per_variable": init_box["initial_per_variable"],
                 "n_diagnosed_total": (init_box["n_diagnosed_prior"]
                                       + init_box.get("n_diag_seg", 0)),
