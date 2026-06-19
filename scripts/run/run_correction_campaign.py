@@ -1129,17 +1129,32 @@ def _assert_corrected_field_finite(name, arr):
     return arr
 
 
-def _averaging_provenance(args) -> dict:
-    """The comparison's ERA5 averaging window — recorded in the output so the empirical
+def _averaging_provenance(args, base_cfg=None) -> dict:
+    """The comparison's averaging windows — recorded in the output so the empirical
     result is SELF-DESCRIBING + reproducible.  A bias computed against a single ERA5
     SNAPSHOT (``era5_n_times=1``) is a different scientific quantity than one against an
     N-time CLIMATOLOGY (iter 140); the time indices + count make 'what was this bias
     measured against' explicit for the analyst, not implicit in the launch command.
+
+    When ``base_cfg`` is given (the campaign output + dry-run; iter 313), ALSO record the
+    MODEL-side averaging window — the model time-mean is over the run length ``days``,
+    sampled every ``diag_days`` — so a deployer can confirm the model climatology window
+    is comparable to the ERA5 one (BOTH time-means, the iter-267 window-alignment is
+    TWO-sided), and a suspiciously short model window is visible.  ``base_cfg=None`` (the
+    cross-grid env-kernel write) omits it, since that kernel deploys on a different grid
+    whose own model window differs.
     """
-    return {
+    block = {
         "era5_time_idx": int(args.era5_time_idx),
         "era5_n_times": int(_resolve_era5_n_times(args.era5_n_times)),
     }
+    if base_cfg is not None:
+        diag = int(getattr(base_cfg.output, "diag_days", 0))
+        days = int(base_cfg.days)
+        block["model_days"] = days
+        block["model_diag_days"] = diag
+        block["model_n_samples"] = (days // diag) if diag > 0 else None
+    return block
 
 
 def build_campaign_output_dict(result, *, grid_provenance, summary, health,
@@ -1381,11 +1396,15 @@ def _dry_run_era5_line(era5: dict | None) -> str:
     n = int(era5.get("era5_n_times", 1))
     idx = era5.get("era5_time_idx")
     at = "" if idx is None else f" @ idx {int(idx)}"
+    md = era5.get("model_days")                          # the MODEL-side window (iter 313)
+    model = "" if md is None else (
+        f"; model mean over {int(md)} days ({era5.get('model_n_samples')} samples @ "
+        f"{era5.get('model_diag_days')}-day cadence)")
     if n == 1:
-        return (f"\n  ERA5 reference: SINGLE snapshot{at} — WARNING: a snapshot vs a "
+        return (f"\n  ERA5 reference: SINGLE snapshot{at}{model} — WARNING: a snapshot vs a "
                 "multi-day model mean is weather-vs-climate; use --era5-n-times N "
                 "(runbook §3).")
-    return f"\n  ERA5 reference: {n}-time climatology{at}"
+    return f"\n  ERA5 reference: {n}-time climatology{at}{model}"
 
 
 def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
@@ -1535,7 +1554,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         **_campaign_knobs_from_args(args))
     if args.dry_run:
         print(_dry_run_report(result, mode=args.mode, out=args.out,
-                              era5=_averaging_provenance(args)))
+                              era5=_averaging_provenance(args, base_cfg)))
         return 0
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
@@ -1567,7 +1586,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, coefficients=coefficients,
-        averaging=_averaging_provenance(args)), indent=2)
+        averaging=_averaging_provenance(args, base_cfg)), indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -1943,7 +1962,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     )
     if args.dry_run:
         print(_dry_run_report(result, mode=args.mode, out=args.out,
-                              era5=_averaging_provenance(args)))
+                              era5=_averaging_provenance(args, base_cfg)))
         return 0
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
@@ -1975,7 +1994,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, corrected_field=corrected_field,
-        averaging=_averaging_provenance(args)), indent=2)
+        averaging=_averaging_provenance(args, base_cfg)), indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")

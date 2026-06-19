@@ -146,6 +146,16 @@ def test_check_deploy_surfaces_averaging_provenance_for_the_deployer(tmp_path, c
     o = capsys.readouterr().out
     assert "SINGLE ERA5 snapshot @ idx 5" in o and "confirm this matches your deploy" in o
 
+    # the MODEL-side averaging window (iter 313) is surfaced when present, so the deployer
+    # confirms BOTH windows are comparable (the iter-267 alignment is two-sided).
+    with_model = _campaign_output(
+        tmp_path, base_cfg, grid, name="model_av.json",
+        averaging={"era5_n_times": 30, "era5_time_idx": 0,
+                   "model_days": 200, "model_diag_days": 5, "model_n_samples": 40})
+    main(["--base-config", cfg, "--campaign-output", with_model])
+    o = capsys.readouterr().out
+    assert "model climatology window: 200 days" in o and "40 samples" in o
+
 
 def test_main_returns_zero_and_prints_ok(tmp_path, capsys):
     from scripts.experiment.check_campaign_deploy import main

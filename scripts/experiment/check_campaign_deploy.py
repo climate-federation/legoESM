@@ -191,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
         note = ("  (a snapshot-trained correction — confirm this matches your deploy "
                 "intent)") if n == 1 else ""
         print(f"    source: corrected against {kind} @ idx {idx}{note}")
+        md = av.get("model_days")                          # the MODEL-side window (iter 313)
+        if md is not None:
+            print(f"    model climatology window: {int(md)} days "
+                  f"({av.get('model_n_samples')} samples @ "
+                  f"{av.get('model_diag_days')}-day cadence) — confirm it is comparable to "
+                  "the ERA5 window above (both time-means, not a snapshot).")
     return 0
 
 

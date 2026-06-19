@@ -2774,6 +2774,25 @@ def test_output_dict_records_averaging_provenance():
     assert out["averaging"] == {"era5_time_idx": 12, "era5_n_times": 30}
 
 
+def test_averaging_provenance_records_the_model_window_when_config_given():
+    """With base_cfg (the campaign output + dry-run), _averaging_provenance ALSO records the
+    MODEL-side averaging window — days / diag_days / n_samples — so the iter-267 window
+    alignment is TWO-sided (the deployer confirms the model climatology window vs the ERA5
+    one, both time-means, not a snapshot). Without base_cfg (the cross-grid kernel write) it
+    omits them; diag_days=0 → n_samples None, not a div-by-zero (iter 313)."""
+    from scripts.run.run_correction_campaign import _averaging_provenance
+
+    args = SimpleNamespace(era5_time_idx=0, era5_n_times=30)
+    cfg = SimpleNamespace(days=200, output=SimpleNamespace(diag_days=5))
+    av = _averaging_provenance(args, cfg)
+    assert av["era5_n_times"] == 30
+    assert av["model_days"] == 200 and av["model_diag_days"] == 5
+    assert av["model_n_samples"] == 40                       # 200 // 5
+    assert "model_days" not in _averaging_provenance(args)   # no base_cfg ⇒ ERA5-only block
+    cfg0 = SimpleNamespace(days=200, output=SimpleNamespace(diag_days=0))
+    assert _averaging_provenance(args, cfg0)["model_n_samples"] is None  # no div-by-zero
+
+
 def test_campaign_output_dict_diverged_run_is_strict_json():
     """The WHOLE build_campaign_output_dict for a DIVERGED run (NaN bias) must be standard
     JSON — no NaN/Infinity tokens anywhere.
