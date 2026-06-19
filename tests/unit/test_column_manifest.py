@@ -125,6 +125,47 @@ def test_build_manifest_selects_worst_and_tags():
     assert worst.environment.sst_K == pytest.approx(300.0)
 
 
+def test_build_manifest_environment_tag_matches_worst_columns_own_cell():
+    """The worst column's environment tag (SST/CAPE/shear) must be gathered from
+    THAT column's cell — not a transposed / wrongly-flattened neighbour.
+
+    ``test_build_manifest_selects_worst_and_tags`` uses a UNIFORM environment, so
+    its sst/cape asserts are vacuous for the GATHER: a mis-indexed env lookup (a
+    C-vs-F flatten or an i↔j transpose between the ranking flat-index and the
+    environment field) would still return the uniform value.  The env tag drives
+    the LES forcing AND the env-kernel clustering/deploy, so a mis-gather would
+    spin off the LES under a DIFFERENT column's climate and diagnose a coefficient
+    for the wrong regime.  Here every cell carries a UNIQUE sst/cape/shear and the
+    worst column sits at a NON-origin, NON-diagonal cell of a NON-SQUARE grid
+    (1,2) so a transpose (→(2,1), out of range) or an F-order flatten (→(0,2))
+    lands on a different cell with different values — a decisive catch.
+    """
+    nlat, nlon = 3, 4
+    combined = jnp.zeros((nlat, nlon)).at[1, 2].set(9.0)   # unique worst at (1,2)
+    errs = _make_error_fields(combined)
+    i_idx = jnp.arange(nlat)[:, None]
+    j_idx = jnp.arange(nlon)[None, :]
+    env = ColumnEnvironmentFields(                          # every cell distinct
+        sst_K=290.0 + 10.0 * i_idx + 1.0 * j_idx,          # (1,2) → 302
+        cape_J_kg=1000.0 + 100.0 * i_idx + 10.0 * j_idx,   # (1,2) → 1120
+        bulk_shear_m_s=(1.0 * i_idx + 0.1 * j_idx) + jnp.zeros((nlat, nlon)),  # (1,2) → 1.2
+    )
+    lat = jnp.array([10.0, 20.0, 30.0])
+    lon = jnp.array([100.0, 110.0, 120.0, 130.0])
+    records = build_worst_column_manifest(
+        error_fields=errs, environment=env,
+        lat_deg=lat, lon_deg=lon, time_index=0, n=1,
+    )
+    worst = records[0]
+    assert worst.grid_index == (1, 2)
+    assert worst.lat_deg == pytest.approx(20.0)            # lat[1], not lat[2]
+    assert worst.lon_deg == pytest.approx(120.0)           # lon[2], not lon[1]
+    # The env tag is THIS cell's value — a transpose/F-order gather would differ.
+    assert worst.environment.sst_K == pytest.approx(302.0)
+    assert worst.environment.cape_J_kg == pytest.approx(1120.0)
+    assert worst.environment.bulk_shear_m_s == pytest.approx(1.2)
+
+
 def test_build_manifest_drops_invalid_columns():
     combined = jnp.array([[0.1, 0.9], [0.5, 0.2]])
     errs = _make_error_fields(combined)
