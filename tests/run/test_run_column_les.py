@@ -255,26 +255,90 @@ def test_build_setup_deep_regime_by_cape():
     assert setup.regime == "deep"  # CAPE 2500 >= 1000
 
 
-def test_build_setup_rejects_unsupported_surface_bc():
-    """The forced-LES path applies no surface BC yet, so a forcing that REQUESTS one
-    (prescribe='T_s' or 'fluxes') fails LOUD rather than silently dropping the surface
-    heating (which would starve a convective LES of its primary turbulence source).
-    The compare-reanalysis extractors leave prescribe='none', so this guards a future
-    extractor/user against a silent drop."""
+def test_build_setup_rejects_unsupported_T_s_surface_bc():
+    """prescribe='T_s' (surface-TEMPERATURE BC) still fails LOUD — the forced-LES path
+    has no bulk-flux closure C_H·|U|·(θ_sfc−θ_1) to convert T_s to a kinematic flux yet
+    (iter 151 left that the documented next channel). prescribe='fluxes' is now
+    supported (see test_build_setup_applies_prescribed_surface_fluxes); 'none' builds."""
     gcm_z, gcm_theta, ls = _gcm_column()
-    for bad in (ls._replace(prescribe="T_s", T_s=300.0),
-                ls._replace(prescribe="fluxes", w_th_s=0.05, w_qv_s=2e-5)):
-        with pytest.raises(ValueError, match="does NOT yet apply a surface BC"):
-            build_column_les_setup(
-                cape_J_kg=200.0, lat_rad=0.3,
-                gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=bad, config=_CONFIG,
-            )
-    # prescribe='none' (the current design) still builds normally.
+    with pytest.raises(ValueError, match="does NOT yet apply"):
+        build_column_les_setup(
+            cape_J_kg=200.0, lat_rad=0.3, gcm_z=gcm_z, gcm_theta=gcm_theta,
+            ls_state=ls._replace(prescribe="T_s", T_s=300.0), config=_CONFIG,
+        )
+    # prescribe='none' (the surface-flux-free design) still builds normally.
     ok = build_column_les_setup(
         cape_J_kg=200.0, lat_rad=0.3,
         gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG,
     )
     assert isinstance(ok, ColumnLESSetup)
+
+
+def test_surface_kinematic_flux_tendency_helper():
+    """The surface-flux helper puts a POSITIVE-upward kinematic flux on the SURFACE
+    (last) cell only, mass-weighted, zero aloft, and is AD-safe."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+        surface_kinematic_flux_tendency,
+    )
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+
+    hc = create_stretched_height_coordinate(6, H=2000.0, dz_sfc=50.0)
+    flux = 0.05
+    tend = np.asarray(surface_kinematic_flux_tendency(flux, hc))
+    assert tend.shape == (6,)
+    np.testing.assert_allclose(tend[:-1], 0.0)         # interior cells untouched
+    rho_w = float(np.asarray(hc.rho_ref_half)[-1])
+    rho = float(np.asarray(hc.rho_ref)[-1])
+    dz = float(np.asarray(hc.dz)[-1])
+    np.testing.assert_allclose(tend[-1], flux * rho_w / rho / dz, rtol=1e-12)
+    assert tend[-1] > 0.0                              # upward flux ⇒ positive (warming)
+    g = jax.grad(lambda f: jnp.sum(surface_kinematic_flux_tendency(f, hc)))(0.05)
+    assert np.isfinite(g) and g > 0.0                  # linear in flux, AD-safe
+
+
+def test_build_setup_applies_prescribed_surface_fluxes():
+    """prescribe='fluxes' now BUILDS (iter 151) and threads the surface kinematic θ/q_v
+    fluxes into the plane forcing physics, which injects them on the SURFACE (last) cell
+    ONLY. Isolated by DIFFERENCING the flux vs no-flux setups (same ls otherwise, so the
+    subsidence/advection channels cancel): the difference is the surface-flux source —
+    zero at every interior level, equal to the helper value at the surface cell."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import make_rest_state
+    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+        surface_kinematic_flux_tendency,
+    )
+
+    gcm_z, gcm_theta, ls = _gcm_column()
+    wth, wqv = 0.05, 2e-5
+    common = dict(cape_J_kg=200.0, lat_rad=0.3, gcm_z=gcm_z, gcm_theta=gcm_theta,
+                  config=_CONFIG)
+    setup_none = build_column_les_setup(ls_state=ls, **common)
+    setup_flux = build_column_les_setup(
+        ls_state=ls._replace(prescribe="fluxes", w_th_s=wth, w_qv_s=wqv), **common)
+    assert isinstance(setup_flux, ColumnLESSetup)
+    grid, hc = setup_flux.grid, setup_flux.height_coord
+    rest = make_rest_state(grid, hc, dtype=jnp.float64)
+    # Moist state with a q_v tracer slot (as run_forced_les builds it) so the surface
+    # q_v flux has a tracer to act on (a dry rest state has n_tracers=0).
+    ny, nx, nlev0 = grid.ny, grid.nx, hc.n_levels
+    tracers = jnp.zeros((ny, nx, nlev0, 1), dtype=jnp.float64).at[..., 0].set(5e-3)
+    rest = rest._replace(tracers=rest.tracers.replace(data=tracers))
+    t_none = setup_none.forcing_physics(rest, grid, hc, None)
+    t_flux = setup_flux.forcing_physics(rest, grid, hc, None)
+    nlev = hc.n_levels
+    d_theta = np.asarray(t_flux.dtheta_prime_dt.data - t_none.dtheta_prime_dt.data)
+    d_qv = np.asarray((t_flux.dtracers_dt.data - t_none.dtracers_dt.data)[..., 0])
+    exp_th = float(np.asarray(surface_kinematic_flux_tendency(wth, hc))[-1])
+    exp_qv = float(np.asarray(surface_kinematic_flux_tendency(wqv, hc))[-1])
+    assert exp_th > 0.0 and exp_qv > 0.0               # upward flux ⇒ warming/moistening
+    np.testing.assert_allclose(d_theta[:, :, :nlev - 1], 0.0, atol=1e-14)   # interior: 0
+    np.testing.assert_allclose(d_qv[:, :, :nlev - 1], 0.0, atol=1e-20)
+    np.testing.assert_allclose(d_theta[:, :, nlev - 1], exp_th, rtol=1e-10)  # surface only
+    np.testing.assert_allclose(d_qv[:, :, nlev - 1], exp_qv, rtol=1e-10)
 
 
 def test_build_setup_raises_when_les_top_above_column():

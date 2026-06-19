@@ -197,28 +197,29 @@ def build_column_les_setup(
     from legoesm.grids.vertical import create_stretched_height_coordinate
 
     validate_column_les_config(config)
-    # The forced-LES path applies only the LARGE-SCALE forcing channels (subsidence,
+    # The forced-LES path applies the LARGE-SCALE forcing channels (subsidence,
     # horizontal advection, geostrophic wind) + the top relaxation toward the GCM
-    # column θ; it does NOT yet apply a SURFACE boundary condition (a prescribed T_s
-    # or surface fluxes — the SCMForcing "Phase B" surface consumer). Silently
-    # dropping a requested surface BC would force a convective column's LES with NO
-    # surface buoyancy flux — its PRIMARY turbulence driver — and yield a quietly-
-    # wrong closure diagnosis, so fail LOUD (dispatch-hardening). The compare-
-    # reanalysis extractors leave prescribe="none" (surface-flux-free BY DESIGN), so
-    # this never fires today; it guards a FUTURE extractor/user that sets a surface BC
-    # against a silent drop. (An invalid prescribe value still gets its own error from
-    # build_column_scm_forcing's validate_forcing; prescribe="none" with surface
-    # fields nonetheless set is caught downstream by its _check_surface_exclusivity —
-    # so all three misconfigurations are LOUD, none silently dropped.)
-    if ls_state.prescribe in ("T_s", "fluxes"):
+    # column θ, AND now (iter 151) a PRESCRIBED-FLUX surface BC (prescribe="fluxes":
+    # the surface kinematic θ/q_v fluxes injected on the surface cell by
+    # make_plane_ls_forcing_physics, the separate surface-scheme source the no-flux
+    # interior SGS leaves room for). It does NOT yet apply a prescribed surface-
+    # TEMPERATURE BC (prescribe="T_s" — that needs a bulk-flux closure C_H·|U|·
+    # (θ_sfc−θ_1); a separate future channel). Silently dropping a requested T_s
+    # would force a convective column's LES with NO surface buoyancy flux — its
+    # PRIMARY turbulence driver — and yield a quietly-wrong closure diagnosis, so
+    # fail LOUD (dispatch-hardening). The compare-reanalysis extractors leave
+    # prescribe="none", so this never fires today. (An invalid prescribe value still
+    # gets its own error from build_column_scm_forcing's validate_forcing;
+    # prescribe="none" with surface fields nonetheless set is caught downstream by its
+    # _check_surface_exclusivity — so every misconfiguration is LOUD, none dropped.)
+    if ls_state.prescribe == "T_s":
         raise ValueError(
-            f"build_column_les_setup: ls_state.prescribe={ls_state.prescribe!r} "
-            "requests a surface boundary condition (prescribed T_s or surface fluxes), "
-            "but the forced-LES path does NOT yet apply a surface BC — only large-scale "
-            "forcing + top relaxation. The requested surface heating would be silently "
-            "dropped, starving a convective LES of its primary turbulence source. Use "
-            "prescribe='none' (surface-flux-free, the current compare-reanalysis "
-            "design), or implement the LES surface-flux bottom BC before requesting one."
+            "build_column_les_setup: ls_state.prescribe='T_s' requests a prescribed "
+            "surface-TEMPERATURE BC, but the forced-LES path does NOT yet apply one — "
+            "it needs a bulk-flux closure C_H·|U|·(θ_sfc−θ_1) to convert T_s to a "
+            "surface kinematic flux. Use prescribe='fluxes' (supply the surface "
+            "kinematic θ/q_v fluxes directly — now supported), or prescribe='none' "
+            "(surface-flux-free), or implement the bulk-flux T_s path before using it."
         )
     regime, res = les_resolution_for_column(cape_J_kg, config.regime)
     f_c = coriolis_f_c(lat_rad)
@@ -253,11 +254,22 @@ def build_column_les_setup(
             )
         return interpolate_column_to_les(gcm_z, profile, hc.z_full)
 
+    # Prescribed-FLUX surface BC (prescribe="fluxes"): the scalar surface kinematic
+    # θ/q_v fluxes (steady scalar callables) injected on the LES surface cell. None
+    # for prescribe="none"/"T_s" (T_s is rejected above); each flux is independently
+    # optional (validate_forcing requires ≥1 when prescribe="fluxes").
+    w_theta_sfc = w_qv_sfc = None
+    if forcing.prescribe == "fluxes":
+        w_theta_sfc = None if forcing.w_th_s is None else float(forcing.w_th_s(0.0))
+        w_qv_sfc = None if forcing.w_qv_s is None else float(forcing.w_qv_s(0.0))
+
     forcing_physics = make_plane_ls_forcing_physics(
         hc,
         w_ls=_to_les(forcing.subsidence_w),
         theta_adv=_to_les(forcing.theta_adv),
         qv_adv=_to_les(forcing.qv_adv),
+        w_theta_sfc=w_theta_sfc,
+        w_qv_sfc=w_qv_sfc,
     )
 
     # Wire the GCM column's geostrophic wind into the plane Coriolis as its
