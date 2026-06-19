@@ -184,3 +184,34 @@ def test_manifest_json_round_trip(tmp_path):
     dicts = manifest_to_dicts(records)
     assert isinstance(dicts[0]["grid_index"], list)
     assert dicts_to_manifest(dicts) == records
+
+
+def test_manifest_round_trip_preserves_nan_precip(tmp_path):
+    """The COMMON ERA5 case has no precip reference, so a VALID worst column carries
+    ``precip_err_mm_day = NaN`` (selection ranks on the finite combined_score). The
+    manifest must round-trip that NaN FAITHFULLY — write→read keeps precip NaN while
+    every other field is exactly equal; it must NOT silently coerce NaN→0 or drop the
+    column. The equality-based round-trip test above can't cover this (NaN != NaN), so
+    this locks the routine NaN path explicitly. Forward-compatible with a future
+    JSON-standard null↔NaN codec change (the round-trip VALUE stays NaN either way)."""
+    import math
+
+    combined = jnp.array([[0.1, 0.9], [0.5, 0.2]])
+    errs = ColumnErrorFields(
+        T_rmse_K=combined, qv_rmse_kg_kg=jnp.zeros_like(combined),
+        wind_rmse_m_s=jnp.zeros_like(combined),
+        precip_err_mm_day=jnp.full_like(combined, jnp.nan),   # no ERA5 precip ⇒ NaN
+        combined_score=combined)
+    records = build_worst_column_manifest(
+        error_fields=errs, environment=_make_env((2, 2)),
+        lat_deg=jnp.array([10.0, 20.0]), lon_deg=jnp.array([100.0, 110.0]),
+        time_index=3, n=2)
+    assert records and all(math.isnan(r.precip_err_mm_day) for r in records)  # builder kept NaN
+    path = str(tmp_path / "manifest_nan.json")
+    write_manifest(records, path)
+    loaded = read_manifest(path)
+    assert len(loaded) == len(records)
+    for lo, rec in zip(loaded, records):
+        assert math.isnan(lo.precip_err_mm_day)               # NaN preserved, not coerced
+        # every OTHER field exactly equal (neutralize the not-self-equal precip slot).
+        assert lo._replace(precip_err_mm_day=0.0) == rec._replace(precip_err_mm_day=0.0)
