@@ -257,3 +257,72 @@ def test_build_perfect_model_osse_rejects_unknown_method():
             les_config=ColumnLESConfig(regime=_SMALL_REGIME,
                                        diagnosis_method="bogus_method"),
             run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1)
+
+
+def test_osse_main_wiring_monkeypatched(monkeypatch):
+    """Drive the OSSE CLI main() with all heavy I/O stubbed: assert it wires the args
+    (true_ck/biased_ck → CLUBBLiteConfig, n_iterations) into build_perfect_model_osse,
+    computes the REAL verdict, and returns 0 on 'recovered' / 1 otherwise. The go/no-go
+    pre-flight's main() was previously untested (pragma: no cover); a wiring regression
+    would surface only when an HPC user runs the pre-flight."""
+    import pytest
+    from legoesm.training.perfect_model_osse import OSSEResult
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.run_perfect_model_osse as osse_cli
+
+    # Stub the function-scoped imports (resolved from rcc at call time) + the
+    # module-level build_perfect_model_osse, so no real driver/twin runs.
+    monkeypatch.setattr(rcc, "load_base_config_and_grid",
+                        lambda path: (object(), object(), object()))
+    monkeypatch.setattr(rcc, "make_base_driver_builder",
+                        lambda mode, coupled_preset=None: ((lambda c: None),
+                                                           (lambda d, day, dt: None)))
+    monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones((1, 1)))
+    monkeypatch.setattr(rcc, "resolve_orographic_phis",
+                        lambda forcing, provider: None)
+
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return OSSEResult(
+            initial_bias=1.0, final_bias=0.4, bias_reduction=0.6, bias_reduced=True,
+            true_value=0.9, initial_value=0.4, recovered_value=0.9,
+            initial_param_error=0.5, final_param_error=0.05, param_error_reduced=True,
+            n_rounds=2, n_accepted=2, summary=None)
+
+    monkeypatch.setattr(osse_cli, "build_perfect_model_osse", fake_build)
+
+    rc = osse_cli.main(["--config", "c.json", "--true-ck", "0.9", "--biased-ck", "0.4",
+                        "--iterations", "2", "--n-worst", "1"])
+    assert rc == 0                                       # the REAL 'recovered' verdict is ok
+    assert float(captured["true_clubb"].C_K) == pytest.approx(0.9)   # default field = C_K
+    assert float(captured["biased_clubb"].C_K) == pytest.approx(0.4)
+    assert captured["n_iterations"] == 2                # CLI --iterations threaded through
+
+
+def test_osse_main_returns_nonzero_when_not_recovered(monkeypatch):
+    """main() returns 1 when the verdict is NOT ok (e.g. no_change) — the CLI exit code
+    is the machine-readable go/no-go an automated pre-flight reads."""
+    from legoesm.training.perfect_model_osse import OSSEResult
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.run_perfect_model_osse as osse_cli
+
+    monkeypatch.setattr(rcc, "load_base_config_and_grid",
+                        lambda path: (object(), object(), object()))
+    monkeypatch.setattr(rcc, "make_base_driver_builder",
+                        lambda mode, coupled_preset=None: ((lambda c: None),
+                                                           (lambda d, day, dt: None)))
+    monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones((1, 1)))
+    monkeypatch.setattr(rcc, "resolve_orographic_phis",
+                        lambda forcing, provider: None)
+    # A no_change result (bias did not fall, no param recovery) → verdict not ok → rc 1.
+    monkeypatch.setattr(osse_cli, "build_perfect_model_osse", lambda **kw: OSSEResult(
+        initial_bias=1.0, final_bias=1.0, bias_reduction=0.0, bias_reduced=False,
+        true_value=0.9, initial_value=0.4, recovered_value=0.4,
+        initial_param_error=0.5, final_param_error=0.5, param_error_reduced=False,
+        n_rounds=2, n_accepted=0, summary=None))
+    rc = osse_cli.main(["--config", "c.json", "--true-ck", "0.9", "--biased-ck", "0.4"])
+    assert rc == 1
