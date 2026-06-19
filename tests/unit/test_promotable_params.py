@@ -168,6 +168,27 @@ def test_param_field_bounds_resolves_ck():
     assert param_field_bounds(CLUBBLiteConfig(), "nonexistent_field") is None
 
 
+def test_param_field_bounds_per_element_bound_treated_as_absent():
+    """A per-element (tuple/array-valued) bound is treated as ABSENT — param_field_bounds
+    returns None, so the downstream clip_field_to_promotable_bounds applies NO clamp.
+    This is the DOCUMENTED
+    design for the per-column-scalar promotable coefficients (the column field is
+    one coefficient broadcast over the vertical, so a per-vertical-level bound does
+    not apply).  Locking it so a future change can neither silently start
+    mis-clamping a per-element bound NOR drop the scalar path without updating this."""
+    from legoesm.training.feedback import param_field_bounds
+
+    class _ArrayBoundCfg:                         # a (hypothetical) per-element bound
+        __param_spec__ = {
+            "foo": {"bounds": (jnp.array([0.1, 0.2]), jnp.array([1.0, 1.1]))}}
+
+    assert param_field_bounds(_ArrayBoundCfg(), "foo") is None      # treated as absent
+    # a scalar bound on the SAME flat-spec layout still resolves (the working path):
+    class _ScalarBoundCfg:
+        __param_spec__ = {"foo": {"bounds": (0.3, 0.9)}}
+    assert param_field_bounds(_ScalarBoundCfg(), "foo") == (0.3, 0.9)
+
+
 def test_prandtl_promotion_registered_and_clamped():
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     assert "clubb_lite_Pr_t" in promotable_field_names()

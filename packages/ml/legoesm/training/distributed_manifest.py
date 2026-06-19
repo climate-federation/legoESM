@@ -28,23 +28,20 @@ differentiated quantity, so the non-AD ``allgather`` (CLAUDE.md: allgather is
 diagnostics/IO only) is appropriate here.  Selection is plain NumPy on the small
 ``R × n_worst`` gathered set — no JAX top-k, no tracing.
 
-.. warning::
-   **Prerequisite, not a complete distributed campaign.**  This reducer makes the
-   per-rank RANKING globally correct, but a fully distributed correction campaign
-   ALSO needs the downstream correction LOOP
-   (:func:`legoesm.training.correction_loop.run_correction_iteration`) to be made
-   COLLECTIVE before this reducer is wired in, because that loop is currently
-   rank-local in two ways that would DEADLOCK / DIVERGE across ranks (Codex iter
-   87): (1) its ``if not records:`` no-op gate skips the second ``compare_fn``
-   (model re-run) on a rank that owns NONE of the globally-selected columns, while
-   ranks that own some re-run — an MPI collective-count mismatch; (2) the
-   line-search improvement test uses the RANK-LOCAL bias, so ranks can choose
-   different step fractions (different numbers of ``compare_fn`` calls).  A
-   distributed campaign must first reduce the bias globally (``global_sum_mpi`` of
-   the weighted numerator/denominator), make the step-fraction choice collectively,
-   and run ``compare_fn`` in lockstep on every rank regardless of its local subset.
-   The single-process runner is unaffected (it leaves ``manifest_reducer=None``, so
-   the gate + line search behave exactly as before).
+.. note::
+   This reducer makes the per-rank RANKING globally correct; the downstream
+   correction LOOP was made COLLECTIVE in iter 88, so the reducer is safely wired
+   into a fully distributed campaign.  The two iter-87 deadlock/divergence hazards
+   are RESOLVED via ``global_reduce=global_sum_mpi``: (1) the ``if not records:``
+   no-op gate could skip the second ``compare_fn`` (model re-run) on a rank owning
+   NONE of the globally-selected columns while others re-run (an MPI
+   collective-count mismatch); (2) the line-search improvement test used the
+   RANK-LOCAL bias, so ranks could pick different step fractions.  Now
+   :func:`legoesm.training.correction_loop.run_correction_iteration` reduces the bias
+   globally (``global_sum_mpi`` of the weighted numerator/denominator), chooses the
+   step fraction collectively, and runs ``compare_fn`` in lockstep on every rank.
+   The single-process runner leaves ``manifest_reducer=None`` (gate + line search
+   behave exactly as before).
 """
 
 from __future__ import annotations

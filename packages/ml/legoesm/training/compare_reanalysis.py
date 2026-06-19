@@ -433,8 +433,10 @@ def owned_cell_valid_mask(layout_or_mask: Any, *, base_mask: Any = None) -> jax.
     OWNED cells; a complete distributed ranking ALSO needs a CROSS-RANK global top-k
     of the per-rank worst cells (else ``R`` ranks each pick ``n_worst`` → ``R ×
     n_worst`` LES, not the global ``n_worst``).  That gather is a SEPARATE distributed
-    step (not yet implemented); the single-process runner needs neither (every cell
-    owned).  Do not read "owned mask wired" as "distributed-MPAS ranking complete".
+    step — :func:`legoesm.training.distributed_manifest.gather_global_worst_columns`
+    (iter 87; ``mpirun``-validated), wired into the distributed correction loop — so
+    the distributed-MPAS ranking IS complete (owned mask + cross-rank top-k); the
+    single-process runner needs neither (every cell owned).
     """
     owned_attr = getattr(layout_or_mask, "owned_mask_cells", None)
     raw = layout_or_mask if owned_attr is None else owned_attr
@@ -503,7 +505,9 @@ def column_state_from_hydrostatic(
     :func:`owned_cell_valid_mask` (the active partition's ``owned_mask_cells``) as
     the comparison ``valid_mask`` so only OWNED cells are ranked (a halo cell would
     otherwise be spun off + corrected on multiple ranks).  The cross-rank global
-    top-k of the per-rank worst cells remains a separate distributed step.
+    top-k of the per-rank worst cells is the separate
+    :func:`legoesm.training.distributed_manifest.gather_global_worst_columns` step
+    (iter 87, wired as the loop's ``manifest_reducer``).
     """
     def _arr(x):
         return x.data if hasattr(x, "data") else x

@@ -23,11 +23,14 @@ Reuse only (CLAUDE.md — no re-derived numerics):
 Geostrophic wind (``∇Φ``, iter 29): :func:`geostrophic_wind_from_gradients`
 diagnoses ``u_geo``/``v_geo`` from the sigma-surface geopotential + surface-
 pressure gradients (two-term pressure-gradient conversion to the pressure
-surface), populated by the **lat-lon** extractor and wired into the column LES as
-the plane Coriolis reference wind (``f×(V − V_geo)``).  ``u_geo = None`` supplies
-no geostrophic reference (within :data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator,
-and on the cubed sphere pending a metric-correct east/north↔grid rotation — see
-the cubed extractor); the plane Coriolis then falls back to ``f×V``.
+surface), populated by ALL FOUR extractors — lat-lon, Gaussian (iter 90), Voronoi
+(iter 82), and the cubed sphere via the metric-correct east/north basis solve
+``_gradient_cubed_geographic_3d`` (iter 93) — and wired into the column LES as the
+plane Coriolis reference wind (``f×(V − V_geo)``).  Over terrain the orographic
+surface-geopotential term ``∇phis`` is added when an extractor is given ``phis``
+(iter 117).  ``u_geo = None`` supplies no geostrophic reference within
+:data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator (geostrophic balance ill-posed as
+``f→0``); the plane Coriolis then falls back to ``f×V``.
 
 Grids: ERA5 is lat-lon (``extract_column_forcing_latlon``), but the model's
 flagship dycore is cubed-sphere, so a worst column flagged on the *native* model
@@ -564,9 +567,11 @@ def extract_column_forcing_voronoi(
     tracer transport scheme).
 
     Geostrophic reference wind is ENABLED here (``u_geo``/``v_geo`` from
-    :func:`_geostrophic_wind_column`) — UNLIKE the cubed sphere, the Perot
-    cell-gradient is already in the geographic (east, north) frame geostrophic
-    balance requires, so the helper's documented precondition holds.  Within
+    :func:`_geostrophic_wind_column`): the Perot cell-gradient is ALREADY in the
+    geographic (east, north) frame geostrophic balance requires (no extra rotation —
+    unlike the cubed sphere, which reaches the same geographic frame via the
+    metric-correct ``_gradient_cubed_geographic_3d`` basis solve, iter 93), so the
+    helper's documented precondition holds.  Within
     :data:`_MIN_GEOSTROPHIC_LAT_DEG` of the equator (f → 0 ill-posed) ``(None,
     None)`` is returned → the column LES falls back to ``f×V`` there, identical to
     the previous unconditional ``None`` (so equatorial columns are never changed).
