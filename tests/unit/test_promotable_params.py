@@ -126,8 +126,12 @@ def test_clip_field_to_promotable_bounds_clamps_ck():
         CLUBBLiteConfig(), "clubb_lite_C_K", field)
     np.testing.assert_allclose(
         np.asarray(clipped).reshape(-1), [0.1, 1.2, 0.4, 1.2])
-    assert float(np.asarray(clipped).min()) >= 0.1
-    assert float(np.asarray(clipped).max()) <= 1.2
+    # fp32-safe bounds (unit tier): float32(1.2)=1.2000000476 > 1.2 and
+    # float32(0.1)=0.10000000149 > 0.1, so use a 1e-5 margin — still proves the
+    # clamp landed at the registered bound. (Prior bare <=1.2 passed only via the
+    # session-wide x64 leak; the assert_allclose above already pins the values.)
+    assert float(np.asarray(clipped).min()) >= 0.1 - 1e-5
+    assert float(np.asarray(clipped).max()) <= 1.2 + 1e-5
 
 
 def test_clip_field_unknown_key_raises():

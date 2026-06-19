@@ -100,9 +100,13 @@ def _run(diagnose_fn, n_iterations=3):
 # Accurate diagnosis → the loop recovers the parameter and lowers the bias.
 # --------------------------------------------------------------------------- #
 def test_accurate_diagnosis_recovers_and_improves():
+    import pytest
     res = _run(_diagnose_true)
-    assert res.true_value == TRUE_CK
-    assert res.initial_value == BIASED_CK
+    # fp32-safe (unit tier): the config C_K round-trips through float32, so
+    # compare with tolerance not exact equality (the prior == passed only via
+    # the session-wide x64 leak). rel=1e-6 still catches a wrong true value.
+    assert res.true_value == pytest.approx(TRUE_CK, rel=1e-6)
+    assert res.initial_value == pytest.approx(BIASED_CK, rel=1e-6)
     assert res.bias_reduced
     assert res.param_error_reduced
     assert res.final_bias < res.initial_bias
@@ -114,6 +118,7 @@ def test_accurate_diagnosis_recovers_and_improves():
 
 
 def test_reference_is_generated_from_true_config():
+    import pytest
     seen = []
 
     def spy_run_fn(config):
@@ -128,7 +133,7 @@ def test_reference_is_generated_from_true_config():
         diagnose_fn=_diagnose_true,
         promotion_key="clubb_lite_C_K", grid_shape=(NLAT, NLON), n_iterations=1)
     # The FIRST run_fn call builds the pseudo-truth from true_config (C_K=0.9).
-    assert seen[0] == TRUE_CK
+    assert seen[0] == pytest.approx(TRUE_CK, rel=1e-6)  # fp32-safe (see above)
 
 
 # --------------------------------------------------------------------------- #
@@ -295,10 +300,16 @@ def test_multi_useless_diagnosis_no_change():
 def test_multi_clip_to_bounds_clamps_unphysical_diagnosis():
     # An LES diagnosis past the registered bounds must be CLIPPED (production parity),
     # so the OSSE cannot declare recovery using a value the real campaign would clip.
+    import pytest
     over = {"C_K": 5.0, "Pr_t": 0.5, "C_eps": 0.3}  # C_K=5.0 >> the (0.1,1.2) bound
     res = _run_multi(over, n_iterations=2, clip_to_bounds=True)
     ck = res.per_coefficient["clubb_lite_C_K"]
-    assert ck.recovered_value <= 1.2 + 1e-9   # clamped into bounds, not 5.0
+    # The clipped diagnosis (5.0 → upper bound 1.2) was APPLIED: recovered lands AT
+    # 1.2 — a two-sided check (Codex). It fails if the clamp broke (→ raw 5.0), OR if
+    # the clamped step was rejected and stayed at the biased 0.4 (the one-sided <=1.2
+    # would have passed in that regression). rel=1e-5 is fp32-safe (float32(1.2)).
+    assert ck.recovered_value == pytest.approx(1.2, rel=1e-5)   # clamped, applied
+    assert float(ck.initial_value) == pytest.approx(BIASED_CK, rel=1e-6)  # moved up from 0.4
 
 
 def test_multi_rejects_duplicate_promotion_key():

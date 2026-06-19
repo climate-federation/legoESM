@@ -35,9 +35,13 @@ def _column(nlev=5, **overrides):
 def test_coriolis_equator_and_30N():
     assert coriolis_f_c(0.0) == pytest.approx(0.0, abs=1e-15)
     f30 = coriolis_f_c(float(jnp.deg2rad(30.0)))
-    assert f30 == pytest.approx(2.0 * constants.Omega * 0.5, rel=1e-10)
+    # rel=1e-5 is fp32-safe: this file is in CI's fp32-by-default unit tier, where
+    # 2·Ω·sin(30°) carries ~5e-8 relative float32 roundoff; 1e-5 stays deterministic
+    # at fp32 AND x64 and still catches a wrong factor/latitude/sign. (The prior
+    # rel=1e-10 passed only via the session-wide x64 leak — order-dependent.)
+    assert f30 == pytest.approx(2.0 * constants.Omega * 0.5, rel=1e-5)
     # Southern hemisphere flips sign.
-    assert coriolis_f_c(float(jnp.deg2rad(-30.0))) == pytest.approx(-f30, rel=1e-10)
+    assert coriolis_f_c(float(jnp.deg2rad(-30.0))) == pytest.approx(-f30, rel=1e-5)
 
 
 def test_subsidence_w_from_omega_matches_shared():
