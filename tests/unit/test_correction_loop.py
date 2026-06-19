@@ -1277,6 +1277,22 @@ def test_iteration_line_search_picks_largest_improving_step():
     assert seen_ck == pytest.approx([dck, 2.0, 1.2])
 
 
+def test_iteration_line_search_all_worsen_falls_back_to_largest():
+    """When NO step improves (the diagnosed C_K=0.1 moves the worst column AWAY from
+    target 1.0 at every fraction: 1.0→0.1 bias 0.9, 0.5→0.25 bias 0.75, both > the 0.6
+    baseline), the line search returns the LARGEST step (the k==0 fallback — never None,
+    which would crash on unpack) reported as NOT improved, so the monotonic gate rejects
+    the round. diag=0.1 is the C_K lower bound, so clipping cannot rescue it."""
+    dck = float(CLUBBLiteConfig().C_K)
+    compare_fn, diagnose = _line_search_setup(diag_value=0.1, target=1.0)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn, diagnose_fn=diagnose,
+        promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=dck,
+        step_fractions=(1.0, 0.5))
+    assert res.step_fraction == pytest.approx(1.0)   # largest fallback (not 0.5, not None)
+    assert not bool(res.bias.improved)               # → the monotonic gate rejects
+
+
 def test_iteration_line_search_takes_full_step_when_it_improves():
     dck = float(CLUBBLiteConfig().C_K)
     compare_fn, diagnose = _line_search_setup(diag_value=1.0, target=1.0)  # full lands on target
