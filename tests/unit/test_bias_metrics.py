@@ -170,6 +170,50 @@ def test_worst_column_out_of_range_raises():
         worst_column_bias_change(base, upd, jnp.array([0, 5]))  # 5 >= 2
 
 
+def test_worst_column_valid_mask_excludes_padded_slots():
+    """A ``valid`` mask drops padded (non-worst) slots from the mean — so raw
+    rank_worst_columns output (which pads in-range when n>n_valid) is safe."""
+    base = jnp.array([[5.0, 1.0], [1.0, 4.0]])
+    upd = jnp.array([[2.0, 1.0], [1.0, 3.0]])
+    # idx 0 (reduction 3.0) is the ONE real worst column; idx 1 is a padded slot
+    # (in-range, but reduction 0.0) — without the mask it would dilute 3.0 → 1.5.
+    out = worst_column_bias_change(
+        base, upd, jnp.array([0, 1]), valid=jnp.array([True, False]))
+    assert float(out) == pytest.approx(3.0)        # padded slot excluded
+    # without the mask the padded slot dilutes the mean (the trap this guards):
+    diluted = worst_column_bias_change(base, upd, jnp.array([0, 1]))
+    assert float(diluted) == pytest.approx(1.5)
+
+
+def test_worst_column_all_invalid_mask_is_zero():
+    """All slots padded (no real worst column) ⇒ 0, like an empty index set."""
+    base = jnp.array([1.0, 2.0])
+    upd = jnp.array([0.5, 1.0])
+    out = worst_column_bias_change(
+        base, upd, jnp.array([0, 1]), valid=jnp.array([False, False]))
+    assert float(out) == 0.0
+
+
+def test_worst_column_valid_mask_only_checks_valid_indices_in_range():
+    """Bounds check applies to the slots that actually contribute: a padded slot
+    whose index is masked out is not range-checked and never contributes (it is
+    still gathered then clamped+masked, but its value cannot affect the mean)."""
+    base = jnp.array([1.0, 2.0])
+    upd = jnp.array([0.5, 1.0])
+    # idx 5 is out of range but masked invalid → no raise; valid idx 0 contributes.
+    out = worst_column_bias_change(
+        base, upd, jnp.array([0, 5]), valid=jnp.array([True, False]))
+    assert float(out) == pytest.approx(0.5)
+
+
+def test_worst_column_valid_mask_shape_mismatch_raises():
+    base = jnp.array([1.0, 2.0])
+    upd = jnp.array([0.5, 1.0])
+    with pytest.raises(ValueError, match="valid mask shape"):
+        worst_column_bias_change(
+            base, upd, jnp.array([0, 1]), valid=jnp.array([True]))
+
+
 def test_aggregate_differentiable_and_jit():
     w = jnp.array([2.0, 1.0, 1.0])
 

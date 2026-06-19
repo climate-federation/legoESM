@@ -129,14 +129,25 @@ def worst_column_bias_change(
     baseline_score: jax.Array,
     updated_score: jax.Array,
     flat_indices: jax.Array,
+    *,
+    valid: jax.Array | None = None,
 ) -> jax.Array:
     """Mean bias reduction at the targeted worst columns (``> 0`` ⇒ improved).
 
-    ``flat_indices`` are the worst-column flat indices (from
-    :func:`legoesm.training.column_era5_metrics.rank_worst_columns`, which
-    returns valid in-range indices); the LES correction targets these, so they
-    should improve most.  Returns the mean of ``baseline − updated`` over those
-    columns; an empty index set returns ``0`` (no targeted columns).
+    ``flat_indices`` are the worst-column flat indices; the LES correction targets
+    these, so they should improve most.  Returns the mean of ``baseline − updated``
+    over those columns; an empty (or all-invalid) index set returns ``0``.
+
+    **Precondition — only ACTUAL worst columns must be passed.**
+    :func:`legoesm.training.column_era5_metrics.rank_worst_columns` returns a
+    STATIC-length array that PADS with invalid (``valid=False``) slots when ``n``
+    exceeds the valid-column count, and those padded indices are still IN RANGE
+    (real column ids), so the bounds check below CANNOT catch them — a padded,
+    non-worst column would silently DILUTE the mean.  So EITHER pass the
+    manifest-filtered indices (:func:`build_worst_column_manifest` drops invalid
+    slots — what the campaign does) OR pass ``rank_worst_columns``'s ``valid``
+    mask here (same shape as ``flat_indices``) and the padded slots are excluded
+    from the mean.
     """
     base_flat = jnp.asarray(baseline_score).reshape(-1)
     upd_flat = jnp.asarray(updated_score).reshape(-1)
@@ -144,14 +155,33 @@ def worst_column_bias_change(
     if int(idx.shape[0]) == 0:
         return jnp.asarray(0.0, dtype=base_flat.dtype)
     # Host-side bounds check: JAX gather silently clamps out-of-range indices, so
-    # validate here (indices are concrete worst-column ids) to fail loudly.
+    # validate here (indices are concrete worst-column ids) to fail loudly.  When a
+    # ``valid`` mask is given, only the indices that will actually contribute are
+    # checked (a padded slot's index is irrelevant — it is masked out of the mean).
     import numpy as _np
 
     idx_np = _np.asarray(idx)
     n_cols = base_flat.shape[0]
-    if idx_np.min() < 0 or idx_np.max() >= n_cols:
+    if valid is not None:
+        valid_mask = jnp.asarray(valid, dtype=bool)
+        if valid_mask.shape != idx.shape:
+            raise ValueError(
+                f"valid mask shape {tuple(valid_mask.shape)} != flat_indices "
+                f"shape {tuple(idx.shape)} (must align on the same worst-column axis)."
+            )
+        check_idx = idx_np[_np.asarray(valid_mask)]
+    else:
+        valid_mask = None
+        check_idx = idx_np
+    if check_idx.size and (check_idx.min() < 0 or check_idx.max() >= n_cols):
         raise ValueError(
             f"flat_indices out of range [0, {n_cols}); got "
-            f"[{int(idx_np.min())}, {int(idx_np.max())}]."
+            f"[{int(check_idx.min())}, {int(check_idx.max())}]."
         )
-    return jnp.mean(base_flat[idx] - upd_flat[idx])
+    diff = base_flat[idx] - upd_flat[idx]
+    if valid_mask is None:
+        return jnp.mean(diff)
+    # Mean over the valid (actual worst) slots only; all-invalid ⇒ 0.
+    n_valid = jnp.sum(valid_mask.astype(diff.dtype))
+    total = jnp.sum(jnp.where(valid_mask, diff, jnp.zeros_like(diff)))
+    return jnp.where(n_valid > 0, total / jnp.maximum(n_valid, 1.0), jnp.zeros((), diff.dtype))
