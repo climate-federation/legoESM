@@ -119,12 +119,19 @@ def check_deploy(
     import json
 
     with open(campaign_output_path) as f:
-        averaging = json.load(f).get("averaging")
+        raw = json.load(f)
+    averaging = raw.get("averaging")
+    # The campaign HEALTH verdict (iter 287/312): the output JSON is written even on a
+    # non-zero campaign exit (only the exit status gates), so a deployer reading a saved
+    # output — possibly without having seen the campaign's exit code — must know whether
+    # it actually IMPROVED the bias vs stalled / produced no valid LES diagnoses.
+    health = raw.get("health")
     return {
         "n_columns": n_columns,
         "corrected": corrected,
         "grid_shape": tuple(int(d) for d in getattr(grid, "grid_shape_2d", ())),
         "averaging": averaging,
+        "health": health,
     }
 
 
@@ -166,6 +173,16 @@ def main(argv: list[str] | None = None) -> int:
               "--allow-unphysical-coeff; otherwise suspect a hand-edited / corrupted output. "
               "The production physics uses the value RAW (no deploy-time clip), so an "
               "unphysical coefficient may DESTABILIZE the run.")
+    health = stats.get("health")
+    if health and health.get("status"):                    # campaign outcome provenance (312)
+        status = health["status"]
+        print(f"    campaign health: {status} — {health.get('message', '')}")
+        if status != "improved":
+            print(f"[deploy-check] WARNING: the campaign verdict was '{status}', NOT "
+                  "'improved' — this correction did NOT lower the bias in the campaign "
+                  "(the monotonic gate keeps the best-so-far field, which for a stalled / "
+                  "no_valid_diagnoses run may be the unchanged background). Confirm the "
+                  "campaign outcome before deploying.")
     av = stats.get("averaging")
     if av:                                                  # source-climate provenance (267)
         n = int(av.get("era5_n_times", 1))

@@ -21,7 +21,7 @@ def _base_config(tmp_path, resolution=8, nlev=5):
 
 
 def _campaign_output(tmp_path, base_cfg, grid, *, name="out.json", field="C_K",
-                     lo=0.3, hi=0.6, grid_for_provenance=None, averaging=None):
+                     lo=0.3, hi=0.6, grid_for_provenance=None, averaging=None, health=None):
     from scripts.run.run_correction_campaign import _grid_provenance
 
     ncol = int(np.prod(grid.grid_shape_2d))
@@ -31,9 +31,44 @@ def _campaign_output(tmp_path, base_cfg, grid, *, name="out.json", field="C_K",
                "biases": [1.0, 0.5], "accepted": [True]}
     if averaging is not None:
         payload["averaging"] = averaging
+    if health is not None:
+        payload["health"] = health
     with open(out, "w") as f:
         json.dump(payload, f)
     return str(out)
+
+
+def test_check_deploy_surfaces_the_campaign_health_verdict(tmp_path, capsys):
+    """The deploy-check surfaces the campaign HEALTH verdict (iter 312): the output JSON is
+    written even on a non-zero campaign exit (only the exit status gates), so a deployer
+    reading a saved output — without having seen the campaign's exit code — must know whether
+    it actually IMPROVED. A non-'improved' verdict ('stalled') prints a WARNING; 'improved'
+    shows the status with no warning; absent health → no health line (pre-312 back-compat)."""
+    from scripts.experiment.check_campaign_deploy import check_deploy, main
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+
+    stalled = _campaign_output(
+        tmp_path, base_cfg, grid, name="stalled.json",
+        health={"status": "stalled", "message": "Bias reduced only 0.1%."})
+    assert check_deploy(cfg, stalled)["health"]["status"] == "stalled"
+    main(["--base-config", cfg, "--campaign-output", stalled])
+    msg = capsys.readouterr().out
+    assert "campaign health: stalled" in msg and "NOT" in msg and "improved" in msg
+
+    good = _campaign_output(
+        tmp_path, base_cfg, grid, name="good.json",
+        health={"status": "improved", "message": "Bias reduced 12%."})
+    main(["--base-config", cfg, "--campaign-output", good])
+    out = capsys.readouterr().out
+    assert "campaign health: improved" in out and "WARNING" not in out
+
+    none_out = _campaign_output(tmp_path, base_cfg, grid, name="nohealth.json")
+    assert check_deploy(cfg, none_out)["health"] is None
+    main(["--base-config", cfg, "--campaign-output", none_out])
+    assert "campaign health" not in capsys.readouterr().out
 
 
 def test_check_deploy_validates_and_reports_stats(tmp_path):
