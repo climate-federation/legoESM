@@ -78,7 +78,21 @@ def select_global_top_k(
     # of the reversed (descending) order → be wrongly picked as "worst" (Codex).
     finite_ok = ok & np.isfinite(s)
     masked = np.where(finite_ok, s, -np.inf)
-    order = np.argsort(masked, kind="stable")[::-1]   # descending, ties stable
+    # Descending by score; ties broken by ASCENDING global id — a canonical,
+    # PARTITION-INDEPENDENT key (iter 213).  Without a gid tie-break, the prior
+    # ``argsort(...)[::-1]`` resolved equal scores by the gathered candidate
+    # POSITION, so the SAME global field decomposed across a different rank count
+    # could select a DIFFERENT set of equally-worst columns (verified: a 3-way
+    # tie for 2 slots gives {C,B} vs {B,A} depending on which rank owns which
+    # cell) — breaking the campaign's resume/decomposition reproducibility.  The
+    # gid tie-break also matches the single-rank path (``rank_worst_columns`` /
+    # ``jax.lax.top_k``, which breaks ties by ascending flat index == ascending
+    # global id here), so serial and distributed runs diagnose the same columns.
+    # lexsort's LAST key is primary: ``-masked`` ascending == score descending;
+    # ``ids`` ascending == lowest global id first on a tie.  Padding/NaN already
+    # mapped to ``-inf`` ⇒ ``+inf`` primary key ⇒ sorts last (loop breaks there).
+    ids_int = np.asarray(ids).reshape(-1).astype(np.int64)
+    order = np.lexsort((ids_int, -masked))
     selected: list[int] = []
     seen: set[int] = set()
     for i in order:

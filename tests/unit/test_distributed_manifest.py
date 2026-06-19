@@ -66,6 +66,30 @@ def test_select_global_top_k_dedups_by_global_id():
     assert select_global_top_k(scores, ids, valid, 2) == [2, 7]   # not [2, 2]
 
 
+def test_select_global_top_k_tie_break_is_partition_invariant():
+    """Equal scores at the selection boundary must resolve by ASCENDING global id,
+    so the global worst-SET is independent of the MPI decomposition (iter 213).
+
+    Before the fix the prior ``argsort(...)[::-1]`` broke ties by the gathered
+    candidate POSITION, so the SAME global field gathered in a different rank
+    order selected a DIFFERENT set of equally-worst cells — silently breaking the
+    campaign's resume/decomposition reproducibility (a resumed or differently-
+    decomposed run would diagnose different columns than the checkpoint).  Three
+    cells (gids 0,1,2) tie for the worst score with only 2 global slots; whichever
+    way the ranks gather them, the 2 lowest gids {0,1} must win.
+    """
+    # Same 3-way tie (score 10), 2 slots, three different gather orders:
+    p1 = select_global_top_k([10.0, 10.0, 10.0, -1.0], [0, 1, 2, -1], [1, 1, 1, 0], 2)
+    p2 = select_global_top_k([10.0, 10.0, 10.0, -1.0], [2, 0, 1, -1], [1, 1, 1, 0], 2)
+    serial = select_global_top_k([10.0, 10.0, 10.0], [0, 1, 2], [1, 1, 1], 2)
+    # Partition-invariant AND order-stable: lowest two gids, descending-score order
+    # (all equal here) with ascending-gid tie-break.
+    assert p1 == p2 == serial == [0, 1]
+    # Consistent with the single-rank rank_worst_columns path, which breaks ties by
+    # ascending flat index (== ascending global id here): lowest indices win.
+    assert select_global_top_k([9.0, 9.0, 9.0, 9.0], [3, 2, 1, 0], [1, 1, 1, 1], 2) == [0, 1]
+
+
 def test_select_global_top_k_shape_mismatch_raises():
     with pytest.raises(ValueError, match="must share shape"):
         select_global_top_k([1.0, 2.0], [0, 1, 2], [1, 1, 1], 2)
