@@ -209,14 +209,15 @@ _SUPPORTED_PHYSICS = {
     # not through this CPU-MPI script.  Listing them as supported
     # here let users pass ``--physics gray_sbm`` and silently
     # benchmark dycore-only with the moist-physics label.
-    "cubed-sphere": {"none", "held_suarez"},
     # "moist" = moisture (q_v/q_c/q_r) + Kessler warm-rain condensation,
-    # NO radiation: the moist baroclinic-wave case.  Wired for the lat-lon
-    # C-grid (serial + band/2-D-pencil MPI) and icosahedral/MPAS — both
-    # advect tracers in mass-weighted flux form, and Kessler is column-local
-    # so it adds NO horizontal halo coupling beyond the dycore's existing
-    # tracer exchange (moist scales on the same ladder as dry).  NOT wired
-    # for the cubed-sphere FV3 dycore, which does not yet advect tracers.
+    # NO radiation: the moist baroclinic-wave case.  Wired for every grid whose
+    # dycore advects tracers: the cubed-sphere FV3 C-D grid (advective form,
+    # consistent with T — single-rank + full-state MPI; NOT the cs-spmd
+    # sub-face path, which still rejects non-"none" physics), the lat-lon C-grid
+    # (mass-weighted flux form, serial + band/2-D-pencil MPI), and
+    # icosahedral/MPAS.  Kessler is column-local, so it adds NO horizontal halo
+    # coupling beyond the dycore's tracer exchange (moist scales like dry).
+    "cubed-sphere": {"none", "held_suarez", "moist"},
     "latlon": {"none", "held_suarez", "moist"},
     "icosahedral": {"none", "held_suarez", "moist"},
     # spectral "moist" = q_v/q_c/q_r + Kessler warm-rain (no radiation), the
@@ -462,7 +463,8 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         zero_mean_ps_tendency=True,
     )
     model = CDGridPrimitiveEquationModel(grid, sigma, config)
-    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+    _moist = physics_level == "moist"
+    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True, moist=_moist)
     state = hydrostatic_to_fv3(state_cc, cdgrid)
     state = jax.tree.map(cast_fn, state)
 
@@ -471,12 +473,21 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     # MPI: initialise distributed but keep full (6, n, n, ...) state
     # on every rank, matching the production driver.  pad_halo_mpi
     # requires the full shape; each rank steps all faces and MPI halo
-    # exchange keeps owned faces correct.
+    # exchange keeps owned faces correct.  The FV3 CD-grid dycore advects
+    # q_v/q_c/q_r in advective form (consistent with T); its tracer halo
+    # rides the same auto-dispatched pad_halo_4d (mpi/spmd/local).
     if n_ranks > 1:
         from legoesm.parallel.distributed import initialize_distributed
         initialize_distributed(global_n=resolution, grid_type="cubed_sphere")
 
-    physics_fn = _build_physics_fn(physics_level, "cubed-sphere")
+    if _moist:
+        # Kessler warm-rain bound to this step's dt (the physics_fn convention
+        # passes no timestep).  Column-local, so it adds NO horizontal halo
+        # coupling beyond the dycore's tracer exchange.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_cube
+        physics_fn = make_kessler_forcing_cube(dt)
+    else:
+        physics_fn = _build_physics_fn(physics_level, "cubed-sphere")
     if physics_fn is not None:
         _phys = physics_fn
         step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)

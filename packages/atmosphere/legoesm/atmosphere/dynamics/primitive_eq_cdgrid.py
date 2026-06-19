@@ -81,6 +81,9 @@ from legoesm.grids.halo import (
 )
 from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
 from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+from legoesm.atmosphere.dynamics.tracer_transport import (
+    advective_tracer_tendency,
+)
 from legoesm import constants
 
 
@@ -768,6 +771,11 @@ def fv3_hydrostatic_tendencies(
         vert_adv_T = _vert_adv_uvT_lead[2]
         # iter-64: defer _vert_adv_uv_cc corner interp to section 12c (batched with diff)
 
+        # Tracer vertical advection uses the SAME hybrid mass flux as T (bound
+        # via default args so the closure captures this branch's arrays).
+        def _tracer_vert_fn(_q1, _mf=mass_flux, _ps=p_s):
+            return vertical_advection_hybrid(_q1, _mf, _ps, sigma_coord)
+
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
     else:
@@ -797,6 +805,11 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
+
+        # Tracer vertical advection uses the SAME sigma_dot as T (bound via a
+        # default arg so the closure captures this branch's array).
+        def _tracer_vert_fn(_q1, _sd=sigma_dot):
+            return vertical_advection(_q1, _sd, sigma_coord)
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -869,6 +882,23 @@ def fv3_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 11c. Tracer advection (advective form, consistent with T) ---
+    # Dynamics tracer tendency via the SHARED cubed-sphere advective-tracer core
+    # (one batched cube halo pad; same numerics as TracerTransportModel and the
+    # T transport above).  Physics tracer tendencies (e.g. Kessler warm-rain via
+    # physics_tendency_cc.tracer_tendencies) are added in the physics block
+    # below.  ``None`` when the state is dry (no tracers).
+    _dtracers = None
+    if state.tracers:
+        _tnames = list(state.tracers)
+        _q_packed = jnp.stack(
+            [state.tracers[k].data for k in _tnames], axis=-1,
+        )  # (6, n, n, nlev, n_tracers)
+        _dq_packed = advective_tracer_tendency(
+            _q_packed, u_cell, v_cell, grid, _tracer_vert_fn,
+        )
+        _dtracers = {k: _dq_packed[..., i] for i, k in enumerate(_tnames)}
 
     # FV3_3D iter 239: aggregate 3 tendency-based d_con sources after A_h block, then cap once
     # (FV3 sw_core.F90 + dyn_core.F90:1764-1779)
@@ -1158,6 +1188,18 @@ def fv3_hydrostatic_tendencies(
         dT_dt_data = dT_dt_data + physics_tendency_cc.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency_cc.dp_s_dt.data
 
+    # Physics tracer tendencies (e.g. Kessler warm-rain) → add to the dynamics
+    # tracer tendency, for tracers already prognostic in the state (introducing
+    # a new key here would break the RK integrator's pytree structure).  Both
+    # tendency containers carry an optional tracer_tendencies dict.
+    if _dtracers is not None:
+        for _src in (physics_tendency, physics_tendency_cc):
+            _tt = None if _src is None else _src.tracer_tendencies
+            if _tt:
+                for _k, _f in _tt.items():
+                    if _k in _dtracers:
+                        _dtracers[_k] = _dtracers[_k] + _f.data
+
     dims_3d_corner = ("face", "x", "y", "level")
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -1169,6 +1211,12 @@ def fv3_hydrostatic_tendencies(
         dp_s_dt=Field(data=dp_s_dt_data, name="dp_s_dt", dims=dims_2d, units="Pa/s"),
         dphis_dt=Field(
             data=jnp.zeros_like(phis), name="dphis_dt", dims=dims_2d, units="m^2/s^3"
+        ),
+        tracer_tendencies=(
+            None if _dtracers is None else {
+                k: Field(data=v, name=f"d{k}_dt", dims=dims_3d, units="kg/kg/s")
+                for k, v in _dtracers.items()
+            }
         ),
     )
 
@@ -1353,13 +1401,23 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 physics_tendency_cc=phys_cc,
                 dt_actual=dt,
             )
-            # Return FV3HydrostaticState-shaped pytree for integrator tree_map
+            # Return FV3HydrostaticState-shaped pytree for integrator tree_map.
+            # Tracer tendencies ride as a matching tracers dict (same keys + Field
+            # aux as the input state) so the SSP-RK3 ``state + dt·tendency``
+            # tree_map advances q_v/q_c/q_r alongside the prognostic fields.
+            _tracer_tend = None
+            if s.tracers is not None and tend.tracer_tendencies is not None:
+                _tracer_tend = {
+                    k: s.tracers[k].replace(data=tend.tracer_tendencies[k].data)
+                    for k in s.tracers
+                }
             return FV3HydrostaticState(
                 u_d=s.u_d.replace(data=tend.du_d_dt.data),
                 v_d=s.v_d.replace(data=tend.dv_d_dt.data),
                 T=s.T.replace(data=tend.dT_dt.data),
                 p_s=s.p_s.replace(data=tend.dp_s_dt.data),
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
+                tracers=_tracer_tend,
             )
 
         state_new = dispatch_integrator(
@@ -1697,6 +1755,17 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 ),
             )
 
+        # Prognostic tracer floor: advective tracer transport is not
+        # positive-definite, so clamp q >= 0 AFTER the RK update (the physics
+        # adapters clip their INPUT; this is the prognostic floor the moist
+        # forcing's contract relies on).  Tracers are untouched by the
+        # wind/sponge/vorticity-damping post-steps above.
+        if state_new.tracers is not None:
+            state_new = state_new._replace(tracers={
+                _k: _f.replace(data=jnp.maximum(_f.data, 0.0))
+                for _k, _f in state_new.tracers.items()
+            })
+
         state_out = cast_pytree(state_new, None, "storage")
 
         # Operator-split physics carry (issue #413): one extra physics
@@ -1831,6 +1900,10 @@ def cdgrid_hydrostatic_tendencies(
         dT_dt=fv3_tend.dT_dt,
         dp_s_dt=fv3_tend.dp_s_dt,
         dphis_dt=fv3_tend.dphis_dt,
+        # Tracers are cell-centre scalars (no corner→centre conversion needed),
+        # so the FV3 advective tracer tendencies pass through unchanged — codex
+        # caught this being dropped on the cell-centre tendencies API.
+        tracer_tendencies=fv3_tend.tracer_tendencies,
     )
 
 
