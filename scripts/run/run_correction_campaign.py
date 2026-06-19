@@ -853,11 +853,16 @@ def _per_variable_bias_from_dict(d):
 
 
 def _capture_initial_record(box, res):
-    """Capture the campaign-START baseline (combined + per-variable) into ``box`` on the
-    FIRST round of a FRESH run — for the CUMULATIVE bias trajectory across job-timeout
-    resumes.  Later rounds (and all resumed rounds, where ``box`` was pre-seeded from the
-    checkpoint) PRESERVE the original.  A non-finite baseline is NOT stored (it would
-    poison every later resume's reported trajectory — Codex); the next round retries."""
+    """Per-round checkpoint bookkeeping for a CUMULATIVE-across-resumes summary.
+
+    (1) Captures the campaign-START baseline (combined + per-variable) into ``box`` on
+    the FIRST round of a FRESH run — later rounds (and all resumed rounds, where ``box``
+    was pre-seeded from the checkpoint) PRESERVE the original.  A non-finite baseline is
+    NOT stored (it would poison every later resume's reported trajectory — Codex); the
+    next round retries.  (2) Accumulates THIS segment's running LES-diagnosis-count sums
+    (``n_diag_seg`` / ``n_valid_seg``) — added to the prior-segments' totals when the
+    checkpoint persists the cumulative counts.  Called EVERY round (accepted or rejected,
+    matching the field persistence)."""
     import math
 
     if box.get("initial_bias") is None:
@@ -867,6 +872,9 @@ def _capture_initial_record(box, res):
             pv = getattr(res, "per_variable_bias", None)
             box["initial_per_variable"] = (
                 _per_variable_bias_dict(pv.baseline) if pv is not None else None)
+    box["n_diag_seg"] = box.get("n_diag_seg", 0) + int(getattr(res, "n_diagnosed", 0))
+    box["n_valid_seg"] = (
+        box.get("n_valid_seg", 0) + int(getattr(res, "n_diagnoses_valid", 0)))
 
 
 def _per_variable_to_json(pv):
@@ -1013,7 +1021,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     gshape = grid.grid_shape_2d
     initial_clubb, initial_fields, start_round = None, None, 0
     # Cumulative-trajectory record across resumes (see the single-coefficient main()).
-    init_box = {"initial_bias": None, "initial_per_variable": None}
+    init_box = {"initial_bias": None, "initial_per_variable": None,
+                "n_diagnosed_prior": 0, "n_diagnoses_valid_prior": 0}
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
@@ -1031,6 +1040,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         start_round = int(ckpt["round"]) + 1
         init_box["initial_bias"] = ckpt.get("initial_bias")
         init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
+        init_box["n_diagnosed_prior"] = int(ckpt.get("n_diagnosed_total", 0))
+        init_box["n_diagnoses_valid_prior"] = int(ckpt.get("n_diagnoses_valid_total", 0))
         print(f"[campaign] resuming multi from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
@@ -1043,7 +1054,11 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
                            "fields": {k: np.asarray(v).reshape(-1).tolist()
                                       for k, v in fields.items()},
                            "initial_bias": init_box["initial_bias"],
-                           "initial_per_variable": init_box["initial_per_variable"]}, f)
+                           "initial_per_variable": init_box["initial_per_variable"],
+                           "n_diagnosed_total": (init_box["n_diagnosed_prior"]
+                                                 + init_box.get("n_diag_seg", 0)),
+                           "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
+                                                       + init_box.get("n_valid_seg", 0))}, f)
 
     result = build_multi_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1077,6 +1092,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         initial_bias_override=init_box["initial_bias"],
         initial_per_variable_override=_per_variable_bias_from_dict(
             init_box["initial_per_variable"]),
+        n_diagnosed_prior=init_box["n_diagnosed_prior"],
+        n_diagnoses_valid_prior=init_box["n_diagnoses_valid_prior"],
     )
     health = campaign_health(summary)
     with open(args.out, "w") as f:
@@ -1262,9 +1279,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     corrected_field = METHOD_PROMOTION[args.diagnosis_method][1]
     initial_clubb, initial_field, start_round = None, None, 0
     # Cumulative-trajectory record across job-timeout resumes (the campaign-START
-    # baseline): seeded from the checkpoint on resume so the final summary reports the
-    # TRUE start→final reduction, not just the last resumed segment.
-    init_box = {"initial_bias": None, "initial_per_variable": None}
+    # baseline + the prior-segments' diagnosis counts): seeded from the checkpoint on
+    # resume so the final summary reports the TRUE start→final reduction + cumulative
+    # counts, not just the last resumed segment.
+    init_box = {"initial_bias": None, "initial_per_variable": None,
+                "n_diagnosed_prior": 0, "n_diagnoses_valid_prior": 0}
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
@@ -1284,10 +1303,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         initial_clubb = CLUBBLiteConfig(
             **{corrected_field: initial_field.reshape(-1)})
         start_round = int(ckpt["round"]) + 1
-        # Restore the ORIGINAL campaign-start baseline (absent in pre-iter-137
-        # checkpoints ⇒ None ⇒ falls back to the segment baseline, the old behaviour).
+        # Restore the ORIGINAL campaign-start baseline + prior cumulative counts (absent
+        # in pre-iter-137/138 checkpoints ⇒ None/0 ⇒ falls back to segment-only, the old
+        # behaviour).
         init_box["initial_bias"] = ckpt.get("initial_bias")
         init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
+        init_box["n_diagnosed_prior"] = int(ckpt.get("n_diagnosed_total", 0))
+        init_box["n_diagnoses_valid_prior"] = int(ckpt.get("n_diagnoses_valid_total", 0))
         print(f"[campaign] resuming from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
@@ -1306,7 +1328,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
                            corrected_field: flat.tolist(),
                            "field": np.asarray(field).tolist(),
                            "initial_bias": init_box["initial_bias"],
-                           "initial_per_variable": init_box["initial_per_variable"]}, f)
+                           "initial_per_variable": init_box["initial_per_variable"],
+                           "n_diagnosed_total": (init_box["n_diagnosed_prior"]
+                                                 + init_box.get("n_diag_seg", 0)),
+                           "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
+                                                       + init_box.get("n_valid_seg", 0))}, f)
 
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1340,6 +1366,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         initial_bias_override=init_box["initial_bias"],
         initial_per_variable_override=_per_variable_bias_from_dict(
             init_box["initial_per_variable"]),
+        n_diagnosed_prior=init_box["n_diagnosed_prior"],
+        n_diagnoses_valid_prior=init_box["n_diagnoses_valid_prior"],
     )
     health = campaign_health(summary)
     with open(args.out, "w") as f:

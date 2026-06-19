@@ -186,6 +186,23 @@ def test_summarize_override_all_rejected_segment_final_is_segment_baseline():
     assert cum.absolute_reduction == pytest.approx(0.4)  # prior segments' gain
 
 
+def test_summarize_diagnosis_counts_cumulative_across_resumes():
+    """RESUME: n_diagnosed_prior / n_diagnoses_valid_prior add the prior-segments' totals
+    so the LES-diagnosis counts are CUMULATIVE (consistent with the cumulative bias), not
+    per-segment — keeping the resumed summary + its health verdict internally consistent."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((4,), 0.4)),
+        iterations=(_cres(0.6, 0.45, n_diagnosed=2, n_diagnoses_valid=1),
+                    _cres(0.45, 0.3, n_diagnosed=3, n_diagnoses_valid=2)),
+        final_field=jnp.full((2, 2), 0.4), accepted=(True, True))
+    seg = summarize_campaign(result, promotion_key="clubb_lite_C_K")     # fresh segment
+    assert seg.n_diagnosed_total == 5 and seg.n_diagnoses_valid_total == 3
+    cum = summarize_campaign(                                            # resumed: + priors
+        result, promotion_key="clubb_lite_C_K",
+        n_diagnosed_prior=10, n_diagnoses_valid_prior=7)
+    assert cum.n_diagnosed_total == 15 and cum.n_diagnoses_valid_total == 10
+
+
 def test_summarize_per_variable_override_cumulative():
     """initial_per_variable_override makes the per-variable trajectory cumulative too:
     the round-0 baseline is the ORIGINAL start, the final is the segment's last-accepted

@@ -135,6 +135,8 @@ def summarize_campaign(
     promotion_key: str | None = None,
     initial_bias_override: float | None = None,
     initial_per_variable_override: Any = None,
+    n_diagnosed_prior: int = 0,
+    n_diagnoses_valid_prior: int = 0,
 ) -> CampaignSummary:
     """Roll a campaign result up into a :class:`CampaignSummary`.
 
@@ -155,6 +157,10 @@ def summarize_campaign(
     override only changes the REPORTED initial; ``final_bias`` is ALWAYS the last
     ACCEPTED ``updated_bias`` of THIS segment (falling back to the segment baseline
     when every post-resume round was rejected — never the override).
+    ``n_diagnosed_prior`` / ``n_diagnoses_valid_prior`` (also persisted in the
+    checkpoint) likewise make the LES-diagnosis counts CUMULATIVE across resumes — so
+    the resumed summary (and its ``no_valid_diagnoses`` health verdict) is internally
+    consistent: cumulative bias AND cumulative counts, not a mix.
     """
     iters = result.iterations
     n_rounds = len(iters)
@@ -210,8 +216,13 @@ def summarize_campaign(
     coefficients = tuple(
         _coefficient_summary(key, f, config) for key, f in fields.items()
     )
-    n_diagnosed_total = int(sum(getattr(it, "n_diagnosed", 0) for it in iters))
-    n_diagnoses_valid_total = int(
+    # Diagnosis counts are CUMULATIVE across resumes too (consistent with the bias
+    # trajectory): this segment's per-round sums + the prior-segments' totals (the
+    # ``*_prior`` overrides, persisted in the checkpoint).  0 (default, fresh run) keeps
+    # the segment-only sum.
+    n_diagnosed_total = int(n_diagnosed_prior) + int(
+        sum(getattr(it, "n_diagnosed", 0) for it in iters))
+    n_diagnoses_valid_total = int(n_diagnoses_valid_prior) + int(
         sum(getattr(it, "n_diagnoses_valid", 0) for it in iters))
     return CampaignSummary(
         n_rounds=n_rounds, n_accepted=n_accepted, acceptance_rate=acceptance_rate,

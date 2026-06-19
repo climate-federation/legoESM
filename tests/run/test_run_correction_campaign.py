@@ -79,7 +79,7 @@ def test_capture_initial_record():
         compare_per_variable_bias,
     )
 
-    def _res(base, t_base):
+    def _res(base, t_base, n_diag=2, n_valid=1):
         bias = BiasImprovement(
             baseline_bias=jnp.asarray(base), updated_bias=jnp.asarray(base * 0.9),
             absolute_reduction=jnp.asarray(0.0), fractional_improvement=jnp.asarray(0.0),
@@ -89,15 +89,18 @@ def test_capture_initial_record():
                             jnp.asarray(float("nan"))),
             PerVariableBias(jnp.asarray(1.0), jnp.asarray(1e-3), jnp.asarray(2.0),
                             jnp.asarray(float("nan"))))
-        return SimpleNamespace(bias=bias, per_variable_bias=pvb)
+        return SimpleNamespace(bias=bias, per_variable_bias=pvb,
+                               n_diagnosed=n_diag, n_diagnoses_valid=n_valid)
 
     box = {"initial_bias": None, "initial_per_variable": None}
     _capture_initial_record(box, _res(5.0, 8.0))       # first fresh round captures
     assert box["initial_bias"] == pytest.approx(5.0)
     assert box["initial_per_variable"]["T_rmse_K"] == pytest.approx(8.0)
-    _capture_initial_record(box, _res(0.6, 3.0))       # later round PRESERVES the original
-    assert box["initial_bias"] == pytest.approx(5.0)
+    assert box["n_diag_seg"] == 2 and box["n_valid_seg"] == 1   # counts accumulate
+    _capture_initial_record(box, _res(0.6, 3.0, n_diag=3, n_valid=2))  # later round
+    assert box["initial_bias"] == pytest.approx(5.0)            # original PRESERVED
     assert box["initial_per_variable"]["T_rmse_K"] == pytest.approx(8.0)
+    assert box["n_diag_seg"] == 5 and box["n_valid_seg"] == 3   # SEGMENT running sum
     # A non-finite baseline is NOT stored (the next round retries) — never poison resumes.
     box2 = {"initial_bias": None, "initial_per_variable": None}
     _capture_initial_record(box2, _res(float("nan"), 8.0))
