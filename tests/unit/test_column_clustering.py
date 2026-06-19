@@ -84,6 +84,24 @@ def test_k_geq_n_is_identity():
         assert out.representative_indices[label] == i
 
 
+def test_constant_dimension_is_suppressed_clusters_by_varying_dims():
+    """A single CONSTANT environment dimension (e.g. all worst columns at a uniform SST
+    — common over tropical ocean) must be SUPPRESSED, not crash or dominate: `_normalize`
+    divides a near-zero-std feature by 1.0 (so it contributes ~0 distance), so clustering
+    groups by the VARYING dims.  `test_duplicate_environments_stop_early` covers ALL dims
+    constant (early stop); this isolates the per-DIMENSION suppression (iter 273)."""
+    records = [
+        _record(0, 9.0, 290.0, 500.0, 10.0),     # anchor (worst score); shear CONSTANT...
+        _record(1, 1.0, 290.0, 600.0, 10.0),     # close to anchor in SST+CAPE
+        _record(2, 0.5, 305.0, 4000.0, 10.0),    # far in SST+CAPE (shear identical)
+    ]
+    out = cluster_columns_by_environment(records, n_clusters=2)
+    # no NaN / crash; the SST+CAPE-far column is the 2nd rep (constant shear ignored).
+    assert set(out.representative_indices) == {0, 2}
+    assert all(0 <= int(label) < len(out.representative_indices) for label in out.labels)
+    assert out.labels[1] == out.labels[0]        # rec 1 (near anchor) → the anchor cluster
+
+
 def test_duplicate_environments_stop_early():
     """K requested > distinct environments ⇒ fewer reps, no duplicate rep."""
     records = [
