@@ -275,6 +275,40 @@ def test_assemble_environment_requires_grid_env():
         assemble_feedback_field(records, diagnoses, (1, 1), strategy="environment")
 
 
+def test_assemble_environment_nonfinite_valid_sample_raises():
+    """A VALID worst-column sample with a non-finite env tag (e.g. a NaN SST over land)
+    must FAIL LOUD — else the NW kernel lets that one NaN poison every grid column's
+    total weight and silently collapses the regression to an all-background no-op.
+    Mirrors the cluster_columns_by_environment guard (closes the asymmetry)."""
+    records = [_erec(0, float("nan"), 100.0, 2.0)]              # NaN SST
+    diagnoses = [_Eddy(K=jnp.array([10.0]), valid=jnp.array([True]))]
+    grid_env = jnp.asarray([[280.0, 100.0, 2.0]])
+    with pytest.raises(ValueError, match="non-finite environment tag"):
+        assemble_feedback_field(
+            records, diagnoses, (1, 1), method="eddy_diffusivity",
+            strategy="environment", grid_env=grid_env,
+            length_scales=jnp.array([5.0, 50.0, 2.0]))
+
+
+def test_assemble_environment_nonfinite_invalid_sample_is_exempt():
+    """An INVALID-diagnosis sample with a non-finite env tag does NOT trip the guard:
+    build_parameter_field zeros invalid samples before the kernel, so they cannot
+    poison it — only a VALID sample's NaN env is fatal. The valid sample still drives
+    a finite field. (Non-vacuous companion to the raise test above.)"""
+    # col 0: valid, good env, K→10; col 1: INVALID diagnosis, NaN SST (must be exempt).
+    records = [_erec(0, 280.0, 100.0, 2.0), _erec(1, float("nan"), 100.0, 2.0)]
+    diagnoses = [_Eddy(K=jnp.array([10.0]), valid=jnp.array([True])),
+                 _Eddy(K=jnp.array([1.0]), valid=jnp.array([False]))]
+    grid_env = jnp.asarray([[280.0, 100.0, 2.0], [281.0, 110.0, 2.2]])
+    field = assemble_feedback_field(
+        records, diagnoses, (1, 2), method="eddy_diffusivity", background=0.4,
+        strategy="environment", grid_env=grid_env,
+        length_scales=jnp.array([5.0, 50.0, 2.0]))
+    f = np.asarray(field).reshape(-1)
+    assert np.all(np.isfinite(f))                  # no NaN poison from the exempt sample
+    assert f[0] == pytest.approx(10.0, abs=1.0)    # driven by the valid sample
+
+
 def test_assemble_unknown_strategy_raises():
     with pytest.raises(ValueError, match="Unknown strategy"):
         assemble_feedback_field([], [], (2, 2), strategy="bogus")

@@ -197,6 +197,21 @@ def assemble_feedback_field(
          float(r.environment.bulk_shear_m_s)]
         for r in records
     ])
+    # Fail LOUD on a non-finite env tag in a VALID sample (e.g. a NaN SST over land):
+    # unlike the cluster_columns_by_environment guard (which raises), the NW kernel
+    # would let ONE NaN tag poison every grid column's total weight (exp(-½·NaN)=NaN
+    # summed into each column) — has_neighbor=(NaN≥floor)=False everywhere — silently
+    # collapsing the regression to an all-background NO-OP correction. Host-side here
+    # (sample_env are concrete manifest tags); invalid-diagnosis samples are exempt
+    # (build_parameter_field zeros them before the kernel).
+    finite_valid = jnp.where(valid[:, None], jnp.isfinite(sample_env), True)
+    if not bool(jnp.all(finite_valid)):
+        raise ValueError(
+            "assemble_feedback_field(strategy='environment'): non-finite environment "
+            "tag (SST/CAPE/shear) in a VALID worst-column sample — a NaN/inf would "
+            "silently collapse the kernel regression to an all-background no-op "
+            "(matches the cluster_columns_by_environment fail-loud guard)."
+        )
     return build_parameter_field(
         "environment",
         grid_shape=grid_shape,
