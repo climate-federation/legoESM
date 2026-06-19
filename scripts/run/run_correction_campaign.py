@@ -1300,7 +1300,29 @@ def _les_per_round_estimate(les_budget: int | None, n_worst: int) -> int:
     return min(int(les_budget), int(n_worst))
 
 
-def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:
+def _dry_run_era5_line(era5: dict | None) -> str:
+    """The ``--dry-run`` ERA5-reference line, or ``""`` when no averaging is given.
+
+    Surfaces the comparison window at PRE-FLIGHT — the earliest point an operator can
+    fix a snapshot-vs-climatology misconfiguration (iter 275, completing the iter-267
+    provenance + §3 window-alignment note).  ``era5_n_times == 1`` is a single SNAPSHOT;
+    compared to a multi-day model time-mean that is weather-vs-climate (a spurious bias
+    the loop would 'correct'), so it is flagged with a WARNING here, not discovered after
+    a multi-day run."""
+    if not era5:
+        return ""
+    n = int(era5.get("era5_n_times", 1))
+    idx = era5.get("era5_time_idx")
+    at = "" if idx is None else f" @ idx {int(idx)}"
+    if n == 1:
+        return (f"\n  ERA5 reference: SINGLE snapshot{at} — WARNING: a snapshot vs a "
+                "multi-day model mean is weather-vs-climate; use --era5-n-times N "
+                "(runbook §3).")
+    return f"\n  ERA5 reference: {n}-time climatology{at}"
+
+
+def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
+                    era5: dict | None = None) -> str:
     """Human-readable one-block summary of a successful ``--dry-run`` pre-flight: the
     campaign CONSTRUCTED (config/units/grid/scheme/method all validated), here is what
     a real launch WOULD run.  Pure (no I/O) so it is unit-testable."""
@@ -1310,7 +1332,8 @@ def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:
         f"  coefficients={tuple(dry.coefficients)}  "
         f"feedback_strategy={dry.feedback_strategy}\n"
         f"  would run ≤ {dry.n_iterations} rounds × ≤ {dry.les_per_round} LES/round "
-        f"(≤ {dry.n_iterations * dry.les_per_round} LES total)\n"
+        f"(≤ {dry.n_iterations * dry.les_per_round} LES total)"
+        + _dry_run_era5_line(era5) + "\n"
         f"  would write → {out}\n"
         "  (re-run without --dry-run to execute the multi-day campaign.)"
     )
@@ -1451,7 +1474,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         sequential=args.staged, dry_run=args.dry_run,
         **_campaign_knobs_from_args(args))
     if args.dry_run:
-        print(_dry_run_report(result, mode=args.mode, out=args.out))
+        print(_dry_run_report(result, mode=args.mode, out=args.out,
+                              era5=_averaging_provenance(args)))
         return 0
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
@@ -1839,7 +1863,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         **_campaign_knobs_from_args(args),
     )
     if args.dry_run:
-        print(_dry_run_report(result, mode=args.mode, out=args.out))
+        print(_dry_run_report(result, mode=args.mode, out=args.out,
+                              era5=_averaging_provenance(args)))
         return 0
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]

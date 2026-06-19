@@ -489,6 +489,24 @@ def test_dry_run_report_formats():
     assert "10 rounds" in rep and "8 LES/round" in rep and "80 LES total" in rep
 
 
+def test_dry_run_report_surfaces_era5_window_and_warns_on_snapshot():
+    """The pre-flight surfaces the ERA5 comparison window (iter 275) so a snapshot-vs-
+    climatology misconfiguration is caught BEFORE the multi-day run: n>1 → a climatology
+    line, n==1 → a weather-vs-climate WARNING; absent → no line (back-compat)."""
+    from scripts.run.run_correction_campaign import _dry_run_era5_line
+
+    dry = CampaignDryRun(grid_shape=(6, 8), n_worst=12, feedback_strategy="static",
+                         coefficients=("C_K",), n_iterations=10, les_per_round=8)
+    assert _dry_run_era5_line(None) == "" and _dry_run_era5_line({}) == ""
+    clim = _dry_run_report(dry, mode="amip", out="o.json",
+                           era5={"era5_n_times": 30, "era5_time_idx": 12})
+    assert "30-time climatology @ idx 12" in clim and "WARNING" not in clim
+    snap = _dry_run_report(dry, mode="amip", out="o.json",
+                           era5={"era5_n_times": 1, "era5_time_idx": 5})
+    assert "SINGLE snapshot @ idx 5" in snap and "WARNING" in snap
+    assert "weather-vs-climate" in snap and "--era5-n-times" in snap
+
+
 def test_dry_run_flag_parsed():
     p = _build_arg_parser()
     base = ["--config", "c.json", "--era5-zarr", "z"]
