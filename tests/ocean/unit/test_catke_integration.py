@@ -139,8 +139,9 @@ def test_model_construction_and_step_with_catke():
         grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
-    out = model.step(state, 3600.0)
-    state_new = out[0] if isinstance(out, tuple) else out
+    # LatLonCGridOceanModel.step returns the new state (a NamedTuple) directly;
+    # do NOT index it (a NamedTuple is a tuple -> [0] would grab its first Field).
+    state_new = model.step(state, 3600.0)
     assert jnp.all(jnp.isfinite(state_new.T.data))
     assert jnp.all(jnp.isfinite(state_new.u.data))
     # CATKE carries a prognostic TKE field that advanced off the cold start.
