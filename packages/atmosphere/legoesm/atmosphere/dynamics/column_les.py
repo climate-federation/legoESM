@@ -197,6 +197,29 @@ def build_column_les_setup(
     from legoesm.grids.vertical import create_stretched_height_coordinate
 
     validate_column_les_config(config)
+    # The forced-LES path applies only the LARGE-SCALE forcing channels (subsidence,
+    # horizontal advection, geostrophic wind) + the top relaxation toward the GCM
+    # column θ; it does NOT yet apply a SURFACE boundary condition (a prescribed T_s
+    # or surface fluxes — the SCMForcing "Phase B" surface consumer). Silently
+    # dropping a requested surface BC would force a convective column's LES with NO
+    # surface buoyancy flux — its PRIMARY turbulence driver — and yield a quietly-
+    # wrong closure diagnosis, so fail LOUD (dispatch-hardening). The compare-
+    # reanalysis extractors leave prescribe="none" (surface-flux-free BY DESIGN), so
+    # this never fires today; it guards a FUTURE extractor/user that sets a surface BC
+    # against a silent drop. (An invalid prescribe value still gets its own error from
+    # build_column_scm_forcing's validate_forcing; prescribe="none" with surface
+    # fields nonetheless set is caught downstream by its _check_surface_exclusivity —
+    # so all three misconfigurations are LOUD, none silently dropped.)
+    if ls_state.prescribe in ("T_s", "fluxes"):
+        raise ValueError(
+            f"build_column_les_setup: ls_state.prescribe={ls_state.prescribe!r} "
+            "requests a surface boundary condition (prescribed T_s or surface fluxes), "
+            "but the forced-LES path does NOT yet apply a surface BC — only large-scale "
+            "forcing + top relaxation. The requested surface heating would be silently "
+            "dropped, starving a convective LES of its primary turbulence source. Use "
+            "prescribe='none' (surface-flux-free, the current compare-reanalysis "
+            "design), or implement the LES surface-flux bottom BC before requesting one."
+        )
     regime, res = les_resolution_for_column(cape_J_kg, config.regime)
     f_c = coriolis_f_c(lat_rad)
     grid = create_plane_grid(

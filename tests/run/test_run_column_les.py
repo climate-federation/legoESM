@@ -255,6 +255,28 @@ def test_build_setup_deep_regime_by_cape():
     assert setup.regime == "deep"  # CAPE 2500 >= 1000
 
 
+def test_build_setup_rejects_unsupported_surface_bc():
+    """The forced-LES path applies no surface BC yet, so a forcing that REQUESTS one
+    (prescribe='T_s' or 'fluxes') fails LOUD rather than silently dropping the surface
+    heating (which would starve a convective LES of its primary turbulence source).
+    The compare-reanalysis extractors leave prescribe='none', so this guards a future
+    extractor/user against a silent drop."""
+    gcm_z, gcm_theta, ls = _gcm_column()
+    for bad in (ls._replace(prescribe="T_s", T_s=300.0),
+                ls._replace(prescribe="fluxes", w_th_s=0.05, w_qv_s=2e-5)):
+        with pytest.raises(ValueError, match="does NOT yet apply a surface BC"):
+            build_column_les_setup(
+                cape_J_kg=200.0, lat_rad=0.3,
+                gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=bad, config=_CONFIG,
+            )
+    # prescribe='none' (the current design) still builds normally.
+    ok = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG,
+    )
+    assert isinstance(ok, ColumnLESSetup)
+
+
 def test_build_setup_raises_when_les_top_above_column():
     gcm_z, gcm_theta, ls = _gcm_column()
     # Column top only 1500 m < LES top 2000 m -> flat-extrapolation guard.
