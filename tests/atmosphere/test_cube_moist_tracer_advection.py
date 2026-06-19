@@ -113,9 +113,10 @@ def test_dycore_advects_tracers_and_mass_bounded():
 
     qv0 = state.tracers["q_v"].data
     m0 = _total_tracer_mass(state, sigma, grid)
+    # CDGrid model.step returns the new state only (the physics carry is stashed
+    # on the model); FV3HydrostaticState is a NamedTuple, so do NOT unpack it.
     for _ in range(15):
-        out = model.step(state, _DT, physics_fn=None)
-        state = out[0] if isinstance(out, tuple) else out
+        state = model.step(state, _DT, physics_fn=None)
     qv1 = state.tracers["q_v"].data
     m1 = _total_tracer_mass(state, sigma, grid)
 
@@ -144,8 +145,7 @@ def test_moist_step_with_kessler_runs():
 
     qv0 = state.tracers["q_v"].data
     for _ in range(5):
-        out = model.step(state, _DT, physics_fn=phys)
-        state = out[0] if isinstance(out, tuple) else out
+        state = model.step(state, _DT, physics_fn=phys)
     for k in ("q_v", "q_c", "q_r"):
         arr = state.tracers[k].data
         assert jnp.all(jnp.isfinite(arr)), f"{k} non-finite"
