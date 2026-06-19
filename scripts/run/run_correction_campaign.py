@@ -1467,22 +1467,15 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     if args.checkpoint:
         def checkpoint_callback(round_idx, res, fields):
             _capture_initial_record(init_box, res)
+            # field finiteness asserted (NaN ⇒ unparseable checkpoint / corrupt resume) —
+            # the checkpoint analog of the iter-270/245 output guards; the round/grid/
+            # bias/count keys are the shared _checkpoint_common (iter 293).
             _atomic_write_json(args.checkpoint, {
-                "round": int(round_idx),
-                "grid": _grid_provenance(base_cfg, grid),
+                **_checkpoint_common(round_idx, base_cfg, grid, init_box),
                 "coefficients": list(coefficients),
-                # field finiteness asserted (NaN ⇒ unparseable checkpoint / corrupt
-                # resume) + initial_bias sanitized to null (a diverged initial is a
-                # recorded metric, not a bug) — the checkpoint analog of the iter-270 /
-                # iter-245 output guards, so a resume artifact stays parseable + finite.
                 "fields": {k: _assert_corrected_field_finite(k, np.asarray(v)).reshape(-1).tolist()
                            for k, v in fields.items()},
-                "initial_bias": _json_finite(init_box["initial_bias"]),
-                "initial_per_variable": init_box["initial_per_variable"],
-                "n_diagnosed_total": (init_box["n_diagnosed_prior"]
-                                      + init_box.get("n_diag_seg", 0)),
-                "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
-                                            + init_box.get("n_valid_seg", 0))})
+            })
 
     result = build_multi_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
@@ -1552,6 +1545,25 @@ def _grid_provenance(base_cfg, grid) -> dict:
     gc = base_cfg.grid
     prov.update(grid_type=gc.grid_type, resolution=gc.resolution, nlev=gc.nlev)
     return prov
+
+
+def _checkpoint_common(round_idx, base_cfg, grid, init_box) -> dict:
+    """The round / grid / initial-bias / diagnosis-count keys SHARED by the single- and
+    multi-coefficient checkpoint callbacks (iter 293) — the field part (``corrected_field``
+    /``field`` vs ``coefficients``/``fields``) is per-callback.  ``initial_bias`` is
+    ``_json_finite``-sanitised (a diverged initial is a recorded ``null``, not a bug — iter
+    245/271); the cumulative diagnosis counts thread the resume seed (iter 137/138).  Keeps
+    the checkpoint-key wiring in ONE place (CLAUDE.md: no duplicate wiring)."""
+    return {
+        "round": int(round_idx),
+        "grid": _grid_provenance(base_cfg, grid),
+        "initial_bias": _json_finite(init_box["initial_bias"]),
+        "initial_per_variable": init_box["initial_per_variable"],
+        "n_diagnosed_total": (init_box["n_diagnosed_prior"]
+                              + init_box.get("n_diag_seg", 0)),
+        "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
+                                    + init_box.get("n_valid_seg", 0)),
+    }
 
 
 def _assert_resume_grid_matches(ckpt: dict, grid: Any) -> None:
@@ -1871,17 +1883,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             arr = _assert_corrected_field_finite(corrected_field, np.asarray(field))
             flat = arr.reshape(-1)
             _atomic_write_json(args.checkpoint, {
-                "round": int(round_idx),
-                "grid": _grid_provenance(base_cfg, grid),
+                **_checkpoint_common(round_idx, base_cfg, grid, init_box),
                 "corrected_field": corrected_field,
                 corrected_field: flat.tolist(),
                 "field": arr.tolist(),
-                "initial_bias": _json_finite(init_box["initial_bias"]),
-                "initial_per_variable": init_box["initial_per_variable"],
-                "n_diagnosed_total": (init_box["n_diagnosed_prior"]
-                                      + init_box.get("n_diag_seg", 0)),
-                "n_diagnoses_valid_total": (init_box["n_diagnoses_valid_prior"]
-                                            + init_box.get("n_valid_seg", 0))})
+            })
 
     result = build_correction_campaign(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,

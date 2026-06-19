@@ -478,6 +478,28 @@ def test_campaign_exit_code_reflects_health_verdict():
         assert _campaign_exit_code(SimpleNamespace(ok=False, status=status)) == 1
 
 
+def test_checkpoint_common_keys_and_sanitization(monkeypatch):
+    """_checkpoint_common (iter 293) builds the round/grid/initial-bias/diagnosis-count
+    keys SHARED by the single + multi checkpoint callbacks: the cumulative counts thread
+    the resume seed (137/138), and a diverged-initial NaN initial_bias is sanitised to null
+    (a recorded metric, not an unparseable token — 245/271)."""
+    import json
+
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(rcc, "_grid_provenance", lambda bc, g: {"grid_type": "stub"})
+    init_box = {"initial_bias": float("nan"), "initial_per_variable": {"T_rmse_K": 1.0},
+                "n_diagnosed_prior": 3, "n_diag_seg": 2,
+                "n_diagnoses_valid_prior": 1, "n_valid_seg": 1}
+    d = rcc._checkpoint_common(7, object(), object(), init_box)
+    assert d["round"] == 7 and d["grid"] == {"grid_type": "stub"}
+    assert d["initial_bias"] is None                     # NaN → null (sanitised)
+    assert d["initial_per_variable"] == {"T_rmse_K": 1.0}
+    assert d["n_diagnosed_total"] == 5                    # 3 + 2 (cumulative)
+    assert d["n_diagnoses_valid_total"] == 2              # 1 + 1
+    json.loads(json.dumps(d))                             # strict JSON: no NaN token
+
+
 def test_build_campaign_harness_returns_the_shared_wiring():
     """_build_campaign_harness (iter 292) factors the compare/diagnose/env-grid wiring that
     was BYTE-IDENTICAL in the single + multi campaign builders: a callable compare_fn +
