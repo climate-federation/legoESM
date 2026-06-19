@@ -2641,6 +2641,40 @@ def test_campaign_output_dict_diverged_run_is_strict_json():
     json.loads(json.dumps(out), parse_constant=_reject_nonstandard)
 
 
+def test_output_dict_rejects_non_finite_corrected_field():
+    """A NON-FINITE corrected coefficient (an un-clipped ill-posed diagnosis that slipped
+    the accept gate) fails LOUD at the write boundary (iter 270) — it would otherwise
+    serialize as a NaN/Infinity token (unparseable output file) AND deploy a coefficient
+    that blows up the production run. NOT sanitized to null (unlike the bias trajectory):
+    a NaN coefficient is a bug to surface. The finite field by construction still writes."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+
+    def _res(field):
+        return CampaignResult(
+            final_config=CLUBBLiteConfig(C_K=field),
+            iterations=(CorrectionResult(
+                updated_config=None, bias=_bias_imp(1.0, 0.6),
+                worst_column_change=jnp.asarray(0.0), feedback_field=field.reshape(2, 2),
+                n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+            final_field=field.reshape(2, 2), accepted=(True,), stop_reason="converged")
+
+    bad = jnp.array([0.42, float("nan"), 0.61, float("inf")])
+    res = _res(bad)
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    base = dict(grid_provenance={}, summary=summary, health=campaign_health(summary))
+    with pytest.raises(ValueError, match=r"corrected field 'C_K' has 2 non-finite"):
+        build_campaign_output_dict(res, corrected_field="C_K", **base)
+    # the finite field still writes fine.
+    ok = _res(jnp.array([0.42, 0.55, 0.61, 0.73]))
+    ok_summary = summarize_campaign(ok, promotion_key="clubb_lite_C_K")
+    out = build_campaign_output_dict(
+        ok, corrected_field="C_K", grid_provenance={}, summary=ok_summary,
+        health=campaign_health(ok_summary))
+    assert len(out["C_K"]) == 4
+
+
 def test_campaign_output_dict_multi_round_trips_into_deploy():
     """The multi-coefficient ``"fields"`` shape round-trips into corrected_clubb_config
     recovering BOTH C_K and Pr_t per column (iter 105)."""

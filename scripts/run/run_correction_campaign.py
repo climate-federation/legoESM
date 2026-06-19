@@ -1036,6 +1036,32 @@ def _summary_to_json(summary):
     }
 
 
+def _assert_corrected_field_finite(name, arr):
+    """Return ``arr`` after asserting EVERY corrected per-column coefficient is finite.
+
+    A corrected field must be finite to be a valid deploy artifact: a NaN/inf coefficient
+    (an un-clipped ill-posed diagnosis that slipped the accept gate) would BOTH (a)
+    serialize as a non-standard ``NaN``/``Infinity`` JSON token, making the WHOLE output
+    file unparseable by the plotters / deploy reader, AND (b) deploy a non-finite
+    coefficient that blows up the production run.  Fail LOUD here — NOT sanitize to null:
+    a NaN coefficient is a BUG to surface (unlike the bias trajectory, which legitimately
+    RECORDS a rejected diverged round's NaN, iter 245).  The accept gate keeps the final
+    field finite by construction; this ENFORCES that invariant at the write boundary so a
+    gate/clip regression fails at the campaign write, not silently downstream (iter 270).
+    """
+    import numpy as np
+
+    a = np.asarray(arr, dtype=float)
+    if not bool(np.all(np.isfinite(a))):
+        n_bad = int(np.count_nonzero(~np.isfinite(a)))
+        raise ValueError(
+            f"build_campaign_output_dict: corrected field {name!r} has {n_bad} "
+            "non-finite (NaN/inf) value(s) — an un-clipped/ill-posed diagnosis reached "
+            "the final field. The accept gate should keep it finite; a non-finite "
+            "coefficient cannot be serialized (unparseable JSON) nor deployed.")
+    return arr
+
+
 def _averaging_provenance(args) -> dict:
     """The comparison's ERA5 averaging window — recorded in the output so the empirical
     result is SELF-DESCRIBING + reproducible.  A bias computed against a single ERA5
@@ -1084,12 +1110,13 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
         # campaign that corrected NOTHING) as a bare float so the deploy loader's
         # 1-D assertion REJECTS it LOUDLY rather than silently promoting it to a
         # length-1 single-column array (Codex iter 105).
-        payload = {corrected_field: np.asarray(
-            getattr(result.final_config, corrected_field)).tolist()}
+        arr = np.asarray(getattr(result.final_config, corrected_field))
+        _assert_corrected_field_finite(corrected_field, arr)
+        payload = {corrected_field: arr.tolist()}
     else:
         payload = {
             "coefficients": list(coefficients),
-            "fields": {k: np.asarray(v).reshape(-1).tolist()
+            "fields": {k: _assert_corrected_field_finite(k, np.asarray(v)).reshape(-1).tolist()
                        for k, v in result.final_fields.items()},
         }
     out = {**payload,
