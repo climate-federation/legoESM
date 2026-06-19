@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import jax.numpy as jnp
+import pytest
 
 
 def _real_output():
@@ -59,7 +60,7 @@ def test_real_campaign_output_feeds_bias_trajectory_plotter(tmp_path):
 
     out = _real_output()
     tr = extract_campaign_trajectory(out)
-    assert tr["round_updated"] == [0.6]              # the REAL 'biases' key was read
+    assert tr["round_updated"] == pytest.approx([0.6])  # REAL 'biases' read (fp32-safe)
     assert tr["initial_bias"] is not None and tr["final_bias"] is not None
     assert tr["pv_baseline"]["T_rmse_K"] == 3.0      # the REAL per-variable block was read
     png = tmp_path / "t.png"

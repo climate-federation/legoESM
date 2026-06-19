@@ -69,6 +69,28 @@ def test_plot_campaign_bias_trajectory_renders_partial(tmp_path):
     assert png.exists() and png.stat().st_size > 0
 
 
+def test_diverged_run_with_null_bias_extracts_as_nan_and_renders(tmp_path):
+    """A DIVERGED round serializes its bias as JSON null (iter 245). The plotter must map
+    it to a NaN GAP — not crash on ``float(None)`` — and still render (iter 248).
+
+    ``test_extract_campaign_trajectory_tolerates_partial`` only covers an EMPTY output, so
+    the actual null-bias path (the bug) was unexercised."""
+    import math
+
+    from scripts.plot.plot_campaign_bias_trajectory import (
+        extract_campaign_trajectory,
+        plot_campaign_bias_trajectory,
+    )
+
+    out = _output(biases=[[5.0, 4.0, True], [4.0, None, False]])   # round 2 diverged -> null
+    tr = extract_campaign_trajectory(out)
+    assert tr["round_updated"][0] == 4.0
+    assert math.isnan(tr["round_updated"][1])                      # null -> NaN gap, not a crash
+    png = tmp_path / "diverged.png"
+    plot_campaign_bias_trajectory(out, str(png))                   # renders the gap, no crash
+    assert png.exists() and png.stat().st_size > 0
+
+
 def test_plot_campaign_main_reads_json_and_writes_png(tmp_path):
     from scripts.plot.plot_campaign_bias_trajectory import main
 

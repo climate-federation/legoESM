@@ -37,9 +37,15 @@ def extract_campaign_trajectory(output: dict) -> dict:
     accepted = output.get("accepted", []) or []
     summary = output.get("summary", {}) or {}
     pv = summary.get("per_variable_bias") or {}
+
+    def _f(x):
+        # A DIVERGED round serializes its bias as JSON null (iter 245); map it to NaN so
+        # matplotlib renders a GAP in the trajectory rather than crashing on float(None).
+        return float("nan") if x is None else float(x)
+
     return {
-        "round_baseline": [float(b[0]) for b in biases],
-        "round_updated": [float(b[1]) for b in biases],
+        "round_baseline": [_f(b[0]) for b in biases],
+        "round_updated": [_f(b[1]) for b in biases],
         "accepted": [bool(a) for a in accepted],
         "initial_bias": summary.get("initial_bias"),
         "final_bias": summary.get("final_bias"),
