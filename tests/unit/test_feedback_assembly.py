@@ -301,6 +301,69 @@ def test_column_environment_grid_shapes_and_sst():
     assert bool(jnp.all(length_scales > 0))
 
 
+def test_column_environment_grid_matches_manifest_sample_env():
+    """CROSS-PATH CONSISTENCY (Codex iter-42, the env-kernel deploy invariant): the
+    kernel's grid predictors (``column_environment_grid``) MUST equal the manifest's
+    per-column sample predictors (the compare's ``record.environment``) for the SAME
+    state, or the Nadaraya–Watson kernel compares mismatched quantities and the
+    cross-resolution deploy is meaningless. Both paths share the SST fallback, the
+    pure-sigma default pressure, and ``compute_column_environment`` — this LOCKS that
+    so a future divergence (e.g. one path changing its SST fallback or default p) fails.
+    """
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import (
+        ColumnState,
+        compare_state_to_reference,
+    )
+
+    nlat, nlon, nlev = 3, 4, 6
+    sigma = create_sigma_coordinate(nlev)
+    # Spatially-VARYING fields so worst columns have DISTINCT environments (SST,
+    # CAPE via T/q_v, shear via u) — a uniform state would make the test vacuous.
+    ones = jnp.ones((nlat, nlon, nlev))
+    iy = jnp.arange(nlat)[:, None, None]
+    ix = jnp.arange(nlon)[None, :, None]
+    lev = jnp.linspace(0.0, 1.0, nlev)[None, None, :]      # 0=top, 1=surface
+    base = ColumnState(
+        T=(230.0 + 60.0 * lev + 3.0 * iy + 1.5 * ix) * ones,  # warmer below + gradient
+        q_v=(1e-3 + 8e-3 * lev) * (1.0 + 0.05 * ix) * ones,   # moister below + gradient
+        u=2.0 * lev * (1.0 + 0.3 * iy) * ones,                # sheared, varying by row
+        v=jnp.zeros((nlat, nlon, nlev)),
+        p_s=jnp.full((nlat, nlon), 1.0e5),
+        sst_K=290.0 + 2.0 * jnp.arange(nlat)[:, None] + 0.5 * jnp.arange(nlon)[None, :])
+    lat_deg = jnp.zeros((nlat, nlon))
+    lon_deg = jnp.zeros((nlat, nlon))
+
+    def _assert_consistent(model):
+        reference = model._replace(T=model.T - (0.5 + 0.4 * iy) * ones)  # column-varying bias
+        comp = compare_state_to_reference(
+            model=model, reference=reference,
+            sigma_full=sigma.sigma_full, sigma_half=sigma.sigma_half,
+            lat_deg=lat_deg, lon_deg=lon_deg, time_index=0, n_worst=nlat * nlon)
+        grid_env = np.asarray(column_environment_grid(model, sigma)[0])  # (ncol, 3)
+        # Finiteness guard: a NaN on BOTH paths would otherwise pass assert_allclose
+        # silently (equal_nan=True default) — Codex. The env must be finite anyway.
+        assert np.all(np.isfinite(grid_env))
+        # Every worst record's stored environment MUST equal the grid predictor at its
+        # flat index — exact match (same function, same inputs, same defaults).
+        for rec in comp.manifest:
+            assert all(np.isfinite([rec.environment.sst_K, rec.environment.cape_J_kg,
+                                    rec.environment.bulk_shear_m_s]))
+            np.testing.assert_allclose(
+                grid_env[rec.flat_index],
+                np.array([rec.environment.sst_K, rec.environment.cape_J_kg,
+                          rec.environment.bulk_shear_m_s]),
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"grid_env vs manifest env diverged at flat_index {rec.flat_index}")
+
+    _assert_consistent(base)                          # explicit-SST path (model.sst_K)
+    # SST-FALLBACK path: no sst_K ⇒ BOTH paths must derive SST from the surface-level
+    # air temperature T[..., -1] identically (Codex: lock the fallback branch too, not
+    # only the explicit-SST branch). T varies per column so the fallback SST still
+    # discriminates a mis-index.
+    _assert_consistent(base._replace(sst_K=None))
+
+
 class _CEps(NamedTuple):
     C_eps: jax.Array
     valid: jax.Array
