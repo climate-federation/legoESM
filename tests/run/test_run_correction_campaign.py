@@ -1847,23 +1847,39 @@ def test_make_base_driver_builder_amip_builds_real_driver():
 def test_make_base_driver_builder_cmip_builds_real_driver():
     """The CMIP builder constructs + sets up a real CoupledESMDriver with
     ocean_grid=None (same-grid coupling: ocean on the atm grid), exposing the
-    state/q_v/ocean_state that cmip_column_state reads."""
+    state/q_v/ocean_state that cmip_column_state reads.
+
+    Also LOCKS the CMIP DEPLOY propagation (the done-criterion's CMIP half): a
+    turbulence_override on the atm config must reach the COUPLED atmosphere — the
+    coupled driver builds its atmosphere from the SAME atm_config (CoupledESMDriver:
+    ``self._atm = ModelDriver(atm_config)``), NOT from coupled_preset (ocean/coupling
+    only), so the LES-informed correction is NOT silently dropped in coupled mode."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        CLUBBLiteConfig,
+        TurbulenceConfig,
+    )
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
     build_cmip, _ = make_base_driver_builder(
         "cmip", coupled_preset=PRESETS["aquaplanet"](), ocean_grid=None)
+    # a deployed-shape per-column override (the real corrected_turbulence_override form).
+    override = TurbulenceConfig(
+        scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=jnp.full((8, 16), 0.77)))
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
-        radiation="gray", turbulence="clubb_lite")
+        radiation="gray", turbulence="clubb_lite", turbulence_override=override)
     driver = build_cmip(cfg)
     assert isinstance(driver, CoupledESMDriver)
     # cmip_column_state reads these; same-grid ⇒ SST on the atm column shape.
     assert driver.state is not None and driver.q_v is not None
     assert tuple(driver.ocean_state.T_sfc.data.shape) == (8, 16)
+    # CMIP DEPLOY PROPAGATION: the override survived onto the coupled atmosphere config.
+    assert driver.atm_config.turbulence_override is override
+    assert float(driver.atm_config.turbulence_override.clubb_lite.C_K[0, 0]) == 0.77
 
 
 @pytest.mark.slow
