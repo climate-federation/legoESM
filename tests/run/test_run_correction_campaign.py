@@ -26,12 +26,14 @@ from legoesm.atmosphere.dynamics.les_regime import (  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
+    CampaignDryRun,
     _area_weights,
     _assert_output_path_writable,
     _build_arg_parser,
     _campaign_knobs_from_args,
     _capture_initial_record,
     _distributed_campaign_kwargs,
+    _dry_run_report,
     _env_kernel_export_note,
     _format_per_variable_bias,
     _json_finite,
@@ -267,6 +269,59 @@ def test_resolve_orographic_phis_unknown_mode_raises():
     constrains the CLI, but the helper must not silently accept a typo)."""
     with pytest.raises(ValueError, match="unknown orographic_forcing mode"):
         resolve_orographic_phis("terrain", lambda: jnp.zeros((4, 8)))
+
+
+def _dry_run_sigma():
+    return SimpleNamespace(sigma_full=jnp.linspace(0.1, 0.9, 5),
+                           sigma_half=jnp.linspace(0.0, 1.0, 6))
+
+
+def test_build_correction_campaign_dry_run_constructs_without_running():
+    """--dry-run pre-flight: build_correction_campaign(dry_run=True) ASSEMBLES the
+    campaign (validating units/grid/scheme/method + the turbulence='clubb_lite' build
+    driver) and returns a CampaignDryRun WITHOUT running the model/LES — every model-
+    touching callback would raise if invoked, proving nothing ran. The launch check
+    that catches a misconfig in ms instead of after a multi-day run."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+
+    def boom(*a, **k):
+        raise AssertionError("dry_run must NOT run the model / LES")
+
+    common = dict(
+        build_base_driver=boom, extract_column_state=boom, run_les_fn=boom,
+        reference=SimpleNamespace(T=SimpleNamespace(shape=(2, 3, 5))),
+        sigma=_dry_run_sigma(), grid=object(), area_weights=jnp.ones((2, 3)),
+        lat_deg=jnp.zeros((2, 3)), lon_deg=jnp.zeros((2, 3)),
+        n_iterations=5, n_worst=4, validate_reference=False, dry_run=True)
+    res = build_correction_campaign(
+        base_atm_config=_base_config(),
+        les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
+    assert isinstance(res, CampaignDryRun)
+    assert tuple(res.grid_shape) == (2, 3) and res.n_worst == 4
+    assert res.coefficients == ("C_K",)             # clubb_coefficient → clubb_lite C_K
+    # dry_run STILL validates: a non-clubb base config fails LOUD (the pre-flight's point).
+    with pytest.raises(ValueError, match="clubb_lite"):
+        build_correction_campaign(
+            base_atm_config=SimpleNamespace(turbulence="bulk"),
+            les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
+
+
+def test_dry_run_report_formats():
+    """_dry_run_report renders the assembled metadata + the would-write path."""
+    rep = _dry_run_report(
+        CampaignDryRun(grid_shape=(6, 8), n_worst=12, feedback_strategy="environment",
+                       coefficients=("C_K", "Pr_t")),
+        mode="cmip", out="/scratch/run/corrected.json")
+    assert "DRY-RUN OK" in rep and "grid_shape=(6, 8)" in rep and "n_worst=12" in rep
+    assert "('C_K', 'Pr_t')" in rep and "cmip" in rep
+    assert "/scratch/run/corrected.json" in rep
+
+
+def test_dry_run_flag_parsed():
+    p = _build_arg_parser()
+    base = ["--config", "c.json", "--era5-zarr", "z"]
+    assert p.parse_args(base).dry_run is False           # default off
+    assert p.parse_args([*base, "--dry-run"]).dry_run is True
 
 
 def test_assert_output_path_writable(tmp_path, monkeypatch):

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 from legoesm.atmosphere.physics.turbulence.config import (
     CLUBBLiteConfig,
@@ -243,6 +243,22 @@ def maybe_env_grid_fn(feedback_strategy, sigma):
     return _partial(column_environment_grid, sigma=sigma)
 
 
+class CampaignDryRun(NamedTuple):
+    """Result of ``build_*_correction_campaign(dry_run=True)``: the campaign
+    CONSTRUCTED — the reference passed the physical-plausibility check, the
+    ``clubb_lite`` build-driver (``turbulence='clubb_lite'``) + the compare/diagnose
+    functions assembled, and the diagnosis-method/coefficient dispatch validated —
+    but it was NOT run.  The cheap launch PRE-FLIGHT for a multi-day HPC campaign:
+    every construction-time failure (bad config / units / grid / method / scheme)
+    surfaces in milliseconds instead of after burning the run.
+    """
+
+    grid_shape: tuple[int, ...]
+    n_worst: int
+    feedback_strategy: str
+    coefficients: tuple[str, ...]   # the corrected clubb_lite field name(s)
+
+
 def build_correction_campaign(
     *,
     base_atm_config: Any,
@@ -276,6 +292,7 @@ def build_correction_campaign(
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
     validate_reference: bool = True,
+    dry_run: bool = False,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -345,6 +362,14 @@ def build_correction_campaign(
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
+
+    if dry_run:
+        # Everything CONSTRUCTED (reference validated, clubb build-driver +
+        # compare/diagnose fns assembled, method/coefficient checks passed) — return
+        # WITHOUT the (multi-day) run. The launch pre-flight.
+        return CampaignDryRun(
+            grid_shape=grid_shape, n_worst=int(n_worst),
+            feedback_strategy=feedback_strategy, coefficients=(field_name,))
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -584,6 +609,7 @@ def build_multi_correction_campaign(
     manifest_reducer: Any | None = None,
     global_reduce: Any | None = None,
     validate_reference: bool = True,
+    dry_run: bool = False,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -639,6 +665,13 @@ def build_multi_correction_campaign(
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
     env_grid_fn = maybe_env_grid_fn(feedback_strategy, sigma)
+
+    if dry_run:
+        # Constructed every per-coefficient spec + the compare/diagnose fns (the
+        # method-union LES, the C_K/c_eps l_mix_max auto-populate) WITHOUT running.
+        return CampaignDryRun(
+            grid_shape=grid_shape, n_worst=int(n_worst),
+            feedback_strategy=feedback_strategy, coefficients=tuple(coefficients))
 
     return run_multi_correction_campaign(
         clubb_cfg, int(n_iterations), specs,
@@ -822,6 +855,10 @@ def _build_arg_parser():
                    help="write a per-round checkpoint JSON (restartable campaign)")
     p.add_argument("--resume", default=None,
                    help="resume from a --checkpoint JSON (continues the accumulation)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="launch PRE-FLIGHT: load the config + ERA5 reference, build the "
+                        "driver + the campaign (validating units/grid/scheme/method), "
+                        "report what WOULD run, then exit 0 WITHOUT the (multi-day) run.")
     return p
 
 
@@ -1034,6 +1071,20 @@ def _assert_output_path_writable(path: str, *, flag: str) -> None:
             f"permissions or choose a writable path before launching.")
 
 
+def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str) -> str:
+    """Human-readable one-block summary of a successful ``--dry-run`` pre-flight: the
+    campaign CONSTRUCTED (config/units/grid/scheme/method all validated), here is what
+    a real launch WOULD run.  Pure (no I/O) so it is unit-testable."""
+    return (
+        "[campaign] DRY-RUN OK — construction validated, NOT run.\n"
+        f"  mode={mode}  grid_shape={tuple(dry.grid_shape)}  n_worst={dry.n_worst}\n"
+        f"  coefficients={tuple(dry.coefficients)}  "
+        f"feedback_strategy={dry.feedback_strategy}\n"
+        f"  would write → {out}\n"
+        "  (re-run without --dry-run to execute the multi-day campaign.)"
+    )
+
+
 def _area_weights(grid):
     """Per-column quadrature weights for the bias aggregation.
 
@@ -1146,8 +1197,11 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_fields=initial_fields,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
-        sequential=args.staged,
+        sequential=args.staged, dry_run=args.dry_run,
         **_campaign_knobs_from_args(args))
+    if args.dry_run:
+        print(_dry_run_report(result, mode=args.mode, out=args.out))
+        return 0
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
@@ -1432,8 +1486,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
+        dry_run=args.dry_run,
         **_campaign_knobs_from_args(args),
     )
+    if args.dry_run:
+        print(_dry_run_report(result, mode=args.mode, out=args.out))
+        return 0
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
     accepted = list(result.accepted)
