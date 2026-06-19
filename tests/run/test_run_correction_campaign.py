@@ -2572,6 +2572,39 @@ def test_campaign_output_dict_single_round_trips_into_deploy():
     assert loaded["grid"]["grid_type"] == "latlon"
 
 
+def test_output_dict_records_averaging_provenance():
+    """The output JSON records the comparison's ERA5 averaging window (iter 267) so the
+    empirical result is self-describing — a bias vs a single SNAPSHOT (n_times=1) is a
+    different quantity than vs an N-time climatology. Absent ``averaging`` keeps the
+    legacy shape (no key); a provided block round-trips through the JSON."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+
+    from scripts.run.run_correction_campaign import _averaging_provenance
+
+    field = jnp.array([0.42, 0.55, 0.61, 0.73])
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 0.6),
+            worst_column_change=jnp.asarray(0.0), feedback_field=field.reshape(2, 2),
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+        final_field=field.reshape(2, 2), accepted=(True,), stop_reason="converged")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    health = campaign_health(summary)
+    base = dict(grid_provenance={}, summary=summary, health=health, corrected_field="C_K")
+    # absent ⇒ no averaging key (back-compat with the round-trip / deploy contract).
+    assert "averaging" not in build_campaign_output_dict(res, **base)
+    # the helper resolves the window from args; a climatology run records n_times>1.
+    av = _averaging_provenance(SimpleNamespace(era5_time_idx=12, era5_n_times=30))
+    assert av == {"era5_time_idx": 12, "era5_n_times": 30}
+    out = json.loads(json.dumps(build_campaign_output_dict(res, averaging=av, **base)))
+    assert out["averaging"] == {"era5_time_idx": 12, "era5_n_times": 30}
+
+
 def test_campaign_output_dict_diverged_run_is_strict_json():
     """The WHOLE build_campaign_output_dict for a DIVERGED run (NaN bias) must be standard
     JSON — no NaN/Infinity tokens anywhere.

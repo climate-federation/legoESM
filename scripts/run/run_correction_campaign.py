@@ -1036,8 +1036,22 @@ def _summary_to_json(summary):
     }
 
 
+def _averaging_provenance(args) -> dict:
+    """The comparison's ERA5 averaging window — recorded in the output so the empirical
+    result is SELF-DESCRIBING + reproducible.  A bias computed against a single ERA5
+    SNAPSHOT (``era5_n_times=1``) is a different scientific quantity than one against an
+    N-time CLIMATOLOGY (iter 140); the time indices + count make 'what was this bias
+    measured against' explicit for the analyst, not implicit in the launch command.
+    """
+    return {
+        "era5_time_idx": int(args.era5_time_idx),
+        "era5_n_times": int(_resolve_era5_n_times(args.era5_n_times)),
+    }
+
+
 def build_campaign_output_dict(result, *, grid_provenance, summary, health,
-                               corrected_field=None, coefficients=None):
+                               corrected_field=None, coefficients=None,
+                               averaging=None):
     """Assemble the JSON-serializable campaign-output dict — the on-disk artifact the
     DEPLOY path (:func:`legoesm.training.deploy_correction.corrected_clubb_config`)
     reads to update a production AMIP/CMIP run (the literal "update the parameters"
@@ -1078,11 +1092,14 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
             "fields": {k: np.asarray(v).reshape(-1).tolist()
                        for k, v in result.final_fields.items()},
         }
-    return {**payload,
-            "grid": grid_provenance,
-            "biases": biases, "accepted": accepted, "step_fractions": steps,
-            "summary": _summary_to_json(summary),
-            "health": {"status": health.status, "message": health.message}}
+    out = {**payload,
+           "grid": grid_provenance,
+           "biases": biases, "accepted": accepted, "step_fractions": steps,
+           "summary": _summary_to_json(summary),
+           "health": {"status": health.status, "message": health.message}}
+    if averaging is not None:                        # comparison averaging-window provenance
+        out["averaging"] = averaging
+    return out
 
 
 def _warn_if_ignored_diagnosis_method(coefficients, diagnosis_method: str) -> None:
@@ -1419,7 +1436,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     health = campaign_health(summary)
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
-        summary=summary, health=health, coefficients=coefficients), indent=2)
+        summary=summary, health=health, coefficients=coefficients,
+        averaging=_averaging_provenance(args)), indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -1802,7 +1820,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     health = campaign_health(summary)
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
-        summary=summary, health=health, corrected_field=corrected_field), indent=2)
+        summary=summary, health=health, corrected_field=corrected_field,
+        averaging=_averaging_provenance(args)), indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")

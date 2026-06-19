@@ -70,6 +70,14 @@ $PY scripts/plot/plot_corrected_coefficient_field.py $OUT  # where/how the coeff
 A `health.status == "improved"` already demonstrates clause 5 **in-sample** (each
 accepted round lowered the bias on a real model re-run, under the monotonic gate).
 
+The output also records an `averaging` block (`era5_n_times`, `era5_time_idx`) — the
+ERA5 window the bias was measured against. **Window alignment is the operator's
+responsibility:** the model run is time-meaned and compared to this ERA5 mean, so they
+must represent the *same* climatological period (a `--era5-n-times 1` snapshot vs a
+multi-day model mean compares weather to climate — a spurious bias the loop would then
+"correct"). Use a multi-time ERA5 climatology (`--era5-n-times N`) matched to the model
+averaging window.
+
 ## 4. Preflight the DEPLOY (seconds, no model run)
 
 Confirm the campaign output deploys onto your production base config + grid (the
