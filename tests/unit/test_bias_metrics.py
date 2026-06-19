@@ -190,6 +190,35 @@ def test_aggregate_global_reduce_none_is_local():
             == float(aggregate_combined_bias(score, w)))
 
 
+def test_aggregate_owned_mask_prevents_halo_double_count():
+    """DISTRIBUTED correctness: a cell HELD as a halo on one rank AND owned on its
+    owner must contribute to the global area-weighted bias EXACTLY ONCE.  Under MPI
+    each rank slices the GLOBAL ``area_weights`` to its local cells (owned + halo) and
+    passes the OWNED-only ``valid_mask``; the global SUM then reduces every rank's
+    masked partial.  Because the mask zeroes the weight AND the value at a halo cell
+    (bias_metrics.py:75-76), the halo copy adds 0 to BOTH sums — so the global mean is
+    the single-count truth, not inflated by the duplicated halo mass.
+
+    Emulated as the np=1 gather of the owned+halo layout: cell c1 appears TWICE — once
+    OWNED (value 20, weight 5) and once as a HALO (garbage value 999, weight 5, mask
+    False).  If the halo were double-counted the mean would move toward 999; it must
+    instead equal the truth over the distinct cells [c0, c1, c2]."""
+    truth = float(aggregate_combined_bias(
+        jnp.array([10.0, 20.0, 30.0]), jnp.array([2.0, 5.0, 3.0])))   # (20+100+90)/10
+    assert truth == pytest.approx(21.0)
+    # the gathered owned+halo array: c1's halo copy carries a garbage value + real
+    # weight but mask=False, so it must drop out of both Σf·w and Σw.
+    field = jnp.array([10.0, 20.0, 999.0, 30.0])   # c0, c1(owned), c1(HALO), c2
+    w = jnp.array([2.0, 5.0, 5.0, 3.0])            # halo carries the SAME area weight
+    mask = jnp.array([True, True, False, True])    # only the OWNED c1 counts
+    out = float(aggregate_combined_bias(field, w, valid_mask=mask))
+    assert out == pytest.approx(21.0)              # halo excluded → single-count truth
+    # sanity: WITHOUT the owned mask the halo doubles c1's mass and corrupts the mean,
+    # which is exactly the double-count the mask prevents.
+    corrupted = float(aggregate_combined_bias(field, w))
+    assert corrupted != pytest.approx(21.0)
+
+
 def test_bias_improvement_global_reduce_is_global_verdict():
     """With ``global_reduce`` the improved verdict is GLOBAL: a reducer that adds a
     large WORSENING other-rank contribution to the updated bias can FLIP the local
