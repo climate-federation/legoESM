@@ -185,6 +185,63 @@ def test_resume_accumulates_diagnosis_counts_across_segments():
     assert total2 == 9 and valid2 == 7       # NOT reset to the last segment, NOT double-counted
 
 
+def test_resume_field_roundtrips_bit_exactly_with_per_column_identity(tmp_path):
+    """A NON-uniform corrected field must survive the checkpoint round-trip with
+    EXACT values AND per-column identity preserved (the checkpoint analog of the
+    iter-36 feedback↔physics column-ordering contract).
+
+    The existing resume test uses a UNIFORM 0.4 field, which reshapes identically
+    under any axis order and so cannot catch a flat↔2-D ordering bug.  Here every
+    cell carries a UNIQUE value, so if the writer's ``np.asarray(field).tolist()``
+    (C-order) and the loader's ``reshape(grid_shape_2d).reshape(-1)`` ever disagree
+    on flatten order (or JSON drops precision), the restored per-column C_K would
+    mismatch the originally-accepted field and a resumed campaign would silently
+    seed the WRONG column corrections.  Driven through the REAL on-disk path
+    (``_atomic_write_json`` → ``json.load`` → ``_load_single_resume``).
+    """
+    import json
+
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    nlat, nlon = grid.grid_shape_2d
+    # Unique per-cell value: cell (i,j) = 0.4 + (i*nlon + j)*1e-3 — a transpose or
+    # F-order flatten anywhere in the chain changes the per-column mapping.
+    field2d = 0.4 + np.arange(nlat * nlon, dtype=np.float64).reshape(nlat, nlon) * 1e-3
+    flat = field2d.reshape(-1)
+
+    ckpt_path = tmp_path / "ckpt.json"
+    rcc._atomic_write_json(str(ckpt_path), {
+        "round": 3,
+        "grid": rcc._grid_provenance(_base_config(), grid),
+        "corrected_field": "C_K",
+        "C_K": flat.tolist(),
+        "field": field2d.tolist(),
+        "n_diagnosed_total": 0, "n_diagnoses_valid_total": 0,
+    }, indent=2)
+
+    with open(ckpt_path) as f:
+        ckpt = json.load(f)
+
+    init_field, init_clubb, start_round, _seed = rcc._load_single_resume(ckpt, grid, "C_K")
+
+    # 1) start_round advances past the checkpointed round.
+    assert start_round == 4
+    # 2) 2-D field restored bit-exactly with the right shape.
+    assert tuple(np.asarray(init_field).shape) == (nlat, nlon)
+    np.testing.assert_array_equal(np.asarray(init_field), field2d)
+    # 3) The CLUBB C_K (flat, fed to the physics) preserves per-column identity:
+    #    column flat-index k holds EXACTLY the accepted field's column k.
+    np.testing.assert_array_equal(np.asarray(init_clubb.C_K), flat)
+    assert np.asarray(init_clubb.C_K).shape == (nlat * nlon,)
+    # The persisted flat copy ("C_K" key, for inspection/method-guard) and the 2-D
+    # "field" the loader actually trusts describe the SAME ordering.
+    np.testing.assert_array_equal(np.asarray(ckpt["C_K"]), flat)
+
+
 def test_json_finite_maps_nonfinite_to_none():
     """_json_finite: finite floats pass through; NaN AND ±inf map to None (valid JSON
     null), None passes through. Non-vacuous: covers the ±inf fractional_reduction case
