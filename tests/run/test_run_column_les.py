@@ -299,6 +299,29 @@ def test_surface_kinematic_flux_tendency_helper():
     assert np.isfinite(g) and g > 0.0                  # linear in flux, AD-safe
 
 
+def test_surface_flux_tendency_column_budget():
+    """SOURCE BUDGET: the surface flux adds EXACTLY its surface mass flux to the column.
+    The mass-weighted column integral of the surface-flux tendency
+    ``Σ_k tend_k·ρ_ref[k]·dz[k]`` must equal ``flux_s·ρ_w_sfc`` (the prescribed kinematic
+    flux × the surface-interface density) — the conservation identity that makes this a
+    correct boundary SOURCE (it is NOT internally conservative; it injects the surface
+    flux's worth of heat/moisture, no more, no less, and only at the surface cell)."""
+    import numpy as np
+    from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
+        surface_kinematic_flux_tendency,
+    )
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+
+    hc = create_stretched_height_coordinate(7, H=3000.0, dz_sfc=40.0)
+    rho = np.asarray(hc.rho_ref)
+    dz = np.asarray(hc.dz)
+    rho_w_sfc = float(np.asarray(hc.rho_ref_half)[-1])
+    for flux in (0.05, -0.02, 3e-5):                   # +up, −down (cooling), tiny moist
+        tend = np.asarray(surface_kinematic_flux_tendency(flux, hc))
+        col_integral = float(np.sum(tend * rho * dz))  # mass-weighted column source
+        np.testing.assert_allclose(col_integral, flux * rho_w_sfc, rtol=1e-12)
+
+
 def test_build_setup_applies_prescribed_surface_fluxes():
     """prescribe='fluxes' now BUILDS (iter 151) and threads the surface kinematic θ/q_v
     fluxes into the plane forcing physics, which injects them on the SURFACE (last) cell
@@ -339,6 +362,11 @@ def test_build_setup_applies_prescribed_surface_fluxes():
     np.testing.assert_allclose(d_qv[:, :, :nlev - 1], 0.0, atol=1e-20)
     np.testing.assert_allclose(d_theta[:, :, nlev - 1], exp_th, rtol=1e-10)  # surface only
     np.testing.assert_allclose(d_qv[:, :, nlev - 1], exp_qv, rtol=1e-10)
+    # The surface flux is a SCALAR (θ/q_v) source — it must NOT leak into momentum (u,v)
+    # or w; their tendencies are identical with and without the flux.
+    np.testing.assert_array_equal(np.asarray(t_flux.du_dt.data), np.asarray(t_none.du_dt.data))
+    np.testing.assert_array_equal(np.asarray(t_flux.dv_dt.data), np.asarray(t_none.dv_dt.data))
+    np.testing.assert_array_equal(np.asarray(t_flux.dw_dt.data), np.asarray(t_none.dw_dt.data))
 
 
 def test_build_setup_raises_when_les_top_above_column():
