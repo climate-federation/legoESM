@@ -237,6 +237,25 @@ def test_momentum_diffusivity_recovers_km():
     np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-5)
 
 
+def test_momentum_diffusivity_recovers_km_nonuniform_grid():
+    """K_m recovery on a STRETCHED grid — the C_K closure (C_K = K_m/(ℓ·√wp2))
+    inherits ``mean_gradient_at_interfaces`` for du/dz, so it has the SAME per-
+    interface-``dz`` exposure as the eddy K (iter 145).  The flux ``w_u`` is the
+    HAND-built constant ``-km0·s0`` (independent of the function), so a constant
+    ``dz=40`` regression computes ``du/dz = s0·dz_actual/dz_const`` and yields
+    ``K_m = km0·dz_const/dz_actual = [5, 2.5, 1.25, 0.625] ≠ km0``, FAILING here —
+    the uniform-z recovers_km test cannot catch it.  C_K is the PRIMARY corrected
+    coefficient, so locking K_m on the realistic stretched vertical matters most."""
+    z = jnp.array([0.0, 40.0, 120.0, 280.0, 600.0])   # stretched: dz = 40,80,160,320
+    s0, km0 = 0.01, 5.0
+    u = s0 * z                                          # linear ⇒ true shear = s0
+    v = jnp.zeros_like(z)
+    w_u = jnp.full((4,), -km0 * s0)                     # true down-gradient flux (constant)
+    Km, valid = momentum_diffusivity_from_fluxes(w_u, jnp.zeros((4,)), u, v, z)
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-5)
+
+
 def test_momentum_diffusivity_projects_misaligned_flux():
     # Shear purely in u; a v-flux component is cross-shear and must be projected
     # out (K_m depends only on the along-shear flux w'u').
