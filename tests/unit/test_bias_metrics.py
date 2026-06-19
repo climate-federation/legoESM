@@ -283,6 +283,20 @@ def test_bias_improvement_detects_worsening():
     assert float(out.absolute_reduction) == pytest.approx(-0.5)
 
 
+def test_bias_improvement_no_change_is_not_improved():
+    """The monotonic accept gate requires a STRICT improvement (``upd < base``): a round
+    that changes NOTHING (``upd == base`` exactly) must read NOT improved, so the gate
+    REJECTS a no-op correction instead of accepting it.  A regression from ``<`` to ``<=``
+    would silently accept no-change rounds — the combined-bias analog of the per-variable
+    'unchanged is NOT improved' lock; distinct from the existing WORSENING cases which all
+    have ``upd > base``."""
+    base = jnp.array([1.0, 2.0])
+    out = bias_improvement(base, base, jnp.ones((2,)))   # upd IS base ⇒ no change at all
+    assert not bool(out.improved)
+    assert float(out.absolute_reduction) == pytest.approx(0.0)
+    assert float(out.fractional_improvement) == pytest.approx(0.0)   # 0 reduction / base
+
+
 def test_bias_improvement_respects_mask():
     # Only the first column counts; it improves.
     base = jnp.array([2.0, 100.0])
