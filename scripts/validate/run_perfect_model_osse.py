@@ -200,6 +200,91 @@ def build_multi_perfect_model_osse(
         **osse_kwargs)
 
 
+def build_cross_resolution_osse(
+    *,
+    build_base_driver: Callable[[Any], Any],
+    extract_column_state: Callable[..., Any],
+    base_atm_config_coarse: Any,
+    coarse_grid: Any,
+    coarse_sigma: Any,
+    area_weights_coarse: Any,
+    base_atm_config_fine: Any,
+    fine_grid: Any,
+    fine_sigma: Any,
+    area_weights_fine: Any,
+    true_clubb: Any,
+    biased_clubb: Any,
+    les_config: Any,
+    run_les_fn: Callable[[Any], Any],
+    n_worst: int,
+    n_iterations: int,
+    phis_coarse: Any | None = None,
+    phis_fine: Any | None = None,
+    **osse_kwargs: Any,
+):
+    """Wire the real driver/LES on TWO grids and run a cross-resolution OSSE.
+
+    Learns a grid-agnostic env→coefficient kernel on the cheap ``coarse`` grid
+    (``feedback_strategy='environment'``) and deploys it on the expensive ``fine``
+    grid, measuring the paired fine-grid bias change WITH vs WITHOUT the correction —
+    the iter-69/70 cross-resolution env-kernel transfer, validated in a twin BEFORE a
+    real high-res run pays for it.
+
+    ``build_base_driver`` is grid-AGNOSTIC (the resolution lives in the config it is
+    handed), so the SAME builder serves both grids; only the ``base_atm_config`` differs
+    (coarse vs fine ``ExperimentConfig``).  Single-coefficient like
+    :func:`build_perfect_model_osse` (the deployed kernel maps env → ONE field).
+    Returns a :class:`~legoesm.training.perfect_model_osse.CrossResOSSEResult`.
+    """
+    from legoesm.training.perfect_model_osse import run_cross_resolution_osse
+
+    if getattr(les_config, "diagnosis_methods", None) is not None:
+        raise ValueError(
+            "build_cross_resolution_osse is single-coefficient: set "
+            "les_config.diagnosis_method, not diagnosis_methods.")
+    method = les_config.diagnosis_method
+    if method not in METHOD_PROMOTION:
+        raise ValueError(
+            f"unknown diagnosis_method {method!r}; choose from "
+            f"{tuple(METHOD_PROMOTION)}.")
+    promotion_key, field_name = METHOD_PROMOTION[method]
+    # C_K / c_eps evaluate the GCM mixing length → match it to the clubb config.
+    if method in METHODS_NEED_LMIX and \
+            getattr(les_config, "clubb_l_mix_max", None) is None:
+        les_config = les_config._replace(clubb_l_mix_max=float(biased_clubb.l_mix_max))
+
+    lat_c, lon_c = grid_latlon_deg(coarse_grid, None, None)
+    coarse_run, coarse_compare, coarse_diagnose, coarse_shape = _build_osse_harness(
+        base_atm_config=base_atm_config_coarse, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, sigma=coarse_sigma, grid=coarse_grid,
+        area_weights=area_weights_coarse, les_config=les_config, run_les_fn=run_les_fn,
+        n_worst=n_worst, lat_deg=lat_c, lon_deg=lon_c, phis=phis_coarse)
+
+    lat_f, lon_f = grid_latlon_deg(fine_grid, None, None)
+    fine_run, fine_compare, _fine_diagnose, fine_shape = _build_osse_harness(
+        base_atm_config=base_atm_config_fine, build_base_driver=build_base_driver,
+        extract_column_state=extract_column_state, sigma=fine_sigma, grid=fine_grid,
+        area_weights=area_weights_fine, les_config=les_config, run_les_fn=run_les_fn,
+        n_worst=n_worst, lat_deg=lat_f, lon_deg=lon_f, phis=phis_fine)
+
+    # The coarse campaign clips the diagnosed coefficient to its bounds (production
+    # parity); the env_grid_fns are passed EXPLICITLY below, so do NOT route through
+    # _production_loop_defaults (which would inject a duplicate env_grid_fn kwarg).
+    osse_kwargs.setdefault("clip_to_bounds", True)
+
+    return run_cross_resolution_osse(
+        true_config=true_clubb, biased_config=biased_clubb,
+        coefficient_field=field_name, promotion_key=promotion_key,
+        diagnosis_method=method,
+        coarse_grid_shape=coarse_shape, coarse_run_fn=coarse_run,
+        coarse_build_compare_fn=coarse_compare, coarse_diagnose_fn=coarse_diagnose,
+        coarse_env_grid_fn=maybe_env_grid_fn("environment", coarse_sigma),
+        fine_grid_shape=fine_shape, fine_run_fn=fine_run,
+        fine_build_compare_fn=fine_compare,
+        fine_env_grid_fn=maybe_env_grid_fn("environment", fine_sigma),
+        n_iterations=n_iterations, **osse_kwargs)
+
+
 def _build_argparser():  # pragma: no cover - thin CLI plumbing
     import argparse
 
@@ -214,6 +299,12 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
     p.add_argument("--diagnosis-method", default="clubb_coefficient",
                    choices=tuple(METHOD_PROMOTION))
     p.add_argument("--iterations", type=int, default=3)
+    p.add_argument("--fine-resolution", type=int, default=None,
+                   help="if set, run a CROSS-RESOLUTION OSSE instead of same-grid: learn "
+                        "the env→coefficient kernel on --config's (coarse) grid, then deploy "
+                        "+ measure the paired bias change on a FINE grid built from the same "
+                        "base config at this resolution. Validates the iter-69/70 "
+                        "env-kernel transfer in a twin before an expensive high-res run.")
     p.add_argument("--n-worst", type=int, default=8)
     p.add_argument("--les-hours", type=float, default=6.0)
     p.add_argument("--les-dt", type=float, default=0.5,
@@ -228,6 +319,60 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
                         "static topography if any (flat models stay flat). 'on': "
                         "REQUIRE terrain (error if flat). 'off': force flat.")
     return p
+
+
+def _run_cross_resolution_main(
+    args, *, base_cfg, coarse_grid, coarse_sigma, build_base_driver, extract_fn,
+    run_les, phis_coarse,
+):  # pragma: no cover - heavy I/O
+    """--fine-resolution: build the FINE grid from the SAME base config (only the
+    resolution differs) the identical way the run does, then run the cross-resolution
+    OSSE — learn the kernel coarse, deploy + measure the paired bias change fine — and
+    print the transfer verdict (exit 0 iff the kernel TRANSFERRED)."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.training.perfect_model_osse import cross_res_osse_verdict
+
+    from scripts.run.run_correction_campaign import (
+        _area_weights,
+        _build_grid_for_config,
+        resolve_orographic_phis,
+    )
+
+    field = METHOD_PROMOTION[args.diagnosis_method][1]
+    fine_cfg = base_cfg._replace(
+        grid=base_cfg.grid._replace(resolution=args.fine_resolution))
+    fine_grid, fine_sigma = _build_grid_for_config(fine_cfg)
+    # The fine grid's OWN static topography (the fine run's forcing), resolved the
+    # identical 'auto'/'on'/'off' way as the coarse phis.
+    phis_fine = resolve_orographic_phis(
+        args.orographic_forcing,
+        lambda: ModelDriver(fine_cfg).static_topography_phis())
+
+    result = build_cross_resolution_osse(
+        build_base_driver=build_base_driver, extract_column_state=extract_fn,
+        base_atm_config_coarse=base_cfg, coarse_grid=coarse_grid,
+        coarse_sigma=coarse_sigma, area_weights_coarse=_area_weights(coarse_grid),
+        base_atm_config_fine=fine_cfg, fine_grid=fine_grid, fine_sigma=fine_sigma,
+        area_weights_fine=_area_weights(fine_grid),
+        true_clubb=CLUBBLiteConfig(**{field: args.true_ck}),
+        biased_clubb=CLUBBLiteConfig(**{field: args.biased_ck}),
+        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
+        run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations,
+        phis_coarse=phis_coarse, phis_fine=phis_fine)
+
+    verdict = cross_res_osse_verdict(result)
+    print(f"[xres] coarse bias {result.coarse_initial_bias:.5g} -> "
+          f"{result.coarse_final_bias:.5g} (reduced={result.coarse_bias_reduced})")
+    print(f"[xres] fine bias {result.fine_bias_uncorrected:.5g} -> "
+          f"{result.fine_bias_corrected:.5g} (reduction "
+          f"{result.fine_bias_reduction:.5g})")
+    print(f"[xres] coverage in_hull={result.fraction_in_hull:.3f} "
+          f"covered={result.fraction_covered:.3f} "
+          f"thresh={result.coverage_threshold:.3f} (n_fine={result.n_fine_columns})")
+    print(f"[xres] {verdict.status.upper()}: {verdict.message}")
+    return 0 if verdict.ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
@@ -246,6 +391,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # campaign's, so this go/no-go predicts the real run — iter 126/127).
     base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
         args)
+
+    if args.fine_resolution is not None:
+        return _run_cross_resolution_main(
+            args, base_cfg=base_cfg, coarse_grid=grid, coarse_sigma=sigma,
+            build_base_driver=build_base_driver, extract_fn=extract_fn,
+            run_les=run_les, phis_coarse=phis)
 
     field = METHOD_PROMOTION[args.diagnosis_method][1]
     result = build_perfect_model_osse(

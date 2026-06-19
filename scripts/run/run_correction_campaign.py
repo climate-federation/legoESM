@@ -1769,14 +1769,29 @@ def load_base_config_and_grid(config_path: str):
     import json
 
     from legoesm.driver.config import experiment_config_from_dict
-    from legoesm.driver.model_driver import ModelDriver
 
     with open(config_path) as f:
         base_cfg = experiment_config_from_dict(json.load(f))
-    probe = ModelDriver(base_cfg)
+    grid, sigma = _build_grid_for_config(base_cfg)
+    return base_cfg, grid, sigma
+
+
+def _build_grid_for_config(cfg):
+    """Build the grid + vertical coordinate for ``cfg`` the EXACT way the run does.
+
+    Factored from :func:`load_base_config_and_grid` so the cross-resolution OSSE CLI
+    can build a FINE grid from the same base config at a different resolution
+    (``cfg.grid._replace(resolution=...)``) the identical way — the driver's own grid
+    constructor + the precision policy (``_bootstrap_runtime`` first so a
+    non-default-precision sigma gets the right dtype), without the heavy ``setup()``.
+    Returns ``(grid, sigma)``.
+    """
+    from legoesm.driver.model_driver import ModelDriver
+
+    probe = ModelDriver(cfg)
     probe._bootstrap_runtime()
     probe._create_grid()
-    return base_cfg, probe.grid, probe.sigma
+    return probe.grid, probe.sigma
 
 
 def refuse_unsupported_multirank(comm_size: int | None = None) -> None:

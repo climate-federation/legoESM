@@ -157,7 +157,13 @@ why); only the exit *status* gates — a workflow reading the JSON is unaffected
 
 **Cross-resolution deploy:** run the campaign with `--feedback-strategy environment`
 to export a `<OUT>.env_kernel.json` that re-evaluates on **any** target grid by
-environmental similarity (a cheap low-res campaign deploys on a high-res run).
+environmental similarity (a cheap low-res campaign deploys on a high-res run). Validate
+that transfer in a twin BEFORE paying for the high-res run with
+`run_perfect_model_osse.py --fine-resolution <N>`: it learns the kernel on `--config`'s
+(coarse) grid and deploys + measures the paired bias change on a fine grid built from the
+same base config at resolution `N`. Exit 0 iff the verdict is `transferred` (well-covered
+**and** the fine bias fell); `out_of_hull` means the fine climate lies outside the
+coarse-sampled environment, so the kernel extrapolates and the change is untrusted.
 
 **Controlled go/no-go before real ERA5:** `scripts/validate/run_perfect_model_osse.py`
 runs the loop in an identical-twin (the model's own run with a KNOWN coefficient is

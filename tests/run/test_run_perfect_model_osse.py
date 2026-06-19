@@ -161,6 +161,87 @@ def test_build_perfect_model_osse_wiring():
     assert osse_verdict(res).status in {"recovered", "bias_only", "no_change"}
 
 
+def test_build_cross_resolution_osse_wiring(monkeypatch):
+    """build_cross_resolution_osse (iter 296) wires the coarse + fine driver/LES harnesses
+    and the env_grid_fns into run_cross_resolution_osse.  Capture the call (monkeypatching the
+    heavy deploy): BOTH grids get a callable run + build-compare harness; the COARSE leg also
+    a diagnose_fn; BOTH legs a callable env_grid_fn (the 'environment' strategy the kernel
+    transfer REQUIRES — a None there is the iter-69/70 failure mode); the promotion_key/field
+    match the method; clip_to_bounds defaults True (production parity).  The deploy/transfer
+    MATH itself is unit-tested with analytic harnesses in tests/unit/test_perfect_model_osse."""
+    import legoesm.training.perfect_model_osse as pmo
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    from scripts.run.run_correction_campaign import METHOD_PROMOTION
+    from scripts.validate.run_perfect_model_osse import build_cross_resolution_osse
+
+    captured = {}
+
+    def _fake_run_cross(**kwargs):
+        captured.update(kwargs)
+        return "SENTINEL"
+
+    # The builder imports run_cross_resolution_osse from this module at call time, so patch
+    # the source — capturing the wiring WITHOUT running the heavy coarse campaign + fine deploy.
+    monkeypatch.setattr(pmo, "run_cross_resolution_osse", _fake_run_cross)
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    cfg = _base_config()
+    out = build_cross_resolution_osse(
+        build_base_driver=_ck_sensitive_base,
+        extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+        base_atm_config_coarse=cfg, coarse_grid=grid, coarse_sigma=sigma,
+        area_weights_coarse=jnp.ones((8, 16)),
+        base_atm_config_fine=cfg, fine_grid=grid, fine_sigma=sigma,
+        area_weights_fine=jnp.ones((8, 16)),
+        true_clubb=CLUBBLiteConfig(C_K=0.9), biased_clubb=CLUBBLiteConfig(C_K=0.4),
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1)
+
+    assert out == "SENTINEL"
+    promotion_key, field_name = METHOD_PROMOTION["clubb_coefficient"]
+    assert captured["coefficient_field"] == field_name
+    assert captured["promotion_key"] == promotion_key
+    assert captured["diagnosis_method"] == "clubb_coefficient"
+    assert captured["coarse_grid_shape"] == (8, 16)
+    assert captured["fine_grid_shape"] == (8, 16)
+    for key in ("coarse_run_fn", "coarse_build_compare_fn", "coarse_diagnose_fn",
+                "coarse_env_grid_fn", "fine_run_fn", "fine_build_compare_fn",
+                "fine_env_grid_fn"):
+        assert callable(captured[key]), f"{key} not wired as a callable"
+    assert captured["clip_to_bounds"] is True       # coarse campaign clips (production parity)
+
+
+def test_build_cross_resolution_osse_rejects_multi_method():
+    """The cross-res builder deploys ONE env->coefficient kernel (single-coefficient): a
+    diagnosis_methods list is rejected loudly, mirroring build_perfect_model_osse."""
+    import pytest
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    from scripts.validate.run_perfect_model_osse import build_cross_resolution_osse
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    cfg = _base_config()
+    with pytest.raises(ValueError, match="single-coefficient"):
+        build_cross_resolution_osse(
+            build_base_driver=_ck_sensitive_base,
+            extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+            base_atm_config_coarse=cfg, coarse_grid=grid, coarse_sigma=sigma,
+            area_weights_coarse=jnp.ones((8, 16)),
+            base_atm_config_fine=cfg, fine_grid=grid, fine_sigma=sigma,
+            area_weights_fine=jnp.ones((8, 16)),
+            true_clubb=CLUBBLiteConfig(C_K=0.9), biased_clubb=CLUBBLiteConfig(C_K=0.4),
+            les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                       diagnosis_method="clubb_coefficient",
+                                       diagnosis_methods=("clubb_coefficient",)),
+            run_les_fn=_mock_run_les_sheared, n_worst=1, n_iterations=1)
+
+
 def test_build_perfect_model_osse_threads_phis(monkeypatch):
     """iter-120 symmetry with the campaign (iter 118): BOTH OSSE builders
     (single + multi) forward the optional static topography `phis` to
