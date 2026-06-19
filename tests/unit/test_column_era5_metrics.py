@@ -92,6 +92,33 @@ def test_vector_wind_rmse_combines_components():
     assert rmse == pytest.approx(5.0, abs=1e-10)
 
 
+def test_vector_wind_rmse_applies_per_level_mass_weights():
+    """The vector-wind RMSE must MASS-WEIGHT the per-level (Δu²+Δv²) — i.e. compute
+    ``sqrt(Σ_k w_k (Δu_k² + Δv_k²))`` with the actual per-level weights.
+
+    ``test_vector_wind_rmse_combines_components`` uses UNIFORM weights AND a uniform
+    error, so its result (5) is independent of the weighting — it pins the u/v
+    combination but NOT the per-level weighting of the codex-scrutinised
+    'stacked-weights-sum-to-two' trick.  A bug that weighted only ``u`` (or used a
+    uniform mean) would pass it.  Here non-uniform weights [0.5,0.3,0.2] meet a
+    level-VARYING error, so the answer depends on the weighting and matches the
+    hand-computed ``sqrt(11.7)``.
+    """
+    import math
+
+    w = normalized_mass_weights(jnp.array([0.5, 0.3, 0.2]))     # = [0.5, 0.3, 0.2]
+    u_m = jnp.zeros((1, 3))
+    v_m = jnp.zeros((1, 3))
+    u_r = jnp.array([[1.0, 2.0, 3.0]])                          # Δu per level
+    v_r = jnp.array([[4.0, 0.0, 1.0]])                          # Δv per level
+    rmse = float(per_column_vector_wind_rmse(u_m, v_m, u_r, v_r, w)[0])
+    # Σ w_k(Δu²+Δv²) = 0.5·17 + 0.3·4 + 0.2·10 = 11.7  (≠ the unweighted mean 10.33).
+    expected = math.sqrt(0.5 * 17.0 + 0.3 * 4.0 + 0.2 * 10.0)
+    assert rmse == pytest.approx(expected, abs=1e-6)
+    # Decisively distinct from the UNWEIGHTED mean — so the weighting is load-bearing.
+    assert rmse != pytest.approx(math.sqrt((17.0 + 4.0 + 10.0) / 3.0), abs=1e-3)
+
+
 def test_score_columns_zero_when_perfect():
     nlev = 5
     w = normalized_mass_weights(jnp.ones((nlev,)))
