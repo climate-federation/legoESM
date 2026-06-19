@@ -31,6 +31,12 @@ from legoesm.driver.config import (
     experiment_config_to_dict,
 )
 
+# A latlon resolution at/below this is a COARSE STARTER (toy ≈ 8×16 grid) — fine for a
+# smoke / dry-run but far too coarse for a meaningful ERA5 comparison. ``main`` reminds the
+# operator to scale up, so a production campaign is not run at toy resolution by mistake
+# (the runbook + sbatch quick-start both show ``--resolution 8``).
+_STARTER_RESOLUTION_MAX = 16
+
 
 def build_amip_clubb_lite_config(
     *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray"
@@ -65,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(experiment_config_to_dict(cfg), f, indent=2)
     print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "
           f"latlon {args.resolution} L{args.nlev}) to {args.out}")
+    if args.resolution <= _STARTER_RESOLUTION_MAX:
+        print(
+            f"[config] NOTE: latlon resolution {args.resolution} is a COARSE STARTER "
+            "(fine for a smoke / dry-run). For a PRODUCTION ERA5 comparison scale "
+            "--resolution / --nlev UP — and lower --dt to keep the CFL stable (a too-large "
+            "dt at higher resolution diverges, and the campaign's baseline-divergence guard "
+            "would then fail the run loud).")
     return 0
 
 

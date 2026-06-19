@@ -76,6 +76,20 @@ def test_generated_config_drives_cmip_coupled_driver(tmp_path):
     assert tuple(driver.ocean_state.T_sfc.data.shape) == (8, 16)  # same-grid: SST on atm shape
 
 
+def test_starter_resolution_prints_a_scaling_note(tmp_path, capsys):
+    """A COARSE starter resolution prints a NOTE reminding the operator to scale up for a
+    PRODUCTION ERA5 comparison (so a toy 8x16 campaign is not run by mistake) + to lower
+    --dt with resolution (CFL); a production-scale resolution does NOT nag (iter 307)."""
+    from scripts.experiment.write_amip_clubb_lite_config import main
+
+    assert main([str(tmp_path / "starter.json"), "--resolution", "8", "--nlev", "10"]) == 0
+    note = capsys.readouterr().out
+    assert "STARTER" in note and "PRODUCTION" in note and "--dt" in note   # scaling + CFL
+    # A production-scale resolution emits NO starter nag (the threshold is meaningful).
+    assert main([str(tmp_path / "prod.json"), "--resolution", "96", "--nlev", "30"]) == 0
+    assert "STARTER" not in capsys.readouterr().out
+
+
 def test_non_clubb_config_is_rejected_by_launcher():
     """Non-vacuity: a NON-clubb config is exactly what make_clubb_build_driver rejects,
     so the generator's clubb_lite guarantee is load-bearing (not a no-op)."""

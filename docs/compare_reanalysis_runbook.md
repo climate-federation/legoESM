@@ -22,6 +22,11 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.j
     --resolution 8 --nlev 10
 ```
 
+> `--resolution 8 --nlev 10` is a **coarse starter** (an 8×16 grid) for the smoke / dry-run
+> below — the generator prints a NOTE reminding you to scale `--resolution` / `--nlev` **up**
+> for a production ERA5 comparison, and to lower `--dt` with resolution (a too-large `dt` at
+> higher resolution diverges; the baseline-divergence guard would then fail the run loud).
+
 ## 1. Preflight the SETUP (seconds, no model run)
 
 Confirms config load + ERA5 ingest (regrid + vertical interp) + grid/sigma build +
