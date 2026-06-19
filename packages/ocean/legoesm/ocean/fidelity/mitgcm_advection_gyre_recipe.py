@@ -65,6 +65,7 @@ from legoesm.grids.latlon import (
     create_beta_plane_cgrid_geometry,
 )
 from legoesm.ocean.eos import LinearEOSConfig
+from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
@@ -173,34 +174,26 @@ def build_advgyre_config() -> LatLonCGridOceanConfig:
       (3rd-order DST flux limiter, multi-dimensional).
     * ``K_h = 0`` -> MITgcm ``PTRACERS_diffKh=0`` (pure advection, no explicit
       tracer diffusion).
+
+    Selects the SHARED MITgcm-faithful numerics block via
+    :func:`mitgcm_canonical_ocean_config` (the MITgcm recipe card) — same
+    single-layer homogeneous barotropic-gyre core (viscAh=400, abEps=0.01, split
+    ``implicit_cn``) — and overrides only the tracer advection to MITgcm's
+    ``PTRACERS_advScheme=80`` (``dst3_multidim``) with ``K_h=0`` (pure advection).
     """
-    return LatLonCGridOceanConfig(
+    return mitgcm_canonical_ocean_config(
         g=G_BARO,
         rho_0=RHO_CONST,
-        eos="linear",
         eos_linear=LinearEOSConfig(rho_ref=RHO_CONST, alpha_T=0.0, beta_S=0.0),
         A_h=VISC_AH,
-        A_h_lat_scaling=False,
-        lateral_viscosity_operator="flux_divergence",
-        lateral_side_bc="no_slip",
-        B_h=0.0,
-        C_smag=0.0,
-        bottom_drag_r=0.0,
-        gm_redi=None,
         # PURE passive-tracer advection: no explicit tracer diffusion.
         K_h=0.0,
+        # MITgcm PTRACERS_advScheme=80 (3rd-order DST flux limiter, multi-dim).
         tracer_advection="dst3_multidim",
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
+        # Split implicit_cn free surface from the equilibrated-gyre pickup (the
+        # tracer comparison PRESCRIBES MITgcm's u,v — see module docstring).
         barotropic_solver="implicit_cn",
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        coriolis_scheme="explicit_ab2",
-        outer_integrator="ab2",
         ab2_epsilon=0.01,
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
     )
 
 

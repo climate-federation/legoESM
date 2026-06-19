@@ -47,6 +47,7 @@ from legoesm.grids.latlon import (
     create_beta_plane_cgrid_geometry,
 )
 from legoesm.ocean.eos import LinearEOSConfig
+from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
@@ -171,42 +172,35 @@ def build_front_relax_config(
         raise ValueError(
             "lateral_viscosity must be 'biharmonic' or 'laplacian_stable', "
             f"got {lateral_viscosity!r}")
-    return LatLonCGridOceanConfig(
+    # Selects the SHARED MITgcm-faithful numerics block via the recipe card
+    # (mitgcm_recipe.py: flux-form centered momentum, explicit_ab2 Coriolis, AB2,
+    # component flux_divergence friction, theta=1 free surface) and supplies the
+    # per-deck knobs: BIHARMONIC horizontal viscosity (viscA4=1e11 via B_h; the
+    # card pins the flux_divergence operator, so this is the component del4),
+    # free-slip walls (no_slip_sides=.FALSE.), the split implicit_cn free surface
+    # (the baroclinic-capable solver under validation), viscAr/diffKrT implicit
+    # vertical mixing, and linear EOS (salt passive).  No convection/physics block.
+    assert visc_op == "flux_divergence"   # the card pins this operator
+    return mitgcm_canonical_ocean_config(
         g=GRAVITY,
         rho_0=RHO_CONST,
-        eos="linear",
         eos_linear=LinearEOSConfig(rho_ref=RHO_CONST, alpha_T=T_ALPHA, beta_S=0.0),
         # Horizontal viscosity: faithful biharmonic (MITgcm viscA4) or the
         # runnable flux_divergence-Laplacian proxy (see docstring).
         A_h=a_h,
-        A_h_lat_scaling=False,
-        B_h=b_h,
-        B_h_lat_scaling=False,
-        lateral_viscosity_operator=visc_op,
-        C_smag=0.0,
-        lateral_side_bc="free_slip",
-        # Vertical viscosity + implicit vertical T diffusion.
+        K_h=0.0,
         A_v=VISC_AR,
         K_v=DIFF_KR_T,
-        K_h=0.0,
-        implicit_vertical_mixing=True,
-        # No bottom drag / eddy params.
-        bottom_drag_r=0.0,
-        gm_redi=None,
-        # MITgcm flux-form momentum advection, centered.
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
+        # Front advects T with the config-default tracer scheme (kept as-is).
+        tracer_advection="tvd",
+        # MITgcm no_slip_sides=.FALSE.
+        lateral_side_bc="free_slip",
         # Implicit free surface, fully backward-Euler (the solver under test).
         barotropic_solver="implicit_cn",
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        # MITgcm unsplit explicit-Coriolis -> AB2(abEps) path.
-        coriolis_scheme="explicit_ab2",
-        outer_integrator="ab2",
         ab2_epsilon=AB_EPS,
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
+        # Biharmonic viscosity (component del4) via the card's overrides.
+        B_h=b_h,
+        B_h_lat_scaling=False,
     )
 
 

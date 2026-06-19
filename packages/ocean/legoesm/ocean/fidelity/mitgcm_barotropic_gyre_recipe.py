@@ -45,6 +45,7 @@ from legoesm.grids.latlon import (
     create_beta_plane_cgrid_geometry,
 )
 from legoesm.ocean.eos import LinearEOSConfig
+from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
@@ -172,42 +173,31 @@ def build_gyre_config(
       face-f Coriolis runs the gyre LAMINAR to ``|u|max≈0.027`` / ``|v|max≈0.078``
       (within ~13% of MITgcm's 0.031/0.084), not the turbulent 0.066+ overshoot.
       See docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md (iteration 7).
+
+    Selects the SHARED MITgcm-faithful numerics block via
+    :func:`mitgcm_canonical_ocean_config` (the MITgcm recipe card) and supplies
+    the per-deck knobs: homogeneous linear EOS, single Laplacian ``viscAh=400``,
+    no vertical mixing / physics (single layer), ``abEps=0.01``, and the
+    ``barotropic_solver`` (the tutorial validates the per-tendency oracle tier on
+    the split ``implicit_cn``; the equilibrium tier uses ``GyreFaithfulModel``).
     """
-    return LatLonCGridOceanConfig(
+    return mitgcm_canonical_ocean_config(
         g=G_BARO,
         rho_0=RHO_CONST,
         # Constant density (homogeneous): linear EOS with zero expansion.
-        eos="linear",
         eos_linear=LinearEOSConfig(rho_ref=RHO_CONST, alpha_T=0.0, beta_S=0.0),
-        # Laplacian lateral viscosity only (no cos-lat scaling on a Cartesian
-        # grid); no biharmonic / Smagorinsky / Leith. MITgcm flux-form operator.
+        # Single Laplacian lateral viscosity (MITgcm viscAh); no horizontal tracer
+        # diffusion; no vertical mixing / physics block (single homogeneous layer).
         A_h=VISC_AH,
-        A_h_lat_scaling=False,
-        lateral_viscosity_operator="flux_divergence",
-        lateral_side_bc="no_slip",
-        B_h=0.0,
-        C_smag=0.0,
-        # No bottom drag, no eddy params, no vertical mixing (single layer).
-        bottom_drag_r=0.0,
-        gm_redi=None,
         K_h=0.0,
-        # MITgcm flux-form momentum advection (vs the vector-invariant default),
-        # 2nd-order CENTERED reconstruction (vs the legoESM upwind default).
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
-        # MITgcm fully-backward-Euler implicit free surface (audit: the lever).
+        # Homogeneous: no active tracer -> the tracer scheme is dynamically inert,
+        # so pin it to the config default ('tvd', overriding the card's 'centered').
+        tracer_advection="tvd",
+        # MITgcm fully-backward-Euler implicit free surface (the card pins theta=1).
+        # Solver is a parameter: the per-tendency oracle tier validates implicit_cn.
         barotropic_solver=barotropic_solver,
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        # MITgcm unsplit explicit-Coriolis → AB2(abEps) → implicit free surface.
-        # Face-f Coriolis (default); the β-plane "energy leak" that motivated the
-        # Sadourny override was a grid-metric bug, now fixed at the grid (lat=0).
-        coriolis_scheme="explicit_ab2",
-        outer_integrator="ab2",
+        # MITgcm abEps for this deck.
         ab2_epsilon=0.01,
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
     )
 
 

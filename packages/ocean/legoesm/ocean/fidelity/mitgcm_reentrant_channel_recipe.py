@@ -63,6 +63,7 @@ from legoesm.grids.latlon import (
     create_beta_plane_cgrid_geometry,
 )
 from legoesm.ocean.eos import LinearEOSConfig
+from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -316,49 +317,27 @@ def build_reentrant_channel_config(
         # taper, which legoESM's GMRediConfig implements (taper_width_frac sets
         # the transition band; the 0.1 default reproduces the standard DM95 curve).
     )
-    return LatLonCGridOceanConfig(
+    # Selects the SHARED MITgcm-faithful numerics block via the recipe card
+    # (mitgcm_recipe.py): flux-form centered momentum, centered tracer, explicit_ab2
+    # Coriolis, AB2(total) + the MITgcm-faithful UNSPLIT implicit free surface,
+    # implicit vertical mixing.  GM/Redi (GM_background_K=1000, dm95 taper, advective
+    # skew form) is threaded through the unsplit step; the ACC case does not develop
+    # the 2dx baroclinic checkerboard (GM/Redi removes the grid-scale APE).  This
+    # supplies only the per-setup knobs: viscAh=2000, NO horizontal tracer diffusion
+    # (diffKhT=0; GM handles lateral tracer mixing), viscAr=3e-3 / diffKrT=1e-5
+    # vertical, ivdc_kappa=1 convective adjustment, linear EOS (T only).
+    return mitgcm_canonical_ocean_config(
         g=GRAVITY,
         rho_0=RHO_CONST,
-        eos="linear",
         eos_linear=LinearEOSConfig(rho_ref=RHO_CONST, alpha_T=T_ALPHA, beta_S=0.0),
-        # Laplacian horizontal viscosity (constant; MITgcm viscAh, no cos-lat
-        # scaling on the Cartesian grid). NO horizontal tracer diffusion (diffKhT=0;
-        # GM/Redi provides the lateral tracer mixing).
         A_h=VISC_AH,
-        A_h_lat_scaling=False,
-        lateral_viscosity_operator="flux_divergence",
-        lateral_side_bc="no_slip",
-        B_h=0.0,
-        C_smag=0.0,
         K_h=DIFF_KH_T,
-        # Vertical viscosity/diffusion (implicit) + convective adjustment.
         A_v=VISC_AR,
         K_v=DIFF_KR_T,
-        implicit_vertical_mixing=True,
-        bottom_drag_r=0.0,
         # GM/Redi is a TOP-LEVEL dynamics field on the lat-lon C-grid (the model
         # reads config.gm_redi; setting it only in physics.lateral_mixing would
         # leave it inactive — see the ACC recipe's note).
         gm_redi=gm_redi,
-        # MITgcm flux-form centered momentum + centered tracer advection
-        # (tempAdvScheme=7 is a high-order scheme; centered is the faithful
-        # dispersion-equivalent core for the GM-parameterized coarse run).
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
-        tracer_advection="centered",
-        # MITgcm-faithful UNSPLIT implicit free surface (MITgcm implicitFreeSurface is
-        # unsplit; audited). GM/Redi is threaded through the unsplit step. The ACC case
-        # does not develop the 2dx baroclinic checkerboard (GM/Redi removes the
-        # grid-scale APE), so cn and unsplit are equivalent here (|u|max 0.231 vs 0.235
-        # over 30 d) — unsplit is the faithful choice.
-        barotropic_solver="implicit_unsplit",
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        coriolis_scheme="explicit_ab2",
-        outer_integrator="ab2",
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
         physics=OceanPhysicsConfig(
             vertical_mixing=VerticalMixingConfig(scheme="none"),
             lateral_mixing=LateralMixingConfig(scheme="none"),

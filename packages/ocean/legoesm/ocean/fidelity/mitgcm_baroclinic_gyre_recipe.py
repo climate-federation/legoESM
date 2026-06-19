@@ -48,6 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.eos import LinearEOSConfig
+from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -153,56 +154,33 @@ def build_baroclinic_gyre_restoring(grid: LatLonGrid) -> RestoringConfig:
 def build_baroclinic_gyre_config(grid: LatLonGrid) -> LatLonCGridOceanConfig:
     """MITgcm baroclinic-gyre core numerics (spherical grid).
 
+    Selects the SHARED MITgcm-faithful numerics block via
+    :func:`mitgcm_canonical_ocean_config` (the MITgcm recipe card) and supplies
+    only the per-setup dimensional knobs + this tutorial's physics:
     Laplacian ``viscAh=5000`` (flux-divergence component operator, MITgcm
     ``useStrainTensionVisc=.FALSE.``) + ``diffKhT=1000`` horizontal tracer
     diffusion; ``viscAr=1e-2`` / ``diffKrT=1e-5`` vertical, applied implicitly;
     ``ivdc_kappa=1`` convective adjustment via the ``enhanced_diffusion`` scheme;
-    no-slip walls; implicit free surface; linear EOS (T only); MITgcm unsplit
-    explicit-Coriolis -> AB2(abEps=0.1) -> implicit free surface (face-f Coriolis
-    is correct here — spherical grid, no Cartesian-metric special case)."""
-    return LatLonCGridOceanConfig(
+    no-slip walls; the card's MITgcm-faithful UNSPLIT implicit free surface
+    (``barotropic_solver="implicit_unsplit"``); linear EOS (T only).  Face-f
+    Coriolis is correct here — spherical grid, no Cartesian-metric special case.
+
+    The card pins the algorithm common to every MITgcm tutorial (flux-form
+    centered momentum, centered tracer, explicit_ab2 Coriolis, AB2(total) +
+    unsplit free surface, implicit vertical mixing); see ``mitgcm_recipe.py``
+    and docs/ocean_fidelity/mitgcm_unsplit_freesurface_fix.md.
+    """
+    return mitgcm_canonical_ocean_config(
         g=GRAVITY,
         rho_0=RHO_NIL,
-        eos="linear",
         eos_linear=LinearEOSConfig(rho_ref=RHO_NIL, alpha_T=T_ALPHA, beta_S=0.0),
         # Laplacian horizontal viscosity (constant; MITgcm viscAh, no cos-lat
         # scaling) + horizontal tracer diffusion.
         A_h=VISC_AH,
-        A_h_lat_scaling=False,
-        lateral_viscosity_operator="flux_divergence",
-        lateral_side_bc="no_slip",
-        B_h=0.0,
-        C_smag=0.0,
         K_h=DIFF_KH_T,
         # Vertical viscosity/diffusion (implicit) + convective adjustment.
         A_v=VISC_AR,
         K_v=DIFF_KR_T,
-        implicit_vertical_mixing=True,
-        # No bottom drag, no eddy params.
-        bottom_drag_r=0.0,
-        gm_redi=None,
-        # MITgcm flux-form centered momentum advection + centered tracer advection.
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
-        tracer_advection="centered",
-        # MITgcm-faithful UNSPLIT implicit free surface (theta=1, backward-Euler
-        # surface mode = MITgcm implicSurfPress=1). NO barotropic/baroclinic mode
-        # split — one 3D predictor + one elliptic eta solve + uniform correction,
-        # matching MITgcm's implicitFreeSurface (audited: no barotropic sub-cycle,
-        # no barotropic-velocity prognostic). The split implicit_cn breaks the
-        # discrete PGF/continuity adjointness at the grid scale and grows a spurious
-        # 2dx baroclinic instability (the long-run velocity checkerboard, zig~1.4);
-        # the unsplit solver keeps it smooth (zig~0.2) at the FAITHFUL viscAh=5000.
-        # docs/ocean_fidelity/mitgcm_unsplit_freesurface_fix.md.
-        barotropic_solver="implicit_unsplit",
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        coriolis_scheme="explicit_ab2",
-        outer_integrator="ab2",
-        ab2_epsilon=AB_EPS,
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
         physics=OceanPhysicsConfig(
             # Constant vertical mixing (config A_v/K_v) — no KPP/TKE.
             vertical_mixing=VerticalMixingConfig(scheme="none"),
@@ -222,6 +200,8 @@ def build_baroclinic_gyre_config(grid: LatLonGrid) -> LatLonCGridOceanConfig:
             bottom_drag=BottomDragConfig(scheme="none"),
             shortwave_penetration=None,
         ),
+        # MITgcm abEps=0.1 (== the card default; passed explicitly to document the map).
+        ab2_epsilon=AB_EPS,
     )
 
 
