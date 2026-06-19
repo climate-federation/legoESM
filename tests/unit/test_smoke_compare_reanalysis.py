@@ -68,6 +68,22 @@ def test_run_smoke_cmip_mode_validates_the_coupled_driver(tmp_path):
     assert rc == 0                                          # coupled-driver dry-run validated
 
 
+def test_run_smoke_propagates_a_dry_run_failure(tmp_path, monkeypatch, capsys):
+    """A campaign dry-run FAILURE (bad config/paths/scheme) must PROPAGATE: run_smoke
+    returns the non-zero code and ``main`` prints FAIL — never a false PASS that would
+    let the operator launch a broken multi-day job."""
+    from scripts.experiment.smoke_compare_reanalysis import main, run_smoke
+
+    # The config + ERA5 generation succeed; force only the campaign dry-run to fail.
+    monkeypatch.setattr("scripts.run.run_correction_campaign.main", lambda argv: 3)
+
+    rc = run_smoke(str(tmp_path / "w1"))
+    assert rc == 3                                          # the dry-run failure propagated
+    rc2 = main(["--workdir", str(tmp_path / "w2")])
+    assert rc2 == 3
+    assert "FAIL" in capsys.readouterr().out               # FAIL, not a false PASS
+
+
 def test_run_smoke_raises_loudly_if_config_generation_fails(tmp_path, monkeypatch):
     """A failure in an EARLY stage (config gen) must abort with a clear error rather
     than silently dry-running against a missing/garbage config."""
