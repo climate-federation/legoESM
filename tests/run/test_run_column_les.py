@@ -384,6 +384,7 @@ def test_build_setup_rejects_nonfinite_surface_flux():
 
 
 @pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 211: no f64->f32 scatter
 def test_prescribed_surface_flux_warms_les_surface_real_dycore():
     """END-TO-END in the REAL plane dycore: prescribed POSITIVE surface θ AND q_v fluxes
     WARM + MOISTEN the LES SURFACE cell vs an identical no-flux run (same fixed θ' seed,
@@ -751,6 +752,7 @@ def test_process_column_cubed_sphere_with_mock_run():
     assert bool(jnp.all(jnp.isfinite(out.K)))
 
 
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 211: no f64->f32 scatter
 def test_process_column_real_dycore_integration():
     """MOCK-FREE end-to-end: extract -> setup -> the REAL plane-NH dycore
     (run_forced_les, a few real steps with the large-scale forcing + top
