@@ -314,3 +314,54 @@ def assemble_global_field(
             "assemble_global_field: an owned global cell id is out of range "
             f"[0, {n_global}) — the partition is malformed on {n_oob_bad} rank(s).")
     return red[:n_global]
+
+
+def assemble_global_campaign_result(
+    result: Any, layout: Any, *, corrected_field: str | None = None,
+    global_reduce: Any = None, verify_coverage: bool = True,
+) -> Any:
+    """Replace a DISTRIBUTED campaign result's RANK-LOCAL corrected field(s) with the
+    GLOBAL assembled field(s) — the one rank-local→global step an MPI driver needs
+    between the campaign and the rank-0 persist.
+
+    A distributed campaign returns a result whose biases / accepted flags / summary
+    inputs are ALREADY global (the loop reduces them with ``global_reduce``); the ONLY
+    rank-local pieces are the corrected coefficient FIELDS.  This calls
+    :func:`assemble_global_field` on each and returns a new result (NamedTuple
+    ``_replace``) whose ``final_field`` / ``final_fields`` (and the single
+    ``final_config.<coef>``) are GLOBAL — so the EXISTING ``summarize_campaign`` +
+    ``build_campaign_output_dict`` + deploy path produce GLOBAL output with NO change.
+    Pure (no I/O, no rank-0 logic — the driver does the rank-0 write); call it on EVERY
+    rank (``assemble_global_field`` is collective), then ``if rank == 0: write(...)``.
+
+    SINGLE (``CampaignResult``): pass ``corrected_field`` (the coefficient name, e.g.
+    ``"C_K"``) — BOTH ``result.final_field`` AND ``result.final_config.<corrected_field>``
+    are replaced (the two places the summary + output consumers read it).  MULTI
+    (``MultiCampaignResult``, detected by a ``final_fields`` attribute): ``corrected_field``
+    is ignored and EVERY ``final_fields[key]`` is replaced (the consumers read
+    ``final_fields``, not the config, for multi).
+
+    Coverage is verified ONCE (the first field) then reused for the rest via
+    ``verify_coverage=False`` — the partition is identical across the fields, so
+    re-running the (collective) gate per field would only add redundant reductions.
+    """
+    verified = [not verify_coverage]      # list cell so the closure can flip it
+
+    def _to_global(field: Any) -> Any:
+        vc = not verified[0]
+        verified[0] = True
+        return jnp.asarray(assemble_global_field(
+            layout, field, global_reduce=global_reduce, verify_coverage=vc))
+
+    if hasattr(result, "final_fields"):              # MultiCampaignResult
+        global_fields = {k: _to_global(v) for k, v in result.final_fields.items()}
+        return result._replace(final_fields=global_fields)
+
+    if corrected_field is None:                      # CampaignResult (single)
+        raise ValueError(
+            "assemble_global_campaign_result: a single-coefficient CampaignResult needs "
+            "corrected_field (the coefficient name, e.g. 'C_K') so final_config.<coef> "
+            "can be replaced too; only a MultiCampaignResult (final_fields) infers it.")
+    global_field = _to_global(result.final_field)
+    new_config = result.final_config._replace(**{corrected_field: global_field})
+    return result._replace(final_field=global_field, final_config=new_config)

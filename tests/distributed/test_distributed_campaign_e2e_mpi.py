@@ -33,7 +33,10 @@ from legoesm.grids.voronoi import create_voronoi_mesh  # noqa: E402
 from legoesm.parallel.reductions import global_sum_mpi  # noqa: E402
 from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout  # noqa: E402
 from legoesm.training.compare_reanalysis import ColumnState  # noqa: E402
-from legoesm.training.distributed_campaign import assemble_global_field  # noqa: E402
+from legoesm.training.distributed_campaign import (  # noqa: E402
+    assemble_global_campaign_result,
+    assemble_global_field,
+)
 from mpi4py import MPI  # noqa: E402
 
 from scripts.run.run_correction_campaign import (  # noqa: E402
@@ -173,6 +176,24 @@ def test_distributed_campaign_corrects_global_worst_on_its_owner():
     assert global_ck.shape == (global_mesh.nCells,)
     assert not np.isclose(global_ck[bias_cell], bg), "global-worst cell not corrected"
     np.testing.assert_allclose(np.delete(global_ck, bias_cell), bg)  # all others bg
+
+    # RESULT-LEVEL persist (iter 256): the same global field, but reached through
+    # assemble_global_campaign_result on the REAL CampaignResult NamedTuple — proving
+    # _replace works on the actual type and the global result feeds the EXISTING
+    # build_campaign_output_dict (the deployable on-disk JSON) unchanged.
+    gres = assemble_global_campaign_result(
+        result, layout, corrected_field="C_K", global_reduce=global_sum_mpi)
+    np.testing.assert_allclose(np.asarray(gres.final_field), global_ck)
+    np.testing.assert_allclose(np.asarray(gres.final_config.C_K), global_ck)
+    if RANK == 0:                                    # the rank-0-only persist an MPI driver does
+        from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+
+        from scripts.run.run_correction_campaign import build_campaign_output_dict
+        summary = summarize_campaign(gres, promotion_key="clubb_lite_C_K")
+        out = build_campaign_output_dict(
+            gres, grid_provenance={"grid_type": "mpas", "ncol": int(global_mesh.nCells)},
+            summary=summary, health=campaign_health(summary), corrected_field="C_K")
+        assert len(out["C_K"]) == global_mesh.nCells  # GLOBAL field in the deployable JSON
     COMM.Barrier()
 
 

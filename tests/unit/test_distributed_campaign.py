@@ -11,12 +11,14 @@ from __future__ import annotations
 
 from functools import partial
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.training.compare_reanalysis import ColumnState, owned_cell_valid_mask
 from legoesm.training.distributed_campaign import (
+    assemble_global_campaign_result,
     assemble_global_field,
     assert_partition_covers_global,
     distributed_campaign_hooks,
@@ -276,6 +278,59 @@ def test_assemble_global_field_rejects_out_of_range_owned_id():
     with pytest.raises(ValueError, match="out of range"):
         assemble_global_field(layout, jnp.asarray([0.1, 0.2, 0.3]),
                               global_reduce=_serial_sum)
+
+
+# --- assemble_global_campaign_result: rank-local result -> global result (iter 256).
+# Lightweight NamedTuple stand-ins (the helper is duck-typed: it only touches
+# final_config / final_field / final_fields + _replace; the real CampaignResult is
+# exercised under MPI by the e2e test).
+class _Cfg(NamedTuple):
+    C_K: object
+
+
+class _Single(NamedTuple):
+    final_config: object
+    final_field: object
+
+
+class _Multi(NamedTuple):
+    final_config: object
+    final_fields: object
+
+
+def test_assemble_global_campaign_result_single_replaces_field_and_config():
+    """SINGLE: BOTH final_field (read by summarize_campaign) AND
+    final_config.<coef> (read by build_campaign_output_dict) become the global field."""
+    layout = _layout([True, True, True, True], [2, 0, 3, 1], n_global=4)
+    local = jnp.asarray([0.5, 1.5, 2.5, 3.5])         # value for local cell k
+    res = _Single(final_config=_Cfg(C_K=local), final_field=local)
+    out = assemble_global_campaign_result(
+        res, layout, corrected_field="C_K", global_reduce=_serial_sum)
+    expected = [1.5, 3.5, 0.5, 2.5]                   # placed by GLOBAL id (see above)
+    np.testing.assert_array_equal(np.asarray(out.final_field), expected)
+    np.testing.assert_array_equal(np.asarray(out.final_config.C_K), expected)
+
+
+def test_assemble_global_campaign_result_multi_replaces_every_field():
+    """MULTI: every final_fields[key] becomes its global field; config untouched
+    (the multi consumers read final_fields, not the config)."""
+    layout = _layout([True, True], [1, 0], n_global=2)
+    res = _Multi(final_config=_Cfg(C_K=None),
+                 final_fields={"clubb_lite_C_K": jnp.asarray([10.0, 20.0]),
+                               "clubb_lite_Pr_t": jnp.asarray([0.3, 0.7])})
+    out = assemble_global_campaign_result(res, layout, global_reduce=_serial_sum)
+    # local cell 0 holds global id 1, local cell 1 holds global id 0 (reversed).
+    np.testing.assert_array_equal(np.asarray(out.final_fields["clubb_lite_C_K"]), [20.0, 10.0])
+    np.testing.assert_array_equal(np.asarray(out.final_fields["clubb_lite_Pr_t"]), [0.7, 0.3])
+
+
+def test_assemble_global_campaign_result_single_requires_corrected_field():
+    """A single CampaignResult without corrected_field is rejected (the config attr to
+    replace is unknown) — only a MultiCampaignResult infers its fields."""
+    layout = _layout([True], [0], n_global=1)
+    res = _Single(final_config=_Cfg(C_K=jnp.asarray([1.0])), final_field=jnp.asarray([1.0]))
+    with pytest.raises(ValueError, match="needs corrected_field"):
+        assemble_global_campaign_result(res, layout, global_reduce=_serial_sum)
 
 
 def test_assemble_global_field_verify_coverage_rejects_a_gap():
