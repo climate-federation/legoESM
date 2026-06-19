@@ -343,6 +343,21 @@ def test_from_dict_rejects_mislabelled_artifact():
     env_kernel_from_dict(no_tag)   # back-compat: missing tag OK
 
 
+def test_from_dict_rejects_non_dict_and_missing_required_keys():
+    """A truncated/corrupted kernel artifact fails loud with a CLEAR message (iter 304):
+    a non-dict top-level, and a dict missing any required key, raise a named ValueError
+    instead of a bare KeyError/AttributeError — parallel to the iter-106 ERA5-loader
+    required-key hardening. 'artifact' stays optional (pre-tag back-compat)."""
+    d = env_kernel_to_dict(_kernel())
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        env_kernel_from_dict([1, 2, 3])                          # a JSON list, not object
+    for key in ("sample_env", "sample_values", "valid", "length_scales", "field",
+                "background", "env_lo", "env_hi"):
+        truncated = {k: v for k, v in d.items() if k != key}
+        with pytest.raises(ValueError, match=rf"missing required key.*{key}"):
+            env_kernel_from_dict(truncated)
+
+
 def test_from_dict_rejects_mismatched_hull_bound_length():
     """A corrupted/hand-edited kernel JSON with a wrong-length ``env_lo``/``env_hi`` is
     rejected on deserialize (iter 284) — the validator's per-field length loop guards

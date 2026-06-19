@@ -627,12 +627,27 @@ def env_kernel_from_dict(data: dict) -> EnvKernel:
     """Deserialize an :class:`EnvKernel` (inverse of :func:`env_kernel_to_dict`)."""
     import jax.numpy as jnp
 
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"env kernel must be a JSON object; got {type(data).__name__}.")
     # Reject a mislabelled artifact LOUDLY (a campaign accepted-field JSON is NOT a
     # kernel); a missing tag is tolerated for back-compat with pre-tag kernels.
     artifact = data.get("artifact")
     if artifact is not None and artifact != _ENV_KERNEL_ARTIFACT:
         raise ValueError(
             f"expected a {_ENV_KERNEL_ARTIFACT!r} artifact, got {artifact!r}.")
+    # A truncated / corrupted kernel JSON missing a required key would otherwise raise a
+    # bare KeyError; name the missing key(s) so the operator knows the artifact is bad
+    # (parallel to the iter-106 ERA5-loader required-key hardening). 'artifact' is the only
+    # optional key (back-compat with pre-tag kernels, handled above).
+    required = ("sample_env", "sample_values", "valid", "length_scales", "field",
+                "background", "env_lo", "env_hi")
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(
+            f"env kernel JSON is missing required key(s) {missing} — the artifact is "
+            "truncated or corrupted; re-export it from the campaign "
+            "(env_kernel_to_dict).")
     # ``_validate_env_kernel`` enforces field membership + every shape invariant
     # (a length-skewed ``env_lo`` would otherwise broadcast silently in the hull
     # check). Default float dtype (no forced float64) honours the x64 flag and
