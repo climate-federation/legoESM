@@ -2588,18 +2588,24 @@ class LatLonCGridOceanModel:
         return state_new
 
     def _tke_prognostic_active(self) -> bool:
-        """True iff the prognostic TKE vertical-mixing closure is configured.
+        """True iff a prognostic-TKE-carrying vertical-mixing closure is active.
 
-        Static Python predicate (config-only, no traced values): the
-        ``vertical_mixing`` scheme is ``"tke"`` AND
-        ``vertical_mixing.tke.prognostic=True``. Used to gate the prognostic
-        TKE carry in the model step (default False ⇒ Mode-B diagnostic chain).
+        Static Python predicate (config-only, no traced values): either the
+        Gaspar/Burchard ``"tke"`` scheme with ``tke.prognostic=True``, OR the
+        ``"catke"`` scheme (CATKE is ALWAYS prognostic — Wagner et al. 2025).
+        Both carry ``OceanState.tke`` and run one backward-Euler TKE step per
+        model step.  Gates the prognostic-TKE carry in the model step (default
+        False ⇒ the Mode-B diagnostic chain).
         """
         physics = getattr(self.config, "physics", None)
         if physics is None:
             return False
         vmix = getattr(physics, "vertical_mixing", None)
-        if vmix is None or vmix.scheme != "tke":
+        if vmix is None:
+            return False
+        if vmix.scheme == "catke":
+            return True
+        if vmix.scheme != "tke":
             return False
         return bool(getattr(vmix.tke, "prognostic", False))
 
@@ -2616,6 +2622,9 @@ class LatLonCGridOceanModel:
         pre-mixing legacy ordering, bit-identical.
         """
         if not self._tke_prognostic_active():
+            return False
+        # Veros post-mixing ordering is a TKE-scheme feature (not CATKE).
+        if self.config.physics.vertical_mixing.scheme != "tke":
             return False
         tke_cfg = self.config.physics.vertical_mixing.tke
         return (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
@@ -2641,6 +2650,9 @@ class LatLonCGridOceanModel:
         the model step traces zero additional ops (bit-identical).
         """
         if not self._tke_prognostic_active():
+            return False
+        # Superbee TKE advection is a TKE-scheme feature (not CATKE).
+        if self.config.physics.vertical_mixing.scheme != "tke":
             return False
         tke_cfg = self.config.physics.vertical_mixing.tke
         return getattr(tke_cfg, "advection_scheme", "none") != "none"
@@ -3203,9 +3215,12 @@ class LatLonCGridOceanModel:
             # uses dt_mom (Veros tke.py:137). For non-prognostic configs (and
             # non-TKE schemes) ``tke_new`` comes back None ⇒ bit-identical.
             _vmix_cfg = physics_config.vertical_mixing
+            # Prognostic-TKE carry fires for the Gaspar/Burchard "tke" scheme
+            # (when prognostic) AND for "catke" (always prognostic).
             _tke_prognostic = (
-                _vmix_cfg.scheme == "tke"
-                and bool(getattr(_vmix_cfg.tke, "prognostic", False))
+                _vmix_cfg.scheme == "catke"
+                or (_vmix_cfg.scheme == "tke"
+                    and bool(getattr(_vmix_cfg.tke, "prognostic", False)))
             )
             if _tke_prognostic:
                 K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
