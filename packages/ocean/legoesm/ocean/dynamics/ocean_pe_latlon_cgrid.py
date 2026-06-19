@@ -58,6 +58,7 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
+    bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -2485,35 +2486,14 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
             # along the level axis.  For the seafloor, ``z_seafloor =
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
-            def _bbl_drag_for_face(u_field, h_face, r_eff):
-                z_half = jnp.concatenate([
-                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
-                    -jnp.cumsum(h_face, axis=-1),
-                ], axis=-1)
-                z_top = z_half[..., :-1]
-                z_bot = z_half[..., 1:]
-                z_seafloor = z_half[..., -1:]
-                bbl_top = z_seafloor + H_BBL
-                overlap = jnp.maximum(
-                    0.0,
-                    jnp.minimum(z_top, bbl_top)
-                    - jnp.maximum(z_bot, z_seafloor),
-                )
-                h_safe = jnp.maximum(h_face, 1e-10)
-                # Effective BBL thickness: on shelves where the
-                # total wet depth is shallower than ``H_BBL`` the
-                # boundary-layer band cannot extend to its full
-                # nominal thickness.  Divide by the actual total
-                # overlap to keep the rate correct (matches
-                # ``ocean_tendency_common.bbl_drag_distributed``).
-                # Codex iter-39 #2.
-                total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
-                h_bbl_eff = jnp.minimum(
-                    jnp.maximum(total_overlap, 1e-10), H_BBL,
-                )
-                return -r_eff * u_field * overlap / (h_safe * h_bbl_eff)
-            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
-            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
+            # #517: distributed BBL drag is the shared canonical helper
+            # (Killworth & Edwards 1999 / MOM6) — route through it instead
+            # of re-deriving the cumsum/overlap/h_bbl_eff math (was
+            # bit-identical to the helper).
+            diag_botdrag_u = bbl_distributed_drag_face_column(
+                u, h_u, r_eff_u, H_BBL)
+            diag_botdrag_v = bbl_distributed_drag_face_column(
+                v, h_v, r_eff_v, H_BBL)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the
