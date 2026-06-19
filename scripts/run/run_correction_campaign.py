@@ -1186,10 +1186,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     LES-forcing term activates identically to the single-coefficient path."""
     import json
 
-    import jax.numpy as jnp
     import numpy as np
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
-    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 
     coefficients = tuple(c.strip() for c in args.coefficients.split(","))
     # promotion_key -> config field name (the coefficient name IS the field name).
@@ -1205,23 +1203,9 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
-        _assert_resume_grid_matches(ckpt, grid)   # wrong-cell guard (same hazard as deploy)
-        if sorted(ckpt.get("coefficients", [])) != sorted(coefficients):
-            raise SystemExit(
-                f"checkpoint coefficients {ckpt.get('coefficients')} != requested "
-                f"{list(coefficients)}; resume with the matching set.")
-        initial_fields = {
-            k: jnp.asarray(v).reshape(gshape) for k, v in ckpt["fields"].items()}
-        # Rebuild the config FROM the accumulated fields (single source of truth).
-        overrides = {
-            promo_to_field[k]: jnp.asarray(v).reshape(-1)
-            for k, v in ckpt["fields"].items()}
-        initial_clubb = CLUBBLiteConfig(**overrides)
-        start_round = int(ckpt["round"]) + 1
-        init_box["initial_bias"] = ckpt.get("initial_bias")
-        init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
-        init_box["n_diagnosed_prior"] = int(ckpt.get("n_diagnosed_total", 0))
-        init_box["n_diagnoses_valid_prior"] = int(ckpt.get("n_diagnoses_valid_total", 0))
+        initial_clubb, initial_fields, start_round, _seed = _load_multi_resume(
+            ckpt, grid, coefficients, gshape, promo_to_field)
+        init_box.update(_seed)
         print(f"[campaign] resuming multi from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
@@ -1372,6 +1356,41 @@ def _load_single_resume(ckpt: dict, grid: Any, corrected_field: str):
         "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
     }
     return initial_field, initial_clubb, start_round, init_seed
+
+
+def _load_multi_resume(ckpt: dict, grid: Any, coefficients, gshape, promo_to_field: dict):
+    """Reconstruct the MULTI-coefficient resume state — the symmetric analog of
+    :func:`_load_single_resume`.
+
+    Validates the grid fingerprint (wrong-cell guard) + the coefficient SET (a mismatched
+    set would load the wrong per-coefficient fields into the config), rebuilds the
+    accumulated per-coefficient ``initial_fields`` (``{promotion_key: 2-D field}``) + the
+    CLUBB config FROM those fields (single source of truth), and returns
+    ``(initial_clubb, initial_fields, start_round, init_seed)`` with the restored
+    campaign-START baseline + cumulative diagnosis counts.  Raises ``SystemExit`` on a
+    grid / coefficient-set mismatch.
+    """
+    import jax.numpy as jnp
+
+    _assert_resume_grid_matches(ckpt, grid)            # wrong-cell guard (same as deploy)
+    if sorted(ckpt.get("coefficients", [])) != sorted(coefficients):
+        raise SystemExit(
+            f"checkpoint coefficients {ckpt.get('coefficients')} != requested "
+            f"{list(coefficients)}; resume with the matching set.")
+    initial_fields = {
+        k: jnp.asarray(v).reshape(gshape) for k, v in ckpt["fields"].items()}
+    overrides = {
+        promo_to_field[k]: jnp.asarray(v).reshape(-1)
+        for k, v in ckpt["fields"].items()}
+    initial_clubb = CLUBBLiteConfig(**overrides)
+    start_round = int(ckpt["round"]) + 1
+    init_seed = {
+        "initial_bias": ckpt.get("initial_bias"),
+        "initial_per_variable": ckpt.get("initial_per_variable"),
+        "n_diagnosed_prior": int(ckpt.get("n_diagnosed_total", 0)),
+        "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
+    }
+    return initial_clubb, initial_fields, start_round, init_seed
 
 
 def _print_deploy_hint(out_path: str, grid) -> None:

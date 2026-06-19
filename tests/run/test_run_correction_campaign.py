@@ -805,6 +805,50 @@ def test_load_single_resume_roundtrip():
     assert sr2 == 1 and seed2["initial_bias"] is None and seed2["n_diagnosed_prior"] == 0
 
 
+def test_load_multi_resume_roundtrip():
+    """The symmetric MULTI-coefficient resume reconstruction (parallel to
+    _load_single_resume): a campaign-written multi checkpoint (grid block + per-coefficient
+    flat 'fields' keyed by promotion_key + coefficient SET + cumulative seed) rebuilds the
+    accumulated per-coefficient initial_fields (2-D, keyed by promotion_key) + the CLUBB
+    config from those fields + round+1; a coefficient-SET mismatch and a transposed grid
+    both fail LOUD."""
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    ck = (jnp.arange(128.0) * 0.001 + 0.4).reshape(8, 16)
+    prt = (jnp.arange(128.0) * 0.002 + 0.6).reshape(8, 16)
+    coefficients = ("C_K", "Pr_t")
+    pk_ck = rcc.COEFFICIENT_SPEC_MAP["C_K"][0]              # promotion key, e.g. clubb_lite_C_K
+    pk_prt = rcc.COEFFICIENT_SPEC_MAP["Pr_t"][0]
+    promo_to_field = {pk_ck: "C_K", pk_prt: "Pr_t"}
+    ckpt = {
+        "round": 2, "grid": rcc._grid_provenance(_base_config(), grid),
+        "coefficients": ["C_K", "Pr_t"],
+        "fields": {pk_ck: np.asarray(ck).reshape(-1).tolist(),
+                   pk_prt: np.asarray(prt).reshape(-1).tolist()},
+        "initial_bias": 7.0, "initial_per_variable": None,
+        "n_diagnosed_total": 8, "n_diagnoses_valid_total": 5,
+    }
+    gshape = grid.grid_shape_2d
+    clubb, fields, sr, seed = rcc._load_multi_resume(
+        ckpt, grid, coefficients, gshape, promo_to_field)
+    np.testing.assert_allclose(np.asarray(clubb.C_K).reshape(-1), np.asarray(ck).reshape(-1))
+    np.testing.assert_allclose(np.asarray(clubb.Pr_t).reshape(-1), np.asarray(prt).reshape(-1))
+    np.testing.assert_allclose(np.asarray(fields[pk_ck]), np.asarray(ck))  # 2-D, keyed by promo key
+    assert sr == 3 and seed["initial_bias"] == 7.0 and seed["n_diagnosed_prior"] == 8
+    # Coefficient-SET mismatch → fail loud (the wrong per-coefficient fields would load).
+    with pytest.raises(SystemExit, match="checkpoint coefficients"):
+        rcc._load_multi_resume({**ckpt, "coefficients": ["C_K", "C_eps"]}, grid,
+                               coefficients, gshape, promo_to_field)
+    # Wrong-cell guard: a transposed-shape grid fails loud before the reshape.
+    with pytest.raises(SystemExit, match="resume grid mismatch"):
+        rcc._load_multi_resume(ckpt, create_latlon_grid(16, 8, dtype=jnp.float64),
+                               coefficients, (16, 8), promo_to_field)
+
+
 def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
     """compose_compare_fn must pass ``valid_mask`` + ``manifest_reducer`` THROUGH to
     make_compare_fn, so an ocean/land mask or the distributed owned-cell mask actually
