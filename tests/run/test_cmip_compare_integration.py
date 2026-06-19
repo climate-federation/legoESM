@@ -25,7 +25,10 @@ from legoesm.training.compare_reanalysis import (
 )
 
 
-def _run_tiny_coupled(days=1, resolution=8, nlev=5, dt=600.0):
+def _run_tiny_coupled(days=1, resolution=8, nlev=5, dt=600.0, *, run=True):
+    """Build + ``setup()`` a tiny coupled (CMIP) driver; ``run()`` it unless
+    ``run=False`` (``ocean_state.T_sfc`` is initialised at setup, so the CMIP column
+    extraction can be exercised without paying for a multi-step integration)."""
     from legoesm.driver.config import (
         DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
     )
@@ -40,8 +43,53 @@ def _run_tiny_coupled(days=1, resolution=8, nlev=5, dt=600.0):
     )
     driver = CoupledESMDriver(atm_config, PRESETS["aquaplanet"]())
     driver.setup()
-    driver.run()
+    if run:
+        driver.run()
     return driver
+
+
+def test_cmip_column_state_extracts_coupled_sst():
+    """``cmip_column_state`` — the CMIP entry point the campaign DISPATCHES to —
+    extracts a valid :class:`ColumnState` from a REAL coupled driver via the PUBLIC
+    accessors (``state``/``q_v``/``ocean_state``) and unwraps the xarray-DataArray
+    coupled SST through ``_sst_array``.
+
+    The sibling smoke test feeds compare via the manual PRIVATE-attr path
+    (``driver._ocean_state.T_sfc.data``), so it does NOT cover the public function the
+    AMIP/CMIP campaign actually calls.  This does: a rename of the public
+    ``ocean_state`` property, a regression in the ``_sst_array`` DataArray unwrap, or
+    a break in the grid-state ``grid_winds_from_spectral`` no-op now fails HERE in CI
+    rather than at a multi-day HPC launch (the done-criterion needs CMIP mode)."""
+    from legoesm.training.run_to_column_mean import cmip_column_state
+
+    driver = _run_tiny_coupled(run=False)        # setup-only: SST is set at setup
+    cs = cmip_column_state(driver)
+
+    # The coupled SST is the PROGNOSTIC ocean surface temperature, unwrapped from its
+    # xarray DataArray to a raw array (NOT a DataArray) via _sst_array.
+    expected_sst = np.asarray(driver.ocean_state.T_sfc.data)
+    assert not hasattr(cs.sst_K, "dims")             # unwrapped: no xarray leftover
+    np.testing.assert_array_equal(np.asarray(cs.sst_K), expected_sst)
+    assert bool(np.all(np.isfinite(np.asarray(cs.sst_K))))
+
+    # The atmospheric column fields come from the PUBLIC state/q_v accessors and are
+    # finite (a cubed-sphere grid state: grid_winds_from_spectral is a no-op).
+    assert cs.T.shape == np.asarray(driver.state.T.data).shape
+    for name in ("T", "q_v", "u", "v", "p_s"):
+        arr = getattr(cs, name)
+        assert arr is not None, name
+        assert bool(jnp.all(jnp.isfinite(jnp.asarray(arr)))), name
+
+    # Equivalence: the public entry point matches the manual extraction the sibling
+    # smoke test feeds to compare (same model state + coupled SST, no divergence) —
+    # ALL column fields, so a regression silently corrupting u/v (e.g. a broken
+    # grid_winds_from_spectral) or p_s/q_v is caught, not just T/sst_K.
+    manual = column_state_from_hydrostatic(
+        driver._atm.state, driver.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    for name in ("T", "q_v", "u", "v", "p_s", "sst_K"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(cs, name)), np.asarray(getattr(manual, name)),
+            err_msg=f"cmip_column_state {name} diverges from the manual extraction")
 
 
 @pytest.mark.slow
