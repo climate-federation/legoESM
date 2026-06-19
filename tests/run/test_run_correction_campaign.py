@@ -763,6 +763,48 @@ def test_assert_resume_grid_matches():
         rcc._assert_resume_grid_matches({"round": 3}, grid)
 
 
+def test_load_single_resume_roundtrip():
+    """The HOT multi-day-restart path: a checkpoint written by the campaign (grid block +
+    2-D 'field' + corrected_field + cumulative baseline/counts) reconstructs back to the
+    SAME accumulated per-column field + CLUBB config (config == flattened field) + resume
+    round (round+1). Locks the write→read round-trip — the reconstruction was inline in
+    pragma:no-cover main() — plus the wrong-slot / wrong-cell / old-checkpoint paths."""
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+
+    import scripts.run.run_correction_campaign as rcc
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    field2d = (jnp.arange(128.0) * 0.001 + 0.4).reshape(8, 16)   # plausible per-column C_K
+    ckpt = {
+        "round": 3, "grid": rcc._grid_provenance(_base_config(), grid),
+        "corrected_field": "C_K",
+        "C_K": np.asarray(field2d).reshape(-1).tolist(),
+        "field": np.asarray(field2d).tolist(),
+        "initial_bias": 5.0, "initial_per_variable": None,
+        "n_diagnosed_total": 12, "n_diagnoses_valid_total": 9,
+    }
+    f, clubb, sr, seed = rcc._load_single_resume(ckpt, grid, "C_K")
+    np.testing.assert_allclose(np.asarray(f), np.asarray(field2d))          # field rebuilt
+    np.testing.assert_allclose(np.asarray(clubb.C_K).reshape(-1),
+                               np.asarray(field2d).reshape(-1))             # config == field
+    assert sr == 4                                                         # round + 1
+    assert seed["initial_bias"] == 5.0 and seed["n_diagnosed_prior"] == 12
+    assert seed["n_diagnoses_valid_prior"] == 9
+    # Wrong-SLOT guard: a Pr_t checkpoint resumed as C_K fails loud.
+    with pytest.raises(SystemExit, match="checkpoint corrects"):
+        rcc._load_single_resume({**ckpt, "corrected_field": "Pr_t"}, grid, "C_K")
+    # Wrong-CELL guard: a transposed-shape grid fails loud.
+    with pytest.raises(SystemExit, match="resume grid mismatch"):
+        rcc._load_single_resume(ckpt, create_latlon_grid(16, 8, dtype=jnp.float64), "C_K")
+    # An OLD checkpoint (no grid block, no cumulative fields) warns + falls back to None/0.
+    with pytest.warns(UserWarning, match="no grid fingerprint"):
+        _f2, _c2, sr2, seed2 = rcc._load_single_resume(
+            {"round": 0, "field": np.asarray(field2d).tolist(), "corrected_field": "C_K"},
+            grid, "C_K")
+    assert sr2 == 1 and seed2["initial_bias"] is None and seed2["n_diagnosed_prior"] == 0
+
+
 def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch):
     """compose_compare_fn must pass ``valid_mask`` + ``manifest_reducer`` THROUGH to
     make_compare_fn, so an ocean/land mask or the distributed owned-cell mask actually

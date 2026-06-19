@@ -1342,6 +1342,38 @@ def _assert_resume_grid_matches(ckpt: dict, grid: Any) -> None:
                 "SAME grid the campaign used.")
 
 
+def _load_single_resume(ckpt: dict, grid: Any, corrected_field: str):
+    """Reconstruct the SINGLE-coefficient resume state from a checkpoint dict.
+
+    Validates the grid fingerprint (wrong-cell guard) + the corrected-coefficient
+    identity (wrong-slot guard), rebuilds the accumulated per-column FIELD (the single
+    source of truth — the CLUBB config is exactly its flattened form, so they cannot
+    desync even after a rejected-round checkpoint) and the resume round, and returns
+    ``(initial_field, initial_clubb, start_round, init_seed)`` where ``init_seed``
+    carries the restored campaign-START baseline + prior cumulative diagnosis counts
+    (absent in pre-iter-137 checkpoints ⇒ ``None``/0 fallback to segment-only).  Raises
+    ``SystemExit`` on a grid / corrected-field mismatch.
+    """
+    import jax.numpy as jnp
+
+    _assert_resume_grid_matches(ckpt, grid)            # wrong-cell guard (same as deploy)
+    ckpt_field = ckpt.get("corrected_field")
+    if ckpt_field is not None and ckpt_field != corrected_field:
+        raise SystemExit(
+            f"checkpoint corrects {ckpt_field!r} but --diagnosis-method "
+            f"requests {corrected_field!r}; resume with the matching method.")
+    initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
+    initial_clubb = CLUBBLiteConfig(**{corrected_field: initial_field.reshape(-1)})
+    start_round = int(ckpt["round"]) + 1
+    init_seed = {
+        "initial_bias": ckpt.get("initial_bias"),
+        "initial_per_variable": ckpt.get("initial_per_variable"),
+        "n_diagnosed_prior": int(ckpt.get("n_diagnosed_total", 0)),
+        "n_diagnoses_valid_prior": int(ckpt.get("n_diagnoses_valid_total", 0)),
+    }
+    return initial_field, initial_clubb, start_round, init_seed
+
+
 def _print_deploy_hint(out_path: str, grid) -> None:
     """Verify the just-written output deploys onto its OWN grid + print the hint.
 
@@ -1481,9 +1513,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         range(args.era5_time_idx, args.era5_time_idx + n_times))
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
-    import jax.numpy as jnp
-    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
-
     n_steps = int(args.les_hours * 3600.0 / args.les_dt)
     run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
 
@@ -1518,30 +1547,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     if args.resume:
         with open(args.resume) as f:
             ckpt = json.load(f)
-        _assert_resume_grid_matches(ckpt, grid)   # wrong-cell guard (same hazard as deploy)
-        # Guard against resuming a checkpoint for a DIFFERENT corrected coefficient
-        # (e.g. a Pr_t checkpoint with --diagnosis-method=clubb_coefficient) — the
-        # field would be silently loaded into the wrong config slot.
-        ckpt_field = ckpt.get("corrected_field")
-        if ckpt_field is not None and ckpt_field != corrected_field:
-            raise SystemExit(
-                f"checkpoint corrects {ckpt_field!r} but --diagnosis-method "
-                f"requests {corrected_field!r}; resume with the matching method.")
-        initial_field = jnp.asarray(ckpt["field"]).reshape(grid.grid_shape_2d)
-        # The accumulated FIELD is the single source of truth for the accepted
-        # state; the per-column coefficient is exactly its flattened form (the
-        # column-ordering contract). Rebuilding the config FROM the field cannot
-        # desync from initial_field, even after a rejected-round checkpoint.
-        initial_clubb = CLUBBLiteConfig(
-            **{corrected_field: initial_field.reshape(-1)})
-        start_round = int(ckpt["round"]) + 1
-        # Restore the ORIGINAL campaign-start baseline + prior cumulative counts (absent
-        # in pre-iter-137/138 checkpoints ⇒ None/0 ⇒ falls back to segment-only, the old
-        # behaviour).
-        init_box["initial_bias"] = ckpt.get("initial_bias")
-        init_box["initial_per_variable"] = ckpt.get("initial_per_variable")
-        init_box["n_diagnosed_prior"] = int(ckpt.get("n_diagnosed_total", 0))
-        init_box["n_diagnoses_valid_prior"] = int(ckpt.get("n_diagnoses_valid_total", 0))
+        initial_field, initial_clubb, start_round, _seed = _load_single_resume(
+            ckpt, grid, corrected_field)
+        init_box.update(_seed)
         print(f"[campaign] resuming from {args.resume} at round {start_round}")
 
     checkpoint_callback = None
