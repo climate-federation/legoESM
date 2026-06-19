@@ -36,6 +36,22 @@ def test_config_round_trips_and_launcher_accepts_it(tmp_path):
     make_clubb_build_driver(cfg, lambda c: object())    # must NOT raise (clubb_lite accepted)
 
 
+def test_generated_config_loads_through_campaign_loader(tmp_path):
+    """End-to-end: the emitted config is loadable by the campaign's OWN loader
+    load_base_config_and_grid (config → ModelDriver → grid + sigma), not merely
+    round-trippable through experiment_config_from_dict — so it is genuinely runnable.
+    A latlon resolution-8, 10-level config builds an (8, 16) grid + a 10-level sigma."""
+    from scripts.experiment.write_amip_clubb_lite_config import main
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    out = tmp_path / "cfg.json"
+    assert main([str(out), "--resolution", "8", "--nlev", "10"]) == 0
+    base_cfg, grid, sigma = load_base_config_and_grid(str(out))
+    assert base_cfg.turbulence == "clubb_lite"
+    assert tuple(grid.grid_shape_2d) == (8, 16)        # latlon res 8 → 8 lat × 16 lon
+    assert len(sigma.sigma_full) == 10                  # nlev levels
+
+
 def test_non_clubb_config_is_rejected_by_launcher():
     """Non-vacuity: a NON-clubb config is exactly what make_clubb_build_driver rejects,
     so the generator's clubb_lite guarantee is load-bearing (not a no-op)."""
