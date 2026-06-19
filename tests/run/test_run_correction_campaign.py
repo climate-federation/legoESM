@@ -464,6 +464,29 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
             les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
 
 
+def test_build_correction_campaign_rejects_unknown_diagnosis_method():
+    """Dispatch hardening (iter 285): an unknown ``diagnosis_method`` RAISES (no silent
+    default).  The method→coefficient resolution fires BEFORE any run (and before the
+    --dry-run construction), so a typo'd ``--diagnosis-method`` is caught at launch, not
+    after a multi-day run quietly correcting the wrong coefficient.  The dispatch-
+    hardening RATCHET counts the guard exists; this locks that it FIRES."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+
+    def boom(*a, **k):
+        raise AssertionError("the method guard must fire before anything runs")
+
+    common = dict(
+        build_base_driver=boom, extract_column_state=boom, run_les_fn=boom,
+        reference=SimpleNamespace(T=SimpleNamespace(shape=(2, 3, 5))),
+        sigma=_dry_run_sigma(), grid=object(), area_weights=jnp.ones((2, 3)),
+        lat_deg=jnp.zeros((2, 3)), lon_deg=jnp.zeros((2, 3)),
+        n_iterations=5, n_worst=4, validate_reference=False, dry_run=True)
+    with pytest.raises(ValueError, match=r"unknown diagnosis_method 'bogus_method'"):
+        build_correction_campaign(
+            base_atm_config=_base_config(),
+            les_config=ColumnLESConfig(diagnosis_method="bogus_method"), **common)
+
+
 def test_dry_run_les_per_round_caps_budget_at_n_worst():
     """The --dry-run LES/round estimate is min(les_budget, n_worst): clustering yields
     at most n_worst representatives, so a budget ABOVE n_worst must NOT over-state the
