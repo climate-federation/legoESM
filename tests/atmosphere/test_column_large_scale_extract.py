@@ -66,6 +66,39 @@ def test_omega_nonzero_finite_for_divergence():
     assert float(jnp.max(jnp.abs(omega))) > 0.0
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "Hybrid LES subsidence (iter 343, DYCORE follow-up): omega_from_divergence's surface "
+    "tendency uses the PURE-SIGMA continuity dp_s/dt = -p_s*D_total/(1-sigma_top), and "
+    "compute_pressure_velocity uses the pure-sigma form omega = sigma*dp_s/dt + p_s*sigma_dot "
+    "(sigma = A+B).  For a hybrid coordinate over terrain (p_s != p_ref) the hybrid continuity "
+    "dp_s/dt = -sum(div * layer_thickness_dp) / B_range differs by ~41%.  The fix is a CORE "
+    "dycore change (compute_pressure_velocity is hybrid-unaware and feeds the dycore adiabatic "
+    "heating term too), beyond compare-reanalysis; the LES realism gate is the interim "
+    "safeguard.  xpasses when the dycore omega is made hybrid-aware."))
+def test_les_omega_uses_hybrid_continuity_over_terrain():
+    """Regression target: the surface-pressure tendency baked into the LES omega must follow
+    the HYBRID continuity for a hybrid coordinate over terrain.  We RECOVER the dp_s/dt
+    omega_from_divergence used by inverting omega = sigma_full*dp_s/dt + p_s*sigma_dot_full,
+    and assert it equals -sum(div * layer_thickness_dp) / B_range.  Currently it is the
+    pure-sigma value (~41% off over terrain)."""
+    from legoesm.grids.vertical import compute_sigma_dot_and_total, make_hybrid_levels
+
+    nlev = 12
+    hc = make_hybrid_levels(nlev, p_top_Pa=100.0)
+    div = jnp.linspace(2e-6, -1e-6, nlev)[None, :]            # (1, nlev) subsidence-like
+    p_s = jnp.array([7.0e4])                                  # 700-hPa terrain (p_s != p_ref)
+    omega = omega_from_divergence(div, p_s, hc)               # (1, nlev)
+    sigma_dot, _ = compute_sigma_dot_and_total(div, hc)
+    sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
+    # invert omega = sigma_full*dp_s/dt + p_s*sigma_dot_full ⇒ the dp_s/dt it actually used.
+    dps_dt_used = (omega - p_s[..., None] * sigma_dot_full) / jnp.asarray(hc.sigma_full)
+    dps_dt_hybrid = (
+        -jnp.sum(div * hc.layer_thickness_dp(p_s), axis=-1, keepdims=True) / hc.B_range)
+    np.testing.assert_allclose(
+        np.asarray(dps_dt_used), np.asarray(jnp.broadcast_to(dps_dt_hybrid, dps_dt_used.shape)),
+        rtol=1e-2)
+
+
 def test_omega_matches_manual_continuity_with_sign():
     """Nonzero column-integrated divergence: verify the dp_s/dt closure + sign
     against an explicit compute_sigma_dot_and_total + compute_pressure_velocity."""
