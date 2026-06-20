@@ -2540,6 +2540,39 @@ def test_build_multi_correction_campaign_mpas_three_coefficients():
     assert float(ceps.min()) >= 0.06 and float(ceps.max()) <= 0.6  # C_eps bounds
 
 
+def test_multi_campaign_valid_mask_restricts_the_ranked_columns():
+    """The multi-coefficient campaign USES the valid_mask (iter 466 forwards it; this confirms
+    it RESTRICTS): masking out the biased cell removes it from the worst-column ranking AND the
+    bias metric, so the campaign's baseline bias drops vs the unmasked run — proving the mask
+    actually restricts the multi path, not just gets accepted."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    nlev = 5
+    sigma = create_sigma_coordinate(nlev)
+    model_state = _mpas_full_state(mesh, nlev)
+    reference = _mpas_full_state(mesh, nlev, bias_cell=37, bias_dt=-6.0)
+
+    def _run(valid_mask):
+        return build_multi_correction_campaign(
+            base_atm_config=_mpas_base_config(nlev),
+            build_base_driver=lambda cfg: _FakeDriver(model_state),
+            extract_column_state=lambda d, day, dt: d.state,  # noqa: ARG005
+            reference=reference, sigma=sigma, grid=mesh,
+            area_weights=jnp.asarray(mesh.grid_area), n_iterations=1,
+            les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+            run_les_fn=_mock_run_les_sheared, n_worst=1,
+            coefficients=("C_K",), accept_only_if_improved=False, valid_mask=valid_mask)
+
+    b_full = float(_run(None).iterations[0].bias.baseline_bias)
+    # exclude the single biased cell (37) — it should drop out of the bias metric + ranking
+    mask = jnp.ones(mesh.nCells, dtype=bool).at[37].set(False)
+    b_masked = float(_run(mask).iterations[0].bias.baseline_bias)
+    assert b_full > b_masked                       # masking the biased cell lowers the bias
+    assert b_masked < 0.5 * b_full                 # most of the bias was at the masked cell
+
+
 def test_build_correction_campaign_prandtl_number_method():
     """The prandtl_number diagnosis is wired end-to-end: the campaign selects the
     clubb_lite_Pr_t promotion + Pr_t background by method, the LES diagnoses a
