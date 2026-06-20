@@ -56,6 +56,42 @@ def test_scatter_differentiable_wrt_values():
     np.testing.assert_allclose(np.asarray(g), [6.0, 8.0], rtol=1e-12)
 
 
+def test_scatter_array_background_invalid_keeps_accumulated():
+    """Campaign accumulation under strategy='static' (the default): an array
+    ``(ncol,)`` background IS the accumulated round-(k-1) field.  A VALID column is
+    overwritten with the new diagnosis; an INVALID column (its LES blew up this
+    round) keeps its ACCUMULATED value — NOT a scalar background, NOT the new value;
+    un-scattered columns are untouched.  This is the static-scatter parallel of
+    ``test_kernel_field_array_background_per_column_fallback`` (env strategy)."""
+    prior = jnp.array([1.0, 2.0, 3.0, 4.0])           # accumulated (ncol,) background
+    field = scatter_column_field(
+        (2, 2),
+        flat_indices=jnp.array([0, 3]),
+        values=jnp.array([10.0, 20.0]),
+        background=prior,
+        valid=jnp.array([True, False]),               # col 3 invalid this round
+    )
+    # col 0 (valid) → 10; col 3 (invalid) keeps accumulated 4 (NOT 20, NOT 0);
+    # cols 1,2 untouched → 2,3.
+    np.testing.assert_allclose(np.asarray(field).reshape(-1), [10.0, 2.0, 3.0, 4.0])
+
+
+def test_scatter_array_background_preserves_float64():
+    """An accumulated float64 background must NOT be downcast to a float32 values
+    dtype (the static-scatter parallel of the kernel float64 test) — else untouched
+    columns drift from the line-search base across partial steps.  Requires x64."""
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("requires JAX_ENABLE_X64=1 to exercise mixed precision")
+    bg = jnp.asarray([0.123456789012345, 1.0, 2.0, 3.0], dtype=jnp.float64)
+    field = scatter_column_field(
+        (2, 2), jnp.array([1]), jnp.array([10.0], dtype=jnp.float32),
+        background=bg, valid=jnp.array([True]))
+    assert field.dtype == jnp.float64
+    # Untouched float64 columns (0, 2, 3) preserved EXACTLY (no f32 downcast).
+    np.testing.assert_array_equal(
+        np.asarray(field).reshape(-1)[[0, 2, 3]], np.asarray(bg)[[0, 2, 3]])
+
+
 def test_kernel_field_recovers_value_at_sample():
     # One sample; a grid column sitting exactly at its environment gets the
     # sample value (single-sample N-W regression = the value, weights cancel).
