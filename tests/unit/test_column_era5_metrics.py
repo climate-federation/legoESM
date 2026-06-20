@@ -48,6 +48,27 @@ def test_normalized_mass_weights_normalizes_per_column():
     np.testing.assert_allclose(np.asarray(w[1]), [0.75, 0.25, 0.0], rtol=1e-12)
 
 
+def test_normalized_mass_weights_hybrid_A0_reduces_to_pure_sigma():
+    """codex-review (iter 402) validated the iter-340 mass-weight fix is BACKWARD-COMPATIBLE:
+    a hybrid coord with A=0, B=σ has per-column layer mass ``dp = dσ·p_s``, and the per-column
+    normalization divides by ``Σdp = p_s·Σdσ`` — so ``p_s`` CANCELS and the weights equal the
+    OLD pure-sigma ``normalized_mass_weights(dσ)`` for EVERY column, regardless of p_s.  This
+    is the safety property of the whole hybrid thread (the fix must not change the pure-sigma
+    answer); lock the cancellation (a regression putting p_s in the numerator, or reverting to
+    a whole-array reduce, would break it).  BYTE-identical at p_s=1 (a power of 2); to machine
+    precision for terrain p_s."""
+    dsigma = jnp.array([0.4, 0.3, 0.2, 0.1])
+    ref = np.asarray(normalized_mass_weights(dsigma))
+    # p_s = 1 (exact ×1) ⇒ the dp = dσ·1 path is BYTE-identical to the pure-sigma input.
+    np.testing.assert_array_equal(np.asarray(normalized_mass_weights(dsigma * 1.0)), ref)
+    # Arbitrary per-column p_s (terrain): the cancellation holds to machine precision, and
+    # EVERY column recovers the same weights (the p_s dependence cancels out).
+    p_s_col = jnp.array([5.0e4, 1.013e5, 1.2e5])[:, None]      # (3, 1) Pa
+    w = np.asarray(normalized_mass_weights(dsigma[None, :] * p_s_col))   # (3, 4) hybrid-A0 mass
+    for col in range(3):
+        np.testing.assert_allclose(w[col], ref, rtol=1e-15, atol=0.0)
+
+
 def test_per_column_weighted_rmse_applies_per_column_weights():
     """`per_column_weighted_rmse` applies PER-COLUMN mass weights `(ncol, nlev)` — the hybrid
     fix's output (each column weighted by its OWN layer mass) — so two columns with the SAME
