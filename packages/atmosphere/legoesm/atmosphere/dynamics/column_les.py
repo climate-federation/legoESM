@@ -625,6 +625,18 @@ def extract_gcm_column(
     # iter-148 behaviour byte-unchanged).  The surface flux is the GCM bulk flux REUSED +
     # converted to kinematic — its iter-148 lock relaxed now that the LES applies it (151).
     if sst_K is not None:
+        # The bulk flux needs the CELL-CENTRED surface wind |U₁| = √(u₁²+v₁²).  The MPAS
+        # path passes ``u=u_edge, v=None`` (edge-normal velocity), so u[idx] is an edge
+        # gather (not the cell wind) and v is absent — FAIL LOUD rather than crash cryptically
+        # or compute a wrong flux.  The MPAS cell-wind reconstruction is a follow-up; the
+        # surface flux is supported on the 3 cell-grids (lat-lon/cubed-sphere/Gaussian).
+        if v is None:
+            raise ValueError(
+                "extract_gcm_column: the prescribed surface-flux BC (sst_K given) needs "
+                "cell-centred winds (u, v) for the bulk surface wind speed, but v is None "
+                "(an MPAS/edge-velocity column). The MPAS cell-wind reconstruction is a "
+                "follow-up — disable --surface-flux for MPAS runs (it is supported on the "
+                "lat-lon / cubed-sphere / Gaussian cell grids).")
         u_col = jnp.asarray(u)[idx]
         v_col = jnp.asarray(v)[idx]
         sst_col = jnp.asarray(sst_K)[idx]

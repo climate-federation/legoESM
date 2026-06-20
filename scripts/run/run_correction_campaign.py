@@ -886,6 +886,17 @@ def _build_run_setup(args):
     from legoesm.driver.model_driver import ModelDriver
 
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
+    # --surface-flux needs cell-centred winds; the MPAS edge-velocity path cannot supply
+    # them (iter 369).  Reject it UPFRONT (caught by the dry-run) — the diagnose-time guard
+    # in extract_gcm_column is the robust backstop, but this fails before any model run.
+    if args.surface_flux:
+        from legoesm.grids.voronoi import VoronoiMesh
+        if isinstance(grid, VoronoiMesh):
+            raise SystemExit(
+                "--surface-flux is not supported for MPAS/Voronoi grids (the bulk surface "
+                "wind needs cell-centred u/v, but MPAS carries only the edge-normal "
+                "velocity; cell-wind reconstruction is a follow-up). Drop --surface-flux or "
+                "use a lat-lon / cubed-sphere / Gaussian grid.")
     build_base_driver, extract_fn = make_base_driver_builder(
         args.mode, coupled_preset=_resolve_coupled_preset(args), ocean_grid=None)
     n_steps = _les_n_steps(args.les_hours, args.les_dt)
