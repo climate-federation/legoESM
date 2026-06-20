@@ -109,6 +109,43 @@ def test_les_omega_uses_hybrid_continuity_over_terrain():
         "the hybrid branch may not be active")
 
 
+def test_omega_hybrid_branch_reduces_to_pure_sigma_when_a_is_zero():
+    """The two ``omega_from_divergence`` branches must AGREE when the hybrid coordinate
+    degenerates to pure sigma (``A=0, B=σ``) — the docstring's 'byte-identical when
+    A=0, B=σ' reduction.  This locks the hybrid generalization
+    (``compute_mass_flux_hybrid`` + ``compute_omega_hybrid``, the ``HybridSigma…``
+    branch) against the proven DIRECT pure-sigma closure
+    (``compute_sigma_dot_and_total`` + ``compute_pressure_velocity``, the
+    ``SigmaCoordinate`` branch).  The per-branch tests above validate each branch
+    against its OWN manual form; only this catches a refactor of EITHER branch that
+    breaks their AGREEMENT in the degenerate case (while leaving the over-terrain
+    hybrid case intact).  Run over terrain (``p_s ≠ p_ref``) so it is non-trivial."""
+    from legoesm.grids.vertical import create_hybrid_coordinate
+
+    nlev = 10
+    sigma = create_sigma_coordinate(nlev, dtype=jnp.float64)         # pure-sigma branch
+    # A HYBRID coordinate that IS pure sigma: A=0 everywhere, B=σ_half.
+    hybrid_pure = create_hybrid_coordinate(
+        nlev,
+        A_half=jnp.zeros(nlev + 1, dtype=jnp.float64),
+        B_half=jnp.asarray(sigma.sigma_half, dtype=jnp.float64),
+        dtype=jnp.float64,
+    )
+
+    div = jnp.linspace(2e-6, -1e-6, nlev)[None, :]                   # (1, nlev)
+    p_s = jnp.array([7.0e4])                                         # 700-hPa terrain
+
+    omega_sigma = omega_from_divergence(div, p_s, sigma)            # SigmaCoordinate branch
+    omega_hybrid = omega_from_divergence(div, p_s, hybrid_pure)     # HybridSigma… branch, A=0
+
+    # The hybrid generalization reduces to the pure-sigma closure (fp64; the two paths
+    # build ω from DIFFERENT intermediates — mass flux vs σ̇ — so allow op-order fp noise).
+    np.testing.assert_allclose(
+        np.asarray(omega_hybrid), np.asarray(omega_sigma), rtol=1e-9, atol=1e-12)
+    # Non-vacuity: the continuity is actually active (nonzero ω from a divergent column).
+    assert float(jnp.max(jnp.abs(omega_sigma))) > 0.0
+
+
 def test_omega_matches_manual_continuity_with_sign():
     """Nonzero column-integrated divergence: verify the dp_s/dt closure + sign
     against an explicit compute_sigma_dot_and_total + compute_pressure_velocity."""
