@@ -1321,16 +1321,9 @@ def barotropic_implicit_latlon_cgrid(
         h_k_old, min_water_col, mask, grid,
     )
 
-    # ----- Step 3: Coriolis face values ---------------------------------
-    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
-        f_u = grid.f_u.astype(eta_dtype)
-        f_v = grid.f_v.astype(eta_dtype)
-    else:
-        f_cell = grid.f.astype(eta_dtype)
-        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
-        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    # ----- Step 3: Coriolis face values (#517: shared fold-safe helper) --
+    from legoesm.ocean.dynamics.barotropic_common import coriolis_at_faces
+    f_u, f_v = coriolis_at_faces(grid, eta_dtype)
 
     # ----- Step 4: predictor (FB Coriolis, OLD eta gradient) -----------
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)
