@@ -88,3 +88,33 @@ def test_invalid_start_doy_rejected_at_validate_strict():
     for bad in [0, 366, 400, -5]:
         with pytest.raises(ValueError, match="insolation_start_doy"):
             ExperimentConfig(insolation_start_doy=bad).validate_strict()
+
+
+def test_every_radiation_scheme_consumes_forcing_day_of_year():
+    """The insolation seam sets the forcing ``day_of_year``/``seconds_of_day``; this LOCKS that
+    EVERY registered radiation scheme's step fn actually CONSUMES them — else
+    ``insolation_start_doy`` would be a SILENT no-op for that scheme. Verified (iter 457) that
+    rrtmgp builds ``cos_zenith`` from these args exactly like gray (the realistic empirical path
+    uses rrtmgp, which the gray-only iter-449 empirical test did not cover). A refactor that
+    drops ``day_of_year`` from a builder's signature fails here.
+
+    Introspects the private ``_RADIATION_BUILDERS`` dispatch table on purpose (a contract test
+    of the scheme registry; not a production cross-module private import)."""
+    import inspect
+
+    from legoesm.driver import physics_pipeline as pp
+
+    schemes = pp._RADIATION_BUILDERS
+    assert {"none", "gray", "rrtmgp", "rrtmg"} <= set(schemes)   # the validate_strict set
+    checked = 0
+    for scheme, builder in schemes.items():
+        try:
+            rad_fn = builder(ExperimentConfig())
+        except (FileNotFoundError, OSError) as exc:               # rrtmgp optics data absent
+            pytest.skip(f"{scheme} radiation data unavailable: {exc}")
+        params = set(inspect.signature(rad_fn).parameters)
+        assert {"day_of_year", "seconds_of_day"} <= params, (
+            f"radiation scheme {scheme!r} step fn must consume day_of_year + seconds_of_day "
+            f"(the forcing fields the insolation seam sets); got {sorted(params)}")
+        checked += 1
+    assert checked >= 4                                          # none/gray/rrtmgp/rrtmg

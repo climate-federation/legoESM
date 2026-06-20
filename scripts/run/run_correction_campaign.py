@@ -1043,6 +1043,12 @@ def _maybe_ocean_mask(args, base_cfg):
             "--ocean-only (e.g. an all-land regional grid has no ocean columns).")
     print(f"[campaign] --ocean-only: ranking the {n_ocean} ocean columns "
           f"(land_fraction <= {args.max_land_fraction}) of {int(mask.size)} total.", flush=True)
+    if getattr(args, "mode", "amip") == "cmip":
+        print("[campaign] NOTE: --ocean-only is most meaningful for AMIP (the PRESCRIBED SST "
+              "pins the ocean surface, so a bias there is attributable to the atmospheric "
+              "closure). Under --mode cmip the ocean is INTERACTIVE, so an ocean-column bias "
+              "also reflects the coupled-ocean SST bias — it still excludes the land-model "
+              "biases, but does not cleanly isolate the closure.", flush=True)
     return mask
 
 

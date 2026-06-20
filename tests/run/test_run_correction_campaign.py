@@ -3447,9 +3447,23 @@ def test_ocean_only_mask_from_land_fraction_and_fail_loud():
     orig = md.ModelDriver
     md.ModelDriver = _FakeDriver
     try:
-        on = SimpleNamespace(ocean_only=True, max_land_fraction=0.5)
+        on = SimpleNamespace(ocean_only=True, max_land_fraction=0.5, mode="amip")
         mask = _maybe_ocean_mask(on, base_cfg=object())
         assert mask is not None and int(jnp.sum(mask)) == 2     # 2 ocean columns ranked
+
+        # CMIP applicability caveat (iter 457): print a NOTE that ocean-only is most meaningful
+        # for AMIP (prescribed SST pins the ocean); silent for AMIP.
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _maybe_ocean_mask(SimpleNamespace(
+                ocean_only=True, max_land_fraction=0.5, mode="cmip"), base_cfg=object())
+        assert "cmip" in buf.getvalue() and "interactive" in buf.getvalue().lower()
+        buf_amip = io.StringIO()
+        with redirect_stdout(buf_amip):
+            _maybe_ocean_mask(on, base_cfg=object())
+        assert "interactive" not in buf_amip.getvalue().lower()   # no CMIP note for AMIP
 
         class _AllLand(_FakeDriver):                            # no ocean => fail loud
             def static_land_fraction(self):
