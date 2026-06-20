@@ -128,6 +128,38 @@ def test_covered_but_out_of_hull_diagnostics_diverge():
     assert ck[0] != pytest.approx(k.background)      # NOT the background fallback
 
 
+def test_apply_partial_coverage_mixes_regression_and_background_per_column():
+    """The REALISTIC cross-resolution deploy: SOME target columns fall in sampled
+    regimes (→ the NW regression) and SOME do not (→ the background), within ONE
+    ``apply_env_kernel_override`` call.  The other tests only hit the all-covered
+    (1.0) and all-far (0.0) extremes — neither exercises the PER-COLUMN coverage
+    dispatch on a MIXED grid, so a regression that applied the regression (or the
+    background) to EVERY column regardless of coverage would pass them all.  Here col
+    0 sits near sample 0 (COVERED ⇒ regression) and col 1 is absurdly far (UNCOVERED ⇒
+    background), giving a partial ``fraction_covered = 0.5`` and a per-column split.
+
+    Uses a DISTINCT non-zero background (1.0, outside the [0.30, 0.62] sample range)
+    so the fallback is distinguishable from a far column's ≈0 weighted average — with
+    the default 0.0 background, an 'ignore coverage, always blend' regression would
+    ALSO yield ≈0 for the far column and pass vacuously."""
+    recs = [_Rec(ColumnEnvironment(*e)) for e in _ENVS]
+    diags = [_Diag(C_K=jnp.array([c, c]), valid=jnp.array([True, True])) for c in _CKS]
+    k = build_env_kernel(recs, diags, "clubb_coefficient",
+                         length_scales=_LENGTH_SCALES, field="C_K", background=1.0)
+    env = jnp.asarray([
+        (298.5, 200.0, 6.0),       # near sample 0 ⇒ COVERED ⇒ NW regression
+        (250.0, 5.0e4, 200.0),     # absurdly far ⇒ UNCOVERED ⇒ background
+    ])
+    override, coverage = apply_env_kernel_override(k, env)
+    assert coverage["fraction_covered"] == 0.5         # exactly one of two covered
+    ck = np.asarray(override.clubb_lite.C_K)
+    assert np.all(np.isfinite(ck))
+    # PER-COLUMN dispatch: covered → in-sample-range regression; uncovered → background.
+    assert 0.30 - 1e-6 <= ck[0] <= 0.62 + 1e-6         # the regression (within samples)
+    assert ck[0] != pytest.approx(1.0)                 # NOT the background
+    assert ck[1] == pytest.approx(1.0)                 # the distinct background fallback
+
+
 def test_apply_min_fraction_covered_fails_loud_on_no_op_deploy():
     """Opt-in fail-loud: an (near-)all-background deploy (grid outside the sampled
     environments ⇒ NO-OP correction) RAISES when ``min_fraction_covered`` is set,
