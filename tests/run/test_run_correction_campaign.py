@@ -742,21 +742,6 @@ def test_surface_flux_flag_wired_into_les_config(tmp_path, monkeypatch):
     assert captured["surface_flux"] is True                  # opt-in flows through
 
 
-def test_surface_flux_rejected_upfront_for_mpas(monkeypatch):
-    """--surface-flux + an MPAS/Voronoi grid is rejected UPFRONT in _build_run_setup (iter
-    369) — caught by the dry-run pre-flight, BEFORE any model run (the diagnose-time guard
-    in extract_gcm_column is the robust backstop, but this fails earlier with a clear msg)."""
-    from legoesm.grids.voronoi import create_voronoi_mesh
-
-    import scripts.run.run_correction_campaign as rcc
-
-    mesh = create_voronoi_mesh(2)
-    monkeypatch.setattr(rcc, "load_base_config_and_grid",
-                        lambda cfg: (SimpleNamespace(), mesh, None))    # noqa: ARG005
-    with pytest.raises(SystemExit, match="not supported for MPAS"):
-        rcc._build_run_setup(SimpleNamespace(surface_flux=True, config="c"))
-
-
 def test_warn_if_ignored_diagnosis_method():
     """--coefficients silently overrides --diagnosis-method (the multi path ignores it);
     a NON-default method alongside --coefficients warns so the user is not surprised. The
@@ -1667,14 +1652,24 @@ def _mpas_full_state(mesh, nlev=5, *, bias_cell=None, bias_dt=0.0):
         u_edge=jnp.asarray(u_edge))
 
 
-def test_make_les_diagnose_fn_mpas_surface_flux_fails_loud():
-    """The prescribed surface-flux BC needs cell-centred winds for |U|; the MPAS
-    edge-velocity path (``u=u_edge, v=None``) cannot supply them, so ``--surface-flux`` +
-    MPAS must FAIL LOUD (iter 369) — not crash cryptically on the ``v=None`` gather (the
-    bug this guard fixes), and not compute a wrong flux from an edge index.  The MPAS
-    cell-wind reconstruction is a follow-up; the cell grids are unaffected."""
+def test_make_les_diagnose_fn_mpas_surface_flux_works(monkeypatch):
+    """The surface-flux BC now WORKS on MPAS (iter 371, was fail-loud in 369): the
+    cell-centred wind is RECONSTRUCTED from ``u_edge`` via the canonical Perot
+    ``reconstruct_cell_velocity`` (REUSE), so ``--surface-flux`` + MPAS composes end-to-end
+    — the surface flux IS computed (``column_surface_kinematic_fluxes`` called once) and the
+    diagnosis is finite, no crash on the old ``v=None`` gather."""
+    from legoesm.atmosphere.dynamics import column_les
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh
+
+    called = {"n": 0}
+    real_flux = column_les.column_surface_kinematic_fluxes
+
+    def spy(**kw):
+        called["n"] += 1
+        return real_flux(**kw)
+
+    monkeypatch.setattr(column_les, "column_surface_kinematic_fluxes", spy)
 
     mesh = create_voronoi_mesh(2)
     nlev = 5
@@ -1692,8 +1687,9 @@ def test_make_les_diagnose_fn_mpas_surface_flux_fails_loud():
     diagnose_fn = make_les_diagnose_fn(
         mesh, sigma, run_les_fn=_mock_run_les,
         les_config=ColumnLESConfig(regime=_SMALL_REGIME, surface_flux=True))
-    with pytest.raises(ValueError, match="MPAS/edge-velocity"):
-        diagnose_fn(_Rec(), state)
+    out = diagnose_fn(_Rec(), state)                 # composes (no crash)
+    assert called["n"] == 1                          # the surface flux WAS computed for MPAS
+    assert bool(jnp.all(jnp.isfinite(out.K)))        # a finite eddy-diffusivity diagnosis
 
 
 @pytest.mark.parametrize("feedback_strategy", ["static", "environment"])

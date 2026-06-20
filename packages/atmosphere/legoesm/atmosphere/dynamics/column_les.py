@@ -626,19 +626,19 @@ def extract_gcm_column(
     # converted to kinematic — its iter-148 lock relaxed now that the LES applies it (151).
     if sst_K is not None:
         # The bulk flux needs the CELL-CENTRED surface wind |U₁| = √(u₁²+v₁²).  The MPAS
-        # path passes ``u=u_edge, v=None`` (edge-normal velocity), so u[idx] is an edge
-        # gather (not the cell wind) and v is absent — FAIL LOUD rather than crash cryptically
-        # or compute a wrong flux.  The MPAS cell-wind reconstruction is a follow-up; the
-        # surface flux is supported on the 3 cell-grids (lat-lon/cubed-sphere/Gaussian).
+        # path passes ``u=u_edge, v=None`` (edge-normal velocity), so RECONSTRUCT the
+        # cell-centred geographic wind from the edge normals via the canonical Perot
+        # reconstruction (``reconstruct_cell_velocity`` — REUSE, the same the MPAS column
+        # physics use; differentiable) before gathering the column.  Cell grids already
+        # carry (u, v).
         if v is None:
-            raise ValueError(
-                "extract_gcm_column: the prescribed surface-flux BC (sst_K given) needs "
-                "cell-centred winds (u, v) for the bulk surface wind speed, but v is None "
-                "(an MPAS/edge-velocity column). The MPAS cell-wind reconstruction is a "
-                "follow-up — disable --surface-flux for MPAS runs (it is supported on the "
-                "lat-lon / cubed-sphere / Gaussian cell grids).")
-        u_col = jnp.asarray(u)[idx]
-        v_col = jnp.asarray(v)[idx]
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            u_cell, v_cell = reconstruct_cell_velocity(jnp.asarray(u), grid)
+            u_col = u_cell[idx]
+            v_col = v_cell[idx]
+        else:
+            u_col = jnp.asarray(u)[idx]
+            v_col = jnp.asarray(v)[idx]
         sst_col = jnp.asarray(sst_K)[idx]
         w_th_s, w_qv_s = column_surface_kinematic_fluxes(
             T_col=T_col, q_v_col=q_col, u_col=u_col, v_col=v_col,
