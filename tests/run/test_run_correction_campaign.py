@@ -2527,6 +2527,54 @@ def test_build_multi_correction_campaign_corrects_both_coefficients():
     assert float(prt.min()) >= 0.3 and float(prt.max()) <= 1.5   # Pr_t bounds
 
 
+def test_multi_campaign_auto_populates_clubb_l_mix_max_from_tuned_config(monkeypatch):
+    """The MULTI-coefficient path's l_mix_max threading guard (the iter-379 single-path
+    analog for ``build_multi_correction_campaign``, line ~767).  C_eps's diagnosis,
+    like C_K's, evaluates the GCM mixing length, so a hardcoded ``l_mix_max`` would
+    bias BOTH co-corrected coefficients whenever the GCM value is tuned.  The
+    'corrects_both_coefficients' wiring test uses the DEFAULT 100.0 (vacuous).  Here a
+    TUNED ``initial_clubb.l_mix_max=175.0`` with ``coefficients=("C_K","C_eps")`` (both
+    need ℓ) must reach ``make_les_diagnose_fn``'s ``les_config.clubb_l_mix_max``."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.run.run_correction_campaign as rcc
+
+    tuned = 175.0                                    # ≠ the 100.0 default ⇒ non-vacuous
+    assert tuned != float(CLUBBLiteConfig().l_mix_max)
+    captured = {}
+
+    def spy_make_les_diagnose_fn(*_a, les_config, **_kw):
+        captured["l_mix_max"] = les_config.clubb_l_mix_max
+        return lambda record, ctx: None
+
+    import legoesm.training.correction_loop as cl
+
+    monkeypatch.setattr(rcc, "make_les_diagnose_fn", spy_make_les_diagnose_fn)
+    # build_multi_correction_campaign imports run_multi_correction_campaign at call
+    # time (function-scope), so patch the SOURCE module, not the rcc namespace.
+    monkeypatch.setattr(cl, "run_multi_correction_campaign",
+                        lambda *_a, **_kw: "SENTINEL")
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    out = build_multi_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),  # noqa: ARG005
+        extract_column_state=lambda d, day, dt: d.state,         # noqa: ARG005
+        reference=model_state, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        coefficients=("C_K", "C_eps"),               # both evaluate the GCM mixing length
+        initial_clubb=CLUBBLiteConfig(l_mix_max=tuned))
+
+    assert out == "SENTINEL"
+    assert captured["l_mix_max"] == pytest.approx(tuned)
+
+
 def test_build_correction_campaign_c_eps_single_method():
     """Single-coefficient c_eps is wired: build_correction_campaign selects the
     clubb_lite_C_eps promotion + C_eps background + auto-populates l_mix_max."""
