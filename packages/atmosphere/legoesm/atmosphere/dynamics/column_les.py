@@ -513,11 +513,13 @@ def extract_gcm_column(
         lat_rad=lat_rad, col_index=col_index, phis=phis,
     )
     idx = tuple(int(c) for c in col_index)
-    sigma_full = jnp.asarray(sigma.sigma_full)
-    sigma_half = jnp.asarray(sigma.sigma_half)
     p_s_col = jnp.asarray(p_s)[idx]
-    p_full_col = p_s_col * sigma_full
-    p_half_col = p_s_col * sigma_half
+    # The column's TRUE full/half-level pressures from the model's coordinate (hybrid-correct;
+    # iter 341): the LES reference θ + heights must be built on the model's ACTUAL levels
+    # (``p = A·p_ref + B·p_s`` for a hybrid coordinate, the default), not pure-sigma ``σ·p_s``.
+    # For a SigmaCoordinate ``pressure_at_full == σ·p_s`` (byte-identical).
+    p_full_col = jnp.asarray(sigma.pressure_at_full(p_s_col))
+    p_half_col = jnp.asarray(sigma.pressure_at_half(p_s_col))
     T_col = jnp.asarray(T)[idx]
     q_col = jnp.asarray(q_v)[idx]
     z_full, _ = compute_heights_from_sigma(

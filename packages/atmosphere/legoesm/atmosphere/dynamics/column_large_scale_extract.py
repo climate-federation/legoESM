@@ -164,8 +164,9 @@ def _geopotential_full_grid(
     ncol = 1
     for d in spatial:
         ncol *= int(d)
-    sigma_half = jnp.asarray(sigma_coord.sigma_half, dtype=T.dtype)
-    p_half = p_s.reshape(ncol, 1) * sigma_half[None, :]
+    # Model TRUE half-level pressures (hybrid-correct; iter 341): for the column geopotential
+    # (the geostrophic wind).  Pure-sigma: pressure_at_half == sigma*p_s (byte-identical).
+    p_half = jnp.asarray(sigma_coord.pressure_at_half(p_s.reshape(ncol)), dtype=T.dtype)
     z_full, _ = compute_heights_from_sigma(
         T.reshape(ncol, nlev), p_half, q_v.reshape(ncol, nlev)
     )
@@ -303,8 +304,10 @@ def extract_column_forcing_latlon(
     u = jnp.asarray(u, dtype=T.dtype)
     v = jnp.asarray(v, dtype=T.dtype)
     p_s = jnp.asarray(p_s, dtype=T.dtype)
-    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
-    p_full = p_s[..., None] * sigma_full
+    # Model TRUE full-level pressures (hybrid-correct; iter 341): use the coordinate's
+    # pressures, not pure-sigma sigma*p_s, so theta is on the model's ACTUAL levels.
+    # For a SigmaCoordinate pressure_at_full == sigma*p_s (byte-identical).
+    p_full = jnp.asarray(sigma_coord.pressure_at_full(p_s), dtype=T.dtype)
 
     theta = T / exner_function(p_full)
     th_x, th_y = _gradient_latlon_3d(theta, grid)
@@ -457,8 +460,10 @@ def extract_column_forcing_cubed_sphere(
     u = jnp.asarray(u, dtype=T.dtype)
     v = jnp.asarray(v, dtype=T.dtype)
     p_s = jnp.asarray(p_s, dtype=T.dtype)
-    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
-    p_full = p_s[..., None] * sigma_full
+    # Model TRUE full-level pressures (hybrid-correct; iter 341): use the coordinate's
+    # pressures, not pure-sigma sigma*p_s, so theta is on the model's ACTUAL levels.
+    # For a SigmaCoordinate pressure_at_full == sigma*p_s (byte-identical).
+    p_full = jnp.asarray(sigma_coord.pressure_at_full(p_s), dtype=T.dtype)
 
     theta = T / exner_function(p_full)
     th_x, th_y = _gradient_cubed_3d(theta, grid)
@@ -620,8 +625,10 @@ def extract_column_forcing_voronoi(
     q_v = jnp.asarray(q_v, dtype=T.dtype)
     u_edge = jnp.asarray(u_edge, dtype=T.dtype)
     p_s = jnp.asarray(p_s, dtype=T.dtype)
-    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
-    p_full = p_s[..., None] * sigma_full
+    # Model TRUE full-level pressures (hybrid-correct; iter 341): use the coordinate's
+    # pressures, not pure-sigma sigma*p_s, so theta is on the model's ACTUAL levels.
+    # For a SigmaCoordinate pressure_at_full == sigma*p_s (byte-identical).
+    p_full = jnp.asarray(sigma_coord.pressure_at_full(p_s), dtype=T.dtype)
 
     theta = T / exner_function(p_full)
     th_x, th_y = _gradient_voronoi_3d(theta, mesh)
@@ -756,8 +763,10 @@ def extract_column_forcing_gaussian(
     u = jnp.asarray(u, dtype=T.dtype)
     v = jnp.asarray(v, dtype=T.dtype)
     p_s = jnp.asarray(p_s, dtype=T.dtype)
-    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=T.dtype)
-    p_full = p_s[..., None] * sigma_full
+    # Model TRUE full-level pressures (hybrid-correct; iter 341): use the coordinate's
+    # pressures, not pure-sigma sigma*p_s, so theta is on the model's ACTUAL levels.
+    # For a SigmaCoordinate pressure_at_full == sigma*p_s (byte-identical).
+    p_full = jnp.asarray(sigma_coord.pressure_at_full(p_s), dtype=T.dtype)
 
     theta = T / exner_function(p_full)
     div_3d = _spectral_divergence_3d(u, v, grid)               # ∇·v

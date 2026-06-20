@@ -612,6 +612,29 @@ def test_extract_gcm_column():
     assert bool(jnp.all(jnp.diff(gcm_theta) < 0.0))    # θ increases with height
 
 
+def test_extract_gcm_column_uses_hybrid_pressures_over_terrain():
+    """extract_gcm_column builds the GCM column's θ from the model COORDINATE's pressures
+    (iter 341), not pure-sigma σ·p_s — so for a hybrid coordinate (the dycore default) over a
+    terrain column (p_s != p_ref) the reference θ DIFFERS from the pure-sigma version (it was
+    silently wrong before).  A pure-sigma coordinate reproduces the prior θ exactly (locked by
+    test_extract_gcm_column above)."""
+    from legoesm.grids.vertical import make_hybrid_levels
+
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    shape = (n_lat, n_lon, nlev)
+    kw = dict(
+        T=jnp.full(shape, 280.0), q_v=jnp.full(shape, 5e-3),
+        u=jnp.full(shape, 10.0), v=jnp.zeros(shape),
+        p_s=jnp.full((n_lat, n_lon), 7.0e4),       # 700-hPa terrain column (p_s != p_ref ~1e5)
+        grid=grid, col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)))
+    _, theta_sigma, _ = extract_gcm_column(sigma=create_sigma_coordinate(nlev), **kw)
+    _, theta_hybrid, _ = extract_gcm_column(
+        sigma=make_hybrid_levels(nlev, p_top_Pa=100.0), **kw)
+    # The hybrid column pressures (A·p_ref + B·p_s) differ from σ·p_s over terrain ⇒ different θ.
+    assert float(jnp.max(jnp.abs(theta_hybrid - theta_sigma))) > 0.5
+
+
 def test_extract_gcm_column_orographic_phis_activates_geostrophic_term():
     """iter-118 driver wiring: passing ``phis`` to extract_gcm_column threads the
     orographic surface-geopotential term (iter 117) into the geostrophic forcing —
