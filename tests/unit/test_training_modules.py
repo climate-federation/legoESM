@@ -701,6 +701,39 @@ class TestERA5ToState:
             f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
         )
 
+    def test_era5_to_cubedsphere_carry_converts_q_to_mixing_ratio(self):
+        """Cross-grid parity with the latlon carry's q→mixing-ratio lock
+        (``test_era5_load_regrid_to_reference_column_state_integration``): the
+        cubed-sphere carry must ALSO convert ERA5 SPECIFIC humidity to MIXING ratio
+        ``r = q/(1−q)`` (each ``era5_to_*_carry`` applies it independently, line 559;
+        a refactor dropping it from THIS carry would silently leave the reference q as
+        specific humidity — a moisture bias on every cubed-sphere run).  A CONSTANT
+        ``q`` makes the test robust to the (nonlinear) convert-vs-regrid order: both
+        give ``r`` for a uniform field."""
+        import jax.numpy as jnp
+        from legoesm.thermo import specific_humidity_to_mixing_ratio
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        q0 = 5e-3
+
+        def const(v):
+            return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
+
+        era5 = ERA5Slice(
+            T=const(280.0), u=const(5.0), v=const(0.0), q=const(q0),
+            p_s=np.full((n_lat, n_lon), 101325.0, dtype=np.float32),
+            sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.zeros((n_lat, n_lon), dtype=np.float32),
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
+        # The uniform specific humidity becomes the (larger) MIXING ratio everywhere.
+        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
+        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver
