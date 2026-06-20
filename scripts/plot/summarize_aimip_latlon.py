@@ -65,10 +65,14 @@ def _composite_scores(entries: dict[str, dict]) -> dict[str, float]:
 
     ``entries`` maps label -> scorecard variant/combo block.  The score is
     the 50/50 mean of the state-group and flux-group means, each metric's
-    RMSE normalized by the positive median across entries.  A score is
-    ``inf`` unless BOTH groups have at least one finite metric — so a
-    partial/errored entry can never out-rank a complete one, and the 50/50
-    weighting is never silently renormalized to one group.
+    RMSE normalized by the positive median across entries.  A group counts
+    only if ALL of its metrics are present and finite; otherwise the whole
+    composite is ``inf``.  So a partial/errored entry can never out-rank a
+    complete one (a composite over an unequal metric set is not a fair
+    comparison), and the 50/50 weighting is never silently renormalized to
+    one group.  ``evaluate()`` always emits all nine metrics, so a real
+    complete run is rankable; a missing metric signals corruption and is
+    treated as unrankable.
     """
     # Positive-finite median per metric (the normalizer); skip degenerate
     # (all-None / all-zero) metrics so we never divide by zero.
@@ -80,10 +84,16 @@ def _composite_scores(entries: dict[str, dict]) -> dict[str, float]:
             medians[k] = statistics.median(vals)
 
     def _grp(e, keys):
-        norm = [_rmse(e, k) / medians[k]
-                for k in keys
-                if k in medians and _rmse(e, k) is not None]
-        return sum(norm) / len(norm) if norm else None
+        # Require EVERY metric in the group to be present + finite — a
+        # composite over an unequal metric set is not a fair comparison, so
+        # a partial entry must be unrankable, not cheaply low-scored.
+        if any(_rmse(e, k) is None for k in keys):
+            return None
+        # rmse/median where a positive median exists; an all-zero metric
+        # (no median) is equal for everyone -> contributes 0.
+        norm = [(_rmse(e, k) / medians[k]) if k in medians else 0.0
+                for k in keys]
+        return sum(norm) / len(norm)
 
     scores = {}
     for label, e in entries.items():

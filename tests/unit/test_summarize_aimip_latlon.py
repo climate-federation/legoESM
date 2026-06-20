@@ -78,23 +78,33 @@ def test_all_failed_is_not_rankable(tmp_path):
     assert "**★**" not in md  # no row marked best (legend has a bare ★)
 
 
-def test_nan_metric_not_selected_as_best(tmp_path):
+def test_nan_metric_makes_entry_unrankable(tmp_path):
     mod = _load_mod()
-    nan_block = _block(1.0)
-    nan_block["eval_metrics"]["T"]["rmse"] = float("nan")
-    nan_block["eval_metrics"]["olr"]["rmse"] = float("nan")
-    sc = {"good": _block(5.0), "nanmodel": nan_block}
-    p = tmp_path / "aimip_latlon_scorecard.json"
-    p.write_text(json.dumps(sc))
-    md = mod.summarize_run(p)
-    # nanmodel still has other finite metrics in each group, so it is
-    # rankable; but its composite must be a real number, never NaN, and the
-    # best must be a finite-scored entry.
-    scores = mod._composite_scores(
-        {k: v for k, v in json.loads(p.read_text()).items()})
     import math
+    nan_block = _block(1.0)
+    nan_block["eval_metrics"]["T"]["rmse"] = float("nan")   # missing a state key
+    nan_block["eval_metrics"]["olr"]["rmse"] = float("nan")  # missing a flux key
+    sc = {"good": _block(5.0), "nanmodel": nan_block}
+    scores = mod._composite_scores(sc)
+    # NaN -> metric absent -> group incomplete -> composite inf (never NaN),
+    # and the finite-scored complete entry is best.
     assert all(not math.isnan(s) for s in scores.values())
-    assert mod._best(scores) is not None
+    assert math.isinf(scores["nanmodel"])
+    assert mod._best(scores) == "good"
+
+
+def test_partial_entry_cannot_beat_complete(tmp_path):
+    """Codex round-2: a partial entry (few below-median metrics) must not
+    out-rank a complete one via median-normalization."""
+    mod = _load_mod()
+    import math
+    complete = _block(10.0)
+    partial = {"eval_metrics": {"T": {"rmse": 1.0, "bias": 0.0},
+                                "rsut": {"rmse": 1.0, "bias": 0.0}}}
+    scores = mod._composite_scores({"complete": complete, "partial": partial})
+    assert math.isinf(scores["partial"])      # missing most metrics
+    assert math.isfinite(scores["complete"])
+    assert mod._best(scores) == "complete"
 
 
 def test_missing_flux_group_not_rankable(tmp_path):
