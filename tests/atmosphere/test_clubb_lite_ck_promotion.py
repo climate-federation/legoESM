@@ -81,6 +81,50 @@ def test_per_column_ck_changes_km_per_column():
     np.testing.assert_allclose(Km_pc[1], 2.0 * Km_base[1], rtol=1e-12)
 
 
+def test_ck_diagnosis_inverts_the_real_clubb_lite_forward():
+    """The LES C_K diagnosis must invert the ACTUAL ``clubb_lite_turbulence`` forward
+    closure — not just a hand-written ``Km = C_K·l·√wp2`` replica (which is what
+    ``test_les_closure_diagnosis.test_clubb_coefficient_exact_inverse_of_gcm_forward``
+    uses).  Run the REAL GCM forward with a known C_K, then diagnose C_K back from the
+    returned ``out.Km`` using the SAME mixing length (``mixing_length(z_full, l_mix_max)``)
+    and wp2 the forward used — recovery to ~machine precision.
+
+    Why a SECOND test against the real forward: the hand-written test and the diagnosis
+    share the same formula, so a DIVERGENCE between ``clubb_lite.py``'s actual
+    ``Km_full = C_K·l_mix·√wp2`` (line ~215) and the inverse (e.g. an edit to ``l_mix²`` on
+    one side only) would leave BOTH passing while every LES-informed correction is
+    systematically biased.  This test fails the moment the real forward and the inverse
+    disagree.  (``tke=0.4 ≫ tke_min`` so the forward's ``wp2=max(tke,tke_min)`` is the raw
+    ``tke``; the forward's ``Km`` uses the RAW ``l_mix``, not ``l_mix_safe``.)"""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        clubb_coefficient_from_diffusivity,
+    )
+    from legoesm.atmosphere.physics._shared import mixing_length
+
+    kw = _inputs()
+    l_mix = mixing_length(kw["z_full"], CLUBBLiteConfig().l_mix_max)
+    wp2 = kw["tke"]                                      # == forward's wp2 (no clamp)
+
+    # (1) scalar C_K (production, vertically constant).
+    ck_true = 0.31
+    out, _ = clubb_lite_turbulence(**kw, config=CLUBBLiteConfig(C_K=ck_true))
+    ck_rec, valid = clubb_coefficient_from_diffusivity(
+        out.Km, jnp.ones_like(out.Km, bool), l_mix, wp2)
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(ck_rec), ck_true, rtol=1e-6)
+
+    # (2) per-column C_K (the LES-informed correction) — each column recovers its own value.
+    ncol = kw["T"].shape[0]
+    ck_col = jnp.array([0.22, 0.31, 0.55])[:ncol]
+    out_pc, _ = clubb_lite_turbulence(**kw, config=CLUBBLiteConfig(C_K=ck_col))
+    ck_rec_pc, valid_pc = clubb_coefficient_from_diffusivity(
+        out_pc.Km, jnp.ones_like(out_pc.Km, bool), l_mix, wp2)
+    assert bool(jnp.all(valid_pc))
+    np.testing.assert_allclose(
+        np.asarray(ck_rec_pc), np.broadcast_to(np.asarray(ck_col)[:, None], out_pc.Km.shape),
+        rtol=1e-6)
+
+
 def test_promotion_registered_and_applies():
     """C_K is registered promotable and apply_feedback_to_scheme splices it."""
     from legoesm.training.promotable_params import (
