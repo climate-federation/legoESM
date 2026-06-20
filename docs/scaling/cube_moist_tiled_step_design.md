@@ -71,9 +71,21 @@ Future-HW (np>6 anti-scales on Ginsburg CPU); every increment gated by BIT-IDENT
    promoted public; `make_tiled_fv3_moist_tracer_tendency_stage_2d` (advection +
    injected per-tile column physics); np24 bit-identity vs serial advection +
    kessler.
-4. **Full moist tiled step.** `make_tiled_fv3_hydrostatic_moist_step_stage_2d` →
-   `step(u_d, v_d, T, p_s, phis, q_pack) -> (..., q_pack)` + post-step tracer
-   floor. np24/54 bit-identity gate vs the serial moist step.
+4. **Full moist tiled step. DONE (code 9ac698e42 codex-CLEAN; test fixes
+   9425e84bd; gate moist_step[2] PASSED np24).** `make_tiled_fv3_hydrostatic
+   _moist_step_stage_2d` → `step(u_d, v_d, T, p_s, phis, q_pack) -> (..., q_pack)`
+   + post-step tracer floor. Parity vs the serial base-cut moist RK3: u_d/v_d/T/p_s
+   rel<1e-10, q_pack rel 3.6e-10 (Kessler nonlinear + 3-stage RK3 FMA reorder,
+   bit-identity class). LESSON — all 3 initial gate failures were TEST-REFERENCE
+   bugs, NOT tiled code: (i) the reference passed `dt_actual` → the iter-189
+   corner-div adaptive cap (a shape error) the tiled base cut omits; (ii) D-grid
+   CORNER fields u_d/v_d need a block-wise `_rel_corner` compare (the tiled output
+   is kt blocks of nl+1 with the staggered shared edge duplicated, NOT n+1);
+   (iii) q_pack rides nonlinear Kessler → looser (1e-8) FMA tol than the linear
+   dynamics. The tiled code (the shared tracer-aware `_build_hydro_tile_tendency
+   _fns` + `_ssp_rk3_tile_step`) was correct from the first build.
+
+   **np24/54 bit-identity gate vs the serial moist step (the original plan):**
    ARCHITECTURE FINDING (scout 2026-06-20): NOT "compose increment 3 into the dry
    RK3" — the tracer VERTICAL advection is coupled to the dynamics' vertical
    velocity (`sigma_dot`/`mass_flux`), which is computed INSIDE the shared

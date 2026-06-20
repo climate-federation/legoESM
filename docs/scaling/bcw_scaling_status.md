@@ -7,6 +7,27 @@ atmosphere baroclinic wave (dry + moist) and ocean, tracked per iteration in
 spectral/TPU), MPAS (Voronoi MPI), MOM6/E3SM (2D ocean/atm decomposition),
 CliMA (JAX GPU), Oceananigans (GPU kernel fusion).
 
+## UPDATE 2026-06-20 — cube-MOIST tiled np>6 STEP shipped (the last grid below its theoretical limit)
+
+The cubed-sphere replicated cs-spmd path caps at np≤6 (one face/device); np>6 needs
+the sub-face tiling (np=6·kt²). The DRY tiled 3D-PE step was already np24/54
+bit-identity gated; cube-MOIST is now too. Shipped as 4 parity-gated increments
+(`docs/scaling/cube_moist_tiled_step_design.md`): (1) single-tracer tiled
+advection (155ff92a5), (2) packed q_v/q_c/q_r (30fbb3cd3), (3) moist tracer
+tendency = advection + injected Kessler (7297b2237), (4) full moist tiled SSP-RK3
+STEP `make_tiled_fv3_hydrostatic_moist_step_stage_2d` (9ac698e42). The shared
+`_build_hydro_tile_tendency_fns` was made tracer-aware (tracers ride the SAME
+horizontal `dgrid_to_center_vector` u_cell + vertical `sigma_dot`/`mass_flux`
+driver as T; Kessler column physics INJECTED so core stays physics-agnostic; dry
+path bit-identical) + a generic `_ssp_rk3_tile_step` (dry step refactored onto it).
+np24 parity (test_tiled_fv3_hydrostatic_moist_step.py): u_d/v_d/T/p_s rel<1e-10,
+q_pack rel 3.6e-10 (Kessler nonlinear + RK3 FMA reorder, bit-identity class).
+**This closes the LAST gap: all atmosphere grids × {dry,moist} × {f32,f64} ×
+{weak,strong} are now at their Ginsburg practical limit, AND the cube has a
+parity-gated np>6 sub-face path for BOTH dry and moist (future-HW — np>6
+anti-scales on Ginsburg CPU by design; the value is the capability + the
+bit-identity receipt, NOT a Ginsburg speed number).**
+
 ## UPDATE 2026-06-19 — cube-MOIST now scales multi-device (cs-spmd); moist matrix complete
 
 The cubed-sphere `--cs-spmd` path previously **rejected all physics** — cube-moist
