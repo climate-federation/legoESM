@@ -178,6 +178,18 @@ def test_assert_model_state_finite_checks_optional_fields_and_skips_absent():
     assert assert_model_state_finite(plain) is None
 
 
+def test_assert_model_state_finite_catches_u_edge_blowup():
+    """codex iter 401 (Finding 2.1): a NaN in the NATIVE MPAS edge velocity ``u_edge`` —
+    a state whose per-column compare fields are ALL finite but whose prognostic edge
+    winds diverged — RAISES naming u_edge.  Regression guard for the fast-path/loop sync:
+    ``model_state_is_finite`` now returns False for a u_edge NaN, so the detailed loop
+    MUST also list u_edge or it would fast-path-False then find-nothing ⇒ silent pass."""
+    bad = _uniform_state((4,), 3)._replace(
+        u_edge=jnp.full((6,), 1.0).at[3].set(jnp.nan))
+    with pytest.raises(ValueError, match=r"u_edge has 1/6 non-finite"):
+        assert_model_state_finite(bad)
+
+
 def test_model_state_is_finite_bool_core():
     """The NON-fatal BOOL core (shared by the loop line-search + held-out-verify gates,
     iters 392/393): finite ⇒ True; any NaN/Inf prognostic ⇒ False; ``None`` (a mock
@@ -190,6 +202,12 @@ def test_model_state_is_finite_bool_core():
     assert model_state_is_finite(bad) is False
     assert model_state_is_finite(None) is True              # mock compare_fn ⇒ skip
     assert model_state_is_finite(object()) is True          # no prognostic fields ⇒ skip
+    # u_edge (native MPAS edge velocity, codex iter 401): a NaN there ⇒ NOT finite even
+    # when every per-column compare field is finite (a u_edge-only MPAS blow-up). It is
+    # None on non-MPAS states (the default), so the ``ok`` above passes unaffected.
+    bad_edge = ok._replace(u_edge=jnp.full((6,), 1.0).at[3].set(jnp.nan))
+    assert model_state_is_finite(bad_edge) is False
+    assert model_state_is_finite(ok._replace(u_edge=jnp.full((6,), 1.0))) is True
 
 
 def test_precip_accum_conversion():

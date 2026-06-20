@@ -525,6 +525,24 @@ def test_campaign_resume_rejects_config_not_carrying_field():
     np.testing.assert_allclose(np.asarray(ok.final_field), 0.7)
 
 
+def test_campaign_resume_rejects_scalar_config_even_at_single_column():
+    """codex iter 401 (Finding 1.1): at ncol=1 a SCALAR config leaf + a (1,) field share
+    the same reshape(-1) shape AND value, so the shape + array_equal checks ALONE would
+    FALSELY pass — yet a scalar config still triggers the first round's round-0
+    uniform-bias branch (the compare reads ``config.<field>``'s NDIM).  The explicit
+    scalar-vs-array ndim check rejects it; the (1,)-array-carrying config is accepted."""
+    field = jnp.full((1, 1), 0.7)                     # a single-column accumulated field
+    noop = lambda c: CompareResult(jnp.zeros((1, 1)), [], jnp.ones((1, 1)))  # noqa: E731,ARG005
+    kw = dict(compare_fn=noop, diagnose_fn=lambda r, c: None,
+              promotion_key="clubb_lite_C_K", grid_shape=(1, 1), background=0.4,
+              initial_field=field)
+    with pytest.raises(ValueError, match=r"scalar \(un-promoted\)"):
+        run_correction_campaign(CLUBBLiteConfig(C_K=0.7), n_iterations=1, **kw)  # scalar == value
+    ok = run_correction_campaign(
+        CLUBBLiteConfig(C_K=field.reshape(-1)), n_iterations=1, **kw)   # (1,) array ⇒ OK
+    np.testing.assert_allclose(np.asarray(ok.final_field), 0.7)
+
+
 def test_multi_campaign_resume_rejects_config_not_carrying_field():
     """The SAME resume contract on the multi-coefficient path: a SCALAR initial_config
     + an array ``initial_fields`` entry (≥1 round) RAISES rather than silently

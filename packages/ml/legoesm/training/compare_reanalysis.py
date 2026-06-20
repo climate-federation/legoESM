@@ -228,10 +228,16 @@ def model_state_is_finite(state: Any) -> bool:
     guard the loop's line search + the held-out verify need: a blown-up CANDIDATE must
     read as NOT-improved, not raise on one bad step (iters 392/393).  ``state is None``
     (a mock ``compare_fn`` carrying no state), or a state lacking the prognostic fields,
-    ⇒ True (nothing to check) — so abstract-mock compare_fns are unaffected."""
+    ⇒ True (nothing to check) — so abstract-mock compare_fns are unaffected.
+
+    Checks EVERY prognostic leaf, incl. ``u_edge`` (the NATIVE MPAS edge-normal velocity;
+    it is not a per-column COMPARE field, but it IS prognostic — a diverged MPAS run can
+    blow up the edge winds, and the Perot cell reconstruction is linear so a NaN there
+    propagates, but guard it directly too rather than rely on that propagation).  Each is
+    ``None``-defaulted, so a non-MPAS state simply skips ``u_edge`` (codex-review iter 401)."""
     if state is None:
         return True
-    for fname in ("T", "q_v", "u", "v", "p_s", "sst_K", "precip_mm_day"):
+    for fname in ("T", "q_v", "u", "v", "p_s", "sst_K", "precip_mm_day", "u_edge"):
         value = getattr(state, fname, None)
         if value is not None and not bool(jnp.all(jnp.isfinite(jnp.asarray(value)))):
             return False
@@ -267,6 +273,11 @@ def assert_model_state_finite(state: ColumnState, *, name: str = "model run") ->
         fields.append(("sst_K", state.sst_K))
     if state.precip_mm_day is not None:
         fields.append(("precip_mm_day", state.precip_mm_day))
+    if getattr(state, "u_edge", None) is not None:
+        # MPAS native edge velocity (iter 401): keep the detailed loop in sync with
+        # model_state_is_finite's field set so a u_edge-only NaN raises here too rather
+        # than fast-path-False → loop-finds-nothing → silent pass.
+        fields.append(("u_edge", state.u_edge))
     for field, value in fields:
         arr = jnp.asarray(value)
         finite = jnp.isfinite(arr)

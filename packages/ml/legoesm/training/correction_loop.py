@@ -91,11 +91,25 @@ def _assert_resume_config_carries_field(
     if pf is None:
         return
     leaf = getattr(initial_config, pf.field, None)
-    field_flat = jnp.asarray(initial_field).reshape(-1)
-    leaf_flat = None if leaf is None else jnp.asarray(leaf).reshape(-1)
-    if (leaf_flat is None or leaf_flat.shape != field_flat.shape
-            or not bool(jnp.array_equal(leaf_flat, field_flat))):
-        got = "absent" if leaf is None else f"shape {tuple(jnp.asarray(leaf).shape)}"
+    field_arr = jnp.asarray(initial_field)
+    field_flat = field_arr.reshape(-1)
+    if leaf is None:
+        bad, got = True, "absent"
+    else:
+        leaf_arr = jnp.asarray(leaf)
+        # A SCALAR (un-promoted) leaf can NEVER carry a per-column field — even at
+        # ncol=1, where a (1,)-vs-(1,) reshape-equality would FALSELY pass, the first
+        # resumed round's compare reads config.<field>'s NDIM to branch (scalar ⇒ the
+        # round-0 uniform path), so reject the ndim mismatch explicitly (codex iter 401).
+        if leaf_arr.ndim == 0 and field_arr.ndim > 0:
+            bad, got = True, "scalar (un-promoted)"
+        elif leaf_arr.reshape(-1).shape != field_flat.shape:
+            bad, got = True, f"shape {tuple(leaf_arr.shape)}"
+        elif not bool(jnp.array_equal(leaf_arr.reshape(-1), field_flat)):
+            bad, got = True, f"shape {tuple(leaf_arr.shape)}, values differ"
+        else:
+            bad, got = False, ""
+    if bad:
         raise ValueError(
             f"run_correction_campaign resume contract violated: the accumulated "
             f"initial_field for {promotion_key!r} {tuple(field_flat.shape)} is NOT "
