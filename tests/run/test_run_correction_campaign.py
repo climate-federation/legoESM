@@ -3352,6 +3352,33 @@ def test_offline_forcing_window_warning_fires_when_run_exceeds_one_month():
     assert _offline_forcing_window_warning(_OFFLINE_FORCING_SPAN_DAYS + 1) is not None
 
 
+def test_effective_config_sidecar_persists_runtime_injections(tmp_path):
+    """The campaign persists the EFFECTIVE config (base + runtime injections) as a sidecar next
+    to --out (iter 464), so a runtime-flag campaign's calibration config is recorded + the
+    deploy/re-run can reproduce the SST boundary + insolation the C_K was tuned for."""
+    import json
+
+    from legoesm.driver.config import ExperimentConfig, experiment_config_from_dict
+
+    from scripts.run.run_correction_campaign import (
+        _effective_config_path,
+        _write_effective_config,
+    )
+
+    out = str(tmp_path / "corrected.json")
+    assert _effective_config_path(out) == str(tmp_path / "corrected.effective_config.json")
+
+    # an effective config carrying the runtime injections (forcing + insolation offset)
+    cfg = ExperimentConfig(insolation_start_doy=244.0, dataset="custom",
+                           forcing_path="/archive/era5_amip.nc")
+    path = _write_effective_config(cfg, out)
+    assert path == _effective_config_path(out)
+    loaded = experiment_config_from_dict(json.load(open(path)))
+    assert loaded.insolation_start_doy == 244.0          # --align-insolation injection recorded
+    assert loaded.dataset == "custom"                    # --amip-forcing injection recorded
+    assert loaded.forcing_path == "/archive/era5_amip.nc"
+
+
 def test_offline_reference_window_warning_fires_for_short_reference_vs_long_model():
     """A SHORT offline ERA5 reference vs a multi-day model climatology warns about
     weather-vs-climate (iter 463); a well-matched window or a short test run is silent. The

@@ -1071,6 +1071,35 @@ def _maybe_align_insolation(args, base_cfg):
     return base_cfg._replace(insolation_start_doy=float(doy))
 
 
+def _effective_config_path(out_path: str) -> str:
+    """The sidecar path for the EFFECTIVE config the campaign ran (next to ``--out``)."""
+    import os
+    return os.path.splitext(out_path)[0] + ".effective_config.json"
+
+
+def _write_effective_config(base_cfg, out_path: str) -> str:
+    """Persist the EFFECTIVE ``ExperimentConfig`` the campaign actually ran — the base config
+    PLUS the RUNTIME injections (``--amip-forcing-from-local-era5`` => dataset/forcing_path;
+    ``--align-insolation`` => insolation_start_doy) — to a sidecar next to ``--out`` (iter 464).
+
+    Without this the runtime-flag injections leave NO on-disk record: the campaign calibrates C_K
+    on (base + injections) but the base config JSON does not capture them, so the run is not
+    reproducible and a SAME-WINDOW deploy (``build_deployed_config``) on the base JSON would run a
+    DIFFERENT SST boundary + insolation season than the C_K was tuned for. This sidecar is the
+    authoritative calibration config — use it as the deploy/re-run base. (A HELD-OUT-window verify
+    still re-derives the window-specific forcing + ``insolation_start_doy`` for that window; the
+    sidecar carries the non-window settings + documents what was calibrated.) Returns the path."""
+    import json
+    import os
+
+    from legoesm.driver.config import config_to_dict
+    path = _effective_config_path(out_path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(config_to_dict(base_cfg), f, indent=2)
+    return path
+
+
 def _maybe_ocean_mask(args, base_cfg):
     """If ``--ocean-only`` (opt-in), build an OCEAN-only worst-column ranking ``valid_mask``
     from the model's STATIC land fraction so the scarce LES budget targets columns where the
@@ -2468,6 +2497,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     base_cfg = _maybe_apply_local_era5_forcing(args, base_cfg)
     # Opt-in: align the radiation insolation season to the offline ERA5 date (iter 449/450).
     base_cfg = _maybe_align_insolation(args, base_cfg)
+    # Persist the EFFECTIVE config (base + runtime injections) as the authoritative calibration
+    # config for reproducibility + the deploy/re-run base (iter 464).
+    _eff_cfg_path = _write_effective_config(base_cfg, args.out)
+    print(f"[campaign] effective calibration config (base + runtime injections) -> "
+          f"{_eff_cfg_path}; use it as the deploy/re-run --base-config so the production run "
+          "reproduces the SST boundary + insolation the C_K was calibrated on.", flush=True)
 
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).

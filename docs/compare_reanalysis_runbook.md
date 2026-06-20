@@ -262,6 +262,15 @@ $PY scripts/experiment/check_campaign_deploy.py \
     --base-config configs/amip_clubb_lite.json --campaign-output $OUT
 ```
 
+> **Use the EFFECTIVE config as `--base-config` for a runtime-flag campaign (iter 464).** If the
+> campaign used runtime flags (`--align-insolation` sets `insolation_start_doy`,
+> `--amip-forcing-from-local-era5` injects the SST forcing), those are **not** in the original
+> base JSON — so the campaign writes the effective config it actually ran to
+> `<out>.effective_config.json` (next to `--out`). Pass **that** as `--base-config` to deploy/re-run
+> on the **same window**, so the production run reproduces the SST boundary + insolation season the
+> C_K was calibrated on. (A **held-out** verify (§6) re-derives the *window-specific* forcing +
+> `insolation_start_doy` for the held-out window, but keeps the non-window settings.)
+
 ## 5. Deploy + run a production simulation
 
 The correction is a **runtime** override (it does not serialize), so inject it at run
