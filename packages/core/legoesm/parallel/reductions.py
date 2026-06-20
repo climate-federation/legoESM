@@ -43,14 +43,16 @@ _FFI_JAX_MAX_EXCL = (0, 11, 0)
 _FFI_MPI4JAX_MIN = (0, 9, 0)
 _FFI_MPI4JAX_MAX_EXCL = (0, 10, 0)
 
-# mpi4jax 0.8.x uses the deprecated API_VERSION_STATUS_RETURNING custom-call
-# convention removed in JAX 0.10.  Until mpi4jax ships an FFI-based release,
-# pin JAX < 0.10 for MPI workloads.  The warning from XLA is cosmetic for now
-# (the API still functions) but will become a hard error once JAX 0.10 ships.
+# Two compatible generations (each package must be paired WITHIN one generation):
+# legacy custom-call (mpi4jax 0.8.x + jax 0.8-0.9) and FFI-based (mpi4jax 0.9.x + jax
+# 0.10.x).  mpi4jax 0.8.x's custom-call API was removed in jax 0.10; mpi4jax 0.9.x ships
+# the FFI-based replacement that REQUIRES jax >= 0.10 (verified-working, iter 333).  A
+# CROSS pairing is the genuinely-incompatible case.
 _MPI4JAX_FFI_MIGRATION_NOTE = (
-    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed in "
-    "JAX 0.10.  Upgrade to mpi4jax >= 0.9 (the FFI rewrite, mpi4jax#289), which "
-    "uses JAX's FFI mechanism and works on JAX 0.10+."
+    "legoESM supports two compatible generations paired TOGETHER: legacy "
+    "(jax 0.8-0.9 + mpi4jax 0.8) and FFI (jax 0.10 + mpi4jax 0.9); a cross pairing is "
+    "incompatible (mpi4jax 0.8's custom-call API was removed in jax 0.10, and the "
+    "mpi4jax 0.9 FFI API needs jax >= 0.10)."
 )
 
 
@@ -183,13 +185,26 @@ def _validate_mpi_runtime_versions(
             f"mpi4jax=={mpi4jax_version} (tested "
             f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)})"
         )
+    # Generation-aware remediation: guide the user to the CONSISTENT pairing for THEIR
+    # jax era (the legacy `pip install 'mpi4jax>=0.8,<0.9'` was wrong for a jax>=0.10 user,
+    # who needs the FFI line — iter 334).
+    if jax_triplet >= _FFI_JAX_MIN:
+        fix = (
+            "for this jax (>=0.10) install the FFI mpi4jax line: "
+            "pip install 'mpi4jax>=0.9,<0.10'"
+        )
+    else:
+        fix = (
+            "for this jax (<0.10) install the legacy mpi4jax line: "
+            "pip install 'mpi4jax>=0.8,<0.9'"
+        )
     msg = (
         "Detected versions outside legoESM's tested MPI range: "
         + ", ".join(parts)
         + ". MPI execution may fail or produce incorrect results. "
         + _MPI4JAX_FFI_MIGRATION_NOTE + " "
-        "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, "
-        "or install tested versions: pip install 'mpi4jax>=0.9,<0.10'"
+        "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, or "
+        + fix + "."
     )
     if strict:
         raise RuntimeError(msg)

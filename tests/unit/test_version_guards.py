@@ -128,6 +128,23 @@ class TestValidate:
         with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
             _validate_mpi_runtime_versions("0.11.0", "0.9.0")
 
+    def test_remediation_is_jax_generation_aware_ffi_era(self):
+        """A jax>=0.10 user with an incompatible mpi4jax must be told to install the FFI line
+        (mpi4jax>=0.9), NOT the legacy `mpi4jax>=0.8,<0.9` (which is removed-API on jax 0.10)
+        — the iter-334 fix to the stale remediation."""
+        with pytest.warns(RuntimeWarning) as rec:
+            _validate_mpi_runtime_versions("0.10.0", "0.8.0")    # FFI-era jax + legacy mpi4jax
+        msg = str(rec[0].message)
+        assert "mpi4jax>=0.9,<0.10" in msg                       # FFI line recommended
+        assert "mpi4jax>=0.8,<0.9'" not in msg                   # NOT the legacy line
+
+    def test_remediation_is_jax_generation_aware_legacy_era(self):
+        """A jax<0.10 user is still guided to the legacy mpi4jax line."""
+        with pytest.warns(RuntimeWarning) as rec:
+            _validate_mpi_runtime_versions("0.7.0", "0.8.0")     # pre-tested jax
+        msg = str(rec[0].message)
+        assert "mpi4jax>=0.8,<0.9" in msg                        # legacy line recommended
+
 
 # -----------------------------------------------------------------------
 # Consistency: constants match pyproject.toml
