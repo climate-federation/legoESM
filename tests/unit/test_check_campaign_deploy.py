@@ -191,6 +191,36 @@ def test_build_deployed_config_carries_the_override_and_validates(tmp_path):
     assert tuple(dgrid.grid_shape_2d) == (8, 16)
 
 
+def test_build_deployed_config_preserves_runtime_injections_from_effective_config(tmp_path):
+    """The iter-464 effective-config sidecar is DEPLOYABLE end-to-end: build_deployed_config on
+    an effective config (carrying the runtime injections dataset=custom + forcing_path +
+    insolation_start_doy) applies the C_K override AND preserves those fields — so a same-window
+    deploy reproduces the SST boundary + insolation the C_K was calibrated on (iter 468)."""
+    from legoesm.driver.config import config_to_dict
+
+    from scripts.experiment.check_campaign_deploy import build_deployed_config
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+    )
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    # an EFFECTIVE config = base clubb_lite + the runtime injections (iter 449/450 + the forcing)
+    eff = build_amip_clubb_lite_config(resolution=8, nlev=5)._replace(
+        dataset="custom", forcing_path="/archive/era5_amip.nc", insolation_start_doy=244.0)
+    eff_path = tmp_path / "corrected.effective_config.json"
+    with open(eff_path, "w") as f:
+        json.dump(config_to_dict(eff), f)
+
+    base_cfg, grid, _ = load_base_config_and_grid(str(eff_path))
+    out = _campaign_output(tmp_path, base_cfg, grid, lo=0.31, hi=0.59)
+    deployed, _dgrid = build_deployed_config(str(eff_path), out)
+
+    assert deployed.turbulence_override is not None         # the C_K correction applied
+    assert deployed.dataset == "custom"                     # --amip-forcing injection preserved
+    assert deployed.forcing_path == "/archive/era5_amip.nc"
+    assert deployed.insolation_start_doy == 244.0           # --align-insolation injection preserved
+
+
 def test_allow_unverified_grid_is_the_escape_hatch_but_keeps_the_length_check(tmp_path):
     """``allow_unverified_grid`` is the escape hatch for a campaign output that PREDATES
     grid provenance (no 'grid' block): refused by default (no provenance to verify),
