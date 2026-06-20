@@ -35,6 +35,8 @@ from legoesm.training.compare_reanalysis import (  # noqa: E402
 from legoesm.training.feedback_assembly import assemble_feedback_field  # noqa: E402
 from legoesm.training.promotable_params import apply_feedback_to_scheme  # noqa: E402
 
+from tests._offline_era5_rda import write_forcing_archive  # noqa: E402
+
 # Tiny LES box so the spin-off is cheap: 50 m * 8 = 400 m < 2 km top.
 _SMALL_RES = LESResolutionConfig(
     dx_m=50.0, nx=8, ny=8, nlev=8, domain_top_m=2000.0, dz_sfc_m=50.0
@@ -306,27 +308,6 @@ def test_full_loop_real_model_real_les_rerun_and_gate():
     assert res.n_corrected >= 1
 
 
-def _write_amip_era5_archive(tmp_path, *, nt=48):
-    """Synthetic NCAR-RDA ``sstk`` (a latitudinal SST gradient, K) + ``ci`` (zero sea-ice)
-    so ``build_era5_amip_forcing`` produces a real, non-trivial AMIP boundary forcing."""
-    import xarray as xr
-
-    nlat, nlon = 8, 16
-    lat = np.linspace(90.0, -90.0, nlat)          # ERA5 order: descending
-    lon = np.linspace(0.0, 337.5, nlon)
-    t = (np.datetime64("2020-01-01T00")
-         + np.arange(nt) * np.timedelta64(1, "h")).astype("datetime64[ns]")
-    sst = np.broadcast_to(
-        (300.0 - 25.0 * np.abs(lat) / 90.0)[:, None], (nt, nlat, nlon)).astype("f4")
-    xr.Dataset({"SSTK": (("time", "latitude", "longitude"), sst, {"units": "K"})},
-               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / "e5.oper.an.sfc.128_034_sstk.ll025sc.2020010100_2020013123.nc")
-    xr.Dataset({"CI": (("time", "latitude", "longitude"),
-                       np.zeros((nt, nlat, nlon), "f4"), {"units": "(0-1)"})},
-               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / "e5.oper.an.sfc.128_031_ci.ll025sc.2020010100_2020013123.nc")
-
-
 def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
     """A base AMIP ``ExperimentConfig`` with a forcing BUILT from the synthetic local ERA5
     archive and injected via the shared ``apply_amip_forcing_to_config`` (the turnkey path)."""
@@ -342,7 +323,7 @@ def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
         build_era5_amip_forcing,
     )
 
-    _write_amip_era5_archive(tmp_path)
+    write_forcing_archive(tmp_path)             # the shared 8x16 forcing archive
     fcfg = build_era5_amip_forcing(
         str(tmp_path), "20200101", str(tmp_path / "amip_forcing.nc"), hour_stride=24)
     base = ExperimentConfig(

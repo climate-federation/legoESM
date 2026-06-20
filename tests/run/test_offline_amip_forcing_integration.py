@@ -18,27 +18,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests._offline_era5_rda import write_forcing_archive
 
-def _write_synthetic_amip_archive(tmp_path, *, nt=48, sst_add=0.0):
-    """A monthly-style RDA ``sstk`` (a latitudinal SST gradient, Kelvin, optionally bumped by
-    ``sst_add``) + ``ci`` (zero sea-ice) so ``build_era5_amip_forcing`` produces a
-    NON-trivial, regrid-testing forcing.  Overwrites in place (called twice for the bump)."""
-    import xarray as xr
-
-    nlat, nlon = 16, 32
-    lat = np.linspace(90.0, -90.0, nlat)         # ERA5 order: descending
-    lon = np.linspace(0.0, 348.75, nlon)
-    t = (np.datetime64("2020-01-01T00")
-         + np.arange(nt) * np.timedelta64(1, "h")).astype("datetime64[ns]")
-    sst2d = (300.0 - 25.0 * np.abs(lat) / 90.0)[:, None] * np.ones((1, nlon))  # 275..300 K
-    sst = np.broadcast_to(sst2d + sst_add, (nt, nlat, nlon)).astype("f4")
-    xr.Dataset({"SSTK": (("time", "latitude", "longitude"), sst, {"units": "K"})},
-               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / "e5.oper.an.sfc.128_034_sstk.ll025sc.2020010100_2020013123.nc")
-    xr.Dataset({"CI": (("time", "latitude", "longitude"),
-                       np.zeros((nt, nlat, nlon), "f4"), {"units": "(0-1)"})},
-               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / "e5.oper.an.sfc.128_031_ci.ll025sc.2020010100_2020013123.nc")
+#: This file's forcing-archive source grid (16x32) — passed to the shared writer.
+_FORCING_GRID = {"nlat": 16, "nlon": 32}
 
 
 def _run_amip(fcfg, *, radiation="gray", nlev=5, resolution=8, rad_update_steps=1):
@@ -76,7 +59,7 @@ def test_offline_era5_forcing_drives_amip_modeldriver_run(tmp_path):
     from scripts.data.load_local_era5 import build_era5_amip_forcing
 
     # --- Base run (the gradient SST). ---
-    _write_synthetic_amip_archive(tmp_path)
+    write_forcing_archive(tmp_path, **_FORCING_GRID)
     fcfg = build_era5_amip_forcing(
         str(tmp_path), "20200101", str(tmp_path / "amip_forcing.nc"), hour_stride=24)
     assert fcfg.dataset == "custom" and fcfg.sst_var == "SSTK" and fcfg.sic_var == "CI"
@@ -99,7 +82,7 @@ def test_offline_era5_forcing_drives_amip_modeldriver_run(tmp_path):
     # If the run merely LOADED the forcing (without the segment step reading it), the two
     # boundary layers would be identical; a warmer ocean MUST warm the BL — proving the SST
     # is consumed.  The smoke measured ~+6.8 K mean bottom-T for +15 K SST; assert >> noise.
-    _write_synthetic_amip_archive(tmp_path, sst_add=15.0)
+    write_forcing_archive(tmp_path, sst_add=15.0, **_FORCING_GRID)
     fcfg_warm = build_era5_amip_forcing(
         str(tmp_path), "20200101", str(tmp_path / "amip_forcing_warm.nc"), hour_stride=24)
     driver_b = _run_amip(fcfg_warm)
@@ -128,7 +111,7 @@ def test_offline_era5_forcing_drives_rrtmgp_amip_run(tmp_path):
 
     from scripts.data.load_local_era5 import build_era5_amip_forcing
 
-    _write_synthetic_amip_archive(tmp_path)
+    write_forcing_archive(tmp_path, **_FORCING_GRID)
     fcfg = build_era5_amip_forcing(
         str(tmp_path), "20200101", str(tmp_path / "amip_forcing.nc"), hour_stride=24)
     driver = _run_amip(
