@@ -72,6 +72,54 @@ def build_deployed_config(
     return deployed, grid
 
 
+def build_env_kernel_deployed_override(
+    kernel_path: str,
+    target_base_config_path: str,
+    target_model_state,
+    *,
+    min_fraction_covered: float | None = None,
+):
+    """CROSS-GRID analog of :func:`build_deployed_config` (iter 475): deploy a campaign's RAW
+    env-kernel (``<out>.env_kernel.json`` from ``--feedback-strategy environment``) onto a
+    DIFFERENT (e.g. finer) production grid by environmental similarity — the iter-69/70
+    grid-agnostic deploy.
+
+    ``build_deployed_config`` needs the per-column field on the SAME grid; this needs the TARGET
+    grid's ENVIRONMENT, which requires the target model's state — so the operator runs the target
+    model ONCE and passes its :class:`~legoesm.training.compare_reanalysis.ColumnState` as
+    ``target_model_state``.  Loads the kernel, builds the target grid/sigma from
+    ``target_base_config_path``, evaluates the kernel on the target environment (the SAME
+    ``column_environment_grid`` the campaign used — hybrid-coordinate-correct via the true layer
+    pressures), and returns ``(deployed_config, grid, coverage)``.
+
+    The ``coverage`` diagnostic (``fraction_covered`` / ``fraction_in_hull``) reports how
+    trustworthy the transfer is; pass ``min_fraction_covered`` to FAIL LOUD on a near-no-op
+    (out-of-hull) deploy.  Validate the transfer first with
+    ``run_perfect_model_osse.py --fine-resolution`` (the twin go/no-go for this exact path)."""
+    import json
+
+    from legoesm.training.deploy_correction import (
+        apply_env_kernel_override,
+        env_kernel_from_dict,
+    )
+    from legoesm.training.feedback_assembly import column_environment_grid
+
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    with open(kernel_path) as f:
+        kernel = env_kernel_from_dict(json.load(f))
+    base_cfg, grid, sigma = load_base_config_and_grid(target_base_config_path)
+    p_s = target_model_state.p_s
+    grid_env, _ = column_environment_grid(
+        target_model_state, sigma,
+        p_full=sigma.pressure_at_full(p_s), p_half=sigma.pressure_at_half(p_s))
+    override, coverage = apply_env_kernel_override(
+        kernel, grid_env, min_fraction_covered=min_fraction_covered)
+    deployed = base_cfg._replace(turbulence_override=override)
+    deployed.validate_strict()
+    return deployed, grid, coverage
+
+
 def check_deploy(
     base_config_path: str,
     campaign_output_path: str,

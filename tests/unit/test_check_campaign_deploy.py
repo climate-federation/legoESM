@@ -191,6 +191,61 @@ def test_build_deployed_config_carries_the_override_and_validates(tmp_path):
     assert tuple(dgrid.grid_shape_2d) == (8, 16)
 
 
+def test_build_env_kernel_deployed_override_cross_grid(tmp_path):
+    """The CROSS-GRID deploy (iter 475): a campaign's env-kernel + a TARGET base config + the
+    target model state → a deployed config whose turbulence_override carries the per-target-column
+    C_K (via environmental similarity) + a coverage diagnostic. The grid-agnostic analog of
+    build_deployed_config (which is same-grid only)."""
+    from typing import NamedTuple
+
+    from legoesm.driver.config import config_to_dict
+    from legoesm.training.column_manifest import ColumnEnvironment
+    from legoesm.training.compare_reanalysis import ColumnState
+    from legoesm.training.deploy_correction import build_env_kernel, env_kernel_to_dict
+
+    from scripts.experiment.check_campaign_deploy import (
+        build_env_kernel_deployed_override,
+    )
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+    )
+
+    class _Diag(NamedTuple):
+        C_K: object
+        valid: object
+
+    class _Rec(NamedTuple):
+        environment: ColumnEnvironment
+
+    # a kernel over an SST/CAPE/shear range
+    envs = [(298.0, 100.0, 5.0), (300.0, 1500.0, 12.0), (302.0, 2800.0, 20.0)]
+    recs = [_Rec(ColumnEnvironment(*e)) for e in envs]
+    diags = [_Diag(C_K=jnp.array([c, c]), valid=jnp.array([True, True]))
+             for c in (0.30, 0.45, 0.62)]
+    kernel = build_env_kernel(recs, diags, "clubb_coefficient",
+                              length_scales=[2.0, 1200.0, 8.0], field="C_K")
+    kpath = tmp_path / "out.json.env_kernel.json"
+    kpath.write_text(json.dumps(env_kernel_to_dict(kernel)))
+
+    # a TARGET base config (latlon 8 -> 8x16) + a synthetic target model state
+    cpath = tmp_path / "target.json"
+    cpath.write_text(json.dumps(config_to_dict(
+        build_amip_clubb_lite_config(resolution=8, nlev=5))))
+    nlat, nlon, nlev = 8, 16, 5
+    state = ColumnState(
+        T=jnp.full((nlat, nlon, nlev), 290.0), q_v=jnp.full((nlat, nlon, nlev), 8e-3),
+        u=jnp.full((nlat, nlon, nlev), 10.0), v=jnp.zeros((nlat, nlon, nlev)),
+        p_s=jnp.full((nlat, nlon), 1.0e5), sst_K=jnp.full((nlat, nlon), 300.0))
+
+    deployed, grid, coverage = build_env_kernel_deployed_override(
+        str(kpath), str(cpath), state)
+    assert deployed.turbulence_override is not None
+    ck = np.asarray(deployed.turbulence_override.clubb_lite.C_K)
+    assert ck.shape == (nlat * nlon,) and bool(np.all(np.isfinite(ck)))   # per target column
+    assert {"fraction_covered", "fraction_in_hull", "n_columns"} <= set(coverage)
+    assert tuple(grid.grid_shape_2d) == (8, 16)
+
+
 def test_check_deploy_surfaces_the_cross_grid_env_kernel_sidecar(tmp_path, capsys):
     """check_deploy reports a `<output>.env_kernel.json` sidecar (iter 474) so a deployer learns
     the cross-grid env-kernel option exists; absent → None; a JSON sharing the name but NOT an

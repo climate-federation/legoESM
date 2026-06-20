@@ -314,6 +314,17 @@ from legoesm.driver.coupled_config import PRESETS
 build_driver, _ = make_base_driver_builder("cmip", coupled_preset=PRESETS["aquaplanet"]())
 ```
 
+> **Cross-grid (grid-agnostic) deploy (`build_env_kernel_deployed_override`, iter 475).** To deploy
+> a *cheap coarse-grid* calibration on an *expensive fine production grid* by environmental
+> similarity, run the campaign with `--feedback-strategy environment` (writes `<out>.env_kernel.json`),
+> then run the **target** model once to get its `ColumnState` and call
+> `build_env_kernel_deployed_override("<out>.env_kernel.json", "<target_config>.json", target_state)`
+> → `(deployed_config, grid, coverage)`. Unlike `build_deployed_config` (same-grid), this evaluates
+> the kernel on the target grid's *environment*, so it needs the target model state. Check the
+> returned `coverage` (`fraction_in_hull`) — pass `min_fraction_covered=` to fail loud on an
+> out-of-hull (near-no-op) transfer — and **validate the transfer first** with
+> `run_perfect_model_osse.py --fine-resolution` (the twin go/no-go for this exact path).
+
 ## 6. Verify on a HELD-OUT window (the rigorous check)
 
 Produce two restarts on a time window **not used for training**:
