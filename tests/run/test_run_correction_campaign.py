@@ -464,6 +464,41 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
             les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient"), **common)
 
 
+def test_dry_run_rejects_per_column_fields_not_matching_grid():
+    """Pre-flight (iter 351): the dry-run RAISES on a per-column field (``area_weights`` /
+    ``valid_mask``) whose shape is not broadcastable to the model grid
+    (``= reference.T.shape[:-1]``).  Such a mismatched-resolution field would otherwise
+    crash only at the FIRST compare, after a (non-free) model run.  The guard uses the SAME
+    ``np.broadcast_shapes`` rules as the runtime ``broadcast_to``, so a genuinely
+    broadcastable shape is NEVER rejected (no false positive)."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+
+    def boom(*a, **k):
+        raise AssertionError("dry_run must NOT run the model / LES")
+
+    common = dict(
+        build_base_driver=boom, extract_column_state=boom, run_les_fn=boom,
+        reference=SimpleNamespace(T=SimpleNamespace(shape=(2, 3, 5))),   # grid_shape (2, 3)
+        sigma=_dry_run_sigma(), grid=object(),
+        lat_deg=jnp.zeros((2, 3)), lon_deg=jnp.zeros((2, 3)),
+        n_iterations=5, n_worst=4, validate_reference=False, dry_run=True)
+    les = ColumnLESConfig(diagnosis_method="clubb_coefficient")
+
+    # (a) a clearly mismatched resolution ⇒ ValueError, BEFORE any model run (boom never fires).
+    with pytest.raises(ValueError, match="area_weights.*not broadcastable to the model grid"):
+        build_correction_campaign(base_atm_config=_base_config(), les_config=les,
+                                  area_weights=jnp.ones((4, 5)), **common)
+    # (b) a genuinely broadcastable shape ((2, 1) → (2, 3)) is NOT rejected (no false positive).
+    res = build_correction_campaign(base_atm_config=_base_config(), les_config=les,
+                                    area_weights=jnp.ones((2, 1)), **common)
+    assert isinstance(res, CampaignDryRun)
+    # (c) a mismatched valid_mask is also caught.
+    with pytest.raises(ValueError, match="valid_mask.*not broadcastable to the model grid"):
+        build_correction_campaign(base_atm_config=_base_config(), les_config=les,
+                                  area_weights=jnp.ones((2, 3)),
+                                  valid_mask=jnp.ones((7,), dtype=bool), **common)
+
+
 def test_campaign_exit_code_reflects_health_verdict():
     """The campaign CLI exit code is the health verdict (iter 287, mirrors the OSSE
     go/no-go): 0 ONLY when the run IMPROVED, non-zero for every other status — so an HPC

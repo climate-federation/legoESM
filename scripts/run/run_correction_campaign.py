@@ -214,6 +214,42 @@ def grid_latlon_deg(grid, lat_deg, lon_deg):
     return lat_deg, lon_deg
 
 
+def assert_per_column_fields_match_grid(grid_shape, *, area_weights, valid_mask=None):
+    """Pre-flight (caught by ``--dry-run``): operator-supplied per-column fields MUST
+    broadcast to the model grid ``grid_shape`` (``= reference.T.shape[:-1]``).
+
+    The bias aggregation does ``jnp.broadcast_to(area_weights, combined_score.shape)``
+    (``bias_metrics._area_weighted_mean``), so a mismatched-resolution ``area_weights``
+    (or ``valid_mask``) — e.g. weights for a different grid than the loaded reference —
+    would otherwise crash only at the FIRST compare, after a (short but non-free) model
+    run.  This raises at CONSTRUCTION instead, so the launch dry-run catches it.
+
+    Uses ``np.broadcast_shapes`` — the SAME rules as the runtime ``jnp.broadcast_to`` —
+    so a genuinely-broadcastable shape is NEVER rejected here (no false positives)."""
+    import numpy as np
+
+    gshape = tuple(int(d) for d in grid_shape)
+    for name, arr in (("area_weights", area_weights), ("valid_mask", valid_mask)):
+        if arr is None:
+            continue
+        shape = tuple(np.shape(arr))
+        # broadcast_to(arr, gshape) succeeds IFF the mutual broadcast equals gshape
+        # exactly (a larger result ⇒ arr does not fit INTO gshape).  This is the precise
+        # runtime condition — no false positives AND no false negatives.
+        ok = False
+        try:
+            ok = np.broadcast_shapes(shape, gshape) == gshape
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError(
+                f"{name} shape {shape} is not broadcastable to the model grid {gshape} "
+                f"(= reference.T.shape[:-1]); the bias aggregation broadcasts {name} onto "
+                "the per-column score, so this would crash at the first compare. Pass a "
+                "per-column field on the SAME grid as the reference."
+            )
+
+
 def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
                         reference, sigma, area_weights, n_worst,
                         lat_deg, lon_deg, valid_mask=None, manifest_reducer=None):
@@ -365,6 +401,8 @@ def build_correction_campaign(
         from legoesm.training.compare_reanalysis import validate_reference_physical
         validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
+    assert_per_column_fields_match_grid(
+        grid_shape, area_weights=area_weights, valid_mask=valid_mask)
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
 
     # Keep the loop's reduction in lock-step with the LES diagnosis, and select
@@ -694,6 +732,8 @@ def build_multi_correction_campaign(
         from legoesm.training.compare_reanalysis import validate_reference_physical
         validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
+    assert_per_column_fields_match_grid(
+        grid_shape, area_weights=area_weights, valid_mask=valid_mask)
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
 
