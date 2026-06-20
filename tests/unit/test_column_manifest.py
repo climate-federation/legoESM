@@ -104,6 +104,32 @@ def test_compute_column_environment_shapes_and_cape_sign():
     assert float(jnp.max(env.cape_J_kg)) > 0.0
 
 
+def test_compute_column_environment_cape_responds_to_p_full():
+    """CAPE is the buoyancy integral over the PASSED p_full/p_half (the mechanism the iter-342
+    hybrid fix relies on — `column_environment_grid` feeds the coordinate's pressures).  Two
+    calls with the SAME T/q/u/v/sigma_full but DIFFERENT p_full give DIFFERENT CAPE — a VACUITY
+    lock (cf. iter 345): if CAPE re-derived pressures from sigma_full internally, the iter-342
+    fix would silently do nothing and this would fail."""
+    nlat, nlon, nlev = 1, 1, 6
+    sigma = jnp.linspace(0.05, 0.98, nlev)
+    sigma_half = jnp.concatenate(
+        [jnp.array([0.0]), 0.5 * (sigma[1:] + sigma[:-1]), jnp.array([1.0])])
+    T = jnp.broadcast_to(jnp.linspace(220.0, 300.0, nlev), (nlat, nlon, nlev))  # noqa: N806
+    q_v = jnp.broadcast_to(jnp.linspace(1e-5, 1.6e-2, nlev), (nlat, nlon, nlev))
+    u = jnp.zeros((nlat, nlon, nlev))
+    v = jnp.zeros((nlat, nlon, nlev))
+    sst = jnp.full((nlat, nlon), 301.0)
+
+    def _cape(p_s):     # DIFFERENT p_full via p_s, SAME sigma_full
+        p_full = jnp.broadcast_to(sigma * p_s, (nlat, nlon, nlev))
+        p_half = jnp.broadcast_to(sigma_half * p_s, (nlat, nlon, nlev + 1))
+        env = compute_column_environment(
+            T=T, q_v=q_v, u=u, v=v, p_full=p_full, p_half=p_half, sst=sst, sigma_full=sigma)
+        return float(env.cape_J_kg[0, 0])
+
+    assert abs(_cape(1.0e5) - _cape(7.0e4)) > 1.0     # CAPE responds to p_full (not ignored)
+
+
 def test_compute_column_environment_places_each_columns_tags_at_its_own_cell():
     """``compute_column_environment`` must place each column's CAPE/shear at THAT
     column's grid cell — the per-column reshape correspondence.
