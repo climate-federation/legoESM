@@ -82,3 +82,18 @@ def test_open_local_era5_dataset_missing_chunk_fails_loud(tmp_path):
     _write_synthetic_rda_era5(tmp_path)
     with pytest.raises(FileNotFoundError, match="no ERA5 file matching"):
         open_local_era5_dataset(str(tmp_path), "20200202")   # no chunk for that date
+
+
+def test_open_local_era5_dataset_ambiguous_chunk_fails_loud(tmp_path):
+    """codex-review iter 414: TWO files matching one (kind, code, chunk) — e.g. a partial
+    re-download alongside the original — must FAIL LOUD, not silently pick the first
+    (a wrong/partial reference).  The ``ll025*`` glob catches both the sc + uv suffixes."""
+    import shutil
+
+    from scripts.data.load_local_era5 import open_local_era5_dataset
+
+    _write_synthetic_rda_era5(tmp_path)
+    orig = tmp_path / "e5.oper.an.pl.128_130_t.ll025sc.2020010100_2020010123.nc"
+    shutil.copy(orig, tmp_path / "e5.oper.an.pl.128_130_t.ll025uv.2020010100_2020010123.nc")
+    with pytest.raises(ValueError, match="files match"):
+        open_local_era5_dataset(str(tmp_path), "20200101")

@@ -65,6 +65,14 @@ def _find(data_dir: str, kind: str, code: str, date: str, *, monthly: bool) -> s
             f"open_local_era5_dataset: no ERA5 file matching {pattern!r} — check the "
             f"data_dir, the date (YYYYMMDD), and that the NCAR-RDA ll025 {kind} {code} "
             "chunk exists locally.")
+    if len(matches) > 1:
+        # One chunk per (kind, code, month/day) is the d633006 convention; an AMBIGUOUS
+        # match (e.g. a partial re-download alongside the original) would otherwise
+        # silently pick the alphabetically-first file → a wrong/partial reference
+        # (codex-review iter 414).  Fail loud instead.
+        raise ValueError(
+            f"open_local_era5_dataset: {len(matches)} files match {pattern!r} "
+            f"(expected exactly one chunk): {matches}. Remove the duplicate/partial.")
     return matches[0]
 
 
@@ -88,4 +96,7 @@ def open_local_era5_dataset(data_dir: str, date: str) -> Any:
     # The single-level files are MONTHLY chunks; align them to the day's pl times so the
     # merged dataset has one consistent time axis (load_era5_slice isel's into it).
     sfc = sfc.sel(time=pl.time)
+    # join="override" forces pl's lat/lon labels onto sfc — SAFE only because both come
+    # from the SAME ll025 archive (identical grid); it would mis-LABEL (not re-grid) sfc
+    # if the two ever used different lat/lon grids (codex-review iter 414).
     return xr.merge([pl, sfc], compat="override", join="override")
