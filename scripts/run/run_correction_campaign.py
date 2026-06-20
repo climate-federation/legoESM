@@ -1089,9 +1089,18 @@ def _resolve_era5_n_times(n_times: int) -> int:
 
 def _build_arg_parser():
     import argparse
+    import os
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, help="base ExperimentConfig JSON")
+    p.add_argument("--compilation-cache-dir",
+                   default=os.environ.get("JAX_COMPILATION_CACHE_DIR", ""),
+                   help="dir for JAX's PERSISTENT compilation cache so the expensive rrtmgp "
+                        "JIT (>16 min) is reused across the self-requeue + repeated launches. "
+                        "Defaults to $JAX_COMPILATION_CACHE_DIR; empty = disabled.")
+    p.add_argument("--cache-min-compile-secs", type=float, default=30.0,
+                   help="(--compilation-cache-dir) cache only compiles slower than this [s] "
+                        "(default 30 = the radiation graph, not trivial compiles).")
     p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
                    help="AMIP (prescribed SST) or CMIP (coupled ocean)")
     p.add_argument("--coupled-preset", default="aquaplanet",
@@ -1575,6 +1584,37 @@ def _enable_line_buffered_stdout() -> None:
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
+
+
+def _configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
+    """Enable JAX's PERSISTENT on-disk compilation cache so the EXPENSIVE radiation JIT
+    (rrtmgp: >16 min, iter 443) is written ONCE and REUSED.
+
+    Chiefly de-risks the sbatch's SELF-REQUEUE: a requeued multi-day job re-runs from the
+    last checkpoint but otherwise recompiles every segment from scratch — with the cache it
+    reuses the compiles the killed job already paid for. Also helps repeated launches with
+    the same config and any C_K-INDEPENDENT sub-compiles. (The deeper "compile ONCE via a
+    traced C_K input so every round shares one graph" is a separate architecture change —
+    the campaign rebuilds the driver per config, so each distinct C_K array currently bakes
+    a new constant and recompiles; tracked as CODEX PENDING in docs/COMPARE_REANALYSIS.md.)
+
+    ``min_compile_secs`` caches only compiles SLOWER than this (default 30 s targets the
+    radiation graph, not trivial compiles). Empty ``cache_dir`` => no-op (disabled). The
+    cache key includes the HLO + jaxlib version + backend/platform, so a code change or a
+    different node type MISSES (recompiles) rather than serving a stale / wrong-arch binary.
+    MUST run before the first JAX compilation — the campaign calls it at the top of main(),
+    before any driver build. Returns the configured dir (or ``None`` when disabled)."""
+    if not cache_dir:
+        return None
+    import jax
+
+    jax.config.update("jax_compilation_cache_dir", str(cache_dir))
+    jax.config.update(
+        "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
+    print(f"[campaign] JAX persistent compilation cache: {cache_dir} (caching compiles > "
+          f"{min_compile_secs:g}s) — amortizes the rrtmgp JIT across the self-requeue + "
+          "repeated launches.", flush=True)
+    return str(cache_dir)
 
 
 def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:
@@ -2303,6 +2343,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _enable_line_buffered_stdout()   # real-time per-round progress in the SLURM log
     refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
+    # Enable the persistent compilation cache FIRST — before any driver build / JIT — so the
+    # expensive rrtmgp compile is reused across the self-requeue + rounds (iter 453).
+    _configure_jax_compilation_cache(
+        args.compilation_cache_dir, args.cache_min_compile_secs)
     _warn_if_ignored_diagnosis_method(args.coefficients, args.diagnosis_method)
     # ERA5 reference source: EXACTLY one of --era5-zarr (store/network) or
     # --local-era5-dir (offline NCAR-RDA NetCDF, iter 410) — fail loud at launch on a

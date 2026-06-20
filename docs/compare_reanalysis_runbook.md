@@ -148,6 +148,16 @@ corrected-coefficient JSON to `$OUT` and a per-round bias trajectory to the `.ou
 > seconds). A coarse real-data run is dominated by this compile + the realistic spin-off LES
 > (`--les-hours`, default 2 h); scale `--les-hours` down only for a smoke, not production.
 
+> **Persistent compilation cache (`JAX_COMPILATION_CACHE_DIR`, iter 453).** With **rrtmgp**
+> radiation the JIT-compile is the >16-min bottleneck (§1b), and this launcher **self-requeues**
+> on the wall-clock limit — without a cache each requeue recompiles from scratch. The sbatch
+> sets `JAX_COMPILATION_CACHE_DIR` (default `results/compare_reanalysis/jax_cache`; override to a
+> **persistent**, not node-local, path) so the expensive compile is written once and reused
+> across requeues + relaunches. The campaign's `--compilation-cache-dir` flag defaults to that
+> env var; `--cache-min-compile-secs` (default 30) caches only the slow compiles. (A different
+> per-round C_K still recompiles within a run — compiling once via a *traced* C_K is a tracked
+> architecture follow-up; the cache is what de-risks the requeue today.)
+
 ### 2b. Fully-offline realistic AMIP (local NCAR-RDA ERA5, no network)
 
 When the cluster has **no outbound network** (no gcsfs / `gs://` Zarr) but mirrors the

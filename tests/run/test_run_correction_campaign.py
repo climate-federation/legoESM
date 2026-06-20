@@ -3388,6 +3388,36 @@ def test_align_insolation_sets_start_doy_from_offline_date():
         ["--config", "x.json", "--align-insolation"]).align_insolation is True
 
 
+def test_configure_jax_compilation_cache(tmp_path):
+    """The persistent compilation-cache config (iter 453): empty dir => no-op (None, no JAX
+    mutation); a dir => sets jax_compilation_cache_dir + the min-compile-time threshold;
+    parser defaults (env-driven dir, 30 s)."""
+    import jax
+
+    from scripts.run.run_correction_campaign import (
+        _build_arg_parser,
+        _configure_jax_compilation_cache,
+    )
+
+    before_dir = jax.config.jax_compilation_cache_dir
+    before_secs = jax.config.jax_persistent_cache_min_compile_time_secs
+    # empty => no-op, no mutation
+    assert _configure_jax_compilation_cache("", 30.0) is None
+    assert jax.config.jax_compilation_cache_dir == before_dir
+    try:
+        d = str(tmp_path / "jaxcache")
+        assert _configure_jax_compilation_cache(d, 45.0) == d
+        assert jax.config.jax_compilation_cache_dir == d
+        assert jax.config.jax_persistent_cache_min_compile_time_secs == 45.0
+    finally:                                    # restore global JAX state for other tests
+        jax.config.update("jax_compilation_cache_dir", before_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", before_secs)
+
+    a = _build_arg_parser().parse_args(["--config", "x.json"])
+    assert a.cache_min_compile_secs == 30.0          # default threshold
+    assert isinstance(a.compilation_cache_dir, str)  # env-driven (empty when unset)
+
+
 def test_ocean_only_mask_from_land_fraction_and_fail_loud():
     """--ocean-only builds a valid_mask from the model's static land fraction (iter 451);
     OFF by default => None (rank all); an all-land grid fails loud; parser defaults are off."""

@@ -60,6 +60,14 @@ OUT="${OUT:-results/compare_reanalysis/corrected_clubb.json}"
 CKPT="${CKPT:-results/compare_reanalysis/campaign.ckpt.json}"
 mkdir -p "$(dirname "$OUT")" "$(dirname "$CKPT")"
 
+# JAX PERSISTENT compilation cache (iter 453): the rrtmgp radiation JIT is the >16-min
+# bottleneck (iter 443) and this self-requeuing job re-runs from a checkpoint on the
+# wall-clock limit -- WITHOUT the cache each requeue recompiles every segment from scratch.
+# Point it at a PERSISTENT (NOT node-local /tmp) filesystem so the cache survives the requeue.
+# Exported so JAX reads it at import (the campaign --compilation-cache-dir flag defaults to it).
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$REPO/results/compare_reanalysis/jax_cache}"
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+
 MODE="${MODE:-amip}"                               # amip (prescribed SST) | cmip (coupled ocean)
 # SPINUP_DAYS discards the un-equilibrated spin-up from the climatology time-mean (iter 446)
 # so the loop targets the EQUILIBRATED bias. Default 0 = keep everything; SET IT (e.g. a few
