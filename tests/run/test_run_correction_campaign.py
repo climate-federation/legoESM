@@ -2088,9 +2088,19 @@ def test_make_base_driver_builder_cmip_builds_real_driver():
         radiation="gray", turbulence="clubb_lite", turbulence_override=override)
     driver = build_cmip(cfg)
     assert isinstance(driver, CoupledESMDriver)
-    # cmip_column_state reads these; same-grid ⇒ SST on the atm column shape.
+    # cmip_column_state reads state + q_v from the coupled driver, and the SST via the
+    # public get_sst_sic accessor (iter 335 — the atm-grid coupled SST, the same path AMIP
+    # uses), NOT the raw ocean_state.T_sfc.
     assert driver.state is not None and driver.q_v is not None
     assert tuple(driver.ocean_state.T_sfc.data.shape) == (8, 16)
+    # DIRECT test of the iter-335 public get_sst_sic on the REAL coupled driver: it returns
+    # the coupled SST on the ATMOSPHERE grid (same-grid here ⇒ atm column shape), a physical
+    # ocean temperature — so the SST env tag always aligns with the atm columns.
+    sst, _sic = driver.get_sst_sic(0.0)
+    sst_arr = jnp.asarray(getattr(sst, "data", sst))
+    assert tuple(sst_arr.shape) == (8, 16)                     # atm-grid, matches columns
+    assert bool(jnp.all(jnp.isfinite(sst_arr)))
+    assert 200.0 < float(jnp.mean(sst_arr)) < 350.0           # a physical SST [K]
     # CMIP DEPLOY PROPAGATION: the override survived onto the coupled atmosphere config.
     assert driver.atm_config.turbulence_override is override
     assert float(driver.atm_config.turbulence_override.clubb_lite.C_K[0, 0]) == 0.77
