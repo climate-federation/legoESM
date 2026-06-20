@@ -97,6 +97,27 @@ def test_apply_out_of_hull_falls_back_and_warns():
     assert coverage["fraction_in_hull"] == 0.0
 
 
+def test_low_coverage_deploy_auto_warns_without_min_fraction(caplog):
+    """A near-no-op deploy (most columns fall back to background) AUTO-warns EVEN WHEN
+    the opt-in ``min_fraction_covered`` fail-loud is unset — a careless production deploy
+    must not SILENTLY land a mostly-background correction (clause-6 would then fail to
+    improve with NO signal to the operator). A fully-covered deploy stays quiet."""
+    import logging
+    k = _kernel()
+    far = jnp.asarray([(250.0, 5e4, 200.0), (255.0, 6e4, 250.0)])    # out-of-hull → 0 coverage
+    with caplog.at_level(logging.WARNING, logger="legoesm.training.deploy_correction"):
+        _, cov = apply_env_kernel_override(k, far)                   # NO min_fraction_covered
+    assert cov["fraction_covered"] == 0.0
+    assert any("near-no-op" in r.getMessage() for r in caplog.records)   # auto-warned
+
+    caplog.clear()
+    good = jnp.asarray([(298.5, 200.0, 6.0), (302.0, 2800.0, 20.0)])  # near samples → fully covered
+    with caplog.at_level(logging.WARNING, logger="legoesm.training.deploy_correction"):
+        _, cov2 = apply_env_kernel_override(k, good)
+    assert cov2["fraction_covered"] == 1.0
+    assert not any("near-no-op" in r.getMessage() for r in caplog.records)   # quiet when covered
+
+
 def test_covered_but_out_of_hull_diagnostics_diverge():
     """``fraction_covered`` and ``fraction_in_hull`` are INDEPENDENT diagnostics and
     must diverge in the soft domain-shift boundary zone.

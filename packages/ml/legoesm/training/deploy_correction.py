@@ -22,7 +22,17 @@ requires the override scheme to match).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, NamedTuple
+
+logger = logging.getLogger(__name__)
+
+# Below this ``fraction_covered``, MOST deploy-grid columns fell back to background
+# (the campaign sampled too few environments to match this grid's climate), so the
+# env-kernel override is a (near-)NO-OP correction. Auto-WARNED at this floor even when
+# the opt-in ``min_fraction_covered`` fail-loud is unset — a campaign-control judgment
+# (cf. ``campaign_summary._MIN_FRACTIONAL_REDUCTION``), not physics.
+_LOW_COVERAGE_WARN = 0.5
 
 # CLUBB-lite promotion key → CLUBBLiteConfig field name (the campaign output's
 # multi "fields" dict is keyed by promotion_key; the single output by field name).
@@ -606,6 +616,17 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
         "fraction_covered": float(jnp.mean(has_neighbor)),
         "fraction_in_hull": float(jnp.mean(in_hull)),
     }
+    # Auto-WARN on a (near-)no-op deploy even when the opt-in min_fraction_covered
+    # fail-loud is unset: a careless production deploy must not SILENTLY land a
+    # mostly-background correction (the run would be largely uncorrected and the
+    # operator left wondering why the bias did not improve).
+    if coverage["fraction_covered"] < _LOW_COVERAGE_WARN:
+        logger.warning(
+            "env-kernel deploy: fraction_covered=%.3g < %.3g — MOST deploy-grid columns "
+            "fall back to background (a near-no-op correction); the production run will be "
+            "largely UNCORRECTED. Sample more diverse environments in the campaign, deploy "
+            "on a closer grid/climate, or set min_fraction_covered to fail loud.",
+            coverage["fraction_covered"], _LOW_COVERAGE_WARN)
     if min_fraction_covered is not None:
         if not 0.0 <= min_fraction_covered <= 1.0:
             raise ValueError(
