@@ -35,3 +35,30 @@ def test_bias_ck_sensitivity_flags_insensitive_vs_sensitive():
     # Shape mismatch fails loud (a wrong pairing would silently mis-diff).
     with pytest.raises(ValueError, match="share shape"):
         bias_ck_sensitivity(np.zeros((2, 2)), np.zeros((3,)))
+
+
+def test_per_level_ck_bias_sensitivity_localizes_to_the_boundary_layer():
+    """The per-level breakdown (iter 416) localizes C_K control: a free-tropospheric bias
+    that C_K does NOT move shows a ~0 controllable fraction, while a BL level C_K DOES
+    move shows a large one — vindicating that the LES→C_K correction is effective WHERE it
+    acts even when the full-column bias is free-trop (radiation) dominated."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import per_level_ck_bias_sensitivity
+
+    ncol, nlev = 4, 3
+    ref = np.full((ncol, nlev), 250.0)
+    # Free-trop (levels 0,1): a big bias UNCHANGED by C_K (both runs +10 K).
+    # BL (level 2, near-surface): C_K MOVES it (+2 K at low C_K → +0.5 K at high C_K).
+    t_lo = ref.copy()
+    t_lo[:, :2] += 10.0
+    t_lo[:, 2] += 2.0
+    t_hi = ref.copy()
+    t_hi[:, :2] += 10.0
+    t_hi[:, 2] += 0.5
+    out = per_level_ck_bias_sensitivity(t_lo, t_hi, ref, np.ones(ncol))
+    frac = out["controllable_fraction_per_level"]
+    assert frac[0] < 1e-6 and frac[1] < 1e-6           # free-trop: C_K-INDEPENDENT
+    assert frac[2] > 0.5                                # BL: C_K-CONTROLLABLE
+    assert out["bias_per_level"][0] == pytest.approx(10.0)
+    with pytest.raises(ValueError, match="share shape"):
+        per_level_ck_bias_sensitivity(
+            np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((3, 3)), np.ones(2))

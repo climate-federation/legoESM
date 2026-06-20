@@ -62,6 +62,39 @@ def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any) -> dict:
     }
 
 
+def per_level_ck_bias_sensitivity(T_low_ck, T_high_ck, T_ref, area_weights) -> dict:  # noqa: N803
+    """Per-LEVEL C_K sensitivity of the T-bias — shows WHERE C_K controls the bias.
+
+    ``T_*`` are model/reference temperature fields broadcastable to ``(ncol, nlev)``;
+    ``area_weights`` is ``(ncol,)``.  Returns per-level area-weighted RMS T-bias and the
+    C_K-controllable FRACTION at each level, so an operator can see that C_K controls the
+    BOUNDARY LAYER (the near-surface levels where it acts) even when the full-COLUMN bias
+    is dominated by a free-tropospheric error (e.g. a radiation bias) that C_K cannot fix
+    — i.e. the LES→C_K correction is EFFECTIVE where it should be, and the full-column
+    insensitivity (``bias_ck_sensitivity``) is the MODEL's free-trop error, not the
+    correction approach (codex-review iter 416)."""
+    lo = np.asarray(T_low_ck, dtype=float)
+    hi = np.asarray(T_high_ck, dtype=float)
+    ref = np.asarray(T_ref, dtype=float)
+    if not (lo.shape == hi.shape == ref.shape):
+        raise ValueError(
+            f"per_level_ck_bias_sensitivity: T fields must share shape; got "
+            f"{lo.shape}, {hi.shape}, {ref.shape}.")
+    nlev = lo.shape[-1]
+    w = np.asarray(area_weights, dtype=float).reshape(-1, 1)
+
+    def _level_rms(field):
+        d2 = (field.reshape(-1, nlev) - ref.reshape(-1, nlev)) ** 2
+        return np.sqrt(np.nansum(w * d2, axis=0) / np.nansum(w))   # (nlev,)
+
+    b_lo, b_hi = _level_rms(lo), _level_rms(hi)
+    mean_b = 0.5 * (b_lo + b_hi)
+    return {
+        "bias_per_level": mean_b,
+        "controllable_fraction_per_level": np.abs(b_hi - b_lo) / np.maximum(mean_b, 1e-12),
+    }
+
+
 def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int):
     """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma)."""
     import jax
