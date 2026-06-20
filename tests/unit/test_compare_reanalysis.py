@@ -524,6 +524,27 @@ def test_column_state_from_hydrostatic_rejects_precip_on_a_different_grid():
         column_state_from_hydrostatic(atm, q_v, precip_mm_day=wrong_grid_precip)
 
 
+def test_column_state_from_hydrostatic_accepts_both_grid_matched_surface_fields():
+    """Positive complement to the wrong-grid guards (iters 329/330): a grid-matched sst_K
+    (here Field-WRAPPED, exercising the shared `_checked_surface` ``_arr`` unwrap) AND a
+    grid-matched precip_mm_day pass through TOGETHER and land as RAW arrays in the
+    ColumnState — the guard must not false-reject a legitimate per-column surface field
+    (the CMIP-with-precip case), and must unwrap a Field leaf like the atm-state fields."""
+    from legoesm.core.field import Field
+    shape, nlev = (2, 3), 5
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    cs = column_state_from_hydrostatic(
+        atm, q_v,
+        sst_K=Field(data=jnp.full(shape, 295.0)),     # Field-wrapped → must unwrap
+        precip_mm_day=jnp.full(shape, 2.0))           # raw, grid-matched
+    assert cs.sst_K.shape == shape and cs.precip_mm_day.shape == shape
+    for arr in (cs.sst_K, cs.precip_mm_day):
+        assert isinstance(arr, jnp.ndarray) and not hasattr(arr, "data")   # unwrapped raw
+    assert float(cs.sst_K[0, 0]) == pytest.approx(295.0)
+    assert float(cs.precip_mm_day[1, 2]) == pytest.approx(2.0)
+
+
 def test_column_state_from_hydrostatic_rejects_none_v():
     atm = _hydro_state((2, 2), 4)._replace(v=None)  # MPAS edge-velocity state
     with pytest.raises(ValueError, match="atm_state.v is None"):
