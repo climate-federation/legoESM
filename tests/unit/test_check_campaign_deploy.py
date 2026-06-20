@@ -191,6 +191,35 @@ def test_build_deployed_config_carries_the_override_and_validates(tmp_path):
     assert tuple(dgrid.grid_shape_2d) == (8, 16)
 
 
+def test_check_deploy_surfaces_the_cross_grid_env_kernel_sidecar(tmp_path, capsys):
+    """check_deploy reports a `<output>.env_kernel.json` sidecar (iter 474) so a deployer learns
+    the cross-grid env-kernel option exists; absent → None; a JSON sharing the name but NOT an
+    env-kernel (wrong artifact tag) is ignored."""
+    from scripts.experiment.check_campaign_deploy import check_deploy, main
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path)
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+    out = _campaign_output(tmp_path, base_cfg, grid, name="env.json")
+
+    assert check_deploy(cfg, out)["env_kernel"] is None             # no sidecar → None
+
+    kernel_path = out + ".env_kernel.json"
+    with open(kernel_path, "w") as f:                               # a real env-kernel artifact
+        json.dump({"artifact": "raw_environment_kernel", "field": "clubb_lite_C_K",
+                   "sample_env": [[290.0, 1.0], [292.0, 2.0], [288.0, 0.5]],
+                   "sample_values": [0.4, 0.5, 0.45], "valid": [True, True, True],
+                   "length_scales": [1.0, 1.0], "background": 0.4}, f)
+    ek = check_deploy(cfg, out)["env_kernel"]
+    assert ek is not None and ek["field"] == "clubb_lite_C_K" and ek["n_samples"] == 3
+    main(["--base-config", cfg, "--campaign-output", out])
+    assert "cross-grid" in capsys.readouterr().out
+
+    with open(kernel_path, "w") as f:                               # wrong artifact → ignored
+        json.dump({"artifact": "something_else", "field": "x"}, f)
+    assert check_deploy(cfg, out)["env_kernel"] is None
+
+
 def test_build_deployed_config_preserves_runtime_injections_from_effective_config(tmp_path):
     """The iter-464 effective-config sidecar is DEPLOYABLE end-to-end: build_deployed_config on
     an effective config (carrying the runtime injections dataset=custom + forcing_path +

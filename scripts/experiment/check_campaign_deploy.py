@@ -126,12 +126,33 @@ def check_deploy(
     # output — possibly without having seen the campaign's exit code — must know whether
     # it actually IMPROVED the bias vs stalled / produced no valid LES diagnoses.
     health = raw.get("health")
+    # Cross-grid env-kernel availability (iter 474): a campaign run with
+    # --feedback-strategy environment ALSO writes a `<output>.env_kernel.json` — the RAW
+    # env->coefficient regression that deploys on ANY grid by environmental similarity
+    # (apply_env_kernel_override). The same-grid deploy above uses the per-column field; surface
+    # that the cross-grid option exists so a deployer (possibly different from the campaign
+    # operator) knows it can also deploy on a DIFFERENT grid, not just this one.
+    import os
+    env_kernel = None
+    _kernel_path = f"{campaign_output_path}.env_kernel.json"
+    if os.path.exists(_kernel_path):
+        try:
+            with open(_kernel_path) as f:
+                _k = json.load(f)
+            # Only report a genuine env-kernel artifact (env_kernel_to_dict stamps "artifact":
+            # "raw_environment_kernel") — never mistake another JSON sharing the name.
+            if _k.get("artifact") == "raw_environment_kernel":
+                env_kernel = {"path": _kernel_path, "field": _k.get("field"),
+                              "n_samples": len(_k.get("sample_env", []))}
+        except (ValueError, OSError):
+            env_kernel = None
     return {
         "n_columns": n_columns,
         "corrected": corrected,
         "grid_shape": tuple(int(d) for d in getattr(grid, "grid_shape_2d", ())),
         "averaging": averaging,
         "health": health,
+        "env_kernel": env_kernel,
     }
 
 
@@ -197,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
                   f"({av.get('model_n_samples')} samples @ "
                   f"{av.get('model_diag_days')}-day cadence) — confirm it is comparable to "
                   "the ERA5 window above (both time-means, not a snapshot).")
+    ek = stats.get("env_kernel")
+    if ek:                                                 # cross-grid kernel available (474)
+        print(f"    cross-grid: an env-kernel ({ek.get('field')}, {ek.get('n_samples')} "
+              f"samples) is ALSO available at {ek['path']} — the same-grid deploy above uses "
+              "the per-column field; deploy on a DIFFERENT grid via "
+              "deploy_correction.apply_env_kernel_override (validate the transfer first with "
+              "run_perfect_model_osse.py --fine-resolution).")
     return 0
 
 
