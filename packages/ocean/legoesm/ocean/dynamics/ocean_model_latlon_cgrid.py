@@ -1147,7 +1147,7 @@ class LatLonCGridOceanModel:
                     "tendencies + implicit FS + implicit vertical mixing; these "
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
-        _valid_time_filters = {"box", "cosine"}
+        _valid_time_filters = {"box", "cosine", "power_law"}
         if config.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
@@ -1327,21 +1327,25 @@ class LatLonCGridOceanModel:
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
             if config.barotropic_solver not in (
-                    "rigid_lid", "implicit_cn", "implicit_unsplit"):
+                    "rigid_lid", "implicit_cn", "implicit_unsplit",
+                    "explicit_substep"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'barotropic_solver in ("rigid_lid","implicit_cn","implicit_unsplit"): '
+                    'barotropic_solver in ("rigid_lid","implicit_cn",'
+                    '"implicit_unsplit","explicit_substep"): '
                     'the explicit Coriolis '
                     "tendency reaches the barotropic mode through its depth-mean "
                     "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
                     "vloc, the depth-integral of du including Coriolis), and the "
                     "solver's own f×U_bt addition is gated off to avoid "
-                    "double-counting (rigid_lid: add_barotropic_coriolis=False; "
+                    "double-counting (rigid_lid / explicit_substep: "
+                    "add_barotropic_coriolis=False; "
                     "implicit_cn: _cori_fac=0 in the FB predictor). The "
-                    "explicit-substep (split-explicit) solver instead sub-steps "
-                    "the barotropic Coriolis on the gravity-wave clock (different "
-                    "physics, not covered). Got barotropic_solver="
-                    f"{config.barotropic_solver!r}.")
+                    "explicit_substep solver now gates its in-substep Coriolis "
+                    "off too (Oceananigans split-explicit convention: ∂_tU = "
+                    "−gH∇η + G^U, no in-substep Coriolis), which removes the "
+                    "C-grid 4-point Coriolis rotational null mode. Got "
+                    f"barotropic_solver={config.barotropic_solver!r}.")
             if getattr(config, "coriolis_energy_conserving", False):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" is incompatible with '
@@ -1917,12 +1921,22 @@ class LatLonCGridOceanModel:
             )
         else:
             dt_s = dt_mom / self.config.n_barotropic_substeps
+            # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
+            # reaches the barotropic mode via F_slow (its depth-mean came through
+            # du_dt), so the substep must NOT add its own f×U_bt — this is the
+            # Oceananigans split-explicit convention and removes the C-grid
+            # 4-point Coriolis rotational null mode (the 2Δx barotropic mode that
+            # otherwise blows the eddy-resolving jet).
+            _add_bt_cor = (
+                getattr(self.config, "coriolis_scheme", "matsuno_split")
+                != "explicit_ab2")
             state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
                 state_mid, dt_s, self.config.n_barotropic_substeps,
                 _grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
+                add_barotropic_coriolis=_add_bt_cor,
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after

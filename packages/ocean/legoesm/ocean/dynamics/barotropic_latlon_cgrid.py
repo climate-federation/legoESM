@@ -37,6 +37,7 @@ from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_re
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    compute_power_law_filter_weights,
     coriolis_at_faces,
     maxvel_clip,
 )
@@ -101,8 +102,19 @@ def barotropic_substeps_latlon_cgrid(
     F_slow_eta=None,
     F_slow_u=None,
     F_slow_v=None,
+    add_barotropic_coriolis: bool = True,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
+
+    ``add_barotropic_coriolis`` (default True) applies the explicit f×U_bt
+    Coriolis term inside each substep.  Set False when the planetary Coriolis
+    already reaches the barotropic mode through ``F_slow_u/v`` (its depth-mean,
+    via ``coriolis_scheme="explicit_ab2"``) — this is the Oceananigans /
+    split-explicit convention (the barotropic equation is ∂_tU = −gH∇η + G^U,
+    with NO in-substep Coriolis), and it avoids the C-grid 4-point Coriolis
+    rotational null mode (the 2Δx barotropic checkerboard; see
+    docs/issues/barotropic_mode_noise.md §A) that otherwise grows under an
+    eddy field and blows the eddy-resolving jet.
 
     Parameters
     ----------
@@ -259,10 +271,25 @@ def barotropic_substeps_latlon_cgrid(
     # filter that alias barotropic modes into the baroclinic coupling.
     # Transport accumulators (Hu, Hv) MUST remain box-filtered for exact
     # volume conservation with the discrete continuity equation.
-    use_cosine_filter = config.barotropic_time_filter == "cosine"
-    w_filter, w_total = compute_filter_weights(
-        n_substeps, eta.dtype, use_cosine=use_cosine_filter,
-    )
+    # Averaging filter for eta/U/V + the matching transport weights for Hu/Hv.
+    # "power_law" = Shchepetkin-McWilliams (2005) extended-window filter (ROMS/
+    # MOM6/Oceananigans), which damps the 2Δx barotropic Coriolis null mode the
+    # first-order cosine filter excites (docs/issues/barotropic_mode_noise.md).
+    # The cosine/box path is bit-identical to before: w_transport = 1/n_substeps
+    # per substep, so Hu_avg = sum(w_transport*flux) == sum(flux)/n_substeps.
+    if config.barotropic_time_filter == "power_law":
+        w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
+            n_substeps, eta.dtype,
+        )
+    else:
+        use_cosine_filter = config.barotropic_time_filter == "cosine"
+        w_filter, w_total = compute_filter_weights(
+            n_substeps, eta.dtype, use_cosine=use_cosine_filter,
+        )
+        n_loop = n_substeps
+        w_transport = jnp.full(
+            (n_substeps,), 1.0 / n_substeps, dtype=eta.dtype,
+        )
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.bebt
@@ -280,7 +307,8 @@ def barotropic_substeps_latlon_cgrid(
     U_sum = jnp.zeros((n_lat, n_lon + 1), dtype=eta.dtype)
     V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=eta.dtype)
 
-    def substep_body(w_i, carry):
+    def substep_body(wts_i, carry):
+        w_i, w_tr_i = wts_i
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
 
         Parameters
@@ -322,8 +350,8 @@ def barotropic_substeps_latlon_cgrid(
         flux_v = H_v * V_bar_c * v_mask
 
         # Accumulate transport (always box-filtered for volume conservation)
-        Hu_sum_new = Hu_sum_c + flux_u.astype(eta.dtype)
-        Hv_sum_new = Hv_sum_c + flux_v.astype(eta.dtype)
+        Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(eta.dtype)
+        Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(eta.dtype)
 
         div_flux = divergence_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
@@ -350,9 +378,13 @@ def barotropic_substeps_latlon_cgrid(
         V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
-        # Forward-backward Coriolis (Matsuno) + PGF + slow forcing
+        # Forward-backward Coriolis (Matsuno) + PGF + slow forcing.  The
+        # in-substep Coriolis is gated off when the planetary f×u already
+        # reaches the barotropic mode via F_slow (Oceananigans convention) —
+        # this removes the C-grid 4-point-average rotational null mode.
+        _cor_u = (f_u * V_at_u) if add_barotropic_coriolis else 0.0
         U_bar_new = (U_bar_c + dt_s * (
-            f_u * V_at_u - g * deta_dx + F_slow_u
+            _cor_u - g * deta_dx + F_slow_u
         )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
@@ -363,8 +395,9 @@ def barotropic_substeps_latlon_cgrid(
         # one cell pad per substep replaces one face pad per substep
         # (same collective count on every rank).
         U_new_at_v = interp_u_to_vface_4pt(U_bar_new, grid)
+        _cor_v = (-f_v * U_new_at_v) if add_barotropic_coriolis else 0.0
         V_bar_new = (V_bar_c + dt_s * (
-            -f_v * U_new_at_v - g * deta_dy + F_slow_v
+            _cor_v - g * deta_dy + F_slow_v
         )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
@@ -421,29 +454,30 @@ def barotropic_substeps_latlon_cgrid(
     init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
 
     if config.differentiable_barotropic:
-        # scan path: pass filter weights as xs for cosine filtering
-        def scan_body(carry, w_i):
-            new_carry = substep_body(w_i, carry)
+        # scan path: pass (averaging, transport) weights as xs per substep
+        def scan_body(carry, wts_i):
+            new_carry = substep_body(wts_i, carry)
             return new_carry, None
 
         (eta_f, U_bar_f, V_bar_f,
          Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f), _ = jax.lax.scan(
-            scan_body, init_carry, xs=w_filter, length=n_substeps,
+            scan_body, init_carry, xs=(w_filter, w_transport), length=n_loop,
         )
     else:
-        # fori_loop path: index into filter weights
+        # fori_loop path: index into the filter + transport weights
         def fori_body(i, carry):
-            w_i = w_filter[i]
-            return substep_body(w_i, carry)
+            return substep_body((w_filter[i], w_transport[i]), carry)
 
         (eta_f, U_bar_f, V_bar_f,
          Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = jax.lax.fori_loop(
-            0, n_substeps, fori_body, init_carry,
+            0, n_loop, fori_body, init_carry,
         )
 
-    # Time-averaged barotropic transport (always box-filtered)
-    Hu_avg = Hu_sum_f / n_substeps
-    Hv_avg = Hv_sum_f / n_substeps
+    # Time-averaged barotropic transport: w_transport already carries the
+    # 1/n_substeps normalisation (box/cosine) or the SM2005 secondary weights
+    # (power_law), so the accumulator IS the time-averaged transport.
+    Hu_avg = Hu_sum_f
+    Hv_avg = Hv_sum_f
 
     # Time-averaged eta and velocity (cosine or box filtered)
     eta_avg = eta_sum_f / w_total

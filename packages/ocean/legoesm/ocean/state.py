@@ -856,7 +856,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box" or "cosine" (shaped filter for time-averaging)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
     max_abs_eta_m: float = 1.0e4
