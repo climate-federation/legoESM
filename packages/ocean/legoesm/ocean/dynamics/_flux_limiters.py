@@ -12,31 +12,12 @@ limited face value is ``f_face = f_donor + 0.5 * psi(r) * (f_downstream
 
 from __future__ import annotations
 
-import jax.numpy as jnp
+# Van Leer / Sweby are the canonical core kernels (redundancy audit #519) —
+# import instead of re-deriving phi(r); re-export so existing ocean callers
+# (`from ..._flux_limiters import sweby_limiter`) keep working.
+from legoesm.core.flux_limiters import sweby_limiter, van_leer_limiter
 
-
-def van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: ``psi(r) = (r + |r|) / (1 + |r|)``.
-
-    Smooth, second-order, TVD. Bounded by [0, 2). Differentiable
-    everywhere. Less aggressive than Sweby/superbee.
-    """
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
-
-
-def sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Sweby (superbee) flux limiter.
-
-    ``psi(r) = max(0, min(1, 2r), min(2, r))``.
-
-    Traces the upper boundary of the Sweby TVD region: maximum
-    anti-diffusion subject to monotonicity. Standard choice in Veros
-    (``enable_superbee_advection=True``) and MOM6 (``superbee``).
-    """
-    return jnp.maximum(
-        0.0,
-        jnp.maximum(jnp.minimum(1.0, 2.0 * r), jnp.minimum(2.0, r)),
-    )
+__all__ = ["van_leer_limiter", "sweby_limiter", "resolve_tvd_limiter"]
 
 
 def resolve_tvd_limiter(name: str):

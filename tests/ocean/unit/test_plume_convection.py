@@ -62,6 +62,39 @@ def test_plume_outputs_finite_and_signs_consistent():
     assert 0.0 <= flag_max <= 1.0
 
 
+def test_plume_uses_passed_eos_fn():
+    """#518: parcel density must come from the passed ``eos_fn``, not a
+    hardcoded ``wright_eos``.  A sentinel EOS that flips the buoyancy sign
+    relative to wright must change the convective trigger — proving the EOS
+    is actually consumed (regression guard against re-hardcoding)."""
+    T, S, rho, p, z, J = _build_state(surface_unstable=True)
+    cfg = PlumeConfig()
+
+    out_default = plume_convection(T, S, rho, p, z, J, cfg)
+
+    # Sentinel EOS: makes the parcel ALWAYS lighter than ambient (rho_plume
+    # well below any ambient rho) → never denser → plume stays inactive →
+    # zero tendencies.  If eos_fn were ignored, this would equal the default.
+    def _always_light_eos(Tp, Sp, pp):
+        return jnp.full_like(Tp, 0.0)
+
+    out_sentinel = plume_convection(T, S, rho, p, z, J, cfg,
+                                    eos_fn=_always_light_eos)
+
+    assert jnp.all(jnp.isfinite(out_sentinel.dT_dt))
+    # Default path produced real convection; sentinel must differ.
+    assert float(jnp.max(jnp.abs(out_default.dT_dt))) > 0.0
+    assert not jnp.allclose(out_default.dT_dt, out_sentinel.dT_dt)
+    # Always-light parcel → never sinks → essentially no detrainment.
+    assert float(jnp.max(jnp.abs(out_sentinel.dT_dt))) < \
+        float(jnp.max(jnp.abs(out_default.dT_dt)))
+
+    # Passing wright explicitly == default (byte-identical).
+    from legoesm.ocean.eos import wright_eos
+    out_wright = plume_convection(T, S, rho, p, z, J, cfg, eos_fn=wright_eos)
+    assert jnp.array_equal(out_default.dT_dt, out_wright.dT_dt)
+
+
 def test_plume_no_nan_for_dry_columns():
     """Dry / land columns (jacobian = 0 → dz = 0) must produce zero output.
 
