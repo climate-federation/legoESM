@@ -40,7 +40,7 @@ _STARTER_RESOLUTION_MAX = 16
 
 def build_amip_clubb_lite_config(
     *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray",
-    days: int = 200,
+    days: int = 200, land_mask_path: str = "",
 ) -> ExperimentConfig:
     """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
 
@@ -52,6 +52,12 @@ def build_amip_clubb_lite_config(
     200-day default ≈ 40 samples at the 5-day diagnostic cadence) and aligned to the
     ERA5 window (runbook §6). Hydrostatic finite-volume dycore — the AMIP default the
     comparison + LES spin-off were built against.
+
+    ``land_mask_path`` (optional land-sea fraction file) sets a real land-sea mask, so the
+    model runs land physics over land and the campaign's ``--ocean-only`` can EXCLUDE land
+    columns. WITHOUT it the config is FLAT (no land): the model treats the whole globe as
+    prescribed-SST ocean, so over CONTINENTS the comparison to ERA5 (which has land) is
+    apples-to-oranges and would dominate the worst-column ranking — see ``main``'s NOTE.
     """
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=int(resolution), nlev=int(nlev)),
@@ -60,6 +66,7 @@ def build_amip_clubb_lite_config(
         radiation=radiation,
         turbulence="clubb_lite",
         days=int(days),
+        land_mask_path=str(land_mask_path),
     )
     # Fail-fast on a bad scheme literal (e.g. a typo'd --radiation like "rrtmpg") via the
     # CANONICAL ExperimentConfig validator BEFORE the starter config is written to disk —
@@ -80,14 +87,38 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--days", type=int, default=200,
                    help="run length = the CLIMATOLOGY WINDOW the time-mean is computed over "
                         "(default 200; keep it long + aligned to the ERA5 window)")
+    p.add_argument("--land-mask-path", default="",
+                   help="optional land-sea fraction file: sets a real land mask so the model "
+                        "runs land physics over land and --ocean-only can exclude land columns. "
+                        "WITHOUT it the config is flat (no land) and the over-continent ERA5 "
+                        "comparison is apples-to-oranges (see the launch NOTE).")
     args = p.parse_args(argv)
+    # Fail-fast (iter 454): a non-existent --land-mask-path would only surface at the model
+    # build, deep in a multi-day run. Catch the typo'd/unmounted path at generation, like the
+    # --radiation validate-before-write (iter 441). os import is function-scoped per the
+    # repo's inline-import budget.
+    if args.land_mask_path:
+        import os
+        if not os.path.exists(args.land_mask_path):
+            raise SystemExit(
+                f"--land-mask-path {args.land_mask_path!r} does not exist; supply a readable "
+                "land-sea fraction file (or omit it for a flat no-land config).")
     cfg = build_amip_clubb_lite_config(
         resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation,
-        days=args.days)
+        days=args.days, land_mask_path=args.land_mask_path)
     with open(args.out, "w") as f:
         json.dump(experiment_config_to_dict(cfg), f, indent=2)
     print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "
           f"latlon {args.resolution} L{args.nlev}, {args.days}-day climatology) to {args.out}")
+    if not args.land_mask_path:
+        print(
+            "[config] NOTE: no --land-mask-path => FLAT config (no land). The model treats the "
+            "whole globe as prescribed-SST ocean, so over CONTINENTS the comparison to ERA5 "
+            "(which has land) is apples-to-oranges and would dominate the worst-column ranking "
+            "(the LES correction would chase the missing-land artifact, not a closure error). "
+            "For a realistic comparison supply --land-mask-path (then the campaign's "
+            "--ocean-only / verify --ocean-only meaningfully exclude land columns); a flat "
+            "config is fine only for an aquaplanet smoke.")
     if args.resolution <= _STARTER_RESOLUTION_MAX:
         print(
             f"[config] NOTE: latlon resolution {args.resolution} is a COARSE STARTER "

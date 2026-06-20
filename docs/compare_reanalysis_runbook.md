@@ -30,6 +30,16 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.j
 > — keep it long enough for a stable mean and **aligned to the ERA5 window** (§6); start from a
 > spun-up restart (or run long enough) so the initial transient does not bias the mean.
 
+> **Supply a land-sea mask for a realistic comparison (`--land-mask-path`, iter 454).** WITHOUT
+> it the config is **flat (no land)** — the model treats the whole globe as prescribed-SST ocean,
+> so over **continents** the comparison to ERA5 (which has land) is apples-to-oranges and would
+> **dominate the worst-column ranking** (the LES correction would then chase the missing-land
+> artifact, not a closure error). For a realistic run pass `--land-mask-path <land-sea fraction
+> file>`; the model then runs land physics over land, and the campaign's `OCEAN_ONLY=1` /
+> verify `--ocean-only` can meaningfully **exclude** the land columns (which need a land mask to
+> identify — without one they read as ocean and are *not* excluded). A flat config is fine only
+> for an aquaplanet smoke; the generator prints this NOTE when no mask is given.
+
 ## 1. Preflight the SETUP (seconds, no model run)
 
 Confirms config load + ERA5 ingest (regrid + vertical interp) + grid/sigma build +

@@ -137,3 +137,33 @@ def test_bad_radiation_fails_fast_at_generation_not_at_load(tmp_path):
     with pytest.raises(ValueError, match="radiation must be one of"):
         main([str(out), "--radiation", "rrtmpg"])
     assert not out.exists()
+
+
+def test_land_mask_path_threads_into_config_and_fails_fast_on_bad_path(tmp_path):
+    """--land-mask-path threads into config.land_mask_path so the model gets a real land-sea
+    mask (iter 454) — enabling --ocean-only to exclude land; empty => flat (no land). A
+    non-existent path fails LOUD at generation (no broken config written)."""
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+        main,
+    )
+
+    # threads into the config + stays schema-valid
+    cfg = build_amip_clubb_lite_config(land_mask_path="/data/sftof.nc")
+    assert cfg.land_mask_path == "/data/sftof.nc"
+    cfg.validate_strict()
+    assert build_amip_clubb_lite_config().land_mask_path == ""        # flat default
+
+    # a real (existing) mask file threads through main() and is serialized
+    mask = tmp_path / "mask.nc"
+    mask.write_text("")                                              # exists (content unread here)
+    out = tmp_path / "withland.json"
+    assert main([str(out), "--land-mask-path", str(mask)]) == 0
+    with open(out) as f:
+        assert json.load(f)["land_mask_path"] == str(mask)
+
+    # a non-existent mask path fails LOUD at generation, writing no config
+    bad = tmp_path / "bad.json"
+    with pytest.raises(SystemExit, match="does not exist"):
+        main([str(bad), "--land-mask-path", "/nonexistent/mask.nc"])
+    assert not bad.exists()
