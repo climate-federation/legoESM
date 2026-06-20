@@ -150,6 +150,37 @@ def build_era5_amip_forcing(
     return AMIPForcingConfig(**base)
 
 
+def apply_amip_forcing_to_config(experiment_config: Any, forcing_config: Any) -> Any:
+    """Inject an ``AMIPForcingConfig``'s fields into an ``ExperimentConfig`` so a custom
+    forcing (e.g. from :func:`build_era5_amip_forcing`) drives the AMIP ``ModelDriver`` run.
+
+    Returns a NEW config (``ExperimentConfig._replace``) — the two structs carry the same
+    forcing field names except ``AMIPForcingConfig.path`` → ``ExperimentConfig.forcing_path``.
+    This is the field map that turns "I built an ERA5 forcing file" into "the campaign runs
+    AMIP with it", with no error-prone hand-editing of ``sst_var``/``sst_offset``/… in the
+    config JSON.  The downstream ``load_amip_forcing`` units guard still cross-checks the
+    K/fraction conventions, so a wrong offset/scale fails loud.  Copies EVERY forcing field
+    the two structs share — including the surface BCs ``T_ice``/``albedo_ice``/
+    ``albedo_ocean`` — so a ``build_era5_amip_forcing(..., T_ice=…)`` override is NOT
+    silently dropped (codex-review iter 421).
+    """
+    return experiment_config._replace(
+        dataset=forcing_config.dataset,
+        forcing_path=forcing_config.path,
+        sic_path=forcing_config.sic_path,
+        sst_var=forcing_config.sst_var,
+        sic_var=forcing_config.sic_var,
+        time_var=forcing_config.time_var,
+        lat_var=forcing_config.lat_var,
+        lon_var=forcing_config.lon_var,
+        sst_offset=forcing_config.sst_offset,
+        sic_scale=forcing_config.sic_scale,
+        T_ice=forcing_config.T_ice,
+        albedo_ice=forcing_config.albedo_ice,
+        albedo_ocean=forcing_config.albedo_ocean,
+    )
+
+
 def open_local_era5_dataset(data_dir: str, date: str) -> Any:
     """Merge the local NCAR-RDA ll025 ERA5 for ``date`` (``YYYYMMDD``) into one dataset.
 

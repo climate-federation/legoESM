@@ -899,6 +899,28 @@ def _build_run_setup(args):
     return base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis
 
 
+def _maybe_apply_local_era5_forcing(args, base_cfg):
+    """If ``--amip-forcing-from-local-era5``, build the AMIP forcing from the local ERA5
+    archive and inject it into ``base_cfg``; else return ``base_cfg`` unchanged.
+
+    Injecting into ``base_cfg`` (the campaign template) means every corrected round's config
+    — derived by ``_replace``-ing only the closure coefficient — carries the same prescribed
+    SST forcing.  ``phis`` (topography) is unaffected by the SST dataset, so it stays correct
+    even though ``_build_run_setup`` computed it from the pre-injection config.
+    """
+    if not getattr(args, "amip_forcing_from_local_era5", False):
+        return base_cfg
+    from scripts.data.load_local_era5 import (
+        apply_amip_forcing_to_config,
+        build_era5_amip_forcing,
+    )
+
+    fcfg = build_era5_amip_forcing(
+        args.local_era5_dir, args.local_era5_date, args.amip_forcing_out,
+        hour_stride=args.amip_forcing_hour_stride)
+    return apply_amip_forcing_to_config(base_cfg, fcfg)
+
+
 def _resolve_era5_n_times(n_times: int) -> int:
     """Validate the ``--era5-n-times`` averaging window LOUDLY, returning the int.
 
@@ -947,6 +969,21 @@ def _build_arg_parser():
     p.add_argument("--local-era5-date", default=None,
                    help="Date (YYYYMMDD) selecting the --local-era5-dir day; "
                         "--era5-time-idx/--era5-n-times index that day's 24 hourly times.")
+    p.add_argument("--amip-forcing-from-local-era5", action="store_true",
+                   help="(--mode amip) ALSO build the AMIP SST/sea-ice forcing from the "
+                        "SAME --local-era5-dir archive (build_era5_amip_forcing) and inject "
+                        "it into the config — a fully-OFFLINE realistic AMIP campaign (real "
+                        "SST forcing AND real ERA5 compare) in one command, no hand-edited "
+                        "dataset=custom config. Overrides any forcing in --config.")
+    p.add_argument("--amip-forcing-out", default="era5_amip_forcing.nc",
+                   help="Output NetCDF for --amip-forcing-from-local-era5 (a runtime "
+                        "artifact; written at launch, gitignored). OVERWRITTEN if it "
+                        "exists — give concurrent campaigns from the same directory "
+                        "DISTINCT paths so they do not clobber each other's forcing.")
+    p.add_argument("--amip-forcing-hour-stride", type=int, default=24,
+                   help="Subsample the monthly-hourly ERA5 boundary forcing to every Nth "
+                        "step (default 24 = daily) — the monthly-hourly file OOMs the "
+                        "loader (iter 419).")
     p.add_argument("--era5-time-idx", type=int, default=0)
     p.add_argument("--era5-n-times", type=int, default=1,
                    help="Average this many consecutive ERA5 times (starting at "
@@ -2099,6 +2136,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         raise SystemExit(
             "run_correction_campaign: --local-era5-dir requires --local-era5-date "
             "YYYYMMDD (which day's 24 hourly ERA5 times to use).")
+    # --amip-forcing-from-local-era5: only meaningful for a prescribed-SST AMIP run from
+    # the local archive — fail loud at launch on a CMIP (interactive ocean) request or a
+    # missing local source, not after the model build.
+    if args.amip_forcing_from_local_era5:
+        if args.mode != "amip":
+            raise SystemExit(
+                "run_correction_campaign: --amip-forcing-from-local-era5 requires --mode "
+                "amip (CMIP uses an interactive ocean, not a prescribed SST forcing).")
+        if not args.local_era5_dir:
+            raise SystemExit(
+                "run_correction_campaign: --amip-forcing-from-local-era5 requires "
+                "--local-era5-dir (+ --local-era5-date) — the SAME local archive supplies "
+                "both the SST forcing and the compare reference.")
+        _assert_output_path_writable(args.amip_forcing_out, flag="amip-forcing-out")
     # Pre-flight: fail in milliseconds (not after a multi-day run) on an unwritable
     # output path — --out is opened only at the very end, --checkpoint each round.
     _assert_output_path_writable(args.out, flag="out")
@@ -2114,6 +2165,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # CLI via _build_run_setup (iter 295).
     base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
         args)
+    # Turnkey OFFLINE realistic AMIP: build the SST/sea-ice forcing from the same local
+    # ERA5 archive and inject it into base_cfg (so every corrected round carries it).
+    base_cfg = _maybe_apply_local_era5_forcing(args, base_cfg)
 
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).

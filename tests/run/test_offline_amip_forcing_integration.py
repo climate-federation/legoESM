@@ -42,8 +42,9 @@ def _write_synthetic_amip_archive(tmp_path, *, nt=48, sst_add=0.0):
 
 
 def _run_amip(tmp_path, forcing_name, fcfg):
-    """Wire an AMIPForcingConfig onto an ExperimentConfig (the field map a campaign applies)
-    and run a tiny hydrostatic gray-radiation AMIP ModelDriver for one day."""
+    """Wire an AMIPForcingConfig onto an ExperimentConfig via the SHARED field map
+    (``apply_amip_forcing_to_config`` — the same the campaign applies) and run a tiny
+    hydrostatic gray-radiation AMIP ModelDriver for one day."""
     from legoesm.driver.config import (
         DycoreConfig,
         ExperimentConfig,
@@ -52,15 +53,14 @@ def _run_amip(tmp_path, forcing_name, fcfg):
     )
     from legoesm.driver.model_driver import ModelDriver
 
-    cfg = ExperimentConfig(
+    from scripts.data.load_local_era5 import apply_amip_forcing_to_config
+
+    base = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
-        output=OutputConfig(diag_days=1), radiation="gray", days=1,
-        dataset="custom", forcing_path=fcfg.path, sic_path=fcfg.sic_path,
-        sst_var=fcfg.sst_var, sic_var=fcfg.sic_var, time_var=fcfg.time_var,
-        lat_var=fcfg.lat_var, lon_var=fcfg.lon_var,
-        sst_offset=fcfg.sst_offset, sic_scale=fcfg.sic_scale)
+        output=OutputConfig(diag_days=1), radiation="gray", days=1)
+    cfg = apply_amip_forcing_to_config(base, fcfg)
     driver = ModelDriver(cfg)
     driver.setup()
     driver.run()

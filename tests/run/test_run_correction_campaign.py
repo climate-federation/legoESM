@@ -1181,6 +1181,75 @@ def test_main_requires_exactly_one_era5_source():
         rcc.main(base + ["--local-era5-dir", "d"])                       # local, no date
 
 
+def test_main_amip_forcing_from_local_era5_validation():
+    """iter 421: --amip-forcing-from-local-era5 builds the AMIP SST/sea-ice forcing from the
+    SAME local archive — only valid for a prescribed-SST AMIP run from --local-era5-dir.
+    Fail LOUD at launch on a CMIP request or a missing local source (before the model
+    build)."""
+    import scripts.run.run_correction_campaign as rcc
+
+    base = ["--config", "c.json", "--out", "o.json", "--amip-forcing-from-local-era5"]
+    # CMIP has an interactive ocean — a prescribed SST forcing is meaningless.
+    with pytest.raises(SystemExit, match="requires --mode amip"):
+        rcc.main(base + ["--mode", "cmip", "--era5-zarr", "z"])
+    # AMIP but no local archive: the forcing has nowhere to come from.
+    with pytest.raises(SystemExit, match="requires --local-era5-dir"):
+        rcc.main(base + ["--mode", "amip", "--era5-zarr", "z"])
+    # AMIP + local dir but no date: the existing date guard fires first (the build needs the
+    # date) — pins the guard ordering so the flag can never reach the build date-less.
+    with pytest.raises(SystemExit, match="requires --local-era5-date"):
+        rcc.main(base + ["--mode", "amip", "--local-era5-dir", "D"])
+
+
+def test_maybe_apply_local_era5_forcing_builds_and_injects_only_when_flagged(monkeypatch):
+    """iter 421: the campaign helper is a NO-OP unless --amip-forcing-from-local-era5; when
+    set it builds the forcing from the local archive (with the CLI's stride/out/date) and
+    injects it into base_cfg.  The build is separately tested, so stub it here."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+    from legoesm.forcing.amip import AMIPForcingConfig
+
+    import scripts.run.run_correction_campaign as rcc
+
+    base_cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=1), radiation="gray", days=2,
+        dataset="analytical")
+
+    called = {}
+
+    def _fake_build(data_dir, date, out_path, *, hour_stride):
+        called.update(dir=data_dir, date=date, out=out_path, stride=hour_stride)
+        return AMIPForcingConfig(
+            dataset="custom", path=out_path, sst_var="SSTK", sic_var="CI",
+            sst_offset=0.0, sic_scale=1.0)
+
+    monkeypatch.setattr(
+        "scripts.data.load_local_era5.build_era5_amip_forcing", _fake_build)
+
+    # OFF ⇒ identity (and the build is never called).
+    args_off = SimpleNamespace(amip_forcing_from_local_era5=False)
+    assert rcc._maybe_apply_local_era5_forcing(args_off, base_cfg) is base_cfg
+    assert not called
+
+    # ON ⇒ build with the CLI args + inject the forcing fields into the config.
+    args_on = SimpleNamespace(
+        amip_forcing_from_local_era5=True, local_era5_dir="D",
+        local_era5_date="20200101", amip_forcing_out="F.nc",
+        amip_forcing_hour_stride=12)
+    out = rcc._maybe_apply_local_era5_forcing(args_on, base_cfg)
+    assert called == {"dir": "D", "date": "20200101", "out": "F.nc", "stride": 12}
+    assert out.dataset == "custom" and out.forcing_path == "F.nc"
+    assert out.sst_var == "SSTK" and out.sic_var == "CI"
+    assert out.radiation == "gray" and out.days == 2     # unrelated fields preserved
+
+
 def test_main_cmip_rejects_unknown_coupled_preset(monkeypatch):
     """--mode cmip with an unknown --coupled-preset fails LOUD at launch (a typo'd preset)
     with the valid choices, NOT a cryptic KeyError deeper in the coupled-driver build.

@@ -157,6 +157,50 @@ def test_build_era5_amip_forcing_missing_seaice_fails_loud(tmp_path):
     assert not out.exists()                          # failed loud BEFORE writing
 
 
+def test_apply_amip_forcing_to_config_injects_the_forcing_fields():
+    """The field map turns a built ERA5 forcing into a ModelDriver-ready ExperimentConfig:
+    EVERY shared forcing field is injected (AMIPForcingConfig.path -> ExperimentConfig.
+    forcing_path) — incl. the surface BCs T_ice/albedos so an override is not dropped
+    (codex-review iter 421) — and UNRELATED config fields (grid, dycore, radiation) are
+    untouched.  Uses a hand-constructed forcing with NON-default values so every assertion
+    is non-vacuous (vs the config defaults)."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+    from legoesm.forcing.amip import AMIPForcingConfig
+
+    from scripts.data.load_local_era5 import apply_amip_forcing_to_config
+
+    fcfg = AMIPForcingConfig(
+        dataset="custom", path="forcing.nc", sic_path="seaice.nc",
+        sst_var="SSTK", sic_var="CI", time_var="time",
+        lat_var="latitude", lon_var="longitude",
+        sst_offset=0.0, sic_scale=1.0,
+        T_ice=270.0, albedo_ice=0.7, albedo_ocean=0.05)   # all NON-default
+    base = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=1), radiation="gray", days=2,
+        dataset="analytical")           # the default — must be overridden by the injection
+    out = apply_amip_forcing_to_config(base, fcfg)
+
+    # Every forcing field injected (path -> forcing_path; separate sic_path non-vacuous).
+    assert out.dataset == "custom" and out.forcing_path == "forcing.nc"
+    assert out.sic_path == "seaice.nc"
+    assert out.sst_var == "SSTK" and out.sic_var == "CI" and out.time_var == "time"
+    assert out.lat_var == "latitude" and out.lon_var == "longitude"
+    assert out.sst_offset == 0.0 and out.sic_scale == 1.0
+    # Surface BCs carried (an override would have been silently dropped before iter 421).
+    assert out.T_ice == 270.0 and out.albedo_ice == 0.7 and out.albedo_ocean == 0.05
+    # Unrelated fields preserved; the input is not mutated (NamedTuple._replace is a copy).
+    assert out.radiation == "gray" and out.days == 2 and out.grid.nlev == 5
+    assert base.dataset == "analytical" and base.T_ice != 270.0
+
+
 def test_open_local_era5_dataset_missing_chunk_fails_loud(tmp_path):
     from scripts.data.load_local_era5 import open_local_era5_dataset
 
