@@ -70,6 +70,25 @@ def test_run_to_column_mean_is_time_mean():
     np.testing.assert_allclose(np.asarray(mean.sst_K), 293.0, rtol=1e-12)
 
 
+def test_run_to_column_mean_excludes_spinup():
+    """``spinup_days`` discards samples with model time < spinup_days (the un-equilibrated
+    transient) before accumulating — the climatology mean is over the POST-spin-up samples
+    only, so a cold-start spin-up does not contaminate the bias the correction loop targets."""
+    states = [_state(0.0), _state(3.0), _state(6.0), _state(9.0)]   # fired at days 0,1,2,3
+    full = run_to_column_mean(_FakeDriver(states), _extract)        # all four → mean scale 4.5
+    np.testing.assert_allclose(np.asarray(full.u), 4.5, rtol=1e-12)
+    post = run_to_column_mean(_FakeDriver(states), _extract, spinup_days=2.0)
+    np.testing.assert_allclose(np.asarray(post.u), 7.5, rtol=1e-12)  # days 2,3 → mean(6, 9)
+
+
+def test_run_to_column_mean_spinup_excluding_all_raises():
+    """If ``spinup_days`` drops EVERY sample (>= the run length) it must raise (not return a
+    zero mean) — fail loud so a spin-up longer than the run is caught, not silently zeroed."""
+    driver = _FakeDriver([_state(1.0), _state(2.0)])               # days 0,1
+    with pytest.raises(ValueError, match="after the spin-up"):
+        run_to_column_mean(driver, _extract, spinup_days=5.0)
+
+
 def test_run_to_column_mean_samples_the_outer_driver_not_the_callback_arg():
     """The extractor MUST read the OUTER (closed-over) driver, NOT the object the driver
     passes as the callback's first arg.  This is load-bearing for CMIP: the outer COUPLED

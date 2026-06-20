@@ -3304,12 +3304,14 @@ def test_campaign_knobs_from_args_maps_flags():
     assert knobs["accept_only_if_improved"] is True       # NOT --keep-worsening-rounds
     assert knobs["step_fractions"] is None
     assert knobs["patience"] == 2 and knobs["n_worst"] == 20 and knobs["bias_tol"] is None
+    assert knobs["spinup_days"] == 0.0                    # default = keep everything
 
     flagged = _campaign_knobs_from_args(parser.parse_args([
         "--config", "x", "--era5-zarr", "z", "--keep-dry-rounds", "--allow-unphysical-coeff",
         "--keep-worsening-rounds", "--step-fractions", "1.0,0.5,0.25",
         "--bias-tol", "1e-3", "--patience", "5", "--n-worst", "8",
-        "--feedback-strategy", "environment", "--les-budget", "4"]))
+        "--feedback-strategy", "environment", "--les-budget", "4", "--spinup-days", "30"]))
+    assert flagged["spinup_days"] == 30.0                 # --spinup-days reaches the build kwargs
     assert flagged["stop_on_no_valid_diagnoses"] is False
     assert flagged["clip_to_bounds"] is False
     assert flagged["accept_only_if_improved"] is False

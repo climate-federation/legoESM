@@ -38,6 +38,7 @@ def run_to_column_mean(
     extract_column_state: Callable[[Any, float, float], ColumnState],
     *,
     run_kwargs: dict | None = None,
+    spinup_days: float = 0.0,
 ) -> ColumnState:
     """Run a configured + ``setup()``-d ``driver`` and return its time-mean ColumnState.
 
@@ -52,12 +53,23 @@ def run_to_column_mean(
     ``day``.  ``run_kwargs`` forwards extra args (e.g. ``start_day``) to
     ``driver.run``.
 
-    Raises if no segment boundary fired (the run is shorter than one diagnostic
-    interval) — a silent zero-sample mean would be a spurious all-zero state.
+    ``spinup_days`` (default ``0.0`` = keep everything) DISCARDS samples whose model
+    time is ``< spinup_days`` before accumulating: a climatology time-mean should
+    exclude the un-equilibrated SPIN-UP transient (a cold-start free-troposphere /
+    stratosphere takes many days to reach radiative equilibrium — iter 445 saw a 91 K
+    aloft T-bias in a 1-day run), else the correction loop targets a spin-up-contaminated
+    bias rather than the equilibrated climatology.  Keep ``days`` enough longer than
+    ``spinup_days`` for a stable post-spin-up mean.
+
+    Raises if no segment boundary fired AFTER the spin-up (the post-spin-up run is
+    shorter than one diagnostic interval) — a silent zero-sample mean would be a
+    spurious all-zero state.
     """
     box: dict[str, Any] = {"acc": None}
 
     def _sample(_driver: Any, day: float, dt_segment: float) -> None:
+        if day < spinup_days:
+            return  # skip the un-equilibrated spin-up transient (iter 446)
         cs = extract_column_state(driver, day, dt_segment)
         if box["acc"] is None:
             box["acc"] = init_column_accumulator(cs)
@@ -67,8 +79,9 @@ def run_to_column_mean(
 
     if box["acc"] is None:
         raise ValueError(
-            "run_to_column_mean: no segment boundary fired — the run is shorter "
-            "than one diagnostic interval (raise `days` or lower `diag_days`)."
+            "run_to_column_mean: no segment boundary fired after the spin-up "
+            f"(spinup_days={spinup_days}) — the post-spin-up run is shorter than one "
+            "diagnostic interval (raise `days`, lower `diag_days`, or reduce `spinup_days`)."
         )
     return mean_column_state(box["acc"])
 
@@ -78,6 +91,7 @@ def make_run_fn(
     extract_column_state: Callable[[Any, float, float], ColumnState],
     *,
     run_kwargs: dict | None = None,
+    spinup_days: float = 0.0,
 ) -> Callable[[Any], ColumnState]:
     """Adapt a ``config → driver`` builder into the ``run_amip_fn``/``run_cmip_fn``
     that :func:`legoesm.training.correction_loop.make_compare_fn` (iter 21) expects.
@@ -99,7 +113,8 @@ def make_run_fn(
     """
     def run_fn(config: Any) -> ColumnState:
         driver = build_driver(config)
-        return run_to_column_mean(driver, extract_column_state, run_kwargs=run_kwargs)
+        return run_to_column_mean(
+            driver, extract_column_state, run_kwargs=run_kwargs, spinup_days=spinup_days)
 
     return run_fn
 

@@ -61,9 +61,13 @@ CKPT="${CKPT:-results/compare_reanalysis/campaign.ckpt.json}"
 mkdir -p "$(dirname "$OUT")" "$(dirname "$CKPT")"
 
 MODE="${MODE:-amip}"                               # amip (prescribed SST) | cmip (coupled ocean)
+# SPINUP_DAYS discards the un-equilibrated spin-up from the climatology time-mean (iter 446)
+# so the loop targets the EQUILIBRATED bias. Default 0 = keep everything; SET IT (e.g. a few
+# tens of days, << the --days run length in the CONFIG) for a real multi-day climatology run.
+SPINUP_DAYS="${SPINUP_DAYS:-0}"
 COMMON=(--config "$CONFIG" --mode "$MODE"
         --diagnosis-method clubb_coefficient --iterations 10 --n-worst 64
-        --les-budget 8 --orographic-forcing auto --out "$OUT")
+        --les-budget 8 --orographic-forcing auto --spinup-days "$SPINUP_DAYS" --out "$OUT")
 # ERA5 reference: EXACTLY one source — the offline local archive OR the Zarr store.
 if [ -n "$LOCAL_ERA5_DIR" ]; then
   COMMON+=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE")

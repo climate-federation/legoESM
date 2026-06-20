@@ -262,7 +262,8 @@ def assert_per_column_fields_match_grid(grid_shape, *, area_weights, valid_mask=
 
 def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
                         reference, sigma, area_weights, n_worst,
-                        lat_deg, lon_deg, valid_mask=None, manifest_reducer=None):
+                        lat_deg, lon_deg, valid_mask=None, manifest_reducer=None,
+                        spinup_days=0.0):
     """``compare_fn(config)`` = build clubb driver → run AMIP/CMIP → time-mean →
     compare to ``reference`` (shared by the single + multi build functions).
 
@@ -277,7 +278,9 @@ def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_sta
     import jax.numpy as jnp
 
     build_driver = make_clubb_build_driver(base_atm_config, build_base_driver)
-    run_fn = make_run_fn(build_driver, extract_column_state)
+    # spinup_days DISCARDS the un-equilibrated transient from the climatology time-mean
+    # (iter 446) so the loop targets the equilibrated bias, not a spin-up-contaminated one.
+    run_fn = make_run_fn(build_driver, extract_column_state, spinup_days=spinup_days)
     return make_compare_fn(
         reference=reference,
         sigma_full=jnp.asarray(sigma.sigma_full),
@@ -324,7 +327,7 @@ class CampaignDryRun(NamedTuple):
 def _build_campaign_harness(
     *, base_atm_config, build_base_driver, extract_column_state, reference, sigma, grid,
     area_weights, n_worst, lat_deg, lon_deg, valid_mask, manifest_reducer, les_config,
-    run_les_fn, phis, feedback_strategy,
+    run_les_fn, phis, feedback_strategy, spinup_days=0.0,
 ):
     """The compare/diagnose/env-grid harness SHARED by the single- + multi-coefficient
     campaign builders (parallel to ``_build_osse_harness``): the ERA5 ``compare_fn`` (via
@@ -340,7 +343,7 @@ def _build_campaign_harness(
         extract_column_state=extract_column_state, reference=reference, sigma=sigma,
         area_weights=area_weights, n_worst=n_worst,
         lat_deg=lat_deg, lon_deg=lon_deg, valid_mask=valid_mask,
-        manifest_reducer=manifest_reducer,
+        manifest_reducer=manifest_reducer, spinup_days=spinup_days,
     )
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_config, run_les_fn=run_les_fn, phis=phis)
@@ -382,6 +385,7 @@ def build_correction_campaign(
     global_reduce: Any | None = None,
     validate_reference: bool = True,
     dry_run: bool = False,
+    spinup_days: float = 0.0,
 ):
     """Assemble + run the LES-informed ``clubb_lite.C_K`` correction campaign.
 
@@ -450,7 +454,7 @@ def build_correction_campaign(
         grid=grid, area_weights=area_weights, n_worst=n_worst, lat_deg=lat_deg,
         lon_deg=lon_deg, valid_mask=valid_mask, manifest_reducer=manifest_reducer,
         les_config=les_config, run_les_fn=run_les_fn, phis=phis,
-        feedback_strategy=feedback_strategy)
+        feedback_strategy=feedback_strategy, spinup_days=spinup_days)
 
     if dry_run:
         # Everything CONSTRUCTED (reference validated, clubb build-driver +
@@ -711,6 +715,7 @@ def build_multi_correction_campaign(
     global_reduce: Any | None = None,
     validate_reference: bool = True,
     dry_run: bool = False,
+    spinup_days: float = 0.0,
 ):
     """Assemble + run the SIMULTANEOUS multi-coefficient correction campaign.
 
@@ -774,7 +779,7 @@ def build_multi_correction_campaign(
         grid=grid, area_weights=area_weights, n_worst=n_worst, lat_deg=lat_deg,
         lon_deg=lon_deg, valid_mask=valid_mask, manifest_reducer=manifest_reducer,
         les_config=les_config, run_les_fn=run_les_fn, phis=phis,
-        feedback_strategy=feedback_strategy)
+        feedback_strategy=feedback_strategy, spinup_days=spinup_days)
 
     if dry_run:
         # Constructed every per-coefficient spec + the compare/diagnose fns (the
@@ -1006,6 +1011,12 @@ def _build_arg_parser():
                         "single synoptic snapshot (which injects weather noise into the "
                         "bias). Default 1 = a single time (the old behaviour).")
     p.add_argument("--iterations", type=int, default=3)
+    p.add_argument("--spinup-days", type=float, default=0.0,
+                   help="discard the first N days of model time from the climatology "
+                        "time-mean (the un-equilibrated SPIN-UP transient) before comparing "
+                        "to ERA5, so the loop targets the equilibrated bias not a spin-up-"
+                        "contaminated one (iter 446; default 0 = keep everything). Keep "
+                        "--days enough longer than --spinup-days for a stable post-spin-up mean.")
     p.add_argument("--bias-tol", type=float, default=None,
                    help="convergence tolerance: stop early once --patience "
                         "consecutive rounds improve the global bias by less than "
@@ -1125,6 +1136,7 @@ def _campaign_knobs_from_args(args) -> dict:
         bias_tol=args.bias_tol,
         patience=args.patience,
         stop_on_no_valid_diagnoses=not args.keep_dry_rounds,
+        spinup_days=args.spinup_days,
     )
 
 

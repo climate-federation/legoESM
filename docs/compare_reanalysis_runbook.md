@@ -100,6 +100,12 @@ top of the launcher, then submit. The job **self-requeues** on the wall-clock li
 (`scontrol requeue` on the pre-timeout signal) and `--resume`s from the last atomic
 checkpoint — submit **once** for a multi-day run.
 
+**Set `SPINUP_DAYS`** (env var → `--spinup-days`) for a real climatology run: it discards the
+first N days of model time (the un-equilibrated spin-up) from the time-mean BEFORE comparing to
+ERA5, so the loop targets the *equilibrated* bias — not a spin-up-contaminated one (iter 445 saw
+a 91 K aloft T-bias in a 1-day run that is largely spin-up). Keep `--days` (the CONFIG run length)
+enough longer than `SPINUP_DAYS` for a stable post-spin-up mean.
+
 ```bash
 CONFIG=configs/amip_clubb_lite.json ERA5=/path/to/era5.zarr \
   sbatch scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch
