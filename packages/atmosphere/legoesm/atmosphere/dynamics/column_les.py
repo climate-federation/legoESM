@@ -509,6 +509,24 @@ def column_surface_kinematic_fluxes(
     the convective-column turbulence driver the surface-flux-free LES omits).
     ``surface_config`` defaults to the standard :class:`SurfaceLayerConfig`.
     Returns ``(w_th_s, w_qv_s)`` scalars.  Pure-JAX, differentiable.
+
+    SCOPE / assumptions (opt-in, default-OFF; the monotonic + LES-realism gates bound any
+    residual error to "no improvement", never a worse bias):
+
+    * **Ocean-oriented ``q_sfc``.**  ``q_sfc = q_sat(SST)`` assumes a SATURATED surface.
+      The SENSIBLE (buoyancy) flux — the PRIMARY turbulence driver — is exact (it uses
+      ``T_sfc = SST``, not ``q_sfc``); only the LATENT flux over-estimates a sub-saturated
+      LAND surface.  Most convective worst columns are oceanic, and the latent flux is
+      secondary for the momentum closure.
+    * **Default bulk coefficients are acceptable.**  The diagnosed
+      ``C_K = K_m/(ℓ·√wp2)`` is a CLOSURE constant — ~invariant to the surface-flux
+      MAGNITUDE (self-similar turbulence).  The flux mainly governs WHETHER turbulence
+      develops (the diagnosis-VALIDITY rate), not the C_K VALUE, so using the standard
+      ``SurfaceLayerConfig`` rather than threading the GCM's exact coefficients is
+      second-order.
+    * **Constant flux.**  Computed ONCE from the time-mean column (the ``prescribe="fluxes"``
+      design, iter 151) — appropriate for the short worst-column spin-off; an over-warming
+      run is caught by the realism gate (``theta_drift``).
     """
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
