@@ -65,6 +65,27 @@ def test_summarize_single_campaign():
     assert "70.0%" in s.report()
 
 
+def test_round_trace_records_per_round_bias_and_accept_flag():
+    """The per-round trace exposes each round's ACHIEVED updated bias + whether the
+    monotonic gate KEPT it (+ kept / - rejected) — so the HPC .out log shows the
+    progression, INCLUDING a worsening round the gate rejected (reverted)."""
+    result = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=jnp.full((2, 2), 0.4)),
+        # r1: 1.0->0.6 kept; r2: 0.6->0.7 WORSE -> rejected; r3: 0.6->0.45 kept.
+        iterations=(_cres(1.0, 0.6), _cres(0.6, 0.7), _cres(0.6, 0.45)),
+        final_field=jnp.full((2, 2), 0.4),
+        accepted=(True, False, True), stop_reason="converged")
+    s = summarize_campaign(result, promotion_key="clubb_lite_C_K")
+    assert [bool(a) for _, a in s.round_trace] == [True, False, True]
+    assert s.round_trace[0][0] == pytest.approx(0.6)
+    assert s.round_trace[1][0] == pytest.approx(0.7)
+    assert s.round_trace[2][0] == pytest.approx(0.45)
+    assert s.final_bias == pytest.approx(0.45)        # last ACCEPTED, skipping the rejected
+    rep = s.report()
+    assert "Per-round updated bias" in rep
+    assert "0.6+" in rep and "0.7-" in rep and "0.45+" in rep   # + kept / - rejected markers
+
+
 def test_summarize_single_requires_promotion_key():
     result = CampaignResult(
         final_config=CLUBBLiteConfig(), iterations=(_cres(1.0, 0.5),),
@@ -100,6 +121,8 @@ def test_summarize_no_rounds_safe():
     assert s.n_rounds == 0 and s.fractional_reduction == 0.0
     assert s.coefficients[0].field_std == pytest.approx(0.0)   # uniform = no correction
     assert s.per_variable is None                              # no rounds ⇒ no per-variable
+    assert s.round_trace == ()                                 # no rounds ⇒ empty trace
+    assert "Per-round" not in s.report()                       # ...and no trace line
 
 
 def _pv(t_rmse):

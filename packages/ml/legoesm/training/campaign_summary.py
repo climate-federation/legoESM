@@ -76,6 +76,11 @@ class CampaignSummary(NamedTuple):
     #   final-accepted per-variable global RMSE (T/q_v/wind, precip when compared) +
     #   per-variable improved flags. None when the campaign carried no error_fields
     #   (a mock); surfaces a combined-bias gain that hid a per-variable regression.
+    round_trace: tuple = ()         # per-round ``(updated_bias, accepted)`` — the bias
+    #   each round ACHIEVED + whether the monotonic gate KEPT it. Lets the HPC operator
+    #   read the per-round progression (converging / plateaued / oscillating — and the
+    #   gate rejecting worsening rounds) straight from the headless .out log, not just
+    #   the initial→final endpoints. Segment-only on resume (like ``final_bias``).
 
     def report(self) -> str:
         """A concise human-readable multi-line report."""
@@ -107,6 +112,10 @@ class CampaignSummary(NamedTuple):
                 f"qv {float(b.global_qv_rmse_kg_kg):.4g}->{float(u.global_qv_rmse_kg_kg):.4g}, "
                 f"wind {float(b.global_wind_rmse_m_s):.4g}->{float(u.global_wind_rmse_m_s):.4g}m/s "
                 f"| improved: {','.join(imp) if imp else 'none'}")
+        if self.round_trace:
+            trace = " ".join(
+                f"{bias:.4g}{'+' if kept else '-'}" for bias, kept in self.round_trace)
+            lines.append(f"Per-round updated bias (+ kept / - rejected): {trace}")
         return "\n".join(lines)
 
 
@@ -180,8 +189,11 @@ def summarize_campaign(
         for it, a in zip(iters, accepted):
             if a:
                 final_bias = float(it.bias.updated_bias)
+        round_trace = tuple(
+            (float(it.bias.updated_bias), bool(a)) for it, a in zip(iters, accepted))
     else:
         initial_bias = final_bias = 0.0
+        round_trace = ()
     absolute_reduction = initial_bias - final_bias
     fractional_reduction = (
         absolute_reduction / initial_bias if initial_bias != 0.0 else 0.0
@@ -232,6 +244,7 @@ def summarize_campaign(
         n_diagnosed_total=n_diagnosed_total,
         n_diagnoses_valid_total=n_diagnoses_valid_total,
         per_variable=per_variable,
+        round_trace=round_trace,
     )
 
 
