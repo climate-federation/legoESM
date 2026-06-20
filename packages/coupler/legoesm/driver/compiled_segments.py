@@ -1011,10 +1011,18 @@ def build_segment_fn(
                 )
 
             # --- Moisture smoothing ---
-            q_v_upd = jnp.maximum(
-                q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
-                0.0,
-            )
+            # ``qv_smooth_coeff`` is a static (closure-const) Python float.
+            # Skip the hyperdiffusion call entirely when it is 0 (no
+            # smoothing): the ×0 result is identical, and this avoids
+            # invoking the cubed-sphere compact Laplacian
+            # (``grid.halo_interp_offsets``) on grids that lack it (lat-lon
+            # / Gaussian).  Feature-gating exception (CLAUDE.md): a Python
+            # ``if`` on a static value, NOT a traced ``jnp.where``.
+            if qv_smooth_coeff:
+                q_v_upd = q_v_upd + _dt * hyperdiffusion_3d(
+                    q_v_upd, grid, qv_smooth_coeff
+                )
+            q_v_upd = jnp.maximum(q_v_upd, 0.0)
 
             # --- Rayleigh friction ---
             u_upd = u_new * _fric_decay

@@ -50,12 +50,24 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         fix_mass=False,
         fric_decay=jnp.ones(sigma_full.shape[0]),
         qv_smooth_coeff=0.0,
-        lat=grid.lat,
-        lon=grid.lon,
+        # 2D horizontal coords (GridProtocol ``grid_lat``/``grid_lon``):
+        # radiation's compute_radiation_core flattens lat to (ncol,), so it
+        # needs the 2D (n_lat, n_lon) field, not the 1D ``grid.lat`` (which
+        # on a lat-lon / Gaussian grid is just the n_lat latitudes).  Equal
+        # to ``grid.lat`` on cubed-sphere (already 2D), so this is safe for
+        # every grid the training driver targets.
+        lat=grid.grid_lat,
+        lon=grid.grid_lon,
         start_day=0.0,
         gradient_checkpoint=True,
         **extra_kwargs,
     )
+
+
+# Public alias: the AIMIP lat-lon orchestrator reuses this exact segment
+# build for held-out evaluation (same defaults as training) rather than
+# importing the private symbol or re-deriving the kwargs.
+build_training_segment = _build_training_segment
 
 
 def _training_loop(
@@ -167,6 +179,8 @@ def train_physics_params(
     n_epochs: int = 100,
     lr: float = 1e-3,
     dt: float = 600.0,
+    rollout_hours: float = 24.0,
+    grad_clip: float = 1.0,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -200,12 +214,17 @@ def train_physics_params(
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt, **seg_kw,
             )
-            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            pred = single_day_rollout(
+                ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
             return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
+    # Gradient clipping guards against the occasional adjoint spike from
+    # the long differentiable rollout (esp. with the shorter horizons).
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip), optax.adam(lr))
     return _training_loop(
-        make_loss_fn, params, optax.adam(lr),
+        make_loss_fn, params, optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config,
         log_every=log_every, log_params=True,
@@ -228,6 +247,8 @@ def train_neural_gcm(
     n_epochs: int = 100,
     lr: float = 1e-4,
     dt: float = 600.0,
+    rollout_hours: float = 24.0,
+    grad_clip: float = 1.0,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -256,12 +277,16 @@ def train_neural_gcm(
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
             )
-            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            pred = single_day_rollout(
+                ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
             return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip),
+        optax.adamw(lr, weight_decay=1e-5))
     return _training_loop(
-        make_loss_fn, neural_physics, optax.adamw(lr, weight_decay=1e-5),
+        make_loss_fn, neural_physics, optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
     )
@@ -283,6 +308,8 @@ def train_sfno_coupled(
     n_epochs: int = 100,
     lr: float = 5e-4,
     dt: float = 600.0,
+    rollout_hours: float = 24.0,
+    grad_clip: float = 1.0,
     coupling_mode: str = "correction",
     physics_pipeline=None,
     loss_config: LossConfig = LossConfig(),
@@ -329,12 +356,16 @@ def train_sfno_coupled(
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
             )
-            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            pred = single_day_rollout(
+                ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
             return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip),
+        optax.adamw(lr, weight_decay=1e-5))
     return _training_loop(
-        make_loss_fn, sfno_physics, optax.adamw(lr, weight_decay=1e-5),
+        make_loss_fn, sfno_physics, optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
     )

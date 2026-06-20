@@ -47,6 +47,16 @@ from legoesm.training.vertical_interp import interp_pressure_to_sigma
 
 logger = logging.getLogger(__name__)
 
+# Public ARCO-ERA5 store (Analysis-Ready Cloud-Optimized ERA5 on GCS,
+# anon-readable).  Source of the radiation-flux TARGETS: the default WB2
+# state store's ``mean_*_radiation_flux`` variables are NaN at every
+# analysis time (probe 8533800 — 0/20 sampled times populated), but
+# ARCO-ERA5 carries the same ERA5 fields with clean W/m² mean-rate fluxes
+# (probe 8533818).  Same 0.25° 1440×721 grid as the WB2 state store.
+ARCO_ERA5_ZARR = (
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
+
 # Module-level cache for regridding weights (expensive to recompute)
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
 
@@ -106,6 +116,21 @@ class TrainingERA5Config(NamedTuple):
     time_range: tuple = ("1979-01-01", "2020-12-31")
     dt_hours: int = 6
     local_cache_dir: str = ""     # empty = no cache
+    # Radiation-flux targets for AIMIP TOA + surface flux supervision.
+    # When True, ``load_era5_slice`` also loads ERA5 TOA/surface radiation
+    # and derives the four model-comparable fluxes (rsut, OLR, surface net
+    # SW, surface net LW) so the target carry's ``held_*`` fields hold real
+    # observations instead of zeros.  Default False → byte-identical legacy.
+    load_radiation_fluxes: bool = False
+    # Radiation-flux TARGETS come from a SEPARATE store: the WB2 state
+    # store's flux vars are all-NaN, so fluxes are read from ARCO-ERA5
+    # (clean ``mean_*_radiation_flux`` in W/m², same 0.25° grid).  Set to
+    # "" to read fluxes from the state ``zarr_store`` instead (only valid
+    # if that store actually populates them).
+    flux_zarr: str = ARCO_ERA5_ZARR
+    # ARCO ``mean_*_radiation_flux`` are W/m² mean rates → divide by 1.0
+    # (no-op).  A store accumulating J/m² over the hour would need 3600.0.
+    flux_accum_seconds: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +210,22 @@ class ERA5Slice(NamedTuple):
     lat: np.ndarray        # (n_lat,) latitude [rad]
     lon: np.ndarray        # (n_lon,) longitude [rad]
     plev_Pa: np.ndarray    # (n_plev,) pressure levels [Pa], ascending
+    # Optional radiation-flux targets [W/m²] (None unless
+    # ``config.load_radiation_fluxes``).  Conventions match the model's
+    # ``SegmentCarry.held_*`` fields:
+    #   rsut       = TOA outgoing (reflected) SW, positive up
+    #   olr        = TOA outgoing LW (OLR/rlut), positive up
+    #   sfc_net_sw = surface net SW (down − up), positive down
+    #   sfc_net_lw = surface net LW (down − up), positive down (usually <0)
+    rsut: np.ndarray = None        # (n_lat, n_lon)
+    olr: np.ndarray = None         # (n_lat, n_lon)
+    sfc_net_sw: np.ndarray = None  # (n_lat, n_lon)
+    sfc_net_lw: np.ndarray = None  # (n_lat, n_lon)
 
 
-def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
+def load_era5_slice(
+    config: TrainingERA5Config, time_idx: int, ds=None, flux_ds=None
+) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
     Parameters
@@ -195,13 +233,18 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     config : TrainingERA5Config
     time_idx : int
         Time index into the dataset.
+    ds : xarray.Dataset, optional
+        Pre-opened ERA5 store.  Pass it when looping over many snapshots
+        (the AIMIP window loader) so the GCS zarr is opened once instead
+        of per slice.  ``None`` opens the store from ``config`` (legacy).
 
     Returns
     -------
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
     store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    ds = open_era5_zarr(store)
+    if ds is None:
+        ds = open_era5_zarr(store)
 
     # Select time
     ds_t = ds.isel(time=time_idx)
@@ -249,6 +292,70 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
             data = data[0]
         return data.astype(np.float32)
 
+    # Optional radiation-flux targets (TOA + surface) for AIMIP flux
+    # supervision.  The WB2 store provides ``mean_*_radiation_flux`` vars
+    # in W/m² (probe-verified).  Derive the four model-comparable fluxes:
+    #   rsut       = top_downward_SW − top_net_SW   (reflected up, +up)
+    #   OLR        = −top_net_LW                     (TOA net LW = −OLR)
+    #   sfc_net_sw = surface_net_SW                  (down − up, +down)
+    #   sfc_net_lw = surface_net_LW                  (down − up, +down)
+    # ``flux_accum_seconds`` (default 1.0) converts an accumulated-J/m²
+    # store to W/m²; it is a no-op for the W/m² WB2 store.
+    rsut = olr = sfc_net_sw = sfc_net_lw = None
+    if config.load_radiation_fluxes:
+        fzarr = config.flux_zarr or store
+        if flux_ds is None:
+            flux_ds = open_era5_zarr(fzarr) if config.flux_zarr else ds
+        # Select the flux-store snapshot at the SAME timestamp as the state
+        # slice (ARCO is hourly; the WB2 6h analysis times are a subset,
+        # matched exactly by datetime).
+        fds_t = flux_ds.sel(time=ds_t.time.values, method="nearest")
+        # Align the flux-store lat ordering to the state grid: the fluxes
+        # are regridded later with era5.lat/era5.lon, so they must share
+        # that ordering.  Same 0.25° ERA5 grid + same 0..360 lon origin, so
+        # only the lat sense can differ (ARCO is N->S, WB2 may be S->N).
+        flux_lat_deg = np.asarray(flux_ds.lat.values, dtype=np.float64)
+        state_lat_deg = np.rad2deg(lat)
+        flip_lat = (np.sign(flux_lat_deg[1] - flux_lat_deg[0])
+                    != np.sign(state_lat_deg[1] - state_lat_deg[0]))
+
+        def _flux_2d(name):
+            r = resolve_var(fds_t, name)
+            src = fds_t
+            if r is None:
+                r = resolve_var(flux_ds, name)
+                src = flux_ds
+            if r is None:
+                raise ValueError(
+                    f"load_radiation_fluxes=True but flux variable {name!r} "
+                    f"is absent from {fzarr}.  Run "
+                    f"scripts/tmp/_probe_arco_era5.py to list available "
+                    f"radiation variables."
+                )
+            d = np.asarray(src[r].values).squeeze()
+            while d.ndim > 2:
+                d = d[0]
+            if d.shape != (len(lat), len(lon)):
+                raise ValueError(
+                    f"flux field {name!r} grid {d.shape} != state grid "
+                    f"{(len(lat), len(lon))}; flux_zarr must match the state "
+                    f"store resolution (both 0.25° ERA5)."
+                )
+            if flip_lat:
+                d = d[::-1]
+            return d.astype(np.float32)
+
+        acc = np.float32(config.flux_accum_seconds)
+        toa_dn_sw = _flux_2d("mean_top_downward_short_wave_radiation_flux")
+        toa_net_sw = _flux_2d("mean_top_net_short_wave_radiation_flux")
+        toa_net_lw = _flux_2d("mean_top_net_long_wave_radiation_flux")
+        sfc_net_sw_v = _flux_2d("mean_surface_net_short_wave_radiation_flux")
+        sfc_net_lw_v = _flux_2d("mean_surface_net_long_wave_radiation_flux")
+        rsut = (toa_dn_sw - toa_net_sw) / acc
+        olr = (-toa_net_lw) / acc
+        sfc_net_sw = sfc_net_sw_v / acc
+        sfc_net_lw = sfc_net_lw_v / acc
+
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
@@ -260,6 +367,36 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
+        rsut=rsut,
+        olr=olr,
+        sfc_net_sw=sfc_net_sw,
+        sfc_net_lw=sfc_net_lw,
+    )
+
+
+def _era5_held_fluxes(era5: ERA5Slice, regrid_2d_fn, shape_2d):
+    """Regrid ERA5 radiation-flux targets onto the model grid for the carry.
+
+    Returns ``(held_sw_up_toa, held_lw_up_toa, held_sw_net_sfc,
+    held_lw_net_sfc)`` — i.e. (rsut, OLR, surface net SW, surface net LW) —
+    each mapped to the model 2D layout by ``regrid_2d_fn`` (a grid-specific
+    callback: Gaussian/lat-lon interpolation or cubed-sphere ``regrid_scalar``).
+    When the slice carries no fluxes (``load_radiation_fluxes=False``) returns
+    four ``jnp.zeros(shape_2d)`` — byte-identical to the legacy zero-fill.
+
+    ``held_sw_down_toa`` (rsdt) is intentionally NOT set from ERA5: it is
+    prescribed insolation that the dycore computes each step, and the flux
+    loss does not penalize it.  One shared implementation so the spectral /
+    lat-lon / cubed-sphere builders never re-derive flux-target packing.
+    """
+    if era5.rsut is None:
+        z = jnp.zeros(shape_2d)
+        return z, z, z, z
+    return (
+        jnp.asarray(regrid_2d_fn(era5.rsut)),
+        jnp.asarray(regrid_2d_fn(era5.olr)),
+        jnp.asarray(regrid_2d_fn(era5.sfc_net_sw)),
+        jnp.asarray(regrid_2d_fn(era5.sfc_net_lw)),
     )
 
 
@@ -335,20 +472,24 @@ def era5_to_spectral_carry(
         phis=Field(phis_jax, name="phis", dims=dims_2d, units="m2/s2"),
     )
 
-    # Pack into SegmentCarry with zero held fields
+    # Pack into SegmentCarry; held radiation fluxes hold ERA5 targets
+    # when loaded (else zeros — legacy behaviour).
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
 
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
     )
@@ -428,16 +569,19 @@ def era5_to_cubedsphere_carry(
     shape_3d = T_model.shape
     shape_2d = p_s_cs.shape
 
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_scalar(jnp.asarray(f.ravel()), weights), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
     )
@@ -515,16 +659,19 @@ def era5_to_latlon_carry(
 
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
     )

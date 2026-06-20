@@ -137,6 +137,21 @@ class LatLonGrid(NamedTuple):
         extra = cols.shape[1:]
         return cols.reshape(self.n_lat, self.n_lon, *extra)
 
+    @property
+    def weights(self) -> jax.Array:
+        """Per-latitude area weights for loss area-weighting.
+
+        Proportional to the cell-row area (∝ cos lat for a uniform-dlon
+        grid); consumers (``losses._lat_weighted_mean``) normalise by the
+        sum so only the relative profile matters.  Mirrors
+        ``GaussianGrid.weights`` so ``combined_loss`` / ``carry_mse``
+        area-weight lat-lon losses automatically — without it the lat-lon
+        loss is a uniform mean that over-weights the poles and distorts
+        the bias and radiation-flux global-mean terms (AIMIP codex
+        review #3).
+        """
+        return self.cos_lat
+
 
 def create_latlon_grid(
     n_lat: int,
