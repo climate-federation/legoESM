@@ -179,6 +179,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # (sst_K) read clearer than snake_case. N815 covers the ColumnState.sst_K field.
 "packages/ml/legoesm/training/compare_reanalysis.py" = ["N803", "N806", "N815"]
 "tests/unit/test_compare_reanalysis.py" = ["N803", "N806"]
+# compare-reanalysis e2e: the SST-in-Kelvin local var sst_K carries the model's _K unit
+# suffix (CLAUDE.md naming) — the same convention as compare_reanalysis.py above.
+"tests/run/test_correction_e2e_integration.py" = ["N806"]
 # bias_metrics: PerVariableBias unit-suffixed global-scalar fields (global_T_rmse_K,
 # global_qv_rmse_kg_kg, ...) — CLAUDE.md-mandated unit suffixes read clearer than
 # snake_case and are kept DISTINCT from the per-column ColumnErrorFields names.

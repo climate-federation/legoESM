@@ -304,3 +304,144 @@ def test_full_loop_real_model_real_les_rerun_and_gate():
     assert np.isfinite(float(res.bias.updated_bias))
     assert isinstance(bool(res.bias.improved), bool)
     assert res.n_corrected >= 1
+
+
+def _write_amip_era5_archive(tmp_path, *, nt=48):
+    """Synthetic NCAR-RDA ``sstk`` (a latitudinal SST gradient, K) + ``ci`` (zero sea-ice)
+    so ``build_era5_amip_forcing`` produces a real, non-trivial AMIP boundary forcing."""
+    import xarray as xr
+
+    nlat, nlon = 8, 16
+    lat = np.linspace(90.0, -90.0, nlat)          # ERA5 order: descending
+    lon = np.linspace(0.0, 337.5, nlon)
+    t = (np.datetime64("2020-01-01T00")
+         + np.arange(nt) * np.timedelta64(1, "h")).astype("datetime64[ns]")
+    sst = np.broadcast_to(
+        (300.0 - 25.0 * np.abs(lat) / 90.0)[:, None], (nt, nlat, nlon)).astype("f4")
+    xr.Dataset({"SSTK": (("time", "latitude", "longitude"), sst, {"units": "K"})},
+               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
+        tmp_path / "e5.oper.an.sfc.128_034_sstk.ll025sc.2020010100_2020013123.nc")
+    xr.Dataset({"CI": (("time", "latitude", "longitude"),
+                       np.zeros((nt, nlat, nlon), "f4"), {"units": "(0-1)"})},
+               coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
+        tmp_path / "e5.oper.an.sfc.128_031_ci.ll025sc.2020010100_2020013123.nc")
+
+
+def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
+    """A base AMIP ``ExperimentConfig`` with a forcing BUILT from the synthetic local ERA5
+    archive and injected via the shared ``apply_amip_forcing_to_config`` (the turnkey path)."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+
+    from scripts.data.load_local_era5 import (
+        apply_amip_forcing_to_config,
+        build_era5_amip_forcing,
+    )
+
+    _write_amip_era5_archive(tmp_path)
+    fcfg = build_era5_amip_forcing(
+        str(tmp_path), "20200101", str(tmp_path / "amip_forcing.nc"), hour_stride=24)
+    base = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=1), radiation="gray", days=1,
+        turbulence="clubb_lite")
+    return apply_amip_forcing_to_config(base, fcfg)
+
+
+def _run_clubb_amip(clubb, base_cfg):
+    """A real AMIP ``ModelDriver`` run that splices the given ``CLUBBLiteConfig`` into the
+    forcing-injected ``base_cfg`` (the per-round C_K correction); returns the driver."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = base_cfg._replace(
+        turbulence_override=TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb))
+    driver = ModelDriver(cfg)
+    driver.setup()
+    driver.run()
+    return driver
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_offline_amip_loop_forcing_drives_correction_and_persists(tmp_path):
+    """The COMPLETE offline-AMIP turnkey path in ONE round: build the SST forcing from a
+    synthetic local ERA5 archive → a real ModelDriver AMIP run → compare → REAL plane-LES →
+    diagnose C_K → RE-RUN the AMIP model → monotonic gate.  The iter-415 full-loop test is
+    COUPLED (CMIP); this is the ONLY place the offline ERA5 forcing flows through the WHOLE
+    correction loop in AMIP mode — and it pins that the forcing PERSISTS through the
+    per-round C_K ``_replace`` (every re-run uses it, the iter-421 claim).  CI-portable
+    (synthetic archive + reference); asserts the loop runs end-to-end (finite biases, a
+    definite verdict, ≥1 worst column flagged + corrected), NOT a reference-dependent bias
+    reduction (the gate may correctly REJECT, as it did against real ERA5)."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+    from legoesm.training.run_to_column_mean import amip_column_state
+
+    from scripts.run.run_correction_campaign import make_les_diagnose_fn
+
+    base_cfg = _amip_base_with_forcing(tmp_path)
+    # The forcing PERSISTS through a per-round C_K correction (the _replace of the turbulence
+    # override does NOT touch the forcing fields) — the iter-421 "every corrected round
+    # carries the forcing" claim, verified directly.
+    corrected_cfg = base_cfg._replace(
+        turbulence_override=TurbulenceConfig(
+            scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=0.7)))
+    assert base_cfg.dataset == "custom" and corrected_cfg.dataset == "custom"
+    assert corrected_cfg.forcing_path == base_cfg.forcing_path != ""
+
+    driver0 = _run_clubb_amip(CLUBBLiteConfig(C_K=0.4), base_cfg)
+    model0 = amip_column_state(driver0, day=0.0)
+    n_lat, n_lon, _ = model0.T.shape
+    sigma, grid = driver0.sigma, driver0.grid
+    rad2deg = 180.0 / float(jnp.pi)
+    # The prescribed SST in the column state carries the ERA5 forcing's ~21 K equator-pole
+    # gradient (NOT a degenerate constant) — with the dataset="custom" persistence check
+    # above, this confirms the real built forcing (not an analytical fallback) loaded.
+    sst0 = jnp.asarray(model0.sst_K)
+    assert float(jnp.max(sst0) - jnp.min(sst0)) > 10.0
+
+    # Synthetic reference (CI-portable): the model minus a localized warm bias so the
+    # worst-column ranking + the LES are non-trivially exercised.
+    bias = np.zeros((n_lat, n_lon))
+    bias[n_lat // 2, n_lon // 2] = 5.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    def _run(clubb):
+        return amip_column_state(_run_clubb_amip(clubb, base_cfg), day=0.0)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=2,
+        run_amip_fn=_run, coordinate=sigma)
+
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4,
+        diagnosis_method="eddy_diffusivity", les_budget=2)
+
+    # The whole offline-AMIP chain ran: finite biases + a DEFINITE gate verdict + ≥1 worst
+    # column flagged + corrected (the loop is not a vacuous no-op).  n_corrected counts the
+    # flagged worst columns; the tiny 2-step LES need not yield a VALID diagnosis every run
+    # (so n_diagnoses_valid is not asserted, matching the iter-415 coupled full-loop test).
+    assert np.isfinite(float(res.bias.baseline_bias))
+    assert np.isfinite(float(res.bias.updated_bias))
+    assert isinstance(bool(res.bias.improved), bool)
+    assert res.n_corrected >= 1
