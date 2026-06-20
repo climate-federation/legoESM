@@ -62,3 +62,34 @@ def test_coupler_insolation_default_is_january_byte_identical():
     lat = drv._atm._grid_lat
     np.testing.assert_allclose(np.asarray(cos_zen), np.asarray(_cos_zen_ref(lat, 1.0)),
                                rtol=1e-6, atol=1e-6)
+
+
+def _earth_system_driver(insolation_start_doy, tmp_path):
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+    from legoesm.driver.earth_system_driver import EarthSystemDriver
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=600.0),
+        output=OutputConfig(diag_days=1), days=1, dataset="analytical", precision="fp64",
+        insolation_start_doy=insolation_start_doy)
+    drv = EarthSystemDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    return drv
+
+
+def test_earth_system_driver_insolation_uses_the_atm_seasonal_offset(tmp_path):
+    """The sibling EarthSystemDriver (iter 462) has the SAME fix as CoupledESMDriver (461):
+    insolation_start_doy=244 makes its surface cos_zenith the doy-244 season, not January."""
+    drv = _earth_system_driver(244, tmp_path)
+    cos_zen = jnp.asarray(drv._build_atm_forcing(0.0).cos_zenith)
+    lat = drv._atm._grid_lat
+    np.testing.assert_allclose(np.asarray(cos_zen), np.asarray(_cos_zen_ref(lat, 244.0)),
+                               rtol=1e-6, atol=1e-6)
+    assert not np.allclose(np.asarray(cos_zen), np.asarray(_cos_zen_ref(lat, 1.0)),
+                           rtol=1e-3, atol=1e-3)
