@@ -61,6 +61,9 @@ from legoesm.atmosphere.physics._shared import (
 from legoesm.core.field import Field
 from legoesm.core.operators_latlon import divergence, gradient
 from legoesm.grids.vertical import (
+    HybridSigmaPressureCoordinate,
+    compute_mass_flux_hybrid,
+    compute_omega_hybrid,
     compute_pressure_velocity,
     compute_sigma_dot_and_total,
 )
@@ -128,15 +131,36 @@ def omega_from_divergence(
 ) -> jax.Array:
     """Pressure velocity ``ω`` from the horizontal-divergence profile.
 
-    Closes the hydrostatic continuity equation: ``∂p_s/∂t = −p_s·D_total/(1−σ_top)``
-    with ``D_total = Σ_k (∇·v)_k Δσ_k`` (the column-integrated divergence the
-    dycore uses for ``dp_s/dt``; see :func:`compute_sigma_dot_and_total`), then
-    ``ω = σ·∂p_s/∂t + p_s·σ̇`` via the canonical
-    :func:`compute_pressure_velocity`.  ``div_3d`` is ``(..., nlev)``; returns
-    ``ω`` ``(..., nlev)`` [Pa/s] (positive = sinking).
+    Closes the hydrostatic continuity equation for the column's large-scale
+    subsidence, matching the model's OWN dycore continuity so the LES vertical
+    advection forcing is consistent with the GCM that produced the column.  The
+    closure is COORDINATE-AWARE (iter 348) — for a hybrid coordinate over terrain
+    (``p_s ≠ p_ref``) the pure-sigma form is ~41% wrong:
+
+    * **Hybrid** (``HybridSigmaPressureCoordinate``): REUSE the canonical dycore
+      blocks :func:`compute_mass_flux_hybrid` (``F_{k+½} = (B_{k+½}−B_top)/B_range
+      · D_total_p − cumsum(D_k·dp_k)``, ``D_total_p = Σ_k (∇·v)_k dp_k``) and
+      :func:`compute_omega_hybrid` (``ω_k = B_full_k·∂p_s/∂t + F_k``) with
+      ``∂p_s/∂t = −D_total_p/B_range`` — the SAME continuity the spectral /
+      primitive-eq hydrostatic dycore uses for hybrid (so the LES ω equals the
+      model's ω over orography). No numerics are re-derived here.
+    * **Pure-sigma** (``SigmaCoordinate``): ``∂p_s/∂t = −p_s·D_total/(1−σ_top)``
+      with ``D_total = Σ_k (∇·v)_k Δσ_k``, then ``ω = σ·∂p_s/∂t + p_s·σ̇`` via
+      :func:`compute_pressure_velocity`.  Byte-identical to the hybrid branch when
+      ``A=0, B=σ`` (``compute_mass_flux_hybrid`` reduces to ``p_s·σ̇``), kept as the
+      direct form.
+
+    ``div_3d`` is ``(..., nlev)``; returns ``ω`` ``(..., nlev)`` [Pa/s] (positive =
+    sinking).
     """
     div_3d = jnp.asarray(div_3d)
     p_s = jnp.asarray(p_s, dtype=div_3d.dtype)
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        # Hybrid continuity via the canonical dycore blocks (cell-center div(v)·dp
+        # form, matching the spectral hybrid path the LES columns come from).
+        mass_flux, D_total_p = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
+        dp_s_dt = -D_total_p[..., 0] / sigma_coord.B_range
+        return compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
     sigma_dot, d_total = compute_sigma_dot_and_total(div_3d, sigma_coord)
     sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=div_3d.dtype)
     # D_total carries a trailing singleton (..., 1); squeeze to the surface

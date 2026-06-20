@@ -66,37 +66,47 @@ def test_omega_nonzero_finite_for_divergence():
     assert float(jnp.max(jnp.abs(omega))) > 0.0
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Hybrid LES subsidence (iter 343, DYCORE follow-up): omega_from_divergence's surface "
-    "tendency uses the PURE-SIGMA continuity dp_s/dt = -p_s*D_total/(1-sigma_top), and "
-    "compute_pressure_velocity uses the pure-sigma form omega = sigma*dp_s/dt + p_s*sigma_dot "
-    "(sigma = A+B).  For a hybrid coordinate over terrain (p_s != p_ref) the hybrid continuity "
-    "dp_s/dt = -sum(div * layer_thickness_dp) / B_range differs by ~41%.  The fix is a CORE "
-    "dycore change (compute_pressure_velocity is hybrid-unaware and feeds the dycore adiabatic "
-    "heating term too), beyond compare-reanalysis; the LES realism gate is the interim "
-    "safeguard.  xpasses when the dycore omega is made hybrid-aware."))
 def test_les_omega_uses_hybrid_continuity_over_terrain():
-    """Regression target: the surface-pressure tendency baked into the LES omega must follow
-    the HYBRID continuity for a hybrid coordinate over terrain.  We RECOVER the dp_s/dt
-    omega_from_divergence used by inverting omega = sigma_full*dp_s/dt + p_s*sigma_dot_full,
-    and assert it equals -sum(div * layer_thickness_dp) / B_range.  Currently it is the
-    pure-sigma value (~41% off over terrain)."""
-    from legoesm.grids.vertical import compute_sigma_dot_and_total, make_hybrid_levels
+    """For a HYBRID coordinate over terrain (``p_s ≠ p_ref``) the LES large-scale ω must
+    close the HYBRID continuity, not the pure-sigma form (~tens-of-% wrong over terrain).
+
+    iter 348 fix: ``omega_from_divergence`` now REUSES the canonical dycore blocks
+    :func:`compute_mass_flux_hybrid` + :func:`compute_omega_hybrid` (the SAME the
+    spectral / primitive-eq hydrostatic dycore uses for hybrid) when handed a
+    :class:`HybridSigmaPressureCoordinate`.  Verify the output equals that canonical
+    hybrid ω EXACTLY, AND differs materially from the OLD pure-sigma ω (non-vacuity —
+    the branch genuinely changed the answer over terrain).
+    """
+    from legoesm.grids.vertical import (
+        compute_mass_flux_hybrid,
+        compute_omega_hybrid,
+        compute_pressure_velocity,
+        compute_sigma_dot_and_total,
+        make_hybrid_levels,
+    )
 
     nlev = 12
     hc = make_hybrid_levels(nlev, p_top_Pa=100.0)
     div = jnp.linspace(2e-6, -1e-6, nlev)[None, :]            # (1, nlev) subsidence-like
     p_s = jnp.array([7.0e4])                                  # 700-hPa terrain (p_s != p_ref)
     omega = omega_from_divergence(div, p_s, hc)               # (1, nlev)
-    sigma_dot, _ = compute_sigma_dot_and_total(div, hc)
-    sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
-    # invert omega = sigma_full*dp_s/dt + p_s*sigma_dot_full ⇒ the dp_s/dt it actually used.
-    dps_dt_used = (omega - p_s[..., None] * sigma_dot_full) / jnp.asarray(hc.sigma_full)
-    dps_dt_hybrid = (
-        -jnp.sum(div * hc.layer_thickness_dp(p_s), axis=-1, keepdims=True) / hc.B_range)
-    np.testing.assert_allclose(
-        np.asarray(dps_dt_used), np.asarray(jnp.broadcast_to(dps_dt_hybrid, dps_dt_used.shape)),
-        rtol=1e-2)
+
+    # (1) Equals the canonical hybrid ω the dycore uses (ω_k = B_full·∂p_s/∂t + F_k,
+    #     ∂p_s/∂t = -D_total_p/B_range, D_total_p = Σ_k (∇·v)_k dp_k).
+    mass_flux, D_total_p = compute_mass_flux_hybrid(div, p_s, hc)
+    dp_s_dt = -D_total_p[..., 0] / hc.B_range
+    omega_hybrid = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, hc)
+    np.testing.assert_allclose(np.asarray(omega), np.asarray(omega_hybrid), rtol=1e-12)
+
+    # (2) NON-VACUITY: the OLD pure-sigma ω (σ·∂p_s/∂t + p_s·σ̇ on the effective σ=A+B)
+    #     differs materially over terrain, so the branch is not a no-op.
+    sigma_dot, d_total = compute_sigma_dot_and_total(div, hc)
+    dp_s_dt_sig = -p_s * d_total[..., 0] / (1.0 - jnp.asarray(hc.sigma_half[0]))
+    omega_sigma = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_sig, hc)
+    rel = float(jnp.max(jnp.abs(omega - omega_sigma)) / jnp.max(jnp.abs(omega_sigma)))
+    assert rel > 0.1, (
+        f"hybrid vs pure-sigma ω differ by only {rel:.1%} over terrain — expected >10%; "
+        "the hybrid branch may not be active")
 
 
 def test_omega_matches_manual_continuity_with_sign():
