@@ -14,6 +14,7 @@ multi-day run plus the second corrected run — but it proves the loop runs.
 from __future__ import annotations
 
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -149,3 +150,90 @@ def test_full_pipeline_real_model_and_les():
     assert bool(jnp.all(jnp.isfinite(corrected.C_K)))
     assert bool(jnp.any(corrected.C_K != background))
     assert float(corrected.C_K[int(rec.flat_index)]) != background
+
+
+def _run_clubb_coupled(clubb, *, resolution=4, nlev=5, days=1):
+    """A real tiny coupled (CMIP) run whose clubb_lite turbulence uses the given
+    ``CLUBBLiteConfig`` (scalar OR per-column C_K)."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+    from legoesm.driver.coupled_config import PRESETS
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.grids.latlon import create_latlon_grid
+
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=max(days, 1)), radiation="gray", days=days,
+        turbulence="clubb_lite",
+        turbulence_override=TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb))
+    driver = CoupledESMDriver(
+        atm, PRESETS["aquaplanet"](),
+        ocean_grid=create_latlon_grid(n_lat=resolution, n_lon=2 * resolution))
+    driver.setup()
+    driver.run()
+    return driver
+
+
+class _EddyDiag(NamedTuple):
+    K: jnp.ndarray
+    valid: jnp.ndarray
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_real_model_osse_reduces_bias_with_applied_ck():
+    """Clause 6 ("updating these parameters IMPROVE the biases") with REAL model physics,
+    in a controlled identical TWIN (the e2e test above runs the loop one round but
+    explicitly does NOT assert a bias reduction — this does, via a model twin; the
+    real-ERA5 case is the separate HPC-only empirical question, iter 412/413).
+
+    Truth = the real coupled clubb_lite model at C_K=1.0; the biased model is the SAME
+    model at C_K=0.4, so the model-vs-truth bias is C_K-driven BY CONSTRUCTION.  One real
+    correction round applies the (known-correct) diagnosed C_K=1.0 to EVERY column and
+    RE-RUNS the real model — and because the model is deterministic, the re-run equals the
+    truth, so the bias falls to ~0 and the monotonic gate accepts it.  Proves the full
+    loop (run real model → compare → diagnose → splice per-column C_K → re-run real model
+    → gate) lowers the bias with the ACTUAL ESM, not a synthetic ``run_fn``."""
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+
+    truth_driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=1.0))
+    ta = truth_driver._atm
+    truth = column_state_from_hydrostatic(
+        ta.state, ta.q_v, sst_K=truth_driver._ocean_state.T_sfc.data)
+    n_lat, n_lon, _ = truth.T.shape
+    ncol = n_lat * n_lon
+    sigma, grid = ta.sigma, ta.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb)
+        a = d._atm
+        return column_state_from_hydrostatic(
+            a.state, a.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=truth, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=ncol,
+        run_amip_fn=_run, coordinate=sigma)
+
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn,
+        diagnose_fn=lambda rec, ctx: _EddyDiag(K=jnp.array([1.0]), valid=jnp.array([True])),
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4)
+
+    assert float(res.bias.baseline_bias) > 1e-5            # a real C_K-driven bias exists
+    assert float(res.bias.updated_bias) < float(res.bias.baseline_bias)   # it FELL
+    assert float(res.bias.updated_bias) == pytest.approx(0.0, abs=1e-6)   # to the twin truth
+    assert bool(res.bias.improved)                         # the monotonic gate accepts
+    assert res.n_corrected == ncol                         # every column corrected
