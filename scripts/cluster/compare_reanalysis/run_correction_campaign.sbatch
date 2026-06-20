@@ -34,6 +34,8 @@
 # job's log (`mkdir -p results/compare_reanalysis && sbatch <this>`). Both done-criterion modes:
 #   AMIP (default):  sbatch <this>
 #   CMIP (coupled):  MODE=cmip COUPLED_PRESET=aquaplanet sbatch <this>
+#   Fully-OFFLINE realistic AMIP (local NCAR-RDA ERA5, no network — set radiation=rrtmgp in
+#   the CONFIG): LOCAL_ERA5_DIR=/path/to/ERA5 LOCAL_ERA5_DATE=20170901 AMIP_FORCING=1 sbatch <this>
 # Other knobs: --diagnosis-method clubb_coefficient|prandtl_number|c_eps OR
 # --coefficients C_K,Pr_t (simultaneous multi-coefficient), --iterations, --n-worst,
 # --les-budget. Auto-requeues itself on the wall-clock limit; re-submitting the SAME
@@ -46,15 +48,33 @@ PY="${LEGOESM_PY:-.venv/bin/python}"
 CONFIG="${CONFIG:-configs/amip_clubb_lite.json}"   # base ExperimentConfig (turbulence=clubb_lite)
 # Create a starter CONFIG with:
 #   python scripts/experiment/write_amip_clubb_lite_config.py "$CONFIG" --resolution 8 --nlev 10
-ERA5="${ERA5:-/path/to/era5.zarr}"                 # ERA5 reanalysis zarr store
+ERA5="${ERA5:-/path/to/era5.zarr}"                 # ERA5 reanalysis zarr store (network/Zarr)
+# Fully-OFFLINE alternative (no network/gcsfs): set LOCAL_ERA5_DIR to a LOCAL NCAR-RDA ERA5
+# archive (e5.oper.an.{pl,sfc}.*.ll025*.nc) + LOCAL_ERA5_DATE=YYYYMMDD and the campaign
+# reads the compare reference OFFLINE. With MODE=amip, AMIP_FORCING=1 ALSO builds the AMIP
+# SST/sea-ice forcing from the SAME archive (turnkey realistic offline AMIP — no hand-built
+# dataset=custom forcing). Empty LOCAL_ERA5_DIR => the default Zarr ERA5 above.
+LOCAL_ERA5_DIR="${LOCAL_ERA5_DIR:-}"
+LOCAL_ERA5_DATE="${LOCAL_ERA5_DATE:-}"             # YYYYMMDD (required with LOCAL_ERA5_DIR)
 OUT="${OUT:-results/compare_reanalysis/corrected_clubb.json}"
 CKPT="${CKPT:-results/compare_reanalysis/campaign.ckpt.json}"
 mkdir -p "$(dirname "$OUT")" "$(dirname "$CKPT")"
 
 MODE="${MODE:-amip}"                               # amip (prescribed SST) | cmip (coupled ocean)
-COMMON=(--config "$CONFIG" --era5-zarr "$ERA5" --mode "$MODE"
+COMMON=(--config "$CONFIG" --mode "$MODE"
         --diagnosis-method clubb_coefficient --iterations 10 --n-worst 64
         --les-budget 8 --orographic-forcing auto --out "$OUT")
+# ERA5 reference: EXACTLY one source — the offline local archive OR the Zarr store.
+if [ -n "$LOCAL_ERA5_DIR" ]; then
+  COMMON+=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE")
+  # Turnkey offline AMIP: ALSO build the SST/sea-ice forcing from the same local archive.
+  if [ "$MODE" = "amip" ] && [ -n "${AMIP_FORCING:-}" ]; then
+    COMMON+=(--amip-forcing-from-local-era5
+             --amip-forcing-out "${AMIP_FORCING_OUT:-results/compare_reanalysis/era5_amip_forcing.nc}")
+  fi
+else
+  COMMON+=(--era5-zarr "$ERA5")
+fi
 # CMIP needs a coupled-ocean preset (aquaplanet|full_coupled|slab_simple|slab_richards|
 # slab_pft|slab_carbon). Run CMIP with:  MODE=cmip COUPLED_PRESET=aquaplanet sbatch <this>
 if [ "$MODE" = "cmip" ]; then COMMON+=(--coupled-preset "${COUPLED_PRESET:-aquaplanet}"); fi

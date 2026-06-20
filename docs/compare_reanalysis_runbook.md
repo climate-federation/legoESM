@@ -79,6 +79,33 @@ corrected-coefficient JSON to `$OUT` and a per-round bias trajectory to the `.ou
 > seconds). A coarse real-data run is dominated by this compile + the realistic spin-off LES
 > (`--les-hours`, default 2 h); scale `--les-hours` down only for a smoke, not production.
 
+### 2b. Fully-offline realistic AMIP (local NCAR-RDA ERA5, no network)
+
+When the cluster has **no outbound network** (no gcsfs / `gs://` Zarr) but mirrors the
+NCAR-RDA ERA5 collection `d633006` (`e5.oper.an.{pl,sfc}.*.ll025*.nc` on the regular 0.25°
+lat-lon grid), the campaign reads ERA5 **entirely offline**: `LOCAL_ERA5_DIR` (+
+`LOCAL_ERA5_DATE=YYYYMMDD`) routes the compare reference through `--local-era5-dir`, and
+(AMIP only) `AMIP_FORCING=1` ALSO builds the prescribed SST/sea-ice forcing from the **same**
+archive via `--amip-forcing-from-local-era5` — so one archive drives both the boundary
+condition *and* the comparison, with no hand-built `dataset=custom` config. Use a realistic
+radiation scheme for the empirical run:
+
+```bash
+# 0. a realistic AMIP config (rrtmgp radiation, ~20 levels):
+$PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_rrtmgp.json \
+  --radiation rrtmgp --nlev 20 --resolution 48
+# 1. launch fully-offline (LOCAL_ERA5_* overrides the Zarr ERA5):
+LOCAL_ERA5_DIR=/glade/.../ERA5 LOCAL_ERA5_DATE=20170901 AMIP_FORCING=1 \
+  CONFIG=configs/amip_rrtmgp.json \
+  sbatch scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch
+```
+
+The launcher's `--dry-run` preflight **builds the forcing** (validating the archive read +
+the daily subsample + the output write) and prints an `AMIP forcing: built from … → …` line
+confirming the offline boundary condition is in place — *before* the multi-day run. The
+monthly-hourly ERA5 single-level files are subsampled to daily (`--amip-forcing-hour-stride`,
+default 24) so the loader does not OOM on the full hourly month.
+
 ## 3. Read the result
 
 The output JSON is **self-describing**: a `health` block (`improved` / `stalled` /
