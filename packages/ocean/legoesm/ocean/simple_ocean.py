@@ -43,12 +43,17 @@ class SimpleOceanConfig(NamedTuple):
     Ch_ocean: float = 1.5e-3         # Heat transfer coefficient
     U_min: float = 1.0               # Numerical wind floor [m/s]
     # Sub-grid convective gustiness floor [m/s] for the air-sea bulk fluxes:
-    # |U|_eff = sqrt(|U|^2 + gustiness^2).  The resolved grid-mean wind misses
-    # boundary-layer convective gustiness, which dominates the surface
-    # evaporation in light-wind/convective regions; a ~1 m/s floor starves the
-    # hydrological cycle (coupled hfls ~35 vs ~80 W/m^2).  5 m/s = Wing (2018)
-    # RCEMIP1, matching the SCM rce_surface_flux gustiness; subsumes U_min.
-    gustiness: float = 5.0
+    # |U|_eff = sqrt(|U|^2 + gustiness^2).  DEFAULT 1.0 (= the old numerical
+    # floor): in an INTERACTIVE slab/two-layer ocean the equilibrium evaporation
+    # is ENERGY-limited, not wind-limited — a larger gustiness boosts E only
+    # transiently, then the latent cooling drops SST -> lowers q_sat(SST) ->
+    # E settles LOWER and the slab cold-drifts (measured: gustiness=5 gave
+    # hfls 35->31, CWV 15->13, SST drift -20 K/yr).  Keep ~1.0 for the coupled
+    # slab; gustiness ~5 (Wing 2018) is correct only for PRESCRIBED-SST paths
+    # (SCM rce_surface_flux / AMIP) where the SST cannot cool away.  See the
+    # CAM surface-energy audit: the coupled dry column is an LW/cloud-opacity
+    # (atmospheric emissivity) problem, not a surface-wind problem.
+    gustiness: float = 1.0
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]

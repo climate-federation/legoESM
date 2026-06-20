@@ -71,10 +71,13 @@ class CouplerConfig(NamedTuple):
     coupling_dt: float = 3600.0       # Coupling interval [s]
     U_min: float = 1.0                # Numerical wind speed floor [m/s]
     # Sub-grid convective gustiness floor [m/s] for the air-sea bulk fluxes:
-    # |U|_eff = sqrt(|U|^2 + gustiness^2).  Boosts surface evaporation in
-    # light-wind/convective regions (resolved grid-mean wind misses BL
-    # gustiness); 5 m/s = Wing (2018) RCEMIP1, matching the SCM. Subsumes U_min.
-    gustiness: float = 5.0
+    # |U|_eff = sqrt(|U|^2 + gustiness^2).  DEFAULT 1.0: in an INTERACTIVE
+    # coupled ocean equilibrium evaporation is ENERGY-limited, so a large
+    # gustiness over-cools the slab (E transiently up -> SST cools -> q_sat down
+    # -> E settles lower; measured gustiness=5 -> SST drift -20 K/yr).  ~5 m/s
+    # (Wing 2018) is correct only for PRESCRIBED-SST (SCM/AMIP).  See the CAM
+    # surface-energy audit.
+    gustiness: float = 1.0
     ocean_albedo: float = 0.06        # Fallback constant ocean albedo
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]
