@@ -1342,6 +1342,14 @@ class ModelDriver:
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
         )
+        # Register per-cell horizontal areas so every global-mean diagnostic
+        # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
+        # unweighted ``jnp.mean`` over-weights the polar rows (each cell counts
+        # equally despite spanning ~cos(lat) less area), which biased <rsdt> to
+        # ~281 W/m² and faked a -36 W/m² "cold drift" where the area-weighted
+        # TOA budget is near balance.  ``grid_area`` is grid-agnostic (lat-lon
+        # (n_lat,n_lon), cube (6,n,n)); grids without it keep the plain mean.
+        self.diagnostics.set_area_weights(getattr(self.grid, "grid_area", None))
         # Configure CMIP spatial regridding weights
         if self.config.output.cmip_output:
             self.diagnostics.set_cmip_grid_info(
