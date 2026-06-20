@@ -292,6 +292,63 @@ def train_neural_gcm(
     )
 
 
+def train_sfno_latlon(
+    model,
+    grid,
+    sigma,
+    sfno_physics,
+    regrid_ll2g,
+    regrid_g2ll,
+    gauss_n_lat,
+    gauss_n_lon,
+    initial_carries,
+    target_carries,
+    forcings,
+    *,
+    n_epochs: int = 100,
+    lr: float = 5e-4,
+    dt: float = 600.0,
+    rollout_hours: float = 24.0,
+    grad_clip: float = 1.0,
+    tendency_scale: float = 1.0e-5,
+    loss_config: LossConfig = LossConfig(),
+    log_every: int = 10,
+):
+    """Train an SFNO on a LAT-LON carry via the Gaussian-regrid bridge.
+
+    The SFNO lives on a Gaussian grid (its SHT requires it); the bridge
+    (``make_sfno_step_unified_latlon``) regrids the lat-lon prognostics to
+    Gaussian, runs the SFNO, and regrids the tendencies back — all
+    differentiable.  Replacement mode (SFNO is the physics).
+    """
+    from legoesm.training.sfno_dycore_coupling import (
+        make_sfno_step_unified_latlon,
+    )
+
+    sigma_full = jnp.asarray(sigma.sigma_full)
+
+    def make_loss_fn(_params, ic, target, forcing):
+        def loss_fn(sfno_ph):
+            step_unified = make_sfno_step_unified_latlon(
+                sfno_ph, regrid_ll2g, regrid_g2ll, gauss_n_lat, gauss_n_lon,
+                tendency_scale=tendency_scale,
+            )
+            run_seg = _build_training_segment(model, step_unified, grid, sigma, dt)
+            pred = single_day_rollout(
+                ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
+            return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
+        return loss_fn
+
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip),
+        optax.adamw(lr, weight_decay=1e-5))
+    return _training_loop(
+        make_loss_fn, sfno_physics, optimizer,
+        initial_carries, target_carries, forcings, sigma_full,
+        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
+    )
+
+
 # ======================================================================
 # Mode 3: SFNO coupled to dycore
 # ======================================================================

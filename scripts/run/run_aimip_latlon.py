@@ -363,10 +363,54 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
         adapter = make_adapter(grid)
         step_unified = make_neural_step_unified(trained, adapter)
         seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
+    elif variant == "sfno":
+        import numpy as _np
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.training.sfno_dycore_coupling import (
+            SFNOPhysics, make_sfno_step_unified_latlon,
+        )
+        from legoesm.training.training_driver import train_sfno_latlon
+        # Gaussian grid for the SFNO (its SHT needs it), ~matched to the
+        # lat-lon resolution; the bridge regrids between the two.
+        n_max = args.sfno_n_max or max(10, 2 * args.n_lat // 3)
+        gauss = create_gaussian_grid(n_max, dealiasing="quadratic")
+        spec = PE3DChannelSpec(nlev=args.n_lev)
+        cfg = SFNOConfig(in_channels=spec.n_channels,
+                         out_channels=spec.n_channels,
+                         embed_dim=args.sfno_embed, n_blocks=args.sfno_blocks,
+                         # output is a TENDENCY, not state+residual: residual
+                         # prediction would feed the input state (~300 K) in as
+                         # dT/dt and blow up the forward.
+                         residual_prediction=False,
+                         gradient_checkpoint=True)
+        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(args.nn_seed))
+        sfno_physics = SFNOPhysics(sfno=sfno, grid=gauss, nlev=args.n_lev)
+        ll_lat, ll_lon = _np.asarray(grid.lat), _np.asarray(grid.lon)
+        g_lat, g_lon = _np.asarray(gauss.lat), _np.asarray(gauss.lon)
+        g_lat2d, g_lon2d = _np.meshgrid(g_lat, g_lon, indexing="ij")
+        ll_lat2d, ll_lon2d = _np.meshgrid(ll_lat, ll_lon, indexing="ij")
+        w_ll2g = compute_latlon_to_voronoi_weights(
+            ll_lat, ll_lon, g_lat2d.ravel(), g_lon2d.ravel())
+        w_g2ll = compute_latlon_to_voronoi_weights(
+            g_lat, g_lon, ll_lat2d.ravel(), ll_lon2d.ravel())
+        trained, hist = train_sfno_latlon(
+            model, grid, sigma, sfno_physics, w_ll2g, w_g2ll,
+            int(gauss.n_lat), int(gauss.n_lon), ics, targets, forcings,
+            n_epochs=args.epochs, lr=args.lr, dt=args.dt,
+            rollout_hours=_ROLLOUT_HOURS, tendency_scale=args.nn_residual_scale,
+            loss_config=loss_config,
+        )
+        step_unified = make_sfno_step_unified_latlon(
+            trained, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon),
+            tendency_scale=args.nn_residual_scale)
+        seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
     else:
         raise ValueError(
-            f"unknown variant {variant!r}; this driver supports "
-            f"'classical' and 'column_nn' (SFNO is Phase 2)."
+            f"unknown variant {variant!r}; supports "
+            f"'classical', 'column_nn', 'sfno'."
         )
 
     train_seconds = time.time() - t0
@@ -424,6 +468,11 @@ def build_parser():
     # forward at init.  Measured: 1e-4 still NaN'd by sample 3, 1e-5 is
     # stable (untrained-NN rollout ≈ pure dynamics) and trains — use 1e-5.
     p.add_argument("--nn-residual-scale", type=float, default=1.0e-5)
+    # SFNO (Gaussian-grid operator bridged to lat-lon via regrid).
+    p.add_argument("--sfno-n-max", type=int, default=0,
+                   help="SFNO Gaussian truncation; 0 -> 2*n_lat//3 (~matched)")
+    p.add_argument("--sfno-embed", type=int, default=128)
+    p.add_argument("--sfno-blocks", type=int, default=4)
     # Radiation-flux loss weights (TOA + surface).
     p.add_argument("--w-flux-olr", type=float, default=1.0)
     p.add_argument("--w-flux-rsut", type=float, default=0.5)
@@ -483,15 +532,23 @@ def main(argv=None):
     driver.setup()
     grid, sigma, model = driver.grid, driver.sigma, driver.model
 
-    # Use the model's CFL-clamped effective dt for the rollout (NOT the
-    # requested --dt): the lat-lon C-grid factory reduces dt for pole-cell
-    # CFL stability (even with the polar filter).  Passing the un-clamped
-    # --dt would blow the 24 h rollout up.  steps/24h = 86400/dt_eff.
-    dt_eff = float(getattr(model, "effective_dt", args.dt))
+    # CFL-safe dt for the rollout.  ``model.effective_dt`` only applies the
+    # equatorial-ADVECTIVE clamp; the gravity-wave CFL is stricter and is
+    # what actually blows up the high-resolution rollout (n_lat=160:
+    # effective_dt=334s but the gravity-wave limit is ~180s -> NaN).  Cap by
+    # the gravity-wave CFL on the MERIDIONAL spacing dy=R*pi/n_lat (the
+    # polar filter relaxes the tiny zonal pole spacing to ~dy), matching the
+    # driver's own reduction.
+    from legoesm.core.cfl import cfl_max_dt
+    from legoesm import constants as _const
+    dy_min = float(_const.R_earth) * float(np.pi) / float(args.n_lat)
+    dt_cfl = cfl_max_dt(dy_min, wave_speed=400.0, cfl_number=0.7)  # gravity wave
+    dt_eff = min(float(getattr(model, "effective_dt", args.dt)), dt_cfl)
     if dt_eff != args.dt:
-        logger.info("Using CFL-clamped effective dt=%.1fs (requested %.1fs); "
-                    "%.0f steps per 24h rollout", dt_eff, args.dt,
-                    86400.0 / dt_eff)
+        logger.info("CFL-safe dt=%.1fs (requested %.1fs, effective_dt=%.1fs, "
+                    "gravity-CFL=%.1fs); %.0f steps per 24h",
+                    dt_eff, args.dt, float(getattr(model, "effective_dt", args.dt)),
+                    dt_cfl, 86400.0 / dt_eff)
     args.dt = dt_eff
 
     from legoesm.driver.physics_pipeline import build_physics_pipeline

@@ -64,10 +64,15 @@ class SFNOPhysics(eqx.Module):
         """
         spec = PE3DChannelSpec(nlev=self.nlev)
 
-        # Pack: [u(nlev), v(nlev), T(nlev), q_v(nlev), lnps, phis]
+        # Pack [u, v, T, q_v, lnps, phis] NORMALISED to O(1) so the encoder
+        # sees standardised inputs — packing raw fields (T~300, lnps~11)
+        # makes the encoder activations (and hence the output tendencies)
+        # huge, blowing up the multi-step forward at init even after the
+        # output tendency_scale.  Same standardisation the column NN uses.
         lnps = jnp.log(jnp.maximum(p_s, 1.0))
         packed = jnp.concatenate(
-            [u, v, T, q_v, lnps[..., None], phis[..., None]],
+            [u / 20.0, v / 20.0, T / 300.0, q_v * 1.0e3,
+             ((lnps - 11.5))[..., None], (phis / 5.0e4)[..., None]],
             axis=-1,
         )
 
@@ -96,6 +101,86 @@ class SFNOPhysics(eqx.Module):
                 reference_3d=T,
             )
         )
+
+
+def make_sfno_step_unified_latlon(
+    sfno_physics: SFNOPhysics,
+    w_ll2g,
+    w_g2ll,
+    gauss_n_lat: int,
+    gauss_n_lon: int,
+    tendency_scale: float = 1.0e-5,
+):
+    """SFNO step_unified for a LAT-LON carry, via a differentiable regrid bridge.
+
+    The SFNO's spherical-harmonic transform is Gaussian-grid specific, so it
+    cannot consume a lat-lon carry directly.  This wrapper regrids the lat-lon
+    prognostics onto the SFNO's Gaussian grid (``w_ll2g``), runs the validated
+    Gaussian ``SFNOPhysics`` unchanged, and regrids the predicted tendencies
+    back to the lat-lon grid (``w_g2ll``).  Both regrids are JAX-native
+    (``regrid_scalar`` = gather + inverse-distance weighted sum) so the whole
+    bridge is differentiable end-to-end.
+
+    Replacement mode only (SFNO IS the physics): the carried radiation
+    ``held_*`` pass through unchanged (SFNO has no flux head yet — that is the
+    follow-up that lets the flux loss act on SFNO; until then the flux loss is
+    inert for this variant and only the state loss trains it).
+
+    Parameters
+    ----------
+    sfno_physics : SFNOPhysics  (on the Gaussian grid)
+    w_ll2g, w_g2ll : RegridWeights  (lat-lon->Gaussian, Gaussian->lat-lon)
+    gauss_n_lat, gauss_n_lon : int  (Gaussian grid shape, for reshaping)
+    """
+    from legoesm.grids.regridding import regrid_scalar
+
+    def _to_gauss(field):
+        # field: (n_lat_ll, n_lon_ll[, nlev]) -> (n_lat_g, n_lon_g[, nlev])
+        out = regrid_scalar(field, w_ll2g)           # (n_g_pts[, nlev])
+        return out.reshape((gauss_n_lat, gauss_n_lon) + field.shape[2:])
+
+    def _to_latlon(field, ll_shape):
+        out = regrid_scalar(field, w_g2ll)           # (n_ll_pts[, nlev])
+        return out.reshape(ll_shape[:2] + field.shape[2:])
+
+    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
+        conv_prog, tail = _parse_step_unified_tail(args)
+        (u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+         solar_weights, s_0, o3_vmr, aerosol_od,
+         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = tail
+        phis = kwargs.get("phis", jnp.zeros_like(p_s))
+
+        # lat-lon prognostics -> Gaussian
+        T_g, u_g, v_g, q_g = (_to_gauss(T), _to_gauss(u),
+                              _to_gauss(v), _to_gauss(q_v))
+        p_s_g, phis_g = _to_gauss(p_s), _to_gauss(phis)
+
+        sfno_out = sfno_physics(T_g, u_g, v_g, q_g, p_s_g, phis_g, dt)
+
+        # Gaussian tendencies -> lat-lon, repackage in the lat-lon carry layout
+        zeros_3d = jnp.zeros(T.shape, dtype=T.dtype)
+        zeros_2d = jnp.zeros(p_s.shape, dtype=p_s.dtype)
+        # Scale the raw SFNO output (O(1)) to physical per-second tendency
+        # magnitudes — without this dT/dt ~ 1 K/s blows the multi-step
+        # forward at init (same fix as the column NN's residual_scale).
+        out_ll = PhysicsOutput(
+            **_physics_output_kwargs(
+                dT_dt=tendency_scale * _to_latlon(sfno_out.dT_dt, T.shape),
+                dq_v_dt=tendency_scale * _to_latlon(sfno_out.dq_v_dt, T.shape),
+                dq_c_dt=zeros_3d, dq_r_dt=zeros_3d, precip=zeros_2d,
+                sw_net_sfc=zeros_2d, lw_net_sfc=zeros_2d,
+                sw_up_toa=zeros_2d, lw_up_toa=zeros_2d, sw_down_toa=zeros_2d,
+                reference_3d=T,
+            )
+        )
+        if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
+            out_ll = out_ll._replace(conv_prog=conv_prog)
+        held_new = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+        return out_ll, held_new
+
+    return step_unified
 
 
 def make_sfno_step_unified(
