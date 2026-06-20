@@ -118,3 +118,22 @@ def test_non_clubb_config_is_rejected_by_launcher():
 
     with pytest.raises(ValueError, match="clubb_lite"):
         make_clubb_build_driver(SimpleNamespace(turbulence="louis"), lambda c: object())
+
+
+def test_bad_radiation_fails_fast_at_generation_not_at_load(tmp_path):
+    """A typo'd --radiation must fail LOUD at GENERATION (via the canonical
+    ExperimentConfig.validate_strict), NOT write a broken config that only surfaces
+    later when the campaign loads it. The realistic HPC radiation (rrtmgp) passes."""
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+        main,
+    )
+
+    with pytest.raises(ValueError, match="radiation must be one of"):
+        build_amip_clubb_lite_config(radiation="rrtmpg")          # typo of rrtmgp
+    assert build_amip_clubb_lite_config(radiation="rrtmgp").radiation == "rrtmgp"  # HPC config OK
+    # Through main(): the raise fires BEFORE the file is written — no broken config on disk.
+    out = tmp_path / "bad.json"
+    with pytest.raises(ValueError, match="radiation must be one of"):
+        main([str(out), "--radiation", "rrtmpg"])
+    assert not out.exists()

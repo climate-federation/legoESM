@@ -53,7 +53,7 @@ def build_amip_clubb_lite_config(
     ERA5 window (runbook §6). Hydrostatic finite-volume dycore — the AMIP default the
     comparison + LES spin-off were built against.
     """
-    return ExperimentConfig(
+    cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=int(resolution), nlev=int(nlev)),
         dycore=DycoreConfig(
             dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
@@ -61,6 +61,13 @@ def build_amip_clubb_lite_config(
         turbulence="clubb_lite",
         days=int(days),
     )
+    # Fail-fast on a bad scheme literal (e.g. a typo'd --radiation like "rrtmpg") via the
+    # CANONICAL ExperimentConfig validator BEFORE the starter config is written to disk —
+    # else the bad value only surfaces later when the campaign LOADS the file (a worse
+    # operator UX: a written-but-broken config). validate_strict checks radiation against
+    # the same ("none","gray","rrtmgp","rrtmg") set the model build uses, so no duplication.
+    cfg.validate_strict()
+    return cfg
 
 
 def main(argv: list[str] | None = None) -> int:
