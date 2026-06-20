@@ -438,6 +438,73 @@ def test_campaign_accumulates_corrections_across_rounds():
     assert float(campaign.iterations[1].bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
 
 
+def test_campaign_resume_is_bit_exactly_equivalent_to_uninterrupted():
+    """HPC reproducibility / desync guard: a checkpoint+resume across a ROUND boundary
+    reproduces the uninterrupted trajectory BIT-EXACTLY.  The loop offsets only the
+    checkpoint LABEL by ``start_round`` (correction_loop.py:328) and carries every
+    accepted state in ``initial_field`` — so resuming from the round-0 checkpoint MUST
+    yield the same round-1 field as never interrupting.  A past 'checkpoint resume
+    desync' bug motivates locking this end-to-end: the per-piece roundtrip/count tests
+    (test_run_correction_campaign) never run the ACTUAL loop across the boundary.
+
+    RESUME CONTRACT (the executable spec): ``initial_config`` must ALREADY carry
+    ``initial_field`` — i.e. resume with BOTH the accumulated field AND the config
+    promoted FROM it, exactly as the CLI does (``_load_single_resume`` rebuilds
+    ``CLUBBLiteConfig(C_K=field.reshape(-1))``).  The first resumed round's
+    ``compare_fn`` reads ``config`` (NOT ``base``), so a SCALAR ``initial_config`` +
+    array ``initial_field`` would make round-1 re-rank against the un-promoted uniform
+    bias and silently mis-select columns.  With deterministic mocks, any hidden
+    round-index dependence — or a mis-modeled resume — diverges the two fields."""
+    nlat, nlon = 2, 2
+    area_w = jnp.ones((nlat, nlon))
+    default_ck = float(CLUBBLiteConfig().C_K)
+
+    def compare_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim == 0:                                     # round 0: nothing corrected
+            bias = jnp.full((nlat, nlon), 8.0)
+        else:
+            bias = jnp.where(
+                jnp.isclose(ck.reshape((nlat, nlon)), default_ck), 8.0, 0.0)
+        flat = np.asarray(bias).reshape(-1)
+        manifest = [_Rec(flat_index=int(i), lat_deg=0.0, environment=_Env(0.0))
+                    for i in np.argsort(-flat)[:2] if flat[i] > 0.0]
+        return CompareResult(combined_score=bias, manifest=manifest,
+                             area_weights=area_w, model_ctx=None)
+
+    def diagnose(record, ctx):                               # noqa: ARG001
+        return _Eddy(K=jnp.array([0.9]), valid=jnp.array([True]))   # != default
+
+    kw = dict(compare_fn=compare_fn, diagnose_fn=diagnose,
+              promotion_key="clubb_lite_C_K", grid_shape=(nlat, nlon),
+              background=default_ck)
+
+    # Uninterrupted: capture the ACCEPTED accumulated field after EACH round.
+    fields = []
+    run_correction_campaign(
+        CLUBBLiteConfig(), n_iterations=2,
+        checkpoint_callback=lambda r, res, field: fields.append(np.asarray(field)),
+        **kw)
+    assert len(fields) == 2                                  # field after round 0, round 1
+
+    # Resume the SECOND round from the round-0 checkpoint, reconstructing the config
+    # FROM the field exactly as the CLI's _load_single_resume does (start_round=1
+    # offsets only the label).
+    resume_field = jnp.asarray(fields[0])
+    resume_config = CLUBBLiteConfig(C_K=resume_field.reshape(-1))
+    resumed = run_correction_campaign(
+        resume_config, n_iterations=1,
+        initial_field=resume_field, start_round=1, **kw)
+    f_resumed = np.asarray(resumed.final_config.C_K).reshape(-1)
+
+    # BIT-EXACT: resuming reproduces the uninterrupted round-1 field exactly.
+    np.testing.assert_array_equal(f_resumed, fields[1].reshape(-1))
+    # NON-VACUOUS boundary: round 0 left 2 columns uncorrected; the resumed round
+    # corrects them (2 → 4), so the equality is not trivially true of a no-op.
+    assert int(np.sum(np.isclose(fields[0].reshape(-1), 0.9))) == 2
+    assert int(np.sum(np.isclose(f_resumed, 0.9))) == 4
+
+
 def _always_worst_compare_fn(nlat=2, nlon=2):
     """compare_fn that ALWAYS reports a high uniform bias ⇒ the 2 worst columns are
     flagged every round (regardless of the config) — to exercise the dry-LES abort."""
