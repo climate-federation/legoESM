@@ -501,6 +501,35 @@ def test_column_state_from_hydrostatic_amip_and_cmip():
         assert float(comp.environment.sst_K[0, 0]) == pytest.approx(sst_value)
 
 
+def test_column_state_from_hydrostatic_rejects_offgrid_surface_field():
+    """A per-column SURFACE field (sst_K / precip) on a DIFFERENT grid than the
+    atmosphere columns must fail LOUDLY — this is the canonical CMIP operator
+    mistake: a coupled OCEAN-grid SST fed straight into the atm comparison. The
+    compare indexes by atmosphere column flat-index, so an off-grid surface field
+    would MISALIGN every column and silently corrupt the worst-column regime
+    clustering (the wrong columns would get LES). Locks the _checked_surface guard
+    for BOTH surface fields; the message points the operator at regridding. Both
+    off-grid values are physically valid (300 K, 2 mm/day) so it is the SHAPE guard
+    that fires, not a range check (non-vacuous: correct-shape inputs are accepted)."""
+    shape, nlev = (2, 3), 5                 # atmosphere column grid = (2, 3)
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    ocean_shape = (4, 5)                    # a DIFFERENT (coupled-ocean) column grid
+    assert ocean_shape != shape
+    with pytest.raises(
+        ValueError,
+        match=r"sst_K shape.*atmosphere column grid.*coupled CMIP ocean grid"):
+        column_state_from_hydrostatic(atm, q_v, sst_K=jnp.full(ocean_shape, 300.0))
+    with pytest.raises(
+        ValueError, match=r"precip_mm_day shape.*atmosphere column grid"):
+        column_state_from_hydrostatic(
+            atm, q_v, precip_mm_day=jnp.full(ocean_shape, 2.0))
+    # Non-vacuous: the SAME fields at the CORRECT atm shape are accepted.
+    ok = column_state_from_hydrostatic(
+        atm, q_v, sst_K=jnp.full(shape, 300.0), precip_mm_day=jnp.full(shape, 2.0))
+    assert ok.sst_K.shape == shape and ok.precip_mm_day.shape == shape
+
+
 def test_column_state_from_hydrostatic_sst_optional():
     atm = _hydro_state((2, 2), 4)
     q_v = jnp.full((2, 2, 4), 1e-3)
