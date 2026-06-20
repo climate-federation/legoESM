@@ -399,6 +399,15 @@ def slice_override_latlon_2d(override, layout):
 # environment by environmental similarity — so a cheap LOW-res campaign deploys on
 # the expensive HIGH-res production run (the practical way to scale).
 # --------------------------------------------------------------------------- #
+#: Canonical predictor ORDER for the environment kernel — the SINGLE source of truth
+#: shared by the producer (:func:`...feedback_assembly.column_environment_grid` +
+#: :func:`build_env_kernel`, both stacking ``[sst_K, cape_J_kg, bulk_shear_m_s]``) and
+#: the deploy. ``new_grid_env`` columns passed to :func:`apply_env_kernel_override` MUST
+#: be in THIS order; a kernel records it (``EnvKernel.predictor_names``) so the artifact
+#: self-documents the contract a wrong-order deploy would otherwise silently violate.
+ENV_PREDICTOR_NAMES: tuple[str, ...] = ("sst_K", "cape_J_kg", "bulk_shear_m_s")
+
+
 class EnvKernel(NamedTuple):
     """A serializable, grid-agnostic environment→coefficient kernel.
 
@@ -407,6 +416,10 @@ class EnvKernel(NamedTuple):
     coefficients; ``length_scales`` ``(3,)`` set the per-predictor similarity scale.
     ``env_lo``/``env_hi`` ``(3,)`` are the sampled env range — provenance for
     detecting a deploy whose grid lies OUTSIDE the sampled hull (domain shift).
+    ``predictor_names`` records the predictor ORDER (``ENV_PREDICTOR_NAMES``) so the
+    serialized artifact self-documents the column contract of ``sample_env`` /
+    ``new_grid_env`` (a deploy whose env is in a DIFFERENT order would silently produce
+    miscorrelated coefficients — codex-review iter 405).
     """
 
     sample_env: Any            # (nsamp, 3)
@@ -417,6 +430,7 @@ class EnvKernel(NamedTuple):
     background: float
     env_lo: Any                # (3,) sampled-env min (domain-shift provenance)
     env_hi: Any                # (3,) sampled-env max
+    predictor_names: tuple[str, ...] = ENV_PREDICTOR_NAMES   # column contract (iter 405)
 
 
 def build_env_kernel(records, diagnoses, method, length_scales, *,
@@ -470,6 +484,11 @@ def _validate_env_kernel(kernel: EnvKernel) -> EnvKernel:
         raise ValueError(
             f"sample_env must be (nsamp, npred); got {tuple(se.shape)}.")
     nsamp, npred = int(se.shape[0]), int(se.shape[1])
+    if len(kernel.predictor_names) != npred:
+        raise ValueError(
+            f"env kernel predictor_names {kernel.predictor_names} has "
+            f"{len(kernel.predictor_names)} names but sample_env has {npred} predictors "
+            "— the column contract is inconsistent (a corrupted/version-skewed kernel).")
     for name, arr, n in (("sample_values", kernel.sample_values, nsamp),
                          ("valid", kernel.valid, nsamp),
                          ("length_scales", kernel.length_scales, npred),
@@ -527,7 +546,12 @@ def apply_env_kernel_override(kernel: EnvKernel, new_grid_env, *,
     """Evaluate an :class:`EnvKernel` on a NEW grid's environment → an override.
 
     ``new_grid_env`` ``(ncol_new, 3)`` from :func:`column_environment_grid` on the
-    production run's state (ANY resolution).  Returns ``(TurbulenceConfig, coverage)``
+    production run's state (ANY resolution).  Its columns MUST be in the kernel's
+    ``predictor_names`` order (``ENV_PREDICTOR_NAMES`` = ``[sst_K, cape_J_kg,
+    bulk_shear_m_s]``); a different order would silently pair each predictor with the
+    WRONG length-scale and produce miscorrelated coefficients — use
+    :func:`column_environment_grid` (which emits exactly that order) rather than
+    hand-building the array.  Returns ``(TurbulenceConfig, coverage)``
     where ``coverage`` reports the fraction of columns that found an environmentally
     similar diagnosis vs fell back to ``background``, and the fraction WITHIN the
     sampled env hull — a LOW ``fraction_covered`` warns the deploy grid's climate
@@ -625,6 +649,7 @@ def env_kernel_to_dict(kernel: EnvKernel) -> dict:
         "background": float(kernel.background),
         "env_lo": np.asarray(kernel.env_lo).reshape(-1).tolist(),
         "env_hi": np.asarray(kernel.env_hi).reshape(-1).tolist(),
+        "predictor_names": list(kernel.predictor_names),   # the column contract (iter 405)
     }
 
 
@@ -664,4 +689,7 @@ def env_kernel_from_dict(data: dict) -> EnvKernel:
         length_scales=jnp.asarray(data["length_scales"]),
         field=data.get("field"), background=float(data["background"]),
         env_lo=jnp.asarray(data["env_lo"]),
-        env_hi=jnp.asarray(data["env_hi"])))
+        env_hi=jnp.asarray(data["env_hi"]),
+        # Optional for back-compat with pre-iter-405 kernels (default the canonical
+        # order); a present block round-trips exactly.
+        predictor_names=tuple(data.get("predictor_names", ENV_PREDICTOR_NAMES))))

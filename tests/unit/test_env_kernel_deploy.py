@@ -262,9 +262,46 @@ def test_json_round_trip_preserves_every_field_exactly():
         np.asarray(k2.valid, dtype=bool), np.asarray(k.valid, dtype=bool))
     assert k2.field == k.field
     assert float(k2.background) == pytest.approx(float(k.background))
+    # The predictor-order CONTRACT round-trips (iter 405): the artifact self-documents
+    # that sample_env / new_grid_env columns are [sst_K, cape_J_kg, bulk_shear_m_s].
+    assert tuple(k2.predictor_names) == tuple(k.predictor_names)
 
 
-def test_deployed_override_passes_validate_strict():
+def test_predictor_names_contract_and_back_compat():
+    """codex-review iter 405: the kernel records its predictor ORDER so the cross-grid
+    deploy's column contract is explicit (a wrong-order new_grid_env would silently
+    miscorrelate).  build_env_kernel stamps the canonical order, the JSON round-trips it,
+    a PRE-iter-405 artifact (no key) defaults to it, and a length-skewed contract is
+    rejected by _validate_env_kernel."""
+    import json
+
+    from legoesm.training.deploy_correction import (
+        ENV_PREDICTOR_NAMES,
+        env_kernel_from_dict,
+        env_kernel_to_dict,
+    )
+
+    k = _kernel()
+    assert tuple(k.predictor_names) == ENV_PREDICTOR_NAMES == (
+        "sst_K", "cape_J_kg", "bulk_shear_m_s")
+    # ORDER AGREEMENT: build_env_kernel stacks the env tags in EXACTLY predictor_names
+    # order — locked against the distinct _ENVS columns (a regression swapping CAPE/shear
+    # in the build stack, or vs column_environment_grid, would land them mislabeled).
+    se = np.asarray(k.sample_env)
+    np.testing.assert_allclose(se[:, 0], [e[0] for e in _ENVS])   # sst_K
+    np.testing.assert_allclose(se[:, 1], [e[1] for e in _ENVS])   # cape_J_kg
+    np.testing.assert_allclose(se[:, 2], [e[2] for e in _ENVS])   # bulk_shear_m_s
+    # Back-compat: a pre-iter-405 artifact lacks "predictor_names" ⇒ default the canonical
+    # order (NOT a crash), and is otherwise unchanged.
+    d = env_kernel_to_dict(k)
+    del d["predictor_names"]
+    k_old = env_kernel_from_dict(json.loads(json.dumps(d)))
+    assert tuple(k_old.predictor_names) == ENV_PREDICTOR_NAMES
+    # A length-skewed contract (names ≠ sample_env npred) fails LOUD on deserialize.
+    bad = env_kernel_to_dict(k)
+    bad["predictor_names"] = ["sst_K", "cape_J_kg"]          # 2 names vs 3 predictors
+    with pytest.raises(ValueError, match="predictor_names.*inconsistent|inconsistent"):
+        env_kernel_from_dict(json.loads(json.dumps(bad)))
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     k = _kernel()
     override, _ = apply_env_kernel_override(
