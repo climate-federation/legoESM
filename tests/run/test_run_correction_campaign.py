@@ -695,6 +695,41 @@ def test_dry_run_report_surfaces_era5_window_and_warns_on_snapshot():
     assert "weather-vs-climate" in snap and "--era5-n-times" in snap
 
 
+def test_dry_run_report_surfaces_amip_forcing_provenance():
+    """The pre-flight surfaces the --amip-forcing-from-local-era5 build (iter 424): the
+    forcing is BUILT before the dry-run short-circuit, so the report's AMIP-forcing line is
+    the operator's confirmation that the offline boundary condition is in place; absent when
+    the flag is off (back-compat)."""
+    from scripts.run.run_correction_campaign import (
+        _amip_forcing_provenance,
+        _dry_run_amip_forcing_line,
+    )
+
+    # Provenance from args: None when off, the build dict when on.
+    assert _amip_forcing_provenance(
+        SimpleNamespace(amip_forcing_from_local_era5=False)) is None
+    prov = _amip_forcing_provenance(SimpleNamespace(
+        amip_forcing_from_local_era5=True, local_era5_dir="/rda/ERA5",
+        local_era5_date="20170901", amip_forcing_out="forcing.nc",
+        amip_forcing_hour_stride=24))
+    assert prov == {"source": "/rda/ERA5", "date": "20170901",
+                    "out": "forcing.nc", "hour_stride": 24}
+
+    # The line: empty when off/None, formatted when on.
+    assert _dry_run_amip_forcing_line(None) == ""
+    line = _dry_run_amip_forcing_line(prov)
+    assert "/rda/ERA5" in line and "20170901" in line and "forcing.nc" in line
+    assert "every 24h" in line and "SSTK/CI" in line
+
+    # The report includes the forcing line only when provenance is given.
+    dry = CampaignDryRun(grid_shape=(6, 8), n_worst=12, feedback_strategy="static",
+                         coefficients=("C_K",), n_iterations=10, les_per_round=8)
+    rep = _dry_run_report(dry, mode="amip", out="o.json", amip_forcing=prov)
+    assert "AMIP forcing: built from /rda/ERA5" in rep
+    rep_off = _dry_run_report(dry, mode="amip", out="o.json")
+    assert "AMIP forcing" not in rep_off
+
+
 def test_dry_run_flag_parsed():
     p = _build_arg_parser()
     base = ["--config", "c.json", "--era5-zarr", "z"]

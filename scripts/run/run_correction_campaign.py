@@ -921,6 +921,20 @@ def _maybe_apply_local_era5_forcing(args, base_cfg):
     return apply_amip_forcing_to_config(base_cfg, fcfg)
 
 
+def _amip_forcing_provenance(args) -> dict | None:
+    """The ``--amip-forcing-from-local-era5`` build provenance for the dry-run report, or
+    ``None`` when the flag is off — derived from the CLI args (the source archive, date,
+    output path, and hour stride that :func:`_maybe_apply_local_era5_forcing` used)."""
+    if not getattr(args, "amip_forcing_from_local_era5", False):
+        return None
+    return {
+        "source": args.local_era5_dir,
+        "date": args.local_era5_date,
+        "out": args.amip_forcing_out,
+        "hour_stride": args.amip_forcing_hour_stride,
+    }
+
+
 def _resolve_era5_n_times(n_times: int) -> int:
     """Validate the ``--era5-n-times`` averaging window LOUDLY, returning the int.
 
@@ -1640,8 +1654,24 @@ def _dry_run_era5_line(era5: dict | None) -> str:
     return f"\n  ERA5 reference: {n}-time climatology{at}{model}"
 
 
+def _dry_run_amip_forcing_line(amip_forcing: dict | None) -> str:
+    """The ``--dry-run`` line for an ``--amip-forcing-from-local-era5`` build, or ``""``.
+
+    The forcing is BUILT during the pre-flight (``_maybe_apply_local_era5_forcing`` runs
+    before the dry-run short-circuit), so reaching this line means the local archive was
+    readable and the combined SST/sea-ice forcing was written — the operator's confirmation
+    that the OFFLINE realistic-AMIP boundary condition is in place before the multi-day run
+    (iter 424)."""
+    if not amip_forcing:
+        return ""
+    return (
+        f"\n  AMIP forcing: built from {amip_forcing['source']} ({amip_forcing['date']}) "
+        f"→ {amip_forcing['out']} (SSTK/CI, every {int(amip_forcing['hour_stride'])}h)")
+
+
 def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
-                    era5: dict | None = None) -> str:
+                    era5: dict | None = None,
+                    amip_forcing: dict | None = None) -> str:
     """Human-readable one-block summary of a successful ``--dry-run`` pre-flight: the
     campaign CONSTRUCTED (config/units/grid/scheme/method all validated), here is what
     a real launch WOULD run.  Pure (no I/O) so it is unit-testable."""
@@ -1653,7 +1683,8 @@ def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
         f"surface_flux={'ON' if dry.surface_flux else 'off'}\n"
         f"  would run ≤ {dry.n_iterations} rounds × ≤ {dry.les_per_round} LES/round "
         f"(≤ {dry.n_iterations * dry.les_per_round} LES total)"
-        + _dry_run_era5_line(era5) + "\n"
+        + _dry_run_era5_line(era5)
+        + _dry_run_amip_forcing_line(amip_forcing) + "\n"
         f"  would write → {out}\n"
         "  (re-run without --dry-run to execute the multi-day campaign.)"
     )
@@ -1797,7 +1828,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         **_campaign_knobs_from_args(args))
     if args.dry_run:
         print(_dry_run_report(result, mode=args.mode, out=args.out,
-                              era5=_averaging_provenance(args, base_cfg)))
+                              era5=_averaging_provenance(args, base_cfg),
+                              amip_forcing=_amip_forcing_provenance(args)))
         return 0
 
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
@@ -2263,7 +2295,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     )
     if args.dry_run:
         print(_dry_run_report(result, mode=args.mode, out=args.out,
-                              era5=_averaging_provenance(args, base_cfg)))
+                              era5=_averaging_provenance(args, base_cfg),
+                              amip_forcing=_amip_forcing_provenance(args)))
         return 0
     biases = [(float(it.bias.baseline_bias), float(it.bias.updated_bias),
                bool(it.bias.improved)) for it in result.iterations]
