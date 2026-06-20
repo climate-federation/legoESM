@@ -186,3 +186,94 @@ def test_correction_loop_osse_is_non_vacuous():
         float(result.bias.baseline_bias))
     assert float(result.bias.baseline_bias) > 0.0
     assert float(result.worst_column_change) == pytest.approx(0.0, abs=1e-12)
+
+
+# --- clustered (les_budget=K) cost-reduction path -----------------------------
+# Worst columns partitioned into two environments by SST; the truth coefficient is
+# a function of the environment (warm columns want a larger C_K), exactly the
+# premise of environment-clustering: similar environments ⇒ similar coefficients,
+# so ONE LES per environment suffices.
+_WARM_SST_K, _COLD_SST_K = 300.0, 280.0
+_WARM_C_K, _COLD_C_K = 0.9, 0.6
+_WARM_FLATS = [1 * _NLON + c for c in range(1, 5)]   # row 1, cols 1-4 (4 columns)
+_COLD_FLATS = [3 * _NLON + c for c in range(1, 5)]   # row 3, cols 1-4 (4 columns)
+
+
+def _clustered_setup():
+    """Per-column SST field + truth C_K field for the two-environment OSSE.
+
+    The env tags the clustering sees come from the BASELINE run (uniform default
+    C_K ⇒ uniform T/q/u/v ⇒ uniform CAPE/shear), so SST is the SOLE distinguishing
+    feature — a clean two-way split.  ``run_fn`` carries the per-column SST."""
+    sst = np.full((_NLAT, _NLON), 290.0)
+    ck_ref = np.full((_N,), _C_K_DEFAULT)
+    for f in _WARM_FLATS:
+        sst[f // _NLON, f % _NLON] = _WARM_SST_K
+        ck_ref[f] = _WARM_C_K
+    for f in _COLD_FLATS:
+        sst[f // _NLON, f % _NLON] = _COLD_SST_K
+        ck_ref[f] = _COLD_C_K
+    sst = jnp.asarray(sst)
+
+    def run_fn(config):
+        ck = jnp.asarray(config.C_K)
+        ck_field = jnp.broadcast_to(ck, (_N,)).reshape(_NLAT, _NLON)
+        T = _T0 + _ALPHA_K_PER_CK * ck_field[:, :, None]  # noqa: N806 — temperature
+        return ColumnState(T=T, q_v=_Q0, u=_U0, v=_V0, p_s=_PS0, sst_K=sst)
+
+    return run_fn, jnp.asarray(ck_ref)
+
+
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_correction_loop_clustering_preserves_bias_reduction_osse():
+    """The HPC cost path: clustering the 8 worst columns into K=2 environments runs
+    only 2 LES yet still zeroes the bias — i.e. each representative's diagnosis is
+    BROADCAST to the right cluster members (the member→representative index mapping
+    is correct).  Asserts the clustered run matches the per-column (8-LES) run's
+    bias reduction at 1/4 the LES cost, and that the broadcast updated-field equals
+    the reference exactly."""
+    run_fn, ck_ref = _clustered_setup()
+    sigma = create_sigma_coordinate(_NLEV)
+    grid = create_latlon_grid(_NLAT, _NLON, dtype=jnp.float64)
+    rad2deg = 180.0 / np.pi
+    reference = run_fn(CLUBBLiteConfig()._replace(C_K=ck_ref))
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(np.asarray(grid.grid_lat) * rad2deg),
+        lon_deg=jnp.asarray(np.asarray(grid.grid_lon) * rad2deg),
+        area_weights=jnp.ones((_NLAT, _NLON)),
+        n_worst=len(_WARM_FLATS) + len(_COLD_FLATS), run_amip_fn=run_fn,
+    )
+
+    def diagnose_fn(record, model_ctx):
+        # The diagnosed coefficient is a function of the column ENVIRONMENT (warm
+        # vs cold SST) — so all members of a cluster share it and one LES suffices.
+        warm = float(record.environment.sst_K) > 0.5 * (_WARM_SST_K + _COLD_SST_K)
+        return _Eddy(_WARM_C_K if warm else _COLD_C_K)
+
+    common = dict(
+        compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(_NLAT, _NLON),
+        background=_C_K_DEFAULT,
+    )
+    res_full = run_correction_iteration(CLUBBLiteConfig(), **common)
+    res_clus = run_correction_iteration(CLUBBLiteConfig(), les_budget=2, **common)
+
+    # Cost: per-column runs 8 LES; clustering runs only K=2 (one per environment).
+    assert res_full.n_diagnosed == 8
+    assert res_clus.n_diagnosed == 2
+    assert res_full.n_corrected == 8 and res_clus.n_corrected == 8
+
+    # Correctness: BOTH zero the bias — the K=2 broadcast reaches every member with
+    # the right per-environment coefficient (mis-mapping would leave a residual).
+    for res in (res_full, res_clus):
+        assert bool(res.bias.improved) is True
+        assert float(res.bias.updated_bias) == pytest.approx(0.0, abs=1e-9)
+    assert float(res_clus.bias.updated_bias) == pytest.approx(
+        float(res_full.bias.updated_bias), abs=1e-12)
+    # The clustered updated field equals the reference exactly ⇒ each of the 8
+    # columns received its own environment's truth coefficient via the broadcast.
+    np.testing.assert_allclose(
+        np.asarray(res_clus.updated_config.C_K), np.asarray(ck_ref))
