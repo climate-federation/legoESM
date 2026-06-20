@@ -2929,6 +2929,48 @@ def test_output_dict_records_averaging_provenance():
     assert out["averaging"] == {"era5_time_idx": 12, "era5_n_times": 30}
 
 
+def test_output_dict_records_les_provenance():
+    """The output JSON records the spin-off LES config (iter 368) — esp. whether a
+    prescribed SURFACE-FLUX BC was used (iter 364/365), which changes HOW the closure was
+    diagnosed — so the correction is self-describing.  Absent ⇒ no ``les_config`` key
+    (back-compat with the deploy contract); a provided block round-trips through JSON and
+    the DEPLOY loader IGNORES the extra key (reads only the corrected field)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+    from legoesm.training.deploy_correction import corrected_clubb_config
+
+    from scripts.run.run_correction_campaign import _les_provenance
+
+    field = jnp.array([0.42, 0.55, 0.61, 0.73])
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 0.6),
+            worst_column_change=jnp.asarray(0.0), feedback_field=field.reshape(2, 2),
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+        final_field=field.reshape(2, 2), accepted=(True,), stop_reason="converged")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    health = campaign_health(summary)
+    base = dict(grid_provenance={}, summary=summary, health=health, corrected_field="C_K")
+    assert "les_config" not in build_campaign_output_dict(res, **base)   # absent ⇒ no key
+
+    prov = _les_provenance(SimpleNamespace(surface_flux=True, les_budget=8,
+                                           les_dt=0.5, les_hours=2.0))
+    assert prov == {"surface_flux": True, "les_budget": 8, "les_dt_s": 0.5, "les_hours": 2.0}
+    # default-OFF run records surface_flux=False (distinguishable from a surface-flux run).
+    assert _les_provenance(SimpleNamespace(surface_flux=False, les_budget=None,
+                                           les_dt=0.5, les_hours=2.0))["surface_flux"] is False
+
+    out = json.loads(json.dumps(build_campaign_output_dict(res, les_provenance=prov, **base)))
+    assert out["les_config"]["surface_flux"] is True
+    # the deploy loader IGNORES the extra les_config key (reads only the corrected field).
+    cfg = corrected_clubb_config(out)
+    np.testing.assert_allclose(np.asarray(cfg.C_K), np.asarray(field), rtol=1e-12)
+
+
 def test_averaging_provenance_records_the_model_window_when_config_given():
     """With base_cfg (the campaign output + dry-run), _averaging_provenance ALSO records the
     MODEL-side averaging window — days / diag_days / n_samples — so the iter-267 window

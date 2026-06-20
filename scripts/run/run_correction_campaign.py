@@ -1229,9 +1229,26 @@ def _averaging_provenance(args, base_cfg=None) -> dict:
     return block
 
 
+def _les_provenance(args) -> dict:
+    """The spin-off LES configuration — recorded in the output so the correction is
+    SELF-DESCRIBING + reproducible (symmetric with :func:`_averaging_provenance`).
+
+    Whether the LES used a prescribed SURFACE-FLUX BC (iter 364/365 — surface-driven
+    turbulence for convective columns) changes HOW the closure was diagnosed (it raises
+    the diagnosis-validity rate for surface-driven columns), so a later analysis can
+    distinguish surface-flux runs from the on-disk artifact rather than the launch command;
+    the cost/run knobs complete the LES-setup record."""
+    return {
+        "surface_flux": bool(args.surface_flux),
+        "les_budget": (None if args.les_budget is None else int(args.les_budget)),
+        "les_dt_s": float(args.les_dt),
+        "les_hours": float(args.les_hours),
+    }
+
+
 def build_campaign_output_dict(result, *, grid_provenance, summary, health,
                                corrected_field=None, coefficients=None,
-                               averaging=None):
+                               averaging=None, les_provenance=None):
     """Assemble the JSON-serializable campaign-output dict — the on-disk artifact the
     DEPLOY path (:func:`legoesm.training.deploy_correction.corrected_clubb_config`)
     reads to update a production AMIP/CMIP run (the literal "update the parameters"
@@ -1280,6 +1297,8 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
            "health": {"status": health.status, "message": health.message}}
     if averaging is not None:                        # comparison averaging-window provenance
         out["averaging"] = averaging
+    if les_provenance is not None:                   # spin-off LES config (incl. surface_flux)
+        out["les_config"] = les_provenance
     return out
 
 
@@ -1699,7 +1718,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, coefficients=coefficients,
-        averaging=_averaging_provenance(args, base_cfg)), indent=2)
+        averaging=_averaging_provenance(args, base_cfg),
+        les_provenance=_les_provenance(args)), indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -2116,7 +2136,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _atomic_write_json(args.out, build_campaign_output_dict(
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, corrected_field=corrected_field,
-        averaging=_averaging_provenance(args, base_cfg)), indent=2)
+        averaging=_averaging_provenance(args, base_cfg),
+        les_provenance=_les_provenance(args)), indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
