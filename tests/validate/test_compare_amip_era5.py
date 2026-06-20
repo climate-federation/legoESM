@@ -217,8 +217,9 @@ def test_load_model_from_restart_vertical_coord_mismatch_raises(monkeypatch):
 
     grid = SimpleNamespace(grid_shape_2d=(2, 3))
 
-    def _fake_restart_with_cfg(shape, run_vcoord):
-        cfg = SimpleNamespace(grid=SimpleNamespace(vertical_coord=run_vcoord))
+    def _fake_restart_with_cfg(shape, run_vcoord, run_p_top=200.0):
+        cfg = SimpleNamespace(grid=SimpleNamespace(
+            vertical_coord=run_vcoord, p_top_Pa=run_p_top))
         def f(path, g, s, strict):                    # noqa: ARG001
             # 5-tuple: (state, q_v, step, day, loaded_config) — load_model reads [0],[1],[4].
             return (SimpleNamespace(T=jnp.zeros(shape)), jnp.zeros(shape), 0, 0.0, cfg)
@@ -234,6 +235,19 @@ def test_load_model_from_restart_vertical_coord_mismatch_raises(monkeypatch):
     monkeypatch.setattr(restart_mod, "load_restart", _fake_restart_with_cfg((4, 4, 5), "hybrid"))
     with pytest.raises(ValueError, match="column shape"):
         drv.load_model_from_restart("x.npz", grid, object(), 5, expected_vertical_coord="hybrid")
+
+    # HYBRID p_top MISMATCH: coord matches (hybrid) but the model top differs ⇒ raise.
+    monkeypatch.setattr(restart_mod, "load_restart",
+                        _fake_restart_with_cfg((2, 3, 5), "hybrid", run_p_top=50.0))
+    with pytest.raises(ValueError, match="does not match the restart's recorded hybrid model top"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5,
+                                    expected_vertical_coord="hybrid", expected_p_top_Pa=200.0)
+    # Matching p_top ⇒ p_top check PASSES, proceeds to the shape guard.
+    monkeypatch.setattr(restart_mod, "load_restart",
+                        _fake_restart_with_cfg((4, 4, 5), "hybrid", run_p_top=200.0))
+    with pytest.raises(ValueError, match="column shape"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5,
+                                    expected_vertical_coord="hybrid", expected_p_top_Pa=200.0)
 
 
 def test_main_wiring_monkeypatched(tmp_path, monkeypatch):

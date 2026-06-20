@@ -217,7 +217,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None,
-                            expected_vertical_coord=None):
+                            expected_vertical_coord=None, expected_p_top_Pa=None):
     """Load a restart checkpoint into a comparison :class:`ColumnState`.
 
     Loads the restart, synthesizes grid winds (a no-op for a grid state; the MPAS
@@ -239,13 +239,27 @@ def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None,
     loaded = load_restart(restart_path, grid, sigma, strict=True)
     state, q_v = loaded[0], loaded[1]
     if expected_vertical_coord is not None and len(loaded) > 4:
-        run_vcoord = getattr(getattr(loaded[4], "grid", None), "vertical_coord", None)
+        run_grid = getattr(loaded[4], "grid", None)
+        run_vcoord = getattr(run_grid, "vertical_coord", None)
         if run_vcoord is not None and str(run_vcoord) != str(expected_vertical_coord):
             raise ValueError(
                 f"--vertical-coord {str(expected_vertical_coord)!r} does not match the "
                 f"restart's recorded run coordinate {str(run_vcoord)!r}; the model state "
                 "would be placed on the WRONG pressure levels (a silently-biased compare). "
                 f"Re-run with --vertical-coord {str(run_vcoord)}.")
+        # For a HYBRID run, p_top also determines the A/B level coefficients
+        # (``make_hybrid_levels``), so a p_top mismatch is the same class of wrong-levels
+        # error (concentrated near the model top).  Checked only when both are hybrid and a
+        # p_top expectation is given; defensive + relative-tolerant against float repr.
+        if (run_vcoord == "hybrid" and str(expected_vertical_coord) == "hybrid"
+                and expected_p_top_Pa is not None):
+            run_p_top = getattr(run_grid, "p_top_Pa", None)
+            if run_p_top is not None and abs(float(run_p_top) - float(expected_p_top_Pa)) > \
+                    1e-6 * max(abs(float(run_p_top)), 1.0):
+                raise ValueError(
+                    f"--p-top-Pa {float(expected_p_top_Pa)} does not match the restart's "
+                    f"recorded hybrid model top {float(run_p_top)} Pa; the hybrid levels "
+                    f"would differ near the top. Re-run with --p-top-Pa {float(run_p_top)}.")
     state = grid_winds_from_spectral(state, grid, sigma)
     expected_cols = tuple(grid.grid_shape_2d)
     if tuple(state.T.shape[:-1]) != expected_cols:
@@ -305,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
             stacklevel=2,
         )
     model = load_model_from_restart(args.restart, grid, sigma, args.nlev, sst_K=sst_K,
-                                    expected_vertical_coord=args.vertical_coord)
+                                    expected_vertical_coord=args.vertical_coord,
+                                    expected_p_top_Pa=args.p_top_Pa)
 
     era5_cfg = TrainingERA5Config(
         zarr_store=args.era5_zarr,
@@ -354,7 +369,8 @@ def main(argv: list[str] | None = None) -> int:
 
         baseline_model = load_model_from_restart(
             args.baseline_restart, grid, sigma, args.nlev, sst_K=sst_K,
-            expected_vertical_coord=args.vertical_coord)
+            expected_vertical_coord=args.vertical_coord,
+            expected_p_top_Pa=args.p_top_Pa)
         # out_path=None ⇒ compare only (no manifest write) against the SAME reference.
         baseline_cmp = compare_and_write(
             model=baseline_model, reference=reference, sigma=sigma, grid=grid,
