@@ -86,3 +86,10 @@ now **superseded** by the faithful root fix and defaults OFF everywhere (includi
    environment (no `codex` binary / plugin); run before merge.
 2. The same masked-land cold-cell contamination affects **any** masked-land WENO ocean run
    (now fixed by the default-on fill); confirm against the production OMIP/coastline runs.
+3. **Perf follow-up** (adversarial-review note): in the RK3 tracer path the fill runs per
+   tracer per stage (3 stages × 2 tracers = 6 `neumann_fill_cgrid` calls/step ≈ 18 halo
+   passes/step) — correct but a real MPI cost. Could be halved by filling the stacked
+   `[T‖S]` once per stage (filling before the vertical step is harmless: it only changes
+   land cells, and wet columns — the only ones the vertical advection keeps — are
+   unchanged). Not done now to avoid destabilising the validated fix; single-node §5 is
+   unaffected (~80 s / 20 days).
