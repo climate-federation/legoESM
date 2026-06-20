@@ -405,7 +405,22 @@ def main(argv: list[str] | None = None) -> int:
             jnp.asarray(grid.grid_area))
         print(_line("COMBINED bias", "", combined.baseline_bias,
                     combined.updated_bias, combined.improved))
-        return 0 if bool(combined.improved) else 1
+        # FAIL-SAFE on a blown-up run: a correction that DESTABILISES the model leaves
+        # NaN/Inf in its STATE.  The per-column RMSE then NaN-MASKS those columns, so
+        # the area-weighted mean reports a spuriously-LOW (≈0) corrected bias and
+        # FALSELY 'improved' (rc 0) — an automated deploy&verify would ship the
+        # blown-up correction.  Guard on the raw STATES (the masking hides it in the
+        # scores): a non-finite corrected OR baseline state is a verification FAILURE.
+        def _state_finite(m) -> bool:
+            return bool(
+                jnp.all(jnp.isfinite(m.T)) and jnp.all(jnp.isfinite(m.q_v))
+                and jnp.all(jnp.isfinite(m.u)) and jnp.all(jnp.isfinite(m.v)))
+
+        states_finite = _state_finite(model) and _state_finite(baseline_model)
+        if not states_finite:
+            print("[compare_amip_era5] NON-FINITE held-out state (the corrected or "
+                  "baseline run produced NaN/Inf — it likely blew up): verification FAILS.")
+        return 0 if (states_finite and bool(combined.improved)) else 1
     return 0       # no --baseline-restart: informational bias report only, no verdict
 
 
