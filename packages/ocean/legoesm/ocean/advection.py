@@ -34,22 +34,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 
 # =============================================================================
 # Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
-# stability for DST-3 at low CFL). Centralized in ``_flux_limiters.py``.
+# stability for DST-3 at low CFL). Centralized in ``core.flux_limiters``;
+# Sweby (``_superbee_limiter``) imported above for the Veros-faithful path.
 # =============================================================================
-
-def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Sweby (superbee) flux limiter.
-
-    psi(r) = max(0, min(1, 2r), min(2, r))
-
-    Traces the upper boundary of the Sweby TVD region, providing
-    maximum anti-diffusion while maintaining monotonicity.
-    """
-    return jnp.maximum(
-        0.0,
-        jnp.maximum(jnp.minimum(1.0, 2.0 * r), jnp.minimum(2.0, r)),
-    )
-
 
 # Van Leer limiter is the canonical core kernel (redundancy audit) — import it
 # instead of re-deriving phi(r) = (r+|r|)/(1+|r|); aliased to the local private

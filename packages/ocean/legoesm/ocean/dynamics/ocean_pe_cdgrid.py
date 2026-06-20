@@ -55,6 +55,7 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.dynamics.ocean_tendency_common import (
+    bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
 )
 
@@ -143,30 +144,11 @@ def _bc_bottom_drag_cdgrid(du_dt, dv_dt, u_a, v_a, h_k, z_coord, config):
         # Distributed BBL drag (Killworth & Edwards 1999 / MOM6): spread the
         # stress over a fixed near-seafloor thickness ``H_BBL`` instead of
         # dumping r·u/h into a single (possibly <1 m) partial cell — the
-        # cold-start thin-bottom-cell blowup fix.  Cell-centre column form of
-        # the lat-lon ``_bbl_drag_for_face``.
-        def _bbl(vel, r_eff):
-            z_half = jnp.concatenate([
-                jnp.zeros(h_k.shape[:-1] + (1,), dtype=h_k.dtype),
-                -jnp.cumsum(h_k, axis=-1),
-            ], axis=-1)
-            z_top = z_half[..., :-1]
-            z_bot = z_half[..., 1:]
-            z_seafloor = z_half[..., -1:]
-            bbl_top = z_seafloor + H_BBL
-            overlap = jnp.maximum(
-                0.0,
-                jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor),
-            )
-            h_safe = jnp.maximum(h_k, 1e-10)
-            # Effective BBL thickness: on shelves shallower than ``H_BBL`` the
-            # band cannot reach its nominal thickness; normalise by the actual
-            # total overlap (matches the lat-lon path / bbl_drag_distributed).
-            total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
-            h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, 1e-10), H_BBL)
-            return -r_eff * vel * overlap / (h_safe * h_bbl_eff)
-        drag_u = _bbl(u_a, r_eff_u)
-        drag_v = _bbl(v_a, r_eff_v)
+        # cold-start thin-bottom-cell blowup fix.  #517: route through the
+        # shared canonical helper instead of re-deriving the cell-centre
+        # column form (was bit-identical to ``bbl_distributed_drag_face_column``).
+        drag_u = bbl_distributed_drag_face_column(u_a, h_k, r_eff_u, H_BBL)
+        drag_v = bbl_distributed_drag_face_column(v_a, h_k, r_eff_v, H_BBL)
     else:
         n_lev = u_a.shape[-1]
         level_idx = jnp.arange(n_lev)

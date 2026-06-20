@@ -80,9 +80,9 @@ def smooth_woa_ts(state, grid, passes):
     cold-start cannot carry them.  The dynamics ARE stable on a smooth
     stratification (uniform-strat rest test), so smoothing the IC toward that
     regime is the natural conditioning."""
-    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+    from legoesm.ocean.bathymetry import laplacian_smooth_2d
     mask = np.asarray(state.land_mask.data) > 0.5
-    # Cube horizontal fields are (6, n, n) -> _laplacian_smooth_2d needs the
+    # Cube horizontal fields are (6, n, n) -> laplacian_smooth_2d needs the
     # cube-topology stencil (cross-face neighbours); 2-D grids are (n_lat, n_lon).
     is_cubed = (mask.ndim == 3)
     T = np.array(state.T.data, dtype=np.float64)
@@ -93,7 +93,7 @@ def smooth_woa_ts(state, grid, passes):
             orig_k = arr[..., k].copy()
             cur = arr[..., k]
             for _ in range(int(passes)):
-                sm = np.asarray(_laplacian_smooth_2d(cur, 1, is_cubed=is_cubed))
+                sm = np.asarray(laplacian_smooth_2d(cur, 1, is_cubed=is_cubed))
                 cur = np.where(mask, sm, orig_k)
             arr[..., k] = cur
     print(f"[setup] WOA T,S horizontal smoothing: {passes} Laplacian passes/level "
@@ -264,17 +264,17 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     lm0 = np.asarray(land_mask, dtype=np.float64)
 
     if smoothing_passes and smoothing_passes > 0:
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d, compute_max_r_factor
         ocean = lm0 > 0.5
-        r_before = float(_r_factor_max(H_np, lm0))
+        r_before = float(compute_max_r_factor(H_np, lm0))
         H_s = H_np.copy()
         # Smooth ocean cells only; hold land fixed and re-impose it each
         # pass so the smoother never bleeds land depths into the ocean.
         for _ in range(int(smoothing_passes)):
-            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=False))
+            H_sm = np.asarray(laplacian_smooth_2d(H_s, 1, is_cubed=False))
             H_s = np.where(ocean, H_sm, H_np)
         H_np = np.where(ocean, H_s, H_np)
-        r_after = float(_r_factor_max(H_np, lm0))
+        r_after = float(compute_max_r_factor(H_np, lm0))
         print(f"[setup] bathymetry smoothing: {smoothing_passes} Laplacian "
               f"passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
 
@@ -886,15 +886,15 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     # cells (land held fixed, seam-correct via is_cubed=True) shrink it directly —
     # the proven NEMO/ROMS technique for exactly this seed.
     if bathy_smoothing_passes and bathy_smoothing_passes > 0:
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d, compute_max_r_factor
         ocean = land_mask > 0.5
-        r_before = float(_r_factor_max(H_bathy, land_mask))
+        r_before = float(compute_max_r_factor(H_bathy, land_mask))
         H_s = H_bathy.copy()
         for _ in range(int(bathy_smoothing_passes)):
-            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=True))
+            H_sm = np.asarray(laplacian_smooth_2d(H_s, 1, is_cubed=True))
             H_s = np.where(ocean, H_sm, H_bathy)
         H_bathy = np.where(ocean, np.maximum(H_s, 50.0), H_bathy)
-        r_after = float(_r_factor_max(H_bathy, land_mask))
+        r_after = float(compute_max_r_factor(H_bathy, land_mask))
         print(f"[setup] cube bathymetry smoothing: {bathy_smoothing_passes} "
               f"Laplacian passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
     # Partial bottom cells: fold the regridded bathymetry into the vertical
@@ -1111,7 +1111,7 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     made SSS only informational). Curvilinear -> model grid via the same IDW used
     for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
     import xarray as xr
-    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+    from legoesm.ocean.bathymetry import laplacian_smooth_2d
     ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
@@ -1145,7 +1145,7 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
         if ocean is not None and spread_passes > 0:
             s0 = float((Rm * ocean).sum())
             for _ in range(int(spread_passes)):
-                sm = np.asarray(_laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
+                sm = np.asarray(laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
                 Rm = np.where(ocean, sm, 0.0)
             s1 = float((Rm * ocean).sum())
             if s1 > 0.0:
@@ -2853,7 +2853,7 @@ def main() -> int:
         if args.grid == "mpas":
             raise ValueError(
                 "--woa-smoothing-passes is not available for mpas: smooth_woa_ts "
-                "uses the structured 2-D _laplacian_smooth_2d; a Voronoi "
+                "uses the structured 2-D laplacian_smooth_2d; a Voronoi "
                 "connectivity smoother (cellsOnCell) is future work.")
         state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
 
@@ -2887,7 +2887,7 @@ def main() -> int:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--runoff: not wired for the cube (parked grid).")
         # MPAS uses the 1-D apply_runoff_step_mpas + spread_passes=0 (the
-        # _laplacian_smooth_2d coastal-spread is structured-only; the IDW k=4
+        # laplacian_smooth_2d coastal-spread is structured-only; the IDW k=4
         # regrid already spreads each river to the nearest cells).
         _spread = 0 if app_grid_type == "mpas" else 2
         runoff_monthly = load_runoff_monthly(

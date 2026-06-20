@@ -14,6 +14,7 @@ from legoesm.grids.latlon import (
     LatLonCGridGeometry,
     FoldDescriptor,
     create_latlon_geometry,
+    create_beta_plane_cgrid_geometry,
     ensure_geometry,
     create_mercator_grid,
     create_regional_latlon_grid,

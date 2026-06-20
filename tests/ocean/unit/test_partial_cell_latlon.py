@@ -41,15 +41,15 @@ def test_make_partial_cell_latlon_basic():
     grid = create_latlon_grid(n_lat=24, n_lon=48)
     z = create_ocean_z_star(20, H_max=5500.0)
     H, mask = _synthetic_bathy(grid)
-    from legoesm.ocean.bathymetry import _r_factor_max
-    r0 = float(_r_factor_max(H, mask))
+    from legoesm.ocean.bathymetry import compute_max_r_factor
+    r0 = float(compute_max_r_factor(H, mask))
 
     zc, H_snap, lm = make_partial_cell_latlon(
         z, H, mask, smoothing_passes=4, min_levels=2)
 
     assert isinstance(zc, OceanPartialCellCoordinate)
     # Smoothing reduces the bathymetric roughness (r-factor).
-    assert float(_r_factor_max(H_snap, lm)) <= r0 + 1e-9
+    assert float(compute_max_r_factor(H_snap, lm)) <= r0 + 1e-9
     # Output shapes + land convention preserved/extended.
     assert H_snap.shape == H.shape and lm.shape == mask.shape
     assert np.all((lm == 0.0) | (lm == 1.0))

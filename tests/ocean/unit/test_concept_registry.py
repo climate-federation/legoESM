@@ -28,8 +28,12 @@ from legoesm.ocean.fidelity.concept_registry import (
 
 _STATUSES = {"canonical", "unit-hazard", "entrenched", "fidelity-scoped"}
 
+# Federation layout: ocean source lives under packages/ocean/legoesm/ocean
+# (the legacy src/legoesm/ocean tree no longer holds experiments/, which made
+# this scan silently empty -> the ratchet gate was vacuous).
 OCEAN_SRC = (
-    pathlib.Path(__file__).resolve().parents[3] / "src" / "legoesm" / "ocean"
+    pathlib.Path(__file__).resolve().parents[3]
+    / "packages" / "ocean" / "legoesm" / "ocean"
 )
 
 # Files (relative to src/legoesm) currently allowed to contain each ratcheted

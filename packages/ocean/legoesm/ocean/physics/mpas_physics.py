@@ -62,6 +62,18 @@ def make_mpas_ocean_physics(
     else:
         _kpp_fn = None
 
+    # CATKE is a prognostic-TKE closure wired ONLY for the lat-lon C-grid
+    # dynamics step (it carries OceanState.tke + needs the implicit solve);
+    # on MPAS it would silently become a no-op (kpp_fn=None below).  Fail
+    # closed rather than silently mis-run (dispatch discipline; codex review).
+    if vm_config is not None and vm_scheme == "catke":
+        raise ValueError(
+            "vertical_mixing.scheme='catke' is not supported on the MPAS "
+            "ocean (CATKE is wired for the lat-lon C-grid only) and would "
+            "silently no-op here. Use 'kpp', or run CATKE on the lat-lon "
+            "C-grid."
+        )
+
     # Warn about unsupported physics schemes that would be silently ignored.
     # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
     # ``vertical_mixing="kpp"`` is now supported (above); other schemes

@@ -30,7 +30,7 @@ from legoesm.ocean.bathymetry import (
     load_bathymetry,
     enforce_straits,
     rest_state_ocean_realistic,
-    _laplacian_smooth_2d,
+    laplacian_smooth_2d,
     _laplacian_smooth_voronoi,
     _derive_ocean_fraction,
     _regrid_bathymetry,
@@ -215,18 +215,18 @@ class TestSmoothing:
         """Smoothing should reduce field variance."""
         np.random.seed(42)
         arr = np.random.randn(6, 8, 8)
-        smoothed = _laplacian_smooth_2d(arr, passes=3, is_cubed=True)
+        smoothed = laplacian_smooth_2d(arr, passes=3, is_cubed=True)
         assert np.var(smoothed) < np.var(arr)
 
     def test_gaussian_reduces_variance(self):
         np.random.seed(42)
         arr = np.random.randn(16, 32)
-        smoothed = _laplacian_smooth_2d(arr, passes=3, is_cubed=False)
+        smoothed = laplacian_smooth_2d(arr, passes=3, is_cubed=False)
         assert np.var(smoothed) < np.var(arr)
 
     def test_zero_passes_no_change(self):
         arr = np.random.randn(6, 4, 4)
-        result = _laplacian_smooth_2d(arr, passes=0, is_cubed=True)
+        result = laplacian_smooth_2d(arr, passes=0, is_cubed=True)
         np.testing.assert_array_equal(result, arr)
 
     def test_voronoi_reduces_variance(self):
@@ -251,7 +251,7 @@ class TestSmoothing:
     def test_uniform_field_unchanged(self):
         """Smoothing a uniform field should not change it."""
         arr = np.full((6, 8, 8), 42.0)
-        smoothed = _laplacian_smooth_2d(arr, passes=5, is_cubed=True)
+        smoothed = laplacian_smooth_2d(arr, passes=5, is_cubed=True)
         np.testing.assert_allclose(smoothed, 42.0, atol=1e-10)
 
 
@@ -683,9 +683,9 @@ class TestMEORFactorCap:
         )
         H_meo, mask_meo = init_ocean_bathymetry(latlon_grid, cfg_meo)
 
-        from legoesm.ocean.bathymetry import _r_factor_max
-        r_no = _r_factor_max(np.asarray(H_no), np.asarray(mask_no))
-        r_meo = _r_factor_max(np.asarray(H_meo), np.asarray(mask_meo))
+        from legoesm.ocean.bathymetry import compute_max_r_factor
+        r_no = compute_max_r_factor(np.asarray(H_no), np.asarray(mask_no))
+        r_meo = compute_max_r_factor(np.asarray(H_meo), np.asarray(mask_meo))
         assert r_no > 0.5, f"baseline r should be high; got {r_no}"
         # Allow a small float32 tolerance from get_policy().storage casts
         # in load_bathymetry_latlon_cgrid.

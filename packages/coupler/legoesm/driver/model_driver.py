@@ -1395,11 +1395,16 @@ class ModelDriver:
                 perf_mode = True
             elif pm_flag == "never":
                 perf_mode = False
-            else:
+            elif pm_flag == "auto":
                 # auto: use perf_mode when running distributed MPI
                 perf_mode = (
                     self._device_config is not None
                     and self._device_config.is_distributed
+                )
+            else:
+                raise ValueError(
+                    "diagnostics_perf_mode must be one of "
+                    f"('auto', 'always', 'never'), got {pm_flag!r}"
                 )
 
         # CMIP output requires full collect() for spatial/monthly

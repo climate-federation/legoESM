@@ -58,6 +58,7 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
+    bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -70,10 +71,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     bilaplacian_cgrid,
     laplacian_cgrid,
+    flux_divergence_bilaplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
     flux_divergence_viscosity_cgrid,
+    no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
     is_tripolar,
     lat_ends_are_poles,
@@ -150,6 +153,9 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
+# at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
+VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
 # Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
 # (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
 # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
@@ -2057,6 +2063,21 @@ def _bc_horizontal_viscosity(
     _use_flux_div = _visc_op == "flux_divergence"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
+    def _biharmonic_op(uu, vv):
+        """∇⁴ operator matched to the lateral-viscosity family: the component
+        ``flux_divergence`` biharmonic (MITgcm-faithful per-component del4, stable)
+        when ``lateral_viscosity_operator="flux_divergence"``, else the vector
+        ``grad(div)−curl(curl)`` biharmonic."""
+        if _use_flux_div:
+            return flux_divergence_bilaplacian_cgrid(
+                uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        # Thread the precomputed ``vertex_mask`` so the vector biharmonic reuses the
+        # cached vertex mask instead of recomputing it (a per-step
+        # ``compute_vertex_mask`` + N-S pole-BC halo) every call.
+        return vector_bilaplacian_cgrid(
+            uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
+
     if _use_flux_div and config.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
@@ -2103,10 +2124,9 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
         if config.B_h > 0:
-            # Biharmonic is a separate (vector-Laplacian) operator, unaffected by the
-            # A_h operator choice: ∇⁴ = ∇²_vec(∇²_vec).
-            bilap_u, bilap_v = vector_bilaplacian_cgrid(
-                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+            # Biharmonic matched to the operator family (component for
+            # flux_divergence — MITgcm-faithful + stable; vector otherwise).
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             if config.B_h_lat_scaling:
                 scale_u, scale_v = biharmonic_scaling_factor(grid)
                 diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
@@ -2243,10 +2263,7 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
     elif config.B_h > 0:
-        bilap_u, bilap_v = vector_bilaplacian_cgrid(
-            u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+        bilap_u, bilap_v = _biharmonic_op(u, v)
         if config.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
@@ -2259,6 +2276,22 @@ def _bc_horizontal_viscosity(
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
+
+    # No-slip lateral walls (MITgcm no_slip_sides): ADD the wall side-drag on top
+    # of the (free-slip) harmonic flux operator, exactly as MITgcm adds
+    # MOM_U_SIDEDRAG on top of MOM_U_DEL2U. Free-slip (the default) adds nothing.
+    _side_bc = getattr(config, "lateral_side_bc", "free_slip")
+    if _side_bc not in VALID_LATERAL_SIDE_BC:
+        raise ValueError(
+            f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
+            f"got {_side_bc!r}"
+        )
+    if _side_bc == "no_slip" and config.A_h > 0:
+        du_drag, dv_drag = no_slip_sidedrag_cgrid(
+            u, v, grid, config.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
+        du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
+        du_dt = du_dt + du_drag
+        dv_dt = dv_dt + dv_drag
 
     if config.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
@@ -2485,35 +2518,14 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
             # along the level axis.  For the seafloor, ``z_seafloor =
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
-            def _bbl_drag_for_face(u_field, h_face, r_eff):
-                z_half = jnp.concatenate([
-                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
-                    -jnp.cumsum(h_face, axis=-1),
-                ], axis=-1)
-                z_top = z_half[..., :-1]
-                z_bot = z_half[..., 1:]
-                z_seafloor = z_half[..., -1:]
-                bbl_top = z_seafloor + H_BBL
-                overlap = jnp.maximum(
-                    0.0,
-                    jnp.minimum(z_top, bbl_top)
-                    - jnp.maximum(z_bot, z_seafloor),
-                )
-                h_safe = jnp.maximum(h_face, 1e-10)
-                # Effective BBL thickness: on shelves where the
-                # total wet depth is shallower than ``H_BBL`` the
-                # boundary-layer band cannot extend to its full
-                # nominal thickness.  Divide by the actual total
-                # overlap to keep the rate correct (matches
-                # ``ocean_tendency_common.bbl_drag_distributed``).
-                # Codex iter-39 #2.
-                total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
-                h_bbl_eff = jnp.minimum(
-                    jnp.maximum(total_overlap, 1e-10), H_BBL,
-                )
-                return -r_eff * u_field * overlap / (h_safe * h_bbl_eff)
-            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
-            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
+            # #517: distributed BBL drag is the shared canonical helper
+            # (Killworth & Edwards 1999 / MOM6) — route through it instead
+            # of re-deriving the cumsum/overlap/h_bbl_eff math (was
+            # bit-identical to the helper).
+            diag_botdrag_u = bbl_distributed_drag_face_column(
+                u, h_u, r_eff_u, H_BBL)
+            diag_botdrag_v = bbl_distributed_drag_face_column(
+                v, h_v, r_eff_v, H_BBL)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the

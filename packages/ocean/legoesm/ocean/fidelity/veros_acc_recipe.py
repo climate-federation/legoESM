@@ -337,6 +337,62 @@ _ACC_NO_SALT_RESTORE_TAU_S = 1.0e30
 
 
 # ---------------------------------------------------------------------------
+# The Veros <-> legoESM WIRING DIAGRAM (oracle-card audit trail)
+# ---------------------------------------------------------------------------
+# (Veros option / numeric, legoESM config field, chosen block + faithfulness note).
+# Mirrors ``NEMO_BLOCK_MAPPING`` (nemo_recipe.py) so every ocean oracle card carries
+# the same auditable map a user reads to see which legoESM block each production
+# numeric corresponds to.  The dycore-identity rows (those whose middle column is a
+# bare top-level ``LatLonCGridOceanConfig`` scheme field) are MACHINE-CHECKED against
+# the ``veros_faithful_v1`` catalog entry by tests/ocean/fidelity/
+# test_veros_block_mapping.py -> the card and the catalog cannot silently diverge.
+VEROS_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
+    ("constants", "ConstantsConfig",
+     "VEROS_CONSTANTS_CONFIG (Veros base constants; derived recomputed)"),
+    ("EOS", "eos",
+     "veros_nonlin2 (Veros 2nd-order nonlinear EOS, linearised-about-state)"),
+    ("momentum advection", "momentum_advection",
+     "flux_form (Veros 2nd-order centered flux-form momentum)"),
+    ("momentum flux reconstruction", "momentum_flux_scheme",
+     "centered (Veros 2nd-order)"),
+    ("tracer advection", "tracer_advection",
+     "centered (Veros 2nd-order centered tracer advection)"),
+    ("pressure gradient", "pgf_scheme",
+     "adcroft (Veros energy-conserving FD hydrostatic PGF)"),
+    ("KE gradient", "ke_gradient_scheme",
+     "centered (flux-form path; Veros adds the explicit KE gradient)"),
+    ("free surface / barotropic", "barotropic_solver",
+     "rigid_lid (Veros streamfunction/rigid-lid external mode)"),
+    ("Coriolis", "coriolis_scheme",
+     "explicit_ab2 (Veros planetary f x u in the AB2-extrapolated tendency)"),
+    ("time integration", "outer_integrator",
+     "ab2 (Veros Adams-Bashforth-2 for momentum + tracers)"),
+    ("AB2 dissipation scope", "ab2_scope",
+     "advective (Veros AB2-extrapolates advection only; mixing stays explicit)"),
+    ("tracer time integration", "tracer_time_integrator",
+     "euler (Veros forward-Euler tracer step under AB2 advection)"),
+    ("momentum friction placement", "momentum_friction_additive",
+     "True (Veros adds lateral+vertical friction as a separate additive tendency)"),
+    ("implicit vertical mixing", "implicit_vertical_mixing",
+     "True (Veros implicit backward-Euler vertical mixing)"),
+    ("implicit-vmix dzw slot", "implicit_vmix_dzw_slot",
+     "True (Veros dzw spacing in the implicit tridiagonal vertical operator)"),
+    ("lateral viscosity operator", "lateral_viscosity_operator",
+     "flux_divergence (Veros per-component harmonic friction)"),
+    ("vertical momentum advection", "vertical_momentum_scheme",
+     "centered_full (Veros centered vertical momentum flux)"),
+    ("lateral viscosity coefficient", "A_h",
+     "acc_A_h (Veros enable_noslip_lateral=False harmonic A_h)"),
+    ("vertical mixing closure", "physics.vertical_mixing",
+     "ACC_TKE_CONFIG (Veros prognostic TKE closure)"),
+    ("GM/Redi eddy parameterisation", "gm_redi",
+     "ACC_GM_REDI_CONFIG (Veros GM + Redi isoneutral, dm95 taper)"),
+    ("bottom drag", "bottom_drag_r",
+     "R_BOT (Veros linear bottom drag r * |u|)"),
+)
+
+
+# ---------------------------------------------------------------------------
 # Grid / vertical coordinate / bathymetry
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1013,7 @@ __all__ = (
     "NZ",
     "R_BOT",
     "T_RESTORING_DAYS",
+    "VEROS_BLOCK_MAPPING",
     "X_ORIGIN_DEG",
     "Y_ORIGIN_DEG",
     "acc_A_h",

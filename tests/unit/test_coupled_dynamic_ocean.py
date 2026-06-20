@@ -71,7 +71,7 @@ def test_dynamic_ocean_requires_latlon_grid():
                            ocean_config=LatLonCGridOceanConfig(), ocean_nlev=4),
     )
     drv._atm.setup()
-    with pytest.raises(ValueError, match="requires a SHARED lat-lon ocean grid"):
+    with pytest.raises(ValueError, match="requires a regular lat-lon ocean grid"):
         drv._init_ocean()
 
 

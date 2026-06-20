@@ -34,7 +34,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.state import MPASHydrostaticTendencies
+from legoesm.core.state import HydrostaticTendencies, MPASHydrostaticTendencies
 from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     pressure_from_sigma,
@@ -47,7 +47,68 @@ from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeor
 _DIMS_CELL = ("nCells", "level")
 _DIMS_EDGE = ("nEdges", "level")
 _DIMS_CELL_2D = ("nCells",)
+_DIMS_LATLON_3D = ("lat", "lon", "level")
+_DIMS_LATLON_2D = ("lat", "lon")
+_DIMS_CUBE_3D = ("face", "x", "y", "level")
+_DIMS_CUBE_2D = ("face", "x", "y")
 _REQUIRED_TRACERS = ("q_v", "q_c", "q_r")
+
+
+def _kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config):
+    """Shared column-local Kessler tendencies for every grid adapter.
+
+    The grid-agnostic core of the warm-rain forcing: it lives in ONE place so
+    the moisture numerics are identical across the MPAS, spectral and lat-lon
+    adapters (each only flattens its horizontal to ``(ncol, nlev)``, calls this,
+    and repackages the rates into its grid-specific tendency container).
+
+    Pure ``(ncol, nlev)`` column physics:
+      * clips the tracer INPUTS to ``>= 0`` (tracer advection is not
+        positive-definite and the dycores apply the prognostic floor only AFTER
+        physics, so a tiny post-advection undershoot must not feed a negative
+        ``q_c`` into Kessler's accretion);
+      * builds the column thermo from the SHARED helpers
+        (``pressure_from_sigma`` / ``compute_rho`` / ``compute_layer_dz``);
+      * runs the shared ``kessler_microphysics`` core.
+
+    Parameters
+    ----------
+    T : jax.Array, shape ``(ncol, nlev)``
+        Temperature [K].
+    p_s : jax.Array, shape ``(ncol,)``
+        Surface pressure [Pa].
+    q_v, q_c, q_r : jax.Array, shape ``(ncol, nlev)``
+        Vapor / cloud / rain mixing ratios [kg/kg] (raw; clipped here).
+    sigma_coord : SigmaCoordinate
+        Sigma vertical coordinate (callers reject hybrid).
+    dt : float
+        Physics step [s].
+    config : KesslerConfig
+
+    Returns
+    -------
+    (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt) : tuple of jax.Array ``(ncol, nlev)``
+        Latent-heating and vapor / cloud / rain mixing-ratio rates.
+    """
+    q_v = jnp.maximum(q_v, 0.0)
+    q_c = jnp.maximum(q_c, 0.0)
+    q_r = jnp.maximum(q_r, 0.0)
+
+    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (ncol, nlev)
+    p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (ncol, nlev+1)
+    rho = compute_rho(T, p_full, q_v)        # moist ideal-gas density
+    dz = compute_layer_dz(T, p_half, q_v)    # moist hypsometric thickness
+
+    ncol, nlev = T.shape
+    hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
+        q_c=q_c, q_r=q_r,
+    )
+    out = kessler_microphysics(
+        T=T, q_v=q_v, hydrometeors=hydro,
+        p_full=p_full, p_half=p_half, rho=rho, dz=dz,
+        dt=dt, config=config,
+    )
+    return out.dT_dt, out.dq_v_dt, out.dq_c_dt, out.dq_r_dt
 
 
 def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
@@ -104,35 +165,17 @@ def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
                 f"{type(sigma_coord).__name__}."
             )
 
+        # MPAS state is already (nCells, nlev) = (ncol, nlev): no flatten.
+        # The shared column core clips the tracer inputs to >=0 and runs the
+        # column thermo + microphysics (see _kessler_column_tendencies).
         T = state.T.data                  # (nCells, nlev)
         p_s = state.p_s.data              # (nCells,)
-        # Tracer advection is NOT positive-definite and the dycore clamps
-        # tracers to >=0 only AFTER physics (primitive_eq_mpas.py / voronoi_mpi.py
-        # apply the floor post-physics).  So a tiny post-advection undershoot
-        # could feed a negative q_c into Kessler's accretion (kessler.py uses
-        # raw q_c), reversing the process.  Clip to non-negative HERE before the
-        # column scheme reads them (codex review).  These are diagnostics-only
-        # clips on the physics INPUT; the prognostic floor still happens in the
-        # dycore after the tendencies are applied.
-        q_v = jnp.maximum(state.tracers["q_v"].data, 0.0)
-        q_c = jnp.maximum(state.tracers["q_c"].data, 0.0)
-        q_r = jnp.maximum(state.tracers["q_r"].data, 0.0)
-
-        # Column thermodynamic inputs from the SHARED helpers (TOA-first
-        # half levels per SigmaCoordinate convention).
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (nCells, nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (nCells, nlev+1)
-        rho = compute_rho(T, p_full, q_v)        # moist ideal-gas density
-        dz = compute_layer_dz(T, p_half, q_v)    # moist hypsometric thickness
-
-        ncol, nlev = T.shape
-        hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
-            q_c=q_c, q_r=q_r,
-        )
-        out = kessler_microphysics(
-            T=T, q_v=q_v, hydrometeors=hydro,
-            p_full=p_full, p_half=p_half, rho=rho, dz=dz,
-            dt=dt, config=cfg,
+        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = _kessler_column_tendencies(
+            T, p_s,
+            state.tracers["q_v"].data,
+            state.tracers["q_c"].data,
+            state.tracers["q_r"].data,
+            sigma_coord, dt=dt, config=cfg,
         )
 
         zeros_edge = jnp.zeros_like(state.u.data)
@@ -140,18 +183,18 @@ def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
         return MPASHydrostaticTendencies(
             du_dt=Field(data=zeros_edge, name="du_dt_kessler",
                         dims=_DIMS_EDGE, units="m/s^2"),
-            dT_dt=Field(data=out.dT_dt, name="dT_dt_kessler",
+            dT_dt=Field(data=dT_dt, name="dT_dt_kessler",
                         dims=_DIMS_CELL, units="K/s"),
             dp_s_dt=Field(data=zeros_ps, name="dp_s_dt_kessler",
                           dims=_DIMS_CELL_2D, units="Pa/s"),
             dphis_dt=Field(data=zeros_ps, name="dphis_dt_kessler",
                            dims=_DIMS_CELL_2D, units="m^2/s^3"),
             tracer_tendencies={
-                "q_v": Field(data=out.dq_v_dt, name="dq_v_dt_kessler",
+                "q_v": Field(data=dq_v_dt, name="dq_v_dt_kessler",
                              dims=_DIMS_CELL, units="kg/kg/s"),
-                "q_c": Field(data=out.dq_c_dt, name="dq_c_dt_kessler",
+                "q_c": Field(data=dq_c_dt, name="dq_c_dt_kessler",
                              dims=_DIMS_CELL, units="kg/kg/s"),
-                "q_r": Field(data=out.dq_r_dt, name="dq_r_dt_kessler",
+                "q_r": Field(data=dq_r_dt, name="dq_r_dt_kessler",
                              dims=_DIMS_CELL, units="kg/kg/s"),
             },
         )
@@ -242,37 +285,24 @@ def make_kessler_forcing_spectral(dt, config: KesslerConfig | None = None):
         p_s_grid = jnp.exp(lnps_grid)
         n_lat, n_lon, nlev = T_grid.shape
 
-        # Flatten the horizontal so the shared (ncol, nlev) column path applies
-        # unchanged (same contract as the MPAS adapter's (nCells, nlev)).
+        # Flatten the horizontal so the SHARED (ncol, nlev) column core applies
+        # unchanged (same contract as the MPAS / lat-lon adapters).  Tracers are
+        # grid-space; the core clips the physics INPUT to >=0.
         T = T_grid.reshape(-1, nlev)
         p_s = p_s_grid.reshape(-1)
-        # Tracers are grid-space; clip the physics INPUT to >=0 (advection is not
-        # positive-definite and the dycore floors only AFTER physics) — same
-        # reasoning as the MPAS adapter.
-        q_v = jnp.maximum(state.tracers["q_v"].data, 0.0).reshape(-1, nlev)
-        q_c = jnp.maximum(state.tracers["q_c"].data, 0.0).reshape(-1, nlev)
-        q_r = jnp.maximum(state.tracers["q_r"].data, 0.0).reshape(-1, nlev)
-
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (ncol, nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (ncol, nlev+1)
-        rho = compute_rho(T, p_full, q_v)
-        dz = compute_layer_dz(T, p_half, q_v)
-
-        ncol = T.shape[0]
-        hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
-            q_c=q_c, q_r=q_r,
-        )
-        out = kessler_microphysics(
-            T=T, q_v=q_v, hydrometeors=hydro,
-            p_full=p_full, p_half=p_half, rho=rho, dz=dz,
-            dt=dt, config=cfg,
+        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = _kessler_column_tendencies(
+            T, p_s,
+            state.tracers["q_v"].data.reshape(-1, nlev),
+            state.tracers["q_c"].data.reshape(-1, nlev),
+            state.tracers["q_r"].data.reshape(-1, nlev),
+            sigma_coord, dt=dt, config=cfg,
         )
 
         # Unflatten back to the spectral grid layout.
-        dT_dt_grid = out.dT_dt.reshape(n_lat, n_lon, nlev)
-        dq_v_grid = out.dq_v_dt.reshape(n_lat, n_lon, nlev)
-        dq_c_grid = out.dq_c_dt.reshape(n_lat, n_lon, nlev)
-        dq_r_grid = out.dq_r_dt.reshape(n_lat, n_lon, nlev)
+        dT_dt_grid = dT_dt.reshape(n_lat, n_lon, nlev)
+        dq_v_grid = dq_v_dt.reshape(n_lat, n_lon, nlev)
+        dq_c_grid = dq_c_dt.reshape(n_lat, n_lon, nlev)
+        dq_r_grid = dq_r_dt.reshape(n_lat, n_lon, nlev)
 
         # Latent heating -> spectral T tendency; momentum / surface pressure have
         # no warm-rain source (zero spectral tendencies).
@@ -295,3 +325,157 @@ def make_kessler_forcing_spectral(dt, config: KesslerConfig | None = None):
     kessler_forcing_spectral._bound_dt = dt
     kessler_forcing_spectral._column_local = True
     return kessler_forcing_spectral
+
+
+def make_kessler_forcing_gridspace(
+    dt, *, dims_3d, dims_2d, config: KesslerConfig | None = None,
+):
+    """Build a cell-centred grid-space Kessler ``physics_fn`` (any FV grid).
+
+    The SHARED warm-rain adapter for every dycore whose ``physics_fn`` receives
+    a cell-centred :class:`HydrostaticState` carrying grid-space tracer
+    ``Field``\\ s and consumes a :class:`HydrostaticTendencies` — currently the
+    lat-lon Arakawa C-grid (:class:`CGridLatLonPrimitiveEquationModel`, dims
+    ``("lat","lon","level")``) and the cubed-sphere FV3 C-D grid
+    (:class:`CDGridPrimitiveEquationModel`, dims ``("face","x","y","level")``).
+    Both call ``physics_fn(state, grid, sigma_coord)`` per RK stage and ADD the
+    returned tendency, including ``tracer_tendencies[name]`` for any tracer
+    already prognostic in the state; the dynamics advects ``q_v``/``q_c``/``q_r``
+    so this adapter supplies only the column microphysics source.
+
+    Grid-agnostic + column-local, so it just flattens the leading horizontal
+    axes to ``(ncol, nlev)`` via ``reshape(-1, nlev)`` (works for the lat-lon 3-D
+    ``(n_lat,n_lon,nlev)`` and the cube 4-D ``(6,n,n,nlev)`` layouts alike), runs
+    the SAME shared column core (:func:`_kessler_column_tendencies`), then
+    reshapes the rates back to the state's own shape.  The thin
+    :func:`make_kessler_forcing_latlon` / :func:`make_kessler_forcing_cube`
+    wrappers bind ``dims_3d`` / ``dims_2d`` for their grid.
+
+    CONTRACT (same as MPAS / spectral): ``dt`` is bound into the closure (the
+    ``physics_fn`` convention passes no timestep) and the caller MUST step the
+    model with the SAME ``dt`` — Kessler's saturation adjustment is an
+    increment/``dt`` rate.  ``_bound_dt`` carries it for assertion.  Warm-rain
+    is column-local (``_column_local = True``), so an MPI step may skip a
+    pre-physics halo exchange for it.
+
+    Parameters
+    ----------
+    dt : float
+        Physics step [s].  Must be > 0.
+    dims_3d : tuple[str, ...]
+        Dim labels for the returned 3-D tendency Fields (e.g.
+        ``("lat","lon","level")`` or ``("face","x","y","level")``).
+    dims_2d : tuple[str, ...]
+        Dim labels for the returned 2-D tendency Fields.
+    config : KesslerConfig, optional
+
+    Returns
+    -------
+    callable
+        ``physics_fn(state, grid, sigma_coord, *, phys_state=None,
+        forcing=None) -> HydrostaticTendencies`` carrying ``dT_dt`` (latent
+        heating) and ``tracer_tendencies`` for ``q_v``/``q_c``/``q_r``.  Wind
+        (``du_dt``/``dv_dt``), surface-pressure and geopotential tendencies are
+        zero (warm-rain microphysics has no momentum / surface source).
+    """
+    cfg = config if config is not None else KesslerConfig()
+    if not (dt > 0.0):
+        raise ValueError(f"kessler forcing dt must be > 0, got {dt!r}")
+    dt = float(dt)
+
+    def kessler_forcing_gridspace(
+        state, grid, sigma_coord, *, phys_state=None, forcing=None,
+    ):
+        if state.tracers is None or any(
+            k not in state.tracers for k in _REQUIRED_TRACERS
+        ):
+            have = None if state.tracers is None else sorted(state.tracers)
+            raise ValueError(
+                "kessler_forcing requires state.tracers with keys "
+                f"{_REQUIRED_TRACERS}; got {have}. Initialize the state with "
+                "the moist baroclinic-wave init (baroclinic_wave_init[_latlon]"
+                "(..., moist=True)) or attach the tracers before stepping."
+            )
+        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+            raise NotImplementedError(
+                "kessler_forcing supports sigma coordinates only "
+                "(half-level hybrid pressure is not wired); got "
+                f"{type(sigma_coord).__name__}."
+            )
+
+        T_grid = state.T.data            # (..., nlev) cell-centred
+        p_s_grid = state.p_s.data        # (...) cell-centred
+        out_shape = T_grid.shape
+        nlev = out_shape[-1]
+
+        # Flatten the leading horizontal axes so the SHARED (ncol, nlev) column
+        # core applies unchanged (same contract as MPAS / spectral).  The core
+        # clips the physics INPUT to >=0.
+        T = T_grid.reshape(-1, nlev)
+        p_s = p_s_grid.reshape(-1)
+        dT_dt_col, dq_v_col, dq_c_col, dq_r_col = _kessler_column_tendencies(
+            T, p_s,
+            state.tracers["q_v"].data.reshape(-1, nlev),
+            state.tracers["q_c"].data.reshape(-1, nlev),
+            state.tracers["q_r"].data.reshape(-1, nlev),
+            sigma_coord, dt=dt, config=cfg,
+        )
+
+        # Unflatten the rates back to the state's own grid layout.
+        dT_dt = dT_dt_col.reshape(out_shape)
+        dq_v = dq_v_col.reshape(out_shape)
+        dq_c = dq_c_col.reshape(out_shape)
+        dq_r = dq_r_col.reshape(out_shape)
+
+        zeros_3d = jnp.zeros_like(T_grid)
+        zeros_2d = jnp.zeros_like(p_s_grid)
+        return HydrostaticTendencies(
+            du_dt=Field(data=zeros_3d, name="du_dt_kessler",
+                        dims=dims_3d, units="m/s^2"),
+            dT_dt=Field(data=dT_dt, name="dT_dt_kessler",
+                        dims=dims_3d, units="K/s"),
+            dp_s_dt=Field(data=zeros_2d, name="dp_s_dt_kessler",
+                          dims=dims_2d, units="Pa/s"),
+            dphis_dt=Field(data=zeros_2d, name="dphis_dt_kessler",
+                           dims=dims_2d, units="m^2/s^3"),
+            dv_dt=Field(data=zeros_3d, name="dv_dt_kessler",
+                        dims=dims_3d, units="m/s^2"),
+            tracer_tendencies={
+                "q_v": Field(data=dq_v, name="dq_v_dt_kessler",
+                             dims=dims_3d, units="kg/kg/s"),
+                "q_c": Field(data=dq_c, name="dq_c_dt_kessler",
+                             dims=dims_3d, units="kg/kg/s"),
+                "q_r": Field(data=dq_r, name="dq_r_dt_kessler",
+                             dims=dims_3d, units="kg/kg/s"),
+            },
+        )
+
+    kessler_forcing_gridspace._bound_dt = dt
+    kessler_forcing_gridspace._column_local = True
+    return kessler_forcing_gridspace
+
+
+def make_kessler_forcing_latlon(dt, config: KesslerConfig | None = None):
+    """Lat-lon C-grid Kessler ``physics_fn`` — thin wrapper over
+    :func:`make_kessler_forcing_gridspace` binding the lat-lon dim labels.
+
+    The lat-lon C-grid dycore already advects ``q_v``/``q_c``/``q_r`` in
+    mass-weighted flux form (``cgrid_latlon_hydrostatic_tendencies``), so this
+    supplies only the column microphysics source.
+    """
+    return make_kessler_forcing_gridspace(
+        dt, dims_3d=_DIMS_LATLON_3D, dims_2d=_DIMS_LATLON_2D, config=config,
+    )
+
+
+def make_kessler_forcing_cube(dt, config: KesslerConfig | None = None):
+    """Cubed-sphere FV3 C-D grid Kessler ``physics_fn`` — thin wrapper over
+    :func:`make_kessler_forcing_gridspace` binding the cube dim labels.
+
+    The FV3 C-D grid dycore advects ``q_v``/``q_c``/``q_r`` in advective form
+    (consistent with its temperature transport); this supplies only the column
+    microphysics source.
+    """
+    return make_kessler_forcing_gridspace(
+        dt, dims_3d=_DIMS_CUBE_3D, dims_2d=_DIMS_CUBE_2D, config=config,
+    )

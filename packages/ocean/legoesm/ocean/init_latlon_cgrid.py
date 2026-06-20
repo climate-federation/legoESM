@@ -572,22 +572,22 @@ def make_partial_cell_latlon(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     Returns ``(z_coord_partial, H_snapped, land_mask_out)``.
     """
     from legoesm.ocean.vertical import create_partial_cell_coordinate
-    from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+    from legoesm.ocean.bathymetry import laplacian_smooth_2d, compute_max_r_factor
 
     H_np = np.asarray(H_bathy, dtype=np.float64)
     lm0 = np.asarray(land_mask, dtype=np.float64)
     ocean = lm0 > 0.5
 
     if smoothing_passes and smoothing_passes > 0:
-        r_before = float(_r_factor_max(H_np, lm0))
+        r_before = float(compute_max_r_factor(H_np, lm0))
         H_s = H_np.copy()
         for _ in range(int(smoothing_passes)):
-            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=False))
+            H_sm = np.asarray(laplacian_smooth_2d(H_s, 1, is_cubed=False))
             H_s = np.where(ocean, H_sm, H_np)
         H_np = np.where(ocean, H_s, H_np)
         logging.getLogger("legoesm.ocean").info(
             "  partial-cell bathy smoothing: %d passes, max r-factor %.3f -> %.3f",
-            smoothing_passes, r_before, float(_r_factor_max(H_np, lm0)))
+            smoothing_passes, r_before, float(compute_max_r_factor(H_np, lm0)))
 
     abs_z_half = np.abs(np.asarray(z_coord.z_half_ref))
     dz_ref_np = np.asarray(z_coord.dz_ref)

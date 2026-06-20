@@ -94,6 +94,21 @@ def van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
     return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
 
 
+def sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
+    """Sweby (superbee) flux limiter ``psi(r) = max(0, min(1, 2r), min(2, r))``.
+
+    Traces the upper boundary of the Sweby TVD region: maximum
+    anti-diffusion subject to monotonicity. Standard choice in Veros
+    (``enable_superbee_advection=True``) and MOM6 (``superbee``). More
+    aggressive than Van Leer. Differentiable a.e. (kinks at the
+    min/max switch points flow cleanly through ``jax.grad``).
+    """
+    return jnp.maximum(
+        0.0,
+        jnp.maximum(jnp.minimum(1.0, 2.0 * r), jnp.minimum(2.0, r)),
+    )
+
+
 def van_leer_face_values(f_im1, f_i, f_ip1, f_ip2, eps: float = 1e-30):
     """Van-Leer slope-limited reconstruction of the ``i+1/2`` face value from
     the 4-cell stencil ``[f_im1, f_i, f_ip1, f_ip2]``.

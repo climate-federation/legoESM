@@ -113,18 +113,23 @@ class TestStructuredGridCMIP:
         assert result.shape == (36, 72, 5)
         assert np.all(np.isfinite(result))
 
-    def test_voronoi_cmip_raises(self):
-        """Voronoi grid with CMIP output raises a clear error."""
-        from legoesm.driver.diagnostics import DiagnosticCollector
-        dc = DiagnosticCollector(
-            nlev=5,
-            sigma_full=np.linspace(0, 1, 5),
-            dsigma=np.ones(5) / 5,
-            cmip_output=True,
-            cmip_resolution_deg=5.0,
+    def test_voronoi_cmip_regrids(self):
+        """Voronoi/MPAS grid with CMIP output is regridded to lat-lon (IDW),
+        not rejected — the unstructured CMIP path the diagnostics collector
+        wires up via ``compute_voronoi_to_latlon_weights``."""
+        from legoesm.grids.regridding import (
+            compute_voronoi_to_latlon_weights,
+            apply_voronoi_to_latlon,
         )
-        with pytest.raises(ValueError, match="not supported.*voronoi"):
-            dc.set_cmip_grid_info("voronoi", grid=None, start_year=1850)
+        n_cells = 64
+        lat_cell = np.linspace(-np.pi / 2, np.pi / 2, n_cells)  # radians
+        lon_cell = np.linspace(0, 2 * np.pi, n_cells, endpoint=False)
+        w = compute_voronoi_to_latlon_weights(
+            lat_cell, lon_cell, n_lon=72, n_lat=36,
+        )
+        result = apply_voronoi_to_latlon(np.cos(lat_cell), w)  # (nCells,) -> (36,72)
+        assert result.shape == (36, 72)
+        assert np.all(np.isfinite(result))
 
 
 # =====================================================================

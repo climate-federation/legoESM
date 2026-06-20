@@ -456,6 +456,104 @@ def coriolis_cgrid(
     return cor_u, cor_v
 
 
+def _vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Planetary Coriolis ``f`` at C-grid VERTICES (corners), shape
+    ``(n_lat+1, n_lon+1)``.
+
+    On a lat-lon grid ``f`` depends only on latitude, and the vertex latitude
+    equals the v-face latitude, so the vertex ``f`` is ``grid.f_v`` extended by
+    one periodic-wrap column.  This is the single shared ``f`` value that makes
+    the C-grid Coriolis energy-conserving on a β-plane (see
+    :func:`coriolis_cgrid_energy_conserving`).
+    """
+    if hasattr(grid, "f_v"):
+        f_v = grid.f_v  # (n_lat+1, n_lon)
+    else:
+        f_cell = grid.f
+        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def coriolis_cgrid_energy_conserving(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """ENERGY-CONSERVING C-grid Coriolis (Sadourny 1975) using VERTEX ``f``.
+
+    The default :func:`coriolis_cgrid` evaluates ``f`` at u-points (``f_u``) for
+    the ``f·v→u`` term and at v-points (``f_v``) for the ``-f·u→v`` term.  On a
+    β-plane these are DIFFERENT values (``f`` varies with latitude), so the two
+    terms do not cancel in the discrete kinetic-energy budget
+    ``Σ u·(f·v) − Σ v·(f·u) ≠ 0`` and the scheme spuriously injects/removes
+    energy (measured ``~1e-6·f·KE`` on grid-scale fields; the root cause of the
+    MITgcm barotropic-gyre oracle residual — see
+    ``docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md``).
+
+    This variant uses the SINGLE ``f`` value at the VERTEX shared by each
+    (u-point, v-point) pair, so the paired contributions
+    ``0.25·f_vertex·u·v`` appear identically in ``cor_u`` and ``cor_v`` and
+    cancel exactly in the energy sum (verified machine-zero power on random
+    β-plane fields).  On an f-plane (``f`` constant) it reduces to the same
+    answer as :func:`coriolis_cgrid`.
+
+    ``cor_u`` depends only on ``v`` and ``cor_v`` only on ``u`` — so a
+    forward-backward caller can compute ``cor_u`` from ``v_old`` and ``cor_v``
+    from the updated ``u_pred`` by two calls (or by passing the right field).
+
+    Shapes match :func:`coriolis_cgrid`: ``u`` is ``(n_lat, n_lon+1[, nlev])``,
+    ``v`` is ``(n_lat+1, n_lon[, nlev])``.
+    """
+    if is_tripolar(grid):
+        raise NotImplementedError(
+            "coriolis_cgrid_energy_conserving is not yet implemented on tripolar "
+            "grids (vertex f + fold-seam averaging needs the 2D metric handling "
+            "of coriolis_cgrid). Use coriolis_energy_conserving=False there."
+        )
+    is_3d = u.ndim == 3
+    f_q = _vertex_coriolis(grid)                       # (n_lat+1, n_lon+1)
+    if is_3d:
+        f_q = f_q[..., jnp.newaxis]
+
+    # --- cor_u at u-points (n_lat, n_lon+1): + f·v averaged with vertex f ---
+    # South/north vertices of u-row i are vertex rows i and i+1.
+    fq_s = f_q[:-1]                                     # (n_lat, n_lon+1[,1])
+    fq_n = f_q[1:]
+    v_west = jnp.roll(v, 1, axis=1)                     # v(:, j-1)
+
+    def _lon_face(a):  # (rows, n_lon[,nlev]) cell field -> (rows, n_lon+1) face
+        return jnp.concatenate([a, a[:, 0:1]], axis=1)
+
+    vs_w = _lon_face(v_west[:-1]); vs_e = _lon_face(v[:-1])   # south (v row i)
+    vn_w = _lon_face(v_west[1:]);  vn_e = _lon_face(v[1:])    # north (v row i+1)
+    cor_u = 0.25 * (fq_s * (vs_w + vs_e) + fq_n * (vn_w + vn_e))
+
+    # --- cor_v at v-points (n_lat+1, n_lon): - f·u averaged with vertex f ---
+    # West/east vertices of v-col j are vertex cols j and j+1.
+    fq_w = f_q[:, :-1]                                  # (n_lat+1, n_lon[,1])
+    fq_e = f_q[:, 1:]
+    u_east = jnp.roll(u, -1, axis=1)                    # u(:, J+1)
+
+    def _lat_sum(a):  # sum u-rows i-1 and i at v-face row i; walls at the ends
+        return jnp.concatenate([a[0:1], a[:-1] + a[1:], a[-1:]], axis=0)
+
+    u_w = u[:, :-1]                                     # west-face col J=j
+    u_e = u_east[:, :-1]                                # east-face col J=j+1
+    cor_v = -0.25 * (fq_w * _lat_sum(u_w) + fq_e * _lat_sum(u_e))
+
+    if u_mask is not None:
+        um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
+        cor_u = cor_u * um
+    if v_mask is not None:
+        vm = v_mask[..., jnp.newaxis] if is_3d and v_mask.ndim == 2 else v_mask
+        cor_v = cor_v * vm
+    return cor_u, cor_v
+
+
 # =============================================================================
 # =============================================================================
 # Laplacian for C-grid scalar fields (at cell centers)
@@ -997,6 +1095,96 @@ def flux_divergence_viscosity_cgrid(
     return visc_u, visc_v, kdiss_h_cell
 
 
+def no_slip_sidedrag_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    A_h: float,
+    *,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""MITgcm no-slip lateral side-drag (``mom_u_sidedrag`` / ``mom_v_sidedrag``).
+
+    The free-slip lateral-viscosity operators (``vector_laplacian_cgrid`` /
+    ``flux_divergence_viscosity_cgrid``) zero the viscous flux across a wall face,
+    i.e. impose ``∂(tangential u)/∂n = 0`` (free-slip). MITgcm's default
+    ``no_slip_sides=.TRUE.`` instead imposes zero tangential velocity at the wall,
+    which adds a drag body force from the wall stress (``mom_u_sidedrag.F``)::
+
+        G^u_drag = -(2/Δy) A_h u   at u-cells touching a meridional (N/S) wall
+        G^v_drag = -(2/Δx) A_h v   at v-cells touching a zonal     (E/W) wall
+
+    Discretely (``sideDragFactor=2``), per CLOSED side
+    ``closed = hFacW − hFacZ = face_open·(1 − vertex_open)``::
+
+        du_drag[j,i] = -(closedS + closedN) · 2 A_h u[j,i] / dy_u[j,i]²
+        dv_drag[j,i] = -(closedW + closedE) · 2 A_h v[j,i] / dx_v[j,i]²
+
+    with the wall corners from :func:`compute_vertex_mask` (vertex ``(J,I)``
+    touches cells ``(J-1,I-1),(J-1,I),(J,I-1),(J,I)``): u-point ``(j,i)`` has south
+    vertex ``vmask[j,i]`` / north ``vmask[j+1,i]``; v-point ``(j,i)`` has west
+    ``vmask[j,i]`` / east ``vmask[j,i+1]``. This is the wall-tangential viscous
+    stress ``A_h·(u−0)/(Δy/2)`` distributed over the cell width ``Δy``. **This is
+    ADDED to** (not a replacement for) the free-slip flux operator, exactly as
+    MITgcm adds ``MOM_U_SIDEDRAG`` on top of ``MOM_U_DEL2U``.
+
+    Exact for uniform-Cartesian grids (the beta-plane oracle regime, where
+    ``dy_u``/``dx_v`` are constant and ``rAw = dx·dy``). Returns ``(du_drag,
+    dv_drag)`` at the u-/v-faces, masked.
+
+    Boundary note: :func:`compute_vertex_mask` zeros the north/south polar vertex
+    rows (the standard pole wall BC), so a meridional domain boundary is treated
+    as a wall and its edge u-row receives the side-drag even with no explicit
+    land — correct for a bounded/closed basin (the gyre), but a y-periodic domain
+    should keep ``lateral_side_bc="free_slip"``.
+    """
+    if not (hasattr(grid, "dy_u") and hasattr(grid, "dx_v")):
+        raise ValueError(
+            "no_slip_sidedrag_cgrid requires a LatLonCGridGeometry with dy_u/dx_v "
+            "metric fields (call ensure_geometry on the grid first)."
+        )
+    if mask is None and vertex_mask is None:
+        raise ValueError("no_slip_sidedrag_cgrid needs either mask or vertex_mask")
+    vmask = vertex_mask if vertex_mask is not None else compute_vertex_mask(mask, grid=grid)
+    vmask = vmask.astype(u.dtype)
+
+    is_3d = u.ndim == 3
+
+    def _b(a, like):
+        return a[..., jnp.newaxis] if (is_3d and a.ndim == like.ndim - 1) else a
+
+    # --- u side-drag: closed N/S sides (a meridional wall above/below) ---
+    v_south = vmask[:-1, :]      # (n_lat, n_lon+1): south vertex of u-point (j,i)
+    v_north = vmask[1:, :]       # (n_lat, n_lon+1): north vertex
+    closed_s = u_mask * (1.0 - v_south)
+    closed_n = u_mask * (1.0 - v_north)
+    # Guard 1/Δ² against zero-length faces (e.g. the polar boundary v-faces on a
+    # spherical grid where dx_v = R·cos(lat_v)·dlon → 0): those faces are masked
+    # out (closed/u_mask = 0) so the drag is zero there, but an unguarded 1/0=inf
+    # times the 0 mask is NaN.  On uniform-metric grids (beta-plane) Δ>0 so this
+    # is bit-identical.
+    _dy_u = grid.dy_u.astype(u.dtype)
+    inv_dy2_u = jnp.where(_dy_u > 0.0, 1.0 / (_dy_u ** 2), 0.0)
+    du_drag = -(2.0 * A_h) * _b(closed_s + closed_n, u) * u * _b(inv_dy2_u, u)
+    du_drag = du_drag * _b(u_mask, du_drag)
+
+    # --- v side-drag: closed E/W sides (a zonal wall to left/right) ---
+    v_west = vmask[:, :-1]       # (n_lat+1, n_lon): west vertex of v-point (j,i)
+    v_east = vmask[:, 1:]        # (n_lat+1, n_lon): east vertex
+    closed_w = v_mask * (1.0 - v_west)
+    closed_e = v_mask * (1.0 - v_east)
+    # Guard against zero-length v-faces (polar boundary: dx_v → 0); see the u note.
+    _dx_v = grid.dx_v.astype(v.dtype)
+    inv_dx2_v = jnp.where(_dx_v > 0.0, 1.0 / (_dx_v ** 2), 0.0)
+    dv_drag = -(2.0 * A_h) * _b(closed_w + closed_e, v) * v * _b(inv_dx2_v, v)
+    dv_drag = dv_drag * _b(v_mask, dv_drag)
+
+    return du_drag, dv_drag
+
+
 def vector_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -1033,6 +1221,47 @@ def vector_bilaplacian_cgrid(
     bilap_u, bilap_v = vector_laplacian_cgrid(
         vlap_u, vlap_v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
         vertex_mask=vertex_mask)
+    return bilap_u, bilap_v
+
+
+def flux_divergence_bilaplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    cos_power: int = 0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""COMPONENT-WISE biharmonic ``∇⁴(u, v)`` = ``∇²(∇²(u, v))`` per component.
+
+    Applies the component harmonic friction :func:`flux_divergence_viscosity_cgrid`
+    (with unit coefficient) TWICE — the scale-selective analogue of the harmonic
+    ``flux_divergence`` Laplacian, and the FAITHFUL form of MITgcm's ``viscA4``
+    biharmonic (``useStrainTensionVisc=.FALSE.`` ⇒ a per-component ``del4``, NOT
+    the vector ``grad(div) − curl(curl)`` biharmonic of
+    :func:`vector_bilaplacian_cgrid`).  The biharmonic tendency is
+    ``∂ₜu = −B_h·∇⁴u`` (same sign convention as ``vector_bilaplacian_cgrid``).
+
+    WHY a separate operator: the vector biharmonic's ``grad(div)``/``curl(curl)``
+    composition is ill-scaled on a uniform-Cartesian / near-degenerate (1-column)
+    C-grid — it returns a value ~``dx⁴`` too large (an unphysical ``O(u)`` instead
+    of ``O(u/dx⁴)``) and blows the integration up within a few steps, whereas this
+    component form telescopes a clean 5-point ``∇²`` twice and stays at the correct
+    ``u/dx⁴`` scale (front_relax baroclinic oracle).
+
+    Reuses ``flux_divergence_viscosity_cgrid`` verbatim (its metric, masking, and
+    cos-scaling), so momentum conservation + free-slip wall handling are inherited.
+    """
+    lap_u, lap_v, _ = flux_divergence_viscosity_cgrid(
+        u, v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
+    bilap_u, bilap_v, _ = flux_divergence_viscosity_cgrid(
+        lap_u, lap_v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
     return bilap_u, bilap_v
 
 

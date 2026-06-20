@@ -6,7 +6,8 @@ Cache root resolution order:
 2. ``$LEGOESM_CACHE_DIR`` (shared cache root, e.g. with ERA5 ingest)
 3. ``~/.cache/legoesm/ocean_fidelity/``
 
-Subdirectories (created on first use): ``veros/``, ``obs/``, ``regrid_weights/``.
+Subdirectories (created on first use): ``veros/``, ``mitgcm/``, ``obs/``,
+``regrid_weights/``.
 
 The hashing helpers are content-addressed (sorted-key JSON + blake2s) so
 cache keys are stable across dict insertion order and Python versions.
@@ -26,7 +27,7 @@ _FALLBACK_ENV = "LEGOESM_CACHE_DIR"
 _DEFAULT_REL = Path(".cache") / "legoesm" / "ocean_fidelity"
 
 ALLOWED_SUBDIRS: tuple[str, ...] = (
-    "veros", "obs", "regrid_weights", "forcing",
+    "veros", "mitgcm", "obs", "regrid_weights", "forcing",
 )
 
 

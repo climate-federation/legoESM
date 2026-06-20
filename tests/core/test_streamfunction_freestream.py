@@ -96,6 +96,39 @@ def test_constant_field_is_preserved(cube):
     assert float(jnp.max(jnp.abs(h - 1.0))) < 1e-6, "free-stream not preserved"
 
 
+def test_freestream_bounded_over_many_revolutions(cube):
+    """LONG-RUN edge-artifact guard (issue 521 / FV3 cube faithfulness).
+
+    The divergence-free curl flux must preserve free-stream not just for 50
+    substeps but for arbitrarily long integrations: any slow seam/corner GCL
+    leak would accumulate over revolutions.  Advect h=1 for 2 full 12-day
+    revolutions and assert it stays flat.  Measured behaviour is a constant
+    ~1.5e-6 with NO growth rev-over-rev (C48 diag: 1.55e-6 flat to 120 days);
+    the pre-fix d2a2c flux gave max|h-1|~0.5 in 2 days."""
+    grid, cd = cube
+    n = grid.lon.shape[1]
+    dt, n_sub = 1800.0, 6
+    psi = rotation_streamfunction(cd.lon_corner, cd.lat_corner,
+                                  grid.radius, math.pi / 4)
+    fluxes = streamfunction_mass_fluxes(cd, psi, dt / n_sub)
+
+    @jax.jit
+    def day_block(h):  # one day = 48 dt-steps * 6 substeps
+        def body(c, _):
+            return streamfunction_transport_step(
+                c, fluxes, cd, mass_target=None, hord=10), None
+        out, _ = jax.lax.scan(body, h, None, length=48 * n_sub)
+        return out
+
+    h = jnp.ones((6, n, n))
+    worst = 0.0
+    for _ in range(24):                      # 24 days = 2 revolutions
+        h = day_block(h)
+        worst = max(worst, float(jnp.max(jnp.abs(h - 1.0))))
+    # bound well below any artifact (pre-fix 0.5) yet above fp32 roundoff floor
+    assert worst < 1e-5, f"free-stream drifted over 2 revolutions: max|h-1|={worst}"
+
+
 def test_streamfunction_curl_matches_geographic_wind(cube):
     """The analytic curl of ``rotation_streamfunction`` reproduces
     ``_rotation_winds_geo`` (so psi and the wind are the same flow)."""

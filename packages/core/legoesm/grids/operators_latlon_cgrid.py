@@ -891,6 +891,24 @@ def curl_vertex_cgrid(
             if north_is_pole_q:
                 sin_ext = sin_ext_n
         A_vertex_full = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+        # Prefer the grid's STORED dual-cell area when present (the C-grid ocean
+        # geometries carry ``area_q``).  On a spherical lat-lon grid the stored
+        # ``area_q`` is computed by the SAME ``R²·dlon·|Δsin(lat)|`` formula
+        # (create_latlon_cgrid_geometry: "Matches curl_vertex_cgrid") and agrees
+        # with the recompute above to ~1e-7 relative — NOT bit-exact: ``area_q`` is
+        # built in float64 while this recompute does ``sin(grid.lat)`` on the stored
+        # float32 ``lat``, losing precision in ``Δsin`` near the equator.  Reading
+        # ``area_q`` is thus a small ACCURACY IMPROVEMENT on spherical grids (any
+        # curl/vorticity regression pinned tighter than ~1e-7 will shift).  On the
+        # CARTESIAN beta-plane the recompute COLLAPSES
+        # to ~0 in the interior — the pseudo-``lat`` is pinned to 0 for the
+        # divergence/gradient metric consistency, so ``Δsin(lat)=0`` and the
+        # ``safe_A`` pole guard then divides by 1.0, blowing the vorticity (and the
+        # vector Laplacian/biharmonic) up ~1e8×.  The stored ``area_q = dx·dy`` is
+        # correct there.  The bare ``LatLonGrid`` (atmos dycore, plane tests) has no
+        # ``area_q`` -> recompute unchanged.
+        if hasattr(grid, "area_q"):
+            A_vertex_full = jnp.abs(grid.area_q[:, 0]).astype(A_vertex_full.dtype)  # noqa: N806
         dy_edge = R * dlat
         _tripolar_curl = False
 

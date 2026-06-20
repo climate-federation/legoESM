@@ -333,6 +333,26 @@ def _weno_z_core(f: list, order: int, epsilon: float) -> tuple:
 #  Public API
 # ===================================================================
 
+def _weno_z_shifted(f: list, order: int, epsilon: float) -> tuple:
+    """Run :func:`_weno_z_core`, common-shifting the stencil by its central value
+    in FLOAT32 for numerical conditioning.
+
+    The reconstruction is affine-consistent (each sub-stencil's coefficients sum to
+    1) and the smoothness indicators β depend only on DIFFERENCES, so subtracting a
+    per-point constant ``ref`` from every stencil value and adding it back to the
+    reconstructions is EXACT (shift-invariant). For a large-mean / small-fluctuation
+    field (e.g. θ≈265 K with O(0.1 K) eddies) the raw-value squared differences in β
+    catastrophically cancel in float32 → NaN; forming β from O(fluctuation) values
+    fixes it. Applied ONLY in float32 so the float64 path stays BIT-IDENTICAL (no
+    regression); float64 has the precision to not need it."""
+    if jnp.result_type(f[0]) == jnp.float32:
+        ref = f[len(f) // 2]                       # central stencil value (per point)
+        fc = [x - ref for x in f]
+        fp, fm = _weno_z_core(fc, order, epsilon)
+        return fp + ref, fm + ref
+    return _weno_z_core(f, order, epsilon)
+
+
 def weno5_z(
     stencil: list | tuple,
     epsilon: float | None = None,
@@ -350,13 +370,16 @@ def weno5_z(
     -------
     (f_plus, f_minus) : tuple of arrays
         Left-biased and right-biased reconstructions at face i+1/2.
+
+    Float32 is common-shifted by the central stencil value for conditioning (exact;
+    see :func:`_weno_z_shifted`); float64 is bit-identical to the unshifted core.
     """
     f = list(stencil)
     if len(f) != 6:
         raise ValueError(f"WENO5 requires 6 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 5, epsilon)
+    return _weno_z_shifted(f, 5, epsilon)
 
 
 def weno7_z(
@@ -382,7 +405,7 @@ def weno7_z(
         raise ValueError(f"WENO7 requires 8 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 7, epsilon)
+    return _weno_z_shifted(f, 7, epsilon)
 
 
 def weno9_z(
@@ -408,7 +431,7 @@ def weno9_z(
         raise ValueError(f"WENO9 requires 10 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 9, epsilon)
+    return _weno_z_shifted(f, 9, epsilon)
 
 
 # ===================================================================

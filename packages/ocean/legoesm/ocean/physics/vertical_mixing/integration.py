@@ -73,6 +73,8 @@ def make_vertical_mixing_physics(
                          constants_config=constants_config)
     elif scheme == "tke":
         return _make_tke(config, apply_diffusion=apply_diffusion)
+    elif scheme == "catke":
+        return _make_catke(config, apply_diffusion=apply_diffusion)
     else:
         raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
 
@@ -251,6 +253,37 @@ def _make_tke(config: VerticalMixingConfig,
                                  K_v=None, A_v=None)
 
     return physics_fn
+
+
+def _make_catke(config: VerticalMixingConfig,
+                apply_diffusion: bool = True) -> Callable:
+    """Factory for the CATKE closure (Wagner et al. 2025).
+
+    Like the TKE closure, CATKE is implicit-only and prognostic: the actual
+    K_M / K_H computation + the backward-Euler TKE step run inside
+    :func:`...k_profiles._vmix_K_profiles` (the ``"catke"`` branch) where the
+    model timestep + carried ``OceanState.tke`` are available.  This factory
+    returns a no-op physics tendency so the model's implicit-mixing path
+    triggers the ``compute_vertical_K_profiles`` fallback and uses that branch.
+    Requires ``implicit_vertical_mixing=True`` (raises otherwise).
+    """
+    if apply_diffusion:
+        raise ValueError(
+            "vertical_mixing=\"catke\" requires implicit_vertical_mixing=True. "
+            "Set LatLonCGridOceanConfig.implicit_vertical_mixing=True so the "
+            "implicit vertical solver can consume the K profiles computed by "
+            "the CATKE closure."
+        )
+
+    def physics_fn(state, grid, z_coord, surface_forcing=None):
+        # No-op: CATKE K-profiles + the prognostic TKE step are computed by the
+        # implicit solver via _vmix_K_profiles (catke branch).
+        return _wrap_tendencies(None, None, None, None, state,
+                                 K_v=None, A_v=None)
+
+    return physics_fn
+
+
 def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state,
                      K_v=None, A_v=None):
     t = wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)
