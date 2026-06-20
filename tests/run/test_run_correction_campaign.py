@@ -794,6 +794,38 @@ def test_main_dry_run_offline_amip_forcing_end_to_end(tmp_path, capsys):
     assert "AMIP forcing: built from" in report  # the iter-424 pre-flight line fired
 
 
+def test_main_dry_run_offline_cmip_compare_end_to_end(tmp_path, capsys):
+    """The offline COMPARE (--local-era5-dir) through the REAL main() in CMIP mode (iter 429).
+
+    The iter-425 test was AMIP (with the offline FORCING); this validates the COUPLED
+    construct (`CoupledESMDriver` via `--coupled-preset`) + the SAME offline compare
+    reference — the path the iter-428 sbatch offline branch enables for CMIP (the ocean is
+    interactive, so there is NO prescribed-SST forcing).  main() drives config load → open
+    the local archive → ERA5 time-mean → regrid → reference physical-validation → the CMIP
+    campaign construction → the dry-run report → exit 0."""
+    from scripts.experiment.write_amip_clubb_lite_config import main as make_cfg
+    from scripts.run.run_correction_campaign import main as campaign_main
+
+    write_full_archive(tmp_path)                # the same full COMPARE archive (no forcing)
+    cfg = str(tmp_path / "cfg.json")
+    out = str(tmp_path / "out.json")
+    assert make_cfg([cfg, "--resolution", "8", "--nlev", "8"]) == 0
+
+    rc = campaign_main([
+        "--config", cfg, "--mode", "cmip", "--coupled-preset", "aquaplanet",
+        "--local-era5-dir", str(tmp_path), "--local-era5-date", "20200101",
+        "--n-worst", "4", "--iterations", "1", "--out", out, "--dry-run"])
+
+    # rc==0 + DRY-RUN OK are load-bearing: the offline archive load + the coupled-builder
+    # construct both run BEFORE build_correction_campaign returns the dry-run, so a broken
+    # preset resolution or archive load propagates to a non-zero exit (codex-review iter 429).
+    assert rc == 0                              # full offline-CMIP construction validated
+    report = capsys.readouterr().out
+    assert "DRY-RUN OK" in report and "mode=cmip" in report
+    assert "n_worst=4" in report                # the CampaignDryRun was built with the knob
+    assert "AMIP forcing" not in report         # CMIP has no prescribed-SST forcing line
+
+
 def test_surface_flux_flag_parsed():
     p = _build_arg_parser()
     base = ["--config", "c.json", "--era5-zarr", "z"]
