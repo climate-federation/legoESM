@@ -420,8 +420,9 @@ def test_column_environment_grid_matches_manifest_sample_env():
     per-column sample predictors (the compare's ``record.environment``) for the SAME
     state, or the Nadaraya–Watson kernel compares mismatched quantities and the
     cross-resolution deploy is meaningless. Both paths share the SST fallback, the
-    pure-sigma default pressure, and ``compute_column_environment`` — this LOCKS that
-    so a future divergence (e.g. one path changing its SST fallback or default p) fails.
+    COORDINATE's layer pressures (``sigma.pressure_at_full/half`` — hybrid-correct, iter
+    342), and ``compute_column_environment`` — this LOCKS that so a future divergence (e.g.
+    one path changing its SST fallback or pressure source) fails.
     """
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.training.compare_reanalysis import (
@@ -452,7 +453,12 @@ def test_column_environment_grid_matches_manifest_sample_env():
         comp = compare_state_to_reference(
             model=model, reference=reference,
             sigma_full=sigma.sigma_full, sigma_half=sigma.sigma_half,
-            lat_deg=lat_deg, lon_deg=lon_deg, time_index=0, n_worst=nlat * nlon)
+            lat_deg=lat_deg, lon_deg=lon_deg, time_index=0, n_worst=nlat * nlon,
+            # Production passes the COORDINATE's layer pressures (iter 338/342: make_compare_fn
+            # supplies coordinate.pressure_at_full/half), so the manifest env uses the SAME
+            # pressures as column_environment_grid below — that is what keeps them consistent.
+            p_full=sigma.pressure_at_full(model.p_s),
+            p_half=sigma.pressure_at_half(model.p_s))
         grid_env = np.asarray(column_environment_grid(model, sigma)[0])  # (ncol, 3)
         # Finiteness guard: a NaN on BOTH paths would otherwise pass assert_allclose
         # silently (equal_nan=True default) — Codex. The env must be finite anyway.

@@ -246,7 +246,8 @@ def column_environment_grid(
     MUST be computed identically or the kernel distances are meaningless, so this
     accepts the SAME knobs the comparison can use — ``env_config`` (default
     :class:`EnvironmentConfig`, e.g. the shear reference levels) and explicit
-    ``p_full``/``p_half`` (both-or-neither; default pure sigma ``p = σ·p_s``).
+    ``p_full``/``p_half`` (both-or-neither; default = the coordinate's pressures
+    ``sigma.pressure_at_full/half(p_s)`` — hybrid-correct, ``== σ·p_s`` for pure-sigma).
     Pass the same ``env_config``/pressure the manifest (``make_compare_fn``) used
     for a hybrid-coordinate or custom-config run.  ``sst`` falls back to the
     surface-level air temperature when the state carries no SST (WARNS once per
@@ -260,15 +261,17 @@ def column_environment_grid(
 
     p_s = jnp.asarray(model.p_s)
     sigma_full = jnp.asarray(sigma.sigma_full, dtype=p_s.dtype)
-    sigma_half = jnp.asarray(sigma.sigma_half, dtype=p_s.dtype)
     if (p_full is None) != (p_half is None):
         raise ValueError(
             "column_environment_grid: pass both p_full and p_half, or neither "
-            "(neither ⇒ pure sigma p = σ·p_s)."
+            "(neither ⇒ the coordinate's pressures via sigma.pressure_at_full/half)."
         )
     if p_full is None:
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        # Use the coordinate's TRUE layer pressures (hybrid-correct; iter 342) so the env
+        # predictors (CAPE/shear) are on the model's actual levels — the same pressures the
+        # compare uses (iter 338/340).  Pure-sigma: pressure_at_full == σ·p_s (byte-identical).
+        p_full = jnp.asarray(sigma.pressure_at_full(p_s), dtype=p_s.dtype)
+        p_half = jnp.asarray(sigma.pressure_at_half(p_s), dtype=p_s.dtype)
     if getattr(model, "sst_K", None) is not None:
         sst = model.sst_K
     else:
