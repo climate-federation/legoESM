@@ -52,9 +52,10 @@ SWEEP_SPACE = {
     "turbulence": [
         "smagorinsky", "holtslag_boville", "ysu", "none",
     ],
-    # hines is the baseline; "none" probes the no-GWD effect.  mcfarlane is
-    # orographic (inert without subgrid-orography input on this lat-lon
-    # setup) but kept to confirm that.
+    # hines is the baseline; "none" probes the no-GWD effect.  mcfarlane and
+    # lindzen are orographic — with no per-column subgrid-orography input they
+    # fall back to the scalar config.h_topo (~500 m), so they ARE active
+    # uniform-orographic drag (not an inert control), a legitimate alternative.
     "gravity_wave_drag": [
         "none", "mcfarlane", "lindzen", "rayleigh",
     ],

@@ -412,6 +412,21 @@ class TestTrainingDriver:
         assert callable(fn)
         assert hasattr(fn, 'raw')
 
+    def test_microphysics_pipeline_mismatch_raises(self):
+        """Segment do_sat_adjust toggle must match the pipeline's condensate
+        scheme: microphysics!='none' with a micro_fn=None pipeline disables
+        sat-adjust while no scheme condenses -> supersaturation. Fail loud.
+        """
+        from legoesm.training.training_driver import train_physics_params
+
+        class _Pipe:
+            micro_fn = None  # microphysics 'none'
+
+        with pytest.raises(ValueError, match="disagrees"):
+            # assert fires before any of model/grid/sigma/carries are touched
+            train_physics_params(None, None, None, _Pipe(), [], [], [],
+                                 microphysics="kessler")
+
     def test_optimizer_filter_handles_int_arrays(self):
         """Regression: an eqx.Module carrying INT arrays (e.g. an SFNO whose
         non-static Gaussian grid holds spherical-harmonic index arrays) must

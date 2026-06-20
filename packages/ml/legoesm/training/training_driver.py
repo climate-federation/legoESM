@@ -217,6 +217,22 @@ def train_physics_params(
     """
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
+    # Single source of truth: the segment's saturation-adjustment toggle
+    # (do_sat_adjust = microphysics=='none') MUST match whether the pipeline
+    # actually produces condensate tendencies.  micro_fn is None iff the
+    # pipeline microphysics is 'none' (_resolve_microphysics).  A mismatch
+    # (e.g. microphysics='kessler' but a 'none' pipeline) would disable
+    # sat-adjust while step_unified returns zero dq_c/dq_r -> supersaturation
+    # accumulates unchecked.  Fail loud rather than silently blow up.
+    _pipeline_has_micro = getattr(physics_pipeline, "micro_fn", None) is not None
+    if _pipeline_has_micro != (microphysics != "none"):
+        raise ValueError(
+            f"microphysics={microphysics!r} disagrees with the physics_pipeline "
+            f"(micro_fn is {'set' if _pipeline_has_micro else 'None'}). Build the "
+            "pipeline and pass the segment microphysics from the SAME config so "
+            "the saturation-adjustment toggle matches the condensate scheme."
+        )
+
     params = TrainablePhysicsParams.from_defaults()
     step_unified = physics_pipeline.build_step_unified()
     sigma_full = jnp.asarray(sigma.sigma_full)
