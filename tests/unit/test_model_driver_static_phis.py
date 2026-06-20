@@ -58,3 +58,24 @@ def test_static_topography_phis_idempotent(tmp_path):
     first = driver.static_topography_phis()
     second = driver.static_topography_phis()
     assert first is second
+
+
+def test_static_land_fraction_flat_is_all_ocean(tmp_path):
+    """A flat (aquaplanet-like) model yields an all-zero land fraction (all ocean) of
+    the grid 2-D shape, built WITHOUT a setup() run (no phantom run directory)."""
+    out = tmp_path / "run"
+    driver = ModelDriver(_cfg("flat"), output_dir=str(out))
+    f_land = driver.static_land_fraction()
+    assert tuple(f_land.shape) == tuple(driver.grid.grid_shape_2d)
+    assert bool(jnp.all(f_land == 0))          # flat → all ocean
+    assert not out.exists()                    # probe writes nothing
+
+
+def test_static_land_fraction_shares_topography_chain(tmp_path):
+    """The land-fraction probe reuses the topography chain — after it runs, phis is
+    also populated (one minimal build, both fields)."""
+    driver = ModelDriver(_cfg("gaussian"), output_dir=str(tmp_path / "run"))
+    f_land = driver.static_land_fraction()
+    assert f_land is not None
+    assert driver._phis_data is not None       # the same chain set phis too
+    assert tuple(f_land.shape) == tuple(driver.grid.grid_shape_2d)

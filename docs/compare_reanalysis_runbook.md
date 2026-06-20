@@ -175,6 +175,16 @@ confirming the offline boundary condition is in place — *before* the multi-day
 monthly-hourly ERA5 single-level files are subsampled to daily (`--amip-forcing-hour-stride`,
 default 24) so the loader does not OOM on the full hourly month.
 
+> **Ocean-only ranking (`OCEAN_ONLY=1` / `--ocean-only`, iter 451).** Over realistic land, the
+> AMIP surface is the model's OWN land model, carrying large surface biases (soil moisture, snow,
+> skin temperature) the turbulence closure cannot fix — so blind worst-column ranking can spend
+> the scarce LES budget on land columns where C_K is the wrong lever. `OCEAN_ONLY=1` restricts the
+> ranking to OCEAN columns (where the prescribed SST pins the surface, so a model-vs-ERA5 bias is
+> attributable to the atmospheric column incl. the closure). A column is ocean where
+> `land_fraction <= --max-land-fraction` (default 0.5); the mask is sourced from the model's own
+> `ModelDriver.static_land_fraction()` and fails loud if no ocean columns exist. A no-op on an
+> aquaplanet (all-zero land fraction → all columns rankable). Off by default (rank all columns).
+
 ## 3. Read the result
 
 The output JSON is **self-describing**: a `health` block (`improved` / `stalled` /

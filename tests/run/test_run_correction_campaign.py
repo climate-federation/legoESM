@@ -3388,6 +3388,56 @@ def test_align_insolation_sets_start_doy_from_offline_date():
         ["--config", "x.json", "--align-insolation"]).align_insolation is True
 
 
+def test_ocean_only_mask_from_land_fraction_and_fail_loud():
+    """--ocean-only builds a valid_mask from the model's static land fraction (iter 451);
+    OFF by default => None (rank all); an all-land grid fails loud; parser defaults are off."""
+    import jax.numpy as jnp
+    import legoesm.driver.model_driver as md
+    import pytest
+
+    from scripts.run.run_correction_campaign import (
+        _build_arg_parser,
+        _maybe_ocean_mask,
+    )
+
+    # flag OFF (default) => None (rank ALL columns), no driver probe
+    off = SimpleNamespace(ocean_only=False, max_land_fraction=0.5)
+    assert _maybe_ocean_mask(off, base_cfg=object()) is None
+
+    # ON: probe the driver's static land fraction -> ocean mask. Patch ModelDriver so the
+    # test is cheap + grid-agnostic (the probe itself is covered in test_model_driver_static_phis;
+    # the helper's function-scope `from ... import ModelDriver` resolves the patched module attr).
+    class _FakeDriver:
+        def __init__(self, _cfg):
+            pass
+
+        def static_land_fraction(self):
+            return jnp.array([[0.0, 0.6], [0.4, 1.0]])   # 2 ocean (<=0.5), 2 land
+
+    orig = md.ModelDriver
+    md.ModelDriver = _FakeDriver
+    try:
+        on = SimpleNamespace(ocean_only=True, max_land_fraction=0.5)
+        mask = _maybe_ocean_mask(on, base_cfg=object())
+        assert mask is not None and int(jnp.sum(mask)) == 2     # 2 ocean columns ranked
+
+        class _AllLand(_FakeDriver):                            # no ocean => fail loud
+            def static_land_fraction(self):
+                return jnp.ones((2, 2))
+        md.ModelDriver = _AllLand
+        with pytest.raises(SystemExit, match="ocean-only"):
+            _maybe_ocean_mask(on, base_cfg=object())
+    finally:
+        md.ModelDriver = orig
+
+    # parser defaults: off, 0.5
+    a = _build_arg_parser().parse_args(["--config", "x.json"])
+    assert a.ocean_only is False and a.max_land_fraction == 0.5
+    a2 = _build_arg_parser().parse_args(
+        ["--config", "x.json", "--ocean-only", "--max-land-fraction", "0.0"])
+    assert a2.ocean_only is True and a2.max_land_fraction == 0.0
+
+
 def test_campaign_knobs_reject_degenerate_counts():
     """A non-positive --n-worst (ranks NOTHING) or --les-budget (runs NO LES) must FAIL
     LOUD at construction — caught by the launch dry-run, not after a multi-day no-op run

@@ -20,6 +20,7 @@ from legoesm.training.compare_reanalysis import (
     column_state_from_hydrostatic,
     compare_state_to_reference,
     model_state_is_finite,
+    ocean_valid_mask,
     owned_cell_valid_mask,
     precip_mm_day_from_accum,
     validate_reference_physical,
@@ -757,6 +758,35 @@ def test_owned_cell_valid_mask_combines_owned_and_base():
     # A same-length but wrong-RANK base ((n,1) vs (n,)) must raise (not broadcast).
     with pytest.raises(ValueError, match="must align EXACTLY"):
         owned_cell_valid_mask(owned, base_mask=base.reshape(5, 1))
+
+
+def test_ocean_valid_mask_selects_ocean_columns():
+    """The ocean-only ranking mask: row-major flatten of a grid-shaped land fraction,
+    the threshold, the aquaplanet no-op, base-mask AND, and the validation guards."""
+    # (2,2) land fraction: row-major flatten = [0.0, 0.6, 0.4, 1.0]
+    f_land = jnp.array([[0.0, 0.6], [0.4, 1.0]])
+    # default max_land_fraction=0.5 => ocean where <= 0.5 => [T, F, T, F]
+    np.testing.assert_array_equal(
+        np.asarray(ocean_valid_mask(f_land)),
+        np.array([True, False, True, False]))
+    # stricter pure-ocean threshold 0.0 => only the f_land==0 cell
+    np.testing.assert_array_equal(
+        np.asarray(ocean_valid_mask(f_land, max_land_fraction=0.0)),
+        np.array([True, False, False, False]))
+    # aquaplanet / flat (all-zero land) => all ocean => SAFE no-op
+    assert bool(jnp.all(ocean_valid_mask(jnp.zeros((3, 4)))))
+    # base-mask AND: ocean AND base-valid (already-flat base)
+    base = jnp.array([True, True, False, True])
+    np.testing.assert_array_equal(
+        np.asarray(ocean_valid_mask(f_land, base_mask=base)),
+        np.array([True, False, False, False]))
+    # out-of-range threshold raises
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="fraction in"):
+            ocean_valid_mask(f_land, max_land_fraction=bad)
+    # mismatched base length raises (no silent broadcast/truncation)
+    with pytest.raises(ValueError, match="same column axis"):
+        ocean_valid_mask(f_land, base_mask=jnp.array([True, False]))
 
 
 def test_mpas_owned_cell_mask_excludes_halo_from_ranking():

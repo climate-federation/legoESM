@@ -68,6 +68,10 @@ SPINUP_DAYS="${SPINUP_DAYS:-0}"
 COMMON=(--config "$CONFIG" --mode "$MODE"
         --diagnosis-method clubb_coefficient --iterations 10 --n-worst 64
         --les-budget 8 --orographic-forcing auto --spinup-days "$SPINUP_DAYS" --out "$OUT")
+# OCEAN_ONLY ranks only ocean columns (where the prescribed SST pins the surface, so a bias is
+# attributable to the atmospheric/turbulence closure the loop tunes — not the land model's own
+# surface biases). Recommended for AMIP over realistic land; a no-op on an aquaplanet. (iter 451)
+if [ -n "${OCEAN_ONLY:-}" ]; then COMMON+=(--ocean-only); fi
 # ERA5 reference: EXACTLY one source — the offline local archive OR the Zarr store.
 if [ -n "$LOCAL_ERA5_DIR" ]; then
   COMMON+=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE")

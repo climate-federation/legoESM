@@ -1015,6 +1015,37 @@ def _maybe_align_insolation(args, base_cfg):
     return base_cfg._replace(insolation_start_doy=float(doy))
 
 
+def _maybe_ocean_mask(args, base_cfg):
+    """If ``--ocean-only`` (opt-in), build an OCEAN-only worst-column ranking ``valid_mask``
+    from the model's STATIC land fraction so the scarce LES budget targets columns where the
+    atmospheric closure is the right lever — over ocean the surface is PRESCRIBED (the AMIP SST
+    pins it), so a column bias is attributable to the atmospheric column (incl. the turbulence
+    closure); over land the model's own land-surface biases dominate and the closure cannot fix
+    them. Flag OFF => ``None`` (rank ALL columns, the default).
+
+    Sources the land fraction via the side-effect-free ``ModelDriver.static_land_fraction()``
+    probe (the SAME minimal chain ``_build_run_setup`` already runs for the orographic ``phis``)
+    and thresholds it through :func:`legoesm.training.compare_reanalysis.ocean_valid_mask`.
+    Fails LOUD (``SystemExit``) if the mask excludes EVERY column (no ocean to rank — the
+    'no silent no-op' convention)."""
+    if not getattr(args, "ocean_only", False):
+        return None
+    import jax.numpy as jnp
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.training.compare_reanalysis import ocean_valid_mask
+    land_fraction = ModelDriver(base_cfg).static_land_fraction()
+    mask = ocean_valid_mask(land_fraction, max_land_fraction=args.max_land_fraction)
+    n_ocean = int(jnp.sum(mask))
+    if n_ocean == 0:
+        raise SystemExit(
+            f"--ocean-only masks out EVERY column (no column has land_fraction <= "
+            f"{args.max_land_fraction}); nothing to rank. Raise --max-land-fraction, or drop "
+            "--ocean-only (e.g. an all-land regional grid has no ocean columns).")
+    print(f"[campaign] --ocean-only: ranking the {n_ocean} ocean columns "
+          f"(land_fraction <= {args.max_land_fraction}) of {int(mask.size)} total.", flush=True)
+    return mask
+
+
 def _amip_forcing_provenance(args) -> dict | None:
     """The ``--amip-forcing-from-local-era5`` build provenance for the dry-run report, or
     ``None`` when the flag is off — derived from the CLI args (the source archive, date,
@@ -1125,6 +1156,13 @@ def _build_arg_parser():
                         "stop_reason='no_valid_diagnoses' to save compute on a "
                         "spin-off LES that develops no turbulence)")
     p.add_argument("--n-worst", type=int, default=20)
+    p.add_argument("--ocean-only", action="store_true",
+                   help="rank ONLY ocean columns (where the AMIP SST pins the surface so a "
+                        "bias is attributable to the atmospheric/turbulence closure). Off by "
+                        "default (rank all columns). Fails loud if no ocean columns exist.")
+    p.add_argument("--max-land-fraction", type=float, default=0.5,
+                   help="(--ocean-only) a column is ocean where land_fraction <= this "
+                        "[0,1]; 0.0 = pure ocean, 0.5 = majority ocean (default).")
     p.add_argument("--les-budget", type=int, default=None,
                    help="cap LES to K env-cluster representatives (default: all)")
     p.add_argument("--feedback-strategy", choices=("static", "environment"),
@@ -2399,7 +2437,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
                                    surface_flux=args.surface_flux),
-        run_les_fn=run_les, phis=phis,
+        run_les_fn=run_les, phis=phis, valid_mask=_maybe_ocean_mask(args, base_cfg),
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         dry_run=args.dry_run,

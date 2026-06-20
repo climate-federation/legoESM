@@ -426,6 +426,25 @@ class ModelDriver:
             self._create_topography()
         return self._phis_data
 
+    def static_land_fraction(self):
+        """The model's STATIC land fraction on the model grid, built WITHOUT the full
+        :meth:`setup` — the same minimal construction chain as
+        :meth:`static_topography_phis` (``_create_topography`` populates BOTH ``phis``
+        and ``f_land`` in every branch: flat → zeros, idealised → from topography, real
+        → loaded, ``land_mask_path`` → from file).
+
+        Exposes the model's OWN land/sea distribution cheaply so a launch-time probe can
+        build an OCEAN-only ranking mask (:func:`legoesm.training.compare_reanalysis.
+        ocean_valid_mask`) WITHOUT writing a phantom run directory.  Grid-shaped — flatten
+        ROW-MAJOR to the worst-column column order.  An aquaplanet/flat model yields an
+        all-zero field (all ocean).  Same runtime-singleton caveat as
+        :meth:`static_topography_phis` (build from the SAME config that drives the run).
+        """
+        # static_topography_phis runs the chain that sets BOTH _phis_data and _f_land,
+        # guarded on _phis_data; after it returns, _f_land is populated too.
+        self.static_topography_phis()
+        return self._f_land
+
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid

@@ -552,6 +552,52 @@ def owned_cell_valid_mask(layout_or_mask: Any, *, base_mask: Any = None) -> jax.
     return owned & base
 
 
+def ocean_valid_mask(
+    land_fraction: Any,
+    *,
+    max_land_fraction: float = 0.5,
+    base_mask: Any = None,
+) -> jax.Array:
+    """Ranking validity mask restricting the worst-column selection to OCEAN columns.
+
+    In an AMIP run the OCEAN surface is PRESCRIBED (the SST forcing pins it), so a
+    model-vs-ERA5 column bias over ocean is attributable to the ATMOSPHERIC column —
+    including the turbulence closure being tuned — the right lever for the LES-closure
+    correction.  Over LAND the surface is the model's OWN land model, carrying its own
+    biases (soil moisture, snow, skin temperature) the closure cannot fix, so ranking a
+    land column as "worst" spends the scarce LES budget where the correction is the wrong
+    lever.  Pass this as the comparison ``valid_mask`` (or as the ``base_mask`` of
+    :func:`owned_cell_valid_mask` under distributed MPAS) to rank ocean columns only.
+
+    ``land_fraction`` is the model's static land fraction on the model grid (e.g.
+    :meth:`legoesm.driver.model_driver.ModelDriver.static_land_fraction`); ANY shape is
+    flattened ROW-MAJOR to the column order the ranking uses (the iter-36 column-ordering
+    contract — structured grids flatten ``(nlat, nlon)`` row-major; MPAS ``(nCells,)`` is
+    already flat).  A column is OCEAN (valid) where ``land_fraction <= max_land_fraction``;
+    an aquaplanet/flat model (all-zero land fraction) yields an all-``True`` mask, so
+    ``ocean_valid_mask`` is a SAFE no-op there.  ``base_mask`` (optional, same flat column
+    shape) is ANDed in (a cell is rankable only if BOTH ocean AND base-valid).  Returns a
+    flat ``(n_columns,)`` bool array suitable for ``valid_mask=`` on the compare.
+    """
+    if not (0.0 <= float(max_land_fraction) <= 1.0):
+        raise ValueError(
+            "ocean_valid_mask: max_land_fraction must be a fraction in [0, 1], got "
+            f"{max_land_fraction!r} (0.0 = pure ocean only; 0.5 = majority ocean; the "
+            "land fraction itself is in [0, 1])."
+        )
+    ocean = jnp.asarray(land_fraction).reshape(-1) <= float(max_land_fraction)
+    if base_mask is None:
+        return ocean
+    base = jnp.asarray(base_mask, dtype=bool).reshape(-1)
+    if base.shape != ocean.shape:
+        raise ValueError(
+            f"ocean_valid_mask: base_mask shape {tuple(base.shape)} != ocean mask shape "
+            f"{tuple(ocean.shape)} — both must flatten to the same column axis "
+            f"(n_columns,)."
+        )
+    return ocean & base
+
+
 def column_state_from_hydrostatic(
     atm_state: Any,
     q_v: jax.Array,
