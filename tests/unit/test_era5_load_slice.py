@@ -109,6 +109,24 @@ def test_load_era5_slice_long_names(monkeypatch):
     np.testing.assert_allclose(sl.p_s, 1.0e5)
 
 
+def test_load_era5_slice_out_of_range_time_idx_gives_clear_error(monkeypatch):
+    """A typo'd ``--era5-time-idx`` / held-out index (the runbook directs the operator
+    to pick one) raises a CAMPAIGN-specific ``IndexError`` naming the store's actual
+    time count — not xarray's generic 'index N is out of bounds for axis 0'.  Negative
+    indices keep xarray semantics (in range ⇒ accepted); only genuinely out-of-range
+    indices raise.  The synthetic store has 1 time, so 0 / −1 are valid; 1 / −2 are not."""
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
+
+    # In range (including the negative wrap to the single time) → loads, no IndexError.
+    assert load_era5_slice(_config(), 0).T.shape == (5, 6, 3)
+    assert load_era5_slice(_config(), -1).T.shape == (5, 6, 3)
+    # Out of range → clear IndexError naming the store's time count (here 1).
+    with pytest.raises(IndexError, match="out of range.*ERA5 store has 1 time"):
+        load_era5_slice(_config(), 1)
+    with pytest.raises(IndexError, match="out of range"):
+        load_era5_slice(_config(), -2)
+
+
 def test_load_era5_slice_nonmonotonic_levels_pair_data_with_correct_pressure(monkeypatch):
     """A NON-monotonic ``config.levels`` must still pair each level's data with the
     right pressure.  ``plev_Pa = np.sort(plev_hPa)`` robustly sorts the COORDINATE, but

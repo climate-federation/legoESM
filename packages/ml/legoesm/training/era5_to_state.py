@@ -285,6 +285,19 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
     ds = open_era5_zarr(store)
 
+    # Bounds-check the time index up front so a typo'd ``--era5-time-idx`` /
+    # held-out index gives a CAMPAIGN-specific message (with the store's actual time
+    # count) instead of xarray's generic "index N is out of bounds for axis 0".  Same
+    # ``IndexError`` type (callers/tests catching it are unaffected); negative indices
+    # are allowed exactly as xarray would (valid range [-n, n-1]).  ``time``-dim
+    # absent ⇒ skip and let ``isel`` raise (a differently-named time axis).
+    n_time = ds.sizes.get("time")
+    if n_time is not None and not (-n_time <= time_idx < n_time):
+        raise IndexError(
+            f"era5 time index {time_idx} is out of range: the ERA5 store has "
+            f"{n_time} time(s) (valid 0..{n_time - 1} or -{n_time}..-1). Pick an "
+            "in-range --era5-time-idx / held-out index.")
+
     # Select time
     ds_t = ds.isel(time=time_idx)
 
