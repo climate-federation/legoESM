@@ -189,6 +189,7 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "williamson6":        frozenset({"sw", "hughes"}),
     "cosine_bell":        frozenset({"sw", "hughes"}),
     "cosine_bell_a0":     frozenset({"sw"}),  # issue 504 alpha=0 diagnostic (not in curated hughes set)
+    "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cubed_sphere only
     # Hydrostatic dry
     "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -283,6 +284,15 @@ def _build_test_matrix() -> list[TestCase]:
             matrix.append(TestCase(
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
+        # Colliding modons (#521, Lin et al. 2017) — non-rotating two-soliton
+        # collision; wired for cubed_sphere (FV3 case 8) via the edge-midpoint
+        # analytic init.  Full return-to-IC is ~100 days; quick smoke = 2 days.
+        # Other grids: IC helpers exist in tests/test_cases/colliding_modons.py
+        # but the non-rotating run path is not yet wired (follow-up).
+        if g == "cubed_sphere":
+            matrix.append(TestCase(
+                "shallow_water", "colliding_modons", g, res[g], "none", 100, 2,
+                {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
     for g in GRID_TYPES:
@@ -2250,7 +2260,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             williamson_test2_exact, compute_error_norms)
 
         n = int(tc.resolution[1:])
-        grid = create_cubed_sphere(n)
+        # Colliding modons (#521, FV3 case 8) run on a NON-ROTATING planet
+        # (f=0); every other SW case is rotating.  The cdgrid infers omega
+        # from base.f, so a base grid with omega=0 yields f=0 throughout.
+        grid = (create_cubed_sphere(n, omega=0.0) if test_num == 8
+                else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2303,7 +2317,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # while latlon W6 14-day is stable.  Override the iter-1030
         # calibration to higher div_damp + damp_v on W6 only.  W2/W5
         # untouched (still pinned at iter-1030 dual-target).
-        if test_num in (2, 5, 6):
+        if test_num in (2, 5, 6, 8):
+            # Colliding modons (8) are strongly nonlinear and need the same
+            # div-damp + biharmonic hyperdiff backstop as the long-duration
+            # propagating-wave cases.
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
             # at day 9 with the iter1009 baseline (hyperdiff=0).
             # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
@@ -2381,6 +2398,25 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             u_d = (cdgrid.cos_angle_edge_x * u_east_x
                    + cdgrid.sin_angle_edge_x * v_north_x)
             u_east_y, v_north_y = _w6_winds_geo(
+                cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
+            )
+            v_d = (-cdgrid.sin_angle_edge_y * u_east_y
+                   + cdgrid.cos_angle_edge_y * v_north_y)
+        elif test_num == 8:
+            # Colliding modons (#521): two zonal Gaussian bursts, constant
+            # depth, NON-ROTATING.  Same edge-midpoint analytic init as W6
+            # (winds depend on lon AND lat), via _modon_winds_geo.
+            from tests.test_cases.colliding_modons import (
+                colliding_modons, _modon_winds_geo,
+            )
+            sw = colliding_modons(grid)
+            R = grid.radius
+            u_east_x, v_north_x = _modon_winds_geo(
+                cdgrid.lon_edge_x, cdgrid.lat_edge_x, R,
+            )
+            u_d = (cdgrid.cos_angle_edge_x * u_east_x
+                   + cdgrid.sin_angle_edge_x * v_north_x)
+            u_east_y, v_north_y = _modon_winds_geo(
                 cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
             )
             v_d = (-cdgrid.sin_angle_edge_y * u_east_y
@@ -5698,6 +5734,7 @@ RUNNERS: dict[str, Callable] = {
     "williamson2": run_shallow_water,
     "williamson5": run_shallow_water,
     "williamson6": run_shallow_water,                # M1.a (mpas + spectral)
+    "colliding_modons": run_shallow_water,           # issue 521 (Lin et al. 2017, cubed_sphere)
     "cosine_bell": run_cosine_bell,
     "cosine_bell_a0": run_cosine_bell,               # issue 504 (alpha=0 edge-crossing)
     "held_suarez": run_held_suarez,
@@ -5767,6 +5804,17 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
         {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
         {"field": "u",          "vmin": -30,   "vmax": 60,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Colliding modons (issue 521): two zonal Gaussian jets roll up into
+    # counter-rotating dipoles that collide and depart.  Zonal wind shows the
+    # westerly/easterly bursts; autoscale height/wind so the collision is
+    # visible.  (Relative vorticity — the cleanest modon signature — is a
+    # follow-up diagnostic; the cube extract_fn currently emits u/v/speed/h.)
+    "colliding_modons": [
+        {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "v",          "vmin": None,  "vmax": None,  "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": None,  "cmap": "viridis", "units": "m/s"},
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
     ],
     # Cosine-bell tracer: height field passively advects.
     "cosine_bell": [
