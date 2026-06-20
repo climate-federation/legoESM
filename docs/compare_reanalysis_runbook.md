@@ -191,7 +191,18 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_rrtmgp.json 
 LOCAL_ERA5_DIR=/glade/.../ERA5 LOCAL_ERA5_DATE=20170901 AMIP_FORCING=1 \
   CONFIG=configs/amip_rrtmgp.json \
   sbatch scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch
+# A FULLY-REALISTIC multi-day offline run (iter 469 — all the consistency knobs in one launch),
+# e.g. a 30-day September climatology over real land (CONFIG built with --land-mask-path):
+LOCAL_ERA5_DIR=/glade/.../ERA5 LOCAL_ERA5_DATE=20170901 AMIP_FORCING=1 \
+  CONFIG=configs/amip_rrtmgp.json ALIGN_INSOLATION=1 OCEAN_ONLY=1 SURFACE_FLUX=1 \
+  SPINUP_DAYS=10 AMIP_FORCING_N_MONTHS=1 ERA5_N_DAYS=30 ERA5_N_TIMES=720 \
+  sbatch scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch
 ```
+
+The launcher exposes every consistency knob as an env var: `ALIGN_INSOLATION` (season, §2),
+`OCEAN_ONLY` + `SURFACE_FLUX` (the realistic LES combo, above), `SPINUP_DAYS` (exclude spin-up),
+`AMIP_FORCING_N_MONTHS` (SST coverage), and `ERA5_N_DAYS` + `ERA5_N_TIMES` (match the reference
+window to the model `days`). The launch NOTEs (§2/§3) cross-check them and warn on a mismatch.
 
 The launcher's `--dry-run` preflight **builds the forcing** (validating the archive read +
 the daily subsample + the output write) and prints an `AMIP forcing: built from … → …` line

@@ -75,14 +75,28 @@ MODE="${MODE:-amip}"                               # amip (prescribed SST) | cmi
 SPINUP_DAYS="${SPINUP_DAYS:-0}"
 COMMON=(--config "$CONFIG" --mode "$MODE"
         --diagnosis-method clubb_coefficient --iterations 10 --n-worst 64
-        --les-budget 8 --orographic-forcing auto --spinup-days "$SPINUP_DAYS" --out "$OUT")
+        --les-budget 8 --orographic-forcing auto --spinup-days "$SPINUP_DAYS"
+        --era5-n-times "${ERA5_N_TIMES:-1}" --out "$OUT")
+# ERA5_N_TIMES averages this many consecutive ERA5 times into a time-MEAN reference CLIMATOLOGY
+# (default 1 = a single snapshot). For a multi-day climatology MATCH it to the model window: set
+# it to ~24*days for the offline hourly path (with ERA5_N_DAYS >= days), else the model multi-day
+# mean is compared to a too-short reference (weather-vs-climate, iter 463 warns).
 # OCEAN_ONLY ranks only ocean columns (where the prescribed SST pins the surface, so a bias is
 # attributable to the atmospheric/turbulence closure the loop tunes — not the land model's own
 # surface biases). Recommended for AMIP over realistic land; a no-op on an aquaplanet. (iter 451)
 if [ -n "${OCEAN_ONLY:-}" ]; then COMMON+=(--ocean-only); fi
+# SURFACE_FLUX gives each spin-off LES an SST-driven surface buoyancy flux (the convective driver
+# the LES needs to develop turbulence for a valid C_K diagnosis, iter 364/465). RECOMMENDED for a
+# realistic run, PAIRED with OCEAN_ONLY (the flux is valid over ocean; a land column would get a
+# non-ocean SST). The recommended realistic combo: OCEAN_ONLY=1 SURFACE_FLUX=1.
+if [ -n "${SURFACE_FLUX:-}" ]; then COMMON+=(--surface-flux); fi
 # ERA5 reference: EXACTLY one source — the offline local archive OR the Zarr store.
 if [ -n "$LOCAL_ERA5_DIR" ]; then
   COMMON+=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE")
+  # ERA5_N_DAYS loads N consecutive days of OFFLINE ERA5 (from LOCAL_ERA5_DATE) so the reference
+  # spans a multi-day CLIMATOLOGY matching the model window (iter 460) instead of one day vs a
+  # multi-day model mean. Pair with ERA5_N_TIMES (above) up to 24*N (24 hourly times per day).
+  COMMON+=(--era5-n-days "${ERA5_N_DAYS:-1}")
   # Turnkey offline AMIP: ALSO build the SST/sea-ice forcing from the same local archive.
   if [ "$MODE" = "amip" ] && [ -n "${AMIP_FORCING:-}" ]; then
     COMMON+=(--amip-forcing-from-local-era5
