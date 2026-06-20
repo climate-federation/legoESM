@@ -40,6 +40,7 @@ from legoesm.training.compare_reanalysis import (
     ColumnState,
     assert_model_state_finite,
     compare_state_to_reference,
+    model_state_is_finite,
 )
 from legoesm.training.feedback_assembly import (
     assemble_feedback_field,
@@ -467,25 +468,6 @@ def make_compare_fn(
     return compare_fn
 
 
-def _state_finite(model_ctx) -> bool:
-    """A model state (``ColumnState``) is FINITE iff its prognostics carry no NaN/Inf.
-
-    A blown-up re-run leaves NaN in the STATE; the per-column RMSE then NaN-MASKS those
-    columns to a spuriously-low (≈0) bias that FALSELY reads as 'improved' (the iter-392
-    bug class), so the monotonic gate must NOT accept it.  ``model_ctx is None`` (a mock
-    ``compare_fn`` carrying no state) ⇒ assume finite (nothing to check); a partial mock
-    lacking the prognostic fields likewise skips the guard."""
-    if model_ctx is None:
-        return True
-    try:
-        return bool(
-            jnp.all(jnp.isfinite(model_ctx.T)) and jnp.all(jnp.isfinite(model_ctx.q_v))
-            and jnp.all(jnp.isfinite(model_ctx.u)) and jnp.all(jnp.isfinite(model_ctx.v))
-            and jnp.all(jnp.isfinite(model_ctx.p_s)))
-    except AttributeError:
-        return True
-
-
 def _run_line_search(compare_fn, baseline, fractions, make_candidate, *,
                      global_reduce=None):
     """Backtracking line search shared by the single- and (future) multi-coefficient
@@ -513,7 +495,7 @@ def _run_line_search(compare_fn, baseline, fractions, make_candidate, *,
         # spurious ≈0 bias that reads as 'improved' (iter 392) — force NOT-improved so
         # it is neither chosen here NOR accepted by the monotonic gate (the k==0
         # fallback then carries this verdict, so the round is rejected, not shipped).
-        if not _state_finite(upd.model_ctx):
+        if not model_state_is_finite(upd.model_ctx):
             imp = imp._replace(improved=jnp.asarray(False))
         candidate = (float(frac), field_state, cfg, upd, imp)
         if k == 0:

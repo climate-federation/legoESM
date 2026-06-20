@@ -38,6 +38,7 @@ from legoesm.training.compare_reanalysis import (
     ColumnState,
     column_state_from_carry,
     compare_state_to_reference,
+    model_state_is_finite,
 )
 
 # Canonical grid-type tokens → aliases.  Anything else is a hard error.
@@ -410,13 +411,10 @@ def main(argv: list[str] | None = None) -> int:
         # the area-weighted mean reports a spuriously-LOW (≈0) corrected bias and
         # FALSELY 'improved' (rc 0) — an automated deploy&verify would ship the
         # blown-up correction.  Guard on the raw STATES (the masking hides it in the
-        # scores): a non-finite corrected OR baseline state is a verification FAILURE.
-        def _state_finite(m) -> bool:
-            return bool(
-                jnp.all(jnp.isfinite(m.T)) and jnp.all(jnp.isfinite(m.q_v))
-                and jnp.all(jnp.isfinite(m.u)) and jnp.all(jnp.isfinite(m.v)))
-
-        states_finite = _state_finite(model) and _state_finite(baseline_model)
+        # scores; shared `model_state_is_finite`): a non-finite corrected OR baseline
+        # state is a verification FAILURE.
+        states_finite = (model_state_is_finite(model)
+                         and model_state_is_finite(baseline_model))
         if not states_finite:
             print("[compare_amip_era5] NON-FINITE held-out state (the corrected or "
                   "baseline run produced NaN/Inf — it likely blew up): verification FAILS.")

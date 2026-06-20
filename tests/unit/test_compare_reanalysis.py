@@ -19,6 +19,7 @@ from legoesm.training.compare_reanalysis import (
     column_state_from_carry,
     column_state_from_hydrostatic,
     compare_state_to_reference,
+    model_state_is_finite,
     owned_cell_valid_mask,
     precip_mm_day_from_accum,
     validate_reference_physical,
@@ -175,6 +176,20 @@ def test_assert_model_state_finite_checks_optional_fields_and_skips_absent():
     plain = _uniform_state((4,), 3)
     assert plain.sst_K is None and plain.precip_mm_day is None
     assert assert_model_state_finite(plain) is None
+
+
+def test_model_state_is_finite_bool_core():
+    """The NON-fatal BOOL core (shared by the loop line-search + held-out-verify gates,
+    iters 392/393): finite ⇒ True; any NaN/Inf prognostic ⇒ False; ``None`` (a mock
+    compare_fn with no state) ⇒ True; an object lacking the prognostic fields ⇒ True
+    (nothing to check).  This is what makes a blown-up CANDIDATE read as NOT-improved
+    WITHOUT raising (unlike the fatal BASELINE guard ``assert_model_state_finite``)."""
+    ok = _uniform_state((4,), 3, T=285.0, q=6e-3, u=10.0)
+    assert model_state_is_finite(ok) is True
+    bad = ok._replace(u=jnp.full((4, 3), 10.0).at[2, 1].set(jnp.nan))
+    assert model_state_is_finite(bad) is False
+    assert model_state_is_finite(None) is True              # mock compare_fn ⇒ skip
+    assert model_state_is_finite(object()) is True          # no prognostic fields ⇒ skip
 
 
 def test_precip_accum_conversion():

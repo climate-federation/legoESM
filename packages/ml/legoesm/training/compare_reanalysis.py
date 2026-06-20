@@ -221,6 +221,23 @@ def validate_reference_physical(
                 "units error produces a large FAKE bias the loop would 'correct').")
 
 
+def model_state_is_finite(state: Any) -> bool:
+    """True iff every present prognostic field of a MODEL ``state`` is finite.
+
+    The BOOL core of :func:`assert_model_state_finite` (which RAISES) AND the NON-fatal
+    guard the loop's line search + the held-out verify need: a blown-up CANDIDATE must
+    read as NOT-improved, not raise on one bad step (iters 392/393).  ``state is None``
+    (a mock ``compare_fn`` carrying no state), or a state lacking the prognostic fields,
+    ⇒ True (nothing to check) — so abstract-mock compare_fns are unaffected."""
+    if state is None:
+        return True
+    for fname in ("T", "q_v", "u", "v", "p_s", "sst_K", "precip_mm_day"):
+        value = getattr(state, fname, None)
+        if value is not None and not bool(jnp.all(jnp.isfinite(jnp.asarray(value)))):
+            return False
+    return True
+
+
 def assert_model_state_finite(state: ColumnState, *, name: str = "model run") -> None:
     """Fail-fast: every present field of a MODEL run's time-mean ``state`` is finite.
 
@@ -234,10 +251,16 @@ def assert_model_state_finite(state: ColumnState, *, name: str = "model run") ->
     Finiteness ONLY (no physical bounds: a model's units are correct by construction,
     unlike a loaded reanalysis).  Pure host-side check on a CONCRETE state; raises
     ``ValueError`` naming the field + the non-finite count + the divergence hint.  Use
-    on the BASELINE (current-config) run — a diverged CANDIDATE/line-search run is
-    instead handled by the monotonic gate (its non-finite bias is never ``< baseline``,
-    so it is REJECTED, not fatal; raising there would crash the campaign on one bad step).
+    on the BASELINE (current-config) run, where a blown-up run is FATAL.  A diverged
+    CANDIDATE/line-search run is instead made NOT-improved by
+    :func:`model_state_is_finite` inside the loop's line search (iter 393) — NOT fatal,
+    so one bad step REJECTS that candidate without crashing the multi-day campaign.  (An
+    earlier design assumed the monotonic gate ALONE caught it; it did NOT — the
+    per-column RMSE NaN-MASKS a blown-up state to a spurious ≈0 bias that reads as
+    'improved', so the explicit state guard is REQUIRED.)
     """
+    if model_state_is_finite(state):
+        return
     fields = [("T", state.T), ("q_v", state.q_v), ("u", state.u), ("v", state.v),
               ("p_s", state.p_s)]
     if state.sst_K is not None:
