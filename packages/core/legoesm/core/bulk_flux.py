@@ -47,6 +47,48 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 _VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
 
 
+def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
+    """Effective surface wind with a sub-grid convective gustiness floor.
+
+    ``|U|_eff = sqrt(u^2 + v^2 + u_gust^2)``.  The resolved grid-mean wind misses
+    sub-grid wind variability — boundary-layer convective gustiness — which in
+    calm/convective regions (the tropics, where the mean wind is light but deep
+    convection drives gusts) is the dominant contributor to the air-sea latent
+    and sensible flux.  Omitting it (or using a ~1 m/s numerical floor) yields
+    ~1/3 of the realistic surface evaporation at light winds, starving the
+    hydrological cycle (measured: coupled hfls ~35 vs ~80 W/m^2 at a 1.9 m/s
+    mean surface wind).  Same algebraic form as the numerical wind floor
+    ``sqrt(u^2+v^2+U_min^2)`` — a larger, physically-motivated ``u_gust``
+    subsumes it.
+
+    The floor lives INSIDE the single ``sqrt`` (not a two-stage
+    ``sqrt(sqrt(u^2+v^2)^2 + g^2)``): with ``gustiness > 0`` the argument is
+    strictly positive everywhere, so the gradient is finite even at exact calm
+    wind ``u = v = 0`` (a bare ``sqrt(u^2+v^2)`` would give a NaN gradient
+    there).  AD-safe for the differentiable coupler.
+
+    Parameters
+    ----------
+    u, v : array
+        Resolved grid-mean surface wind components [m/s].  A caller holding only
+        the wind SPEED magnitude ``s`` passes ``apply_gustiness(s, 0.0, gust)``
+        (``sqrt(s^2 + gust^2)``), which is equally AD-safe.
+    gustiness : float
+        Gustiness floor ``u_gust`` [m/s] (~5 m/s, Wing 2018 RCEMIP1).
+
+    Returns
+    -------
+    array
+        Effective wind speed for the bulk flux [m/s].
+
+    References
+    ----------
+    - Beljaars (1995), QJRMS 121, 255-270 — convective gustiness in bulk fluxes.
+    - Wing et al. (2018), GMD 11, 793-813 — RCEMIP1 5 m/s gustiness floor.
+    """
+    return jnp.sqrt(u ** 2 + v ** 2 + gustiness ** 2)
+
+
 def validate_bulk_scheme(scheme: str) -> None:
     """Raise ``ValueError`` on an unknown bulk-flux scheme name.
 
