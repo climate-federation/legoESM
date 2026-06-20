@@ -937,6 +937,21 @@ def _offline_reference_window_warning(days, era5_n_times) -> str | None:
             f">= {int(days)}) so the reference spans the model window.")
 
 
+def _surface_flux_land_warning(surface_flux, ocean_only, has_land_mask) -> str | None:
+    """Warn when ``--surface-flux`` is set on a config WITH a land mask but WITHOUT
+    ``--ocean-only`` (iter 465). The surface-flux LES BC derives the flux from the column SST
+    (via the GCM bulk scheme, valid over OCEAN); a LAND worst-column would get a flux from a
+    NON-ocean SST (a fill/extrapolated value) — a wrong/invalid diagnosis that WASTES the LES
+    budget. Pair ``--surface-flux`` with ``--ocean-only`` so only ocean columns (valid SST) are
+    ranked. Silent without a land mask (aquaplanet: all ocean) or when ``--ocean-only`` is set."""
+    if not surface_flux or ocean_only or not has_land_mask:
+        return None
+    return ("[campaign] NOTE: --surface-flux derives the LES surface BC from the column SST "
+            "(valid over OCEAN), but this config has a land mask and --ocean-only is OFF — a LAND "
+            "worst-column would get a surface flux from a non-ocean SST (wrong/invalid diagnosis, "
+            "wasting the LES budget). Add --ocean-only so only ocean columns are ranked.")
+
+
 # Months seasonally FAR from the model's JANUARY-based insolation (cfg.start_day defaults to 0,
 # so day_to_calendar(0)=Jan 1) — the solar declination differs most across Apr–Sep, so a
 # non-January offline ERA5 window mismatches the insolation season (iter 447, the deferred gap).
@@ -1001,11 +1016,15 @@ def _build_run_setup(args):
         _offline_reference_window_warning(getattr(base_cfg, "days", 0),
                                           int(getattr(args, "era5_n_times", 1) or 1))
         if getattr(args, "local_era5_dir", None) else None)
+    _surface_flux_note = _surface_flux_land_warning(
+        getattr(args, "surface_flux", False), getattr(args, "ocean_only", False),
+        bool(getattr(base_cfg, "land_mask_path", "")))
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
                   _insolation_season_note(_insol_date),
                   _offline_forcing_note,
-                  _ref_window_note):
+                  _ref_window_note,
+                  _surface_flux_note):
         if _note:
             print(_note, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(

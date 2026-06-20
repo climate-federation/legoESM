@@ -3335,6 +3335,19 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
     assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
 
 
+def test_surface_flux_land_warning_fires_without_ocean_only():
+    """--surface-flux on a config WITH a land mask but WITHOUT --ocean-only warns (iter 465):
+    a land worst-column would get a surface flux from a non-ocean SST. Silent when paired with
+    --ocean-only, without a land mask (aquaplanet), or with --surface-flux off."""
+    from scripts.run.run_correction_campaign import _surface_flux_land_warning
+
+    w = _surface_flux_land_warning(True, False, True)      # land mask, no ocean-only → warns
+    assert w is not None and "OCEAN" in w and "--ocean-only" in w
+    assert _surface_flux_land_warning(True, True, True) is None      # paired → silent
+    assert _surface_flux_land_warning(True, False, False) is None    # aquaplanet (no mask) → silent
+    assert _surface_flux_land_warning(False, False, True) is None    # surface-flux off → silent
+
+
 def test_offline_forcing_window_warning_fires_when_run_exceeds_one_month():
     """A run longer than the single-month offline AMIP forcing warns about the SST/insolation
     DESYNC (get_forcing_at_time cyclically repeats the month, iter 458); a sub-month window is

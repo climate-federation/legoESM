@@ -219,6 +219,16 @@ default 24) so the loader does not OOM on the full hourly month.
 > `ModelDriver.static_land_fraction()` and fails loud if no ocean columns exist. A no-op on an
 > aquaplanet (all-zero land fraction → all columns rankable). Off by default (rank all columns).
 
+> **Recommended realistic LES config: `--ocean-only --surface-flux` (iter 364/465).** The spin-off
+> LES develops convective turbulence (needed for a valid C_K diagnosis) from the surface buoyancy
+> flux. `--surface-flux` derives that flux from the column SST via the GCM bulk scheme — valid over
+> **ocean**. So pair it with `--ocean-only`: without it, a LAND worst-column would get a flux from a
+> non-ocean SST (a fill value) → a wrong/invalid diagnosis that wastes the LES budget (the campaign
+> prints a NOTE when `--surface-flux` is set with a land mask but no `--ocean-only`). Without
+> `--surface-flux`, the ocean-column LES is forced only by large-scale subsidence/shear and may not
+> develop turbulence (low diagnosis-validity). For a smoke/aquaplanet, `--surface-flux` alone is
+> fine (every column is ocean). Both off by default.
+
 ## 3. Read the result
 
 The output JSON is **self-describing**: a `health` block (`improved` / `stalled` /
