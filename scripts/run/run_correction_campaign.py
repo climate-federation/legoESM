@@ -1421,6 +1421,31 @@ def _assert_output_path_writable(path: str, *, flag: str) -> None:
             f"permissions or choose a writable path before launching.")
 
 
+def _assert_era5_zarr_readable(path: str) -> None:
+    """Fail LOUD up front if a LOCAL ``--era5-zarr`` reference store does not exist.
+
+    The ERA5 reference is opened only AFTER the model/grid build + driver setup
+    (``load_era5_time_mean``), so a typo'd LOCAL path would otherwise crash with a
+    cryptic zarr/fsspec error AFTER burning that setup — wasting cluster time at the
+    start of a multi-day run.  This millisecond pre-flight catches it at launch,
+    mirroring the ``--out`` / ``--checkpoint`` guards.
+
+    A REMOTE URI (``gs://`` / ``s3://`` / ``http://`` / …, detected by ``"://"``) is
+    NOT existence-checked here — the fsspec/zarr backend resolves it — so a valid
+    CLOUD store is NEVER falsely rejected (a false positive would be strictly worse
+    than the late error it replaces).
+    """
+    import os
+
+    if "://" in path:               # remote URI: leave resolution to the storage backend
+        return
+    if not os.path.exists(path):    # a Zarr is a directory (or a .zip) on the local FS
+        raise SystemExit(
+            f"--era5-zarr {path!r}: no ERA5 reference store at that path (a Zarr is a "
+            "directory or .zip). Fix the path before launching, or use a gs://, s3://, "
+            "or http:// URI for a remote store.")
+
+
 def _fsync_dir(parent: str) -> None:
     """Best-effort ``fsync`` of a directory so a rename within it is crash-durable.
 
@@ -2018,6 +2043,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _assert_output_path_writable(args.out, flag="out")
     if args.checkpoint:
         _assert_output_path_writable(args.checkpoint, flag="checkpoint")
+    # Pre-flight: fail fast on a typo'd LOCAL --era5-zarr (opened only AFTER the
+    # model/grid build), instead of a cryptic zarr error wasting that setup.
+    _assert_era5_zarr_readable(args.era5_zarr)
     # Run-setup preamble (config/grid/sigma + driver builder with the RESOLVED coupled
     # preset + the CFL-checked LES runner + the orographic phis) — shared with the OSSE
     # CLI via _build_run_setup (iter 295).

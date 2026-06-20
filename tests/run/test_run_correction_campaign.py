@@ -863,6 +863,39 @@ def test_assert_output_path_writable(tmp_path, monkeypatch):
         _assert_output_path_writable(str(tmp_path / "ckpt.json"), flag="checkpoint")
 
 
+def test_assert_era5_zarr_readable(tmp_path):
+    """The launch pre-flight fails FAST on a typo'd LOCAL --era5-zarr (opened only AFTER
+    the model/grid build, so a bad path otherwise wastes that setup on a cryptic zarr
+    error).  A valid local store passes; a missing one raises a clear, actionable
+    SystemExit; and a REMOTE URI is NOT existence-checked — so a valid cloud store is
+    never falsely rejected (a false positive would be worse than the late error)."""
+    from scripts.run.run_correction_campaign import _assert_era5_zarr_readable
+
+    # A valid LOCAL store (a real directory, like a Zarr) → no raise.
+    _assert_era5_zarr_readable(str(tmp_path))
+    # A missing LOCAL path → fail FAST with a clear, actionable message.
+    with pytest.raises(SystemExit, match="no ERA5 reference store"):
+        _assert_era5_zarr_readable(str(tmp_path / "typo.zarr"))
+    # REMOTE URIs are left to the fsspec/zarr backend — never existence-checked here
+    # (a nonexistent local path SPELLED as a URI must NOT raise → no false positive).
+    for uri in ("gs://weatherbench2/datasets/era5.zarr",
+                "s3://bucket/era5.zarr", "http://example.com/era5.zarr"):
+        _assert_era5_zarr_readable(uri)
+
+
+def test_main_fails_fast_on_missing_era5_zarr(tmp_path):
+    """main() WIRES the --era5-zarr pre-flight: a typo'd local store raises at LAUNCH
+    (before the config/grid/driver build the reference load follows), not deep in
+    load_era5_time_mean.  A valid --out is given so the (earlier) output guard passes
+    and execution reaches the era5 guard."""
+    import scripts.run.run_correction_campaign as rcc
+
+    with pytest.raises(SystemExit, match="no ERA5 reference store"):
+        rcc.main(["--config", "c.json",
+                  "--era5-zarr", str(tmp_path / "missing.zarr"),
+                  "--out", str(tmp_path / "out.json")])
+
+
 def test_print_round_progress_emits_a_real_time_line(capsys):
     """The per-round progress line (iter 318) prints DURING the run (line-buffered) so a
     multi-day SLURM .out log shows LIVE progress instead of silence until the end — the
