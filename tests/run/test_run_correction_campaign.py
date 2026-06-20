@@ -2045,6 +2045,52 @@ def test_build_correction_campaign_clubb_coefficient_method():
     assert float(ck.min()) >= 0.1 and float(ck.max()) <= 1.2
 
 
+def test_campaign_auto_populates_clubb_l_mix_max_from_tuned_config(monkeypatch):
+    """The diagnosis ℓ MUST use the GCM's ACTUAL ``l_mix_max`` — ``C_K = K_m/(ℓ·√wp2)``
+    is the exact inverse of clubb_lite's ``K_m = C_K·ℓ·√wp2`` ONLY if both use the
+    same mixing length, so a hardcoded ``l_mix_max`` would BIAS the diagnosed C_K
+    whenever the GCM's value is tuned away from the 100.0 default.  The sibling wiring
+    test uses the DEFAULT 100.0, so it cannot distinguish 'auto-populated from the
+    config' from a hardcoded 100.0.  Here a TUNED ``initial_clubb.l_mix_max = 175.0``
+    must reach ``make_les_diagnose_fn``'s ``les_config.clubb_l_mix_max`` — proving the
+    campaign threads the real GCM mixing length into the parameter estimation.  (Stub
+    the harness's diagnose builder + the run so this is a fast wiring assertion.)"""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.run.run_correction_campaign as rcc
+
+    tuned = 175.0                                    # ≠ the 100.0 default ⇒ non-vacuous
+    assert tuned != float(CLUBBLiteConfig().l_mix_max)
+    captured = {}
+
+    def spy_make_les_diagnose_fn(*_a, les_config, **_kw):
+        captured["l_mix_max"] = les_config.clubb_l_mix_max
+        return lambda record, ctx: None             # dummy diagnose_fn (never called)
+
+    monkeypatch.setattr(rcc, "make_les_diagnose_fn", spy_make_les_diagnose_fn)
+    monkeypatch.setattr(rcc, "run_correction_campaign", lambda *_a, **_kw: "SENTINEL")
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    out = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),  # noqa: ARG005
+        extract_column_state=lambda d, day, dt: d.state,         # noqa: ARG005
+        reference=model_state, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1,
+        initial_clubb=CLUBBLiteConfig(l_mix_max=tuned))
+
+    assert out == "SENTINEL"                         # the stubbed run was reached
+    # The TUNED GCM mixing length (not the 100.0 default) reached the diagnosis.
+    assert captured["l_mix_max"] == pytest.approx(tuned)
+
+
 def test_build_correction_campaign_rejects_multi_methods():
     """build_correction_campaign is single-coefficient: a diagnosis_methods config
     (which makes process_column return a dict) is rejected up front, not crashed
