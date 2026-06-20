@@ -42,11 +42,31 @@ Future-HW (np>6 anti-scales on Ginsburg CPU); every increment gated by BIT-IDENT
    carries (`FV3HydrostaticState.tracers`); one tiled scalar-advection per tracer
    (or batched on a trailing tracer axis like the serial `_q_packed`). Parity vs
    serial packed tracer tendency.
-3. **Kessler per-tile in the step.** Apply `make_kessler_forcing_cube(dt)` column
-   physics INSIDE the tiled step (post-dynamics, pre/post-RK stage as in the serial
-   path) — column-local, no halo, so it runs SPMD-local on each tile shard exactly
-   like the replicated path's `step_with_physics`. Parity: tiled moist step ==
-   serial moist step.
+   **DONE (commits 155ff92a5 increment-1 + 30fbb3cd3 increment-2; gates 8532495 /
+   8532505 PASS).** Single-tracer + packed q_v/q_c/q_r tiled advection in
+   `tiled_production_cdgrid.py`; np24 bit-identity vs serial
+   `advective_tracer_tendency`; thermo refactored onto the shared helper
+   (bit-identical, no regression).
+3. **Kessler per-tile (combined moist tracer tendency).** Add the warm-rain tracer
+   tendencies to the increment-2 advection.  ARCHITECTURE FINDING (scout
+   2026-06-20): kessler is pointwise (no halo, `mesh` unused), BUT the public
+   state-based closures (`make_kessler_forcing_cube`/`_gridspace`) flatten with
+   `reshape(-1, nlev)` over the horizontal axes — that **breaks under tile
+   sharding** (a reshape across a sharded axis). So the COLUMN core must run
+   per-tile INSIDE the shard_map (each tile reshapes only its OWN local columns).
+   That core is `_kessler_column_tendencies` (atmosphere, `_`-private); core
+   cannot import atmosphere. CLEAN FIX (dependency injection, keeps core
+   physics-agnostic): (a) PROMOTE `_kessler_column_tendencies` ->
+   `kessler_column_tendencies` (public, + update its 3 internal callers); (b) core
+   `make_tiled_fv3_moist_tracer_tendency_stage_2d(mesh, cdgrid, n, kt, nlev, *,
+   column_tracer_physics_fn)` = increment-2 advection + an INJECTED per-tile
+   `column_tracer_physics_fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t) -> (dq_v, dq_c,
+   dq_r)` (built by the caller/test from `kessler_column_tendencies` with
+   sigma_coord/dt/cfg closed over).  Serial reference (parity): the dynamics add
+   is `_dtracers[k] += physics_tendency_cc.tracer_tendencies[k]`
+   (primitive_eq_cdgrid.py:1195) so total = advection + kessler tracer rates.
+   sigma-only (kessler raises on hybrid).  Gate: tiled combined dq_pack == serial
+   (advective_tracer_tendency + kessler) at np24 bit-identity.
 4. **Full moist tiled step.** `make_tiled_fv3_hydrostatic_moist_step_stage_2d` →
    `step(u_d, v_d, T, p_s, phis, tracers) -> (..., tracers)` + post-step tracer
    floor. np24/54 bit-identity gate `test_tiled_fv3_hydrostatic_moist_step.py`.
