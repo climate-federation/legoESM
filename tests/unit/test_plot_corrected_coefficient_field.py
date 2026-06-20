@@ -36,6 +36,41 @@ def test_plot_corrected_coefficient_field_2d_single(tmp_path):
     assert png.exists() and png.stat().st_size > 0
 
 
+def test_plot_corrected_coefficient_field_imshow_orientation_is_row_major(tmp_path, monkeypatch):
+    """The per-column field → grid reshape MUST be row-major (C-order), matching the
+    manifest's ``flat_index = row*nlon + col``, so the spatial map shows each
+    correction at its TRUE cell.  A transpose / F-order reshape would garble the map
+    — the operator would read corrections at the wrong columns — and the PNG-exists
+    test could NOT catch it.  Spy on ``Axes.imshow`` to lock the array a single
+    distinctive value lands in: flat index 19 on an 8×16 grid ⇒ cell (1, 3)."""
+    import matplotlib.axes
+    import numpy as np
+
+    from scripts.plot.plot_corrected_coefficient_field import (
+        plot_corrected_coefficient_field,
+    )
+
+    captured = {}
+    real_imshow = matplotlib.axes.Axes.imshow
+
+    def spy_imshow(self, data, *a, **k):
+        captured["arr"] = np.asarray(data, dtype=float)
+        return real_imshow(self, data, *a, **k)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "imshow", spy_imshow)
+    field = [0.0] * 128
+    field[19] = 9.9                                      # flat 19 ⇒ (row 1, col 3) on 8×16
+    out = {"C_K": field, "grid": {"shape_2d": [8, 16], "grid_type": "latlon"}}
+    plot_corrected_coefficient_field(out, str(tmp_path / "c.png"))
+
+    arr2d = captured["arr"]
+    assert arr2d.shape == (8, 16)
+    assert abs(float(arr2d[1, 3]) - 9.9) < 1e-9          # C-order: flat 19 = 1*16 + 3
+    others = arr2d.copy()
+    others[1, 3] = 0.0
+    assert np.allclose(others, 0.0)                      # the value is at (1,3) and NOWHERE else
+
+
 def test_plot_corrected_coefficient_field_multi_and_non2d(tmp_path):
     """A multi-coefficient output on a NON-2-D (cubed-sphere (6,4,4)) grid renders one
     per-column-line panel per coefficient — the imshow fallback, no crash."""
