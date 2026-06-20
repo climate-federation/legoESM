@@ -70,6 +70,35 @@ def test_run_to_column_mean_is_time_mean():
     np.testing.assert_allclose(np.asarray(mean.sst_K), 293.0, rtol=1e-12)
 
 
+def test_run_to_column_mean_samples_the_outer_driver_not_the_callback_arg():
+    """The extractor MUST read the OUTER (closed-over) driver, NOT the object the driver
+    passes as the callback's first arg.  This is load-bearing for CMIP: the outer COUPLED
+    driver carries ``ocean_state`` (the prognostic SST), but a wrapper driver could pass an
+    atm SUB-driver to the callback — which lacks the ocean.  Lock it non-vacuously: a driver
+    that passes a WRONG sentinel as the callback's first arg must STILL be sampled via the
+    outer reference (so ``cmip_column_state`` reaches the real ocean_state)."""
+    sentinel = object()
+
+    class _PassesWrongArg(_FakeDriver):
+        def run(self, segment_callback, **kwargs):
+            self.run_kwargs = kwargs
+            for k in range(len(self.states)):
+                self.i = k
+                segment_callback(sentinel, float(k), 1.0)   # WRONG first arg (not self)
+            return "OK"
+
+    driver = _PassesWrongArg([_state(0.0), _state(6.0)])    # outer-driver mean scale = 3
+    seen = []
+
+    def extract(d, day, dt):  # noqa: ARG001
+        seen.append(d)
+        return d.states[d.i]                                # sentinel has no .states → would raise
+
+    mean = run_to_column_mean(driver, extract)
+    assert seen and all(d is driver for d in seen)          # always the OUTER driver
+    np.testing.assert_allclose(np.asarray(mean.T), 283.0, rtol=1e-12)  # mean(280, 286)
+
+
 def test_run_to_column_mean_forwards_run_kwargs():
     driver = _FakeDriver([_state(1.0)])
     run_to_column_mean(driver, _extract, run_kwargs={"start_day": 7.0})
