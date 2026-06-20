@@ -59,10 +59,15 @@ class SilvestriJetConfig(NamedTuple):
     # White-noise kick on T to seed the instability [K].
     noise_amplitude_K: float = 1.0e-3
     noise_seed: int = 0
-    # GH #480: rate [1/s] of the N/S free-slip-wall grid-mode filter (see
-    # LatLonCGridOceanConfig.wall_grid_filter_rate_s). Default 5e-4 lets W9V/W9D
-    # run with NO closure; set 0.0 to reproduce the day-11 blow-up.
-    wall_grid_filter_rate_s: float = 5.0e-4
+    # GH #480: the day-11 eddy-permitting blow-up is now cured at the ROOT by
+    # the faithful tracer-wall Neumann fill (LatLonCGridOceanConfig.
+    # tracer_wall_neumann_fill, default ON) — the masked-land cold cell (T=0)
+    # was contaminating the wide WENO tracer stencil at the free-slip walls and
+    # manufacturing a spurious near-wall front (matched to the Oceananigans
+    # oracle: v→buoyancy wall gain 68×→1.2×).  W9V/W9D now survive §5 with NO
+    # closure and NO wall filter.  The wall Shapiro filter below is retained as
+    # an optional belt-and-braces knob but defaults OFF (0.0).
+    wall_grid_filter_rate_s: float = 0.0
 
     @property
     def Delta_phi_rad(self) -> float:
