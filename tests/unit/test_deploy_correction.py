@@ -390,6 +390,20 @@ def test_columns_gather_matches_explicit_indices():
         np.asarray(local.clubb_lite.C_K), np.asarray(ov.clubb_lite.C_K)[[0, 5, 10, 15]])
 
 
+def test_columns_gather_empty_rank_is_clean_zero_column_slice():
+    """codex-review iter 404: a ZERO-column rank (more MPI ranks than cells, or a
+    custom/unstructured decomposition) must slice to an empty per-column override —
+    NOT crash on ``idx.min()`` over a size-0 array (an opaque 'zero-size reduction'
+    JAX error before the fix).  ``jnp.take`` with a size-0 index is well-defined."""
+    ov = _global_override(16)
+    local = slice_override_columns(ov, jnp.asarray([], dtype=jnp.int32))
+    assert np.asarray(local.clubb_lite.C_K).shape == (0,)
+    assert local.scheme == "clubb_lite"
+    # Out-of-range is STILL caught for a non-empty index (the guard only skips empty).
+    with pytest.raises(ValueError, match="out of range"):
+        slice_override_columns(ov, jnp.array([0, 99]))
+
+
 def test_columns_gather_is_ad_safe():
     # The override may be a TRAINED leaf — the slice must be differentiable, with
     # the gradient landing on the gathered global positions.

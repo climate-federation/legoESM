@@ -347,7 +347,12 @@ def slice_override_columns(override, local_column_indices):
     if not jnp.issubdtype(idx.dtype, jnp.integer):
         raise ValueError(
             f"local_column_indices must be integer; got dtype {idx.dtype}.")
-    if per_column:
+    if per_column and idx.shape[0] > 0:
+        # Bounds-check only a NON-empty index set: a zero-column rank (more ranks than
+        # cells, or a custom/unstructured decomposition) is valid — jnp.take with a
+        # size-0 index yields a clean size-0 field. min()/max() on an empty array would
+        # otherwise raise an OPAQUE "zero-size reduction" instead of slicing cleanly
+        # (codex-review iter 404).
         ncol = int(next(iter(per_column.values())).shape[0])
         lo, hi = int(idx.min()), int(idx.max())
         if lo < 0 or hi >= ncol:
