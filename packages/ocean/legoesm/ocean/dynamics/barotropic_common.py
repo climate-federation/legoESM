@@ -107,6 +107,58 @@ def maxvel_clip(field: jnp.ndarray, maxvel: float | jnp.ndarray) -> jnp.ndarray:
     return jnp.clip(field, -maxvel, maxvel)
 
 
+def coriolis_at_faces(grid, dtype) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Coriolis parameter at C-grid u-/v-faces ``(f_u, f_v)``.
+
+    Single source of truth for the semi-implicit Coriolis face values that
+    the lat-lon C-grid barotropic solvers (explicit + implicit) and the
+    full PE step each reconstructed with a byte-identical inline block
+    (#517).  Behaviour, in preference order:
+
+    1. **Stored metrics (the shipping path).** If the geometry carries
+       pre-computed ``grid.f_u`` (shape ``(n_lat, n_lon+1)``) and
+       ``grid.f_v`` (``(n_lat+1, n_lon)``) — every ``LatLonCGridGeometry``,
+       including tripolar — return those cast to ``dtype``.  Bit-identical
+       to the previous inline ``hasattr(grid, "f_u")`` branch.
+    2. **Reconstruct from cell-centre ``grid.f``** (lean ``LatLonGrid``,
+       which lacks face metrics): average adjacent cells onto the faces.
+       Bit-identical to the previous inline ``else`` branch.
+
+    Fold safety (the latent bug this dedup closes): the reconstruction in
+    (2) is NOT tripolar-fold-aware — it averages cell-centre ``f`` without
+    the fold's ``vector_sign_v`` flip on the north v-row, so on a folded
+    grid it would yield wrong vorticity at the seam.  Real folded grids
+    always take path (1) (they store ``f_u/f_v``).  Should a folded grid
+    ever reach (2) without stored face metrics, RAISE rather than silently
+    mis-reconstruct (dispatch-hardening: a latent silent-wrong-answer
+    becomes a loud error; no shipping path changes).
+
+    Operator-package-free: the fold check reads ``grid.fold.is_active``
+    directly (mirrors ``operators_latlon_cgrid.is_tripolar``) so this
+    module keeps its no-operator-import contract.
+    """
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        return grid.f_u.astype(dtype), grid.f_v.astype(dtype)
+
+    fold = getattr(grid, "fold", None)
+    if fold is not None and bool(getattr(fold, "is_active", False)):
+        raise ValueError(
+            "coriolis_at_faces: tripolar/folded grid is missing stored "
+            "f_u/f_v. The reconstruct-from-grid.f fallback is not "
+            "fold-aware (no vector_sign_v flip on the north v-row) and "
+            "would produce wrong vorticity at the fold seam. Populate "
+            "grid.f_u/grid.f_v (LatLonCGridGeometry does this) instead of "
+            "passing a bare fold-less grid."
+        )
+
+    f_cell = grid.f.astype(dtype)
+    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+    f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    return f_u, f_v
+
+
 # ---------------------------------------------------------------------
 # Distributed implicit Helmholtz solve (shared lat-lon C-grid + MPAS)
 # ---------------------------------------------------------------------

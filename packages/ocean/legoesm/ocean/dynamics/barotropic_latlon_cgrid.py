@@ -37,6 +37,7 @@ from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_re
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    coriolis_at_faces,
     maxvel_clip,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
@@ -176,16 +177,9 @@ def barotropic_substeps_latlon_cgrid(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
     )
 
-    # Semi-implicit Coriolis parameter at face points
-    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
-        f_u = grid.f_u.astype(eta.dtype)
-        f_v = grid.f_v.astype(eta.dtype)
-    else:
-        f_cell = grid.f.astype(eta.dtype)
-        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-        f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    # Semi-implicit Coriolis parameter at face points (#517: shared helper,
+    # prefers stored grid.f_u/f_v, fold-safe).
+    f_u, f_v = coriolis_at_faces(grid, eta.dtype)
 
     # Barotropic diffusion — flux-form with face-centered coefficient.
     # Using div(nu_face * grad(eta)) instead of nu_cell * div(grad(eta))

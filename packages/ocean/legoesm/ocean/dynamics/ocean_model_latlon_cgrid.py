@@ -561,18 +561,9 @@ def _forward_backward_coriolis_3d(
     u_prime = (u - U_bar[..., jnp.newaxis]) * u_mask_3d
     v_prime = (v - V_bar[..., jnp.newaxis]) * v_mask_3d
 
-    # --- Coriolis parameter at face points ---
-    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
-        f_u = grid.f_u.astype(u.dtype)  # (n_lat, n_lon+1)
-        f_v = grid.f_v.astype(u.dtype)  # (n_lat+1, n_lon)
-    else:
-        f_cell = grid.f.astype(u.dtype)
-        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-        f_v = jnp.concatenate(
-            [f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0,
-        )
+    # --- Coriolis parameter at face points (#517: shared fold-safe helper) ---
+    from legoesm.ocean.dynamics.barotropic_common import coriolis_at_faces
+    f_u, f_v = coriolis_at_faces(grid, u.dtype)  # (n_lat, n_lon+1), (n_lat+1, n_lon)
 
     # --- Forward step: update u' using old v' ---
     # Average v' to u-points (Sadourny 4-point average)

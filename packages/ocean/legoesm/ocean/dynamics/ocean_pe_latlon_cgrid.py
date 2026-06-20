@@ -122,6 +122,14 @@ from legoesm.ocean.vertical import (
 VALID_MOMENTUM_ADVECTION = frozenset(
     {"vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
 )
+# Tracer-advection literals (config.tracer_advection).  Single source for the
+# fail-fast membership check in LatLonCGridOceanModel._validate_config; mirrors
+# the flux-form tendency dispatch (its else-raise) plus the SOM special case
+# handled in step().  Keep in sync if a tracer scheme is added.
+VALID_TRACER_ADVECTION = frozenset(
+    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
+     "dst3", "dst3_multidim", "weno5", "weno7", "som"}
+)
 # WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
 # vorticity-flux Z and divergence-flux D use this order; vertical C is capped
 # at WENO5 for order 9 (paper Table 2: C is WENO5 in W9V, "minimal impact").
