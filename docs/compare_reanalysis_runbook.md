@@ -83,7 +83,9 @@ total.
 > under the `gray` default — same coupled driver + 0.25° ERA5 ingest — completes interactively).
 > The `gray` default is interactive-quick but always reports NO-GO (idealization-dominated), so
 > it only confirms "do not run the loop under gray"; the **realistic** go/no-go needs rrtmgp on a
-> compute node.
+> compute node. The turnkey wrapper `scripts/cluster/compare_reanalysis/preflight_ck_sensitivity.sbatch`
+> runs it as a batch job and exits with the go/no-go code, so the campaign launch can be a
+> dependency: `jid=$(sbatch --parsable preflight_ck_sensitivity.sbatch); sbatch --dependency=afterok:$jid run_correction_campaign.sbatch`.
 
 ## 2. Launch the campaign (resumable, self-requeuing)
 

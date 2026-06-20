@@ -254,23 +254,10 @@ def _preflight_exit_code(go: bool) -> int:
     return 0 if go else 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the C_K-sensitivity feasibility check against a local ERA5 archive."""
+def _build_arg_parser():
+    """The CLI parser as a factory so the cluster sbatch ↔ CLI flag contract is testable
+    (mirrors ``run_correction_campaign._build_arg_parser``)."""
     import argparse
-
-    import jax.numpy as jnp
-    from legoesm.training.compare_reanalysis import (
-        column_state_from_carry,
-        compare_state_to_reference,
-    )
-    from legoesm.training.era5_to_state import (
-        WB2_PRESSURE_LEVELS,
-        TrainingERA5Config,
-        era5_to_latlon_carry,
-        load_era5_time_mean,
-    )
-
-    from scripts.data.load_local_era5 import open_local_era5_dataset
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--local-era5-dir", required=True)
@@ -288,7 +275,26 @@ def main(argv: list[str] | None = None) -> int:
                         "fraction vs run length (equilibration-limited vs idealization-"
                         "limited) instead of the single-run report")
     p.add_argument("--era5-n-times", type=int, default=4)
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the C_K-sensitivity feasibility check against a local ERA5 archive."""
+    import jax.numpy as jnp
+    from legoesm.training.compare_reanalysis import (
+        column_state_from_carry,
+        compare_state_to_reference,
+    )
+    from legoesm.training.era5_to_state import (
+        WB2_PRESSURE_LEVELS,
+        TrainingERA5Config,
+        era5_to_latlon_carry,
+        load_era5_time_mean,
+    )
+
+    from scripts.data.load_local_era5 import open_local_era5_dataset
+
+    args = _build_arg_parser().parse_args(argv)
 
     if args.radiation != "gray":
         # Fail-fast heads-up BEFORE the (slow) runs: rrtmgp's radiation graph is

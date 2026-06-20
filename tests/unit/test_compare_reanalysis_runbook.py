@@ -141,6 +141,28 @@ def test_campaign_sbatch_flags_are_valid_cli_options():
         "renamed/removed CLI option would break the production launch at argparse.")
 
 
+def test_preflight_sbatch_flags_are_valid_cli_options():
+    """The REALISTIC-pre-flight SLURM wrapper (iter 443: rrtmgp is compute-node-only) passes
+    ck_sensitivity-CLI flags; a renamed/removed CLI option would break the batch pre-flight at
+    argparse. Lock the sbatch↔CLI contract (mirrors the campaign test). #SBATCH directives +
+    comment examples (--days-sweep, sbatch --dependency) are excluded (they start with #)."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import _build_arg_parser as _ck_parser
+
+    sbatch = _REPO / "scripts/cluster/compare_reanalysis/preflight_ck_sensitivity.sbatch"
+    assert sbatch.is_file(), f"missing pre-flight launcher at {sbatch}"
+    flags: set[str] = set()
+    for line in sbatch.read_text().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        flags.update(_FLAG_RE.findall(line))
+    assert flags, "no flags parsed from the pre-flight sbatch (regex/file broken?)"
+    valid = {opt for action in _ck_parser()._actions for opt in action.option_strings}
+    unknown = sorted(f for f in flags if f not in valid)
+    assert not unknown, (
+        f"the pre-flight sbatch passes flag(s) the ck_sensitivity CLI does not define: "
+        f"{unknown} — a renamed/removed option would break the batch pre-flight at argparse.")
+
+
 # Detect a top-level OR function-scope ``from scripts.* import`` / ``import scripts.*``.
 _IMPORTS_SCRIPTS_RE = re.compile(r"^\s*(?:from\s+scripts[.\s]|import\s+scripts\b)", re.M)
 
