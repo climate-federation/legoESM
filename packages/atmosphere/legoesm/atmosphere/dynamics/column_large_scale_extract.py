@@ -319,9 +319,11 @@ def extract_column_forcing_latlon(
     tendencies — ready for
     :func:`~legoesm.atmosphere.column_forcing.build_column_scm_forcing`.
 
-    Pure pressures use a sigma coordinate (``p = σ·p_s``); ``ω`` and the
-    advective tendencies are diagnosed on the FULL grid (so the metric-correct
-    stencils see the neighbourhood) and then the single column is gathered.
+    Pressures use the model's coordinate (``sigma_coord.pressure_at_full`` — hybrid
+    correct, iter 341/348; ``== σ·p_s`` for a pure-sigma coordinate); ``ω`` (via the
+    coordinate-aware :func:`omega_from_divergence`) and the advective tendencies are
+    diagnosed on the FULL grid (so the metric-correct stencils see the neighbourhood)
+    and then the single column is gathered.
     """
     T = jnp.asarray(T)
     q_v = jnp.asarray(q_v, dtype=T.dtype)

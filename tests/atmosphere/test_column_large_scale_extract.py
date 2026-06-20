@@ -167,6 +167,57 @@ def test_extract_uniform_state_zero_forcing():
     np.testing.assert_allclose(np.asarray(ls.omega), 0.0, atol=1e-8)
 
 
+def test_extract_latlon_threads_hybrid_coord_to_omega_over_terrain():
+    """END-TO-END (iter 348): the latlon extractor must thread a HYBRID coordinate all the
+    way to ``omega_from_divergence`` so the column's large-scale ω over terrain uses the
+    hybrid continuity — not silently re-default to pure-sigma.  A non-uniform wind (nonzero
+    divergence) + a 700-hPa terrain ``p_s`` + a hybrid coordinate ⇒ the extracted ω must
+    EQUAL the direct hybrid ω computed on the extractor's OWN divergence operator
+    (:func:`_divergence_latlon_3d`), gathered at the column.  Non-vacuity: that hybrid ω
+    differs materially (>10%) from the pure-sigma ω the pre-fix extractor produced.
+    """
+    from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+        _divergence_latlon_3d,
+    )
+    from legoesm.grids.vertical import (
+        compute_pressure_velocity,
+        compute_sigma_dot_and_total,
+        make_hybrid_levels,
+    )
+
+    n_lat, n_lon, nlev = 8, 16, 10
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    hc = make_hybrid_levels(nlev, p_top_Pa=100.0)
+    # Longitude-varying zonal wind ⇒ nonzero horizontal divergence ⇒ nonzero ω.
+    lon = jnp.linspace(0.0, 2.0 * jnp.pi, n_lon, endpoint=False)[None, :, None]
+    u = (10.0 + 5.0 * jnp.sin(lon)) * jnp.ones((n_lat, n_lon, nlev))
+    v = jnp.zeros((n_lat, n_lon, nlev))
+    T = jnp.full((n_lat, n_lon, nlev), 280.0)
+    q_v = jnp.full((n_lat, n_lon, nlev), 5e-3)
+    p_s = jnp.full((n_lat, n_lon), 7.0e4)            # terrain (p_s != p_ref)
+    col = (4, 8)
+    ls = extract_column_forcing_latlon(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma_coord=hc,
+        lat_rad=float(jnp.deg2rad(20.0)), col_index=col,
+    )
+    assert bool(jnp.all(jnp.isfinite(ls.omega)))
+    assert float(jnp.max(jnp.abs(ls.omega))) > 0.0   # genuinely nonzero subsidence
+
+    # (1) The extracted ω equals the direct HYBRID ω on the extractor's own divergence.
+    div_3d = _divergence_latlon_3d(u, v, grid)
+    omega_hybrid = omega_from_divergence(div_3d, p_s, hc)[col]
+    np.testing.assert_allclose(np.asarray(ls.omega), np.asarray(omega_hybrid), rtol=1e-12)
+
+    # (2) NON-VACUITY: that differs materially from the pure-sigma ω (the pre-iter-348
+    #     value), so the hybrid coordinate genuinely changed the answer end-to-end.
+    sigma_dot, d_total = compute_sigma_dot_and_total(div_3d, hc)
+    dp_s_dt_sig = -p_s * d_total[..., 0] / (1.0 - jnp.asarray(hc.sigma_half[0]))
+    omega_sigma = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_sig, hc)[col]
+    rel = float(jnp.max(jnp.abs(omega_hybrid - omega_sigma))
+                / jnp.max(jnp.abs(omega_sigma)))
+    assert rel > 0.1, f"hybrid vs pure-sigma column ω differ by only {rel:.1%} over terrain"
+
+
 def test_extract_latlon_is_surface_flux_free():
     """The latlon extractor produces NO surface boundary condition (prescribe='none',
     no T_s / w_th_s / w_qv_s) — matching the cubed-sphere lock and iter-148's
