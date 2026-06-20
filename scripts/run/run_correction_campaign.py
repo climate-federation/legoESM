@@ -917,6 +917,26 @@ def _offline_forcing_window_warning(days, *, span_days=_OFFLINE_FORCING_SPAN_DAY
             "(keeps SST + insolation aligned), or build a multi-month forcing.")
 
 
+def _offline_reference_window_warning(days, era5_n_times) -> str | None:
+    """Warn when the OFFLINE ERA5 reference window is much SHORTER than the model climatology
+    window (iter 463) — the un-automated half of runbook §3's "match the windows". The offline
+    times are hourly, so the reference spans ``era5_n_times/24`` days; comparing a short
+    reference (the default ``--era5-n-times 1`` = one hour) to a multi-day model time-mean
+    compares WEATHER to CLIMATE — a spurious bias the loop would then "correct". Silent for a
+    short test (``days < _SPINUP_WARN_DAYS``) or when the reference covers >= half the model
+    window (close enough)."""
+    if not days or int(days) < _SPINUP_WARN_DAYS:
+        return None
+    ref_days = float(era5_n_times) / 24.0
+    if ref_days >= 0.5 * float(days):
+        return None
+    return (f"[campaign] NOTE: the offline ERA5 reference averages {int(era5_n_times)} hourly "
+            f"time(s) (~{ref_days:.1f} day(s)) but the model climatology window is {int(days)} "
+            "days — a short reference vs a multi-day model mean compares WEATHER to CLIMATE "
+            f"(runbook §3). Raise --era5-n-times toward ~{24 * int(days)} (with --era5-n-days "
+            f">= {int(days)}) so the reference spans the model window.")
+
+
 # Months seasonally FAR from the model's JANUARY-based insolation (cfg.start_day defaults to 0,
 # so day_to_calendar(0)=Jan 1) — the solar declination differs most across Apr–Sep, so a
 # non-January offline ERA5 window mismatches the insolation season (iter 447, the deferred gap).
@@ -976,10 +996,16 @@ def _build_run_setup(args):
         _offline_forcing_window_warning(getattr(base_cfg, "days", 0),
                                         span_days=_n_months * _OFFLINE_FORCING_SPAN_DAYS)
         if getattr(args, "amip_forcing_from_local_era5", False) else None)
+    # The reference-window check only applies to the OFFLINE (hourly) reference path.
+    _ref_window_note = (
+        _offline_reference_window_warning(getattr(base_cfg, "days", 0),
+                                          int(getattr(args, "era5_n_times", 1) or 1))
+        if getattr(args, "local_era5_dir", None) else None)
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
                   _insolation_season_note(_insol_date),
-                  _offline_forcing_note):
+                  _offline_forcing_note,
+                  _ref_window_note):
         if _note:
             print(_note, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(

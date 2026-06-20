@@ -246,8 +246,10 @@ averaging window.
 > most that one day — a single-day reference vs a multi-day model climatology is still
 > weather-vs-climate. For a multi-day offline climatology set `--era5-n-days D` (loads D consecutive
 > days from `--local-era5-date`, ~24·D times; concatenated) and `--era5-n-times` up to `24·D`. The
-> campaign fails loud if `--era5-time-idx + --era5-n-times` exceeds the loaded coverage. (Zarr
-> `--era5-zarr` already spans times, so `--era5-n-days` is offline-only.)
+> campaign fails loud if `--era5-time-idx + --era5-n-times` exceeds the loaded coverage, **and
+> prints a NOTE (iter 463) when the offline reference window (`era5_n_times/24` days) is much
+> shorter than the model `days`** — so the default `--era5-n-times 1` against a multi-day run is
+> caught at launch. (Zarr `--era5-zarr` already spans times, so `--era5-n-days` is offline-only.)
 
 ## 4. Preflight the DEPLOY (seconds, no model run)
 

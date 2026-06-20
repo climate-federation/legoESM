@@ -3352,6 +3352,21 @@ def test_offline_forcing_window_warning_fires_when_run_exceeds_one_month():
     assert _offline_forcing_window_warning(_OFFLINE_FORCING_SPAN_DAYS + 1) is not None
 
 
+def test_offline_reference_window_warning_fires_for_short_reference_vs_long_model():
+    """A SHORT offline ERA5 reference vs a multi-day model climatology warns about
+    weather-vs-climate (iter 463); a well-matched window or a short test run is silent. The
+    AMIP default (days=200, --era5-n-times 1) trips it."""
+    from scripts.run.run_correction_campaign import _offline_reference_window_warning
+
+    w = _offline_reference_window_warning(200, 1)          # default snapshot vs 200-day mean
+    assert w is not None and "WEATHER to CLIMATE" in w
+    assert _offline_reference_window_warning(30, 24) is not None     # 1 day vs 30-day model
+    assert _offline_reference_window_warning(30, 720) is None        # 30 days hourly → matched
+    assert _offline_reference_window_warning(30, 360) is None        # >= half the window → silent
+    assert _offline_reference_window_warning(3, 1) is None           # short test → silent
+    assert _offline_reference_window_warning(None, 1) is None        # unknown → silent
+
+
 def test_insolation_season_note_warns_off_season_offline_date():
     """An off-season (Apr–Sep) OFFLINE ERA5 date warns about the model's January-based insolation
     mismatch and surfaces BOTH fixes: the exact ``insolation_start_doy=<doy>`` (iter 449) and the
