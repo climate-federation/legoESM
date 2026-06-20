@@ -160,6 +160,59 @@ def test_prt_diagnosis_inverts_the_real_clubb_lite_forward():
         rtol=1e-6)
 
 
+def test_ceps_dissipation_form_and_production_scaling_match_real_clubb_lite_forward():
+    """Real-forward lock for the C_eps diagnosis PREMISE, without duplicating clubb_lite's
+    inline S²/N² numerics (which would violate the no-duplicate-numerics rule).
+
+    The ``c_eps_from_budget`` diagnosis inverts clubb_lite's wp2 DISSIPATION rate
+    ``diss = C_eps·√wp2/ℓ`` (giving the equilibrium ``C_eps = P·ℓ/wp2^{3/2}``).  With a
+    UNIFORM wp2 the wp2 vertical diffusion is zero (no gradient), so the semi-implicit
+    update is the LOCAL balance ``wp2_new = (wp2_0 + dt·P)/(1 + dt·diss)`` (same ``wp2_0``
+    and the SAME production ``P`` for any C_eps — P depends on the fixed u/v/T, not C_eps).
+    Running C_eps=0 gives ``wp2_p = wp2_0 + dt·P``; C_eps=c gives ``wp2_c = wp2_p/(1+dt·diss_c)``
+    ⇒ ``diss_c = (wp2_p/wp2_c − 1)/dt`` is EXTRACTED from two REAL forward runs (S²/N²
+    cancel) and MUST equal ``c·√wp2_0/ℓ`` (ℓ = the SAME ``mixing_length`` the forward + the
+    diagnosis use).  This catches a future edit to clubb_lite's dissipation form that the
+    analytic-equilibrium diagnosis test (which shares the formula) cannot.  Also locks
+    production ∝ Km ∝ C_K (doubling C_K doubles the extracted P).  Neutral (constant-θ)
+    sheared column ⇒ N²=0 ⇒ ``P = Km·S² > 0`` (no wp2-floor clamp)."""
+    from legoesm.atmosphere.physics._shared import mixing_length
+
+    ncol, nlev = 2, 10
+    cfg = CLUBBLiteConfig()
+    z_half = jnp.asarray(np.tile(np.linspace(3000.0, 0.0, nlev + 1), (ncol, 1)))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    p_half = jnp.asarray(np.tile(np.linspace(7.0e4, 1.0e5, nlev + 1), (ncol, 1)))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    exner = (p_full / constants.p_ref) ** constants.kappa
+    T = jnp.asarray(290.0 * exner)                       # constant θ ⇒ N²=0  # noqa: N806
+    u = jnp.asarray(np.tile(np.linspace(20.0, 0.0, nlev), (ncol, 1)))   # linear shear
+    v = jnp.zeros((ncol, nlev))
+    q_v = jnp.full((ncol, nlev), 1e-3)
+    rho = jnp.asarray(p_full) / (constants.R_d * T)
+    wp2_0 = 0.5
+    kw = dict(u=u, v=v, T=T, q_v=q_v, tke=jnp.full((ncol, nlev), wp2_0),
+              p_full=jnp.asarray(p_full), p_half=p_half, z_full=z_full, z_half=z_half,
+              T_sfc=T[:, -1], q_sfc=q_v[:, -1], rho=rho, dt=200.0)
+    dt = kw["dt"]
+
+    _, wp2_p = clubb_lite_turbulence(**kw, config=cfg._replace(C_eps=0.0))   # pure production
+    c = 0.4
+    _, wp2_c = clubb_lite_turbulence(**kw, config=cfg._replace(C_eps=c))     # + dissipation
+    assert bool(jnp.all(wp2_p > cfg.tke_min)) and bool(jnp.all(wp2_c > cfg.tke_min))
+
+    diss_extracted = (wp2_p / wp2_c - 1.0) / dt
+    l_mix_safe = jnp.clip(mixing_length(z_full, cfg.l_mix_max), 1.0, None)
+    diss_form = c * jnp.sqrt(wp2_0) / l_mix_safe                              # C_eps·√wp2/ℓ
+    np.testing.assert_allclose(np.asarray(diss_extracted), np.asarray(diss_form), rtol=1e-9)
+
+    # Production ∝ Km ∝ C_K (uniform wp2 ⇒ no transport ⇒ P = (wp2_p − wp2_0)/dt).
+    P1 = (wp2_p - wp2_0) / dt                                                 # noqa: N806
+    _, wp2_p2 = clubb_lite_turbulence(**kw, config=cfg._replace(C_eps=0.0, C_K=2.0 * cfg.C_K))
+    P2 = (wp2_p2 - wp2_0) / dt                                                # noqa: N806
+    np.testing.assert_allclose(np.asarray(P2), 2.0 * np.asarray(P1), rtol=1e-9)
+
+
 def test_promotion_registered_and_applies():
     """C_K is registered promotable and apply_feedback_to_scheme splices it."""
     from legoesm.training.promotable_params import (
