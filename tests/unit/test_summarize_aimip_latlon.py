@@ -44,7 +44,7 @@ def test_failed_variant_does_not_crash(tmp_path):
     p = tmp_path / "aimip_latlon_scorecard.json"
     p.write_text(json.dumps(sc))
     md = mod.summarize_run(p)
-    assert "sfno (FAILED)" in md
+    assert "`sfno` (FAILED)" in md
     assert "Best family: `classical`" in md
 
 
@@ -65,6 +65,50 @@ def test_sweep_empty_root(tmp_path):
     mod = _load_mod()
     md = mod.summarize_sweep(tmp_path)
     assert "No combo scorecards found" in md
+
+
+def test_all_failed_is_not_rankable(tmp_path):
+    mod = _load_mod()
+    sc = {"classical": {"variant": "classical", "error": "x"},
+          "sfno": {"variant": "sfno", "error": "y"}}
+    p = tmp_path / "aimip_latlon_scorecard.json"
+    p.write_text(json.dumps(sc))
+    md = mod.summarize_run(p)
+    assert "No rankable family" in md
+    assert "**★**" not in md  # no row marked best (legend has a bare ★)
+
+
+def test_nan_metric_not_selected_as_best(tmp_path):
+    mod = _load_mod()
+    nan_block = _block(1.0)
+    nan_block["eval_metrics"]["T"]["rmse"] = float("nan")
+    nan_block["eval_metrics"]["olr"]["rmse"] = float("nan")
+    sc = {"good": _block(5.0), "nanmodel": nan_block}
+    p = tmp_path / "aimip_latlon_scorecard.json"
+    p.write_text(json.dumps(sc))
+    md = mod.summarize_run(p)
+    # nanmodel still has other finite metrics in each group, so it is
+    # rankable; but its composite must be a real number, never NaN, and the
+    # best must be a finite-scored entry.
+    scores = mod._composite_scores(
+        {k: v for k, v in json.loads(p.read_text()).items()})
+    import math
+    assert all(not math.isnan(s) for s in scores.values())
+    assert mod._best(scores) is not None
+
+
+def test_missing_flux_group_not_rankable(tmp_path):
+    mod = _load_mod()
+    no_flux = _block(1.0)
+    for k in ("rsut", "olr", "sfc_net_sw", "sfc_net_lw"):
+        del no_flux["eval_metrics"][k]
+    sc = {"stateonly": no_flux}
+    p = tmp_path / "aimip_latlon_scorecard.json"
+    p.write_text(json.dumps(sc))
+    scores = mod._composite_scores({"stateonly": no_flux})
+    import math
+    assert math.isinf(scores["stateonly"])  # both groups required
+    assert "No rankable family" in mod.summarize_run(p)
 
 
 if __name__ == "__main__":

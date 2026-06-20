@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -44,43 +45,60 @@ def _load_scorecard(path: Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def _finite(x) -> bool:
+    """True only for a real, finite number (rejects None / NaN / inf)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) \
+        and math.isfinite(x)
+
+
 def _rmse(entry: dict, key: str):
-    """RMSE for metric ``key`` from a variant/combo eval block, or None."""
-    em = entry.get("eval_metrics", {})
-    m = em.get(key)
-    return None if m is None else m.get("rmse")
+    """Finite RMSE for metric ``key``, or None (None/NaN/inf -> None)."""
+    m = entry.get("eval_metrics", {}).get(key)
+    if not isinstance(m, dict):
+        return None
+    v = m.get("rmse")
+    return v if _finite(v) else None
 
 
 def _composite_scores(entries: dict[str, dict]) -> dict[str, float]:
     """Median-normalized composite skill per entry (lower = better).
 
-    ``entries`` maps label -> scorecard variant/combo block.  Missing or
-    errored entries (no eval_metrics) get ``inf``.
+    ``entries`` maps label -> scorecard variant/combo block.  The score is
+    the 50/50 mean of the state-group and flux-group means, each metric's
+    RMSE normalized by the positive median across entries.  A score is
+    ``inf`` unless BOTH groups have at least one finite metric — so a
+    partial/errored entry can never out-rank a complete one, and the 50/50
+    weighting is never silently renormalized to one group.
     """
-    # Median per metric across the entries that have it (the normalizer).
+    # Positive-finite median per metric (the normalizer); skip degenerate
+    # (all-None / all-zero) metrics so we never divide by zero.
     medians = {}
     for k in _ALL_KEYS:
         vals = [v for v in (_rmse(e, k) for e in entries.values())
-                if v is not None and v == v]  # drop None/NaN
+                if _finite(v) and v > 0.0]
         if vals:
-            medians[k] = statistics.median(vals) or 1.0
+            medians[k] = statistics.median(vals)
+
+    def _grp(e, keys):
+        norm = [_rmse(e, k) / medians[k]
+                for k in keys
+                if k in medians and _rmse(e, k) is not None]
+        return sum(norm) / len(norm) if norm else None
 
     scores = {}
     for label, e in entries.items():
-        if "eval_metrics" not in e:
-            scores[label] = float("inf")
-            continue
-
-        def _grp(keys):
-            norm = [_rmse(e, k) / medians[k]
-                    for k in keys
-                    if k in medians and _rmse(e, k) is not None]
-            return sum(norm) / len(norm) if norm else None
-
-        state, flux = _grp(_STATE_KEYS), _grp(_FLUX_KEYS)
-        parts = [p for p in (state, flux) if p is not None]
-        scores[label] = sum(parts) / len(parts) if parts else float("inf")
+        state, flux = _grp(e, _STATE_KEYS), _grp(e, _FLUX_KEYS)
+        if state is None or flux is None:
+            scores[label] = float("inf")   # incomplete -> not rankable
+        else:
+            scores[label] = 0.5 * state + 0.5 * flux
     return scores
+
+
+def _best(scores: dict[str, float]):
+    """Label with the lowest FINITE composite, or None if none rankable."""
+    finite = {l: s for l, s in scores.items() if math.isfinite(s)}
+    return min(finite, key=finite.get) if finite else None
 
 
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
@@ -92,7 +110,7 @@ def _md_table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _fmt(x, nd=3):
-    return "—" if x is None or x != x else f"{x:.{nd}f}"
+    return f"{x:.{nd}f}" if _finite(x) else "—"
 
 
 def summarize_run(scorecard_path: Path) -> str:
@@ -100,26 +118,24 @@ def summarize_run(scorecard_path: Path) -> str:
     sc = _load_scorecard(scorecard_path)
     variants = {k: v for k, v in sc.items() if isinstance(v, dict)}
     scores = _composite_scores(variants)
-    best = min(scores, key=scores.get) if scores else None
+    best = _best(scores)
 
     headers = ["model"] + _ALL_KEYS + ["composite"]
     rows = []
     for label in sorted(variants, key=lambda l: scores.get(l, float("inf"))):
         e = variants[label]
-        if "eval_metrics" not in e:
-            rows.append([f"{label} (FAILED)"] + ["—"] * len(_ALL_KEYS) + ["—"])
-            continue
+        failed = "eval_metrics" not in e
+        tag = " (FAILED)" if failed else ""
         cells = [_fmt(_rmse(e, k)) for k in _ALL_KEYS]
-        comp = _fmt(scores[label])
         mark = " **★**" if label == best else ""
-        rows.append([f"`{label}`{mark}"] + cells + [f"**{comp}**"])
+        rows.append([f"`{label}`{tag}{mark}"] + cells + [f"**{_fmt(scores[label])}**"])
 
     out = [f"### Model-family comparison — `{scorecard_path}`",
            "RMSE vs ERA5 (held-out); fluxes in W/m². ★ = best composite "
-           "(state+flux, median-normalized, lower is better).", "",
-           _md_table(headers, rows)]
-    if best:
-        out.append(f"\n**Best family: `{best}`** (composite {scores[best]:.3f}).")
+           "(50/50 state+flux, median-normalized; needs both groups; lower is "
+           "better).", "", _md_table(headers, rows)]
+    out.append(f"\n**Best family: `{best}`** (composite {scores[best]:.3f})."
+               if best else "\n_No rankable family (all incomplete/failed)._")
     return "\n".join(out)
 
 
@@ -141,28 +157,31 @@ def summarize_sweep(sweep_root: Path) -> str:
                 "(`<combo>/aimip_latlon_scorecard.json`)._")
 
     scores = _composite_scores(combos)
-    best = min(scores, key=scores.get)
+    best = _best(scores)
     headers = ["combo"] + _STATE_KEYS + _FLUX_KEYS + ["composite"]
     rows = []
     for combo in sorted(combos, key=lambda c: scores[c]):
         e = combos[combo]
+        tag = " (FAILED)" if "eval_metrics" not in e else ""
         cells = [_fmt(_rmse(e, k)) for k in _ALL_KEYS]
         mark = " **★**" if combo == best else ""
-        rows.append([f"`{combo}`{mark}"] + cells + [f"**{_fmt(scores[combo])}**"])
+        rows.append([f"`{combo}`{tag}{mark}"] + cells + [f"**{_fmt(scores[combo])}**"])
 
-    sch = combos[best].get("schemes", {})
-    combo_desc = (f"convection=`{sch.get('convection','?')}`, "
-                  f"turbulence=`{sch.get('turbulence','?')}`, "
-                  f"gwd=`{sch.get('gravity_wave_drag','?')}`, "
-                  f"microphysics=`{sch.get('microphysics','?')}`, "
-                  f"radiation=`{sch.get('radiation','?')}`")
-    return "\n".join([
-        f"### Best physics combination — `{sweep_root}`",
-        "Classical-variant RMSE vs ERA5 per swept combo. ★ = best composite.",
-        "", _md_table(headers, rows),
-        f"\n**Best combination: `{best}`** — {combo_desc} "
-        f"(composite {scores[best]:.3f}).",
-    ])
+    tail = [f"### Best physics combination — `{sweep_root}`",
+            "Classical-variant RMSE vs ERA5 per swept combo. ★ = best composite "
+            "(needs both state and flux groups).", "", _md_table(headers, rows)]
+    if best is None:
+        tail.append("\n_No rankable combo (all incomplete/failed)._")
+    else:
+        sch = combos[best].get("schemes", {})
+        combo_desc = (f"convection=`{sch.get('convection','?')}`, "
+                      f"turbulence=`{sch.get('turbulence','?')}`, "
+                      f"gwd=`{sch.get('gravity_wave_drag','?')}`, "
+                      f"microphysics=`{sch.get('microphysics','?')}`, "
+                      f"radiation=`{sch.get('radiation','?')}`")
+        tail.append(f"\n**Best combination: `{best}`** — {combo_desc} "
+                    f"(composite {scores[best]:.3f}).")
+    return "\n".join(tail)
 
 
 def main(argv=None):
