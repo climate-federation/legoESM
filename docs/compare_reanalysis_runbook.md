@@ -108,14 +108,16 @@ enough longer than `SPINUP_DAYS` for a stable post-spin-up mean. (A multi-day `-
 `SPINUP_DAYS=0` prints a launch NOTE reminding you.)
 
 > **Insolation season — a tracked comparability limitation (iter 447, CODEX PENDING).** The AMIP
-> **SST** is aligned to the ERA5 date (via the forcing), but the radiation **insolation** calendar
-> is NOT: the driver derives the day-of-year from `day_to_calendar(day)` (early-year/equinox), not
-> the ERA5 date — so a September comparison runs ~off-season insolation. It cannot be aligned via
-> `cfg.start_day` alone (that ALSO offsets the *relative* AMIP SST-forcing index, pushing the SST
-> out of range). This biases the **high-latitude** worst-column ranking most (where seasonal
-> insolation differs). A driver-level fix (decouple the insolation date from `cfg.start_day`) is
-> tracked; until then prefer an ERA5 window near the model's insolation season, or read
-> high-latitude worst columns with care.
+> **SST** is aligned to the ERA5 date (via the forcing), but the radiation **insolation** is NOT:
+> the driver derives the day-of-year from `day_to_calendar(day)` and `cfg.start_day` defaults to
+> `0`, so the model's insolation is **January-based** (day 0 → Jan 1) — a September comparison runs
+> ~winter (off-season) insolation. It cannot be aligned via `cfg.start_day` alone (that ALSO
+> offsets the *relative* AMIP SST-forcing index, pushing the SST out of range), and the insolation
+> day-of-year is computed at THREE driver sites, so a clean fix is driver-level (decouple the
+> insolation date from `cfg.start_day`). This biases the **high-latitude** worst-column ranking
+> most. **Workaround until the fix:** use a **January** ERA5 window (e.g. `20170115`) — it aligns
+> BOTH the SST forcing AND the Jan-based insolation. The campaign prints a launch NOTE when the
+> offline `--local-era5-date` falls in the off-season half (Apr–Sep).
 
 ```bash
 CONFIG=configs/amip_clubb_lite.json ERA5=/path/to/era5.zarr \

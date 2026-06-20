@@ -896,6 +896,30 @@ def _spinup_warning_line(spinup_days, days) -> str | None:
     return None
 
 
+# Months seasonally FAR from the model's JANUARY-based insolation (cfg.start_day defaults to 0,
+# so day_to_calendar(0)=Jan 1) — the solar declination differs most across Apr–Sep, so a
+# non-January offline ERA5 window mismatches the insolation season (iter 447, the deferred gap).
+_INSOLATION_OFF_SEASON_MONTHS = frozenset({4, 5, 6, 7, 8, 9})
+
+
+def _insolation_season_note(local_era5_date) -> str | None:
+    """The model-vs-ERA5 INSOLATION season-mismatch note (iter 447) for an OFFLINE ERA5 date in
+    the off-season half (Apr–Sep).  The model's solar calendar is JANUARY-based, so a
+    spring/summer/autumn comparison runs ~off-season insolation while the AMIP SST IS aligned — a
+    tracked driver-level gap; the WORKAROUND is a January window (aligns BOTH the relative SST
+    forcing and the insolation).  Returns ``None`` for no offline date / a near-January window."""
+    s = str(local_era5_date or "")
+    if len(s) < 6 or not s[:6].isdigit():
+        return None
+    if int(s[4:6]) in _INSOLATION_OFF_SEASON_MONTHS:
+        return (f"[campaign] NOTE: the ERA5 date {s} is in the off-season half (month "
+                f"{int(s[4:6])}); the model's insolation is JANUARY-based (cfg.start_day=0), so "
+                "the solar season MISMATCHES the SST-aligned comparison (iter 447, a tracked "
+                "driver-level gap). Workaround: use a January ERA5 window to align BOTH the SST "
+                "forcing AND the insolation.")
+    return None
+
+
 def _build_run_setup(args):
     """The run-setup preamble SHARED by the campaign + OSSE CLIs (CLAUDE.md: no duplicate
     wiring): load the base config/grid/sigma, build the mode-specific driver builder +
@@ -911,9 +935,11 @@ def _build_run_setup(args):
     from legoesm.driver.model_driver import ModelDriver
 
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
-    _warn = _spinup_warning_line(getattr(args, "spinup_days", 0.0), getattr(base_cfg, "days", 0))
-    if _warn:
-        print(_warn, flush=True)
+    for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
+                                       getattr(base_cfg, "days", 0)),
+                  _insolation_season_note(getattr(args, "local_era5_date", None))):
+        if _note:
+            print(_note, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(
         args.mode, coupled_preset=_resolve_coupled_preset(args), ocean_grid=None)
     n_steps = _les_n_steps(args.les_hours, args.les_dt)

@@ -3333,6 +3333,20 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
     assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
 
 
+def test_insolation_season_note_warns_off_season_offline_date():
+    """An off-season (Apr–Sep) OFFLINE ERA5 date warns about the model's January-based insolation
+    mismatch (iter 447); a January window, the Zarr path (no date), or a malformed date is silent
+    (no crash). The driver-level fix is deferred; the note surfaces the workaround."""
+    from scripts.run.run_correction_campaign import _insolation_season_note
+
+    w = _insolation_season_note("20170901")                # September → off-season → warns
+    assert w is not None and "insolation" in w.lower() and "January" in w
+    assert _insolation_season_note("20170115") is None     # January → aligned → silent
+    assert _insolation_season_note("20171115") is None     # November (near-January half) → silent
+    assert _insolation_season_note(None) is None           # Zarr path (no offline date) → silent
+    assert _insolation_season_note("bad") is None           # malformed → silent (no crash)
+
+
 def test_campaign_knobs_reject_degenerate_counts():
     """A non-positive --n-worst (ranks NOTHING) or --les-budget (runs NO LES) must FAIL
     LOUD at construction — caught by the launch dry-run, not after a multi-day no-op run
