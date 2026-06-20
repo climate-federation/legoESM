@@ -388,6 +388,10 @@ coarse-sampled environment, so the kernel extrapolates and the change is untrust
 **Controlled go/no-go before real ERA5:** `scripts/validate/run_perfect_model_osse.py`
 runs the loop in an identical-twin (the model's own run with a KNOWN coefficient is
 the pseudo-truth) and checks it both lowers the bias and recovers the known parameter.
+For the go/no-go to faithfully predict your **realistic** run, pass the SAME
+diagnosis-path flags the campaign will use — `--surface-flux` (iter 471) and
+`--orographic-forcing` — since they change *how* the closure is diagnosed; `--ocean-only`
+is column-selection (orthogonal in a self-consistent twin).
 
 ---
 

@@ -104,6 +104,16 @@ def test_orographic_forcing_flag_parsed():
         p.parse_args(base + ["--orographic-forcing", "terrain"])
 
 
+def test_surface_flux_flag_parsed():
+    """The OSSE CLI exposes --surface-flux (default off, iter 471) so the go/no-go can use the
+    SAME SST-driven LES surface BC the real campaign does — it changes HOW the closure is
+    diagnosed, so the OSSE must match it to faithfully predict the realistic recovery."""
+    p = _build_argparser()
+    base = ["--config", "c.json", "--true-ck", "0.2", "--biased-ck", "0.1"]
+    assert p.parse_args(base).surface_flux is False       # off by default (back-compat)
+    assert p.parse_args(base + ["--surface-flux"]).surface_flux is True
+
+
 def test_build_osse_harness_returns_the_shared_wiring():
     """_build_osse_harness (iter 291) factors the driver/LES harness shared by the single
     + multi OSSE builders (byte-identical before): a callable run_fn / build_compare_fn /

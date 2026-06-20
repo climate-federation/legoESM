@@ -328,6 +328,12 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
                         "faithfully predicts it. 'auto' (default): use the model's OWN "
                         "static topography if any (flat models stay flat). 'on': "
                         "REQUIRE terrain (error if flat). 'off': force flat.")
+    p.add_argument("--surface-flux", action="store_true",
+                   help="give each spin-off LES the SST-driven surface buoyancy flux (iter "
+                        "364/465) — MUST match the real campaign's --surface-flux so the OSSE "
+                        "go/no-go faithfully predicts the REALISTIC diagnosis path (it changes "
+                        "HOW the closure is diagnosed, not just which columns). The OSSE twin's "
+                        "runs carry SST, so the shared make_les_diagnose_fn threads it.")
     return p
 
 
@@ -390,7 +396,8 @@ def _run_cross_resolution_main(
         area_weights_fine=_area_weights(fine_grid),
         true_clubb=CLUBBLiteConfig(**{field: args.true_ck}),
         biased_clubb=CLUBBLiteConfig(**{field: args.biased_ck}),
-        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
+        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
+                                   surface_flux=args.surface_flux),
         run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations,
         phis_coarse=phis_coarse, phis_fine=phis_fine)
 
@@ -437,7 +444,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         area_weights=_area_weights(grid),
         true_clubb=CLUBBLiteConfig(**{field: args.true_ck}),
         biased_clubb=CLUBBLiteConfig(**{field: args.biased_ck}),
-        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
+        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
+                                   surface_flux=args.surface_flux),
         run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations,
         phis=phis)
 
