@@ -1102,6 +1102,34 @@ _TOS_MONTHLY_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
                    "ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc")
 
 
+def _load_nemo_cell_area_m2(path=_NEMO_DOMAIN_CFG):
+    """NEMO ORCA1 horizontal T-cell area ``e1t*e2t`` [m^2] from ``domain_cfg``
+    (shape ``(jpj, jpi)`` == the Dai-Trenberth runoff grid).  This is the EXACT
+    NEMO metric used to area-weight the runoff SOURCE integral for conservation.
+    Deliberately NOT a gradient-of-lat/lon approximation: a centred ``np.gradient``
+    of longitude across the +/-180 seam sees an O(360 deg) jump that wrapping the
+    averaged derivative cannot undo, inflating dateline river-cell areas and the
+    source total to ~2.95 Sv vs NEMO's true ~1.27 Sv (codex review).  The TARGET
+    grids carry their own exact ``.area``/``.areaCell``."""
+    import xarray as xr
+    ds = xr.open_dataset(path, decode_times=False)
+    e1t = _squeeze2d(np.asarray(ds["e1t"].values, dtype=np.float64))
+    e2t = _squeeze2d(np.asarray(ds["e2t"].values, dtype=np.float64))
+    return e1t * e2t
+
+
+def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
+    """Scale a per-area flux ``field`` [X/m^2] so its area-integral over the wet
+    cells equals ``target_integral`` [X]: returns ``field * target/current``.
+    No-op (returns ``field`` unchanged) when the current integral is <= 0 (an
+    all-zero / all-dry field has nothing to scale)."""
+    field = np.asarray(field, dtype=np.float64)
+    cur = float((field * np.asarray(cell_area) * np.asarray(wet_mask)).sum())
+    if cur > 0.0:
+        return field * (float(target_integral) / cur)
+    return field
+
+
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                         land_mask=None, spread_passes=2):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
@@ -1122,8 +1150,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
     # field is sparse, so IDW from ALL cells (incl. zeros) would dilute the discharge
     # to ~0. Routing only from nonzero cells spreads each river to the nearest model
-    # coastal cells (codex HIGH). Approximately freshwater-conserving (places the
-    # discharge density at the coast); exact area-integral conservation is a refinement.
+    # coastal cells (codex HIGH). Exact area-integral conservation is enforced
+    # below by the area-weighted renorm (every grid receives the same source total).
     annual = total.sum(axis=0)
     src_valid = annual > 0.0
     out = np.zeros((12,) + tuple(np.asarray(lat2d_deg).shape), dtype=np.float64)
@@ -1131,6 +1159,16 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     ocean = None
     if land_mask is not None:
         ocean = np.asarray(land_mask) > 0.5
+    # Area-conservation inputs: SOURCE cell areas = NEMO's exact e1t*e2t from
+    # domain_cfg (the runoff grid's metric), TARGET cell areas from the model grid
+    # (``areaCell`` on the MPAS VoronoiMesh, ``.area`` on the C-grid families).
+    # Both [m^2]; A_tgt.shape == lat2d_deg.shape == out[m].shape.
+    A_src = _load_nemo_cell_area_m2()
+    if A_src.shape != total.shape[1:]:
+        raise ValueError(
+            f"runoff source area {A_src.shape} != runoff field {total.shape[1:]}: "
+            f"domain_cfg e1t/e2t must match the Dai-Trenberth grid")
+    A_tgt = np.asarray(grid.areaCell if hasattr(grid, "areaCell") else grid.area)
     for m in range(12):
         # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
         Rm, _ = _regrid_curv_to_points(
@@ -1139,21 +1177,37 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
         Rm = np.maximum(Rm, 0.0)
         # COASTAL SPREAD (codex conservation flag + SSS-quality): the NN/IDW
         # regrid concentrates each river in ~1 model cell -> over-fresh spots that
-        # hurt SSS. Spread over a coastal band via ocean-masked averaging, then
-        # renormalise to preserve the per-month ocean SUM (sum-conserving; exact
-        # area-weighted conservation needs the eORCA1 cell areas, a further refinement).
+        # hurt SSS. Spread over a coastal band via ocean-masked averaging.
         if ocean is not None and spread_passes > 0:
-            s0 = float((Rm * ocean).sum())
             for _ in range(int(spread_passes)):
                 sm = np.asarray(laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
                 Rm = np.where(ocean, sm, 0.0)
-            s1 = float((Rm * ocean).sum())
-            if s1 > 0.0:
-                Rm = Rm * (s0 / s1)        # restore the ocean sum
+        # AREA-CONSERVATIVE renorm (replaces the old cell-SUM renorm and now runs
+        # on EVERY grid incl. MPAS spread_passes=0): scale the regridded runoff so
+        # its area-integral equals the source month total [kg/s], i.e. NEMO's
+        # Dai-Trenberth global freshwater input.  This makes MPAS and tripole
+        # receive the SAME total -> removes the grid-dependent surface fresh bias
+        # (MPAS was -0.50 PSU vs tripole -0.12 from a non-conservative regrid).
+        F_src = float((total[m] * A_src).sum())            # kg/s into ocean
+        wet = ocean if ocean is not None else np.ones(Rm.shape, dtype=bool)
+        if F_src > 0.0 and float((Rm * A_tgt * wet).sum()) <= 0.0:
+            warnings.warn(                                 # codex LOW: don't silently skip
+                f"runoff month {m}: source {F_src:.3e} kg/s but the regridded "
+                f"target integral is <=0 (no wet target cell received runoff -- "
+                f"check land_mask / IDW max_deg) -> month NOT conserved",
+                RuntimeWarning)
+        Rm = _area_conservative_scale(Rm, A_tgt, wet, F_src)
         out[m] = Rm
+    # Annual-mean conserved total on BOTH the source and the (renormed) target,
+    # in Sv of freshwater (1 Sv = 1e9 kg/s) -> they should match to ~rounding,
+    # and be grid-INDEPENDENT (the whole point of the renorm).
+    _wet = ocean if ocean is not None else np.ones(out.shape[1:], dtype=bool)
+    _src_Sv = float((total.mean(axis=0) * A_src).sum()) / 1.0e9
+    _tgt_Sv = float((out.mean(axis=0) * A_tgt * _wet).sum()) / 1.0e9
     print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
           f"discharge cells, 12 months, {spread_passes} spread passes, "
-          f"max {out.max():.2e} kg/m^2/s")
+          f"max {out.max():.2e} kg/m^2/s | conserved total src={_src_Sv:.4f} Sv "
+          f"-> target={_tgt_Sv:.4f} Sv (area-weighted, grid-independent)")
     return out
 
 
