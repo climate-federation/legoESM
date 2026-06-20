@@ -29,6 +29,24 @@ import numpy as np
 #: a heuristic go/no-go, NOT a hard physical threshold (a realistic model needs less).
 _FEASIBLE_FRACTION = 0.05
 
+#: Sigma above which a (surface-last) level is classified as the boundary layer, for the
+#: per-level "C_K controls the BL it acts in" interpretive note — a coarse near-surface
+#: cutoff, NOT a physical BL-top diagnosis.
+_BL_SIGMA_THRESHOLD = 0.8
+
+
+def _most_controllable_level(frac: Any) -> int | None:
+    """Index of the most C_K-controllable level (max fraction), or ``None`` if undefined.
+
+    Returns ``None`` for an empty or all-NaN fraction vector — a degenerate run where every
+    level perfectly matches (or fails to compare against) ERA5 has no "most-controllable"
+    level, and ``np.nanargmax`` would otherwise raise on the all-NaN slice.
+    """
+    f = np.asarray(frac, dtype=float).reshape(-1)
+    if f.size == 0 or bool(np.all(np.isnan(f))):
+        return None
+    return int(np.nanargmax(f))
+
 
 def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any) -> dict:
     """How much the per-column combined bias CHANGES between two C_K runs.
@@ -93,6 +111,35 @@ def per_level_ck_bias_sensitivity(T_low_ck, T_high_ck, T_ref, area_weights) -> d
         "bias_per_level": mean_b,
         "controllable_fraction_per_level": np.abs(b_hi - b_lo) / np.maximum(mean_b, 1e-12),
     }
+
+
+def format_per_level_report(per_level: dict, sigma_full: Any) -> list[str]:
+    """Operator-readable per-level C_K-sensitivity lines, flagging the most-controllable
+    level.
+
+    ``per_level`` is :func:`per_level_ck_bias_sensitivity`'s output; ``sigma_full`` is the
+    ``[nlev]`` surface-last sigma.  All three are ``[nlev]`` and must share that length.
+    Surfacing the iter-416 insight: C_K control concentrates near the surface (sigma → 1,
+    the boundary layer where the closure acts), so a free-tropospherically-dominated
+    full-column insensitivity is the MODEL's free-trop (radiation) error — NOT a flaw in
+    the LES→C_K correction, which is tuning the right place.
+    """
+    bias = np.asarray(per_level["bias_per_level"], dtype=float).reshape(-1)
+    frac = np.asarray(
+        per_level["controllable_fraction_per_level"], dtype=float).reshape(-1)
+    sig = np.asarray(sigma_full, dtype=float).reshape(-1)
+    if not (bias.shape == frac.shape == sig.shape):
+        raise ValueError(
+            f"format_per_level_report: bias/frac/sigma must share length; got "
+            f"{bias.shape}, {frac.shape}, {sig.shape}.")
+    k_most = _most_controllable_level(frac)   # None on a degenerate (all-NaN) fraction
+    lines = []
+    for k in range(bias.shape[0]):
+        tag = "   <- most C_K-controllable" if k == k_most else ""
+        lines.append(
+            f"  sigma={sig[k]:.3f}: T-bias {bias[k]:.3g} K, "
+            f"C_K-controllable {frac[k]:.2%}{tag}")
+    return lines
 
 
 def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int):
@@ -193,6 +240,33 @@ def main(argv: list[str] | None = None) -> int:
              if s["c_k_feasible"] else
              "bias is idealization-dominated; a correction loop would find NO "
              "improvement here — use a more realistic (multi-day, real-radiation) run."))
+
+    # Per-level breakdown (iter 417): WHERE in the column is the bias C_K-controllable?
+    # Area-weight per column with cos(lat) — grid.grid_lat shares the model's column grid
+    # (same object _score passes to compare_state_to_reference), so reshape(-1) aligns with
+    # model.T.reshape(-1, nlev).  This shows that even when the full-column bias is
+    # C_K-insensitive, the closure still controls the boundary layer it acts on.
+    mt = np.asarray(m_lo.T)
+    ncol = int(np.prod(mt.shape[:-1]))               # leading dims = columns ([..., nlev])
+    w = np.cos(np.asarray(grid.grid_lat)).reshape(-1)
+    if w.size != ncol:                               # fail loud, never silently broadcast
+        raise ValueError(
+            f"ck-sensitivity per-level: cos(lat) area weights have {w.size} cells but "
+            f"model.T has {ncol} columns — grid/state column-grid mismatch (the area "
+            "weighting would be wrong).")
+    pl = per_level_ck_bias_sensitivity(mt, np.asarray(m_hi.T), np.asarray(ref.T), w)
+    print("  per-level C_K sensitivity (T-bias vs ERA5, surface-last sigma):")
+    for line in format_per_level_report(pl, sigma.sigma_full):
+        print(line)
+    k_most = _most_controllable_level(pl["controllable_fraction_per_level"])
+    sig_full = np.asarray(sigma.sigma_full, dtype=float).reshape(-1)
+    if (k_most is not None and not s["c_k_feasible"]
+            and sig_full[k_most] >= _BL_SIGMA_THRESHOLD):
+        print(f"  => the most C_K-sensitive level is in the boundary layer "
+              f"(sigma {float(sig_full[k_most]):.2f}); the full-column insensitivity is the "
+              "model's free-trop (radiation) error, NOT the LES->C_K correction — it tunes "
+              "the right place, but needs a more realistic free-troposphere for tuning to "
+              "move the TOTAL bias.")
     return 0
 
 

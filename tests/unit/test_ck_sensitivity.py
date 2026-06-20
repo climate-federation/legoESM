@@ -62,3 +62,51 @@ def test_per_level_ck_bias_sensitivity_localizes_to_the_boundary_layer():
     with pytest.raises(ValueError, match="share shape"):
         per_level_ck_bias_sensitivity(
             np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((3, 3)), np.ones(2))
+
+
+def test_format_per_level_report_flags_the_most_controllable_level():
+    """The operator-facing per-level report (iter 417) flags the most C_K-controllable
+    level so an operator reading a C_K-INSENSITIVE full-column verdict still sees that the
+    closure controls the boundary layer (surface-last sigma → 1) — the actionable nuance
+    that the insensitivity is the model's free-trop error, not the correction approach."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import format_per_level_report
+
+    # Free-trop (sigma 0.1, 0.5): big bias, ~0 C_K-controllable; BL (sigma 0.95): controllable.
+    pl = {
+        "bias_per_level": np.array([10.0, 9.0, 2.0]),
+        "controllable_fraction_per_level": np.array([0.001, 0.002, 0.40]),
+    }
+    sigma_full = np.array([0.1, 0.5, 0.95])         # surface-last
+    lines = format_per_level_report(pl, sigma_full)
+    assert len(lines) == 3
+    assert "most C_K-controllable" in lines[2]      # the BL level is flagged
+    assert "most C_K-controllable" not in lines[0]  # ... and only it
+    assert "most C_K-controllable" not in lines[1]
+    assert "0.950" in lines[2]
+    # The bias value lands in the T-bias field of line 0 (not merely a sigma substring).
+    assert "10 K" in lines[0].split("T-bias")[1]
+
+    # Length mismatch fails loud (a wrong sigma would mis-label every level).
+    with pytest.raises(ValueError, match="share length"):
+        format_per_level_report(pl, np.array([0.1, 0.5]))
+
+
+def test_format_per_level_report_degenerate_all_nan_fraction_no_flag_no_crash():
+    """A degenerate run (every level perfectly matches / fails to compare ⇒ all-NaN
+    controllable fractions) must NOT crash ``np.nanargmax`` (codex-review iter 417) — it
+    reports every level with NO most-controllable flag rather than raising."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import (
+        _most_controllable_level,
+        format_per_level_report,
+    )
+
+    assert _most_controllable_level(np.full(3, np.nan)) is None
+    assert _most_controllable_level(np.array([])) is None
+    assert _most_controllable_level(np.array([0.1, 0.4, 0.2])) == 1
+    pl = {
+        "bias_per_level": np.array([5.0, 5.0, 5.0]),
+        "controllable_fraction_per_level": np.full(3, np.nan),
+    }
+    lines = format_per_level_report(pl, np.array([0.1, 0.5, 0.95]))
+    assert len(lines) == 3
+    assert all("most C_K-controllable" not in ln for ln in lines)
