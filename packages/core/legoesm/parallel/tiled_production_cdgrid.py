@@ -1327,6 +1327,106 @@ def make_tiled_fv3_tracer_pack_advection_stage_2d(mesh, cdgrid, n: int, kt: int,
     return stage
 
 
+def make_tiled_fv3_moist_tracer_tendency_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                                  nlev: int, *,
+                                                  column_tracer_physics_fn):
+    """Tiled MOIST tracer tendency on a ``(6, kt, kt)`` mesh — increment 3 of the
+    cube-MOIST np>6 step.
+
+    Returns ``stage(u_d, v_d, T, p_s, q_pack, vert_adv_q) -> dq_pack`` where
+    ``q_pack``/``vert_adv_q`` are ``(6, n, n, nlev, 3)`` with the tracer order
+    ``[q_v, q_c, q_r]``.  Combines the sub-face tiled advection
+    (``-(u . grad q) + vert_adv_q``, the increment-2 packed path) with an INJECTED
+    per-tile column physics
+    ``column_tracer_physics_fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t) -> (dq_v, dq_c,
+    dq_r)`` (each ``(1, nl, nl, nlev)``) added to the advected pack.  Dependency
+    injection keeps this core stage PHYSICS-AGNOSTIC: the caller builds the fn
+    from a column-local scheme (e.g.
+    ``legoesm.atmosphere.kessler_forcing.kessler_column_tendencies`` with
+    sigma_coord/dt/config closed over).  Warm-rain microphysics is column-local
+    (no halo) so the per-tile call is bit-identical to a global apply.  Output
+    ``dq_pack`` ``(6, n, n, nlev, 3)`` is the EXACT cc partition
+    (``P("face","tile_i","tile_j",None,None)``), gathered == the global moist
+    tracer tendency (dynamics + physics).
+    """
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if column_tracer_physics_fn is None:
+        raise ValueError(
+            "make_tiled_fv3_moist_tracer_tendency_stage_2d: "
+            "column_tracer_physics_fn is required (inject a column-local physics, "
+            "e.g. built from kessler_column_tendencies).")
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_moist_tracer_tendency_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_moist_tracer_tendency_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    nl = n // kt
+    dx = grid.dx
+    dy = grid.dy
+    offsets = grid.halo_interp_offsets
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    _phys = column_tracer_physics_fn
+
+    fw = P("face", None, None, None)               # 4D corner winds / T
+    fw5 = P("face", None, None, None, None)         # 5D packed tracer block
+    fo = P("face", None, None)                     # 2D cc metric / p_s
+    co5 = P("face", "tile_i", "tile_j", None, None)  # 5D cc output
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fw5, fw5)   # u_d, v_d, T, p_s, q, vert_adv_q
+                       + (fo, fo)                   # dx, dy
+                       + (P(),),                    # offsets (replicated)
+             out_specs=co5, check_vma=False)
+    def _body(u_d, v_d, T, p_s, q, vert_adv_q, dx_, dy_, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        T_t = _s(T, nl, nl)                        # (1, nl, nl, nlev) cc
+        p_s_t = _s(p_s, nl, nl)                    # (1, nl, nl) cc
+        q_t = _s(q, nl, nl)                        # (1, nl, nl, nlev, 3) cc
+        vadv_t = _s(vert_adv_q, nl, nl)
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
+        adv = _tiled_scalar_horiz_advect(
+            q_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs) + vadv_t
+        # Injected per-tile column physics (column-local -> SPMD-local).
+        dq_v, dq_c, dq_r = _phys(T_t, p_s_t, q_t[..., 0], q_t[..., 1], q_t[..., 2])
+        phys_pack = jnp.stack([dq_v, dq_c, dq_r], axis=-1)  # (1, nl, nl, nlev, 3)
+        return adv + phys_pack
+
+    def stage(u_d, v_d, T, p_s, q, vert_adv_q):
+        if q.ndim != 5 or q.shape[-1] != 3 or vert_adv_q.shape != q.shape:
+            raise ValueError(
+                "make_tiled_fv3_moist_tracer_tendency_stage_2d: q and vert_adv_q "
+                "must be (6,n,n,nlev,3) with tracer order [q_v,q_c,q_r]; got "
+                f"q={q.shape}, vert_adv_q={vert_adv_q.shape}")
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)),
+                      T=(T, (n, n, nlev)), p_s=(p_s, (n, n)),
+                      q=(q, (n, n, nlev, 3)),
+                      vert_adv_q=(vert_adv_q, (n, n, nlev, 3)))
+        return _body(u_d, v_d, T, p_s, q, vert_adv_q, dx, dy, offsets)
+
+    return stage
+
+
 # ---------------------------------------------------------------------------
 # P-3D cc->D-grid VECTOR lift: tiled ``center_to_dgrid_vector`` (base case,
 # use_fv3_a2b_ord4=False) — the cell-centre wind vector to D-grid CORNER lift.

@@ -54,7 +54,7 @@ _DIMS_CUBE_2D = ("face", "x", "y")
 _REQUIRED_TRACERS = ("q_v", "q_c", "q_r")
 
 
-def _kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config):
+def kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config):
     """Shared column-local Kessler tendencies for every grid adapter.
 
     The grid-agnostic core of the warm-rain forcing: it lives in ONE place so
@@ -167,10 +167,10 @@ def make_kessler_forcing_mpas(dt, config: KesslerConfig | None = None):
 
         # MPAS state is already (nCells, nlev) = (ncol, nlev): no flatten.
         # The shared column core clips the tracer inputs to >=0 and runs the
-        # column thermo + microphysics (see _kessler_column_tendencies).
+        # column thermo + microphysics (see kessler_column_tendencies).
         T = state.T.data                  # (nCells, nlev)
         p_s = state.p_s.data              # (nCells,)
-        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = _kessler_column_tendencies(
+        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = kessler_column_tendencies(
             T, p_s,
             state.tracers["q_v"].data,
             state.tracers["q_c"].data,
@@ -290,7 +290,7 @@ def make_kessler_forcing_spectral(dt, config: KesslerConfig | None = None):
         # grid-space; the core clips the physics INPUT to >=0.
         T = T_grid.reshape(-1, nlev)
         p_s = p_s_grid.reshape(-1)
-        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = _kessler_column_tendencies(
+        dT_dt, dq_v_dt, dq_c_dt, dq_r_dt = kessler_column_tendencies(
             T, p_s,
             state.tracers["q_v"].data.reshape(-1, nlev),
             state.tracers["q_c"].data.reshape(-1, nlev),
@@ -346,7 +346,7 @@ def make_kessler_forcing_gridspace(
     Grid-agnostic + column-local, so it just flattens the leading horizontal
     axes to ``(ncol, nlev)`` via ``reshape(-1, nlev)`` (works for the lat-lon 3-D
     ``(n_lat,n_lon,nlev)`` and the cube 4-D ``(6,n,n,nlev)`` layouts alike), runs
-    the SAME shared column core (:func:`_kessler_column_tendencies`), then
+    the SAME shared column core (:func:`kessler_column_tendencies`), then
     reshapes the rates back to the state's own shape.  The thin
     :func:`make_kessler_forcing_latlon` / :func:`make_kessler_forcing_cube`
     wrappers bind ``dims_3d`` / ``dims_2d`` for their grid.
@@ -413,7 +413,7 @@ def make_kessler_forcing_gridspace(
         # clips the physics INPUT to >=0.
         T = T_grid.reshape(-1, nlev)
         p_s = p_s_grid.reshape(-1)
-        dT_dt_col, dq_v_col, dq_c_col, dq_r_col = _kessler_column_tendencies(
+        dT_dt_col, dq_v_col, dq_c_col, dq_r_col = kessler_column_tendencies(
             T, p_s,
             state.tracers["q_v"].data.reshape(-1, nlev),
             state.tracers["q_c"].data.reshape(-1, nlev),

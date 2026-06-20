@@ -145,6 +145,103 @@ def test_tiled_tracer_pack_matches_global(cdg, KT):
     assert rel < 1e-10, f"packed dq_dt rel {rel:.3e} (kt={KT})"
 
 
+def _kessler_injected_fn(sigma_coord, dt, cfg):
+    """Build the per-tile column physics the moist stage injects: reshape a tile
+    cc field (1,nl,nl,nlev) to (ncol,nlev) for the shared kessler column core,
+    return the 3 tracer rates back in tile shape.  Mirrors kessler_forcing
+    _gridspace's flatten/unflatten but on the TILE (so it shards)."""
+    from legoesm.atmosphere.kessler_forcing import kessler_column_tendencies
+
+    def fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t):
+        shp = T_t.shape
+        nlev = shp[-1]
+        _, dqv, dqc, dqr = kessler_column_tendencies(
+            T_t.reshape(-1, nlev), p_s_t.reshape(-1),
+            q_v_t.reshape(-1, nlev), q_c_t.reshape(-1, nlev),
+            q_r_t.reshape(-1, nlev), sigma_coord, dt=dt, config=cfg)
+        return dqv.reshape(shp), dqc.reshape(shp), dqr.reshape(shp)
+
+    return fn
+
+
+@pytest.mark.parametrize("KT", [2, 3])
+def test_tiled_moist_tracer_tendency_matches_global(cdg, KT):
+    """Increment 3: tiled moist tracer tendency (advection + INJECTED kessler) ==
+    serial advective_tracer_tendency + the same kessler tracer rates, at np24/54
+    bit-identity.  q_pack order [q_v, q_c, q_r]; sigma-only."""
+    ndev = 6 * KT * KT
+    if len(jax.devices()) < ndev:
+        pytest.skip(
+            f"kt={KT} needs {ndev} host devices "
+            f"(--xla_force_host_platform_device_count={ndev})")
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    from legoesm.atmosphere.kessler_forcing import kessler_column_tendencies
+    from legoesm.parallel.tiled_production_cdgrid import (
+        make_tiled_fv3_moist_tracer_tendency_stage_2d,
+    )
+    coord = create_sigma_coordinate(NLEV)
+    cfg = KesslerConfig()
+    dt = 300.0
+    rng = np.random.default_rng(70 + KT)
+    u_d = jnp.asarray(rng.standard_normal((6, N + 1, N + 1, NLEV)))
+    v_d = jnp.asarray(rng.standard_normal((6, N + 1, N + 1, NLEV)))
+    T = jnp.asarray(285.0 + 5.0 * rng.standard_normal((6, N, N, NLEV)))
+    p_s = jnp.asarray(1.0e5 + 1.0e3 * rng.standard_normal((6, N, N)))
+    # Positive mixing ratios [q_v, q_c, q_r].
+    q_pack = jnp.asarray(np.abs(
+        1.0e-2 + 2.0e-3 * rng.standard_normal((6, N, N, NLEV, 3))))
+    vert_adv_q = jnp.asarray(rng.standard_normal((6, N, N, NLEV, 3)))
+
+    grid = cdg.base
+    u_cell, v_cell = dgrid_to_center_vector(u_d, v_d)
+    adv_g = advective_tracer_tendency(
+        q_pack, u_cell, v_cell, grid,
+        lambda q1: jnp.zeros_like(q1), hyperdiff_coeff=0.0)
+    # serial kessler (global flatten — pointwise, so == per-tile flatten).
+    _, dqv, dqc, dqr = kessler_column_tendencies(
+        T.reshape(-1, NLEV), p_s.reshape(-1),
+        q_pack[..., 0].reshape(-1, NLEV), q_pack[..., 1].reshape(-1, NLEV),
+        q_pack[..., 2].reshape(-1, NLEV), coord, dt=dt, config=cfg)
+    kessler_pack = jnp.stack(
+        [dqv.reshape(6, N, N, NLEV), dqc.reshape(6, N, N, NLEV),
+         dqr.reshape(6, N, N, NLEV)], axis=-1)
+    dq_g = np.asarray(adv_g + vert_adv_q + kessler_pack)
+
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    dev = np.array(jax.devices()[:ndev]).reshape(6, KT, KT)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    inj = _kessler_injected_fn(coord, dt, cfg)
+    stage = make_tiled_fv3_moist_tracer_tendency_stage_2d(
+        mesh, cdg, N, KT, NLEV, column_tracer_physics_fn=inj)
+    fw = NamedSharding(mesh, P("face", None, None, None))
+    fo = NamedSharding(mesh, P("face", None, None))
+    fw5 = NamedSharding(mesh, P("face", None, None, None, None))
+    dq_t = stage(
+        jax.device_put(u_d, fw), jax.device_put(v_d, fw),
+        jax.device_put(T, fw), jax.device_put(p_s, fo),
+        jax.device_put(q_pack, fw5), jax.device_put(vert_adv_q, fw5))
+    rel = _rel_cc(dq_t, dq_g)
+    assert rel < 1e-10, f"moist tracer tendency rel {rel:.3e} (kt={KT})"
+
+
+def test_moist_stage_requires_physics_fn(cdg):
+    """Fail-loud: the injected column physics is required (core stays
+    physics-agnostic but must be GIVEN a physics)."""
+    if len(jax.devices()) < 6:
+        pytest.skip("guard test builds a (6,1,1) mesh -> needs 6 host devices")
+    from jax.sharding import Mesh
+    from legoesm.parallel.tiled_production_cdgrid import (
+        make_tiled_fv3_moist_tracer_tendency_stage_2d,
+    )
+    dev = np.array(jax.devices()[:6]).reshape(6, 1, 1)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    with pytest.raises(ValueError, match="column_tracer_physics_fn"):
+        make_tiled_fv3_moist_tracer_tendency_stage_2d(
+            mesh, cdg, N, 1, NLEV, column_tracer_physics_fn=None)
+
+
 def test_tracer_horiz_matches_thermo_T_path(cdg):
     """The tracer horizontal advect MUST be the SAME operator the thermo stage
     applies to T: with vert_adv_q=0 the tiled tracer dq/dt equals the serial
