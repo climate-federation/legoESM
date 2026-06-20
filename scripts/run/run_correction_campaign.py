@@ -1563,6 +1563,11 @@ def _averaging_provenance(args, base_cfg=None) -> dict:
         "era5_time_idx": int(args.era5_time_idx),
         "era5_n_times": int(_resolve_era5_n_times(args.era5_n_times)),
     }
+    # OFFLINE-only: the number of ERA5 DAYS loaded (iter 460/470) — the reference's coverage
+    # (~24*era5_n_days hourly times available). Makes the offline multi-day reference visible in
+    # the dry-run + output (the Zarr path spans times itself, so era5_n_days is N/A there).
+    if getattr(args, "local_era5_dir", None):
+        block["era5_n_days"] = int(getattr(args, "era5_n_days", 1) or 1)
     if base_cfg is not None:
         diag = int(getattr(base_cfg.output, "diag_days", 0))
         days = int(base_cfg.days)
@@ -1953,15 +1958,17 @@ def _dry_run_era5_line(era5: dict | None) -> str:
     n = int(era5.get("era5_n_times", 1))
     idx = era5.get("era5_time_idx")
     at = "" if idx is None else f" @ idx {int(idx)}"
+    nd = era5.get("era5_n_days")                          # OFFLINE day coverage (iter 460/470)
+    over = "" if nd is None else f" over {int(nd)} day(s) of offline ERA5"
     md = era5.get("model_days")                          # the MODEL-side window (iter 313)
     model = "" if md is None else (
         f"; model mean over {int(md)} days ({era5.get('model_n_samples')} samples @ "
         f"{era5.get('model_diag_days')}-day cadence)")
     if n == 1:
-        return (f"\n  ERA5 reference: SINGLE snapshot{at}{model} — WARNING: a snapshot vs a "
+        return (f"\n  ERA5 reference: SINGLE snapshot{at}{over}{model} — WARNING: a snapshot vs a "
                 "multi-day model mean is weather-vs-climate; use --era5-n-times N "
                 "(runbook §3).")
-    return f"\n  ERA5 reference: {n}-time climatology{at}{model}"
+    return f"\n  ERA5 reference: {n}-time climatology{at}{over}{model}"
 
 
 def _dry_run_amip_forcing_line(amip_forcing: dict | None) -> str:

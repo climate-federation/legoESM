@@ -3849,6 +3849,26 @@ def test_averaging_provenance_records_the_model_window_when_config_given():
     assert _averaging_provenance(args, cfg0)["model_n_samples"] is None  # no div-by-zero
 
 
+def test_averaging_provenance_records_era5_n_days_for_the_offline_reference():
+    """The OFFLINE multi-day reference coverage (era5_n_days, iter 460/470) is recorded in the
+    provenance + surfaced in the dry-run line, so a deployer/operator sees the reference's day
+    span. The Zarr path (no --local-era5-dir) omits it (it spans times itself)."""
+    from scripts.run.run_correction_campaign import (
+        _averaging_provenance,
+        _dry_run_era5_line,
+    )
+
+    offline = SimpleNamespace(era5_time_idx=0, era5_n_times=720,
+                              local_era5_dir="/rda/ERA5", era5_n_days=30)
+    av = _averaging_provenance(offline)
+    assert av["era5_n_days"] == 30 and av["era5_n_times"] == 720
+    assert "over 30 day(s) of offline ERA5" in _dry_run_era5_line(av)
+
+    zarr = SimpleNamespace(era5_time_idx=0, era5_n_times=4, local_era5_dir=None)
+    assert "era5_n_days" not in _averaging_provenance(zarr)         # Zarr: N/A
+    assert "offline ERA5" not in _dry_run_era5_line(_averaging_provenance(zarr))
+
+
 def test_campaign_output_dict_diverged_run_is_strict_json():
     """The WHOLE build_campaign_output_dict for a DIVERGED run (NaN bias) must be standard
     JSON — no NaN/Infinity tokens anywhere.
