@@ -2133,6 +2133,47 @@ def test_campaign_threads_phis_to_make_les_diagnose_fn(monkeypatch):
     assert captured["phis"] is phis
 
 
+def test_campaign_threads_env_scales_to_run(monkeypatch):
+    """build_correction_campaign(env_scales=...) must thread the clustering env-feature
+    weights THROUGH to run_correction_campaign (→ _diagnose_columns →
+    cluster_columns_by_environment).  The clustering's USE of env_scales is unit-tested
+    (`test_env_scales_changes_representative`), but the CAMPAIGN-level pass-through is
+    not — a dropped hop would SILENTLY revert to default (equal-weight) clustering,
+    ignoring an operator who weighted e.g. SST to group columns by their dominant
+    regime.  Non-vacuous: a non-default tuple ≠ the None default.  (Completes the
+    campaign pass-through review: coordinate / l_mix_max / phis / env_scales.)"""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.run.run_correction_campaign as rcc
+
+    captured = {}
+
+    def stub_run_correction_campaign(*_a, **kw):
+        captured["env_scales"] = kw.get("env_scales", "MISSING")
+        return "SENTINEL"
+
+    monkeypatch.setattr(rcc, "run_correction_campaign", stub_run_correction_campaign)
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    scales = (1.0, 1000.0, 1.0)                       # ≠ None default ⇒ non-vacuous
+    out = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),  # noqa: ARG005
+        extract_column_state=lambda d, day, dt: d.state,         # noqa: ARG005
+        reference=model_state, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, env_scales=scales)
+
+    assert out == "SENTINEL"
+    # The operator's env-feature weights reached the run (a dropped hop ⇒ None).
+    assert captured["env_scales"] == scales
+
+
 def test_build_correction_campaign_rejects_multi_methods():
     """build_correction_campaign is single-coefficient: a diagnosis_methods config
     (which makes process_column return a dict) is rejected up front, not crashed
