@@ -24,15 +24,29 @@ from legoesm.parallel.profiling import mpi_timer
 _TESTED_JAX_MIN = (0, 8, 0)
 _TESTED_JAX_MAX_EXCL = (0, 10, 0)
 _TESTED_MPI4JAX_MIN = (0, 8, 0)
-_TESTED_MPI4JAX_MAX_EXCL = (0, 10, 0)
+_TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
 
-# mpi4jax 0.9.0 shipped the FFI rewrite (mpi4jax#289): the collectives now use
-# JAX's modern FFI mechanism instead of the legacy API_VERSION_STATUS_RETURNING
-# custom call, so they no longer emit the XLA deprecation warning and survive
-# the legacy-API removal in JAX 0.10.  Validated np=2 on this stack (issue #567):
-# mpi4jax 0.8.1 emits STATUS_RETURNING, 0.9.0 does not (allreduce numerics
-# match).  Prefer mpi4jax >= 0.9; 0.8.x still functions but on the deprecated
-# (warned, slow) custom-call path.
+# Second compatible generation — the FFI-based mpi4jax line.  mpi4jax 0.8.x used a
+# custom-call API removed in jax 0.10; mpi4jax >= 0.9 ships FFI-based custom calls that
+# REQUIRE jax >= 0.10 (the INVERSE pairing of the legacy [_TESTED_*] range).  This
+# generation is VERIFIED-working: the distributed compare-reanalysis suite (serial-vs-MPI
+# equivalence + differentiability, 17 tests under `mpirun -np 2`) passes on jax==0.10.0 +
+# mpi4jax==0.9.0.post1 (iter 333).  Accept it so the operator is not false-warned off the
+# working HPC stack.  Bounds are capped at the verified versions' next minor (conservative:
+# a future jax 0.11 / mpi4jax 0.10 warns again until re-verified).
+# FOLLOW-UP (CODEX PENDING, Jun 24): fold both generations into a single regime model that
+# also flags the CROSS pairings, mirror it in `mpi_stack_outside_tested_range` (the test
+# xfail condition, left conservative here), and bump the pyproject MPI extra + the
+# `TestConstantsConsistency` baseline.
+_FFI_JAX_MIN = (0, 10, 0)
+_FFI_JAX_MAX_EXCL = (0, 11, 0)
+_FFI_MPI4JAX_MIN = (0, 9, 0)
+_FFI_MPI4JAX_MAX_EXCL = (0, 10, 0)
+
+# mpi4jax 0.8.x uses the deprecated API_VERSION_STATUS_RETURNING custom-call
+# convention removed in JAX 0.10.  Until mpi4jax ships an FFI-based release,
+# pin JAX < 0.10 for MPI workloads.  The warning from XLA is cosmetic for now
+# (the API still functions) but will become a hard error once JAX 0.10 ships.
 _MPI4JAX_FFI_MIGRATION_NOTE = (
     "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed in "
     "JAX 0.10.  Upgrade to mpi4jax >= 0.9 (the FFI rewrite, mpi4jax#289), which "
@@ -147,6 +161,15 @@ def _validate_mpi_runtime_versions(
     in_tested_jax = _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
     in_tested_mpi4jax = _TESTED_MPI4JAX_MIN <= mpi4jax_triplet < _TESTED_MPI4JAX_MAX_EXCL
     if in_tested_jax and in_tested_mpi4jax:
+        return
+    # The FFI generation (verified-working, iter 333): jax 0.10.x + mpi4jax 0.9.x must be
+    # paired TOGETHER (the FFI API needs jax>=0.10; the legacy custom-call line needs
+    # jax<0.10). Accept only the consistent pairing — a CROSS pairing (e.g. jax 0.10 +
+    # mpi4jax 0.8, or jax 0.8 + mpi4jax 0.9) is the genuinely-incompatible case and still
+    # falls through to the warning below.
+    in_ffi_jax = _FFI_JAX_MIN <= jax_triplet < _FFI_JAX_MAX_EXCL
+    in_ffi_mpi4jax = _FFI_MPI4JAX_MIN <= mpi4jax_triplet < _FFI_MPI4JAX_MAX_EXCL
+    if in_ffi_jax and in_ffi_mpi4jax:
         return
 
     parts = []

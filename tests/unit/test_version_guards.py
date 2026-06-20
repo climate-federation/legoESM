@@ -98,6 +98,36 @@ class TestValidate:
         with pytest.raises(RuntimeError, match="mpi4jax==0.10.0"):
             _validate_mpi_runtime_versions("0.8.0", "0.10.0", strict=True)
 
+    # --- FFI generation (the SECOND compatible regime; iter 333) -------------
+    @pytest.mark.parametrize("mpi4jax_v", ["0.9.0", "0.9.0.post1", "0.9.5"])
+    def test_ffi_generation_passes_silently(self, mpi4jax_v):
+        """jax 0.10.x PAIRED WITH mpi4jax 0.9.x (the FFI-based line) is verified-working
+        (the distributed compare-reanalysis suite passes on jax 0.10.0 + mpi4jax
+        0.9.0.post1) and must NOT warn — it is a compatible generation, not 'outside the
+        tested range'. Pinning jax<0.10 (the legacy advice) would BREAK this stack."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning → exception
+            _validate_mpi_runtime_versions("0.10.0", mpi4jax_v)
+
+    def test_cross_pairing_ffi_jax_legacy_mpi4jax_warns(self):
+        """jax 0.10 (FFI-era) with mpi4jax 0.8 (legacy custom-call, removed in jax 0.10)
+        is the genuinely-incompatible CROSS pairing — it must still warn, not be silently
+        accepted by the FFI short-circuit."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.10.0", "0.8.0")
+
+    def test_cross_pairing_legacy_jax_ffi_mpi4jax_warns(self):
+        """jax 0.8 (legacy) with mpi4jax 0.9 (FFI, needs jax>=0.10) is the other
+        incompatible CROSS pairing — must still warn."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.8.0", "0.9.0")
+
+    def test_future_jax_with_ffi_mpi4jax_warns_conservatively(self):
+        """A jax beyond the verified FFI minor (0.11) warns again until re-verified — the
+        FFI acceptance is capped at the tested versions' next minor (the safe direction)."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.11.0", "0.9.0")
+
 
 # -----------------------------------------------------------------------
 # Consistency: constants match pyproject.toml
