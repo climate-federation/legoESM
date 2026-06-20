@@ -984,21 +984,37 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
 
 def _tiled_scalar_horiz_advect(field_t, u_cell, v_cell, dx_t, dy_t,
                                scalar_body, offs):
-    """``-(u . grad field)`` for a cell-centre scalar on one tile.
+    """``-(u . grad field)`` for a cell-centre scalar (or packed tracer block) on
+    one tile.
 
     THE shared horizontal scalar-advection: in-stage scalar halo
     (``scalar_body``, the ndim=4 ``make_tiled_pad_body``) -> centred cc gradients
-    (``gradient_{x,y}_3d_core``) -> advective form.  Used by BOTH the
-    thermodynamic stage (temperature) and the tracer-advection stage
-    (q_v/q_c/q_r) so the identical numerics live in one place (no per-field
-    copy-paste).  ``field_t`` is a single tile ``(1, nl, nl, nlev)``; ``u_cell``/
-    ``v_cell`` are the cc winds ``(1, nl, nl, nlev)``; ``dx_t``/``dy_t`` the tile
-    cc metrics ``(1, nl, nl)``.  Returns ``(1, nl, nl, nlev)``.
+    (``gradient_{x,y}_3d_core``) -> advective form.  Used by the thermodynamic
+    stage (temperature), the single-tracer stage, AND the packed tracer stage so
+    the identical numerics live in one place (no per-field copy-paste).
+
+    ``field_t`` is a single tile, either ``(1, nl, nl, nlev)`` (a scalar: T or one
+    tracer) or ``(1, nl, nl, nlev, n_tracers)`` (a packed tracer block).
+    ``u_cell``/``v_cell`` are the cc winds ``(1, nl, nl, nlev)``; ``dx_t``/
+    ``dy_t`` the tile cc metrics ``(1, nl, nl)``.  For the packed case the tracer
+    axis is folded into the level axis for ONE halo + gradient pass (mirroring the
+    serial ``advective_tracer_tendency`` ``q_flat`` reshape), then unfolded for the
+    per-tracer ``-(u[...,None] . grad q)`` advect.  Returns the input's shape.
     """
     from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
-    f_pad = scalar_body(field_t[0], offs)[None]            # (1, nl+2, nl+2, nlev)
+    packed = field_t.ndim == 5
+    if packed:
+        nlev, nt = field_t.shape[-2], field_t.shape[-1]
+        f_flat = field_t.reshape(*field_t.shape[:3], nlev * nt)  # fold -> ndim 4
+    else:
+        f_flat = field_t
+    f_pad = scalar_body(f_flat[0], offs)[None]            # (1, nl+2, nl+2, C)
     df_dx = gradient_x_3d_core(f_pad, dx_t)
     df_dy = gradient_y_3d_core(f_pad, dy_t)
+    if packed:
+        df_dx = df_dx.reshape(*field_t.shape)             # unfold -> ndim 5
+        df_dy = df_dy.reshape(*field_t.shape)
+        return -(u_cell[..., None] * df_dx + v_cell[..., None] * df_dy)
     return -(u_cell * df_dx + v_cell * df_dy)
 
 
@@ -1222,6 +1238,90 @@ def make_tiled_fv3_tracer_advection_stage_2d(mesh, cdgrid, n: int, kt: int,
                       v_d=(v_d, (n + 1, n + 1, nlev)),
                       q=(q, (n, n, nlev)),
                       vert_adv_q=(vert_adv_q, (n, n, nlev)))
+        return _body(u_d, v_d, q, vert_adv_q, dx, dy, offsets)
+
+    return stage
+
+
+def make_tiled_fv3_tracer_pack_advection_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                                  nlev: int):
+    """Tiled advective tendency for a PACKED tracer block on a ``(6, kt, kt)``
+    mesh (axes ``("face","tile_i","tile_j")``) — increment 2 of the cube-MOIST
+    np>6 step.
+
+    Returns ``stage(u_d, v_d, q, vert_adv_q) -> dq_dt`` where ``q``/``vert_adv_q``
+    are ``(6, n, n, nlev, n_tracers)`` (e.g. q_v/q_c/q_r): each tracer advected by
+    ``-(u . grad q)`` with the tracer axis folded into the level axis for ONE
+    in-stage scalar halo + gradient pass (mirroring serial
+    ``advective_tracer_tendency``'s ``q_flat`` reshape), then per-column
+    ``vert_adv_q`` added.  Same numerics as the single-tracer stage (the shared
+    ``_tiled_scalar_horiz_advect`` packed branch); ``n_tracers`` is dynamic (the
+    5-D specs carry any trailing size).  Output ``dq_dt``
+    ``(6, n, n, nlev, n_tracers)`` is the EXACT cc partition
+    (``P("face","tile_i","tile_j",None,None)``), gathered == the global dq/dt.
+    """
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_tracer_pack_advection_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_tracer_pack_advection_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    nl = n // kt
+    dx = grid.dx
+    dy = grid.dy
+    offsets = grid.halo_interp_offsets
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+
+    fw = P("face", None, None, None)               # 4D corner winds
+    fw5 = P("face", None, None, None, None)         # 5D packed tracer block
+    fo = P("face", None, None)                     # 2D cc metric
+    co5 = P("face", "tile_i", "tile_j", None, None)  # 5D cc output (exact partition)
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw5, fw5)           # u_d, v_d, q, vert_adv_q
+                       + (fo, fo)                   # dx, dy
+                       + (P(),),                    # offsets (replicated)
+             out_specs=co5, check_vma=False)
+    def _body(u_d, v_d, q, vert_adv_q, dx_, dy_, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        q_t = _s(q, nl, nl)                        # (1, nl, nl, nlev, nt) cc
+        vadv_t = _s(vert_adv_q, nl, nl)            # (1, nl, nl, nlev, nt) cc
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
+        horiz = _tiled_scalar_horiz_advect(
+            q_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs)  # packed branch
+        return horiz + vadv_t
+
+    def stage(u_d, v_d, q, vert_adv_q):
+        if q.ndim != 5 or vert_adv_q.shape != q.shape:
+            raise ValueError(
+                "make_tiled_fv3_tracer_pack_advection_stage_2d: q and vert_adv_q "
+                f"must be (6,n,n,nlev,n_tracers); got q={q.shape}, "
+                f"vert_adv_q={vert_adv_q.shape}")
+        nt = q.shape[-1]
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)),
+                      q=(q, (n, n, nlev, nt)),
+                      vert_adv_q=(vert_adv_q, (n, n, nlev, nt)))
         return _body(u_d, v_d, q, vert_adv_q, dx, dy, offsets)
 
     return stage

@@ -101,6 +101,50 @@ def test_tiled_tracer_matches_global(cdg, KT):
     assert rel < 1e-10, f"dq_dt rel {rel:.3e} (kt={KT})"
 
 
+def _inputs_packed(n, nlev, n_tracers, seed):
+    rng = np.random.default_rng(seed)
+    u_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    q = jnp.asarray(1.0e-2 + 1.0e-3 * rng.standard_normal(
+        (6, n, n, nlev, n_tracers)))
+    vert_adv_q = jnp.asarray(rng.standard_normal((6, n, n, nlev, n_tracers)))
+    return u_d, v_d, q, vert_adv_q
+
+
+@pytest.mark.parametrize("KT", [2, 3])
+def test_tiled_tracer_pack_matches_global(cdg, KT):
+    """Packed q_v/q_c/q_r block (n_tracers=3): tiled dq/dt == serial packed
+    advective_tracer_tendency (hyperdiff=0, zero vertical_fn) + vert_adv_q."""
+    ndev = 6 * KT * KT
+    if len(jax.devices()) < ndev:
+        pytest.skip(
+            f"kt={KT} needs {ndev} host devices "
+            f"(--xla_force_host_platform_device_count={ndev})")
+    from legoesm.parallel.tiled_production_cdgrid import (
+        make_tiled_fv3_tracer_pack_advection_stage_2d,
+    )
+    u_d, v_d, q, vert_adv_q = _inputs_packed(N, NLEV, 3, 60 + KT)
+    grid = cdg.base
+    u_cell, v_cell = dgrid_to_center_vector(u_d, v_d)
+    horiz_g = advective_tracer_tendency(
+        q, u_cell, v_cell, grid,
+        lambda q1: jnp.zeros_like(q1), hyperdiff_coeff=0.0)
+    dq_g = np.asarray(horiz_g + vert_adv_q)
+
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    dev = np.array(jax.devices()[:ndev]).reshape(6, KT, KT)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_fv3_tracer_pack_advection_stage_2d(mesh, cdg, N, KT, NLEV)
+    fw = NamedSharding(mesh, P("face", None, None, None))
+    fw5 = NamedSharding(mesh, P("face", None, None, None, None))
+    dq_t = stage(
+        jax.device_put(u_d, fw), jax.device_put(v_d, fw),
+        jax.device_put(q, fw5), jax.device_put(vert_adv_q, fw5))
+    rel = _rel_cc(dq_t, dq_g)
+    assert rel < 1e-10, f"packed dq_dt rel {rel:.3e} (kt={KT})"
+
+
 def test_tracer_horiz_matches_thermo_T_path(cdg):
     """The tracer horizontal advect MUST be the SAME operator the thermo stage
     applies to T: with vert_adv_q=0 the tiled tracer dq/dt equals the serial
