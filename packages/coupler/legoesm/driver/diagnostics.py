@@ -854,10 +854,12 @@ class DiagnosticCollector:
         """Collect only scalar reduction diagnostics (no host materialization).
 
         This is the performance-mode alternative to :meth:`collect`.
-        It computes global means and max-wind via ``jnp.mean``/``jnp.max``
-        which work correctly on SPMD-sharded arrays (JAX handles
-        cross-device reductions internally).  No ``np.asarray()`` calls,
-        no snapshot capture, no profile extraction, no monthly means.
+        It computes global means via ``area_weighted_mean`` (cell-area
+        weighted when ``set_area_weights`` was called, else a plain
+        ``jnp.mean``) and max-wind via ``jnp.max``; both work correctly on
+        SPMD-sharded arrays (JAX handles cross-device reductions
+        internally).  No ``np.asarray()`` calls, no snapshot capture, no
+        profile extraction, no monthly means.
 
         Use this for scaling benchmarks where diagnostic overhead must
         not dominate wall-clock time.
