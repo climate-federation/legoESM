@@ -211,6 +211,77 @@ def test_consecutive_months_handles_year_rollover():
         _consecutive_months("202001", 0)
 
 
+def test_consecutive_days_handles_month_and_year_rollover():
+    from scripts.data.load_local_era5 import _consecutive_days
+
+    assert _consecutive_days("20170930", 3) == ["20170930", "20171001", "20171002"]
+    assert _consecutive_days("20171231", 2) == ["20171231", "20180101"]
+    assert _consecutive_days("20200228", 2) == ["20200228", "20200229"]   # 2020 is leap
+    assert _consecutive_days("20200101", 1) == ["20200101"]
+    with pytest.raises(ValueError, match="n must be"):
+        _consecutive_days("20200101", 0)
+
+
+def _write_two_days_rda(tmp_path):
+    """Two consecutive days of synthetic pl chunks (daily) + a monthly sfc spanning both —
+    for the multi-day offline reference concat (iter 460)."""
+    import xarray as xr
+
+    nlat, nlon, nlev = 4, 5, 3
+    lat = np.linspace(90.0, -90.0, nlat)
+    lon = np.linspace(0.0, 288.0, nlon)
+    lev = np.array([500.0, 850.0, 1000.0])
+    days = ["20200101", "20200102"]
+
+    def _day_times(day):
+        return (np.datetime64(f"{day[:4]}-{day[4:6]}-{day[6:8]}T00")
+                + np.arange(4) * np.timedelta64(6, "h")).astype("datetime64[ns]")
+
+    for day in days:                       # daily pl chunks
+        t_pl = _day_times(day)
+        for code, var in (("128_130_t", "T"), ("128_131_u", "U"),
+                          ("128_132_v", "V"), ("128_133_q", "Q")):
+            xr.Dataset(
+                {var: (("time", "level", "latitude", "longitude"),
+                       np.full((4, nlev, nlat, nlon), 250.0, "f4")),
+                 "utc_date": ("time", np.arange(4))},
+                coords={"time": t_pl, "level": lev, "latitude": lat, "longitude": lon},
+            ).to_netcdf(tmp_path / pl_name(code, day))
+
+    t_sfc = np.concatenate([_day_times(d) for d in days])   # monthly sfc spanning both days
+    for code, var, val in (("128_134_sp", "SP", 1.0e5), ("128_034_sstk", "SSTK", 290.0)):
+        xr.Dataset(
+            {var: (("time", "latitude", "longitude"), np.full((8, nlat, nlon), val, "f4"))},
+            coords={"time": t_sfc, "latitude": lat, "longitude": lon},
+        ).to_netcdf(tmp_path / sfc_name(code, "20200101"))
+
+
+def test_open_local_era5_dataset_multiday_concatenates_days(tmp_path):
+    """n_days>1 concatenates consecutive daily ERA5 chunks along time (iter 460) so the offline
+    reference is a multi-day CLIMATOLOGY (not a single-day snapshot vs a multi-day model mean).
+    n_days=1 is the single-day open, byte-identical."""
+    from scripts.data.load_local_era5 import (
+        open_local_era5_dataset,
+        open_local_era5_dataset_multiday,
+    )
+
+    _write_two_days_rda(tmp_path)
+    one = open_local_era5_dataset_multiday(str(tmp_path), "20200101", 1)
+    base = open_local_era5_dataset(str(tmp_path), "20200101")
+    assert one.sizes["time"] == base.sizes["time"] == 4     # n_days=1 == single-day open
+
+    two = open_local_era5_dataset_multiday(str(tmp_path), "20200101", 2)
+    assert two.sizes["time"] == 8                            # both days concatenated
+    assert sorted(two.data_vars) == ["q", "skt", "sp", "t", "u", "v"]
+    t = two["time"].values.astype("datetime64[ns]").astype("int64")
+    assert np.all(np.diff(t) > 0)                            # monotonic across the day concat
+
+    with pytest.raises(ValueError, match="n_days must be"):
+        open_local_era5_dataset_multiday(str(tmp_path), "20200101", 0)
+    with pytest.raises(FileNotFoundError):                   # day 3 (20200103) absent
+        open_local_era5_dataset_multiday(str(tmp_path), "20200101", 3)
+
+
 def test_build_era5_amip_forcing_missing_seaice_fails_loud(tmp_path):
     """A missing ci (sea-ice) chunk must fail loud at build time (via _find), not later
     inside the model run with a cryptic KeyError — and before writing any output."""

@@ -241,6 +241,14 @@ multi-day model mean compares weather to climate — a spurious bias the loop wo
 "correct"). Use a multi-time ERA5 climatology (`--era5-n-times N`) matched to the model
 averaging window.
 
+> **Offline reference spans only ONE day by default (`--era5-n-days`, iter 460).** The local
+> NCAR-RDA path opens a single day's chunk (~24 hourly times), so `--era5-n-times` can average at
+> most that one day — a single-day reference vs a multi-day model climatology is still
+> weather-vs-climate. For a multi-day offline climatology set `--era5-n-days D` (loads D consecutive
+> days from `--local-era5-date`, ~24·D times; concatenated) and `--era5-n-times` up to `24·D`. The
+> campaign fails loud if `--era5-time-idx + --era5-n-times` exceeds the loaded coverage. (Zarr
+> `--era5-zarr` already spans times, so `--era5-n-days` is offline-only.)
+
 ## 4. Preflight the DEPLOY (seconds, no model run)
 
 Confirm the campaign output deploys onto your production base config + grid (the

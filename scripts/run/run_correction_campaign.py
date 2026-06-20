@@ -1186,6 +1186,12 @@ def _build_arg_parser():
                         "the time-mean model is compared to a time-mean ERA5, not a "
                         "single synoptic snapshot (which injects weather noise into the "
                         "bias). Default 1 = a single time (the old behaviour).")
+    p.add_argument("--era5-n-days", type=int, default=1,
+                   help="(OFFLINE --local-era5-dir) load this many CONSECUTIVE days of ERA5 "
+                        "(from --local-era5-date) so the offline reference can span a "
+                        "multi-day CLIMATOLOGY window matching the model time-mean (default 1 "
+                        "= a single day, ~24 hourly times). Pair with --era5-n-times up to "
+                        "24*n_days. Zarr (--era5-zarr) ignores this (its store spans times).")
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--spinup-days", type=float, default=0.0,
                    help="discard the first N days of model time from the climatology "
@@ -2446,10 +2452,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     n_times = _resolve_era5_n_times(args.era5_n_times)
     _era5_window = range(args.era5_time_idx, args.era5_time_idx + n_times)
     if args.local_era5_dir:
-        # REAL ERA5 from the local NCAR-RDA archive (offline) — open the day's per-variable
-        # NetCDF, average the requested hourly window, through the SAME regrid chain.
-        from scripts.data.load_local_era5 import open_local_era5_dataset
-        _local_ds = open_local_era5_dataset(args.local_era5_dir, args.local_era5_date)
+        # REAL ERA5 from the local NCAR-RDA archive (offline) — open --era5-n-days consecutive
+        # days (iter 460), average the requested time window, through the SAME regrid chain.
+        from scripts.data.load_local_era5 import open_local_era5_dataset_multiday
+        _n_days = int(getattr(args, "era5_n_days", 1) or 1)
+        if _n_days < 1:
+            raise SystemExit(f"--era5-n-days must be >= 1, got {_n_days}.")
+        _local_ds = open_local_era5_dataset_multiday(
+            args.local_era5_dir, args.local_era5_date, _n_days)
+        _n_avail = int(_local_ds.sizes["time"])
+        if args.era5_time_idx + n_times > _n_avail:
+            raise SystemExit(
+                f"--era5-time-idx {args.era5_time_idx} + --era5-n-times {n_times} exceeds the "
+                f"{_n_avail} ERA5 times available over --era5-n-days {_n_days} (~24/day). "
+                "Lower --era5-n-times or raise --era5-n-days.")
         era5_slice = load_era5_time_mean(
             TrainingERA5Config(
                 surface_variables=("surface_pressure", "skin_temperature")),

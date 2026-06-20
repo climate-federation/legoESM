@@ -96,6 +96,39 @@ def _consecutive_months(start_yyyymm: str, n: int) -> list[str]:
     return out
 
 
+def _consecutive_days(start_yyyymmdd: str, n: int) -> list[str]:
+    """The ``n`` consecutive ``YYYYMMDD`` strings starting at ``start_yyyymmdd`` (month/year
+    rollover handled via ``datetime``), e.g. ``("20170930", 3) -> ["20170930", "20171001",
+    "20171002"]``."""
+    import datetime
+
+    if n < 1:
+        raise ValueError(f"_consecutive_days: n must be >= 1, got {n}.")
+    d0 = datetime.date(int(start_yyyymmdd[:4]), int(start_yyyymmdd[4:6]), int(start_yyyymmdd[6:8]))
+    return [(d0 + datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(n)]
+
+
+def open_local_era5_dataset_multiday(data_dir: str, start_date: str, n_days: int = 1) -> Any:
+    """Merge ``n_days`` CONSECUTIVE days of local NCAR-RDA ll025 ERA5 into one dataset (iter
+    460), concatenated along time — so the OFFLINE compare reference is a multi-day CLIMATOLOGY
+    mean matching a multi-day model time-mean (not a single-day SNAPSHOT compared to a
+    multi-month model climatology — weather-vs-climate). ``n_days=1`` (default) is exactly
+    :func:`open_local_era5_dataset` (single day), byte-identical.
+
+    Each day is independently merged + time-aligned by :func:`open_local_era5_dataset` (so a
+    day spanning a month boundary picks up the right monthly ``sfc`` chunk), then the per-day
+    datasets are concatenated along the (monotonic, calendar-ordered) hourly time axis. A
+    missing day's chunk fails loud (``FileNotFoundError``) via the per-day open."""
+    if n_days < 1:
+        raise ValueError(f"open_local_era5_dataset_multiday: n_days must be >= 1, got {n_days}.")
+    if n_days == 1:
+        return open_local_era5_dataset(data_dir, start_date)
+    import xarray as xr
+
+    days = _consecutive_days(start_date, n_days)
+    return xr.concat([open_local_era5_dataset(data_dir, d) for d in days], dim="time")
+
+
 def build_era5_amip_forcing(
     data_dir: str, date: str, out_path: str, *, hour_stride: int = 24, n_months: int = 1,
     **overrides: Any,
