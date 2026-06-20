@@ -1140,6 +1140,31 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_main_local_era5_dir_routes_to_the_archive_adapter(monkeypatch):
+    """iter 410/411: --local-era5-dir routes the reference load through the offline
+    NCAR-RDA adapter (``open_local_era5_dataset(dir, date)``) — NOT the Zarr/network
+    path — and threads the opened dataset to ``load_era5_time_mean(ds=...)``.  Spies the
+    adapter (so no real archive is needed) + --dry-run so nothing runs."""
+    import scripts.data.load_local_era5 as lle
+    import scripts.run.run_correction_campaign as rcc
+
+    _stub_campaign_main_io(monkeypatch)
+    seen = {}
+
+    class _ReachedError(Exception):
+        pass
+
+    def _spy(data_dir, date):
+        seen["call"] = (data_dir, date)     # record the routing, then stop main() here
+        raise _ReachedError
+
+    monkeypatch.setattr(lle, "open_local_era5_dataset", _spy)
+    with pytest.raises(_ReachedError):           # main() reached the LOCAL adapter (not the zarr)
+        rcc.main(["--config", "c.json", "--out", "o.json", "--local-era5-dir",
+                  "/rda/ERA5", "--local-era5-date", "20170901"])
+    assert seen["call"] == ("/rda/ERA5", "20170901")     # the adapter WAS the source
+
+
 def test_main_requires_exactly_one_era5_source():
     """iter 410: the ERA5 reference is EITHER --era5-zarr OR --local-era5-dir (the
     offline NCAR-RDA archive) — never neither and never both — and --local-era5-dir
@@ -1200,7 +1225,7 @@ def _stub_campaign_main_io(monkeypatch):
         lambda mode, coupled_preset=None, ocean_grid=None: ((lambda c: None),
                                                             (lambda d, day, dt: None)))
     monkeypatch.setattr(e2s, "load_era5_time_mean",
-                        lambda cfg, idx: SimpleNamespace(lat=jnp.zeros(2)))
+                        lambda cfg, idx, **kw: SimpleNamespace(lat=jnp.zeros(2)))
     monkeypatch.setattr(cae, "select_era5_regrid", lambda canon: (lambda slc, g, s: object()))
     monkeypatch.setattr(cr, "column_state_from_carry", lambda carry: object())
     monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda forcing, provider: None)
