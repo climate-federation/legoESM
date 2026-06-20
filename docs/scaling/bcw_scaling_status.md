@@ -7,6 +7,35 @@ atmosphere baroclinic wave (dry + moist) and ocean, tracked per iteration in
 spectral/TPU), MPAS (Voronoi MPI), MOM6/E3SM (2D ocean/atm decomposition),
 CliMA (JAX GPU), Oceananigans (GPU kernel fusion).
 
+## UPDATE 2026-06-19 — cube-MOIST now scales multi-device (cs-spmd); moist matrix complete
+
+The cubed-sphere `--cs-spmd` path previously **rejected all physics** — cube-moist
+was single-device only while the other grids scaled moist multi-device. That gap is
+now closed: `_build_cubed_sphere_spmd` accepts `--physics moist`, threading
+`make_kessler_forcing_cube` through the already-physics-capable `make_sharded_step`
+(`model.step_with_physics`) under the jax.distributed multiface-ppermute halo. The
+q_v/q_c/q_r tracers ride the same halo as T; Kessler is column-local (no extra
+exchange). Multi-device numerical parity vs serial = **1.2e-10 / 8.7e-11 / 2.9e-10**
+at np2/3/6 (bit-identity class). C96 strong / C24→C58 weak, np 1/2/3/6, both
+precisions:
+
+| | np1 | np2 | np3 | np6 |
+|---|---|---|---|---|
+| cube-moist STRONG f64 (Mc/s) | 10.5 | 9.2 | 10.0 | 10.3 |
+| cube-moist WEAK f64 (Mc/s) | 9.3 | 7.4 | 8.6 | 10.0 |
+| cube-dry STRONG f64 (Mc/s) | 22.1 | 17.6 | 19.6 | 21.4 |
+
+Strong-scaling FLAT (np6≈np1) = the Ginsburg CPU HW limit (halo cost, no compute
+speedup — consistent with the convergent-practical-limit verdict). WEAK-scaling
+holds per-device throughput np1→np6 (moist 9.3→10.0) → aggregate scales ~6× for 6×
+work. Moist ≈2× dry per-cell cost (Kessler + 3-tracer advection). **With this, the
+moist × {latlon, icosahedral, cubed-sphere, spectral} × {f32, f64} × {weak, strong}
+matrix is complete at Ginsburg's practical limits.** The np>6 cube sub-face tiling
+(SW + 3D-PE full step) remains built + np24/54 bit-identity parity-gated but
+future-HW (np>6 anti-scales on Ginsburg CPU by design). Bench:
+`run_cpu_mpi_scaling --grid cubed-sphere --cs-spmd --physics moist`; parity
+`tests/parallel/test_cube_moist_spmd_parity.py`.
+
 ## UPDATE 2026-06-16 — multi-node UNBLOCKED (was a bug, not a fabric limit)
 
 The earlier "atm icosahedral is single-node only / at the practical limit"
