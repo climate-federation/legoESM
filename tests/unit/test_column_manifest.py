@@ -15,6 +15,7 @@ from legoesm.training.column_era5_metrics import ColumnErrorFields
 from legoesm.training.column_manifest import (
     ColumnEnvironmentFields,
     EnvironmentConfig,
+    assert_coords_match_grid,
     build_worst_column_manifest,
     compute_bulk_shear,
     compute_column_environment,
@@ -332,3 +333,20 @@ def test_manifest_round_trip_preserves_nan_precip(tmp_path):
         assert math.isnan(lo.precip_err_mm_day)               # NaN preserved, not coerced
         # every OTHER field exactly equal (neutralize the not-self-equal precip slot).
         assert lo._replace(precip_err_mm_day=0.0) == rec._replace(precip_err_mm_day=0.0)
+
+
+def test_assert_coords_match_grid_accepts_grid_shaped_and_1d_rectilinear():
+    """assert_coords_match_grid (the public pre-flight wrapper) accepts coords the manifest
+    builder accepts — grid-shaped (n_lat, n_lon) OR rectilinear 1-D lat[n_lat]+lon[n_lon] —
+    and RAISES on a mismatch (so a campaign --dry-run catches a coord/grid mismatch before
+    the per-column lat_flat[flat_index] gather mis-indexes at the first compare)."""
+    # grid-shaped (2, 3): OK
+    assert_coords_match_grid(jnp.zeros((2, 3)), jnp.zeros((2, 3)), (2, 3))
+    # rectilinear 1-D lat[2] + lon[3] meshed to (2, 3): OK
+    assert_coords_match_grid(jnp.zeros((2,)), jnp.zeros((3,)), (2, 3))
+    # wrong 2-D shape ⇒ raise
+    with pytest.raises(ValueError, match="not broadcastable to the column grid"):
+        assert_coords_match_grid(jnp.zeros((4, 5)), jnp.zeros((4, 5)), (2, 3))
+    # 1-D vectors with the WRONG lengths (lat[3]+lon[2] for a (2,3) grid) ⇒ raise
+    with pytest.raises(ValueError, match="not broadcastable to the column grid"):
+        assert_coords_match_grid(jnp.zeros((3,)), jnp.zeros((2,)), (2, 3))

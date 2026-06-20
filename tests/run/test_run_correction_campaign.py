@@ -497,6 +497,12 @@ def test_dry_run_rejects_per_column_fields_not_matching_grid():
         build_correction_campaign(base_atm_config=_base_config(), les_config=les,
                                   area_weights=jnp.ones((2, 3)),
                                   valid_mask=jnp.ones((7,), dtype=bool), **common)
+    # (d) a mismatched lat/lon (1-D vectors with the WRONG lengths for the (2,3) grid) ⇒
+    #     caught in the dry-run, before the manifest's lat_flat[flat_index] gather mis-indexes.
+    common_d = {**common, "lat_deg": jnp.zeros((4,)), "lon_deg": jnp.zeros((5,))}
+    with pytest.raises(ValueError, match="not broadcastable to the column grid"):
+        build_correction_campaign(base_atm_config=_base_config(), les_config=les,
+                                  area_weights=jnp.ones((2, 3)), **common_d)
 
 
 def test_campaign_exit_code_reflects_health_verdict():

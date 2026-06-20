@@ -214,18 +214,23 @@ def grid_latlon_deg(grid, lat_deg, lon_deg):
     return lat_deg, lon_deg
 
 
-def assert_per_column_fields_match_grid(grid_shape, *, area_weights, valid_mask=None):
-    """Pre-flight (caught by ``--dry-run``): operator-supplied per-column fields MUST
-    broadcast to the model grid ``grid_shape`` (``= reference.T.shape[:-1]``).
+def assert_per_column_fields_match_grid(grid_shape, *, area_weights, valid_mask=None,
+                                        lat_deg=None, lon_deg=None):
+    """Pre-flight (caught by ``--dry-run``): operator-supplied per-column fields MUST be
+    placed on the model grid ``grid_shape`` (``= reference.T.shape[:-1]``).
 
-    The bias aggregation does ``jnp.broadcast_to(area_weights, combined_score.shape)``
-    (``bias_metrics._area_weighted_mean``), so a mismatched-resolution ``area_weights``
-    (or ``valid_mask``) — e.g. weights for a different grid than the loaded reference —
-    would otherwise crash only at the FIRST compare, after a (short but non-free) model
-    run.  This raises at CONSTRUCTION instead, so the launch dry-run catches it.
+    Two failure modes, both otherwise surfacing only at the FIRST compare (after a short
+    but non-free model run); this raises at CONSTRUCTION so the launch dry-run catches them:
 
-    Uses ``np.broadcast_shapes`` — the SAME rules as the runtime ``jnp.broadcast_to`` —
-    so a genuinely-broadcastable shape is NEVER rejected here (no false positives)."""
+    * ``area_weights`` / ``valid_mask`` are BROADCAST onto the per-column score
+      (``bias_metrics._area_weighted_mean`` → ``jnp.broadcast_to(.., score.shape)``), so a
+      mismatched-resolution field must be broadcastable to ``grid_shape``.  Checked with
+      ``np.broadcast_shapes`` — the SAME rule as the runtime ``broadcast_to`` (no false
+      positives AND no false negatives).
+    * ``lat_deg`` / ``lon_deg`` are GATHERED per-column in the manifest
+      (``lat_flat[flat_index]``), so a mismatch would mis-index; validated via the manifest's
+      own :func:`~legoesm.training.column_manifest.assert_coords_match_grid` (grid-shaped OR
+      rectilinear 1-D ``lat[n_lat]``+``lon[n_lon]``)."""
     import numpy as np
 
     gshape = tuple(int(d) for d in grid_shape)
@@ -248,6 +253,9 @@ def assert_per_column_fields_match_grid(grid_shape, *, area_weights, valid_mask=
                 "the per-column score, so this would crash at the first compare. Pass a "
                 "per-column field on the SAME grid as the reference."
             )
+    if lat_deg is not None and lon_deg is not None:
+        from legoesm.training.column_manifest import assert_coords_match_grid
+        assert_coords_match_grid(lat_deg, lon_deg, gshape)
 
 
 def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_state,
@@ -401,9 +409,10 @@ def build_correction_campaign(
         from legoesm.training.compare_reanalysis import validate_reference_physical
         validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
-    assert_per_column_fields_match_grid(
-        grid_shape, area_weights=area_weights, valid_mask=valid_mask)
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
+    assert_per_column_fields_match_grid(
+        grid_shape, area_weights=area_weights, valid_mask=valid_mask,
+        lat_deg=lat_deg, lon_deg=lon_deg)
 
     # Keep the loop's reduction in lock-step with the LES diagnosis, and select
     # the promotable coefficient + its production default by method:
@@ -732,9 +741,10 @@ def build_multi_correction_campaign(
         from legoesm.training.compare_reanalysis import validate_reference_physical
         validate_reference_physical(reference, name="reference")
     grid_shape = tuple(int(d) for d in reference.T.shape[:-1])
-    assert_per_column_fields_match_grid(
-        grid_shape, area_weights=area_weights, valid_mask=valid_mask)
     lat_deg, lon_deg = grid_latlon_deg(grid, lat_deg, lon_deg)
+    assert_per_column_fields_match_grid(
+        grid_shape, area_weights=area_weights, valid_mask=valid_mask,
+        lat_deg=lat_deg, lon_deg=lon_deg)
     clubb_cfg = initial_clubb if initial_clubb is not None else CLUBBLiteConfig()
 
     specs = []

@@ -31,7 +31,7 @@ the lightweight index that drives that stage.
 from __future__ import annotations
 
 import json
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -258,6 +258,18 @@ def _broadcast_coords(
         f"column grid shape {shape}; pass grid-shaped coordinates or 1-D "
         f"lat[n_lat]+lon[n_lon] for a rectilinear grid."
     )
+
+
+def assert_coords_match_grid(lat_deg: Any, lon_deg: Any, grid_shape: tuple[int, ...]) -> None:
+    """Public pre-flight wrapper: raise if ``lat_deg``/``lon_deg`` cannot be placed on the
+    column grid ``grid_shape``.
+
+    Reuses the SAME acceptance logic as the manifest builder (:func:`_broadcast_coords` —
+    grid-shaped OR rectilinear 1-D ``lat[n_lat]``+``lon[n_lon]``), so a campaign launch
+    pre-flight (``--dry-run``) catches a coordinate/grid mismatch BEFORE the first compare
+    (where the manifest's per-column ``lat_flat[flat_index]`` gather would otherwise mis-
+    index) instead of after a model run.  No drift: the check IS the builder's logic."""
+    _broadcast_coords(np.asarray(lat_deg), np.asarray(lon_deg), tuple(int(d) for d in grid_shape))
 
 
 def manifest_to_dicts(records: list[ColumnRecord]) -> list[dict]:
