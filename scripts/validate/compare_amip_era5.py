@@ -216,7 +216,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None):
+def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None,
+                            expected_vertical_coord=None):
     """Load a restart checkpoint into a comparison :class:`ColumnState`.
 
     Loads the restart, synthesizes grid winds (a no-op for a grid state; the MPAS
@@ -224,12 +225,27 @@ def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None):
     the grid, and builds the model state.  Shared by the scored ``--restart`` and
     the optional ``--baseline-restart`` so both are loaded IDENTICALLY (same grid,
     sigma, SST source) — the before/after bias is then comparable.
+
+    ``expected_vertical_coord`` (the operator's ``--vertical-coord``): when the
+    restart RECORDS the run's coordinate (``loaded_config.grid.vertical_coord``),
+    a mismatch is FAILED LOUDLY — placing the state on the wrong pressure levels
+    (the warning the flag's help only described) would silently bias the compare.
+    Defensive: skipped when the recorded coordinate is unavailable (legacy / no
+    config), so it only raises on a CONFIRMED mismatch.
     """
     from legoesm.driver.restart import load_restart
     from legoesm.training.compare_reanalysis import grid_winds_from_spectral
 
     loaded = load_restart(restart_path, grid, sigma, strict=True)
     state, q_v = loaded[0], loaded[1]
+    if expected_vertical_coord is not None and len(loaded) > 4:
+        run_vcoord = getattr(getattr(loaded[4], "grid", None), "vertical_coord", None)
+        if run_vcoord is not None and str(run_vcoord) != str(expected_vertical_coord):
+            raise ValueError(
+                f"--vertical-coord {str(expected_vertical_coord)!r} does not match the "
+                f"restart's recorded run coordinate {str(run_vcoord)!r}; the model state "
+                "would be placed on the WRONG pressure levels (a silently-biased compare). "
+                f"Re-run with --vertical-coord {str(run_vcoord)}.")
     state = grid_winds_from_spectral(state, grid, sigma)
     expected_cols = tuple(grid.grid_shape_2d)
     if tuple(state.T.shape[:-1]) != expected_cols:
@@ -288,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
             "follow-up (docs/COMPARE_REANALYSIS.md).",
             stacklevel=2,
         )
-    model = load_model_from_restart(args.restart, grid, sigma, args.nlev, sst_K=sst_K)
+    model = load_model_from_restart(args.restart, grid, sigma, args.nlev, sst_K=sst_K,
+                                    expected_vertical_coord=args.vertical_coord)
 
     era5_cfg = TrainingERA5Config(
         zarr_store=args.era5_zarr,
@@ -336,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         baseline_model = load_model_from_restart(
-            args.baseline_restart, grid, sigma, args.nlev, sst_K=sst_K)
+            args.baseline_restart, grid, sigma, args.nlev, sst_K=sst_K,
+            expected_vertical_coord=args.vertical_coord)
         # out_path=None ⇒ compare only (no manifest write) against the SAME reference.
         baseline_cmp = compare_and_write(
             model=baseline_model, reference=reference, sigma=sigma, grid=grid,

@@ -205,6 +205,37 @@ def test_load_model_from_restart_shape_and_nlev_guards(monkeypatch):
         drv.load_model_from_restart("x.npz", grid, object(), 5)
 
 
+def test_load_model_from_restart_vertical_coord_mismatch_raises(monkeypatch):
+    """Pre-flight (iter 357): when the restart RECORDS the run's coordinate
+    (loaded_config.grid.vertical_coord), load_model_from_restart fails LOUD if the
+    operator's --vertical-coord disagrees — otherwise the state lands on the WRONG
+    pressure levels and the before/after bias is silently wrong (the flag's help only
+    WARNED).  Defensive: skipped when the recorded coordinate is unavailable."""
+    from types import SimpleNamespace
+
+    import legoesm.driver.restart as restart_mod
+
+    grid = SimpleNamespace(grid_shape_2d=(2, 3))
+
+    def _fake_restart_with_cfg(shape, run_vcoord):
+        cfg = SimpleNamespace(grid=SimpleNamespace(vertical_coord=run_vcoord))
+        def f(path, g, s, strict):                    # noqa: ARG001
+            # 5-tuple: (state, q_v, step, day, loaded_config) — load_model reads [0],[1],[4].
+            return (SimpleNamespace(T=jnp.zeros(shape)), jnp.zeros(shape), 0, 0.0, cfg)
+        return f
+
+    # MISMATCH: run was hybrid, operator passed sigma ⇒ raise BEFORE any shape work.
+    monkeypatch.setattr(restart_mod, "load_restart", _fake_restart_with_cfg((2, 3, 5), "hybrid"))
+    with pytest.raises(ValueError, match="does not match the restart's recorded run coordinate"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5, expected_vertical_coord="sigma")
+
+    # MATCH: the coordinate agrees ⇒ the coord check PASSES and the SHAPE guard runs next
+    # (wrong columns here ⇒ the shape error, proving the coord check did not fire).
+    monkeypatch.setattr(restart_mod, "load_restart", _fake_restart_with_cfg((4, 4, 5), "hybrid"))
+    with pytest.raises(ValueError, match="column shape"):
+        drv.load_model_from_restart("x.npz", grid, object(), 5, expected_vertical_coord="hybrid")
+
+
 def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
     """Drive main() with all live I/O stubbed; assert the wiring contract.
 
