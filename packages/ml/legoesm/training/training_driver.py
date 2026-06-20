@@ -30,11 +30,18 @@ logger = logging.getLogger(__name__)
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
 
-def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs):
+def _build_training_segment(model, step_unified, grid, sigma, dt, *,
+                            microphysics="none", **extra_kwargs):
     """Build a segment function with standard training defaults.
 
     Encapsulates the boilerplate kwargs shared by all training modes.
     Returns the compiled segment function (use ``.raw`` for AD).
+
+    ``microphysics`` selects the prognostic-condensate scheme applied in the
+    carry hot loop (``"none"`` keeps the saturation-adjustment closure).  The
+    classical physics variant threads its real scheme (e.g. ``"kessler"``)
+    here so q_c/q_r/precip evolve; NN-replacement variants keep ``"none"``
+    (the network subsumes condensation).
     """
     sigma_full = jnp.asarray(sigma.sigma_full)
     return build_segment_fn(
@@ -45,7 +52,7 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         dsigma=jnp.asarray(sigma.dsigma),
         dt=dt,
         rad_update_steps=1,
-        microphysics="none",
+        microphysics=microphysics,
         fix_moisture=False,
         fix_mass=False,
         fric_decay=jnp.ones(sigma_full.shape[0]),
@@ -186,6 +193,7 @@ def train_physics_params(
     dt: float = 600.0,
     rollout_hours: float = 24.0,
     grad_clip: float = 1.0,
+    microphysics: str = "none",
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -217,7 +225,8 @@ def train_physics_params(
         def loss_fn(params_):
             seg_kw = params_.to_segment_kwargs()
             run_seg = _build_training_segment(
-                model, step_unified, grid, sigma, dt, **seg_kw,
+                model, step_unified, grid, sigma, dt,
+                microphysics=microphysics, **seg_kw,
             )
             pred = single_day_rollout(
                 ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
@@ -401,7 +410,9 @@ def train_sfno_coupled(
     sfno_physics : updated SFNOPhysics
     list[float] — loss history
     """
-    from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
+    from legoesm.training.sfno_dycore_coupling import (
+        make_sfno_step_unified, SFNOPhysics,
+    )
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -416,8 +427,19 @@ def train_sfno_coupled(
             )
         traditional_step = physics_pipeline.build_step_unified()
 
+    # Differentiate ONLY the SFNO (float/complex params).  SFNOPhysics.grid is
+    # a non-static GaussianGrid whose FLOAT leaves (Pnm/Hnm/wPnm/lap — the SHT
+    # transform matrices) would otherwise be swept up by is_inexact_array and
+    # corrupted by AdamW (grad + weight decay) — and its INT index arrays
+    # ms/ls would break optax's tree structure.  The grid + nlev are closure
+    # consts; only sfno_physics.sfno is trained.
+    sfno0 = sfno_physics.sfno
+    gauss_grid = sfno_physics.grid
+    nlev = sfno_physics.nlev
+
     def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(sfno_ph):
+        def loss_fn(sfno_):
+            sfno_ph = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev)
             step_unified = make_sfno_step_unified(
                 sfno_ph,
                 mode=coupling_mode,
@@ -434,8 +456,11 @@ def train_sfno_coupled(
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip),
         optax.adamw(lr, weight_decay=1e-5))
-    return _training_loop(
-        make_loss_fn, sfno_physics, optimizer,
+    trained_sfno, hist = _training_loop(
+        make_loss_fn, sfno0, optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
     )
+    # Re-wrap the trained SFNO so the caller gets a usable SFNOPhysics back
+    # (preserves the previous return contract).
+    return SFNOPhysics(sfno=trained_sfno, grid=gauss_grid, nlev=nlev), hist

@@ -335,12 +335,13 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
         trained, hist = train_physics_params(
             model, grid, sigma, physics_pipeline, ics, targets, forcings,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
-            rollout_hours=_ROLLOUT_HOURS,
+            rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
             loss_config=loss_config, log_every=1,
         )
         step_unified = physics_pipeline.build_step_unified()
         seg = build_training_segment(
             model, step_unified, grid, sigma, args.dt,
+            microphysics=args.microphysics,
             **trained.to_segment_kwargs(),
         )
     elif variant == "column_nn":
@@ -450,12 +451,22 @@ def build_parser():
     p.add_argument("--n-lat", type=int, default=72)
     p.add_argument("--n-lev", type=int, default=8)
     p.add_argument("--dt", type=float, default=600.0)
-    p.add_argument("--radiation", default="gray")
+    # AMIP-like runs MUST use the band model (rrtmgp): gray radiation ignores
+    # o3/aerosol/water-vapour spectral structure, so its TOA/surface fluxes
+    # cannot generalize to a different climate — the whole point of flux
+    # supervision.  Gray stays selectable for cheap debug only.
+    p.add_argument("--radiation", default="rrtmgp")
     p.add_argument("--convection", default="sbm")
     p.add_argument("--turbulence", default="louis")
-    p.add_argument("--microphysics", default="none")
+    # Full AMIP physics stack: warm-rain microphysics (kessler — cheap,
+    # differentiable, fast-compiling; morrison/p3 + rrtmgp blow the compile
+    # budget) and non-orographic spectral gravity-wave drag (hines — active
+    # without subgrid-orography input, which the lat-lon setup lacks; mcfarlane
+    # would be inert here).  Applied to the CLASSICAL physics variant; the
+    # NN-replacement variants subsume these into the learned tendencies.
+    p.add_argument("--microphysics", default="kessler")
     p.add_argument("--clouds", default="xu_randall")
-    p.add_argument("--gravity-wave-drag", default="none")
+    p.add_argument("--gravity-wave-drag", default="hines")
     p.add_argument("--variants", default="classical,column_nn",
                    help="comma list: classical,column_nn")
     p.add_argument("--epochs", type=int, default=8)
@@ -501,16 +512,21 @@ def main(argv=None):
         args.train_windows = "2015:0:1"
         args.eval_windows = "2017:0:1"
 
-    # Guard (codex review #4): build_training_segment fixes
-    # microphysics='none'; a non-none scheme would be computed by the
-    # physics pipeline but the segment-level microphysics handling
-    # (q_c/q_r/precip) would be inconsistent.  Fail loud until threaded.
-    if args.microphysics != "none":
-        raise NotImplementedError(
-            "run_aimip_latlon: microphysics must be 'none' for now — the "
-            "training segment wrapper fixes microphysics='none'. Threading "
-            "the scheme into build_training_segment is the microphysics-axis "
-            "sweep task."
+    # Microphysics is now threaded through build_training_segment (the carry
+    # already carries q_c/q_r/conv_prog/precip_accum), so a real scheme runs
+    # in the CLASSICAL physics variant.  The NN-replacement variants
+    # (column_nn / sfno) keep microphysics='none' inside their segment — the
+    # network subsumes condensation — so the scheme only changes the physics
+    # model.  Warn if a non-none scheme is requested while only NN variants
+    # are selected (it would have no effect there).
+    _sel_variants = {v.strip() for v in args.variants.split(",") if v.strip()}
+    _nn_only = _sel_variants <= {"column_nn", "sfno"}
+    if args.microphysics != "none" and _nn_only:
+        logger.warning(
+            "microphysics=%s requested but only NN-replacement variants are "
+            "selected; the network subsumes condensation, so the microphysics "
+            "scheme has no effect. It applies to the 'classical' variant.",
+            args.microphysics,
         )
     # Guard (codex review #5): per-window ozone/aerosol composition is not
     # threaded; the forcing climatology is taken once and reused (only

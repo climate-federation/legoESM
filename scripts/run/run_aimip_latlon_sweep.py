@@ -9,11 +9,12 @@ radiation-flux loss on.  Mirrors the spectral
 lat-lon C-grid carry stack.
 
 Axes swept: convection, turbulence, gravity-wave drag — the
-differentiable levers with >1 option.  Microphysics is NOT swept here:
-the training segment wrapper currently fixes ``microphysics='none'``
-(see run_aimip_latlon guard), so a microphysics axis needs the segment
-to thread the scheme first.  Radiation stays gray (cheap + the flux loss
-tunes its tau knobs); rrtmgp combos are a later stage.
+differentiable levers with >1 option.  Microphysics is now threaded
+through the training segment (baseline uses the orchestrator default,
+``kessler``), but is not an OAT axis here (one warm-rain scheme is enough
+to "have microphysics"; add an axis if scheme choice needs comparing).
+Radiation is the orchestrator default ``rrtmgp`` (band model — required
+for AMIP-like flux generalization; gray is debug-only).
 
 Usage:
     python run_aimip_latlon_sweep.py --list           # n combos
@@ -29,11 +30,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Baseline classical stack (one known-good point in the space).
+# Baseline classical stack (one known-good point in the space).  Full AMIP
+# physics: convection + turbulence + active (non-orographic) GWD; microphysics
+# (kessler) and radiation (rrtmgp) come from the orchestrator defaults.
 BASELINE = {
     "convection": "sbm",
     "turbulence": "louis",
-    "gravity_wave_drag": "none",
+    "gravity_wave_drag": "hines",
 }
 
 # OAT alternatives per axis (baseline value excluded — it is the
@@ -49,8 +52,11 @@ SWEEP_SPACE = {
     "turbulence": [
         "smagorinsky", "holtslag_boville", "ysu", "none",
     ],
+    # hines is the baseline; "none" probes the no-GWD effect.  mcfarlane is
+    # orographic (inert without subgrid-orography input on this lat-lon
+    # setup) but kept to confirm that.
     "gravity_wave_drag": [
-        "mcfarlane", "lindzen", "rayleigh", "hines",
+        "none", "mcfarlane", "lindzen", "rayleigh",
     ],
 }
 
@@ -63,6 +69,8 @@ def build_combos():
     combos = [{"name": "combo_baseline", **BASELINE}]
     for axis, alts in SWEEP_SPACE.items():
         for alt in alts:
+            if alt == BASELINE[axis]:
+                continue  # baseline value is the shared combo_baseline run
             combo = dict(BASELINE)
             combo[axis] = alt
             combo["name"] = f"combo_{_AXIS_TAG[axis]}_{alt}"
