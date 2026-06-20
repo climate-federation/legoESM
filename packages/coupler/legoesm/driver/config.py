@@ -224,6 +224,14 @@ class ExperimentConfig(NamedTuple):
     # Integration
     days: int = 200
     start_day: float = 0.0
+    # Optional seasonal alignment for the radiation insolation ONLY (decoupled
+    # from the relative-indexed AMIP SST forcing). When set, model day 0 maps to
+    # this noleap day-of-year [1, 366) for the insolation day_of_year, so an
+    # AMIP run started from a non-January ERA5 date can run the matching solar
+    # season WITHOUT shifting start_day (which would push the relative SST out of
+    # range). None => legacy behavior: day 0 -> Jan 1 (day_to_calendar(0)).
+    # See docs/COMPARE_REANALYSIS.md (iter 449). CODEX PENDING (radiation path).
+    insolation_start_doy: float | None = None
 
     # Forcing
     dataset: str = "analytical"
@@ -1079,6 +1087,15 @@ class ExperimentConfig(NamedTuple):
                     "aimip_variant='classical' requires "
                     "cloud_scheme='xu_randall', "
                     f"got {self.cloud_scheme!r}"
+                )
+
+        # Seasonal insolation alignment (radiation-only; see the field doc).
+        if self.insolation_start_doy is not None:
+            _doy = self.insolation_start_doy
+            if not (isinstance(_doy, (int, float)) and 1.0 <= float(_doy) < 366.0):
+                errors.append(
+                    "insolation_start_doy must be None or a noleap day-of-year "
+                    f"in [1, 366), got {self.insolation_start_doy!r}"
                 )
 
         if errors:

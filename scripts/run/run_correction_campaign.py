@@ -903,21 +903,30 @@ _INSOLATION_OFF_SEASON_MONTHS = frozenset({4, 5, 6, 7, 8, 9})
 
 
 def _insolation_season_note(local_era5_date) -> str | None:
-    """The model-vs-ERA5 INSOLATION season-mismatch note (iter 447) for an OFFLINE ERA5 date in
-    the off-season half (Apr–Sep).  The model's solar calendar is JANUARY-based, so a
-    spring/summer/autumn comparison runs ~off-season insolation while the AMIP SST IS aligned — a
-    tracked driver-level gap; the WORKAROUND is a January window (aligns BOTH the relative SST
-    forcing and the insolation).  Returns ``None`` for no offline date / a near-January window."""
+    """The model-vs-ERA5 INSOLATION season-mismatch note for an OFFLINE ERA5 date in the off-season
+    half (Apr–Sep).  By default the model's solar calendar is JANUARY-based (model day 0 -> Jan 1),
+    so a spring/summer/autumn comparison runs ~off-season insolation while the AMIP SST IS aligned.
+    Two fixes, surfaced here: (1, iter 449) set ``insolation_start_doy=<doy>`` in the config to map
+    model day 0 to the ERA5 date's day-of-year for the radiation insolation ONLY (CODEX PENDING for
+    the radiation path), or (2, fully validated) use a January window so day 0 -> Jan 1 aligns BOTH
+    the relative SST forcing and the insolation.  Returns ``None`` for no offline date / a
+    near-January window / a malformed date."""
     s = str(local_era5_date or "")
-    if len(s) < 6 or not s[:6].isdigit():
+    if len(s) < 8 or not s[:8].isdigit():
         return None
-    if int(s[4:6]) in _INSOLATION_OFF_SEASON_MONTHS:
-        return (f"[campaign] NOTE: the ERA5 date {s} is in the off-season half (month "
-                f"{int(s[4:6])}); the model's insolation is JANUARY-based (cfg.start_day=0), so "
-                "the solar season MISMATCHES the SST-aligned comparison (iter 447, a tracked "
-                "driver-level gap). Workaround: use a January ERA5 window to align BOTH the SST "
-                "forcing AND the insolation.")
-    return None
+    if int(s[4:6]) not in _INSOLATION_OFF_SEASON_MONTHS:
+        return None
+    from legoesm.forcing.time_utils import noleap_day_of_year
+    try:
+        doy = noleap_day_of_year(int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None
+    return (f"[campaign] NOTE: the ERA5 date {s} (noleap day-of-year {doy}) is in the off-season "
+            f"half (month {int(s[4:6])}); the model's insolation defaults to JANUARY-based (model "
+            "day 0 -> Jan 1), so the solar season MISMATCHES the SST-aligned comparison. Align it "
+            f"with EITHER insolation_start_doy={doy} in the config (radiation-only, decoupled from "
+            "the relative SST; CODEX PENDING) OR a January ERA5 window (validated; day 0 -> Jan 1 "
+            "aligns BOTH the SST forcing AND the insolation).")
 
 
 def _build_run_setup(args):

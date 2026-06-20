@@ -107,17 +107,24 @@ a 91 K aloft T-bias in a 1-day run that is largely spin-up). Keep `--days` (the 
 enough longer than `SPINUP_DAYS` for a stable post-spin-up mean. (A multi-day `--days` with
 `SPINUP_DAYS=0` prints a launch NOTE reminding you.)
 
-> **Insolation season — a tracked comparability limitation (iter 447, CODEX PENDING).** The AMIP
-> **SST** is aligned to the ERA5 date (via the forcing), but the radiation **insolation** is NOT:
-> the driver derives the day-of-year from `day_to_calendar(day)` and `cfg.start_day` defaults to
-> `0`, so the model's insolation is **January-based** (day 0 → Jan 1) — a September comparison runs
-> ~winter (off-season) insolation. It cannot be aligned via `cfg.start_day` alone (that ALSO
-> offsets the *relative* AMIP SST-forcing index, pushing the SST out of range), and the insolation
-> day-of-year is computed at THREE driver sites, so a clean fix is driver-level (decouple the
-> insolation date from `cfg.start_day`). This biases the **high-latitude** worst-column ranking
-> most. **Workaround until the fix:** use a **January** ERA5 window (e.g. `20170115`) — it aligns
-> BOTH the SST forcing AND the Jan-based insolation. The campaign prints a launch NOTE when the
-> offline `--local-era5-date` falls in the off-season half (Apr–Sep).
+> **Insolation season — a tracked comparability limitation (iter 447/449).** The AMIP **SST** is
+> aligned to the ERA5 date (via the forcing), but by default the radiation **insolation** is NOT:
+> the driver derives the day-of-year from `day_to_calendar(day)` and, with `insolation_start_doy`
+> unset, the model's insolation is **January-based** (day 0 → Jan 1) — a September comparison runs
+> ~winter (off-season) insolation. This biases the **high-latitude** worst-column ranking most.
+> Two ways to align it:
+> - **`insolation_start_doy=<doy>` in the config (iter 449, the seam exists; CODEX PENDING for the
+>   radiation path).** Maps model day 0 to that noleap day-of-year for the insolation **only** —
+>   decoupled from the relative-indexed SST forcing — so a non-January window can run the matching
+>   solar season. All five insolation sites route through one driver seam
+>   (`_calendar_for_radiation`); the integer-day offset shifts `day_of_year` while preserving the
+>   diurnal phase; unset (`None`) is byte-identical to the legacy path (validated by the bitwise
+>   restart-continuation test). For a Sep 1 (`20170901`) start use `insolation_start_doy=244`.
+> - **A January ERA5 window (e.g. `20170115`) — fully validated.** Day 0 → Jan 1 aligns BOTH the
+>   SST forcing AND the Jan-based insolation with no config change.
+>
+> The campaign prints a launch NOTE (with the exact day-of-year and the `insolation_start_doy=<doy>`
+> value) when the offline `--local-era5-date` falls in the off-season half (Apr–Sep).
 
 ```bash
 CONFIG=configs/amip_clubb_lite.json ERA5=/path/to/era5.zarr \

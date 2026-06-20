@@ -138,6 +138,17 @@ class ModelDriver:
             context="ModelDriver tracer registry",
         )
         self.get_sst_sic = None
+        # Seasonal insolation offset (days): align model day 0 to
+        # config.insolation_start_doy for the radiation day_of_year ONLY, so an
+        # AMIP run from a non-January ERA5 date can run the matching solar season
+        # without shifting start_day (which the relative-indexed SST forcing
+        # depends on). None => 0.0 => legacy (day 0 -> Jan 1). Static Python
+        # float: the calendar is computed host-side per step, so this is a
+        # constant, never a traced leaf. See config.insolation_start_doy.
+        _insol_doy = getattr(config, "insolation_start_doy", None)
+        self._insolation_day_offset: float = (
+            0.0 if _insol_doy is None else float(_insol_doy) - 1.0
+        )
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
         # grid-shaped or None) returning the coupler's tile-blended dynamic
@@ -3684,6 +3695,27 @@ class ModelDriver:
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
 
+    def _insolation_day(self, day):
+        """Model ``day`` shifted by the static seasonal insolation offset
+        (``_insolation_day_offset``, from ``config.insolation_start_doy``). The
+        ONE place the offset is applied, consumed by BOTH insolation mechanisms:
+        the ``day_to_calendar`` day_of_year (rrtmgp/forcing-dict path, via
+        :meth:`_calendar_for_radiation`) AND the gray-radiation
+        ``daily_mean_insolation`` solar declination. Decoupled from the
+        relative-indexed SST forcing (which keeps the un-shifted ``day``).
+        Offset 0.0 (``insolation_start_doy is None``) => identical to ``day``.
+        """
+        return day + self._insolation_day_offset
+
+    def _calendar_for_radiation(self, day):
+        """``day_to_calendar`` for the radiation insolation day_of_year/seconds,
+        applying the seasonal offset (:meth:`_insolation_day`). The integer-day
+        offset (the whole-day-of-year case) shifts ``day_of_year`` while leaving
+        ``seconds_of_day`` (the diurnal phase) unchanged; offset 0.0 =>
+        byte-identical to ``day_to_calendar(day)``.
+        """
+        return day_to_calendar(self._insolation_day(day))
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -4257,10 +4289,7 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import (
-            daily_forcing_bucket,
-            day_to_calendar,
-        )
+        from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
@@ -4311,7 +4340,7 @@ class ModelDriver:
                 # whole run would see the insolation of the initial day —
                 # no seasonal or diurnal cycle.  Scalars only; the heavier
                 # daily fields above are reused between updates.
-                _doy, _sod = day_to_calendar(_force_day)
+                _doy, _sod = self._calendar_for_radiation(_force_day)
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
@@ -4645,7 +4674,8 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0)
+                insol = daily_mean_insolation(
+                    lat_col, self._insolation_day(current_day), S_0)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4817,8 +4847,6 @@ class ModelDriver:
         t_start = time.time()
         _ext_daily: dict = {}
         _last_ext_day = None
-        if _full_physics:
-            from legoesm.forcing.time_utils import day_to_calendar
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
@@ -4854,7 +4882,7 @@ class ModelDriver:
                             k: jnp.asarray(v) for k, v in _ghg.items()
                         }
                     _last_ext_day = _fd_int
-                _doy, _sod = day_to_calendar(self._current_day)
+                _doy, _sod = self._calendar_for_radiation(self._current_day)
                 forcing_data = {
                     "T_sfc": _T_sfc_step,
                     "day_of_year": jnp.asarray(_doy),
@@ -4864,7 +4892,8 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+                insol_step = daily_mean_insolation(
+                    _lat_col_loop, self._insolation_day(self._current_day), S_0)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
@@ -5803,7 +5832,7 @@ class ModelDriver:
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
             sst, sic = self.get_sst_sic(day)
 
             # Re-sample time-varying external forcing at every segment
@@ -6362,7 +6391,7 @@ class ModelDriver:
         # --- JIT warmup ---
         t_jit_start = time.time()
         day = START_DAY + (start_step + 1) * DT / 86400.0
-        day_of_year, seconds_of_day = day_to_calendar(day)
+        day_of_year, seconds_of_day = self._calendar_for_radiation(day)
         sst, sic = self.get_sst_sic(day)
 
         # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
@@ -6502,7 +6531,7 @@ class ModelDriver:
 
         for step in range(start_step + 1, n_steps_total):
             day = START_DAY + (step + 1) * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
 
             sst, sic = self.get_sst_sic(day)
 

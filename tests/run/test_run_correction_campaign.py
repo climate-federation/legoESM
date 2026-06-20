@@ -3335,16 +3335,20 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
 
 def test_insolation_season_note_warns_off_season_offline_date():
     """An off-season (Apr–Sep) OFFLINE ERA5 date warns about the model's January-based insolation
-    mismatch (iter 447); a January window, the Zarr path (no date), or a malformed date is silent
-    (no crash). The driver-level fix is deferred; the note surfaces the workaround."""
+    mismatch and surfaces BOTH fixes: the exact ``insolation_start_doy=<doy>`` (iter 449) and the
+    January-window workaround. A January window, the Zarr path (no date), or a malformed date is
+    silent (no crash)."""
     from scripts.run.run_correction_campaign import _insolation_season_note
 
     w = _insolation_season_note("20170901")                # September → off-season → warns
     assert w is not None and "insolation" in w.lower() and "January" in w
+    # the note reports Sep 1's exact noleap day-of-year (244) and the config-field fix
+    assert "244" in w and "insolation_start_doy=244" in w
     assert _insolation_season_note("20170115") is None     # January → aligned → silent
     assert _insolation_season_note("20171115") is None     # November (near-January half) → silent
     assert _insolation_season_note(None) is None           # Zarr path (no offline date) → silent
     assert _insolation_season_note("bad") is None           # malformed → silent (no crash)
+    assert _insolation_season_note("201709") is None        # date w/o day-of-month → silent
 
 
 def test_campaign_knobs_reject_degenerate_counts():
