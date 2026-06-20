@@ -765,6 +765,33 @@ class TestERA5ToState:
         np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
         assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
 
+    def test_era5_to_cubedsphere_carry_regrids_phis_into_the_state(self):
+        """``era5_to_*_carry`` builds a FULL reference state — used both as the compare
+        target AND to INITIALISE a model from ERA5, where the surface geopotential
+        ``phis`` (topography ``g·z_s``) matters.  T/q/u have their regridded VALUES
+        asserted; ``phis`` (regridded by the same IDW ``regrid_scalar``) only had its
+        shape checked.  A CONSTANT ERA5 ``phis`` is invariant under the IDW regrid
+        (weights sum to 1), so ``carry.phis`` equals it everywhere — a dropped or
+        zeroed phis regrid is caught."""
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        phis0 = 2000.0          # surface geopotential g·z_s [m²/s²]
+
+        def const(v):
+            return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
+
+        era5 = ERA5Slice(
+            T=const(280.0), u=const(5.0), v=const(0.0), q=const(5e-3),
+            p_s=np.full((n_lat, n_lon), 101325.0, dtype=np.float32),
+            sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.full((n_lat, n_lon), phis0, dtype=np.float32),
+            lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        np.testing.assert_allclose(np.asarray(carry.phis), phis0, rtol=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver
