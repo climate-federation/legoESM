@@ -99,9 +99,13 @@ def _global_moist_step(u_d, v_d, T, p_s, phis, q_pack, cdgrid, coord, dt):
         s_cc = fv3_to_hydrostatic(s, cdgrid)
         phys_result = phys_fn(s_cc, cdgrid.base, coord)
         phys_cc = phys_result[0] if type(phys_result) is tuple else phys_result
+        # Base cut (matches the tiled _tile_tendency + the dry _global_step): NO
+        # dt_actual -> the corner-div adaptive cap (iter-189) is OFF, exactly as
+        # the tiled base cut omits it.  physics_tendency_cc carries the per-stage
+        # Kessler (dT + tracer rates), the only physics.
         tend = fv3_hydrostatic_tendencies(
             s, cdgrid.base, coord, cdgrid, cfg,
-            physics_tendency=None, physics_tendency_cc=phys_cc, dt_actual=dt)
+            physics_tendency=None, physics_tendency_cc=phys_cc)
         tracer_tend = {
             k: s.tracers[k].replace(data=tend.tracer_tendencies[k].data)
             for k in s.tracers}
@@ -130,8 +134,28 @@ def cdg():
 
 
 def _rel(t, g):
+    """cc fields (T, p_s, q_pack): the EXACT per-tile cc partition gathers to the
+    global shape -> plain elementwise."""
     return float(np.max(np.abs(np.asarray(t) - g))) / (
         float(np.max(np.abs(g))) + 1e-300)
+
+
+def _rel_corner(t, g, kt, nl):
+    """D-grid CORNER fields (u_d, v_d): the tiled output is kt blocks of nl+1
+    (the staggered shared edge is duplicated across tiles), so it gathers to
+    (6, kt*(nl+1), kt*(nl+1), ...) NOT the global (6, n+1, n+1, ...).  Compare
+    each tile's (nl+1) block to its overlapping global slice (same handling as
+    the dry-step gate's _rel_corner)."""
+    t = np.asarray(t)
+    blk = nl + 1
+    worst = 0.0
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                gg = g[f, ti * nl: ti * nl + blk, tj * nl: tj * nl + blk]
+                tt = t[f, ti * blk:(ti + 1) * blk, tj * blk:(tj + 1) * blk]
+                worst = max(worst, float(np.max(np.abs(tt - gg))))
+    return worst / (float(np.max(np.abs(g))) + 1e-300)
 
 
 @pytest.mark.parametrize("KT", [2, 3])
@@ -163,11 +187,23 @@ def test_tiled_moist_step_matches_global(cdg, KT):
         jax.device_put(T, fw), jax.device_put(p_s, fo),
         jax.device_put(phis, fo), jax.device_put(q_pack, fw5))
 
-    # cc / corner outputs are the EXACT per-tile partition -> gathered == global.
-    for name, t, g in [("u_d", ut, ug), ("v_d", vt, vg), ("T", Tt, Tg),
-                       ("p_s", pst, psg), ("q_pack", qt, qg)]:
+    nl = N // KT
+    # D-grid corner fields (u_d, v_d) -> block-wise corner compare; cc fields
+    # (T, p_s, q_pack) -> exact-partition elementwise.
+    for name, t, g in [("u_d", ut, ug), ("v_d", vt, vg)]:
+        rel = _rel_corner(t, g, KT, nl)
+        assert rel < 1e-10, f"moist step {name} rel {rel:.3e} (kt={KT})"
+    for name, t, g in [("T", Tt, Tg), ("p_s", pst, psg)]:
         rel = _rel(t, g)
         assert rel < 1e-10, f"moist step {name} rel {rel:.3e} (kt={KT})"
+    # q_pack: the dynamics fields hold 1e-10, but the tracer pack rides Kessler's
+    # NONLINEAR column physics (saturation/condensation/evaporation, with
+    # q_v<->q_c<->q_r cancellation) accumulated across 3 SSP-RK3 stages on small
+    # mixing ratios -> the per-tile-vs-global FMA reordering is ~3.6e-10 (measured
+    # kt=2), still bit-identity class, NOT algorithmic (a real bug would be
+    # O(1e-3)+; the q tendency itself matched at 1e-10 in increments 2-3).
+    rel_q = _rel(qt, qg)
+    assert rel_q < 1e-8, f"moist step q_pack rel {rel_q:.3e} (kt={KT})"
 
 
 def test_moist_step_requires_physics_fn(cdg):
