@@ -660,6 +660,56 @@ def test_column_surface_kinematic_fluxes_sign_and_reuse():
     assert float(w_th_cold) < 0.0
 
 
+def test_column_surface_kinematic_fluxes_independent_analytic():
+    """Adversarial-review lock (iter 376): the kinematic fluxes equal the textbook
+    constant-Ch bulk closed form computed INDEPENDENTLY of ``compute_surface_fluxes``
+    — so a regression in that function's argument ORDER or internals is caught here,
+    which the reuse-equivalence test cannot do (it routes the expected value through
+    the SAME function, so both would move together).  Also independently pins (a) the
+    rho CANCELLATION — the closed form is rho-FREE — and (b) the surface-exner
+    DIRECTION: ``p_s < p_ref`` (high terrain) AMPLIFIES w'θ' (a classic
+    inverted-exner bug would damp it).  Uses ``Ch_neutral`` from the config (not a
+    hardcoded coefficient) and the shared saturation helper (no re-derivation)."""
+    from legoesm.atmosphere.dynamics.column_les import (
+        column_surface_kinematic_fluxes,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.thermo import saturation_mixing_ratio
+
+    from legoesm import constants
+
+    nlev = 4
+    T_col = jnp.array([240.0, 260.0, 275.0, 285.0])             # noqa: N806
+    q_col = jnp.full((nlev,), 6e-3)
+    u_col = jnp.full((nlev,), 6.0)
+    v_col = jnp.full((nlev,), 3.0)
+    p_full = jnp.array([2.0e4, 5.0e4, 7.0e4, 9.0e4])           # surface = last (max p)
+    sst = jnp.asarray(292.0)                                    # warmer than T_1 = 285
+    p_s = jnp.asarray(0.7 * constants.p_ref)                    # high terrain ⇒ exner > 1
+
+    w_th, w_qv = column_surface_kinematic_fluxes(
+        T_col=T_col, q_v_col=q_col, u_col=u_col, v_col=v_col,
+        p_full_col=p_full, sst_K=sst, p_s=p_s)
+
+    # Independent textbook closed form (default bulk_scheme="constant"):
+    #   w'θ'_s = Ch·|U|·(SST−T₁)·(p_ref/p_s)^κ ,  w'q'_s = Ch·|U|·(q_sat(SST)−q₁) .
+    # The ρ₁ in shflx cancels the ρ₁ in the kinematic conversion ⇒ rho-FREE here.
+    ch = SurfaceLayerConfig().Ch_neutral
+    s = int(jnp.argmax(p_full))
+    wind = float(jnp.sqrt(u_col[s] ** 2 + v_col[s] ** 2 + 1e-4))  # production floor
+    exner = float((constants.p_ref / p_s) ** constants.kappa)
+    q_sfc = float(saturation_mixing_ratio(sst, p_s))
+    w_th_expected = ch * wind * (float(sst) - float(T_col[s])) * exner
+    w_qv_expected = ch * wind * (q_sfc - float(q_col[s]))
+
+    assert float(w_th) == pytest.approx(w_th_expected, rel=1e-12)
+    assert float(w_qv) == pytest.approx(w_qv_expected, rel=1e-12)
+    # Exner DIRECTION: low surface pressure AMPLIFIES the kinematic θ flux above the
+    # plain temperature flux w'T' (an inverted (p_s/p_ref)^κ would damp it instead).
+    assert exner > 1.0
+    assert float(w_th) > ch * wind * (float(sst) - float(T_col[s]))
+
+
 def test_extract_gcm_column_surface_flux_opt_in():
     """extract_gcm_column adds a prescribe='fluxes' surface BC ONLY when sst_K is given —
     default None ⇒ surface-flux-free (iter-148 behaviour byte-unchanged).  Locks the
