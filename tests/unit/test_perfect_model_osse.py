@@ -148,6 +148,35 @@ def test_useless_diagnosis_does_not_worsen_and_reports_no_change():
     assert not osse_verdict(res).ok
 
 
+def _diagnose_harmful(record, ctx):
+    # CONFIDENTLY WRONG: C_K=0.2 is IN bounds (0.1, 1.2) but moves AWAY from the truth
+    # (0.9) past the biased start (0.4), so applying it WORSENS the bias |C_K − 0.9|.
+    return _Eddy(K=jnp.array([0.2]), valid=jnp.array([True]))
+
+
+def test_harmful_diagnosis_is_rejected_so_bias_never_worsens():
+    """The method's CORE SAFETY guarantee, demonstrated end-to-end at the OSSE (operator)
+    level: a confidently-WRONG LES diagnosis must never make the AMIP bias worse.
+
+    Distinct from :func:`test_useless_diagnosis_does_not_worsen_and_reports_no_change` —
+    that returns the biased value (a NO-OP that trivially cannot worsen).  Here the
+    diagnosis (C_K=0.2) is IN the physical bounds but moves AWAY from the truth (0.9) past
+    the biased start (0.4), so every line-search step toward it WORSENS ``|C_K − 0.9|``.
+    The monotonic gate must ACTIVELY reject all of them, leaving the bias exactly at the
+    uncorrected start.  NON-VACUITY: with the gate off the harmful 0.2 would be applied
+    (``final_bias = |0.2−0.9| = 0.7 > 0.5``), failing this — so it genuinely exercises the
+    gate's rejection, not a no-op."""
+    import pytest
+
+    res = _run(_diagnose_harmful)
+    assert res.final_bias <= res.initial_bias + 1e-12            # never worse
+    assert res.final_bias == pytest.approx(res.initial_bias, rel=1e-6)  # stayed at biased
+    assert res.recovered_value == pytest.approx(BIASED_CK, rel=1e-6)    # field not moved
+    assert not res.bias_reduced
+    assert res.n_accepted == 0
+    assert osse_verdict(res).status == "no_change" and not osse_verdict(res).ok
+
+
 # --------------------------------------------------------------------------- #
 # Verdict classifier branches (hand-built results; summary unused by the verdict).
 # --------------------------------------------------------------------------- #
