@@ -136,6 +136,66 @@ needs-attention → all three findings addressed): C96 scaling measured
 `tests/core/test_streamfunction_freestream.py::test_flux_sign_convention`
 (finding 3).
 
+## Long-run cosine-bell faithfulness (issue #521 context, 2026-06-20)
+
+Verified the cube cosine-bell transport over **10 revolutions (120 days)** at C48,
+both orientations, reusing the production streamfunction path
+(`scripts/tmp/diag_cosine_bell_longrun.py`). Reference: FV3 `test_cases.F90`
+`wind_field=0` builds the mass flux as the corner-streamfunction discrete curl
+(`uc=-(ψ[i,j+1]-ψ[i,j])/dy`, `vc=(ψ[i+1,j]-ψ[i,j])/dx`) — exactly
+`fv_tp_2d.streamfunction_mass_fluxes`; the PPM is `tp_core.F90` hord=10 (Huynh
+2nd-constraint) with the `is==1`/`ie+1==npx` one-sided edge stencil
+(`apply_fortran_xppm_boundary`). Faithful by construction.
+
+| @ rev10 (120 d), C48 | α=π/4 (corners) | α=0 (edges) |
+|----------------------|-----------------|-------------|
+| free-stream `max\|h−1\|` | **1.55e-6 (flat, no rev-over-rev growth)** | **1.55e-6 (flat)** |
+| bell L2 vs IC | 0.45 | 0.41 |
+| peak height (init 988) | 477 | 712 |
+| mass error | ~1e-6 (bounded) | ~1e-6 |
+| min h | 0 (monotone, no undershoot) | 0 |
+| centroid drift | 2.66° | 5.35° |
+
+**Conclusions (faithful endpoint, no remaining bug):**
+1. **No edge/corner GCL artifact — spatially localized, not just global.**
+   Free-stream `h≡1` stays at the roundoff floor for the full 120 days
+   (C48 1.55e-6, C96 1.19e-7), and that residual is **uniform**: edge-ring max ==
+   interior max == face-corner max (ratio 1.00). A seam/corner leak would both
+   accumulate over revolutions AND concentrate on the boundary ring; it does
+   neither. (pre-#504 d2a2c flux: 0.52 in 2 days, striped at the seam.) The
+   no-rescaler regression test (`mass_target=None`) confirms this is not the
+   global mass fixer masking a local leak — `max|h−1|` is a local max and would
+   expose any sign-cancelling seam pair.
+2. **The distortion CONVERGES with resolution ⇒ it is numerical diffusion, not a
+   bug or a fixed cube artifact.** Doubling C48→C96 (α=π/4): rev-1 peak loss
+   16%→5%, 1-rev L2 0.114→0.041 (~2.8×, between 2nd and 3rd order), drift
+   0.31°→0.07° (4.4×). A GCL/seam artifact would NOT clean up at ~2nd order.
+
+   | | C48 rev1 | C96 rev1 | order |
+   |--|----------|----------|-------|
+   | bell L2 (α=π/4) | 0.114 | 0.041 | ~1.5 |
+   | peak loss | 16% | 5% | |
+   | drift | 0.31° | 0.07° | ~2.1 |
+
+3. **The corner orientation is no longer the outlier.** α=π/4 (corner-crossing)
+   L2 0.45 vs α=0 (edge-only) 0.41 (pre-#504 it was 0.93 vs 0.19); edge-crossing
+   in fact *drifts more* (5.35° vs 2.66°). Consistent with — though not by itself
+   proof of — grid-generic dispersion; the resolution convergence in (2) is the
+   decisive evidence. Single-rev L2 matches PL07 / Lauritzen monotone-PPM at this
+   resolution. Chasing zero decay would require a non-monotone or non-FV3 limiter
+   — a faithfulness regression, rejected.
+
+Scope (what is and isn't certified): free-stream `h≡1` certifies GCL /
+divergence-freeness across all seams/corners for all time; the α=π/4 cosine bell
+certifies a real non-constant gradient transported *over* the corners. Neither
+probes filamentary tracers or sign-changing fields — the colliding-modons test
+(issue #521) is the intended nonlinear seam stress test and is NOT yet
+implemented. Regression pin:
+`test_streamfunction_freestream.py::test_freestream_bounded_over_many_revolutions`
+(h≡1 over 2 revolutions, `max|h−1|` < 1e-5). Diagnostic:
+`scripts/tmp/diag_cosine_bell_longrun.py`. Codex-reviewed (5 adversarial
+findings; resolution-scaling + residual-localization added to address them).
+
 ## Visual verification (no artifacts)
 
 `scripts/validate/visual_regression.py --check`: SSIM=1.0000, hamming=0,
