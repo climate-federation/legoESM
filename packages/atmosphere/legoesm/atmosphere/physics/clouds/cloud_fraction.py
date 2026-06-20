@@ -188,6 +188,62 @@ def xu_randall_cloud_fraction(
     return jnp.clip(cf, 0.0, 1.0)
 
 
+def convective_cloud_fraction(
+    conv_precip: jnp.ndarray,
+    p_full: jnp.ndarray,
+    config: CloudConfig,
+) -> jnp.ndarray:
+    """Slingo (1987)-style convective (cumulus) cloud fraction.
+
+    Adjustment convection schemes (sbm Betts-Miller) hold the grid-mean column
+    near ``RH_ref`` (~0.7) and detrain no ``q_c``, so the RH/condensate
+    stratiform schemes diagnose ~0 cloud in the convecting tropics — the
+    surface then radiates LW straight to space (the measured ~4.5 K coupled
+    cold bias: tropical ``LW_net_sfc`` ~−137 W/m², precip ~1 mm/day).
+    Following Slingo (1987), tie a *bounded* cumulus cloud cover to the
+    convective precipitation rate:
+
+        ``cf_conv = clip(conv_cloud_coeff · ln(1 + P_conv/P0), 0, conv_cloud_max)``
+
+    distributed over the free-tropospheric convective deck
+    ``[conv_cloud_sigma_top, conv_cloud_sigma_base]``.  The log-of-precip form
+    saturates (so heavy ITCZ precip gives a capped, not overcast, cover — the
+    failure mode of feeding a moistened column to the steep Sundqvist √-curve,
+    which goes to cf≈1).  Combine with the stratiform fraction by MAXIMUM
+    overlap in :func:`compute_cloud_properties`.
+
+    Parameters
+    ----------
+    conv_precip : jnp.ndarray
+        Column convective precipitation rate [kg/m²/s], shape (ncol,).
+    p_full : jnp.ndarray
+        Full-level pressure [Pa], shape (ncol, nlev).
+    config : CloudConfig
+
+    Returns
+    -------
+    jnp.ndarray
+        Convective cloud fraction [0, 1], shape (ncol, nlev).
+    """
+    # Normalize to strict (ncol,): accept (ncol,) or (ncol, 1) without the
+    # ``[:, None]`` below producing a rank-3 broadcast (codex review).
+    P = jnp.maximum(
+        jnp.reshape(jnp.asarray(conv_precip, p_full.dtype), (p_full.shape[0],)),
+        0.0,
+    )
+    cf_col = jnp.clip(
+        config.conv_cloud_coeff * jnp.log1p(P / config.conv_precip_scale),
+        0.0, config.conv_cloud_max,
+    )  # (ncol,)
+    # Sigma from the column's own surface (bottom full level ≈ surface).
+    sigma = p_full / jnp.maximum(p_full[:, -1:], 1.0)
+    deck = (
+        (sigma >= config.conv_cloud_sigma_top)
+        & (sigma <= config.conv_cloud_sigma_base)
+    ).astype(p_full.dtype)
+    return cf_col[:, None] * deck
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -198,6 +254,7 @@ def compute_cloud_properties(
     q_ice: jnp.ndarray | None = None,
     n_ice: jnp.ndarray | None = None,
     n_cloud: jnp.ndarray | None = None,
+    conv_precip: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -257,6 +314,27 @@ def compute_cloud_properties(
             f"Valid schemes: 'sundqvist', 'xu_randall', 'resolved'. "
             f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
         )
+
+    # --- Opt-in convective (cumulus) cloud, MAXIMUM-overlap combined ---
+    # The stratiform RH/condensate fractions above miss convective cloud when an
+    # adjustment scheme (sbm) holds the column subsaturated, so the convecting
+    # tropics get cf≈0 and leak surface LW.  When enabled, add a bounded
+    # Slingo(1987) cumulus cover tied to the convective precip rate; the existing
+    # ``cf * q_c_diagnostic`` condensate floor below then makes it radiatively
+    # active.  Default-off / ``conv_precip=None`` ⇒ ``cf`` unchanged.
+    if config.convective_cloud:
+        if conv_precip is None:
+            # Loud misconfiguration: the feature was requested but the caller
+            # never plumbed the convective precip, so it would silently be a
+            # no-op (dispatch-hardening — never a silent default).
+            raise ValueError(
+                "CloudConfig.convective_cloud=True requires conv_precip to be "
+                "passed to compute_cloud_properties (the column convective "
+                "precipitation rate [kg/m^2/s]); got None.  Wire the "
+                "convection scheme's precip into the radiation cloud call."
+            )
+        cf_conv = convective_cloud_fraction(conv_precip, p_full, config)
+        cf = jnp.maximum(cf, cf_conv)
 
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
