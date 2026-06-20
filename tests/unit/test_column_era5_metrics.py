@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.training.column_era5_metrics import (
@@ -31,6 +32,34 @@ def test_normalized_mass_weights_sum_to_one():
     assert float(jnp.sum(w)) == pytest.approx(1.0, abs=1e-12)
     # Proportional to dsigma.
     assert float(w[0] / w[3]) == pytest.approx(4.0, abs=1e-10)
+
+
+def test_normalized_mass_weights_normalizes_per_column():
+    """The hybrid fix (iter 338) made `normalized_mass_weights` normalize along axis=-1, so a
+    PER-COLUMN `(ncol, nlev)` layer-thickness field (the hybrid weights — `dp = dA·p_ref +
+    dB·p_s` varies by column because it depends on p_s) normalizes PER COLUMN (each row sums to
+    one), NOT over the whole array.  A regression to the old whole-array `jnp.sum` would make
+    the rows sum to 1/ncol."""
+    dp = jnp.array([[1.0, 2.0, 1.0],          # column 0 → 0.25, 0.5, 0.25
+                    [3.0, 1.0, 0.0]])         # column 1 → 0.75, 0.25, 0.0
+    w = normalized_mass_weights(dp)
+    np.testing.assert_allclose(np.asarray(jnp.sum(w, axis=-1)), [1.0, 1.0], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(w[0]), [0.25, 0.5, 0.25], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(w[1]), [0.75, 0.25, 0.0], rtol=1e-12)
+
+
+def test_per_column_weighted_rmse_applies_per_column_weights():
+    """`per_column_weighted_rmse` applies PER-COLUMN mass weights `(ncol, nlev)` — the hybrid
+    fix's output (each column weighted by its OWN layer mass) — so two columns with the SAME
+    per-level error but DIFFERENT weight profiles get DIFFERENT RMSEs (the weights are not a
+    single shared `(nlev,)` vector applied to every column)."""
+    model = jnp.array([[10.0, 0.0, 0.0], [10.0, 0.0, 0.0]])   # 10 K bias at level 0 only
+    ref = jnp.zeros((2, 3))
+    w = jnp.array([[0.8, 0.1, 0.1],          # column 0 weights the biased level heavily
+                   [0.1, 0.1, 0.8]])         # column 1 weights it lightly
+    rmse = np.asarray(per_column_weighted_rmse(model, ref, w))
+    np.testing.assert_allclose(rmse, [np.sqrt(0.8 * 100.0), np.sqrt(0.1 * 100.0)], rtol=1e-5)
+    assert rmse[0] > rmse[1]                  # the heavily-weighted column scores higher
 
 
 def test_rmse_zero_when_model_equals_ref():
