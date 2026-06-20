@@ -62,6 +62,7 @@ from legoesm.core.field import Field
 from legoesm.core.operators_latlon import divergence, gradient
 from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
+    SigmaCoordinate,
     compute_mass_flux_hybrid,
     compute_omega_hybrid,
     compute_pressure_velocity,
@@ -161,6 +162,15 @@ def omega_from_divergence(
         mass_flux, D_total_p = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
         dp_s_dt = -D_total_p[..., 0] / sigma_coord.B_range
         return compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
+    if not isinstance(sigma_coord, SigmaCoordinate):
+        # Dispatch hardening (CLAUDE.md): never silently fall through to the pure-sigma
+        # closure for an unrecognised coordinate (e.g. a height/z* coordinate has no
+        # hydrostatic σ continuity) — that would diagnose ω from the wrong pressures.
+        raise ValueError(
+            "omega_from_divergence: unsupported vertical coordinate "
+            f"{type(sigma_coord).__name__}; expected SigmaCoordinate or "
+            "HybridSigmaPressureCoordinate (hydrostatic σ/hybrid continuity diagnostic)."
+        )
     sigma_dot, d_total = compute_sigma_dot_and_total(div_3d, sigma_coord)
     sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=div_3d.dtype)
     # D_total carries a trailing singleton (..., 1); squeeze to the surface

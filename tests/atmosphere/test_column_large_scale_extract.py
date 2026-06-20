@@ -167,6 +167,21 @@ def test_extract_uniform_state_zero_forcing():
     np.testing.assert_allclose(np.asarray(ls.omega), 0.0, atol=1e-8)
 
 
+def test_omega_from_divergence_rejects_unsupported_coordinate():
+    """Dispatch hardening (iter 350, CLAUDE.md): ``omega_from_divergence`` must RAISE on a
+    coordinate that is neither sigma nor hybrid rather than silently using the pure-sigma
+    closure — a height/z* coordinate has no hydrostatic σ continuity, so diagnosing ω from
+    σ pressures there would be silently wrong.  Synthetic-violation self-test: a
+    non-(Sigma|Hybrid) coordinate object ⇒ ``ValueError``."""
+    class _NotACoord:
+        """Stands in for a non-(Sigma|Hybrid) coordinate, e.g. a height/z* coord."""
+
+    div = jnp.zeros((1, 6))
+    p_s = jnp.array([1.0e5])
+    with pytest.raises(ValueError, match="unsupported vertical coordinate"):
+        omega_from_divergence(div, p_s, _NotACoord())
+
+
 def test_extract_latlon_threads_hybrid_coord_to_omega_over_terrain():
     """END-TO-END (iter 348): the latlon extractor must thread a HYBRID coordinate all the
     way to ``omega_from_divergence`` so the column's large-scale ω over terrain uses the
