@@ -76,6 +76,80 @@ def _find(data_dir: str, kind: str, code: str, date: str, *, monthly: bool) -> s
     return matches[0]
 
 
+#: GRIB param codes for the AMIP lower-boundary fields in the d633006 sfc archive.
+_AMIP_SST_CODE = "128_034_sstk"   # SST [K]
+_AMIP_SIC_CODE = "128_031_ci"     # sea-ice concentration [fraction, 0-1]
+
+
+def build_era5_amip_forcing(
+    data_dir: str, date: str, out_path: str, *, hour_stride: int = 24,
+    **overrides: Any,
+) -> Any:
+    """Build a memory-safe subsampled AMIP forcing file from LOCAL ERA5 + return its config.
+
+    The FORCING-side twin of :func:`open_local_era5_dataset`, so a fully-OFFLINE realistic
+    AMIP run (``ModelDriver``, ``dataset="custom"``) can use REAL ERA5 lower boundary
+    conditions with no network.  The single-level ``sstk``/``ci`` chunks are MONTHLY and
+    HOURLY (~720 steps × 721×1440 ≈ 6 GB/field) — feeding the raw file to
+    ``load_amip_forcing`` OOMs (verified iter 419) — and ERA5 SST/SIC vary negligibly within
+    a day, so this subsamples to every ``hour_stride``-th step (00Z daily by default),
+    reading ONLY those strided slices (memory-safe), and writes ONE combined NetCDF
+    (``SSTK`` [K] + ``CI`` [0-1 fraction], with ``latitude``/``longitude``/``time``) to
+    ``out_path``.  ``out_path`` is a runtime artifact (gitignored), NOT committed.
+
+    ``date`` is ``YYYYMMDD`` (selects that month's chunk).  Returns a ``dataset="custom"``
+    :class:`AMIPForcingConfig` (Kelvin SST ⇒ ``sst_offset=0``; fraction SIC ⇒
+    ``sic_scale=1``; SIC read from the same combined file); ``overrides`` pass through (e.g.
+    ``T_ice=...``).  ``load_amip_forcing``'s units guard cross-checks the K/fraction
+    conventions, so a wrong offset/scale still fails loud.  Verified iter 419 against
+    d633006 Sept-2017.
+    """
+    import xarray as xr
+    from legoesm.forcing.amip import AMIPForcingConfig
+
+    if hour_stride < 1:
+        raise ValueError(
+            f"build_era5_amip_forcing: hour_stride must be >= 1, got {hour_stride}.")
+    # Both _find calls FIRST so a missing chunk fails loud before any open/write.
+    sst_file = _find(data_dir, "sfc", _AMIP_SST_CODE, date, monthly=True)
+    sic_file = _find(data_dir, "sfc", _AMIP_SIC_CODE, date, monthly=True)
+    sel = slice(0, None, hour_stride)
+    # .isel(time=sel).load() reads ONLY the strided slices for the NCAR-RDA ll025 layout
+    # (time stored contiguously, not HDF5-chunked) — the memory-safe step that avoids the
+    # ~6 GB/field OOM.  (A file HDF5-chunked along time could still read full chunks per
+    # selected index.)  Context-managed so the HDF5 file descriptors close after load.
+    with xr.open_dataset(sst_file) as ds_sst:
+        sst = ds_sst["SSTK"].isel(time=sel).load()
+    with xr.open_dataset(sic_file) as ds_sic:
+        sic = ds_sic["CI"].isel(time=sel).load()
+    if int(sst.sizes["time"]) < 2:
+        raise ValueError(
+            f"build_era5_amip_forcing: hour_stride={hour_stride} leaves "
+            f"{int(sst.sizes['time'])} time step(s); the time-interpolated AMIP forcing "
+            "needs >= 2. Use a smaller stride.")
+    # Same archive ⇒ the SPATIAL grids must match EXACTLY (a silent mis-LABEL, not a regrid,
+    # if they ever differed — same-size-but-different-values would slip past a shape check),
+    # so verify lat/lon by value and fail loud.  Time is force-aligned: the two files share
+    # the same hourly steps, and an encoding nicety should not block the build.
+    for axis in ("latitude", "longitude"):
+        if not sst[axis].equals(sic[axis]):
+            raise ValueError(
+                f"build_era5_amip_forcing: SST and CI {axis} grids differ — both must be "
+                "the same d633006 ll025 chunk (this would silently mis-label, not regrid).")
+    sic = sic.assign_coords(time=sst["time"])
+    xr.Dataset({"SSTK": sst, "CI": sic}).to_netcdf(out_path)
+
+    base = dict(
+        dataset="custom", path=str(out_path),
+        sst_var="SSTK", sic_var="CI",          # SIC lives in the same combined file
+        time_var="time", lat_var="latitude", lon_var="longitude",
+        sst_offset=0.0,     # SSTK is already in Kelvin
+        sic_scale=1.0,      # ERA5 CI is already a [0, 1] fraction
+    )
+    base.update(overrides)
+    return AMIPForcingConfig(**base)
+
+
 def open_local_era5_dataset(data_dir: str, date: str) -> Any:
     """Merge the local NCAR-RDA ll025 ERA5 for ``date`` (``YYYYMMDD``) into one dataset.
 
