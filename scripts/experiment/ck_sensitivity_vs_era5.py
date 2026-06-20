@@ -290,6 +290,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--era5-n-times", type=int, default=4)
     args = p.parse_args(argv)
 
+    if args.radiation != "gray":
+        # Fail-fast heads-up BEFORE the (slow) runs: rrtmgp's radiation graph is
+        # compute-heavy (a res-4/nlev-20/2-day realistic run did NOT finish in ~16 min on a
+        # login node — the gray default with the SAME ingest + coupled driver completes
+        # interactively). Run the realistic pre-flight on a COMPUTE node (a short srun/sbatch).
+        print(f"[ck-sensitivity] NOTE: --radiation {args.radiation} is COMPUTE-HEAVY "
+              "(the radiation graph) — run this on a compute node, not the login node.",
+              flush=True)
+
     ck_lo, ck_hi = args.c_k
 
     def _build_reference(grid, sigma):

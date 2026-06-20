@@ -77,6 +77,14 @@ still shows C_K controls the boundary layer even when the free-trop radiation er
 the TOTAL bias — it tunes the right place, but needs a realistic free-troposphere to move the
 total.
 
+> **Run the `--radiation rrtmgp` pre-flight ON A COMPUTE NODE** (a short `srun`/sbatch), not the
+> login node: rrtmgp's radiation graph is compute-heavy (a measured realistic run at
+> res 4 / nlev 20 / 2 days did not finish in ~16 min on a login node, whereas the same run
+> under the `gray` default — same coupled driver + 0.25° ERA5 ingest — completes interactively).
+> The `gray` default is interactive-quick but always reports NO-GO (idealization-dominated), so
+> it only confirms "do not run the loop under gray"; the **realistic** go/no-go needs rrtmgp on a
+> compute node.
+
 ## 2. Launch the campaign (resumable, self-requeuing)
 
 Edit the `#SBATCH` account/partition/time + the `CONFIG`/`ERA5`/`OUT` paths at the
