@@ -211,6 +211,20 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
             target_carry, _, _ = block[d + stride]
+            # The IC must NOT carry the observed ERA5 fluxes (they are
+            # loaded for the TARGET only): otherwise the model's predicted
+            # held_* can leak the IC's observed fluxes and fake a perfect
+            # flux score (column_nn's untrained ~0-tendency NN left the
+            # ERA5-seeded held_* almost untouched).  Zero them on the IC —
+            # radiation/physics recompute them on step 1.
+            ic_carry = ic_carry._replace(
+                held_dT_rad=jnp.zeros_like(ic_carry.held_dT_rad),
+                held_sw_net_sfc=jnp.zeros_like(ic_carry.held_sw_net_sfc),
+                held_lw_net_sfc=jnp.zeros_like(ic_carry.held_lw_net_sfc),
+                held_sw_up_toa=jnp.zeros_like(ic_carry.held_sw_up_toa),
+                held_lw_up_toa=jnp.zeros_like(ic_carry.held_lw_up_toa),
+                held_sw_down_toa=jnp.zeros_like(ic_carry.held_sw_down_toa),
+            )
             sst = jnp.asarray(
                 regrid_2d_to_gaussian(ic_era5.sst, ic_era5.lat, ic_era5.lon, grid)
             )
