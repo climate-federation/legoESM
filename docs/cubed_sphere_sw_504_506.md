@@ -196,6 +196,43 @@ implemented. Regression pin:
 `scripts/tmp/diag_cosine_bell_longrun.py`. Codex-reviewed (5 adversarial
 findings; resolution-scaling + residual-localization added to address them).
 
+## #521 — Colliding modons (nonlinear SW test case, 2026-06-20)
+
+Implemented the FV3 case-8 "soliton twin-vortex" / JAMES Colliding-Modons test
+(`doi:10.1002/2017MS000965`). Faithful port of `tools/test_cases.F90` case-8
+(codex-reviewed, 6/6 axes, no bugs):
+- Non-rotating (f=0), flat free surface h≡5000 m (`gh0=5e3·g`, `delp/g`).
+- Two equatorial zonal-wind Gaussians `±50·exp(−(r/750 km)²)` at 90°E (westerly)
+  and 270°E (easterly); `r` = great-circle distance to the edge midpoint.
+- Reuses the validated cube zonal-wind edge projection (`u_d=cos_angle_edge_x·u_e`,
+  `v_d=−sin_angle_edge_y·u_e`) — same as the W2 / cosine-bell cube IC; FV3's
+  `inner_prod(e1/e2, ex)` of the east vector is exactly that metric rotation.
+- Non-rotating handled as experiment glue: `cdgrid._replace(f_corner=0)` (the SW
+  core's only Coriolis use is `f_corner + rarea_c·vort`), mirroring `f0=fC=0`.
+
+`tests/test_cases/modons.py` (`colliding_modons_cubesphere`) +
+`tests/test_cases/test_modons.py` (IC faithfulness + short non-rotating
+prognostic run: stable, mass-conserving, modons evolve, h>0). Driver
+`scripts/validate/run_colliding_modons.py` (collision/conservation/symmetry
+diagnostics).
+
+**Status — works, stable, faithful IC; long-run damping calibration is open.**
+C48 60-day non-rotating run (`--dt 150 --div-damp 10 --damp-v 0.04
+--hyperdiff-factor 2`): **mass conserved to machine (1e-15)**, energy bounded
+(slow creep to 3.4e-3 over 60 d, no blow-up), **h>0 throughout** (4438–5763 m),
+the two modons persist (17–27 m/s after the initial f=0 gravity-wave adjustment
+from the unbalanced flat-h IC) and visibly **collide / exchange / propagate**
+(tracked vortex longitudes orbit), with NO cube-seam grid noise (per-face height
+std smooth across all six faces). The damping is a bracket: the W2/W5-tuned
+`iter1009` preset is **under-damped** for this nonlinear case (C24 blows up by
+day ~3, max|u|→1000), heavy hyperdiff×4 is **over-damped** (modons decay to
+~6 m/s); hyperdiff×2 / div-damp 10 is the stable middle.
+OPEN (separate calibration effort, like the W2/W5 iter-985..1030 narrative):
+the exact ~100-day return-to-initial-position acceptance + a per-resolution
+damping calibration (C96+ to resolve the 750 km cores) + matrix-runner case
+registration. Not claimed here — only a stable, conservative, artifact-free
+60-day demonstration.
+
 ## Visual verification (no artifacts)
 
 `scripts/validate/visual_regression.py --check`: SSIM=1.0000, hamming=0,
