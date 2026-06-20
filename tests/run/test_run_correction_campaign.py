@@ -293,9 +293,7 @@ def test_summary_to_json_diverged_biases_serialize_as_null():
         initial_bias=5.0, final_bias=float("nan"),
         absolute_reduction=float("nan"), fractional_reduction=float("inf"),
         n_diagnosed_total=4, n_diagnoses_valid_total=2, per_variable=None,
-        coefficients=(coeff,),
-        # A diverged round legitimately records a NaN updated bias in the trace.
-        round_trace=((5.0, False), (float("nan"), False)))
+        coefficients=(coeff,))
     out = _summary_to_json(summary)
     assert out["initial_bias"] == pytest.approx(5.0)         # finite survives
     assert out["final_bias"] is None                          # NaN -> null
@@ -304,10 +302,9 @@ def test_summary_to_json_diverged_biases_serialize_as_null():
     c0 = out["coefficients"][0]
     assert c0["field_min"] is None and c0["field_std"] is None  # coeff stats -> null
     assert c0["bounds"] == [0.0, 1.0]                         # finite metadata intact
-    # The per-round trace null-sanitizes a diverged round's NaN bias too (same
-    # convention) so the whole output file stays STANDARD JSON.
-    assert out["round_trace"] == [[5.0, False], [None, False]]
-    json.loads(json.dumps(out, allow_nan=False))             # strict JSON, no NaN token
+    # The WHOLE summary block stays STANDARD JSON (every non-finite field sanitized to
+    # null — no NaN/Infinity token leaks through any branch).
+    json.loads(json.dumps(out, allow_nan=False))
     # The WHOLE dict is STANDARD JSON (no NaN/Infinity tokens) under the strict parser.
     reparsed = json.loads(json.dumps(out), parse_constant=_reject_nonstandard)
     assert reparsed["final_bias"] is None

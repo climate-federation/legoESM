@@ -1227,11 +1227,10 @@ def _summary_to_json(summary):
         "fractional_reduction": _json_finite(summary.fractional_reduction),
         "n_diagnosed_total": summary.n_diagnosed_total,
         "n_diagnoses_valid_total": summary.n_diagnoses_valid_total,
-        # Per-round [updated_bias, accepted] — the trajectory the plotter / post-hoc
-        # analysis reads (a rejected diverged round may legitimately record a NaN bias,
-        # so _json_finite null-sanitizes it, matching the other bias fields).
-        "round_trace": [[_json_finite(bias), bool(kept)]
-                        for bias, kept in summary.round_trace],
+        # NB: the per-round trajectory is NOT re-serialized here — the campaign output
+        # already carries it at the TOP LEVEL as ``biases`` (per-round [baseline,
+        # updated, …], NaN-sanitized) + ``accepted``, which the plotter reads. The
+        # CampaignSummary.round_trace exists only for the human-readable .report() recap.
         "per_variable_bias": _per_variable_to_json(summary.per_variable),
         "coefficients": [
             {"promotion_key": c.promotion_key, "n_columns": c.n_columns,

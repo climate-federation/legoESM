@@ -68,6 +68,50 @@ def test_real_campaign_output_feeds_bias_trajectory_plotter(tmp_path):
     assert png.exists() and png.stat().st_size > 0
 
 
+def test_stalled_all_rejected_campaign_still_plots(tmp_path):
+    """A STALLED run — EVERY round REJECTED by the monotonic gate (the operator's
+    experience when the bias is idealization-dominated and the LES C_K cannot move it,
+    iter 412) — must still produce a trajectory PNG and a non-'improved' health verdict,
+    NOT crash: this is exactly the output the operator inspects to SEE that clause-6 did
+    not improve + why (no accepted markers, the start/final lines coincide)."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.bias_metrics import BiasImprovement
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+
+    from scripts.plot.plot_campaign_bias_trajectory import (
+        extract_campaign_trajectory,
+        plot_campaign_bias_trajectory,
+    )
+    from scripts.run.run_correction_campaign import build_campaign_output_dict
+
+    field = jnp.full((4,), 0.4)
+    # The round WORSENED (1.0 -> 1.05) ⇒ improved=False ⇒ the gate rejects it.
+    bias = BiasImprovement(
+        baseline_bias=jnp.asarray(1.0), updated_bias=jnp.asarray(1.05),
+        absolute_reduction=jnp.asarray(-0.05), fractional_improvement=jnp.asarray(-0.05),
+        improved=jnp.asarray(False))
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=bias, worst_column_change=jnp.asarray(0.0),
+            feedback_field=field.reshape(2, 2), n_corrected=1, n_diagnosed=1,
+            n_diagnoses_valid=1, per_variable_bias=None),),
+        final_field=field.reshape(2, 2), accepted=(False,), stop_reason="max_iterations")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    assert summary.final_bias == pytest.approx(1.0)         # no accepted round ⇒ stays at baseline
+    health = campaign_health(summary)
+    assert not health.ok                                    # clause-6 NOT achieved
+    out = json.loads(json.dumps(build_campaign_output_dict(
+        res, grid_provenance={"grid_type": "latlon", "shape_2d": [2, 2], "ncol": 4},
+        summary=summary, health=health, corrected_field="C_K", averaging=None)))
+    tr = extract_campaign_trajectory(out)
+    assert tr["accepted"] == [False]                        # no accepted markers to plot
+    png = tmp_path / "stalled.png"
+    plot_campaign_bias_trajectory(out, str(png))            # must not crash (empty accepted set)
+    assert png.exists() and png.stat().st_size > 0
+
+
 def test_real_averaging_block_flows_producer_to_every_consumer(tmp_path):
     """PRODUCER→CONSUMER contract for the iter-267 ``averaging`` block (iter 278): a REAL
     ``build_campaign_output_dict(averaging=…)`` output, after a JSON round-trip, must feed
