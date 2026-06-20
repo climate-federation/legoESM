@@ -483,6 +483,71 @@ def test_column_environment_grid_matches_manifest_sample_env():
     _assert_consistent(base._replace(sst_K=None))
 
 
+def test_column_environment_grid_matches_manifest_env_hybrid_over_terrain():
+    """CROSS-PATH CONSISTENCY under a HYBRID coordinate over TERRAIN (iter 347).
+
+    The iter-42 invariant test above runs at uniform ``p_s = p_ref = 1e5`` where the
+    hybrid layer pressures ``A·p_ref + B·p_s`` are IDENTICAL to pure-sigma ``σ·p_s`` — so
+    it can NOT catch a regression where one path (``column_environment_grid`` env or the
+    manifest's ``compare_state_to_reference`` env) silently reverts to pure-sigma
+    pressures while the other stays hybrid: both still match at ``p_s = p_ref``.  This
+    locks the invariant where the two pressure conventions actually DIVERGE — a hybrid
+    coordinate with a TERRAIN surface pressure (``p_s`` well below ``p_ref``) — so the
+    env predictors (CAPE on the layer pressures) must agree EXACTLY only because both
+    paths use the SAME hybrid ``pressure_at_full/half``.  Non-vacuity is asserted
+    directly: the hybrid pressures differ materially from pure-sigma at this ``p_s``.
+    """
+    from legoesm.grids.vertical import make_hybrid_levels
+    from legoesm.training.compare_reanalysis import (
+        ColumnState,
+        compare_state_to_reference,
+    )
+
+    nlat, nlon, nlev = 3, 4, 8
+    hybrid = make_hybrid_levels(nlev)
+    ones = jnp.ones((nlat, nlon, nlev))
+    iy = jnp.arange(nlat)[:, None, None]
+    ix = jnp.arange(nlon)[None, :, None]
+    lev = jnp.linspace(0.0, 1.0, nlev)[None, None, :]      # 0=top, 1=surface
+    # TERRAIN p_s: 650–760 hPa, well below p_ref=1e5 so hybrid ≠ pure-sigma per column.
+    p_s = jnp.asarray(6.5e4 + 1.0e4 * iy[..., 0] / max(nlat - 1, 1)
+                      + 0.3e4 * ix[..., 0] / max(nlon - 1, 1))
+    # Non-vacuity: the hybrid layer pressures must NOT equal pure-sigma σ·p_s here, or
+    # this test would pass even if a path used the wrong (pure-sigma) convention.
+    p_full_hyb = np.asarray(hybrid.pressure_at_full(p_s))
+    p_full_sig = np.asarray(hybrid.sigma_full)[None, None, :] * np.asarray(p_s)[..., None]
+    assert np.max(np.abs(p_full_hyb - p_full_sig)) > 1.0e3, (
+        "hybrid and pure-sigma pressures coincide here — test cannot discriminate the bug")
+
+    base = ColumnState(
+        T=(230.0 + 60.0 * lev + 3.0 * iy + 1.5 * ix) * ones,
+        q_v=(1e-3 + 8e-3 * lev) * (1.0 + 0.05 * ix) * ones,
+        u=2.0 * lev * (1.0 + 0.3 * iy) * ones,
+        v=jnp.zeros((nlat, nlon, nlev)),
+        p_s=p_s,
+        sst_K=290.0 + 2.0 * jnp.arange(nlat)[:, None] + 0.5 * jnp.arange(nlon)[None, :])
+    lat_deg = jnp.zeros((nlat, nlon))
+    lon_deg = jnp.zeros((nlat, nlon))
+
+    reference = base._replace(T=base.T - (0.5 + 0.4 * iy) * ones)
+    comp = compare_state_to_reference(
+        model=base, reference=reference,
+        sigma_full=hybrid.sigma_full, sigma_half=hybrid.sigma_half,
+        lat_deg=lat_deg, lon_deg=lon_deg, time_index=0, n_worst=nlat * nlon,
+        # Production (make_compare_fn coordinate=hybrid) supplies the hybrid pressures.
+        p_full=hybrid.pressure_at_full(base.p_s),
+        p_half=hybrid.pressure_at_half(base.p_s))
+    grid_env = np.asarray(column_environment_grid(base, hybrid)[0])   # (ncol, 3)
+    assert np.all(np.isfinite(grid_env))
+    for rec in comp.manifest:
+        np.testing.assert_allclose(
+            grid_env[rec.flat_index],
+            np.array([rec.environment.sst_K, rec.environment.cape_J_kg,
+                      rec.environment.bulk_shear_m_s]),
+            rtol=1e-6, atol=1e-6,
+            err_msg=f"hybrid grid_env vs manifest env diverged at flat_index {rec.flat_index}")
+
+
 class _CEps(NamedTuple):
     C_eps: jax.Array
     valid: jax.Array
