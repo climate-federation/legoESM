@@ -167,6 +167,10 @@ def compare_and_write(
         sigma_full=sigma_full, sigma_half=sigma_half,
         lat_deg=lat_deg, lon_deg=lon_deg,
         time_index=time_index, n_worst=n_worst, valid_mask=valid_mask,
+        # Weight the bias by the model's TRUE layer pressures (correct for a HYBRID
+        # coordinate; iter 340) — byte-identical for pure-sigma (pressure_at_full == σ·p_s).
+        p_full=sigma.pressure_at_full(model.p_s),
+        p_half=sigma.pressure_at_half(model.p_s),
     )
     if out_path is not None:
         write_manifest(result.manifest, out_path)
@@ -189,6 +193,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Grid resolution matching the checkpoint")
     p.add_argument("--nlev", type=int, required=True,
                    help="Number of sigma levels matching the checkpoint")
+    p.add_argument("--vertical-coord", choices=("sigma", "hybrid"), default="hybrid",
+                   help="The model's vertical coordinate (MUST match the checkpoint's run; "
+                        "the GridConfig default is 'hybrid'). A mismatch puts the model state "
+                        "and the regridded ERA5 reference on different pressure levels.")
+    p.add_argument("--p-top-Pa", type=float, default=100.0,
+                   help="Model-top pressure [Pa] for --vertical-coord hybrid (match the run)")
     p.add_argument("--era5-zarr", required=True,
                    help="ERA5 Zarr store (GCS or local)")
     p.add_argument("--era5-time-idx", type=int, default=0,
@@ -239,14 +249,20 @@ def main(argv: list[str] | None = None) -> int:
     # Deferred heavy imports (kept out of module import so the unit-tested
     # helpers above load without the grid factory / ERA5 / restart machinery).
     from legoesm.grids.factory import create_grid
-    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
     from legoesm.training.era5_to_state import (
         TrainingERA5Config,
         load_era5_slice,
     )
 
     grid = create_grid(_FACTORY_GRID_TOKEN[canon], resolution=args.resolution)
-    sigma = create_sigma_coordinate(args.nlev)
+    # Build the SAME vertical coordinate the run used (default hybrid) so the model state,
+    # the regridded ERA5 reference, and the bias mass weights are all on the model's TRUE
+    # levels (iter 339/340).  Both coordinate types expose pressure_at_full/half.
+    if args.vertical_coord == "hybrid":
+        sigma = make_hybrid_levels(args.nlev, p_top_Pa=args.p_top_Pa)
+    else:
+        sigma = create_sigma_coordinate(args.nlev)
 
     # strict=True keeps the restart's reproducibility checks on (x64 / shape /
     # config-hash); a metadata mismatch surfaces instead of silently loading a

@@ -48,6 +48,13 @@ class _FakeSigma:
         self.sigma_half = half
         self.sigma_full = 0.5 * (half[1:] + half[:-1])
 
+    # pure-sigma layer pressures (the VerticalCoordProtocol the compare uses, iter 340).
+    def pressure_at_full(self, p_s):
+        return p_s[..., None] * self.sigma_full
+
+    def pressure_at_half(self, p_s):
+        return p_s[..., None] * self.sigma_half
+
 
 def test_sigma_levels_extraction():
     sig = _FakeSigma(5)
@@ -130,6 +137,13 @@ def _stub_main_io(monkeypatch, *, nlev=4, shape=(2, 2)):
 
     def fake_create_sigma(nlev_arg):
         calls["nlev"] = nlev_arg
+        calls["coord"] = "sigma"
+        return sig
+
+    def fake_make_hybrid(nlev_arg, *, p_top_Pa=100.0, **kw):
+        calls["nlev"] = nlev_arg          # default --vertical-coord is 'hybrid'
+        calls["coord"] = "hybrid"
+        calls["p_top_Pa"] = p_top_Pa
         return sig
 
     def fake_load_restart(path, g, s, strict=True):
@@ -157,6 +171,7 @@ def _stub_main_io(monkeypatch, *, nlev=4, shape=(2, 2)):
 
     monkeypatch.setattr(factory, "create_grid", fake_create_grid)
     monkeypatch.setattr(vertical, "create_sigma_coordinate", fake_create_sigma)
+    monkeypatch.setattr(vertical, "make_hybrid_levels", fake_make_hybrid)
     monkeypatch.setattr(restart, "load_restart", fake_load_restart)
     monkeypatch.setattr(e2s, "TrainingERA5Config", _FakeERA5Cfg)
     monkeypatch.setattr(e2s, "load_era5_slice", fake_load_slice)
@@ -211,10 +226,28 @@ def test_main_wiring_monkeypatched(tmp_path, monkeypatch):
     assert rc == 0
     assert calls["create_grid"] == ("gaussian", 8)  # spectral -> gaussian token
     assert calls["nlev"] == nlev
+    assert calls["coord"] == "hybrid"        # --vertical-coord defaults to hybrid (iter 340)
     assert calls["load_restart"][1] is True  # strict=True
     assert calls["n_load_restart"] == 1      # no baseline ⇒ single load
     assert calls["era5_time_idx"] == 3
     assert calls["regrid"] == ("ERA5SLICE", True, True)  # (slice, grid, sigma)
+
+
+def test_main_vertical_coord_sigma_builds_pure_sigma(tmp_path, monkeypatch):
+    """--vertical-coord sigma builds the pure-sigma coordinate (vs the default hybrid), so a
+    user verifying a pure-sigma run gets the matching coordinate for the model state, the
+    ERA5 reference regrid, and the bias mass weights (iter 340)."""
+    nlev = 4
+    _grid, calls = _stub_main_io(monkeypatch, nlev=nlev)
+    out = str(tmp_path / "m.json")
+    with pytest.warns(UserWarning, match="surface air temperature"):
+        rc = drv.main([
+            "--restart", "chk.npz", "--grid-type", "gaussian",
+            "--resolution", "8", "--nlev", str(nlev), "--vertical-coord", "sigma",
+            "--era5-zarr", "gs://x", "--n-worst", "1", "--out", out,
+        ])
+    assert rc == 0
+    assert calls["coord"] == "sigma"
     with open(out) as f:
         dicts = json.load(f)
     assert len(dicts) == 1
