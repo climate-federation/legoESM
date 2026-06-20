@@ -182,6 +182,25 @@ def test_clubb_coefficient_matches_manual_composition():
     np.testing.assert_array_equal(np.asarray(out.valid), np.asarray(valid))
 
 
+def test_clubb_coefficient_excludes_boundary_wp2():
+    """The interior C_K must use ONLY the interior wp2 half-levels (``wp2_half[1:-1]``);
+    the two BOUNDARY half-levels (top + surface) must not leak in.  Scaling ONLY the
+    boundary-interface w (→ huge boundary wp2, interior wp2 + interior fluxes
+    unchanged) must leave EVERY interior C_K identical — a slice that kept a boundary
+    (``[:-1]`` or ``[1:]``) would put the huge wp2 at an edge interface and change C_K
+    there.  Locks the wp2 co-location PHYSICALLY: ``test_clubb_coefficient_matches_
+    manual_composition`` uses the SAME slice (and level-constant wp2), so it cannot."""
+    state, hc = _les_state_with_shear()
+    w = state.w.data                                   # (4,4,9) half-level w
+    # Scale ONLY the top (k=0) and surface (k=-1) half-level interfaces by 100×.
+    w_sentinel = w.at[:, :, 0].multiply(100.0).at[:, :, -1].multiply(100.0)
+    state_b = state._replace(w=state.w.replace(data=w_sentinel))
+    out_a = diagnose_clubb_coefficient(state, hc, l_mix_max=100.0)
+    out_b = diagnose_clubb_coefficient(state_b, hc, l_mix_max=100.0)
+    np.testing.assert_array_equal(np.asarray(out_a.C_K), np.asarray(out_b.C_K))
+    np.testing.assert_array_equal(np.asarray(out_a.valid), np.asarray(out_b.valid))
+
+
 def test_clubb_coefficient_min_valid_levels_invalidates_column():
     # Requiring more valid levels than exist flags the WHOLE column invalid.
     state, hc = _les_state_with_shear()
