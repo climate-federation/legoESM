@@ -705,6 +705,43 @@ def test_main_dry_run_end_to_end_on_synthetic_era5(tmp_path):
     assert rc == 0                       # full construction validated on synthetic data
 
 
+def test_surface_flux_flag_parsed():
+    p = _build_arg_parser()
+    base = ["--config", "c.json", "--era5-zarr", "z"]
+    assert p.parse_args(base).surface_flux is False          # default OFF
+    assert p.parse_args([*base, "--surface-flux"]).surface_flux is True
+
+
+def test_surface_flux_flag_wired_into_les_config(tmp_path, monkeypatch):
+    """--surface-flux (iter 365) flows into the campaign's ``ColumnLESConfig.surface_flux``
+    (default OFF) — spies on build_correction_campaign through the synthetic dry-run, so the
+    flag→config WIRING is locked, not just the flag parse (a hardcoded value would pass a
+    parse-only test).  Both the default-OFF and the opt-in are asserted."""
+    import scripts.run.run_correction_campaign as rcc
+    from scripts.data.make_synthetic_era5 import main as make_era5
+    from scripts.experiment.write_amip_clubb_lite_config import main as make_cfg
+
+    captured = {}
+    real = rcc.build_correction_campaign
+
+    def spy(**kw):
+        captured["surface_flux"] = kw["les_config"].surface_flux
+        return real(**kw)
+
+    monkeypatch.setattr(rcc, "build_correction_campaign", spy)
+    zp = str(tmp_path / "syn.zarr")
+    cfg = str(tmp_path / "cfg.json")
+    out = str(tmp_path / "o.json")
+    assert make_era5([zp, "--nlat", "12", "--nlon", "24", "--ntime", "2"]) == 0
+    assert make_cfg([cfg, "--resolution", "8", "--nlev", "8"]) == 0
+    base = ["--config", cfg, "--era5-zarr", zp, "--mode", "amip", "--n-worst", "4",
+            "--iterations", "1", "--out", out, "--dry-run"]
+    assert rcc.main(base) == 0
+    assert captured["surface_flux"] is False                 # default OFF
+    assert rcc.main([*base, "--surface-flux"]) == 0
+    assert captured["surface_flux"] is True                  # opt-in flows through
+
+
 def test_warn_if_ignored_diagnosis_method():
     """--coefficients silently overrides --diagnosis-method (the multi path ignores it);
     a NON-default method alongside --coefficients warns so the user is not surprised. The

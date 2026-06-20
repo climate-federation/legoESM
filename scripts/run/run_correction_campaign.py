@@ -999,6 +999,13 @@ def _build_arg_parser():
                         "at the shallow-regime dx=50 m (n_acoustic=6); a larger dt is "
                         "rejected by run_forced_les' acoustic-CFL pre-flight.")
     p.add_argument("--les-hours", type=float, default=2.0, help="LES duration [h]")
+    p.add_argument("--surface-flux", action="store_true",
+                   help="OPT-IN (iter 364/365): give each worst-column spin-off LES a "
+                        "prescribed surface-flux BC — the GCM bulk surface sensible/latent "
+                        "fluxes (reused, no new tunables) converted to kinematic θ/q_v "
+                        "fluxes — so surface-driven (convective) columns get their primary "
+                        "turbulence driver. Default OFF (surface-flux-free LES). Requires "
+                        "the run's state to carry an SST (AMIP prescribed / CMIP coupled).")
     p.add_argument("--orographic-forcing", choices=("auto", "on", "off"),
                    default="auto",
                    help="orographic geostrophic LES-forcing term over terrain. "
@@ -1651,7 +1658,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma, grid=grid,
         area_weights=_area_weights(grid), n_iterations=args.iterations,
-        les_config=ColumnLESConfig(), coefficients=coefficients,
+        les_config=ColumnLESConfig(surface_flux=args.surface_flux),
+        coefficients=coefficients,
         run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_fields=initial_fields,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
@@ -2066,7 +2074,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, reference=reference, sigma=sigma,
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
-        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method),
+        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
+                                   surface_flux=args.surface_flux),
         run_les_fn=run_les, phis=phis,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
