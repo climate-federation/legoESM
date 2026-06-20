@@ -738,3 +738,40 @@ def test_mpas_owned_cell_mask_excludes_halo_from_ranking():
     masked = _rank(owned_mask)
     assert masked.manifest[0].grid_index == (owned_worst,)
     assert masked.manifest[0].T_rmse_K == pytest.approx(8.0, abs=1e-4)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Hybrid-coordinate compare bug (iter 337, CODEX PENDING): compare_state_to_reference "
+    "weights the bias by the SIGMA-layer thickness (diff(sigma_half), p_s-independent) and "
+    "IGNORES the p_full/p_half override that carries the true layer pressures. "
+    "vertical_coord defaults to 'hybrid' (p = A*p_ref + B*p_s), so over terrain (p_s != "
+    "p_ref) the per-level bias is mis-weighted by up to ~276%. Fix: derive the mass weights "
+    "from the layer PRESSURE thickness diff(p_half) (per-column, axis=-1 normalized) — "
+    "byte-identical for pure-sigma (p_s cancels) and correct for hybrid — and thread the "
+    "model coordinate through make_compare_fn so the campaign supplies the hybrid pressures."))
+def test_compare_mass_weights_follow_the_pressure_profile_not_sigma():
+    """Regression target for the hybrid mass-weight bug: the bias mass weighting must respond
+    to the LAYER PRESSURE thickness (the p_half override), not the sigma thickness.  Two
+    p_half overrides that put very different mass in the biased TOP layer must yield DIFFERENT
+    combined scores; currently they are EQUAL (the weights come from sigma_half, ignoring the
+    override) — the bug.  xpasses (then drop the xfail) once the codex-reviewed fix lands."""
+    shape, nlev = (1, 1), 3
+    ref = _uniform_state(shape, nlev, T=250.0)
+    model = ref._replace(T=ref.T.at[0, 0, 0].set(260.0))   # 10 K bias in the TOP layer only
+    sigma_half = jnp.array([0.0, 1.0 / 3, 2.0 / 3, 1.0])
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    lat, lon = jnp.array([0.0]), jnp.array([0.0])
+
+    def _score(p_half_1d):
+        p_half = jnp.broadcast_to(p_half_1d, shape + (nlev + 1,))
+        p_full = 0.5 * (p_half[..., 1:] + p_half[..., :-1])
+        comp = compare_state_to_reference(
+            model=model, reference=ref, sigma_full=sigma_full, sigma_half=sigma_half,
+            lat_deg=lat, lon_deg=lon, time_index=0, n_worst=1,
+            p_full=p_full, p_half=p_half)
+        return float(jnp.max(comp.error_fields.combined_score))
+
+    # A: the biased top layer is THICK (lots of mass); B: it is THIN (little mass).
+    score_thick_top = _score(jnp.array([0.0, 40000.0, 70000.0, 1.0e5]))
+    score_thin_top = _score(jnp.array([0.0, 2000.0, 60000.0, 1.0e5]))
+    assert abs(score_thick_top - score_thin_top) > 1e-6   # mass weighting must follow p_half
