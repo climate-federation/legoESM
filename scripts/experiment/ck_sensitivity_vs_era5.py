@@ -113,6 +113,59 @@ def per_level_ck_bias_sensitivity(T_low_ck, T_high_ck, T_ref, area_weights) -> d
     }
 
 
+def ck_sensitivity_trend(days: Any, bl_fractions: Any) -> dict:
+    """Trend of the boundary-layer C_K-controllable fraction with run length (iter 418).
+
+    ``days`` and ``bl_fractions`` are matching 1-D sequences (>= 2 points): the run lengths
+    and the BL C_K-controllable fraction at each (sorted internally, so input order is
+    free).  Returns the least-squares ``slope_per_day``, whether the fraction is strictly
+    ``monotonic_increasing``, and a CRUDE linear extrapolation ``days_to_feasible_floor_
+    linear`` of how many days that trend would take to reach :data:`_FEASIBLE_FRACTION`
+    (``None`` if already at/above the floor, or not rising).
+
+    A climbing fraction ⇒ EQUILIBRATION-limited (a longer, more-equilibrated run is the
+    lever, because C_K's slow BL mixing needs time to accumulate a difference); a flat one
+    ⇒ IDEALIZATION-limited (realism — real radiation/SST — is needed, not run length).
+    iter-418 (a 1/3/6-day aquaplanet vs real ERA5) measured a climbing-BUT-shallow trend
+    (~0.03 %/day, ~130 days to the floor by linear extrapolation) ⇒ run length helps but is
+    insufficient alone; realism is ALSO required — the precise HPC characterization.
+    """
+    d = np.asarray(days, dtype=float).reshape(-1)
+    f = np.asarray(bl_fractions, dtype=float).reshape(-1)
+    if d.shape != f.shape:
+        raise ValueError(
+            f"ck_sensitivity_trend: days and bl_fractions must share shape; got "
+            f"{d.shape} vs {f.shape}.")
+    if d.size < 2:
+        raise ValueError(
+            "ck_sensitivity_trend: need >= 2 (days, fraction) points to fit a trend.")
+    if bool(np.any(np.isnan(d))) or bool(np.any(np.isnan(f))):
+        raise ValueError(
+            "ck_sensitivity_trend: days/bl_fractions contain NaN — a NaN would silently "
+            "poison the fitted slope.")
+    order = np.argsort(d)                  # robust to unsorted input
+    d, f = d[order], f[order]
+    if bool(np.any(np.diff(d) == 0)):
+        # Two fraction measurements at the SAME run length are noise, not a time trend —
+        # they would falsely read as monotonic (codex-review iter 418).  main() dedups via
+        # sorted(set(...)), but the public function must reject it directly.
+        raise ValueError(
+            f"ck_sensitivity_trend: duplicate day values are not allowed; got sorted days "
+            f"{d.tolist()} — each run length must appear exactly once.")
+    slope = float(np.polyfit(d, f, 1)[0])
+    rising = bool(np.all(np.diff(f) > 0))
+    last_d, last_f = float(d[-1]), float(f[-1])
+    if rising and slope > 1e-12 and last_f < _FEASIBLE_FRACTION:
+        days_to_floor: float | None = last_d + (_FEASIBLE_FRACTION - last_f) / slope
+    else:
+        days_to_floor = None
+    return {
+        "slope_per_day": slope,
+        "monotonic_increasing": rising,
+        "days_to_feasible_floor_linear": days_to_floor,
+    }
+
+
 def format_per_level_report(per_level: dict, sigma_full: Any) -> list[str]:
     """Operator-readable per-level C_K-sensitivity lines, flagging the most-controllable
     level.
@@ -203,20 +256,79 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resolution", type=int, default=8)
     p.add_argument("--nlev", type=int, default=5)
     p.add_argument("--days", type=int, default=1)
+    p.add_argument("--days-sweep", type=int, nargs="+", default=None,
+                   help="run lengths [days] to sweep — reports the BL C_K-controllable "
+                        "fraction vs run length (equilibration-limited vs idealization-"
+                        "limited) instead of the single-run report")
     p.add_argument("--era5-n-times", type=int, default=4)
     args = p.parse_args(argv)
 
     ck_lo, ck_hi = args.c_k
+
+    def _build_reference(grid, sigma):
+        ds = open_local_era5_dataset(args.local_era5_dir, args.local_era5_date)
+        era5 = load_era5_time_mean(
+            TrainingERA5Config(levels=WB2_PRESSURE_LEVELS,
+                               surface_variables=("surface_pressure", "skin_temperature")),
+            range(args.era5_n_times), ds=ds)
+        return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+
+    def _bl_per_level(m_lo_s, m_hi_s, grid, ref):
+        """(sigma, T-bias, C_K-controllable fraction) at the boundary-layer (max-sigma)
+        level — shared per-level computation with the single-run report below."""
+        mt = np.asarray(m_lo_s.T)
+        ncol = int(np.prod(mt.shape[:-1]))
+        w = np.cos(np.asarray(grid.grid_lat)).reshape(-1)
+        if w.size != ncol:                           # fail loud, never silently broadcast
+            raise ValueError(
+                f"ck-sensitivity per-level: cos(lat) area weights have {w.size} cells but "
+                f"model.T has {ncol} columns — grid/state column-grid mismatch.")
+        return per_level_ck_bias_sensitivity(mt, np.asarray(m_hi_s.T), np.asarray(ref.T), w)
+
+    if args.days_sweep:
+        days_list = sorted(set(args.days_sweep))
+        ref_box: dict = {}
+        fracs: list[float] = []
+        print(f"[ck-sensitivity sweep] C_K {ck_lo} vs {ck_hi} vs real ERA5 "
+              f"({args.local_era5_date}, res={args.resolution}); BL C_K-controllable vs "
+              "run length:")
+        for days in days_list:
+            m_lo, grid, sigma = _run_model_state(
+                ck_lo, resolution=args.resolution, nlev=args.nlev, days=days)
+            m_hi, _, _ = _run_model_state(
+                ck_hi, resolution=args.resolution, nlev=args.nlev, days=days)
+            if "ref" not in ref_box:                 # grid/sigma depend only on res/nlev
+                ref_box["ref"] = _build_reference(grid, sigma)
+            pl = _bl_per_level(m_lo, m_hi, grid, ref_box["ref"])
+            sig = np.asarray(sigma.sigma_full, dtype=float).reshape(-1)
+            bl = int(np.argmax(sig))                 # surface-last: the BL is max sigma
+            sbl = float(sig[bl])
+            bbl = float(np.asarray(pl["bias_per_level"])[bl])
+            fbl = float(np.asarray(pl["controllable_fraction_per_level"])[bl])
+            fracs.append(fbl)
+            print(f"  days={days:>3}: BL sigma {sbl:.3f}  T-bias {bbl:.3g} K  "
+                  f"C_K-controllable {fbl:.3%}")
+        trend = ck_sensitivity_trend(days_list, fracs)
+        print(f"  trend: slope {trend['slope_per_day']:.3%}/day, "
+              f"monotonic_increasing={trend['monotonic_increasing']}")
+        dtf = trend["days_to_feasible_floor_linear"]
+        if not trend["monotonic_increasing"]:
+            print("  => FLAT: run length is NOT the lever — the bias is idealization-"
+                  "dominated (needs real radiation/SST), not equilibration-limited.")
+        elif dtf is None:
+            print("  => already at/above the feasibility floor.")
+        else:
+            print(f"  => EQUILIBRATION is a lever (the fraction climbs with run length); a "
+                  f"LINEAR extrapolation needs ~{dtf:.0f} days to reach the "
+                  f"{_FEASIBLE_FRACTION:.0%} floor — if impractically long, realism (real "
+                  "radiation/SST) is ALSO needed, not run length alone.")
+        return 0
+
     m_lo, grid, sigma = _run_model_state(
         ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days)
     m_hi, _, _ = _run_model_state(
         ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days)
-    ds = open_local_era5_dataset(args.local_era5_dir, args.local_era5_date)
-    era5 = load_era5_time_mean(
-        TrainingERA5Config(levels=WB2_PRESSURE_LEVELS,
-                           surface_variables=("surface_pressure", "skin_temperature")),
-        range(args.era5_n_times), ds=ds)
-    ref = column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+    ref = _build_reference(grid, sigma)
 
     def _score(model):
         comp = compare_state_to_reference(
@@ -242,19 +354,11 @@ def main(argv: list[str] | None = None) -> int:
              "improvement here — use a more realistic (multi-day, real-radiation) run."))
 
     # Per-level breakdown (iter 417): WHERE in the column is the bias C_K-controllable?
-    # Area-weight per column with cos(lat) — grid.grid_lat shares the model's column grid
-    # (same object _score passes to compare_state_to_reference), so reshape(-1) aligns with
-    # model.T.reshape(-1, nlev).  This shows that even when the full-column bias is
-    # C_K-insensitive, the closure still controls the boundary layer it acts on.
-    mt = np.asarray(m_lo.T)
-    ncol = int(np.prod(mt.shape[:-1]))               # leading dims = columns ([..., nlev])
-    w = np.cos(np.asarray(grid.grid_lat)).reshape(-1)
-    if w.size != ncol:                               # fail loud, never silently broadcast
-        raise ValueError(
-            f"ck-sensitivity per-level: cos(lat) area weights have {w.size} cells but "
-            f"model.T has {ncol} columns — grid/state column-grid mismatch (the area "
-            "weighting would be wrong).")
-    pl = per_level_ck_bias_sensitivity(mt, np.asarray(m_hi.T), np.asarray(ref.T), w)
+    # _bl_per_level area-weights per column with cos(lat) (grid.grid_lat shares the model's
+    # column grid, the same object _score passes to compare_state_to_reference), showing
+    # that even when the full-column bias is C_K-insensitive the closure still controls the
+    # boundary layer it acts on.
+    pl = _bl_per_level(m_lo, m_hi, grid, ref)
     print("  per-level C_K sensitivity (T-bias vs ERA5, surface-last sigma):")
     for line in format_per_level_report(pl, sigma.sigma_full):
         print(line)

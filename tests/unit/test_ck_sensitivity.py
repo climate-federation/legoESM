@@ -64,6 +64,44 @@ def test_per_level_ck_bias_sensitivity_localizes_to_the_boundary_layer():
             np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((3, 3)), np.ones(2))
 
 
+def test_ck_sensitivity_trend_distinguishes_equilibration_from_idealization_limited():
+    """The run-length trend (iter 418) classifies WHY the model is C_K-insensitive: a BL
+    C_K-controllable fraction that CLIMBS with run length is equilibration-limited (a longer
+    run is the lever), a FLAT one is idealization-limited (needs real radiation/SST)."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import ck_sensitivity_trend
+
+    # The REAL iter-418 shape (1/3/6-day aquaplanet): climbing but shallow — equilibration
+    # is a lever, but a linear extrapolation needs an impractically long run to the floor.
+    t = ck_sensitivity_trend([1, 3, 6], [0.00304, 0.00384, 0.00474])
+    assert t["monotonic_increasing"] and t["slope_per_day"] > 0.0
+    assert t["days_to_feasible_floor_linear"] > 100   # shallow ⇒ impractically long alone
+
+    # Flat ⇒ NOT equilibration-limited; no finite days-to-floor (run length is not the lever).
+    t2 = ck_sensitivity_trend([1, 3, 6], [0.01, 0.01, 0.01])
+    assert not t2["monotonic_increasing"]
+    assert t2["days_to_feasible_floor_linear"] is None
+
+    # Already at/above the feasibility floor ⇒ None (no extrapolation needed).
+    t3 = ck_sensitivity_trend([1, 2], [0.06, 0.07])
+    assert t3["days_to_feasible_floor_linear"] is None
+
+    # Unsorted input is sorted internally (the monotonicity check is in run-length order).
+    t4 = ck_sensitivity_trend([6, 1, 3], [0.00474, 0.00304, 0.00384])
+    assert t4["monotonic_increasing"]
+    assert t4["slope_per_day"] == pytest.approx(t["slope_per_day"])
+
+    with pytest.raises(ValueError, match="share shape"):
+        ck_sensitivity_trend([1, 2], [0.003])
+    with pytest.raises(ValueError, match=">= 2"):
+        ck_sensitivity_trend([1], [0.003])
+    # Duplicate run lengths are noise, not a trend — reject (codex-review iter 418).
+    with pytest.raises(ValueError, match="duplicate day"):
+        ck_sensitivity_trend([1, 1, 6], [0.003, 0.004, 0.005])
+    # NaN would silently poison the fitted slope — reject.
+    with pytest.raises(ValueError, match="NaN"):
+        ck_sensitivity_trend([1, 3, 6], [0.003, np.nan, 0.005])
+
+
 def test_format_per_level_report_flags_the_most_controllable_level():
     """The operator-facing per-level report (iter 417) flags the most C_K-controllable
     level so an operator reading a C_K-INSENSITIVE full-column verdict still sees that the
