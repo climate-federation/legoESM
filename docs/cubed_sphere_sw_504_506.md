@@ -136,6 +136,103 @@ needs-attention → all three findings addressed): C96 scaling measured
 `tests/core/test_streamfunction_freestream.py::test_flux_sign_convention`
 (finding 3).
 
+## Long-run cosine-bell faithfulness (issue #521 context, 2026-06-20)
+
+Verified the cube cosine-bell transport over **10 revolutions (120 days)** at C48,
+both orientations, reusing the production streamfunction path
+(`scripts/tmp/diag_cosine_bell_longrun.py`). Reference: FV3 `test_cases.F90`
+`wind_field=0` builds the mass flux as the corner-streamfunction discrete curl
+(`uc=-(ψ[i,j+1]-ψ[i,j])/dy`, `vc=(ψ[i+1,j]-ψ[i,j])/dx`) — exactly
+`fv_tp_2d.streamfunction_mass_fluxes`; the PPM is `tp_core.F90` hord=10 (Huynh
+2nd-constraint) with the `is==1`/`ie+1==npx` one-sided edge stencil
+(`apply_fortran_xppm_boundary`). Faithful by construction.
+
+| @ rev10 (120 d), C48 | α=π/4 (corners) | α=0 (edges) |
+|----------------------|-----------------|-------------|
+| free-stream `max\|h−1\|` | **1.55e-6 (flat, no rev-over-rev growth)** | **1.55e-6 (flat)** |
+| bell L2 vs IC | 0.45 | 0.41 |
+| peak height (init 988) | 477 | 712 |
+| mass error | ~1e-6 (bounded) | ~1e-6 |
+| min h | 0 (monotone, no undershoot) | 0 |
+| centroid drift | 2.66° | 5.35° |
+
+**Conclusions (faithful endpoint, no remaining bug):**
+1. **No edge/corner GCL artifact — spatially localized, not just global.**
+   Free-stream `h≡1` stays at the roundoff floor for the full 120 days
+   (C48 1.55e-6, C96 1.19e-7), and that residual is **uniform**: edge-ring max ==
+   interior max == face-corner max (ratio 1.00). A seam/corner leak would both
+   accumulate over revolutions AND concentrate on the boundary ring; it does
+   neither. (pre-#504 d2a2c flux: 0.52 in 2 days, striped at the seam.) The
+   no-rescaler regression test (`mass_target=None`) confirms this is not the
+   global mass fixer masking a local leak — `max|h−1|` is a local max and would
+   expose any sign-cancelling seam pair.
+2. **The distortion CONVERGES with resolution ⇒ it is numerical diffusion, not a
+   bug or a fixed cube artifact.** Doubling C48→C96 (α=π/4): rev-1 peak loss
+   16%→5%, 1-rev L2 0.114→0.041 (~2.8×, between 2nd and 3rd order), drift
+   0.31°→0.07° (4.4×). A GCL/seam artifact would NOT clean up at ~2nd order.
+
+   | | C48 rev1 | C96 rev1 | order |
+   |--|----------|----------|-------|
+   | bell L2 (α=π/4) | 0.114 | 0.041 | ~1.5 |
+   | peak loss | 16% | 5% | |
+   | drift | 0.31° | 0.07° | ~2.1 |
+
+3. **The corner orientation is no longer the outlier.** α=π/4 (corner-crossing)
+   L2 0.45 vs α=0 (edge-only) 0.41 (pre-#504 it was 0.93 vs 0.19); edge-crossing
+   in fact *drifts more* (5.35° vs 2.66°). Consistent with — though not by itself
+   proof of — grid-generic dispersion; the resolution convergence in (2) is the
+   decisive evidence. Single-rev L2 matches PL07 / Lauritzen monotone-PPM at this
+   resolution. Chasing zero decay would require a non-monotone or non-FV3 limiter
+   — a faithfulness regression, rejected.
+
+Scope (what is and isn't certified): free-stream `h≡1` certifies GCL /
+divergence-freeness across all seams/corners for all time; the α=π/4 cosine bell
+certifies a real non-constant gradient transported *over* the corners. Neither
+probes filamentary tracers or sign-changing fields — the colliding-modons test
+(issue #521) is the intended nonlinear seam stress test and is NOT yet
+implemented. Regression pin:
+`test_streamfunction_freestream.py::test_freestream_bounded_over_many_revolutions`
+(h≡1 over 2 revolutions, `max|h−1|` < 1e-5). Diagnostic:
+`scripts/tmp/diag_cosine_bell_longrun.py`. Codex-reviewed (5 adversarial
+findings; resolution-scaling + residual-localization added to address them).
+
+## #521 — Colliding modons (nonlinear SW test case, 2026-06-20)
+
+Implemented the FV3 case-8 "soliton twin-vortex" / JAMES Colliding-Modons test
+(`doi:10.1002/2017MS000965`). Faithful port of `tools/test_cases.F90` case-8
+(codex-reviewed, 6/6 axes, no bugs):
+- Non-rotating (f=0), flat free surface h≡5000 m (`gh0=5e3·g`, `delp/g`).
+- Two equatorial zonal-wind Gaussians `±50·exp(−(r/750 km)²)` at 90°E (westerly)
+  and 270°E (easterly); `r` = great-circle distance to the edge midpoint.
+- Reuses the validated cube zonal-wind edge projection (`u_d=cos_angle_edge_x·u_e`,
+  `v_d=−sin_angle_edge_y·u_e`) — same as the W2 / cosine-bell cube IC; FV3's
+  `inner_prod(e1/e2, ex)` of the east vector is exactly that metric rotation.
+- Non-rotating handled as experiment glue: `cdgrid._replace(f_corner=0)` (the SW
+  core's only Coriolis use is `f_corner + rarea_c·vort`), mirroring `f0=fC=0`.
+
+`tests/test_cases/modons.py` (`colliding_modons_cubesphere`) +
+`tests/test_cases/test_modons.py` (IC faithfulness + short non-rotating
+prognostic run: stable, mass-conserving, modons evolve, h>0). Driver
+`scripts/validate/run_colliding_modons.py` (collision/conservation/symmetry
+diagnostics).
+
+**Status — works, stable, faithful IC; long-run damping calibration is open.**
+C48 60-day non-rotating run (`--dt 150 --div-damp 10 --damp-v 0.04
+--hyperdiff-factor 2`): **mass conserved to machine (1e-15)**, energy bounded
+(slow creep to 3.4e-3 over 60 d, no blow-up), **h>0 throughout** (4438–5763 m),
+the two modons persist (17–27 m/s after the initial f=0 gravity-wave adjustment
+from the unbalanced flat-h IC) and visibly **collide / exchange / propagate**
+(tracked vortex longitudes orbit), with NO cube-seam grid noise (per-face height
+std smooth across all six faces). The damping is a bracket: the W2/W5-tuned
+`iter1009` preset is **under-damped** for this nonlinear case (C24 blows up by
+day ~3, max|u|→1000), heavy hyperdiff×4 is **over-damped** (modons decay to
+~6 m/s); hyperdiff×2 / div-damp 10 is the stable middle.
+OPEN (separate calibration effort, like the W2/W5 iter-985..1030 narrative):
+the exact ~100-day return-to-initial-position acceptance + a per-resolution
+damping calibration (C96+ to resolve the 750 km cores) + matrix-runner case
+registration. Not claimed here — only a stable, conservative, artifact-free
+60-day demonstration.
+
 ## Visual verification (no artifacts)
 
 `scripts/validate/visual_regression.py --check`: SSIM=1.0000, hamming=0,
