@@ -494,6 +494,22 @@ def test_column_state_from_hydrostatic_sst_optional():
     assert cs.precip_mm_day is None
 
 
+def test_column_state_from_hydrostatic_rejects_sst_on_a_different_grid():
+    """A coupled (CMIP) run with an ocean grid DIFFERENT from the atmosphere
+    (make_base_driver_builder ocean_grid=...) yields ocean_state.T_sfc on the OCEAN
+    grid.  The SST environment tag indexes by ATMOSPHERE column flat-index
+    (column_manifest: sst[flat_i]), so a differently-shaped SST would silently misalign
+    every column's SST (or index out of bounds).  It must fail LOUD at the bridge — like
+    the MPAS edge/cell mesh checks — not silently corrupt the env tag.  (Non-vacuous: a
+    grid-matched SST, AMIP prescribed or same-grid CMIP, still passes — covered above.)"""
+    shape, nlev = (2, 3), 5
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    ocean_grid_sst = jnp.full((4, 5), 295.0)   # a DIFFERENT (ocean) grid shape than (2, 3)
+    with pytest.raises(ValueError, match=r"sst_K shape .* != the atmosphere column grid"):
+        column_state_from_hydrostatic(atm, q_v, sst_K=ocean_grid_sst)
+
+
 def test_column_state_from_hydrostatic_rejects_none_v():
     atm = _hydro_state((2, 2), 4)._replace(v=None)  # MPAS edge-velocity state
     with pytest.raises(ValueError, match="atm_state.v is None"):
