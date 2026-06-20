@@ -263,6 +263,38 @@ def compute_cloud_properties(
     if has_explicit_condensate:
         q_c = jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0)
         q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        # Coarse-GCM cloud-radiation floor (planetary-albedo fix).  The
+        # prognostic GRID-MEAN condensate from microphysics under-represents the
+        # radiatively-active SUB-GRID in-cloud water: a coarse grid-mean rarely
+        # reaches saturation, so the grid-mean saturation-adjustment condenses
+        # ~0 (q_c->0) even where the DIAGNOSTIC cloud fraction cf>0.  Feeding
+        # that q_c~=0 to the cloud optics makes clouds OPTICALLY INERT and the
+        # planetary albedo collapses to the clear-sky value (~12% vs Earth ~30%;
+        # rrtmgp 8525261 measured rsut 35 W/m^2 with q_c~=0).  For the
+        # DIAGNOSTIC-fraction schemes (sundqvist / xu_randall — sub-grid by
+        # construction) floor the RADIATIVE condensate with ``cf *
+        # q_c_diagnostic`` (the SAME calibrated in-cloud value the no-microphysics
+        # path below uses), temperature-partitioned.  ``jnp.maximum`` so a scheme
+        # carrying genuinely resolved/large q_c is unchanged (no double-count),
+        # and condensate stays proportional to cf (aligned with the rh_crit=0.8
+        # onset — does NOT re-introduce the cf/condensate MISMATCH that drove the
+        # earlier overcast cold-drift; see CloudConfig.rh_crit).  Radiation-only:
+        # the prognostic q_c and the water/energy budget are untouched.
+        # NOT applied to 'resolved' (CRM: q_c IS the truth; a floor would inject
+        # spurious cloud water).
+        if config.scheme in ("sundqvist", "xu_randall"):
+            # Floor on TOTAL condensate, then add only the DEFICIT, partitioned
+            # by temperature.  Per-phase maxima would over-floor a layer whose
+            # explicit condensate already meets the floor but sits in one phase
+            # (e.g. all-ice: the liquid max would still inject liquid),
+            # inflating total condensate (codex review).  The deficit form adds
+            # nothing when the prognostic TOTAL already meets the floor, so the
+            # explicit phase split is preserved EXACTLY there.
+            q_total_diag = cf * config.q_c_diagnostic
+            deficit = jnp.maximum(q_total_diag - (q_c + q_i), 0.0)
+            f_ice_diag = _ice_fraction(T, config)
+            q_c = q_c + deficit * (1.0 - f_ice_diag)
+            q_i = q_i + deficit * f_ice_diag
     else:
         # Diagnose condensate from cloud fraction and a typical in-cloud value.
         # Total condensate = cf * q_c_diagnostic, partitioned by temperature.

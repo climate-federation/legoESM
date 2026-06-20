@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.bulk_flux import simple_bulk_fluxes
+from legoesm.core.bulk_flux import simple_bulk_fluxes, apply_gustiness
 
 
 def _validate_nh_state_shape(state, height_coord) -> None:
@@ -157,7 +157,10 @@ def compose_rce_surface_scalar_tendencies(
         height_coord.rho_ref[k_sfc] + state.rho_prime.data[..., k_sfc]
     )
     # Apply gustiness floor: |U|_eff = sqrt(|U|² + u_gust²) (Wing 2018).
-    wind_speed_eff = jnp.sqrt(wind_speed ** 2 + gustiness_floor ** 2)
+    # Shared with the coupled bulk-flux paths (core.bulk_flux.apply_gustiness).
+    # Pass the precomputed magnitude as the first component (v=0): the floor is
+    # inside the single sqrt, so it stays AD-safe at calm wind.
+    wind_speed_eff = apply_gustiness(wind_speed, 0.0, gustiness_floor)
     # Reuse coupler/bulk_flux.simple_bulk_fluxes for shflx + lhflx.
     # u/v not consumed for scalar-only fluxes (Cd=0 zeros the stress).
     zero_field = jnp.zeros_like(T_atm_sfc)

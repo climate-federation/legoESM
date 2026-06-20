@@ -230,3 +230,69 @@ def test_unknown_cloud_scheme_raises():
             config=CloudConfig(scheme="resolvd"),  # typo
             q_cloud=q_c, q_ice=q_i,
         )
+
+
+# --- Coarse-GCM cloud-radiation condensate floor (planetary-albedo fix) -------
+# With microphysics active, compute_cloud_properties receives the PROGNOSTIC
+# grid-mean q_c/q_i, which is ~0 in a coarse model (grid-mean rarely saturates)
+# even where the diagnostic cloud fraction cf>0 — giving optically INERT clouds
+# and a clear-sky planetary albedo (~12% vs Earth ~30%).  The floor restores a
+# radiatively-active in-cloud condensate (cf*q_c_diagnostic) for the
+# diagnostic-fraction schemes, BOTH liquid and ice, without touching the
+# water/energy budget; 'resolved' (CRM) is excluded.
+
+def test_cloud_radiation_floors_both_liquid_and_ice():
+    """The floor wires BOTH phases into cloud radiation: with prognostic q_c/q_i
+    ~= 0, sundqvist clouds carry radiative condensate floored to cf*q_c_diagnostic,
+    temperature-partitioned into LIQUID (warm cloudy layers) and ICE (cold cloudy
+    layers) — neither phase optically inert (user req: liquid + ice both wired)."""
+    from legoesm.thermo import saturation_mixing_ratio
+    nlev = 20
+    T = jnp.linspace(240.0, 300.0, nlev)[None, :]        # spans ice + liquid
+    p_full = jnp.linspace(1.0e4, 1.0e5, nlev)[None, :]
+    p_half = jnp.linspace(9.0e3, 1.013e5, nlev + 1)[None, :]
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    q_v = 0.9 * saturation_mixing_ratio(T, p_full)       # RH=0.9 > rh_crit ⇒ cf>0
+    zeros = jnp.zeros_like(T)
+    cp = compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp,
+        config=CloudConfig(scheme="sundqvist"),
+        q_cloud=zeros, q_ice=zeros,                      # microphysics drained both
+    )
+    lwp = np.asarray(cp.lwp); iwp = np.asarray(cp.iwp)
+    assert float(lwp.sum()) > 0.0, "liquid condensate not wired into cloud radiation"
+    assert float(iwp.sum()) > 0.0, "ice condensate not wired into cloud radiation"
+    # The kwargs handed to RRTMGP must carry BOTH paths.
+    kw = cp.to_rrtmg_kwargs()
+    assert float(np.asarray(kw["cloud_path_liq"]).sum()) > 0.0
+    assert float(np.asarray(kw["cloud_path_ice"]).sum()) > 0.0
+
+
+def test_floor_not_applied_to_resolved_scheme():
+    """The floor is gated to diagnostic-fraction schemes; 'resolved' (CRM, q_c IS
+    the truth) is NOT floored — zero explicit condensate ⇒ zero LWP/IWP."""
+    T, p_full, _, q_v, dp, _, _ = _column()
+    zeros = jnp.zeros_like(T)
+    cp = compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp,
+        config=CloudConfig(scheme="resolved"), q_cloud=zeros, q_ice=zeros,
+    )
+    assert float(np.asarray(cp.lwp).sum()) == 0.0
+    assert float(np.asarray(cp.iwp).sum()) == 0.0
+
+
+def test_floor_preserves_large_prognostic_condensate():
+    """jnp.maximum: where the prognostic condensate exceeds the diagnostic floor
+    it is preserved (no double-count). A thick prognostic cloud gives MORE LWP
+    than the floor-only (zero-q_c) case at the same level."""
+    T, p_full, _, q_v, dp, q_c, _ = _column()      # q_c=4e-4 at lev 12-14
+    zeros = jnp.zeros_like(T)
+    cfg = CloudConfig(scheme="sundqvist")
+    lwp_big = np.asarray(compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
+        q_cloud=q_c, q_ice=zeros).lwp)[0]
+    lwp_floor = np.asarray(compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg,
+        q_cloud=zeros, q_ice=zeros).lwp)[0]
+    # Thick prognostic cloud (4e-4) exceeds the cf*q_c_diagnostic floor (<=2e-4).
+    assert lwp_big[13] > lwp_floor[13]

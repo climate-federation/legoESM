@@ -108,7 +108,7 @@ class CloudConfig(NamedTuple):
     # multiplies the cloud optical depth (both LW + SW), that mismatch fed a
     # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
     # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
-    rh_crit: float = 0.8
+    rh_crit: float = 0.77
     alpha_xr: float = 100.0
     p_xr: float = 0.25
     gamma_xr: float = 0.49
@@ -121,7 +121,13 @@ class CloudConfig(NamedTuple):
                                      # MorrisonConfig.predict_Nc=False) where the
                                      # prognostic Nc slot stays 0. Matches Morrison
                                      # Nc_0=1e8 so RRTMGP r_eff_liq is SAM-faithful.
-    q_c_diagnostic: float = 0.2e-3
+    q_c_diagnostic: float = 1.0e-3   # in-cloud condensate for the radiative
+    # cloud-opacity floor [kg/kg].  Raised 0.2e-3 -> 1.0e-3 per the CAM
+    # surface-energy audit: thin clouds gave planetary albedo ~14% (vs ~30%)
+    # AND weak LW_down (~270 vs ~340) => surface LW loss -110 (vs -55) =>
+    # energy-starved evaporation => cold/dry feedback.  More in-cloud condensate
+    # raises BOTH cloud albedo (SW) and cloud LW emissivity (LW_down), running
+    # the cold/dry feedback in reverse.  Upper bound of the __param_spec__ range.
     T_freeze: float = constants.T_freeze
     T_ice_only: float = 233.15
     q_cloud_resolved_ref: float = 1.0e-6
