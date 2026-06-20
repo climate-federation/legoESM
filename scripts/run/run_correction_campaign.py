@@ -1292,7 +1292,13 @@ def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:
     :func:`_enable_line_buffered_stdout`'s real-time-progress promise needs something printed
     PER ROUND (iter 318).  Lets the operator tell a running campaign from a hung one and watch
     the bias fall live.  Works for the single + multi result (both carry ``bias`` /
-    ``n_corrected`` / ``n_diagnoses_valid`` / ``step_fraction``)."""
+    ``n_corrected`` / ``n_diagnoses_valid`` / ``step_fraction``).
+
+    NOTE (round numbering, iter 326): the live line is DELIBERATELY 1-based ("round {idx+1}/N",
+    natural progress) while the final per-round table (:func:`_format_round_line`) and the
+    checkpoint/resume arithmetic use the 0-based canonical ``round_idx`` (``start_round + i``).
+    So live "round 3/10" is the SAME round the summary calls "round 2" and the checkpoint stores
+    as ``round=2`` — an intentional display offset, not a desync; keep them in sync if changed."""
     b = res.bias
     step = float(getattr(res, "step_fraction", 1.0))
     if not bool(b.improved):

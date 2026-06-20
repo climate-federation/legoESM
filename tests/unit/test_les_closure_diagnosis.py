@@ -388,6 +388,30 @@ def test_clubb_coefficient_low_wp2_invalid_and_ad_safe():
     assert bool(jnp.all(jnp.isfinite(g)))    # sqrt(wp2) double-where is AD-safe
 
 
+def test_clubb_coefficient_zero_mixing_length_invalid_and_ad_safe():
+    """The ``l_mix > 0`` guard (C_K = K_m/(ℓ·√wp2) is ill-posed at ℓ=0) — untested
+    until now, yet physically reachable: the Blackadar ``mixing_length`` → 0 as z→0,
+    so a near-surface interface can carry ℓ≈0.  An ℓ=0 interface must be flagged
+    INVALID, return C_K=0 (not K_m/0=inf), and leave a FINITE gradient w.r.t. ℓ (the
+    masked-denominator double-where) so a column with a surface interface stays
+    differentiable.  Parallels the low-wp2 guard test above."""
+    Km = jnp.full((3,), 5.0)
+    l_mix = jnp.array([50.0, 0.0, 50.0])      # middle interface at the surface (ℓ=0)
+    wp2 = jnp.full((3,), 0.25)
+    CK, valid = clubb_coefficient_from_diffusivity(
+        Km, jnp.ones((3,), bool), l_mix, wp2)
+    assert bool(valid[0]) and not bool(valid[1]) and bool(valid[2])
+    assert float(CK[1]) == 0.0                # K_m/0 would be inf; the guard zeros it
+
+    def loss(lm):
+        CK, _ = clubb_coefficient_from_diffusivity(
+            Km, jnp.ones((3,), bool), lm, wp2)
+        return jnp.sum(CK ** 2)
+
+    g = jax.grad(loss)(l_mix)
+    assert bool(jnp.all(jnp.isfinite(g)))     # masked denom ⇒ finite grad at ℓ=0
+
+
 def test_prandtl_number_ratio():
     # Pr_t = Km/Kh = 4/5 = 0.8.
     from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
