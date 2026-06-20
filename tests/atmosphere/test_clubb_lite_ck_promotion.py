@@ -125,6 +125,41 @@ def test_ck_diagnosis_inverts_the_real_clubb_lite_forward():
         rtol=1e-6)
 
 
+def test_prt_diagnosis_inverts_the_real_clubb_lite_forward():
+    """Pr_t analog of :func:`test_ck_diagnosis_inverts_the_real_clubb_lite_forward`: the LES
+    Prandtl diagnosis ``Pr_t = K_m/K_h`` must invert the ACTUAL ``clubb_lite_turbulence``
+    forward ``Kh_full = Km_full / Pr_t`` (`clubb_lite.py:219`, ``Kh=Kh_full`` returned
+    unmodified) — not a hand-written ``Km=4, Kh=5`` replica (which is what
+    ``test_les_closure_diagnosis``'s Prandtl test uses).  Run the real GCM forward with a
+    known Pr_t (scalar AND per-column), diagnose Pr_t back from ``out.Km``/``out.Kh``,
+    recover to ~machine precision — so a DIVERGENCE between the real ``Kh`` forward and the
+    inverse (which would bias every Pr_t correction) fails here even though both
+    formula-sharing tests stay green."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+
+    kw = _inputs()
+    # (1) scalar Pr_t (production, vertically constant).
+    prt_true = 0.7
+    out, _ = clubb_lite_turbulence(**kw, config=CLUBBLiteConfig(Pr_t=prt_true))
+    prt_rec, valid = prandtl_number_from_diffusivities(
+        out.Km, jnp.ones_like(out.Km, bool), out.Kh, jnp.ones_like(out.Kh, bool))
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(prt_rec), prt_true, rtol=1e-6)
+
+    # (2) per-column Pr_t (the LES-informed correction) — each column recovers its own value.
+    ncol = kw["T"].shape[0]
+    prt_col = jnp.array([0.5, 0.7, 1.1])[:ncol]
+    out_pc, _ = clubb_lite_turbulence(**kw, config=CLUBBLiteConfig(Pr_t=prt_col))
+    prt_rec_pc, valid_pc = prandtl_number_from_diffusivities(
+        out_pc.Km, jnp.ones_like(out_pc.Km, bool), out_pc.Kh, jnp.ones_like(out_pc.Kh, bool))
+    assert bool(jnp.all(valid_pc))
+    np.testing.assert_allclose(
+        np.asarray(prt_rec_pc), np.broadcast_to(np.asarray(prt_col)[:, None], out_pc.Km.shape),
+        rtol=1e-6)
+
+
 def test_promotion_registered_and_applies():
     """C_K is registered promotable and apply_feedback_to_scheme splices it."""
     from legoesm.training.promotable_params import (
