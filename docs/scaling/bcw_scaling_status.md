@@ -389,3 +389,49 @@ the cube has a parity-gated path beyond 6 devices for fast-interconnect HW. The
 two remaining decomposition projects (atm lat-lon 2-D pencil at high np, spectral
 transpose) stay HW-blocked on Gloo/PCIe — the SOTA fixes (MOM6/E3SM 2-D pencil;
 NeuralGCM/spectral transpose) need InfiniBand/NCCL Ginsburg does not have.
+
+## Publication MPI+GPU scaling matrix (2026-06-20)
+
+Full publication sweep: every atmosphere grid + the ocean, float32 AND float64,
+weak AND strong, on BOTH backends — CPU-MPI (1–8 ranks) and GPU (1–2 dual Quadro
+RTX8000 per node).  120 measured points aggregated into one tidy CSV
+(`aggregate_bcw_scaling.py`, multi-root + dedup) and plotted by
+`plot_throughput_by_grid.py` / `plot_scaling_efficiency.py` →
+`docs/scaling/pub_mpi_gpu/{throughput_by_grid,scaling_efficiency}.png`.
+
+Peak single-config throughput [Mcells/s] (best over the sweep):
+
+| component | grid          | f32 CPU | f64 CPU | f32 GPU | f64 GPU |
+|-----------|---------------|--------:|--------:|--------:|--------:|
+| atm       | latlon        |   48.6  |  26.8   |  71.6   |  71.8   |
+| atm       | icosahedral   |   19.1  |  10.9   | 228.5   |  62.7   |
+| atm       | cubed-sphere  |   45.1  |  23.3   |  73.2   |  73.4   |
+| atm       | spectral      |    1.3  |   1.3   |  15.7   |  15.7   |
+| ocean     | latlon        |   11.2  |   9.0   | 103.4   |  98.1   |
+| ocean     | mpas          |    —    |   —     |  59.5   |  59.5   |
+
+GPU per-device wins (1 RTX8000 vs the CPU-MPI peak): ocean lat-lon ≈ 10×,
+atm-icosahedral f32 up to ~12× (228 Mcells/s — the most GPU-friendly grid),
+spectral ≈ 12× over a near-stalled CPU spectral (transform-bound, f64-only).  On
+GPU, f32≈f64 throughput for the FV-family grids (RTX8000 f64 is not heavily
+penalised at these sizes; the cost is memory traffic, identical layout) — only
+icosahedral shows the classic f32>f64 split (228 vs 63).
+
+Honest scope: GPU is capped at **2 devices** (one dual-RTX8000 node; multi-node
+GPU is HW-blocked — no NCCL/IB, only PCIe-Gen3 + Gloo).  **spectral is
+float64-only single-device** by design.  **Ocean GPU is single-device only**
+(`bench_ocean_gpu_scaling.py` hardcodes `n_gpus=1`; the ocean SPMD multi-GPU
+wrapper is not wired — see `omip_multinode_spmd_scope`).  The **cubed-sphere GPU
+strong-scaling 2-device** point is still finishing in the long
+`run_levante_gpu_scaling` cube sweep (the cube weak 1→2 GPU + both single-device
+throughputs ARE in the figure); it refreshes on the next aggregate when that
+strong CSV lands.
+
+Aggregator fix (this run, codex-reviewed): `aggregate_bcw_scaling.py` previously
+SILENTLY DROPPED the nested atmosphere GPU `ScalingReport` JSONs (only flat
+CPU-MPI + nested-ocean were ingested) and CONFLATED MPAS-ocean into lat-lon
+(neither nested report serialises `grid_type`).  Fixed with one reusable
+`grid_from_path()` (recovers the grid from the `<grid>_<suffix>` output sub-dir,
++ short aliases) routed through a `component`-aware `_rows_from_nested`; an
+atm row whose grid is unresolvable is SKIPPED + warned, never emitted with an
+empty grid that would collide distinct grids in the dedup key.

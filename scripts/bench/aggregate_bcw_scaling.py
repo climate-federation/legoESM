@@ -28,6 +28,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 from legoesm import constants
@@ -77,6 +78,45 @@ def backend_from_path(path: Path) -> str:
     if "_cpu_" in s or "/cpu_" in s:
         return "CPU"
     return "UNKNOWN"
+
+
+# Grid families recognised in an output-dir name (longest/hyphen variants first
+# so 'cubed-sphere' matches before any shorter token).  The nested GPU
+# ScalingReport JSON does NOT serialize grid_type, so when one sub-dir holds a
+# single grid (``.../atm/latlon_ng2/...``, ``.../ocean/mpas_f64/...``) the grid
+# is recovered from that sub-dir name.
+_KNOWN_GRIDS = ("cubed-sphere", "cubed_sphere", "icosahedral", "latlon",
+                "spectral", "gaussian", "mpas")
+# Short aliases that show up in ad-hoc sub-dir names (e.g. the GPU smoke dir
+# ``atm_cube_1gpu``); mapped to the canonical grid family.
+_GRID_ALIASES = {"cube": "cubed-sphere", "cubedsphere": "cubed-sphere",
+                 "cs": "cubed-sphere", "ll": "latlon", "ico": "icosahedral"}
+
+
+def _canon_grid(g: str) -> str:
+    return "cubed-sphere" if g == "cubed_sphere" else g
+
+
+def grid_from_path(source) -> str | None:
+    """Infer the grid family from a result path when the JSON omits grid_type.
+
+    Two passes per path PART (the GPU harnesses name sub-dirs ``<grid>_<suffix>``
+    — ``latlon_ng2``, ``cubed-sphere_ng1``, ``mpas_f64``):
+      1. PART equal to a known grid token or beginning ``<grid>_`` (canonical).
+      2. underscore/hyphen sub-tokens matched against known grids + short
+         aliases (catches ad-hoc names like ``atm_cube_1gpu`` -> cubed-sphere).
+    Returns the canonical hyphen form, or None if no known grid token is found
+    (the caller then SKIPS the row rather than emit a colliding empty grid)."""
+    for part in Path(source).parts:
+        for g in _KNOWN_GRIDS:
+            if part == g or part.startswith(g + "_"):
+                return _canon_grid(g)
+        for tok in part.replace("-", "_").split("_"):
+            if tok in _GRID_ALIASES:
+                return _GRID_ALIASES[tok]
+            if tok in _KNOWN_GRIDS:
+                return _canon_grid(tok)
+    return None
 
 
 def resolve_backend(d: dict, source: Path) -> str:
@@ -151,34 +191,55 @@ def _is_ocean_schema(d: dict) -> bool:
     return False
 
 
-def _rows_from_nested(d: dict, source: Path) -> list[dict]:
-    """Ocean-campaign schema: ``{backend, results:[TimingResult,...]}``.
+def _rows_from_nested(d: dict, source: Path, component: str) -> list[dict]:
+    """Nested ScalingReport schema ``{backend, results:[TimingResult,...]}``.
 
-    Flattens each inner result into a component='ocean' tidy row so the
-    atmosphere (flat per-case JSON) and ocean (nested) campaigns land in one
-    unified table.
+    Written by BOTH the ocean bench (``mode`` 'ocean_*') and the atmosphere GPU
+    harness ``run_levante_gpu_scaling.py`` (``mode`` 'weak'/'strong').
+    ``component`` is 'ocean' or 'atm' (decided by the caller from the mode
+    prefix).  Flattens each inner result into one tidy row so the atmosphere
+    (flat per-case JSON) and the nested GPU/ocean campaigns land in one unified
+    table.  Neither nested report serializes ``grid_type``, so the grid is taken
+    from the inner result if present, else inferred from the output-dir path
+    (``grid_from_path``); ocean falls back to 'latlon' only as a last resort.
     """
     backend = str(d.get("backend", "")).upper() or backend_from_path(source)
     if backend not in ("CPU", "GPU", "TPU"):
         backend = backend_from_path(source)
+    path_grid = grid_from_path(source)
     out = []
+    skipped = 0
     for r in d.get("results") or []:
         if not isinstance(r, dict) or r.get("sypd") is None:
             continue
         n_dev = r.get("n_ranks", r.get("n_gpus"))
         if n_dev is None:
             continue
-        grid = r.get("grid_type", "latlon")
+        phys = r.get("physics_level", "none")
+        # Ocean keeps the historical 'latlon' fallback; atm has no safe default
+        # (an empty grid would collide distinct grids in _key()), so an
+        # unresolvable atm grid is SKIPPED + warned, never silently mislabelled.
+        grid = r.get("grid_type") or path_grid or (
+            "latlon" if component == "ocean" else "")
+        if component != "ocean" and not grid:
+            skipped += 1
+            continue
+        if component == "ocean":
+            case = "ocean"
+            mode = str(r.get("mode", "strong")).replace("ocean_", "") or "strong"
+        else:
+            case = _CASE.get(phys, phys)
+            mode = str(r.get("mode", ""))
         res = r.get("resolution")
         cpt = int(r.get("cpus_per_task") or 1)
         n_cores = int(r.get("n_cores") or (int(n_dev) * cpt))
         out.append({
-            "component": "ocean",
+            "component": component,
             "backend": backend,
             "grid": grid,
-            "case": "ocean",
+            "case": case,
             "precision": r.get("precision", ""),
-            "mode": str(r.get("mode", "strong")).replace("ocean_", "") or "strong",
+            "mode": mode,
             "n_devices": int(n_dev),
             "cpus_per_task": cpt,
             "n_cores": n_cores,
@@ -197,6 +258,10 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
             "compile_time_s": r.get("compile_time_s"),
             "source": str(source),
         })
+    if skipped:
+        print(f"  [warn] {source}: skipped {skipped} nested-{component} "
+              f"result(s) with unresolvable grid (no grid_type, no grid token "
+              f"in the output-dir path)", file=sys.stderr)
     return out
 
 
@@ -249,11 +314,15 @@ def collect(roots) -> tuple[list[dict], int]:
             except (json.JSONDecodeError, OSError):
                 continue
             if isinstance(d, dict) and isinstance(d.get("results"), list):
-                # Nested ONLY ingested for the ocean schema; a nested atm
-                # (levante) report is skipped, not faked as ocean.
-                if _is_ocean_schema(d):
-                    for row in _rows_from_nested(d, jf):
-                        _add(row)
+                # Nested ScalingReport.  Ocean (inner mode 'ocean_*') -> the
+                # 'ocean' component; the atmosphere GPU harness
+                # (run_levante_gpu_scaling.py) writes the SAME nested shape with
+                # mode 'weak'/'strong' -> the 'atm' component (previously this
+                # nested-atm report was silently dropped).  Grid is recovered
+                # via grid_from_path since neither serializes grid_type.
+                component = "ocean" if _is_ocean_schema(d) else "atm"
+                for row in _rows_from_nested(d, jf, component):
+                    _add(row)
             else:
                 _add(_row_from_json(d, jf))
     rows = sorted(
