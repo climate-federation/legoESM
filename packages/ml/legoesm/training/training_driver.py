@@ -105,7 +105,12 @@ def _training_loop(
     params : updated parameters
     loss_history : list[float]
     """
-    opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
+    # Optimize INEXACT (float/complex) arrays only — exactly what
+    # eqx.filter_value_and_grad differentiates.  is_array would also pull in
+    # any INT arrays (e.g. an SFNO's non-static Gaussian grid index arrays
+    # ms/ls), which then get None grad → optax tree-structure mismatch
+    # ("Expected None, got Array").
+    opt_state = optimizer.init(eqx.filter(params, eqx.is_inexact_array))
     loss_history = []
 
     for epoch in range(n_epochs):
@@ -138,9 +143,9 @@ def _training_loop(
             epoch_loss += loss_val
 
             updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
+                eqx.filter(grads, eqx.is_inexact_array),
                 opt_state,
-                eqx.filter(params, eqx.is_array),
+                eqx.filter(params, eqx.is_inexact_array),
             )
             params = eqx.apply_updates(params, updates)
 
@@ -296,7 +301,9 @@ def train_sfno_latlon(
     model,
     grid,
     sigma,
-    sfno_physics,
+    sfno,
+    gauss_grid,
+    nlev,
     regrid_ll2g,
     regrid_g2ll,
     gauss_n_lat,
@@ -322,15 +329,21 @@ def train_sfno_latlon(
     differentiable.  Replacement mode (SFNO is the physics).
     """
     from legoesm.training.sfno_dycore_coupling import (
-        make_sfno_step_unified_latlon,
+        make_sfno_step_unified_latlon, SFNOPhysics,
     )
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
+    # Differentiate ONLY the SFNO (all float/complex params).  The Gaussian
+    # grid (with INT spherical-harmonic index arrays ms/ls) is a closure
+    # const — bundling it into the differentiated module makes eqx grad emit
+    # an Array cotangent for the int leaves where it expects None
+    # ("Expected None, got Array").
     def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(sfno_ph):
+        def loss_fn(sfno_):
+            sphys = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev)
             step_unified = make_sfno_step_unified_latlon(
-                sfno_ph, regrid_ll2g, regrid_g2ll, gauss_n_lat, gauss_n_lon,
+                sphys, regrid_ll2g, regrid_g2ll, gauss_n_lat, gauss_n_lon,
                 tendency_scale=tendency_scale,
             )
             run_seg = _build_training_segment(model, step_unified, grid, sigma, dt)
@@ -343,7 +356,7 @@ def train_sfno_latlon(
         optax.clip_by_global_norm(grad_clip),
         optax.adamw(lr, weight_decay=1e-5))
     return _training_loop(
-        make_loss_fn, sfno_physics, optimizer,
+        make_loss_fn, sfno, optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
     )

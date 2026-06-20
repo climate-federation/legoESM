@@ -387,7 +387,6 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
                          residual_prediction=False,
                          gradient_checkpoint=True)
         sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(args.nn_seed))
-        sfno_physics = SFNOPhysics(sfno=sfno, grid=gauss, nlev=args.n_lev)
         ll_lat, ll_lon = _np.asarray(grid.lat), _np.asarray(grid.lon)
         g_lat, g_lon = _np.asarray(gauss.lat), _np.asarray(gauss.lon)
         g_lat2d, g_lon2d = _np.meshgrid(g_lat, g_lon, indexing="ij")
@@ -396,15 +395,19 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             ll_lat, ll_lon, g_lat2d.ravel(), g_lon2d.ravel())
         w_g2ll = compute_latlon_to_voronoi_weights(
             g_lat, g_lon, ll_lat2d.ravel(), ll_lon2d.ravel())
+        # train_sfno_latlon differentiates ONLY the SFNO (float/complex); the
+        # Gaussian grid (int SHT index arrays) stays a closure const, so it
+        # takes the bare SFNO + grid + nlev, not a bundled SFNOPhysics.
         trained, hist = train_sfno_latlon(
-            model, grid, sigma, sfno_physics, w_ll2g, w_g2ll,
+            model, grid, sigma, sfno, gauss, args.n_lev, w_ll2g, w_g2ll,
             int(gauss.n_lat), int(gauss.n_lon), ics, targets, forcings,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS, tendency_scale=args.nn_residual_scale,
             loss_config=loss_config,
         )
         step_unified = make_sfno_step_unified_latlon(
-            trained, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon),
+            SFNOPhysics(sfno=trained, grid=gauss, nlev=args.n_lev),
+            w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon),
             tendency_scale=args.nn_residual_scale)
         seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
     else:

@@ -412,6 +412,44 @@ class TestTrainingDriver:
         assert callable(fn)
         assert hasattr(fn, 'raw')
 
+    def test_optimizer_filter_handles_int_arrays(self):
+        """Regression: an eqx.Module carrying INT arrays (e.g. an SFNO whose
+        non-static Gaussian grid holds spherical-harmonic index arrays) must
+        train without an optax tree-structure mismatch.  filter_value_and_grad
+        diffs inexact arrays only, so the optimizer must filter the SAME way;
+        eqx.is_array would pull the int leaves into opt_state and update would
+        raise "Expected None, got Array".
+        """
+        import equinox as eqx
+        import optax
+
+        class _Mixed(eqx.Module):
+            w: jax.Array      # trainable float
+            idx: jax.Array    # non-trainable int (mimics grid ms/ls)
+
+        m = _Mixed(w=jnp.ones(4), idx=jnp.arange(4))
+
+        def loss_fn(mod):
+            # idx participates (gather) but carries no float gradient
+            return jnp.sum(mod.w[mod.idx] ** 2)
+
+        _, grads = eqx.filter_value_and_grad(loss_fn)(m)
+        opt = optax.adamw(1e-2)
+
+        # is_array (the bug): int leaf in opt_state, None in grads -> mismatch
+        st_bad = opt.init(eqx.filter(m, eqx.is_array))
+        with pytest.raises(ValueError):
+            opt.update(eqx.filter(grads, eqx.is_array), st_bad,
+                       eqx.filter(m, eqx.is_array))
+
+        # is_inexact_array (the fix): structures match, update round-trips
+        st = opt.init(eqx.filter(m, eqx.is_inexact_array))
+        upd, _ = opt.update(eqx.filter(grads, eqx.is_inexact_array), st,
+                            eqx.filter(m, eqx.is_inexact_array))
+        m2 = eqx.apply_updates(m, upd)
+        assert not jnp.allclose(m2.w, m.w)          # float trained
+        assert jnp.array_equal(m2.idx, m.idx)       # int untouched
+
 
 # ---------------------------------------------------------------------------
 # 9. API signature guards
