@@ -35,6 +35,8 @@ from legoesm.diagnostics.conservation_drift import (
 from legoesm.diagnostics.energy_budget import (
     EnergyBudget,
     EnergyBudgetTracker,
+    area_weighted_mean,
+    area_weighted_profile,
     column_dry_static_energy,
     column_moist_static_energy,
     surface_energy_flux,

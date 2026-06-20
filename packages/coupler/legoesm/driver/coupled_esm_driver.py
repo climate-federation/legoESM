@@ -23,6 +23,7 @@ from legoesm import constants
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
+from legoesm.diagnostics.energy_budget import area_weighted_mean
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
@@ -116,6 +117,11 @@ class CoupledESMDriver:
         self._ocean_grid = self._ocean_grid_arg or self._atm.grid
         self._grid_remapper = make_grid_remapper(self._atm.grid, self._ocean_grid)
         shape_2d = self._ocean_grid.grid_shape_2d
+        # Per-cell ocean area weights for the global-mean SST / drift metric.
+        # ``jnp.mean`` over a lat-lon ocean grid over-weights the cold polar
+        # rows, so an unweighted SST mean read a much larger cold drift than the
+        # area-weighted ocean actually experiences (see ``area_weighted_mean``).
+        self._ocean_area_w = getattr(self._ocean_grid, "grid_area", None)
 
         # Initial SST from the atmosphere's SST source (day 0), remapped onto
         # the ocean grid (identity => unchanged).
@@ -1117,7 +1123,12 @@ class CoupledESMDriver:
         has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
         has_T_sfc = self._last_sfc_response is not None
 
-        terms = [jnp.mean(sst), jnp.min(sst), jnp.max(sst)]
+        terms = [area_weighted_mean(sst, self._ocean_area_w),
+                 jnp.min(sst), jnp.max(sst)]
+        # co2/T_sfc kept as unweighted means deliberately: the co2 global mean
+        # mirrors the radiation-override mean (line ~1100), so area-weighting it
+        # here would diverge from the value that actually forces the radiation —
+        # that change is NOT diagnostics-only and needs separate validation.
         if has_co2:
             terms.append(jnp.mean(self._co2_field))
         if has_T_sfc:
