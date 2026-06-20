@@ -883,6 +883,32 @@ def test_assert_era5_zarr_readable(tmp_path):
         _assert_era5_zarr_readable(uri)
 
 
+def test_warn_if_grid_exceeds_era5_lat_coverage():
+    """The silent-failure guard: a REGIONAL --era5-zarr (whose latitude band does not
+    span the global model grid) would extrapolate a GARBAGE reference outside its
+    domain — surfaced as a WARNING (not a block) before the multi-day run.  A global /
+    near-global ERA5 (whose pole rows sit just inside the model's, within the 2×
+    spacing tolerance) is NEVER falsely flagged."""
+    import warnings
+
+    import numpy as np
+
+    from scripts.run.run_correction_campaign import (
+        _warn_if_grid_exceeds_era5_lat_coverage,
+    )
+
+    model_global = np.deg2rad(np.linspace(-88.0, 88.0, 32))      # ~global model grid
+    # GLOBAL ERA5 (90..−90, 5°): covers the model ⇒ NO warning (any warning ⇒ error).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn_if_grid_exceeds_era5_lat_coverage(
+            np.deg2rad(np.linspace(90.0, -90.0, 37)), model_global)
+    # REGIONAL ERA5 (30..−30): the global model reaches ~48° beyond ⇒ WARN.
+    with pytest.warns(UserWarning, match="REGIONAL ERA5 store yields a GARBAGE"):
+        _warn_if_grid_exceeds_era5_lat_coverage(
+            np.deg2rad(np.linspace(30.0, -30.0, 13)), model_global)
+
+
 def test_main_fails_fast_on_missing_era5_zarr(tmp_path):
     """main() WIRES the --era5-zarr pre-flight: a typo'd local store raises at LAUNCH
     (before the config/grid/driver build the reference load follows), not deep in

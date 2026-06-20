@@ -1446,6 +1446,41 @@ def _assert_era5_zarr_readable(path: str) -> None:
             "or http:// URI for a remote store.")
 
 
+def _warn_if_grid_exceeds_era5_lat_coverage(era5_lat_rad, model_lat_rad) -> None:
+    """WARN (do NOT block) when the model grid's LATITUDE extent reaches MATERIALLY
+    beyond the ERA5 reference's coverage — the tell-tale of a REGIONAL ``--era5-zarr``.
+
+    Unlike a typo'd path (which crashes), a regional store loads fine and the IDW
+    regrid SILENTLY EXTRAPOLATES a GARBAGE reference outside its domain — the worst
+    failure mode: a whole multi-day run wasted on wrong data with no error.  This
+    surfaces it BEFORE the run.  Tolerance = 2× the ERA5 latitude spacing (the IDW
+    handles a cell or two of edge extrapolation), so a near-GLOBAL ERA5 whose pole
+    rows sit just inside the model's is NEVER flagged.  A WARNING, not an error: an
+    operator deliberately running a regional domain may proceed; longitude is not
+    checked here (periodic; a regional lon box is far rarer than a lat band).  Both
+    inputs are RADIANS (``ERA5Slice.lat`` and ``grid.grid_lat``)."""
+    import warnings
+
+    import numpy as np
+
+    e = np.rad2deg(np.asarray(era5_lat_rad, dtype=float)).ravel()
+    g = np.rad2deg(np.asarray(model_lat_rad, dtype=float)).ravel()
+    if e.size < 2 or g.size == 0:
+        return
+    uniq = np.unique(e)
+    spacing = float(np.median(np.abs(np.diff(uniq)))) if uniq.size > 1 else 0.0
+    tol = 2.0 * spacing
+    e_lo, e_hi = float(e.min()), float(e.max())
+    over = max((e_lo - tol) - float(g.min()), float(g.max()) - (e_hi + tol), 0.0)
+    if over > 0.0:
+        warnings.warn(
+            f"--era5-zarr latitude coverage [{e_lo:.1f}, {e_hi:.1f}]deg does NOT span "
+            f"the model grid (which reaches ~{over:.0f}deg beyond it): the reference is "
+            "EXTRAPOLATED there. A REGIONAL ERA5 store yields a GARBAGE reference "
+            "outside its domain — verify the store is GLOBAL before a multi-day run.",
+            stacklevel=2)
+
+
 def _fsync_dir(parent: str) -> None:
     """Best-effort ``fsync`` of a directory so a rename within it is crash-durable.
 
@@ -2062,6 +2097,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     era5_slice = load_era5_time_mean(
         TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
         range(args.era5_time_idx, args.era5_time_idx + n_times))
+    # Surface a REGIONAL --era5-zarr before the run (it would silently extrapolate a
+    # garbage reference where the model grid extends beyond the ERA5 coverage).
+    _warn_if_grid_exceeds_era5_lat_coverage(era5_slice.lat, grid.grid_lat)
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
     if args.coefficients is not None:
