@@ -888,6 +888,41 @@ def test_process_column_threads_sst_only_when_surface_flux(monkeypatch):
     assert captured["sst_K"] is not None
 
 
+def test_process_column_surface_flux_composes_with_multi_coefficient(monkeypatch):
+    """The surface-flux opt-in composes with the MULTI-coefficient diagnosis: ONE
+    surface-flux LES feeds ALL methods.  The surface flux is built into the shared
+    ``setup`` (``process_column`` → ``extract_gcm_column``, line 690-695) UPSTREAM of
+    ``run_column_les_pipeline``'s single/multi branch, so a surface-flux +
+    simultaneous-C_K/Pr_t HPC campaign must (a) forward ``sst_K`` to
+    ``extract_gcm_column`` in the MULTI path AND (b) return the ``{method: diagnosis}``
+    dict.  The existing spy test covers only the SINGLE path; this guards against a
+    future refactor moving the surface-flux threading into a single-only branch."""
+    from legoesm.atmosphere.dynamics import column_les
+
+    captured = {}
+    real = column_les.extract_gcm_column
+
+    def spy(**kw):
+        captured["sst_K"] = kw.get("sst_K")
+        return real(**kw)
+
+    monkeypatch.setattr(column_les, "extract_gcm_column", spy)
+    sst = jnp.full((8, 16), 300.0)
+    fake_run = lambda s: _synthetic_plane_state(s.grid, s.height_coord)  # noqa: E731
+    cfg = ColumnLESConfig(
+        regime=_SMALL_REGIME, surface_flux=True,
+        diagnosis_methods=("clubb_coefficient", "prandtl_number"),
+        clubb_l_mix_max=100.0)
+    out = process_column(_SfcRec(), config=cfg, run_les_fn=fake_run, sst_K=sst,
+                         **_sfc_state())
+    # (a) the surface flux reached the LES setup IN THE MULTI path...
+    assert captured["sst_K"] is not None
+    # (b) ...and the multi-coefficient dict (one LES, all methods) is returned + finite.
+    assert set(out) == {"clubb_coefficient", "prandtl_number"}
+    assert bool(jnp.all(jnp.isfinite(out["clubb_coefficient"].C_K)))
+    assert bool(jnp.all(jnp.isfinite(out["prandtl_number"].Pr_t)))
+
+
 def test_extract_gcm_column_cubed_sphere():
     """The column extractor is grid-agnostic: a (face,i,j) index on a cubed-
     sphere state gathers the RIGHT column (not another face) + builds the
