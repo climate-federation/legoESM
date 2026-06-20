@@ -1228,9 +1228,12 @@ class CoupledESMDriver:
         snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
-        # Cosine zenith
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Cosine zenith — route through the atmosphere's seasonal insolation seam (iter
+        # 449/461) so the coupler's ocean/surface insolation runs the SAME season as the
+        # atmosphere (config.insolation_start_doy); offset 0 (default) == day_to_calendar(day),
+        # byte-identical. Without this the coupled ocean surface saw JANUARY insolation while
+        # the atmosphere saw the aligned season — a physically inconsistent sun.
+        doy, _ = self._atm._calendar_for_radiation(day)
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
@@ -1526,8 +1529,6 @@ class CoupledESMDriver:
         so that the carbon cycle's forward-Euler integration remains
         stable and fluxes are physically consistent.
         """
-        from legoesm.forcing.time_utils import day_to_calendar
-
         coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
@@ -1552,7 +1553,9 @@ class CoupledESMDriver:
             u_sfc = remap_field(u_o, self._grid_remapper.o2a)
             v_sfc = remap_field(v_o, self._grid_remapper.o2a)
 
-            doy, _ = day_to_calendar(day)
+            # Same seasonal insolation seam as the atmosphere (iter 449/461) so the surface
+            # step's day-of-year matches the atmosphere's season; offset 0 => identical.
+            doy, _ = self._atm._calendar_for_radiation(day)
 
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
