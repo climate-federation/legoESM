@@ -882,6 +882,33 @@ def test_extract_gcm_column_cubed_sphere():
         np.asarray(T[f, i, j, :] / exner_function(p_full_col)), rtol=1e-12)
 
 
+def test_extract_gcm_column_surface_flux_cubed_sphere():
+    """The surface-flux opt-in works on a CUBED-SPHERE state — the 3-tuple ``col_index``
+    + the ``sst_K[face,i,j]`` gather (the 2nd cell-grid family, after the iter-369 MPAS
+    fail-loud).  Uses a PHYSICAL state (the gather test above uses unphysical column-unique
+    values): a warmer-than-air SST ⇒ ``prescribe='fluxes'`` with a positive θ/q_v flux;
+    default (no sst_K) stays surface-flux-free."""
+    from legoesm.grids.factory import create_grid
+
+    res, nlev = 8, 6
+    grid = create_grid("cubed_sphere", resolution=res)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (6, res, res, nlev)
+    T = jnp.broadcast_to(jnp.linspace(240.0, 295.0, nlev), shape)  # physical  # noqa: N806
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 8.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((6, res, res), 1.0e5)
+    sst = jnp.full((6, res, res), 320.0)              # warmer than the surface air (≤295)
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+              col_index=(2, 3, 5), lat_rad=float(jnp.deg2rad(20.0)))
+    _, _, ls_none = extract_gcm_column(**kw)
+    assert ls_none.prescribe == "none"
+    _, _, ls_flux = extract_gcm_column(**kw, sst_K=sst)
+    assert ls_flux.prescribe == "fluxes"
+    assert float(ls_flux.w_th_s) > 0.0 and float(ls_flux.w_qv_s) > 0.0
+
+
 def test_process_column_cubed_sphere_with_mock_run():
     """Full per-column pipeline composes on a cubed-sphere GCM state with a
     (face,i,j) record + a mock LES run (iter 28)."""
