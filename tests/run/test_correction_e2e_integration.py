@@ -445,3 +445,50 @@ def test_full_offline_amip_loop_forcing_drives_correction_and_persists(tmp_path)
     assert np.isfinite(float(res.bias.updated_bias))
     assert isinstance(bool(res.bias.improved), bool)
     assert res.n_corrected >= 1
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_amip_offline_forcing_osse_reduces_bias_with_applied_ck(tmp_path):
+    """Clause 6 ("updating these parameters IMPROVE the biases") — the bias REDUCTION — in
+    AMIP mode with the OFFLINE ERA5 forcing, the closest in-repo proxy to the HPC empirical
+    demo (real prescribed SST + AMIP physics).  iter-413 demonstrated this REDUCTION for
+    CMIP (coupled); iter-422 runs the AMIP loop but asserts only that it RUNS (synthetic
+    reference, gate may reject).  The AMIP twin: truth = the offline-forced AMIP model
+    @C_K=1.0, biased = the SAME model @C_K=0.4 (the bias is C_K-driven BY CONSTRUCTION, the
+    prescribed SST forcing identical across runs), apply the diagnosed C_K=1.0 to EVERY
+    column and RE-RUN → the deterministic re-run equals the truth, the bias falls to ~0, and
+    the monotonic gate ACCEPTS — proving the full AMIP loop with the offline forcing LOWERS
+    the bias with the real ESM (the real-ERA5 case stays the HPC-only empirical question)."""
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+    from legoesm.training.run_to_column_mean import amip_column_state
+
+    base_cfg = _amip_base_with_forcing(tmp_path)
+    truth_driver = _run_clubb_amip(CLUBBLiteConfig(C_K=1.0), base_cfg)
+    truth = amip_column_state(truth_driver, day=0.0)
+    n_lat, n_lon, _ = truth.T.shape
+    ncol = n_lat * n_lon
+    sigma, grid = truth_driver.sigma, truth_driver.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    def _run(clubb):
+        return amip_column_state(_run_clubb_amip(clubb, base_cfg), day=0.0)
+
+    compare_fn = make_compare_fn(
+        reference=truth, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=ncol,
+        run_amip_fn=_run, coordinate=sigma)
+
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn,
+        diagnose_fn=lambda rec, ctx: _EddyDiag(K=jnp.array([1.0]), valid=jnp.array([True])),
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4)
+
+    assert float(res.bias.baseline_bias) > 1e-5            # a real C_K-driven AMIP bias exists
+    assert float(res.bias.updated_bias) < float(res.bias.baseline_bias)   # it FELL
+    assert float(res.bias.updated_bias) == pytest.approx(0.0, abs=1e-6)   # to the twin truth
+    assert bool(res.bias.improved)                         # the monotonic gate accepts
+    assert res.n_corrected == ncol                         # every column corrected
