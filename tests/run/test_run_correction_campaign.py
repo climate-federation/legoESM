@@ -2091,6 +2091,48 @@ def test_campaign_auto_populates_clubb_l_mix_max_from_tuned_config(monkeypatch):
     assert captured["l_mix_max"] == pytest.approx(tuned)
 
 
+def test_campaign_threads_phis_to_make_les_diagnose_fn(monkeypatch):
+    """build_correction_campaign(phis=...) must thread the model's STATIC topography
+    THROUGH _build_campaign_harness to make_les_diagnose_fn, so the orographic
+    geostrophic LES forcing uses the real terrain.  ``resolve_orographic_phis`` and the
+    ``make_les_diagnose_fn`` → ``process_column`` hop are tested separately, but the
+    CAMPAIGN-level pass-through is not — a dropped ``phis`` here would SILENTLY flatten
+    the orographic forcing over terrain (no error, just a wrong shear ⇒ biased
+    shear-based C_K).  Non-vacuous: ``phis=None`` is exactly the dropped state, so
+    passing a real (non-None) terrain and asserting identity catches a drop."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    import scripts.run.run_correction_campaign as rcc
+
+    captured = {}
+
+    def spy_make_les_diagnose_fn(*_a, phis=None, **_kw):
+        captured["phis"] = phis
+        return lambda record, ctx: None
+
+    monkeypatch.setattr(rcc, "make_les_diagnose_fn", spy_make_les_diagnose_fn)
+    monkeypatch.setattr(rcc, "run_correction_campaign", lambda *_a, **_kw: "SENTINEL")
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+    model_state = _full_grid_state()
+    phis = jnp.linspace(0.0, 5.0e4, 8 * 16).reshape(8, 16)   # non-trivial g·z_s terrain
+    out = build_correction_campaign(
+        base_atm_config=_base_config(),
+        build_base_driver=lambda cfg: _FakeDriver(model_state),  # noqa: ARG005
+        extract_column_state=lambda d, day, dt: d.state,         # noqa: ARG005
+        reference=model_state, sigma=sigma, grid=grid,
+        area_weights=jnp.ones((8, 16)), n_iterations=1,
+        les_config=ColumnLESConfig(regime=_SMALL_REGIME,
+                                   diagnosis_method="clubb_coefficient"),
+        run_les_fn=_mock_run_les_sheared, n_worst=1, phis=phis)
+
+    assert out == "SENTINEL"
+    # The real terrain reached the diagnosis builder (a dropped pass-through ⇒ None).
+    assert captured["phis"] is phis
+
+
 def test_build_correction_campaign_rejects_multi_methods():
     """build_correction_campaign is single-coefficient: a diagnosis_methods config
     (which makes process_column return a dict) is rejected up front, not crashed
