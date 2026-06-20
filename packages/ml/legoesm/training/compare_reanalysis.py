@@ -609,24 +609,31 @@ def column_state_from_hydrostatic(
         u_cell = jnp.asarray(_arr(atm_state.u), dtype=dt)
         v_cell = jnp.asarray(_arr(v_field), dtype=dt)
         u_edge_native = None
-    if sst_K is not None:
-        # Guard the ocean→atmosphere SST coupling the SAME way as the MPAS edge→cell
-        # wind above: a coupled (CMIP) run with an ocean grid DIFFERENT from the
-        # atmosphere (make_base_driver_builder ocean_grid=...) yields ocean_state.T_sfc
-        # on the OCEAN grid, but the SST environment tag indexes by ATMOSPHERE column
-        # flat-index (column_manifest: sst[flat_i]).  A mismatched shape would silently
-        # misalign every column's SST (or index out of bounds), so fail LOUD here rather
-        # than corrupt the env tags.  Same-grid coupling (ocean_grid=None) + AMIP's
-        # prescribed SST are already on the atmosphere grid and pass unchanged.
-        sst_K = jnp.asarray(_arr(sst_K), dtype=dt)
-        if sst_K.shape != T.shape[:-1]:
+    # Guard each optional per-column SURFACE field (sst_K, precip_mm_day) the SAME way as
+    # the MPAS edge→cell wind above: both enter the comparison indexed by ATMOSPHERE column
+    # flat-index (column_manifest: field[flat_i] — the SST env tag, the precip score term).
+    # A coupled (CMIP) run with an ocean grid DIFFERENT from the atmosphere
+    # (make_base_driver_builder ocean_grid=...) yields ocean_state.T_sfc on the OCEAN grid; a
+    # mismatched shape would silently misalign every column (or index out of bounds), so fail
+    # LOUD rather than corrupt the tags/score.  Same-grid coupling (ocean_grid=None) + AMIP's
+    # prescribed SST are already on the atmosphere grid and pass unchanged.  Also unwraps a
+    # Field-wrapped surface array for consistency with the atm-state fields above.
+    def _checked_surface(field, name):
+        if field is None:
+            return None
+        field = jnp.asarray(_arr(field), dtype=dt)
+        if field.shape != T.shape[:-1]:
             raise ValueError(
-                f"column_state_from_hydrostatic: sst_K shape {sst_K.shape} != the "
-                f"atmosphere column grid {T.shape[:-1]} — a coupled (CMIP) ocean grid "
-                "different from the atmosphere yields ocean_state.T_sfc on the OCEAN "
-                "grid; regrid it to the atmosphere grid before the comparison (the SST "
-                "environment tag indexes by atmosphere column flat-index)."
+                f"column_state_from_hydrostatic: {name} shape {field.shape} != the "
+                f"atmosphere column grid {T.shape[:-1]} — a per-column surface field on a "
+                "DIFFERENT grid (e.g. a coupled CMIP ocean grid via ocean_grid=...) would "
+                "misalign every column (the comparison indexes by atmosphere column "
+                "flat-index); regrid it to the atmosphere grid first."
             )
+        return field
+
+    sst_K = _checked_surface(sst_K, "sst_K")
+    precip_mm_day = _checked_surface(precip_mm_day, "precip_mm_day")
     return ColumnState(
         T=T,
         q_v=jnp.asarray(q_v, dtype=dt),

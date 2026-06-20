@@ -510,6 +510,20 @@ def test_column_state_from_hydrostatic_rejects_sst_on_a_different_grid():
         column_state_from_hydrostatic(atm, q_v, sst_K=ocean_grid_sst)
 
 
+def test_column_state_from_hydrostatic_rejects_precip_on_a_different_grid():
+    """``precip_mm_day`` is the sibling optional per-column SURFACE field; it enters the
+    precip SCORE term indexed by the same atmosphere column flat-index, so a wrong-grid
+    precip has the IDENTICAL misalignment hazard as a wrong-grid SST and must fail LOUD
+    the same way (the guard covers BOTH fields, not just SST)."""
+    shape, nlev = (2, 3), 5
+    atm = _hydro_state(shape, nlev)
+    q_v = jnp.full(shape + (nlev,), 4e-3)
+    wrong_grid_precip = jnp.full((4, 5), 3.0)   # a DIFFERENT grid shape than (2, 3)
+    with pytest.raises(ValueError,
+                       match=r"precip_mm_day shape .* != the atmosphere column grid"):
+        column_state_from_hydrostatic(atm, q_v, precip_mm_day=wrong_grid_precip)
+
+
 def test_column_state_from_hydrostatic_rejects_none_v():
     atm = _hydro_state((2, 2), 4)._replace(v=None)  # MPAS edge-velocity state
     with pytest.raises(ValueError, match="atm_state.v is None"):
