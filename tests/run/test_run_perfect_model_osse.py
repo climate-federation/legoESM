@@ -292,6 +292,56 @@ def test_run_cross_resolution_main_exit_code_gates_on_transfer(monkeypatch):
     assert rpo._run_cross_resolution_main(args, **common) == 1
 
 
+def test_run_multi_osse_main_gates_exit_and_forwards_the_config(monkeypatch):
+    """The multi-coefficient OSSE CLI (iter 472) builds true=defaults / biased=defaults*factor,
+    runs build_multi_perfect_model_osse, and exit-code-gates on multi_osse_verdict (0 = all
+    recovered + bias fell, else 1); forwards the coefficients + --surface-flux. Wires the
+    previously CLI-unreachable build_multi_perfect_model_osse."""
+    from types import SimpleNamespace
+
+    from legoesm.training.perfect_model_osse import CoefRecovery, MultiOSSEResult
+
+    import scripts.validate.run_perfect_model_osse as rpo
+
+    captured = {}
+
+    def _coef(field, fin_err):
+        return CoefRecovery(field=field, true_value=0.4, initial_value=0.6,
+                            recovered_value=0.42, initial_param_error=0.2,
+                            final_param_error=fin_err, param_error_reduced=fin_err < 0.2)
+
+    def _result(final, all_rec):
+        per = {"clubb_lite_C_K": _coef("C_K", 0.05 if all_rec else 0.3),
+               "clubb_lite_Pr_t": _coef("Pr_t", 0.05 if all_rec else 0.3)}
+        return MultiOSSEResult(initial_bias=1.0, final_bias=final,
+                               bias_reduction=1.0 - final, bias_reduced=final < 1.0,
+                               per_coefficient=per, all_recovered=all_rec,
+                               n_rounds=3, n_accepted=2, summary=None)
+
+    args = SimpleNamespace(coefficients="C_K,Pr_t", multi_bias_factor=1.5, surface_flux=True,
+                           n_worst=4, iterations=1)
+    common = dict(
+        base_cfg=object(),
+        grid=SimpleNamespace(grid_shape_2d=(2, 2), grid_area=jnp.ones(4)),
+        sigma=object(), build_base_driver=lambda *a, **k: None,
+        extract_fn=lambda *a, **k: None, run_les=lambda *a, **k: None, phis=None)
+
+    # all recovered + bias fell -> exit 0; the spy captures the forwarded config
+    def _spy_ok(**kw):
+        captured.update(kw)
+        return _result(0.4, all_rec=True)
+    monkeypatch.setattr(rpo, "build_multi_perfect_model_osse", _spy_ok)
+    assert rpo._run_multi_osse_main(args, **common) == 0
+    assert captured["coefficients"] == ("C_K", "Pr_t")        # forwarded
+    assert captured["les_config"].surface_flux is True        # --surface-flux forwarded
+    assert captured["true_clubb"].C_K != captured["biased_clubb"].C_K   # biased = default*factor
+
+    # bias fell but NOT all recovered -> bias_only -> exit 1
+    monkeypatch.setattr(rpo, "build_multi_perfect_model_osse",
+                        lambda **kw: _result(0.4, all_rec=False))
+    assert rpo._run_multi_osse_main(args, **common) == 1
+
+
 def test_assert_pseudo_truth_finite_gates_on_columnstate():
     """_assert_pseudo_truth_finite (iter 302) fails loud on a DIVERGED ColumnState pseudo-truth
     (run_fn(true_config) blew up → NaN), but SKIPS a non-ColumnState reference (the analytic

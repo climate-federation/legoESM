@@ -391,7 +391,12 @@ the pseudo-truth) and checks it both lowers the bias and recovers the known para
 For the go/no-go to faithfully predict your **realistic** run, pass the SAME
 diagnosis-path flags the campaign will use — `--surface-flux` (iter 471) and
 `--orographic-forcing` — since they change *how* the closure is diagnosed; `--ocean-only`
-is column-selection (orthogonal in a self-consistent twin).
+is column-selection (orthogonal in a self-consistent twin). For a **simultaneous
+multi-coefficient** campaign (`--coefficients C_K,Pr_t,C_eps`), pre-flight it with the OSSE's
+matching `--coefficients` mode (iter 472): the truth is the model defaults and the biased
+start is each default × `--multi-bias-factor`; the verdict (exit-code-gated) requires **all**
+coefficients to recover, so it catches compensating-error interactions a single-C_K go/no-go
+misses.
 
 ---
 

@@ -302,12 +302,21 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
     p.add_argument("--config", required=True, help="base experiment config (YAML/JSON)")
     p.add_argument("--mode", default="amip", choices=("amip", "cmip"))
     p.add_argument("--coupled-preset", default=None)
-    p.add_argument("--true-ck", type=float, required=True,
-                   help="the KNOWN true coefficient (the pseudo-truth uses it)")
-    p.add_argument("--biased-ck", type=float, required=True,
-                   help="the biased start the loop corrects")
+    p.add_argument("--true-ck", type=float, default=None,
+                   help="the KNOWN true coefficient (the pseudo-truth uses it); REQUIRED for "
+                        "the single-coefficient mode (omit when using --coefficients)")
+    p.add_argument("--biased-ck", type=float, default=None,
+                   help="the biased start the loop corrects (single-coefficient mode)")
     p.add_argument("--diagnosis-method", default="clubb_coefficient",
                    choices=tuple(METHOD_PROMOTION))
+    p.add_argument("--coefficients", default=None,
+                   help="comma-list (e.g. C_K,Pr_t,C_eps) for a SIMULTANEOUS multi-coefficient "
+                        "OSSE — mirrors the campaign's --coefficients so a multi-coefficient run "
+                        "is pre-flightable (iter 472). The TRUE values are the model defaults; "
+                        "the biased start is each default x --multi-bias-factor.")
+    p.add_argument("--multi-bias-factor", type=float, default=1.5,
+                   help="(--coefficients) the biased start = each coefficient's true default x "
+                        "this factor (default 1.5); the loop must recover the defaults.")
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--fine-resolution", type=int, default=None,
                    help="if set, run a CROSS-RESOLUTION OSSE instead of same-grid: learn "
@@ -414,6 +423,50 @@ def _run_cross_resolution_main(
     return 0 if verdict.ok else 1
 
 
+def _run_multi_osse_main(args, *, base_cfg, grid, sigma, build_base_driver, extract_fn,
+                         run_les, phis):
+    """SIMULTANEOUS multi-coefficient OSSE (``--coefficients``, iter 472): recover the model's
+    DEFAULT coefficients from a ``--multi-bias-factor``-perturbed start, mirroring the campaign's
+    ``--coefficients`` so a multi-coefficient run is pre-flightable. Exit-code-gated on the
+    verdict (0 = all recovered + bias fell), like the single mode."""
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.perfect_model_osse import multi_osse_verdict
+
+    from scripts.run.run_correction_campaign import _area_weights
+
+    coefficients = tuple(c.strip() for c in args.coefficients.split(",") if c.strip())
+    if not coefficients:
+        raise SystemExit("--coefficients is empty; pass e.g. --coefficients C_K,Pr_t,C_eps.")
+    f = float(args.multi_bias_factor)
+    if f <= 0.0:
+        raise SystemExit(f"--multi-bias-factor must be > 0, got {f}.")
+    true_clubb = CLUBBLiteConfig()                    # the model defaults are the pseudo-truth
+    biased_clubb = true_clubb._replace(
+        **{c: float(getattr(true_clubb, c)) * f for c in coefficients})
+
+    result = build_multi_perfect_model_osse(
+        base_atm_config=base_cfg, build_base_driver=build_base_driver,
+        extract_column_state=extract_fn, sigma=sigma, grid=grid,
+        area_weights=_area_weights(grid),
+        true_clubb=true_clubb, biased_clubb=biased_clubb, coefficients=coefficients,
+        les_config=ColumnLESConfig(surface_flux=args.surface_flux),
+        run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations, phis=phis)
+
+    verdict = multi_osse_verdict(result)
+    n = len(result.per_coefficient)
+    n_rec = sum(1 for c in result.per_coefficient.values()
+                if c.final_param_error < c.initial_param_error)
+    print(f"[osse-multi] bias {result.initial_bias:.5g} -> {result.final_bias:.5g} "
+          f"(kept {result.n_accepted}/{result.n_rounds}); {n_rec}/{n} coefficients recovered")
+    for c in result.per_coefficient.values():
+        moved = "yes" if c.final_param_error < c.initial_param_error else "NO"
+        print(f"[osse-multi]   {c.field}: true={c.true_value:.4g} biased={c.initial_value:.4g} "
+              f"recovered={c.recovered_value:.4g} (toward truth: {moved})")
+    print(f"[osse-multi] {verdict.status.upper()}: {verdict.message}")
+    return 0 if verdict.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     """CLI: build the real driver, run the OSSE, print the recovery verdict."""
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
@@ -431,12 +484,27 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
         args)
 
+    if args.coefficients is not None:
+        if args.fine_resolution is not None:
+            raise SystemExit(
+                "--coefficients (simultaneous multi-coefficient) + --fine-resolution "
+                "(cross-resolution) is unsupported: the cross-resolution OSSE is "
+                "single-coefficient. Run them separately.")
+        return _run_multi_osse_main(
+            args, base_cfg=base_cfg, grid=grid, sigma=sigma,
+            build_base_driver=build_base_driver, extract_fn=extract_fn,
+            run_les=run_les, phis=phis)
+
     if args.fine_resolution is not None:
         return _run_cross_resolution_main(
             args, base_cfg=base_cfg, coarse_grid=grid, coarse_sigma=sigma,
             build_base_driver=build_base_driver, extract_fn=extract_fn,
             run_les=run_les, phis_coarse=phis)
 
+    if args.true_ck is None or args.biased_ck is None:
+        raise SystemExit(
+            "the single-coefficient OSSE requires --true-ck and --biased-ck (or pass "
+            "--coefficients for the simultaneous multi-coefficient mode).")
     field = METHOD_PROMOTION[args.diagnosis_method][1]
     result = build_perfect_model_osse(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
