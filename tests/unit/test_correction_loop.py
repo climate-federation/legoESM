@@ -339,6 +339,39 @@ def test_make_compare_fn_uses_real_comparison_in_loop():
     assert bool(jnp.isnan(pv.baseline.global_precip_err_mm_day))
 
 
+def test_make_compare_fn_model_ctx_is_the_model_run_not_the_reference():
+    """Glue contract (iter 407): ``compare_fn`` returns ``model_ctx`` = the
+    ``run_amip_fn`` MODEL state — the state every LES diagnosis extracts its column
+    FORCING from (``make_les_diagnose_fn`` reads ``model_ctx.T/q_v/u/v/p_s/sst_K``),
+    NOT the ERA5 reference.  A regression returning the REFERENCE as ``model_ctx`` would
+    pass the scoring tests (the RMSE is symmetric in which state is the 'model') yet make
+    every diagnosis force its LES from the REANALYSIS instead of the model — silently
+    diagnosing the wrong column state.  Locked with a model state DISTINCT from the
+    reference (T+7, u+3)."""
+    nlat, nlon, nlev = 2, 2, 3
+    shape = (nlat, nlon, nlev)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    reference = ColumnState(
+        T=jnp.full(shape, 250.0), q_v=jnp.full(shape, 1e-3),
+        u=jnp.zeros(shape), v=jnp.zeros(shape), p_s=jnp.full((nlat, nlon), 1e5))
+    model_T = reference.T + 7.0          # noqa: N806 — T is the temperature symbol
+    model_u = reference.u + 3.0
+
+    def run_amip_fn(config):                                  # noqa: ARG001
+        return reference._replace(T=model_T, u=model_u)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=jnp.linspace(-30.0, 30.0, nlat), lon_deg=jnp.linspace(0.0, 180.0, nlon),
+        area_weights=jnp.ones((nlat, nlon)), n_worst=1, run_amip_fn=run_amip_fn)
+    res = compare_fn(object())
+    # model_ctx carries the MODEL state (the diagnosis source), NOT the reference.
+    np.testing.assert_array_equal(np.asarray(res.model_ctx.T), np.asarray(model_T))
+    np.testing.assert_array_equal(np.asarray(res.model_ctx.u), np.asarray(model_u))
+    assert not np.allclose(np.asarray(res.model_ctx.T), np.asarray(reference.T))
+
+
 def test_make_compare_fn_real_compare_not_improved():
     """Real-compare path: a correction that does NOT remove the bias reports
     improved == False."""
