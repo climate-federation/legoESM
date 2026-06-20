@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests._offline_era5_rda import pl_name, sfc_name
+
 
 def _write_synthetic_rda_era5(tmp_path):
     import xarray as xr
@@ -29,13 +31,13 @@ def _write_synthetic_rda_era5(tmp_path):
             {var: (("time", "level", "latitude", "longitude"), data),
              "utc_date": ("time", np.arange(4))},      # metadata var the adapter drops
             coords={"time": t_pl, "level": lev, "latitude": lat, "longitude": lon})
-        ds.to_netcdf(tmp_path / f"e5.oper.an.pl.{code}.ll025sc.2020010100_2020010123.nc")
+        ds.to_netcdf(tmp_path / pl_name(code, "20200101"))
 
     def _sfc(code, var, val):
         ds = xr.Dataset(
             {var: (("time", "latitude", "longitude"), np.full((8, nlat, nlon), val, "f4"))},
             coords={"time": t_sfc, "latitude": lat, "longitude": lon})
-        ds.to_netcdf(tmp_path / f"e5.oper.an.sfc.{code}.ll025sc.2020010100_2020013123.nc")
+        ds.to_netcdf(tmp_path / sfc_name(code, "20200101"))
 
     for code, var in (("128_130_t", "T"), ("128_131_u", "U"),
                       ("128_132_v", "V"), ("128_133_q", "Q")):
@@ -90,7 +92,7 @@ def _write_synthetic_rda_seaice(tmp_path, *, val=0.0):
         {"CI": (("time", "latitude", "longitude"),
                 np.full((8, nlat, nlon), val, "f4"), {"units": "(0-1)"})},
         coords={"time": t, "latitude": lat, "longitude": lon})
-    ds.to_netcdf(tmp_path / "e5.oper.an.sfc.128_031_ci.ll025sc.2020010100_2020013123.nc")
+    ds.to_netcdf(tmp_path / sfc_name("128_031_ci", "20200101"))
 
 
 def test_build_era5_amip_forcing_feeds_load_amip_forcing(tmp_path):
@@ -218,7 +220,7 @@ def test_open_local_era5_dataset_ambiguous_chunk_fails_loud(tmp_path):
     from scripts.data.load_local_era5 import open_local_era5_dataset
 
     _write_synthetic_rda_era5(tmp_path)
-    orig = tmp_path / "e5.oper.an.pl.128_130_t.ll025sc.2020010100_2020010123.nc"
-    shutil.copy(orig, tmp_path / "e5.oper.an.pl.128_130_t.ll025uv.2020010100_2020010123.nc")
+    orig = tmp_path / pl_name("128_130_t", "20200101")
+    shutil.copy(orig, tmp_path / pl_name("128_130_t", "20200101").replace("ll025sc", "ll025uv"))
     with pytest.raises(ValueError, match="files match"):
         open_local_era5_dataset(str(tmp_path), "20200101")

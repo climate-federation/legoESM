@@ -5,6 +5,9 @@ the ``T``/``U``/``V``/``Q``/``SP``/``SSTK``/``CI`` variable names and K/[0,1] un
 copy-pasted across the offline-AMIP forcing + compare tests; this is the SINGLE source of
 truth for that convention (CLAUDE.md: no naming-only copy-paste).
 
+* :func:`sfc_name` / :func:`pl_name` — the d633006 filename for a single-level / pressure-
+  level GRIB code (the SINGLE source of the filename convention; also used by the unit test
+  that exercises ``open_local_era5_dataset``'s parser with its own bespoke archive content).
 * :func:`write_forcing_archive` — the monthly SST (``sstk``, K gradient) + sea-ice (``ci``)
   ``build_era5_amip_forcing`` reads (the FORCING side).
 * :func:`write_full_archive` — that PLUS pl ``T``/``U``/``V``/``Q`` at the 13 WB2 levels +
@@ -17,13 +20,13 @@ from __future__ import annotations
 import numpy as np
 
 
-def _sfc_name(code: str, day: str = "20200101") -> str:
+def sfc_name(code: str, day: str = "20200101") -> str:
     """The monthly single-level RDA filename for ``code`` covering ``day`` (``YYYYMMDD``)."""
     m = day[:6]
     return f"e5.oper.an.sfc.{code}.ll025sc.{m}0100_{m}3123.nc"
 
 
-def _pl_name(code: str, day: str = "20200101") -> str:
+def pl_name(code: str, day: str = "20200101") -> str:
     """The daily pressure-level RDA filename for ``code`` on ``day`` (``YYYYMMDD``)."""
     return f"e5.oper.an.pl.{code}.ll025sc.{day}00_{day}23.nc"
 
@@ -59,11 +62,11 @@ def write_forcing_archive(tmp_path, *, nlat: int = 8, nlon: int = 16,
         (nt, nlat, nlon)).astype("f4")
     xr.Dataset({"SSTK": (("time", "latitude", "longitude"), sst, {"units": "K"})},
                coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / _sfc_name("128_034_sstk", day))
+        tmp_path / sfc_name("128_034_sstk", day))
     xr.Dataset({"CI": (("time", "latitude", "longitude"),
                        np.zeros((nt, nlat, nlon), "f4"), {"units": "(0-1)"})},
                coords={"time": t, "latitude": lat, "longitude": lon}).to_netcdf(
-        tmp_path / _sfc_name("128_031_ci", day))
+        tmp_path / sfc_name("128_031_ci", day))
 
 
 def write_full_archive(tmp_path, *, nlat: int = 6, nlon: int = 8,
@@ -87,7 +90,7 @@ def write_full_archive(tmp_path, *, nlat: int = 6, nlon: int = 8,
         xr.Dataset(
             {var: (("time", "level", "latitude", "longitude"), data)},
             coords={"time": t_pl, "level": lev, "latitude": lat, "longitude": lon},
-        ).to_netcdf(tmp_path / _pl_name(code, day))
+        ).to_netcdf(tmp_path / pl_name(code, day))
 
     def _sfc(code, var, val, units=None):
         attrs = {"units": units} if units else {}
@@ -95,7 +98,7 @@ def write_full_archive(tmp_path, *, nlat: int = 6, nlon: int = 8,
             {var: (("time", "latitude", "longitude"),
                    np.full((nt_sfc, nlat, nlon), val, "f4"), attrs)},
             coords={"time": t_sfc, "latitude": lat, "longitude": lon},
-        ).to_netcdf(tmp_path / _sfc_name(code, day))
+        ).to_netcdf(tmp_path / sfc_name(code, day))
 
     _pl("128_130_t", "T", 250.0)
     _pl("128_131_u", "U", 5.0)
