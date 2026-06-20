@@ -475,6 +475,64 @@ def run_forced_les(
     return state
 
 
+def column_surface_kinematic_fluxes(
+    *,
+    T_col: jax.Array,
+    q_v_col: jax.Array,
+    u_col: jax.Array,
+    v_col: jax.Array,
+    p_full_col: jax.Array,
+    sst_K: jax.Array,
+    p_s: jax.Array,
+    surface_config: Any = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Surface kinematic θ/q_v fluxes for the LES ``prescribe="fluxes"`` BC.
+
+    Computes the GCM column's surface sensible/latent heat fluxes by REUSING the GCM
+    bulk surface scheme (:func:`...surface_layer.compute_surface_fluxes` — so NO new
+    tunables; the same `Cd_neutral`/`Ch_neutral` the GCM used) from the SURFACE cell
+    (the highest-pressure level — ordering-robust) + the column SST, then converts the
+    ``W/m²`` fluxes to the kinematic fluxes the iter-151 surface BC consumes
+    (``plane_large_scale_forcing``, ``w'θ'_s`` [K·m/s], ``w'q'_s`` [kg/kg·m/s]):
+
+        ``w'θ'_s = shflx / (ρ₁·c_pd) · (p_ref/p_s)^κ``   (T→θ exner scaling at the surface)
+        ``w'q'_s = lhflx / (ρ₁·L_v)``
+
+    A warm SST (``SST > T₁``) gives ``shflx>0 ⇒ w'θ'_s>0`` (the surface WARMS the air —
+    the convective-column turbulence driver the surface-flux-free LES omits).
+    ``surface_config`` defaults to the standard :class:`SurfaceLayerConfig`.
+    Returns ``(w_th_s, w_qv_s)`` scalars.  Pure-JAX, differentiable.
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        SurfaceLayerConfig,
+        compute_surface_fluxes,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    from legoesm import constants
+
+    cfg = SurfaceLayerConfig() if surface_config is None else surface_config
+    p_full_col = jnp.asarray(p_full_col)
+    s = jnp.argmax(p_full_col)                          # surface cell = highest pressure
+    T_1 = jnp.take(jnp.asarray(T_col), s)
+    q_1 = jnp.take(jnp.asarray(q_v_col), s)
+    u_1 = jnp.take(jnp.asarray(u_col), s)
+    v_1 = jnp.take(jnp.asarray(v_col), s)
+    p_1 = jnp.take(p_full_col, s)
+    sst_K = jnp.asarray(sst_K)
+    p_s = jnp.asarray(p_s)
+    rho_1 = p_1 / (constants.R_d * virtual_temperature(T_1, q_1))
+    q_sfc = saturation_mixing_ratio(sst_K, p_s)
+    a1 = jnp.atleast_1d
+    _, _, shflx, lhflx, _ = compute_surface_fluxes(
+        a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1), cfg)
+    exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
+    w_qv_s = lhflx[0] / (rho_1 * constants.L_v)
+    return w_th_s, w_qv_s
+
+
 def extract_gcm_column(
     *,
     T: jax.Array,
@@ -487,6 +545,8 @@ def extract_gcm_column(
     col_index: tuple[int, ...],
     lat_rad: float,
     phis: jax.Array | None = None,
+    sst_K: jax.Array | None = None,
+    surface_config: Any = None,
 ) -> tuple[jax.Array, jax.Array, ColumnLargeScaleState]:
     """Extract one column's heights, θ profile, and large-scale forcing state.
 
@@ -499,6 +559,14 @@ def extract_gcm_column(
     ``(face, i, j)`` on a cubed-sphere grid — the spatial gather
     ``arr[tuple(col_index)]`` keeps the trailing level axis either way, and the
     forcing extraction routes through the grid dispatcher.
+
+    ``sst_K`` (OPT-IN; default ``None`` ⇒ the iter-148 surface-flux-free LES, unchanged):
+    when the column's surface field is supplied, a ``prescribe="fluxes"`` surface BC is
+    added — the GCM bulk surface sensible/latent fluxes (REUSED via
+    :func:`column_surface_kinematic_fluxes`, no new tunables) converted to the kinematic
+    θ/q_v fluxes — so a surface-driven (convective) column's LES gets its PRIMARY
+    turbulence driver.  ``surface_config`` (a :class:`SurfaceLayerConfig`) overrides the
+    default bulk coefficients.
     """
     from legoesm.atmosphere.dynamics.column_large_scale_extract import (
         extract_column_forcing,
@@ -527,6 +595,20 @@ def extract_gcm_column(
     )
     gcm_z = z_full[0]
     gcm_theta = T_col / exner_function(p_full_col)
+
+    # OPT-IN prescribed surface-flux BC (default off: sst_K=None ⇒ surface-flux-free,
+    # iter-148 behaviour byte-unchanged).  The surface flux is the GCM bulk flux REUSED +
+    # converted to kinematic — its iter-148 lock relaxed now that the LES applies it (151).
+    if sst_K is not None:
+        u_col = jnp.asarray(u)[idx]
+        v_col = jnp.asarray(v)[idx]
+        sst_col = jnp.asarray(sst_K)[idx]
+        w_th_s, w_qv_s = column_surface_kinematic_fluxes(
+            T_col=T_col, q_v_col=q_col, u_col=u_col, v_col=v_col,
+            p_full_col=p_full_col, sst_K=sst_col, p_s=p_s_col,
+            surface_config=surface_config,
+        )
+        ls_state = ls_state._replace(prescribe="fluxes", w_th_s=w_th_s, w_qv_s=w_qv_s)
     return gcm_z, gcm_theta, ls_state
 
 

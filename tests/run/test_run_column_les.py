@@ -612,6 +612,80 @@ def test_extract_gcm_column():
     assert bool(jnp.all(jnp.diff(gcm_theta) < 0.0))    # θ increases with height
 
 
+def test_column_surface_kinematic_fluxes_sign_and_reuse():
+    """The surface-flux helper REUSES the GCM bulk scheme (no new tunables) and converts
+    its W/m² fluxes to the kinematic θ/q_v fluxes the iter-151 LES BC consumes.  Locks: a
+    warm SST warms+moistens the surface air (w'θ'_s>0, w'q'_s>0); the result EQUALS
+    compute_surface_fluxes converted directly (so it shares the GCM's flux, not a
+    re-derived one); a COLD SST flips the sign (surface cools — non-vacuity)."""
+    from legoesm.atmosphere.dynamics.column_les import column_surface_kinematic_fluxes
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        SurfaceLayerConfig,
+        compute_surface_fluxes,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    from legoesm import constants
+
+    nlev = 6
+    T = jnp.linspace(240.0, 295.0, nlev)        # surface-last (p ascending)  # noqa: N806
+    q = jnp.linspace(1e-4, 1.2e-2, nlev)
+    u = jnp.full((nlev,), 5.0)
+    v = jnp.zeros((nlev,))
+    p_full = jnp.linspace(2.0e4, 1.0e5, nlev)   # surface = highest p = last index
+    p_s = jnp.array(1.0e5)
+    sst = jnp.array(300.0)                       # warm SST > T_1=295
+    w_th, w_qv = column_surface_kinematic_fluxes(
+        T_col=T, q_v_col=q, u_col=u, v_col=v, p_full_col=p_full, sst_K=sst, p_s=p_s)
+    assert float(w_th) > 0.0 and float(w_qv) > 0.0
+
+    # Reuse-equivalence: exactly compute_surface_fluxes converted (NOT a re-derived bulk flux).
+    cfg = SurfaceLayerConfig()
+    rho = p_full[-1] / (constants.R_d * virtual_temperature(T[-1], q[-1]))
+    q_sfc = saturation_mixing_ratio(sst, p_s)
+    _, _, sh, lh, _ = compute_surface_fluxes(
+        jnp.atleast_1d(u[-1]), jnp.atleast_1d(v[-1]), jnp.atleast_1d(T[-1]),
+        jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
+        jnp.atleast_1d(rho), cfg)
+    exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    np.testing.assert_allclose(
+        float(w_th), float(sh[0] / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
+    np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
+
+    # COLD SST (SST < T_1) ⇒ surface COOLS the air ⇒ w'θ'_s < 0 (sign flips) — non-vacuity.
+    w_th_cold, _ = column_surface_kinematic_fluxes(
+        T_col=T, q_v_col=q, u_col=u, v_col=v, p_full_col=p_full,
+        sst_K=jnp.array(250.0), p_s=p_s)
+    assert float(w_th_cold) < 0.0
+
+
+def test_extract_gcm_column_surface_flux_opt_in():
+    """extract_gcm_column adds a prescribe='fluxes' surface BC ONLY when sst_K is given —
+    default None ⇒ surface-flux-free (iter-148 behaviour byte-unchanged).  Locks the
+    opt-in: no sst_K ⇒ prescribe='none' (no surface fields); with sst_K ⇒ prescribe='fluxes'
+    with a positive θ/q_v flux (a warmer-than-air SST)."""
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    # TOP-DOWN column (index 0 = top): warm surface air (last level) + a warmer SST.
+    T = jnp.broadcast_to(jnp.linspace(240.0, 295.0, nlev), shape)  # noqa: N806
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 8.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+    sst = jnp.full((n_lat, n_lon), 300.0)
+    kw = dict(T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+              col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)))
+    _, _, ls_none = extract_gcm_column(**kw)                       # default: no sst_K
+    assert ls_none.prescribe == "none"
+    assert ls_none.w_th_s is None and ls_none.w_qv_s is None
+    _, _, ls_flux = extract_gcm_column(**kw, sst_K=sst)            # opt-in
+    assert ls_flux.prescribe == "fluxes"
+    assert float(ls_flux.w_th_s) > 0.0 and float(ls_flux.w_qv_s) > 0.0
+
+
 def test_extract_gcm_column_uses_hybrid_pressures_over_terrain():
     """extract_gcm_column builds the GCM column's θ from the model COORDINATE's pressures
     (iter 341), not pure-sigma σ·p_s — so for a hybrid coordinate (the dycore default) over a
