@@ -1140,6 +1140,22 @@ def test_maybe_env_grid_fn_dispatch():
     assert maybe_env_grid_fn("anything_else", sigma) is None
 
 
+def test_main_requires_exactly_one_era5_source():
+    """iter 410: the ERA5 reference is EITHER --era5-zarr OR --local-era5-dir (the
+    offline NCAR-RDA archive) — never neither and never both — and --local-era5-dir
+    needs --local-era5-date.  Fail LOUD at launch (right after parse), before any
+    model/grid build, so a misconfigured source never wastes the (multi-day) setup."""
+    import scripts.run.run_correction_campaign as rcc
+
+    base = ["--config", "c.json", "--out", "o.json"]
+    with pytest.raises(SystemExit, match="EXACTLY one ERA5 reference"):
+        rcc.main(base)                                                   # neither source
+    with pytest.raises(SystemExit, match="EXACTLY one ERA5 reference"):
+        rcc.main(base + ["--era5-zarr", "z", "--local-era5-dir", "d"])   # both sources
+    with pytest.raises(SystemExit, match="requires --local-era5-date"):
+        rcc.main(base + ["--local-era5-dir", "d"])                       # local, no date
+
+
 def test_main_cmip_rejects_unknown_coupled_preset(monkeypatch):
     """--mode cmip with an unknown --coupled-preset fails LOUD at launch (a typo'd preset)
     with the valid choices, NOT a cryptic KeyError deeper in the coupled-driver build.

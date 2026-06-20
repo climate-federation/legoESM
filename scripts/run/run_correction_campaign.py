@@ -935,8 +935,18 @@ def _build_arg_parser():
                    help="AMIP (prescribed SST) or CMIP (coupled ocean)")
     p.add_argument("--coupled-preset", default="aquaplanet",
                    help="coupled_config preset name (CMIP mode)")
-    p.add_argument("--era5-zarr", required=True, help="ERA5 zarr (reference)")
+    p.add_argument("--era5-zarr", default=None,
+                   help="ERA5 zarr/store (reference); OR use --local-era5-dir for a "
+                        "local NCAR-RDA NetCDF archive (offline, no network).")
     p.add_argument("--era5-cache", default=None, help="ERA5 local cache dir")
+    p.add_argument("--local-era5-dir", default=None,
+                   help="Directory of LOCAL NCAR-RDA ERA5 NetCDF (e5.oper.an.{pl,sfc}."
+                        "*.ll025*.nc) — reads REAL ERA5 OFFLINE via "
+                        "scripts.data.load_local_era5 (no Zarr/network). Mutually "
+                        "exclusive with --era5-zarr. Requires --local-era5-date.")
+    p.add_argument("--local-era5-date", default=None,
+                   help="Date (YYYYMMDD) selecting the --local-era5-dir day; "
+                        "--era5-time-idx/--era5-n-times index that day's 24 hourly times.")
     p.add_argument("--era5-time-idx", type=int, default=0)
     p.add_argument("--era5-n-times", type=int, default=1,
                    help="Average this many consecutive ERA5 times (starting at "
@@ -2077,14 +2087,28 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     refuse_unsupported_multirank()   # single-process CLI: refuse mpirun -np >1
     args = _build_arg_parser().parse_args(argv)
     _warn_if_ignored_diagnosis_method(args.coefficients, args.diagnosis_method)
+    # ERA5 reference source: EXACTLY one of --era5-zarr (store/network) or
+    # --local-era5-dir (offline NCAR-RDA NetCDF, iter 410) — fail loud at launch on a
+    # missing/ambiguous source rather than a cryptic load error after the model build.
+    if bool(args.era5_zarr) == bool(args.local_era5_dir):
+        raise SystemExit(
+            "run_correction_campaign: pass EXACTLY one ERA5 reference source — "
+            "--era5-zarr <store> OR --local-era5-dir <dir> --local-era5-date YYYYMMDD "
+            f"(got era5_zarr={args.era5_zarr!r}, local_era5_dir={args.local_era5_dir!r}).")
+    if args.local_era5_dir and not args.local_era5_date:
+        raise SystemExit(
+            "run_correction_campaign: --local-era5-dir requires --local-era5-date "
+            "YYYYMMDD (which day's 24 hourly ERA5 times to use).")
     # Pre-flight: fail in milliseconds (not after a multi-day run) on an unwritable
     # output path — --out is opened only at the very end, --checkpoint each round.
     _assert_output_path_writable(args.out, flag="out")
     if args.checkpoint:
         _assert_output_path_writable(args.checkpoint, flag="checkpoint")
     # Pre-flight: fail fast on a typo'd LOCAL --era5-zarr (opened only AFTER the
-    # model/grid build), instead of a cryptic zarr error wasting that setup.
-    _assert_era5_zarr_readable(args.era5_zarr)
+    # model/grid build), instead of a cryptic zarr error wasting that setup.  (The local
+    # archive path validates per-chunk in open_local_era5_dataset, so skip the zarr check.)
+    if args.era5_zarr:
+        _assert_era5_zarr_readable(args.era5_zarr)
     # Run-setup preamble (config/grid/sigma + driver builder with the RESOLVED coupled
     # preset + the CFL-checked LES runner + the orographic phis) — shared with the OSSE
     # CLI via _build_run_setup (iter 295).
@@ -2098,9 +2122,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # slice, the old behaviour): compares the time-mean model to a time-mean ERA5
     # climatology, not a single synoptic snapshot.
     n_times = _resolve_era5_n_times(args.era5_n_times)
-    era5_slice = load_era5_time_mean(
-        TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
-        range(args.era5_time_idx, args.era5_time_idx + n_times))
+    _era5_window = range(args.era5_time_idx, args.era5_time_idx + n_times)
+    if args.local_era5_dir:
+        # REAL ERA5 from the local NCAR-RDA archive (offline) — open the day's per-variable
+        # NetCDF, average the requested hourly window, through the SAME regrid chain.
+        from scripts.data.load_local_era5 import open_local_era5_dataset
+        _local_ds = open_local_era5_dataset(args.local_era5_dir, args.local_era5_date)
+        era5_slice = load_era5_time_mean(
+            TrainingERA5Config(
+                surface_variables=("surface_pressure", "skin_temperature")),
+            _era5_window, ds=_local_ds)
+    else:
+        era5_slice = load_era5_time_mean(
+            TrainingERA5Config(zarr_store=args.era5_zarr, local_cache_dir=args.era5_cache),
+            _era5_window)
     # Surface a REGIONAL --era5-zarr before the run (it would silently extrapolate a
     # garbage reference where the model grid extends beyond the ERA5 coverage).
     _warn_if_grid_exceeds_era5_lat_coverage(era5_slice.lat, grid.grid_lat)

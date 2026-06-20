@@ -409,7 +409,9 @@ def load_era5_slice(
     )
 
 
-def load_era5_time_mean(config: TrainingERA5Config, time_indices) -> ERA5Slice:
+def load_era5_time_mean(
+    config: TrainingERA5Config, time_indices, *, ds: Any = None
+) -> ERA5Slice:
     """Time-MEAN ERA5 reference: the element-wise average over ``time_indices`` of each
     field, so the time-mean MODEL state (``run_to_column_mean``) is compared to a
     time-mean ERA5 CLIMATOLOGY rather than a single synoptic snapshot (which injects
@@ -436,7 +438,7 @@ def load_era5_time_mean(config: TrainingERA5Config, time_indices) -> ERA5Slice:
 
     def _load(i):
         try:
-            return load_era5_slice(config, int(i))
+            return load_era5_slice(config, int(i), ds=ds)
         except IndexError as e:
             raise ValueError(
                 f"load_era5_time_mean: ERA5 time index {int(i)} is out of range — the "
