@@ -71,8 +71,10 @@ Future-HW (np>6 anti-scales on Ginsburg CPU); every increment gated by BIT-IDENT
    promoted public; `make_tiled_fv3_moist_tracer_tendency_stage_2d` (advection +
    injected per-tile column physics); np24 bit-identity vs serial advection +
    kessler.
-4. **Full moist tiled step. DONE (code 9ac698e42 codex-CLEAN; test fixes
-   9425e84bd; gate moist_step[2] PASSED np24).** `make_tiled_fv3_hydrostatic
+4. **Full moist tiled step. DONE + FULLY GATED (code 9ac698e42 codex-CLEAN; test
+   fixes 9425e84bd; np24 full gate 8532552 = 16 passed; np54 kt=3 gate 8532570 =
+   12 passed — moist_step[3] + tracer[3]/pack[3]/tendency[3], the strip-ppermute
+   DIRECTION cases kt=2 cannot catch, all bit-identity).** `make_tiled_fv3_hydrostatic
    _moist_step_stage_2d` → `step(u_d, v_d, T, p_s, phis, q_pack) -> (..., q_pack)`
    + post-step tracer floor. Parity vs the serial base-cut moist RK3: u_d/v_d/T/p_s
    rel<1e-10, q_pack rel 3.6e-10 (Kessler nonlinear + 3-stage RK3 FMA reorder,
