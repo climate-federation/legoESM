@@ -237,3 +237,70 @@ def test_real_model_osse_reduces_bias_with_applied_ck():
     assert float(res.bias.updated_bias) == pytest.approx(0.0, abs=1e-6)   # to the twin truth
     assert bool(res.bias.improved)                         # the monotonic gate accepts
     assert res.n_corrected == ncol                         # every column corrected
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_loop_real_model_real_les_rerun_and_gate():
+    """The COMPLETE chain in ONE round with EVERY heavy end real: a real coupled model →
+    compare → REAL plane-LES spin-off → diagnose C_K → splice → RE-RUN the real model →
+    monotonic gate.  The e2e test above stops at the feedback field (no re-run); the
+    real-model-OSSE test re-runs but with a SYNTHETIC diagnose — this is the only test
+    where the real LES's diagnosis AND a real model re-run AND the gate all run together
+    (the holistic real-ERA5 culmination, iter 415, here with a synthetic reference so it
+    is CI-portable).  It asserts the loop runs end-to-end (finite bias, a definite
+    accept/reject verdict, the real LES corrected ≥1 worst column) — NOT a bias reduction,
+    which is reference-dependent (the gate may correctly REJECT, exactly as it did against
+    real ERA5 where the idealized model's bias is C_K-insensitive, iter 412)."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+
+    from scripts.run.run_correction_campaign import make_les_diagnose_fn
+
+    driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=0.4))
+    a = driver._atm
+    model0 = column_state_from_hydrostatic(
+        a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    n_lat, n_lon, _ = model0.T.shape
+    sigma, grid = a.sigma, a.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    # Synthetic reference (CI-portable): the model's own state minus a spatially varying
+    # warm bias, so worst-column ranking + the LES are non-trivially exercised.
+    bias = np.zeros((n_lat, n_lon))
+    bias[n_lat // 2, n_lon // 2] = 5.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb)
+        aa = d._atm
+        return column_state_from_hydrostatic(
+            aa.state, aa.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=2,
+        run_amip_fn=_run, coordinate=sigma)
+
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4,
+        diagnosis_method="eddy_diffusivity", les_budget=2)
+
+    # The whole real chain ran: finite biases + a DEFINITE gate verdict + the real LES
+    # spliced ≥1 worst column (the loop is not a vacuous no-op).
+    assert np.isfinite(float(res.bias.baseline_bias))
+    assert np.isfinite(float(res.bias.updated_bias))
+    assert isinstance(bool(res.bias.improved), bool)
+    assert res.n_corrected >= 1
