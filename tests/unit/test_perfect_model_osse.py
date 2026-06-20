@@ -117,6 +117,30 @@ def test_accurate_diagnosis_recovers_and_improves():
     assert verdict.status == "recovered" and verdict.ok
 
 
+def test_recovery_metric_uses_rms_norm_not_mean():
+    """codex-review iter 406: ``_recovery_metrics`` scores parameter recovery by the RMS
+    distance to the KNOWN truth at BOTH ends — so a final field SCATTERED around the
+    truth (mean == true, but per-column values wrong) reports its SCATTER, not ~0.  The
+    ``recovered_value`` (a MEAN) can look perfectly recovered while ``final_param_error``
+    (RMS) reveals the columns are individually wrong — a ``|mean − true|`` norm would
+    falsely report ZERO error, a false 'recovered'.  This guards the OSSE proof's rigor
+    against a compensating-SCATTER fit (the per-column analog of the bias_only
+    compensating-errors guard)."""
+    import pytest
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.perfect_model_osse import _recovery_metrics
+
+    true_config = CLUBBLiteConfig(C_K=0.5)
+    biased_config = CLUBBLiteConfig(C_K=1.0)              # uniform biased start, far from true
+    final = jnp.array([0.3, 0.7, 0.3, 0.7])              # mean 0.5 == true, but ±0.2 scattered
+    rec = _recovery_metrics("C_K", true_config, biased_config, final)
+    assert rec.true_value == pytest.approx(0.5)
+    assert rec.recovered_value == pytest.approx(0.5)              # the MEAN looks recovered…
+    # …but the RMS norm reports the per-column SCATTER (a |mean−true| norm would give 0):
+    assert rec.final_param_error == pytest.approx(0.2, abs=1e-9)
+    assert rec.initial_param_error == pytest.approx(0.5, abs=1e-9)   # uniform 1.0 vs true 0.5
+
+
 def test_reference_is_generated_from_true_config():
     import pytest
     seen = []
