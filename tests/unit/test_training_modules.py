@@ -253,6 +253,28 @@ class TestVerticalInterp:
         np.testing.assert_allclose(g[3], 1.0 - alpha, rtol=1e-4)  # d/df[3] = 1-alpha
         assert np.allclose(g[[0, 1, 2, 5]], 0.0)                  # non-bracket levels unused
 
+    def test_p_full_overrides_pure_sigma_target_for_hybrid(self):
+        """``p_full`` interpolates to the model's TRUE full-level pressures (e.g. a HYBRID
+        coordinate's ``A·p_ref + B·p_s``) instead of pure-sigma ``sigma·p_s`` (iter 339,
+        completing the iter-337/338 fix so the ERA5 reference lands on the model's actual
+        levels).  Over terrain (p_s != p_ref) the targets differ ⇒ the interpolated field
+        differs; passing ``p_full == sigma·p_s`` reproduces the default EXACTLY."""
+        from legoesm.grids.vertical import make_hybrid_levels
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])     # T(p), increasing with p
+        p_s = jnp.array([70000.0])                               # terrain (p_s != p_ref ~1e5)
+        hc = make_hybrid_levels(6, p_top_Pa=100.0)
+        sigma_f = jnp.asarray(hc.sigma_full)
+        pure = interp_pressure_to_sigma(f, self._PLEV, p_s, sigma_f)
+        hybrid = interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma_f, p_full=hc.pressure_at_full(p_s))
+        assert float(jnp.max(jnp.abs(hybrid - pure))) > 1.0       # the level pressures differ
+        # passing the pure-sigma target explicitly reproduces the default (byte-identical).
+        same = interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma_f, p_full=p_s[:, None] * sigma_f)
+        np.testing.assert_allclose(np.asarray(same), np.asarray(pure), rtol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # 1b. era5 horizontal regrid — latitude ordering (no N/S hemisphere flip)

@@ -472,29 +472,24 @@ def era5_to_spectral_carry(
     # path comment for details).
     p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
-    if _is_hybrid:
-        _A = jnp.asarray(sigma.A_full)
-        _B = jnp.asarray(sigma.B_full)
-        _p_ref = float(sigma.p_ref)
-        def _vinterp(f):
-            return interp_pressure_to_hybrid(jnp.asarray(f), plev, p_s_jax, _A, _B, _p_ref)
-    else:
-        sigma_f = jnp.asarray(sigma_full)
-        def _vinterp(f):
-            return interp_pressure_to_sigma(jnp.asarray(f), plev, p_s_jax, sigma_f)
+    sigma_f = jnp.asarray(sigma_full)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
+    # ERA5 reference to these, not pure-sigma sigma*p_s, so it lands on the model's
+    # actual levels.  Pure-sigma: pressure_at_full == sigma*p_s (byte-identical).
+    p_full = sigma.pressure_at_full(p_s_jax)
 
-    T_model = _vinterp(T_ll)
-    u_model = _vinterp(u_ll)
-    v_model = _vinterp(v_ll)
-    # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air).  The
-    # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
-    # / mass dry air) — saturation_mixing_ratio in thermo.py returns
-    # the mixing-ratio convention, and atmosphere/physics modules
-    # consume q_v under that convention.  Convert at the ERA5 boundary
-    # via the CANONICAL thermo helper r = q/(1−q) (clips q below 1 and
-    # floors the denominator to guard the float32 divide).  In the
-    # tropical PBL (q ≈ 0.025) the bias from skipping this is ~3% of q.
-    q_model = specific_humidity_to_mixing_ratio(_vinterp(q_ll))
+    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air); the legoesm
+    # physics path treats q_v as MASS MIXING RATIO (mass vapor / mass dry air —
+    # the convention saturation_mixing_ratio + the physics modules consume).
+    # Convert at the ERA5 boundary via the CANONICAL thermo helper r = q/(1−q)
+    # (clips q below 1 to guard the division).  In the tropical PBL (q ≈ 0.025)
+    # the bias from skipping this conversion is ~3% of q.
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    )
 
     # Surface geopotential (regrid to Gaussian)
     phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
@@ -653,24 +648,19 @@ def era5_to_cubedsphere_carry(
     # ~20 K temperature errors and ~70 m/s wind imbalances that cause
     # immediate numerical blowup.
     plev = jnp.asarray(era5.plev_Pa)
-    if _is_hybrid:
-        _A = jnp.asarray(sigma.A_full)
-        _B = jnp.asarray(sigma.B_full)
-        _p_ref = float(sigma.p_ref)
-        def _vinterp(field_cs):
-            return interp_pressure_to_hybrid(field_cs, plev, p_s_cs, _A, _B, _p_ref)
-    else:
-        sigma_f = jnp.asarray(sigma_full)
-        def _vinterp(field_cs):
-            return interp_pressure_to_sigma(field_cs, plev, p_s_cs, sigma_f)
-
-    T_model = _vinterp(T_cs)
-    u_model = _vinterp(u_cs)
-    v_model = _vinterp(v_cs)
+    sigma_f = jnp.asarray(sigma_full)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
+    # ERA5 reference to these, not pure-sigma sigma*p_s, so it lands on the model's
+    # actual levels.  Pure-sigma: pressure_at_full == sigma*p_s (byte-identical).
+    p_full = sigma.pressure_at_full(p_s_cs)
+    T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f, p_full=p_full)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
-    # r = q/(1−q) via the CANONICAL thermo helper (see the lat-lon path
-    # above; clips q below 1 and floors the float32 divide).
-    q_model = specific_humidity_to_mixing_ratio(_vinterp(q_cs))
+    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    )
 
     if logger.isEnabledFor(logging.INFO):
         import jax as _jax
@@ -794,13 +784,16 @@ def era5_to_mpas_carry(
     p_s_cell = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)   # (nCells,)
     phis_cell = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
 
-    T_model = interp_pressure_to_sigma(T_cell, plev, p_s_cell, sigma_f)
-    u_model = interp_pressure_to_sigma(u_cell, plev, p_s_cell, sigma_f)
-    v_model = interp_pressure_to_sigma(v_cell, plev, p_s_cell, sigma_f)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the ERA5 reference
+    # to these, not pure-sigma sigma*p_s.  Pure-sigma: pressure_at_full == sigma*p_s.
+    p_full = sigma.pressure_at_full(p_s_cell)
+    T_model = interp_pressure_to_sigma(T_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(u_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(v_cell, plev, p_s_cell, sigma_f, p_full=p_full)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
     # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
     q_model = specific_humidity_to_mixing_ratio(
-        interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f)
+        interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f, p_full=p_full)
     )
 
     dims_3d = ("cell", "level")
@@ -871,14 +864,18 @@ def era5_to_latlon_carry(
     p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
     sigma_f = jnp.asarray(sigma_full)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
+    # ERA5 reference to these, not pure-sigma sigma*p_s, so it lands on the model's
+    # actual levels.  Pure-sigma: pressure_at_full == sigma*p_s (byte-identical).
+    p_full = sigma.pressure_at_full(p_s_jax)
 
-    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
-    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
-    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
+    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f, p_full=p_full)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
     # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
     q_model = specific_humidity_to_mixing_ratio(
-        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f)
+        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
     )
 
     phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
