@@ -199,6 +199,14 @@ confirming the offline boundary condition is in place — *before* the multi-day
 monthly-hourly ERA5 single-level files are subsampled to daily (`--amip-forcing-hour-stride`,
 default 24) so the loader does not OOM on the full hourly month.
 
+> **Match `--days` to the forcing coverage (≈ 1 month, iter 458).** `--amip-forcing-from-local-era5`
+> builds the SST forcing from a **single month** (the `--local-era5-date`'s chunk). A run **longer**
+> than that coverage cyclically **repeats** the month (`get_forcing_at_time` wraps over the forcing
+> period — intended for a *full annual* cycle), so the SST replays the month while the insolation
+> advances seasonally and they **desync**. So keep the **climatology window ≤ ~1 month** for the
+> offline path (the AMIP-default `days=200` is **far too long** — the campaign prints a NOTE when
+> `days` exceeds the forcing span), or build a multi-month forcing.
+
 > **Ocean-only ranking (`OCEAN_ONLY=1` / `--ocean-only`, iter 451).** Over realistic land, the
 > AMIP surface is the model's OWN land model, carrying large surface biases (soil moisture, snow,
 > skin temperature) the turbulence closure cannot fix — so blind worst-column ranking can spend

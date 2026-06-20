@@ -896,6 +896,27 @@ def _spinup_warning_line(spinup_days, days) -> str | None:
     return None
 
 
+# build_era5_amip_forcing builds a SINGLE-MONTH SST forcing (one date -> one monthly chunk); a
+# run longer than this cyclically REPEATS the month (get_forcing_at_time wraps over the forcing
+# period — intended for a FULL annual cycle, not a sub-annual one). ~31 d = the longest month.
+_OFFLINE_FORCING_SPAN_DAYS = 31
+
+
+def _offline_forcing_window_warning(days, *, span_days=_OFFLINE_FORCING_SPAN_DAYS) -> str | None:
+    """Warn when an OFFLINE single-month AMIP forcing (``--amip-forcing-from-local-era5``) drives a
+    run LONGER than its ~1-month coverage (iter 458): ``get_forcing_at_time`` then CYCLICALLY WRAPS
+    the month, so the SST REPEATS the month while the insolation advances seasonally (iter 449) —
+    they DESYNC over the run, biasing the comparison. The AMIP default ``days=200`` trips this.
+    Returns ``None`` when the run fits within the forcing span (no wrap)."""
+    if days is None or int(days) <= span_days:
+        return None
+    return (f"[campaign] NOTE: --amip-forcing-from-local-era5 builds a SINGLE-MONTH "
+            f"(~{span_days} d) SST forcing, but days={int(days)} exceeds it; get_forcing_at_time "
+            "CYCLICALLY REPEATS the month while the insolation advances seasonally, so the SST "
+            f"and insolation DESYNC over the run. Use a climatology window <= ~{span_days} days "
+            "(keeps SST + insolation aligned), or build a multi-month forcing.")
+
+
 # Months seasonally FAR from the model's JANUARY-based insolation (cfg.start_day defaults to 0,
 # so day_to_calendar(0)=Jan 1) — the solar declination differs most across Apr–Sep, so a
 # non-January offline ERA5 window mismatches the insolation season (iter 447, the deferred gap).
@@ -948,9 +969,14 @@ def _build_run_setup(args):
     # itself (its own confirmation line prints in _maybe_align_insolation instead).
     _insol_date = (None if getattr(args, "align_insolation", False)
                    else getattr(args, "local_era5_date", None))
+    # The single-month offline-forcing wrap warning only applies when building the offline forcing.
+    _offline_forcing_note = (
+        _offline_forcing_window_warning(getattr(base_cfg, "days", 0))
+        if getattr(args, "amip_forcing_from_local_era5", False) else None)
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
-                  _insolation_season_note(_insol_date)):
+                  _insolation_season_note(_insol_date),
+                  _offline_forcing_note):
         if _note:
             print(_note, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(

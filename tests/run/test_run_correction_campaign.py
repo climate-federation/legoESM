@@ -3333,6 +3333,23 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
     assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
 
 
+def test_offline_forcing_window_warning_fires_when_run_exceeds_one_month():
+    """A run longer than the single-month offline AMIP forcing warns about the SST/insolation
+    DESYNC (get_forcing_at_time cyclically repeats the month, iter 458); a sub-month window is
+    silent. The AMIP default days=200 trips it."""
+    from scripts.run.run_correction_campaign import (
+        _OFFLINE_FORCING_SPAN_DAYS,
+        _offline_forcing_window_warning,
+    )
+
+    w = _offline_forcing_window_warning(200)               # AMIP default >> 1 month → warns
+    assert w is not None and "DESYNC" in w and "SINGLE-MONTH" in w
+    assert _offline_forcing_window_warning(_OFFLINE_FORCING_SPAN_DAYS) is None   # fits → silent
+    assert _offline_forcing_window_warning(20) is None     # sub-month → silent
+    assert _offline_forcing_window_warning(None) is None   # unknown → silent
+    assert _offline_forcing_window_warning(_OFFLINE_FORCING_SPAN_DAYS + 1) is not None
+
+
 def test_insolation_season_note_warns_off_season_offline_date():
     """An off-season (Apr–Sep) OFFLINE ERA5 date warns about the model's January-based insolation
     mismatch and surfaces BOTH fixes: the exact ``insolation_start_doy=<doy>`` (iter 449) and the
