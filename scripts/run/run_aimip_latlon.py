@@ -87,6 +87,11 @@ def build_latlon_config(args):
         "--nlev", str(args.n_lev),
         "--vertical-coord", "sigma",
         "--dt", str(args.dt),
+        # Unique per-run driver output dir: ModelDriver.setup() writes a
+        # run_manifest, and concurrent sweep tasks sharing the default
+        # results/amip/<grid>_<date> dir collide ("refuses to mix two
+        # runs").  Point it at this run's own output dir.
+        "--output", str(args.output_dir),
         "--radiation", args.radiation,
         "--convection", args.convection,
         "--turbulence", args.turbulence,

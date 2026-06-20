@@ -43,8 +43,11 @@ SWEEP_SPACE = {
         "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
         "kain_fritsch", "emanuel", "bechtold", "tiedtke",
     ],
+    # Stateful-TKE schemes (tke, mynn25) need a seeded prognostic carry
+    # (issue #413) the orchestrator doesn't thread yet -> excluded; the
+    # diagnostic closures are swept.
     "turbulence": [
-        "tke", "smagorinsky", "holtslag_boville", "ysu", "none",
+        "smagorinsky", "holtslag_boville", "ysu", "none",
     ],
     "gravity_wave_drag": [
         "mcfarlane", "lindzen", "rayleigh", "hines",

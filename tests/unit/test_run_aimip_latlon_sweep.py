@@ -15,8 +15,8 @@ _spec.loader.exec_module(mod)
 
 def test_combo_count_and_structure():
     combos = mod.build_combos()
-    # baseline + 9 conv + 5 turb + 4 gwd
-    assert len(combos) == 1 + 9 + 5 + 4 == 19
+    # baseline + 9 conv + 4 turb (tke/mynn25 excluded) + 4 gwd
+    assert len(combos) == 1 + 9 + 4 + 4 == 18
     assert combos[0]["name"] == "combo_baseline"
     assert combos[0]["convection"] == mod.BASELINE["convection"]
     for c in combos:
