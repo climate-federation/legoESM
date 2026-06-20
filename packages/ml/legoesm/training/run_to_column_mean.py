@@ -114,10 +114,14 @@ def cmip_column_state(
 ) -> ColumnState:
     """:class:`ColumnState` from a coupled (CMIP) driver: atm state + coupled SST.
 
-    Uses the public ``state`` / ``q_v`` / ``ocean_state`` accessors; ``sst_K`` is
-    the prognostic ocean surface temperature (the CMIP coupled SST).  ``day`` /
-    ``dt_segment`` are accepted for the ``extract_column_state`` protocol but
-    unused — the coupled SST is prognostic, not a time-prescribed forcing.
+    Uses the public ``state`` / ``q_v`` / ``get_sst_sic`` accessors.  ``sst_K`` is the
+    coupled SST on the ATMOSPHERE grid — via ``coupled_driver.get_sst_sic(day)``, the same
+    accessor AMIP uses, which the coupler remaps from the (possibly different) ocean grid
+    onto the atm grid (``o2a``).  This keeps the SST env tag aligned with the atm columns
+    for ANY ``ocean_grid`` (the raw ``ocean_state.T_sfc`` is on the OCEAN grid and would
+    mis-align it — cf. the ``column_state_from_hydrostatic`` sst_K grid guard, iter 329);
+    for a same-grid coupled run the o2a remapper is the identity, so this is the same SST
+    as before.  ``dt_segment`` is unused.
     """
     # Spectral CMIP: synthesize the grid winds from the spectral state first
     # (no-op for grid / MPAS states); MPAS: column_state_from_hydrostatic
@@ -125,10 +129,11 @@ def cmip_column_state(
     state = grid_winds_from_spectral(
         coupled_driver.state, getattr(coupled_driver, "grid", None),
         getattr(coupled_driver, "sigma", None))
+    sst, _sic = coupled_driver.get_sst_sic(day)
     return column_state_from_hydrostatic(
         state,
         coupled_driver.q_v,
-        sst_K=_sst_array(coupled_driver.ocean_state.T_sfc),
+        sst_K=_sst_array(sst),
         mesh=getattr(coupled_driver, "grid", None),
     )
 

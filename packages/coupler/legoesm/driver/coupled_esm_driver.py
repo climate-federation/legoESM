@@ -1689,6 +1689,21 @@ class CoupledESMDriver:
     def surface_state(self):
         return self._sfc_state
 
+    def get_sst_sic(self, day):
+        """The coupled SST + SIC on the ATMOSPHERE grid (the same public signature as
+        :meth:`ModelDriver.get_sst_sic`).
+
+        Delegates to the atmosphere driver, whose ``get_sst_sic`` was overridden at setup
+        (:meth:`_override_sst`) to return the slab/dynamic-ocean SST remapped onto the
+        atmosphere grid via the coupler's ``o2a`` remapper — so it is atm-grid even when the
+        ocean runs on a DIFFERENT grid.  Exposed (like ``grid`` / ``sigma`` / ``state`` /
+        ``q_v``) so the column comparison reads the CMIP coupled SST on the atmosphere grid
+        (matching the atm columns) for BOTH AMIP and CMIP — unlike ``ocean_state.T_sfc``,
+        which is on the OCEAN grid and would mis-align the env tag when ``ocean_grid``
+        differs (cf. the ``column_state_from_hydrostatic`` sst_K grid guard, iter 329).
+        """
+        return self._atm.get_sst_sic(day)
+
     @property
     def diagnostics(self):
         return self._atm.diagnostics

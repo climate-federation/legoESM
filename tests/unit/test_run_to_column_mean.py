@@ -168,7 +168,14 @@ def test_cmip_column_state_mpas_reconstructs_winds_and_carries_u_edge():
     """The CMIP (coupled) × MPAS path: cmip_column_state reconstructs the cell
     wind from the native edge velocity (driver.grid is the VoronoiMesh, via the
     iter-74 CoupledESMDriver.grid property), carries u_edge for the LES extractor,
-    and uses the COUPLED-ocean SST — the only mode×grid combo not yet covered."""
+    and uses the coupled SST on the ATMOSPHERE grid via ``get_sst_sic`` (iter 335) —
+    the only mode×grid combo not yet covered.
+
+    Non-vacuous for the iter-335 SST source switch: the fake's ``ocean_state.T_sfc`` is on
+    a DIFFERENT (smaller) ocean grid with a DIFFERENT value, while ``get_sst_sic`` returns
+    the atm-grid coupled SST.  cmip_column_state must read the atm-grid SST (matching the
+    nCells atm columns), so a regression reverting to ``ocean_state.T_sfc`` would either
+    read 295 K or hit the column-grid guard (wrong shape)."""
     from legoesm.grids.voronoi import create_voronoi_mesh, reconstruct_cell_velocity
 
     mesh = create_voronoi_mesh(2)
@@ -180,7 +187,11 @@ def test_cmip_column_state_mpas_reconstructs_winds_and_carries_u_edge():
         p_s=jnp.full((mesh.nCells,), 1.0e5))
     coupled = SimpleNamespace(
         state=state, q_v=jnp.full((mesh.nCells, nlev), 6e-3),
-        ocean_state=SimpleNamespace(T_sfc=jnp.full((mesh.nCells,), 301.0)),
+        # atm-grid coupled SST (the o2a-remapped one the atm felt) — what cmip_column_state
+        # must use; the same accessor AMIP uses.
+        get_sst_sic=lambda day: (jnp.full((mesh.nCells,), 301.0), None),  # noqa: ARG005
+        # a DIFFERENT-grid raw ocean SST (smaller, different value) — must NOT be used.
+        ocean_state=SimpleNamespace(T_sfc=jnp.full((mesh.nCells - 1,), 295.0)),
         grid=mesh)                                   # the CoupledESMDriver.grid property
 
     cs = cmip_column_state(coupled)
@@ -190,7 +201,8 @@ def test_cmip_column_state_mpas_reconstructs_winds_and_carries_u_edge():
         jnp.asarray(u_edge, dtype=cs.T.dtype), mesh)
     np.testing.assert_allclose(np.asarray(cs.u), np.asarray(u_ref), rtol=1e-5)
     np.testing.assert_allclose(np.asarray(cs.v), np.asarray(v_ref), rtol=1e-5)
-    np.testing.assert_allclose(np.asarray(cs.sst_K), 301.0)   # the COUPLED ocean SST
+    assert cs.sst_K.shape == (mesh.nCells,)                   # atm-grid, matches columns
+    np.testing.assert_allclose(np.asarray(cs.sst_K), 301.0)   # the atm-grid COUPLED SST
 
 
 def test_make_run_fn_builds_driver_from_config_and_means():
