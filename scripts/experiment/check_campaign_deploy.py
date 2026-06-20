@@ -190,8 +190,16 @@ def check_deploy(
             # Only report a genuine env-kernel artifact (env_kernel_to_dict stamps "artifact":
             # "raw_environment_kernel") — never mistake another JSON sharing the name.
             if _k.get("artifact") == "raw_environment_kernel":
+                # The TRAINING-env hull (iter 475/476): the [lo, hi] range of each predictor the
+                # kernel was trained on, so the operator can judge cross-grid transferability —
+                # a target grid whose environments fall OUTSIDE this is out-of-hull (low coverage,
+                # unreliable). Both REQUIRED in the env-kernel JSON (env_kernel_from_dict).
+                _names = _k.get("predictor_names", ["sst_K", "cape_J_kg", "bulk_shear_m_s"])
+                _lo, _hi = _k.get("env_lo"), _k.get("env_hi")
+                hull = (None if _lo is None or _hi is None else
+                        {n: [float(lo), float(hi)] for n, lo, hi in zip(_names, _lo, _hi)})
                 env_kernel = {"path": _kernel_path, "field": _k.get("field"),
-                              "n_samples": len(_k.get("sample_env", []))}
+                              "n_samples": len(_k.get("sample_env", [])), "hull": hull}
         except (ValueError, OSError):
             env_kernel = None
     return {
@@ -271,8 +279,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    cross-grid: an env-kernel ({ek.get('field')}, {ek.get('n_samples')} "
               f"samples) is ALSO available at {ek['path']} — the same-grid deploy above uses "
               "the per-column field; deploy on a DIFFERENT grid via "
-              "deploy_correction.apply_env_kernel_override (validate the transfer first with "
-              "run_perfect_model_osse.py --fine-resolution).")
+              "check_campaign_deploy.build_env_kernel_deployed_override (validate the transfer "
+              "first with run_perfect_model_osse.py --fine-resolution).")
+        if ek.get("hull"):                                 # the training-env hull (476)
+            hull_str = ", ".join(f"{n}∈[{lo:.4g},{hi:.4g}]"
+                                 for n, (lo, hi) in ek["hull"].items())
+            print(f"      trained-env hull: {hull_str} — a target grid OUTSIDE this is "
+                  "out-of-hull (low coverage; the transfer falls back to the background).")
     return 0
 
 

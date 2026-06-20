@@ -262,13 +262,20 @@ def test_check_deploy_surfaces_the_cross_grid_env_kernel_sidecar(tmp_path, capsy
     kernel_path = out + ".env_kernel.json"
     with open(kernel_path, "w") as f:                               # a real env-kernel artifact
         json.dump({"artifact": "raw_environment_kernel", "field": "clubb_lite_C_K",
-                   "sample_env": [[290.0, 1.0], [292.0, 2.0], [288.0, 0.5]],
+                   "predictor_names": ["sst_K", "cape_J_kg", "bulk_shear_m_s"],
+                   "sample_env": [[298.0, 100.0, 5.0], [300.0, 1500.0, 12.0],
+                                  [302.0, 2800.0, 20.0]],
                    "sample_values": [0.4, 0.5, 0.45], "valid": [True, True, True],
-                   "length_scales": [1.0, 1.0], "background": 0.4}, f)
+                   "length_scales": [2.0, 1200.0, 8.0], "background": 0.4,
+                   "env_lo": [298.0, 100.0, 5.0], "env_hi": [302.0, 2800.0, 20.0]}, f)
     ek = check_deploy(cfg, out)["env_kernel"]
     assert ek is not None and ek["field"] == "clubb_lite_C_K" and ek["n_samples"] == 3
+    # the training-env hull is surfaced (iter 476) so the operator can judge cross-grid transfer
+    assert ek["hull"]["sst_K"] == [298.0, 302.0]
+    assert ek["hull"]["cape_J_kg"] == [100.0, 2800.0]
     main(["--base-config", cfg, "--campaign-output", out])
-    assert "cross-grid" in capsys.readouterr().out
+    msg = capsys.readouterr().out
+    assert "cross-grid" in msg and "trained-env hull" in msg and "sst_K" in msg
 
     with open(kernel_path, "w") as f:                               # wrong artifact → ignored
         json.dump({"artifact": "something_else", "field": "x"}, f)
