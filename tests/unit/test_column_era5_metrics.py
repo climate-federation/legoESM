@@ -415,6 +415,45 @@ def test_score_columns_nan_precip_obs_does_not_exclude_bad_column():
     assert bool(valid[0]) and int(idx[0]) == 0       # the bad column IS still selected
 
 
+def test_vector_wind_rmse_masks_nan_levels():
+    """A NaN wind level (u or v) is dropped + the column renormalized, like the
+    scalar path — the vector metric must not let a missing ERA5 level poison it."""
+    nlev = 4
+    w = normalized_mass_weights(jnp.ones((nlev,)))
+    u_r = jnp.zeros((1, nlev))
+    v_r = jnp.zeros((1, nlev))
+    u_m = jnp.full((1, nlev), 3.0)
+    v_m = jnp.full((1, nlev), 4.0)
+    full = float(per_column_vector_wind_rmse(u_m, v_m, u_r, v_r, w)[0])
+    assert full == pytest.approx(5.0, abs=1e-10)
+    # A NaN in u at one level (the magnitude agrees on the rest) keeps RMS=5 via
+    # per-column renormalization over the remaining valid levels.
+    u_r_nan = u_r.at[0, 2].set(jnp.nan)
+    masked = float(per_column_vector_wind_rmse(u_m, v_m, u_r_nan, v_r, w)[0])
+    assert masked == pytest.approx(5.0, abs=1e-10)
+
+
+def test_vector_wind_grad_finite_with_nan_and_all_invalid():
+    """jax.grad through the VECTOR-wind RMSE must stay finite with a NaN level AND
+    a fully-masked column — the same NaN-masking machinery as the scalar path PLUS
+    the stacked u/v concat, guarding the differentiability of the worst-column
+    WIND ranking (the scalar grad test does not exercise this path)."""
+    nlev = 4
+    w = normalized_mass_weights(jnp.ones((nlev,)))
+    # Column 0: one NaN level (in u); column 1: entirely missing in ERA5.
+    u_r = jnp.zeros((2, nlev)).at[0, 1].set(jnp.nan).at[1, :].set(jnp.nan)
+    v_r = jnp.zeros((2, nlev)).at[1, :].set(jnp.nan)
+
+    def rms_of(scale):
+        u_m = jnp.full((2, nlev), 3.0) * scale
+        v_m = jnp.full((2, nlev), 4.0) * scale
+        return jnp.sum(per_column_vector_wind_rmse(u_m, v_m, u_r, v_r, w))
+
+    assert bool(jnp.all(jnp.isfinite(rms_of(1.0))))
+    g = jax.grad(rms_of)(1.0)
+    assert jnp.isfinite(g)
+
+
 def test_all_nan_column_is_finite_zero_with_finite_grad():
     """A fully-masked column must yield finite zero RMSE and finite gradient."""
     nlev = 4
