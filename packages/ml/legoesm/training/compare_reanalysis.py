@@ -316,25 +316,9 @@ def compare_state_to_reference(
             "coordinate override) or neither (got exactly one)."
         )
 
-    dsigma = sigma_half[1:] - sigma_half[:-1]
-    weights = normalized_mass_weights(dsigma)
-
-    have_both_precip = (
-        model.precip_mm_day is not None and reference.precip_mm_day is not None
-    )
-    precip_model = model.precip_mm_day if have_both_precip else None
-    precip_ref = reference.precip_mm_day if have_both_precip else None
-
-    error_fields = score_columns(
-        T_model=model.T, qv_model=model.q_v, u_model=model.u, v_model=model.v,
-        T_ref=reference.T, qv_ref=reference.q_v,
-        u_ref=reference.u, v_ref=reference.v,
-        mass_weights=weights,
-        precip_model_mm_day=precip_model,
-        precip_ref_mm_day=precip_ref,
-        config=error_config,
-    )
-
+    # Build (or validate) the layer pressures FIRST, so the mass weights can derive from the
+    # actual layer PRESSURE thickness (correct for a hybrid coordinate when the caller supplies
+    # the hybrid p_half), not the sigma thickness (iter 338, fixing the iter-337 mis-weighting).
     if p_full is None:  # both-or-neither already enforced above
         p_full, p_half = build_pressure_from_sigma(
             model.p_s, sigma_full, sigma_half
@@ -358,6 +342,30 @@ def compare_state_to_reference(
                 "p_half override must increase monotonically top→surface "
                 "(surface-last); got a reversed or non-monotonic pressure."
             )
+
+    # Per-column mass weights from the layer PRESSURE thickness dp = diff(p_half).  Pure-sigma
+    # (p_half = sigma_half·p_s): the per-column p_s factor cancels in the axis=-1 normalization,
+    # so this is byte-identical to the old diff(sigma_half) weights.  HYBRID (a supplied p_half):
+    # dp = dA·p_ref + dB·p_s, so the weights are correct — vs the iter-337 bug where the sigma
+    # thickness over-weighted upper-terrain levels by ~276% at p_s≠p_ref.
+    dp = jnp.asarray(p_half)[..., 1:] - jnp.asarray(p_half)[..., :-1]
+    weights = normalized_mass_weights(dp)
+
+    have_both_precip = (
+        model.precip_mm_day is not None and reference.precip_mm_day is not None
+    )
+    precip_model = model.precip_mm_day if have_both_precip else None
+    precip_ref = reference.precip_mm_day if have_both_precip else None
+
+    error_fields = score_columns(
+        T_model=model.T, qv_model=model.q_v, u_model=model.u, v_model=model.v,
+        T_ref=reference.T, qv_ref=reference.q_v,
+        u_ref=reference.u, v_ref=reference.v,
+        mass_weights=weights,
+        precip_model_mm_day=precip_model,
+        precip_ref_mm_day=precip_ref,
+        config=error_config,
+    )
 
     if model.sst_K is not None:
         sst = model.sst_K

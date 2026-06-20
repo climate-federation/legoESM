@@ -379,6 +379,7 @@ def make_compare_fn(
     time_index: int = 0,
     valid_mask: jax.Array | None = None,
     manifest_reducer: Callable[[list], list] | None = None,
+    coordinate: Any = None,
     **compare_kwargs: Any,
 ) -> Callable[[Any], CompareResult]:
     """Build a ``compare_fn`` for :func:`run_correction_iteration` over the REAL
@@ -406,21 +407,44 @@ def make_compare_fn(
     that turns per-rank owned rankings into the rank's share of the GLOBAL worst
     ``n_worst`` (iter 87).  Single-process runs leave it ``None`` (the local
     manifest already IS the global top-k).
+
+    ``coordinate`` (optional) is the model's vertical coordinate object (``driver.sigma`` —
+    a ``SigmaCoordinate`` or ``HybridSigmaPressureCoordinate``).  When supplied, each run's
+    LAYER PRESSURES are computed from it (``coordinate.pressure_at_full/half(model.p_s)``) and
+    passed to the compare, so the bias is mass-weighted by the TRUE per-column layer mass —
+    correct for a HYBRID coordinate (the default; iter 337/338) and byte-identical for
+    pure-sigma.  ``None`` keeps the original pure-sigma weighting (exact only at p_s = p_ref).
     """
     if "model" in compare_kwargs:
         raise ValueError(
             "compare_kwargs may not override 'model' — it is the per-config "
             "model state produced by run_amip_fn inside make_compare_fn."
         )
+    if coordinate is not None and ("p_full" in compare_kwargs or "p_half" in compare_kwargs):
+        raise ValueError(
+            "make_compare_fn: pass coordinate= OR p_full/p_half (not both) — coordinate "
+            "computes the per-run layer pressures from model.p_s itself."
+        )
 
     def compare_fn(config: Any) -> CompareResult:
         model = run_amip_fn(config)
+        # When the model's vertical COORDINATE is supplied, compute the per-run layer
+        # pressures from it (``model.p_s``) so the compare weights the bias by the TRUE layer
+        # mass — correct for a HYBRID coordinate (the default; iter 337/338) and byte-identical
+        # for pure-sigma (``pressure_at_full = sigma·p_s``).  Without it the compare falls back
+        # to pure-sigma pressures (the original behaviour, exact only at p_s = p_ref).
+        p_overrides: dict[str, Any] = {}
+        if coordinate is not None:
+            p_overrides = {
+                "p_full": coordinate.pressure_at_full(model.p_s),
+                "p_half": coordinate.pressure_at_half(model.p_s),
+            }
         comparison = compare_state_to_reference(
             model=model, reference=reference,
             sigma_full=sigma_full, sigma_half=sigma_half,
             lat_deg=lat_deg, lon_deg=lon_deg,
             time_index=time_index, n_worst=n_worst,
-            valid_mask=valid_mask, **compare_kwargs,
+            valid_mask=valid_mask, **p_overrides, **compare_kwargs,
         )
         # DISTRIBUTED hook: reduce the rank-local (owned-only, iter-86 valid_mask)
         # manifest to this rank's owned subset of the GLOBAL n_worst worst columns

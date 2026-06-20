@@ -740,21 +740,12 @@ def test_mpas_owned_cell_mask_excludes_halo_from_ranking():
     assert masked.manifest[0].T_rmse_K == pytest.approx(8.0, abs=1e-4)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Hybrid-coordinate compare bug (iter 337, CODEX PENDING): compare_state_to_reference "
-    "weights the bias by the SIGMA-layer thickness (diff(sigma_half), p_s-independent) and "
-    "IGNORES the p_full/p_half override that carries the true layer pressures. "
-    "vertical_coord defaults to 'hybrid' (p = A*p_ref + B*p_s), so over terrain (p_s != "
-    "p_ref) the per-level bias is mis-weighted by up to ~276%. Fix: derive the mass weights "
-    "from the layer PRESSURE thickness diff(p_half) (per-column, axis=-1 normalized) — "
-    "byte-identical for pure-sigma (p_s cancels) and correct for hybrid — and thread the "
-    "model coordinate through make_compare_fn so the campaign supplies the hybrid pressures."))
 def test_compare_mass_weights_follow_the_pressure_profile_not_sigma():
-    """Regression target for the hybrid mass-weight bug: the bias mass weighting must respond
-    to the LAYER PRESSURE thickness (the p_half override), not the sigma thickness.  Two
-    p_half overrides that put very different mass in the biased TOP layer must yield DIFFERENT
-    combined scores; currently they are EQUAL (the weights come from sigma_half, ignoring the
-    override) — the bug.  xpasses (then drop the xfail) once the codex-reviewed fix lands."""
+    """The bias mass weighting follows the LAYER PRESSURE thickness (the p_half override), not
+    the sigma thickness (iter 338 — the compare-side half of the iter-337 hybrid-coordinate
+    fix).  Two p_half overrides that put very different mass on the biased TOP layer yield
+    DIFFERENT combined scores; before the fix they were EQUAL (the weights came from
+    sigma_half, ignoring the override, mis-weighting a terrain hybrid column by up to ~276%)."""
     shape, nlev = (1, 1), 3
     ref = _uniform_state(shape, nlev, T=250.0)
     model = ref._replace(T=ref.T.at[0, 0, 0].set(260.0))   # 10 K bias in the TOP layer only

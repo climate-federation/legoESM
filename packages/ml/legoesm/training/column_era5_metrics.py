@@ -91,19 +91,27 @@ class ColumnErrorFields(NamedTuple):
     combined_score: jax.Array
 
 
-def normalized_mass_weights(dsigma: jax.Array) -> jax.Array:
-    """Return per-level mass weights that sum to one along the vertical axis.
+def normalized_mass_weights(layer_thickness: jax.Array) -> jax.Array:
+    """Return per-level mass weights that sum to one along the LAST (vertical) axis.
 
-    For a sigma vertical coordinate the layer mass is ``Δp = p_s · dsigma``;
-    the surface-pressure factor cancels in the per-column normalization, so the
-    mass weight reduces to ``dsigma / Σ dsigma``.  Input is the ``[nlev]``
-    layer thickness vector; the output is ``[nlev]``.
+    The layer mass weight is the layer thickness divided by the column total.  The
+    thickness can be:
+
+    * a ``[nlev]`` sigma-thickness ``dsigma`` (pure-sigma: ``Δp = p_s·dsigma`` and the
+      ``p_s`` factor cancels in the per-column normalization, so this reduces to
+      ``dsigma / Σ dsigma``), or
+    * a ``[..., nlev]`` per-column PRESSURE thickness ``dp = diff(p_half)`` — correct
+      for a HYBRID coordinate (``Δp = dA·p_ref + dB·p_s``), where ``p_s`` does NOT cancel.
+
+    Normalization is along ``axis=-1`` so a ``[nlev]`` vector and a ``[ncol, nlev]`` field
+    both normalize per column (the 1-D case is unchanged: ``Σ`` over the only axis).
     """
-    dsigma = jnp.asarray(dsigma)
+    layer_thickness = jnp.asarray(layer_thickness)
     total = jnp.maximum(
-        jnp.sum(dsigma), jnp.asarray(_WEIGHT_SUM_FLOOR, dtype=dsigma.dtype)
+        jnp.sum(layer_thickness, axis=-1, keepdims=True),
+        jnp.asarray(_WEIGHT_SUM_FLOOR, dtype=layer_thickness.dtype),
     )
-    return dsigma / total
+    return layer_thickness / total
 
 
 def _masked_weights(

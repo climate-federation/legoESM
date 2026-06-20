@@ -1898,3 +1898,39 @@ def test_clubb_field_for_promotion_key_resolves_clubb_only():
     assert _clubb_field_for_promotion_key("clubb_lite_C_eps") == "C_eps"
     assert _clubb_field_for_promotion_key("gray_tau_equator") is None    # registered, non-CLUBB
     assert _clubb_field_for_promotion_key("nonexistent_key") is None     # unregistered
+
+
+def test_make_compare_fn_coordinate_activates_hybrid_mass_weighting():
+    """make_compare_fn(coordinate=<hybrid>) weights the bias by the TRUE hybrid layer mass
+    (computed per-run from model.p_s), vs the pure-sigma default — so for a terrain column
+    (p_s != p_ref) the combined score DIFFERS (iter 338: the campaign-side activation of the
+    iter-337 hybrid-coordinate fix).  coordinate=None reproduces the legacy pure-sigma
+    weighting; the difference here is the bug that was silently corrupting elevated columns."""
+    from legoesm.grids.vertical import make_hybrid_levels
+
+    nlev = 6
+    hc = make_hybrid_levels(nlev, p_top_Pa=100.0)
+    shape = (1, 1)
+
+    def _state():
+        return ColumnState(
+            T=jnp.full(shape + (nlev,), 250.0), q_v=jnp.full(shape + (nlev,), 1e-3),
+            u=jnp.full(shape + (nlev,), 5.0), v=jnp.zeros(shape + (nlev,)),
+            p_s=jnp.full(shape, 70000.0))                # 700 hPa terrain (p_s != p_ref ~1e5)
+
+    reference = _state()
+    model = reference._replace(T=reference.T.at[0, 0, 0].set(260.0))   # 10 K bias, TOP layer
+
+    def _run_fn(_config):
+        return model
+
+    common = dict(
+        reference=reference, sigma_full=jnp.asarray(hc.sigma_full),
+        sigma_half=jnp.asarray(hc.sigma_half), lat_deg=jnp.array([0.0]),
+        lon_deg=jnp.array([0.0]), area_weights=jnp.ones(shape), n_worst=1, run_amip_fn=_run_fn)
+
+    score_sigma = float(jnp.max(
+        make_compare_fn(**common, coordinate=None)(None).combined_score))
+    score_hybrid = float(jnp.max(
+        make_compare_fn(**common, coordinate=hc)(None).combined_score))
+    assert abs(score_sigma - score_hybrid) > 1e-6     # hybrid re-weights the terrain column

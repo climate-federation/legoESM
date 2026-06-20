@@ -239,6 +239,9 @@ def compose_compare_fn(*, base_atm_config, build_base_driver, extract_column_sta
         lat_deg=lat_deg, lon_deg=lon_deg, area_weights=area_weights,
         n_worst=n_worst, run_amip_fn=run_fn, valid_mask=valid_mask,
         manifest_reducer=manifest_reducer,
+        # Pass the COORDINATE so the per-run layer pressures (hence the bias mass weights)
+        # are correct for a HYBRID coordinate (the default) — not pure-sigma (iter 337/338).
+        coordinate=sigma,
     )
 
 
