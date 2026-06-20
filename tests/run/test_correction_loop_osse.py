@@ -277,3 +277,41 @@ def test_correction_loop_clustering_preserves_bias_reduction_osse():
     # columns received its own environment's truth coefficient via the broadcast.
     np.testing.assert_allclose(
         np.asarray(res_clus.updated_config.C_K), np.asarray(ck_ref))
+
+
+def test_correction_loop_rejects_a_blown_up_rerun():
+    """REGRESSION (the iter-392 bug class, here in the CAMPAIGN monotonic gate): a
+    re-run that BLOWS UP (non-finite state) must NOT be accepted as 'improved'.  The
+    per-column RMSE NaN-masks the blown-up columns to a spurious ≈0 bias, which
+    (0 < baseline) would FALSELY read as an improvement and let the gate ACCEPT a
+    garbage round — corrupting every subsequent round + wasting the multi-day run.  The
+    corrected (per-column C_K) re-run here returns an all-NaN state; the loop must
+    report ``bias.improved is False`` so the gate rejects it (the ``_state_finite``
+    fail-safe in ``_run_line_search``, shared by the single + multi paths)."""
+    def run_fn(config):
+        ck = jnp.asarray(config.C_K)
+        if ck.ndim > 0:                              # corrected (per-column) ⇒ BLOW UP
+            T = jnp.full((_NLAT, _NLON, _NLEV), jnp.nan)   # noqa: N806 — temperature
+        else:                                        # baseline (scalar) ⇒ finite, biased
+            T = _T0 + 5.0                            # noqa: N806 — temperature
+        return ColumnState(T=T, q_v=_Q0, u=_U0, v=_V0, p_s=_PS0, sst_K=_SST0)
+
+    reference = ColumnState(T=_T0, q_v=_Q0, u=_U0, v=_V0, p_s=_PS0, sst_K=_SST0)
+    sigma = create_sigma_coordinate(_NLEV)
+    grid = create_latlon_grid(_NLAT, _NLON, dtype=jnp.float64)
+    rad2deg = 180.0 / np.pi
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(np.asarray(grid.grid_lat) * rad2deg),
+        lon_deg=jnp.asarray(np.asarray(grid.grid_lon) * rad2deg),
+        area_weights=jnp.ones((_NLAT, _NLON)), n_worst=1, run_amip_fn=run_fn)
+    result = run_correction_iteration(
+        CLUBBLiteConfig(), compare_fn=compare_fn,
+        diagnose_fn=lambda record, ctx: _Eddy(0.9),
+        promotion_key="clubb_lite_C_K", grid_shape=(_NLAT, _NLON),
+        background=_C_K_DEFAULT)
+    # The masking DID happen (the spurious ≈0 re-run bias) — but the non-finite STATE
+    # is detected, so the round is NOT an improvement and the gate rejects it.
+    assert float(result.bias.updated_bias) == pytest.approx(0.0)
+    assert bool(result.bias.improved) is False
