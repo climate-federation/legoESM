@@ -38,7 +38,11 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.j
 > file>`; the model then runs land physics over land, and the campaign's `OCEAN_ONLY=1` /
 > verify `--ocean-only` can meaningfully **exclude** the land columns (which need a land mask to
 > identify — without one they read as ocean and are *not* excluded). A flat config is fine only
-> for an aquaplanet smoke; the generator prints this NOTE when no mask is given.
+> for an aquaplanet smoke; the generator prints this NOTE when no mask is given. The mask file is
+> any regular lat-lon NetCDF with a land-sea variable — an **ERA5 `lsm`** invariant (fraction 0–1)
+> or a **CMIP6 `sftlf`** (percent 0–100) both work; `load_land_fraction` auto-detects the variable,
+> rescales percent→fraction, and regrids to the model grid (the end-to-end `land_mask_path →
+> static_land_fraction → ocean_valid_mask` chain is locked by a test, iter 455).
 
 ## 1. Preflight the SETUP (seconds, no model run)
 

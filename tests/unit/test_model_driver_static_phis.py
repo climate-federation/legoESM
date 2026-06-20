@@ -79,3 +79,45 @@ def test_static_land_fraction_shares_topography_chain(tmp_path):
     assert f_land is not None
     assert driver._phis_data is not None       # the same chain set phis too
     assert tuple(f_land.shape) == tuple(driver.grid.grid_shape_2d)
+
+
+def test_land_mask_to_ocean_only_chain_end_to_end(tmp_path):
+    """END-TO-END (iter 454/455): the realistic AMIP config's --land-mask-path flows through
+    the WHOLE production chain a `--ocean-only` empirical run depends on — generator ->
+    config.land_mask_path -> driver _create_topography (ERA5-lsm auto-detect, latlon grid) ->
+    _f_land -> static_land_fraction -> ocean_valid_mask EXCLUDES the land columns. The
+    untested pieces this locks: ERA5 `lsm` (fraction) auto-detect AND the latlon grid the
+    AMIP config uses (the prior load_land_fraction test was sftlf-percent on cubed-sphere)."""
+    import numpy as np
+    import xarray as xr
+    from legoesm.training.compare_reanalysis import ocean_valid_mask
+
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+    )
+
+    # Synthetic ERA5-lsm-style mask (variable `lsm`, FRACTION 0..1 — exercises auto-detect +
+    # the no-percent-rescale branch): Northern hemisphere land, Southern ocean.
+    lat = np.linspace(-89.0, 89.0, 90)
+    lon = np.linspace(0.0, 358.0, 180)
+    mask = np.where(lat[:, None] > 0.0, 1.0, 0.0) * np.ones_like(lon)
+    mask_path = tmp_path / "era5_lsm.nc"
+    xr.Dataset({"lsm": (("lat", "lon"), mask)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(mask_path)
+
+    cfg = build_amip_clubb_lite_config(resolution=8, nlev=6, land_mask_path=str(mask_path))
+    driver = ModelDriver(cfg, output_dir=str(tmp_path / "run"))
+    f_land = driver.static_land_fraction()
+    assert tuple(f_land.shape) == tuple(driver.grid.grid_shape_2d)      # latlon (8, 16)
+    assert 0.0 <= float(jnp.min(f_land)) and float(jnp.max(f_land)) <= 1.0
+
+    glat_deg = np.asarray(driver.grid.grid_lat) * 180.0 / np.pi
+    fl = np.asarray(f_land)
+    assert fl[glat_deg > 10.0].mean() > 0.9        # NH resolved as land
+    assert fl[glat_deg < -10.0].mean() < 0.1       # SH resolved as ocean
+
+    mask_ocean = ocean_valid_mask(f_land)           # ocean where land_fraction <= 0.5
+    # exactly the SH (ocean) half is rankable; the NH (land) columns are EXCLUDED
+    assert 0 < int(jnp.sum(mask_ocean)) < int(mask_ocean.size)
+    flat_land = fl.reshape(-1)
+    np.testing.assert_array_equal(np.asarray(mask_ocean), flat_land <= 0.5)
