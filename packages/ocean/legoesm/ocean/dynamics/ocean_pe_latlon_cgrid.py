@@ -532,7 +532,12 @@ def neumann_fill_cgrid(
     Parameters
     ----------
     f : (n_lat, n_lon, ...) field at cell centers.
-    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land).
+    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land), OR a per-level
+        (n_lat, n_lon, nlev) / (n_lat, n_lon, 1) mask matching the field rank
+        (e.g. ``is_active`` for partial-cell topography). A lower-rank mask is
+        broadcast over the level axis (the historical 2D behaviour); a
+        rank-matching mask is applied per level (fills topographic-step dead
+        cells, not just lateral walls).
     grid : optional LatLonGrid or LatLonCGridGeometry.
         When provided and a tripolar fold is active, the north neighbor
         of the fold row uses the fold-partner cell instead of repeating
@@ -620,7 +625,12 @@ def neumann_fill_cgrid(
 
         is_land = m < 0.5
 
-        if f.ndim > 2:
+        # Broadcast a LOWER-rank (2D) mask up to the field's level axis. A mask
+        # whose rank already MATCHES the field (a 3D per-level ``is_active`` /
+        # partial-cell mask, possibly with a singleton level axis) is used as-is
+        # and broadcasts elementwise — this lets the fill clean dead cells at
+        # TOPOGRAPHIC STEPS, not just lateral walls (#480 partial-cell coverage).
+        if f.ndim > 2 and m.ndim < f.ndim:
             m_s_e = m_s[..., jnp.newaxis]
             m_n_e = m_n[..., jnp.newaxis]
             m_w_e = m_w[..., jnp.newaxis]
@@ -638,7 +648,7 @@ def neumann_fill_cgrid(
         nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
 
         has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
-        if f.ndim > 2:
+        if f.ndim > 2 and m.ndim < f.ndim:
             has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
         else:
             has_any_nbr_e = has_any_nbr

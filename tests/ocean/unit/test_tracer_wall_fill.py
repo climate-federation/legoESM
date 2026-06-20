@@ -112,6 +112,46 @@ class TestColdLandContamination:
         assert float(deep) < 1e-12, "fill must be inert in the deep interior"
 
 
+class TestPartialCellTopography:
+    def test_3d_mask_fills_topographic_step_dead_cell(self):
+        """A per-level (3D) ``is_active`` mask cleans a dead cell at a
+        topographic STEP (a column wet at the surface but dead at depth) — the
+        same cold-cell contamination the lateral-wall fix targets, but at depth.
+        A 2D surface mask (all-wet at the surface) leaves it untouched; the 3D
+        mask fills it from its wet horizontal neighbours."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+        grid = _make_grid(n_lat=10, n_lon=12)
+        n_lat, n_lon, nlev = 10, 12, 4
+        # all columns wet at the surface; ONE interior cell dead at the deepest
+        # level (a topographic step) holding a cold contaminating value.
+        active = jnp.ones((n_lat, n_lon, nlev))
+        active = active.at[5, 6, nlev - 1].set(0.0)
+        T = jnp.full((n_lat, n_lon, nlev), 11.0)
+        T = T.at[5, 6, nlev - 1].set(-99.0)        # cold dead-cell value
+        surf2d = active[:, :, 0]                    # all wet -> no-op at depth
+        f_2d = neumann_fill_cgrid(T, surf2d, grid=grid)
+        f_3d = neumann_fill_cgrid(T, active, grid=grid)
+        # 2D surface mask cannot see the deep dead cell -> stays cold.
+        assert float(f_2d[5, 6, nlev - 1]) == -99.0
+        # 3D mask fills it from wet neighbours (= 11.0), removing the cold spike.
+        assert abs(float(f_3d[5, 6, nlev - 1]) - 11.0) < 1e-9
+        # wet cells are untouched by either fill.
+        assert float(f_3d[5, 6, 0]) == 11.0 and float(f_2d[5, 6, 0]) == 11.0
+
+    def test_3d_singleton_mask_matches_2d(self):
+        """A (n_lat,n_lon,1) singleton-level mask must give the bit-identical
+        fill to the equivalent 2D mask (flat-bottom runs pass active_3d as a
+        singleton; §5 must stay unchanged)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+        grid = _make_grid(n_lat=10, n_lon=12)
+        n_lat, n_lon, nlev = 10, 12, 4
+        mask2d = jnp.ones((n_lat, n_lon)).at[0].set(0.0).at[-1].set(0.0)
+        T = jax.random.normal(jax.random.PRNGKey(7), (n_lat, n_lon, nlev)) * mask2d[:, :, None]
+        f_2d = neumann_fill_cgrid(T, mask2d, grid=grid)
+        f_3d1 = neumann_fill_cgrid(T, mask2d[:, :, None], grid=grid)
+        assert jnp.allclose(f_2d, f_3d1, atol=1e-13)
+
+
 class TestConservation:
     def test_wet_domain_conserved(self):
         """With the wall faces masked (mfv=0 at the N/S walls), the summed

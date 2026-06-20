@@ -43,14 +43,21 @@ itself; grad/curl operators (`curl(grad)=0`); spherical metric; **z\*** (Oceanan
 stays bounded → innocent); Coriolis; continuity/`w` at the wall.
 
 ## Fix (FAITHFUL, shipped, default-on)
-**Zero-gradient (Neumann) fill the tracer over land BEFORE the flux-form advection
-reconstruction** — `LatLonCGridOceanConfig.tracer_wall_neumann_fill` (default **True**).
-The reconstruction now sees a **flat extension** across solid walls instead of the masked
-cold cell — i.e. the physical **no-flux insulating wall**, which is exactly what
-Oceananigans' clean grid-edge wall does. Implemented as `recon_fill_mask` threaded into
-`_compute_advection_flux_div` / `_compute_advection_flux_div_pair` /
+**Zero-gradient (Neumann) fill the tracer over the DEAD cells BEFORE the flux-form
+advection reconstruction** — `LatLonCGridOceanConfig.tracer_wall_neumann_fill`
+(default **True**). The reconstruction now sees a **flat extension** across solid walls
+instead of the masked cold cell — i.e. the physical **no-flux insulating wall**, which is
+exactly what Oceananigans' clean grid-edge wall does. Implemented as `recon_fill_mask`
+threaded into `_compute_advection_flux_div` / `_compute_advection_flux_div_pair` /
 `_ssp_rk3_tracer_pair_step` (the fill happens inside the reconstruction; the flux-form
-UPDATE and land-gating keep the ORIGINAL tracer, so stored land values are unchanged).
+UPDATE and land-gating keep the ORIGINAL tracer, so stored dead-cell values are unchanged).
+The mask is the **per-level `active_3d` (`is_active`)**, not the 2D surface land_mask, so
+the fill also cleans **topographic-step dead cells** in partial-cell runs (a column wet at
+the surface but dead below the partial seafloor — the same wide-stencil contamination at
+depth). `neumann_fill_cgrid` was made 3D-mask-aware (a lower-rank mask broadcasts over the
+level axis = the historical 2D behaviour; a rank-matching `(…,nlev)`/`(…,1)` mask is
+applied per level). Flat-bottom runs pass a `(n_lat,n_lon,1)` singleton mask ⇒ bit-identical
+to the 2D path (§5 unchanged).
 
 - **NOT a viscosity/closure backstop** (distinct from the rejected A_h/Smag/biharmonic):
   it adds zero dissipation; it removes a spurious *source*.
@@ -84,8 +91,13 @@ now **superseded** by the faithful root fix and defaults OFF everywhere (includi
 ## Open items
 1. **Codex adversarial review** still owed (per repo policy) — could not run in this
    environment (no `codex` binary / plugin); run before merge.
-2. The same masked-land cold-cell contamination affects **any** masked-land WENO ocean run
-   (now fixed by the default-on fill); confirm against the production OMIP/coastline runs.
+2. The same masked-cell contamination affects **any** masked-land/partial-cell WENO ocean
+   run; now fixed by the default-on `active_3d` fill (lateral walls AND topographic steps).
+   Adversarial-review Findings 1–3 addressed: (1) clarified that the filled tracer also
+   feeds vertical advection and is safe because only dead cells change (gated out);
+   (2) switched to the per-level `active_3d` mask so partial-cell topographic steps are
+   covered; (3) explicit ack that the fill is a real (conservation-neutral, default-on)
+   change to every coastline run, not literally a no-op there.
 3. **Perf follow-up** (adversarial-review note): in the RK3 tracer path the fill runs per
    tracer per stage (3 stages × 2 tracers = 6 `neumann_fill_cgrid` calls/step ≈ 18 halo
    passes/step) — correct but a real MPI cost. Could be halved by filling the stacked

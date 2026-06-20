@@ -137,11 +137,17 @@ def _compute_advection_flux_div(
     known limitation shared with MITgcm.
     """
     # Wall tracer BC (#480): zero-gradient (Neumann) fill the RECONSTRUCTION
-    # tracer over land so the flux-form face reconstructions (esp. the wide
-    # WENO stencil) see a flat extension across solid walls instead of the
-    # masked cold land cell (T=0).  The mass-flux carries the wall masking
-    # (zero normal flux), so this conserves the wet-domain tracer and is a
-    # strict no-op where there is no land.  ``None`` => disabled (legacy).
+    # tracer over the dead cells so the flux-form face reconstructions (esp. the
+    # wide WENO stencil) see a flat extension across solid walls / topographic
+    # steps instead of the masked cold cell (T=0).  The mass-flux carries the
+    # wall masking (zero normal flux), so this conserves the wet-domain tracer
+    # and is a strict no-op where there is no land.  ``None`` => disabled.
+    # NOTE: the filled ``tr`` feeds BOTH the horizontal AND the vertical
+    # reconstruction below; that is safe because neumann_fill_cgrid only
+    # overwrites DEAD cells (mask < 0.5) — every WET column is bit-identical, so
+    # the vertical flux differs only in dead cells, which the caller's
+    # active_3d / mass_flux gating discards.  (If a future caller passes a mask
+    # that modifies a wet cell, this invariant must be revisited.)
     if recon_fill_mask is not None:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             neumann_fill_cgrid,
@@ -328,16 +334,20 @@ def _compute_advection_flux_div_pair(
         )
 
     nlev = tr_a.shape[-1]
-    # Wall tracer BC (#480): fill the HORIZONTAL reconstruction tracer over
-    # land (see _compute_advection_flux_div).  Vertical advection (below) is
-    # per-column and never crosses a lateral wall, so it keeps the original
-    # tr_a/tr_b.  ``mask`` (n_lat, n_lon) broadcasts over the stacked levels.
+    # Wall tracer BC (#480): fill the HORIZONTAL reconstruction tracer over the
+    # dead cells (see _compute_advection_flux_div).  Vertical advection (below)
+    # is per-column, so it keeps the original tr_a/tr_b.  The mask is a 2D / 3D
+    # (singleton-level) mask that broadcasts over the stacked 2*nlev axis, or a
+    # full per-level (…,nlev) mask that must be re-stacked to (…,2*nlev).
     trs_h = jnp.concatenate([tr_a, tr_b], axis=-1)
     if recon_fill_mask is not None:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             neumann_fill_cgrid,
         )
-        trs_h = neumann_fill_cgrid(trs_h, recon_fill_mask, grid=grid)
+        mask_h = recon_fill_mask
+        if mask_h.ndim == trs_h.ndim and mask_h.shape[-1] == nlev:
+            mask_h = jnp.concatenate([mask_h, mask_h], axis=-1)
+        trs_h = neumann_fill_cgrid(trs_h, mask_h, grid=grid)
     trs = trs_h
     mfu2 = jnp.concatenate([mass_flux_u, mass_flux_u], axis=-1)
     mfv2 = jnp.concatenate([mass_flux_v, mass_flux_v], axis=-1)
@@ -2404,12 +2414,16 @@ class LatLonCGridOceanModel:
             # an un-dissipatable grid mode at free-slip walls (the §5
             # eddy-permitting blow-up).  Oceananigans' clean grid-edge wall
             # has no such cold cell.  Faithful cure: zero-gradient (Neumann)
-            # fill the tracer over land INSIDE the reconstruction (see
-            # _compute_advection_flux_div) so the stencil sees a flat
-            # extension = the physical no-flux insulating wall, while the
-            # flux-form UPDATE / gating below keeps the ORIGINAL land value.
+            # fill the tracer over the DEAD cells INSIDE the reconstruction (see
+            # _compute_advection_flux_div) so the stencil sees a flat extension
+            # = the physical no-flux insulating wall, while the flux-form
+            # UPDATE / gating below keeps the ORIGINAL dead-cell value.  Use the
+            # per-level ``active_3d`` (= is_active) mask, NOT the 2D surface
+            # land_mask, so the fill also cleans TOPOGRAPHIC-STEP dead cells in
+            # partial-cell runs (flat-bottom: active_3d is (n_lat,n_lon,1) and
+            # the fill is bit-identical to the 2D-mask path).
             _wall_fill_mask = (
-                mask if getattr(self.config, "tracer_wall_neumann_fill", True)
+                active_3d if getattr(self.config, "tracer_wall_neumann_fill", True)
                 else None
             )
 
