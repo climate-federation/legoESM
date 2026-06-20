@@ -982,6 +982,42 @@ def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int)
 # the shared gradient_{x,y}_3d_core (no re-derived numerics).
 # ---------------------------------------------------------------------------
 
+def _tiled_scalar_horiz_advect(field_t, u_cell, v_cell, dx_t, dy_t,
+                               scalar_body, offs):
+    """``-(u . grad field)`` for a cell-centre scalar (or packed tracer block) on
+    one tile.
+
+    THE shared horizontal scalar-advection: in-stage scalar halo
+    (``scalar_body``, the ndim=4 ``make_tiled_pad_body``) -> centred cc gradients
+    (``gradient_{x,y}_3d_core``) -> advective form.  Used by the thermodynamic
+    stage (temperature), the single-tracer stage, AND the packed tracer stage so
+    the identical numerics live in one place (no per-field copy-paste).
+
+    ``field_t`` is a single tile, either ``(1, nl, nl, nlev)`` (a scalar: T or one
+    tracer) or ``(1, nl, nl, nlev, n_tracers)`` (a packed tracer block).
+    ``u_cell``/``v_cell`` are the cc winds ``(1, nl, nl, nlev)``; ``dx_t``/
+    ``dy_t`` the tile cc metrics ``(1, nl, nl)``.  For the packed case the tracer
+    axis is folded into the level axis for ONE halo + gradient pass (mirroring the
+    serial ``advective_tracer_tendency`` ``q_flat`` reshape), then unfolded for the
+    per-tracer ``-(u[...,None] . grad q)`` advect.  Returns the input's shape.
+    """
+    from legoesm.core.operators_3d import gradient_x_3d_core, gradient_y_3d_core
+    packed = field_t.ndim == 5
+    if packed:
+        nlev, nt = field_t.shape[-2], field_t.shape[-1]
+        f_flat = field_t.reshape(*field_t.shape[:3], nlev * nt)  # fold -> ndim 4
+    else:
+        f_flat = field_t
+    f_pad = scalar_body(f_flat[0], offs)[None]            # (1, nl+2, nl+2, C)
+    df_dx = gradient_x_3d_core(f_pad, dx_t)
+    df_dy = gradient_y_3d_core(f_pad, dy_t)
+    if packed:
+        df_dx = df_dx.reshape(*field_t.shape)             # unfold -> ndim 5
+        df_dy = df_dy.reshape(*field_t.shape)
+        return -(u_cell[..., None] * df_dx + v_cell[..., None] * df_dy)
+    return -(u_cell * df_dx + v_cell * df_dy)
+
+
 def make_tiled_fv3_hydrostatic_thermo_stage_2d(mesh, cdgrid, coord, n: int,
                                               kt: int, nlev: int, *,
                                               p_floor: float):
@@ -1092,13 +1128,11 @@ def make_tiled_fv3_hydrostatic_thermo_stage_2d(mesh, cdgrid, coord, n: int,
         # Each is bit-identical to the global op's pad_halo_4d (the single-device
         # reference path the gate composes); the production packs T + ln_ps into
         # ONE collective — coalescing here is a perf-only change to the SAME pads.
-        T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
         lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
 
-        # ---- horizontal advection: -(u . grad T) (centred cc gradients) ----
-        dT_dx = gradient_x_3d_core(T_pad, dx_t)                # (1, nl, nl, nlev)
-        dT_dy = gradient_y_3d_core(T_pad, dy_t)
-        horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
+        # ---- horizontal advection: -(u . grad T) (shared scalar advect) ----
+        horiz_adv_T = _tiled_scalar_horiz_advect(
+            T_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs)
 
         # ---- adiabatic: kappa*T*omega/p + kappa*T*(v . grad ln p_s) ----
         dln_ps_dx = gradient_x_3d_core(lnps_pad, dx_t)[..., 0]  # (1, nl, nl)
@@ -1121,6 +1155,274 @@ def make_tiled_fv3_hydrostatic_thermo_stage_2d(mesh, cdgrid, coord, n: int,
                       omega=(omega, (n, n, nlev)),
                       vert_adv_T=(vert_adv_T, (n, n, nlev)))
         return _body(u_d, v_d, T, p_s, omega, vert_adv_T, dx, dy, offsets)
+
+    return stage
+
+
+def make_tiled_fv3_tracer_advection_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                             nlev: int):
+    """Tiled advective tracer tendency on a ``(6, kt, kt)`` mesh
+    (axes ``("face","tile_i","tile_j")``) — the cube-MOIST np>6 unlock.
+
+    Returns ``stage(u_d, v_d, q, vert_adv_q) -> dq_dt`` for ONE cc tracer ``q``
+    ``(6, n, n, nlev)``: the SAME advective horizontal transport the
+    thermodynamic stage applies to temperature (``-(u . grad q)`` via the shared
+    in-stage scalar halo + centred cc gradients), PLUS the per-column-local
+    vertical advection ``vert_adv_q`` (an upstream cc-local stage output, exactly
+    like ``vert_adv_T``).  Tiled analogue of the serial
+    ``advective_tracer_tendency`` (FV3 cube moist transport), base case
+    ``hyperdiff_coeff=0`` — q_v/q_c/q_r ride this instead of the replicated
+    ``step_with_physics`` path that caps cube-moist at np<=6.
+
+    Inputs FACE-SHARDED, TILE-REPLICATED (``P("face",None,None,None)``):
+    ``u_d``/``v_d`` D-grid CORNER winds ``(6, n+1, n+1, nlev)``; ``q``/
+    ``vert_adv_q`` cc ``(6, n, n, nlev)``.  Output ``dq_dt`` ``(6, n, n, nlev)``
+    is the EXACT cc partition (``P("face","tile_i","tile_j",None)``), gathered ==
+    the global ``dq/dt``.  No new numerics — reuses ``dgrid_to_center_vector`` +
+    the shared ``_tiled_scalar_horiz_advect``.
+    """
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_tracer_advection_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_tracer_advection_stage_2d: base cut supports the "
+            "orthogonal-rotation (non-duogrid) cube only; the in-stage scalar "
+            "halo does not carry the duogrid kinked->extended remap.")
+    nl = n // kt
+    dx = grid.dx                                   # (6, n, n)
+    dy = grid.dy
+    offsets = grid.halo_interp_offsets             # (6, 4, n) — non-duogrid
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+
+    fw = P("face", None, None, None)               # 4D state
+    fo = P("face", None, None)                     # 2D cc metric
+    co = P("face", "tile_i", "tile_j", None)       # 4D cc output (exact partition)
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fw)             # u_d, v_d, q, vert_adv_q
+                       + (fo, fo)                   # dx, dy
+                       + (P(),),                    # offsets (replicated)
+             out_specs=co, check_vma=False)
+    def _body(u_d, v_d, q, vert_adv_q, dx_, dy_, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        q_t = _s(q, nl, nl)                        # (1, nl, nl, nlev) cc
+        vadv_t = _s(vert_adv_q, nl, nl)            # (1, nl, nl, nlev) cc
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+
+        # cc velocity (within-face 4-pt avg; NO halo — like the thermo stage).
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)
+        horiz = _tiled_scalar_horiz_advect(
+            q_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs)
+        return horiz + vadv_t
+
+    def stage(u_d, v_d, q, vert_adv_q):
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)),
+                      q=(q, (n, n, nlev)),
+                      vert_adv_q=(vert_adv_q, (n, n, nlev)))
+        return _body(u_d, v_d, q, vert_adv_q, dx, dy, offsets)
+
+    return stage
+
+
+def make_tiled_fv3_tracer_pack_advection_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                                  nlev: int):
+    """Tiled advective tendency for a PACKED tracer block on a ``(6, kt, kt)``
+    mesh (axes ``("face","tile_i","tile_j")``) — increment 2 of the cube-MOIST
+    np>6 step.
+
+    Returns ``stage(u_d, v_d, q, vert_adv_q) -> dq_dt`` where ``q``/``vert_adv_q``
+    are ``(6, n, n, nlev, n_tracers)`` (e.g. q_v/q_c/q_r): each tracer advected by
+    ``-(u . grad q)`` with the tracer axis folded into the level axis for ONE
+    in-stage scalar halo + gradient pass (mirroring serial
+    ``advective_tracer_tendency``'s ``q_flat`` reshape), then per-column
+    ``vert_adv_q`` added.  Same numerics as the single-tracer stage (the shared
+    ``_tiled_scalar_horiz_advect`` packed branch); ``n_tracers`` is dynamic (the
+    5-D specs carry any trailing size).  Output ``dq_dt``
+    ``(6, n, n, nlev, n_tracers)`` is the EXACT cc partition
+    (``P("face","tile_i","tile_j",None,None)``), gathered == the global dq/dt.
+    """
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_tracer_pack_advection_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_tracer_pack_advection_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    nl = n // kt
+    dx = grid.dx
+    dy = grid.dy
+    offsets = grid.halo_interp_offsets
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+
+    fw = P("face", None, None, None)               # 4D corner winds
+    fw5 = P("face", None, None, None, None)         # 5D packed tracer block
+    fo = P("face", None, None)                     # 2D cc metric
+    co5 = P("face", "tile_i", "tile_j", None, None)  # 5D cc output (exact partition)
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw5, fw5)           # u_d, v_d, q, vert_adv_q
+                       + (fo, fo)                   # dx, dy
+                       + (P(),),                    # offsets (replicated)
+             out_specs=co5, check_vma=False)
+    def _body(u_d, v_d, q, vert_adv_q, dx_, dy_, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        q_t = _s(q, nl, nl)                        # (1, nl, nl, nlev, nt) cc
+        vadv_t = _s(vert_adv_q, nl, nl)            # (1, nl, nl, nlev, nt) cc
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
+        horiz = _tiled_scalar_horiz_advect(
+            q_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs)  # packed branch
+        return horiz + vadv_t
+
+    def stage(u_d, v_d, q, vert_adv_q):
+        if q.ndim != 5 or vert_adv_q.shape != q.shape:
+            raise ValueError(
+                "make_tiled_fv3_tracer_pack_advection_stage_2d: q and vert_adv_q "
+                f"must be (6,n,n,nlev,n_tracers); got q={q.shape}, "
+                f"vert_adv_q={vert_adv_q.shape}")
+        nt = q.shape[-1]
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)),
+                      q=(q, (n, n, nlev, nt)),
+                      vert_adv_q=(vert_adv_q, (n, n, nlev, nt)))
+        return _body(u_d, v_d, q, vert_adv_q, dx, dy, offsets)
+
+    return stage
+
+
+def make_tiled_fv3_moist_tracer_tendency_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                                  nlev: int, *,
+                                                  column_tracer_physics_fn):
+    """Tiled MOIST tracer tendency on a ``(6, kt, kt)`` mesh — increment 3 of the
+    cube-MOIST np>6 step.
+
+    Returns ``stage(u_d, v_d, T, p_s, q_pack, vert_adv_q) -> dq_pack`` where
+    ``q_pack``/``vert_adv_q`` are ``(6, n, n, nlev, 3)`` with the tracer order
+    ``[q_v, q_c, q_r]``.  Combines the sub-face tiled advection
+    (``-(u . grad q) + vert_adv_q``, the increment-2 packed path) with an INJECTED
+    per-tile column physics
+    ``column_tracer_physics_fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t) -> (dq_v, dq_c,
+    dq_r)`` (each ``(1, nl, nl, nlev)``) added to the advected pack.  Dependency
+    injection keeps this core stage PHYSICS-AGNOSTIC: the caller builds the fn
+    from a column-local scheme (e.g.
+    ``legoesm.atmosphere.kessler_forcing.kessler_column_tendencies`` with
+    sigma_coord/dt/config closed over).  Warm-rain microphysics is column-local
+    (no halo) so the per-tile call is bit-identical to a global apply.  Output
+    ``dq_pack`` ``(6, n, n, nlev, 3)`` is the EXACT cc partition
+    (``P("face","tile_i","tile_j",None,None)``), gathered == the global moist
+    tracer tendency (dynamics + physics).
+    """
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if column_tracer_physics_fn is None:
+        raise ValueError(
+            "make_tiled_fv3_moist_tracer_tendency_stage_2d: "
+            "column_tracer_physics_fn is required (inject a column-local physics, "
+            "e.g. built from kessler_column_tendencies).")
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_moist_tracer_tendency_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_moist_tracer_tendency_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    nl = n // kt
+    dx = grid.dx
+    dy = grid.dy
+    offsets = grid.halo_interp_offsets
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    _phys = column_tracer_physics_fn
+
+    fw = P("face", None, None, None)               # 4D corner winds / T
+    fw5 = P("face", None, None, None, None)         # 5D packed tracer block
+    fo = P("face", None, None)                     # 2D cc metric / p_s
+    co5 = P("face", "tile_i", "tile_j", None, None)  # 5D cc output
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fw5, fw5)   # u_d, v_d, T, p_s, q, vert_adv_q
+                       + (fo, fo)                   # dx, dy
+                       + (P(),),                    # offsets (replicated)
+             out_specs=co5, check_vma=False)
+    def _body(u_d, v_d, T, p_s, q, vert_adv_q, dx_, dy_, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        u_d_t = _s(u_d, nl + 1, nl + 1)            # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        T_t = _s(T, nl, nl)                        # (1, nl, nl, nlev) cc
+        p_s_t = _s(p_s, nl, nl)                    # (1, nl, nl) cc
+        q_t = _s(q, nl, nl)                        # (1, nl, nl, nlev, 3) cc
+        vadv_t = _s(vert_adv_q, nl, nl)
+        dx_t = _s(dx_, nl, nl)
+        dy_t = _s(dy_, nl, nl)
+
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
+        adv = _tiled_scalar_horiz_advect(
+            q_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs) + vadv_t
+        # Injected per-tile column physics (column-local -> SPMD-local).
+        dq_v, dq_c, dq_r = _phys(T_t, p_s_t, q_t[..., 0], q_t[..., 1], q_t[..., 2])
+        phys_pack = jnp.stack([dq_v, dq_c, dq_r], axis=-1)  # (1, nl, nl, nlev, 3)
+        return adv + phys_pack
+
+    def stage(u_d, v_d, T, p_s, q, vert_adv_q):
+        if q.ndim != 5 or q.shape[-1] != 3 or vert_adv_q.shape != q.shape:
+            raise ValueError(
+                "make_tiled_fv3_moist_tracer_tendency_stage_2d: q and vert_adv_q "
+                "must be (6,n,n,nlev,3) with tracer order [q_v,q_c,q_r]; got "
+                f"q={q.shape}, vert_adv_q={vert_adv_q.shape}")
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)),
+                      T=(T, (n, n, nlev)), p_s=(p_s, (n, n)),
+                      q=(q, (n, n, nlev, 3)),
+                      vert_adv_q=(vert_adv_q, (n, n, nlev, 3)))
+        return _body(u_d, v_d, T, p_s, q, vert_adv_q, dx, dy, offsets)
 
     return stage
 
@@ -1285,7 +1587,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
 
     def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
                        cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
-                       dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs):
+                       dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs,
+                       q_pack_t=None, column_physics_fn=None):
         # ---- cc winds: dgrid_to_center_vector for B/thermo (within-face, NO
         #      halo); interp_corner_to_center (batched) for vertical advection.
         u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
@@ -1394,7 +1697,30 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         adiabatic = adiabatic + kappa * T_t * v_dot_grad_lnps
         dT_dt = horiz_adv_T + vert_adv_T + adiabatic
 
-        return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
+        if q_pack_t is None:
+            return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
+
+        # ---- MOIST tracer tendency + injected column physics (cube-MOIST np>6) ----
+        # Tracers advect by the IDENTICAL horizontal (shared scalar advect, same
+        # u_cell as T) + vertical (the SAME _vadv_drive = sigma_dot/mass_flux as
+        # vert_adv_T) operators the serial fv3_hydrostatic_tendencies applies
+        # (u_cell=dgrid_to_center_vector at :315; _tracer_vert_fn=vertical_advection
+        # (·, sigma_dot) at :811).  Column physics (e.g. Kessler) is injected so
+        # core stays physics-agnostic; its dT rides into dT_dt and its tracer rates
+        # add to the advected pack (serial add primitive_eq_cdgrid.py:1188/1195).
+        dq_horiz = _tiled_scalar_horiz_advect(
+            q_pack_t, u_cell, v_cell, dx_t, dy_t, scalar_body, offs)
+        q_lead = jnp.moveaxis(q_pack_t, -1, 0)            # (nt, 1, nl, nl, nlev)
+        if _hybrid:
+            vadv_q_lead = _vadv(q_lead, _vadv_drive, p_s_t, coord)
+        else:
+            vadv_q_lead = _vadv(q_lead, _vadv_drive, coord)
+        vert_adv_q = jnp.moveaxis(vadv_q_lead, 0, -1)     # (1, nl, nl, nlev, nt)
+        dT_k, dq_v, dq_c, dq_r = column_physics_fn(
+            T_t, p_s_t, q_pack_t[..., 0], q_pack_t[..., 1], q_pack_t[..., 2])
+        phys_pack = jnp.stack([dq_v, dq_c, dq_r], axis=-1)  # (1, nl, nl, nlev, 3)
+        dq_pack = dq_horiz + vert_adv_q + phys_pack
+        return du_d_dt, dv_d_dt, dT_dt + dT_k, dp_s_dt, dq_pack
 
     def _slice_metrics(_s, cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco,
                        cosau, dx_, dy_, ca, sa, capf, sapf):
@@ -1545,6 +1871,26 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 # gated by bit-identity, not wall-clock.
 # ===========================================================================
 
+def _ssp_rk3_tile_step(s0, F, dt):
+    """SSP-RK3 (Shu-Osher; timestepping/ssp_rk3.py) on a tuple of tile-local
+    state arrays.  ``F(s_tuple)`` returns the matching tuple of tendencies;
+    pointwise tile-local combines (no halo — the halos live inside ``F``).
+    Shared by the dry (4-tuple) and moist (5-tuple) tiled steps so the RK3
+    weights/order live in ONE place (no per-arity copy).  Bit-identical to the
+    prior explicit dry combine."""
+    def _euler(s):
+        f = F(s)
+        return tuple(x + dt * fi for x, fi in zip(s, f))
+
+    def _blend(a, s, b, e):
+        return tuple(a * x + b * y for x, y in zip(s, e))
+
+    s1 = _euler(s0)                                    # s0 + dt F(s0)
+    s2 = _blend(0.75, s0, 0.25, _euler(s1))            # 3/4 s0 + 1/4 (s1 + dt F)
+    s3 = _blend(1.0 / 3.0, s0, 2.0 / 3.0, _euler(s2))  # 1/3 s0 + 2/3 (s2 + dt F)
+    return s3
+
+
 def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
                                             kt: int, nlev: int, *,
                                             p_floor: float, dt: float):
@@ -1646,34 +1992,159 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
         T0 = _s(T, nl, nl)
         ps0 = _s(p_s, nl, nl)
 
-        def _F(ud, vd, Tt, ps):
-            return _tile_tendency(ud, vd, Tt, ps, phis_t, *mt)
+        def _F(s):
+            return _tile_tendency(s[0], s[1], s[2], s[3], phis_t, *mt)
 
-        # SSP-RK3 (timestepping/ssp_rk3.py) — pointwise tile-local combines.
-        du, dv, dTt, dps = _F(ud0, vd0, T0, ps0)          # k1 = s0 + dt*F(s0)
-        ud1 = ud0 + _dt * du
-        vd1 = vd0 + _dt * dv
-        T1 = T0 + _dt * dTt
-        ps1 = ps0 + _dt * dps
-
-        du, dv, dTt, dps = _F(ud1, vd1, T1, ps1)          # k2 = 3/4 s0 + 1/4(k1+dt*F)
-        ud2 = 0.75 * ud0 + 0.25 * (ud1 + _dt * du)
-        vd2 = 0.75 * vd0 + 0.25 * (vd1 + _dt * dv)
-        T2 = 0.75 * T0 + 0.25 * (T1 + _dt * dTt)
-        ps2 = 0.75 * ps0 + 0.25 * (ps1 + _dt * dps)
-
-        du, dv, dTt, dps = _F(ud2, vd2, T2, ps2)          # k3 = 1/3 s0 + 2/3(k2+dt*F)
-        ud3 = (1.0 / 3.0) * ud0 + (2.0 / 3.0) * (ud2 + _dt * du)
-        vd3 = (1.0 / 3.0) * vd0 + (2.0 / 3.0) * (vd2 + _dt * dv)
-        T3 = (1.0 / 3.0) * T0 + (2.0 / 3.0) * (T2 + _dt * dTt)
-        ps3 = (1.0 / 3.0) * ps0 + (2.0 / 3.0) * (ps2 + _dt * dps)
-        return ud3, vd3, T3, ps3
+        # SSP-RK3 (shared _ssp_rk3_tile_step) — pointwise tile-local combines.
+        return _ssp_rk3_tile_step((ud0, vd0, T0, ps0), _F, _dt)
 
     def step(u_d, v_d, T, p_s, phis):
         _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
                       v_d=(v_d, (n + 1, n + 1, nlev)), T=(T, (n, n, nlev)),
                       p_s=(p_s, (n, n)), phis=(phis, (n, n)))
         return _step_body(u_d, v_d, T, p_s, phis,
+                          cosa_corner, dx_edge_y, dy_edge_x, area,
+                          gc00, gc01, gc10, gc11, f_corner, cosa_u,
+                          dx, dy, cos_a, sin_a, cap, sap, offsets)
+
+    return step
+
+
+def make_tiled_fv3_hydrostatic_moist_step_stage_2d(mesh, cdgrid, coord, n: int,
+                                                  kt: int, nlev: int, *,
+                                                  p_floor: float, dt: float,
+                                                  column_physics_fn):
+    """Full tiled MOIST SSP-RK3 STEP on a ``(6, kt, kt)`` mesh — increment 4, the
+    cube-MOIST np>6 capstone.
+
+    Returns ``step(u_d, v_d, T, p_s, phis, q_pack) -> (u_d, v_d, T, p_s, q_pack)``
+    advanced one ``dt`` with ``q_pack`` ``(6, n, n, nlev, 3)`` (tracer order
+    ``[q_v, q_c, q_r]``).  Threads the 5-tuple through the SAME SSP-RK3
+    (``_ssp_rk3_tile_step``) and the SAME tracer-aware tendency
+    (``_build_hydro_tile_tendency_fns``, ``q_pack_t``/``column_physics_fn`` given)
+    the dry step uses — dynamics tracer advection (horizontal + the SAME
+    ``sigma_dot``/``mass_flux`` vertical driver as T) + the INJECTED per-tile
+    ``column_tracer_physics_fn(T_t, p_s_t, q_v_t, q_c_t, q_r_t) -> (dT, dq_v,
+    dq_c, dq_r)`` (warm-rain; its dT rides into dT_dt).  A post-step
+    ``jnp.maximum(q, 0)`` floor matches the serial tracer floor
+    (primitive_eq_cdgrid.py:1758-1765).  Output staggering as the dry step plus
+    ``q_pack`` cc 5-D ``P("face","tile_i","tile_j",None,None)``; gathered == the
+    serial ``model.step_with_physics`` base cut.  sigma OR hybrid per ``coord``
+    (the injected physics may restrict — Kessler is sigma-only).
+    """
+    from legoesm.parallel.cubesphere_exchange import (
+        make_tiled_pad_body, make_tiled_pad_vector_body)
+
+    if column_physics_fn is None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_moist_step_stage_2d: column_physics_fn "
+            "is required (inject the column-local physics, e.g. built from "
+            "kessler_column_tendencies, returning (dT, dq_v, dq_c, dq_r)).")
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    _check_tiled_mesh(mesh, n, kt)
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_moist_step_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_moist_step_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only.")
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_moist_step_stage_2d: coord.n_levels="
+            f"{coord.n_levels} != nlev={nlev}")
+    if not (float(p_floor) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_moist_step_stage_2d: p_floor must be a "
+            f"positive pressure [Pa]; got {p_floor}")
+    if not (float(dt) > 0.0):
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_moist_step_stage_2d: dt must be a "
+            f"positive time step [s]; got {dt}")
+    nl = n // kt
+    _dt = float(dt)
+    _phys = column_physics_fn
+
+    # Static metrics (same as the dry step — face-sharded, tile-replicated).
+    cosa_corner = cdgrid.cosa_corner
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x
+    area = grid.area
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    f_corner = cdgrid.f_corner
+    cosa_u = cdgrid.cosa_u
+    dx, dy = grid.dx, grid.dy
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded
+    offsets = grid.halo_interp_offsets
+
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=4, halo=1, with_offsets=True)
+    _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+
+    fo = P("face", None, None)
+    fw = P("face", None, None, None)
+    fw5 = P("face", None, None, None, None)
+    cz = P("face", "tile_i", "tile_j", None)       # corner / cc 4D state out
+    co = P("face", "tile_i", "tile_j")             # p_s 2D cc state out
+    cz5 = P("face", "tile_i", "tile_j", None, None)  # q_pack 5D cc state out
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fo, fw5)     # u_d, v_d, T, p_s, phis, q
+                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
+                       + (fo,) * 4                  # gc00..gc11
+                       + (fo, fo)                   # f_corner, cosa_u
+                       + (fo, fo)                   # dx, dy
+                       + (fo,) * 4                  # cos_a, sin_a, cap, sap
+                       + (P(),),                    # offsets
+             out_specs=(cz, cz, cz, co, cz5), check_vma=False)
+    def _step_body(u_d, v_d, T, p_s, phis, q,
+                   cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
+                   dx_, dy_, ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        m = _slice_metrics(_s, cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco,
+                           cosau, dx_, dy_, ca, sa, capf, sapf)
+        mt = (m["cosa_c_t"], m["dxe_t"], m["dye_t"], m["ar_t"], m["gc"],
+              m["fco_t"], m["cosau_t"], m["dx_t"], m["dy_t"],
+              m["ca_t"], m["sa_t"], m["cap_t"], m["sap_t"], offs)
+
+        phis_t = _s(phis, nl, nl)
+        ud0 = _s(u_d, nl + 1, nl + 1)
+        vd0 = _s(v_d, nl + 1, nl + 1)
+        T0 = _s(T, nl, nl)
+        ps0 = _s(p_s, nl, nl)
+        q0 = _s(q, nl, nl)                          # (1, nl, nl, nlev, 3)
+
+        def _F(s):
+            return _tile_tendency(s[0], s[1], s[2], s[3], phis_t, *mt,
+                                  q_pack_t=s[4], column_physics_fn=_phys)
+
+        ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
+            (ud0, vd0, T0, ps0, q0), _F, _dt)
+        q3 = jnp.maximum(q3, 0.0)                   # post-step tracer floor
+        return ud3, vd3, T3, ps3, q3
+
+    def step(u_d, v_d, T, p_s, phis, q):
+        if q.ndim != 5 or q.shape[-1] != 3:
+            raise ValueError(
+                "make_tiled_fv3_hydrostatic_moist_step_stage_2d: q must be "
+                f"(6,n,n,nlev,3) [q_v,q_c,q_r]; got {q.shape}")
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)), T=(T, (n, n, nlev)),
+                      p_s=(p_s, (n, n)), phis=(phis, (n, n)),
+                      q=(q, (n, n, nlev, 3)))
+        return _step_body(u_d, v_d, T, p_s, phis, q,
                           cosa_corner, dx_edge_y, dy_edge_x, area,
                           gc00, gc01, gc10, gc11, f_corner, cosa_u,
                           dx, dy, cos_a, sin_a, cap, sap, offsets)

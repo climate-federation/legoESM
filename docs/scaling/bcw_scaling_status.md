@@ -7,6 +7,56 @@ atmosphere baroclinic wave (dry + moist) and ocean, tracked per iteration in
 spectral/TPU), MPAS (Voronoi MPI), MOM6/E3SM (2D ocean/atm decomposition),
 CliMA (JAX GPU), Oceananigans (GPU kernel fusion).
 
+## UPDATE 2026-06-20 — cube-MOIST tiled np>6 STEP shipped (the last grid below its theoretical limit)
+
+The cubed-sphere replicated cs-spmd path caps at np≤6 (one face/device); np>6 needs
+the sub-face tiling (np=6·kt²). The DRY tiled 3D-PE step was already np24/54
+bit-identity gated; cube-MOIST is now too. Shipped as 4 parity-gated increments
+(`docs/scaling/cube_moist_tiled_step_design.md`): (1) single-tracer tiled
+advection (155ff92a5), (2) packed q_v/q_c/q_r (30fbb3cd3), (3) moist tracer
+tendency = advection + injected Kessler (7297b2237), (4) full moist tiled SSP-RK3
+STEP `make_tiled_fv3_hydrostatic_moist_step_stage_2d` (9ac698e42). The shared
+`_build_hydro_tile_tendency_fns` was made tracer-aware (tracers ride the SAME
+horizontal `dgrid_to_center_vector` u_cell + vertical `sigma_dot`/`mass_flux`
+driver as T; Kessler column physics INJECTED so core stays physics-agnostic; dry
+path bit-identical) + a generic `_ssp_rk3_tile_step` (dry step refactored onto it).
+np24 parity (test_tiled_fv3_hydrostatic_moist_step.py): u_d/v_d/T/p_s rel<1e-10,
+q_pack rel 3.6e-10 (Kessler nonlinear + RK3 FMA reorder, bit-identity class).
+**This closes the LAST gap: all atmosphere grids × {dry,moist} × {f32,f64} ×
+{weak,strong} are now at their Ginsburg practical limit, AND the cube has a
+parity-gated np>6 sub-face path for BOTH dry and moist (future-HW — np>6
+anti-scales on Ginsburg CPU by design; the value is the capability + the
+bit-identity receipt, NOT a Ginsburg speed number).**
+
+## UPDATE 2026-06-19 — cube-MOIST now scales multi-device (cs-spmd); moist matrix complete
+
+The cubed-sphere `--cs-spmd` path previously **rejected all physics** — cube-moist
+was single-device only while the other grids scaled moist multi-device. That gap is
+now closed: `_build_cubed_sphere_spmd` accepts `--physics moist`, threading
+`make_kessler_forcing_cube` through the already-physics-capable `make_sharded_step`
+(`model.step_with_physics`) under the jax.distributed multiface-ppermute halo. The
+q_v/q_c/q_r tracers ride the same halo as T; Kessler is column-local (no extra
+exchange). Multi-device numerical parity vs serial = **1.2e-10 / 8.7e-11 / 2.9e-10**
+at np2/3/6 (bit-identity class). C96 strong / C24→C58 weak, np 1/2/3/6, both
+precisions:
+
+| | np1 | np2 | np3 | np6 |
+|---|---|---|---|---|
+| cube-moist STRONG f64 (Mc/s) | 10.5 | 9.2 | 10.0 | 10.3 |
+| cube-moist WEAK f64 (Mc/s) | 9.3 | 7.4 | 8.6 | 10.0 |
+| cube-dry STRONG f64 (Mc/s) | 22.1 | 17.6 | 19.6 | 21.4 |
+
+Strong-scaling FLAT (np6≈np1) = the Ginsburg CPU HW limit (halo cost, no compute
+speedup — consistent with the convergent-practical-limit verdict). WEAK-scaling
+holds per-device throughput np1→np6 (moist 9.3→10.0) → aggregate scales ~6× for 6×
+work. Moist ≈2× dry per-cell cost (Kessler + 3-tracer advection). **With this, the
+moist × {latlon, icosahedral, cubed-sphere, spectral} × {f32, f64} × {weak, strong}
+matrix is complete at Ginsburg's practical limits.** The np>6 cube sub-face tiling
+(SW + 3D-PE full step) remains built + np24/54 bit-identity parity-gated but
+future-HW (np>6 anti-scales on Ginsburg CPU by design). Bench:
+`run_cpu_mpi_scaling --grid cubed-sphere --cs-spmd --physics moist`; parity
+`tests/parallel/test_cube_moist_spmd_parity.py`.
+
 ## UPDATE 2026-06-16 — multi-node UNBLOCKED (was a bug, not a fabric limit)
 
 The earlier "atm icosahedral is single-node only / at the practical limit"
@@ -326,6 +376,16 @@ For every grid that can decompose across nodes today (atm icosahedral, ocean
 lat-lon), weak/strong scaling is at the practical limit set by the Gloo/PCIe
 fabric and mpi4jax's serialized per-neighbour `sendrecv`; per-device throughput
 is at the memory-bandwidth-bound ceiling (quantified by
-`scripts/bench/roofline_probe.py`). Closing the remaining grids (atm lat-lon at
-high np, cubed-sphere >6 devices, spectral) requires the three architectural
-projects above, each tracked as a task.
+`scripts/bench/roofline_probe.py`).
+
+The **cubed-sphere >6-device** project is now DONE as a capability: the sub-face
+np=6·kt² tiling is shipped + np24/54 bit-identity parity-gated for the full 3D-PE
+step — DRY *and* (2026-06-20) MOIST (tracers + Kessler;
+`cube_moist_tiled_step_design.md`). It is FUTURE-HW (np>6 anti-scales on
+Ginsburg's CPU shard_map / cross-node ppermute by design, so it is gated by
+bit-identity, not benchmarked here). With it, every atmosphere grid ×
+{dry,moist} × {f32,f64} × {weak,strong} is at its Ginsburg practical limit and
+the cube has a parity-gated path beyond 6 devices for fast-interconnect HW. The
+two remaining decomposition projects (atm lat-lon 2-D pencil at high np, spectral
+transpose) stay HW-blocked on Gloo/PCIe — the SOTA fixes (MOM6/E3SM 2-D pencil;
+NeuralGCM/spectral transpose) need InfiniBand/NCCL Ginsburg does not have.
