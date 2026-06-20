@@ -268,6 +268,42 @@ def test_momentum_diffusivity_projects_misaligned_flux():
     np.testing.assert_allclose(np.asarray(Km_a), np.asarray(Km_b))  # v-flux ignored
 
 
+def test_momentum_diffusivity_recovers_km_with_veering_wind():
+    """K_m is the VECTOR least-squares projection ``K_m = -(F·S)/|S|²``.  Every other
+    momentum-diffusivity test has v-shear ZERO, so a regression dropping the v-component
+    from EITHER the numerator (``w_v·dv_dz``) OR the denominator (``dv_dz²``) would pass
+    them all yet be wrong for a veering wind — and C_K (the primary corrected
+    coefficient) is built on this K_m.  Lock it: a wind veering with height (shear in
+    BOTH u and v), perfectly down-gradient flux ``F = -Km0·S``, must recover Km0, which
+    holds only if both shear components enter both terms.  (Drop ``dv_dz²`` → K_m =
+    Km0·(a²+b²)/a² ≠ Km0; drop ``w_v·dv_dz`` → K_m = Km0·a²/(a²+b²) ≠ Km0.)"""
+    z = jnp.array([0.0, 100.0, 200.0, 300.0])
+    a, b, km0 = 0.01, 0.02, 5.0                # shear vector S = (a, b), both nonzero
+    u, v = a * z, b * z                         # linear ⇒ constant shear (a, b)
+    w_u = jnp.full((3,), -km0 * a)              # F = -Km0·S, exactly down-gradient
+    w_v = jnp.full((3,), -km0 * b)
+    Km, valid = momentum_diffusivity_from_fluxes(w_u, w_v, u, v, z)
+    assert bool(jnp.all(valid))
+    np.testing.assert_allclose(np.asarray(Km), km0, rtol=1e-5)
+
+
+def test_momentum_diffusivity_discards_cross_shear_flux_under_veering_wind():
+    """The projection keeps ONLY the along-shear flux: adding a flux component
+    ORTHOGONAL to a veering shear vector ``S=(a,b)`` — i.e. along ``(-b, a)`` — must
+    leave K_m unchanged (a scalar viscosity cannot represent the cross-shear part).
+    Complements the u-only projection test with genuinely 2-D shear."""
+    z = jnp.array([0.0, 100.0, 200.0, 300.0])
+    a, b, km0 = 0.01, 0.02, 5.0
+    u, v = a * z, b * z
+    w_u = jnp.full((3,), -km0 * a)
+    w_v = jnp.full((3,), -km0 * b)
+    c = 0.03                                    # cross-shear amplitude along (-b, a) ⟂ (a, b)
+    Km_base, _ = momentum_diffusivity_from_fluxes(w_u, w_v, u, v, z)
+    Km_cross, _ = momentum_diffusivity_from_fluxes(
+        w_u + c * (-b), w_v + c * a, u, v, z)
+    np.testing.assert_allclose(np.asarray(Km_cross), np.asarray(Km_base), rtol=1e-6)
+
+
 def test_momentum_diffusivity_countergradient_invalid():
     z = jnp.array([0.0, 100.0, 200.0])
     u = 0.01 * z
