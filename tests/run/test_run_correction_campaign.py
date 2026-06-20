@@ -1407,6 +1407,39 @@ def test_compose_compare_fn_threads_valid_mask_and_manifest_reducer(monkeypatch)
     assert captured["n_worst"] == 2                  # (sanity: other args also threaded)
 
 
+def test_compose_compare_fn_threads_coordinate_for_hybrid_weights(monkeypatch):
+    """compose_compare_fn must pass ``coordinate=sigma`` THROUGH to make_compare_fn so
+    the per-run layer pressures (hence the bias MASS WEIGHTS) are hybrid-correct
+    (iter 337/338).  A dropped pass-through would silently revert the campaign compare
+    to PURE-SIGMA weights — the exact iter-337 over-terrain mis-weighting (~276% upper-
+    level over-weighting at p_s≠p_ref) — and NO fast test would catch it: the
+    ``make_compare_fn`` unit test supplies ``coordinate`` explicitly, so it cannot see
+    a campaign-side drop.  This is the campaign-level regression guard for that fix."""
+    from types import SimpleNamespace
+
+    import scripts.run.run_correction_campaign as rcc
+
+    captured = {}
+
+    def fake_make_compare_fn(**kwargs):
+        captured.update(kwargs)
+        return lambda config: None
+
+    monkeypatch.setattr(rcc, "make_compare_fn", fake_make_compare_fn)
+    sigma = SimpleNamespace(sigma_full=jnp.zeros(5), sigma_half=jnp.zeros(6))
+    compose_compare_fn(
+        base_atm_config=_base_config(),          # turbulence="clubb_lite" (required)
+        build_base_driver=(lambda cfg: object()),
+        extract_column_state=(lambda d, day, dt: None),
+        reference=object(), sigma=sigma, area_weights=jnp.ones(3), n_worst=2,
+        lat_deg=jnp.zeros(3), lon_deg=jnp.zeros(3),
+    )
+    # The coordinate is threaded as the SAME object (⇒ make_compare_fn derives hybrid
+    # pressures from it); a None here would be the silent pure-sigma fallback.
+    assert captured["coordinate"] is sigma
+    assert captured["coordinate"] is not None
+
+
 def test_make_clubb_build_driver_injects_override():
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 
