@@ -879,6 +879,23 @@ def _resolve_coupled_preset(args):
     return PRESETS[args.coupled_preset]()
 
 
+# A climatology window (in CONFIG days) at/above which a missing spin-up exclusion is worth
+# warning about — below this it is a quick test, not a climatology (campaign-control judgment).
+_SPINUP_WARN_DAYS = 5
+
+
+def _spinup_warning_line(spinup_days, days) -> str | None:
+    """The spin-up reminder for a multi-day climatology run with NO spin-up exclusion (iter
+    447): the time-mean would include the un-equilibrated transient (iter 445/446).  Returns
+    the note string, or ``None`` when --spinup-days is set OR the run is a short test."""
+    if float(spinup_days or 0.0) <= 0.0 and int(days or 0) >= _SPINUP_WARN_DAYS:
+        return (f"[campaign] NOTE: --spinup-days 0 — the {int(days)}-day climatology time-mean "
+                "INCLUDES the un-equilibrated model spin-up (iter 445/446 saw a 91 K aloft bias "
+                "in a 1-day run). Set --spinup-days (e.g. a few tens of days, << --days) so the "
+                "loop targets the EQUILIBRATED bias.")
+    return None
+
+
 def _build_run_setup(args):
     """The run-setup preamble SHARED by the campaign + OSSE CLIs (CLAUDE.md: no duplicate
     wiring): load the base config/grid/sigma, build the mode-specific driver builder +
@@ -894,6 +911,9 @@ def _build_run_setup(args):
     from legoesm.driver.model_driver import ModelDriver
 
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
+    _warn = _spinup_warning_line(getattr(args, "spinup_days", 0.0), getattr(base_cfg, "days", 0))
+    if _warn:
+        print(_warn, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(
         args.mode, coupled_preset=_resolve_coupled_preset(args), ocean_grid=None)
     n_steps = _les_n_steps(args.les_hours, args.les_dt)

@@ -3321,6 +3321,18 @@ def test_campaign_knobs_from_args_maps_flags():
     assert flagged["feedback_strategy"] == "environment"
 
 
+def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
+    """A multi-day climatology with --spinup-days 0 warns the operator (the time-mean would
+    include the un-equilibrated spin-up, iter 445/446); a set --spinup-days OR a short test
+    run is silent (no noise on a quick smoke)."""
+    from scripts.run.run_correction_campaign import _SPINUP_WARN_DAYS, _spinup_warning_line
+
+    w = _spinup_warning_line(0.0, _SPINUP_WARN_DAYS)       # multi-day, no exclusion → warns
+    assert w is not None and "spin-up" in w and f"{_SPINUP_WARN_DAYS}-day" in w
+    assert _spinup_warning_line(10.0, 90) is None          # --spinup-days set → silent
+    assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
+
+
 def test_campaign_knobs_reject_degenerate_counts():
     """A non-positive --n-worst (ranks NOTHING) or --les-budget (runs NO LES) must FAIL
     LOUD at construction — caught by the launch dry-run, not after a multi-day no-op run

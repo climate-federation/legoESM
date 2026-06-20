@@ -104,7 +104,18 @@ checkpoint — submit **once** for a multi-day run.
 first N days of model time (the un-equilibrated spin-up) from the time-mean BEFORE comparing to
 ERA5, so the loop targets the *equilibrated* bias — not a spin-up-contaminated one (iter 445 saw
 a 91 K aloft T-bias in a 1-day run that is largely spin-up). Keep `--days` (the CONFIG run length)
-enough longer than `SPINUP_DAYS` for a stable post-spin-up mean.
+enough longer than `SPINUP_DAYS` for a stable post-spin-up mean. (A multi-day `--days` with
+`SPINUP_DAYS=0` prints a launch NOTE reminding you.)
+
+> **Insolation season — a tracked comparability limitation (iter 447, CODEX PENDING).** The AMIP
+> **SST** is aligned to the ERA5 date (via the forcing), but the radiation **insolation** calendar
+> is NOT: the driver derives the day-of-year from `day_to_calendar(day)` (early-year/equinox), not
+> the ERA5 date — so a September comparison runs ~off-season insolation. It cannot be aligned via
+> `cfg.start_day` alone (that ALSO offsets the *relative* AMIP SST-forcing index, pushing the SST
+> out of range). This biases the **high-latitude** worst-column ranking most (where seasonal
+> insolation differs). A driver-level fix (decouple the insolation date from `cfg.start_day`) is
+> tracked; until then prefer an ERA5 window near the model's insolation season, or read
+> high-latitude worst columns with care.
 
 ```bash
 CONFIG=configs/amip_clubb_lite.json ERA5=/path/to/era5.zarr \
