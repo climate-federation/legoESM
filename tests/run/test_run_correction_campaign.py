@@ -758,6 +758,80 @@ def test_main_dry_run_end_to_end_on_synthetic_era5(tmp_path):
     assert rc == 0                       # full construction validated on synthetic data
 
 
+def _write_full_rda_archive(tmp_path):
+    """A full synthetic NCAR-RDA ERA5 archive — pl T/U/V/Q at the 13 WB2 pressure levels +
+    sfc SP/SSTK/CI — so main()'s offline COMPARE (open_local_era5_dataset) AND offline
+    FORCING (build_era5_amip_forcing) both read the SAME local archive (iter 425)."""
+    import xarray as xr
+    from legoesm.training.era5_to_state import WB2_PRESSURE_LEVELS
+
+    nlat, nlon = 6, 8
+    lat = np.linspace(90.0, -90.0, nlat)        # ERA5 order: descending
+    lon = np.linspace(0.0, 315.0, nlon)
+    lev = np.array(WB2_PRESSURE_LEVELS, dtype="f4")     # hPa, the compare's default levels
+    t_sfc = (np.datetime64("2020-01-01T00")
+             + np.arange(8) * np.timedelta64(1, "h")).astype("datetime64[ns]")
+    t_pl = t_sfc[:4]                            # the day's hourly pl times ⊂ the monthly sfc
+
+    def _pl(code, var, val):
+        data = np.full((4, len(lev), nlat, nlon), val, "f4")
+        xr.Dataset(
+            {var: (("time", "level", "latitude", "longitude"), data)},
+            coords={"time": t_pl, "level": lev, "latitude": lat, "longitude": lon},
+        ).to_netcdf(tmp_path / f"e5.oper.an.pl.{code}.ll025sc.2020010100_2020010123.nc")
+
+    def _sfc(code, var, val, units=None):
+        attrs = {"units": units} if units else {}
+        xr.Dataset(
+            {var: (("time", "latitude", "longitude"),
+                   np.full((8, nlat, nlon), val, "f4"), attrs)},
+            coords={"time": t_sfc, "latitude": lat, "longitude": lon},
+        ).to_netcdf(tmp_path / f"e5.oper.an.sfc.{code}.ll025sc.2020010100_2020013123.nc")
+
+    _pl("128_130_t", "T", 250.0)
+    _pl("128_131_u", "U", 5.0)
+    _pl("128_132_v", "V", 2.0)
+    _pl("128_133_q", "Q", 0.001)
+    _sfc("128_134_sp", "SP", 1.0e5)
+    _sfc("128_034_sstk", "SSTK", 290.0, units="K")
+    _sfc("128_031_ci", "CI", 0.0, units="(0-1)")
+
+
+def test_main_dry_run_offline_amip_forcing_end_to_end(tmp_path, capsys):
+    """The COMPLETE turnkey offline-AMIP path through the REAL main() (iter 425): one local
+    NCAR-RDA archive supplies BOTH the SST/sea-ice FORCING (--amip-forcing-from-local-era5)
+    AND the compare REFERENCE (--local-era5-dir), fully offline.  main() exercises config
+    load → BUILD the AMIP forcing + inject → open the local archive → ERA5 time-mean → regrid
+    → reference physical-validation → campaign construction → the dry-run report → exit 0.
+    Neither main()'s --local-era5-dir end-to-end nor the --amip-forcing-from-local-era5 path
+    was covered before (iter-411 was a routing spy; iter-421 tested the pieces)."""
+    from scripts.experiment.write_amip_clubb_lite_config import main as make_cfg
+    from scripts.run.run_correction_campaign import main as campaign_main
+
+    _write_full_rda_archive(tmp_path)
+    cfg = str(tmp_path / "cfg.json")
+    out = str(tmp_path / "out.json")
+    forcing = str(tmp_path / "forcing.nc")
+    assert make_cfg([cfg, "--resolution", "8", "--nlev", "8"]) == 0
+
+    rc = campaign_main([
+        "--config", cfg, "--mode", "amip",
+        "--local-era5-dir", str(tmp_path), "--local-era5-date", "20200101",
+        "--amip-forcing-from-local-era5", "--amip-forcing-out", forcing,
+        "--amip-forcing-hour-stride", "4",      # 8 synthetic sfc times / 4 = 2 (>= 2 guard)
+        "--n-worst", "4", "--iterations", "1", "--out", out, "--dry-run"])
+
+    assert rc == 0                              # full offline-AMIP construction validated
+    # The forcing was actually BUILT during the dry-run — a VALID NetCDF with the combined
+    # SST + sea-ice (not a zero-byte/partial artifact that os.path.exists alone would accept).
+    import xarray as xr
+    with xr.open_dataset(forcing) as fds:
+        assert "SSTK" in fds.data_vars and "CI" in fds.data_vars
+    report = capsys.readouterr().out
+    assert "DRY-RUN OK" in report
+    assert "AMIP forcing: built from" in report  # the iter-424 pre-flight line fired
+
+
 def test_surface_flux_flag_parsed():
     p = _build_arg_parser()
     base = ["--config", "c.json", "--era5-zarr", "z"]
