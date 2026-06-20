@@ -310,3 +310,35 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(5e-3)))
     np.testing.assert_allclose(np.asarray(ref.q_v), expected_r, rtol=1e-4)
     assert expected_r > 5e-3        # mixing ratio strictly exceeds specific humidity
+
+
+def test_reference_columnstate_invariant_to_config_levels_order(monkeypatch):
+    """COMPOSITION-level lock on the iter-327 fix: the regridded reference ColumnState must
+    be INVARIANT to the ORDER of ``config.levels``.  Both a monotonic and a SCRAMBLED levels
+    list sort to the same ascending ``plev_Pa``; the loader pairs the data with it (iter 327
+    argsort, not a monotonic-only ``[::-1]`` flip), so the FULL chain (load → regrid → log-p
+    vertical interp → ColumnState) must yield the IDENTICAL reference.  The log-p interp
+    depends on data↔pressure pairing being correct, so this catches a mispairing regression
+    that the unit test alone could miss.  Non-vacuous: the pre-iter-327 flip would mispair the
+    500/1000 hPa data for the scrambled list → a DIFFERENT (corrupted) reference."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import column_state_from_carry
+    from legoesm.training.era5_to_state import era5_to_latlon_carry
+
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
+    grid = create_latlon_grid(3, 4)
+    sigma = create_sigma_coordinate(5)
+
+    def _ref(levels):
+        era5 = load_era5_slice(TrainingERA5Config(zarr_store="dummy", levels=levels), 0)
+        return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+
+    ref_mono = _ref((1000.0, 500.0, 100.0))         # monotonic descending (store order)
+    ref_scrambled = _ref((500.0, 1000.0, 100.0))    # non-monotonic permutation
+    for name in ("T", "q_v", "u", "v", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(ref_scrambled, name)),
+            np.asarray(getattr(ref_mono, name)), rtol=1e-6,
+            err_msg=f"reference {name} changed with config.levels ORDER — a data↔pressure "
+                    "mispairing in the ingest/interp chain (cf. iter 327).")
