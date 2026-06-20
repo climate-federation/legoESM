@@ -67,9 +67,34 @@ Future-HW (np>6 anti-scales on Ginsburg CPU); every increment gated by BIT-IDENT
    (primitive_eq_cdgrid.py:1195) so total = advection + kessler tracer rates.
    sigma-only (kessler raises on hybrid).  Gate: tiled combined dq_pack == serial
    (advective_tracer_tendency + kessler) at np24 bit-identity.
+   **DONE (commit 7297b2237, gate 8532506 PASS).** `kessler_column_tendencies`
+   promoted public; `make_tiled_fv3_moist_tracer_tendency_stage_2d` (advection +
+   injected per-tile column physics); np24 bit-identity vs serial advection +
+   kessler.
 4. **Full moist tiled step.** `make_tiled_fv3_hydrostatic_moist_step_stage_2d` →
-   `step(u_d, v_d, T, p_s, phis, tracers) -> (..., tracers)` + post-step tracer
-   floor. np24/54 bit-identity gate `test_tiled_fv3_hydrostatic_moist_step.py`.
+   `step(u_d, v_d, T, p_s, phis, q_pack) -> (..., q_pack)` + post-step tracer
+   floor. np24/54 bit-identity gate vs the serial moist step.
+   ARCHITECTURE FINDING (scout 2026-06-20): NOT "compose increment 3 into the dry
+   RK3" — the tracer VERTICAL advection is coupled to the dynamics' vertical
+   velocity (`sigma_dot`/`mass_flux`), which is computed INSIDE the shared
+   `_build_hydro_tile_tendency_fns::_tile_tendency` (the `_vadv_drive`/`_vadv`
+   pair, also used for T's `vert_adv_T`).  And the serial moist step recomputes
+   physics PER-RK-STAGE (`_step_fv3.tendency_fn` calls `physics_fn` each stage,
+   feeding `physics_tendency_cc` into `fv3_hydrostatic_tendencies`; dT_dt already
+   includes the kessler dT at primitive_eq_cdgrid.py:1188).  So increment 4 =
+   EXTEND `_build_hydro_tile_tendency_fns` to be tracer-aware: when a `q_pack`
+   (+ injected `column_tracer_physics_fn`) is given, additionally compute
+   `dq_pack = -(u . grad q)` (the shared `_tiled_scalar_horiz_advect`, packed)
+   + `_vadv(q, _vadv_drive)` (vertical, the SAME driver as T) + kessler tracer
+   rates, and add the kessler dT to dT_dt; **dry path (`tracers=None`) returns
+   the 4-tuple bit-identically (gated dry step/tendency UNCHANGED)**.  Then a
+   `make_tiled_fv3_hydrostatic_moist_step_stage_2d` threads the 5-tuple
+   (u_d,v_d,T,p_s,q_pack) through the SAME SSP-RK3 combine (generic pytree axpy
+   so the dry step's explicit RK3 is not duplicated) + a post-step
+   `jnp.maximum(q,0)` floor (serial floor primitive_eq_cdgrid.py:1758-1765).
+   Reference: the serial cube `model.step_with_physics(state, dt, kessler)` base
+   cut.  sigma-only (kessler).  DEEP + must preserve the dry gate — build as its
+   own iteration.
 
 ## Non-goals / caveats
 
