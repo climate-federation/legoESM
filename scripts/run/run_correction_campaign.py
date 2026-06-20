@@ -318,6 +318,7 @@ class CampaignDryRun(NamedTuple):
     coefficients: tuple[str, ...]   # the corrected clubb_lite field name(s)
     n_iterations: int               # rounds the real run would execute
     les_per_round: int              # LES spun off per round (les_budget, else n_worst)
+    surface_flux: bool = False      # spin-off LES surface-flux BC ON (iter 364)? (operator-visible)
 
 
 def _build_campaign_harness(
@@ -459,7 +460,8 @@ def build_correction_campaign(
             grid_shape=grid_shape, n_worst=int(n_worst),
             feedback_strategy=feedback_strategy, coefficients=(field_name,),
             n_iterations=int(n_iterations),
-            les_per_round=_les_per_round_estimate(les_budget, n_worst))
+            les_per_round=_les_per_round_estimate(les_budget, n_worst),
+            surface_flux=bool(getattr(les_config, "surface_flux", False)))
 
     return run_correction_campaign(
         initial_clubb if initial_clubb is not None else CLUBBLiteConfig(),
@@ -781,7 +783,8 @@ def build_multi_correction_campaign(
             grid_shape=grid_shape, n_worst=int(n_worst),
             feedback_strategy=feedback_strategy, coefficients=tuple(coefficients),
             n_iterations=int(n_iterations),
-            les_per_round=_les_per_round_estimate(les_budget, n_worst))
+            les_per_round=_les_per_round_estimate(les_budget, n_worst),
+            surface_flux=bool(getattr(les_config, "surface_flux", False)))
 
     return run_multi_correction_campaign(
         clubb_cfg, int(n_iterations), specs,
@@ -1599,7 +1602,8 @@ def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
         "[campaign] DRY-RUN OK — construction validated, NOT run.\n"
         f"  mode={mode}  grid_shape={tuple(dry.grid_shape)}  n_worst={dry.n_worst}\n"
         f"  coefficients={tuple(dry.coefficients)}  "
-        f"feedback_strategy={dry.feedback_strategy}\n"
+        f"feedback_strategy={dry.feedback_strategy}  "
+        f"surface_flux={'ON' if dry.surface_flux else 'off'}\n"
         f"  would run ≤ {dry.n_iterations} rounds × ≤ {dry.les_per_round} LES/round "
         f"(≤ {dry.n_iterations * dry.les_per_round} LES total)"
         + _dry_run_era5_line(era5) + "\n"

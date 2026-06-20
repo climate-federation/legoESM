@@ -457,6 +457,14 @@ def test_build_correction_campaign_dry_run_constructs_without_running():
     assert res.coefficients == ("C_K",)             # clubb_coefficient → clubb_lite C_K
     assert res.n_iterations == 5                     # compute estimate: rounds…
     assert res.les_per_round == 4                    # …× LES/round (no les_budget → n_worst)
+    assert res.surface_flux is False                 # default LES config ⇒ surface-flux-free
+    # The dry-run PROPAGATES the material surface-flux setting (iter 403) so the launch
+    # pre-flight report can surface it before the multi-day run.
+    res_sf = build_correction_campaign(
+        base_atm_config=_base_config(),
+        les_config=ColumnLESConfig(diagnosis_method="clubb_coefficient",
+                                   surface_flux=True), **common)
+    assert res_sf.surface_flux is True
     # dry_run STILL validates: a non-clubb base config fails LOUD (the pre-flight's point).
     with pytest.raises(ValueError, match="clubb_lite"):
         build_correction_campaign(
@@ -657,6 +665,16 @@ def test_dry_run_report_formats():
     assert "/scratch/run/corrected.json" in rep
     # compute estimate (10 rounds × 8 LES = 80 LES total) — the launch decision input.
     assert "10 rounds" in rep and "8 LES/round" in rep and "80 LES total" in rep
+    # The spin-off LES surface-flux BC (iter 364) is a MATERIAL physics setting; the
+    # pre-flight surfaces it so an operator confirms ON/off before the multi-day run
+    # (iter 403). Default-constructed ⇒ off.
+    assert "surface_flux=off" in rep
+    rep_on = _dry_run_report(
+        CampaignDryRun(grid_shape=(6, 8), n_worst=12, feedback_strategy="environment",
+                       coefficients=("C_K",), n_iterations=10, les_per_round=8,
+                       surface_flux=True),
+        mode="amip", out="/scratch/run/c.json")
+    assert "surface_flux=ON" in rep_on
 
 
 def test_dry_run_report_surfaces_era5_window_and_warns_on_snapshot():
