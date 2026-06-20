@@ -71,6 +71,40 @@ def _clubb_field_for_promotion_key(promotion_key: str) -> str | None:
     return pf.field
 
 
+def _assert_resume_config_carries_field(
+    initial_config: Any, promotion_key: str, initial_field: Any
+) -> None:
+    """RESUME CONTRACT (fail-loud): when a campaign is RESUMED with an accumulated
+    ``initial_field``, ``initial_config`` MUST already carry that field in its
+    promotable leaf — because the FIRST resumed round's ``compare_fn`` reads the
+    CONFIG (not the feedback ``base``).  A scalar / stale ``initial_config`` paired
+    with an array ``initial_field`` would silently RE-RANK that round against the
+    un-promoted (uniform) field and mis-select the worst columns — a SILENT resume
+    desync, the exact class of past 'checkpoint resume desync' bug.  The CLI's
+    ``_load_single_resume`` rebuilds the config FROM the field (so a correctly-resumed
+    campaign passes); this guards a DIRECT ``run_*_campaign`` caller — or a future
+    regression in that rebuild — that forgets to.  No-op for a fresh run
+    (``initial_field is None``) or an unregistered key (validated elsewhere)."""
+    if initial_field is None:
+        return
+    pf = PROMOTABLE_FIELDS.get(promotion_key)
+    if pf is None:
+        return
+    leaf = getattr(initial_config, pf.field, None)
+    field_flat = jnp.asarray(initial_field).reshape(-1)
+    leaf_flat = None if leaf is None else jnp.asarray(leaf).reshape(-1)
+    if (leaf_flat is None or leaf_flat.shape != field_flat.shape
+            or not bool(jnp.array_equal(leaf_flat, field_flat))):
+        got = "absent" if leaf is None else f"shape {tuple(jnp.asarray(leaf).shape)}"
+        raise ValueError(
+            f"run_correction_campaign resume contract violated: the accumulated "
+            f"initial_field for {promotion_key!r} {tuple(field_flat.shape)} is NOT "
+            f"carried by initial_config.{pf.field} ({got}). The first resumed round's "
+            f"compare_fn reads the CONFIG, so resume with the config promoted FROM the "
+            f"field — replace the scheme leaf with initial_field.reshape(-1), as the "
+            f"CLI's _load_single_resume does. Pass a consistent (config, field) pair.")
+
+
 class CompareResult(NamedTuple):
     """One AMIP-vs-ERA5 comparison: the score field, manifest, and weights."""
 
@@ -284,6 +318,10 @@ def run_correction_campaign(
         raise ValueError(
             f"patience must be >= 1 when bias_tol is set, got {patience}.")
     config = initial_config
+    # The contract only bites once a round actually runs (its compare reads the
+    # config); n_iterations=0 just reads the field back, so skip the guard there.
+    if int(n_iterations) >= 1:
+        _assert_resume_config_carries_field(initial_config, promotion_key, initial_field)
     base = background if initial_field is None else initial_field
     iterations: list = []
     accepted_flags: list = []
@@ -1141,6 +1179,11 @@ def run_multi_correction_campaign(
             if key not in bases:
                 raise ValueError(
                     f"initial_fields key {key!r} is not a spec promotion_key {list(bases)}.")
+            # Resume contract (same as the single path): initial_config must already
+            # carry EVERY resumed field — the first round's compare reads the config.
+            # Vacuous for n_iterations=0 (no round runs), so gate it the same way.
+            if int(n_iterations) >= 1:
+                _assert_resume_config_carries_field(initial_config, key, field)
             bases[key] = field
     iterations: list = []
     accepted_flags: list = []

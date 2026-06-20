@@ -505,6 +505,39 @@ def test_campaign_resume_is_bit_exactly_equivalent_to_uninterrupted():
     assert int(np.sum(np.isclose(f_resumed, 0.9))) == 4
 
 
+def test_campaign_resume_rejects_config_not_carrying_field():
+    """Fail-loud on the resume foot-gun the equivalence test documents: a SCALAR
+    initial_config paired with an ARRAY initial_field and ≥1 round is a silent desync
+    (the first round's compare would re-rank against the un-promoted uniform field), so
+    it RAISES the resume contract.  n_iterations=0 is EXEMPT (no round reads the config
+    — see test_campaign_resume_zero_iterations_returns_initial_field).  The CORRECT
+    resume (config promoted FROM the field) is accepted."""
+    field = jnp.full((2, 2), 0.7)
+    noop_compare = lambda c: CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2)))  # noqa: E731,ARG005
+    kw = dict(compare_fn=noop_compare, diagnose_fn=lambda r, c: None,
+              promotion_key="clubb_lite_C_K", grid_shape=(2, 2), background=0.4,
+              initial_field=field)
+    with pytest.raises(ValueError, match="resume contract violated"):
+        run_correction_campaign(CLUBBLiteConfig(), n_iterations=1, **kw)   # SCALAR config
+    # Config promoted FROM the field ⇒ accepted (noop round keeps the resumed field).
+    ok = run_correction_campaign(
+        CLUBBLiteConfig(C_K=field.reshape(-1)), n_iterations=1, **kw)
+    np.testing.assert_allclose(np.asarray(ok.final_field), 0.7)
+
+
+def test_multi_campaign_resume_rejects_config_not_carrying_field():
+    """The SAME resume contract on the multi-coefficient path: a SCALAR initial_config
+    + an array ``initial_fields`` entry (≥1 round) RAISES rather than silently
+    desyncing the first round's worst-column ranking."""
+    field = jnp.full((2, 2), 0.7)
+    with pytest.raises(ValueError, match="resume contract violated"):
+        run_multi_correction_campaign(
+            CLUBBLiteConfig(), 1, _SPECS,
+            compare_fn=lambda c: CompareResult(jnp.zeros((2, 2)), [], jnp.ones((2, 2))),
+            diagnose_fn=lambda r, c: None, grid_shape=(2, 2),
+            initial_fields={"clubb_lite_C_K": field})
+
+
 def _always_worst_compare_fn(nlat=2, nlon=2):
     """compare_fn that ALWAYS reports a high uniform bias ⇒ the 2 worst columns are
     flagged every round (regardless of the config) — to exercise the dry-LES abort."""

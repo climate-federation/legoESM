@@ -1135,6 +1135,9 @@ def test_main_cmip_rejects_unknown_coupled_preset(monkeypatch):
         lambda path: (SimpleNamespace(
             grid=SimpleNamespace(grid_type="latlon", resolution=8, nlev=5)),
             object(), object()))
+    # The era5-readability pre-flight (iter 389) runs before _build_run_setup (where the
+    # coupled-preset guard fires), so bypass it for this dummy --era5-zarr path.
+    monkeypatch.setattr(rcc, "_assert_era5_zarr_readable", lambda path: None)
     with pytest.raises(SystemExit, match="unknown --coupled-preset"):
         rcc.main(["--config", "c.json", "--era5-zarr", "z", "--mode", "cmip",
                   "--coupled-preset", "not_a_preset"])
@@ -1155,17 +1158,24 @@ def _stub_campaign_main_io(monkeypatch):
 
     fake_cfg = SimpleNamespace(
         grid=SimpleNamespace(grid_type="latlon", resolution=8, nlev=5))
-    fake_grid = SimpleNamespace(grid_shape_2d=(2, 3))
+    fake_grid = SimpleNamespace(grid_shape_2d=(2, 3), grid_lat=jnp.zeros(2))
     monkeypatch.setattr(rcc, "load_base_config_and_grid",
                         lambda path: (fake_cfg, fake_grid, object()))
     monkeypatch.setattr(
         rcc, "make_base_driver_builder",
         lambda mode, coupled_preset=None, ocean_grid=None: ((lambda c: None),
                                                             (lambda d, day, dt: None)))
-    monkeypatch.setattr(e2s, "load_era5_time_mean", lambda cfg, idx: object())
+    monkeypatch.setattr(e2s, "load_era5_time_mean",
+                        lambda cfg, idx: SimpleNamespace(lat=jnp.zeros(2)))
     monkeypatch.setattr(cae, "select_era5_regrid", lambda canon: (lambda slc, g, s: object()))
     monkeypatch.setattr(cr, "column_state_from_carry", lambda carry: object())
     monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda forcing, provider: None)
+    # The launch pre-flights (iters 389-391) run in the preamble BEFORE the resume/
+    # dispatch logic these tests target; the dummy --era5-zarr path + stubbed
+    # (attribute-less) era5 slice would trip the readability + lat-coverage checks
+    # first, so stub them here (each has its own direct test).
+    monkeypatch.setattr(rcc, "_assert_era5_zarr_readable", lambda path: None)
+    monkeypatch.setattr(rcc, "_warn_if_grid_exceeds_era5_lat_coverage", lambda a, b: None)
     return fake_grid
 
 
