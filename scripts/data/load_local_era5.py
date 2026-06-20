@@ -81,8 +81,23 @@ _AMIP_SST_CODE = "128_034_sstk"   # SST [K]
 _AMIP_SIC_CODE = "128_031_ci"     # sea-ice concentration [fraction, 0-1]
 
 
+def _consecutive_months(start_yyyymm: str, n: int) -> list[str]:
+    """The ``n`` consecutive ``YYYYMM`` strings starting at ``start_yyyymm`` (year rollover
+    handled), e.g. ``("201711", 3) -> ["201711", "201712", "201801"]``."""
+    if n < 1:
+        raise ValueError(f"_consecutive_months: n must be >= 1, got {n}.")
+    y, m = int(start_yyyymm[:4]), int(start_yyyymm[4:6])
+    out: list[str] = []
+    for _ in range(n):
+        out.append(f"{y:04d}{m:02d}")
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
+
+
 def build_era5_amip_forcing(
-    data_dir: str, date: str, out_path: str, *, hour_stride: int = 24,
+    data_dir: str, date: str, out_path: str, *, hour_stride: int = 24, n_months: int = 1,
     **overrides: Any,
 ) -> Any:
     """Build a memory-safe subsampled AMIP forcing file from LOCAL ERA5 + return its config.
@@ -97,12 +112,17 @@ def build_era5_amip_forcing(
     (``SSTK`` [K] + ``CI`` [0-1 fraction], with ``latitude``/``longitude``/``time``) to
     ``out_path``.  ``out_path`` is a runtime artifact (gitignored), NOT committed.
 
-    ``date`` is ``YYYYMMDD`` (selects that month's chunk).  Returns a ``dataset="custom"``
-    :class:`AMIPForcingConfig` (Kelvin SST ⇒ ``sst_offset=0``; fraction SIC ⇒
-    ``sic_scale=1``; SIC read from the same combined file); ``overrides`` pass through (e.g.
-    ``T_ice=...``).  ``load_amip_forcing``'s units guard cross-checks the K/fraction
-    conventions, so a wrong offset/scale still fails loud.  Verified iter 419 against
-    d633006 Sept-2017.
+    ``date`` is ``YYYYMMDD``; ``n_months`` (iter 459) consecutive monthly chunks starting at
+    that month are CONCATENATED along time, so a multi-month climatology window stays within
+    the forcing coverage instead of cyclically REPEATING one month against an advancing
+    insolation (the iter-458 desync — ``get_forcing_at_time`` wraps over the forcing period).
+    ``n_months=1`` (default) is the single-month behaviour, byte-identical.
+
+    Returns a ``dataset="custom"`` :class:`AMIPForcingConfig` (Kelvin SST ⇒ ``sst_offset=0``;
+    fraction SIC ⇒ ``sic_scale=1``; SIC read from the same combined file); ``overrides`` pass
+    through (e.g. ``T_ice=...``).  ``load_amip_forcing``'s units guard cross-checks the
+    K/fraction conventions, so a wrong offset/scale still fails loud.  Verified iter 419
+    against d633006 Sept-2017.
     """
     import xarray as xr
     from legoesm.forcing.amip import AMIPForcingConfig
@@ -110,33 +130,50 @@ def build_era5_amip_forcing(
     if hour_stride < 1:
         raise ValueError(
             f"build_era5_amip_forcing: hour_stride must be >= 1, got {hour_stride}.")
-    # Both _find calls FIRST so a missing chunk fails loud before any open/write.
-    sst_file = _find(data_dir, "sfc", _AMIP_SST_CODE, date, monthly=True)
-    sic_file = _find(data_dir, "sfc", _AMIP_SIC_CODE, date, monthly=True)
+    if n_months < 1:
+        raise ValueError(
+            f"build_era5_amip_forcing: n_months must be >= 1, got {n_months}.")
+    months = _consecutive_months(date[:6], n_months)
     sel = slice(0, None, hour_stride)
+    # ALL _find calls FIRST so a missing month chunk fails loud before any open/write.
+    sst_files = [_find(data_dir, "sfc", _AMIP_SST_CODE, ym + "01", monthly=True) for ym in months]
+    sic_files = [_find(data_dir, "sfc", _AMIP_SIC_CODE, ym + "01", monthly=True) for ym in months]
     # .isel(time=sel).load() reads ONLY the strided slices for the NCAR-RDA ll025 layout
     # (time stored contiguously, not HDF5-chunked) — the memory-safe step that avoids the
     # ~6 GB/field OOM.  (A file HDF5-chunked along time could still read full chunks per
     # selected index.)  Context-managed so the HDF5 file descriptors close after load.
-    with xr.open_dataset(sst_file) as ds_sst:
-        sst = ds_sst["SSTK"].isel(time=sel).load()
-    with xr.open_dataset(sic_file) as ds_sic:
-        sic = ds_sic["CI"].isel(time=sel).load()
+    sst_parts: list[Any] = []
+    sic_parts: list[Any] = []
+    for ym, sst_file, sic_file in zip(months, sst_files, sic_files):
+        with xr.open_dataset(sst_file) as ds_sst:
+            _sst = ds_sst["SSTK"].isel(time=sel).load()
+        with xr.open_dataset(sic_file) as ds_sic:
+            _sic = ds_sic["CI"].isel(time=sel).load()
+        # Same archive ⇒ the SPATIAL grids must match EXACTLY (a silent mis-LABEL, not a
+        # regrid, if they ever differed — same-size-but-different-values would slip past a
+        # shape check), so verify lat/lon by value and fail loud.  Verify SST-vs-SIC AND each
+        # month vs the FIRST month (a mislabeled month chunk would mis-align the concat).
+        for axis in ("latitude", "longitude"):
+            if not _sst[axis].equals(_sic[axis]):
+                raise ValueError(
+                    f"build_era5_amip_forcing: SST and CI {axis} grids differ for {ym} — both "
+                    "must be the same d633006 ll025 chunk (would silently mis-label, not regrid).")
+            if sst_parts and not _sst[axis].equals(sst_parts[0][axis]):
+                raise ValueError(
+                    f"build_era5_amip_forcing: month {ym} {axis} grid differs from the first "
+                    f"month {months[0]} — the consecutive chunks must share the ll025 grid.")
+        # Force-align SIC time to SST (the two files share the hourly steps; an encoding
+        # nicety should not block the build).
+        sic_parts.append(_sic.assign_coords(time=_sst["time"]))
+        sst_parts.append(_sst)
+    # Concatenate the consecutive months along time (monotonic: absolute, in calendar order).
+    sst = sst_parts[0] if n_months == 1 else xr.concat(sst_parts, dim="time")
+    sic = sic_parts[0] if n_months == 1 else xr.concat(sic_parts, dim="time")
     if int(sst.sizes["time"]) < 2:
         raise ValueError(
-            f"build_era5_amip_forcing: hour_stride={hour_stride} leaves "
+            f"build_era5_amip_forcing: hour_stride={hour_stride} (n_months={n_months}) leaves "
             f"{int(sst.sizes['time'])} time step(s); the time-interpolated AMIP forcing "
-            "needs >= 2. Use a smaller stride.")
-    # Same archive ⇒ the SPATIAL grids must match EXACTLY (a silent mis-LABEL, not a regrid,
-    # if they ever differed — same-size-but-different-values would slip past a shape check),
-    # so verify lat/lon by value and fail loud.  Time is force-aligned: the two files share
-    # the same hourly steps, and an encoding nicety should not block the build.
-    for axis in ("latitude", "longitude"):
-        if not sst[axis].equals(sic[axis]):
-            raise ValueError(
-                f"build_era5_amip_forcing: SST and CI {axis} grids differ — both must be "
-                "the same d633006 ll025 chunk (this would silently mis-label, not regrid).")
-    sic = sic.assign_coords(time=sst["time"])
+            "needs >= 2. Use a smaller stride or more months.")
     xr.Dataset({"SSTK": sst, "CI": sic}).to_netcdf(out_path)
 
     base = dict(

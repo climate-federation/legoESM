@@ -969,9 +969,12 @@ def _build_run_setup(args):
     # itself (its own confirmation line prints in _maybe_align_insolation instead).
     _insol_date = (None if getattr(args, "align_insolation", False)
                    else getattr(args, "local_era5_date", None))
-    # The single-month offline-forcing wrap warning only applies when building the offline forcing.
+    # The offline-forcing wrap warning only applies when building the offline forcing; the span
+    # scales with --amip-forcing-n-months (iter 459) — N months => ~N*31 days of coverage.
+    _n_months = max(1, int(getattr(args, "amip_forcing_n_months", 1) or 1))
     _offline_forcing_note = (
-        _offline_forcing_window_warning(getattr(base_cfg, "days", 0))
+        _offline_forcing_window_warning(getattr(base_cfg, "days", 0),
+                                        span_days=_n_months * _OFFLINE_FORCING_SPAN_DAYS)
         if getattr(args, "amip_forcing_from_local_era5", False) else None)
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
@@ -1007,7 +1010,8 @@ def _maybe_apply_local_era5_forcing(args, base_cfg):
 
     fcfg = build_era5_amip_forcing(
         args.local_era5_dir, args.local_era5_date, args.amip_forcing_out,
-        hour_stride=args.amip_forcing_hour_stride)
+        hour_stride=args.amip_forcing_hour_stride,
+        n_months=getattr(args, "amip_forcing_n_months", 1))
     return apply_amip_forcing_to_config(base_cfg, fcfg)
 
 
@@ -1089,6 +1093,7 @@ def _amip_forcing_provenance(args) -> dict | None:
         "date": args.local_era5_date,
         "out": args.amip_forcing_out,
         "hour_stride": args.amip_forcing_hour_stride,
+        "n_months": getattr(args, "amip_forcing_n_months", 1),
     }
 
 
@@ -1169,6 +1174,11 @@ def _build_arg_parser():
                    help="Subsample the monthly-hourly ERA5 boundary forcing to every Nth "
                         "step (default 24 = daily) — the monthly-hourly file OOMs the "
                         "loader (iter 419).")
+    p.add_argument("--amip-forcing-n-months", type=int, default=1,
+                   help="Concatenate this many CONSECUTIVE monthly SST/SIC chunks (from "
+                        "--local-era5-date's month) into the AMIP forcing (default 1) — use "
+                        ">1 so a multi-month climatology window stays within the forcing "
+                        "coverage instead of cyclically repeating one month (iter 458/459).")
     p.add_argument("--era5-time-idx", type=int, default=0)
     p.add_argument("--era5-n-times", type=int, default=1,
                    help="Average this many consecutive ERA5 times (starting at "

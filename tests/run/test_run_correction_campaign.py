@@ -715,9 +715,9 @@ def test_dry_run_report_surfaces_amip_forcing_provenance():
     prov = _amip_forcing_provenance(SimpleNamespace(
         amip_forcing_from_local_era5=True, local_era5_dir="/rda/ERA5",
         local_era5_date="20170901", amip_forcing_out="forcing.nc",
-        amip_forcing_hour_stride=24))
-    assert prov == {"source": "/rda/ERA5", "date": "20170901",
-                    "out": "forcing.nc", "hour_stride": 24}
+        amip_forcing_hour_stride=24, amip_forcing_n_months=3))
+    assert prov == {"source": "/rda/ERA5", "date": "20170901", "out": "forcing.nc",
+                    "hour_stride": 24, "n_months": 3}
 
     # The line: empty when off/None, formatted when on.
     assert _dry_run_amip_forcing_line(None) == ""
@@ -1330,8 +1330,9 @@ def test_maybe_apply_local_era5_forcing_builds_and_injects_only_when_flagged(mon
 
     called = {}
 
-    def _fake_build(data_dir, date, out_path, *, hour_stride):
-        called.update(dir=data_dir, date=date, out=out_path, stride=hour_stride)
+    def _fake_build(data_dir, date, out_path, *, hour_stride, n_months=1):
+        called.update(dir=data_dir, date=date, out=out_path, stride=hour_stride,
+                      n_months=n_months)
         return AMIPForcingConfig(
             dataset="custom", path=out_path, sst_var="SSTK", sic_var="CI",
             sst_offset=0.0, sic_scale=1.0)
@@ -1344,13 +1345,14 @@ def test_maybe_apply_local_era5_forcing_builds_and_injects_only_when_flagged(mon
     assert rcc._maybe_apply_local_era5_forcing(args_off, base_cfg) is base_cfg
     assert not called
 
-    # ON ⇒ build with the CLI args + inject the forcing fields into the config.
+    # ON ⇒ build with the CLI args (incl. n_months, iter 459) + inject the forcing fields.
     args_on = SimpleNamespace(
         amip_forcing_from_local_era5=True, local_era5_dir="D",
         local_era5_date="20200101", amip_forcing_out="F.nc",
-        amip_forcing_hour_stride=12)
+        amip_forcing_hour_stride=12, amip_forcing_n_months=2)
     out = rcc._maybe_apply_local_era5_forcing(args_on, base_cfg)
-    assert called == {"dir": "D", "date": "20200101", "out": "F.nc", "stride": 12}
+    assert called == {"dir": "D", "date": "20200101", "out": "F.nc", "stride": 12,
+                      "n_months": 2}
     assert out.dataset == "custom" and out.forcing_path == "F.nc"
     assert out.sst_var == "SSTK" and out.sic_var == "CI"
     assert out.radiation == "gray" and out.days == 2     # unrelated fields preserved

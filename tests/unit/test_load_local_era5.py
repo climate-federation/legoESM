@@ -147,6 +147,70 @@ def test_build_era5_amip_forcing_feeds_load_amip_forcing(tmp_path):
             str(tmp_path), "20200101", str(tmp_path / "y.nc"), hour_stride=8)  # 8/8 -> 1
 
 
+def _write_month_sst_sic(tmp_path, day, *, sst_val, sic_val=0.0):
+    """Write a month's synthetic SSTK + CI chunk (8 hourly steps) for the d633006 ll025
+    layout, keyed to ``day``'s month — for the multi-month concatenation test (iter 459)."""
+    import xarray as xr
+
+    nlat, nlon = 4, 5
+    lat = np.linspace(90.0, -90.0, nlat)
+    lon = np.linspace(0.0, 288.0, nlon)
+    t = (np.datetime64(f"{day[:4]}-{day[4:6]}-01T00")
+         + np.arange(8) * np.timedelta64(1, "h")).astype("datetime64[ns]")
+    xr.Dataset(
+        {"SSTK": (("time", "latitude", "longitude"), np.full((8, nlat, nlon), sst_val, "f4"))},
+        coords={"time": t, "latitude": lat, "longitude": lon},
+    ).to_netcdf(tmp_path / sfc_name("128_034_sstk", day))
+    xr.Dataset(
+        {"CI": (("time", "latitude", "longitude"),
+                np.full((8, nlat, nlon), sic_val, "f4"), {"units": "(0-1)"})},
+        coords={"time": t, "latitude": lat, "longitude": lon},
+    ).to_netcdf(tmp_path / sfc_name("128_031_ci", day))
+
+
+def test_build_era5_amip_forcing_multi_month_concatenates(tmp_path):
+    """n_months>1 CONCATENATES consecutive monthly chunks along time (iter 459), so a
+    multi-month climatology window stays within the forcing coverage (no iter-458 cyclic
+    repeat). The concat preserves calendar order + each month's SST; a missing later month
+    fails loud BEFORE any write; n_months<1 is rejected."""
+    import xarray as xr
+
+    from scripts.data.load_local_era5 import build_era5_amip_forcing
+
+    _write_month_sst_sic(tmp_path, "20200101", sst_val=290.0)
+    _write_month_sst_sic(tmp_path, "20200201", sst_val=292.0)
+    out = tmp_path / "amip_multi.nc"
+
+    cfg = build_era5_amip_forcing(str(tmp_path), "20200101", str(out),
+                                  hour_stride=4, n_months=2)
+    assert out.exists() and cfg.dataset == "custom"
+    with xr.open_dataset(out) as built:
+        assert built.sizes["time"] == 4              # 2 months x (8 / stride 4)
+        sst = np.asarray(built["SSTK"])              # (time, lat, lon)
+        assert float(sst[:2].mean()) == pytest.approx(290.0)   # month 1 first (concat order)
+        assert float(sst[2:].mean()) == pytest.approx(292.0)   # month 2 last
+        t = built["time"].values.astype("datetime64[ns]").astype("int64")
+        assert np.all(np.diff(t) > 0)                # monotonic across the concat (searchsorted)
+
+    with pytest.raises(ValueError, match="n_months"):            # n_months >= 1
+        build_era5_amip_forcing(str(tmp_path), "20200101", str(tmp_path / "z.nc"), n_months=0)
+
+    z2 = tmp_path / "z2.nc"
+    with pytest.raises(FileNotFoundError):                       # month 3 (202003) absent
+        build_era5_amip_forcing(str(tmp_path), "20200101", str(z2), n_months=3)
+    assert not z2.exists()                                       # failed loud BEFORE writing
+
+
+def test_consecutive_months_handles_year_rollover():
+    from scripts.data.load_local_era5 import _consecutive_months
+
+    assert _consecutive_months("201709", 3) == ["201709", "201710", "201711"]
+    assert _consecutive_months("201711", 3) == ["201711", "201712", "201801"]
+    assert _consecutive_months("202012", 1) == ["202012"]
+    with pytest.raises(ValueError, match="n must be"):
+        _consecutive_months("202001", 0)
+
+
 def test_build_era5_amip_forcing_missing_seaice_fails_loud(tmp_path):
     """A missing ci (sea-ice) chunk must fail loud at build time (via _find), not later
     inside the model run with a cryptic KeyError — and before writing any output."""

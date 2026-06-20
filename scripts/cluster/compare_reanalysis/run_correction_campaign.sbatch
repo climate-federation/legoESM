@@ -87,6 +87,10 @@ if [ -n "$LOCAL_ERA5_DIR" ]; then
   if [ "$MODE" = "amip" ] && [ -n "${AMIP_FORCING:-}" ]; then
     COMMON+=(--amip-forcing-from-local-era5
              --amip-forcing-out "${AMIP_FORCING_OUT:-results/compare_reanalysis/era5_amip_forcing.nc}")
+    # AMIP_FORCING_N_MONTHS concatenates N consecutive monthly SST/SIC chunks so a multi-month
+    # climatology window stays within the forcing coverage (iter 459) — set it to ceil(days/31)
+    # for a run longer than one month, else the SST cyclically repeats one month (iter 458).
+    COMMON+=(--amip-forcing-n-months "${AMIP_FORCING_N_MONTHS:-1}")
   fi
   # ALIGN_INSOLATION sets insolation_start_doy from LOCAL_ERA5_DATE so the radiation insolation
   # runs the matching solar season (iter 449/450) — recommended for a NON-January window, which
