@@ -253,6 +253,26 @@ class TestVerticalInterp:
         np.testing.assert_allclose(g[3], 1.0 - alpha, rtol=1e-4)  # d/df[3] = 1-alpha
         assert np.allclose(g[[0, 1, 2, 5]], 0.0)                  # non-bracket levels unused
 
+    def test_hybrid_p_full_overrides_pure_sigma_target(self):
+        """The explicit ``p_full`` (iter-339) must land the field on the MODEL's HYBRID
+        full-level pressures (``A·p_ref + B·p_s``), NOT pure-sigma ``σ·p_s`` — else a
+        hybrid model's ERA5 reference is interpolated to the wrong levels and every
+        bias is silently off.  A field linear in log-p is reproduced at ``p_full``'s
+        pressures, which DIFFER from ``σ·p_s`` here (so ``p_full`` must actually be used)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        a, b = 280.0, -8.0
+        f = (a + b * jnp.log(self._PLEV))[None, :]
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.3, 0.6, 0.85])             # σ·p_s = [30000, 60000, 85000]
+        p_full = jnp.array([[40000., 55000., 80000.]])  # hybrid levels, interior, ≠ σ·p_s
+        out = np.asarray(
+            interp_pressure_to_sigma(f, self._PLEV, p_s, sigma, p_full=p_full))[0]
+        # Lands on p_full (reproducing the log-p-linear field at the HYBRID pressures).
+        np.testing.assert_allclose(out, a + b * np.log(np.asarray(p_full)[0]), rtol=1e-4)
+        # And is DISTINCT from the pure-sigma result (proves p_full is honoured, not ignored).
+        pure = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        assert not np.allclose(out, pure)
+
     def test_p_full_overrides_pure_sigma_target_for_hybrid(self):
         """``p_full`` interpolates to the model's TRUE full-level pressures (e.g. a HYBRID
         coordinate's ``A·p_ref + B·p_s``) instead of pure-sigma ``sigma·p_s`` (iter 339,
