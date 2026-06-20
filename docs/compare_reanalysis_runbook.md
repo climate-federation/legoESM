@@ -86,6 +86,12 @@ total.
 > compute node. The turnkey wrapper `scripts/cluster/compare_reanalysis/preflight_ck_sensitivity.sbatch`
 > runs it as a batch job and exits with the go/no-go code, so the campaign launch can be a
 > dependency: `jid=$(sbatch --parsable preflight_ck_sensitivity.sbatch); sbatch --dependency=afterok:$jid run_correction_campaign.sbatch`.
+>
+> *Tip:* run the **gray** pre-flight FIRST as a quick (minutes, interactive) chain sanity-check —
+> it reports NO-GO with the per-level BL-localization, so a clean run confirms the real-ERA5
+> ingest + model + compare are wired end-to-end before you submit the compute-heavy rrtmgp job
+> (validated iter 445: res 4 / nlev 10 / days 1 vs 20170901 ERA5 → exit 1, mean bias 11.25,
+> most-controllable level σ=0.97 in the BL).
 
 ## 2. Launch the campaign (resumable, self-requeuing)
 
