@@ -260,6 +260,14 @@ $PY scripts/validate/compare_amip_era5.py \
 It reports the per-variable global bias **before vs after** — the clause-5
 "did updating the parameters improve the biases" answer on held-out data.
 
+> **Match the ranking domain (`--ocean-only`, iter 452).** If the campaign ran with
+> `OCEAN_ONLY=1`, add `--ocean-only --base-config <the run's config>` here so the held-out
+> bias (per-variable, combined, AND the exit-code verdict) is measured over the SAME ocean
+> columns the correction optimized — otherwise land columns the closure never touched dilute
+> the before/after signal. The mask is sourced from the config's own
+> `ModelDriver.static_land_fraction()` (its grid must match `--grid-type/--resolution/--nlev`),
+> reusing the campaign's `ocean_valid_mask`. Off by default (global bias, all columns).
+
 > **Match the vertical coordinate to your run.** Pass `--vertical-coord {sigma,hybrid}`
 > (default `hybrid`, the `GridConfig` default) and, for hybrid, `--p-top-Pa` to match the
 > *checkpoint's* run — they set the pressure levels the model state is placed on. The CLI

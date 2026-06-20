@@ -213,8 +213,63 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-worst", type=int, default=20)
     p.add_argument("--time-index", type=int, default=0,
                    help="Time index stamped into the manifest records")
+    p.add_argument("--ocean-only", action="store_true",
+                   help="report the per-variable + combined bias over OCEAN columns only "
+                        "(matching a campaign run with --ocean-only), so the held-out check "
+                        "measures the SAME column subset the correction optimized. Requires "
+                        "--base-config (sources the model land fraction). Off by default.")
+    p.add_argument("--max-land-fraction", type=float, default=0.5,
+                   help="(--ocean-only) a column is ocean where land_fraction <= this "
+                        "[0,1]; 0.0 = pure ocean, 0.5 = majority ocean (default).")
+    p.add_argument("--base-config", default="",
+                   help="(--ocean-only) the run's ExperimentConfig JSON, used to source the "
+                        "model land fraction (its grid MUST match --grid-type/--resolution/"
+                        "--nlev).")
     p.add_argument("--out", default="worst_columns.json")
     return p
+
+
+def _ocean_mask_for_verify(args, grid):
+    """OCEAN-only validity mask for the held-out verify (iter 452), sourced from
+    ``--base-config`` so the reported bias change is measured on the SAME ocean-column
+    subset a campaign run with ``--ocean-only`` optimized (over ocean the prescribed SST
+    pins the surface, so a bias is attributable to the atmospheric/turbulence closure).
+    Reuses the iter-451 library primitives (:func:`legoesm.training.compare_reanalysis.
+    ocean_valid_mask` + :meth:`ModelDriver.static_land_fraction`).
+
+    ``None`` when ``--ocean-only`` is off (report the GLOBAL bias, the default). Fails LOUD
+    (``SystemExit``) without ``--base-config``, on a grid mismatch (mask column count !=
+    the verify grid's), or if no ocean columns exist."""
+    if not args.ocean_only:
+        return None
+    if not args.base_config:
+        raise SystemExit(
+            "--ocean-only requires --base-config (the run's ExperimentConfig JSON) to source "
+            "the model land fraction.")
+    import json
+
+    import jax.numpy as jnp
+    from legoesm.driver.config import experiment_config_from_dict
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.training.compare_reanalysis import ocean_valid_mask
+    with open(args.base_config) as f:
+        cfg = experiment_config_from_dict(json.load(f))
+    mask = ocean_valid_mask(ModelDriver(cfg).static_land_fraction(),
+                            max_land_fraction=args.max_land_fraction)
+    n_cols = int(jnp.asarray(grid.grid_area).size)
+    if int(mask.size) != n_cols:
+        raise SystemExit(
+            f"--ocean-only: the --base-config land fraction has {int(mask.size)} columns but "
+            f"the verify grid has {n_cols}; the --base-config grid must match "
+            "--grid-type/--resolution/--nlev.")
+    n_ocean = int(jnp.sum(mask))
+    if n_ocean == 0:
+        raise SystemExit(
+            f"--ocean-only masks out EVERY column (no column has land_fraction <= "
+            f"{args.max_land_fraction}); drop --ocean-only or raise --max-land-fraction.")
+    print(f"[compare_amip_era5] --ocean-only: bias over {n_ocean} ocean columns "
+          f"(land_fraction <= {args.max_land_fraction}) of {n_cols} total.")
+    return mask
 
 
 def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None,
@@ -345,14 +400,19 @@ def main(argv: list[str] | None = None) -> int:
     # by the grid's true cell areas (the public GridProtocol `grid_area`).
     from legoesm.training.bias_metrics import aggregate_per_variable_bias
 
+    # OCEAN-only restriction (iter 452): when set, every bias below is measured over the
+    # SAME ocean-column subset a campaign --ocean-only run optimized; None => global.
+    ocean_mask = _ocean_mask_for_verify(args, grid)
+    _bias_scope = "ocean-only" if ocean_mask is not None else "global"
     have_precip = (getattr(model, "precip_mm_day", None) is not None
                    and getattr(reference, "precip_mm_day", None) is not None)
     pvb = aggregate_per_variable_bias(
-        result.error_fields, jnp.asarray(grid.grid_area), have_precip=have_precip)
+        result.error_fields, jnp.asarray(grid.grid_area), have_precip=have_precip,
+        valid_mask=ocean_mask)
     precip_str = (f"{float(pvb.global_precip_err_mm_day):.4g} mm/day"
                   if have_precip else "N/A (precip not compared)")
     print(
-        "[compare_amip_era5] global area-weighted bias: "
+        f"[compare_amip_era5] {_bias_scope} area-weighted bias: "
         f"T_rmse={float(pvb.global_T_rmse_K):.4g} K, "
         f"qv_rmse={float(pvb.global_qv_rmse_kg_kg):.4g} kg/kg, "
         f"wind_rmse={float(pvb.global_wind_rmse_m_s):.4g} m/s, "
@@ -378,14 +438,15 @@ def main(argv: list[str] | None = None) -> int:
             time_index=args.time_index, n_worst=args.n_worst, out_path=None)
         pvi = per_variable_bias_improvement(
             baseline_cmp.error_fields, result.error_fields,
-            jnp.asarray(grid.grid_area), have_precip=have_precip)
+            jnp.asarray(grid.grid_area), have_precip=have_precip,
+            valid_mask=ocean_mask)
 
         def _line(name, unit, base_v, upd_v, improved):
             mark = "improved" if bool(improved) else "WORSE/same"
             return (f"  {name}: {float(base_v):.4g} -> {float(upd_v):.4g} {unit} "
                     f"({mark})")
 
-        print("[compare_amip_era5] per-variable bias baseline -> corrected:")
+        print(f"[compare_amip_era5] {_bias_scope} per-variable bias baseline -> corrected:")
         print(_line("T_rmse", "K", pvi.baseline.global_T_rmse_K,
                     pvi.updated.global_T_rmse_K, pvi.T_improved))
         print(_line("qv_rmse", "kg/kg", pvi.baseline.global_qv_rmse_kg_kg,
@@ -403,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         # period) instead of silently reporting success.
         combined = bias_improvement(
             baseline_cmp.error_fields.combined_score, result.error_fields.combined_score,
-            jnp.asarray(grid.grid_area))
+            jnp.asarray(grid.grid_area), valid_mask=ocean_mask)
         print(_line("COMBINED bias", "", combined.baseline_bias,
                     combined.updated_bias, combined.improved))
         # FAIL-SAFE on a blown-up run: a correction that DESTABILISES the model leaves

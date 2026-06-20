@@ -424,3 +424,67 @@ def test_compare_and_write_end_to_end(tmp_path):
         dicts = json.load(f)
     assert dicts[0]["grid_index"] == [1, 0]
     assert dicts[0]["time_index"] == 2
+
+
+def test_ocean_mask_for_verify(tmp_path):
+    """--ocean-only sources an ocean valid_mask from --base-config (iter 452): off => None;
+    on without --base-config or on an all-land grid or a grid-shape mismatch fails loud;
+    on with a 2-ocean/2-land land fraction returns the 2-ocean mask."""
+    from types import SimpleNamespace
+
+    import legoesm.driver.model_driver as md
+
+    # off => None (no probe, grid irrelevant)
+    off = SimpleNamespace(ocean_only=False, base_config="", max_land_fraction=0.5)
+    assert drv._ocean_mask_for_verify(off, grid=None) is None
+
+    # on but no --base-config => fail loud
+    with pytest.raises(SystemExit, match="requires --base-config"):
+        drv._ocean_mask_for_verify(
+            SimpleNamespace(ocean_only=True, base_config="", max_land_fraction=0.5),
+            grid=None)
+
+    cfg_path = str(tmp_path / "base.json")
+    with open(cfg_path, "w") as f:
+        json.dump({}, f)                       # default ExperimentConfig (loader fills it)
+
+    class _FakeDriver:
+        def __init__(self, _cfg):
+            pass
+
+        def static_land_fraction(self):
+            return jnp.array([[0.0, 0.6], [0.4, 1.0]])   # 2 ocean (<=0.5), 2 land
+
+    grid4 = SimpleNamespace(grid_area=jnp.ones(4))        # 4 columns, matches the (2,2) mask
+    grid9 = SimpleNamespace(grid_area=jnp.ones(9))        # mismatch
+    on = SimpleNamespace(ocean_only=True, base_config=cfg_path, max_land_fraction=0.5)
+
+    orig = md.ModelDriver
+    md.ModelDriver = _FakeDriver
+    try:
+        mask = drv._ocean_mask_for_verify(on, grid4)
+        assert mask is not None and int(jnp.sum(mask)) == 2
+
+        with pytest.raises(SystemExit, match="must match"):   # grid-shape mismatch
+            drv._ocean_mask_for_verify(on, grid9)
+
+        class _AllLand(_FakeDriver):                          # no ocean => fail loud
+            def static_land_fraction(self):
+                return jnp.ones((2, 2))
+        md.ModelDriver = _AllLand
+        with pytest.raises(SystemExit, match="masks out EVERY column"):
+            drv._ocean_mask_for_verify(on, grid4)
+    finally:
+        md.ModelDriver = orig
+
+
+def test_ocean_only_flags_parse_defaults():
+    a = drv._build_arg_parser().parse_args(
+        ["--restart", "r", "--grid-type", "latlon", "--resolution", "8",
+         "--nlev", "10", "--era5-zarr", "z"])
+    assert a.ocean_only is False and a.max_land_fraction == 0.5 and a.base_config == ""
+    a2 = drv._build_arg_parser().parse_args(
+        ["--restart", "r", "--grid-type", "latlon", "--resolution", "8", "--nlev", "10",
+         "--era5-zarr", "z", "--ocean-only", "--base-config", "c.json",
+         "--max-land-fraction", "0.0"])
+    assert a2.ocean_only is True and a2.base_config == "c.json" and a2.max_land_fraction == 0.0
