@@ -147,9 +147,11 @@ def omega_from_divergence(
       model's ω over orography). No numerics are re-derived here.
     * **Pure-sigma** (``SigmaCoordinate``): ``∂p_s/∂t = −p_s·D_total/(1−σ_top)``
       with ``D_total = Σ_k (∇·v)_k Δσ_k``, then ``ω = σ·∂p_s/∂t + p_s·σ̇`` via
-      :func:`compute_pressure_velocity`.  Byte-identical to the hybrid branch when
-      ``A=0, B=σ`` (``compute_mass_flux_hybrid`` reduces to ``p_s·σ̇``), kept as the
-      direct form.
+      :func:`compute_pressure_velocity`.  ANALYTICALLY identical to the hybrid branch
+      reduced to ``A=0, B=σ`` (where ``compute_mass_flux_hybrid``'s ``dp=Δσ·p_s`` makes
+      the mass flux ``= p_s·σ̇``) — the two agree to floating-point ROUNDING (the ``p_s``
+      factor distributes through the divergence integral at a different point), so they
+      are NOT bit-identical; kept as the direct form.
 
     ``div_3d`` is ``(..., nlev)``; returns ``ω`` ``(..., nlev)`` [Pa/s] (positive =
     sinking).
