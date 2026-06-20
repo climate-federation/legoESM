@@ -41,6 +41,28 @@ def test_synthetic_store_loads_via_campaign_era5_loader(tmp_path):
     assert np.all(np.diff(sl.plev_Pa) > 0)            # ascending Pa (sorted from hPa-descending)
 
 
+def test_load_era5_slice_accepts_a_preopened_dataset_bypassing_the_store():
+    """``ds=`` injection (iter 408): feed a PRE-OPENED ERA5 dataset directly, bypassing
+    the Zarr/network open — the path a LOCAL-ARCHIVE adapter uses (per-variable NetCDF
+    merged into one dataset, e.g. NCAR-RDA ll025 ERA5) to run REAL ERA5 through the SAME
+    extraction/regrid chain OFFLINE.  The injected ds yields a valid ERA5Slice, and a
+    bogus ``zarr_store`` is NEVER opened (proves the bypass).  Also exercises the dim
+    normalization: a ds with the raw CF ``latitude``/``longitude`` dims is accepted."""
+    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+
+    from scripts.data.make_synthetic_era5 import build_synthetic_era5_dataset
+
+    ds = build_synthetic_era5_dataset(nlat=8, nlon=12, ntime=3)
+    cfg = TrainingERA5Config(zarr_store="/does/not/exist/never/opened.zarr")
+    sl = load_era5_slice(cfg, time_idx=0, ds=ds)          # ds= bypasses the bogus store
+    assert tuple(sl.T.shape) == (8, 12, 13) and bool(np.all(np.isfinite(sl.T)))
+    assert tuple(sl.p_s.shape) == (8, 12)
+    # A raw-CF dataset (latitude/longitude dims) is normalized by the ds= path itself.
+    ds_cf = ds.rename({"lat": "latitude", "lon": "longitude"})
+    sl_cf = load_era5_slice(cfg, time_idx=0, ds=ds_cf)
+    np.testing.assert_array_equal(np.asarray(sl_cf.T), np.asarray(sl.T))
+
+
 def test_synthetic_load_preserves_field_to_level_correspondence(tmp_path):
     """The descending→ascending level reorder must keep each field value tied to its
     OWN pressure level — the silent-catastrophic-bug surface of the ERA5 ingest.

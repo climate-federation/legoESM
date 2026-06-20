@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import jax.numpy as jnp
@@ -269,7 +269,9 @@ def _assert_required_era5_vars(ds_t, ds) -> None:
             "NOT silently load as zeros (it would corrupt the whole compare).")
 
 
-def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
+def load_era5_slice(
+    config: TrainingERA5Config, time_idx: int, *, ds: Any = None
+) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
     Parameters
@@ -277,13 +279,29 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     config : TrainingERA5Config
     time_idx : int
         Time index into the dataset.
+    ds : xarray.Dataset, optional
+        A PRE-OPENED ERA5 dataset (lat/lon dims, ``resolve_var``-findable variables on
+        a ``level`` axis).  When given, the Zarr open from ``config`` is BYPASSED — used
+        by a local-archive adapter (e.g. per-variable NetCDF merged into one dataset)
+        to feed REAL ERA5 through the SAME extraction/regrid chain WITHOUT a Zarr store
+        or network.  ``None`` (default) opens the configured store as before.
 
     Returns
     -------
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
-    store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    ds = open_era5_zarr(store)
+    if ds is None:
+        store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
+        ds = open_era5_zarr(store)
+    else:
+        # Normalize a PRE-OPENED ds the same way open_era5_zarr does, so a local-archive
+        # adapter may pass the raw ``latitude``/``longitude`` dims (the NetCDF/CF
+        # convention) without renaming them itself.
+        _rename = {long: short for short, long in (("lat", "latitude"),
+                                                   ("lon", "longitude"))
+                   if long in ds.dims and short not in ds.dims}
+        if _rename:
+            ds = ds.rename(_rename)
 
     # Bounds-check the time index up front so a typo'd ``--era5-time-idx`` /
     # held-out index gives a CAMPAIGN-specific message (with the store's actual time
