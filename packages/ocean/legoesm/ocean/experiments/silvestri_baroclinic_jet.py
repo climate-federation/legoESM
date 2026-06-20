@@ -16,10 +16,21 @@ Represented in the model's linear-EOS temperature: b = g·α_T·(T−T_ref) ⇒
     T(φ,z) = T_ref + (N²·z + Δb·B(φ)) / (g·α_T).
 Initial velocity: thermal wind  f·∂u/∂z = −∂b/∂y, u(z=−H)=0 ⇒ u depth-linear.
 
-The dycore stack is the corrected eddy-resolving stack (implicit-CN barotropic,
-WENO7 tracer, RK3 + AB2, smc03 PGF, linear EOS, vertical background ν/κ, no GM/
-KPP); the momentum scheme is selected by ``apply_silvestri_scheme`` (UP3/W9V/
-W9D/SM2/QG2). Resolutions 1/8°,1/16°,1/32° (Ny=20/res), L_d≈5.5→6.75 km.
+The dycore stack is the eddy-resolving stack (split-explicit barotropic free
+surface, WENO7 tracer, RK3 + AB2, smc03 PGF, linear EOS, vertical background ν/κ,
+no GM/KPP); the momentum scheme is selected by ``apply_silvestri_scheme`` (UP3/
+W9V/W9D/SM2/QG2). Resolutions 1/8°,1/16°,1/32° (Ny=20/res), L_d≈5.5→6.75 km.
+
+Barotropic solver (turbulent-stage fix): ``explicit_substep`` (split-explicit
+free surface = what the Oceananigans oracle uses).  The earlier ``implicit_cn``
+choice was found — by a validated state-bridge against the oracle — to SOURCE the
+eddy-scale 2Δx barotropic grid mode: single-step Crank–Nicolson is neutral at the
+Nyquist (|amp|=1, θ=0.55), so it never damps the 2Δx mode the eddy field projects
+onto the barotropic flow each step; it accumulates over the spin-up (~25× the
+oracle's grid-noise by day 50) and blows up (~day 72).  The split-explicit
+substep time-filter damps it, so all five schemes now run eddy-resolving with NO
+closure and NO viscosity backstop, tracking the oracle's bounded 80-day
+trajectory.  (``barotropic_div_damp`` stays 0 — the substep filter alone suffices.)
 """
 
 from __future__ import annotations
@@ -238,7 +249,11 @@ def build_silvestri_baroclinic_jet_setup(
                                   dz_surface=_dz, dz_deep=_dz)
 
     base_config = LatLonCGridOceanConfig(
-        barotropic_solver="implicit_cn",
+        # Split-explicit free surface (= the Oceananigans oracle's barotropic
+        # treatment).  implicit_cn was found to SOURCE the eddy-scale 2Δx
+        # barotropic grid mode and blow up at ~day 72 (see module docstring);
+        # the substep time-filter damps it, matching the oracle's bounded run.
+        barotropic_solver="explicit_substep",
         tracer_advection="weno7",            # paper: 7th-order WENO tracer (all cases)
         tracer_time_integrator="rk3",
         outer_integrator="ab2",
