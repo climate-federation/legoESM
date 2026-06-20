@@ -109,6 +109,26 @@ def test_load_era5_slice_long_names(monkeypatch):
     np.testing.assert_allclose(sl.p_s, 1.0e5)
 
 
+def test_load_era5_slice_nonmonotonic_levels_pair_data_with_correct_pressure(monkeypatch):
+    """A NON-monotonic ``config.levels`` must still pair each level's data with the
+    right pressure.  ``plev_Pa = np.sort(plev_hPa)`` robustly sorts the COORDINATE, but
+    the old data reorder was a bare ``[::-1]`` flip keyed on ``plev_hPa[0] > [-1]`` —
+    correct ONLY for a monotonic list.  config.levels is NOT validated monotonic, so a
+    scrambled list (here ``[500, 1000, 100]`` hPa) would flip the data to ``[200, 300,
+    250]`` while the sorted plev_Pa is ``[100, 500, 1000]`` hPa → the 500/1000 hPa data
+    SWAPPED onto the wrong pressures, silently corrupting the vertical interp.  The
+    argsort reorder pairs them correctly: T = [200, 250, 300] at ascending pressure.
+    (Non-vacuous: the pre-fix flip fails this; mutation-checked separately.)"""
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
+    # store levels are (1000, 500, 100) hPa with T = (300, 250, 200) K; request them
+    # SCRAMBLED so the flip-vs-argsort distinction bites.
+    cfg = TrainingERA5Config(zarr_store="dummy", levels=(500.0, 1000.0, 100.0))
+    sl = load_era5_slice(cfg, 0)
+    np.testing.assert_allclose(sl.plev_Pa, [10000.0, 50000.0, 100000.0])   # 100,500,1000 hPa
+    # T rides with the SORTED pressure: 200 K @100 hPa, 250 K @500 hPa, 300 K @1000 hPa.
+    np.testing.assert_allclose(sl.T[0, 0, :], [200.0, 250.0, 300.0])
+
+
 def test_load_era5_slice_short_names_via_bidirectional_resolve(monkeypatch):
     """A SHORT-name store (t/u/v/q/sp) loads via the bidirectional resolver even
     though the loader requests the LONG names."""

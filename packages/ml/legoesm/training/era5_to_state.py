@@ -328,9 +328,16 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
             level_axis = next((i for i, d in enumerate(dims) if d not in spatial), 0)
             if level_axis != 2:
                 data = np.moveaxis(data, level_axis, -1)
-        # Ensure levels are ascending in pressure
-        if plev_hPa[0] > plev_hPa[-1]:
-            data = data[..., ::-1]
+        # Reorder the level axis to ASCENDING pressure, matching ``plev_Pa =
+        # np.sort(plev_hPa)`` for ANY level order — not just a monotonic config.levels.
+        # The coordinate is robustly sorted, so the DATA (selected in config.levels
+        # order) must be reordered the SAME way; a mere ``[::-1]`` flip only matches when
+        # config.levels is monotonic, so a non-monotonic list (e.g. [1000, 850, 500, 700,
+        # 200]) would silently pair each level's data with the WRONG pressure in the
+        # vertical interp.  ``argsort`` == reversal for the descending WB2 default, so
+        # this is behavior-preserving there.
+        order = np.argsort(plev_hPa)
+        data = data[..., order]
         return data.astype(np.float32)
 
     def _get_2d(name, *, required=False):
