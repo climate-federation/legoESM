@@ -312,6 +312,33 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     assert expected_r > 5e-3        # mixing ratio strictly exceeds specific humidity
 
 
+def test_era5_to_latlon_carry_hybrid_over_terrain_is_physical(monkeypatch):
+    """END-TO-END smoke (iters 339/345): the full ERA5→carry chain runs with a HYBRID
+    coordinate over a TERRAIN column (p_s != p_ref) and produces a PHYSICALLY VALID reference
+    — the @slow campaign tests use a uniform p_s = 1e5 = p_ref (where hybrid == pure-sigma), so
+    this is the only coverage of the hybrid reference regrid where it actually differs from
+    pure-sigma.  (The iter-339 `p_full` fix itself is locked NON-vacuously by the
+    interp_pressure_to_sigma unit test; this confirms the carry wiring stays finite + in-range
+    when the hybrid pressures genuinely diverge from σ·p_s.)"""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_hybrid_levels
+    from legoesm.training.compare_reanalysis import (
+        column_state_from_carry,
+        validate_reference_physical,
+    )
+    from legoesm.training.era5_to_state import era5_to_latlon_carry
+
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5("long"))
+    era5 = load_era5_slice(_config(), 0)
+    era5 = era5._replace(p_s=np.full_like(np.asarray(era5.p_s), 7.0e4))   # 700-hPa terrain
+    grid = create_latlon_grid(3, 4)
+    ref = column_state_from_carry(
+        era5_to_latlon_carry(era5, grid, make_hybrid_levels(5, p_top_Pa=100.0)))
+    validate_reference_physical(ref, name="hybrid-over-terrain ERA5 reference")  # T/q/p_s in range
+    assert bool(np.all(np.isfinite(np.asarray(ref.T))))
+    assert 150.0 < float(np.min(ref.T)) and float(np.max(ref.T)) < 350.0
+
+
 def test_reference_columnstate_invariant_to_config_levels_order(monkeypatch):
     """COMPOSITION-level lock on the iter-327 fix: the regridded reference ColumnState must
     be INVARIANT to the ORDER of ``config.levels``.  Both a monotonic and a SCRAMBLED levels
