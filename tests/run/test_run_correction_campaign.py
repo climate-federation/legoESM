@@ -3351,6 +3351,43 @@ def test_insolation_season_note_warns_off_season_offline_date():
     assert _insolation_season_note("201709") is None        # date w/o day-of-month → silent
 
 
+def test_align_insolation_sets_start_doy_from_offline_date():
+    """--align-insolation derives insolation_start_doy from the offline ERA5 date (iter 450);
+    OFF by default it leaves the config untouched; ON without/with a bad date fails LOUD."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+
+    from scripts.run.run_correction_campaign import (
+        _build_arg_parser,
+        _maybe_align_insolation,
+    )
+
+    base = ExperimentConfig()
+    assert base.insolation_start_doy is None
+
+    # flag OFF (default) => unchanged, even with an offline date present
+    off = SimpleNamespace(align_insolation=False, local_era5_date="20170901")
+    assert _maybe_align_insolation(off, base) is base
+
+    # flag ON + Sep 1 => insolation_start_doy = noleap day-of-year 244
+    on = SimpleNamespace(align_insolation=True, local_era5_date="20170901")
+    aligned = _maybe_align_insolation(on, base)
+    assert aligned.insolation_start_doy == 244.0
+    aligned.validate_strict()                          # the derived value is valid
+
+    # flag ON but no offline date / malformed date => fail loud
+    for bad in (None, "", "2017", "20171301"):         # incl. month 13 (bad date)
+        with pytest.raises(SystemExit, match="align-insolation"):
+            _maybe_align_insolation(
+                SimpleNamespace(align_insolation=True, local_era5_date=bad), base)
+
+    # parser default is OFF
+    assert _build_arg_parser().parse_args(
+        ["--config", "x.json"]).align_insolation is False
+    assert _build_arg_parser().parse_args(
+        ["--config", "x.json", "--align-insolation"]).align_insolation is True
+
+
 def test_campaign_knobs_reject_degenerate_counts():
     """A non-positive --n-worst (ranks NOTHING) or --les-budget (runs NO LES) must FAIL
     LOUD at construction — caught by the launch dry-run, not after a multi-day no-op run

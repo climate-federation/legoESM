@@ -76,6 +76,10 @@ if [ -n "$LOCAL_ERA5_DIR" ]; then
     COMMON+=(--amip-forcing-from-local-era5
              --amip-forcing-out "${AMIP_FORCING_OUT:-results/compare_reanalysis/era5_amip_forcing.nc}")
   fi
+  # ALIGN_INSOLATION sets insolation_start_doy from LOCAL_ERA5_DATE so the radiation insolation
+  # runs the matching solar season (iter 449/450) — recommended for a NON-January window, which
+  # otherwise runs ~January insolation against the dated comparison. Decoupled from the SST.
+  if [ -n "${ALIGN_INSOLATION:-}" ]; then COMMON+=(--align-insolation); fi
 else
   COMMON+=(--era5-zarr "$ERA5")
 fi

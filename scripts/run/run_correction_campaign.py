@@ -944,9 +944,13 @@ def _build_run_setup(args):
     from legoesm.driver.model_driver import ModelDriver
 
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
+    # The off-season insolation NOTE is suppressed when --align-insolation will set the season
+    # itself (its own confirmation line prints in _maybe_align_insolation instead).
+    _insol_date = (None if getattr(args, "align_insolation", False)
+                   else getattr(args, "local_era5_date", None))
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
-                  _insolation_season_note(getattr(args, "local_era5_date", None))):
+                  _insolation_season_note(_insol_date)):
         if _note:
             print(_note, flush=True)
     build_base_driver, extract_fn = make_base_driver_builder(
@@ -979,6 +983,36 @@ def _maybe_apply_local_era5_forcing(args, base_cfg):
         args.local_era5_dir, args.local_era5_date, args.amip_forcing_out,
         hour_stride=args.amip_forcing_hour_stride)
     return apply_amip_forcing_to_config(base_cfg, fcfg)
+
+
+def _maybe_align_insolation(args, base_cfg):
+    """If ``--align-insolation`` (opt-in), set ``base_cfg.insolation_start_doy`` to the noleap
+    day-of-year of the offline ``--local-era5-date`` so the radiation insolation runs the SAME
+    solar season as the ERA5 comparison (iter 449/450) — decoupled from the relative-indexed SST
+    forcing (the iter-449 driver seam). Injecting into ``base_cfg`` (the campaign template) carries
+    the alignment into every corrected round. Flag off => unchanged (production default).
+
+    Fails LOUDLY (``SystemExit``) when the flag is set without an offline date (the season is taken
+    from that date) or with a malformed date. CODEX PENDING: the radiation-path behaviour change is
+    pending the mandatory adversarial review; the flag is OFF by default, so it changes nothing
+    until an operator opts in."""
+    if not getattr(args, "align_insolation", False):
+        return base_cfg
+    s = str(getattr(args, "local_era5_date", None) or "")
+    if len(s) < 8 or not s[:8].isdigit():
+        raise SystemExit(
+            "--align-insolation needs an offline --local-era5-date YYYYMMDD (the insolation "
+            f"season is taken from that date); got {s!r}. For a Zarr ERA5 reference, set "
+            "insolation_start_doy in the config directly instead.")
+    from legoesm.forcing.time_utils import noleap_day_of_year
+    try:
+        doy = noleap_day_of_year(int(s[4:6]), int(s[6:8]))
+    except ValueError as e:
+        raise SystemExit(f"--align-insolation: invalid --local-era5-date {s}: {e}")
+    print(f"[campaign] --align-insolation: insolation_start_doy={doy} (noleap day-of-year of the "
+          f"ERA5 date {s}) so the model's solar season matches the SST-aligned comparison "
+          "(iter 449 seam; radiation-only, CODEX PENDING).", flush=True)
+    return base_cfg._replace(insolation_start_doy=float(doy))
 
 
 def _amip_forcing_provenance(args) -> dict | None:
@@ -1043,6 +1077,11 @@ def _build_arg_parser():
     p.add_argument("--local-era5-date", default=None,
                    help="Date (YYYYMMDD) selecting the --local-era5-dir day; "
                         "--era5-time-idx/--era5-n-times index that day's 24 hourly times.")
+    p.add_argument("--align-insolation", action="store_true",
+                   help="Set insolation_start_doy from --local-era5-date so the radiation "
+                        "insolation runs the SAME solar season as the comparison (iter 449 "
+                        "seam; radiation-only, decoupled from the SST). Off by default; "
+                        "fails loud without an offline date. CODEX PENDING.")
     p.add_argument("--amip-forcing-from-local-era5", action="store_true",
                    help="(--mode amip) ALSO build the AMIP SST/sea-ice forcing from the "
                         "SAME --local-era5-dir archive (build_era5_amip_forcing) and inject "
@@ -2271,6 +2310,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # Turnkey OFFLINE realistic AMIP: build the SST/sea-ice forcing from the same local
     # ERA5 archive and inject it into base_cfg (so every corrected round carries it).
     base_cfg = _maybe_apply_local_era5_forcing(args, base_cfg)
+    # Opt-in: align the radiation insolation season to the offline ERA5 date (iter 449/450).
+    base_cfg = _maybe_align_insolation(args, base_cfg)
 
     # ERA5 reference regridded to the model grid + sigma (same regrid as the
     # one-shot compare driver).
