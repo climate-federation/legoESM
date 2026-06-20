@@ -164,6 +164,7 @@ def make_les_diagnose_fn(
                 p_s=model_ctx.p_s,
                 grid=grid, sigma=sigma, config=les_config, run_les_fn=run_les_fn,
                 phis=phis,
+                sst_K=getattr(model_ctx, "sst_K", None),
             )
         if getattr(model_ctx, "u", None) is None or getattr(model_ctx, "v", None) is None:
             raise ValueError(
@@ -177,6 +178,7 @@ def make_les_diagnose_fn(
             v=model_ctx.v, p_s=model_ctx.p_s,
             grid=grid, sigma=sigma, config=les_config, run_les_fn=run_les_fn,
             phis=phis,
+            sst_K=getattr(model_ctx, "sst_K", None),
         )
 
     return diagnose_fn

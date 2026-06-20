@@ -95,6 +95,13 @@ class ColumnLESConfig(NamedTuple):
     # max RH = q_v/q_sat exceeds this (cold-cloud runaway). None ⇒ OFF (the default;
     # the test mocks use an unphysical uniform q). Recommended ~1.5 when enabled.
     les_realism_rh_max: float | None = None
+    # OPT-IN prescribed surface-flux BC (iter 364): when True, the spin-off LES gets a
+    # ``prescribe="fluxes"`` surface BC = the GCM bulk surface sensible/latent fluxes
+    # (REUSED, no new tunables) converted to kinematic θ/q_v fluxes — the surface-driven
+    # turbulence driver a surface-flux-free LES omits.  Requires the column SST to be
+    # threaded to ``process_column`` (``make_les_diagnose_fn`` supplies ``model_ctx.sst_K``);
+    # ``False`` (default) ⇒ the iter-148 surface-flux-free LES, byte-unchanged.
+    surface_flux: bool = False
 
 
 def validate_column_les_config(config: ColumnLESConfig) -> None:
@@ -625,6 +632,7 @@ def process_column(
     config: ColumnLESConfig,
     run_les_fn: Callable[[ColumnLESSetup], Any],
     phis: jax.Array | None = None,
+    sst_K: jax.Array | None = None,
 ):
     """Full per-column pipeline: extract → setup → run (injected) → diagnose.
 
@@ -636,11 +644,23 @@ def process_column(
     full grid, co-located with ``p_s``) activates the orographic geostrophic-forcing
     term for TERRAIN columns (iter 117); ``None`` (default) keeps the flat/ocean
     behaviour (geostrophic wind from the above-surface geopotential only).
+
+    ``sst_K`` (the surface field, co-located with ``p_s``) is REQUIRED when
+    ``config.surface_flux`` (iter 364) — it activates the ``prescribe="fluxes"`` surface
+    BC for the spin-off LES; the column SST is gathered at ``record.grid_index``.  Fail
+    LOUD if ``config.surface_flux`` is set but no ``sst_K`` is supplied (dispatch-hardening:
+    a silently surface-flux-free LES would defeat the purpose).
     """
+    if config.surface_flux and sst_K is None:
+        raise ValueError(
+            "process_column: config.surface_flux=True but no sst_K supplied — the "
+            "prescribed-flux surface BC needs the column SST (make_les_diagnose_fn "
+            "threads model_ctx.sst_K; a coupled/AMIP state must carry it).")
     lat_rad = float(jnp.deg2rad(record.lat_deg))
     gcm_z, gcm_theta, ls_state = extract_gcm_column(
         T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
         col_index=tuple(record.grid_index), lat_rad=lat_rad, phis=phis,
+        sst_K=(sst_K if config.surface_flux else None),
     )
     setup = build_column_les_setup(
         cape_J_kg=record.environment.cape_J_kg, lat_rad=lat_rad,

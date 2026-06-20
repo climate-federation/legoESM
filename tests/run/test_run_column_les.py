@@ -783,6 +783,61 @@ def test_process_column_end_to_end_with_mock_run():
     assert multi["prandtl_number"].Pr_t.shape == (7,)
 
 
+class _SfcEnv:
+    cape_J_kg = 200.0  # noqa: N815 — matches the manifest env field name
+
+
+class _SfcRec:
+    grid_index = (4, 8)
+    lat_deg = 20.0
+    environment = _SfcEnv()
+
+
+def _sfc_state(nlev=6, n_lat=8, n_lon=16):
+    shape = (n_lat, n_lon, nlev)
+    return dict(
+        T=jnp.broadcast_to(jnp.linspace(240.0, 295.0, nlev), shape),  # warm surface (last)
+        q_v=jnp.full(shape, 5e-3), u=jnp.full(shape, 8.0), v=jnp.zeros(shape),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5),
+        grid=create_latlon_grid(n_lat, n_lon, dtype=jnp.float64),
+        sigma=create_sigma_coordinate(nlev))
+
+
+def test_process_column_surface_flux_requires_sst():
+    """config.surface_flux=True with no sst_K is a LOUD error (dispatch-hardening): a
+    silently surface-flux-free LES would defeat the opt-in."""
+    cfg = ColumnLESConfig(regime=_SMALL_REGIME, surface_flux=True)
+    with pytest.raises(ValueError, match="surface_flux=True but no sst_K"):
+        process_column(_SfcRec(), config=cfg, run_les_fn=lambda s: None, **_sfc_state())
+
+
+def test_process_column_threads_sst_only_when_surface_flux(monkeypatch):
+    """process_column passes sst_K to extract_gcm_column ONLY when config.surface_flux is
+    set (else None ⇒ the surface-flux-free LES, iter-148 unchanged).  Spies on
+    extract_gcm_column so the wiring is locked without inspecting the opaque forcing."""
+    from legoesm.atmosphere.dynamics import column_les
+
+    captured = {}
+    real = column_les.extract_gcm_column
+
+    def spy(**kw):
+        captured["sst_K"] = kw.get("sst_K")
+        return real(**kw)
+
+    monkeypatch.setattr(column_les, "extract_gcm_column", spy)
+    sst = jnp.full((8, 16), 300.0)
+    fake_run = lambda s: _synthetic_plane_state(s.grid, s.height_coord)  # noqa: E731
+
+    # OFF (default): sst_K is supplied but NOT forwarded (no surface flux).
+    process_column(_SfcRec(), config=ColumnLESConfig(regime=_SMALL_REGIME),
+                   run_les_fn=fake_run, sst_K=sst, **_sfc_state())
+    assert captured["sst_K"] is None
+    # ON: sst_K forwarded ⇒ extract_gcm_column builds the prescribe='fluxes' BC.
+    process_column(_SfcRec(), config=ColumnLESConfig(regime=_SMALL_REGIME, surface_flux=True),
+                   run_les_fn=fake_run, sst_K=sst, **_sfc_state())
+    assert captured["sst_K"] is not None
+
+
 def test_extract_gcm_column_cubed_sphere():
     """The column extractor is grid-agnostic: a (face,i,j) index on a cubed-
     sphere state gathers the RIGHT column (not another face) + builds the

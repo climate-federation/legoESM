@@ -1455,6 +1455,42 @@ def test_make_les_diagnose_fn_threads_phis_to_process_column(monkeypatch):
     assert captured["phis"] is None
 
 
+def test_make_les_diagnose_fn_threads_sst_to_process_column(monkeypatch):
+    """iter-364 wiring: make_les_diagnose_fn forwards ``model_ctx.sst_K`` to
+    process_column (→ the opt-in surface-flux BC, activated by
+    ``ColumnLESConfig.surface_flux``).  process_column is stubbed so the test pins ONLY
+    the SST threading."""
+    import legoesm.atmosphere.dynamics.column_les as cl
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    captured = {}
+
+    def fake_process_column(record, **kw):
+        captured["sst_K"] = kw.get("sst_K", "MISSING")
+        return "DIAG"
+
+    monkeypatch.setattr(cl, "process_column", fake_process_column)
+
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(5)
+
+    class _Env:
+        cape_J_kg = 200.0  # noqa: N815
+
+    class _Rec:
+        grid_index = (4, 8)
+        lat_deg = 20.0
+        environment = _Env()
+
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=ColumnLESConfig(regime=_SMALL_REGIME),
+        run_les_fn=_mock_run_les)
+    state = _full_grid_state()                     # the comparison state carries sst_K (290 K)
+    assert diagnose_fn(_Rec(), state) == "DIAG"
+    assert captured["sst_K"] is state.sst_K        # the model-grid SST is forwarded
+
+
 def test_make_les_diagnose_fn_mpas_routes_edge_velocity():
     """An MPAS worst column spins off its LES end-to-end (iter 76): the model_ctx
     carries the native u_edge, make_les_diagnose_fn routes it to the Voronoi
