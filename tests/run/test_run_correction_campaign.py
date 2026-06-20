@@ -3335,6 +3335,42 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
     assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
 
 
+def test_run_multi_main_forwards_valid_mask_to_the_builder(monkeypatch):
+    """The multi-coefficient main forwards the ocean-only valid_mask to
+    build_multi_correction_campaign (iter 466 fix): it previously dropped it silently, so
+    `--ocean-only --coefficients C_K,Pr_t` ranked ALL columns instead of ocean-only."""
+    import jax.numpy as jnp
+    import pytest
+
+    import scripts.run.run_correction_campaign as mod
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _spy(**kwargs):
+        captured.update(kwargs)
+        raise _StopError()                         # stop before the dry-run report
+
+    monkeypatch.setattr(mod, "build_multi_correction_campaign", _spy)
+
+    grid = SimpleNamespace(grid_shape_2d=(2, 2), grid_area=jnp.ones(4))
+    args = SimpleNamespace(
+        coefficients="C_K,Pr_t", resume=None, checkpoint=None, iterations=1,
+        staged=False, surface_flux=False, dry_run=True,
+        n_worst=4, les_budget=None, feedback_strategy="static",
+        keep_worsening_rounds=False, step_fractions=None, allow_unphysical_coeff=False,
+        bias_tol=None, patience=2, keep_dry_rounds=False, spinup_days=0.0)
+    mask = jnp.array([True, False, True, False])
+    with pytest.raises(_StopError):
+        mod._run_multi_main(
+            args, base_cfg=object(), grid=grid, sigma=object(), reference=object(),
+            build_base_driver=lambda c: object(), extract_fn=lambda *a: object(),
+            run_les=object(), valid_mask=mask)
+    assert captured["valid_mask"] is mask          # forwarded, not dropped
+
+
 def test_surface_flux_land_warning_fires_without_ocean_only():
     """--surface-flux on a config WITH a land mask but WITHOUT --ocean-only warns (iter 465):
     a land worst-column would get a surface flux from a non-ocean SST. Silent when paired with

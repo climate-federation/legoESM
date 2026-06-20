@@ -2073,7 +2073,8 @@ def _format_per_variable_bias(pvb) -> str:
 
 
 def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
-                    extract_fn, run_les, *, phis=None):  # pragma: no cover - heavy I/O
+                    extract_fn, run_les, *, phis=None,
+                    valid_mask=None):  # pragma: no cover - heavy I/O
     """Multi-coefficient campaign entry (``--coefficients``): a dict checkpoint /
     resume / output for the per-coefficient accumulated fields.  ``phis`` (the
     model's static orographic topography, resolved once in :func:`main`) is
@@ -2131,7 +2132,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(surface_flux=args.surface_flux),
         coefficients=coefficients,
-        run_les_fn=run_les, phis=phis,
+        run_les_fn=run_les, phis=phis, valid_mask=valid_mask,
         initial_clubb=initial_clubb, initial_fields=initial_fields,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         sequential=args.staged, dry_run=args.dry_run,
@@ -2559,10 +2560,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     _warn_if_grid_exceeds_era5_lat_coverage(era5_slice.lat, grid.grid_lat)
     reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
 
+    # OCEAN-only ranking mask (iter 451) — computed ONCE here and passed to BOTH the single- and
+    # multi-coefficient paths (the multi path previously dropped it silently — iter 466 fix).
+    _ocean_mask = _maybe_ocean_mask(args, base_cfg)
+
     if args.coefficients is not None:
         return _run_multi_main(
             args, base_cfg, grid, sigma, reference, build_base_driver, extract_fn,
-            run_les, phis=phis)
+            run_les, phis=phis, valid_mask=_ocean_mask)
 
     # Restart: resume from a checkpoint (corrected config + accumulated field +
     # round), so a multi-day campaign survives a job timeout (§1 restartable).
@@ -2619,7 +2624,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         grid=grid, area_weights=_area_weights(grid), n_iterations=args.iterations,
         les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
                                    surface_flux=args.surface_flux),
-        run_les_fn=run_les, phis=phis, valid_mask=_maybe_ocean_mask(args, base_cfg),
+        run_les_fn=run_les, phis=phis, valid_mask=_ocean_mask,
         initial_clubb=initial_clubb, initial_field=initial_field,
         start_round=start_round, checkpoint_callback=checkpoint_callback,
         dry_run=args.dry_run,
