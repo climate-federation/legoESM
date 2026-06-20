@@ -73,6 +73,43 @@ def test_kernel_field_recovers_value_at_sample():
     assert float(field[1]) == pytest.approx(-9.0)
 
 
+def test_kernel_field_gradient_is_finite_through_no_neighbor_column():
+    """AD-safety of the no-neighbor fallback: ``jax.grad`` w.r.t. ``sample_values``
+    AND ``sample_env`` stays FINITE even when the grid contains a FAR column that
+    falls back to ``background``.
+
+    The forward value at a far column is ``background`` regardless, so EVERY forward
+    test passes even with the NAIVE masked division ``weighted / total`` — but a far
+    column has ``total ≈ 0``, and reverse-mode AD through ``0/0`` yields a NaN
+    gradient (``jnp.where`` propagates a NaN cotangent from the UNSELECTED branch:
+    ``0 * NaN = NaN``).  The ``denom = where(has_neighbor, total, 1)`` double-where
+    is what makes the unselected branch finite; this LOCKS that protection — a
+    regression to a single ``weighted / total`` would NaN the deploy's gradient (the
+    env-kernel is differentiable w.r.t. the diagnosed values per the docstring and is
+    used inside the differentiable correction loss)."""
+    sample_env = jnp.array([[300.0, 1000.0]])               # one diagnosed sample
+    length = jnp.array([5.0, 500.0])
+    # Column 0 sits AT the sample (covered); column 1 is absurdly far (no neighbor
+    # ⇒ background) — so the gradient MUST traverse the fallback branch.
+    grid_env = jnp.array([[300.0, 1000.0], [250.0, 9.0e4]])
+
+    def loss_values(values):
+        f = environment_kernel_field(
+            grid_env, sample_env, values, length_scales=length, background=-9.0)
+        return jnp.sum(f ** 2)
+
+    g_values = jax.grad(loss_values)(jnp.array([0.5]))
+    assert np.all(np.isfinite(np.asarray(g_values)))
+
+    def loss_env(senv):                                     # weights depend on senv too
+        f = environment_kernel_field(
+            grid_env, senv, jnp.array([0.5]), length_scales=length, background=-9.0)
+        return jnp.sum(f ** 2)
+
+    g_env = jax.grad(loss_env)(sample_env)
+    assert np.all(np.isfinite(np.asarray(g_env)))
+
+
 def test_kernel_covered_columns_are_convex_combinations_within_sample_range():
     """A COVERED column's value is ``Σ wⱼ vⱼ / Σ wⱼ`` — a true convex combination of
     the sample values (weights ≥ 0), so it is GUARANTEED within
