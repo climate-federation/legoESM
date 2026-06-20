@@ -994,6 +994,62 @@ def test_process_column_real_dycore_integration():
     assert bool(jnp.all(jnp.isfinite(out.K)))
 
 
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 211: no f64->f32 scatter
+def test_process_column_real_dycore_surface_flux_warms_vs_noflux():
+    """MOCK-FREE end-to-end for the SURFACE-FLUX opt-in (iter 364-371): the helper's
+    kinematic surface flux, fed through the REAL plane-NH dycore, must (a) stay finite
+    and (b) inject net heat — the surface-flux run's column-total theta' strictly
+    exceeds the otherwise-identical no-flux run's.  The unit tests exercise the flux
+    wiring against a MOCK LES; this is the only test that runs the helper's flux through
+    the actual compressible-Euler integration, locking that prescribe='fluxes' is not a
+    silent no-op and warms in the physically correct direction."""
+    from legoesm.atmosphere.dynamics.column_les import (
+        build_column_les_setup,
+        run_forced_les,
+    )
+
+    n_lat, n_lon, nlev = 8, 16, 6
+    grid = create_latlon_grid(n_lat, n_lon, dtype=jnp.float64)
+    sigma = create_sigma_coordinate(nlev)
+    shape = (n_lat, n_lon, nlev)
+    # TOP-DOWN column (index 0 = top): warm surface air + a warmer SST ⇒ upward flux.
+    T = jnp.broadcast_to(jnp.linspace(240.0, 295.0, nlev), shape)  # noqa: N806
+    q_v = jnp.full(shape, 5e-3)
+    u = jnp.full(shape, 8.0)
+    v = jnp.zeros(shape)
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+    sst = jnp.full((n_lat, n_lon), 300.0)
+    common = dict(
+        T=T, q_v=q_v, u=u, v=v, p_s=p_s, grid=grid, sigma=sigma,
+        col_index=(4, 8), lat_rad=float(jnp.deg2rad(20.0)),
+    )
+
+    def _run(ls_state):
+        setup = build_column_les_setup(
+            cape_J_kg=200.0, lat_rad=float(jnp.deg2rad(20.0)),
+            gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls_state, config=_CONFIG,
+        )
+        return run_forced_les(setup, dt_s=0.5, n_steps=3)
+
+    gcm_z, gcm_theta, ls_noflux = extract_gcm_column(**common)             # prescribe='none'
+    _, _, ls_flux = extract_gcm_column(**common, sst_K=sst)                # prescribe='fluxes'
+    assert ls_noflux.prescribe == "none"
+    assert ls_flux.prescribe == "fluxes" and float(ls_flux.w_th_s) > 0.0
+
+    final_noflux = _run(ls_noflux)
+    final_flux = _run(ls_flux)
+
+    # Both real integrations stay finite (no acoustic blow-up).
+    for arr in (final_flux.theta_prime.data, final_flux.tracers.data,
+                final_noflux.theta_prime.data):
+        assert bool(jnp.all(jnp.isfinite(arr)))
+    # The surface flux is NOT a silent no-op and warms in the right direction:
+    # net column theta' is strictly larger with the upward surface heat flux.
+    total_flux = float(jnp.sum(final_flux.theta_prime.data))
+    total_noflux = float(jnp.sum(final_noflux.theta_prime.data))
+    assert total_flux > total_noflux
+
+
 def test_run_forced_les_rejects_acoustically_unstable_dt():
     """run_forced_les FAILS FAST on a timestep that violates the horizontal acoustic
     CFL — caught BEFORE the multi-day run, not as a mid-run blow-up (iter 103). The
