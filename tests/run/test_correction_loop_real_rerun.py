@@ -167,3 +167,120 @@ def test_full_correction_loop_real_rerun_with_injected_ck():
     assert np.isfinite(float(result.bias.baseline_bias))
     assert np.isfinite(float(result.bias.updated_bias))
     assert np.isfinite(float(result.worst_column_change))
+
+
+def _build_amip_driver(clubb_cfg):
+    """The AMIP (atm-only, prescribed analytical SST) analog of ``_build_driver``.
+
+    ``dataset="analytical"`` wires the prescribed analytical SST that
+    ``amip_column_state`` reads via ``get_sst_sic`` — the one mode-specific piece
+    distinguishing the AMIP run path from the CMIP one above."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+    from legoesm.driver.model_driver import ModelDriver
+
+    atm = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=_NLAT, nlev=_NLEV),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=0.5), radiation="gray",
+        turbulence="clubb_lite", days=0.5, dataset="analytical",
+        turbulence_override=TurbulenceConfig(
+            scheme="clubb_lite", clubb_lite=clubb_cfg))
+    driver = ModelDriver(atm)
+    driver.setup()
+    return driver
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")  # iter 208/210: no f64->f32 scatter
+def test_full_correction_loop_real_rerun_amip():
+    """AMIP twin of the CMIP capstone: the done-criterion names BOTH modes, so the
+    LES-informed per-column C_K must reach a real AMIP (atm-only, prescribed SST)
+    re-run's turbulence kernel exactly as it does for CMIP.  The AMIP path differs
+    only in the driver (`ModelDriver` vs `CoupledESMDriver`) and the column-state
+    extractor (`amip_column_state` vs `cmip_column_state`); the injection +
+    re-compare are shared.  Proves the loop closes for AMIP and the re-run genuinely
+    consumed the corrected config.  SIGN of the bias change NOT asserted (needs real
+    ERA5 at HPC scale)."""
+    from legoesm.training.compare_reanalysis import compare_state_to_reference
+    from legoesm.training.run_to_column_mean import amip_column_state
+
+    built: list = []
+
+    def build_driver(clubb_cfg):
+        driver = _build_amip_driver(clubb_cfg)
+        built.append((clubb_cfg, driver))
+        return driver
+
+    run_fn = make_run_fn(build_driver, amip_column_state)
+
+    # Probe driver (setup only, no run; NOT recorded in `built`) for grid + sigma.
+    probe = _build_amip_driver(CLUBBLiteConfig())
+    sigma = probe.sigma            # ModelDriver exposes sigma/grid directly (no ._atm)
+    grid = probe.grid
+    rad2deg = 180.0 / np.pi
+    sigma_full = jnp.asarray(sigma.sigma_full)
+    sigma_half = jnp.asarray(sigma.sigma_half)
+    lat_deg = jnp.asarray(np.asarray(grid.grid_lat) * rad2deg)
+    lon_deg = jnp.asarray(np.asarray(grid.grid_lon) * rad2deg)
+
+    # Baseline run → reference with a localized +6 K bias pinning the worst column.
+    model0 = run_fn(CLUBBLiteConfig())
+    assert model0.T.shape == (_NLAT, _NLON, _NLEV)
+    assert model0.sst_K is not None          # AMIP prescribed SST carried through
+    flat = _NLAT // 2 * _NLON + _NLON // 2
+    bias = np.zeros((_NLAT, _NLON))
+    bias[_NLAT // 2, _NLON // 2] = 6.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    comparison = compare_state_to_reference(
+        model=model0, reference=reference, sigma_full=sigma_full,
+        sigma_half=sigma_half, lat_deg=lat_deg, lon_deg=lon_deg,
+        time_index=0, n_worst=1)
+    assert comparison.manifest[0].flat_index == flat
+    score = np.asarray(comparison.error_fields.combined_score).reshape(-1)
+    assert score[flat] > 2.0 * float(np.delete(score, flat).max())  # dominance
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=sigma_full, sigma_half=sigma_half,
+        lat_deg=lat_deg, lon_deg=lon_deg, area_weights=jnp.ones((_NLAT, _NLON)),
+        n_worst=1, run_amip_fn=run_fn,
+    )
+
+    def diagnose_fn(record, model_ctx):
+        return _Eddy(0.8)
+
+    background = float(CLUBBLiteConfig().C_K)
+    result = run_correction_iteration(
+        CLUBBLiteConfig(),
+        compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(_NLAT, _NLON),
+        background=background,
+    )
+
+    # The loop closed: 1 worst column diagnosed + corrected with the per-column C_K.
+    assert result.n_diagnosed == 1
+    assert result.n_corrected == 1
+    ck = np.asarray(result.updated_config.C_K)
+    assert ck.shape == (_NLAT * _NLON,)
+    assert ck[flat] == pytest.approx(0.8)
+    assert np.allclose(np.delete(ck, flat), background)
+
+    # NON-VACUITY: the AMIP re-run's resolved turbulence kernel carries EXACTLY the
+    # per-column C_K array — the injection reached the real AMIP kernel (had
+    # turbulence_override been ignored, this would be the scalar default).
+    updated_cfg, updated_driver = built[-1]
+    assert np.ndim(np.asarray(updated_cfg.C_K)) == 1
+    np.testing.assert_array_equal(
+        np.asarray(updated_driver.physics.turbulence_config.C_K),
+        np.asarray(result.updated_config.C_K))
+
+    # The re-run produced a finite, real bias measurement (sign NOT asserted).
+    assert np.isfinite(float(result.bias.baseline_bias))
+    assert np.isfinite(float(result.bias.updated_bias))
+    assert np.isfinite(float(result.worst_column_change))
