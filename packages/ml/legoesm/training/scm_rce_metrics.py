@@ -245,7 +245,10 @@ def realism_reasons_from_diagnostics(
 ) -> list[str]:
     """Return human-readable realism-gate failures from scalar diagnostics."""
     reasons: list[str] = []
-    n_ft = int(diag.get("n_free_trop_levels", 0))
+    # Fail CLOSED on a missing/NaN level count, consistent with the float fields below
+    # (a NaN must REJECT the LES, never crash `int(nan)` and take the campaign down with it).
+    n_ft_raw = float(diag.get("n_free_trop_levels", 0))
+    n_ft = int(n_ft_raw) if math.isfinite(n_ft_raw) else 0
     if n_ft < min_free_trop_levels:
         reasons.append(f"too few free-troposphere levels ({n_ft})")
     mean_abs = float(diag.get("mean_abs_K", float("nan")))
