@@ -376,6 +376,16 @@ For every grid that can decompose across nodes today (atm icosahedral, ocean
 lat-lon), weak/strong scaling is at the practical limit set by the Gloo/PCIe
 fabric and mpi4jax's serialized per-neighbour `sendrecv`; per-device throughput
 is at the memory-bandwidth-bound ceiling (quantified by
-`scripts/bench/roofline_probe.py`). Closing the remaining grids (atm lat-lon at
-high np, cubed-sphere >6 devices, spectral) requires the three architectural
-projects above, each tracked as a task.
+`scripts/bench/roofline_probe.py`).
+
+The **cubed-sphere >6-device** project is now DONE as a capability: the sub-face
+np=6·kt² tiling is shipped + np24/54 bit-identity parity-gated for the full 3D-PE
+step — DRY *and* (2026-06-20) MOIST (tracers + Kessler;
+`cube_moist_tiled_step_design.md`). It is FUTURE-HW (np>6 anti-scales on
+Ginsburg's CPU shard_map / cross-node ppermute by design, so it is gated by
+bit-identity, not benchmarked here). With it, every atmosphere grid ×
+{dry,moist} × {f32,f64} × {weak,strong} is at its Ginsburg practical limit and
+the cube has a parity-gated path beyond 6 devices for fast-interconnect HW. The
+two remaining decomposition projects (atm lat-lon 2-D pencil at high np, spectral
+transpose) stay HW-blocked on Gloo/PCIe — the SOTA fixes (MOM6/E3SM 2-D pencil;
+NeuralGCM/spectral transpose) need InfiniBand/NCCL Ginsburg does not have.
