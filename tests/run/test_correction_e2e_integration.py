@@ -243,7 +243,8 @@ def test_real_model_osse_reduces_bias_with_applied_ck():
 
 @pytest.mark.slow
 @pytest.mark.filterwarnings("error::FutureWarning")
-def test_full_loop_real_model_real_les_rerun_and_gate():
+@pytest.mark.parametrize("surface_flux", [False, True])
+def test_full_loop_real_model_real_les_rerun_and_gate(surface_flux):
     """The COMPLETE chain in ONE round with EVERY heavy end real: a real coupled model →
     compare → REAL plane-LES spin-off → diagnose C_K → splice → RE-RUN the real model →
     monotonic gate.  The e2e test above stops at the feedback field (no re-run); the
@@ -253,7 +254,13 @@ def test_full_loop_real_model_real_les_rerun_and_gate():
     is CI-portable).  It asserts the loop runs end-to-end (finite bias, a definite
     accept/reject verdict, the real LES corrected ≥1 worst column) — NOT a bias reduction,
     which is reference-dependent (the gate may correctly REJECT, exactly as it did against
-    real ERA5 where the idealized model's bias is C_K-insensitive, iter 412)."""
+    real ERA5 where the idealized model's bias is C_K-insensitive, iter 412).
+
+    Parametrized over ``surface_flux`` (iter 473): the True case is the FIRST end-to-end run
+    of the REALISTIC diagnosis path — the real model's coupled SST → the GCM bulk surface
+    flux → the prescribed-flux surface BC on the real LES → C_K — the exact diagnosis the
+    recommended realistic empirical run uses (--surface-flux). The model state carries sst_K
+    (from the coupled ocean), so the shared make_les_diagnose_fn threads it."""
     from functools import partial as _partial
 
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
@@ -290,7 +297,8 @@ def test_full_loop_real_model_real_les_rerun_and_gate():
         area_weights=jnp.ones((n_lat, n_lon)), n_worst=2,
         run_amip_fn=_run, coordinate=sigma)
 
-    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False,
+                              surface_flux=surface_flux)
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma, les_config=les_cfg,
         run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
