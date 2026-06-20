@@ -20,9 +20,18 @@ real-ERA5 compare (data-dependent: needs a local ERA5 archive + a model integrat
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+# Make the sibling ``scripts.*`` entry points (``scripts.data.load_local_era5``) importable
+# when this file is run as a standalone CLI; under pytest the repo root is already on the
+# path, so the guard makes this a no-op there.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 #: Below this C_K-controllable FRACTION of the total bias, a real-ERA5 correction loop
 #: would be dominated by model-idealization error and is unlikely to show a reduction —
@@ -195,8 +204,14 @@ def format_per_level_report(per_level: dict, sigma_full: Any) -> list[str]:
     return lines
 
 
-def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int):
-    """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma)."""
+def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
+                     radiation: str = "gray"):
+    """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma).
+
+    ``radiation`` defaults to ``"gray"`` (the idealized config the iter-412 NO-GO was
+    measured at); pass ``"rrtmgp"`` to measure the C_K sensitivity at the REALISTIC config
+    the HPC run uses — the pre-flight then answers whether the loop can move the bias THERE,
+    not just under idealized radiation."""
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
@@ -215,7 +230,7 @@ def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int):
         grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
-        output=OutputConfig(diag_days=max(days, 1)), radiation="gray", days=days,
+        output=OutputConfig(diag_days=max(days, 1)), radiation=radiation, days=days,
         turbulence="clubb_lite",
         turbulence_override=TurbulenceConfig(
             scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=float(c_k))))
@@ -228,6 +243,15 @@ def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int):
     model = column_state_from_hydrostatic(
         a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
     return model, a.grid, a.sigma
+
+
+def _preflight_exit_code(go: bool) -> int:
+    """GO/NO-GO pre-flight exit status (mirrors the campaign's ``_campaign_exit_code``):
+    ``0`` when the C_K loop CAN lower the real-ERA5 bias (so an HPC launch should PROCEED),
+    ``1`` when it cannot (idealization-dominated — realism needed, not the loop).  Lets an
+    operator gate ``ck_sensitivity_vs_era5.py … && sbatch run_correction_campaign.sbatch``
+    so a multi-day HPC run is not spent on a bias the C_K closure cannot move."""
+    return 0 if go else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -256,6 +280,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resolution", type=int, default=8)
     p.add_argument("--nlev", type=int, default=5)
     p.add_argument("--days", type=int, default=1)
+    p.add_argument("--radiation", default="gray",
+                   help="radiation scheme for the sensitivity runs (default gray; pass "
+                        "rrtmgp to measure the C_K sensitivity at the REALISTIC HPC config)")
     p.add_argument("--days-sweep", type=int, nargs="+", default=None,
                    help="run lengths [days] to sweep — reports the BL C_K-controllable "
                         "fraction vs run length (equilibration-limited vs idealization-"
@@ -294,9 +321,11 @@ def main(argv: list[str] | None = None) -> int:
               "run length:")
         for days in days_list:
             m_lo, grid, sigma = _run_model_state(
-                ck_lo, resolution=args.resolution, nlev=args.nlev, days=days)
+                ck_lo, resolution=args.resolution, nlev=args.nlev, days=days,
+                radiation=args.radiation)
             m_hi, _, _ = _run_model_state(
-                ck_hi, resolution=args.resolution, nlev=args.nlev, days=days)
+                ck_hi, resolution=args.resolution, nlev=args.nlev, days=days,
+                radiation=args.radiation)
             if "ref" not in ref_box:                 # grid/sigma depend only on res/nlev
                 ref_box["ref"] = _build_reference(grid, sigma)
             pl = _bl_per_level(m_lo, m_hi, grid, ref_box["ref"])
@@ -322,12 +351,17 @@ def main(argv: list[str] | None = None) -> int:
                   f"LINEAR extrapolation needs ~{dtf:.0f} days to reach the "
                   f"{_FEASIBLE_FRACTION:.0%} floor — if impractically long, realism (real "
                   "radiation/SST) is ALSO needed, not run length alone.")
-        return 0
+        # GO/NO-GO gate: run length is a lever iff the trend rises toward feasibility; a FLAT
+        # trend is idealization-dominated (the loop cannot reach the floor with run length).
+        go = bool(trend["monotonic_increasing"])
+        print(f"  preflight verdict: {'GO' if go else 'NO-GO'} (exit {_preflight_exit_code(go)}) "
+              "— gate an HPC launch on this exit code.")
+        return _preflight_exit_code(go)
 
     m_lo, grid, sigma = _run_model_state(
-        ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days)
+        ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days, radiation=args.radiation)
     m_hi, _, _ = _run_model_state(
-        ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days)
+        ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days, radiation=args.radiation)
     ref = _build_reference(grid, sigma)
 
     def _score(model):
@@ -371,7 +405,12 @@ def main(argv: list[str] | None = None) -> int:
               "model's free-trop (radiation) error, NOT the LES->C_K correction — it tunes "
               "the right place, but needs a more realistic free-troposphere for tuning to "
               "move the TOTAL bias.")
-    return 0
+    # GO/NO-GO gate: the C_K loop can lower the TOTAL bias iff it is C_K-feasible at this
+    # config; if not, try --days-sweep (run length) or add realism before committing HPC hours.
+    go = bool(s["c_k_feasible"])
+    print(f"  preflight verdict: {'GO' if go else 'NO-GO'} (exit {_preflight_exit_code(go)}) "
+          "— gate an HPC launch on this exit code (NO-GO: try --days-sweep or add realism).")
+    return _preflight_exit_code(go)
 
 
 if __name__ == "__main__":

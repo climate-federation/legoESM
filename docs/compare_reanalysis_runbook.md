@@ -53,6 +53,30 @@ $PY scripts/experiment/smoke_compare_reanalysis.py --era5-zarr /path/to/era5.zar
 
 A green `[smoke] PASS` means the turnkey chain is wired.
 
+### 1b. Preflight the C_K SENSITIVITY (go/no-go, before a multi-day run)
+
+The LES→C_K loop can only lower a bias the boundary-layer closure CONTROLS; an
+idealization-dominated bias (gray radiation / no real SST) is **not** moved by C_K (iter 412),
+so a multi-day run on it converges to NO improvement. `ck_sensitivity_vs_era5.py` runs two
+short C_K runs (or a `--days-sweep`) against real ERA5 and **exits 0 (GO — the loop can lower
+the bias) / 1 (NO-GO — idealization-dominated)**, mirroring the campaign exit-code gate, so the
+launch can be guarded:
+
+```bash
+# REALISTIC go/no-go (rrtmgp, two C_K runs vs real ERA5) gates the launch:
+$PY scripts/experiment/ck_sensitivity_vs_era5.py --local-era5-dir $LOCAL_ERA5_DIR \
+    --local-era5-date $DATE --resolution 8 --nlev 20 --radiation rrtmgp --days 10 --c-k 0.4 1.0 \
+  && sbatch scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch
+# OR ask if RUN LENGTH is the lever (sweep — NO-GO only if the trend is FLAT):
+$PY scripts/experiment/ck_sensitivity_vs_era5.py ... --radiation rrtmgp --days-sweep 1 3 6
+```
+
+NO-GO means: add realism (real radiation/SST) and/or run longer (the `--days-sweep` prints the
+~days to the feasibility floor) BEFORE spending HPC hours on the loop. The per-level report
+still shows C_K controls the boundary layer even when the free-trop radiation error dominates
+the TOTAL bias — it tunes the right place, but needs a realistic free-troposphere to move the
+total.
+
 ## 2. Launch the campaign (resumable, self-requeuing)
 
 Edit the `#SBATCH` account/partition/time + the `CONFIG`/`ERA5`/`OUT` paths at the

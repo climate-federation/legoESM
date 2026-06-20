@@ -37,6 +37,30 @@ def test_bias_ck_sensitivity_flags_insensitive_vs_sensitive():
         bias_ck_sensitivity(np.zeros((2, 2)), np.zeros((3,)))
 
 
+def test_preflight_exit_code_gates_the_hpc_launch():
+    """The pre-flight exit code gates an HPC launch: GO (0) when the C_K loop CAN lower the
+    bias (a rising sensitivity trend OR a C_K-feasible config), NO-GO (1) when it cannot
+    (a FLAT idealization-dominated trend / an insensitive config) — mirrors the campaign's
+    ``_campaign_exit_code`` so ``ck_sensitivity … && sbatch`` is a real go/no-go gate."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import (
+        _preflight_exit_code,
+        bias_ck_sensitivity,
+        ck_sensitivity_trend,
+    )
+
+    assert _preflight_exit_code(True) == 0 and _preflight_exit_code(False) == 1
+    # --days-sweep: a FLAT trend (idealization-dominated) → NO-GO; a rising trend → GO.
+    flat = ck_sensitivity_trend([1, 3, 6], [0.01, 0.01, 0.01])
+    assert _preflight_exit_code(flat["monotonic_increasing"]) == 1
+    rising = ck_sensitivity_trend([1, 3, 6], [0.003, 0.004, 0.005])
+    assert _preflight_exit_code(rising["monotonic_increasing"]) == 0
+    # single-config: a C_K-sensitive bias → GO; the idealization-dominated iter-412 case → NO-GO.
+    feasible = bias_ck_sensitivity(np.full((4, 4), 5.0), np.full((4, 4), 3.0))
+    assert _preflight_exit_code(feasible["c_k_feasible"]) == 0
+    insensitive = bias_ck_sensitivity(np.full((4, 4), 11.2), np.full((4, 4), 11.201))
+    assert _preflight_exit_code(insensitive["c_k_feasible"]) == 1
+
+
 def test_per_level_ck_bias_sensitivity_localizes_to_the_boundary_layer():
     """The per-level breakdown (iter 416) localizes C_K control: a free-tropospheric bias
     that C_K does NOT move shows a ~0 controllable fraction, while a BL level C_K DOES
