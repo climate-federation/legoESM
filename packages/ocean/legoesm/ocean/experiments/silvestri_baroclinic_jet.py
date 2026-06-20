@@ -59,6 +59,10 @@ class SilvestriJetConfig(NamedTuple):
     # White-noise kick on T to seed the instability [K].
     noise_amplitude_K: float = 1.0e-3
     noise_seed: int = 0
+    # GH #480: rate [1/s] of the N/S free-slip-wall grid-mode filter (see
+    # LatLonCGridOceanConfig.wall_grid_filter_rate_s). Default 5e-4 lets W9V/W9D
+    # run with NO closure; set 0.0 to reproduce the day-11 blow-up.
+    wall_grid_filter_rate_s: float = 5.0e-4
 
     @property
     def Delta_phi_rad(self) -> float:
@@ -240,6 +244,12 @@ def build_silvestri_baroclinic_jet_setup(
             alpha_T=config.alpha_T, rho_ref=config.rho_0,
             T_ref=config.T_ref_C, S_ref=config.S_uniform),
         gm_redi=None,
+        # GH #480: suppress the un-dissipatable 2dx-in-lon grid mode that grows at
+        # the N/S free-slip walls (WENO vector-invariant momentum). Boundary-localised
+        # to the wall rows only (no-op for the non-WENO schemes UP3/SM2/QG2). Lets the
+        # eddy-permitting W9V/W9D jet run with NO closure (vs the A_h+Smag `stabilize`
+        # backstop below). Validated: §5 W9V survives 16 d at the Oceananigans amplitude.
+        wall_grid_filter_rate_s=config.wall_grid_filter_rate_s,
     )
     model_config = apply_silvestri_scheme(base_config, scheme)
 

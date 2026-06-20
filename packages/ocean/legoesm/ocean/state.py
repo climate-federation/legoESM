@@ -938,6 +938,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     #              (Eq 44). The paper notes the divergence choice "has a large
     #              impact on the solution" (W9D is markedly more dissipative).
     weno_smoothness: str = "split"
+    # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
+    # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
+    # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant
+    # momentum + free-slip walls (e.g. the Silvestri §5 jet), where the rotational
+    # 2dx wall mode is un-dissipatable by advection (no zonal velocity). NOT a
+    # domain viscosity/closure — a boundary Shapiro filter on the wall rows only.
+    wall_grid_filter_rate_s: float = 0.0
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.
