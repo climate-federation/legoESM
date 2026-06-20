@@ -154,6 +154,15 @@ $PY scripts/validate/compare_amip_era5.py \
 It reports the per-variable global bias **before vs after** — the clause-5
 "did updating the parameters improve the biases" answer on held-out data.
 
+> **Match the vertical coordinate to your run.** Pass `--vertical-coord {sigma,hybrid}`
+> (default `hybrid`, the `GridConfig` default) and, for hybrid, `--p-top-Pa` to match the
+> *checkpoint's* run — they set the pressure levels the model state is placed on. The CLI
+> now **verifies these against the restart's recorded config and fails loud on a mismatch**
+> (so you cannot silently compare on the wrong levels); a pure-sigma run therefore needs
+> `--vertical-coord sigma`. The campaign's `--dry-run` likewise rejects a per-column
+> `area_weights`/`valid_mask`/`lat`/`lon` whose shape does not match the reference grid —
+> all caught in the cheap preflight, not after a multi-day run.
+
 ## Automated gating (exit codes)
 
 Every step exits **0 only on success**, so the whole workflow chains with `&&` (or a
