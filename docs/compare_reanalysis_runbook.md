@@ -78,10 +78,11 @@ $PY scripts/experiment/smoke_compare_reanalysis.py --ocean-only --surface-flux \
 
 A green `[smoke] PASS` means the turnkey chain is wired. Pass `--ocean-only`/`--surface-flux`
 to validate the realistic flag combo (the iter-484 ocean-only flat-mask bug was grid-shape-
-specific), and `--grid-type {latlon,cubed_sphere,gaussian}` to smoke the FULL harness (ERA5
+specific), and `--grid-type {latlon,cubed_sphere}` to smoke the FULL harness (ERA5
 regrid → compare → rank → ocean mask) on a structured non-lat-lon grid before the HPC run.
-(`--align-insolation` is NOT a smoke flag — it needs the offline `--local-era5-date`, not the
-Zarr smoke.)
+(`gaussian` is unsupported for clubb_lite — the spectral loop does not thread its physics
+state, issue #405; `--align-insolation` is NOT a smoke flag — it needs the offline
+`--local-era5-date`, not the Zarr smoke.)
 
 ### 1b. Preflight the C_K SENSITIVITY (go/no-go, before a multi-day run)
 
@@ -126,9 +127,9 @@ total.
 > To MATCH an ocean-only campaign, pass the same env vars to the pre-flight wrapper as to the
 > campaign one: `OCEAN_ONLY=1 LAND_MASK_PATH=<mask> MAX_LAND_FRACTION=<thr>` (iter 478) — both
 > launchers then score the same ocean columns, so the go/no-go reflects the campaign's domain.
-> For a NON-lat-lon campaign also set `GRID_TYPE=cubed_sphere` (or `gaussian`, iter 493) so the
-> sensitivity is measured on the campaign's grid family (the OSSE pre-flight already uses the
-> exact `--config`, so it is grid-faithful by construction).
+> For a CUBED-SPHERE campaign also set `GRID_TYPE=cubed_sphere` (iter 493) so the sensitivity is
+> measured on the campaign's grid family (gaussian is unsupported for clubb_lite, issue #405;
+> the OSSE pre-flight already uses the exact `--config`, so it is grid-faithful by construction).
 >
 > *Tip:* run the **gray** pre-flight FIRST as a quick (minutes, interactive) chain sanity-check —
 > it reports NO-GO with the per-level BL-localization, so a clean run confirms the real-ERA5

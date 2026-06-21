@@ -232,9 +232,16 @@ def _build_ck_atm_config(c_k: float, *, resolution: int, nlev: int, days: int,
     """The clubb_lite ``ExperimentConfig`` the C_K-sensitivity twin runs at ``c_k`` — pure
     (no driver/run), so the GRID-TYPE threading is unit-testable without a model run.
 
-    ``grid_type`` (default ``latlon``; also ``cubed_sphere``/``gaussian``) MUST match the
-    campaign's grid so the go/no-go measures the C_K sensitivity on the SAME grid the campaign
-    ranks over (iter 493 — the campaign config generator gained ``--grid-type`` in iter 485)."""
+    ``grid_type`` (``latlon`` or ``cubed_sphere``) MUST match the campaign's grid so the
+    go/no-go measures the C_K sensitivity on the SAME grid the campaign ranks over (iter 493).
+    ``gaussian`` is rejected: clubb_lite's prognostic physics state is not threaded by the
+    spectral loop gaussian requires (issue #405 / iter 494) — it would fail at the model
+    build, so fail loud here."""
+    if grid_type not in ("latlon", "cubed_sphere"):
+        raise ValueError(
+            f"grid_type {grid_type!r} is unsupported for the clubb_lite C_K-sensitivity twin: "
+            "clubb_lite carries prognostic physics state the spectral run loop (gaussian) does "
+            "not thread (issue #405). Use 'latlon' or 'cubed_sphere'.")
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
     from legoesm.driver.config import (
         DycoreConfig,
@@ -315,9 +322,10 @@ def _build_arg_parser():
     p.add_argument("--resolution", type=int, default=8)
     p.add_argument("--nlev", type=int, default=5)
     p.add_argument("--grid-type", default="latlon",
-                   choices=("latlon", "cubed_sphere", "gaussian"),
+                   choices=("latlon", "cubed_sphere"),
                    help="model grid family — MATCH the campaign's --grid-type so the go/no-go "
-                        "measures the C_K sensitivity on the SAME grid (default latlon)")
+                        "measures the C_K sensitivity on the SAME grid (default latlon; gaussian "
+                        "is unsupported for clubb_lite, issue #405)")
     p.add_argument("--days", type=int, default=1)
     p.add_argument("--radiation", default="gray",
                    help="radiation scheme for the sensitivity runs (default gray; pass "

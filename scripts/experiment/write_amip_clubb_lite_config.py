@@ -45,16 +45,21 @@ def build_amip_clubb_lite_config(
     """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
 
     ``turbulence`` is fixed to ``"clubb_lite"`` (the campaign's requirement); the
-    grid (``grid_type``, default ``latlon``; also ``cubed_sphere``/``gaussian`` so the
-    realistic comparison + ocean-only ranking can be smoked on a STRUCTURED non-lat-lon
-    grid — the iter-484 flat-mask bug was grid-shape-specific), vertical resolution,
-    timestep, radiation, and run length are exposed so the starter can be scaled toward
-    a production run.  ``days`` is the
-    run length, i.e. the CLIMATOLOGY WINDOW the model time-mean is computed over and
+    grid (``grid_type``, default ``latlon``; also ``cubed_sphere`` so the realistic
+    comparison + ocean-only ranking work on a STRUCTURED non-lat-lon grid — the iter-484
+    flat-mask bug was grid-shape-specific), vertical resolution, timestep, radiation, and
+    run length are exposed so the starter can be scaled toward a production run.  ``days``
+    is the run length, i.e. the CLIMATOLOGY WINDOW the model time-mean is computed over and
     compared to the (matched) ERA5 mean — keep it long enough for a stable mean (the
     200-day default ≈ 40 samples at the 5-day diagnostic cadence) and aligned to the
     ERA5 window (runbook §6). Hydrostatic finite-volume dycore — the AMIP default the
     comparison + LES spin-off were built against.
+
+    ``grid_type`` MUST be ``latlon`` or ``cubed_sphere``: ``clubb_lite`` carries prognostic
+    physics state that only the per-step / finite-volume run loop threads between steps
+    (issue #405), so a ``gaussian`` grid (which forces the SPECTRAL loop) cannot run the
+    clubb_lite campaign — a config that VALIDATES + dry-runs but FAILS at the model build
+    (iter 494). Fail loud here at config-gen, not deep in the build.
 
     ``land_mask_path`` (optional land-sea fraction file) sets a real land-sea mask, so the
     model runs land physics over land and the campaign's ``--ocean-only`` can EXCLUDE land
@@ -62,6 +67,12 @@ def build_amip_clubb_lite_config(
     prescribed-SST ocean, so over CONTINENTS the comparison to ERA5 (which has land) is
     apples-to-oranges and would dominate the worst-column ranking — see ``main``'s NOTE.
     """
+    if grid_type not in ("latlon", "cubed_sphere"):
+        raise ValueError(
+            f"grid_type {grid_type!r} is unsupported for a clubb_lite campaign: clubb_lite "
+            "carries prognostic physics state the spectral run loop (which 'gaussian' "
+            "requires) does not thread (issue #405), so the model build fails. Use 'latlon' "
+            "or 'cubed_sphere'.")
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type=str(grid_type), resolution=int(resolution),
                         nlev=int(nlev)),
@@ -85,8 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("out", help="output path for the JSON config")
     p.add_argument("--grid-type", default="latlon",
-                   choices=("latlon", "cubed_sphere", "gaussian"),
-                   help="model grid family (default latlon; cubed_sphere/gaussian let the "
+                   choices=("latlon", "cubed_sphere"),
+                   help="model grid family (default latlon; cubed_sphere lets the "
                         "realistic comparison + ocean-only ranking be smoked on a structured "
                         "non-lat-lon grid)")
     p.add_argument("--resolution", type=int, default=8, help="grid resolution (default 8)")

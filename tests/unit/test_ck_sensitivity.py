@@ -229,15 +229,22 @@ def test_build_ck_atm_config_matches_the_campaign_grid_type(tmp_path):
         _build_ck_atm_config,
     )
 
-    for gt in ("latlon", "cubed_sphere", "gaussian"):
+    for gt in ("latlon", "cubed_sphere"):
         cfg = _build_ck_atm_config(0.7, resolution=4, nlev=5, days=1, radiation="gray",
                                    land_mask_path="", grid_type=gt)
         cfg.validate_strict()                              # builds a schema-valid config
         assert cfg.grid.grid_type == gt                   # the campaign's grid family
         assert cfg.turbulence == "clubb_lite"
         assert float(cfg.turbulence_override.clubb_lite.C_K) == 0.7   # the C_K under test
-    # the CLI exposes --grid-type and defaults to latlon (back-compat)
+    # gaussian is REJECTED (iter 494): clubb_lite physics state is not threaded by the
+    # spectral loop gaussian forces (issue #405) — a config that validates but fails the build.
+    with pytest.raises(ValueError, match="unsupported for the clubb_lite"):
+        _build_ck_atm_config(0.7, resolution=4, nlev=5, days=1, radiation="gray",
+                             land_mask_path="", grid_type="gaussian")
+    # the CLI exposes --grid-type and defaults to latlon (back-compat); gaussian is not a choice
     p = _build_arg_parser()
     base = ["--local-era5-dir", str(tmp_path), "--local-era5-date", "20200101"]
     assert p.parse_args(base).grid_type == "latlon"
     assert p.parse_args(base + ["--grid-type", "cubed_sphere"]).grid_type == "cubed_sphere"
+    with pytest.raises(SystemExit):                        # argparse rejects gaussian
+        p.parse_args(base + ["--grid-type", "gaussian"])

@@ -130,8 +130,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
                    help="AMIP (prescribed SST) or CMIP (coupled); default amip")
     p.add_argument("--grid-type", default="latlon",
-                   choices=("latlon", "cubed_sphere", "gaussian"),
-                   help="model grid family for the generated config (default latlon)")
+                   choices=("latlon", "cubed_sphere"),
+                   help="model grid family for the generated config (default latlon; gaussian "
+                        "is unsupported for clubb_lite — the spectral loop does not thread its "
+                        "physics state, issue #405 / iter 494)")
     p.add_argument("--ocean-only", action="store_true",
                    help="forward --ocean-only to the dry-run (validate the realistic "
                         "ocean-column ranking flag in this environment)")

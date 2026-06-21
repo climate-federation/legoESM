@@ -22,23 +22,31 @@ def test_build_amip_clubb_lite_config_is_clubb_and_parameterized():
 
 
 def test_grid_type_is_selectable_for_structured_non_latlon_grids(tmp_path):
-    """--grid-type builds a schema-valid config on a non-lat-lon STRUCTURED grid (iter 485),
-    so the realistic comparison + ocean-only ranking can be smoked on cubed-sphere/Gaussian —
-    the iter-484 ocean-only flat-mask bug was grid-shape-specific, so the (6,n,n) / Gaussian
-    grid shapes must be exercisable end-to-end."""
+    """--grid-type builds a schema-valid config on the non-lat-lon STRUCTURED grid that the
+    clubb_lite campaign supports — CUBED-SPHERE (iter 485); the iter-484 ocean-only flat-mask
+    bug was grid-shape-specific, so the (6,n,n) shape must be exercisable. GAUSSIAN is REJECTED
+    (iter 494): clubb_lite's prognostic physics state is not threaded by the spectral loop
+    gaussian forces (issue #405), so it would VALIDATE + dry-run but FAIL at the model build —
+    fail loud at config-gen instead."""
+    import pytest
+
     from scripts.experiment.write_amip_clubb_lite_config import (
         build_amip_clubb_lite_config,
         main,
     )
 
-    for gt in ("cubed_sphere", "gaussian"):
-        cfg = build_amip_clubb_lite_config(grid_type=gt, resolution=4, nlev=5)
-        assert cfg.grid.grid_type == gt                 # validate_strict passed (build raises else)
-        assert cfg.turbulence == "clubb_lite"
+    cfg = build_amip_clubb_lite_config(grid_type="cubed_sphere", resolution=4, nlev=5)
+    assert cfg.grid.grid_type == "cubed_sphere"         # validate_strict passed (build raises else)
+    assert cfg.turbulence == "clubb_lite"
     out = tmp_path / "cs.json"
     assert main([str(out), "--grid-type", "cubed_sphere", "--resolution", "4",
                  "--nlev", "5"]) == 0
     assert out.is_file()
+    # gaussian is unsupported for clubb_lite -> fail loud at the build (not deep in the model)
+    with pytest.raises(ValueError, match="unsupported for a clubb_lite campaign"):
+        build_amip_clubb_lite_config(grid_type="gaussian", resolution=4, nlev=5)
+    with pytest.raises(SystemExit):                     # argparse rejects the removed choice
+        main([str(tmp_path / "g.json"), "--grid-type", "gaussian"])
 
 
 def test_days_climatology_window_is_exposed_and_defaults_to_a_real_window(tmp_path):
