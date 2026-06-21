@@ -18,7 +18,10 @@ import jax.numpy as jnp
 
 from legoesm.ocean.eos import compute_buoyancy_frequency
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
-from legoesm.ocean.physics.vertical_mixing._shared import vmap_vertical_diffusion
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    richardson_number,
+    vmap_vertical_diffusion,
+)
 from legoesm.ocean.physics.vertical_mixing.config import RichardsonVerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -73,16 +76,10 @@ def richardson_vertical_mixing(
     # N^2 at interfaces
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
 
-    # Shear^2 at interfaces
+    # Gradient Richardson number Ri = N^2 / S^2 (#518: shared helper; clip
+    # negative Ri -> max mixing for the unstable branch).
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
-    du = u[..., :-1] - u[..., 1:]
-    dv = v[..., :-1] - v[..., 1:]
-    S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
-
-    # Richardson number
-    Ri = N2 / jnp.maximum(S2, eps)
-    Ri = jnp.maximum(Ri, 0.0)  # Clip negative Ri (unstable → max mixing)
+    Ri = richardson_number(N2, u, v, dz_actual, eps=eps, clip_negative=True)
 
     # Pacanowski & Philander (1981, JPO 11, p.1448, Eq. 1) — the
     # POP / E3SM Omega convention is:

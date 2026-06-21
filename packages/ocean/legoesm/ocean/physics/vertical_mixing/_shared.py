@@ -40,6 +40,57 @@ def vertical_shear_squared(
     return du * du + dv * dv
 
 
+def richardson_number(
+    N2: jnp.ndarray,
+    u_cell: jnp.ndarray,
+    v_cell: jnp.ndarray,
+    dz_actual: jnp.ndarray,
+    *,
+    eps: float,
+    clip_negative: bool = False,
+) -> jnp.ndarray:
+    """Gradient Richardson number ``Ri = N^2 / S^2`` at interfaces.
+
+    Single source for the Richardson-scheme (``richardson.py``) and KPP
+    interior-shear (``kpp.py``) blocks, which computed this from byte-identical
+    inline code (#518 item 5).  ``N2`` is supplied by the caller (both already
+    call ``eos.compute_buoyancy_frequency``; KPP also reuses ``N2`` for its
+    static-instability term).
+
+    The squared shear uses the floor-on-the-SQUARED-denominator form
+    ``S^2 = (du^2 + dv^2) / max(dz_half^2, eps)`` with ``du = u[k] - u[k+1]``
+    — preserved bit-for-bit from both call sites.  NOTE: this floor placement
+    differs from :func:`vertical_shear_squared` (which floors the LINEAR
+    ``dz_half`` before dividing); the two are equal away from vanishing
+    ``dz_half`` but diverge in sub-eps-thin layers, so they are intentionally
+    NOT merged here — reconciling the floor convention is a numerics-affecting
+    change for a separate PR.
+
+    Parameters
+    ----------
+    N2 : (..., nlev-1) — buoyancy frequency squared at interfaces.
+    u_cell, v_cell : (..., nlev) — cell-centre velocities.
+    dz_actual : (..., nlev) — actual layer thickness (z* Jacobian applied).
+    eps : float — denominator floor (caller's scheme eps; applied to both
+        ``dz_half**2`` and ``S2``).
+    clip_negative : bool — when True, clip ``Ri`` to ``>= 0`` (the Richardson
+        scheme's "unstable -> max mixing" convention); KPP passes False and
+        clamps downstream via ``Ri / Ri_0``.
+
+    Returns
+    -------
+    Ri : (..., nlev-1)
+    """
+    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    du = u_cell[..., :-1] - u_cell[..., 1:]
+    dv = v_cell[..., :-1] - v_cell[..., 1:]
+    S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
+    Ri = N2 / jnp.maximum(S2, eps)
+    if clip_negative:
+        Ri = jnp.maximum(Ri, 0.0)
+    return Ri
+
+
 def compute_N2(
     rho_cell: jnp.ndarray, dz_half: jnp.ndarray, rho_0: float,
     g: float = constants.g,

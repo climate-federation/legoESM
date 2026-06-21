@@ -33,6 +33,7 @@ from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+from legoesm.ocean.physics.vertical_mixing._shared import richardson_number
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -327,11 +328,11 @@ def kpp_vertical_mixing(
 
     # --- Interior mixing: Richardson-number dependent ---
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # Interface spacing — also reused by the surface T/S gradient terms below.
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
-    du = u[..., :-1] - u[..., 1:]
-    dv = v[..., :-1] - v[..., 1:]
-    S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
-    Ri_int = N2 / jnp.maximum(S2, eps)
+    # Interior Ri = N^2 / S^2 (#518: shared helper; no clip here — KPP clamps
+    # downstream via Ri / Ri_0).
+    Ri_int = richardson_number(N2, u, v, dz_actual, eps=eps, clip_negative=False)
     # LMD94 interior shear instability: K = K_0 * (1 - (Ri/Ri_0)^2)^3
     # for Ri < Ri_0, zero above.
     Ri_ratio = jnp.clip(Ri_int / cfg.Ri_0, 0.0, 1.0)
