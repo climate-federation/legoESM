@@ -212,6 +212,16 @@ def main():
                              "classification + reference soil map (downloaded + "
                              "cached on first use). 'analytical' = latitude-band "
                              "PFT fractions, no soil map.")
+    parser.add_argument("--snow-albedo-feedback", dest="snow_albedo_feedback",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable the land snow-albedo feedback + latitude-"
+                             "varying vegetation albedo (surface_albedo: veg "
+                             "0.15 tropics / 0.20 midlat / 0.25 highlat, with "
+                             "snow-covered land brightening toward ~0.6-0.8).  "
+                             "OFF (default) leaves land at a constant 0.2 — too "
+                             "DARK over snow-covered high-latitude land (should "
+                             "be bright snow).  Recommended ON for realistic "
+                             "land/cryosphere surface albedo.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -514,6 +524,20 @@ def main():
         overrides.update(land_scheme_overrides(args.land_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
+
+    # Land snow-albedo feedback + lat-varying vegetation albedo (opt-in): the
+    # presets build the land config with snow_albedo_feedback=False, which holds
+    # land at a constant 0.2 — too dark over snow-covered high-latitude land.
+    # Enabling it activates the surface_albedo veg-by-latitude + snow-brightening
+    # scheme (both slab and multilayer land read config.snow_albedo_feedback).
+    if (getattr(args, "snow_albedo_feedback", False)
+            and coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                snow_albedo_feedback=True))
+        logger.info("  Land albedo: snow-albedo feedback + lat-varying "
+                    "vegetation albedo ENABLED")
 
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
