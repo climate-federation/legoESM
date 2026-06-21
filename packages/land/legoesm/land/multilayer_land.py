@@ -450,12 +450,31 @@ def _step_multilayer_land_impl(
         co2_flux = jnp.zeros(ncol)
 
     # --- TileResponse ---
+    # ``T_sfc`` is the AERODYNAMIC surface temperature for the atmosphere's
+    # sensible-heat coupling.  For the two-leaf canopy that is the canopy
+    # air-space temperature ``Tc`` (the exchange node, H_tot = rho*cp*(Tc-Ta)/Ra);
+    # for SimpleSEB it is the top-soil surface temperature ``T_surface_new``.
+    # Static dispatch on the (compile-time) surface-scheme type — feature gating,
+    # not data-dependent selection.
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        response_T_sfc = surface_out.T_canopy_air   # aerodynamic (canopy air-space temp)
+        # Upward LW MUST be the canopy's conservative top-of-canopy LW_out (the
+        # flux consistent with T_rad / eps_col), NOT a recomputation from the
+        # post-step top-SOIL temperature — otherwise the tile blend, the gray
+        # brightness temperature (sigma*T_bb^4 = lw_up), and lw_net all carry a
+        # soil-based flux that discards the canopy radiative state.  (The slab
+        # canopy path likewise reports surface_out.lw_up.)
+        response_lw_up = surface_out.lw_up          # canopy LW_out
+    else:
+        response_T_sfc = T_surface_new              # SimpleSEB: top-soil surface temp
+        response_lw_up = lw_up_new                  # recomputed from post-step skin T
     response = TileResponse(
-        T_sfc=T_surface_new,
+        T_sfc=response_T_sfc,
         # Emission-equivalent canopy temperature for the LW boundary
-        # (eps_col*sigma*T_surface^4 = LW_emit); T_sfc above is the top-soil
-        # temperature kept for sensible heat.  The tile blend emits with T_rad,
-        # not T_soil, to conserve LW for vegetated cells.
+        # (eps_col*sigma*T_surface^4 = LW_emit); T_sfc above is the aerodynamic
+        # (Tc for canopy / top-soil for SimpleSEB) temperature for sensible heat.
+        # The tile blend emits with this radiometric T_rad, not the aerodynamic
+        # temp, to conserve LW for vegetated cells.
         T_rad=surface_out.T_surface,
         albedo=alpha_new,
         emissivity=surface_out.emissivity,
@@ -465,7 +484,7 @@ def _step_multilayer_land_impl(
         lhflx=lhflx_actual,
         tau_x=tau_x,
         tau_y=tau_y,
-        lw_up=lw_up_new,
+        lw_up=response_lw_up,
         u_ocean_sfc=jnp.zeros(ncol),
         v_ocean_sfc=jnp.zeros(ncol),
         co2_flux=co2_flux,

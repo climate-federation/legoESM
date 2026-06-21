@@ -138,24 +138,28 @@ class EarthSystemDriver:
         # fall back to the static blend before the first coupler step.
         cfg = self.config
         sst, sic = self._atm.get_sst_sic(day)
-        from legoesm.forcing.surface_utils import blend_surface_property
+        from legoesm.forcing.surface_utils import (
+            blend_surface_property,
+            surface_emissivity_for_lw_inversion,
+            surface_temperature_for_lw_boundary,
+        )
         # _last_sfc_response is only set after the first coupler step; this
         # reconstruction runs before it on segment 0.
         _resp = getattr(self, "_last_sfc_response", None)
         _dyn_sfc = (
             _resp is not None and getattr(_resp, "albedo", None) is not None
         )
-        # Only RRTMGP/RRTMG emitted with the paired (T_rad, eps_grid); gray/none
-        # emitted as a black surface at the area-weighted T_sfc.
-        _conservative_lw = getattr(
-            self.config, "radiation", "gray") in ("rrtmgp", "rrtmg")
+        # ALL radiation forms the LW boundary with the LW-derived T_rad: RRTMGP/
+        # RRTMG with the paired (T_rad, eps_grid); gray/none as a black surface at
+        # a brightness temperature.  Invert lw_net with the SAME (eps, T) radiation
+        # emitted with — NOT the aerodynamic/sensible-heat T_sfc (the canopy
+        # air-space temp Tc over vegetated cells).
+        _radiation = getattr(self.config, "radiation", "gray")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            # Conservative schemes inverted lw_net with the radiative-equivalent
-            # skin temperature T_rad (flux-conserving tile blend) that radiation
-            # used for the LW boundary; gray/none used the black-surface T_sfc.
-            T_sfc = (getattr(_resp, "T_rad", _resp.T_sfc)
-                     if _conservative_lw else _resp.T_sfc)
+            T_sfc = surface_temperature_for_lw_boundary(
+                _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
+                lw_up=_resp.lw_up)
         else:
             albedo_eff = blend_surface_property(
                 sic,
@@ -164,17 +168,19 @@ class EarthSystemDriver:
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity for inverting lw_net_sfc -> gross lw_down.  When the
-        # dynamic feedback is active, radiation produced lw_net_sfc with the
-        # coupler's tile-blended emissivity (incl. the canopy's LAI-dependent
-        # eps_col), so invert with that SAME emissivity for a consistent gross
-        # flux; else use the canonical ocean/ice static blend (not a magic 0.96).
-        if (_dyn_sfc and _conservative_lw
-                and getattr(_resp, "emissivity", None) is not None):
-            eps_sfc = _resp.emissivity
-        else:
-            eps_sfc = blend_surface_property(
-                sic, constants.emissivity_ice, constants.emissivity_ocean)
+        # Emissivity matching the emission: RRTMGP/RRTMG + feedback -> the
+        # tile-blended eps_col; RRTMGP/RRTMG static -> the EXACT ocean/ice/land
+        # emissivity blend the radiation pipeline emitted with (configured
+        # emissivity_* values, not a constant ocean/ice approximation); gray/none
+        # -> an idealized black surface (eps = 1.0).
+        _phys = self._atm.physics
+        eps_sfc = surface_emissivity_for_lw_inversion(
+            _radiation,
+            dynamic_emissivity=(
+                getattr(_resp, "emissivity", None) if _dyn_sfc else None),
+            static_sfc_emissivity=_phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None),
+        )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
@@ -263,6 +269,10 @@ class EarthSystemDriver:
         # its conservative LW_out.
         self._last_sfc_response = sfc_response
 
+        from legoesm.forcing.surface_utils import (
+            surface_temperature_for_lw_boundary,
+        )
+
         def _get_sfc_override(day, _self=self):
             r = _self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
@@ -276,11 +286,16 @@ class EarthSystemDriver:
             _cons = getattr(
                 _self.config, "radiation", "gray") in ("rrtmgp", "rrtmg")
             if not _cons:
-                # Gray/none use an idealized black surface (eps=1) and ignore the
-                # dynamic emissivity; feeding them T_rad (defined WITH eps_grid)
-                # would over-emit by 1/eps_grid.  Give the area-weighted skin
-                # temperature + no emissivity override instead.
-                return r.albedo, r.T_sfc, None
+                # Gray/none emit as an idealized BLACK surface (eps = 1) and
+                # cannot honour the canopy's eps_col, so feed them a black-surface
+                # BRIGHTNESS temperature from the full upward flux
+                # (sigma*T_bb^4 = LW_out).  Feeding T_rad would emit
+                # sigma*T_rad^4 = LW_emit/eps_col and overstate canopy emission by
+                # ~1/eps_col.  No emissivity override (gray keeps eps = 1).  NOT
+                # the aerodynamic/sensible-heat T_sfc (the canopy air-space Tc).
+                T_bb = surface_temperature_for_lw_boundary(
+                    "gray", T_rad=getattr(r, "T_rad", r.T_sfc), lw_up=r.lw_up)
+                return r.albedo, T_bb, None
             # RRTMGP/RRTMG: the tile-blended (albedo, T_rad, emissivity) flow in.
             # T_rad (radiative-equivalent skin T) + dynamic eps_grid make the LW
             # boundary eps*sigma*T^4 + (1-eps)*La reproduce the area-weighted sum

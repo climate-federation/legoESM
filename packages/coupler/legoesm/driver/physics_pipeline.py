@@ -16,7 +16,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
-from legoesm.forcing.surface_utils import blend_surface_temperature
+from legoesm.forcing.surface_utils import (
+    blend_surface_property,
+    blend_surface_temperature,
+)
 from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -201,6 +204,30 @@ class PhysicsPipeline:
         when ``self.f_land is not None`` (the land tile is active).
         """
         return self.f_land * land_field + (1.0 - self.f_land) * ocean_field
+
+    def static_surface_emissivity(self, sic, *, land_active):
+        """Surface LW emissivity blend radiation emits with absent an override.
+
+        Mirrors the ocean/ice (+ optional land) blend formed in
+        ``compute_radiation_core`` so the coupled drivers can invert the held
+        ``lw_net_sfc`` back to gross ``lw_down`` with the SAME emissivity field
+        radiation actually used — not a constant ocean/ice approximation (which
+        ignores the configured ``emissivity_*`` values and the land tile, biasing
+        the reconstructed surface forcing).
+
+        Parameters
+        ----------
+        sic : array
+            Sea-ice concentration [0, 1].
+        land_active : bool
+            Whether the land tile contributes (``f_land`` set AND a land skin
+            temperature present); matches ``compute_radiation_core``'s gate.
+        """
+        emissivity = blend_surface_property(
+            sic, self.emissivity_ice, self.emissivity_ocean)
+        if land_active and self.f_land is not None:
+            emissivity = self._blend_land(emissivity, self.emissivity_land)
+        return emissivity
 
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
                         T, p_s, q_v, u, v, dt):
@@ -893,8 +920,6 @@ class PhysicsPipeline:
         surface energy balance.  Otherwise ``T_land`` is returned
         unchanged and the surface is pure ocean/ice.
         """
-        from legoesm.forcing.surface_utils import blend_surface_property
-
         _albedo_ice = self.albedo_ice if albedo_ice is None else albedo_ice
         _albedo_ocean = self.albedo_ocean if albedo_ocean is None else albedo_ocean
 
@@ -934,14 +959,12 @@ class PhysicsPipeline:
                                             _albedo_ocean_dyn)
         else:
             albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
-        emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
-
-        # --- Land tile: blend land surface into T_sfc / albedo / emissivity
+        # --- Land tile: blend land surface into emissivity / T_sfc / albedo
         _land_active = self.f_land is not None and T_land is not None
+        emissivity = self.static_surface_emissivity(sic, land_active=_land_active)
         if _land_active:
             T_sfc = self._blend_land(T_sfc, T_land)
             albedo = self._blend_land(albedo, self.albedo_land)
-            emissivity = self._blend_land(emissivity, self.emissivity_land)
 
         # --- Coupler-provided dynamic surface overrides ---
         # In a coupled run the ocean/sea-ice/land tile models compute dynamic

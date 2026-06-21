@@ -347,8 +347,10 @@ def compute_two_leaf_canopy_fluxes(
         Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
     # ---- Converged state ----
+    # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].
     Tf_Sun = x_final[:, 0]
     Tf_Sh  = x_final[:, 1]
+    Tc_cvg = x_final[:, 4]   # canopy air-space temperature (aerodynamic node)
     Ts_cvg = Ts_bc_k
 
     fSun    = sw_rt.fSun
@@ -449,6 +451,7 @@ def compute_two_leaf_canopy_fluxes(
         gpp=GPP,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
+        T_canopy_air=Tc_cvg,
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,

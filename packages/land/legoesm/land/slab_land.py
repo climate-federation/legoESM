@@ -546,7 +546,12 @@ def _step_land_canopy(
     # Post-step coupler-facing surface state (re-uses canopy-derived
     # albedo and emissivity from surface_out).  T_soil_new is already
     # unflattened above; surface_out fields are still flat.
-    response_T_surface     = T_soil_new
+    # ``T_sfc`` is the AERODYNAMIC surface temperature for the atmosphere's
+    # sensible-heat coupling: the canopy air-space temperature ``Tc`` (the
+    # exchange node, H_tot = rho*cp*(Tc - Ta)/Ra), NOT the soil temperature.
+    # The LW-derived radiometric ``T_surface`` is carried separately as T_rad.
+    # (``T_soil_new`` remains the soil thermal prognostic in the land state.)
+    response_T_surface     = _unflat(surface_out.T_canopy_air)
     response_albedo        = _unflat(surface_out.albedo)
     response_emissivity    = _unflat(surface_out.emissivity)
     response_z0            = _unflat(surface_out.z0)
@@ -580,9 +585,10 @@ def _step_land_canopy(
         T_sfc=response_T_surface,
         # Emission-equivalent canopy temperature for the LW boundary: the
         # two-leaf ``surface_out.T_surface`` satisfies eps_col*sigma*T_surface^4
-        # = LW_emit, whereas ``T_sfc = T_soil_new`` above is the soil temperature
-        # kept for the (linear) sensible-heat path.  The tile blend MUST emit
-        # with T_rad, not T_soil, or LW conservation breaks for vegetated cells.
+        # = LW_emit, whereas ``T_sfc`` above is the aerodynamic canopy air-space
+        # temperature ``Tc`` used by the (linear) sensible-heat path.  The tile
+        # blend MUST emit with this radiometric T_rad, not Tc, or LW conservation
+        # breaks for vegetated cells.
         T_rad=_unflat(surface_out.T_surface),
         albedo=response_albedo,
         emissivity=response_emissivity,

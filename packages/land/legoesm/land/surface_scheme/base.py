@@ -60,6 +60,13 @@ class SurfaceFluxOutput(NamedTuple):
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
     Tf_Sh: jax.Array | None = None         # shaded leaf T [K]
+    # Canopy air-space temperature Tc [K] = conductance-weighted blend of the
+    # above-canopy air, sunlit/shaded leaves, and ground.  This is the canopy's
+    # AERODYNAMIC surface temperature (the exchange node for sensible heat,
+    # H_tot = rho*cp*(Tc - Ta)/Ra), and is what the coupler reports as the tile
+    # ``T_sfc`` for the atmosphere's sensible-heat coupling.  Distinct from the
+    # LW-derived radiometric ``T_surface``.  None for SimpleSEB.
+    T_canopy_air: jax.Array | None = None
     gs_Sun: jax.Array | None = None        # sunlit stomatal conductance [m/s]
     gs_Sh: jax.Array | None = None         # shaded stomatal conductance [m/s]
     n_iters: jax.Array | None = None       # canopy Newton iteration count
