@@ -1217,8 +1217,22 @@ class PhysicsPipeline:
         return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
                 sw_down_toa, T_land_new)
 
-    def build_step_unified(self, static_need_rad: bool | None = None):
+    def build_step_unified(self, static_need_rad: bool | None = None,
+                           rad_stop_gradient: bool = False):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
+
+        ``rad_stop_gradient`` (radiation-as-forcing): wrap the radiation core's
+        outputs (heating + TOA/surface fluxes) in ``jax.lax.stop_gradient`` so
+        radiation is applied FORWARD but carries no reverse-mode gradient.
+        rrtmgp's adjoint is the dominant XLA compile cost of the differentiable
+        rollout (it grows with grid size — minutes at T21, >10 h at T106), yet
+        the only rrtmgp-tunable param is surface albedo (2 scalars; ``tau`` is
+        gray-only).  Treating radiation as a slowly-varying forcing collapses
+        that compile so high-res training becomes feasible; the state loss
+        still trains convection/turbulence/surface, and TOA/surface fluxes
+        follow once the state matches.  Albedo, if needed, is tuned via a cheap
+        separate path (forward-mode / finite-diff on the 2 scalars), NOT this
+        rollout adjoint.  Default False (full adjoint, unchanged behavior).
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
@@ -1302,6 +1316,15 @@ class PhysicsPipeline:
                         sfc_T_override=sfc_T_override,
                         conv_precip=conv_precip,
                     )
+
+                # Radiation-as-forcing: cut radiation's reverse-mode so the
+                # expensive rrtmgp adjoint never enters the rollout backward
+                # graph (the dominant, grid-size-scaling compile cost).
+                if rad_stop_gradient:
+                    (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
+                     lw_up_toa, sw_down_toa, T_land_new) = jax.lax.stop_gradient(
+                        (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
+                         lw_up_toa, sw_down_toa, T_land_new))
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,

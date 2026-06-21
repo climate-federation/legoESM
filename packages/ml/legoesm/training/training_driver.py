@@ -203,6 +203,7 @@ def train_physics_params(
     grad_clip: float = 1.0,
     microphysics: str = "none",
     rad_update_steps: int = 1,
+    rad_stop_gradient: bool = False,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -256,7 +257,8 @@ def train_physics_params(
         )
 
     params = TrainablePhysicsParams.from_defaults()
-    step_unified = physics_pipeline.build_step_unified()
+    step_unified = physics_pipeline.build_step_unified(
+        rad_stop_gradient=rad_stop_gradient)
     sigma_full = jnp.asarray(sigma.sigma_full)
 
     def make_loss_fn(_params, ic, target, forcing):

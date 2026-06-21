@@ -339,9 +339,11 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,
+            rad_stop_gradient=args.radiation_as_forcing,
             loss_config=loss_config, log_every=1,
         )
-        step_unified = physics_pipeline.build_step_unified()
+        step_unified = physics_pipeline.build_step_unified(
+            rad_stop_gradient=args.radiation_as_forcing)
         seg = build_training_segment(
             model, step_unified, grid, sigma, args.dt,
             microphysics=args.microphysics,
@@ -486,6 +488,15 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    # Radiation-as-forcing: stop_gradient rrtmgp in the rollout so its adjoint
+    # never enters the backward graph.  rrtmgp's reverse-mode is the dominant
+    # XLA compile cost and it GROWS with grid size (>10 h at true T106) — this
+    # collapses it so high-res differentiable training is feasible.  The state
+    # loss still trains convection/turbulence/surface; TOA/surface fluxes
+    # follow once the state matches ERA5.  Trade-off: the flux loss can no
+    # longer tune radiation params (albedo) — that needs the cheap 2-scalar
+    # forward-mode path (follow-up).  Classical variant only.
+    p.add_argument("--radiation-as-forcing", action="store_true", default=False)
     p.add_argument("--variants", default="classical,column_nn",
                    help="comma list: classical,column_nn")
     p.add_argument("--epochs", type=int, default=8)

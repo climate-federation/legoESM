@@ -50,6 +50,21 @@ def test_rad_update_steps_roundtrip():
     assert "rad_update_steps" in inspect.signature(_build_training_segment).parameters
 
 
+def test_radiation_as_forcing_threads():
+    """--radiation-as-forcing must reach train_physics_params and the pipeline
+    build_step_unified (the rrtmgp-adjoint stop_gradient lever)."""
+    import inspect
+    args = mod.build_parser().parse_args([])
+    assert args.radiation_as_forcing is False          # default: full adjoint
+    args = mod.build_parser().parse_args(["--radiation-as-forcing"])
+    assert args.radiation_as_forcing is True
+    from legoesm.training.training_driver import train_physics_params
+    from legoesm.driver.physics_pipeline import PhysicsPipeline
+    assert "rad_stop_gradient" in inspect.signature(train_physics_params).parameters
+    assert "rad_stop_gradient" in inspect.signature(
+        PhysicsPipeline.build_step_unified).parameters
+
+
 def test_loss_config_has_flux_weights():
     args = mod.build_parser().parse_args([])
     lc = mod.make_loss_config(args)
