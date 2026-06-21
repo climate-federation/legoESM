@@ -247,9 +247,12 @@ def solve_richards(
     # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
-    # Subsurface runoff: gravitational drainage at bottom
+    # Subsurface runoff: gravitational drainage at bottom.  Keep the column axis
+    # (``[:, -1:]`` then squeeze) so a PER-COLUMN hydro_config (ncol,1) broadcasts —
+    # same fix as the K_top boundary call; bit-identical for a scalar config.
     if richards_config.bottom_bc == "free_drainage":
-        K_bot = hydraulic_conductivity(psi_final[:, -1], theta_final[:, -1], hydro_config)
+        K_bot = hydraulic_conductivity(psi_final[:, -1:], theta_final[:, -1:],
+                                       hydro_config)[:, 0]
         runoff_subsurface = K_bot  # [m/s]
     else:
         runoff_subsurface = jnp.zeros(ncol)
