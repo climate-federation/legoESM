@@ -42,6 +42,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _per_variable_bias_from_dict,
     _per_variable_to_json,
     _realism_campaign_summary_line,
+    _realism_summary_dict,
     _RealismCapture,
     _resolve_era5_n_times,
     _summary_to_json,
@@ -4124,3 +4125,38 @@ def test_realism_campaign_summary_line():
     line = _realism_campaign_summary_line(mixed)
     assert "1/4 realistic" in line and "3 rejected" in line
     assert "2x laminar" in line and "1x moisture-runaway" in line
+
+
+def test_output_dict_records_les_realism():
+    """The output JSON records the campaign-aggregate LES-realism rejection counts (iter 514)
+    for machine-readable post-run analysis; absent when no LES ran (None ⇒ no key), present +
+    JSON-round-tripping when given, and IGNORED by the deploy loader (an extra key)."""
+    import json
+
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+    from legoesm.training.campaign_summary import campaign_health, summarize_campaign
+    from legoesm.training.correction_loop import CampaignResult, CorrectionResult
+    from legoesm.training.deploy_correction import corrected_clubb_config
+
+    field = jnp.array([0.42, 0.55, 0.61, 0.73])
+    res = CampaignResult(
+        final_config=CLUBBLiteConfig(C_K=field),
+        iterations=(CorrectionResult(
+            updated_config=None, bias=_bias_imp(1.0, 0.6),
+            worst_column_change=jnp.asarray(0.0), feedback_field=field.reshape(2, 2),
+            n_corrected=2, n_diagnosed=2, n_diagnoses_valid=2),),
+        final_field=field.reshape(2, 2), accepted=(True,), stop_reason="converged")
+    summary = summarize_campaign(res, promotion_key="clubb_lite_C_K")
+    health = campaign_health(summary)
+    base = dict(grid_provenance={}, summary=summary, health=health, corrected_field="C_K")
+
+    assert _realism_summary_dict(None) is None and _realism_summary_dict([]) is None
+    rd = _realism_summary_dict([_mk_breakdown(), _mk_breakdown(turbulent=False)])
+    assert rd["n_total"] == 2 and rd["n_realistic"] == 1 and rd["n_not_turbulent"] == 1
+    assert all(isinstance(v, int) for v in rd.values())            # JSON-safe ints
+
+    assert "les_realism" not in build_campaign_output_dict(res, **base)   # absent ⇒ no key
+    out = json.loads(json.dumps(build_campaign_output_dict(res, les_realism=rd, **base)))
+    assert out["les_realism"]["n_not_turbulent"] == 1
+    cfg = corrected_clubb_config(out)                              # deploy IGNORES the extra key
+    np.testing.assert_allclose(np.asarray(cfg.C_K), np.asarray(field), rtol=1e-12)

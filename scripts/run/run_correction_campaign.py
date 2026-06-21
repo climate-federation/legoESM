@@ -239,12 +239,10 @@ class _RealismCapture:
         return final_state
 
 
-def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
-    """One-line campaign-aggregate LES-realism report from the captured per-column
-    ``LESRealismBreakdown``\\ s (iter 512): how many spin-offs were realistic, and the
-    dominant rejection modes — so an operator reading a finished multi-day run sees WHETHER
-    the LESs were trustworthy and WHY any were not.  ``None`` when nothing was captured (a
-    dry-run, or no LES ran), so the caller prints nothing."""
+def _realism_summary(breakdowns: Any):
+    """Stack the captured per-column ``LESRealismBreakdown``\\ s into a single
+    ``RealismRejectionSummary`` (iter 512), or ``None`` when nothing was captured (a dry-run /
+    no LES ran).  Shared by the printed line + the output-JSON dict so the two cannot drift."""
     if not breakdowns:
         return None
     import jax.numpy as jnp
@@ -255,7 +253,18 @@ def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
     stacked = LESRealismBreakdown(*(
         jnp.stack([getattr(b, f) for b in breakdowns])
         for f in LESRealismBreakdown._fields))
-    s = summarize_realism_breakdowns(stacked)
+    return summarize_realism_breakdowns(stacked)
+
+
+def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
+    """One-line campaign-aggregate LES-realism report from the captured per-column
+    ``LESRealismBreakdown``\\ s (iter 512): how many spin-offs were realistic, and the
+    dominant rejection modes — so an operator reading a finished multi-day run sees WHETHER
+    the LESs were trustworthy and WHY any were not.  ``None`` when nothing was captured (a
+    dry-run, or no LES ran), so the caller prints nothing."""
+    s = _realism_summary(breakdowns)
+    if s is None:
+        return None
     if s.n_rejected == 0:
         return f"[campaign] LES realism: all {s.n_total} spin-offs realistic."
     modes = [f"{n}x {lbl}" for lbl, n in (
@@ -265,6 +274,14 @@ def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
     return (f"[campaign] LES realism: {s.n_realistic}/{s.n_total} realistic, "
             f"{s.n_rejected} rejected ({', '.join(modes)}) — see the no_valid_diagnoses "
             "verdict if this starved the correction.")
+
+
+def _realism_summary_dict(breakdowns: Any) -> dict | None:
+    """The campaign-aggregate realism counts as a plain ``dict`` for the output JSON
+    (machine-readable post-run analysis across many campaigns); ``None`` when no LES ran, so
+    the key is omitted (like ``averaging`` / ``les_config``)."""
+    s = _realism_summary(breakdowns)
+    return None if s is None else dict(s._asdict())
 
 
 # Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.
@@ -1706,7 +1723,7 @@ def _les_provenance(args) -> dict:
 
 def build_campaign_output_dict(result, *, grid_provenance, summary, health,
                                corrected_field=None, coefficients=None,
-                               averaging=None, les_provenance=None):
+                               averaging=None, les_provenance=None, les_realism=None):
     """Assemble the JSON-serializable campaign-output dict — the on-disk artifact the
     DEPLOY path (:func:`legoesm.training.deploy_correction.corrected_clubb_config`)
     reads to update a production AMIP/CMIP run (the literal "update the parameters"
@@ -1757,6 +1774,8 @@ def build_campaign_output_dict(result, *, grid_provenance, summary, health,
         out["averaging"] = averaging
     if les_provenance is not None:                   # spin-off LES config (incl. surface_flux)
         out["les_config"] = les_provenance
+    if les_realism is not None:                       # per-mode LES-realism rejection counts
+        out["les_realism"] = les_realism
     return out
 
 
@@ -2296,7 +2315,8 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, coefficients=coefficients,
         averaging=_averaging_provenance(args, base_cfg),
-        les_provenance=_les_provenance(args)), indent=2)
+        les_provenance=_les_provenance(args),
+        les_realism=_realism_summary_dict(getattr(run_les, "breakdowns", None))), indent=2)
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
@@ -2796,7 +2816,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
         result, grid_provenance=_grid_provenance(base_cfg, grid),
         summary=summary, health=health, corrected_field=corrected_field,
         averaging=_averaging_provenance(args, base_cfg),
-        les_provenance=_les_provenance(args)), indent=2)
+        les_provenance=_les_provenance(args),
+        les_realism=_realism_summary_dict(getattr(run_les, "breakdowns", None))), indent=2)
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
