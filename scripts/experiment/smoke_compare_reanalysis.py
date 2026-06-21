@@ -49,6 +49,7 @@ def run_smoke(
     ocean_only: bool = False,
     surface_flux: bool = False,
     align_insolation: bool = False,
+    grid_type: str = "latlon",
 ) -> int:
     """Generate a config (+ synthetic ERA5 unless ``era5_zarr`` is given), then dry-run.
 
@@ -78,7 +79,8 @@ def run_smoke(
     config_path = work / "amip_clubb_lite.json"
 
     rc = config_main(
-        [str(config_path), "--resolution", str(resolution), "--nlev", str(nlev)])
+        [str(config_path), "--resolution", str(resolution), "--nlev", str(nlev),
+         "--grid-type", grid_type])
     if rc != 0:
         raise RuntimeError(f"config generation failed (exit {rc})")
 
@@ -124,6 +126,9 @@ def main(argv: list[str] | None = None) -> int:
              "synthetic (the dry-run still loads + regrids it); default: synthetic")
     p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
                    help="AMIP (prescribed SST) or CMIP (coupled); default amip")
+    p.add_argument("--grid-type", default="latlon",
+                   choices=("latlon", "cubed_sphere", "gaussian"),
+                   help="model grid family for the generated config (default latlon)")
     p.add_argument("--ocean-only", action="store_true",
                    help="forward --ocean-only to the dry-run (validate the realistic "
                         "ocean-column ranking flag in this environment)")
@@ -139,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         rc = run_smoke(wd, era5_zarr=args.era5_zarr, mode=args.mode,
                        resolution=args.resolution, nlev=args.nlev,
                        ocean_only=args.ocean_only, surface_flux=args.surface_flux,
-                       align_insolation=args.align_insolation)
+                       align_insolation=args.align_insolation, grid_type=args.grid_type)
         era5_kind = "REAL ERA5" if args.era5_zarr else "synthetic ERA5"
         if rc == 0:
             print(f"[smoke] PASS: config -> {era5_kind} -> campaign --dry-run "

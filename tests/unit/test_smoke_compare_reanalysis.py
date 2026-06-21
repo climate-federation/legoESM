@@ -36,6 +36,19 @@ def test_run_smoke_validates_realistic_ocean_only_surface_flux_flags(tmp_path):
     assert rc == 0
 
 
+def test_run_smoke_ocean_only_on_a_cubed_sphere_grid(tmp_path):
+    """REGRESSION (iter 485): --ocean-only must validate end-to-end on a CUBED-SPHERE grid
+    too. The iter-484 flat-mask bug was grid-shape-specific — the fix reshapes the mask to the
+    grid shape, which for cubed-sphere is the 3-D (6,n,n), a DIFFERENT shape than lat-lon's
+    (nlat,nlon). This smokes the full harness (ERA5 regrid -> compare -> rank -> ocean mask)
+    on (6,4,4), confirming the fix generalizes beyond lat-lon."""
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    rc = run_smoke(str(tmp_path), grid_type="cubed_sphere", resolution=4, nlev=5,
+                   era5_nlat=8, era5_nlon=16, ocean_only=True, surface_flux=True)
+    assert rc == 0
+
+
 def test_main_with_explicit_workdir_returns_zero(tmp_path, capsys):
     from scripts.experiment.smoke_compare_reanalysis import main
 

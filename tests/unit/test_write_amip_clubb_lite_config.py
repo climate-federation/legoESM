@@ -16,9 +16,29 @@ def test_build_amip_clubb_lite_config_is_clubb_and_parameterized():
 
     cfg = build_amip_clubb_lite_config(resolution=16, nlev=30, dt=300.0)
     assert cfg.turbulence == "clubb_lite"               # the campaign's hard requirement
-    assert cfg.grid.grid_type == "latlon"
+    assert cfg.grid.grid_type == "latlon"               # the default
     assert cfg.grid.resolution == 16 and cfg.grid.nlev == 30
     assert cfg.dycore.dt == 300.0
+
+
+def test_grid_type_is_selectable_for_structured_non_latlon_grids(tmp_path):
+    """--grid-type builds a schema-valid config on a non-lat-lon STRUCTURED grid (iter 485),
+    so the realistic comparison + ocean-only ranking can be smoked on cubed-sphere/Gaussian —
+    the iter-484 ocean-only flat-mask bug was grid-shape-specific, so the (6,n,n) / Gaussian
+    grid shapes must be exercisable end-to-end."""
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+        main,
+    )
+
+    for gt in ("cubed_sphere", "gaussian"):
+        cfg = build_amip_clubb_lite_config(grid_type=gt, resolution=4, nlev=5)
+        assert cfg.grid.grid_type == gt                 # validate_strict passed (build raises else)
+        assert cfg.turbulence == "clubb_lite"
+    out = tmp_path / "cs.json"
+    assert main([str(out), "--grid-type", "cubed_sphere", "--resolution", "4",
+                 "--nlev", "5"]) == 0
+    assert out.is_file()
 
 
 def test_days_climatology_window_is_exposed_and_defaults_to_a_real_window(tmp_path):

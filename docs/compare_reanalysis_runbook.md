@@ -63,9 +63,17 @@ and corrupt the bias). `skin_temperature` (SST) and `geopotential_at_surface` ar
 $PY scripts/experiment/smoke_compare_reanalysis.py
 # real-ERA5 ingest smoke:
 $PY scripts/experiment/smoke_compare_reanalysis.py --era5-zarr /path/to/era5.zarr --mode amip
+# validate the REALISTIC flag combo + a non-lat-lon grid (iter 484/485):
+$PY scripts/experiment/smoke_compare_reanalysis.py --ocean-only --surface-flux \
+    --grid-type cubed_sphere
 ```
 
-A green `[smoke] PASS` means the turnkey chain is wired.
+A green `[smoke] PASS` means the turnkey chain is wired. Pass `--ocean-only`/`--surface-flux`
+to validate the realistic flag combo (the iter-484 ocean-only flat-mask bug was grid-shape-
+specific), and `--grid-type {latlon,cubed_sphere,gaussian}` to smoke the FULL harness (ERA5
+regrid → compare → rank → ocean mask) on a structured non-lat-lon grid before the HPC run.
+(`--align-insolation` is NOT a smoke flag — it needs the offline `--local-era5-date`, not the
+Zarr smoke.)
 
 ### 1b. Preflight the C_K SENSITIVITY (go/no-go, before a multi-day run)
 

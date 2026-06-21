@@ -40,13 +40,16 @@ _STARTER_RESOLUTION_MAX = 16
 
 def build_amip_clubb_lite_config(
     *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray",
-    days: int = 200, land_mask_path: str = "",
+    days: int = 200, land_mask_path: str = "", grid_type: str = "latlon",
 ) -> ExperimentConfig:
     """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
 
     ``turbulence`` is fixed to ``"clubb_lite"`` (the campaign's requirement); the
-    grid (lat-lon), vertical resolution, timestep, radiation, and run length are
-    exposed so the starter can be scaled toward a production run.  ``days`` is the
+    grid (``grid_type``, default ``latlon``; also ``cubed_sphere``/``gaussian`` so the
+    realistic comparison + ocean-only ranking can be smoked on a STRUCTURED non-lat-lon
+    grid — the iter-484 flat-mask bug was grid-shape-specific), vertical resolution,
+    timestep, radiation, and run length are exposed so the starter can be scaled toward
+    a production run.  ``days`` is the
     run length, i.e. the CLIMATOLOGY WINDOW the model time-mean is computed over and
     compared to the (matched) ERA5 mean — keep it long enough for a stable mean (the
     200-day default ≈ 40 samples at the 5-day diagnostic cadence) and aligned to the
@@ -60,7 +63,8 @@ def build_amip_clubb_lite_config(
     apples-to-oranges and would dominate the worst-column ranking — see ``main``'s NOTE.
     """
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="latlon", resolution=int(resolution), nlev=int(nlev)),
+        grid=GridConfig(grid_type=str(grid_type), resolution=int(resolution),
+                        nlev=int(nlev)),
         dycore=DycoreConfig(
             dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
         radiation=radiation,
@@ -80,7 +84,12 @@ def build_amip_clubb_lite_config(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("out", help="output path for the JSON config")
-    p.add_argument("--resolution", type=int, default=8, help="lat-lon resolution (default 8)")
+    p.add_argument("--grid-type", default="latlon",
+                   choices=("latlon", "cubed_sphere", "gaussian"),
+                   help="model grid family (default latlon; cubed_sphere/gaussian let the "
+                        "realistic comparison + ocean-only ranking be smoked on a structured "
+                        "non-lat-lon grid)")
+    p.add_argument("--resolution", type=int, default=8, help="grid resolution (default 8)")
     p.add_argument("--nlev", type=int, default=10, help="vertical levels (default 10)")
     p.add_argument("--dt", type=float, default=600.0, help="dycore timestep [s] (default 600)")
     p.add_argument("--radiation", default="gray", help="radiation scheme (default gray)")
@@ -105,11 +114,12 @@ def main(argv: list[str] | None = None) -> int:
                 "land-sea fraction file (or omit it for a flat no-land config).")
     cfg = build_amip_clubb_lite_config(
         resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation,
-        days=args.days, land_mask_path=args.land_mask_path)
+        days=args.days, land_mask_path=args.land_mask_path, grid_type=args.grid_type)
     with open(args.out, "w") as f:
         json.dump(experiment_config_to_dict(cfg), f, indent=2)
     print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "
-          f"latlon {args.resolution} L{args.nlev}, {args.days}-day climatology) to {args.out}")
+          f"{args.grid_type} {args.resolution} L{args.nlev}, {args.days}-day climatology) "
+          f"to {args.out}")
     if not args.land_mask_path:
         print(
             "[config] NOTE: no --land-mask-path => FLAT config (no land). The model treats the "
