@@ -68,6 +68,26 @@ def test_days_climatology_window_is_exposed_and_defaults_to_a_real_window(tmp_pa
     assert cfg.days == 3650          # a 10-year window threads through CLI -> JSON -> config
 
 
+def test_days_not_exceeding_the_diagnostic_cadence_warns(tmp_path, capsys):
+    """REGRESSION (iter 499): --days <= the diagnostic cadence (output.diag_days) WARNS — a
+    REAL campaign's climatology time-mean fires NO segment boundary in a run that short and
+    FAILS LOUD ('no segment boundary fired'), which a real-ERA5 --days 1 run caught the hard
+    way. It is fine for a --dry-run smoke, so this WARNS (not fail-loud), and a long-enough run
+    does not warn."""
+    from legoesm.driver.config import OutputConfig
+
+    from scripts.experiment.write_amip_clubb_lite_config import main
+
+    cadence = int(OutputConfig().diag_days)
+    short = tmp_path / "short.json"
+    assert main([str(short), "--resolution", "4", "--nlev", "5", "--days", str(cadence)]) == 0
+    w = capsys.readouterr().out
+    assert "WARNING" in w and "diagnostic cadence" in w and "no segment boundary" in w
+    long = tmp_path / "long.json"
+    assert main([str(long), "--resolution", "4", "--nlev", "5", "--days", str(cadence + 50)]) == 0
+    assert "diagnostic cadence" not in capsys.readouterr().out   # a long run does not warn
+
+
 def test_config_round_trips_and_launcher_accepts_it(tmp_path):
     """The emitted JSON loads back into an ExperimentConfig AND make_clubb_build_driver
     accepts it — the exact contract the campaign ``--config`` path requires."""

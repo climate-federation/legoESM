@@ -147,6 +147,17 @@ def main(argv: list[str] | None = None) -> int:
             "--resolution / --nlev UP — and lower --dt to keep the CFL stable (a too-large "
             "dt at higher resolution diverges, and the campaign's baseline-divergence guard "
             "would then fail the run loud).")
+    # The campaign time-mean fires a sample at each diag_days segment boundary; a run shorter
+    # than ONE cadence has no boundary and the campaign FAILS LOUD ("no segment boundary
+    # fired"). days <= diag_days is fine for a --dry-run smoke (which never runs the time-mean),
+    # so this WARNS rather than fails (iter 499 — caught by a real-ERA5 days=1 run).
+    if args.days <= cfg.output.diag_days:
+        print(
+            f"[config] WARNING: --days {args.days} <= the {cfg.output.diag_days}-day diagnostic "
+            "cadence (output.diag_days): a REAL campaign's climatology time-mean fires NO "
+            "segment boundary in a run this short and FAILS LOUD ('no segment boundary "
+            f"fired'). Fine for a --dry-run smoke; for a real run use --days > "
+            f"{cfg.output.diag_days} (the 200-day default gives ~40 samples).")
     return 0
 
 
