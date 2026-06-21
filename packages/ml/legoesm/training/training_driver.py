@@ -242,6 +242,19 @@ def train_physics_params(
             "the saturation-adjustment toggle matches the condensate scheme."
         )
 
+    # rad_update_steps must update radiation at least once within the rollout,
+    # else held_* stay at their IC value (zeroed) at the rollout end -> the
+    # flux loss compares stale/zero fluxes and no gradient reaches radiation
+    # params.  Last update lands at floor(n_steps/N)*N, so require N <= n_steps.
+    _n_steps = max(1, int(round(rollout_hours * 3600.0 / dt)))
+    if not 1 <= rad_update_steps <= _n_steps:
+        raise ValueError(
+            f"rad_update_steps={rad_update_steps} must be in [1, n_steps="
+            f"{_n_steps}] (rollout_hours={rollout_hours}, dt={dt}); a larger "
+            "value never updates radiation during the rollout, leaving held_* "
+            "fluxes stale/zero with no flux-loss gradient to radiation params."
+        )
+
     params = TrainablePhysicsParams.from_defaults()
     step_unified = physics_pipeline.build_step_unified()
     sigma_full = jnp.asarray(sigma.sigma_full)

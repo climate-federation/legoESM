@@ -427,6 +427,21 @@ class TestTrainingDriver:
             train_physics_params(None, None, None, _Pipe(), [], [], [],
                                  microphysics="kessler")
 
+    def test_rad_update_steps_exceeding_rollout_raises(self):
+        """rad_update_steps > n_steps means radiation never updates in the
+        rollout -> stale/zero held_* fluxes, no flux gradient. Fail loud."""
+        from legoesm.training.training_driver import train_physics_params
+
+        class _Pipe:
+            micro_fn = None  # microphysics 'none' -> passes the micro assert
+
+        with pytest.raises(ValueError, match="rad_update_steps"):
+            # 6h / 600s = 36 steps; 1000 > 36. Guard fires before the loop,
+            # so model/grid/sigma=None are never touched.
+            train_physics_params(None, None, None, _Pipe(), [], [], [],
+                                 microphysics="none", rad_update_steps=1000,
+                                 rollout_hours=6.0, dt=600.0)
+
     def test_optimizer_filter_handles_int_arrays(self):
         """Regression: an eqx.Module carrying INT arrays (e.g. an SFNO whose
         non-static Gaussian grid holds spherical-harmonic index arrays) must
