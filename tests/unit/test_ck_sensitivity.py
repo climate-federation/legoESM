@@ -248,3 +248,22 @@ def test_build_ck_atm_config_matches_the_campaign_grid_type(tmp_path):
     assert p.parse_args(base + ["--grid-type", "cubed_sphere"]).grid_type == "cubed_sphere"
     with pytest.raises(SystemExit):                        # argparse rejects gaussian
         p.parse_args(base + ["--grid-type", "gaussian"])
+
+
+@pytest.mark.slow
+def test_run_model_state_builds_and_runs_on_cubed_sphere():
+    """REGRESSION (iter 493/494): the non-lat-lon ck-sensitivity EXECUTION. iter 494 found
+    that the DRY-RUN does NOT build the model, so it missed that GAUSSIAN fails the build
+    (clubb_lite carries prognostic physics state the spectral loop does not thread, issue
+    #405) — gaussian was removed. CUBED-SPHERE (finite_volume; the per-step loop DOES thread
+    the state, ocean_grid=None ⇒ the driver's own atm grid) is the remaining non-lat-lon
+    option: this BUILDS + RUNS the tiny coupled model and asserts a finite (6,n,n,nlev) state
+    + the (6,n,n) land fraction — a build break (the gaussian class) would fail here, not on a
+    multi-day HPC run."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import _run_model_state
+
+    m, grid, sigma, fland = _run_model_state(
+        0.4, resolution=4, nlev=3, days=1, radiation="gray", grid_type="cubed_sphere")
+    assert tuple(np.asarray(m.T).shape) == (6, 4, 4, 3)   # cubed-sphere column shape
+    assert tuple(fland.shape) == (6, 4, 4)                 # static land fraction, grid-shaped
+    assert bool(np.all(np.isfinite(np.asarray(m.T))))     # coupled run produced finite state
