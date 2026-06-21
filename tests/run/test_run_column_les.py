@@ -1320,3 +1320,34 @@ def test_column_les_cli_reports_realism_when_les_runs(tmp_path, monkeypatch, cap
     assert rc == 0
     assert seen["state"] is les_final and seen["hc"] == "HC"   # captured state reached it
     assert "realism: REALISTIC" in capsys.readouterr().out
+
+
+def test_run_pipeline_excludes_the_top_sponge_layer(monkeypatch):
+    """relax_width_frac threads through run_column_les_pipeline (iter 513): it computes
+    z_max = domain_top*(1-relax_width_frac) from the setup's height coord and AND-s out every
+    diagnosis interface at/above it. Mock the diagnosis to an ALL-VALID profile spanning the
+    domain so the ONLY invalidation is the sponge — pinning the z_max computation + the mask
+    application precisely (below-sponge stays valid, sponge is excluded)."""
+    import legoesm.atmosphere.dynamics.column_les as cl
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import ClubbCoefficientProfile
+
+    gcm_z, gcm_theta, ls = _gcm_column()
+    setup = build_column_les_setup(
+        cape_J_kg=200.0, lat_rad=0.3,
+        gcm_z=gcm_z, gcm_theta=gcm_theta, ls_state=ls, config=_CONFIG)
+    domain_top = float(jnp.max(jnp.asarray(setup.height_coord.z_full)))
+    z_max = domain_top * 0.75                              # relax_width_frac = 0.25
+
+    z_m = jnp.linspace(domain_top * 0.1, domain_top * 0.95, 8)
+    all_valid = ClubbCoefficientProfile(
+        z_m=z_m, C_K=jnp.full((8,), 0.3), valid=jnp.ones(8, dtype=bool))
+    monkeypatch.setattr(cl, "diagnose_column_coefficient", lambda *a, **k: all_valid)
+
+    out = run_column_les_pipeline(
+        setup, lambda s: _synthetic_plane_state(s.grid, s.height_coord),
+        method="clubb_coefficient", gate_realism=False, relax_width_frac=0.25)
+    z, valid = np.asarray(out.z_m), np.asarray(out.valid)
+    sponge = z >= z_max
+    assert sponge.any() and (~sponge).any()               # non-vacuous: both sides present
+    assert not valid[sponge].any()                        # sponge excluded
+    assert valid[~sponge].all()                           # below-sponge UNCHANGED (precise z_max)
