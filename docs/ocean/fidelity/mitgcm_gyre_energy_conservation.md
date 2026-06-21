@@ -1,5 +1,23 @@
 # MITgcm barotropic-gyre oracle: the residual is the free-surface SPLIT, not the momentum scheme
 
+## FINAL 2026-06-21 (issue #519 item 1): bespoke `GyreFaithfulModel` DELETED
+
+With the iteration-7 metric fix below, the canonical, end-to-end `jax.grad`-able
+`LatLonCGridOceanModel` runs the gyre LAMINAR by itself, so the bespoke scipy-sparse
+(non-differentiable) `GyreFaithfulModel` is no longer the only laminar reference. It was
+**deleted** (`packages/ocean/legoesm/ocean/fidelity/mitgcm_gyre_faithful.py`,
+`scripts/validate/ocean_fidelity/mitgcm_gyre_faithful_stepper.py`,
+`tests/ocean/fidelity/test_mitgcm_gyre_faithful.py`) and `build_gyre_faithful_model` removed
+from the recipe. BOTH oracle tiers (10-step per-tendency AND multi-year laminar equilibrium)
+now run on the canonical model via `build_gyre_recipe` (default `barotropic_solver="implicit_cn"`).
+Measured canonical equilibrium at 15000 steps (~0.57 yr): `|u|max≈0.027` / `|v|max≈0.079`,
+steady — within ~12% / ~6% of MITgcm's `0.031` / `0.084`, far inside the laminar band (the
+turbulent attractor is 0.15-0.37). The residual is the canonical operator-split's slightly higher
+effective dissipation on a Munk layer resolved by only ~1.7 cells. New test:
+`tests/ocean/fidelity/test_mitgcm_gyre_canonical.py` (dipole + laminar equilibrium +
+steady-not-growing + a `jax.grad` smoke check the scipy solver could not pass). The iteration-6
+section below (the bespoke stepper) is therefore **SUPERSEDED**.
+
 ## RESOLVED 2026-06-18 (iteration 7): a cos-lat METRIC INCONSISTENCY in the beta-plane grid
 
 The turbulent overshoot is **fixed**. Root cause, found by a clean *dynamic operator bisect*
@@ -304,7 +322,7 @@ This is a known sensitive regime (wind-driven-gyre WBC instability). The oracle 
 tiers (10-step eta 0.9997 + per-term tendency + inviscid-energy match); the equilibrium laminar/
 turbulent selection is a marginal-stability difference of two valid schemes, documented as open.
 
-## RESOLUTION 2026-06-18 (iteration 6): MITgcm-faithful integrator matches laminar 0.031
+## RESOLUTION 2026-06-18 (iteration 6): MITgcm-faithful integrator matches laminar 0.031 [SUPERSEDED — see FINAL #519 block at top: the bespoke stepper was deleted; the canonical model is laminar]
 
 Built a bit-exact MITgcm `tutorial_barotropic_gyre` stepper
 (`packages/ocean/legoesm/ocean/fidelity/mitgcm_gyre_faithful.py`, `GyreFaithfulModel`):
@@ -325,9 +343,16 @@ predictor), confirmed by: `explicit_ab2` (unsplit-equivalent config on the canon
 marginally-resolved (Munk δ≈1.7-cell) gyre, sits on the unstable side of the WBC barotropic
 instability where the unsplit MITgcm sequencing is stable.
 
-The gyre oracle therefore matches MITgcm at all tiers: 10-step eta 0.9997 + per-tendency (canonical
-split model, `build_gyre_recipe`) AND the multi-year laminar equilibrium (the faithful integrator,
-`build_gyre_faithful_model`). The faithful integrator is mimicry harness glue per
-`oracle_recipe_strategy.md`. Making the canonical split solver itself laminar at this marginal
-resolution remains a separate open dycore item (an energy/stability-consistent unsplit single-layer
-path in the production model).
+The gyre oracle matches MITgcm at all tiers ON THE CANONICAL MODEL: 10-step eta 0.9997 +
+per-tendency AND the multi-year laminar equilibrium (|u|max≈0.027 / |v|max≈0.079, within ~12% / ~6%
+of MITgcm's 0.031 / 0.084) — all via `build_gyre_recipe` with `barotropic_solver="implicit_cn"`. The
+turbulence above is specific to the EXPLICIT barotropic/baroclinic split + forward-backward-Coriolis
+predictor; the fully-implicit Crank-Nicolson free-surface solver (`implicit_cn`, a different
+canonical barotropic option — not a bespoke solver) is laminar on the marginally-resolved Munk gyre,
+so it carries the equilibrium tier directly in the shipped, differentiable `LatLonCGridOceanModel`.
+
+The previous bespoke `GyreFaithfulModel` / `build_gyre_faithful_model` (a hand-rolled single-layer
+integrator with a scipy-sparse, non-differentiable Helmholtz solve) was DELETED in #519 item 1 once
+`implicit_cn` was shown to reproduce the laminar equilibrium — a non-differentiable bespoke solver in
+a model-adjacent path violated the oracle-recipe doctrine (`oracle_recipe_strategy.md`). Making the
+EXPLICIT split itself laminar at this marginal resolution remains a separate open dycore item.

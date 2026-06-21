@@ -81,9 +81,38 @@ def test_spins_up_a_dipole_at_the_right_scale():
     assert np.all(np.isfinite(eta)) and np.all(np.isfinite(u))
     # Wind-curl forcing tilts the free surface into a dipole (min < 0 < max).
     assert eta.min() < 0.0 < eta.max()
+    # The dipole is a BASIN-SCALE tilt, not a one-cell spurious spike: the
+    # extreme-high and extreme-low free-surface cells sit in genuinely
+    # different parts of the basin (>1/4 of the domain apart), and the
+    # extrema are INTERIOR (not pinned on a wall) — a sign-changing grid-scale
+    # artifact would fail both (codex review).
+    eta2 = eta[..., 0] if eta.ndim == 3 else eta
+    ny, nx = eta2.shape
+    jmin, imin = np.unravel_index(np.argmin(eta2), eta2.shape)
+    jmax, imax = np.unravel_index(np.argmax(eta2), eta2.shape)
+    sep = np.hypot((jmax - jmin) / ny, (imax - imin) / nx)
+    assert sep > 0.25, f"eta extrema not basin-scale-separated (sep={sep:.3f})"
+    assert 1 <= imin <= nx - 2 and 1 <= imax <= nx - 2, "eta extremum on a wall"
     # Same order as MITgcm after 10 steps (u,v ~ 1e-4 m/s spin-up), not a blow-up.
     assert 1e-5 < np.abs(u).max() < 1e-2, f"|u|max={np.abs(u).max():.2e}"
     assert 1e-5 < np.abs(v).max() < 1e-2, f"|v|max={np.abs(v).max():.2e}"
+
+
+def test_stays_laminar_not_turbulent_default_ci():
+    """NON-slow equilibrium guard (so the default ``-m 'not slow'`` run is NOT
+    blind to a turbulent regression, codex HIGH): a shorter 2000-step spin-up
+    must stay an order below the turbulent western-boundary-instability band
+    (0.15-0.37).  The precise laminar magnitude vs MITgcm is the slow
+    ``test_reproduces_mitgcm_laminar_equilibrium``; this one only has to FAIL
+    on a blow-up into turbulence (|u|max -> O(0.1+))."""
+    model, state, r = _build_model()
+    chunk = _chunk_fn(model, r)
+    s = chunk(chunk(state))  # 2000 steps
+    umax = float(np.abs(np.asarray(s.u.data)).max())
+    vmax = float(np.abs(np.asarray(s.v.data)).max())
+    assert np.isfinite(umax) and np.isfinite(vmax)
+    assert umax < 0.06, f"|u|max={umax:.4f} entered the turbulent band by step 2000"
+    assert vmax < 0.12, f"|v|max={vmax:.4f} entered the turbulent band by step 2000"
 
 
 def test_grad_flows_through_the_gyre_step():
@@ -130,10 +159,24 @@ def test_reproduces_mitgcm_laminar_equilibrium():
     assert np.all(np.isfinite(u)) and np.all(np.isfinite(v))
     umax = float(np.abs(u).max())
     vmax = float(np.abs(v).max())
-    # Near MITgcm's laminar 0.031 / 0.084 (canonical split runs ~12% / ~6% low),
-    # and well below the turbulent band.
-    assert 0.022 < umax < 0.040, f"|u|max={umax:.4f} not at MITgcm's laminar 0.031"
-    assert 0.060 < vmax < 0.105, f"|v|max={vmax:.4f} not at MITgcm's laminar 0.084"
+    # TIGHT windows bracketing the MEASURED canonical equilibrium
+    # (|u|max≈0.027 / |v|max≈0.079) with the upper bound at MITgcm's laminar
+    # 0.031 / 0.084 (codex: 29%-low floors could hide a regression).  Fails on
+    # BOTH a further drop AND a turbulent overshoot.
+    assert 0.024 < umax < 0.032, f"|u|max={umax:.4f} off MITgcm's laminar 0.031"
+    assert 0.072 < vmax < 0.086, f"|v|max={vmax:.4f} off MITgcm's laminar 0.084"
+    # WESTERN/boundary intensification (the defining gyre property, codex MED):
+    # the equilibrium |u| extremum hugs a meridional wall (outer 30% column
+    # band), and the boundary current is far stronger than the interior —
+    # a uniform or interior-blob field would fail both.
+    u2 = np.abs(u[..., 0] if u.ndim == 3 else u)
+    nx = u2.shape[-1]
+    imax_col = int(np.unravel_index(np.argmax(u2), u2.shape)[-1])
+    assert imax_col < 0.3 * nx or imax_col > 0.7 * nx, (
+        f"|u|max in basin interior (col {imax_col}/{nx}) — not boundary-intensified")
+    interior = u2[..., int(0.35 * nx):int(0.65 * nx)]
+    assert umax > 3.0 * float(np.median(interior) + 1e-12), (
+        "no boundary intensification (western current not >> interior)")
 
 
 @pytest.mark.slow
