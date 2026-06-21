@@ -601,3 +601,50 @@ def test_c_eps_round_trip_non_vacuous():
     n2 = jnp.zeros_like(wp2)
     c_eps, _ = c_eps_from_budget(p_wrong, ok, jnp.ones_like(wp2), ok, s2, n2, l_mix, wp2)
     assert not np.allclose(np.asarray(c_eps), c_eps_true, rtol=1e-6)
+
+
+def test_realism_breakdown_each_flag_is_load_bearing():
+    """LESRealismBreakdown surfaces WHICH realism term failed (campaign observability, iter
+    508). A single-failure state must set EXACTLY its own flag False (the others True) and
+    overall False — so the operator can tell laminar from blown-up from drifted from wet."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        column_les_realism,
+        column_les_realism_breakdown,
+    )
+
+    state, hc = _les_state_with_shear()
+
+    healthy = column_les_realism_breakdown(state, hc)
+    assert all(bool(f) for f in (healthy.turbulent, healthy.finite,
+                                 healthy.thermo_consistent, healthy.moisture_physical,
+                                 healthy.rh_ok, healthy.overall))
+
+    # dead (w≡0) → ONLY turbulent fails
+    dead = column_les_realism_breakdown(
+        state._replace(w=state.w.replace(data=jnp.zeros_like(state.w.data))), hc)
+    assert not bool(dead.turbulent) and not bool(dead.overall)
+    assert bool(dead.finite) and bool(dead.thermo_consistent) and bool(dead.moisture_physical)
+
+    # blown up (a NaN) → ONLY finite fails
+    blown = column_les_realism_breakdown(state._replace(
+        theta_prime=state.theta_prime.replace(
+            data=state.theta_prime.data.at[0, 0, 0].set(jnp.nan))), hc)
+    assert not bool(blown.finite) and not bool(blown.overall)
+    assert bool(blown.moisture_physical)
+
+    # θ-drifted (+6 K uniform) → ONLY thermo_consistent fails (fluctuations unchanged)
+    drifted = column_les_realism_breakdown(state._replace(
+        theta_prime=state.theta_prime.replace(data=state.theta_prime.data + 6.0)), hc)
+    assert not bool(drifted.thermo_consistent) and not bool(drifted.overall)
+    assert bool(drifted.turbulent) and bool(drifted.finite) and bool(drifted.moisture_physical)
+
+    # moisture runaway (q_v=0.1) → ONLY moisture_physical fails
+    wet = column_les_realism_breakdown(state._replace(
+        tracers=state.tracers.replace(data=state.tracers.data.at[..., 0].set(0.1))), hc)
+    assert not bool(wet.moisture_physical) and not bool(wet.overall)
+    assert bool(wet.turbulent) and bool(wet.finite) and bool(wet.thermo_consistent)
+
+    # overall is bit-identical to the public column_les_realism bool (the bool API delegates)
+    assert bool(column_les_realism(state, hc)) == bool(healthy.overall)
+    assert bool(column_les_realism(
+        state._replace(w=state.w.replace(data=jnp.zeros_like(state.w.data))), hc)) is False

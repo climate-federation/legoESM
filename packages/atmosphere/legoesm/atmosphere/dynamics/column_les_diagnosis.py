@@ -126,6 +126,57 @@ def _relative_humidity_field(les_state, height_coord, q_v: jax.Array) -> jax.Arr
     return q_v / (q_sat + _Q_SAT_FLOOR_KG_KG)
 
 
+class LESRealismBreakdown(NamedTuple):
+    """Per-criterion realism flags for one finished column LES — the WHY behind the single
+    :func:`column_les_realism` bool, for campaign OBSERVABILITY: when the loop reports few/no
+    valid diagnoses, the operator needs to know WHICH rejection mode fired (a coarse LES that
+    stayed laminar, a blown-up one, a θ-drifted one, a moisture runaway, or a supersaturated
+    one) to decide whether to refine the LES, fix the forcing, or accept that the column is
+    genuinely quiescent.  Each field is a TRACED scalar bool; ``overall`` is their AND and is
+    bit-identical to :func:`column_les_realism`'s return."""
+
+    turbulent: jax.Array          # peak resolved w'² above wp2_floor (else: dead / laminar)
+    finite: jax.Array             # all fields finite (else: blown up)
+    thermo_consistent: jax.Array  # mean-θ′ drift within bound (else: drifted off the column)
+    moisture_physical: jax.Array  # q_v within [−tol, q_v_max] (else: moisture runaway)
+    rh_ok: jax.Array              # supersaturation cap (True when rh_max is None — opt-in)
+    overall: jax.Array            # turbulent & finite & thermo_consistent & moisture & rh_ok
+
+
+def column_les_realism_breakdown(
+        les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
+        theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K,
+        q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0,
+        rh_max: float | None = None) -> LESRealismBreakdown:
+    """The per-criterion realism flags (:class:`LESRealismBreakdown`) underlying
+    :func:`column_les_realism`.  ``overall`` reproduces that gate EXACTLY (this is its single
+    implementation — the bool API delegates here, so there is no duplicated threshold logic);
+    the individual flags surface WHY a column was rejected (campaign observability).  Same
+    semantics, thresholds, and AD-safety as :func:`column_les_realism` (see its docstring)."""
+    thp = jnp.asarray(les_state.theta_prime.data)
+    wp2 = vertical_velocity_variance_plane(les_state, height_coord)
+    q_v = jnp.asarray(les_state.tracers.data)[..., qv_slot]
+    turbulent = jnp.max(wp2) > jnp.asarray(wp2_floor, dtype=wp2.dtype)
+    finite = (jnp.all(jnp.isfinite(wp2)) & jnp.all(jnp.isfinite(thp))
+              & jnp.all(jnp.isfinite(q_v)))
+    thermo_consistent = (
+        _thermo_drift_rms(thp) < jnp.asarray(theta_drift_rms_max_K, dtype=thp.dtype))
+    moisture_physical = (
+        (jnp.max(q_v) < jnp.asarray(q_v_max, dtype=q_v.dtype))
+        & (jnp.min(q_v) > jnp.asarray(-_Q_V_NEG_TOL_KG_KG, dtype=q_v.dtype)))
+    if rh_max is not None:
+        # OPT-IN supersaturation cap (iter 68): static gate on a config float (None ⇒ off),
+        # so the T/p/q_sat work is skipped unless a campaign enables it.
+        rh = _relative_humidity_field(les_state, height_coord, q_v)
+        rh_ok = jnp.all(jnp.isfinite(rh)) & (jnp.max(rh) < jnp.asarray(rh_max, dtype=rh.dtype))
+    else:
+        rh_ok = jnp.asarray(True)
+    overall = turbulent & finite & thermo_consistent & moisture_physical & rh_ok
+    return LESRealismBreakdown(
+        turbulent=turbulent, finite=finite, thermo_consistent=thermo_consistent,
+        moisture_physical=moisture_physical, rh_ok=rh_ok, overall=overall)
+
+
 def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
                        theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K,
                        q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0,
@@ -158,27 +209,14 @@ def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_W
     a false negative.  Thresholds are regime-sensitive and configurable.  Pure-JAX (a
     boolean mask; no NaN grad — ``&`` is logical-and on bool scalars, and ``NaN < thr``
     is ``False`` so a non-finite field still rejects).
+
+    Returns the single ``overall`` flag; :func:`column_les_realism_breakdown` returns the
+    SAME computation as per-criterion flags (WHY a column failed) for campaign observability.
     """
-    thp = jnp.asarray(les_state.theta_prime.data)
-    wp2 = vertical_velocity_variance_plane(les_state, height_coord)
-    q_v = jnp.asarray(les_state.tracers.data)[..., qv_slot]
-    turbulent = jnp.max(wp2) > jnp.asarray(wp2_floor, dtype=wp2.dtype)
-    finite = (jnp.all(jnp.isfinite(wp2)) & jnp.all(jnp.isfinite(thp))
-              & jnp.all(jnp.isfinite(q_v)))
-    thermo_consistent = (
-        _thermo_drift_rms(thp) < jnp.asarray(theta_drift_rms_max_K, dtype=thp.dtype))
-    moisture_physical = (
-        (jnp.max(q_v) < jnp.asarray(q_v_max, dtype=q_v.dtype))
-        & (jnp.min(q_v) > jnp.asarray(-_Q_V_NEG_TOL_KG_KG, dtype=q_v.dtype)))
-    realistic = turbulent & finite & thermo_consistent & moisture_physical
-    if rh_max is not None:
-        # OPT-IN supersaturation cap (iter 68): static gate on a config float (None
-        # ⇒ off), so the T/p/q_sat work is skipped unless a campaign enables it. The
-        # finite term covers rh too (NaN rh ⇒ rejected by both isfinite and max<thr).
-        rh = _relative_humidity_field(les_state, height_coord, q_v)
-        realistic = realistic & jnp.all(jnp.isfinite(rh)) & (
-            jnp.max(rh) < jnp.asarray(rh_max, dtype=rh.dtype))
-    return realistic
+    return column_les_realism_breakdown(
+        les_state, height_coord, wp2_floor=wp2_floor,
+        theta_drift_rms_max_K=theta_drift_rms_max_K, q_v_max=q_v_max, qv_slot=qv_slot,
+        rh_max=rh_max).overall
 
 
 def gate_diagnosis_realism(diagnosis, realistic):
