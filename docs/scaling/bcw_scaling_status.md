@@ -430,12 +430,16 @@ throughput because the C-D-grid face split adds a cross-device halo (the "21
 collective-permute start/done" ops in the timed HLO census) whose latency cancels
 the compute gain at these problem sizes.  This is the SAME mechanism as the
 documented cube >6-device anti-scaling — the cube simply does not strong-scale on
-the dual-RTX8000 PCIe/Gloo fabric.  (The f64 + C192 strong points were not run to
-completion: each cross-GPU cube config compiles ~200s and the f32+f64 × {1,2}dev
-× {48,96,192} sweep exceeds practical walltime — but the result is already clear
-from f32/C48-C96.)  The publication figure therefore represents the cube on GPU
-by its single-device throughput (f32 & f64) + weak 1→2 device; the strong
-2-device curve is omitted as a measured non-result (halo-bound), not a gap.
+the dual-RTX8000 PCIe/Gloo fabric.  The C48 1→2-device strong point (f32, job
+8534220: 59.3→50.9 Mcells/s, 0.86×, 42.9% eff) IS plotted in the publication
+figure so the cube has a GPU strong-scaling curve like every other grid; the
+larger cross-GPU cube configs (C96/C192 × 2 dev) are excluded because each
+compiles ~200s and the {1,2}dev sweep repeatedly exceeded practical walltime
+(jobs 8534076/8534102/8534207/8534214 timed out) — a measured limitation, and the
+anti-scaling verdict is unchanged across the sizes that did complete (C48 0.86×,
+C96 1.0×).  Every grid family therefore now appears in the figure with both weak
+and strong GPU curves; the cube strong curve simply documents a halo-bound
+non-speedup rather than a gain.
 
 Aggregator fix (this run, codex-reviewed): `aggregate_bcw_scaling.py` previously
 SILENTLY DROPPED the nested atmosphere GPU `ScalingReport` JSONs (only flat
