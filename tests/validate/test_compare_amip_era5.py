@@ -455,7 +455,7 @@ def test_ocean_mask_for_verify(tmp_path):
         def static_land_fraction(self):
             return jnp.array([[0.0, 0.6], [0.4, 1.0]])   # 2 ocean (<=0.5), 2 land
 
-    grid4 = SimpleNamespace(grid_area=jnp.ones(4))        # 4 columns, matches the (2,2) mask
+    grid4 = SimpleNamespace(grid_area=jnp.ones((2, 2)))   # 4 columns on a STRUCTURED 2x2 grid
     grid9 = SimpleNamespace(grid_area=jnp.ones(9))        # mismatch
     on = SimpleNamespace(ocean_only=True, base_config=cfg_path, max_land_fraction=0.5)
 
@@ -464,6 +464,10 @@ def test_ocean_mask_for_verify(tmp_path):
     try:
         mask = drv._ocean_mask_for_verify(on, grid4)
         assert mask is not None and int(jnp.sum(mask)) == 2
+        # REGRESSION (iter 484): the mask must be GRID-SHAPED (broadcastable to the 2D
+        # per-column score in aggregate_combined_bias), NOT a flat (n_columns,) array — a flat
+        # mask would crash the bias reduction on a structured grid.
+        assert mask.shape == (2, 2)
 
         with pytest.raises(SystemExit, match="must match"):   # grid-shape mismatch
             drv._ocean_mask_for_verify(on, grid9)

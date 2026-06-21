@@ -1138,7 +1138,16 @@ def _maybe_ocean_mask(args, base_cfg):
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.compare_reanalysis import ocean_valid_mask
     land_fraction = ModelDriver(base_cfg).static_land_fraction()
-    mask = ocean_valid_mask(land_fraction, max_land_fraction=args.max_land_fraction)
+    # ocean_valid_mask flattens ROW-MAJOR to (n_columns,); reshape it BACK to the model grid
+    # shape so the mask is broadcastable to the 2D per-column score in the bias aggregation
+    # (like area_weights) AND still flattens cleanly inside rank_worst_columns. A FLAT mask is
+    # broadcastable only on a flat (MPAS nCells) grid — on a STRUCTURED grid (nlat,nlon) a
+    # flat (n_columns,) mask is REJECTED by assert_per_column_fields_match_grid (n_columns does
+    # not broadcast to (nlat,nlon)), which silently broke --ocean-only on lat-lon/cubed-sphere/
+    # Gaussian grids until the dry-run harness check surfaced it.
+    grid_shape = jnp.asarray(land_fraction).shape
+    mask = ocean_valid_mask(
+        land_fraction, max_land_fraction=args.max_land_fraction).reshape(grid_shape)
     n_ocean = int(jnp.sum(mask))
     if n_ocean == 0:
         raise SystemExit(

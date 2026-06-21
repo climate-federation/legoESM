@@ -277,7 +277,11 @@ def _ocean_mask_for_verify(args, grid):
               "so the ocean-only restriction is a no-op (this is the GLOBAL bias).")
     print(f"[compare_amip_era5] --ocean-only: bias over {n_ocean} ocean columns "
           f"(land_fraction <= {args.max_land_fraction}) of {n_cols} total.")
-    return mask
+    # ocean_valid_mask flattens ROW-MAJOR to (n_columns,); reshape it to the verify grid's 2D
+    # shape so it broadcasts onto the per-column score in aggregate_combined_bias (like the
+    # area weights). A flat mask only broadcasts on a flat (MPAS) grid — on a STRUCTURED grid
+    # it would crash the bias reduction (the same iter-484 flat-mask bug as the campaign path).
+    return mask.reshape(jnp.asarray(grid.grid_area).shape)
 
 
 def load_model_from_restart(restart_path, grid, sigma, nlev, *, sst_K=None,

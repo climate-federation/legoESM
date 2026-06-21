@@ -22,6 +22,20 @@ def test_run_smoke_validates_the_turnkey_chain(tmp_path):
     assert (tmp_path / "synthetic_era5.zarr").exists()
 
 
+def test_run_smoke_validates_realistic_ocean_only_surface_flux_flags(tmp_path):
+    """REGRESSION (iter 484): forwarding the realistic --ocean-only/--surface-flux flags to the
+    dry-run must validate end-to-end on a STRUCTURED (lat-lon) grid. --ocean-only built a FLAT
+    (n_columns,) valid_mask that assert_per_column_fields_match_grid REJECTED as not
+    broadcastable to the (nlat,nlon) grid — silently broken for EVERY structured grid (only
+    flat MPAS worked) until this full-harness smoke surfaced it. (On a flat synthetic config
+    --ocean-only is a safe no-op the dry-run still validates the wiring of.)"""
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    rc = run_smoke(str(tmp_path), resolution=8, nlev=5, era5_nlat=8, era5_nlon=16,
+                   ocean_only=True, surface_flux=True)
+    assert rc == 0
+
+
 def test_main_with_explicit_workdir_returns_zero(tmp_path, capsys):
     from scripts.experiment.smoke_compare_reanalysis import main
 

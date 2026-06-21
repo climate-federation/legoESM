@@ -46,6 +46,9 @@ def run_smoke(
     nlev: int = 5,
     era5_nlat: int = 8,
     era5_nlon: int = 16,
+    ocean_only: bool = False,
+    surface_flux: bool = False,
+    align_insolation: bool = False,
 ) -> int:
     """Generate a config (+ synthetic ERA5 unless ``era5_zarr`` is given), then dry-run.
 
@@ -55,6 +58,12 @@ def run_smoke(
     the actual store, since the campaign loads + regrids + vertically-interpolates
     the reference even in ``--dry-run`` (lines 64-67 of the campaign main).  ``mode``
     selects AMIP vs CMIP.
+
+    ``ocean_only`` / ``surface_flux`` / ``align_insolation`` forward the realistic-run
+    flags (iters 449/451/465) to the dry-run, so an operator can validate the EXACT
+    flag combo they will launch with — catching a flag-wiring problem in THIS
+    environment on cheap synthetic data, before the multi-day job (on a flat synthetic
+    config ``--ocean-only`` is a safe no-op the dry-run still validates).
 
     Returns the campaign main's exit code (0 = the whole preamble validated).  The
     sub-mains are invoked programmatically (not via a shell) so a failure at any
@@ -86,12 +95,19 @@ def run_smoke(
 
     # The REAL campaign main, --dry-run: validates config + ERA5 ingest (load +
     # regrid + vertical interp) + grid + scheme/method WITHOUT the multi-day run.
-    return campaign_main([
+    dry_argv = [
         "--config", str(config_path),
         "--era5-zarr", era5_path,
         "--mode", mode,
         "--dry-run",
-    ])
+    ]
+    if ocean_only:
+        dry_argv.append("--ocean-only")
+    if surface_flux:
+        dry_argv.append("--surface-flux")
+    if align_insolation:
+        dry_argv.append("--align-insolation")
+    return campaign_main(dry_argv)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,11 +124,22 @@ def main(argv: list[str] | None = None) -> int:
              "synthetic (the dry-run still loads + regrids it); default: synthetic")
     p.add_argument("--mode", choices=("amip", "cmip"), default="amip",
                    help="AMIP (prescribed SST) or CMIP (coupled); default amip")
+    p.add_argument("--ocean-only", action="store_true",
+                   help="forward --ocean-only to the dry-run (validate the realistic "
+                        "ocean-column ranking flag in this environment)")
+    p.add_argument("--surface-flux", action="store_true",
+                   help="forward --surface-flux to the dry-run (validate the realistic "
+                        "SST-driven LES surface-flux flag)")
+    p.add_argument("--align-insolation", action="store_true",
+                   help="forward --align-insolation to the dry-run (validate the "
+                        "seasonal-insolation alignment flag)")
     args = p.parse_args(argv)
 
     def _go(wd: str) -> int:
         rc = run_smoke(wd, era5_zarr=args.era5_zarr, mode=args.mode,
-                       resolution=args.resolution, nlev=args.nlev)
+                       resolution=args.resolution, nlev=args.nlev,
+                       ocean_only=args.ocean_only, surface_flux=args.surface_flux,
+                       align_insolation=args.align_insolation)
         era5_kind = "REAL ERA5" if args.era5_zarr else "synthetic ERA5"
         if rc == 0:
             print(f"[smoke] PASS: config -> {era5_kind} -> campaign --dry-run "

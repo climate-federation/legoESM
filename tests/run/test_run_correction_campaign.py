@@ -1412,6 +1412,11 @@ def _stub_campaign_main_io(monkeypatch):
     # first, so stub them here (each has its own direct test).
     monkeypatch.setattr(rcc, "_assert_era5_zarr_readable", lambda path: None)
     monkeypatch.setattr(rcc, "_warn_if_grid_exceeds_era5_lat_coverage", lambda a, b: None)
+    # The effective-config sidecar write (iter 464) runs in the preamble BEFORE the resume/
+    # dispatch guards these tests target; it calls config_to_dict(base_cfg), which the
+    # SimpleNamespace fake_cfg above does not support — stub it (a preamble side-effect, not
+    # what these tests assert) so the launch reaches the resume/dispatch logic.
+    monkeypatch.setattr(rcc, "_write_effective_config", lambda base_cfg, out: "")
     return fake_grid
 
 
@@ -3593,6 +3598,17 @@ def test_ocean_only_mask_from_land_fraction_and_fail_loud():
         on = SimpleNamespace(ocean_only=True, max_land_fraction=0.5, mode="amip")
         mask = _maybe_ocean_mask(on, base_cfg=object())
         assert mask is not None and int(jnp.sum(mask)) == 2     # 2 ocean columns ranked
+
+        # REGRESSION (iter 484): the mask must be GRID-SHAPED (broadcastable to the 2D
+        # per-column score), NOT a flat (n_columns,) array. A flat mask is REJECTED by the
+        # harness check on a STRUCTURED grid (n_columns does not broadcast to (nlat,nlon)),
+        # which silently broke --ocean-only on lat-lon/cubed-sphere/Gaussian until the dry-run
+        # surfaced it. sum() alone (shape-agnostic) passed despite the bug, so assert the SHAPE
+        # AND that the harness broadcastability check accepts it.
+        from scripts.run.run_correction_campaign import assert_per_column_fields_match_grid
+        assert mask.shape == (2, 2)
+        assert_per_column_fields_match_grid(
+            (2, 2), area_weights=jnp.ones((2, 2)), valid_mask=mask)   # must NOT raise
 
         # CMIP applicability caveat (iter 457): print a NOTE that ocean-only is most meaningful
         # for AMIP (prescribed SST pins the ocean); silent for AMIP.
