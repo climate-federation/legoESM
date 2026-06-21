@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.surface_forcing.wind_profiles import compute_wind_stress
@@ -48,9 +49,9 @@ def prescribed_surface_forcing(
     # u/v faces (T->u, T->v) where the ocean side gets contaminated.
     dz_0 = z_coord.dz_ref[0] * jacobian  # T-point shape; 0 on land
     is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
-    inv_rho_dz = jnp.where(
-        is_ocean, 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1.0e-10)), 0.0,
-    )
+    # Wet-cell flux→tendency reciprocals (#518: shared helper; eos rho_0/c_sw).
+    inv_rho_dz, inv_rho_csw_dz = surface_tendency_factors(
+        is_ocean, dz_0, rho_0_ref, c_sw)
 
     # Wind stress from shared grid-agnostic computation (T-point shape)
     tau_x, tau_y = compute_wind_stress(grid.grid_lat, cfg)
@@ -99,12 +100,8 @@ def prescribed_surface_forcing(
     dv_dt = jnp.pad(dv_dt_vf[..., None], (*pad_axes_v, (0, nlev - 1)))
 
     # Heat flux: dT/dt = Q_net / (rho_0 * c_sw * dz_0)  — T-point
+    # (inv_rho_csw_dz from the shared helper above).
     Q_net = jnp.full_like(dz_0, cfg.Q_net, dtype=dtype)
-    inv_rho_csw_dz = jnp.where(
-        is_ocean,
-        1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1.0e-10)),
-        0.0,
-    )
     dT_dt = jnp.pad(
         (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes_T, (0, nlev - 1)),
     )
