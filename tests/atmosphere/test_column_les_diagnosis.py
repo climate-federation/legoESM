@@ -697,3 +697,31 @@ def test_summarize_over_vmapped_breakdowns_end_to_end():
     assert summary.n_rejected == 1
     assert summary.n_not_turbulent == 1        # the dead column, for being laminar
     assert summary.n_not_finite == 0
+
+
+def test_mask_diagnosis_above_excludes_sponge_levels():
+    """mask_diagnosis_above (iter 513, 'keep the diagnosis below the sponge') invalidates
+    profile levels at/above z_max; a no-op for z_max=None and for a scalar diagnosis without
+    a z_m profile (entrainment)."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        ClubbCoefficientProfile,
+        mask_diagnosis_above,
+    )
+
+    z_m = jnp.asarray([100.0, 500.0, 1000.0, 1800.0])     # ascending interface heights [m]
+    prof = ClubbCoefficientProfile(
+        z_m=z_m, C_K=jnp.asarray([0.3, 0.3, 0.3, 0.3]),
+        valid=jnp.asarray([True, True, True, True]))
+
+    # domain_top 2000, relax 0.25 → sponge base 1500 m: only the 1800 m level is in the sponge.
+    masked = mask_diagnosis_above(prof, 2000.0 * (1.0 - 0.25))
+    np.testing.assert_array_equal(np.asarray(masked.valid), [True, True, True, False])
+    np.testing.assert_array_equal(np.asarray(masked.C_K), np.asarray(prof.C_K))  # value kept
+
+    # z_max=None → unchanged (byte-identical default path)
+    assert mask_diagnosis_above(prof, None) is prof
+
+    # a scalar diagnosis (no z_m) → unchanged (entrainment is a single inversion level)
+    from types import SimpleNamespace
+    scalar = SimpleNamespace(w_entrainment=jnp.asarray(0.1), valid=jnp.asarray(True))
+    assert mask_diagnosis_above(scalar, 1500.0) is scalar

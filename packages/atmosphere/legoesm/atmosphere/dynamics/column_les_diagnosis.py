@@ -276,6 +276,28 @@ def gate_diagnosis_realism(diagnosis, realistic):
     )
 
 
+def mask_diagnosis_above(diagnosis, z_max):
+    """Invalidate diagnosis levels AT/ABOVE ``z_max`` — "keep the diagnosis below the sponge"
+    (``docs/COMPARE_REANALYSIS.md`` §Risks).  The LES top relaxation layer nudges θ toward the
+    GCM column, contaminating the turbulence there, so a coefficient diagnosed in that layer
+    must NOT be averaged into the per-column value.  ``z_max = domain_top·(1 − relax_width_frac)``
+    is the sponge base; profile levels (``z_m`` ascending) at/above it are AND-ed out of
+    ``valid`` (the value is left as-is — the reduce double-where-masks invalid).
+
+    A NO-OP when ``z_max is None`` (byte-identical), or for a scalar diagnosis without a ``z_m``
+    profile (the entrainment ``w_e``, a single inversion level — not a column average).  Pure /
+    AD-safe (a boolean mask on a static-shape array)."""
+    if z_max is None:
+        return diagnosis
+    z_m = getattr(diagnosis, "z_m", None)
+    if z_m is None:
+        return diagnosis
+    return diagnosis._replace(
+        valid=jnp.asarray(diagnosis.valid, dtype=bool)
+        & (jnp.asarray(z_m) < jnp.asarray(z_max, dtype=jnp.asarray(z_m).dtype))
+    )
+
+
 class EddyDiffusivityProfile(NamedTuple):
     """Down-gradient eddy diffusivity ``K`` per interior interface (ascending z)."""
 

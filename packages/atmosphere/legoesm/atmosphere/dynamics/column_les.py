@@ -35,6 +35,7 @@ from legoesm.atmosphere.dynamics.column_les_diagnosis import (
     column_les_realism,
     diagnose_column_coefficient,
     gate_diagnosis_realism,
+    mask_diagnosis_above,
 )
 from legoesm.atmosphere.dynamics.les_regime import (
     LESRegimeConfig,
@@ -332,6 +333,7 @@ def run_column_les_pipeline(
     realism_theta_drift_K: float | None = None,
     realism_q_v_max: float | None = None,
     realism_rh_max: float | None = None,
+    relax_width_frac: float | None = None,
 ):
     """Run the LES (via ``run_les_fn``) and diagnose its closure coefficient(s).
 
@@ -354,8 +356,20 @@ def run_column_les_pipeline(
     INVALIDATED (the loop then keeps the column's background coefficient) rather
     than injecting a finite-but-meaningless value.  The same realism flag gates
     every method in the diagnose-many path.
+
+    **Sponge exclusion** (``relax_width_frac``): when given, diagnosis levels inside the LES
+    top relaxation layer (height ``≥ domain_top·(1 − relax_width_frac)``) are invalidated
+    (:func:`mask_diagnosis_above`) — the relaxation nudges θ toward the GCM column there, so a
+    coefficient diagnosed in the sponge is contaminated and must not be averaged in ("keep the
+    diagnosis below the sponge", §Risks).  ``None`` (default) keeps every interior level
+    (byte-identical); pass ``config.relax_width_frac`` to enable it.
     """
     final_state = run_les_fn(setup)
+    # The sponge base height: levels at/above this are inside the top relaxation layer.
+    z_max = None
+    if relax_width_frac is not None:
+        domain_top = jnp.max(jnp.asarray(setup.height_coord.z_full))
+        z_max = domain_top * (1.0 - relax_width_frac)
     # None ⇒ column_les_realism uses its own (module-default) threshold for each.
     realism_kw = {"qv_slot": qv_slot}      # the moisture cap reads tracer slot qv_slot
     if realism_wp2_floor is not None:
@@ -374,19 +388,23 @@ def run_column_les_pipeline(
         if len(methods) == 0:
             raise ValueError("methods must be a non-empty list (or None).")
         return {
-            m: gate_diagnosis_realism(
-                diagnose_column_coefficient(
-                    final_state, setup.height_coord, method=m, qv_slot=qv_slot,
-                    l_mix_max=l_mix_max),
-                realistic,
+            m: mask_diagnosis_above(
+                gate_diagnosis_realism(
+                    diagnose_column_coefficient(
+                        final_state, setup.height_coord, method=m, qv_slot=qv_slot,
+                        l_mix_max=l_mix_max),
+                    realistic),
+                z_max,
             )
             for m in methods
         }
-    return gate_diagnosis_realism(
-        diagnose_column_coefficient(
-            final_state, setup.height_coord, method=method, qv_slot=qv_slot,
-            l_mix_max=l_mix_max),
-        realistic,
+    return mask_diagnosis_above(
+        gate_diagnosis_realism(
+            diagnose_column_coefficient(
+                final_state, setup.height_coord, method=method, qv_slot=qv_slot,
+                l_mix_max=l_mix_max),
+            realistic),
+        z_max,
     )
 
 
@@ -706,5 +724,6 @@ def process_column(
         realism_theta_drift_K=config.les_realism_theta_drift_K,
         realism_q_v_max=config.les_realism_q_v_max,
         realism_rh_max=config.les_realism_rh_max,
+        relax_width_frac=config.relax_width_frac,   # exclude the top sponge from the diagnosis
     )
 
