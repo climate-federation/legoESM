@@ -324,10 +324,13 @@ def campaign_health(
       the non-improving branches so a GROWN bias is never misreported as "stalled: reduced
       -50%"; do NOT deploy.
     * ``"no_valid_diagnoses"`` — the bias did NOT improve AND LES ran but EVERY
-      diagnosis was rejected by the realism gate (``n_diagnoses_valid_total == 0`` with
-      ``n_diagnosed_total > 0``): no column was corrected, so the root cause is the LES
-      itself (too short / unforced to develop turbulence), NOT the correction logic —
-      lengthen or properly force the spin-off LES.
+      diagnosis was rejected (``n_diagnoses_valid_total == 0`` with
+      ``n_diagnosed_total > 0``), by EITHER the realism gate (no turbulence / blow-up /
+      drift) OR the per-level diagnosis validity (insufficient resolved shear or variance
+      for a down-gradient closure, or fewer than ``min_valid_levels`` valid levels — this
+      fires INDEPENDENTLY of the realism gate, even when it is off): no column was
+      corrected, so the root cause is the LES itself (resolution / duration / forcing),
+      NOT the correction logic — lengthen or properly force the spin-off LES.
     * ``"clamp_limited"`` — the bias did NOT improve AND ≥ ``clamp_fraction_warn`` of
       columns are pinned at a coefficient's registered bounds: the clamp (not the
       diagnosis) is the likely cause — the LES wants a value OUTSIDE the calibratable
@@ -398,9 +401,12 @@ def campaign_health(
     if summary.n_diagnosed_total > 0 and summary.n_diagnoses_valid_total == 0:
         return CampaignHealth(
             "no_valid_diagnoses",
-            f"All {summary.n_diagnosed_total} LES diagnoses were rejected by the "
-            "realism gate (no turbulence developed) — no column was corrected; "
-            "lengthen or properly force the spin-off LES. "
+            f"All {summary.n_diagnosed_total} LES diagnoses were rejected — either by the "
+            "realism gate (no turbulence developed / blow-up / drift) OR by the per-level "
+            "diagnosis validity (insufficient resolved shear or variance for a down-gradient "
+            "closure, or fewer than min_valid_levels valid levels) — so no column was "
+            "corrected; the root cause is the LES (resolution / duration / forcing), not the "
+            "correction logic — lengthen or properly force the spin-off LES. "
             f"Bias reduced {red} ({acc}).")
     if clamp_binding:
         return CampaignHealth(

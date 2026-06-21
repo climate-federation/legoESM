@@ -390,6 +390,10 @@ def test_campaign_health_no_valid_diagnoses():
     assert h.status == "no_valid_diagnoses" and not h.ok
     assert "All 6 LES diagnoses were rejected" in h.message
     assert "lengthen or properly force" in h.message
+    # The verdict must name BOTH rejection paths, not just the realism gate (iter 507/510):
+    # diagnosis-validity (shear/variance/levels) can zero the valid count even with the
+    # realism gate OFF, so attributing it solely to "no turbulence" misdirects the operator.
+    assert "realism gate" in h.message and "diagnosis validity" in h.message
 
 
 def test_campaign_health_no_valid_diagnoses_precedes_clamp():
