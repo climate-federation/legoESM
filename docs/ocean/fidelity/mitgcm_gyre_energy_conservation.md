@@ -324,15 +324,17 @@ turbulent selection is a marginal-stability difference of two valid schemes, doc
 
 ## RESOLUTION 2026-06-18 (iteration 6): MITgcm-faithful integrator matches laminar 0.031 [SUPERSEDED — see FINAL #519 block at top: the bespoke stepper was deleted; the canonical model is laminar]
 
-Built a bit-exact MITgcm `tutorial_barotropic_gyre` stepper
-(`packages/ocean/legoesm/ocean/fidelity/mitgcm_gyre_faithful.py`, `GyreFaithfulModel`):
-unsplit explicit-Coriolis momentum tendency → AB2(abEps=0.01) → predictor → implicit
-free-surface elliptic solve → ∇η correction, in MITgcm (ny,nx) convention. Every operator
-CALIBRATED to corr≈1.0 against MITgcm's `momU`/`momV` diagnostic dumps (advection 0.9998;
-Coriolis/wind/PGF/viscosity/sidedrag 1.0). **It reproduces MITgcm's laminar equilibrium
-`|u|max≈0.031, |v|max≈0.084`, steady, at BOTH 1× and 2× resolution** (the canonical split
-`LatLonCGridOceanModel` runs the same gyre turbulent, 0.15–0.37). Tested:
-`tests/ocean/fidelity/test_mitgcm_gyre_faithful.py` (laminar equilibrium + steady-not-growing).
+[SUPERSEDED — iteration 6; the bespoke stepper described here was DELETED in #519 item 1,
+see the iteration-7 block below.] A bit-exact MITgcm `tutorial_barotropic_gyre` stepper was
+built (`mitgcm_gyre_faithful.py`, `GyreFaithfulModel`): unsplit explicit-Coriolis momentum
+tendency → AB2(abEps=0.01) → predictor → implicit free-surface elliptic solve → ∇η correction,
+in MITgcm (ny,nx) convention. Every operator was CALIBRATED to corr≈1.0 against MITgcm's
+`momU`/`momV` diagnostic dumps (advection 0.9998; Coriolis/wind/PGF/viscosity/sidedrag 1.0). It
+reproduced MITgcm's laminar equilibrium `|u|max≈0.031, |v|max≈0.084`, steady, at BOTH 1× and 2×
+resolution — while at that time the canonical EXPLICIT-split path ran the same gyre turbulent
+(0.15–0.37). It was tested by the now-removed `test_mitgcm_gyre_faithful.py`. (Later superseded:
+the canonical `implicit_cn` solver was found laminar, so the bespoke stepper + its test were
+deleted in favour of `test_mitgcm_gyre_canonical.py`.)
 
 Bug found + fixed during the port: a **v-viscosity hFacZ/m mask-swap** that under-damped the WBC
 (0.057 → 0.031). Confirmed legoESM's own `flux_divergence_viscosity_cgrid` v-component is correct

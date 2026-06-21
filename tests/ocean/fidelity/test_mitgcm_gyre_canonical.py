@@ -111,8 +111,13 @@ def test_stays_laminar_not_turbulent_default_ci():
     umax = float(np.abs(np.asarray(s.u.data)).max())
     vmax = float(np.abs(np.asarray(s.v.data)).max())
     assert np.isfinite(umax) and np.isfinite(vmax)
-    assert umax < 0.06, f"|u|max={umax:.4f} entered the turbulent band by step 2000"
-    assert vmax < 0.12, f"|v|max={vmax:.4f} entered the turbulent band by step 2000"
+    # WINDOW around the measured 2000-step spin-up (umax≈0.019 / vmax≈0.062):
+    # the LOWER bound catches a magnitude regression that spins up too weakly /
+    # collapses (which an upper-only turbulent guard would miss, codex), the
+    # UPPER bound catches a turbulent blow-up (band 0.15-0.37).  The precise
+    # equilibrium magnitude vs MITgcm is the slow test below.
+    assert 0.012 < umax < 0.06, f"|u|max={umax:.4f} off the laminar spin-up band"
+    assert 0.040 < vmax < 0.12, f"|v|max={vmax:.4f} off the laminar spin-up band"
 
 
 def test_grad_flows_through_the_gyre_step():
