@@ -78,6 +78,7 @@ def build_env_kernel_deployed_override(
     target_model_state,
     *,
     min_fraction_covered: float | None = None,
+    require_sst: bool = False,
 ):
     """CROSS-GRID analog of :func:`build_deployed_config` (iter 475): deploy a campaign's RAW
     env-kernel (``<out>.env_kernel.json`` from ``--feedback-strategy environment``) onto a
@@ -92,10 +93,16 @@ def build_env_kernel_deployed_override(
     ``column_environment_grid`` the campaign used — hybrid-coordinate-correct via the true layer
     pressures), and returns ``(deployed_config, grid, coverage)``.
 
-    The ``coverage`` diagnostic (``fraction_covered`` / ``fraction_in_hull``) reports how
-    trustworthy the transfer is; pass ``min_fraction_covered`` to FAIL LOUD on a near-no-op
-    (out-of-hull) deploy.  Validate the transfer first with
-    ``run_perfect_model_osse.py --fine-resolution`` (the twin go/no-go for this exact path)."""
+    The ``coverage`` diagnostic reports how trustworthy the transfer is: ``fraction_covered`` /
+    ``fraction_in_hull`` (the env hull), and ``sst_from_model`` (whether the target state carried
+    a REAL SST).  SST is the env-kernel's DOMINANT predictor, so a deploy whose target state has
+    ``sst_K is None`` evaluates the kernel on an SST FABRICATED from the lowest-level air
+    temperature (``column_environment_grid`` warns) — fine for an in-loop diagnostic but
+    untrustworthy for a config that will drive a multi-day production run.  Pass
+    ``require_sst=True`` to FAIL LOUD in that case (recommended for a real deploy; the operator
+    supplies the target run's prescribed/coupled SST in the model state), and
+    ``min_fraction_covered`` to fail loud on a near-no-op (out-of-hull) deploy.  Validate the
+    transfer first with ``run_perfect_model_osse.py --fine-resolution`` (the twin go/no-go)."""
     import json
 
     from legoesm.training.deploy_correction import (
@@ -109,12 +116,22 @@ def build_env_kernel_deployed_override(
     with open(kernel_path) as f:
         kernel = env_kernel_from_dict(json.load(f))
     base_cfg, grid, sigma = load_base_config_and_grid(target_base_config_path)
+    sst_from_model = getattr(target_model_state, "sst_K", None) is not None
+    if require_sst and not sst_from_model:
+        raise ValueError(
+            "build_env_kernel_deployed_override: require_sst=True but the target model state "
+            "has sst_K=None — the cross-grid env-kernel's DOMINANT predictor is SST, so "
+            "deploying on an SST fabricated from the lowest-level air temperature would produce "
+            "an untrustworthy override for a production run. Supply the target run's "
+            "prescribed/coupled SST in the model state (or set require_sst=False to proceed "
+            "knowingly, accepting the approximate-SST environment).")
     p_s = target_model_state.p_s
     grid_env, _ = column_environment_grid(
         target_model_state, sigma,
         p_full=sigma.pressure_at_full(p_s), p_half=sigma.pressure_at_half(p_s))
     override, coverage = apply_env_kernel_override(
         kernel, grid_env, min_fraction_covered=min_fraction_covered)
+    coverage = {**coverage, "sst_from_model": bool(sst_from_model)}
     deployed = base_cfg._replace(turbulence_override=override)
     deployed.validate_strict()
     return deployed, grid, coverage

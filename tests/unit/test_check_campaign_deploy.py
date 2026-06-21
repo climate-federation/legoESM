@@ -244,6 +244,20 @@ def test_build_env_kernel_deployed_override_cross_grid(tmp_path):
     assert ck.shape == (nlat * nlon,) and bool(np.all(np.isfinite(ck)))   # per target column
     assert {"fraction_covered", "fraction_in_hull", "n_columns"} <= set(coverage)
     assert tuple(grid.grid_shape_2d) == (8, 16)
+    assert coverage["sst_from_model"] is True            # the target state carried a real SST
+
+    # A target state with NO SST: the env-kernel's DOMINANT predictor (SST) would be
+    # fabricated from air temperature, so require_sst fails loud (a production deploy must not
+    # silently use an approximate-SST environment); the default (warn) proceeds but FLAGS it.
+    state_no_sst = state._replace(sst_K=None)
+    with pytest.raises(ValueError, match="require_sst=True"):
+        build_env_kernel_deployed_override(str(kpath), str(cpath), state_no_sst,
+                                           require_sst=True)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")                  # column_environment_grid SST warning
+        _, _, cov2 = build_env_kernel_deployed_override(str(kpath), str(cpath), state_no_sst)
+    assert cov2["sst_from_model"] is False
 
 
 def test_check_deploy_surfaces_the_cross_grid_env_kernel_sidecar(tmp_path, capsys):
