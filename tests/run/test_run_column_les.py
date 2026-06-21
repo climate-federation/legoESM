@@ -1299,7 +1299,7 @@ def test_column_les_cli_reports_realism_when_les_runs(tmp_path, monkeypatch, cap
 
     def fake_process_column(rec, *, run_les_fn, **kwargs):  # noqa: ARG001
         run_les_fn(SimpleNamespace(height_coord="HC"))     # triggers _run → captures les_final
-        return "diag"
+        return SimpleNamespace(valid=jnp.asarray([True, True, False, False]))  # 2/4 valid
 
     monkeypatch.setattr(cl, "process_column", fake_process_column)
     monkeypatch.setattr(cl, "coefficient_value", lambda diag, method: np.asarray([1.0]))
@@ -1319,7 +1319,11 @@ def test_column_les_cli_reports_realism_when_les_runs(tmp_path, monkeypatch, cap
                    "--method", "clubb_coefficient"])
     assert rc == 0
     assert seen["state"] is les_final and seen["hc"] == "HC"   # captured state reached it
-    assert "realism: REALISTIC" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "realism: REALISTIC" in out
+    # iter 524: the per-column line ALSO reports the valid diagnosis-level count, so a
+    # REALISTIC line with few/0 valid levels points at the DIAGNOSIS, not the realism gate.
+    assert "2/4 valid diagnosis levels" in out
 
 
 def test_run_pipeline_excludes_the_top_sponge_layer(monkeypatch):
