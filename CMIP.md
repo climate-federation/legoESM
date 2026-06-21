@@ -104,6 +104,50 @@ over-grew, dragging the global tas down. This is **incomplete spin-up, not a
 physics bug** (R_TOA>0 confirms net energy gain). Equilibration timescale: 50 m
 slab @ +17.8 W/m² ≈ 3–4 yr to recover; soil months–yr. 90d is far too short.
 
+## Deeper diagnosis — air-sea DECOUPLING + anemic evaporation (2026-06-21)
+Splitting the combined-run tas/tos by latitude band exposed the real mechanism:
+
+| band | tas | tos | sea-air gap |
+|---|---|---|---|
+| tropics (0–20°) | 15.0°C | **27.9°C** | **+12.9** |
+| midlat (20–50°) | 12.7°C | 19.7°C | +7.0 |
+| highlat (50–90°) | −0.8°C | 6.0°C | +6.8 |
+
+The ocean SST is ~right (tropics 28°C ✓) but the near-surface AIR is ~13K
+colder than the ocean **even over open tropical ocean (0% ice)**. With
+`hfls`≈40 W/m² (tropical Earth ~120), the warm ocean is barely
+evaporating → the air stays cold + dry (CWV 18) → weak vapor greenhouse →
+surface LW to space → cold. **The proximate cause is the surface latent-heat
+flux.** Math: tropical `hfls=ρ·L_v·Ch·|U|·Δq` with Δq~0.017, Ch=1.5e-3 implies a
+surface wind |U|~0.5 m/s — the model's tropical surface winds are near-calm, and
+the **constant neutral** bulk scheme has **no convective gustiness**. Over a
+13K-unstable ocean the real atmosphere evaporates via free-convection gustiness
+(w*); the `coare3`/`large_yeager` MOST schemes include exactly that w* term.
+
+**New lever SHIPPED — `--surface-bulk-scheme {constant,coare3,large_yeager}`**
+(opt-in, default `constant` ⇒ byte-identical). Applied CONSISTENTLY across the
+three air-sea flux computations so the turbulent heat leaving the ocean matches
+the heat entering the atmosphere:
+- atmosphere `SurfaceLayerConfig.bulk_scheme` (via `_resolve_turbulence`),
+- **slab/two-layer `SimpleOceanConfig.bulk_scheme`** (the actual coupled heat
+  budget — new shared `_ocean_turbulent_fluxes` helper, dispatch-hardened),
+- coupler `CouplerConfig.bulk_scheme` (radiation skin-T feedback / dynamic ocean).
+
+Codex adversarial review (read-only, 7 findings) caught the key bug: the
+slab/two-layer `SimpleOcean` heat budget hard-codes its OWN constant fluxes and
+does NOT read `CouplerConfig` — so an atmosphere-only switch would be
+**non-conservative**. Fixed by wiring the scheme into `SimpleOceanConfig` too
+(HIGH#1). Also: reject `coare3`+`turbulence=none` (HIGH#2, no atm surface layer
+to update); CLI help scoped honestly (land/lake/ice tiles keep their own scheme,
+MED#4); known 0.98 saline-qsat offset in `ocean_tile_response` only (MED#3, not
+the slab budget). Tests: resolver propagation, validate_strict membership +
+turbulence guard, coverage ratchet, SimpleOcean MOST-enhances-unstable-flux,
+dispatch-hardening raise.
+CAUTION (prior dead-end): an *ad-hoc* gustiness bump over-cooled the
+energy-limited slab (−20 K/yr); the MOST scheme computes w* self-consistently
+from the buoyancy flux. The 30d coare3 experiment will show whether stronger,
+*conservative* evaporation warms+moistens the air faster than it cools the slab.
+
 ## Open / next levers (ranked by the combined-run diagnosis)
 The combined run isolates the residual to **spin-up of the slow surface
 reservoirs**, dominated by cold land + over-grown sea ice (tos warm, tas cold).

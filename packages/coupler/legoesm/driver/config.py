@@ -292,6 +292,15 @@ class ExperimentConfig(NamedTuple):
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
+    # Surface-layer bulk-flux algorithm (SurfaceLayerConfig.bulk_scheme):
+    # "constant" (neutral coefficients; DEFAULT, byte-identical) | "coare3" |
+    # "large_yeager".  The constant scheme has NO convective-gustiness term, so
+    # evaporation over a calm, convectively-unstable warm tropical ocean is
+    # anemic (cold/dry surface-air bias).  The stability-dependent MOST schemes
+    # add the free-convection velocity scale w*.  For interface energy
+    # consistency the coupler ocean tile (CouplerConfig.bulk_scheme) MUST use the
+    # same scheme — run_coupled wires both together.
+    surface_bulk_scheme: str = "constant"
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
@@ -571,6 +580,25 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
+            )
+        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        if self.surface_bulk_scheme not in _valid_surface_bulk:
+            errors.append(
+                f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
+                f"got {self.surface_bulk_scheme!r}"
+            )
+        # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
+        # (via _resolve_turbulence on the turbulence config).  With
+        # turbulence="none" there is no SurfaceLayerConfig to update, so the
+        # atmosphere would silently stay on its fallback fluxes while the
+        # ocean/coupler tiles switch to MOST — an inconsistent interface.  Reject
+        # loudly (codex review HIGH#2).
+        if self.surface_bulk_scheme != "constant" and self.turbulence == "none":
+            errors.append(
+                f"surface_bulk_scheme={self.surface_bulk_scheme!r} requires a "
+                f"turbulence scheme (turbulence != 'none') so the atmosphere "
+                f"surface layer uses the same bulk-flux algorithm as the ocean "
+                f"tile; got turbulence='none'."
             )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",

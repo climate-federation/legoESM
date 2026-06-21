@@ -1885,6 +1885,16 @@ def _resolve_turbulence(config):
 
     tc = TurbulenceConfig(scheme=scheme)
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
+    # Propagate the experiment-level surface bulk-flux algorithm into the
+    # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
+    # identical).  The stability-dependent MOST schemes (coare3/large_yeager)
+    # add the convective-gustiness w* term absent from the constant neutral
+    # coefficients — the fix for anemic evaporation over a calm warm ocean.
+    sbs = getattr(config, "surface_bulk_scheme", "constant")
+    if (sbs != "constant" and turb_config is not None
+            and getattr(turb_config, "surface", None) is not None):
+        turb_config = turb_config._replace(
+            surface=turb_config.surface._replace(bulk_scheme=sbs))
     return turb_fn, turb_config
 
 
