@@ -197,6 +197,13 @@ def main():
                              "the coupler land tile. Default (unset): keep the preset's "
                              "land (e.g. full_coupled=multilayer). --ocean-ic woa "
                              "defaults to slab when unset.")
+    parser.add_argument("--land-params", choices=("analytical", "clm"),
+                        default="clm",
+                        help="Spatial land parameters when land is active. 'clm' "
+                             "(default) = CLM reference surfdata: real global PFT "
+                             "classification + reference soil map (downloaded + "
+                             "cached on first use). 'analytical' = latitude-band "
+                             "PFT fractions, no soil map.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -485,6 +492,11 @@ def main():
         overrides["ocean_mode"] = "slab"
     if args.co2_init != 415.0:
         overrides["co2_ppmv_init"] = args.co2_init
+
+    # Spatial land parameters: CLM reference map (real PFT + soil) by default.
+    overrides["land_param_source"] = args.land_params
+    if args.land_params == "clm":
+        overrides["use_pft"] = True
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same
