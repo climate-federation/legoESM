@@ -247,3 +247,16 @@ def test_runbook_documents_the_starved_correction_diagnostics():
     assert "valid diagnosis levels" in text             # the diagnosis-validity count (iter 524)
     assert "C_K-INSENSITIVE" in text and "rrtmgp" in text  # the idealized-radiation guidance (515)
     assert "n_diagnoses_valid" in text                  # the column-count signal (iter 100/510)
+
+
+def test_runbook_distributed_realism_symbols_resolve():
+    """The §7 distributed-realism example's imports must resolve (iter 528) — a doc-reference
+    bug (e.g. global_sum_mpi being in parallel.reductions, NOT distributed_manifest) would
+    silently mislead the HPC operator at launch. Import them exactly as the runbook documents."""
+    from legoesm.parallel.reductions import global_sum_mpi  # noqa: F401
+
+    from scripts.run.run_correction_campaign import (  # noqa: F401
+        _RealismCapture,
+        realism_summary,
+        reduce_realism_summary_mpi,
+    )

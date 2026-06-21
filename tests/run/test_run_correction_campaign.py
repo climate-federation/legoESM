@@ -59,6 +59,8 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     make_les_diagnose_fn,
     maybe_env_grid_fn,
     print_realism_summary,
+    realism_summary,
+    reduce_realism_summary_mpi,
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
@@ -4224,3 +4226,31 @@ def test_realism_capture_is_wired_into_build_run_setup(monkeypatch, capsys):
     # the bias is C_K-insensitive), for BOTH the campaign and the OSSE.
     out = capsys.readouterr().out
     assert "IDEALIZED" in out and "rrtmgp" in out
+
+
+def test_reduce_realism_summary_mpi():
+    """reduce_realism_summary_mpi (iter 528) collective-sums a per-rank RealismRejectionSummary
+    into the global one — verified WITHOUT mpirun by injecting the reduce: identity (single
+    rank) leaves it unchanged; a doubling reduce (a 2-rank sim) doubles every count; the result
+    is a RealismRejectionSummary of plain ints."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import RealismRejectionSummary
+
+    s = RealismRejectionSummary(
+        n_total=4, n_realistic=1, n_rejected=3, n_not_turbulent=2, n_not_finite=1,
+        n_thermo_drift=0, n_moisture_runaway=0, n_supersaturated=0)
+
+    assert reduce_realism_summary_mpi(s, lambda x: x) == s          # single rank → unchanged
+    g = reduce_realism_summary_mpi(s, lambda x: x * 2)             # 2-rank sim → 2x
+    assert isinstance(g, RealismRejectionSummary)
+    assert g.n_total == 8 and g.n_rejected == 6 and g.n_not_turbulent == 4
+    assert all(isinstance(v, int) for v in g)                      # global counts are ints
+
+
+def test_realism_summary_public_list_entry():
+    """realism_summary (promoted public, iter 528) turns a LIST of per-column breakdowns (the
+    distributed operator's `_RealismCapture.breakdowns`) into a RealismRejectionSummary, or
+    None when empty — the entry the distributed pattern (runbook §7) feeds to
+    reduce_realism_summary_mpi."""
+    assert realism_summary(None) is None and realism_summary([]) is None
+    s = realism_summary([_mk_breakdown(), _mk_breakdown(turbulent=False)])
+    assert s.n_total == 2 and s.n_realistic == 1 and s.n_not_turbulent == 1

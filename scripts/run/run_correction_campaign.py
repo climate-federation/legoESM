@@ -239,10 +239,12 @@ class _RealismCapture:
         return final_state
 
 
-def _realism_summary(breakdowns: Any):
-    """Stack the captured per-column ``LESRealismBreakdown``\\ s into a single
-    ``RealismRejectionSummary`` (iter 512), or ``None`` when nothing was captured (a dry-run /
-    no LES ran).  Shared by the printed line + the output-JSON dict so the two cannot drift."""
+def realism_summary(breakdowns: Any):
+    """Stack a LIST of captured per-column ``LESRealismBreakdown``\\ s into a single
+    ``RealismRejectionSummary`` (iter 512/528), or ``None`` when nothing was captured (a
+    dry-run / no LES ran).  Shared by the printed line + the output-JSON dict (so the two
+    cannot drift) AND the public entry the DISTRIBUTED operator calls on its rank's
+    ``_RealismCapture.breakdowns`` before :func:`reduce_realism_summary_mpi` (runbook §7)."""
     if not breakdowns:
         return None
     import jax.numpy as jnp
@@ -263,7 +265,7 @@ def _realism_campaign_summary_line(breakdowns: Any, *, prefix: str = "[campaign]
     trustworthy and WHY any were not.  ``prefix`` tags the line (``[campaign]`` / ``[osse]``).
     ``None`` when nothing was captured (a dry-run, or no LES ran), so the caller prints
     nothing."""
-    s = _realism_summary(breakdowns)
+    s = realism_summary(breakdowns)
     if s is None:
         return None
     if s.n_rejected == 0:
@@ -290,8 +292,24 @@ def _realism_summary_dict(breakdowns: Any) -> dict | None:
     """The campaign-aggregate realism counts as a plain ``dict`` for the output JSON
     (machine-readable post-run analysis across many campaigns); ``None`` when no LES ran, so
     the key is omitted (like ``averaging`` / ``les_config``)."""
-    s = _realism_summary(breakdowns)
+    s = realism_summary(breakdowns)
     return None if s is None else dict(s._asdict())
+
+
+def reduce_realism_summary_mpi(summary: Any, global_reduce: Callable[[Any], Any]) -> Any:
+    """Collective-sum a PER-RANK ``RealismRejectionSummary`` into the GLOBAL one — the
+    DISTRIBUTED-MPAS campaign's realism aggregate (iter 528).  Each rank summarises ITS owned
+    worst columns' captured breakdowns (``summarize_realism_breakdowns`` on a
+    ``_RealismCapture``-wrapped ``run_les``), then passes the per-rank summary here on EVERY
+    rank; ``global_reduce`` (an MPI allreduce-SUM, e.g. ``global_sum_mpi`` from the distributed
+    setup) sums the eight counts so every rank gets the SAME global summary (collective, so a
+    rank-0-only print does not deadlock).  Pure host-side (eight ints packed → reduced →
+    unpacked); inject ``global_reduce`` so it is unit-testable without ``mpirun``."""
+    import jax.numpy as jnp
+
+    packed = jnp.asarray([getattr(summary, f) for f in summary._fields])
+    reduced = global_reduce(packed)
+    return type(summary)(*(int(x) for x in reduced))
 
 
 # Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.

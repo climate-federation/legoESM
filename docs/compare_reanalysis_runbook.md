@@ -533,6 +533,25 @@ if MPI.COMM_WORLD.Get_rank() == 0:
 The output is the **same** deployable artifact as the single-process path, so the
 deploy + held-out verify (steps 4–6) are unchanged.
 
+> **Monitor the spin-off LES realism at HPC scale (§3b, distributed).** The single-process CLIs
+> print the `LES realism:` breakdown automatically; the distributed path is library-only, so
+> wrap the `run_les` you pass to `make_les_diagnose_fn` in `_RealismCapture` and collective-sum
+> the per-rank counts into the GLOBAL breakdown — `0` realistic ⇒ debug per §3b:
+>
+> ```python
+> from scripts.run.run_correction_campaign import (
+>     _RealismCapture, realism_summary, reduce_realism_summary_mpi)
+> from legoesm.parallel.reductions import global_sum_mpi             # the allreduce-SUM
+>
+> run_les = _RealismCapture(my_run_forced_les)          # then make_les_diagnose_fn(..., run_les_fn=run_les)
+> # ... after the distributed campaign, on EVERY rank: ...
+> local = realism_summary(run_les.breakdowns)           # this rank's owned columns (None if no LES)
+> if local is not None:
+>     g = reduce_realism_summary_mpi(local, global_sum_mpi)   # collective → SAME on every rank
+>     if MPI.COMM_WORLD.Get_rank() == 0:
+>         print(f"LES realism: {g.n_realistic}/{g.n_total} realistic, {g.n_rejected} rejected")
+> ```
+
 > **MPI version requirement (correctness):** the collective reductions need a compatible
 > JAX / mpi4jax stack. There are **two compatible generations** (the two packages must be paired
 > *within* a generation — a cross pairing is the genuinely-incompatible case):
