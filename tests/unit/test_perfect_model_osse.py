@@ -684,3 +684,20 @@ def test_multi_osse_no_change_notes_a_trivial_initial_bias():
     trivial = multi_osse_verdict(_r(0.0025))
     assert trivial.status == "no_change" and "rrtmgp" in trivial.message
     assert "NOTE: the initial bias" not in multi_osse_verdict(_r(1.0)).message
+
+
+def test_cross_res_no_transfer_notes_a_trivial_fine_bias():
+    """The cross-resolution verdict shares the trivial-bias note via the same helper (iter
+    518): a near-zero UNCORRECTED fine bias appends the config-not-kernel guidance to
+    no_transfer; the status stays no_transfer; a meaningful fine bias gets no note."""
+    def _r(unc):
+        return CrossResOSSEResult(
+            coarse_initial_bias=1.0, coarse_final_bias=0.6, coarse_bias_reduced=True,
+            fine_bias_uncorrected=unc, fine_bias_corrected=unc,   # flat → no_transfer
+            fine_bias_reduction=0.0, fine_bias_reduced=False,
+            fraction_covered=1.0, fraction_in_hull=1.0,
+            coverage_threshold=0.8, n_fine_columns=512, kernel_field="C_K")
+
+    trivial = cross_res_osse_verdict(_r(0.0025))
+    assert trivial.status == "no_transfer" and "rrtmgp" in trivial.message
+    assert "NOTE: the initial bias" not in cross_res_osse_verdict(_r(1.0)).message

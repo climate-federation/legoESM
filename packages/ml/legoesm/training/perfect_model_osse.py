@@ -501,7 +501,8 @@ def run_cross_resolution_osse(
     )
 
 
-def cross_res_osse_verdict(result: CrossResOSSEResult) -> OSSEVerdict:
+def cross_res_osse_verdict(result: CrossResOSSEResult,
+                           *, min_meaningful_bias: float = _MIN_MEANINGFUL_BIAS) -> OSSEVerdict:
     """Classify a cross-resolution OSSE: did the coarse-learned kernel transfer?
 
     * ``transferred`` — the fine grid is well COVERED by the coarse env hull AND
@@ -557,12 +558,16 @@ def cross_res_osse_verdict(result: CrossResOSSEResult) -> OSSEVerdict:
             f"(in_hull={result.fraction_in_hull:.2g}) — the deploy is ACTIVELY HARMFUL "
             "across resolution (an in-domain closure-transfer failure), not merely "
             "unhelpful; do NOT deploy.")
+    # As with the same-grid no_change: a near-zero UNCORRECTED fine bias means there was
+    # almost nothing for the kernel to lower, so no_transfer reflects the CONFIG (C_K leverage),
+    # not the kernel — append the same shared guidance (iters 515/516/517).
     return OSSEVerdict(
         "no_transfer",
         f"the fine grid is well covered (in_hull={result.fraction_in_hull:.2g}) but "
         f"the env-kernel did NOT lower its bias "
         f"({result.fine_bias_uncorrected:.4g} -> {result.fine_bias_corrected:.4g}); "
-        "suspect the LES->GCM closure transfer before trusting cross-resolution use.")
+        "suspect the LES->GCM closure transfer before trusting cross-resolution use."
+        + _trivial_bias_note(result.fine_bias_uncorrected, min_meaningful_bias))
 
 
 class MultiOSSEResult(NamedTuple):
