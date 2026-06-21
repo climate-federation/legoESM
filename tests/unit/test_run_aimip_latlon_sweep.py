@@ -15,12 +15,36 @@ _spec.loader.exec_module(mod)
 
 def test_combo_count_and_structure():
     combos = mod.build_combos()
-    # baseline + 9 conv + 4 turb (tke/mynn25 excluded) + 4 gwd
-    assert len(combos) == 1 + 9 + 4 + 4 == 18
+    # baseline + 4 conv (profile-prognostic excluded) + 4 turb + 4 gwd
+    assert len(combos) == 1 + 4 + 4 + 4 == 13
     assert combos[0]["name"] == "combo_baseline"
     assert combos[0]["convection"] == mod.BASELINE["convection"]
     for c in combos:
         assert {"name", "convection", "turbulence", "gravity_wave_drag"} <= set(c)
+
+
+def test_sweep_schemes_are_run_amip_choices():
+    """Drift tripwire: every swept scheme (incl. baseline) MUST be a valid
+    run_amip CLI choice, else the sweep task dies at argparse (exit 2) and
+    wastes a GPU slot — which is exactly how the profile-prognostic
+    convection schemes silently failed before."""
+    import importlib.util as _u
+    rspec = _u.spec_from_file_location(
+        "_run_amip_mod", REPO / "scripts" / "run" / "run_amip.py")
+    ra = _u.module_from_spec(rspec)
+    rspec.loader.exec_module(ra)
+    parser = ra.build_arg_parser()
+    flag = {"convection": "--convection", "turbulence": "--turbulence",
+            "gravity_wave_drag": "--gravity-wave-drag"}
+    choices = {}
+    for action in parser._actions:
+        for axis, f in flag.items():
+            if f in action.option_strings:
+                choices[axis] = set(action.choices or [])
+    for axis, alts in mod.SWEEP_SPACE.items():
+        valid = choices[axis]
+        bad = [s for s in [mod.BASELINE[axis], *alts] if s not in valid]
+        assert not bad, f"{axis} schemes {bad} not in run_amip choices {valid}"
 
 
 def test_oat_changes_exactly_one_axis():

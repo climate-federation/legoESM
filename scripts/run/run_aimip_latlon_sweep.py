@@ -42,9 +42,13 @@ BASELINE = {
 # OAT alternatives per axis (baseline value excluded — it is the
 # ``combo_baseline`` run, shared across axes).
 SWEEP_SPACE = {
+    # Only the convection schemes run_amip's --convection exposes; the
+    # profile-prognostic schemes (zhang_mcfarlane, kain_fritsch, emanuel,
+    # bechtold, tiedtke) need a seeded conv_prog carry (issue #413) + a CLI
+    # wiring the orchestrator/run_amip don't have yet -> deferred (they would
+    # fail argparse, wasting a sweep task).
     "convection": [
-        "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
-        "kain_fritsch", "emanuel", "bechtold", "tiedtke",
+        "dca", "kuo", "mass_flux", "edmf",
     ],
     # Stateful-TKE schemes (tke, mynn25) need a seeded prognostic carry
     # (issue #413) the orchestrator doesn't thread yet -> excluded; the
