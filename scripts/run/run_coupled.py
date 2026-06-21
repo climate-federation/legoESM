@@ -190,11 +190,13 @@ def main():
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
     parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
-                        default="slab",
-                        help="Land surface model over continents (--ocean-ic woa). "
-                             "'slab' = 1-layer bucket; 'multilayer' = 8-layer soil "
-                             "thermal + Richards soil moisture (column land). Both "
-                             "route through the coupler land tile.")
+                        default=None,
+                        help="Override the preset's land surface model. 'slab' = "
+                             "1-layer bucket; 'multilayer' = 8-layer soil thermal + "
+                             "Richards soil moisture (column land). Both route through "
+                             "the coupler land tile. Default (unset): keep the preset's "
+                             "land (e.g. full_coupled=multilayer). --ocean-ic woa "
+                             "defaults to slab when unset.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -460,7 +462,8 @@ def main():
             overrides["f_land_mode"] = "from_ocean"
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
-            overrides.update(land_scheme_overrides(args.land_scheme))
+            # woa defaults to slab when --land-scheme is unset.
+            overrides.update(land_scheme_overrides(args.land_scheme or "slab"))
             # With real continents the atmospheric radiative surface boundary
             # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
             # ocean SST everywhere (else land cells radiate at the dynamic-ocean
@@ -482,6 +485,12 @@ def main():
         overrides["ocean_mode"] = "slab"
     if args.co2_init != 415.0:
         overrides["co2_ppmv_init"] = args.co2_init
+
+    # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
+    # (the woa branch already applied its own default above; re-applying the same
+    # explicit value is idempotent). Unset -> keep the preset's land choice.
+    if args.land_scheme is not None:
+        overrides.update(land_scheme_overrides(args.land_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
 
