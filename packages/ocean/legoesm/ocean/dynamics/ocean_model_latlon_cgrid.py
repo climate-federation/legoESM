@@ -4079,6 +4079,7 @@ class LatLonCGridOceanModel:
         _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
                     else None)
         eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
         mask3 = state.land_mask.data[..., jnp.newaxis]
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
@@ -4120,10 +4121,14 @@ class LatLonCGridOceanModel:
             dT_diss_incr, dS_diss_incr, du_diss_incr, dv_diss_incr = diss_incr
         else:
             dT_diss_incr = dS_diss_incr = du_diss_incr = dv_diss_incr = 0.0
-        # (#517 item 8: shared ab2_blend; eps passed verbatim → bit-identical
-        # since a_n == 1.5 + eps, a_p == 0.5 + eps.)
-        T_ab2 = (state.T.data + ab2_blend(dT_n, dT_p, eps) + dT_diss_incr) * mask3
-        S_ab2 = (state.S.data + ab2_blend(dS_n, dS_p, eps) + dS_diss_incr) * mask3
+        # NB (#517 item 8): NOT routed through ab2_blend.  The original adds
+        # the blend INTO ``state.X.data`` as ``((base + a_n·new) - a_p·old)``;
+        # ``base + ab2_blend(...)`` re-associates to ``base + (a_n·new −
+        # a_p·old)`` and FP addition is non-associative → ~1e-16 byte drift
+        # (codex).  Kept inline.  ab2_blend is used only where the blend is a
+        # STANDALONE subexpression (rigid-lid ψ, the flux-div / TKE AB2 above).
+        T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p + dT_diss_incr) * mask3
+        S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p + dS_diss_incr) * mask3
 
         # --- Momentum: AB2 the BAROCLINIC increment; keep the explicit
         #     barotropic mode (CFL-stiff, set by the barotropic solver) ---
@@ -4156,8 +4161,8 @@ class LatLonCGridOceanModel:
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
                 else jnp.zeros_like(dv_n))
-        u_ab2 = ((ubc_n + ab2_blend(du_n, du_p, eps)) + bt_u_e) * u_mask3
-        v_ab2 = ((vbc_n + ab2_blend(dv_n, dv_p, eps)) + bt_v_e) * v_mask3
+        u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
+        v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
         # ab2_scope="advective": add the weight-1.0 DISSIPATIVE momentum
         # increment (lateral friction + bottom drag, evaluated on u^n) as its
         # BAROCLINIC DEVIATION only. The increment's DEPTH-MEAN already forced
@@ -4346,6 +4351,7 @@ class LatLonCGridOceanModel:
         _grid = grid if grid is not None else self.grid
         g = self.config.g
         eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
         u_mask = state.u_mask.data
         v_mask = state.v_mask.data
         cmask = state.land_mask.data
@@ -4407,11 +4413,13 @@ class LatLonCGridOceanModel:
         dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None  # noqa: N806
                 else jnp.zeros_like(dS_n))
         # 2. AB2 predictor on the FULL 3-D velocity + tracers.
-        # (#517 item 8: shared ab2_blend; eps passed verbatim → bit-identical.)
-        u_star = (state.u.data + ab2_blend(du_n, du_p, eps)) * u_mask3
-        v_star = (state.v.data + ab2_blend(dv_n, dv_p, eps)) * v_mask3
-        T_star = (state.T.data + ab2_blend(dT_n, dT_p, eps)) * mask3   # noqa: N806
-        S_star = (state.S.data + ab2_blend(dS_n, dS_p, eps)) * mask3   # noqa: N806
+        # NB (#517 item 8): kept inline (NOT ab2_blend) — adding the blend into
+        # ``state.X.data`` re-associates the FP add (~1e-16 drift); see the
+        # split-predictor note above.
+        u_star = (state.u.data + a_n * du_n - a_p * du_p) * u_mask3
+        v_star = (state.v.data + a_n * dv_n - a_p * dv_p) * v_mask3
+        T_star = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3   # noqa: N806
+        S_star = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3   # noqa: N806
 
         # 3. UNSPLIT implicit free surface + uniform surface-pressure correction.
         h_k = compute_layer_thickness(
