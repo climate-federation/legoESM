@@ -57,7 +57,8 @@ def _most_controllable_level(frac: Any) -> int | None:
     return int(np.nanargmax(f))
 
 
-def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any) -> dict:
+def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any, *,
+                        valid_mask: Any = None) -> dict:
     """How much the per-column combined bias CHANGES between two C_K runs.
 
     ``score_*_ck`` are the ``compare_state_to_reference`` per-column combined-bias
@@ -67,6 +68,15 @@ def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any) -> dict:
     closure tuning actually moves, and ``c_k_feasible`` flags it above
     :data:`_FEASIBLE_FRACTION` — the cheap signal that tuning C_K against real ERA5 could
     lower the bias (vs an idealization-dominated bias that it cannot).
+
+    ``valid_mask`` (optional, same flat column shape as the scores after a ROW-MAJOR
+    flatten — e.g. :func:`legoesm.training.compare_reanalysis.ocean_valid_mask`) restricts
+    the sensitivity to the SAME columns the realistic campaign ranks/corrects: non-selected
+    columns are masked to NaN (ignored by the nan-aware means), so the pre-flight measures
+    the OCEAN-only C_K sensitivity the ocean-only campaign actually exploits — without it a
+    land-model-driven bias over continents (the wrong lever for the closure) dilutes the
+    fraction and can FALSELY gate an ocean-only campaign as NO-GO (the iter-466 silent-
+    feature-drop class, here in the pre-flight rather than the campaign).
     """
     lo = np.asarray(score_low_ck, dtype=float).reshape(-1)
     hi = np.asarray(score_high_ck, dtype=float).reshape(-1)
@@ -74,6 +84,19 @@ def bias_ck_sensitivity(score_low_ck: Any, score_high_ck: Any) -> dict:
         raise ValueError(
             f"bias_ck_sensitivity: the two score fields must share shape; got "
             f"{lo.shape} vs {hi.shape}.")
+    if valid_mask is not None:
+        m = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if m.shape != lo.shape:
+            raise ValueError(
+                f"bias_ck_sensitivity: valid_mask has {m.shape} cells but the score fields "
+                f"have {lo.shape} — they must share the (row-major flattened) column grid.")
+        if not bool(m.any()):
+            raise ValueError(
+                "bias_ck_sensitivity: valid_mask selects no columns — an ocean-only "
+                "restriction left nothing to score (check --max-land-fraction / the land "
+                "mask).")
+        lo = np.where(m, lo, np.nan)
+        hi = np.where(m, hi, np.nan)
     mean_bias = float(np.nanmean(0.5 * (lo + hi)))
     abs_delta = np.abs(hi - lo)
     mean_abs_delta = float(np.nanmean(abs_delta))
@@ -205,13 +228,19 @@ def format_per_level_report(per_level: dict, sigma_full: Any) -> list[str]:
 
 
 def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
-                     radiation: str = "gray"):
-    """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma).
+                     radiation: str = "gray", land_mask_path: str = ""):
+    """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma,
+    land_fraction).
 
     ``radiation`` defaults to ``"gray"`` (the idealized config the iter-412 NO-GO was
     measured at); pass ``"rrtmgp"`` to measure the C_K sensitivity at the REALISTIC config
     the HPC run uses — the pre-flight then answers whether the loop can move the bias THERE,
-    not just under idealized radiation."""
+    not just under idealized radiation.
+
+    ``land_mask_path`` (default ``""`` = flat/aquaplanet) gives the model the SAME land/sea
+    distribution as the realistic campaign so the returned static ``land_fraction`` can
+    build the ocean-only mask the campaign ranks over; an empty path keeps the flat model
+    (all-ocean land fraction → an ocean-only restriction is a safe no-op)."""
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
@@ -231,7 +260,7 @@ def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=max(days, 1)), radiation=radiation, days=days,
-        turbulence="clubb_lite",
+        turbulence="clubb_lite", land_mask_path=land_mask_path,
         turbulence_override=TurbulenceConfig(
             scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=float(c_k))))
     driver = CoupledESMDriver(
@@ -242,7 +271,7 @@ def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
     a = driver._atm
     model = column_state_from_hydrostatic(
         a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
-    return model, a.grid, a.sigma
+    return model, a.grid, a.sigma, np.asarray(a.static_land_fraction())
 
 
 def _preflight_exit_code(go: bool) -> int:
@@ -275,6 +304,17 @@ def _build_arg_parser():
                         "fraction vs run length (equilibration-limited vs idealization-"
                         "limited) instead of the single-run report")
     p.add_argument("--era5-n-times", type=int, default=4)
+    p.add_argument("--land-mask-path", default="",
+                   help="land/sea mask file giving the sensitivity runs the SAME land "
+                        "distribution as the realistic campaign (default flat/aquaplanet); "
+                        "required for --ocean-only to select a real ocean subset")
+    p.add_argument("--ocean-only", action="store_true",
+                   help="restrict the C_K sensitivity to OCEAN columns (land_fraction <= "
+                        "--max-land-fraction), matching an ocean-only campaign so a land-"
+                        "model-driven bias does not falsely gate it NO-GO")
+    p.add_argument("--max-land-fraction", type=float, default=0.5,
+                   help="ocean threshold for --ocean-only: a column is ocean where "
+                        "land_fraction <= this (default 0.5 = majority ocean)")
     return p
 
 
@@ -284,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     from legoesm.training.compare_reanalysis import (
         column_state_from_carry,
         compare_state_to_reference,
+        ocean_valid_mask,
     )
     from legoesm.training.era5_to_state import (
         WB2_PRESSURE_LEVELS,
@@ -307,6 +348,21 @@ def main(argv: list[str] | None = None) -> int:
 
     ck_lo, ck_hi = args.c_k
 
+    def _ocean_mask(land_fraction):
+        """The ocean-only column mask (or ``None`` when ``--ocean-only`` is off) from a
+        run's static land fraction, matching the campaign's ``ocean_valid_mask`` so the
+        pre-flight scores the SAME columns; warns when ``--ocean-only`` is set on a flat
+        model (no ``--land-mask-path``) so the would-be-silent no-op is visible."""
+        if not args.ocean_only:
+            return None
+        m = np.asarray(ocean_valid_mask(
+            land_fraction, max_land_fraction=args.max_land_fraction))
+        if bool(m.all()):
+            print("[ck-sensitivity] NOTE: --ocean-only selected ALL columns — the model has "
+                  "no land (pass --land-mask-path to give it the campaign's land mask), so "
+                  "the ocean-only restriction is a no-op here.", flush=True)
+        return m
+
     def _build_reference(grid, sigma):
         ds = open_local_era5_dataset(args.local_era5_dir, args.local_era5_date)
         era5 = load_era5_time_mean(
@@ -315,9 +371,13 @@ def main(argv: list[str] | None = None) -> int:
             range(args.era5_n_times), ds=ds)
         return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
 
-    def _bl_per_level(m_lo_s, m_hi_s, grid, ref):
+    def _bl_per_level(m_lo_s, m_hi_s, grid, ref, ocean_mask=None):
         """(sigma, T-bias, C_K-controllable fraction) at the boundary-layer (max-sigma)
-        level — shared per-level computation with the single-run report below."""
+        level — shared per-level computation with the single-run report below.
+
+        ``ocean_mask`` (optional, flat per-column bool) zero-weights LAND columns so the
+        per-level sensitivity matches an ocean-only campaign (the combined-score restriction
+        the GO/NO-GO gate uses), keeping the two reports consistent."""
         mt = np.asarray(m_lo_s.T)
         ncol = int(np.prod(mt.shape[:-1]))
         w = np.cos(np.asarray(grid.grid_lat)).reshape(-1)
@@ -325,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 f"ck-sensitivity per-level: cos(lat) area weights have {w.size} cells but "
                 f"model.T has {ncol} columns — grid/state column-grid mismatch.")
+        if ocean_mask is not None:
+            om = np.asarray(ocean_mask, dtype=bool).reshape(-1)
+            if om.size != ncol:
+                raise ValueError(
+                    f"ck-sensitivity per-level: ocean mask has {om.size} cells but model.T "
+                    f"has {ncol} columns — grid/mask column-grid mismatch.")
+            w = w * om                               # land columns contribute zero weight
         return per_level_ck_bias_sensitivity(mt, np.asarray(m_hi_s.T), np.asarray(ref.T), w)
 
     if args.days_sweep:
@@ -335,15 +402,16 @@ def main(argv: list[str] | None = None) -> int:
               f"({args.local_era5_date}, res={args.resolution}); BL C_K-controllable vs "
               "run length:")
         for days in days_list:
-            m_lo, grid, sigma = _run_model_state(
+            m_lo, grid, sigma, f_land = _run_model_state(
                 ck_lo, resolution=args.resolution, nlev=args.nlev, days=days,
-                radiation=args.radiation)
-            m_hi, _, _ = _run_model_state(
+                radiation=args.radiation, land_mask_path=args.land_mask_path)
+            m_hi, _, _, _ = _run_model_state(
                 ck_hi, resolution=args.resolution, nlev=args.nlev, days=days,
-                radiation=args.radiation)
+                radiation=args.radiation, land_mask_path=args.land_mask_path)
             if "ref" not in ref_box:                 # grid/sigma depend only on res/nlev
                 ref_box["ref"] = _build_reference(grid, sigma)
-            pl = _bl_per_level(m_lo, m_hi, grid, ref_box["ref"])
+            pl = _bl_per_level(m_lo, m_hi, grid, ref_box["ref"],
+                               ocean_mask=_ocean_mask(f_land))
             sig = np.asarray(sigma.sigma_full, dtype=float).reshape(-1)
             bl = int(np.argmax(sig))                 # surface-last: the BL is max sigma
             sbl = float(sig[bl])
@@ -373,11 +441,14 @@ def main(argv: list[str] | None = None) -> int:
               "— gate an HPC launch on this exit code.")
         return _preflight_exit_code(go)
 
-    m_lo, grid, sigma = _run_model_state(
-        ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days, radiation=args.radiation)
-    m_hi, _, _ = _run_model_state(
-        ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days, radiation=args.radiation)
+    m_lo, grid, sigma, f_land = _run_model_state(
+        ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days,
+        radiation=args.radiation, land_mask_path=args.land_mask_path)
+    m_hi, _, _, _ = _run_model_state(
+        ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days,
+        radiation=args.radiation, land_mask_path=args.land_mask_path)
     ref = _build_reference(grid, sigma)
+    ocean_mask = _ocean_mask(f_land)
 
     def _score(model):
         comp = compare_state_to_reference(
@@ -389,9 +460,10 @@ def main(argv: list[str] | None = None) -> int:
             time_index=0, n_worst=1)
         return np.asarray(comp.error_fields.combined_score)
 
-    s = bias_ck_sensitivity(_score(m_lo), _score(m_hi))
+    s = bias_ck_sensitivity(_score(m_lo), _score(m_hi), valid_mask=ocean_mask)
+    _scope = "ocean-only" if ocean_mask is not None else "all columns"
     print(f"[ck-sensitivity] C_K {ck_lo} vs {ck_hi} against real ERA5 "
-          f"({args.local_era5_date}, res={args.resolution}, days={args.days}):")
+          f"({args.local_era5_date}, res={args.resolution}, days={args.days}, {_scope}):")
     print(f"  mean bias {s['mean_bias']:.4g}  |  C_K moves it by "
           f"{s['mean_abs_delta']:.4g} (max {s['max_abs_delta']:.4g})  |  "
           f"controllable fraction {s['controllable_fraction']:.3%}")
@@ -407,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
     # column grid, the same object _score passes to compare_state_to_reference), showing
     # that even when the full-column bias is C_K-insensitive the closure still controls the
     # boundary layer it acts on.
-    pl = _bl_per_level(m_lo, m_hi, grid, ref)
+    pl = _bl_per_level(m_lo, m_hi, grid, ref, ocean_mask=ocean_mask)
     print("  per-level C_K sensitivity (T-bias vs ERA5, surface-last sigma):")
     for line in format_per_level_report(pl, sigma.sigma_full):
         print(line)

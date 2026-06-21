@@ -37,6 +37,39 @@ def test_bias_ck_sensitivity_flags_insensitive_vs_sensitive():
         bias_ck_sensitivity(np.zeros((2, 2)), np.zeros((3,)))
 
 
+def test_bias_ck_sensitivity_ocean_only_mask_rescues_a_land_diluted_verdict():
+    """The OCEAN-only mask must score the same columns the ocean-only campaign ranks — a
+    land-model-driven bias the closure cannot move would otherwise dilute the fraction and
+    FALSELY gate an ocean-only campaign NO-GO (the iter-466 silent-drop class, in the
+    pre-flight)."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import bias_ck_sensitivity
+
+    # 6 LAND columns: a big, C_K-INSENSITIVE bias (Δ=0) — the land model's own error.
+    # 2 OCEAN columns: a C_K-SENSITIVE bias (mean 4, Δ=2 ⇒ 50% controllable).
+    lo = np.array([50.0] * 6 + [5.0, 5.0])
+    hi = np.array([50.0] * 6 + [3.0, 3.0])
+
+    # Over ALL columns the land bias dilutes the fraction below the 5% floor ⇒ NO-GO.
+    s_all = bias_ck_sensitivity(lo, hi)
+    assert not s_all["c_k_feasible"] and s_all["controllable_fraction"] < 0.05
+
+    # OCEAN-only (mask out the 6 land columns) recovers the true 50% sensitivity ⇒ GO.
+    ocean = np.array([False] * 6 + [True, True])
+    s_ocn = bias_ck_sensitivity(lo, hi, valid_mask=ocean)
+    assert s_ocn["c_k_feasible"]
+    assert s_ocn["controllable_fraction"] == pytest.approx(0.5)
+    assert s_ocn["mean_bias"] == pytest.approx(4.0)
+
+    # A mask that shares no shape with the scores fails loud (a row-major misalignment
+    # would silently score the wrong columns).
+    with pytest.raises(ValueError, match="must share"):
+        bias_ck_sensitivity(lo, hi, valid_mask=np.array([True, False, True]))
+
+    # A mask selecting nothing is an error, not a NaN no-op.
+    with pytest.raises(ValueError, match="selects no columns"):
+        bias_ck_sensitivity(lo, hi, valid_mask=np.zeros(8, dtype=bool))
+
+
 def test_preflight_exit_code_gates_the_hpc_launch():
     """The pre-flight exit code gates an HPC launch: GO (0) when the C_K loop CAN lower the
     bias (a rising sensitivity trend OR a C_K-feasible config), NO-GO (1) when it cannot

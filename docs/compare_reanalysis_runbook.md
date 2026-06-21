@@ -85,6 +85,13 @@ $PY scripts/experiment/ck_sensitivity_vs_era5.py --local-era5-dir $LOCAL_ERA5_DI
 $PY scripts/experiment/ck_sensitivity_vs_era5.py ... --radiation rrtmgp --days-sweep 1 3 6
 ```
 
+**Match the campaign's column domain (`--ocean-only`, iter 477).** If the campaign ranks
+ocean columns (`OCEAN_ONLY=1`), pass `--ocean-only --land-mask-path $LAND_MASK` (and the same
+`--max-land-fraction`) here too, so the go/no-go scores the SAME columns. Without it the
+pre-flight measures the TOTAL-column sensitivity over a flat config, where a land-model-driven
+bias the closure cannot move dilutes the fraction and can FALSELY gate an ocean-only campaign
+NO-GO. `--ocean-only` on a flat model (no land mask) prints a NOTE and is a safe no-op.
+
 NO-GO means: add realism (real radiation/SST) and/or run longer (the `--days-sweep` prints the
 ~days to the feasibility floor) BEFORE spending HPC hours on the loop. The per-level report
 still shows C_K controls the boundary layer even when the free-trop radiation error dominates
