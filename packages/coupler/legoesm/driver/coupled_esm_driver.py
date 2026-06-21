@@ -635,7 +635,10 @@ class CoupledESMDriver:
                     f"f_land_mean={land_frac:.2f}")
 
     def _build_pft_provider(self, shape_2d):
-        """Create a PFTParamProvider with analytical PFT fractions."""
+        """Create the spatial land-parameter provider.
+
+        ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
+        reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
         from legoesm.land.param_providers import PFTParamProvider
 
@@ -644,6 +647,20 @@ class CoupledESMDriver:
             logger.warning("  PFT requested but no latitude available; "
                            "falling back to scalar params")
             return None
+
+        source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        if source == "clm":
+            from legoesm.land.clm_surface_map import clm_surface_provider
+            lon = self._atm._grid_lon
+            lat_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            provider = clm_surface_provider(lat_deg, lon_deg)
+            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
+                        f"reference soil), {lat_deg.size} columns")
+            return provider
+        if source != "analytical":
+            raise ValueError(
+                f"land_param_source must be 'analytical' or 'clm', got {source!r}.")
 
         # Flatten to (ncol,)
         lat_flat = jnp.ravel(lat) if lat.ndim > 1 else lat

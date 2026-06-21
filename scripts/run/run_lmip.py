@@ -103,63 +103,9 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
 # Keys: theta_r, theta_sat, alpha_vg [1/m], n_vg, K_sat [m/s]
 # ===========================================================================
 
-_SOIL_TEXTURE_PRESETS: dict[str, dict] = {
-    "sand": dict(
-        theta_r=0.045, theta_sat=0.430,
-        alpha_vg=14.5, n_vg=2.68,
-        K_sat=8.25e-5,
-    ),
-    "loamy_sand": dict(
-        theta_r=0.057, theta_sat=0.410,
-        alpha_vg=12.4, n_vg=2.28,
-        K_sat=4.05e-5,
-    ),
-    "sandy_loam": dict(
-        theta_r=0.065, theta_sat=0.410,
-        alpha_vg=7.5, n_vg=1.89,
-        K_sat=1.22e-5,
-    ),
-    "loam": dict(
-        theta_r=0.078, theta_sat=0.430,
-        alpha_vg=3.6, n_vg=1.56,
-        K_sat=2.89e-6,
-    ),
-    "silt_loam": dict(
-        theta_r=0.067, theta_sat=0.450,
-        alpha_vg=2.0, n_vg=1.41,
-        K_sat=1.25e-6,
-    ),
-    "sandy_clay_loam": dict(
-        theta_r=0.100, theta_sat=0.390,
-        alpha_vg=5.9, n_vg=1.48,
-        K_sat=3.64e-6,
-    ),
-    "clay_loam": dict(
-        theta_r=0.095, theta_sat=0.410,
-        alpha_vg=1.9, n_vg=1.31,
-        K_sat=7.22e-7,
-    ),
-    "silty_clay_loam": dict(
-        theta_r=0.089, theta_sat=0.430,
-        alpha_vg=1.0, n_vg=1.23,
-        K_sat=1.94e-7,
-    ),
-    "sandy_clay": dict(
-        theta_r=0.100, theta_sat=0.380,
-        alpha_vg=2.7, n_vg=1.23,
-        K_sat=3.33e-6,
-    ),
-    "silty_clay": dict(
-        theta_r=0.070, theta_sat=0.360,
-        alpha_vg=0.5, n_vg=1.09,
-        K_sat=5.56e-8,
-    ),
-    "clay": dict(
-        theta_r=0.068, theta_sat=0.380,
-        alpha_vg=0.8, n_vg=1.09,
-        K_sat=5.56e-8,
-    ),
-}
+# USDA texture van-Genuchten presets (Carsel & Parrish 1988) — shared with the
+# global CLM reference-soil-map provider (no duplicated soil constants).
+from legoesm.land.soil_texture import SOIL_TEXTURE_VG as _SOIL_TEXTURE_PRESETS
 
 
 # ===========================================================================

@@ -97,6 +97,9 @@ class CoupledConfig(NamedTuple):
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()
     use_pft: bool = False
+    # Source of the spatial land parameters when use_pft: "analytical" (latitude
+    # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
+    land_param_source: str = "analytical"
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
