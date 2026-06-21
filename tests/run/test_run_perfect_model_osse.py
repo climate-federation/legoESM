@@ -704,3 +704,41 @@ def test_production_loop_defaults_matches_production():
     osse._production_loop_defaults(kw3, sigma=object())
     assert kw3["clip_to_bounds"] is False
     assert kw3["env_grid_fn"] == "EXPLICIT"
+
+
+def test_osse_main_prints_realism_breakdown(monkeypatch, capsys):
+    """The OSSE go/no-go reports the LES-realism breakdown (iter 520): when _build_run_setup's
+    _RealismCapture accumulated breakdowns, main() prints them with the [osse] prefix — so the
+    operator sees WHY any spin-off LES was rejected right at the go/no-go, not just the verdict.
+    """
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+    from legoesm.training.perfect_model_osse import OSSEResult
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.run_perfect_model_osse as rpo
+
+    t, f = jnp.asarray(True), jnp.asarray(False)
+    cap = rcc._RealismCapture(lambda setup: None)
+    cap.breakdowns = [
+        LESRealismBreakdown(turbulent=t, finite=t, thermo_consistent=t,
+                            moisture_physical=t, rh_ok=t, overall=t),
+        LESRealismBreakdown(turbulent=f, finite=t, thermo_consistent=t,
+                            moisture_physical=t, rh_ok=t, overall=f)]   # 1 laminar
+    dummy_grid = SimpleNamespace(grid_shape_2d=(2, 2), grid_area=jnp.ones(4))
+    monkeypatch.setattr(rcc, "_build_run_setup",
+                        lambda args: (object(), dummy_grid, object(),
+                                      (lambda *a, **k: None), (lambda *a, **k: None), cap, None))
+    monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones(4))
+    monkeypatch.setattr(rpo, "build_perfect_model_osse", lambda **kw: OSSEResult(
+        initial_bias=2.0, final_bias=1.0, bias_reduction=1.0, bias_reduced=True,
+        true_value=0.4, initial_value=0.6, recovered_value=0.42,
+        initial_param_error=0.2, final_param_error=0.02, param_error_reduced=True,
+        n_rounds=1, n_accepted=1, summary=None))
+
+    rpo.main(["--config", "x.json", "--true-ck", "0.4", "--biased-ck", "0.6",
+              "--iterations", "1"])
+    out = capsys.readouterr().out
+    assert "[osse] LES realism: 1/2 realistic" in out and "1x laminar" in out
