@@ -4160,3 +4160,18 @@ def test_output_dict_records_les_realism():
     assert out["les_realism"]["n_not_turbulent"] == 1
     cfg = corrected_clubb_config(out)                              # deploy IGNORES the extra key
     np.testing.assert_allclose(np.asarray(cfg.C_K), np.asarray(field), rtol=1e-12)
+
+
+def test_idealized_radiation_low_leverage_warning():
+    """The launch warning fires for IDEALIZED radiation (gray/none) — where the bias has tiny
+    C_K leverage (iters 412/514) — and is SILENT for the realistic spectral schemes
+    (rrtmgp/rrtmg), so an operator does not misread a gray 'stalled' verdict (iter 515)."""
+    from scripts.run.run_correction_campaign import (
+        _idealized_radiation_low_leverage_warning as warn,
+    )
+
+    assert warn("rrtmgp") is None and warn("rrtmg") is None      # realistic → silent
+    assert warn(None) is None                                    # missing → silent (stub-safe)
+    for idealized in ("gray", "none", "GRAY"):
+        msg = warn(idealized)
+        assert msg is not None and "IDEALIZED" in msg and "rrtmgp" in msg

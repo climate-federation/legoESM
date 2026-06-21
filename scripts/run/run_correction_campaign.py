@@ -1017,6 +1017,27 @@ def _days_below_cadence_warning(days, diag_days) -> str | None:
             "(regenerate with write_amip_clubb_lite_config.py --days N).")
 
 
+_REALISTIC_RADIATION = ("rrtmgp", "rrtmg")   # spectral schemes where BL mixing (C_K) matters
+
+
+def _idealized_radiation_low_leverage_warning(radiation) -> str | None:
+    """Launch warning that an IDEALIZED radiation scheme (gray / none — anything but the
+    spectral rrtmgp/rrtmg) gives the bias TINY C_K leverage, so the LES-informed correction
+    cannot meaningfully reduce it.  iters 412/514 measured this: a 40% C_K change moved the
+    OSSE-twin combined-score bias by only ~0.0025 (vs the ~11 real-ERA5 idealization bias) —
+    the bias is C_K-INSENSITIVE under idealized radiation, so the run will likely report
+    'stalled'/'no_change' NOT because the loop is broken but because there is nothing C_K can
+    fix.  Surfaced at LAUNCH (campaign + OSSE share ``_build_run_setup``) so the operator does
+    not misread the verdict or burn HPC time.  ``None`` (no warning) for a realistic scheme."""
+    if radiation is None or str(radiation).lower() in _REALISTIC_RADIATION:
+        return None
+    return (f"[campaign] WARNING: radiation={radiation!r} is IDEALIZED (not rrtmgp/rrtmg) — the "
+            "bias has TINY C_K leverage under it, so the LES-informed correction cannot "
+            "meaningfully reduce a C_K-INSENSITIVE bias (iters 412/514: a 40% C_K change moved "
+            "the OSSE-twin bias only ~0.0025) and the run will likely report 'stalled'/"
+            "'no_change'. Use radiation='rrtmgp' for a meaningful correction / go/no-go.")
+
+
 def _offline_forcing_window_warning(days, *, span_days=_OFFLINE_FORCING_SPAN_DAYS) -> str | None:
     """Warn when an OFFLINE single-month AMIP forcing (``--amip-forcing-from-local-era5``) drives a
     run LONGER than its ~1-month coverage (iter 458): ``get_forcing_at_time`` then CYCLICALLY WRAPS
@@ -1139,6 +1160,8 @@ def _build_run_setup(args):
                   _days_below_cadence_warning(
                       getattr(base_cfg, "days", 0),
                       getattr(getattr(base_cfg, "output", None), "diag_days", 0)),
+                  _idealized_radiation_low_leverage_warning(
+                      getattr(base_cfg, "radiation", None)),
                   _insolation_season_note(_insol_date),
                   _offline_forcing_note,
                   _ref_window_note,
