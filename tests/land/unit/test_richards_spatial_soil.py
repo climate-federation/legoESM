@@ -28,6 +28,9 @@ def _run(cfg, ncol, steps=20, dt=1800.0):
     sink = jnp.zeros((ncol, GRID.n_layers))
     for _ in range(steps):
         out = solve_richards(psi, theta, GRID, cfg, RCFG, flux, sink, dt)
+        # the boundary fluxes must stay (ncol,) under a per-column (ncol,1) config
+        assert out.runoff_subsurface.shape == (ncol,)
+        assert out.runoff_surface.shape == (ncol,)
         psi, theta = out.psi_new, out.theta_new
     return np.asarray(theta)
 
