@@ -58,6 +58,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     make_clubb_build_driver,
     make_les_diagnose_fn,
     maybe_env_grid_fn,
+    print_realism_summary,
     refuse_unsupported_multirank,
     resolve_orographic_phis,
 )
@@ -4175,3 +4176,41 @@ def test_idealized_radiation_low_leverage_warning():
     for idealized in ("gray", "none", "GRAY"):
         msg = warn(idealized)
         assert msg is not None and "IDEALIZED" in msg and "rrtmgp" in msg
+
+
+def test_print_realism_summary_uses_prefix_and_skips_empty(capsys):
+    """print_realism_summary (iter 520) reads a _RealismCapture-wrapped run_les's breakdowns
+    and prints the aggregate line with the given prefix (so the OSSE tags it [osse], the
+    campaign [campaign]); prints NOTHING when nothing was captured (a dry-run / no LES)."""
+    print_realism_summary(SimpleNamespace(breakdowns=[]))      # empty → no print
+    print_realism_summary(SimpleNamespace())                   # no .breakdowns → no print
+    assert capsys.readouterr().out == ""
+
+    run_les = SimpleNamespace(breakdowns=[_mk_breakdown(), _mk_breakdown(turbulent=False)])
+    print_realism_summary(run_les, prefix="[osse]")
+    out = capsys.readouterr().out
+    assert "[osse] LES realism:" in out and "1x laminar" in out
+
+
+def test_realism_capture_is_wired_into_build_run_setup(monkeypatch):
+    """_build_run_setup wraps run_les in a _RealismCapture (iter 520) so BOTH the campaign and
+    the OSSE capture realism without per-main wrapping — verified on the returned run_les
+    without running the heavy setup body (the heavy deps are monkeypatched)."""
+    import scripts.run.run_correction_campaign as rcc
+
+    monkeypatch.setattr(rcc, "load_base_config_and_grid", lambda cfg: (SimpleNamespace(
+        days=10, output=SimpleNamespace(diag_days=5), radiation="gray", land_mask_path=""),
+        object(), object()))
+    monkeypatch.setattr(rcc, "make_base_driver_builder",
+                        lambda *a, **k: (lambda c: None, lambda *x, **y: None))
+    monkeypatch.setattr(rcc, "_les_n_steps", lambda h, d: 1)
+    monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda *a, **k: None)
+    args = SimpleNamespace(config="c.json", mode="amip", coupled_preset=None,
+                           les_hours=2.0, les_dt=0.5, orographic_forcing="off",
+                           align_insolation=False, local_era5_date=None,
+                           amip_forcing_n_months=1, amip_forcing_from_local_era5=False,
+                           local_era5_dir=None, surface_flux=False, ocean_only=False,
+                           spinup_days=0.0)
+    run_les = rcc._build_run_setup(args)[5]
+    assert isinstance(run_les, rcc._RealismCapture)
+    assert run_les.breakdowns == []

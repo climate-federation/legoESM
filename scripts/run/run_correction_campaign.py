@@ -256,24 +256,34 @@ def _realism_summary(breakdowns: Any):
     return summarize_realism_breakdowns(stacked)
 
 
-def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
-    """One-line campaign-aggregate LES-realism report from the captured per-column
+def _realism_campaign_summary_line(breakdowns: Any, *, prefix: str = "[campaign]") -> str | None:
+    """One-line aggregate LES-realism report from the captured per-column
     ``LESRealismBreakdown``\\ s (iter 512): how many spin-offs were realistic, and the
-    dominant rejection modes — so an operator reading a finished multi-day run sees WHETHER
-    the LESs were trustworthy and WHY any were not.  ``None`` when nothing was captured (a
-    dry-run, or no LES ran), so the caller prints nothing."""
+    dominant rejection modes — so an operator reading a finished run sees WHETHER the LESs were
+    trustworthy and WHY any were not.  ``prefix`` tags the line (``[campaign]`` / ``[osse]``).
+    ``None`` when nothing was captured (a dry-run, or no LES ran), so the caller prints
+    nothing."""
     s = _realism_summary(breakdowns)
     if s is None:
         return None
     if s.n_rejected == 0:
-        return f"[campaign] LES realism: all {s.n_total} spin-offs realistic."
+        return f"{prefix} LES realism: all {s.n_total} spin-offs realistic."
     modes = [f"{n}x {lbl}" for lbl, n in (
         ("laminar", s.n_not_turbulent), ("blow-up", s.n_not_finite),
         ("theta-drift", s.n_thermo_drift), ("moisture-runaway", s.n_moisture_runaway),
         ("supersaturated", s.n_supersaturated)) if n]
-    return (f"[campaign] LES realism: {s.n_realistic}/{s.n_total} realistic, "
+    return (f"{prefix} LES realism: {s.n_realistic}/{s.n_total} realistic, "
             f"{s.n_rejected} rejected ({', '.join(modes)}) — see the no_valid_diagnoses "
             "verdict if this starved the correction.")
+
+
+def print_realism_summary(run_les: Any, *, prefix: str = "[campaign]") -> None:
+    """Print the aggregate LES-realism line for a finished run, reading the breakdowns a
+    :class:`_RealismCapture`-wrapped ``run_les`` accumulated (iter 520).  Shared by the
+    campaign + OSSE report sections; a no-op (prints nothing) when nothing was captured."""
+    line = _realism_campaign_summary_line(getattr(run_les, "breakdowns", None), prefix=prefix)
+    if line:
+        print(line)
 
 
 def _realism_summary_dict(breakdowns: Any) -> dict | None:
@@ -1171,7 +1181,10 @@ def _build_run_setup(args):
     build_base_driver, extract_fn = make_base_driver_builder(
         args.mode, coupled_preset=_resolve_coupled_preset(args), ocean_grid=None)
     n_steps = _les_n_steps(args.les_hours, args.les_dt)
-    run_les = partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps)
+    # Wrap the LES runner ONCE here (shared by the campaign + OSSE CLIs) so EVERY spin-off
+    # LES's realism breakdown is captured for the end-of-run aggregate report (iter 512/520);
+    # pure observation, the diagnosis is unchanged.
+    run_les = _RealismCapture(partial(run_forced_les, dt_s=args.les_dt, n_steps=n_steps))
     phis = resolve_orographic_phis(
         args.orographic_forcing,
         lambda: ModelDriver(base_cfg).static_topography_phis())
@@ -2343,9 +2356,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
-    realism_line = _realism_campaign_summary_line(getattr(run_les, "breakdowns", None))
-    if realism_line:
-        print(realism_line)
+    print_realism_summary(run_les)
     _print_deploy_hint(args.out, grid)
     # Exit code = the health verdict (iter 287): 0 only when the run IMPROVED, non-zero
     # otherwise, so an HPC workflow gating on `run_campaign && deploy` does NOT deploy a
@@ -2681,10 +2692,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # CLI via _build_run_setup (iter 295).
     base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
         args)
-    # Observe every spin-off LES's realism breakdown for the end-of-run aggregate report
-    # (iter 512); pure observation, the diagnosis is unchanged. A no-op for a --dry-run (no
-    # LES runs → no breakdowns captured).
-    run_les = _RealismCapture(run_les)
+    # ``run_les`` is already a ``_RealismCapture`` (wrapped in ``_build_run_setup``), so the
+    # report sections below read ``run_les.breakdowns`` (iter 520).
     # Turnkey OFFLINE realistic AMIP: build the SST/sea-ice forcing from the same local
     # ERA5 archive and inject it into base_cfg (so every corrected round carries it).
     base_cfg = _maybe_apply_local_era5_forcing(args, base_cfg)
@@ -2844,9 +2853,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
-    realism_line = _realism_campaign_summary_line(getattr(run_les, "breakdowns", None))
-    if realism_line:
-        print(realism_line)
+    print_realism_summary(run_les)
     _print_deploy_hint(args.out, grid)
     _maybe_write_env_kernel(args, result)
     # Exit code = the health verdict (iter 287, mirrors the OSSE go/no-go + the multi

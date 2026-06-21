@@ -38,6 +38,7 @@ from scripts.run.run_correction_campaign import (
     make_clubb_build_driver,
     make_les_diagnose_fn,
     maybe_env_grid_fn,
+    print_realism_summary,
 )
 
 
@@ -442,6 +443,7 @@ def _run_cross_resolution_main(
           f"covered={result.fraction_covered:.3f} "
           f"thresh={result.coverage_threshold:.3f} (n_fine={result.n_fine_columns})")
     print(f"[xres] {verdict.status.upper()}: {verdict.message}")
+    print_realism_summary(run_les, prefix="[xres]")
     return 0 if verdict.ok else 1
 
 
@@ -486,6 +488,7 @@ def _run_multi_osse_main(args, *, base_cfg, grid, sigma, build_base_driver, extr
         print(f"[osse-multi]   {c.field}: true={c.true_value:.4g} biased={c.initial_value:.4g} "
               f"recovered={c.recovered_value:.4g} (toward truth: {moved})")
     print(f"[osse-multi] {verdict.status.upper()}: {verdict.message}")
+    print_realism_summary(run_les, prefix="[osse-multi]")
     return 0 if verdict.ok else 1
 
 
@@ -551,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
           f"(kept {result.n_accepted}/{result.n_rounds}); param error "
           f"{result.initial_param_error:.4g} -> {result.final_param_error:.4g}")
     print(f"[osse] {verdict.status.upper()}: {verdict.message}")
+    print_realism_summary(run_les, prefix="[osse]")   # WHY any spin-off LES was rejected
     if args.quick:
         import math
         ran = math.isfinite(result.initial_bias) and math.isfinite(result.final_bias)
