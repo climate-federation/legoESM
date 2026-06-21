@@ -21,6 +21,19 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 
 EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 
+# Division / stable-stratification guard shared by ALL four GM/Redi + MLE
+# variants (#518 item 11).  Used as ``1/max(x, EPS_DIV)`` and the negative
+# stratification floor ``min(drho/dz, -EPS_DIV)``.  Unified to 1e-10 (the value
+# the validated lat-lon GM/Redi + both MLE paths already used): it bounds the
+# reciprocal at 1e10 so the fp64 backward pass cannot overflow into pathological
+# gradients, and it is the stable-strat slope floor those paths are tuned to.
+# This REPLACES gm_redi_mpas's prior 1e-30 (a copy-paste drift — its own code
+# comment said it "mirrors lat-lon convention", yet lat-lon is 1e-10; the 1e-30
+# stratification floor let near-neutral MPAS columns build ~1e10x larger raw
+# slopes than lat-lon before tapering).  NOT byte-identical for gm_redi_mpas by
+# design — this is the bugfix the issue asks for.
+EPS_DIV = 1e-10
+
 
 # ---------------------------------------------------------------------------
 # DM95 slope tapering

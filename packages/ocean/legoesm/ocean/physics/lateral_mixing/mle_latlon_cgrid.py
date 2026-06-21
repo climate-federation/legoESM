@@ -61,10 +61,13 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
     mle_streamfunction_magnitude,
     mle_vertical_structure,
 )
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    EPS_DIV as _EPS_DIV,
+)
 
-# Division-guard epsilon — larger than float32 machine eps to prevent
-# intermediate blow-up in the backward pass (matches gm_redi_latlon_cgrid).
-_EPS_DIV = 1e-10
+# Division-guard epsilon (shared _gm_redi_common.EPS_DIV = 1e-10, #518 item 11):
+# larger than float32 machine eps to prevent intermediate blow-up in the
+# backward pass (matches gm_redi_latlon_cgrid).
 
 
 __physics_contract__ = {

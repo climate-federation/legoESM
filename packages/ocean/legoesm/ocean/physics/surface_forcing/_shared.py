@@ -18,7 +18,49 @@ hidden inconsistency) and a future unification is a one-line change.
 
 from __future__ import annotations
 
+import enum
+
 import jax.numpy as jnp
+
+
+class WindStressConvention(enum.Enum):
+    """Sign convention for how a surface wind stress drives the ocean (#518 §11).
+
+    The two surface-forcing schemes consume tau with OPPOSITE — and deliberately
+    test-pinned — signs (``test_surface_forcing_sign_convention.py``):
+
+    * ``OCEAN_DIRECT`` (sign +1): tau IS the on-ocean stress; ``du/dt = +tau/(rho*dz)``.
+      The ``prescribed`` scheme — a fixed/idealised stress applied directly.
+    * ``ATMOSPHERE_REACTION`` (sign -1): tau is in the atmosphere/coupler
+      convention; the ocean reaction is ``-tau``, so ``du/dt = -tau/(rho*dz)``.
+      The ``external`` scheme — coupler-provided stress.
+
+    Naming the convention makes the per-scheme sign self-describing instead of a
+    bare ``-`` buried in one file.  It does NOT unify or flip the signs (an
+    accidental unification breaks coupled forcing — the pinned test guards that);
+    it only labels the existing, intentional divergence.
+    """
+
+    OCEAN_DIRECT = "ocean_direct"
+    ATMOSPHERE_REACTION = "atmosphere_reaction"
+
+
+def wind_stress_sign(convention: WindStressConvention) -> float:
+    """Return the momentum sign (+1.0 / -1.0) for a :class:`WindStressConvention`.
+
+    Static Python float (folded at trace time); multiply tau by it before the
+    flux→tendency reciprocal.  Raises on an unknown convention (dispatch
+    hardening — no silent default).
+    """
+    if convention is WindStressConvention.OCEAN_DIRECT:
+        return 1.0
+    if convention is WindStressConvention.ATMOSPHERE_REACTION:
+        return -1.0
+    raise ValueError(
+        f"Unknown WindStressConvention {convention!r}; expected "
+        f"OCEAN_DIRECT or ATMOSPHERE_REACTION."
+    )
+
 
 # Volume floor on the surface-layer thickness in the flux→tendency reciprocal.
 # Keeps the divide finite on land (where ``is_ocean`` already zeroes the
