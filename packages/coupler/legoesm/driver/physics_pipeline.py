@@ -1072,9 +1072,17 @@ class PhysicsPipeline:
             # from the lagged convective precip so the convecting tropics get
             # radiative cloud the RH-based stratiform scheme misses.  Default
             # False => CloudConfig defaults (no convective term, no guard).
+            # Activate the convective cloud term only where the convective
+            # precip is actually plumbed (the compiled segment threads it via
+            # the lagged carry).  Auxiliary callers that don't pass conv_precip
+            # — the single warm-up step, any non-compiled per-step path —
+            # degrade to no convective cloud rather than tripping the loud
+            # compute_cloud_properties guard.  The guard still fires for a
+            # direct convective_cloud=True + conv_precip=None misconfiguration.
             cloud_config = CloudConfig(
                 scheme=cloud_scheme,
-                convective_cloud=getattr(self, "_cloud_convective", False),
+                convective_cloud=(getattr(self, "_cloud_convective", False)
+                                  and conv_precip is not None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -1261,7 +1269,8 @@ class PhysicsPipeline:
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
                          sfc_T_override=None,
-                         tke=None, qke=None, gwd_spectrum=None):
+                         tke=None, qke=None, gwd_spectrum=None,
+                         conv_precip=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1274,7 +1283,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum) = args
+                 tke, qke, gwd_spectrum, conv_precip) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -1291,6 +1300,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
+                        conv_precip=conv_precip,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1336,7 +1346,8 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum) = args
+                 tke, qke, gwd_spectrum, conv_precip) = args
+                del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -1377,7 +1388,7 @@ class PhysicsPipeline:
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
-                    tke, qke, gwd_spectrum)
+                    tke, qke, gwd_spectrum, conv_precip)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch

@@ -155,6 +155,13 @@ class SegmentCarry(NamedTuple):
     tke: jax.Array = None
     qke: jax.Array = None
     gwd_spectrum: jax.Array = None
+    conv_precip_prev: jax.Array = None
+    # Lagged (previous-step) total precip [kg/m²/s] driving the opt-in
+    # convective cloud-fraction source.  Radiation runs BEFORE convection in
+    # the step, so this carries last step's precip to this step's cloud
+    # diagnosis.  ``None`` (warm-rain / convective_cloud off) ⇒ byte-identical
+    # legacy carry; pack_carry seeds a zeros array for production runs so the
+    # feature can read it when ``PhysicsPipeline._cloud_convective`` is set.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -167,6 +174,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
+               conv_precip_prev=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -205,6 +213,11 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         shflx_accum = jnp.zeros_like(state.p_s.data)
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
+    # Lagged convective-cloud precip: always a real array (like precip_accum /
+    # T_land) so the hot loop has no None branch; read only when the convective
+    # cloud feature is enabled.  Zeros at t=0 ⇒ no convective cloud on step 0.
+    if conv_precip_prev is None:
+        conv_precip_prev = jnp.zeros_like(state.p_s.data)
     if conv_prog is None:
         if conv_prog_nlev is not None:
             conv_prog = jnp.zeros(
@@ -256,6 +269,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         qke=None if qke is None else _promote(qke, storage),
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
+        conv_precip_prev=_promote(conv_precip_prev, storage),
     )
 
 
@@ -850,7 +864,9 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
-                    T_land=_T_land_in, **_dm_in,
+                    T_land=_T_land_in,
+                    conv_precip=carry.conv_precip_prev[_ofi],
+                    **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
                 # 3rd value = slab-land skin T (#325); legacy 2-tuple
@@ -910,6 +926,9 @@ def build_segment_fn(
                 # Precip: update at owned indices
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new[_ofi])
                 precip_accum = carry.precip_accum.at[_ofi].add(precip_step * _dt)
+                # Lag this step's total precip for next step's convective cloud.
+                conv_precip_prev_new = carry.conv_precip_prev.at[_ofi].set(
+                    precip_step)
 
                 # Surface heat fluxes: accumulate at owned indices
                 _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new[_ofi])
@@ -948,7 +967,9 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
-                    T_land=carry.T_land, **_dm_in,
+                    T_land=carry.T_land,
+                    conv_precip=carry.conv_precip_prev,
+                    **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
                 # ``step_unified`` returns a 3rd value (the slab-land skin
@@ -987,6 +1008,8 @@ def build_segment_fn(
                 # --- Accumulate precipitation ---
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
                 precip_accum = carry.precip_accum + precip_step * _dt
+                # Lag this step's total precip for next step's convective cloud.
+                conv_precip_prev_new = precip_step
 
                 # --- Accumulate surface heat fluxes ---
                 _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new)
@@ -1093,6 +1116,8 @@ def build_segment_fn(
                                   if phys_out.gwd_spectrum is not None
                                   else carry.gwd_spectrum,
                                   carry.gwd_spectrum)),
+                conv_precip_prev=_match_dtype(
+                    conv_precip_prev_new, carry.conv_precip_prev),
             )
             return new_carry, None
         return _single_step
@@ -1238,6 +1263,7 @@ def build_segment_fn(
                     T_land=_T_land_in,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    conv_precip=_own(carry.conv_precip_prev),
                 )
             held_new = (
                 carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
@@ -1271,6 +1297,7 @@ def build_segment_fn(
                     T_land=carry.T_land,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    conv_precip=carry.conv_precip_prev,
                 )
             held_new = (
                 dT_dt_rad, sw_net_sfc, lw_net_sfc,
