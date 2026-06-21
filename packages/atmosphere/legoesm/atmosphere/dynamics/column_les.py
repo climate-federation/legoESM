@@ -528,7 +528,7 @@ def column_surface_kinematic_fluxes(
       design, iter 151) — appropriate for the short worst-column spin-off; an over-warming
       run is caught by the realism gate (``theta_drift``).
     """
-    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         SurfaceLayerConfig,
         compute_surface_fluxes,
@@ -552,7 +552,9 @@ def column_surface_kinematic_fluxes(
     a1 = jnp.atleast_1d
     _, _, shflx, lhflx, _ = compute_surface_fluxes(
         a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1), cfg)
-    exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    # θ-flux = (sensible heat flux)/(ρ·c_p) · 1/Π, with the canonical Exner helper
+    # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
+    exner_inv = 1.0 / exner_function(p_s)
     w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
     w_qv_s = lhflx[0] / (rho_1 * constants.L_v)
     return w_th_s, w_qv_s

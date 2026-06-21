@@ -519,3 +519,85 @@ def test_round_trip_self_test_is_non_vacuous():
     c_k, _ = clubb_coefficient_from_diffusivity(
         km_wrong, jnp.ones_like(km_wrong, dtype=bool), l_mix, wp2)
     assert not np.allclose(np.asarray(c_k), c_k_true, rtol=1e-6)     # must NOT recover
+
+
+def test_prandtl_forward_inverse_round_trip():
+    """K_h = clubb_heat_diffusivity(K_m, Pr_t, l) then Pr_t = K_m/K_h recovers the EXACT
+    Pr_t — pins the integrator's heat-diffusivity form against the diagnosis inverse (the
+    second of the three multi-coefficient closures, after C_K)."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_heat_diffusivity
+
+    l_mix, wp2 = _roundtrip_setup()
+    k_m = 0.4 * l_mix * jnp.sqrt(wp2)                         # any positive K_m profile
+    ok = jnp.ones_like(k_m, dtype=bool)
+    for pr_t_true in (0.5, 1.0, 1.6):
+        k_h = clubb_heat_diffusivity(k_m, pr_t_true, l_mix)  # integrator forward
+        pr_t, valid = prandtl_number_from_diffusivities(k_m, ok, k_h, ok)  # diagnosis inverse
+        assert bool(jnp.all(valid))
+        np.testing.assert_allclose(np.asarray(pr_t), pr_t_true, rtol=1e-12)
+
+
+def test_prandtl_round_trip_non_vacuous():
+    """Non-vacuity: a desynced forward (K_h = K_m * Pr_t instead of / Pr_t) would NOT be
+    recovered by the genuine inverse — the round-trip genuinely pins the form."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        prandtl_number_from_diffusivities,
+    )
+
+    l_mix, wp2 = _roundtrip_setup()
+    k_m = 0.4 * l_mix * jnp.sqrt(wp2)
+    ok = jnp.ones_like(k_m, dtype=bool)
+    pr_t_true = 1.6
+    k_h_wrong = k_m * pr_t_true                              # DESYNCED forward (× not ÷)
+    pr_t, _ = prandtl_number_from_diffusivities(k_m, ok, k_h_wrong, ok)
+    assert not np.allclose(np.asarray(pr_t), pr_t_true, rtol=1e-6)
+
+
+def test_c_eps_forward_inverse_round_trip():
+    """The wp2-budget inversion round-trips: build the steady-state production that
+    clubb_wp2_dissipation_rate(C_eps) sustains, realise it through clubb_wp2_production
+    (exercising BOTH the shear AND buoyancy terms), and recover the EXACT C_eps. This pins
+    the most subtle diagnosis (a budget inversion, not a ratio) against the integrator's
+    actual production + dissipation forms."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import c_eps_from_budget
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import (
+        clubb_wp2_dissipation_rate,
+        clubb_wp2_production,
+    )
+
+    l_mix, wp2 = _roundtrip_setup()                          # l_mix > 1 m so l_safe == l_mix
+    sqrt_wp2 = jnp.sqrt(wp2)
+    ok = jnp.ones_like(wp2, dtype=bool)
+    for c_eps_true in (0.06, 0.2, 0.6):
+        # forward: the net production that sustains wp2 at this C_eps (rate * wp2)
+        p_target = clubb_wp2_dissipation_rate(c_eps_true, sqrt_wp2, l_mix) * wp2
+        # realise P through BOTH production terms: buoyancy = 10% of P, shear = the rest
+        n2 = -0.1 * p_target                                 # unstable (−K_h·N² > 0)
+        k_h = jnp.ones_like(wp2)
+        s2 = jnp.ones_like(wp2)
+        k_m = 0.9 * p_target                                 # K_m·S² = 0.9·P
+        # the integrator's production form must reproduce the target (shared helper)
+        np.testing.assert_allclose(
+            np.asarray(clubb_wp2_production(k_m, k_h, s2, n2)), np.asarray(p_target),
+            rtol=1e-12)
+        c_eps, valid = c_eps_from_budget(k_m, ok, k_h, ok, s2, n2, l_mix, wp2)  # inverse
+        assert bool(jnp.all(valid))
+        np.testing.assert_allclose(np.asarray(c_eps), c_eps_true, rtol=1e-12)
+
+
+def test_c_eps_round_trip_non_vacuous():
+    """Non-vacuity: a desynced forward dissipation (C_eps·wp2/ℓ — power 1 not 3/2) gives a
+    production the genuine wp2^{3/2} inverse does NOT map back to C_eps."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import c_eps_from_budget
+
+    l_mix, wp2 = _roundtrip_setup()
+    ok = jnp.ones_like(wp2, dtype=bool)
+    c_eps_true = 0.3
+    p_wrong = c_eps_true * wp2 / l_mix                       # DESYNCED (wp2, not wp2^{3/2})
+    s2 = jnp.ones_like(wp2)
+    n2 = jnp.zeros_like(wp2)
+    c_eps, _ = c_eps_from_budget(p_wrong, ok, jnp.ones_like(wp2), ok, s2, n2, l_mix, wp2)
+    assert not np.allclose(np.asarray(c_eps), c_eps_true, rtol=1e-6)
