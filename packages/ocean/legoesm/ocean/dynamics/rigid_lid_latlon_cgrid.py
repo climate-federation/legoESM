@@ -73,6 +73,10 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_uface,
     min_cell_to_vface,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    column_depth,
+    depth_average_to_faces,
+)
 
 # Numerical floor for reciprocal depths / empty cells.
 _DEPTH_FLOOR = 1.0e-10
@@ -514,12 +518,17 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
         min_water_column_m=config.min_water_column_m)
     h_u = min_cell_to_uface(h_k)                              # (n_lat, n_lon+1, nlev)
     h_v = min_cell_to_vface(h_k, grid)                        # (n_lat+1, n_lon, nlev)
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), _DEPTH_FLOOR)    # (n_lat, n_lon+1)
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), _DEPTH_FLOOR)    # (n_lat+1, n_lon)
+    # Floored face-column depths (#517 item 5: shared column_depth; floor
+    # = _DEPTH_FLOOR → bit-identical).  H_u / H_v are reused below to
+    # rebuild the depth-integrated transport, so keep them named.
+    H_u = column_depth(h_u, _DEPTH_FLOOR)                     # (n_lat, n_lon+1)
+    H_v = column_depth(h_v, _DEPTH_FLOOR)                     # (n_lat+1, n_lon)
 
     # Old barotropic (depth-mean) of the predicted velocity -> baroclinic dev.
-    U_old = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
-    V_old = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
+    # (#517 items 1/5: shared depth_average_to_faces; floor = _DEPTH_FLOOR
+    # passed verbatim → bit-identical.)
+    U_old = depth_average_to_faces(u_3d, h_u, u_mask, _DEPTH_FLOOR)  # (n_lat, n_lon+1)
+    V_old = depth_average_to_faces(v_3d, h_v, v_mask, _DEPTH_FLOOR)  # (n_lat+1, n_lon)
     u_prime = u_3d - U_old[..., jnp.newaxis]
     v_prime = v_3d - V_old[..., jnp.newaxis]
 

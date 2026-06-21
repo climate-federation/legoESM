@@ -40,7 +40,10 @@ from legoesm.ocean.dynamics.barotropic_common import (
     coriolis_at_faces,
     maxvel_clip,
 )
-from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    depth_average_to_faces,
+    implicit_bottom_drag_factor,
+)
 
 
 def _depth_average_to_faces(
@@ -78,15 +81,11 @@ def _depth_average_to_faces(
     h_u = min_cell_to_uface(h_k)
     h_v = min_cell_to_vface(h_k, grid)
 
-    # Fuse the per-face thickness + barotropic-mean column reductions —
-    # both reduce ``... * h`` over the same level axis.
-    _u_pair = jnp.sum(jnp.stack([h_u, u_3d * h_u], axis=-1), axis=-2)
-    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
-    U_bar = _u_pair[..., 1] / H_u * u_mask
-
-    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
-    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
-    V_bar = _v_pair[..., 1] / H_v * v_mask
+    # Barotropic-mean face velocities: thickness-weighted depth average
+    # masked by the face mask (#517 item 1: shared depth_average_to_faces;
+    # floor = min_water_col, passed verbatim → bit-identical).
+    U_bar = depth_average_to_faces(u_3d, h_u, u_mask, min_water_col)
+    V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
 
     return U_bar, V_bar
 

@@ -74,6 +74,10 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
 from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
     barotropic_implicit_latlon_cgrid,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    depth_average_to_faces,
+    depth_mean,
+)
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
@@ -588,15 +592,11 @@ def _forward_backward_coriolis_3d(
     h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
-    # Per-face thickness + barotropic-mean column reductions share the
-    # h_u/h_v weight on the level axis — fuse into one stack each.
-    _u_pair = jnp.sum(jnp.stack([h_u, u * h_u], axis=-1), axis=-2)
-    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
-    U_bar = _u_pair[..., 1] / H_u * u_mask
-
-    _v_pair = jnp.sum(jnp.stack([h_v, v * h_v], axis=-1), axis=-2)
-    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
-    V_bar = _v_pair[..., 1] / H_v * v_mask
+    # Thickness-weighted depth average masked by the face mask (#517
+    # item 1: shared depth_average_to_faces; floor = min_water_col,
+    # passed verbatim → bit-identical).
+    U_bar = depth_average_to_faces(u, h_u, u_mask, min_water_col)
+    V_bar = depth_average_to_faces(v, h_v, v_mask, min_water_col)
 
     # --- Perturbation velocity ---
     u_prime = (u - U_bar[..., jnp.newaxis]) * u_mask_3d
@@ -4130,8 +4130,9 @@ class LatLonCGridOceanModel:
         h_v = min_cell_to_vface(h_k, _grid)
 
         def _split(field, h_face):
-            bt = (jnp.sum(field * h_face, axis=-1, keepdims=True)
-                  / jnp.maximum(jnp.sum(h_face, axis=-1, keepdims=True), 1.0e-10))
+            # (#517 item 5: shared depth_mean; floor 1.0e-10 + keepdims
+            # passed verbatim → bit-identical.)
+            bt = depth_mean(field, h_face, 1.0e-10, keepdims=True)
             return field - bt, bt          # (baroclinic deviation, barotropic mean)
 
         # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-

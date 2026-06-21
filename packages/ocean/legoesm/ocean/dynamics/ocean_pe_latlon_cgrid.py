@@ -59,6 +59,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
     bbl_distributed_drag_face_column,
+    depth_average_to_faces,
     iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -1281,12 +1282,13 @@ def _bc_vertical_and_depthmean_velocity(
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     # --- 4b. Depth-mean velocity (for diagnostics / KE gradient) ---
-    # Fuse num/denom reductions per face — both share their h_u/h_v
-    # weight on the level axis.
-    _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
-    U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
-    _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
-    V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
+    # Thickness-weighted depth average masked by the face mask (#517
+    # item 1: shared depth_average_to_faces).
+    # NOTE: this PE diagnostic path floors the column depth at a bare
+    # numerical 1e-10, NOT config.min_water_column_m as the barotropic-
+    # mean paths do — floor passed verbatim → bit-identical.
+    U_bar = depth_average_to_faces(u, h_u, u_mask, 1e-10)  # (n_lat, n_lon+1)
+    V_bar = depth_average_to_faces(v, h_v, v_mask, 1e-10)  # (n_lat+1, n_lon)
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
     return h_u, h_v, flux_div_k, w, u_prime, v_prime
