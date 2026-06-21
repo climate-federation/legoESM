@@ -13,8 +13,14 @@ from __future__ import annotations
 
 from typing import Literal, TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 import equinox as eqx
+
+# Radiation fluxes are O(100 W/m^2); the flux head's raw output (O(1)) is
+# scaled by this so it can reach observed magnitudes (mirrors the column
+# NN's flux_output_scale).  Untrained -> ~0 (stable).
+_SFNO_FLUX_OUTPUT_SCALE = 100.0
 
 if TYPE_CHECKING:
     from legoesm.grids.gaussian import GaussianGrid
@@ -41,11 +47,20 @@ class SFNOPhysics(eqx.Module):
 
     Packs prognostic fields into PE3DChannelSpec layout, runs the SFNO,
     and unpacks output as tendencies.
+
+    ``flux_head`` (optional) is a per-column MLP mapping the packed
+    normalized state -> 4 radiation fluxes (sw_net_sfc, lw_net_sfc,
+    sw_up_toa, lw_up_toa) so the radiation-flux loss can supervise the SFNO
+    (replacement) variant.  None -> zeros (state-only training, the legacy
+    behavior).  It is a separate float module so it trains alongside the
+    SFNO without dragging the Gaussian grid's int leaves into the gradient.
     """
 
     sfno: SFNO
     grid: "GaussianGrid"  # noqa: F821
     nlev: int = eqx.field(static=True)
+    flux_head: eqx.Module = None
+    flux_output_scale: float = eqx.field(static=True, default=_SFNO_FLUX_OUTPUT_SCALE)
 
     def __call__(
         self,
@@ -86,6 +101,20 @@ class SFNOPhysics(eqx.Module):
         zeros_3d = jnp.zeros(T.shape, dtype=T.dtype)
         zeros_2d = jnp.zeros(p_s.shape, dtype=p_s.dtype)
 
+        # Flux head: per-column MLP on the packed normalized state -> 4
+        # radiation fluxes (sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa),
+        # scaled to W/m^2.  None -> zeros (state-only).  precip / sw_down_toa
+        # stay zero (insolation is an external forcing, not predicted here).
+        if self.flux_head is not None:
+            n_lat_g, n_lon_g, n_ch = packed.shape
+            flat = packed.reshape(n_lat_g * n_lon_g, n_ch)
+            f = jax.vmap(self.flux_head)(flat) * self.flux_output_scale
+            f = f.reshape(n_lat_g, n_lon_g, 4)
+            sw_net_sfc, lw_net_sfc = f[..., 0], f[..., 1]
+            sw_up_toa, lw_up_toa = f[..., 2], f[..., 3]
+        else:
+            sw_net_sfc = lw_net_sfc = sw_up_toa = lw_up_toa = zeros_2d
+
         return PhysicsOutput(
             **_physics_output_kwargs(
                 dT_dt=dT_dt,
@@ -93,10 +122,10 @@ class SFNOPhysics(eqx.Module):
                 dq_c_dt=zeros_3d,
                 dq_r_dt=zeros_3d,
                 precip=zeros_2d,
-                sw_net_sfc=zeros_2d,
-                lw_net_sfc=zeros_2d,
-                sw_up_toa=zeros_2d,
-                lw_up_toa=zeros_2d,
+                sw_net_sfc=sw_net_sfc,
+                lw_net_sfc=lw_net_sfc,
+                sw_up_toa=sw_up_toa,
+                lw_up_toa=lw_up_toa,
                 sw_down_toa=zeros_2d,
                 reference_3d=T,
             )
@@ -121,10 +150,10 @@ def make_sfno_step_unified_latlon(
     (``regrid_scalar`` = gather + inverse-distance weighted sum) so the whole
     bridge is differentiable end-to-end.
 
-    Replacement mode only (SFNO IS the physics): the carried radiation
-    ``held_*`` pass through unchanged (SFNO has no flux head yet — that is the
-    follow-up that lets the flux loss act on SFNO; until then the flux loss is
-    inert for this variant and only the state loss trains it).
+    Replacement mode only (SFNO IS the physics).  If ``sfno_physics`` has a
+    ``flux_head``, its predicted TOA/surface fluxes are regridded back to
+    lat-lon and written into ``held_*`` so the radiation-flux loss supervises
+    the SFNO; with no flux head they are zero (state-only training).
 
     Parameters
     ----------
@@ -174,10 +203,27 @@ def make_sfno_step_unified_latlon(
                 reference_3d=T,
             )
         )
-        if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
+        # Pass the carry's conv_prog through UNCHANGED (None or array) so the
+        # lax.scan carry structure stays consistent step-to-step — SFNO has no
+        # convection state, and setting a default zeros array when the carry's
+        # is None flips the carry pytree (None->Array) and breaks the scan.
+        if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
             out_ll = out_ll._replace(conv_prog=conv_prog)
-        held_new = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+        # Flux head -> held_*: regrid the SFNO's predicted Gaussian-grid
+        # fluxes back to lat-lon so the radiation-flux loss supervises them.
+        # (flux_head=None -> sfno_out fluxes are zeros -> regridded zeros, the
+        # legacy passthrough-equivalent.)  held_dT_rad stays at its IC value
+        # (0): the SFNO dT_dt is the TOTAL tendency and already includes
+        # radiative heating.  sw_down_toa (insolation) is external forcing.
+        del held_sw_net_sfc, held_lw_net_sfc, held_sw_up_toa, held_lw_up_toa
+        held_new = (
+            held_dT_rad,
+            _to_latlon(sfno_out.sw_net_sfc, p_s.shape),
+            _to_latlon(sfno_out.lw_net_sfc, p_s.shape),
+            _to_latlon(sfno_out.sw_up_toa, p_s.shape),
+            _to_latlon(sfno_out.lw_up_toa, p_s.shape),
+            held_sw_down_toa,
+        )
         return out_ll, held_new
 
     return step_unified

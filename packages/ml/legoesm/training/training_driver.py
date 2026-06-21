@@ -360,6 +360,7 @@ def train_sfno_latlon(
     target_carries,
     forcings,
     *,
+    flux_head=None,
     n_epochs: int = 100,
     lr: float = 5e-4,
     dt: float = 600.0,
@@ -375,6 +376,10 @@ def train_sfno_latlon(
     (``make_sfno_step_unified_latlon``) regrids the lat-lon prognostics to
     Gaussian, runs the SFNO, and regrids the tendencies back — all
     differentiable.  Replacement mode (SFNO is the physics).
+
+    ``flux_head`` (optional eqx column MLP) is trained jointly so the SFNO's
+    predicted TOA/surface fluxes feed the radiation-flux loss.  Returns the
+    trained ``SFNOPhysics`` (sfno + flux_head rewrapped with the grid).
     """
     from legoesm.training.sfno_dycore_coupling import (
         make_sfno_step_unified_latlon, SFNOPhysics,
@@ -382,14 +387,16 @@ def train_sfno_latlon(
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
-    # Differentiate ONLY the SFNO (all float/complex params).  The Gaussian
-    # grid (with INT spherical-harmonic index arrays ms/ls) is a closure
-    # const — bundling it into the differentiated module makes eqx grad emit
-    # an Array cotangent for the int leaves where it expects None
-    # ("Expected None, got Array").
+    # Differentiate the SFNO + flux_head (all float/complex params) as a
+    # tuple; the Gaussian grid (with INT spherical-harmonic index arrays
+    # ms/ls) stays a closure const — bundling it into the differentiated
+    # module makes eqx grad emit an Array cotangent for the int leaves where
+    # it expects None ("Expected None, got Array").
     def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(sfno_):
-            sphys = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev)
+        def loss_fn(params_):
+            sfno_, flux_head_ = params_
+            sphys = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev,
+                                flux_head=flux_head_)
             step_unified = make_sfno_step_unified_latlon(
                 sphys, regrid_ll2g, regrid_g2ll, gauss_n_lat, gauss_n_lon,
                 tendency_scale=tendency_scale,
@@ -403,11 +410,14 @@ def train_sfno_latlon(
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip),
         optax.adamw(lr, weight_decay=1e-5))
-    return _training_loop(
-        make_loss_fn, sfno, optimizer,
+    trained_params, hist = _training_loop(
+        make_loss_fn, (sfno, flux_head), optimizer,
         initial_carries, target_carries, forcings, sigma_full,
         n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
     )
+    sfno_t, flux_head_t = trained_params
+    return SFNOPhysics(sfno=sfno_t, grid=gauss_grid, nlev=nlev,
+                       flux_head=flux_head_t), hist
 
 
 # ======================================================================

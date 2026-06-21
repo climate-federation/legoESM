@@ -314,6 +314,45 @@ class TestSFNOCoupling:
         from legoesm.training.sfno_dycore_coupling import SFNOPhysics
         assert SFNOPhysics is not None
 
+    def test_flux_head_predicts_nonzero_fluxes(self):
+        """SFNOPhysics with a flux_head produces nonzero TOA/surface fluxes;
+        without one they are zero (state-only)."""
+        import equinox as eqx
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.training.sfno_dycore_coupling import SFNOPhysics
+
+        nlev = 4
+        gauss = create_gaussian_grid(n_max=8, dealiasing="quadratic")
+        spec = PE3DChannelSpec(nlev=nlev)
+        cfg = SFNOConfig(in_channels=spec.n_channels,
+                         out_channels=spec.n_channels,
+                         embed_dim=16, n_blocks=1, residual_prediction=False)
+        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(0))
+        head = eqx.nn.MLP(in_size=spec.n_channels, out_size=4, width_size=8,
+                          depth=2, activation=jax.nn.gelu,
+                          key=jax.random.PRNGKey(1))
+
+        nlat, nlon = int(gauss.n_lat), int(gauss.n_lon)
+        T = jnp.full((nlat, nlon, nlev), 280.0)
+        z3 = jnp.zeros((nlat, nlon, nlev))
+        p_s = jnp.full((nlat, nlon), 1.0e5)
+        z2 = jnp.zeros((nlat, nlon))
+        dt = jnp.array(600.0)
+
+        no_head = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
+        out0 = no_head(T, z3, z3, z3, p_s, z2, dt)
+        assert float(jnp.abs(out0.sw_up_toa).max()) == 0.0  # state-only
+
+        with_head = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev,
+                                flux_head=head, flux_output_scale=100.0)
+        out1 = with_head(T, z3, z3, z3, p_s, z2, dt)
+        assert float(jnp.abs(out1.sw_up_toa).max()) > 0.0
+        assert float(jnp.abs(out1.lw_up_toa).max()) > 0.0
+        assert float(jnp.abs(out1.sw_net_sfc).max()) > 0.0
+        assert out1.sw_up_toa.shape == (nlat, nlon)
+
 
 # ---------------------------------------------------------------------------
 # 7. era5_to_state
