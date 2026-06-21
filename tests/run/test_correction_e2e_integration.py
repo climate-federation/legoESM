@@ -475,6 +475,87 @@ def test_full_loop_environment_strategy_builds_a_deployable_kernel():
     assert 0.0 <= float(coverage["fraction_covered"]) <= 1.0
 
 
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_loop_multi_coefficient_corrects_all_from_one_les():
+    """REGRESSION (iter 489): the SIMULTANEOUS multi-coefficient correction (one LES run →
+    C_K + Pr_t + C_eps diagnoses → ATOMIC gate) through a REAL model loop. The multi path is
+    unit-tested only with MOCK compares (test_correction_loop); the 3 diagnosis functions are
+    each unit-tested in isolation — but their SIMULTANEOUS application from ONE real LES
+    output + the atomic all-or-nothing gate was untested end-to-end (the iter-484 integration
+    lesson: pieces tested separately can still break composed). Builds the specs + the
+    multi-method diagnose_fn the SAME way ``build_multi_correction_campaign`` does."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import (
+        CorrectionSpec,
+        make_compare_fn,
+        run_multi_correction_iteration,
+    )
+
+    from scripts.run.run_correction_campaign import (
+        COEFFICIENT_SPEC_MAP,
+        make_les_diagnose_fn,
+    )
+
+    driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=0.4))
+    a = driver._atm
+    model0 = column_state_from_hydrostatic(
+        a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    n_lat, n_lon, _ = model0.T.shape
+    sigma, grid = a.sigma, a.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    bias = np.zeros((n_lat, n_lon))
+    bias[n_lat // 2, n_lon // 2] = 5.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb)
+        aa = d._atm
+        return column_state_from_hydrostatic(
+            aa.state, aa.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=2,
+        run_amip_fn=_run, coordinate=sigma)
+
+    # Correct ALL THREE CLUBB coefficients simultaneously — specs + the multi-method
+    # diagnose_fn built EXACTLY as build_multi_correction_campaign does (one LES → 3 methods).
+    coeffs = ("C_K", "Pr_t", "C_eps")
+    specs = [CorrectionSpec(*COEFFICIENT_SPEC_MAP[n],
+                            float(getattr(CLUBBLiteConfig(), n))) for n in coeffs]
+    methods = tuple(dict.fromkeys(s.diagnosis_method for s in specs))
+    les_cfg = ColumnLESConfig(
+        regime=_SMALL_REGIME, gate_les_realism=False, diagnosis_methods=methods,
+        clubb_l_mix_max=float(CLUBBLiteConfig().l_mix_max))
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    res = run_multi_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), specs, compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        grid_shape=(n_lat, n_lon), les_budget=2)
+
+    # The whole multi chain ran from ONE LES: finite biases + a definite atomic gate verdict.
+    assert np.isfinite(float(res.bias.baseline_bias))
+    assert np.isfinite(float(res.bias.updated_bias))
+    assert isinstance(bool(res.bias.improved), bool)
+    assert res.n_corrected >= 1
+    # ALL THREE coefficients got a per-column feedback field (the simultaneous correction).
+    for name in coeffs:
+        key = COEFFICIENT_SPEC_MAP[name][0]
+        assert key in res.feedback_fields, (key, sorted(res.feedback_fields))
+        fld = np.asarray(res.feedback_fields[key]).reshape(-1)
+        assert fld.shape == (n_lat * n_lon,) and bool(np.all(np.isfinite(fld)))
+
+
 def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
     """A base AMIP ``ExperimentConfig`` with a forcing BUILT from the synthetic local ERA5
     archive and injected via the shared ``apply_amip_forcing_to_config`` (the turnkey path)."""
