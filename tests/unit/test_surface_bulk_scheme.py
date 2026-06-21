@@ -98,6 +98,28 @@ def test_ocean_coare3_enhances_unstable_latent_flux() -> None:
     assert float(lh_coare.mean()) > float(lh_const.mean())
 
 
+@pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
+def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
+    """Regression: MOST under float32 inputs (the atmosphere coupled path) must
+    keep its fori_loop carry dtype-stable.  Before the fix a float64 physical
+    constant promoted a carry leaf float32->float64 mid-loop, raising
+    'scan body ... carry input and carry output must have equal types'.  Wrapped
+    in jit so the fori_loop equal-types invariant is actually enforced."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+
+    f32 = lambda v: jnp.full((16,), v, dtype=jnp.float32)  # noqa: E731
+    fn = jax.jit(lambda **kw: compute_most_fluxes(**kw, scheme=scheme))
+    tau_x, tau_y, sh, lh, ust = fn(
+        u_rel=f32(4.0), v_rel=f32(-2.0), T_atm=f32(288.0), q_atm=f32(8e-3),
+        T_sfc=f32(300.0), q_sfc=f32(2.0e-2), rho=f32(1.15),
+    )
+    for arr in (tau_x, tau_y, sh, lh, ust):
+        assert jnp.all(jnp.isfinite(arr))
+    assert float(lh.mean()) > 0.0  # evaporation upward over a warm ocean
+
+
 def test_ocean_unknown_bulk_scheme_raises() -> None:
     # Dispatch hardening (CLAUDE.md): an unknown scheme must raise, not silently
     # fall through to a default.
