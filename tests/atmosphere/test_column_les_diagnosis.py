@@ -445,3 +445,77 @@ def test_realism_gate_nan_diagnosis_contained_to_finite_field():
     f2 = assemble_feedback_field([_Rec()], [gated_ent], (2, 2),
                                  method="entrainment", background=0.5)
     assert bool(jnp.all(jnp.isfinite(f2))) and bool(jnp.allclose(f2, 0.5))
+
+
+# ---------------------------------------------------------------------------
+# Forward/inverse round-trip: the LES diagnosis MUST invert the integrator's
+# ACTUAL forward closure (else OSSE parameter recovery is impossible, no matter
+# how good the LES). This is non-circular: it imports clubb_eddy_diffusivity
+# (the SAME forward clubb_lite_turbulence integrates) and inverts it with
+# clubb_coefficient_from_diffusivity (the SAME inverse diagnose_clubb_coefficient
+# uses) — so a change to EITHER form that de-syncs them fails here.
+# ---------------------------------------------------------------------------
+
+def _roundtrip_setup():
+    from legoesm.atmosphere.physics._shared import mixing_length
+
+    l_mix_max = 250.0
+    z = jnp.linspace(20.0, 3000.0, 12, dtype=jnp.float64)   # ascending interior heights [m]
+    l_mix = mixing_length(z, l_mix_max)                     # the GCM's Blackadar length
+    wp2 = jnp.linspace(0.5, 3.0, 12, dtype=jnp.float64)     # resolved w'^2 [m^2/s^2] > floor
+    return l_mix, wp2
+
+
+def test_clubb_forward_inverse_round_trip_scalar():
+    """Km = clubb_eddy_diffusivity(C_K, l, sqrt_wp2) then C_K = Km/(l*sqrt_wp2) recovers the
+    EXACT scalar C_K — the algebraic guarantee underlying perfect-model recovery (clause 6)."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        clubb_coefficient_from_diffusivity,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_eddy_diffusivity
+
+    l_mix, wp2 = _roundtrip_setup()
+    for c_k_true in (0.1, 0.3, 0.55, 1.0):
+        km = clubb_eddy_diffusivity(c_k_true, l_mix, jnp.sqrt(wp2))   # integrator forward
+        c_k, valid = clubb_coefficient_from_diffusivity(             # diagnosis inverse
+            km, jnp.ones_like(km, dtype=bool), l_mix, wp2)
+        assert bool(jnp.all(valid))
+        np.testing.assert_allclose(np.asarray(c_k), c_k_true, rtol=1e-12)
+
+
+def test_clubb_forward_inverse_round_trip_per_column():
+    """The per-column C_K field path (the LES-informed correction) round-trips too: a
+    (ncol,) C_K broadcast through the forward is recovered at EVERY level by the inverse."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        clubb_coefficient_from_diffusivity,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_eddy_diffusivity
+
+    l_mix_1d, wp2_1d = _roundtrip_setup()
+    ncol = 3
+    l_mix = jnp.broadcast_to(l_mix_1d, (ncol, l_mix_1d.shape[0]))
+    wp2 = jnp.broadcast_to(wp2_1d, (ncol, wp2_1d.shape[0]))
+    c_k_col = jnp.asarray([0.2, 0.35, 0.5], dtype=jnp.float64)         # per-column field
+    km = clubb_eddy_diffusivity(c_k_col, l_mix, jnp.sqrt(wp2))
+    c_k, valid = clubb_coefficient_from_diffusivity(
+        km, jnp.ones_like(km, dtype=bool), l_mix, wp2)
+    assert bool(jnp.all(valid))
+    # each column's recovered C_K is its true field value at every level
+    expected = np.broadcast_to(np.asarray(c_k_col)[:, None], np.asarray(c_k).shape)
+    np.testing.assert_allclose(np.asarray(c_k), expected, rtol=1e-12)
+
+
+def test_round_trip_self_test_is_non_vacuous():
+    """Non-vacuity (Domain-Architect tripwire doctrine): if the forward used a DIFFERENT
+    form (l^2 instead of l), the genuine inverse would NOT recover C_K — proving the
+    round-trip above genuinely pins the form, not a tautology."""
+    from legoesm.atmosphere.dynamics.les_closure_diagnosis import (
+        clubb_coefficient_from_diffusivity,
+    )
+
+    l_mix, wp2 = _roundtrip_setup()
+    c_k_true = 0.3
+    km_wrong = c_k_true * (l_mix ** 2) * jnp.sqrt(wp2)               # a DESYNCED forward
+    c_k, _ = clubb_coefficient_from_diffusivity(
+        km_wrong, jnp.ones_like(km_wrong, dtype=bool), l_mix, wp2)
+    assert not np.allclose(np.asarray(c_k), c_k_true, rtol=1e-6)     # must NOT recover

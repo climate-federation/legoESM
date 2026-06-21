@@ -124,6 +124,30 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 
 from legoesm import constants
 
+
+def clubb_eddy_diffusivity(
+    C_K: jax.Array,
+    l_mix: jax.Array,
+    sqrt_wp2: jax.Array,
+) -> jax.Array:
+    """The CLUBB-lite down-gradient momentum diffusivity ``K_m = C_K · ℓ · √wp2``.
+
+    This is the SINGLE definition of the forward eddy-diffusivity closure: the integrator
+    (:func:`clubb_lite_turbulence`) builds ``K_m`` from it, and it is the EXACT inverse of the
+    LES diagnosis ``C_K = K_m/(ℓ·√wp2)``
+    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.clubb_coefficient_from_diffusivity`).
+    Factored out so the forward/inverse round-trip is pinned against the closure the model
+    ACTUALLY integrates (a change to this form is then caught by the round-trip test, not
+    silently de-synced from the diagnosis — which would break OSSE parameter recovery).
+
+    ``C_K`` may be a scalar (production) OR a per-column ``(ncol,)`` field (the LES-informed
+    eddy-diffusivity correction); ``broadcast_column_param`` keeps the scalar path
+    byte-identical and reshapes a per-column field to broadcast over the vertical.  All inputs
+    are pure arrays — JAX-traced, differentiable, no side effects.
+    """
+    return broadcast_column_param(C_K, l_mix) * l_mix * sqrt_wp2
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -212,7 +236,7 @@ def clubb_lite_turbulence(
     # (the LES-informed eddy-diffusivity correction); broadcast_column_param
     # keeps the scalar path byte-identical and reshapes a per-column field to
     # broadcast over the vertical axis. See docs/COMPARE_REANALYSIS.md.
-    Km_full = broadcast_column_param(config.C_K, l_mix) * l_mix * sqrt_wp2  # (ncol, nlev)
+    Km_full = clubb_eddy_diffusivity(config.C_K, l_mix, sqrt_wp2)  # (ncol, nlev)
     # ``Pr_t`` likewise may be a scalar (production, byte-identical) OR a
     # per-column LES-informed correction (the turbulent Prandtl number
     # Pr_t = K_m/K_h diagnosed from the LES); broadcast it over the vertical too.
