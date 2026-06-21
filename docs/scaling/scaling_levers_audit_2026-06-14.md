@@ -24,6 +24,9 @@ Gloo-TCP no-IB; 2× RTX8000 PCIe no-NVLink) from FUTURE-HW-only.
 3. **MPAS METIS partition by default in scaling runs** — MED-HIGH, CPU-MPI. RCB
    is default; METIS exists (`voronoi_partition.py:204/422`). Better cut →
    fewer halo cells/neighbors/imbalance on coastal MPAS. Cheap to A/B.
+   **DONE 2026-06-21**: default flipped to capability-gated `method="auto"`
+   (METIS when `pymetis` present, else RCB) + new Hilbert `method="sfc"`; see the
+   2026-06-21 update in `scaling_levers_audit_2026-06-15.md` for the A/B numbers.
 4. **MPAS operator fusion / Pallas for indirect gathers** — HIGH, single-GPU
    first. MPAS is gather-heavy (`profile_mpas_ocean.py`, `ocean_pe_mpas.py:357`);
    fuse repeated edge/cell gathers.

@@ -96,7 +96,7 @@
 
 **New capabilities (Voronoi halo exchange, ensemble parallelism, land model validation):**
 
-1. **Voronoi mesh domain decomposition** (`parallel/voronoi_partition.py`): Full domain decomposition for unstructured MPAS/Voronoi meshes. Recursive Coordinate Bisection (RCB) geometric partitioner using 3D cell-center coordinates on the unit sphere — no external dependencies. Optional METIS graph partitioner (`partition_cells_metis()`) for better load balancing on variable-resolution meshes. 2-layer halo depth for biharmonic (del4) stencils. Entity ownership rules: edges owned by rank of `min(cellsOnEdge)`, vertices by `min(cellsOnVertex)`. Communication schedules with send/recv lists sorted by global index for deterministic MPI matching. See §6.2.3.
+1. **Voronoi mesh domain decomposition** (`parallel/voronoi_partition.py`): Full domain decomposition for unstructured MPAS/Voronoi meshes. The partitioner is selected by a capability-aware `method="auto"` default: METIS k-way graph partitioning (via the optional `pymetis` dependency — the `[mesh]` extra) when available, else the dependency-free Recursive Coordinate Bisection (RCB) geometric partitioner using 3D cell-center coordinates on the unit sphere. Graph partitioning minimizes the edge cut → better load balance and smaller halos on variable-resolution meshes; `auto` is byte-identical to RCB where `pymetis` is absent. A third `method="sfc"` orders cells along a Hilbert space-filling curve into balanced contiguous chunks (dependency-free, locality-preserving), and `reorder_voronoi_for_sharding()` Hilbert-orders cells within each shard for `NamedSharding` locality. Local arrays use owned-first indexing (owned cells before halo). 2-layer halo depth for biharmonic (del4) stencils. Entity ownership rules: edges owned by rank of `min(cellsOnEdge)`, vertices by `min(cellsOnVertex)`. Communication schedules with send/recv lists sorted by global index for deterministic MPI matching. See §6.2.3.
 
 2. **Voronoi halo exchange** (`parallel/halo_exchange_voronoi.py`): `VoronoiHaloExchange` class with `exchange_cell_field()`, `exchange_edge_field()`, `exchange_vertex_field()` methods using mpi4jax sendrecv. MPI tags use entity-type offset (0/1M/2M) to avoid collisions between simultaneous cell/edge/vertex exchanges. `exchange_local_simulated()` for single-process testing. Supports multi-dimensional fields `(n_local, nlev, ...)`. Local mesh construction remaps connectivity from global to local indices; non-local entries mapped to -1 (compatible with existing TRiSK operator masking). 34 tests verify partition validity, operator equivalence (divergence, gradient, curl, kinetic energy), and halo exchange correctness. See §6.2.3.
 
@@ -1740,9 +1740,10 @@ halo = VoronoiHaloExchange(part, backend="mpi")
 u_local = halo.exchange_edge_field(u_local)
 ```
 
-**Partitioning strategies**:
+**Partitioning strategies** (`method="auto"` default via `resolve_partition_method()`: METIS when `pymetis` importable, else RCB):
 - `partition_cells_geometric()` — Recursive Coordinate Bisection (RCB) using 3D cell centers. No external dependencies.
-- `partition_cells_metis()` — k-way graph partitioning via pymetis. Better load balancing for variable-resolution meshes.
+- `partition_cells_metis()` — k-way graph partitioning via pymetis (`[mesh]` extra). Minimizes edge cut → better load balance + smaller halos on variable-resolution meshes.
+- `partition_cells_sfc()` — balanced contiguous chunks along a Hilbert space-filling curve (`hilbert_cell_keys()`). Dependency-free, locality-preserving. `reorder_voronoi_for_sharding()` also Hilbert-orders cells within each shard.
 
 **Data structures**:
 - `VoronoiPartition` — owned/halo cell/edge/vertex lists, global sizes, communication schedules per entity type.
@@ -2461,7 +2462,7 @@ legoESM/
 │   │   ├── comm.py                         # CommTopology
 │   │   ├── distributed.py                  # MPI initialization
 │   │   ├── halo_exchange.py                # MPI halo exchange (structured grids)
-│   │   ├── voronoi_partition.py            # Voronoi/MPAS mesh decomposition (RCB, METIS)
+│   │   ├── voronoi_partition.py            # Voronoi/MPAS mesh decomposition (auto: METIS/RCB; SFC Hilbert)
 │   │   ├── halo_exchange_voronoi.py        # Voronoi halo exchange (MPI + simulated)
 │   │   ├── ensemble.py                     # Ensemble parallelism (vmap, sharding, scan)
 │   │   ├── metal.py                        # Apple Metal support

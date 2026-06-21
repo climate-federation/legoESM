@@ -76,7 +76,7 @@ untouched.
 
 | component | grid          | MPI multi-rank        | strong scaling (this host) |
 |-----------|---------------|-----------------------|----------------------------|
-| atmosphere| **icosahedral** | ✅ RCB domain decomp | 1.24× @2 ranks, plateaus @4 — sync-barrier/jitter-bound on a shared node; correct vs serial to ~1e-9 |
+| atmosphere| **icosahedral** | ✅ `auto` domain decomp (METIS graph-partition when `pymetis` present, else RCB; `sfc` Hilbert option) | 1.24× @2 ranks, plateaus @4 — sync-barrier/jitter-bound on a shared node; correct vs serial to ~1e-9 |
 | atmosphere| cubed-sphere  | replicated under MPI; real path = face-sharded SPMD (≥2 GPUs) | — |
 | atmosphere| lat-lon       | not implemented (#115) | — |
 | atmosphere| spectral      | rank-1 (global transforms) | — |
