@@ -82,6 +82,7 @@ from legoesm.parallel.voronoi_partition import (
     build_local_mesh,
     scatter_to_local,
     reorder_voronoi_for_sharding,
+    resolve_partition_method,
 )
 
 from legoesm.parallel.halo_exchange_voronoi import (
@@ -205,6 +206,7 @@ __all__ = [
     "build_local_mesh",
     "scatter_to_local",
     "reorder_voronoi_for_sharding",
+    "resolve_partition_method",
     "VoronoiHaloExchange",
     "exchange_local_simulated",
     # Ensemble parallelism

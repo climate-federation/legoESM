@@ -58,6 +58,7 @@ from legoesm.parallel.voronoi_partition import (
     partition_cells_geometric,
     partition_cells_metis,
     partition_voronoi_mesh,
+    resolve_partition_method,
     scatter_to_local,
 )
 from legoesm.parallel.halo_exchange_voronoi import (
@@ -133,7 +134,7 @@ def make_voronoi_partition_layout(
     rank: int,
     n_ranks: int,
     *,
-    method: str = "geometric",
+    method: str = "auto",
     halo_depth: int = 2,
     cell_owner: np.ndarray | None = None,
 ) -> VoronoiPartitionLayout:
@@ -389,7 +390,7 @@ def _fix_mass_mpi(
 def initialize_voronoi_mpi(
     global_mesh: VoronoiMesh,
     *,
-    method: str = "geometric",
+    method: str = "auto",
     halo_depth: int = 2,
 ) -> tuple[int, int, VoronoiPartitionLayout]:
     """Initialize MPI for Voronoi domain decomposition.
@@ -406,10 +407,13 @@ def initialize_voronoi_mpi(
     n_ranks = comm.Get_size()
 
     # Compute cell ownership on all ranks (deterministic, no communication)
+    method = resolve_partition_method(method)
     if method == "geometric":
         cell_owner = partition_cells_geometric(global_mesh, n_ranks)
-    else:
+    elif method == "metis":
         cell_owner = partition_cells_metis(global_mesh, n_ranks)
+    else:
+        raise ValueError(f"Unknown partitioning method: {method!r}")
 
     layout = make_voronoi_partition_layout(
         global_mesh, rank, n_ranks,

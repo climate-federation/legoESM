@@ -31,10 +31,55 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import importlib.util
+import logging
+
 import numpy as np
 import jax.numpy as jnp
 
 from legoesm.grids.voronoi import VoronoiMesh
+
+logger = logging.getLogger("legoesm.parallel.voronoi_partition")
+
+# One-time log guard so a per-rank/per-call "auto" resolution does not spam.
+_AUTO_METHOD_LOGGED = False
+
+
+def _metis_available() -> bool:
+    """True if the optional ``pymetis`` graph-partitioning package is importable."""
+    return importlib.util.find_spec("pymetis") is not None
+
+
+def resolve_partition_method(method: str) -> str:
+    """Resolve a partition method, expanding ``"auto"`` by available capability.
+
+    ``"auto"`` (the default) selects ``"metis"`` when ``pymetis`` is importable —
+    graph partitioning minimizes the edge cut, giving better load balance and
+    smaller halos on irregular/variable-resolution meshes (the MPAS lesson:
+    geometric RCB leaves lopsided cell counts and fat halos at scale) — and
+    otherwise falls back to ``"geometric"`` (RCB, no dependency).
+
+    ``"geometric"``, ``"metis"``, and any unknown value pass through UNCHANGED so
+    the caller's own dispatch guard still raises on an unknown method. Returns the
+    concrete method name.
+    """
+    global _AUTO_METHOD_LOGGED
+    if method != "auto":
+        return method
+    chosen = "metis" if _metis_available() else "geometric"
+    if not _AUTO_METHOD_LOGGED:
+        _AUTO_METHOD_LOGGED = True
+        if chosen == "metis":
+            logger.info(
+                "Voronoi partition method='auto' -> 'metis' (pymetis available; "
+                "graph partitioning for load balance + smaller halos)."
+            )
+        else:
+            logger.info(
+                "Voronoi partition method='auto' -> 'geometric' RCB (pymetis not "
+                "installed; `pip install pymetis` for better load balance at scale)."
+            )
+    return chosen
 
 
 # ============================================================================
@@ -394,7 +439,7 @@ def partition_voronoi_mesh(
     n_ranks: int,
     rank: int,
     *,
-    method: str = "geometric",
+    method: str = "auto",
     halo_depth: int = 2,
     cell_owner: np.ndarray | None = None,
 ) -> VoronoiPartition:
@@ -409,7 +454,8 @@ def partition_voronoi_mesh(
     rank : int
         This rank (0-based).
     method : str
-        ``"geometric"`` (RCB) or ``"metis"``.
+        ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
+        ``"geometric"`` (RCB), or ``"metis"``.
     halo_depth : int
         Number of halo cell layers (default 2 for del4 support).
     cell_owner : np.ndarray or None
@@ -419,13 +465,17 @@ def partition_voronoi_mesh(
     -------
     VoronoiPartition
     """
+    # Validate at entry on the static method value (CLAUDE.md: fail early) so an
+    # unknown method raises even when ``cell_owner`` is supplied or the method is
+    # otherwise unused.
+    method = resolve_partition_method(method)
+    if method not in ("geometric", "metis"):
+        raise ValueError(f"Unknown partitioning method: {method!r}")
     if cell_owner is None:
         if method == "geometric":
             cell_owner = partition_cells_geometric(mesh, n_ranks)
-        elif method == "metis":
+        else:  # "metis" (validated above)
             cell_owner = partition_cells_metis(mesh, n_ranks)
-        else:
-            raise ValueError(f"Unknown partitioning method: {method!r}")
 
     # Convert mesh connectivity to numpy for the setup phase.
     cellsOnCell = np.asarray(mesh.cellsOnCell)       # (maxEdges, nCells)
@@ -860,7 +910,7 @@ def reorder_voronoi_for_sharding(
     mesh: VoronoiMesh,
     n_devices: int,
     *,
-    method: str = "geometric",
+    method: str = "auto",
 ) -> VoronoiMesh:
     """Reorder a Voronoi mesh so that JAX NamedSharding gives spatial locality.
 
@@ -877,20 +927,26 @@ def reorder_voronoi_for_sharding(
     n_devices : int
         Number of devices (partitions).
     method : str
-        ``"geometric"`` (RCB) or ``"metis"``.
+        ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
+        ``"geometric"`` (RCB), or ``"metis"``.
 
     Returns
     -------
     VoronoiMesh
         Mesh with reordered entities and remapped connectivity.
     """
+    # Validate at entry (CLAUDE.md: fail early) BEFORE the single-device shortcut,
+    # so an unknown method raises even when no partitioning happens.
+    method = resolve_partition_method(method)
+    if method not in ("geometric", "metis"):
+        raise ValueError(f"Unknown partitioning method: {method!r}")
     if n_devices <= 1:
         return mesh
 
     # --- Partition cells ---
     if method == "geometric":
         cell_owner = partition_cells_geometric(mesh, n_devices)
-    else:
+    else:  # "metis" (validated above)
         cell_owner = partition_cells_metis(mesh, n_devices)
 
     # --- Cell permutation: group by owner, stable sort within each group ---
