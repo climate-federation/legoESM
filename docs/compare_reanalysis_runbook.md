@@ -312,6 +312,37 @@ averaging window.
 > shorter than the model `days`** — so the default `--era5-n-times 1` against a multi-day run is
 > caught at launch. (Zarr `--era5-zarr` already spans times, so `--era5-n-days` is offline-only.)
 
+### 3b. Diagnose a `stalled` / `no_valid_diagnoses` correction (why didn't the bias move?)
+
+A no-go verdict is NOT necessarily a broken loop — it is usually the **config**. The run prints
+and records exactly which, so debug in this order:
+
+1. **Was the bias C_K-INSENSITIVE?** If you launched with **idealized radiation** (`gray`/`none`),
+   the run prints a launch `WARNING: radiation='gray' is IDEALIZED ... use radiation='rrtmgp'`,
+   and the verdict (`stalled` / OSSE `no_change`) carries a `C_K-INSENSITIVE` note. Under gray the
+   bias is idealization-dominated, so a 40 % C_K change moves it only ~0.0025 (vs an ~11 real-ERA5
+   bias) — **no C_K can fix it.** Re-run with `--radiation rrtmgp` (the §1b go/no-go uses it).
+
+2. **Did the spin-off LESs develop turbulence?** Each run prints an aggregate
+   `LES realism: M/N realistic, K rejected (a× laminar, b× blow-up, …)` line (and an identical
+   `les_realism` block in the output JSON). Many `laminar` rejections ⇒ the LES is too short /
+   unforced — lengthen `--les-hours` or check the surface forcing (`--surface-flux`).
+
+3. **Realistic LES but still no correction?** Run the single-column debug CLI on a worst column —
+   it prints, per column, `realism: REALISTIC — N/M valid diagnosis levels`. `REALISTIC` with a low
+   `N` means the rejection is the **diagnosis** (insufficient resolved shear/variance for a
+   down-gradient closure, or too few levels below the top sponge), NOT turbulence — refine the LES
+   **resolution**, not its duration:
+
+```bash
+$PY scripts/run/run_column_les.py --manifest worst.json --restart amip_restart.npz \
+    --resolution $RES --nlev $NLEV --method clubb_coefficient --out col_coef.npz
+```
+
+`n_diagnoses_valid` in the per-round report (and `..._total` in the summary) is the column count
+that received a real correction; `0` with worst columns flagged means every spin-off was rejected —
+the cause is one of the three above, NOT the correction logic.
+
 ## 4. Preflight the DEPLOY (seconds, no model run)
 
 Confirm the campaign output deploys onto your production base config + grid (the

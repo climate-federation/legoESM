@@ -233,3 +233,17 @@ def test_path_bootstrap_audit_is_non_vacuous():
     assert _IMPORTS_SCRIPTS_RE.search(bug) and "sys.path.insert" not in bug      # flagged
     assert _IMPORTS_SCRIPTS_RE.search(fixed) and "sys.path.insert" in fixed       # passes
     assert not _IMPORTS_SCRIPTS_RE.search(clean)                                  # not applicable
+
+
+def test_runbook_documents_the_starved_correction_diagnostics():
+    """The runbook must teach the operator to read the diagnostics the iter-508..524 arc added
+    (iter 526): the realism breakdown, the diagnosis valid-level count, and the
+    C_K-insensitivity/rrtmgp guidance — else those operator-facing outputs are produced but the
+    operator does not know they exist or what they mean. A doc-consistency tripwire: removing the
+    §3b diagnose-a-stalled-correction guidance fails here."""
+    text = _runbook_text()
+    # the three rejection causes a no-go verdict can have, each surfaced by the run:
+    assert "LES realism:" in text                       # the realism breakdown line (iter 512/520)
+    assert "valid diagnosis levels" in text             # the diagnosis-validity count (iter 524)
+    assert "C_K-INSENSITIVE" in text and "rrtmgp" in text  # the idealized-radiation guidance (515)
+    assert "n_diagnoses_valid" in text                  # the column-count signal (iter 100/510)
