@@ -31,7 +31,10 @@ from legoesm.ocean.eos import (
     c_sw as _C_SW,
 )
 from legoesm.ocean.init_mpas import reconstruct_cell_velocity
-from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+from legoesm.ocean.physics.mixing import (
+    vertical_diffusion_variable_K,
+    flux_divergence_zero_flux,
+)
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
@@ -145,11 +148,10 @@ def _vertical_diffusion_edge_partial(
     df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
     flux = K_half * df_dz  # (nEdges, nlev-1)
 
-    # Tendency at full levels: d(flux)/dz with zero-flux BCs.
-    top = -flux[..., :1] / h_safe[..., :1]
-    interior = (flux[..., :-1] - flux[..., 1:]) / h_safe[..., 1:-1]
-    bottom = flux[..., -1:] / h_safe[..., -1:]
-    return jnp.concatenate([top, interior, bottom], axis=-1)
+    # Tendency at full levels: d(flux)/dz with zero-flux BCs (shared kernel,
+    # #518 item 4).  ``h_safe`` carries this site's max(h_e, 1.0) partial-cell
+    # floor (NOT the z* where(dz>0,dz,1) floor — different on partial cells).
+    return flux_divergence_zero_flux(flux, h_safe)
 
 
 def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):

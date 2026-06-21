@@ -180,7 +180,12 @@ def vertical_flux_divergence(
     -------
     tendency : array (..., nlev)
     """
-    # Single Pad HLO op (replaces alloc-zeros + concatenate of three).
+    # NOT routed through ``mixing.flux_divergence_zero_flux`` (#518 item 4): the
+    # GM/Redi flux ``F_z`` is a rotated isoneutral tensor flux (off-diagonal
+    # S_x·dq/dx terms), NOT a simple K·dq/dz, AND this site builds the surface
+    # ghost via ``jnp.pad`` (``0 - F_z[0]``), which differs from the diffusion
+    # sites' explicit ``-F_z[0]`` by a sign-of-zero when ``F_z[0]`` is +0.0.
+    # Keeping the original pad form preserves byte identity here.
     pad_axes = ((0, 0),) * (F_z.ndim - 1)
     F_z_ext = jnp.pad(F_z, (*pad_axes, (1, 1)))
     return (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
