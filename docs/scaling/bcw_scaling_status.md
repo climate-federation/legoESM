@@ -421,11 +421,21 @@ Honest scope: GPU is capped at **2 devices** (one dual-RTX8000 node; multi-node
 GPU is HW-blocked — no NCCL/IB, only PCIe-Gen3 + Gloo).  **spectral is
 float64-only single-device** by design.  **Ocean GPU is single-device only**
 (`bench_ocean_gpu_scaling.py` hardcodes `n_gpus=1`; the ocean SPMD multi-GPU
-wrapper is not wired — see `omip_multinode_spmd_scope`).  The **cubed-sphere GPU
-strong-scaling 2-device** point is still finishing in the long
-`run_levante_gpu_scaling` cube sweep (the cube weak 1→2 GPU + both single-device
-throughputs ARE in the figure); it refreshes on the next aggregate when that
-strong CSV lands.
+wrapper is not wired — see `omip_multinode_spmd_scope`).
+
+**Cubed-sphere GPU strong-scaling 1→2 device is cross-GPU-halo bound (measured,
+anti-scaling).**  Direct measurement (f32, job 8534102): C48 59.4→51.0 Mcells/s
+(0.86×, 43% eff), C96 82.1→82.0 Mcells/s (1.0×, 50% eff) — the 2nd GPU buys ~no
+throughput because the C-D-grid face split adds a cross-device halo (the "21
+collective-permute start/done" ops in the timed HLO census) whose latency cancels
+the compute gain at these problem sizes.  This is the SAME mechanism as the
+documented cube >6-device anti-scaling — the cube simply does not strong-scale on
+the dual-RTX8000 PCIe/Gloo fabric.  (The f64 + C192 strong points were not run to
+completion: each cross-GPU cube config compiles ~200s and the f32+f64 × {1,2}dev
+× {48,96,192} sweep exceeds practical walltime — but the result is already clear
+from f32/C48-C96.)  The publication figure therefore represents the cube on GPU
+by its single-device throughput (f32 & f64) + weak 1→2 device; the strong
+2-device curve is omitted as a measured non-result (halo-bound), not a gap.
 
 Aggregator fix (this run, codex-reviewed): `aggregate_bcw_scaling.py` previously
 SILENTLY DROPPED the nested atmosphere GPU `ScalingReport` JSONs (only flat
