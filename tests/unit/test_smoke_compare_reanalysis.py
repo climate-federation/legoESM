@@ -37,16 +37,19 @@ def test_run_smoke_validates_realistic_ocean_only_surface_flux_flags(tmp_path):
 
 
 def test_run_smoke_ocean_only_with_a_real_land_mask_excludes_land(tmp_path, capsys):
-    """REGRESSION (iter 486): with a real (synthetic) land mask, --ocean-only must rank a
-    STRICT SUBSET of columns (land EXCLUDED), validating the full harness on a NON-trivial
-    mask — not the flat-config all-ocean no-op the other ocean-only smoke exercises."""
+    """REGRESSION (iter 486/490): the COMPLETE realistic AMIP combo — a real (synthetic) land
+    mask + --ocean-only + --surface-flux TOGETHER (iter 490). --ocean-only must rank a STRICT
+    SUBSET of columns (land EXCLUDED), validating the full harness on a NON-trivial mask (not
+    the flat-config all-ocean no-op), while --surface-flux (the SST-driven LES BC, valid over
+    the ocean columns ocean-only keeps) rides along — the exact flag combo the recommended
+    realistic run uses, all three at once."""
     from scripts.data.make_synthetic_land_mask import main as mask_main
     from scripts.experiment.smoke_compare_reanalysis import run_smoke
 
     mask = tmp_path / "land.nc"
     assert mask_main([str(mask)]) == 0
     rc = run_smoke(str(tmp_path), resolution=8, nlev=5, era5_nlat=8, era5_nlon=16,
-                   ocean_only=True, land_mask_path=str(mask))
+                   ocean_only=True, surface_flux=True, land_mask_path=str(mask))
     assert rc == 0
     out = capsys.readouterr().out
     import re
