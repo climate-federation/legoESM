@@ -31,13 +31,22 @@ NLEV="${NLEV:-20}"        # rrtmgp wants ~20 levels for accurate radiation (runb
 DAYS="${DAYS:-10}"
 mkdir -p results/compare_reanalysis
 
+ARGS=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE"
+      --resolution "$RESOLUTION" --nlev "$NLEV" --radiation rrtmgp --days "$DAYS" --c-k 0.4 1.0)
+# OCEAN_ONLY restricts the sensitivity to ocean columns so the go/no-go scores the SAME columns
+# an ocean-only campaign ranks (iter 477) -- without it a land-model bias the closure cannot move
+# dilutes the fraction and can FALSELY gate the campaign NO-GO. Pair it with LAND_MASK_PATH (the
+# campaign's land/sea mask) to select a real ocean subset (on a flat model it is a safe no-op),
+# and set MAX_LAND_FRACTION to match the campaign's OCEAN_ONLY threshold (default 0.5).
+if [ -n "${OCEAN_ONLY:-}" ]; then ARGS+=(--ocean-only); fi
+if [ -n "${LAND_MASK_PATH:-}" ]; then ARGS+=(--land-mask-path "$LAND_MASK_PATH"); fi
+if [ -n "${MAX_LAND_FRACTION:-}" ]; then ARGS+=(--max-land-fraction "$MAX_LAND_FRACTION"); fi
+
 echo "=== HOST ==="; hostname; date
 # Run the REALISTIC (rrtmgp) two-C_K sensitivity vs real ERA5; the tool's exit code IS the
 # go/no-go gate (0=GO, 1=NO-GO). Swap --days for "--days-sweep 1 3 6" to ask if run length
 # (equilibration) is the lever instead.
-JAX_ENABLE_X64=1 "$PY" scripts/experiment/ck_sensitivity_vs_era5.py \
-  --local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE" \
-  --resolution "$RESOLUTION" --nlev "$NLEV" --radiation rrtmgp --days "$DAYS" --c-k 0.4 1.0
+JAX_ENABLE_X64=1 "$PY" scripts/experiment/ck_sensitivity_vs_era5.py "${ARGS[@]}"
 rc=$?
 echo "preflight_rc=$rc (0=GO -> launch the campaign; 1=NO-GO -> add realism / run longer)"; date
 exit "$rc"

@@ -107,6 +107,9 @@ total.
 > compute node. The turnkey wrapper `scripts/cluster/compare_reanalysis/preflight_ck_sensitivity.sbatch`
 > runs it as a batch job and exits with the go/no-go code, so the campaign launch can be a
 > dependency: `jid=$(sbatch --parsable preflight_ck_sensitivity.sbatch); sbatch --dependency=afterok:$jid run_correction_campaign.sbatch`.
+> To MATCH an ocean-only campaign, pass the same env vars to the pre-flight wrapper as to the
+> campaign one: `OCEAN_ONLY=1 LAND_MASK_PATH=<mask> MAX_LAND_FRACTION=<thr>` (iter 478) — both
+> launchers then score the same ocean columns, so the go/no-go reflects the campaign's domain.
 >
 > *Tip:* run the **gray** pre-flight FIRST as a quick (minutes, interactive) chain sanity-check —
 > it reports NO-GO with the per-level BL-localization, so a clean run confirms the real-ERA5

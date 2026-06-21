@@ -337,6 +337,15 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _build_arg_parser().parse_args(argv)
 
+    # Fail-fast on a non-existent land mask BEFORE the (slow) model runs — without this a
+    # typo'd --land-mask-path surfaces only deep in the model build (xarray open_dataset),
+    # after the setup time is spent; worse, with --ocean-only it could read as a config the
+    # operator never has (mirrors the iter-454 config-writer fail-fast).
+    if args.land_mask_path and not Path(args.land_mask_path).is_file():
+        raise SystemExit(
+            f"[ck-sensitivity] --land-mask-path does not exist: {args.land_mask_path!r} — "
+            "pass the campaign's land/sea mask (or drop it for a flat/aquaplanet preflight).")
+
     if args.radiation != "gray":
         # Fail-fast heads-up BEFORE the (slow) runs: rrtmgp's radiation graph is
         # compute-heavy (a res-4/nlev-20/2-day realistic run did NOT finish in ~16 min on a

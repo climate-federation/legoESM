@@ -70,6 +70,18 @@ def test_bias_ck_sensitivity_ocean_only_mask_rescues_a_land_diluted_verdict():
         bias_ck_sensitivity(lo, hi, valid_mask=np.zeros(8, dtype=bool))
 
 
+def test_main_fails_fast_on_a_nonexistent_land_mask(tmp_path):
+    """A typo'd --land-mask-path must fail BEFORE the (slow) model runs — a non-existent
+    mask would otherwise surface only deep in the model build, after the setup is spent
+    (mirrors the iter-454 config-writer fail-fast)."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import main
+
+    missing = tmp_path / "no_such_mask.nc"
+    with pytest.raises(SystemExit, match="does not exist"):
+        main(["--local-era5-dir", str(tmp_path), "--local-era5-date", "20200101",
+              "--ocean-only", "--land-mask-path", str(missing)])
+
+
 def test_preflight_exit_code_gates_the_hpc_launch():
     """The pre-flight exit code gates an HPC launch: GO (0) when the C_K loop CAN lower the
     bias (a rising sensitivity trend OR a C_K-feasible config), NO-GO (1) when it cannot

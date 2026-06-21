@@ -85,6 +85,10 @@ COMMON=(--config "$CONFIG" --mode "$MODE"
 # attributable to the atmospheric/turbulence closure the loop tunes — not the land model's own
 # surface biases). Recommended for AMIP over realistic land; a no-op on an aquaplanet. (iter 451)
 if [ -n "${OCEAN_ONLY:-}" ]; then COMMON+=(--ocean-only); fi
+# MAX_LAND_FRACTION is the ocean threshold for OCEAN_ONLY (a column is ocean where its land
+# fraction <= this; default 0.5 = majority ocean). Set it to MATCH the C_K-sensitivity preflight
+# (ck_sensitivity_vs_era5.py --max-land-fraction, iter 477) so both score the same columns.
+if [ -n "${MAX_LAND_FRACTION:-}" ]; then COMMON+=(--max-land-fraction "${MAX_LAND_FRACTION}"); fi
 # SURFACE_FLUX gives each spin-off LES an SST-driven surface buoyancy flux (the convective driver
 # the LES needs to develop turbulence for a valid C_K diagnosis, iter 364/465). RECOMMENDED for a
 # realistic run, PAIRED with OCEAN_ONLY (the flux is valid over ocean; a land column would get a
