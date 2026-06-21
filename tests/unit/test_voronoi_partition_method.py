@@ -16,18 +16,19 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import legoesm.parallel.voronoi_partition as vp
 import numpy as np
 import pytest
-
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.parallel.voronoi_partition import (
+    hilbert_cell_keys,
     partition_cells_geometric,
     partition_cells_metis,
+    partition_cells_sfc,
     partition_voronoi_mesh,
     reorder_voronoi_for_sharding,
     resolve_partition_method,
 )
-import legoesm.parallel.voronoi_partition as vp
 
 N_RANKS = 4
 
@@ -92,6 +93,59 @@ class TestOwnerArrays:
         owner = partition_cells_metis(mesh, N_RANKS)
         _assert_valid_owner(owner, mesh.nCells, N_RANKS)
 
+    def test_sfc_owner_valid(self, mesh):
+        owner = partition_cells_sfc(mesh, N_RANKS)
+        _assert_valid_owner(owner, mesh.nCells, N_RANKS)
+
+    def test_sfc_balanced_contiguous(self, mesh):
+        owner = partition_cells_sfc(mesh, N_RANKS)
+        counts = np.bincount(owner, minlength=N_RANKS)
+        # Contiguous equal chunks -> counts differ by at most 1.
+        assert counts.max() - counts.min() <= 1
+
+    def test_sfc_deterministic(self, mesh):
+        assert np.array_equal(
+            partition_cells_sfc(mesh, N_RANKS), partition_cells_sfc(mesh, N_RANKS)
+        )
+
+    def test_sfc_single_rank_all_zero(self, mesh):
+        owner = partition_cells_sfc(mesh, 1)
+        assert owner.shape == (mesh.nCells,)
+        assert np.all(owner == 0)
+
+
+# ---------------------------------------------------------------------------
+# Hilbert space-filling curve
+# ---------------------------------------------------------------------------
+
+class TestHilbert:
+    @pytest.mark.parametrize("order", [1, 2, 3, 4])
+    def test_hilbert_is_bijection(self, order):
+        n = 1 << order
+        gx, gy = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        d = vp._hilbert_xy2d(order, gx.ravel(), gy.ravel())
+        # Bijection [0,n)^2 -> [0,n^2): every distance hit exactly once.
+        assert np.array_equal(np.sort(d), np.arange(n * n))
+
+    def test_hilbert_unit_step_adjacency(self):
+        # Consecutive Hilbert distances must be grid-adjacent (|dx|+|dy| == 1):
+        # the locality property the partitioner relies on.
+        order = 4
+        n = 1 << order
+        gx, gy = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        d = vp._hilbert_xy2d(order, gx.ravel(), gy.ravel())
+        inv = np.empty(n * n, dtype=np.int64)
+        inv[d] = np.arange(n * n)  # inv[k] = flat index of the k-th curve point
+        xs, ys = gx.ravel()[inv], gy.ravel()[inv]
+        steps = np.abs(np.diff(xs)) + np.abs(np.diff(ys))
+        assert np.all(steps == 1)
+
+    def test_cell_keys_shape_and_range(self, mesh):
+        keys = hilbert_cell_keys(mesh)
+        n = 1 << vp._DEFAULT_HILBERT_ORDER
+        assert keys.shape == (mesh.nCells,)
+        assert keys.min() >= 0 and keys.max() < n * n
+
 
 # ---------------------------------------------------------------------------
 # Dispatch hardening — unknown method raises at EVERY site
@@ -139,3 +193,49 @@ class TestAutoEquivalence:
     def test_reorder_single_device_noop(self, mesh):
         # n_devices <= 1 returns the mesh unchanged (no partition needed).
         assert reorder_voronoi_for_sharding(mesh, 1, method="auto") is mesh
+
+
+# ---------------------------------------------------------------------------
+# Owned-first local indexing (existing contract — locked by a test)
+# ---------------------------------------------------------------------------
+
+class TestOwnedFirstLocalIndexing:
+    def test_owned_cells_come_first(self, mesh):
+        owner = partition_cells_geometric(mesh, N_RANKS)
+        part = partition_voronoi_mesh(mesh, N_RANKS, 0, cell_owner=owner)
+        no = part.n_owned_cells
+        local = np.asarray(part.local_cells)
+        # Owned block first (all owned by rank 0), halo block after (none rank 0).
+        assert np.all(owner[local[:no]] == 0)
+        assert np.all(owner[local[no:]] != 0)
+
+    def test_cell_g2l_roundtrips_local_order(self, mesh):
+        owner = partition_cells_geometric(mesh, N_RANKS)
+        part = partition_voronoi_mesh(mesh, N_RANKS, 0, cell_owner=owner)
+        local = np.asarray(part.local_cells)
+        g2l = np.asarray(part.cell_g2l)
+        assert np.all(g2l[local] == np.arange(len(local)))
+
+
+# ---------------------------------------------------------------------------
+# SFC wired into the entry points
+# ---------------------------------------------------------------------------
+
+class TestSFCWiring:
+    def test_partition_voronoi_mesh_sfc(self, mesh):
+        part = partition_voronoi_mesh(mesh, N_RANKS, 0, method="sfc")
+        assert part.n_owned_cells > 0
+
+    def test_reorder_sfc_is_permutation(self, mesh):
+        reordered = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
+        assert reordered.nCells == mesh.nCells
+        # Reorder is a pure permutation: the cell-latitude multiset is preserved.
+        assert np.allclose(
+            np.sort(np.asarray(reordered.latCell)),
+            np.sort(np.asarray(mesh.latCell)),
+        )
+
+    def test_reorder_default_preserves_cells(self, mesh):
+        # Default method (auto->geometric here) now SFC-orders within owners.
+        reordered = reorder_voronoi_for_sharding(mesh, 2)
+        assert reordered.nCells == mesh.nCells

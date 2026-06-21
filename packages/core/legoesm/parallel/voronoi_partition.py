@@ -44,6 +44,13 @@ logger = logging.getLogger("legoesm.parallel.voronoi_partition")
 # One-time log guard so a per-rank/per-call "auto" resolution does not spam.
 _AUTO_METHOD_LOGGED = False
 
+# Hilbert space-filling-curve resolution: a 2^order x 2^order (lat, lon) grid.
+# order=10 -> 1024^2 ~ 1.05e6 buckets, finer than any production Voronoi mesh
+# (level-9 SCVT ~2.6e6 cells is the practical ceiling; ties break by stable
+# sort), so distinct cells almost never collide. Module constant, not config:
+# it is a numerics resolution knob, not a tunable.
+_DEFAULT_HILBERT_ORDER = 10
+
 
 def _metis_available() -> bool:
     """True if the optional ``pymetis`` graph-partitioning package is importable."""
@@ -279,6 +286,88 @@ def partition_cells_metis(mesh: VoronoiMesh, n_ranks: int) -> np.ndarray:
     return np.array(membership, dtype=np.int32)
 
 
+def _hilbert_xy2d(order: int, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Hilbert-curve distance ``d`` for integer grid coords ``(x, y)``.
+
+    Vectorized form of the canonical Wikipedia ``xy2d`` integer algorithm on a
+    ``2^order x 2^order`` grid (rotation uses the full side length ``n``, not the
+    current level ``s``).  Returns a bijection ``[0, n)^2 -> [0, n^2)`` whose
+    1-D ordering preserves 2-D locality: cells adjacent on the curve are spatially
+    close, which keeps each contiguous partition compact (small halo surface).
+    """
+    n = 1 << order
+    x = x.astype(np.int64).copy()
+    y = y.astype(np.int64).copy()
+    d = np.zeros(x.shape, dtype=np.int64)
+    s = n >> 1
+    while s > 0:
+        rx = ((x & s) > 0).astype(np.int64)
+        ry = ((y & s) > 0).astype(np.int64)
+        d += s * s * ((3 * rx) ^ ry)
+        # rot(n, x, y, rx, ry): reflect when ry==0 (and x,y when rx==1), then swap.
+        ry0 = ry == 0
+        flip = ry0 & (rx == 1)
+        x = np.where(flip, n - 1 - x, x)
+        y = np.where(flip, n - 1 - y, y)
+        tx = np.where(ry0, y, x)
+        ty = np.where(ry0, x, y)
+        x, y = tx, ty
+        s >>= 1
+    return d
+
+
+def hilbert_cell_keys(mesh: VoronoiMesh, order: int = _DEFAULT_HILBERT_ORDER) -> np.ndarray:
+    """Per-cell Hilbert space-filling-curve key from cell (lat, lon).
+
+    Maps each cell center to a ``2^order x 2^order`` (lon, lat) grid and returns
+    its Hilbert distance.  Sorting cells by this key yields a 1-D ordering with
+    strong 2-D spatial locality — used to build compact, contiguous partitions
+    and locality-friendly local indexings.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    order : int
+        SFC grid resolution (side = ``2^order``).
+
+    Returns
+    -------
+    np.ndarray, shape (nCells,), dtype int64
+    """
+    two_pi = 2.0 * np.pi
+    lon = np.mod(np.asarray(mesh.lonCell, dtype=np.float64), two_pi)
+    lat = np.asarray(mesh.latCell, dtype=np.float64)
+    n = 1 << order
+    u = lon / two_pi                       # [0, 1)
+    v = (lat + 0.5 * np.pi) / np.pi        # [0, 1]
+    gx = np.clip((u * n).astype(np.int64), 0, n - 1)
+    gy = np.clip((v * n).astype(np.int64), 0, n - 1)
+    return _hilbert_xy2d(order, gx, gy)
+
+
+def partition_cells_sfc(
+    mesh: VoronoiMesh, n_ranks: int, order: int = _DEFAULT_HILBERT_ORDER,
+) -> np.ndarray:
+    """Partition cells into contiguous Hilbert space-filling-curve chunks.
+
+    Orders cells along a Hilbert curve, then assigns ``n_ranks`` balanced
+    contiguous runs.  Dependency-free (unlike METIS) and gives compact,
+    spatially-local partitions (smaller halos than RCB on irregular meshes).
+
+    Returns
+    -------
+    cell_owner : np.ndarray, shape (nCells,), dtype int32
+    """
+    n_cells = mesh.nCells
+    if n_ranks <= 1 or n_cells <= 1:
+        return np.zeros(n_cells, dtype=np.int32)
+    keys = hilbert_cell_keys(mesh, order)
+    order_idx = np.argsort(keys, kind="stable")
+    pos = np.empty(n_cells, dtype=np.int64)
+    pos[order_idx] = np.arange(n_cells, dtype=np.int64)
+    return (pos * n_ranks // n_cells).astype(np.int32)
+
+
 # ============================================================================
 # Halo computation
 # ============================================================================
@@ -455,7 +544,8 @@ def partition_voronoi_mesh(
         This rank (0-based).
     method : str
         ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
-        ``"geometric"`` (RCB), or ``"metis"``.
+        ``"geometric"`` (RCB), ``"metis"``, or ``"sfc"`` (Hilbert
+        space-filling-curve contiguous chunks).
     halo_depth : int
         Number of halo cell layers (default 2 for del4 support).
     cell_owner : np.ndarray or None
@@ -469,13 +559,15 @@ def partition_voronoi_mesh(
     # unknown method raises even when ``cell_owner`` is supplied or the method is
     # otherwise unused.
     method = resolve_partition_method(method)
-    if method not in ("geometric", "metis"):
+    if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
     if cell_owner is None:
         if method == "geometric":
             cell_owner = partition_cells_geometric(mesh, n_ranks)
-        else:  # "metis" (validated above)
+        elif method == "metis":
             cell_owner = partition_cells_metis(mesh, n_ranks)
+        else:  # "sfc" (validated above)
+            cell_owner = partition_cells_sfc(mesh, n_ranks)
 
     # Convert mesh connectivity to numpy for the setup phase.
     cellsOnCell = np.asarray(mesh.cellsOnCell)       # (maxEdges, nCells)
@@ -928,7 +1020,8 @@ def reorder_voronoi_for_sharding(
         Number of devices (partitions).
     method : str
         ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
-        ``"geometric"`` (RCB), or ``"metis"``.
+        ``"geometric"`` (RCB), ``"metis"``, or ``"sfc"`` (Hilbert
+        space-filling-curve contiguous chunks).
 
     Returns
     -------
@@ -938,7 +1031,7 @@ def reorder_voronoi_for_sharding(
     # Validate at entry (CLAUDE.md: fail early) BEFORE the single-device shortcut,
     # so an unknown method raises even when no partitioning happens.
     method = resolve_partition_method(method)
-    if method not in ("geometric", "metis"):
+    if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
     if n_devices <= 1:
         return mesh
@@ -946,11 +1039,19 @@ def reorder_voronoi_for_sharding(
     # --- Partition cells ---
     if method == "geometric":
         cell_owner = partition_cells_geometric(mesh, n_devices)
-    else:  # "metis" (validated above)
+    elif method == "metis":
         cell_owner = partition_cells_metis(mesh, n_devices)
+    else:  # "sfc" (validated above)
+        cell_owner = partition_cells_sfc(mesh, n_devices)
 
-    # --- Cell permutation: group by owner, stable sort within each group ---
-    cell_perm = np.argsort(cell_owner, kind="stable")
+    # --- Cell permutation: group by owner (primary), then order WITHIN each
+    # owner by the Hilbert space-filling curve (secondary) so each contiguous
+    # NamedSharding shard is spatially compact -> better cache/GPU locality and
+    # smaller cross-shard stencil reach.  Ownership is unchanged; this sets only
+    # the intra-shard order (the prior stable sort left it as arbitrary mesh
+    # order).
+    hkeys = hilbert_cell_keys(mesh)
+    cell_perm = np.lexsort((hkeys, cell_owner))
     cell_inv = np.empty_like(cell_perm)
     cell_inv[cell_perm] = np.arange(len(cell_perm))
 

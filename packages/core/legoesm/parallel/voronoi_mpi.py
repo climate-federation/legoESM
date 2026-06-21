@@ -57,6 +57,7 @@ from legoesm.parallel.voronoi_partition import (
     build_local_mesh,
     partition_cells_geometric,
     partition_cells_metis,
+    partition_cells_sfc,
     partition_voronoi_mesh,
     resolve_partition_method,
     scatter_to_local,
@@ -412,6 +413,8 @@ def initialize_voronoi_mpi(
         cell_owner = partition_cells_geometric(global_mesh, n_ranks)
     elif method == "metis":
         cell_owner = partition_cells_metis(global_mesh, n_ranks)
+    elif method == "sfc":
+        cell_owner = partition_cells_sfc(global_mesh, n_ranks)
     else:
         raise ValueError(f"Unknown partitioning method: {method!r}")
 
