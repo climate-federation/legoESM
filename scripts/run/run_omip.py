@@ -767,6 +767,15 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # ``omip_nemo_match_mpas_v1`` by tests/ocean/unit/test_recipes.py), then
         # overlay only the run-dependent SETUP physics above.
         config = nemo_match_mpas_model_config(physics=physics)
+        # Enforce global surface-freshwater balance, exactly as the lat-lon/tripole
+        # config does (LatLonCGridOceanConfig(normalize_freshwater=True) above).
+        # The CORE-II P-E+R integral is a net ~+0.65 Sv freshwater input (a true
+        # forcing imbalance, identical on every grid); without this the MPAS ocean
+        # accumulates it as a ~-0.5 PSU global-mean fresh drift in 90 days, while
+        # the tripole/lat-lon path (which sets the flag) stays balanced.  The MPAS
+        # step already reads config.normalize_freshwater (ocean_pe_mpas) — the only
+        # gap was the flag defaulting False on MPASOceanConfig.
+        config = config._replace(normalize_freshwater=True)
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
 
