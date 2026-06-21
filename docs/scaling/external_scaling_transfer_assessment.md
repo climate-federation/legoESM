@@ -1,0 +1,47 @@
+# External scaling-strategy transfer assessment (MPAS · FV3/Pace · CliMA · Oceananigans · JAX-Fluids · JAX-cosmology)
+
+**Date:** 2026-06-21 · **Method:** 21-agent workflow (6 external web-research + 5 internal repo-read + synthesis + 9 adversarial verifiers cross-checked against `docs/scaling/*.md`).
+
+## TL;DR (adversarially verified)
+
+The verify pass **confirms the existing convergent practical-limit verdict** (`bcw_scaling_status.md`, `scaling_levers_audit_2026-06-15.md`, `scaling_theoretical_limit_report_2026-06-15.md`): nearly every candidate lever is either **already shipped** or **hardware-blocked on Ginsburg** (Gloo/TCP CPU collectives + PCIe-pair RTX8000/A40, no NVLink/IB/GPU-direct). **No external technique yields a free Ginsburg throughput win.**
+
+The large transferable value is **TPU + future-hardware AGILITY**, not current-silicon speed. Every external system that reaches TPU does it the same way legoESM's `shard_map` path already does: lower the whole program to XLA and express collectives as `shard_map` + `ppermute`/`psum`/`all_to_all`. Oceananigans-via-Reactant (JAMES 2026, doi 10.1029/2025MS005615) and jaxDecomp's pure-JAX backend are the two proofs. **legoESM already sits on that substrate** — but carries two comm stacks: `mpi4jax` (multi-controller, **TPU dead-end**, pinned jax<0.10) and `shard_map`+`ppermute`/`psum` (single-controller, **the only TPU-capable path**; already shipped for cube, lat-band ocean, tripole north-fold). The transfer is convergence onto the XLA-collective stack + making it reachable beyond intra-node — not new numerics.
+
+## External strategies (one line each)
+
+| System | Decomposition | GPU model | TPU | Transferable lesson |
+|---|---|---|---|---|
+| MPAS / OMEGA | METIS graph-partition of cell-adjacency, 2–3 ring halo, persistent exchange-lists | OpenACC (MPAS-A ~3.7×/GPU) → OMEGA C++/Kokkos full device-residency | none (Fortran/OpenACC/Kokkos, no XLA) | partition-once → **static** index sets; full device-residency mandatory; partial GPU port = slowdown |
+| FV3 / Pace-NDSL | 6 cubed-sphere faces × layout grid (FMS MPI) | GT4Py → DaCe/CUDA/CPU, one DSL → many backends | none | DSL-spec-vs-backend split = **what JAX/XLA gives for free**; face halo = `collective_permute` on a 6-face/12-edge/8-corner mesh |
+| CliMA (ClimaCore/Atmos/Ocean) | cubed-sphere spectral-element, `ClimaComms` device abstraction | KernelAbstractions CPU+CUDA | only via Reactant→XLA | `weighted_dss!` = **one halo fn, one custom_vjp, identical serial/GPU/TPU**; design **bandwidth-first** (4 state→15 cache = 4× tax) |
+| Oceananigans.jl | slab/pencil structured FV | KA: CUDA/ROCm/Metal | **yes, via Reactant.jl** | Reactant proves Julia→XLA gets TPU like JAX; FP32 default ~1.6×; wide-halo barotropic; ~42% cells land |
+| JAX-Fluids 2.0 | structured block, `pmap`+`ppermute` | multi-GPU XLA | **first-class (same code)** | **halo = `lax.ppermute` → differentiability FREE**; face→edge→vertex corner fill; one `jax.distributed.initialize()` = CPU/GPU/TPU-pod, no MPI |
+| JAX cosmology (jaxDecomp/JaxPM/pmwd/DISCO-DJ) | 2-D pencil / 1-D slab FFT | cuDecomp NCCL **+ pure-JAX backend** | **yes (pure `shard_map`+`all_to_all`)** | distributed-transpose FFT via `shard_map`+`all_to_all`+`custom_vjp`; reversible-integrator O(1) AD memory |
+
+## Ranked transferable levers (verify-adjusted)
+
+### Tier A — real, in-domain, do now (TPU-agility / single-device; NOT a Ginsburg throughput claim)
+1. **Generalize the `jax.distributed` SPMD bootstrap beyond cube-only.** shard_map kernels (`sharded_ocean_step.py`, `latlon_spmd.py`, tripole fold, `reductions.batch_psum_spmd`) already shipped + equivalence-gated; net-new code is the ~5-line gate (`runtime/config.py`, `runtime/devices.py`, `driver/config.py`) that rejects `distributed_mode='spmd'` for non-cube grids. **Prerequisite for any multi-chip TPU run** (mpi4jax cannot go there). Verifier caveat: no Ginsburg gain — NCCL local-topology timeout (`bcw_scaling_status.md:265-267`) + pathological ¼° SPMD compile (>7h, OOM, jobs 8524108/8524221). Value = TPU + intra-node multi-GPU + completeness.
+2. **Mixed-precision as a validated production default + CLI flags.** Mechanism present (`precision.py` policy split; `LEGOESM_VMIX_F32_SOLVE`/`BAROCLINIC_F32`/`TRIDIAG=lapack`; ~2× single-device measured, `bcw_scaling_status.md:164`). Missing: `--precision/--mixed` on `run_omip/amip/coupled` (CLI-flag-gap rule) + conservation/drift validation to flip `set_policy(fp64())` defaults. **f32 FV is a hard TPU prerequisite** (TPU has no efficient f64; `precision._clamp_to_backend` silently downgrades). Note: does NOT improve distributed scaling (f32 weak-eff 0.65–0.73 < f64 0.85–0.90 — halved compute makes fixed halo/reduction latency a bigger fraction).
+3. **Extend SH-as-GEMM to all transform variants (+ bf16/tf32 compute, fp32 accumulate).** `LEGOESM_SH_GEMM` GEMM path exists, parity ~1e-12 — MXU-native single-device spectral lever for Ampere+/TPU. Extend to the H/oc2/dmu variants. (bf16 blocked by the f64 SI solve + x64 grid guard — see Tier B.)
+4. **Non-divisor `pad_halo` fallback for cube.** `explicit_pad_halo_4d` hardcodes a 6-face `shard_map` mesh and raises `Received incompatible devices` on an 8-chip TPU (8∤6). A replicated/local fallback is a bounded TPU-enablement fix.
+
+### Tier B — future-hardware capability (opt-in + equivalence-gated; zero Ginsburg gain; real on TPU-ICI / NVLink / IB)
+- **`n_sh`-sharded distributed-transpose spectral transform** (jaxDecomp pattern): shard *wavenumber*, not level → the level all-gather vanishes and each dense `(nlev,nlev)` SI solve stays local; AD via the self-adjoint `all_to_all` custom_vjp pattern **already present** in `parallel/distributed_fft.py`. Verifier: both level-shard and transpose are **measured-dead on Gloo/PCIe** (`spectral_level_shard_cliff.md:44-54`, `scaling_theoretical_limit_report_2026-06-15.md:103`), and spectral is f64/complex128-only → TPU-shaped, not TPU-ready until SI-solve precision is re-engineered. Build only when NVLink/IB/TPU is the target. Note the existing mesh exposes only a `P('level')` axis (`mesh.py:553-641`) — adding the `n_sh` axis is the real net-new work.
+- **Cube sub-face tiling >6 devices** (`tiled_d2a2c.py`, `tiled_production_cdgrid.py`): the only path past 6-way cube parallelism; bit-exact today, gap is consumer tile-awareness.
+- **Pure-`shard_map` `all_to_all` spectral-LES FFT backend**: retires a ~15-line custom_vjp (AD cleanup) + reference impl for a future single-process SPMD LES driver (current LES is multi-controller MPI — the backend swap requires that driver first; throughput-neutral on Ginsburg).
+
+### Tier C — orthogonal (per-device or training-memory; backend-agnostic)
+- **Reversible / adjoint integrator** (pmwd KDK, DISCO-DJ II adjoint): O(1)-in-timesteps reverse-mode AD memory for long differentiable rollouts vs the current O(√N) checkpointing. Serves the end-to-end `jax.grad` goal; reduces HBM live-set (matters most on TPU).
+- **Bandwidth-first fusion**: mostly already harvested (T+S vmix 1.15×, RK3 frozen-EOS −31%). The "35% to roofline" is GDDR6 sustained-vs-spec **cache physics, not fusion-recoverable** (`roofline_probe.py`, `bcw_scaling_status.md:308-329`). Only cube/atm tendency files (`operators_3d.py`, `compressible_euler_cdgrid.py`) are under-fused, but command-buffer A/B showed zero cube/atm dispatch headroom on this GPU. Any `donate_argnums`/`remat` added to the hot loop MUST preserve the non-donating `.raw` AD variant + custom_vjp halo boundaries.
+
+### Tier D — verified DEAD / skip
+- **s-step / communication-avoiding Krylov**: `single_reduce` (Chronopoulos–Gear) already shipped; barotropic ~9% of step; monomial s-step basis is worse-conditioned (Chebyshev deg-4 already diverges, `barotropic_multinode_verdict_2026-06-15.md:21-28`) + adds matvec-halos.
+- **Weighted/multi-constraint METIS**: premise false in this repo — no `maxLevelCell`, ocean uses 2-D wet masks with full-depth columns (per-column FLOP is depth-independent); RCB already balances uniform meshes (`bcw_scaling_status.md:163`). The useful variant is *culling* dead cells from the partition graph, not weighting them — and even that is near-zero ROI until straggler imbalance is measured on a genuinely non-uniform mesh.
+- **Wide-halo barotropic subcycle**: targets `explicit_substep` (already point-to-point halos, ~7% of step) not the production `implicit_cn` PCG (whose wall is allreduce-latency); MPAS-O explicitly rejected wide halos as numerically unsafe; our cosine-filtered forward-backward scheme is unverified under it. Conservation + codex gate mandatory if ever revisited on a low-latency fabric.
+- **SFC (Hilbert) cell ordering** · **batched multi-field halo** (shipped: ocean latlon strong np8 0.35→0.55; MPAS union-neighbor default) · **single AD-safe primitive doctrine** (shipped + test-gated: `get_sendrecv_vjp`, `ppermute`/`psum`/`allreduce(SUM)`, `test_mpi_differentiability.py`).
+
+## Honest framing for any follow-up
+
+All Tier-A items are **TPU/future-HW enablement**, small, codex-reviewable, equivalence-gated, and **none claims a Ginsburg speedup** — consistent with the campaign's measured per-device + fabric practical limit. The mpi4jax→`shard_map` convergence is the strategic throughline; everything else is either already in-tree or hardware-gated. Truth tiers (conservation/equivalence) outrank any oracle/throughput motivation; mixed-precision and SPMD-bootstrap changes must clear conservation + bit-equivalence gates before touching OMIP-faithful production paths.
