@@ -166,7 +166,7 @@ def _exchange_mpi(
     neighbor.  Collecting all sends from the original field and scattering
     once removes both costs.  Measured comm overhead was 22 ms/step at
     np=4 (18 serialized sendrecv) and 30 ms at np=8 (36) — see
-    docs/scaling/amip_mpi_scaling.md.
+    docs/performance/scaling/amip_mpi_scaling.md.
 
     Correctness: ``send_idx`` ⊂ owned, ``recv_idx`` ⊂ halo (disjoint), and
     each halo entity is owned by exactly one neighbor, so the per-neighbor

@@ -16,7 +16,7 @@ of the western-boundary-current barotropic instability and runs the gyre turbule
 sequencing is laminar (0.031).  Every operator here is calibrated to ``corr≈1.0``
 against MITgcm's ``momU``/``momV`` diagnostics; the stepper reproduces MITgcm's
 laminar equilibrium ``|u|max≈0.031, |v|max≈0.084`` at 1× and 2× resolution.  This is
-mimicry glue for the gyre oracle (per ``docs/ocean_fidelity/oracle_recipe_strategy.md``),
+mimicry glue for the gyre oracle (per ``docs/ocean/fidelity/oracle_recipe_strategy.md``),
 kept in the fidelity harness rather than the shippable model.
 
 Index convention: MITgcm ``(ny, nx)`` C-grid — ``u`` at western cell faces, ``v`` at

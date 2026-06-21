@@ -1,12 +1,12 @@
 # Scripts
 
 Canonical run scripts for legoESM validation, benchmarking, and production runs.
-See `docs/TESTING.md` for the overarching tiered test & experiment strategy.
+See `docs/validation/TESTING.md` for the overarching tiered test & experiment strategy.
 
 ## `experiment/` — the experiment harness
 
 Versioned templates + provenance ergonomics layered on `legoesm run` /
-`legoesm reproduce` (see `docs/TESTING.md` §4 and `config/templates/`):
+`legoesm reproduce` (see `docs/validation/TESTING.md` §4 and `config/templates/`):
 
 | Script | Purpose |
 |--------|---------|
@@ -32,7 +32,7 @@ bucket:
 | Bucket | Contents |
 |--------|----------|
 | `run/` | Production experiment drivers (`run_amip`, `run_omip`, `run_rce`, `run_held_suarez*`, `run_dino`, `run_coupled`, `run_aimip*`, the cross-grid `.sh` wrappers, …). |
-| `matrix/` | The complexity-tiered test-matrix runners (`run_{atmosphere,ocean,sea_ice,scm}_test_matrix`, `summarize_matrix_results`, `validate_matrix_report`, `check_conservation_all`). See `docs/TESTING.md`. |
+| `matrix/` | The complexity-tiered test-matrix runners (`run_{atmosphere,ocean,sea_ice,scm}_test_matrix`, `summarize_matrix_results`, `validate_matrix_report`, `check_conservation_all`). See `docs/validation/TESTING.md`. |
 | `experiment/` | The template/provenance harness (see above). |
 | `bench/` | Benchmarking, scaling, profiling (`bench_*`, `profile_*`, `*scaling*`, `analyze_*`). |
 | `plot/` | Plotting / figure regeneration (`plot_*`, `replot_*`, `regen_*`). |

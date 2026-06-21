@@ -4,7 +4,7 @@ Analytic checks (the strongest available for linear interpolation/derivative
 operators): linear fields are reproduced/differentiated exactly, round-trip
 smoothers preserve linear fields, and shapes/pytree behaviour are correct.
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

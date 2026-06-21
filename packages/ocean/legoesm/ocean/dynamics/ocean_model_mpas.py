@@ -466,7 +466,7 @@ class MPASOceanModel:
         # the physics-stepped tracer, before advection).  Mirrors the
         # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
         # centred scheme is implemented on MPAS (Phase 1-4 of the plan
-        # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
+        # at docs/ocean/experiments/gm_redi_mpas_plan.md); the triad
         # branch raises NotImplementedError.
         if config.gm_redi is not None:
             dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(

@@ -50,7 +50,7 @@ filter's three-level carry is the only non-standard feature; the
 
 Integration into ``LatLonCGridOceanModel`` and the ``timestepping/
 split_explicit.py`` ``outer_integrator`` dispatch is tracked under
-Phase G.2 in ``docs/ocean_fidelity/phase_g_veros_recipe_audit.md`` —
+Phase G.2 in ``docs/ocean/fidelity/phase_g_veros_recipe_audit.md`` —
 this module provides the standalone closure ready for that wiring.
 
 References

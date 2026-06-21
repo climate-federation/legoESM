@@ -3,7 +3,7 @@
 Mirrors ``test_mle.py`` (C-grid) for the Voronoi port ``mle_mpas.py``:
 exact tracer conservation, restratification signature, the equatorial
 finiteness guard (rn_lat=20 floor), the convection gate, partial cells,
-and jit-stability.  See docs/ocean_experiments/mle_mpas_port_plan.md.
+and jit-stability.  See docs/ocean/experiments/mle_mpas_port_plan.md.
 """
 
 from __future__ import annotations

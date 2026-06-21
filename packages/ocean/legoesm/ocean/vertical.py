@@ -406,7 +406,7 @@ def create_partial_cell_coordinate(
     while ``bottom_level`` does not change — i.e., piecewise smooth
     with discontinuities at every reference-level interface.  This is
     the documented limitation of partial-cell schemes (see
-    ``docs/ocean_experiments/partial_cells_plan.md`` Differentiability
+    ``docs/ocean/experiments/partial_cells_plan.md`` Differentiability
     Contract); not specific to this implementation.
     """
     H = jnp.asarray(H_bathy)

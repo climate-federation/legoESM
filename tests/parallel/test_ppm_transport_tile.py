@@ -4,7 +4,7 @@ U1: ``ppm_transport_1d(..., rd_prepadded=True)`` is BIT-IDENTICAL to the
 default internal edge-pad when fed the same padded rdelta — the hook that
 lets a sub-face TILE supply a REAL depth-1 neighbour-tile rdelta halo at
 interior cuts (the internal edge-pad is wrong there: the upwind CFL cell
-lives in the neighbour tile).  See docs/scaling/cube_transport_tiling_design.md.
+lives in the neighbour tile).  See docs/performance/scaling/cube_transport_tiling_design.md.
 
 (U2 will add the tile-vs-global PPM flux parity here.)
 """

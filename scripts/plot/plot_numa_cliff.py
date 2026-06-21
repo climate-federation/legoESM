@@ -7,7 +7,7 @@ hybrid 8r x 4c recovery are both visible.
 
     python scripts/plot/plot_numa_cliff.py --root results/bcw_scaling \
         --grid icosahedral --resolution 5 --precision float64 \
-        --out docs/scaling/mpas_numa_cliff.png
+        --out docs/performance/scaling/mpas_numa_cliff.png
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def main() -> int:
     p.add_argument("--resolution", type=int, default=5)
     p.add_argument("--precision", default="float64")
     p.add_argument("--mode", default="strong")
-    p.add_argument("--out", default="docs/scaling/mpas_numa_cliff.png")
+    p.add_argument("--out", default="docs/performance/scaling/mpas_numa_cliff.png")
     args = p.parse_args()
 
     by_cfg = collect(Path(args.root), args.grid, args.resolution,

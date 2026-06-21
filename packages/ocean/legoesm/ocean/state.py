@@ -591,7 +591,7 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Naming convention: ``<term>_u`` and ``<term>_v`` for the u- and
     v-momentum contributions respectively.  The same pattern can be
     re-used for future tracer or energy budgets — see Phase 1.5 of
-    docs/ocean_experiments/global_overturning_plan.md.
+    docs/ocean/experiments/global_overturning_plan.md.
 
     Fields
     ------
@@ -957,7 +957,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # strict no-op where there is no land (periodic/global aquaplanet).  Default
     # ON: the masked cold-cell contamination is a bug for any masked-land run.
     tracer_wall_neumann_fill: bool = True
-    # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
+    # Barotropic solver selection (see docs/dev-notes/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.
     # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
@@ -988,7 +988,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Helmholtz at 1°-¼°; it MUST be validated against the returned global
     # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
     # tripole-fold / coastal conditioning can require more.  See
-    # docs/ocean_experiments/distributed_barotropic_pcg.md.
+    # docs/ocean/experiments/distributed_barotropic_pcg.md.
     barotropic_implicit_pcg_fixed_iters: int = 60
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # Force the fixed-iteration PCG even when not distributed.  Two uses:
@@ -1059,7 +1059,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # reconstruction — closes the BH partial-cell gap by avoiding the
     # single-level z-spike that the Adcroft correction produces and that
     # drives the 2Δz computational mode.  See
-    # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
+    # docs/ocean/experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
     # Tracer time integration for the flux-form advection step.
@@ -1115,7 +1115,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (`MPASOceanConfig`) also defaults True. The lat-lon default was
     # flipped from False to True on 2026-05-14 after a DINO forced run
     # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
-    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # restoring (see docs/ocean/experiments/dino_replication_plan.md
     # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
@@ -1375,7 +1375,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the single shared VERTEX f so Σu·cor_u+Σv·cor_v == 0 on a β-plane (the
     # face-f form leaks ~1e-6·f·KE because f_u != f_v when f varies with lat —
     # the MITgcm barotropic-gyre oracle residual; see
-    # docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
+    # docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
     # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
     coriolis_energy_conserving: bool = False
 

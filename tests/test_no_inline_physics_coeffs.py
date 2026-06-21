@@ -9,7 +9,7 @@ scheme ``*Config`` NamedTuple (tunable) or as a named module-level provenance bl
 (fixed published constants/tables) — and the body reads ``cfg.<name>`` only.
 
 This gate is the *Syntax-Engine* tripwire for that rule (see
-``docs/ai_guardrails/domain_architect_vs_syntax_engine.md``): it flags every
+``docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md``): it flags every
 float literal that lives **inside a function scope** in the physics rosters, with a
 small, precise allowlist so genuine math (``0.5 * (a + b)``, ``x ** 2``) and
 numerics floors are not false-positives. It composes with — and does not overlap —

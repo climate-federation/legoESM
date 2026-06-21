@@ -607,7 +607,7 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
 # ---------------------------------------------------------------------------
 # Geometric multigrid preconditioner (anisotropic: zonal-line smoother)
 # ---------------------------------------------------------------------------
-# POC 8487762 (docs/scaling/scaling_levers_audit_2026-06-14.md): a geometric
+# POC 8487762 (docs/performance/scaling/scaling_levers_audit_2026-06-14.md): a geometric
 # V-cycle with a ZONAL-LINE smoother cuts the barotropic-PCG outer iteration
 # count M60 -> M2-4 on the polar-anisotropic lat-lon Helmholtz (textbook
 # O(log n)), where the pointwise-Jacobi smoother gives only ~3x.  The line

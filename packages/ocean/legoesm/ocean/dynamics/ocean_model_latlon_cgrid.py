@@ -3735,7 +3735,7 @@ class LatLonCGridOceanModel:
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
             # elliptic eta solve + uniform surface-pressure correction. Removes the
             # split's grid-scale PGF/continuity adjointness violation that drives the
-            # spurious 2dx baroclinic instability (docs/ocean_fidelity/
+            # spurious 2dx baroclinic instability (docs/ocean/fidelity/
             # mitgcm_unsplit_freesurface_fix.md). Requires the ab2 outer integrator.
             if _oi != "ab2":
                 raise ValueError(
@@ -4310,7 +4310,7 @@ class LatLonCGridOceanModel:
         Replaces the split-explicit barotropic/baroclinic stepping (which breaks
         the discrete PGF/continuity adjointness at the grid scale, driving the
         spurious 2dx baroclinic instability) with MITgcm's unsplit
-        ``implicitFreeSurface`` algorithm (docs/ocean_fidelity/
+        ``implicitFreeSurface`` algorithm (docs/ocean/fidelity/
         mitgcm_unsplit_freesurface_fix.md):
 
           1. u* = u^n + AB2(Δt·du_dt)   — the FULL explicit baroclinic tendency

@@ -11,9 +11,9 @@ does not improve.  The per-step global-reduction count is 2*M.
 Usage::
 
     python scripts/plot/plot_barotropic_mcut_weakscale.py \
-        --csv docs/scaling/barotropic_mcut_np2.csv \
-              docs/scaling/barotropic_mcut_np4.csv \
-        --out docs/scaling/barotropic_mcut_weakscale.png
+        --csv docs/performance/scaling/barotropic_mcut_np2.csv \
+              docs/performance/scaling/barotropic_mcut_np4.csv \
+        --out docs/performance/scaling/barotropic_mcut_weakscale.png
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _load(path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--csv", nargs="+", required=True)
-    p.add_argument("--out", default="docs/scaling/barotropic_mcut_weakscale.png")
+    p.add_argument("--out", default="docs/performance/scaling/barotropic_mcut_weakscale.png")
     p.add_argument("--target", type=float, default=1e-6)
     args = p.parse_args()
 

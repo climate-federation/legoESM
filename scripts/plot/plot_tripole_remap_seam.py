@@ -14,7 +14,7 @@ smooth everywhere INCLUDING across the fold; any sharp line along the top rows
 
 Usage (compute node / sbatch, NOT the login node):
     python scripts/plot/plot_tripole_remap_seam.py \
-        --mesh data/grids/eORCA1.2_mesh_mask.nc --out docs/scaling/tripole_remap_seam.png
+        --mesh data/grids/eORCA1.2_mesh_mask.nc --out docs/performance/scaling/tripole_remap_seam.png
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ if _ROOT not in sys.path:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mesh", default="data/grids/eORCA1.2_mesh_mask.nc")
-    ap.add_argument("--out", default="docs/scaling/tripole_remap_seam.png")
+    ap.add_argument("--out", default="docs/performance/scaling/tripole_remap_seam.png")
     ap.add_argument("--atm-nlat", type=int, default=72)  # 2.5deg atm
     args = ap.parse_args()
 

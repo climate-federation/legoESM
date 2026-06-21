@@ -65,7 +65,7 @@ RUN_SETS: dict[str, list] = {
          DATA_ROOT / "mpas_jra55_etopo_100yr_ico6" / "mpas" / "ico6"),
     ],
     # 3-way intercomparison once the tripole JRA55 spinup completes
-    # (Step 2 of docs/ocean_experiments/tripole_omip_plan.md). The
+    # (Step 2 of docs/ocean/experiments/tripole_omip_plan.md). The
     # tripole entry resolves to results/omip/tripole/eorca1/ during
     # the run, then to ~/saved_legoESM_data/tripole_jra55_etopo_10yr_nudge/
     # after archival.

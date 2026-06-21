@@ -566,7 +566,7 @@ def bbl_distributed_drag_face_column(
     Killworth & Edwards (1999), JPO 29, 1221–1238.
     MOM6 ``BBL_thick_min`` (Adcroft et al. 2019, JAMES).
 
-    See ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` §8a
+    See ``docs/ocean/experiments/density_jacobian_pgf_mpas.md`` §8a
     for the MPAS+ETOPO diagnostic that motivated the cross-grid port.
     """
     pad_axes = ((0, 0),) * (h_face.ndim - 1)  # noqa: F841 (parity with lat-lon)

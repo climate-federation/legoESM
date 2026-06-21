@@ -27,7 +27,7 @@ References
 ----------
 Fox-Kemper, Ferrari & Hallberg (2008), JPO 38, 1145-1165.
 NEMO 5.0.1 TRA/tramle.F90 (ORCA1 RUN_REF: ln_mle, nn_mle=1, rn_ce=0.06, rn_lat=20).
-See also ``docs/ocean_experiments/mle_mpas_port_plan.md``.
+See also ``docs/ocean/experiments/mle_mpas_port_plan.md``.
 """
 from __future__ import annotations
 

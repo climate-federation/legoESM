@@ -11,7 +11,7 @@ Usage::
 
     python scripts/plot/plot_baro_mcut_multinode.py \
         --log results/scaling_ginsburg/logs/baro_mcut_mn_<JOBID>.out \
-        --out docs/scaling/baro_mcut_multinode.png
+        --out docs/performance/scaling/baro_mcut_multinode.png
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _parse(log_path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--log", required=True)
-    p.add_argument("--out", default="docs/scaling/baro_mcut_multinode.png")
+    p.add_argument("--out", default="docs/performance/scaling/baro_mcut_multinode.png")
     args = p.parse_args()
 
     data = _parse(args.log)

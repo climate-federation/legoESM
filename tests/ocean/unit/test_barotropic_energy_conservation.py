@@ -5,7 +5,7 @@ In the INVISCID, UNFORCED limit, the continuous shallow-water momentum equations
 energy (KE + ½g∫η²) exactly. A faithful discretization must too.
 
 This pins the root cause of the MITgcm barotropic-gyre oracle's residual. Direct
-measurement (see docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md) localized
+measurement (see docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md) localized
 the spurious, dt-independent energy injection to the **Coriolis ⟷ implicit-free-
 surface-projection coupling** — NOT the momentum scheme: the source is byte-identical
 across upwind / centered / vector-invariant advection (advection contributes
@@ -97,7 +97,7 @@ def _ke(s):
     "advection-independent; Coriolis neutral and free surface alone conserves, "
     "but explicit-Coriolis-then-project injects when f!=0). Pending a dycore fix "
     "to the C-grid implicit free-surface step; see "
-    "docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md",
+    "docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md",
     strict=False,
 )
 def test_inviscid_unforced_barotropic_conserves_energy():

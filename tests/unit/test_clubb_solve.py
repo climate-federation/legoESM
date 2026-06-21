@@ -1,6 +1,6 @@
 """Unit tests for the CLUBB tridiagonal-solve adapter (now in ``clubb.py``).
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """PGF tiered test suite — automated pass/fail gates.
 
 Tests the pressure gradient force discretization across a progression
-of increasing complexity (see docs/ocean_experiments/pgf_test_plan.md).
+of increasing complexity (see docs/ocean/experiments/pgf_test_plan.md).
 
 Tier 1: τ=0, idealized bathymetry, uniform stratification
 Tier 2: τ=0, idealized bathymetry, realistic (WOA-like) stratification

@@ -3,7 +3,7 @@
 **Status (2026-04-28):** This module defines the public API for the
 MPAS port of GM/Redi but does not yet implement it.  Calling any
 function below raises ``NotImplementedError`` with a pointer to the
-implementation plan at ``docs/ocean_experiments/gm_redi_mpas_plan.md``.
+implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
 
 The signatures mirror ``gm_redi_tracer_tendency_latlon`` in
 ``gm_redi_latlon_cgrid.py`` so the dycore hook in
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
-_PLAN = "docs/ocean_experiments/gm_redi_mpas_plan.md"
+_PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
 
 _EPS_DIV = 1e-30
 
@@ -148,7 +148,7 @@ def compute_isopycnal_slopes_mpas(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Edge-normal isopycnal slope at interior interfaces (Phase 1).
 
-    Implements Option (A) from ``docs/ocean_experiments/gm_redi_mpas_plan.md``:
+    Implements Option (A) from ``docs/ocean/experiments/gm_redi_mpas_plan.md``:
     a single scalar slope along each edge's own normal, no cell-centred
     reconstruction.
 

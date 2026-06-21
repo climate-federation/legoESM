@@ -88,7 +88,7 @@ def _maybe_chunk_trailing(
 # the summation grouping changes) → parity to fp round-off; AD-safe.  OPT-IN
 # via ``LEGOESM_SH_GEMM`` because the win needs fp64 tensor cores (Ampere+);
 # on Turing/CPU the default reduce is competitive (design:
-# docs/scaling/sh_gemm_design_2026-06-13.md).
+# docs/performance/scaling/sh_gemm_design_2026-06-13.md).
 
 
 def _sh_gemm_enabled() -> bool:

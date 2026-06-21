@@ -244,7 +244,7 @@ CANONICAL_FORMULAS = {
             # (ponytail dedup 2026-06-17) → budget ratcheted to 0 (entries removed).
             # clubb_lite keeps its single inline g/θ N² term by decision (the
             # buoyancy_coefficient wrapper was judged superfluous there —
-            # docs/md_files/clubb_port_history.md); this restores the pre-CLUBB-port
+            # docs/dev-notes/clubb_port_history.md); this restores the pre-CLUBB-port
             # main baseline value, it is NOT new debt.
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,

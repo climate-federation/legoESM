@@ -10,7 +10,7 @@ parameters over the averaging window; the loss is the misfit of the §3.2
 observation vector (equal-weighted, per-field-normalized mean+std maps of
 T, S, ψ, depth-integrated EKE). ACC transport is HELD OUT for early stopping.
 
-This is the protocol shakedown (``docs/planning/geometric_calibration_campaign.md``
+This is the protocol shakedown (``docs/dev-notes/planning/geometric_calibration_campaign.md``
 §4 Stage 0): truth = the model at known ``GeometricConfig`` defaults, so success =
 ETKI drives the ensemble-mean parameters back to those defaults and the misfit
 decreases to the averaging-window noise floor.

@@ -4,7 +4,7 @@ A faithful, differentiable re-implementation of Veros's rigid-lid barotropic
 mode (``veros/core/external/solve_stream.py``) as a selectable
 ``barotropic_solver = "rigid_lid"`` option, for apples-to-apples fidelity with
 the Veros oracle (the ACC transport's response to bottom drag differs between a
-free surface and a rigid lid; see docs/ocean_fidelity/oracle_recipe_strategy.md).
+free surface and a rigid lid; see docs/ocean/fidelity/oracle_recipe_strategy.md).
 
 Formulation
 -----------

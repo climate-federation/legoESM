@@ -17,7 +17,7 @@ Run::
 
     mpirun -np 2 python scripts/bench/bench_barotropic_mcut.py --n-lat 96 --n-lon 192
 
-Writes ``docs/scaling/barotropic_mcut.csv`` on rank 0 for the plotter.
+Writes ``docs/performance/scaling/barotropic_mcut.csv`` on rank 0 for the plotter.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def main():
     p.add_argument("--m-sweep", type=int, nargs="+",
                    default=[2, 4, 6, 8, 12, 20, 40, 60])
     p.add_argument("--target", type=float, default=1e-6)
-    p.add_argument("--out", default="docs/scaling/barotropic_mcut.csv")
+    p.add_argument("--out", default="docs/performance/scaling/barotropic_mcut.csv")
     # Wall-time mode (multi-node): time jacobi-M vs multigrid-M solves so the
     # reduction-latency win shows in ms/solve (Gloo allreduce dominates at scale).
     p.add_argument("--time-solves", type=int, default=0,

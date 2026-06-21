@@ -9,7 +9,7 @@ multinode barotropic solve.
 Usage::
 
     python scripts/plot/plot_barotropic_mcut.py \
-        --csv docs/scaling/barotropic_mcut.csv --out docs/scaling/barotropic_mcut.png
+        --csv docs/performance/scaling/barotropic_mcut.csv --out docs/performance/scaling/barotropic_mcut.png
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ import matplotlib.pyplot as plt
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", default="docs/scaling/barotropic_mcut.csv")
-    p.add_argument("--out", default="docs/scaling/barotropic_mcut.png")
+    p.add_argument("--csv", default="docs/performance/scaling/barotropic_mcut.csv")
+    p.add_argument("--out", default="docs/performance/scaling/barotropic_mcut.png")
     p.add_argument("--target", type=float, default=1e-6)
     args = p.parse_args()
 

@@ -13,7 +13,7 @@ reassembled output equal ``d2a2c_vect`` with NO global post-pass.  With
 :func:`d2a2c_adjacent_strips` on the reassembled global staggered fields
 (correctness proven bit-exact vs ``d2a2c_vect`` in
 ``tests/parallel/test_tiled_d2a2c_ua_va.py``).  Design:
-``docs/scaling/d2a2c_spmd_stage_design.md``.
+``docs/performance/scaling/d2a2c_spmd_stage_design.md``.
 """
 from __future__ import annotations
 

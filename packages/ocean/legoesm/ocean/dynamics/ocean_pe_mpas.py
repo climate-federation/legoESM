@@ -406,7 +406,7 @@ def mpas_ocean_baroclinic_tendencies(
     #                thin spike at partial-cell interfaces that drives
     #                a 2Δz vertical mode on ETOPO; SMC03's per-column
     #                ρ(z) reconstruction is smooth in z).  See
-    #                ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.
+    #                ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``.
     #   "centered" : no correction; ``grad_B`` already contains the
     #                bare ``∇(KE + p'/rho_0)``.
     if pgf_scheme == "adcroft" and isinstance(z_coord, OceanPartialCellCoordinate):
@@ -665,7 +665,7 @@ def mpas_ocean_baroclinic_tendencies(
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Legacy single-cell drag at maxLevelEdgeBot.
             # WARNING: CFL-violates at thin partial cells (see
-            # docs/ocean_experiments/density_jacobian_pgf_mpas.md §8a).
+            # docs/ocean/experiments/density_jacobian_pgf_mpas.md §8a).
             # Prefer ``bottom_drag_bbl_thickness > 0`` on real bathymetry.
             bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
             # Edges with at least one dry neighbor have bot_e < 0 (since

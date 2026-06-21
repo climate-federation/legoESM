@@ -20,7 +20,7 @@ Usage::
     JAX_PLATFORMS=cpu .venv/bin/python scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py
 
 Add ``--tolerance 0.10`` to relax the gate to 10%, or ``--write-report
-docs/ocean_fidelity/legoesm_vs_veros_<sha>.md`` to dump a Markdown report.
+docs/ocean/fidelity/legoesm_vs_veros_<sha>.md`` to dump a Markdown report.
 """
 
 from __future__ import annotations
