@@ -41,6 +41,8 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     _per_variable_bias_dict,
     _per_variable_bias_from_dict,
     _per_variable_to_json,
+    _realism_campaign_summary_line,
+    _RealismCapture,
     _resolve_era5_n_times,
     _summary_to_json,
     build_campaign_output_dict,
@@ -4080,3 +4082,45 @@ def test_fast_validation_les_regime_is_tiny_valid_and_shared():
     cells = lambda r: r.nx * r.ny * r.nlev  # noqa: E731
     assert cells(tiny) * 100 < cells(prod.shallow)
     assert cells(tiny) * 100 < cells(prod.deep)
+
+
+def _mk_breakdown(turbulent=True, finite=True, thermo=True, moisture=True, rh=True):
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+    flags = (turbulent, finite, thermo, moisture, rh)
+    return LESRealismBreakdown(
+        turbulent=jnp.asarray(turbulent), finite=jnp.asarray(finite),
+        thermo_consistent=jnp.asarray(thermo), moisture_physical=jnp.asarray(moisture),
+        rh_ok=jnp.asarray(rh), overall=jnp.asarray(all(flags)))
+
+
+def test_realism_capture_records_breakdown_and_passes_state_through(monkeypatch):
+    """_RealismCapture (iter 512) wraps run_les_fn: it returns the LES state UNCHANGED (pure
+    observation) and stores the per-column realism breakdown for the end-of-run report."""
+    import legoesm.atmosphere.dynamics.column_les_diagnosis as cld
+
+    sentinel_state = object()
+    monkeypatch.setattr(cld, "column_les_realism_breakdown",
+                        lambda state, hc: _mk_breakdown(turbulent=(hc == "GOOD")))
+    cap = _RealismCapture(lambda setup: sentinel_state)
+    out = cap(SimpleNamespace(height_coord="GOOD"))
+    assert out is sentinel_state                       # state passed through unchanged
+    cap(SimpleNamespace(height_coord="DEAD"))          # a laminar one
+    assert len(cap.breakdowns) == 2
+    assert bool(cap.breakdowns[0].overall) and not bool(cap.breakdowns[1].overall)
+
+
+def test_realism_campaign_summary_line():
+    """The campaign-aggregate realism line: None when nothing captured, an all-realistic
+    line when none rejected, else the per-mode rejection counts (iter 512)."""
+    assert _realism_campaign_summary_line(None) is None
+    assert _realism_campaign_summary_line([]) is None
+
+    allgood = [_mk_breakdown(), _mk_breakdown(), _mk_breakdown()]
+    line = _realism_campaign_summary_line(allgood)
+    assert line is not None and "all 3 spin-offs realistic" in line
+
+    mixed = [_mk_breakdown(), _mk_breakdown(turbulent=False),
+             _mk_breakdown(moisture=False), _mk_breakdown(turbulent=False)]
+    line = _realism_campaign_summary_line(mixed)
+    assert "1/4 realistic" in line and "3 rejected" in line
+    assert "2x laminar" in line and "1x moisture-runaway" in line

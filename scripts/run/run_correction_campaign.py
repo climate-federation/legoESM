@@ -215,6 +215,58 @@ def fast_validation_les_regime() -> Any:
     return regime
 
 
+class _RealismCapture:
+    """Wrap a ``run_les_fn`` so every spin-off LES's per-criterion realism breakdown is
+    captured (campaign-aggregate observability, iter 512).  A drop-in CALLABLE: the diagnosis
+    pipeline calls ``run_les_fn(setup)`` host-side (one per worst column), so this computes the
+    breakdown on the FINISHED state and stores ONLY the small ``LESRealismBreakdown`` (six
+    bools), never the heavy state — so a multi-day campaign accumulates a tiny list, not a heap
+    of plane LESs.  The campaign uses DEFAULT realism thresholds (no CLI flag exposes them), so
+    this breakdown matches the gate the pipeline applied.  ``run_les_fn`` is the only contract;
+    the diagnosis result is unchanged (this is pure observation)."""
+
+    def __init__(self, run_les_fn: Callable[[Any], Any]) -> None:
+        self._run_les_fn = run_les_fn
+        self.breakdowns: list[Any] = []
+
+    def __call__(self, setup: Any) -> Any:
+        from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+            column_les_realism_breakdown,
+        )
+        final_state = self._run_les_fn(setup)
+        self.breakdowns.append(
+            column_les_realism_breakdown(final_state, setup.height_coord))
+        return final_state
+
+
+def _realism_campaign_summary_line(breakdowns: Any) -> str | None:
+    """One-line campaign-aggregate LES-realism report from the captured per-column
+    ``LESRealismBreakdown``\\ s (iter 512): how many spin-offs were realistic, and the
+    dominant rejection modes — so an operator reading a finished multi-day run sees WHETHER
+    the LESs were trustworthy and WHY any were not.  ``None`` when nothing was captured (a
+    dry-run, or no LES ran), so the caller prints nothing."""
+    if not breakdowns:
+        return None
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        LESRealismBreakdown,
+        summarize_realism_breakdowns,
+    )
+    stacked = LESRealismBreakdown(*(
+        jnp.stack([getattr(b, f) for b in breakdowns])
+        for f in LESRealismBreakdown._fields))
+    s = summarize_realism_breakdowns(stacked)
+    if s.n_rejected == 0:
+        return f"[campaign] LES realism: all {s.n_total} spin-offs realistic."
+    modes = [f"{n}x {lbl}" for lbl, n in (
+        ("laminar", s.n_not_turbulent), ("blow-up", s.n_not_finite),
+        ("theta-drift", s.n_thermo_drift), ("moisture-runaway", s.n_moisture_runaway),
+        ("supersaturated", s.n_supersaturated)) if n]
+    return (f"[campaign] LES realism: {s.n_realistic}/{s.n_total} realistic, "
+            f"{s.n_rejected} rejected ({', '.join(modes)}) — see the no_valid_diagnoses "
+            "verdict if this starved the correction.")
+
+
 # Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.
 COEFFICIENT_SPEC_MAP = {
     "C_K": ("clubb_lite_C_K", "clubb_coefficient"),
@@ -2248,6 +2300,9 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     print(f"[campaign] wrote corrected multi-coefficient config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
+    realism_line = _realism_campaign_summary_line(getattr(run_les, "breakdowns", None))
+    if realism_line:
+        print(realism_line)
     _print_deploy_hint(args.out, grid)
     # Exit code = the health verdict (iter 287): 0 only when the run IMPROVED, non-zero
     # otherwise, so an HPC workflow gating on `run_campaign && deploy` does NOT deploy a
@@ -2583,6 +2638,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # CLI via _build_run_setup (iter 295).
     base_cfg, grid, sigma, build_base_driver, extract_fn, run_les, phis = _build_run_setup(
         args)
+    # Observe every spin-off LES's realism breakdown for the end-of-run aggregate report
+    # (iter 512); pure observation, the diagnosis is unchanged. A no-op for a --dry-run (no
+    # LES runs → no breakdowns captured).
+    run_les = _RealismCapture(run_les)
     # Turnkey OFFLINE realistic AMIP: build the SST/sea-ice forcing from the same local
     # ERA5 archive and inject it into base_cfg (so every corrected round carries it).
     base_cfg = _maybe_apply_local_era5_forcing(args, base_cfg)
@@ -2741,6 +2800,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     print(f"[campaign] wrote corrected clubb config to {args.out}")
     print(summary.report())
     print(f"[campaign] {health.status.upper()}: {health.message}")
+    realism_line = _realism_campaign_summary_line(getattr(run_les, "breakdowns", None))
+    if realism_line:
+        print(realism_line)
     _print_deploy_hint(args.out, grid)
     _maybe_write_env_kernel(args, result)
     # Exit code = the health verdict (iter 287, mirrors the OSSE go/no-go + the multi
