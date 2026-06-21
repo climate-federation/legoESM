@@ -532,6 +532,32 @@ class CoupledESMDriver:
             carbon_cfg = CarbonConfig(scheme="differland")
             land_cfg = land_cfg._replace(carbon=carbon_cfg)
 
+        # Calibrated config-level land parameters on the CLM default path (the
+        # per-cell PFT params come from the provider; these are the global snow/ice
+        # + bulk-transfer values tuned vs ERA5 under physical bounds).
+        if (cfg.land_mode != "none"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"):
+            from legoesm.land.clm_surface_map import TUNED_CH, TUNED_SNOW_ALBEDO_MAX
+            land_cfg = land_cfg._replace(
+                Ch_land=TUNED_CH, Cd_land=TUNED_CH, snow_albedo_feedback=True,
+                land_albedo=land_cfg.land_albedo._replace(
+                    alpha_snow_max=TUNED_SNOW_ALBEDO_MAX))
+            logger.info("  Land: ERA5-calibrated Ch/snow params (CLM default path)")
+
+        # Spatial soil hydraulics from the CLM reference map (per-column van-
+        # Genuchten retention) for the Richards multilayer land.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"
+                and self._atm._grid_lat is not None):
+            from legoesm.land.clm_surface_map import (
+                download_clm_surfdata, load_clm_surface, clm_hydraulics_config)
+            lat = self._atm._grid_lat; lon = self._atm._grid_lon
+            lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            land_cfg = land_cfg._replace(hydraulics=clm_hydraulics_config(smap))
+            logger.info("  Soil: CLM reference van-Genuchten map (per-column)")
+
         self._land_cfg = land_cfg  # store for diagnostics
 
         # PFT parameter provider (if requested and land is active)
@@ -635,7 +661,10 @@ class CoupledESMDriver:
                     f"f_land_mean={land_frac:.2f}")
 
     def _build_pft_provider(self, shape_2d):
-        """Create a PFTParamProvider with analytical PFT fractions."""
+        """Create the spatial land-parameter provider.
+
+        ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
+        reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
         from legoesm.land.param_providers import PFTParamProvider
 
@@ -644,6 +673,20 @@ class CoupledESMDriver:
             logger.warning("  PFT requested but no latitude available; "
                            "falling back to scalar params")
             return None
+
+        source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        if source == "clm":
+            from legoesm.land.clm_surface_map import clm_surface_provider
+            lon = self._atm._grid_lon
+            lat_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            provider = clm_surface_provider(lat_deg, lon_deg)
+            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
+                        f"reference soil), {lat_deg.size} columns")
+            return provider
+        if source != "analytical":
+            raise ValueError(
+                f"land_param_source must be 'analytical' or 'clm', got {source!r}.")
 
         # Flatten to (ncol,)
         lat_flat = jnp.ravel(lat) if lat.ndim > 1 else lat
