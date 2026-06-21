@@ -304,6 +304,46 @@ def compute_static_rho_ref_z(
     return rho_ref_z.astype(T.dtype)
 
 
+def ab2_blend(
+    f_new: jnp.ndarray,
+    f_old: jnp.ndarray,
+    eps: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Adams-Bashforth-2 time blend ``(1.5 + eps)·f_new − (0.5 + eps)·f_old``.
+
+    The standard AB2 extrapolation of a tendency to the half-step, with
+    the Robert-Asselin-style stabilising offset ``eps`` (``config.
+    ab2_epsilon``) that shifts the weights ``(3/2, −1/2)`` towards a more
+    damped ``(3/2 + ε, −1/2 − ε)`` to suppress the AB2 weak instability.
+
+    ``f_new`` is the tendency at the current step ``F^n``; ``f_old`` is
+    the previous step ``F^{n−1}``.  Open-coded identically across the
+    rigid-lid streamfunction update and the split / unsplit baroclinic
+    tracer + momentum predictors — factored here (#517 item 8).
+
+    The arithmetic is written EXACTLY as the call sites had it
+    (``(1.5 + eps) * f_new - (0.5 + eps) * f_old``, including those that
+    pre-bound ``a_n = 1.5 + eps``, ``a_p = 0.5 + eps``) so the result is
+    BIT-IDENTICAL.  Pure elementwise; broadcasts over any shape; fully
+    differentiable.
+
+    Parameters
+    ----------
+    f_new : jax.Array
+        Tendency at the current step ``F^n``.
+    f_old : jax.Array
+        Tendency at the previous step ``F^{n−1}``.
+    eps : float or jax.Array
+        AB2 stabilising offset (``config.ab2_epsilon``).
+
+    Returns
+    -------
+    jax.Array
+        ``(1.5 + eps)·f_new − (0.5 + eps)·f_old``.
+    """
+    return (1.5 + eps) * f_new - (0.5 + eps) * f_old
+
+
 def column_depth(
     h_face: jnp.ndarray,
     min_water_column_m: jnp.ndarray | float,

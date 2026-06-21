@@ -74,6 +74,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
+    ab2_blend,
     column_depth,
     depth_average_to_faces,
 )
@@ -453,10 +454,11 @@ def rigid_lid_step(psi, dpsi, dpsi_prev, dpsin, dpsin_prev,
     dpsin_new = _solve_island_constants(line_forc, rl_data)
 
     # 5. AB2 integrate ψ (interior + island contributions).
-    ab2_int = (1.5 + eps) * dpsi_new - (0.5 + eps) * dpsi
+    # (#517 item 8: shared ab2_blend; eps passed verbatim → bit-identical.)
+    ab2_int = ab2_blend(dpsi_new, dpsi, eps)
     psi_new = psi + dt * ab2_int
     if rl_data.nisle > 1:
-        ab2_isle = (1.5 + eps) * dpsin_new - (0.5 + eps) * dpsin       # (nisle,)
+        ab2_isle = ab2_blend(dpsin_new, dpsin, eps)                    # (nisle,)
         # Σ_k ab2_isle[k] · psin[...,k]
         psi_new = psi_new + dt * jnp.tensordot(rl_data.psin, ab2_isle, axes=([2], [0]))
 
