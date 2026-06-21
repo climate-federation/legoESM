@@ -324,10 +324,21 @@ def compute_cloud_properties(
     # The stratiform RH/condensate fractions above miss convective cloud when an
     # adjustment scheme (sbm) holds the column subsaturated, so the convecting
     # tropics get cf≈0 and leak surface LW.  When enabled, add a bounded
-    # Slingo(1987) cumulus cover tied to the convective precip rate; the existing
-    # ``cf * q_c_diagnostic`` condensate floor below then makes it radiatively
-    # active.  Default-off / ``conv_precip=None`` ⇒ ``cf`` unchanged.
-    if config.convective_cloud:
+    # Slingo(1987) cumulus cover tied to the convective precip rate; the
+    # condensate floor below makes it radiatively active.  Default-off /
+    # ``conv_precip=None`` ⇒ ``cf`` unchanged.  ``cf_strat`` is the stratiform
+    # fraction BEFORE the convective overlap; the convective EXCESS
+    # (``cf - cf_strat``) gets the optically-THIN ``conv_cloud_condensate``
+    # (anvil cirrus: LW-active, SW-transparent) instead of the thick
+    # ``q_c_diagnostic`` stratiform floor — without this, the high anvil
+    # over-reflects SW (validation: planetary albedo ~42% vs Earth 30%).
+    cf_strat = cf
+    # Only the diagnostic-fraction schemes have the cf·condensate floor that
+    # makes the added convective cover radiatively active; for 'resolved' (CRM,
+    # explicit condensate is the truth) raising cf would leave the convective
+    # excess optically inert, so restrict the feature to sundqvist/xu_randall
+    # (codex review).
+    if config.convective_cloud and config.scheme in ("sundqvist", "xu_randall"):
         if conv_precip is None:
             # Loud misconfiguration: the feature was requested but the caller
             # never plumbed the convective precip, so it would silently be a
@@ -340,6 +351,19 @@ def compute_cloud_properties(
             )
         cf_conv = convective_cloud_fraction(conv_precip, p_full, config)
         cf = jnp.maximum(cf, cf_conv)
+
+    # --- Diagnostic in-cloud condensate scale, split stratiform/convective ---
+    # Stratiform fraction carries the thick ``q_c_diagnostic``; the convective
+    # EXCESS carries the thin ``conv_cloud_condensate`` so the anvil is LW-active
+    # but SW-transparent.  When the convective cloud is off, ``cf_strat == cf``
+    # ⇒ the excess is 0 ⇒ this reduces EXACTLY to ``cf * q_c_diagnostic``
+    # (value-identical legacy behaviour — same numbers; the extra max/add ops
+    # constant-fold but are not byte-identical HLO).
+    _conv_excess = jnp.maximum(cf - cf_strat, 0.0)
+    q_total_diag = (
+        cf_strat * config.q_c_diagnostic
+        + _conv_excess * config.conv_cloud_condensate
+    )
 
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
@@ -373,18 +397,16 @@ def compute_cloud_properties(
             # inflating total condensate (codex review).  The deficit form adds
             # nothing when the prognostic TOTAL already meets the floor, so the
             # explicit phase split is preserved EXACTLY there.
-            q_total_diag = cf * config.q_c_diagnostic
             deficit = jnp.maximum(q_total_diag - (q_c + q_i), 0.0)
             f_ice_diag = _ice_fraction(T, config)
             q_c = q_c + deficit * (1.0 - f_ice_diag)
             q_i = q_i + deficit * f_ice_diag
     else:
-        # Diagnose condensate from cloud fraction and a typical in-cloud value.
-        # Total condensate = cf * q_c_diagnostic, partitioned by temperature.
-        q_total = cf * config.q_c_diagnostic
+        # Diagnose condensate from cloud fraction and a typical in-cloud value
+        # (stratiform thick + convective-excess thin), partitioned by temperature.
         f_ice = _ice_fraction(T, config)
-        q_c = q_total * (1.0 - f_ice)
-        q_i = q_total * f_ice
+        q_c = q_total_diag * (1.0 - f_ice)
+        q_i = q_total_diag * f_ice
 
     # --- Cloud water/ice paths [kg/m^2] ---
     # Grid-mean water/ice paths: q * dp / g

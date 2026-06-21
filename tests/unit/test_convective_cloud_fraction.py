@@ -107,10 +107,14 @@ class TestConvectiveCloudFraction:
         # Total cloud amount must increase (max is saturated by the BL
         # stratiform cf=1, so compare the column sum).
         assert float(on.cloud_fraction.sum()) > float(base.cloud_fraction.sum())
-        # And the convective deck must gain cloud where stratiform gave ~0.
-        mid = on.cloud_fraction.shape[1] // 2   # a free-trop deck level
-        assert float(on.cloud_fraction[:, mid].max()) > float(
-            base.cloud_fraction[:, mid].max()
+        # And the convective anvil deck [sigma_top, sigma_base] must gain cloud
+        # where stratiform gave ~0.  Pick a level INSIDE the deck (it is the
+        # upper troposphere, not the column mid-point).
+        sig = np.asarray(p_full[0]) / float(np.asarray(p_full[0])[-1])
+        deck = (sig >= cfg.conv_cloud_sigma_top) & (sig <= cfg.conv_cloud_sigma_base)
+        assert deck.any()
+        assert float(on.cloud_fraction[:, deck].max()) > float(
+            base.cloud_fraction[:, deck].max()
         )
         lwp_iwp = float((on.lwp + on.iwp).sum())
         assert lwp_iwp > 0.0

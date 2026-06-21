@@ -48,7 +48,8 @@ __param_spec__ = {
             "conv_cloud_max": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "Slingo (1987) convective cloud-amount cap", "shape": None},
             "conv_precip_scale": {"units": "kg/m^2/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective-cloud reference precip rate (~1 mm/day)", "shape": None},
             "conv_cloud_sigma_top": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck top (sigma); numerics layer-bound", "shape": None},
-            "conv_cloud_sigma_base": {"units": "1", "bounds": (0.6, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck base (sigma); numerics layer-bound", "shape": None},
+            "conv_cloud_sigma_base": {"units": "1", "bounds": (0.35, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective anvil-deck base (sigma); numerics layer-bound", "shape": None},
+            "conv_cloud_condensate": {"units": "kg/kg", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "thin anvil-cirrus in-cloud condensate", "shape": None},
         },
     },
 }
@@ -160,10 +161,27 @@ class CloudConfig(NamedTuple):
     # stratiform fraction by maximum overlap.  Default False => byte-identical
     # to the validated stratiform-only path (no production change).
     convective_cloud: bool = False
-    conv_cloud_coeff: float = 0.15      # cloud-amount per e-fold of P_conv
-    conv_cloud_max: float = 0.6         # cap on convective cloud cover (realistic
-                                        # max cumulus+anvil cover, reachable at
-                                        # heavy ITCZ rain; cf~0.36 at 10 mm/day)
+    # Tuned DOWN from coeff=0.15/cap=0.6/deck[0.15,0.90] (15 levels), which
+    # over-produced: applying cf_conv across the whole free troposphere, each
+    # level then carrying the cf*q_c_diagnostic radiative-condensate floor,
+    # stacked column LWP to OVERCAST (validation 8534361: albedo 78.9%, R_TOA
+    # -100 W/m2 — the mass_flux failure mode).  Concentrate the cover in a thin
+    # upper-tropospheric ANVIL deck [0.15,0.45] (~3-4 levels) with a small
+    # coeff/cap so the convective cloud NUDGES the tropical cloud-radiative
+    # effect instead of dominating it.
+    # v2 (coeff0.04/cap0.2/deck[0.15,0.45]) closed the LW deficit (LW_net_sfc
+    # -110 -> -66, CWV 14 -> 25) but albedo was still 44% (Earth ~30%): the
+    # anvil reflected too much SW, so the LW warming was offset (R_TOA -15, SST
+    # drift unchanged).  v3 RAISES + THINS the anvil to make it LW-DOMINANT —
+    # colder/higher cloud tops trap LW efficiently while a thinner, higher deck
+    # reflects less SW.
+    conv_cloud_coeff: float = 0.04      # cloud-amount per e-fold of P_conv
+    conv_cloud_max: float = 0.15        # cap on convective cloud cover
     conv_precip_scale: float = 1.1574e-5  # ~1 mm/day in kg/m^2/s (P0)
-    conv_cloud_sigma_top: float = 0.15   # convective deck top (sigma)
-    conv_cloud_sigma_base: float = 0.90  # convective deck base (sigma)
+    conv_cloud_sigma_top: float = 0.10   # convective anvil deck top (sigma)
+    conv_cloud_sigma_base: float = 0.35  # convective anvil deck base (sigma)
+    # In-cloud condensate [kg/kg] for the convective EXCESS fraction — an
+    # optically-THIN anvil cirrus (~7x less than the thick stratiform
+    # q_c_diagnostic=1e-3) so the high cloud traps LW without over-reflecting SW
+    # (the v3 albedo~42% overshoot; high cold tops keep the LW benefit).
+    conv_cloud_condensate: float = 1.5e-4
