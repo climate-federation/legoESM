@@ -177,6 +177,81 @@ def _vertical_diffusion_edge_partial(
     return jnp.concatenate([top, interior, bottom], axis=-1)
 
 
+def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
+    """Prepare MPAS-KPP inputs and run ``kpp_vertical_mixing`` (#518 item 2).
+
+    ``make_kpp_physics_mpas`` and ``make_kpp_profiles_mpas`` shared this entire
+    input-preparation block verbatim (the two copies differed only in comment
+    verbosity): TRiSK/Perot cell-velocity reconstruction, land-safe Jacobian +
+    density, surface-forcing buoyancy flux, land-zeroing, and the partial-cell
+    sub-seafloor T/S/u/v fill — then the KPP call.
+
+    Returns ``(kpp_out, J)``.  ``J`` (the land-safe Jacobian) is returned because
+    the physics path reuses it for the cell→edge Jacobian average; the profiles
+    path uses only ``kpp_out`` (``J`` is then dead and pruned).
+    """
+    T_3d = state.T.data       # (nCells, nlev)
+    S_3d = state.S.data
+    u_edge = state.u.data     # (nEdges, nlev)
+    eta = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data  # (nCells,) — 1=ocean, 0=land
+
+    # Cell-centred (u_east, v_north) from edge-normal u via TRiSK/Perot — KPP
+    # needs it to diagnose Richardson-number shear instability.  (Sub-seafloor
+    # momentum leak is closed by the fill + masking below, so real velocities
+    # are safe to pass.)
+    u_east_raw, v_north_raw = reconstruct_cell_velocity(u_edge, mesh)
+
+    # Density at cells.  KPP divides by the Jacobian internally; it is 0 on land
+    # (H_bathy=0) → NaN, so replace land J with 1.0 and land density with rho_0
+    # (those cells are masked out downstream).
+    J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    J = jnp.where(mask > 0.5, J_real, 1.0)
+    rho_real = compute_ocean_rho(state, z_coord, J_real)
+    rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
+
+    # Surface forcing channels (None → KPP uses interior proxies).
+    tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
+    tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
+    q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
+    fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+    salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
+
+    # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
+    B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
+        q_net, fw, salt, T_3d, S_3d)
+
+    # Land-zero KPP inputs; on partial cells fill sub-seafloor levels with the
+    # deepest active value so KPP sees no spurious T=0/u=0 discontinuity.
+    m3 = mask[:, None]
+    u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
+    v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
+    T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
+    S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)  # safe S for EOS
+    if hasattr(z_coord, 'is_active'):
+        _active = z_coord.is_active  # (nCells, nlev) bool
+        _bot_lev = z_coord.bottom_level  # (nCells,) int
+        _bot_lev_safe = jnp.clip(_bot_lev, 0, T_3d.shape[1] - 1)
+        _row_idx = jnp.arange(T_w.shape[0])
+        _T_bot = T_w[_row_idx, _bot_lev_safe]
+        _S_bot = S_w[_row_idx, _bot_lev_safe]
+        _u_bot = u_east_w[_row_idx, _bot_lev_safe]
+        _v_bot = v_north_w[_row_idx, _bot_lev_safe]
+        T_w = jnp.where(_active, T_w, _T_bot[:, None])
+        S_w = jnp.where(_active, S_w, _S_bot[:, None])
+        u_east_w = jnp.where(_active, u_east_w, _u_bot[:, None])
+        v_north_w = jnp.where(_active, v_north_w, _v_bot[:, None])
+
+    kpp_out = kpp_vertical_mixing(
+        u_east_w, v_north_w, T_w, S_w,
+        rho, eta, z_coord, J, cfg,
+        tau_x=tau_x, tau_y=tau_y, B_f=B_f,
+        Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+    )
+    return kpp_out, J
+
+
 def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
     """Build KPP physics_fn for MPAS Voronoi mesh.
 
@@ -200,88 +275,14 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
         z_coord,
         surface_forcing=None,
     ):
-        T_3d = state.T.data       # (nCells, nlev)
-        S_3d = state.S.data       # (nCells, nlev)
-        u_edge = state.u.data     # (nEdges, nlev)
-        eta = state.eta.data      # (nCells,)
+        # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
+        kpp_out, J = _run_mpas_kpp(state, mesh, z_coord, surface_forcing, cfg)
+        # State accessors reused by the post-KPP edge-diffusion code below.
+        T_3d = state.T.data
+        eta = state.eta.data
         H_bathy = state.H_bathy.data
-        mask = state.land_mask.data  # (nCells,) — 1=ocean, 0=land
-
-        # Reconstruct cell-centered (u_east, v_north) from edge-normal u
-        # via TRiSK/Perot.  KPP needs this to diagnose Richardson-number
-        # shear instability and produce the enhanced viscosity that damps
-        # the equatorial jet (the whole reason we want KPP).
-        #
-        # Earlier (2026-05-09), passing real velocities destabilized the
-        # equator at day 1 due to sub-seafloor momentum leak: KPP saw
-        # spurious velocity below the seafloor (from zero-fill mismatch
-        # with the active mask) and produced bogus viscosity profiles.
-        # With the 2026-05-10 fixes (sub-seafloor T/S fill, A_v masking
-        # at inactive interfaces, edge_mask_3d on physics du_dt in the
-        # PE module, per-edge CFL cap with actual h_e), the sub-seafloor
-        # leak is closed and real velocities can be passed safely.
-        u_east_raw, v_north_raw = reconstruct_cell_velocity(u_edge, mesh)
-
-        # Density at cells.  KPP divides by Jacobian internally; the
-        # Jacobian is 0 on land cells (where H_bathy=0), which produces
-        # NaN.  Replace land Jacobian with 1.0 (reference) and density
-        # with rho_0 — the resulting tendencies are masked out below.
-        J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
-        J = jnp.where(mask > 0.5, J_real, 1.0)
-        rho_real = compute_ocean_rho(state, z_coord, J_real)
-        rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
-
-        # Surface forcing (KPP needs friction velocity and buoyancy flux).
-        # Lat-lon code derives these from OceanSurfaceForcing — we mirror
-        # that pattern.  When surface_forcing is None, KPP uses interior
-        # proxies and still runs.
-        tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
-        tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
-        q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
-        fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
-        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
-
-        # Surface buoyancy + kinematic T/S fluxes (#518: shared MPAS helper).
-        B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
-            q_net, fw, salt, T_3d, S_3d)
-
-        # Zero-out fields on land cells so KPP doesn't see junk values.
-        # On partial-cell coordinates, also fill sub-seafloor levels with
-        # the deepest active cell's value.  Without this, KPP sees T=0
-        # below the seafloor and interprets it as a massive temperature
-        # discontinuity → spurious mixing at the bottom active level.
-        m3 = mask[:, None]
-        u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
-        v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
-        T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-        S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)  # safe S for EOS
-        if hasattr(z_coord, 'is_active'):
-            # Fill sub-seafloor T/S/u/v by extending the deepest active
-            # value downward.  Without this, KPP sees a discontinuity at
-            # the seafloor (T=0, u=0 below) → spurious large mixing.
-            _active = z_coord.is_active  # (nCells, nlev) bool
-            _bot_lev = z_coord.bottom_level  # (nCells,) int
-            _bot_lev_safe = jnp.clip(_bot_lev, 0, T_3d.shape[1] - 1)
-            _row_idx = jnp.arange(T_w.shape[0])
-            _T_bot = T_w[_row_idx, _bot_lev_safe]
-            _S_bot = S_w[_row_idx, _bot_lev_safe]
-            _u_bot = u_east_w[_row_idx, _bot_lev_safe]
-            _v_bot = v_north_w[_row_idx, _bot_lev_safe]
-            T_w = jnp.where(_active, T_w, _T_bot[:, None])
-            S_w = jnp.where(_active, S_w, _S_bot[:, None])
-            u_east_w = jnp.where(_active, u_east_w, _u_bot[:, None])
-            v_north_w = jnp.where(_active, v_north_w, _v_bot[:, None])
-
-        # Run KPP on cell-centered fields.  KPP returns (du_dt, dv_dt) at
-        # cells AND the viscosity field A_v(nCells, nlev-1) at half levels.
-        # We discard the cell-centered velocity tendencies and re-apply
-        # diffusion to edge-normal u using the interpolated A_v.
-        kpp_out = kpp_vertical_mixing(
-            u_east_w, v_north_w, T_w, S_w,
-            rho, eta, z_coord, J, cfg,
-            tau_x=tau_x, tau_y=tau_y, B_f=B_f,
-            Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-        )
+        u_edge = state.u.data
+        mask = state.land_mask.data
 
         # Mask tracer tendencies — zero on land AND shallow cells.
         # KPP is designed for open-ocean boundary layers (50-500m deep).
@@ -434,60 +435,11 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
         z_coord,
         surface_forcing=None,
     ):
-        T_3d = state.T.data       # (nCells, nlev)
-        S_3d = state.S.data       # (nCells, nlev)
-        u_edge = state.u.data     # (nEdges, nlev)
-        eta = state.eta.data      # (nCells,)
-        H_bathy = state.H_bathy.data
-        mask = state.land_mask.data  # (nCells,) — 1=ocean, 0=land
-
-        # Reconstruct cell-centered (u_east, v_north) from edge-normal u.
-        u_east_raw, v_north_raw = reconstruct_cell_velocity(u_edge, mesh)
-
-        # Density at cells (land-safe Jacobian).
-        J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
-        J = jnp.where(mask > 0.5, J_real, 1.0)
-        rho_real = compute_ocean_rho(state, z_coord, J_real)
-        rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
-
-        # Surface forcing (KPP needs friction velocity and buoyancy flux).
-        tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
-        tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
-        q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
-        fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
-        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
-
-        # Surface buoyancy + kinematic T/S fluxes (#518: shared MPAS helper).
-        B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
-            q_net, fw, salt, T_3d, S_3d)
-
-        # Zero-out fields on land cells; fill sub-seafloor levels.
-        m3 = mask[:, None]
-        u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
-        v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
-        T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-        S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)
-        if hasattr(z_coord, 'is_active'):
-            _active = z_coord.is_active
-            _bot_lev = z_coord.bottom_level
-            _bot_lev_safe = jnp.clip(_bot_lev, 0, T_3d.shape[1] - 1)
-            _row_idx = jnp.arange(T_w.shape[0])
-            _T_bot = T_w[_row_idx, _bot_lev_safe]
-            _S_bot = S_w[_row_idx, _bot_lev_safe]
-            _u_bot = u_east_w[_row_idx, _bot_lev_safe]
-            _v_bot = v_north_w[_row_idx, _bot_lev_safe]
-            T_w = jnp.where(_active, T_w, _T_bot[:, None])
-            S_w = jnp.where(_active, S_w, _S_bot[:, None])
-            u_east_w = jnp.where(_active, u_east_w, _u_bot[:, None])
-            v_north_w = jnp.where(_active, v_north_w, _v_bot[:, None])
-
-        # Run KPP to get viscosity/diffusivity profiles.
-        kpp_out = kpp_vertical_mixing(
-            u_east_w, v_north_w, T_w, S_w,
-            rho, eta, z_coord, J, cfg,
-            tau_x=tau_x, tau_y=tau_y, B_f=B_f,
-            Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-        )
+        # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
+        # ``J`` is unused on the profiles path (only A_v/K_v are returned).
+        kpp_out, _ = _run_mpas_kpp(state, mesh, z_coord, surface_forcing, cfg)
+        T_3d = state.T.data
+        mask = state.land_mask.data
 
         # Shallow-cell mask: KPP is physically inappropriate for cells
         # with fewer than 5 active levels.
