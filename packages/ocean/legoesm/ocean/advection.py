@@ -30,6 +30,7 @@ from legoesm.ocean.dynamics._flux_limiters import (
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     is_tripolar,
+    vface_zonal_cos_lat,
 )
 
 # =============================================================================
@@ -1271,11 +1272,12 @@ def _zalesak_signsplit_face_alphas(
         dlon = grid.dlon
         # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
         face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        lat = grid.lat
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        face_dx = R_planet * dlon * jnp.pad(
-            jnp.cos(lat_interior), (1, 1),
-        )  # (n_lat+1,)
+        # #516: single-source v-face zonal cos(lat_v) (interior
+        # cos(0.5·(lat[j]+lat[j+1])), poles 0) — routes through the shared
+        # backend-aware helper so an MPI lat-band cut keeps the neighbour-rank
+        # metric instead of the old serial jnp.pad (which zeroed local band
+        # edges).  Bit-identical on serial.
+        face_dx = R_planet * dlon * vface_zonal_cos_lat(grid)  # (n_lat+1,)
         _is_2d_dy = False
         _is_2d_dx = False
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)

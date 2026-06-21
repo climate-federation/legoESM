@@ -51,8 +51,21 @@ def _basin(uniform_cos=False, enclosed=True, seed=7, nlev=_NLEV):
     spherical metric vanishes and the flux divergence telescopes EXACTLY."""
     grid = create_latlon_grid(_NLAT, _NLON, dtype=jnp.float64)
     if uniform_cos:
-        cosc = float(grid.cos_lat[_NLAT // 2])
-        grid = grid._replace(cos_lat=jnp.full_like(grid.cos_lat, cosc))
+        # Metric-free basin: the spherical metric vanishes only if EVERY
+        # cos(lat) the operator reads is the same constant.  #516 routes
+        # the v-face cosine through ``vface_zonal_cos_lat``, which
+        # recomputes ``cos(0.5·(lat[j]+lat[j+1]))`` from ``grid.lat`` —
+        # so overriding only ``cos_lat`` (the cell cosine) leaves a
+        # varying interface cosine and the budget no longer telescopes.
+        # Pin ``lat`` to a single mid-latitude too, so both the cell and
+        # the interface cosine collapse to the same constant.
+        mid = _NLAT // 2
+        latc = float(grid.lat[mid])
+        cosc = float(grid.cos_lat[mid])
+        grid = grid._replace(
+            lat=jnp.full_like(grid.lat, latc),
+            cos_lat=jnp.full_like(grid.cos_lat, cosc),
+        )
     m = np.ones((_NLAT, _NLON))
     m[0, :] = 0.0
     m[-1, :] = 0.0
@@ -190,7 +203,19 @@ def _veros_harmonic_friction_reference(grid, um, vm, u, v, cos_power):
     """
     R = float(grid.radius); dlon = float(grid.dlon)
     cos_u = np.asarray(grid.cos_lat)
-    cos_v = np.concatenate([cos_u[:1], 0.5 * (cos_u[:-1] + cos_u[1:]), cos_u[-1:]])
+    # #516: Veros's velocity-point cosine is ``cosu = cos(yu)`` at the
+    # v-FACE (interface) latitude ``yu`` — the cos-OF-interface
+    # ``cos(0.5·(lat[j]+lat[j+1]))``.  (The earlier ``0.5·(cos_u[:-1]+
+    # cos_u[1:])`` mean-of-cos reference was the slightly-LESS-faithful
+    # approximation #516 removed: it equals ``cos(yu)`` only to O(dlat²) on
+    # a stretched grid.)  Computed INDEPENDENTLY from ``grid.lat`` with
+    # numpy — NOT via the operator's ``_cos_lat_uv`` — so a regression in
+    # the unified metric cannot be copied into this oracle (codex).  Only
+    # the interior ``cos_v[1:-1]`` is used below; the polar placeholders
+    # are irrelevant to the friction terms.
+    _lat = np.asarray(grid.lat)
+    _cos_v_int = np.cos(0.5 * (_lat[:-1] + _lat[1:]))   # (n_lat-1,) interior
+    cos_v = np.concatenate([cos_u[:1], _cos_v_int, cos_u[-1:]])
     dx_cell = R * cos_u * dlon                       # cost*dxt (zonal arc of T-cell)
     dy_cell = np.asarray(grid.dy) * 0.5              # dyt
     dy_v_int = 0.5 * (dy_cell[1:] + dy_cell[:-1])    # dyu interior

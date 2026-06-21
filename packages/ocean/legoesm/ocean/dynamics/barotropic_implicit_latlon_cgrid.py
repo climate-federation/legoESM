@@ -79,6 +79,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     is_tripolar,
     pad_ns_zero,
+    vface_zonal_cos_lat,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import (
@@ -402,14 +403,13 @@ def _helmholtz_inv_diag(
         dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
         dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
 
-        lat = grid.lat
-        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
-        lat_v = jnp.concatenate([
-            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-            lat_v_int,
-            jnp.array([jnp.pi / 2], dtype=lat.dtype),
-        ])
-        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        # #516: single-source v-face zonal cos(lat_v) — interior
+        # cos(0.5·(lat[j]+lat[j+1])), poles exactly 0.  Routes through the
+        # shared helper (backend-aware pad_with_pole_bc_lat + zero_polar_lat_ends)
+        # so an MPI band cut keeps the neighbour-rank metric instead of the
+        # old synthetic ±π/2 endpoints (which dropped the meridional diagonal
+        # at interior cuts — #515).  Bit-identical on serial.
+        cos_lat_v = vface_zonal_cos_lat(grid)            # (n_lat+1,)
         dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
         diag_zonal = (
