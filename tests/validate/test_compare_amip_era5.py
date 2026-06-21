@@ -478,6 +478,38 @@ def test_ocean_mask_for_verify(tmp_path):
         md.ModelDriver = orig
 
 
+def test_ocean_mask_for_verify_all_ocean_is_a_flagged_noop(tmp_path, capsys):
+    """A flat (no-land-mask) --base-config selects EVERY column under --ocean-only — a silent
+    no-op that would report the GLOBAL bias as if ocean-only. It must be FLAGGED (mirrors the
+    iter-477 preflight NOTE), not pass silently."""
+    from types import SimpleNamespace
+
+    import legoesm.driver.model_driver as md
+
+    cfg_path = str(tmp_path / "flat.json")
+    with open(cfg_path, "w") as f:
+        json.dump({}, f)
+
+    class _FlatDriver:
+        def __init__(self, _cfg):
+            pass
+
+        def static_land_fraction(self):
+            return jnp.zeros((2, 2))                  # flat => all ocean (no land mask)
+
+    grid4 = SimpleNamespace(grid_area=jnp.ones(4))
+    on = SimpleNamespace(ocean_only=True, base_config=cfg_path, max_land_fraction=0.5)
+    orig = md.ModelDriver
+    md.ModelDriver = _FlatDriver
+    try:
+        mask = drv._ocean_mask_for_verify(on, grid4)
+    finally:
+        md.ModelDriver = orig
+    assert mask is not None and int(jnp.sum(mask)) == 4   # all 4 selected (no-op)
+    out = capsys.readouterr().out
+    assert "selected ALL 4 columns" in out and "no-op" in out
+
+
 def test_ocean_only_flags_parse_defaults():
     a = drv._build_arg_parser().parse_args(
         ["--restart", "r", "--grid-type", "latlon", "--resolution", "8",

@@ -267,6 +267,14 @@ def _ocean_mask_for_verify(args, grid):
         raise SystemExit(
             f"--ocean-only masks out EVERY column (no column has land_fraction <= "
             f"{args.max_land_fraction}); drop --ocean-only or raise --max-land-fraction.")
+    if n_ocean == n_cols:
+        # All columns selected => the restriction is a NO-OP: either the --base-config is
+        # flat (no land_mask_path) or --max-land-fraction is too permissive, so the verify
+        # silently reports the GLOBAL (land-included) bias under the guise of "ocean-only"
+        # — surface it (mirrors the iter-477 preflight NOTE) rather than mislead.
+        print(f"[compare_amip_era5] NOTE: --ocean-only selected ALL {n_cols} columns — the "
+              "--base-config has no land mask (flat) or --max-land-fraction is too permissive, "
+              "so the ocean-only restriction is a no-op (this is the GLOBAL bias).")
     print(f"[compare_amip_era5] --ocean-only: bias over {n_ocean} ocean columns "
           f"(land_fraction <= {args.max_land_fraction}) of {n_cols} total.")
     return mask
