@@ -53,9 +53,25 @@ from legoesm.land.surface_params import (
 _TABLE = np.asarray(clm5_pft_table())          # (17,12) CLM5 PFT params
 _PI = {n: i for i, n in enumerate(PARAM_NAMES)}
 _N_PFT = 17
+# PHYSICAL per-PFT snow-free albedo bounds (lo, hi) in CLM5 PFT order, so the
+# calibration cannot over-brighten vegetation to cancel the offline-forcing warm
+# bias (literature broadband ranges): bare/soil bright, forests dark, grass/crop mid.
+_PFT_ALB_LO = np.array([0.25, 0.08, 0.08, 0.08, 0.09, 0.09, 0.09, 0.09, 0.09,
+                        0.12, 0.12, 0.12, 0.14, 0.15, 0.15, 0.14, 0.14])
+_PFT_ALB_HI = np.array([0.40, 0.14, 0.14, 0.16, 0.16, 0.16, 0.17, 0.17, 0.17,
+                        0.22, 0.22, 0.22, 0.24, 0.25, 0.25, 0.26, 0.26])
+# per-PFT rooting depth [m] (water uptake): forests deep, grass/crop shallow, bare ~0.
+_PFT_ROOT_LO = np.array([0.05, 0.8, 0.8, 0.6, 1.0, 1.0, 0.8, 0.8, 0.6,
+                         0.4, 0.4, 0.4, 0.3, 0.3, 0.3, 0.3, 0.3])
+_PFT_ROOT_HI = np.array([0.3, 3.0, 3.0, 2.5, 4.0, 4.0, 3.0, 3.0, 2.5,
+                         2.0, 2.0, 2.0, 1.2, 1.5, 1.5, 1.5, 1.5])
+# per-PFT bucket capacity [kg/m2] (plant-available water store).
+_PFT_WMAX_LO, _PFT_WMAX_HI = 60.0, 320.0
 # constrained parameter bounds (lo, hi); per-PFT params are length-17 vectors.
-BOUNDS = dict(pft_alb=(0.05, 0.45), pft_emis=(0.90, 0.995),
-              glac_alb=(0.40, 0.75), snow_max=(0.55, 0.85), ch=(1.0e-3, 6.0e-3))
+BOUNDS = dict(pft_alb=(_PFT_ALB_LO, _PFT_ALB_HI), pft_emis=(0.94, 0.99),
+              pft_root=(_PFT_ROOT_LO, _PFT_ROOT_HI),
+              pft_wmax=(_PFT_WMAX_LO, _PFT_WMAX_HI),
+              glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85), ch=(2.0e-3, 5.0e-3))
 _STEPS_PER_MONTH = 120                          # 6-h steps over ~30 days
 _DT = 6 * 3600.0
 
@@ -68,18 +84,27 @@ def constrain(p: dict) -> dict:
             for k, v in p.items()}
 
 
+def _inv(v, k):
+    """Inverse-sigmoid of value(s) v into raw space for bounded param k (lo/hi may
+    be scalars or per-PFT arrays)."""
+    lo, hi = BOUNDS[k]
+    v = np.clip(v, np.asarray(lo) + 1e-4, np.asarray(hi) - 1e-4)
+    return np.log((v - lo) / (hi - v))
+
+
 def init_raw_params() -> dict:
-    """Raw (unconstrained) params initialised at the CLM5 defaults."""
-    def inv(v, k):
-        lo, hi = BOUNDS[k]
-        v = np.clip(v, lo + 1e-4, hi - 1e-4)
-        return np.log((v - lo) / (hi - v))
+    """Raw (unconstrained) params initialised at the CLM5 defaults (clamped into the
+    physical bounds)."""
     return dict(
-        pft_alb=jnp.asarray([inv(a, "pft_alb") for a in _TABLE[:, _PI["albedo_veg"]]]),
-        pft_emis=jnp.asarray([inv(0.96, "pft_emis")] * _N_PFT),
-        glac_alb=jnp.asarray(inv(0.55, "glac_alb")),
-        snow_max=jnp.asarray(inv(0.80, "snow_max")),
-        ch=jnp.asarray(inv(3.0e-3, "ch")))
+        pft_alb=jnp.asarray(_inv(_TABLE[:, _PI["albedo_veg"]], "pft_alb")),  # (17,)
+        pft_emis=jnp.asarray(np.full(_N_PFT, _inv(0.96, "pft_emis"))),
+        pft_root=jnp.asarray(_inv(
+            np.clip(_TABLE[:, _PI["root_depth"]], _PFT_ROOT_LO + 1e-3, _PFT_ROOT_HI - 1e-3),
+            "pft_root")),
+        pft_wmax=jnp.asarray(np.full(_N_PFT, _inv(150.0, "pft_wmax"))),
+        glac_alb=jnp.asarray(_inv(0.55, "glac_alb")),
+        snow_max=jnp.asarray(_inv(0.80, "snow_max")),
+        ch=jnp.asarray(_inv(3.0e-3, "ch")))
 
 
 def _land_params(cp, data):
@@ -89,8 +114,8 @@ def _land_params(cp, data):
     other = data["pft"] @ jnp.asarray(_TABLE)
     lp = LandSurfaceParams(
         albedo_veg=alb, emissivity=emis, z0=other[:, _PI["z0"]],
-        W_max=other[:, _PI["W_max"]], C_soil=other[:, _PI["C_soil"]],
-        d_soil=other[:, _PI["d_soil"]], root_depth=other[:, _PI["root_depth"]],
+        W_max=data["pft"] @ cp["pft_wmax"], C_soil=other[:, _PI["C_soil"]],
+        d_soil=other[:, _PI["d_soil"]], root_depth=data["pft"] @ cp["pft_root"],
         theta_wp=data["wp"], theta_fc=data["fc"], Vc_max25=other[:, _PI["Vc_max25"]],
         LCMA=other[:, _PI["LCMA"]], g1=other[:, _PI["g1"]])
     cfg = LandConfig(snow_albedo_feedback=True, Ch_land=cp["ch"], Cd_land=cp["ch"],

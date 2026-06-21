@@ -532,6 +532,18 @@ class CoupledESMDriver:
             carbon_cfg = CarbonConfig(scheme="differland")
             land_cfg = land_cfg._replace(carbon=carbon_cfg)
 
+        # Calibrated config-level land parameters on the CLM default path (the
+        # per-cell PFT params come from the provider; these are the global snow/ice
+        # + bulk-transfer values tuned vs ERA5 under physical bounds).
+        if (cfg.land_mode != "none"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"):
+            from legoesm.land.clm_surface_map import TUNED_CH, TUNED_SNOW_ALBEDO_MAX
+            land_cfg = land_cfg._replace(
+                Ch_land=TUNED_CH, Cd_land=TUNED_CH, snow_albedo_feedback=True,
+                land_albedo=land_cfg.land_albedo._replace(
+                    alpha_snow_max=TUNED_SNOW_ALBEDO_MAX))
+            logger.info("  Land: ERA5-calibrated Ch/snow params (CLM default path)")
+
         # Spatial soil hydraulics from the CLM reference map (per-column van-
         # Genuchten retention) for the Richards multilayer land.
         if (cfg.land_mode == "multilayer"
