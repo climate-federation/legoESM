@@ -410,11 +410,13 @@ def barotropic_implicit_mpas(
         :func:`barotropic_substeps_mpas` interface).
 
     When ``return_residual=True`` (static; default ``False``) a fourth
-    value ``rel_residual`` is appended — the (rank-local) relative
-    Helmholtz residual diagnostic of the stock-CG solve.  MPAS runs stock
-    CG only (single-rank; the distributed PCG is deferred — see the
-    Step-4 note), so this residual is NOT a global reduction.  Log /
-    assert it OUTSIDE the JIT; never branch the compiled step on it.
+    value ``rel_residual`` is appended — the relative Helmholtz residual
+    diagnostic of the FINAL eta.  Single-rank (stock-CG branch): a
+    rank-local ``jnp.sum`` (exact for one rank).  Distributed (the entry
+    dispatch below, armed by ``initialize_voronoi_mpi``): an owned-cell-
+    masked GLOBAL reduction (one batched allreduce; halo rows excluded so
+    Voronoi ghost cells are not double-counted).  Log / assert it OUTSIDE
+    the JIT; never branch the compiled step on it.
     """
     # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
     # when ``initialize_voronoi_mpi`` has armed a partition layout, the
@@ -669,14 +671,12 @@ def barotropic_implicit_mpas(
         _actual_mass = _actual_mass_l
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
     eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
-    # Residual diagnostic for the single-rank stock-CG path (uniform
-    # return shape with the lat-lon solver's ``return_residual``).
-    # RANK-LOCAL ON PURPOSE: do NOT route through the lat-lon helper's
-    # ``_global_dot_batch`` (which would fire a bare ``batch_allreduce_mpi``
-    # under MPI and double-count Voronoi halo cells — the exact reason the
-    # MPAS solver is single-rank only here).  Plain ``jnp.sum`` is exact
-    # for the single rank this path runs on.  Computed AFTER the floor
-    # clamp below so it reflects the ACTUAL returned eta.
+    # Residual diagnostic (uniform return shape with the lat-lon solver's
+    # ``return_residual``), computed AFTER the floor clamp below so it
+    # reflects the ACTUAL returned eta.  Single-rank: plain ``jnp.sum``
+    # (exact for one rank).  Distributed: owned-masked sums + ONE batched
+    # allreduce — never the lat-lon helper's ``_global_dot_batch``, whose
+    # bare reduction would double-count Voronoi halo cells.
 
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to

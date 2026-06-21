@@ -245,17 +245,20 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
-    # Distributed (MPI) implicit-CN knobs — RESERVED for future MPAS use,
-    # mirroring the lat-lon ``LatLonCGridOceanConfig`` contract.  MPAS
-    # currently runs stock CG (single-rank only): distributing the
-    # Voronoi PCG needs a halo-exchange inside ``A_op`` and owned-cell-
-    # masked reductions that aren't wired yet (see the Step-4
-    # TODO(distributed-mpas-pcg) note in barotropic_implicit_mpas.py and
-    # docs/ocean_experiments/distributed_barotropic_pcg.md).  ``fixed_iters``
-    # would target 1e-10 residual on the diagonally-dominant Voronoi
-    # Helmholtz; kept here so the config schema matches the lat-lon path.
+    # Distributed (MPI) implicit-CN knobs, mirroring the lat-lon
+    # ``LatLonCGridOceanConfig`` contract.  The distributed Voronoi PCG IS
+    # wired (barotropic_implicit_mpas.py dispatches at entry when
+    # ``initialize_voronoi_mpi`` armed a partition layout): a cell-halo
+    # exchange composed into every ``A_op`` + owned-cell-masked
+    # area-weighted dots (docs/ocean_experiments/distributed_barotropic_pcg
+    # .md).  ``fixed_iters`` targets 1e-10 residual on the diagonally-
+    # dominant Voronoi Helmholtz.  ``pcg_variant`` selects the reduction
+    # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
+    # with one batched allreduce per iteration — validated at solver entry,
+    # ValueError on unknown).
     barotropic_implicit_pcg_fixed_iters: int = 60
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    barotropic_implicit_pcg_variant: str = "standard"
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux
