@@ -4950,9 +4950,10 @@ class ModelDriver:
 
             # Coupler-provided dynamic surface albedo / skin temperature for
             # this segment (None unless a coupled driver wired the feedback).
-            _sfc_albedo_ovr, _sfc_T_ovr = (None, None)
+            _sfc_albedo_ovr, _sfc_T_ovr, _sfc_emis_ovr = (None, None, None)
             if self.get_sfc_override is not None:
-                _sfc_albedo_ovr, _sfc_T_ovr = self.get_sfc_override(day)
+                _sfc_albedo_ovr, _sfc_T_ovr, _sfc_emis_ovr = \
+                    self.get_sfc_override(day)
 
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
@@ -4963,6 +4964,7 @@ class ModelDriver:
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
+                sfc_emissivity_override=_sfc_emis_ovr,
             )
 
             # Pack state into carry

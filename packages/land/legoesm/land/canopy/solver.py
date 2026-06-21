@@ -306,6 +306,9 @@ def _canopy_forward(
     Ls = lw_out.Ls
     Lcanopy_up = lw_out.Lcanopy_up
     gap_LW = lw_out.gap_LW
+    LW_out = lw_out.LW_out
+    eps_col = lw_out.eps_col
+    LW_emit = lw_out.LW_emit
 
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
@@ -364,7 +367,8 @@ def _canopy_forward(
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,
-        G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW,
+        G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
+        eps_col=eps_col, LW_emit=LW_emit,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
         ustar=ustar, zeta=zeta,
         rah_above=rah_above, rah_below=rah_below,

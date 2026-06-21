@@ -879,7 +879,8 @@ class PhysicsPipeline:
                                cloud_scheme="none",
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
-                               sfc_T_override=None):
+                               sfc_T_override=None,
+                               sfc_emissivity_override=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -956,6 +957,14 @@ class PhysicsPipeline:
             albedo = sfc_albedo_override
         if sfc_T_override is not None:
             T_sfc = sfc_T_override
+        # Dynamic surface emissivity (tile-blended, incl. the canopy's LAI-
+        # dependent eps_eff) replaces the static blend so the LW boundary
+        # ``eps·σ·T_sfc⁴ + (1−eps)·La`` uses the SAME emissivity the land tile
+        # used to form its conservative ``LW_out`` / ``T_surface`` — closing the
+        # land→atmosphere LW consistency gap.  ``None`` ⇒ static blend (AMIP /
+        # uncoupled), byte-identical.
+        if sfc_emissivity_override is not None:
+            emissivity = sfc_emissivity_override
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -1163,6 +1172,7 @@ class PhysicsPipeline:
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
                          sfc_T_override=None,
+                         sfc_emissivity_override=None,
                          tke=None, qke=None, gwd_spectrum=None):
 
             def _rad_branch(args):
@@ -1175,7 +1185,7 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override,
+                 sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  tke, qke, gwd_spectrum) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -1192,6 +1202,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
+                        sfc_emissivity_override=sfc_emissivity_override,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1236,7 +1247,7 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override,
+                 sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  tke, qke, gwd_spectrum) = args
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1277,7 +1288,7 @@ class PhysicsPipeline:
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
-                    sfc_albedo_override, sfc_T_override,
+                    sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     tke, qke, gwd_spectrum)
 
             # Issue #316 fix: when the caller knows at build time which
@@ -1386,6 +1397,17 @@ def _build_gray_radiation_fn(config):
         # solver sees the same surface as the energy budget — previously
         # gray used only the static ``config.sfc_albedo`` and the
         # blended albedo was silently dropped (audit 2026-06-10).
+        #
+        # NOTE — ``emis_col`` (the blended / coupler-dynamic surface emissivity,
+        # incl. the canopy eps_eff) is INTENTIONALLY NOT forwarded here.  Gray
+        # radiation keeps its idealized black-surface convention
+        # (``GrayRadiationConfig.sfc_emissivity = 1.0``, the Held-Suarez /
+        # Frierson default).  Only RRTMGP honours the dynamic surface emissivity
+        # (``solve_columns(sfc_emissivity=emis_col)``); threading it into gray
+        # would shift every idealized gray run's surface LW by ~3-5 %.  This is a
+        # deliberate scheme divergence from the albedo handling above, not the
+        # same silently-dropped bug (user decision 2026-06-21).
+        del emis_col
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,

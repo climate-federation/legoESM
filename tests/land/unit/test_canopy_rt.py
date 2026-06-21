@@ -21,24 +21,6 @@ from legoesm.land.canopy.radiative_transfer import (
 )
 
 
-def _bulk_lw_reference(LAI, CI, SZA, Ts, Tf, La, epsf, epss):
-    """Independent bulk-canopy LW reference for the isothermal-canopy limit.
-
-    With ``Tf_Sun == Tf_Sh == Tf`` the per-class kernels must collapse to:
-        ALW_Sun + ALW_Sh = W_tot * (Ls + La - 2 Lf)
-        ALW_Soil         = W_tot * Lf + gap_LW * La - Ls
-    """
-    kd = 0.78
-    L_eff = LAI * CI
-    W_tot = 1.0 - jnp.exp(-kd * L_eff)
-    gap_LW = jnp.exp(-kd * L_eff)
-    Ls = epss * constants.sigma_sb * Ts ** 4
-    Lf = epsf * constants.sigma_sb * Tf ** 4
-    canopy = W_tot * (Ls + La - 2.0 * Lf)
-    soil = W_tot * Lf + gap_LW * La - Ls
-    return canopy, soil
-
-
 def test_split_sw_partitions_daytime():
     sw_down = jnp.array([800.0, 400.0])
     cos_zenith = jnp.array([0.8, 0.3])
@@ -124,15 +106,40 @@ def test_longwave_isothermal_blackbody_zero():
         assert jnp.allclose(v, 0.0, atol=1e-6)
 
 
-def test_longwave_isothermal_canopy_reduces_to_bulk():
-    """With Tf_Sun == Tf_Sh the per-class form collapses to the bulk form."""
-    LAI = jnp.array([2.5]); CI = jnp.array([0.7]); SZA = jnp.array([35.0])
-    Ts = jnp.array([305.0]); Tf = jnp.array([298.0]); La = jnp.array([340.0])
-    epsf, epss = 0.97, 0.96
-    out = canopy_longwave_rt(LAI, CI, SZA, Ts, Tf, Tf, La, epsf, epss)
-    canopy_ref, soil_ref = _bulk_lw_reference(LAI, CI, SZA, Ts, Tf, La, epsf, epss)
-    assert jnp.allclose(out.ALW_Sun + out.ALW_Sh, canopy_ref, rtol=1e-6, atol=1e-6)
-    assert jnp.allclose(out.ALW_Soil, soil_ref, rtol=1e-6, atol=1e-6)
+def test_longwave_global_conservation():
+    """Conservative gray-body scheme: ΣALW == La − LW_out for any εf, εs.
+
+    The near-black scheme this replaces fails this for ε<1 (it has no reflected
+    term).  Checked at the physical εf=0.97/εs=0.96 and at the εf=εs=1 limit.
+    """
+    LAI = jnp.array([3.0, 1.0, 5.0]); CI = jnp.array([0.75, 0.6, 0.9])
+    SZA = jnp.array([30.0, 70.0, 10.0]); Ts = jnp.array([305.0, 315.0, 298.0])
+    TfS = jnp.array([300.0, 308.0, 297.0]); TfH = jnp.array([297.0, 303.0, 296.0])
+    La = jnp.array([340.0, 300.0, 380.0])
+    for epsf, epss in ((0.97, 0.96), (1.0, 1.0), (0.9, 0.85)):
+        out = canopy_longwave_rt(LAI, CI, SZA, Ts, TfS, TfH, La, epsf, epss)
+        sigma_alw = out.ALW_Sun + out.ALW_Sh + out.ALW_Soil
+        assert jnp.allclose(sigma_alw, La - out.LW_out, rtol=0, atol=1e-9)
+
+
+def test_longwave_isothermal_graybody_zero():
+    """Isothermal equilibrium at εf<1, εs<1 → all net LW = 0 (the gray-body fix).
+
+    With every emitter at T and a black sky (La=σT⁴), the conservative scheme
+    gives exactly zero net flux for ANY emissivity — the property the near-black
+    scheme violated (it gained O(1−ε)·σT⁴).
+    """
+    T = jnp.array([295.0, 280.0])
+    La = constants.sigma_sb * T ** 4
+    out = canopy_longwave_rt(
+        LAI=jnp.array([3.0, 1.0]), CI=jnp.array([0.75, 0.9]),
+        SZA=jnp.array([30.0, 70.0]), Ts=T, Tf_Sun=T, Tf_Sh=T, La=La,
+        epsf=0.97, epss=0.96,
+    )
+    for v in (out.ALW_Sun, out.ALW_Sh, out.ALW_Soil):
+        assert jnp.allclose(v, 0.0, atol=1e-9)
+    # and the column looks like a blackbody at T from above: LW_out == σT⁴
+    assert jnp.allclose(out.LW_out, La, atol=1e-9)
 
 
 def test_longwave_clumping_reduces_canopy_absorption():
@@ -206,3 +213,27 @@ def test_longwave_sza_gradient_matches_fd_through_kb_eq_kd():
         g_fd = (alw_sun(sza + 1e-3) - alw_sun(sza - 1e-3)) / 2e-3
         assert jnp.isfinite(g_ad)
         assert jnp.allclose(g_ad, g_fd, rtol=1e-4, atol=1e-6)
+
+
+def test_longwave_atmosphere_equivalent_reconstruction():
+    """eps_col + LW_emit reproduce LW_out via the atmosphere's property-coupling.
+
+    The coupler hands RRTMGP (eps_col, T_surface); RRTMGP forms the surface LW
+    boundary eps_col*sigma*T^4 + (1-eps_col)*La.  With T_surface derived from
+    LW_emit = LW_out - R_col*La and eps_col = 1 - R_col, this MUST equal the
+    canopy's conservative LW_out EXACTLY for any eps_f, eps_s, LAI — closing the
+    land->atmosphere LW consistency gap.
+    """
+    LAI = jnp.array([0.1, 1.0, 3.0, 7.0]); CI = jnp.array([0.7, 0.8, 0.6, 0.9])
+    SZA = jnp.array([20.0, 40.0, 60.0, 10.0]); Ts = jnp.array([305.0, 310.0, 300.0, 295.0])
+    TfS = jnp.array([300.0, 305.0, 298.0, 294.0]); TfH = jnp.array([297.0, 301.0, 296.0, 293.0])
+    La = jnp.array([340.0, 300.0, 360.0, 380.0])
+    for epsf, epss in ((0.97, 0.96), (0.9, 0.85), (1.0, 1.0)):
+        out = canopy_longwave_rt(LAI, CI, SZA, Ts, TfS, TfH, La, epsf, epss)
+        T_surface = (out.LW_emit / (out.eps_col * constants.sigma_sb)) ** 0.25
+        recon = (out.eps_col * constants.sigma_sb * T_surface ** 4
+                 + (1.0 - out.eps_col) * La)
+        assert jnp.allclose(recon, out.LW_out, rtol=0, atol=1e-8)
+        # physical: column emissivity in (0,1], emission-only flux positive
+        assert bool(jnp.all(out.eps_col > 0.0)) and bool(jnp.all(out.eps_col <= 1.0))
+        assert bool(jnp.all(out.LW_emit > 0.0))

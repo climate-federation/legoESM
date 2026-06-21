@@ -452,6 +452,11 @@ def _step_multilayer_land_impl(
     # --- TileResponse ---
     response = TileResponse(
         T_sfc=T_surface_new,
+        # Emission-equivalent canopy temperature for the LW boundary
+        # (eps_col*sigma*T_surface^4 = LW_emit); T_sfc above is the top-soil
+        # temperature kept for sensible heat.  The tile blend emits with T_rad,
+        # not T_soil, to conserve LW for vegetated cells.
+        T_rad=surface_out.T_surface,
         albedo=alpha_new,
         emissivity=surface_out.emissivity,
         z0=surface_out.z0,

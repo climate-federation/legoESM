@@ -342,6 +342,17 @@ class CoupledESMDriver:
             blend_surface_property, blend_surface_temperature,
         )
 
+        # Only correlated-k schemes (RRTMGP/RRTMG) honour the PAIRED dynamic
+        # (T_rad, eps_grid) surface boundary, so they get the flux-conserving
+        # radiative-equivalent temperature + dynamic emissivity.  Gray/none use
+        # an idealized black surface (eps=1) and ignore the dynamic emissivity;
+        # handing them T_rad (which is defined WITH eps_grid via
+        # eps_grid*sigma*T_rad^4 = blended emission) would make sigma*T_rad^4
+        # over-emit by 1/eps_grid, so they keep the area-weighted skin
+        # temperature instead.  See physics_pipeline gray radiation_fn.
+        _conservative_lw = getattr(
+            self.atm_config, "radiation", "gray") in ("rrtmgp", "rrtmg")
+
         def _seed_blend(day):
             # Same static blend the atmosphere radiation would use, as
             # grid-shaped arrays — used only until the first sfc_response.
@@ -352,17 +363,48 @@ class CoupledESMDriver:
                 getattr(acfg, "albedo_ocean", 0.06),
             )
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
-            return alb, T
+            if not _conservative_lw:
+                # Gray/none never take an emissivity override (eps=1); return
+                # None so the override leaf is CONSISTENTLY None across seed and
+                # response — matching ``_coupled_get_sfc_override`` so no
+                # None->array pytree transition / recompile occurs.
+                return alb, T, None
+            # Seed a GRID-SHAPED emissivity (the static ice/ocean blend the
+            # radiation uses internally) — NOT None.  A None->array transition at
+            # the first coupler response would change the SegmentForcing pytree
+            # structure (None has no leaf, an array does) and force a recompile,
+            # violating the no-recompile invariant.  Keeping the override leaf a
+            # constant-shape array from segment zero avoids that; the value
+            # matches the radiation's static blend so the seed stays
+            # ~byte-identical until the first dynamic response.
+            eps = blend_surface_property(
+                sic,
+                getattr(acfg, "emissivity_ice", constants.emissivity_ice),
+                getattr(acfg, "sfc_emissivity", constants.emissivity_ocean),
+            )
+            return alb, T, eps
 
         def _coupled_get_sfc_override(day):
             r = self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
                 return _seed_blend(day)
-            return r.albedo, r.T_sfc
+            if not _conservative_lw:
+                # Gray/none: area-weighted skin temperature + no emissivity
+                # override (the scheme keeps its own eps); NOT T_rad/eps_grid.
+                return r.albedo, r.T_sfc, None
+            eps = getattr(r, "emissivity", None)
+            if eps is None:
+                # Keep the override leaf a constant-shape array (no recompile).
+                eps = _seed_blend(day)[2]
+            # RRTMGP/RRTMG: the radiative-equivalent T_rad + dynamic eps_grid
+            # (flux-conserving tile blend) make eps*sigma*T_rad^4 + (1-eps)*La
+            # equal the area-weighted sum of tile lw_up exactly for mixed cells.
+            return r.albedo, getattr(r, "T_rad", r.T_sfc), eps
 
         self._atm.get_sfc_override = _coupled_get_sfc_override
         logger.info(
-            "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
+            "  Surface-radiation feedback: dynamic albedo + skin T + emissivity"
+            " -> radiation"
         )
 
     # ==================================================================
@@ -410,9 +452,19 @@ class CoupledESMDriver:
             and _resp is not None
             and getattr(_resp, "albedo", None) is not None
         )
+        # Only RRTMGP/RRTMG emitted with the paired (T_rad, eps_grid); gray/none
+        # emitted as a black surface at the area-weighted T_sfc.  Invert lw_net
+        # with whatever the active scheme actually used (see _override_sfc).
+        _conservative_lw = getattr(
+            self.atm_config, "radiation", "gray") in ("rrtmgp", "rrtmg")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            T_sfc = _resp.T_sfc
+            # Conservative schemes formed the LW boundary with the radiative-
+            # equivalent T_rad (flux-conserving tile blend), so invert lw_net with
+            # T_rad — NOT the area-weighted T_sfc (which is for the linear
+            # sensible-heat path).  Gray/none used the black-surface T_sfc.
+            T_sfc = (getattr(_resp, "T_rad", _resp.T_sfc)
+                     if _conservative_lw else _resp.T_sfc)
         else:
             albedo_eff = blend_surface_property(
                 sic,
@@ -421,16 +473,23 @@ class CoupledESMDriver:
             )
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity comes from the coupler config (per-tile
-        # ocean/ice/land emissivity is blended via tile fractions
-        # downstream).  The 0.96 broad-spectrum default lives in the
-        # ``CoupledDriverConfig.surface_emissivity`` field, falling
-        # back to the canonical ocean emissivity from
-        # ``constants.emissivity_ocean`` if not set.
-        eps_sfc = getattr(
-            self.coupled_cfg, "surface_emissivity",
-            constants.emissivity_ocean,
-        )
+        # Surface emissivity for inverting the held lw_net_sfc back to gross
+        # lw_down.  When the dynamic feedback is active, radiation produced
+        # lw_net_sfc with the coupler's tile-blended emissivity (incl. the
+        # canopy's LAI-dependent eps_col), so invert with that SAME emissivity —
+        # else the static-scalar de-blend biases lw_down (and hence the La fed
+        # back to every surface tile) whenever the surface emissivity departs
+        # from the static default.  Falls back to the static
+        # ``CoupledDriverConfig.surface_emissivity`` (or ``constants.
+        # emissivity_ocean``) when the feedback is off / before the first response.
+        if (_dyn_sfc and _conservative_lw
+                and getattr(_resp, "emissivity", None) is not None):
+            eps_sfc = _resp.emissivity
+        else:
+            eps_sfc = getattr(
+                self.coupled_cfg, "surface_emissivity",
+                constants.emissivity_ocean,
+            )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 

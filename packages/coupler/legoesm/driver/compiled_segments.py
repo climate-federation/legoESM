@@ -417,6 +417,7 @@ class SegmentForcing(NamedTuple):
     # is created at import and the pytree carries no spurious empty leaf.
     sfc_albedo_override: jax.Array | None = None
     sfc_T_override: jax.Array | None = None
+    sfc_emissivity_override: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -458,6 +459,7 @@ def pack_forcing(
     ghg_vmr=None,
     sfc_albedo_override=None,
     sfc_T_override=None,
+    sfc_emissivity_override=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -466,11 +468,13 @@ def pack_forcing(
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
-    sfc_albedo_override, sfc_T_override : jax.Array or None
-        Coupler-provided tile-blended surface albedo / skin temperature for
-        this segment (grid-shaped, like sst/sic).  ``None`` (default) leaves
-        the radiation's static internal blend untouched — byte-identical for
-        AMIP / standalone runs.
+    sfc_albedo_override, sfc_T_override, sfc_emissivity_override : jax.Array or None
+        Coupler-provided tile-blended surface albedo / skin temperature /
+        emissivity for this segment (grid-shaped, like sst/sic).  ``None``
+        (default) leaves the radiation's static internal blend untouched —
+        byte-identical for AMIP / standalone runs.  The emissivity override
+        carries the canopy's LAI-dependent eps_eff so the atmospheric LW
+        boundary uses the same emissivity the land tile formed its LW_out with.
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -494,6 +498,10 @@ def pack_forcing(
         ),
         sfc_T_override=(
             None if sfc_T_override is None else jnp.asarray(sfc_T_override)
+        ),
+        sfc_emissivity_override=(
+            None if sfc_emissivity_override is None
+            else jnp.asarray(sfc_emissivity_override)
         ),
     )
 
@@ -803,6 +811,7 @@ def build_segment_fn(
                     ghg_vmr_override=_ghg_vmr_override,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
                     T_land=_T_land_in, **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
@@ -890,6 +899,7 @@ def build_segment_fn(
                     ghg_vmr_override=_ghg_vmr_override,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
                     T_land=carry.T_land, **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]

@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from functools import partial
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import saturation_vapor_pressure_aerk
 
 # Module-local numerics / stability parameters (not physical constants —
 # those come from ``legoesm.constants``).
@@ -50,7 +50,7 @@ def sat_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     -------
     q_sat [kg kg-1]
     """
-    e_s = saturation_vapor_pressure(T)
+    e_s = saturation_vapor_pressure_aerk(T)
     return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 

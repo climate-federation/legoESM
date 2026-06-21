@@ -49,8 +49,15 @@ class CanopyLWOutput(NamedTuple):
     ALW_Sh: jax.Array      # Net absorbed LW by shaded leaves [W m-2 ground]
     ALW_Soil: jax.Array    # Net absorbed LW by soil [W m-2 ground]
     Ls: jax.Array          # Upward LW emitted by soil [W m-2]
-    Lcanopy_up: jax.Array  # Kernel-weighted canopy LW emitted upward [W m-2 ground]
+    Lcanopy_up: jax.Array  # Kernel-weighted canopy LW emitted upward (= S_up) [W m-2 ground]
     gap_LW: jax.Array      # LW gap fraction exp(-kd L_eff) [-]
+    LW_out: jax.Array      # Total top-of-canopy upward LW escaping to atmosphere
+                           # (S_up + t_c*U_g + r_c*La) [W m-2 ground]; conservative
+                           # land->atmosphere flux
+    eps_col: jax.Array     # Atmosphere-equivalent column LW emissivity 1 - R_col,
+                           # R_col = dLW_out/dLa = r_c + t_c^2*rho/(1-rho*r_c) [-]
+    LW_emit: jax.Array     # Emission-only upward LW = LW_out - R_col*La [W m-2 ground];
+                           # eps_col*sigma*T^4 + (1-eps_col)*La = LW_out exactly
 
 
 # ---------------------------------------------------------------------------
@@ -365,18 +372,19 @@ def canopy_longwave_rt(
     ``Tf_Sun > Tf_Sh`` over hot soil.  The canopy is always fully coupled to
     the soil (no decoupling option).
 
-    Emissivity convention (inherited from DifferBESS / Ryu et al. 2011): each
-    surface emits ``eps * sigma * T^4`` but absorbs incident LW with unit
-    absorptivity and reflection is neglected (the "near-black" big-leaf
-    approximation, valid for the leaf/soil emissivities ~0.96-0.97).  This is
-    NOT a strict gray-body: at a hypothetical isothermal equilibrium with
-    eps < 1 the net flux is O(1 - eps) rather than exactly zero (the
-    ``test_longwave_isothermal_blackbody_zero`` check therefore uses eps = 1).
-    A strictly conservative formulation would track reflected/multiply-
-    scattered LW; that diverges from the DifferBESS oracle and is left as a
-    documented follow-up.  The top-of-canopy ``lw_net`` boundary diagnostic in
-    ``two_leaf_canopy`` IS gray-body consistent (applies the effective
-    emissivity to both up- and down-welling).
+    Conservative gray-body emissivity (β = 1/2 isotropic leaf scatter): each
+    surface ABSORBS ``eps * incident`` (Kirchhoff: absorptivity = emissivity)
+    and REFLECTS ``(1 - eps)``.  The diffuse canopy stream splits into absorbed
+    ``a_c = eps_f * W_tot``, back-scattered ``r_c = (1-eps_f) W_tot / 2`` and
+    transmitted ``t_c`` (``a_c + r_c + t_c = 1``), and the canopy<->ground
+    interreflection is summed in closed form ``1/(1 - rho * r_c)`` (one division;
+    ``rho * r_c <= 6e-4`` for physical eps).  This is EXACTLY energy-conserving
+    (``ALW_Sun + ALW_Sh + ALW_Soil = La - LW_out``) and gives zero net flux at
+    isothermal equilibrium for ANY eps_f, eps_s; it reduces exactly to the
+    previous near-black scheme at eps_f = eps_s = 1 (then r_c = 0, t_c = gap_LW).
+    ``LW_out`` is the true top-of-canopy upward LW (emission + reflection) for the
+    coupler and the LST diagnostic.  Ported from DifferBESS; full derivation in
+    docs/canopy_longwave_graybody_conservation.md §5.
 
     Parameters
     ----------
@@ -446,25 +454,60 @@ def canopy_longwave_rt(
     W_sh_sky   = jnp.clip(W_sh_sky,   0.0, W_tot)
     W_sh_soil  = jnp.clip(W_sh_soil,  0.0, W_tot)
 
-    # Net absorbed LW per leaf class: each class absorbs from the soil below
-    # and the sky above and emits with its own temperature.
-    ALW_Sun = W_sun_soil * (Ls - Lf_Sun) + W_sun_sky * (La - Lf_Sun)
-    ALW_Sh  = W_sh_soil  * (Ls - Lf_Sh)  + W_sh_sky  * (La - Lf_Sh)
-
-    # Soil absorbed LW: depth-weighted per-class canopy emission (detailed
-    # balance) + gap-transmitted atmospheric LW - soil's own emission.
     gap_LW = jnp.exp(-kd_L_eff)
-    ALW_Soil = (
-        W_sun_soil * Lf_Sun
-        + W_sh_soil * Lf_Sh
-        + gap_LW * La
-        - Ls
-    )
 
-    # Kernel-weighted canopy LW emitted upward to the atmosphere (for the
-    # top-of-canopy LST / lw_up diagnostic — uses the same sky kernels as the
-    # sky->leaf absorption, by detailed balance).
-    Lcanopy_up = W_sun_sky * Lf_Sun + W_sh_sky * Lf_Sh
+    # ---- Conservative gray-body two-leaf longwave (β = 1/2 isotropic) ----
+    # Keeps the physical leaf/soil emissivities εf, εs < 1.  Each surface absorbs
+    # ε·incident (Kirchhoff) and reflects (1−ε); the diffuse canopy stream splits
+    # into absorbed ``a_c``, back-scattered ``r_c`` (canopy LW reflectance) and
+    # transmitted ``t_c``, with ``a_c + r_c + t_c = 1``.  The canopy↔ground
+    # interreflection is summed in closed form ``1/(1 − ρ·r_c)`` (one division,
+    # ρ·r_c ≤ 6e-4 for physical ε, so the denominator stays ≈1).  This is exactly
+    # conservative (``ΣALW = La − LW_out``), zero-net at isothermal equilibrium for
+    # any εf, εs, and reduces EXACTLY to the previous near-black scheme at
+    # εf=εs=1 (then r_c=0, t_c=gap_LW).  Ported from DifferBESS
+    # CanopyLongwaveRadiation; see docs/canopy_longwave_graybody_conservation.md §5.
+    a_c = epsf * W_tot                          # absorbed (absorptivity = εf)
+    r_c = 0.5 * (1.0 - epsf) * W_tot            # back-scattered (β = 1/2)
+    t_c = gap_LW + 0.5 * (1.0 - epsf) * W_tot   # transmitted (gap + forward-scatter)
+    rho = 1.0 - epss                            # ground LW reflectance
+
+    # Per-class canopy emission to the sky / ground hemispheres (``Lf`` already
+    # carries εf, so ``S_up`` ≡ εf·(W_sun_sky·B_Sun + W_sh_sky·B_Sh)).
+    S_up   = W_sun_sky  * Lf_Sun + W_sh_sky  * Lf_Sh
+    S_down = W_sun_soil * Lf_Sun + W_sh_soil * Lf_Sh
+
+    # Closed-form canopy↔ground interreflection (note εs·B_g ≡ Ls):
+    S_d = t_c * La + S_down                       # primary downward source
+    U_g = (Ls + rho * S_d) / (1.0 - rho * r_c)    # upward LW leaving the ground
+    D_g = S_d + r_c * U_g                          # downward LW onto the ground
+
+    # Net absorbed LW per leaf class: absorb εf of the sky stream (above) and of
+    # the ground upwelling U_g (below); emit εf·B to both hemispheres.
+    ALW_Sun = epsf * (W_sun_sky * La + W_sun_soil * U_g) - (W_sun_sky + W_sun_soil) * Lf_Sun
+    ALW_Sh  = epsf * (W_sh_sky  * La + W_sh_soil  * U_g) - (W_sh_sky  + W_sh_soil ) * Lf_Sh
+    ALW_Soil = epss * D_g - Ls                    # ≡ εs·(D_g − B_g)
+
+    # Top-of-canopy upward LW escaping to the atmosphere: canopy up-emission +
+    # ground upwelling transmitted out + sky reflected off the canopy top.
+    LW_out = S_up + t_c * U_g + r_c * La
+
+    # Atmosphere-equivalent column representation so the coupler's property-
+    # coupling LW boundary ``eps*sigma*T^4 + (1-eps)*La`` reproduces this LW_out
+    # EXACTLY.  The column LW reflectance R_col = dLW_out/dLa is the fraction of
+    # incident sky LW the canopy+ground column reflects back up — canopy back-
+    # scatter r_c PLUS sky LW transmitted to the ground, reflected, and
+    # re-transmitted out through the multiple-reflection chain
+    # t_c^2*rho/(1-rho*r_c) (differentiate U_g w.r.t. La: dU_g/dLa = rho*t_c/
+    # (1-rho*r_c)).  The remaining LW_out - R_col*La is the La-independent
+    # emission of the column.  Then eps_col*sigma*T_emit^4 + (1-eps_col)*La
+    # = LW_emit + R_col*La = LW_out for any eps_f, eps_s, LAI.
+    R_col   = r_c + t_c * t_c * rho / (1.0 - rho * r_c)
+    eps_col = 1.0 - R_col
+    LW_emit = LW_out - R_col * La
+
+    # Back-compat: kernel-weighted canopy up-emission (≡ S_up).
+    Lcanopy_up = S_up
 
     return CanopyLWOutput(
         ALW_Sun=ALW_Sun,
@@ -473,4 +516,7 @@ def canopy_longwave_rt(
         Ls=Ls,
         Lcanopy_up=Lcanopy_up,
         gap_LW=gap_LW,
+        LW_out=LW_out,
+        eps_col=eps_col,
+        LW_emit=LW_emit,
     )

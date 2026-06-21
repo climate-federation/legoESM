@@ -578,6 +578,12 @@ def _step_land_canopy(
 
     response = TileResponse(
         T_sfc=response_T_surface,
+        # Emission-equivalent canopy temperature for the LW boundary: the
+        # two-leaf ``surface_out.T_surface`` satisfies eps_col*sigma*T_surface^4
+        # = LW_emit, whereas ``T_sfc = T_soil_new`` above is the soil temperature
+        # kept for the (linear) sensible-heat path.  The tile blend MUST emit
+        # with T_rad, not T_soil, or LW conservation breaks for vegetated cells.
+        T_rad=_unflat(surface_out.T_surface),
         albedo=response_albedo,
         emissivity=response_emissivity,
         z0=response_z0,

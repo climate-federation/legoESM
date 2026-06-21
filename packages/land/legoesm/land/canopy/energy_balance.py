@@ -22,7 +22,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_vapor_pressure_aerk,
+    d_saturation_vapor_pressure_aerk,
+    dd_saturation_vapor_pressure_aerk,
+)
 from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
@@ -32,16 +36,13 @@ _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor 0.446; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 
-# Magnus/Tetens saturation-curve coefficients, matching the curve used by
-# ``legoesm.thermo.saturation_vapor_pressure`` (exponential slope 17.67,
-# offset 243.5 degC).  thermo exposes e_s but not its derivatives, which the
-# canopy PM/EB linearisation needs.  Deriving des/dT here from the SAME
-# coefficients keeps the derivative consistent with the curve — a mismatched
-# parameterisation makes the PM closure humidity-dependently wrong.
-# des/dT = e_s * (B*C) / (Tc + C)^2 ;  Tc in degC.
-_MAGNUS_B    = 17.67           # exponential slope [-]
-_MAGNUS_C    = 243.5           # offset [degC]
-_DESDT_COEFF = _MAGNUS_B * _MAGNUS_C   # des/dT prefactor [degC]
+# Saturation vapour pressure and its first/second temperature derivatives come
+# from the shared ``legoesm.thermo`` Alduchov-Eskridge (1996) AERK water + AERKi
+# ice blend (``*_aerk``), matching the DifferBESS two-big-leaf canopy oracle.
+# Using the curve's OWN analytic derivatives keeps des/dT, d2es/dT2 consistent
+# with e_s (a mismatched parameterisation makes the PM closure humidity-dependently
+# wrong) and gives a proper over-ice branch below freezing (the over-water Magnus
+# over-estimates e_s by ~10-60 % at -10..-50 degC).
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +53,15 @@ _DESDT_COEFF = _MAGNUS_B * _MAGNUS_C   # des/dT prefactor [degC]
 def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     """Saturation specific humidity [kg kg-1] from T [K] and p [Pa].
 
-    Uses ``legoesm.thermo.saturation_vapor_pressure`` for the Tetens
-    formula (CLAUDE.md: never inline Tetens).  The specific-humidity
+    Uses the shared ``legoesm.thermo`` AERK water+ice saturation curve
+    (``saturation_vapor_pressure_aerk``; CLAUDE.md: never inline Tetens),
+    matching the canopy's other ``e_s`` evaluations.  The specific-humidity
     denominator ``p - (1 - ε) e_s`` differs from the mixing-ratio
     denominator in ``thermo.saturation_mixing_ratio`` — this function
     returns **specific** humidity, which is what the canopy air and
     leaf boundary layers carry throughout the two-leaf closure.
     """
-    e_s = saturation_vapor_pressure(T)
+    e_s = saturation_vapor_pressure_aerk(T)
     return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
@@ -84,23 +86,17 @@ def canopy_met_variables(
     """
     # Vapour pressure from specific humidity
     e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
-    # Saturation vapour pressure (Tetens — shared helper).
     TcC  = Tc - constants.T_freeze
-    es_c = saturation_vapor_pressure(Tc)
+    # Saturation vapour pressure + its analytic derivatives from the shared AERK
+    # water+ice curve (one consistent curve; over-ice below freezing).  ddesTc
+    # uses the saturation curve only (no actual vapour pressure) — the historical
+    # PM ``e_c``-instead-of-``e_s`` second-derivative bug is fixed at the source.
+    es_c   = saturation_vapor_pressure_aerk(Tc)
+    desTc  = d_saturation_vapor_pressure_aerk(Tc)    # des/dT  [Pa K-1]
+    ddesTc = dd_saturation_vapor_pressure_aerk(Tc)   # d²es/dT² [Pa K-2]
 
     VPD_c = es_c - e_c
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
-
-    # First derivative des/dT [Pa K-1] — analytical derivative of the SAME
-    # Tetens curve used by ``saturation_vapor_pressure`` (slope 17.67, offset
-    # 243.5).  Kept local because ``legoesm.thermo`` does not expose des/dT.
-    desTc  = es_c * _DESDT_COEFF * (TcC + _MAGNUS_C) ** (-2)
-    # Second derivative d²es/dT² [Pa K-2].  Uses es_c (saturation), NOT e_c:
-    # the saturation curve and its derivatives depend on T only.
-    ddesTc = _DESDT_COEFF * (
-        desTc  * (TcC + _MAGNUS_C) ** (-2)
-        + (-2.0) * es_c * (TcC + _MAGNUS_C) ** (-3)
-    )
 
     # Latent heat (temperature-corrected) and psychrometric constant
     lam   = constants.L_v - 2.361e3 * TcC

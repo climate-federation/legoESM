@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.driver.compiled_segments import SegmentForcing, pack_forcing
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.driver.coupled_esm_driver import CoupledESMDriver
@@ -58,8 +59,16 @@ class TestOverrideSfc:
     Exercised on a lightweight stub (the method only touches coupled_cfg,
     _atm, _last_sfc_response, atm_config) to avoid a full coupled setup."""
 
-    def _atm_config(self):
-        return SimpleNamespace(albedo_ice=0.65, albedo_ocean=0.06, T_ice=271.35)
+    def _atm_config(self, radiation="rrtmgp"):
+        return SimpleNamespace(albedo_ice=0.65, albedo_ocean=0.06,
+                               T_ice=271.35, radiation=radiation)
+
+    def _drv(self, atm, radiation="rrtmgp"):
+        return SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_radiation=True),
+            _atm=atm, _last_sfc_response=None,
+            atm_config=self._atm_config(radiation),
+        )
 
     def test_noop_when_flag_off(self):
         atm = SimpleNamespace(get_sfc_override="sentinel")
@@ -72,38 +81,65 @@ class TestOverrideSfc:
         assert atm.get_sfc_override == "sentinel"
 
     def test_seeds_static_blend_before_first_response(self):
+        # RRTMGP (conservative) path: seed returns a grid-shaped emissivity array.
         sst = jnp.full((2, 2), 290.0)
         sic = jnp.zeros((2, 2))
         atm = SimpleNamespace(
             get_sfc_override=None, get_sst_sic=lambda d: (sst, sic),
         )
-        drv = SimpleNamespace(
-            coupled_cfg=CoupledConfig(couple_surface_radiation=True),
-            _atm=atm, _last_sfc_response=None, atm_config=self._atm_config(),
-        )
+        drv = self._drv(atm, "rrtmgp")
         CoupledESMDriver._override_sfc(drv)
         assert atm.get_sfc_override is not None
-        alb, T = atm.get_sfc_override(0.0)
+        alb, T, emis = atm.get_sfc_override(0.0)
         # Seed = static blend (all-ocean here): albedo 0.06, T_sfc = sst.
         assert alb is not None and T is not None
         assert jnp.allclose(alb, 0.06)
         assert jnp.allclose(T, 290.0)
+        # RRTMGP seed emissivity is a GRID-SHAPED static array (NOT None) so the
+        # override leaf keeps a constant pytree shape from segment 0 (no
+        # recompile).  All-ocean here; acfg has no emissivity fields → constants.
+        assert emis is not None and emis.shape == sst.shape
+        assert jnp.allclose(emis, constants.emissivity_ocean)
 
     def test_passes_through_sfc_response(self):
+        # RRTMGP: dynamic albedo + radiative-equivalent T_rad + emissivity flow.
         sst = jnp.full((2, 2), 290.0)
         sic = jnp.zeros((2, 2))
         atm = SimpleNamespace(
             get_sfc_override=None, get_sst_sic=lambda d: (sst, sic),
         )
-        drv = SimpleNamespace(
-            coupled_cfg=CoupledConfig(couple_surface_radiation=True),
-            _atm=atm, _last_sfc_response=None, atm_config=self._atm_config(),
-        )
+        drv = self._drv(atm, "rrtmgp")
         CoupledESMDriver._override_sfc(drv)
-        # Once a coupler response exists, its dynamic albedo / skin-T flow.
         drv._last_sfc_response = SimpleNamespace(
             albedo=jnp.full((2, 2), 0.5), T_sfc=jnp.full((2, 2), 250.0),
+            T_rad=jnp.full((2, 2), 248.0), emissivity=jnp.full((2, 2), 0.985),
         )
-        alb, T = atm.get_sfc_override(0.0)
+        alb, T, emis = atm.get_sfc_override(0.0)
         assert jnp.array_equal(alb, jnp.full((2, 2), 0.5))
+        # RRTMGP gets the radiative-equivalent T_rad (NOT the soil-side T_sfc).
+        assert jnp.array_equal(T, jnp.full((2, 2), 248.0))
+        assert jnp.array_equal(emis, jnp.full((2, 2), 0.985))
+
+    def test_gray_uses_tsfc_and_no_emissivity_override(self):
+        # Gray (idealized eps=1): area-weighted T_sfc, NO T_rad, NO emissivity
+        # override — feeding gray T_rad (defined with eps_grid) would over-emit.
+        sst = jnp.full((2, 2), 290.0)
+        sic = jnp.zeros((2, 2))
+        atm = SimpleNamespace(
+            get_sfc_override=None, get_sst_sic=lambda d: (sst, sic),
+        )
+        drv = self._drv(atm, "gray")
+        CoupledESMDriver._override_sfc(drv)
+        # Seed: gray emissivity override is None (consistent across seed/response,
+        # so still no None->array recompile).
+        alb, T, emis = atm.get_sfc_override(0.0)
+        assert emis is None
+        assert jnp.allclose(T, 290.0)
+        # Response: gray gets T_sfc (250), NOT T_rad (248), and None emissivity.
+        drv._last_sfc_response = SimpleNamespace(
+            albedo=jnp.full((2, 2), 0.5), T_sfc=jnp.full((2, 2), 250.0),
+            T_rad=jnp.full((2, 2), 248.0), emissivity=jnp.full((2, 2), 0.985),
+        )
+        alb, T, emis = atm.get_sfc_override(0.0)
         assert jnp.array_equal(T, jnp.full((2, 2), 250.0))
+        assert emis is None

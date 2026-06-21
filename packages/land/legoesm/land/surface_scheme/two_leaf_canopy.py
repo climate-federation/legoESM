@@ -390,24 +390,27 @@ def compute_two_leaf_canopy_fluxes(
         jnp.broadcast_to(jnp.asarray(land_config.albedo_land), T_soil_top.shape),
         alpha_canopy)
 
-    # ---- Emission-weighted surface T from canopy LW ----
-    # Consistent with the internal longwave RT: use the kd-kernel canopy
-    # upward emission (Lcanopy_up = W_sun_sky*Lf_Sun + W_sh_sky*Lf_Sh) and the
-    # LW gap fraction (gap_LW = exp(-kd*LAI*CI)) returned by
-    # ``canopy_longwave_rt`` — NOT a separate bulk exp(-0.78*LAI)/fSun form,
-    # which would disagree with the radiation that drove the solved energy
-    # balance (especially for clumped or non-isothermal canopies).
-    Lcanopy_up = fluxes_per_col["Lcanopy_up"]
-    gap_LW     = fluxes_per_col["gap_LW"]
-    Lw_up = Lcanopy_up + gap_LW * cc.epss * constants.sigma_sb * Ts_cvg**4
-    eps_eff = (1.0 - gap_LW) * cc.epsf + gap_LW * cc.epss
-    T_surface = (Lw_up / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12))**0.25
+    # ---- Surface emissivity + radiometric temperature (atmosphere-equivalent) ----
+    # The conservative ``canopy_longwave_rt`` exports the column LW emissivity
+    # ``eps_col = 1 - R_col`` (R_col = column LW reflectance) and the emission-only
+    # upward flux ``LW_emit``, chosen so the atmosphere's property-coupling LW
+    # boundary ``eps_col*sigma*T_surface^4 + (1-eps_col)*La`` reproduces the
+    # canopy's conservative ``LW_out`` EXACTLY (verified to ~1e-13 W/m2 across
+    # LAI/emissivities).  These are the physically-correct surface radiative
+    # properties: the coupler tile-blends ``eps_eff`` (the column emissivity) and
+    # ``T_surface`` and threads them into RRTMGP as the dynamic surface emissivity
+    # + skin temperature, so the land->atmosphere LW boundary carries no static-
+    # emissivity mismatch.  The raw upward flux is still ``lw_up = LW_out`` with
+    # ``lw_net = La - LW_out``.
+    LW_out_col = fluxes_per_col["LW_out"]
+    eps_eff    = fluxes_per_col["eps_col"]
+    LW_emit    = fluxes_per_col["LW_emit"]
+    T_surface = (LW_emit / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12)) ** 0.25
 
-    # Downstream expects SW_net and LW_net: SW_net = (1-α) SW_down,
-    # LW_net = ε (LW_down - σ T_surface^4).
+    # SW_net and the (conservative) external LW_net = La − LW_out.
     sw_net = (1.0 - alpha_canopy) * forcing.sw_down
-    lw_net = eps_eff * forcing.lw_down - eps_eff * constants.sigma_sb * T_surface**4
-    lw_up_out = Lw_up  # Emission-weighted upward LW (already multiplied by eps_eff).
+    lw_net = forcing.lw_down - LW_out_col
+    lw_up_out = LW_out_col   # true top-of-canopy upward LW (emission + reflection)
 
     # External (boundary-condition) radiation balance — what a downstream
     # observer sees from forcing + canopy-mean emission T.

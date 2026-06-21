@@ -253,6 +253,7 @@ class TestFluxAccumulatorGrad:
         def make_sfc_to_atm(T_sfc):
             return SurfaceToAtm(
                 T_sfc=T_sfc,
+                T_rad=T_sfc,
                 albedo=0.1 * ones,
                 emissivity=0.97 * ones,
                 z0=1e-4 * ones,

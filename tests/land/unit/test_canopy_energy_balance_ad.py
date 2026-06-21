@@ -15,7 +15,15 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.thermo import (
+    saturation_vapor_pressure,
+    saturation_vapor_pressure_aerk,
+    d_saturation_vapor_pressure_aerk,
+    dd_saturation_vapor_pressure_aerk,
+)
 from legoesm.land.canopy.energy_balance import (
+    canopy_met_variables,
     leaf_energy_balance_bt,
     soil_energy_balance_bt,
 )
@@ -100,3 +108,39 @@ def test_sensible_heat_can_be_negative():
         An=jnp.array(0.0),
         **{**_LEAF, "ASW": jnp.array(0.0), "ALW": jnp.array(-80.0)})
     assert float(H_leaf) < 0.0
+
+
+# ---------------------------------------------------------------------------
+# canopy_met_variables now uses the shared thermo AERK water+ice curve and its
+# analytic derivatives (matching the DifferBESS oracle) — over-ice below 0 degC,
+# and d2es/dT2 from the saturation curve ONLY (no e_c double-count bug).
+# ---------------------------------------------------------------------------
+
+def test_canopy_met_uses_aerk_curve_and_derivatives():
+    Ps = jnp.array(101325.0)
+    for Tc in (jnp.array(298.0), jnp.array(constants.T_freeze - 15.0)):  # warm + sub-freezing
+        q_c = jnp.array(0.008)
+        _, es_c, _, _, desTc, ddesTc, _ = canopy_met_variables(Ps, Tc, q_c)
+        assert jnp.allclose(es_c, saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
+        assert jnp.allclose(desTc, d_saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
+        assert jnp.allclose(ddesTc, dd_saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
+
+
+def test_canopy_met_second_derivative_independent_of_humidity():
+    """d2es/dT2 depends on T only — invariant to canopy-air humidity q_c.
+
+    Regression for the historical Penman-Monteith ``e_c``-instead-of-``e_s``
+    second-derivative bug: ddesTc must not move when only q_c changes.
+    """
+    Ps = jnp.array(101325.0); Tc = jnp.array(300.0)
+    _, _, _, _, _, dd_dry, _ = canopy_met_variables(Ps, Tc, jnp.array(0.002))
+    _, _, _, _, _, dd_wet, _ = canopy_met_variables(Ps, Tc, jnp.array(0.020))
+    assert jnp.allclose(dd_dry, dd_wet, rtol=0, atol=1e-12)
+
+
+def test_canopy_met_over_ice_below_freezing():
+    """Below 0 degC es_c uses the ice branch — materially below over-water Bolton."""
+    Ps = jnp.array(101325.0); q_c = jnp.array(0.001)
+    Tc = jnp.array(constants.T_freeze - 20.0)
+    _, es_c, _, _, _, _, _ = canopy_met_variables(Ps, Tc, q_c)
+    assert float(es_c) < 0.9 * float(saturation_vapor_pressure(Tc))

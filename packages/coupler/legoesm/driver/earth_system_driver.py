@@ -145,9 +145,17 @@ class EarthSystemDriver:
         _dyn_sfc = (
             _resp is not None and getattr(_resp, "albedo", None) is not None
         )
+        # Only RRTMGP/RRTMG emitted with the paired (T_rad, eps_grid); gray/none
+        # emitted as a black surface at the area-weighted T_sfc.
+        _conservative_lw = getattr(
+            self.config, "radiation", "gray") in ("rrtmgp", "rrtmg")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            T_sfc = _resp.T_sfc
+            # Conservative schemes inverted lw_net with the radiative-equivalent
+            # skin temperature T_rad (flux-conserving tile blend) that radiation
+            # used for the LW boundary; gray/none used the black-surface T_sfc.
+            T_sfc = (getattr(_resp, "T_rad", _resp.T_sfc)
+                     if _conservative_lw else _resp.T_sfc)
         else:
             albedo_eff = blend_surface_property(
                 sic,
@@ -156,10 +164,17 @@ class EarthSystemDriver:
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity from canonical constants, blended ocean/ice over sea-ice
-        # fraction (same blend as albedo above) — not a magic 0.96 literal.
-        eps_sfc = blend_surface_property(
-            sic, constants.emissivity_ice, constants.emissivity_ocean)
+        # Surface emissivity for inverting lw_net_sfc -> gross lw_down.  When the
+        # dynamic feedback is active, radiation produced lw_net_sfc with the
+        # coupler's tile-blended emissivity (incl. the canopy's LAI-dependent
+        # eps_col), so invert with that SAME emissivity for a consistent gross
+        # flux; else use the canonical ocean/ice static blend (not a magic 0.96).
+        if (_dyn_sfc and _conservative_lw
+                and getattr(_resp, "emissivity", None) is not None):
+            eps_sfc = _resp.emissivity
+        else:
+            eps_sfc = blend_surface_property(
+                sic, constants.emissivity_ice, constants.emissivity_ocean)
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
@@ -241,15 +256,36 @@ class EarthSystemDriver:
         # permanently False), so the surface feedback silently never happened —
         # radiation kept using the frozen config albedo / skin temperature.
         # The real channel is ``ModelDriver.get_sfc_override``, which threads
-        # the (albedo, T_sfc) pair into radiation as a traced SegmentForcing
-        # (no recompile, AD-safe — mirrors the SST/SIC feedback).
+        # the (albedo, T_sfc, emissivity) triple into radiation as a traced
+        # SegmentForcing (no recompile, AD-safe — mirrors the SST/SIC feedback).
+        # The emissivity carries the land tile's LAI-dependent eps_eff so the
+        # atmospheric LW boundary matches the emissivity the land used to form
+        # its conservative LW_out.
         self._last_sfc_response = sfc_response
 
         def _get_sfc_override(day, _self=self):
             r = _self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
-                return None, None
-            return r.albedo, r.T_sfc
+                # Before the first coupler response, return NO override so the
+                # radiation keeps its OWN internal land/ocean/ice blend — a
+                # static ocean/ice seed here would run segment-zero land cells
+                # with ocean/ice radiative properties.  The resulting one-time
+                # seg0->seg1 None->array recompile is benign (one extra compile,
+                # not a per-segment retrace).
+                return None, None, None
+            _cons = getattr(
+                _self.config, "radiation", "gray") in ("rrtmgp", "rrtmg")
+            if not _cons:
+                # Gray/none use an idealized black surface (eps=1) and ignore the
+                # dynamic emissivity; feeding them T_rad (defined WITH eps_grid)
+                # would over-emit by 1/eps_grid.  Give the area-weighted skin
+                # temperature + no emissivity override instead.
+                return r.albedo, r.T_sfc, None
+            # RRTMGP/RRTMG: the tile-blended (albedo, T_rad, emissivity) flow in.
+            # T_rad (radiative-equivalent skin T) + dynamic eps_grid make the LW
+            # boundary eps*sigma*T^4 + (1-eps)*La reproduce the area-weighted sum
+            # of tile lw_up exactly for mixed land/ocean/ice cells.
+            return r.albedo, getattr(r, "T_rad", r.T_sfc), getattr(r, "emissivity", None)
 
         driver.get_sfc_override = _get_sfc_override
 
