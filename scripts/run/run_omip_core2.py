@@ -778,7 +778,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
     fv3sw barotropic + face-edge-stability A_h/K_h) and the OMIP-2 applicator
     (grid_type='cubed_sphere'). NOTE: the cube OceanModel still has the documented
-    PGF-over-bathy instability (docs/ocean_experiments/cubed_sphere_pgf_stability.md)
+    PGF-over-bathy instability (docs/ocean/experiments/cubed_sphere_pgf_stability.md)
     that FC + elevated diffusion only delay; this builder is the harness to drive
     the dycore fix, not a finished faithful path."""
     from scripts.run import run_omip

@@ -7,7 +7,7 @@ into one shared fidelity helper.  This is that module.
 
 These are pure NumPy layout transforms (no model state, no autodiff) that
 re-order a VEROS array into legoESM grid convention — harness glue, not
-model numerics, per ``docs/ocean_fidelity/oracle_recipe_strategy.md``.
+model numerics, per ``docs/ocean/fidelity/oracle_recipe_strategy.md``.
 
 The 4° recipe keeps its own ``veros_xyz_to_legoesm``/``veros_xy_to_legoesm``
 which are pinned to that recipe's fixed ``NX`` and take an explicit

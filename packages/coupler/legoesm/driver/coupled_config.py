@@ -64,7 +64,7 @@ class CoupledConfig(NamedTuple):
     #     fields below; the coupled cold-start uses the OMIP-validated stable
     #     stack (rk3 momentum + implicit_cn barotropic + implicit vmix + smc03
     #     PGF), forced in CoupledESMDriver._init_ocean.  See
-    #     docs/coupled_3d_ocean_plan.md.
+    #     docs/ocean/coupled_3d_ocean_plan.md.
     ocean_mode: str = "slab"
     ocean_config: SimpleOceanConfig | LatLonCGridOceanConfig = SimpleOceanConfig(
         mode="slab")

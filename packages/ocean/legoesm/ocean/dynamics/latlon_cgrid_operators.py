@@ -492,7 +492,7 @@ def coriolis_cgrid_energy_conserving(
     ``Σ u·(f·v) − Σ v·(f·u) ≠ 0`` and the scheme spuriously injects/removes
     energy (measured ``~1e-6·f·KE`` on grid-scale fields; the root cause of the
     MITgcm barotropic-gyre oracle residual — see
-    ``docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md``).
+    ``docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md``).
 
     This variant uses the SINGLE ``f`` value at the VERTEX shared by each
     (u-point, v-point) pair, so the paired contributions
@@ -3193,7 +3193,7 @@ def density_jacobian_pgf_smc03_x(
        *below* the shallower column's seafloor when its partial cell is thin
        (``h < dz/3``), producing an asymmetric seafloor clamp and a spurious
        ~10⁶ Pa/face pressure gradient — the C1 bug that drove the BH-seamount
-       blowup (see ``docs/ocean_experiments/pgf_smc03_code_review.md``).
+       blowup (see ``docs/ocean/experiments/pgf_smc03_code_review.md``).
        ``min`` matches the Adcroft & Campin 2004 /
        ``partial_cell_pgf_correction_x`` convention
        (``face_ref = jnp.minimum(centroid_east, centroid_west)``).

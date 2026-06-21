@@ -5,7 +5,7 @@ atmosphere set), reusing the same ``ParamConstraint`` + sigmoid-transform
 machinery so there is ONE constraint/dead-DOF mechanism in the repo.
 
 Stage 0 of the GEOMETRIC calibration campaign
-(``docs/planning/geometric_calibration_campaign.md``): the tunables are the
+(``docs/dev-notes/planning/geometric_calibration_campaign.md``): the tunables are the
 Torres et al. (2025) closure coefficients of
 :class:`legoesm.ocean.physics.lateral_mixing.eke.GeometricConfig`, with the
 paper's own sampled/plausible ranges as bounds. Wide-decade parameters use a

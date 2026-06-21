@@ -1,5 +1,5 @@
 """np24 gate: the full tiled MOIST SSP-RK3 STEP — increment 4, the cube-MOIST
-np>6 capstone (docs/scaling/cube_moist_tiled_step_design.md).
+np>6 capstone (docs/performance/scaling/cube_moist_tiled_step_design.md).
 
 ``make_tiled_fv3_hydrostatic_moist_step_stage_2d`` threads q_v/q_c/q_r through the
 SAME tiled SSP-RK3 + tracer-aware tendency the dry step uses, plus an INJECTED

@@ -147,7 +147,7 @@ class CoupledESMDriver:
         elif cfg.ocean_mode == "dynamic":
             # Prognostic 3D ocean (LatLonCGridOceanModel) stepped by the coupler
             # on a SHARED lat-lon grid (no cross-grid remap).  Phase 1 of
-            # docs/coupled_3d_ocean_plan.md.
+            # docs/ocean/coupled_3d_ocean_plan.md.
             self._init_dynamic_ocean(T_sfc_mean)
         else:
             raise ValueError(
@@ -157,7 +157,7 @@ class CoupledESMDriver:
     def _init_dynamic_ocean(self, T_sfc_mean: float):
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
-        cold-start stack.  See docs/coupled_3d_ocean_plan.md (Phase 1)."""
+        cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.state import LatLonCGridOceanConfig
         from legoesm.ocean.vertical import create_ocean_z_star
@@ -1254,7 +1254,7 @@ class CoupledESMDriver:
         # NOTE: the prognostic 3D ocean (ocean_mode='dynamic') is NOT yet
         # checkpointed — its full LatLonCGridOceanState pytree (T,S,u,v,eta +
         # AB2 history) needs the checkpoint-v2 flatten path (deferred, see
-        # docs/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
+        # docs/ocean/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
         # for dynamic so a short Phase-1 run does not crash on the missing
         # T_sfc field; a dynamic run must currently restart from the IC.
         if self._ocean_state is not None and not getattr(
@@ -1314,7 +1314,7 @@ class CoupledESMDriver:
             raise ValueError(
                 "Coupled checkpoint restart is not supported for "
                 "ocean_mode='dynamic' (the 3D ocean state is not checkpointed; "
-                "ckpt v2 is deferred — see docs/coupled_3d_ocean_plan.md). "
+                "ckpt v2 is deferred — see docs/ocean/coupled_3d_ocean_plan.md). "
                 "Restart from the initial condition instead.")
 
         # Validate provenance BEFORE restoring — a checkpoint from a different

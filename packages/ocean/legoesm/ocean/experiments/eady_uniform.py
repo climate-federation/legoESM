@@ -644,7 +644,7 @@ def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
         # (enstrophy-cascade-aware); both grid-aware so they scale across a
         # resolution sweep. c_smag_lap/b_h available for extra grid-scale control.
         # VALIDATED EDDY-RESOLVING MINIMUM-DISSIPATION RECIPE (≥120×120, weak U=0.2,
-        # dt=600; ralph-loop search, docs/planning/eady_eddy_resolving_ralph.md):
+        # dt=600; ralph-loop search, docs/dev-notes/planning/eady_eddy_resolving_ralph.md):
         # the COMBINATION a_h≈1000 + c_smag≈0.1 + smag_cfl_safety=0.5 is stable,
         # spectrally clean, and keeps strong eddies (pure A_h over-damps; pure
         # biharmonic Smagorinsky blows up at 120 — the ~4–5Δx mode is too close to

@@ -461,7 +461,7 @@ class OceanModel:
         # ceiling bounds those spikes (open ocean |u|<ceiling is untouched), so the
         # run is stable for a CAVEATED open-ocean comparison (the capped marginal-sea
         # cells are non-physical -- like the lat-lon Arctic caveat). Documented band-aid
-        # (docs/ocean_experiments/cubed_sphere_pgf_stability.md: clipping prevents NaN).
+        # (docs/ocean/experiments/cubed_sphere_pgf_stability.md: clipping prevents NaN).
         if self.config.velocity_ceiling > 0.0:
             vmax = self.config.velocity_ceiling
             state_new = state_new._replace(

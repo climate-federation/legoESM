@@ -4,7 +4,7 @@ These tests prevent regressions of the #356 bug class — rank-dependent code
 branching in the lat-lon C-grid dynamics, where a fold-descriptor
 ``is_active`` gate that does NOT also check fold locality (``fold_j >= 0`` /
 ``fold_is_local``) produces different MPI call counts or rank-local-only
-values at partition cuts.  See ``docs/DISTRIBUTED_ARCHITECTURE.md``.
+values at partition cuts.  See ``docs/architecture/DISTRIBUTED_ARCHITECTURE.md``.
 
 The audit is AST-based (not a line regex), so it is robust to multiline
 boolean expressions, simple ``f = grid.fold`` aliases, and
@@ -265,7 +265,7 @@ def test_no_bare_is_active_fold_gate(rel):
     assert not offenders, (
         "Bare fold `.is_active` gate without a `fold_j`/`fold_is_local` "
         "locality check (rank-dependent branching risk; see "
-        f"docs/DISTRIBUTED_ARCHITECTURE.md, issue #359) in {rel}:\n  "
+        f"docs/architecture/DISTRIBUTED_ARCHITECTURE.md, issue #359) in {rel}:\n  "
         + "\n  ".join(offenders)
     )
 
@@ -330,8 +330,8 @@ def test_fold_is_local_helper_exists_and_is_single_source():
 
 
 def test_architecture_doc_present():
-    doc = _ROOT / "docs/DISTRIBUTED_ARCHITECTURE.md"
-    assert doc.exists(), "docs/DISTRIBUTED_ARCHITECTURE.md (issue #359) missing"
+    doc = _ROOT / "docs/architecture/DISTRIBUTED_ARCHITECTURE.md"
+    assert doc.exists(), "docs/architecture/DISTRIBUTED_ARCHITECTURE.md (issue #359) missing"
     body = doc.read_text()
     for anchor in ("Pre-pad-then-operate", "fold_is_local", "is_tripolar"):
         assert anchor in body, f"architecture doc missing section: {anchor}"

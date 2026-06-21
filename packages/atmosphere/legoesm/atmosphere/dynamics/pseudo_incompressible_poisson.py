@@ -42,7 +42,7 @@ neighbours are taken with ``jnp.roll``; wall neighbours never enter, by the zero
 Pure-pytree, JIT- and ``jax.grad``-safe (no Python control flow on traced values, no host
 callbacks). MPI: replace the ``jnp.roll`` halos with ``parallel.halo_exchange`` strips
 when distributing — the stencil and diagonal are unchanged (follow-up; see runbook
-``docs/pseudo_incompressible_les.md``).
+``docs/physics-notes/pseudo_incompressible_les.md``).
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ days under implicit-CN barotropic + linear bottom drag, with the
 SMC03 density-Jacobian PGF.
 
 This is the headline real-bathymetry check.  Pass criterion (per
-``docs/ocean_experiments/density_jacobian_pgf_plan.md`` §3 Phase 6):
+``docs/ocean/experiments/density_jacobian_pgf_plan.md`` §3 Phase 6):
 
 - Model integrates 30 sim-days without NaN.
 - ``|u|max < 50 mm/s``.

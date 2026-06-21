@@ -5,7 +5,7 @@
 #   - float32 only (TPUs have no efficient native float64; spectral excluded)
 #   - cubed-sphere face sharding on 6 of the 8 chips (8 does not divide the
 #     6-face layout; the 8-chip "level fallback" path is unsupported for the
-#     cubed-sphere dycore — see docs/scaling/scaling_tpu.md)
+#     cubed-sphere dycore — see docs/performance/scaling/scaling_tpu.md)
 #
 # This sweeps the valid cubed-sphere device counts (1, 2, 3, 6) at a fixed
 # resolution (strong scaling).  Override knobs via env vars.

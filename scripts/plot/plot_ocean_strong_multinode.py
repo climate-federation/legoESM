@@ -6,7 +6,7 @@ production default) speedup + efficiency vs node count on Ginsburg CPU-MPI
 0.55 eff overall) — the reduction-latency wall (barotropic 120 allreduces/step =
 24% of the np32 step) + the baroclinic halos that grow with rank, both
 characterized as having no cheap wall-time fix
-(docs/scaling/barotropic_multinode_verdict_2026-06-15.md).
+(docs/performance/scaling/barotropic_multinode_verdict_2026-06-15.md).
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ MS = [139.85, 79.12, 63.06]
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--out", default="docs/scaling/ocean_strong_multinode.png")
+    p.add_argument("--out", default="docs/performance/scaling/ocean_strong_multinode.png")
     args = p.parse_args()
 
     base = MS[0]

@@ -6,7 +6,7 @@ Spins up the 2° Veros-ACC channel with the GEOMETRIC mesoscale closure
 
   * ``truth_snapshot.npz`` — the full ocean state at the end of the averaging
     window (every Field leaf AND the rigid-lid ψ / AB2 carries), for the
-    exact-IC member protocol (``docs/planning/geometric_calibration_campaign.md``
+    exact-IC member protocol (``docs/dev-notes/planning/geometric_calibration_campaign.md``
     §3.1; consumed by ``run_geometric_stage0_etki.py``).
   * ``observables.npz`` — the ETKI observation vector: time-mean AND temporal-std
     maps of T, S, ψ and the depth-integrated EKE over the averaging window (§3.2;

@@ -2,7 +2,7 @@
 
 Truth-based, ORACLE-FREE guards that the physics is invariant to *conventions*
 (pressure-unit choice, vertical-index order), per the oracle-recipe doctrine
-(``docs/ocean_fidelity/oracle_recipe_strategy.md`` §4, §7). These push convention
+(``docs/ocean/fidelity/oracle_recipe_strategy.md`` §4, §7). These push convention
 bugs DOWN from the expensive tier-3 oracle comparison to a cheap every-PR test.
 
 Decidable criterion (doctrine §4): a difference is a *convention* iff a bijective

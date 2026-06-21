@@ -4,7 +4,7 @@ Covers (a) the canonical Flatau SVP curves added to ``legoesm.thermo`` and
 (b) the ``clubb_saturation`` mixing-ratio adapter (CAM default: Flatau,
 mixing ratio with CLUBB's AD-safe denominator guard).
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

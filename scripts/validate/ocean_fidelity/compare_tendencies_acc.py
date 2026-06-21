@@ -15,7 +15,7 @@ Usage
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \\
         scripts/validate/ocean_fidelity/compare_tendencies_acc.py \\
         --runlen-s 4800 \\
-        --write-report docs/ocean_fidelity/veros_acc_tendency_comparison.md
+        --write-report docs/ocean/fidelity/veros_acc_tendency_comparison.md
 
 Requires Veros installed in the legoESM venv (``pip install -e
 <path-to-your-veros-checkout>``). If Veros is missing the script emits a
@@ -248,7 +248,7 @@ def main() -> int:
     p.add_argument("--runlen-s", type=float, default=float(DT_MOM_S),
                    help=f"Veros run length [s]; default {DT_MOM_S} (one dt_mom).")
     p.add_argument("--write-report", type=Path,
-                   default=Path("docs/ocean_fidelity/veros_acc_tendency_comparison.md"),
+                   default=Path("docs/ocean/fidelity/veros_acc_tendency_comparison.md"),
                    help="Path for the Markdown comparison report.")
     args = p.parse_args()
 

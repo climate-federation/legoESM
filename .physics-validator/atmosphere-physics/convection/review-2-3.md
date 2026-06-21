@@ -187,7 +187,7 @@ src/legoesm/atmosphere/physics/thermodynamics.py
 src/legoesm/driver/physics_pipeline.py
 src/legoesm/atmosphere/physics/_shared.py
 docs/ocean_test_experiments_audit.md
-docs/ml_physics_parameterization.md
+docs/science/ml_physics_parameterization.md
 src/legoesm/atmosphere/physics/turbulence/tke.py
 src/legoesm/atmosphere/physics/turbulence/output.py
 src/legoesm/atmosphere/physics/turbulence/surface_layer.py

@@ -254,7 +254,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # wet/rock mask (face active iff BOTH adjacent A-cells active, with a
         # cross-seam ``is_active`` halo) is the next conservation upgrade and
         # closes coastline + seafloor faces together; tracked in
-        # docs/md_files/ocean_faithfulness_nemo.md.
+        # docs/dev-notes/ocean_faithfulness_nemo.md.
 
     # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
     # Reference Jacobian (J=1, eta=0): the barotropic solver handles
@@ -305,7 +305,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # carry a spurious flux across the seafloor step.  Mask each C-face to
         # wet iff BOTH adjacent A-cells are wet (land_mask AND above seafloor),
         # halo-correctly across cube seams.  This is the conservation upgrade
-        # tracked in docs/md_files/ocean_faithfulness_nemo.md and closes the
+        # tracked in docs/dev-notes/ocean_faithfulness_nemo.md and closes the
         # coastline + seafloor faces together.  z* path (is_partial False)
         # stays bit-exact (no masking).
         wet_cc_3d = mask_3d * active_3d

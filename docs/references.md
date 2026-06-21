@@ -12,13 +12,13 @@ legoESM ships citation metadata at the repository root:
 ## Technical specification
 
 The full equation-level specification lives at
-[`docs/specs/SPECIFICATION.md`](https://github.com/gentine/legoESM/blob/main/docs/specs/SPECIFICATION.md)
-(LaTeX sources `docs/legoesm_documentation.tex` and `docs/legoesm_scientific_guide.tex`).
+[`docs/science/specs/SPECIFICATION.md`](https://github.com/gentine/legoESM/blob/main/docs/science/specs/SPECIFICATION.md)
+(LaTeX sources `docs/science/legoesm_documentation.tex` and `docs/science/legoesm_scientific_guide.tex`).
 
 ## Validation benchmarks
 
 The dynamical cores and physics are validated against the standard literature test
-cases — see the [Dycore validation catalog](dycore_validation_catalog.md) for the
+cases — see the [Dycore validation catalog](validation/dycore_validation_catalog.md) for the
 configurations and pass criteria:
 
 - **Williamson et al. (1992)** — shallow-water test suite (geostrophic flow, isolated
@@ -28,10 +28,10 @@ configurations and pass criteria:
 - **DCMIP** — Dynamical Core Model Intercomparison Project cases.
 - **Held & Suarez (1994)** — idealized dry GCM climate benchmark.
 - Ocean: OMIP/CORE2 and NEMO-faithfulness comparisons (notes under
-  [`docs/md_files/`](md_files/README.md)).
+  [`docs/dev-notes/`](dev-notes/README.md)).
 
 ## Internal development notes
 
 Working notes, plans, audits, fidelity reviews, and development logs are collected
-under [`docs/md_files/`](md_files/README.md). They are kept for history and referenced
+under [`docs/dev-notes/`](dev-notes/README.md). They are kept for history and referenced
 from code by basename; they are not part of this published documentation site.

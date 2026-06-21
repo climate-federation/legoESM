@@ -32,7 +32,7 @@ SERIES = [
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--out", default="docs/scaling/multinode_summary.png")
+    p.add_argument("--out", default="docs/performance/scaling/multinode_summary.png")
     args = p.parse_args()
 
     fig, ax = plt.subplots(figsize=(8.6, 5.4))

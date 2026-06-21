@@ -3,7 +3,7 @@
 The single home for the tier taxonomy, case/result types, conservation
 PASS/FAIL gates, summary reporting, and the ``MatrixRunner`` base shared by the
 per-component matrix scripts in ``scripts/matrix/``.  See
-``docs/TESTING.md`` for the tier ladder and how to plug in a component.
+``docs/validation/TESTING.md`` for the tier ladder and how to plug in a component.
 
 Component-agnostic by contract: this subpackage imports only stdlib, numpy, and
 ``legoesm.diagnostics`` — never a component package — so it stays on the

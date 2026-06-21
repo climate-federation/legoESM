@@ -7,7 +7,7 @@ runtime config class — only the CAM-default tree is implemented — so the fla
 tests parse the reference comment table at the end of ``clubb.py`` (keeping
 the namelist source-of-truth tripwire alive on the comments themselves).
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

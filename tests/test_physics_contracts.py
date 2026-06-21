@@ -2,7 +2,7 @@
 ``__physics_contract__``.
 
 This is the "Domain Architect dictates logic" half of the harness (see
-``docs/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
+``docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
 a physics parameterization is written, the domain expert pins its *contract* —
 the units of every input/output, the sign convention, what it conserves, whether
 it is differentiable, the literature reference, and an idealized acceptance

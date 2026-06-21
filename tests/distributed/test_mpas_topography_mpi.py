@@ -1,6 +1,6 @@
 """MPI correctness scaffold for MPAS partial-cell realistic bathymetry.
 
-P7 of ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``.
+P7 of ``docs/ocean/experiments/realistic_geometry_mpas_plan.md``.
 
 **Status**: SCAFFOLD ONLY — auto-skipped today.  The MPAS *atmosphere*
 has a full MPI step path (``legoesm.parallel.voronoi_mpi``,
@@ -56,7 +56,7 @@ def _skip_if_no_mpi_or_ocean_mpi():
     except ImportError:
         pytest.skip(
             "MPAS ocean MPI step not yet implemented — see P7 of "
-            "docs/ocean_experiments/realistic_geometry_mpas_plan.md"
+            "docs/ocean/experiments/realistic_geometry_mpas_plan.md"
         )
 
 

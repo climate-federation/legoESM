@@ -3,7 +3,7 @@
 Confirms ``scheme="clubb"`` dispatches, runs through the column interface, is
 JIT/grad-clean, and behaves physically (positive diffusivities, more vigorous
 mixing in unstable than stable columns). The full prognostic moment coupling is
-deepened in later phases (see ``docs/md_files/clubb.md``); this locks the runnable entry.
+deepened in later phases (see ``docs/dev-notes/clubb.md``); this locks the runnable entry.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 These are the two PROVEN OMIP CORE-II configurations that match the NEMO ORCA1
 *climate* (not the bit-faithful NEMO-numerics card in :mod:`nemo_recipe`).  They
-were validated against NEMO Mar day-90 SST (``docs/md_files/ocean_faithfulness_nemo.md``):
+were validated against NEMO Mar day-90 SST (``docs/dev-notes/ocean_faithfulness_nemo.md``):
 
 * **MPAS ico6 (~115 km ≈ ORCA1)** — SST RMSE **0.84** vs NEMO (best grid).
 * **tripole eORCA025 (¼°)** — SST RMSE **1.15**, corr 0.99.

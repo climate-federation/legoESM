@@ -172,7 +172,7 @@ def build_gyre_config(
       (``create_beta_plane_cgrid_geometry`` now pins ``lat=0``), the MITgcm-faithful
       face-f Coriolis runs the gyre LAMINAR to ``|u|max≈0.027`` / ``|v|max≈0.078``
       (within ~13% of MITgcm's 0.031/0.084), not the turbulent 0.066+ overshoot.
-      See docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md (iteration 7).
+      See docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md (iteration 7).
 
     Selects the SHARED MITgcm-faithful numerics block via
     :func:`mitgcm_canonical_ocean_config` (the MITgcm recipe card) and supplies
@@ -224,7 +224,7 @@ def build_gyre_faithful_model(
     barotropic/baroclinic split + forward-backward-Coriolis predictor sits on the
     unstable side of the western-boundary-current instability.  Use this stepper for
     the multi-year equilibrium comparison; see
-    ``docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md``.
+    ``docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md``.
     """
     from legoesm.ocean.fidelity.mitgcm_gyre_faithful import GyreFaithfulModel
     return GyreFaithfulModel(n=n, dx_m=dx_m, dt_s=dt_s)

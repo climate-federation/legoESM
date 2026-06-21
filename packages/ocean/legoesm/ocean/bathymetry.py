@@ -134,7 +134,7 @@ class BathymetryConfig(NamedTuple):
     Arctic singular-point + tiny-dx high-latitude regime is hard to
     keep stable + damped simultaneously, especially with cos²(lat)
     A_h scaling that *reduces* damping at high latitudes.  See
-    ``docs/ocean_experiments/realistic_geometry_topology_fixes.md``.
+    ``docs/ocean/experiments/realistic_geometry_topology_fixes.md``.
     When None, no cap is applied (preserves bit-exact regression)."""
     south_cap_lat: float | None = None
     """Southern polar cap latitude [deg].  When set, all ocean cells

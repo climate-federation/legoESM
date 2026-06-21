@@ -92,7 +92,7 @@ from legoesm.ocean.physics.surface_forcing.config import FluxFeedbackConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py and
-# docs/ai_guardrails/domain_architect_vs_syntax_engine.md).
+# docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md).
 __physics_contract__ = {
     "summary": (
         "Veros-style surface tracer forcing: prescribed heat flux plus a linear "

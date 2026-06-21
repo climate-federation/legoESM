@@ -2,7 +2,7 @@
 BathymetryConfig.  These cap fields close off high-latitude ocean cells
 where the lat-lon grid singularity + small dx + cos²(lat) A_h scaling
 combine to leave the Arctic under-damped (see
-``docs/ocean_experiments/realistic_geometry_topology_fixes.md``).
+``docs/ocean/experiments/realistic_geometry_topology_fixes.md``).
 """
 
 from __future__ import annotations

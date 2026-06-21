@@ -1,5 +1,5 @@
 """np24 gate: the tiled advective TRACER tendency stage — the cube-MOIST np>6
-unlock (increment 1 of docs/scaling/cube_moist_tiled_step_design.md).
+unlock (increment 1 of docs/performance/scaling/cube_moist_tiled_step_design.md).
 
 ``make_tiled_fv3_tracer_advection_stage_2d`` advects one cc tracer ``q`` by the
 SAME advective horizontal transport the thermodynamic stage applies to

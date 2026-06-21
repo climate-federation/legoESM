@@ -757,7 +757,7 @@ def make_sharded_step(
     # function still calls the full-face operators); the 3D
     # ``fv3_hydrostatic_tendencies`` tiling is in progress (dgrid_vorticity
     # 4D-tiled).  See ``tiled_production_cdgrid.py`` +
-    # ``docs/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
+    # ``docs/performance/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
     # (np>6 anti-scales on Gloo-TCP/PCIe) — future-HW capability.
     import os as _os
     _tiled_ok = (

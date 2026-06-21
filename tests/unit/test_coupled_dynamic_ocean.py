@@ -1,4 +1,4 @@
-"""Phase-1 coupled 3D-ocean wiring (docs/coupled_3d_ocean_plan.md): the coupled
+"""Phase-1 coupled 3D-ocean wiring (docs/ocean/coupled_3d_ocean_plan.md): the coupled
 driver can step the prognostic LatLonCGridOceanModel (ocean_mode='dynamic') on a
 SHARED lat-lon grid with the atmosphere, instead of only a thermodynamic slab.
 

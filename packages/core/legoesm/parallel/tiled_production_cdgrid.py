@@ -1,5 +1,5 @@
 """Sub-face tiled PRODUCTION cube-dycore ops (task (a), design:
-``docs/scaling/cube_production_tiling_design.md``).
+``docs/performance/scaling/cube_production_tiling_design.md``).
 
 Ports the U3/U4 approach-C sub-face tiling from the EXPERIMENTAL FB chain to the
 PRODUCTION ``fv3_sw_tendencies`` / ``fv3_hydrostatic_tendencies`` op set, so the

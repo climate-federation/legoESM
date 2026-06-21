@@ -1,4 +1,4 @@
-"""Bit-exact restart continuation (FIX_RESTART_TIME, docs/FIX_RESTART_TIME.md).
+"""Bit-exact restart continuation (FIX_RESTART_TIME, docs/dev-notes/FIX_RESTART_TIME.md).
 
 The #413 series made the PhysicsState carry persist exactly through
 checkpoints, but the restart TRAJECTORY still diverged from an

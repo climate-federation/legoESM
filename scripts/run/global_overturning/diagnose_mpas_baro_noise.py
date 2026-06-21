@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Diagnose barotropic-mode grid-scale noise in MPAS overturning restarts.
 
-Implements the diagnostic plan from ``docs/issues/barotropic_mode_noise.md``
+Implements the diagnostic plan from ``docs/dev-notes/issues/barotropic_mode_noise.md``
 on the MPAS Voronoi C-grid.  The lat-lon C-grid suffers from a Coriolis-
 averaging null mode that contaminates time-mean V_baro with grid-scale
 ±5 cm/s noise; the analogous TRiSK rotational null branch on hexagonal

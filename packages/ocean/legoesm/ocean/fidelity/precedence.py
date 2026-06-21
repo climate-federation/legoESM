@@ -1,6 +1,6 @@
 """Truth-tier precedence gate for the oracle-recipe fidelity ladder (#388 Ask#4).
 
-The verification ladder (``docs/ocean_fidelity/oracle_recipe_strategy.md`` §2/§3
+The verification ladder (``docs/ocean/fidelity/oracle_recipe_strategy.md`` §2/§3
 rule E, summarised in ``CLAUDE.md``) splits into:
 
 * **truth tiers** 0–2 — conservation, equivariance, analytic / manufactured

@@ -9,7 +9,7 @@ latitude zonal wind stress, started from rest.  Spin up for 30 days;
 time-average over the last 10 days; assert the Crit 1 invariants on the
 time-mean V_baro.
 
-Crit 1 invariants (from docs/issues/barotropic_mode_noise.md):
+Crit 1 invariants (from docs/dev-notes/issues/barotropic_mode_noise.md):
   1.  var(∇·U_baro) / var(U_baro) < 0.05
   2.  max |⟨V_baro⟩| outside polar caps < 5e-3 m/s
   3.  σ(grid-scale V_baro after 3-pt meridional Laplacian) < 1e-2 m/s

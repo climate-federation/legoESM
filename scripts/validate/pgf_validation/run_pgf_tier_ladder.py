@@ -6,7 +6,7 @@ diagnostic (Tier 1: idealized rest-state) to most realistic (Tier 5:
 JRA-forced realistic bathymetry).  Each tier adds one source of
 complexity, so failures can be attributed cleanly.
 
-See docs/ocean_experiments/pgf_test_plan.md for the full rationale.
+See docs/ocean/experiments/pgf_test_plan.md for the full rationale.
 
 Tiers
 -----

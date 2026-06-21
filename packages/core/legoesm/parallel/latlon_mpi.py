@@ -188,7 +188,7 @@ class LatLon2DLayout(NamedTuple):
     """2-D pencil (lat × lon) decomposition layout for MPI.
 
     Increment 2 of the lat-lon 2-D decomposition
-    (``docs/scaling/latlon_2d_decomposition_design.md``).  Generalises
+    (``docs/performance/scaling/latlon_2d_decomposition_design.md``).  Generalises
     :class:`LatLonBandLayout` from a 1-D latitude band to a 2-D
     ``(proc_lat, proc_lon)`` process grid (row-major rank =
     ``proc_row * proc_lon + proc_col``).  Latitude is a LINE (poles
@@ -839,7 +839,7 @@ def exchange_halo_lon(
     """Exchange ``halo`` ghost LONGITUDE columns on each side (W/E).
 
     Increment 1 of the lat-lon 2-D pencil decomposition
-    (``docs/scaling/latlon_2d_decomposition_design.md``).  Longitude is
+    (``docs/performance/scaling/latlon_2d_decomposition_design.md``).  Longitude is
     GLOBALLY PERIODIC, so — unlike the N/S :func:`exchange_halo_latlon`
     — there are no pole/wall ends: every rank in the longitude ring
     sends its west edge west and its east edge east, and the wrap is
@@ -2748,7 +2748,7 @@ def make_latlon_2d_mpi_step(
 
     Wall poles only — a labeled midlatitude throughput benchmark, NOT the
     atmosphere's 180° pole fold (that needs a lat-pencil transpose; see
-    ``docs/scaling/latlon_2d_build_plan.md``).
+    ``docs/performance/scaling/latlon_2d_build_plan.md``).
 
     ``proc_lon == 1`` (latitude split only) is the band-EQUIVALENT layout
     and is fully wired: the lat axis is exchanged via the 2-D dispatch and
