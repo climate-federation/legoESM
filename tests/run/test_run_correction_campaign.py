@@ -4126,6 +4126,10 @@ def test_realism_campaign_summary_line():
     line = _realism_campaign_summary_line(mixed)
     assert "1/4 realistic" in line and "3 rejected" in line
     assert "2x laminar" in line and "1x moisture-runaway" in line
+    # The line is SHARED by the campaign + OSSE (prefix=), so its tail must be GENERIC: it must
+    # NOT name a campaign-only verdict (the OSSE has no `no_valid_diagnoses`) — iter 523.
+    assert "no_valid_diagnoses" not in line
+    assert "[osse]" in _realism_campaign_summary_line(mixed, prefix="[osse]")
 
 
 def test_output_dict_records_les_realism():

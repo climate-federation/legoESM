@@ -273,8 +273,8 @@ def _realism_campaign_summary_line(breakdowns: Any, *, prefix: str = "[campaign]
         ("theta-drift", s.n_thermo_drift), ("moisture-runaway", s.n_moisture_runaway),
         ("supersaturated", s.n_supersaturated)) if n]
     return (f"{prefix} LES realism: {s.n_realistic}/{s.n_total} realistic, "
-            f"{s.n_rejected} rejected ({', '.join(modes)}) — see the no_valid_diagnoses "
-            "verdict if this starved the correction.")
+            f"{s.n_rejected} rejected ({', '.join(modes)}) — rejected spin-offs leave their "
+            "columns uncorrected; the run verdict flags a starved correction.")
 
 
 def print_realism_summary(run_les: Any, *, prefix: str = "[campaign]") -> None:
