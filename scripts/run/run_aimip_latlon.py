@@ -98,7 +98,9 @@ def build_latlon_config(args):
         "--microphysics", args.microphysics,
         "--clouds", args.clouds,
         "--gravity-wave-drag", args.gravity_wave_drag,
-        "--rad-update-steps", "1",   # resolve None (we skip _postprocess_args)
+        # Match the training-segment sub-cycling (also resolves the None that
+        # skipping _postprocess_args would leave).
+        "--rad-update-steps", str(args.rad_update_steps),
         # Lat-lon C-grid needs pole-CFL relief; the Fourier polar filter
         # lets the dycore take a much larger stable dt than the ~30 s the
         # raw pole cells force.  The effective (CFL-clamped) dt is read
@@ -479,10 +481,11 @@ def build_parser():
     p.add_argument("--clouds", default="xu_randall")
     p.add_argument("--gravity-wave-drag", default="hines")
     # Radiation sub-cycling for the TRAINING rollout: run rrtmgp every N
-    # dynamics steps.  N>1 cuts the dominant rrtmgp cost of the classical
-    # variant (radiation varies slowly; hourly-ish is standard) so a full
-    # T106 multi-epoch run fits the walltime.  Moot for NN variants.
-    p.add_argument("--rad-update-steps", type=int, default=1)
+    # dynamics steps, NOT every step (radiation varies slowly; GCMs update it
+    # ~hourly).  rrtmgp is the dominant cost of the classical variant, so the
+    # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
+    # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
+    p.add_argument("--rad-update-steps", type=int, default=6)
     p.add_argument("--variants", default="classical,column_nn",
                    help="comma list: classical,column_nn")
     p.add_argument("--epochs", type=int, default=8)

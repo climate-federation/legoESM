@@ -35,7 +35,7 @@ def test_parser_defaults():
     assert args.radiation == "rrtmgp"    # band model, not gray
     assert args.microphysics == "kessler"
     assert args.gravity_wave_drag == "hines"
-    assert args.rad_update_steps == 1
+    assert args.rad_update_steps > 1     # rrtmgp sub-cycled, NOT every step
 
 
 def test_rad_update_steps_roundtrip():
