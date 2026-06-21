@@ -336,12 +336,14 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             model, grid, sigma, physics_pipeline, ics, targets, forcings,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
+            rad_update_steps=args.rad_update_steps,
             loss_config=loss_config, log_every=1,
         )
         step_unified = physics_pipeline.build_step_unified()
         seg = build_training_segment(
             model, step_unified, grid, sigma, args.dt,
             microphysics=args.microphysics,
+            rad_update_steps=args.rad_update_steps,
             **trained.to_segment_kwargs(),
         )
     elif variant == "column_nn":
@@ -467,6 +469,11 @@ def build_parser():
     p.add_argument("--microphysics", default="kessler")
     p.add_argument("--clouds", default="xu_randall")
     p.add_argument("--gravity-wave-drag", default="hines")
+    # Radiation sub-cycling for the TRAINING rollout: run rrtmgp every N
+    # dynamics steps.  N>1 cuts the dominant rrtmgp cost of the classical
+    # variant (radiation varies slowly; hourly-ish is standard) so a full
+    # T106 multi-epoch run fits the walltime.  Moot for NN variants.
+    p.add_argument("--rad-update-steps", type=int, default=1)
     p.add_argument("--variants", default="classical,column_nn",
                    help="comma list: classical,column_nn")
     p.add_argument("--epochs", type=int, default=8)

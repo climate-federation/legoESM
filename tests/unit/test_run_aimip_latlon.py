@@ -31,6 +31,23 @@ def test_parser_defaults():
     assert "classical" in args.variants
     assert mod._ROLLOUT_HOURS == 6       # short horizon: adjoint stability
     assert args.w_flux_olr > 0.0         # flux supervision on by default
+    # AMIP physics stack defaults (user directive: NO gray; full stack).
+    assert args.radiation == "rrtmgp"    # band model, not gray
+    assert args.microphysics == "kessler"
+    assert args.gravity_wave_drag == "hines"
+    assert args.rad_update_steps == 1
+
+
+def test_rad_update_steps_roundtrip():
+    args = mod.build_parser().parse_args(["--rad-update-steps", "6"])
+    assert args.rad_update_steps == 6
+    # plumbs into train_physics_params + build_training_segment signatures
+    import inspect
+    from legoesm.training.training_driver import (
+        train_physics_params, _build_training_segment,
+    )
+    assert "rad_update_steps" in inspect.signature(train_physics_params).parameters
+    assert "rad_update_steps" in inspect.signature(_build_training_segment).parameters
 
 
 def test_loss_config_has_flux_weights():

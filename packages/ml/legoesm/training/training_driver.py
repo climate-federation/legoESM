@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 
 def _build_training_segment(model, step_unified, grid, sigma, dt, *,
-                            microphysics="none", **extra_kwargs):
+                            microphysics="none", rad_update_steps=1,
+                            **extra_kwargs):
     """Build a segment function with standard training defaults.
 
     Encapsulates the boilerplate kwargs shared by all training modes.
@@ -42,6 +43,13 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, *,
     classical physics variant threads its real scheme (e.g. ``"kessler"``)
     here so q_c/q_r/precip evolve; NN-replacement variants keep ``"none"``
     (the network subsumes condensation).
+
+    ``rad_update_steps`` sub-cycles radiation: rrtmgp runs every N dynamics
+    steps (1 = every step).  N>1 cuts the dominant rrtmgp cost of the
+    classical variant — radiation varies slowly, so hourly-ish updates are
+    standard GCM practice and keep ``held_*`` fresh enough for the flux loss
+    (the last update lands within N steps of the rollout end).  Moot for the
+    NN-replacement variants (their step_unified ignores ``need_rad``).
     """
     sigma_full = jnp.asarray(sigma.sigma_full)
     return build_segment_fn(
@@ -51,7 +59,7 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, *,
         sigma_full=sigma_full,
         dsigma=jnp.asarray(sigma.dsigma),
         dt=dt,
-        rad_update_steps=1,
+        rad_update_steps=rad_update_steps,
         microphysics=microphysics,
         fix_moisture=False,
         fix_mass=False,
@@ -194,6 +202,7 @@ def train_physics_params(
     rollout_hours: float = 24.0,
     grad_clip: float = 1.0,
     microphysics: str = "none",
+    rad_update_steps: int = 1,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -242,7 +251,8 @@ def train_physics_params(
             seg_kw = params_.to_segment_kwargs()
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
-                microphysics=microphysics, **seg_kw,
+                microphysics=microphysics, rad_update_steps=rad_update_steps,
+                **seg_kw,
             )
             pred = single_day_rollout(
                 ic, forcing, run_seg.raw, dt=dt, hours=rollout_hours)
