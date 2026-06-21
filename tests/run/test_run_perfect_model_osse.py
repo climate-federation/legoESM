@@ -342,6 +342,67 @@ def test_run_multi_osse_main_gates_exit_and_forwards_the_config(monkeypatch):
     assert rpo._run_multi_osse_main(args, **common) == 1
 
 
+def test_main_single_dispatch_builds_clubb_and_gates_exit(monkeypatch):
+    """The TOP-LEVEL OSSE main() SINGLE-coefficient path (iter 492) — what
+    preflight_osse.sbatch's default invokes (main() is pragma:no-cover heavy I/O). It wires
+    --config → _build_run_setup → build_perfect_model_osse(true/biased CLUBB from
+    --true-ck/--biased-ck) → osse_verdict → exit code. The heavy setup + the 4 model runs are
+    monkeypatched; the DISPATCH + the clubb-config building + the verdict→exit wiring run for
+    real, so a launcher-breaking regression (wrong builder args, broken dispatch) fails in CI
+    rather than on a multi-day HPC batch node."""
+    from types import SimpleNamespace
+
+    import pytest
+    from legoesm.training.perfect_model_osse import OSSEResult
+
+    import scripts.run.run_correction_campaign as rcc
+    import scripts.validate.run_perfect_model_osse as rpo
+
+    # _build_run_setup + _area_weights are FUNCTION-scope-imported in main() from
+    # run_correction_campaign, so patch them THERE; build_perfect_model_osse is module-level.
+    dummy_grid = SimpleNamespace(grid_shape_2d=(2, 2), grid_area=jnp.ones(4))
+    monkeypatch.setattr(
+        rcc, "_build_run_setup",
+        lambda args: (object(), dummy_grid, object(), (lambda *a, **k: None),
+                      (lambda *a, **k: None), (lambda *a, **k: None), None))
+    monkeypatch.setattr(rcc, "_area_weights", lambda grid: jnp.ones(4))
+
+    def _osse_result(recovered):
+        return OSSEResult(
+            initial_bias=2.0, final_bias=1.0, bias_reduction=1.0, bias_reduced=True,
+            true_value=0.4, initial_value=0.6,
+            recovered_value=0.42 if recovered else 0.6,
+            initial_param_error=0.2, final_param_error=0.02 if recovered else 0.3,
+            param_error_reduced=recovered, n_rounds=1, n_accepted=1, summary=None)
+
+    captured = {}
+
+    def _spy(**kw):
+        captured.update(kw)
+        return _osse_result(recovered=True)
+    monkeypatch.setattr(rpo, "build_perfect_model_osse", _spy)
+
+    rc = rpo.main(["--config", "ignored.json", "--true-ck", "0.4", "--biased-ck", "0.6",
+                   "--iterations", "1", "--n-worst", "2"])
+    assert rc == 0                                         # recovered → GO (exit 0)
+    assert float(captured["true_clubb"].C_K) == 0.4        # config-derived TRUE coefficient
+    assert float(captured["biased_clubb"].C_K) == 0.6      # the biased start
+    assert captured["n_iterations"] == 1 and captured["n_worst"] == 2
+    assert captured["les_config"].surface_flux is False    # default off
+
+    # NOT recovered → bias_only/no_change → exit 1 (the campaign-gating no-go).
+    monkeypatch.setattr(rpo, "build_perfect_model_osse",
+                        lambda **kw: _osse_result(recovered=False))
+    assert rpo.main(["--config", "x.json", "--true-ck", "0.4", "--biased-ck", "0.6"]) == 1
+
+    # Single mode REQUIRES --true-ck/--biased-ck (fail-loud dispatch); --coefficients +
+    # --fine-resolution is an unsupported combination.
+    with pytest.raises(SystemExit, match="requires --true-ck"):
+        rpo.main(["--config", "x.json"])
+    with pytest.raises(SystemExit, match="cross-resolution"):
+        rpo.main(["--config", "x.json", "--coefficients", "C_K", "--fine-resolution", "8"])
+
+
 def test_assert_pseudo_truth_finite_gates_on_columnstate():
     """_assert_pseudo_truth_finite (iter 302) fails loud on a DIVERGED ColumnState pseudo-truth
     (run_fn(true_config) blew up → NaN), but SKIPS a non-ColumnState reference (the analytic
