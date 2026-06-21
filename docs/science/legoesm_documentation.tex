@@ -2,6 +2,7 @@
 
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,bm}
+\usepackage{natbib}
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{enumitem}
@@ -259,14 +260,14 @@ Complexity ladder & \texttt{resolve\_model\_complexity()} & idealized, intermedi
 \subsection{Cubed-Sphere Grid}
 %-----------------------------------------------------------------------------
 
-Six faces of a cube are mapped to the sphere via \textbf{gnomonic (central) projection}.  Let $(\alpha_x,\alpha_y)\in[-\pi/4,\pi/4]^2$ be gnomonic coordinates on a face.
+Six faces of a cube are mapped to the sphere via \textbf{gnomonic (central) projection} \citep{Ronchi1996,PutmanLin2007}.  This quasi-uniform tiling replaces the polar singularity and meridian convergence of a latitude--longitude mesh with six logically rectangular panels, so the maximum stable timestep is set by a near-uniform grid spacing rather than by the vanishing zonal spacing at the poles.  Let $(\alpha_x,\alpha_y)\in[-\pi/4,\pi/4]^2$ be the equiangular gnomonic coordinates on a face; because great circles map to straight lines in $(\alpha_x,\alpha_y)$, the projection is naturally suited to conservative finite-volume discretisation \citep{Sadourny1972}.
 
 \subsubsection{Face-to-Cartesian mapping}
-For face~0 ($+x$ face):
+For face~0 ($+x$ face), the gnomonic map sends the planar face coordinates to a ray from the cube centre:
 \begin{equation}
   (x,y,z) = \bigl(1,\;\tan\alpha_x,\;\tan\alpha_y\bigr),
 \end{equation}
-with analogous expressions for the remaining five faces.  Points are normalised to the unit sphere: $\hat{\bm r}=\bm r/|\bm r|$, and geographic coordinates follow as $\lambda=\mathrm{atan2}(\hat y,\hat x)$, $\phi=\arcsin(\hat z)$.
+with analogous expressions for the remaining five faces obtained by axis permutation and sign.  Points are normalised to the unit sphere: $\hat{\bm r}=\bm r/|\bm r|$, and the geographic longitude $\lambda$ and latitude $\phi$ follow as $\lambda=\mathrm{atan2}(\hat y,\hat x)$, $\phi=\arcsin(\hat z)$.
 
 \subsubsection{Cell area}
 The area element on the gnomonic equidistant grid is
@@ -275,6 +276,7 @@ The area element on the gnomonic equidistant grid is
   \qquad D = \sqrt{1+\tan^2\!\alpha_x+\tan^2\!\alpha_y},
   \qquad \Delta\alpha=\frac{\pi}{2n}.
 \end{equation}
+Here $R$ is the planetary radius, $\Delta\alpha$ the uniform angular cell width on a C$n$ face of $n\times n$ cells, and $D$ the distance from the cube centre to the projected point.  The $D^{-3}$ factor is exactly the Jacobian of the gnomonic map; summing $\Delta A$ over the six faces recovers $4\pi R^2$, the discrete area-conservation property the finite-volume operators depend on.
 
 \subsubsection{Grid spacing}
 Great-circle distances use the chord-to-arc formula:
@@ -296,7 +298,7 @@ Wind rotation between geographic $(u_E,v_N)$ and grid-aligned $(u_g,v_g)$:
 \end{equation}
 
 \subsubsection{Halo exchange}
-Scalar fields are exchanged directly across the six-face connectivity table.  Vector fields are first rotated to geographic components, padded as scalars, then rotated back using the padded grid angle.
+Scalar fields are exchanged directly across the six-face connectivity table.  Vector fields are first rotated to geographic components, padded as scalars, then rotated back using the padded grid angle, because the grid-aligned basis is discontinuous across a panel edge and a naive copy of $(u_g,v_g)$ would inject a spurious rotation at the seam.  A discrete duo-grid treatment of the panel edges removes the residual edge imprint that a single-grid halo leaves on differential operators \citep{Mouallem2023}.
 
 Two halo widths are supported.  \textbf{Halo\,=\,1} (one ghost cell per side) suffices for second-order centred differences and MUSCL reconstruction.  \textbf{Halo\,=\,2} (two ghost cells per side) is required by higher-order reconstruction stencils (PPM, WENO5).  The halo exchange interpolates neighbour-face strips to the correct gnomonic position at each depth, removing the O($\Delta\alpha$) mismatch near cube corners.
 
@@ -317,7 +319,7 @@ Levante-cluster validation is described in
 \subsection{Gaussian Grid and Spectral Transforms}
 %-----------------------------------------------------------------------------
 
-The spectral dynamical cores use a Gaussian grid with triangular truncation at total wavenumber $n_{\max}$.
+The spectral dynamical cores represent fields by their spherical-harmonic coefficients and use a Gaussian grid with triangular truncation at total wavenumber $n_{\max}$ \citep{Bourke1972}.  Triangular truncation is chosen because it is isotropic: the retained set of harmonics is invariant under rotation of the sphere, so no direction is preferentially resolved.
 
 \subsubsection{Grid dimensions}
 \begin{equation}
@@ -325,7 +327,7 @@ The spectral dynamical cores use a Gaussian grid with triangular truncation at t
   \qquad n_{\mathrm{lon}} = 2\,n_{\mathrm{lat}},
   \qquad n_{\mathrm{sh}} = \frac{(n_{\max}+1)(n_{\max}+2)}{2}.
 \end{equation}
-Latitudes are Gaussian quadrature points $\mu_k=\sin\phi_k$ with weights $w_k$; longitudes are equispaced.
+The factor $\tfrac{3}{2}$ is the standard transform-grid choice that makes the Gaussian quadrature exact for the quadratic (advective) products, eliminating spectral aliasing.  Latitudes are Gaussian quadrature points $\mu_k=\sin\phi_k$ with weights $w_k$; longitudes are equispaced so the zonal direction can be treated by FFT.
 
 \subsubsection{Associated Legendre polynomials}
 Fully normalised ($4\pi$) polynomials $P_n^m(\mu)$ satisfy $\int|Y_n^m|^2\,\dd A=1$.  They are computed via the recursion
@@ -369,7 +371,7 @@ where $\theta$ is colatitude.
 Half-level interfaces $\sigma_{k+1/2}$ are uniformly spaced; full levels $\sigma_k=(\sigma_{k-1/2}+\sigma_{k+1/2})/2$.  Layer thickness $\Delta\sigma_k=\sigma_{k+1/2}-\sigma_{k-1/2}$.
 
 \subsubsection{Simmons--Burridge geopotential}
-The geopotential at full level $k$ is
+The vertical finite differencing follows \citet{SimmonsBurridge1981}, constructed so that the discrete pressure-gradient and energy-conversion terms conserve total energy under adiabatic, frictionless flow.  The geopotential at full level $k$ is
 \begin{equation}
   \Phi_k = \Phi_s + \Rd\!\sum_{k'=k+1}^{N-1}T_{k'}\ln\frac{\sigma_{k'+1/2}}{\sigma_{k'-1/2}}
   + \alpha_k\,\Rd\,T_k,
@@ -441,10 +443,10 @@ where $h_x=\Delta x/2$, $h_y=\Delta y/2$ are half-edge lengths and $A$ is the ce
 
 \subsection{C-D Grid Operators (FV3-style, \texttt{operators\_cdgrid.py})}
 
-The canonical cubed-sphere operator module uses FV3-style C-D grid staggering (Lin 2004, Putman \& Lin 2007), shared by all atmosphere (SW, PE, CE) and ocean dynamical cores.  D-grid winds at cell corners~$(6,n\!+\!1,n\!+\!1)$ are prognostic; C-grid velocities at cell edges are diagnosed for mass/scalar transport.
+The canonical cubed-sphere operator module uses FV3-style C-D grid staggering \citep{Lin2004,PutmanLin2007}, shared by all atmosphere (SW, PE, CE) and ocean dynamical cores.  D-grid winds at cell corners~$(6,n\!+\!1,n\!+\!1)$ are prognostic; C-grid velocities at cell edges are diagnosed for mass/scalar transport.  The C-D arrangement combines the favourable geostrophic adjustment of the C-grid with the cleanly defined corner vorticity of the D-grid.
 
 \paragraph{FV3-faithful PPM transport (v3.9).}
-The operator module was rewritten (${\sim}$740 lines) with proper PPM reconstruction, Colella--Woodward monotonicity limiters, and flux-form mass transport on staggered grids, faithfully following the FV3 algorithm of Putman \& Lin~(2007).  This replaces the earlier simplified A-grid transport with a fully staggered C-D grid transport that correctly handles cross-face halo exchange, geographic-to-grid wind rotation, and corner interpolation for the cubed sphere.
+The operator module was rewritten (${\sim}$740 lines) with proper Piecewise Parabolic Method reconstruction \citep{ColellaWoodward1984}, Colella--Woodward monotonicity limiters, and flux-form mass transport on staggered grids, faithfully following the FV3 algorithm of \citet{PutmanLin2007}.  This replaces the earlier simplified A-grid transport with a fully staggered C-D grid transport that correctly handles cross-face halo exchange, geographic-to-grid wind rotation, and corner interpolation for the cubed sphere.
 
 \paragraph{D-grid vorticity.}
 Vorticity at each cell corner is the discrete circulation integral divided by the corner dual-cell area~$A_c$:
@@ -452,7 +454,7 @@ Vorticity at each cell corner is the discrete circulation integral divided by th
   \zeta_{\mathrm{corner}} = \frac{1}{A_c}\oint \bm{u}\cdot\dd\bm{l}
   \approx \frac{1}{A_c}\bigl[u^D_{i,j}\Delta x - u^D_{i+1,j}\Delta x + v^D_{i,j+1}\Delta y - v^D_{i,j}\Delta y\bigr].
 \end{equation}
-This circulation-based discretisation is exact on the D-grid and eliminates the Hollingsworth--Kallberg instability that plagues A-grid vorticity operators.
+Because vorticity is defined as the line integral of the tangential wind around the dual cell, the discrete curl inherits the Stokes-theorem identity exactly, so the kinetic-energy and enstrophy budgets remain mutually consistent.  This circulation-based discretisation is exact on the D-grid and eliminates the Hollingsworth--Kallberg instability that plagues A-grid vorticity operators.
 
 \paragraph{Arakawa--Lamb gradient.}
 The Bernoulli (or Exner) gradient at D-grid corners is a 4-point Arakawa--Lamb average:
@@ -470,7 +472,7 @@ Scalar transport uses upwind C-grid mass fluxes:
 where $u_c,v_c$ are diagnosed from $u_d,v_d$ by face-edge averaging.
 
 \paragraph{FV3 forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}).}
-An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward stepping algorithm (Lin 2004).  The forward step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward step (d\_sw) updates D-grid winds using the vorticity flux and pressure gradient.  Key components:
+An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward stepping algorithm \citep{Lin2004}.  The forward step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward step (d\_sw) updates D-grid winds using the vorticity flux and pressure gradient.  Key components:
 \begin{itemize}[nosep]
   \item \textbf{d2a2c\_vect}: D-grid $\to$ A-grid $\to$ C-grid vector conversion, faithfully porting the GFDL FV3 algorithm including edge-boundary stencils, one-sided interpolation near cube edges, and non-orthogonality corrections via $\cos\alpha$/$\sin^{-2}\!\alpha$ metrics.
   \item \textbf{PPM wind advection}: Piecewise Parabolic Method reconstruction for C-grid wind tendencies (\texttt{xtp\_u}, \texttt{ytp\_v}), with FV3-specific interpolation coefficients ($A_1$, $A_2$, $C_1$--$C_3$).
@@ -478,8 +480,8 @@ An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward steppi
   \item \textbf{Kinetic energy}: Cell-centred kinetic energy computed from A-grid velocities with optional 4th-order averaging via \texttt{a2b\_ord4}.
 \end{itemize}
 
-\paragraph{Duo-grid sub-grid metrics (Mouallem et al.\ 2023).}
-The cubed-sphere C-D grid includes 9-point sub-grid angle metrics per cell, stored as $\sin\alpha_{\mathrm{sg}}$ and $\cos\alpha_{\mathrm{sg}}$ arrays of shape $(6,n,n,9)$.  These encode the local deviation from orthogonality at cell centres, edge midpoints, and corners, enabling FV3-faithful flux scaling at cube-face boundaries where the gnomonic projection introduces non-orthogonality.  Additional C-D grid metrics include centre-to-centre distances $\Delta x_c$, $\Delta y_c$, and non-orthogonality factors $\cos\alpha_{\mathrm{corner}}$, $(\sin^2\!\alpha_{\mathrm{corner}})^{-1}$ at D-grid corners.
+\paragraph{Duo-grid sub-grid metrics \citep{Mouallem2023}.}
+Following the duo-grid construction of \citet{Mouallem2023}, the cubed-sphere C-D grid includes 9-point sub-grid angle metrics per cell, stored as $\sin\alpha_{\mathrm{sg}}$ and $\cos\alpha_{\mathrm{sg}}$ arrays of shape $(6,n,n,9)$.  These encode the local deviation from orthogonality at cell centres, edge midpoints, and corners, enabling FV3-faithful flux scaling at cube-face boundaries where the gnomonic projection introduces non-orthogonality.  Additional C-D grid metrics include centre-to-centre distances $\Delta x_c$, $\Delta y_c$, and non-orthogonality factors $\cos\alpha_{\mathrm{corner}}$, $(\sin^2\!\alpha_{\mathrm{corner}})^{-1}$ at D-grid corners.
 
 \subsection{Laplacian and Hyperdiffusion}
 \begin{equation}
@@ -491,13 +493,13 @@ The cubed-sphere C-D grid includes 9-point sub-grid angle metrics per cell, stor
 \section{Finite-Volume Transport}
 %=============================================================================
 
-The finite-volume dynamical cores use upwind reconstruction at cell edges coupled with a Rusanov approximate Riemann solver.  Three reconstruction methods are available, selected via the \texttt{limiter} parameter.
+The finite-volume dynamical cores use upwind reconstruction at cell edges coupled with a Rusanov approximate Riemann solver.  The flux-form, dimensionally split transport follows the multidimensional flux-form semi-Lagrangian construction of \citet{LinRood1996} and the vertically Lagrangian finite-volume core of \citet{Lin2004}, which together guarantee discrete mass conservation.  Three reconstruction methods are available, selected via the \texttt{limiter} parameter, trading order of accuracy against the width of the halo stencil.
 
 %-----------------------------------------------------------------------------
 \subsection{MUSCL Reconstruction (2nd order, halo\,=\,1)}
 %-----------------------------------------------------------------------------
 
-Piecewise-linear reconstruction with slope limiting (van Leer, 1979).  At the interface between cells $i$ and $i\!+\!1$:
+Piecewise-linear reconstruction with slope limiting \citep{vanLeer1979}.  The limiter clips the reconstructed slope so the edge states never overshoot the neighbouring cell averages, preserving monotonicity.  At the interface between cells $i$ and $i\!+\!1$:
 \begin{equation}
   q_L = q_i + \half\,\phi_i, \qquad q_R = q_{i+1} - \half\,\phi_{i+1},
 \end{equation}
@@ -511,7 +513,7 @@ where $\phi_i$ is the limited slope.  Two limiters are provided:
 \subsection{PPM Reconstruction (4th order, halo\,=\,2)}
 %-----------------------------------------------------------------------------
 
-The Piecewise Parabolic Method (Colella \& Woodward, 1984) constructs a monotone parabola in each cell from two edge values and the cell average.
+The Piecewise Parabolic Method \citep{ColellaWoodward1984} constructs a monotone parabola in each cell from two edge values and the cell average, giving fourth-order accuracy in smooth regions while suppressing oscillations at sharp gradients.
 
 \subsubsection{Fourth-order edge values}
 At the interface $i\!+\!\half$:
@@ -541,7 +543,7 @@ The left and right states at each edge are then $q_L=a_R$ of the cell to the lef
 \subsection{WENO5 Reconstruction (5th order, halo\,=\,2)}
 %-----------------------------------------------------------------------------
 
-The 5th-order Weighted Essentially Non-Oscillatory scheme (Jiang \& Shu, 1996) combines three 3rd-order sub-stencil polynomials with nonlinear weights that adapt to local smoothness.
+The 5th-order Weighted Essentially Non-Oscillatory scheme \citep{JiangShu1996} combines three 3rd-order sub-stencil polynomials with nonlinear weights that adapt to local smoothness, downweighting any stencil that straddles a discontinuity so that the reconstruction stays high-order in smooth flow yet essentially non-oscillatory near shocks.
 
 \subsubsection{Left-biased reconstruction at $i\!+\!\half$}
 Using cells $q_{i-2},\ldots,q_{i+2}$:
@@ -587,7 +589,7 @@ where $c=\sqrt{g\,h}$ is the gravity-wave speed (set to zero for pure transport 
 where $h_x,h_y$ are the edge metric factors.
 
 \subsection{Well-balanced scheme}
-When topography $h_s$ is present, the scheme reconstructs the free surface $\eta=h+h_s$ instead of $h$.  The fluid depth at each edge is recovered as $h_L=\max(\eta_L-h_{s,\mathrm{edge}},0)$, ensuring zero spurious flux for a lake-at-rest state (Audusse et al., 2004).
+When topography $h_s$ is present, the scheme reconstructs the free surface $\eta=h+h_s$ instead of $h$.  The fluid depth at each edge is recovered as $h_L=\max(\eta_L-h_{s,\mathrm{edge}},0)$, ensuring zero spurious flux for a lake-at-rest state \citep{Audusse2004}.
 
 %=============================================================================
 \section{FC-Gram Spectral Operators}
@@ -624,13 +626,13 @@ applied to the momentum equations.  This selectively damps gravity-wave modes wh
 \subsection{Shallow Water Equations}
 %-----------------------------------------------------------------------------
 
-In \textbf{vector-invariant form} on the cubed sphere:
+The shallow water system is the canonical proving ground for horizontal dynamical cores: it retains the rotational and gravity-wave dynamics of the full equations while collapsing the vertical structure to one layer, so the standard test set of \citet{Williamson1992} can isolate grid-imprinting, dispersion, and conservation errors.  In \textbf{vector-invariant form} on the cubed sphere:
 \begin{align}
   \frac{\pp h}{\pp t} &= -\nabla\!\cdot\!(h\,\bm v), \label{eq:sw-mass}\\
   \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp B}{\pp x} + D_u, \label{eq:sw-u}\\
   \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} + D_v, \label{eq:sw-v}
 \end{align}
-where the Bernoulli function is $B=\half(u^2+v^2)+g(h+h_s)$ and $D_u,D_v$ represent hyperdiffusion.
+where $h$ is the fluid depth, $\bm v=(u,v)$ the horizontal velocity, $f$ the Coriolis parameter, $h_s$ the bottom topography, the Bernoulli function is $B=\half(u^2+v^2)+g(h+h_s)$, $\zeta$ is the relative vorticity, and $D_u,D_v$ represent hyperdiffusion.  Equation~\eqref{eq:sw-mass} expresses exact mass (volume) conservation in flux form; the momentum equations express the balance between the absolute-vorticity ($\zeta+f$) flux, the Bernoulli gradient that combines kinetic energy and free-surface pressure, and scale-selective dissipation.
 
 The mass equation~\eqref{eq:sw-mass} is discretised using the finite-volume Rusanov flux (Section~5) with a configurable reconstruction method: MUSCL (2nd order), PPM (4th order), or WENO5 (5th order), selected via \texttt{ShallowWaterConfig.fv\_limiter}.  Momentum uses centred differences with velocity-only biharmonic hyperdiffusion.
 
@@ -638,7 +640,7 @@ The mass equation~\eqref{eq:sw-mass} is discretised using the finite-volume Rusa
 \subsection{Hydrostatic Primitive Equations ($\sigma$-coordinates)}
 %-----------------------------------------------------------------------------
 
-Prognostic variables: $u,v$ (winds), $T$ (temperature), $p_s$ (surface pressure).
+Prognostic variables: $u,v$ (winds), $T$ (temperature), $p_s$ (surface pressure).  The vertical discretisation uses the energy- and angular-momentum-conserving finite differences of \citet{SimmonsBurridge1981}.
 
 \begin{align}
   \frac{\pp p_s}{\pp t} &= -\int_0^1 \nabla\!\cdot\!(p_s\,\bm v)\,\dd\sigma, \label{eq:pe-ps}\\
@@ -646,13 +648,13 @@ Prognostic variables: $u,v$ (winds), $T$ (temperature), $p_s$ (surface pressure)
   \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} - \Rd T\,\frac{\pp\ln p_s}{\pp y} + D_v, \label{eq:pe-v}\\
   \frac{\pp T}{\pp t} &= -\nabla\!\cdot\!(T\,\bm v)+T\,\nabla\!\cdot\!\bm v - \dot\sigma\,\frac{\pp T}{\pp\sigma} + \kappa\,T\,\frac{\omega}{p} + Q, \label{eq:pe-T}
 \end{align}
-where $B=K+\Phi$, $K=\half(u^2+v^2)$, and $\kappa=\Rd/\cpd$.
+where $B=K+\Phi$, $K=\half(u^2+v^2)$, $\Phi$ is the geopotential, $\dot\sigma$ the vertical velocity in $\sigma$-space, $\omega=\dd p/\dd t$ the pressure velocity, $Q$ the diabatic heating from physics, and $\kappa=\Rd/\cpd$.  The surface-pressure tendency~\eqref{eq:pe-ps} is the vertically integrated mass continuity that closes the hydrostatic system: with vertical momentum replaced by hydrostatic balance, it is column mass divergence---not vertical acceleration---that sets $p_s$.  The $\Rd T\,\nabla\ln p_s$ term in the momentum equations accounts for the tilt of the $\sigma$ surfaces, and the adiabatic term $\kappa T\omega/p$ in~\eqref{eq:pe-T} represents compression warming during descent.
 
 %-----------------------------------------------------------------------------
 \subsection{Spectral Primitive Equations (Vorticity--Divergence)}
 %-----------------------------------------------------------------------------
 
-On the Gaussian grid, the momentum equations are recast in the vorticity--divergence form (Bourke, 1972):
+On the Gaussian grid, the momentum equations are recast in the vorticity--divergence form \citep{Bourke1972}, in which the prognostic scalars $\hat\zeta$ and $\hat\delta$ replace the vector momentum and the horizontal Laplacian is diagonal in spectral space:
 \begin{align}
   \frac{\pp\hat\zeta}{\pp t} &= \widehat{\nabla\!\times\![(\zeta+f)\bm v]} + \widehat{\text{vert.\ adv.}} - \nu\nabla^{2p}\hat\zeta, \label{eq:spe-vor}\\
   \frac{\pp\hat\delta}{\pp t} &= \widehat{\nabla\!\cdot\![(\zeta+f)\bm v]} - \nabla^2\widehat{(K+\Phi+\Rd T\ln p_s)} + \widehat{\text{vert.\ adv.}} - \nu\nabla^{2p}\hat\delta, \label{eq:spe-div}\\
@@ -672,7 +674,7 @@ where $\mathcal S$ and $\mathcal S_\mu$ denote the SH analysis with standard and
 \subsection{Non-Hydrostatic Compressible Euler Equations}
 %-----------------------------------------------------------------------------
 
-In the $z^*$ terrain-following coordinate, the prognostic variables are $u,v,w,\theta',\rho'$ (perturbations from a reference state $\rho_0,\theta_0,\pi_0$).
+In the $z^*$ terrain-following coordinate, the prognostic variables are $u,v,w,\theta',\rho'$ (perturbations from a reference state $\rho_0,\theta_0,\pi_0$).  Retaining the full vertical momentum equation~\eqref{eq:nh-w} admits acoustic and non-hydrostatic gravity-wave modes, which are advanced on a fast time level by the split-explicit integrator below \citep{SkamarockKlemp2008}.
 
 \begin{align}
   \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x} - \cpd\theta\,\frac{\pp\pi'}{\pp x} + D_u - r\,u, \label{eq:nh-u}\\
@@ -705,7 +707,7 @@ The equations are integrated with an outer SSP-RK3 scheme for the slow tendencie
 An optional \textbf{semi-implicit acoustic} solve replaces the forward Euler for $w$ with a tridiagonal system to remove the vertical acoustic CFL constraint.
 
 \paragraph{Acoustic off-centering (v3.7).}
-To damp vertically propagating acoustic/gravity wave noise in long integrations, the density update can be off-centred (Skamarock \& Klemp 2008):
+To damp vertically propagating acoustic/gravity wave noise in long integrations, the density update can be off-centred \citep{SkamarockKlemp2008}:
 \begin{equation}
   \rho'^{n+1}_{\beta} = (1+\beta)\,\rho'^{n+1} - \beta\,\rho'^{n},
 \end{equation}
@@ -719,7 +721,7 @@ where $\beta\ge 0$ is the off-centering parameter (\texttt{acoustic\_off\_center
 \subsubsection{Turbulence closure: CRM, LES, and DNS}
 The diffusion terms $D_u,D_v,D_w,D_\theta$ are evaluated in flux form, $D_\phi = \rho_0^{-1}\,\partial_j\!\bigl(\rho_0\,K_\phi\,\partial_j\phi\bigr)$, over the horizontal directions and (optionally) a mass-weighted vertical leg.  The same discrete operator spans three turbulence-resolving regimes that differ only in the viscosity $K_m$ and the grid spacing $\Delta x$ (heat and scalars use $K_h=K_m/\mathrm{Pr}$), selected by the \texttt{turbulence\_closure} parameter:
 \begin{itemize}
-  \item \textbf{CRM} (convection-permitting, $\Delta x\sim1$--$4$\,km; \texttt{smagorinsky}): the 3-D Smagorinsky--Lilly eddy viscosity $K_m=(C_s\Delta)^2\sqrt{\max(0,\,|S|^2-\mathrm{Pr}\,N^2)}$ with $\Delta=(\Delta x\,\Delta y\,\Delta z)^{1/3}$, the full strain $|S|^2=2S_{ij}S_{ij}$, $C_s\approx0.19$, and the SAM \texttt{dosmagor} moist stratification cutoff $N^2$.  The energy-containing eddies are entirely sub-grid; this is the regime validated against gSAM for the GATE, LBA, and RCE cases.
+  \item \textbf{CRM} (convection-permitting, $\Delta x\sim1$--$4$\,km; \texttt{smagorinsky}): the 3-D Smagorinsky--Lilly eddy viscosity \citep{Smagorinsky1963} $K_m=(C_s\Delta)^2\sqrt{\max(0,\,|S|^2-\mathrm{Pr}\,N^2)}$ with $\Delta=(\Delta x\,\Delta y\,\Delta z)^{1/3}$, the full strain $|S|^2=2S_{ij}S_{ij}$, $C_s\approx0.19$, and the SAM \texttt{dosmagor} moist stratification cutoff $N^2$.  The energy-containing eddies are entirely sub-grid; this is the regime validated against gSAM for the GATE, LBA, and RCE cases.
   \item \textbf{LES} (large-eddy simulation, $\Delta x\sim10$--$100$\,m; \texttt{smagorinsky}): the same closure with $C_s\approx0.15$ and an optional near-wall limiter $\ell_m=\min(C_s\Delta,\kappa z)$; the energy-containing eddies are resolved.  gSAM's GATE and LBA references are themselves $100$\,m LES, so this mode uses the identical closure at the identical resolution.
   \item \textbf{DNS} (direct numerical simulation, $\Delta x\to$ the Kolmogorov scale; \texttt{molecular}): no turbulence model; $K_m$ is the constant molecular kinematic viscosity $\nu$ with $K_h=\nu/\mathrm{Pr}$ ($\mathrm{Pr}\approx0.71$ for air), giving the molecular dissipation $\nu\nabla^2\bm u$ directly.
 \end{itemize}
@@ -732,6 +734,12 @@ Because the three regimes share one discrete flux-form operator, LES and DNS are
 %-----------------------------------------------------------------------------
 \subsection{Gray Radiation (Frierson 2006)}
 %-----------------------------------------------------------------------------
+
+The gray-radiation scheme \citep{Frierson2006} replaces the spectral
+detail of the longwave with a single broadband optical depth that is a
+prescribed function of pressure and latitude plus a water-vapour
+contribution, giving an inexpensive but physically self-consistent
+radiative driving for aquaplanet and idealized-climate experiments.
 
 \subsubsection{Longwave optical depth}
 \begin{equation}
@@ -778,11 +786,18 @@ where $k+\half$ is the bottom interface and $k-\half$ the top (pressure increasi
 \subsection{RRTMGP Correlated-$k$ Radiation}
 %-----------------------------------------------------------------------------
 
-The RRTMGP backend calls JAX-RRTMGP with correlated-$k$ gaseous optics (128~LW and 112~SW $g$-points), a two-stream RTE solver, and optional cloud optics.  Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv, N$_2$O=332~ppbv.
+The RRTMGP backend \citep{Mlawer1997,Pincus2019} calls JAX-RRTMGP with correlated-$k$ gaseous optics (128~LW and 112~SW $g$-points), a two-stream RTE solver, and optional cloud optics.  The correlated-$k$ method reorders the line-by-line absorption spectrum by opacity so a handful of quadrature points reproduce the broadband fluxes at a fraction of the cost.  Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv, N$_2$O=332~ppbv.
 
 %-----------------------------------------------------------------------------
 \subsection{SBM Convection (Frierson 2007)}
 %-----------------------------------------------------------------------------
+
+The simplified Betts--Miller (SBM) scheme \citep{Frierson2007} relaxes
+the column toward a moist-adiabatic reference profile whenever it is
+convectively unstable, conserving column moist enthalpy.  Symbols below:
+$\Gamma_m$ is the moist-adiabatic lapse rate, $q_s$ the saturation
+mixing ratio, CAPE the convective available potential energy,
+$\mathcal F$ a smooth trigger, and $\tau_c$ the relaxation timescale.
 
 \subsubsection{Moist adiabatic lapse rate}
 \begin{equation}
@@ -825,6 +840,12 @@ Newton iteration (2 steps) solves for the temperature offset.  Tendencies:
 \subsection{Held--Suarez Forcing}
 %-----------------------------------------------------------------------------
 
+The \citet{HeldSuarez1994} benchmark replaces the full physics with
+Newtonian relaxation of temperature toward a prescribed radiative
+equilibrium and Rayleigh friction in the boundary layer, providing a
+reproducible dynamical-core intercomparison that bypasses
+parameterisation uncertainty.
+
 \subsubsection{Equilibrium temperature}
 \begin{equation}
   T_{\mathrm{eq}} = \max\!\Bigl(200,\;\bigl[315-\Delta T_y\sin^2\!\phi - \Delta\theta_z\ln(p/\pref)\cos^2\!\phi\bigr](p/\pref)^\kappa\Bigr),
@@ -847,6 +868,11 @@ with $k_a=1/(40\;\text{day})$, $k_s=1/(4\;\text{day})$, $\sigma_b=0.7$.
 %-----------------------------------------------------------------------------
 \subsection{Louis (1979) Turbulence}
 %-----------------------------------------------------------------------------
+
+The \citet{Louis1979} scheme parameterises vertical eddy fluxes through
+a mixing length and Richardson-number-dependent stability functions,
+giving a smooth, differentiable closure for the boundary-layer
+diffusivities $K_m$ and $K_h$.
 
 \subsubsection{Mixing length}
 \begin{equation}
@@ -908,7 +934,7 @@ with $C_D=C_H=C_E=1.5\times10^{-3}$ and $|\bm V|=\sqrt{u^2+v^2+10^{-4}}$.
 
 \subsubsection{Monin--Obukhov Similarity Theory (MOST)}
 
-Stability-dependent transfer coefficients via iterative Obukhov length computation (Businger--Dyer profiles).
+Stability-dependent transfer coefficients via iterative Obukhov-length computation using the Businger--Dyer flux--profile relationships \citep{Businger1971}.
 
 \paragraph{Obukhov length.}
 \begin{equation}
@@ -943,7 +969,8 @@ The system $u_*,\theta_*,q_*,z_0,z_{0t},z_{0q},L$ is solved iteratively (default
 
 \subsubsection{COARE~3.0 roughness (Fairall et al.\ 2003)}
 
-Over ocean, roughness lengths are updated each iteration:
+Over ocean, the COARE~3.0 bulk algorithm \citep{Fairall2003} updates the
+roughness lengths each iteration from the evolving friction velocity:
 \begin{equation}
   z_0 = \alpha_c\,\frac{u_*^2}{g}+0.11\,\frac{\nu}{u_*}, \qquad
   z_{0t} = \min\!\bigl(1.15\times10^{-4},\;5.5\times10^{-5}\,\mathrm{Re}_*^{-0.6}\bigr),
@@ -952,7 +979,8 @@ where $\alpha_c=0.011$ is the Charnock parameter and $\mathrm{Re}_*=u_*\,z_0/\nu
 
 \subsubsection{Large \& Yeager (2004) roughness}
 
-Empirical neutral drag coefficient as a function of neutral 10-m wind speed $U_{10N}$:
+The \citet{LargeYeager2004} bulk formulae specify an empirical neutral
+drag coefficient as a function of the neutral 10-m wind speed $U_{10N}$:
 \begin{equation}
   C_{DN}\times10^3 = \frac{2.7}{U_{10N}}+0.142+0.0764\,U_{10N},
 \end{equation}
@@ -979,7 +1007,7 @@ Eddy-diffusivity mass-flux unified PBL framework combining diffusive and convect
 %-----------------------------------------------------------------------------
 
 \subsubsection{Kuo (1974)}
-Column moisture-excess scheme partitioning excess moisture between heating (fraction $\alpha_{\mathrm{heat}}$) and moistening ($1-\alpha_{\mathrm{heat}}$).
+Column moisture-excess scheme \citep{Kuo1974} partitioning excess moisture between heating (fraction $\alpha_{\mathrm{heat}}$) and moistening ($1-\alpha_{\mathrm{heat}}$).
 
 \subsubsection{Mass-Flux Convection (Arakawa--Wu Type)}
 Entraining-detraining plume model with bulk mass flux, CAPE closure, and configurable entrainment/detrainment rates.
@@ -997,9 +1025,9 @@ Bottom-to-top adjustment with smooth sigmoid triggers for JAX differentiability.
 Six GWD schemes are available:
 \begin{itemize}[nosep]
   \item \textbf{Rayleigh friction}: Simple linear damping above a threshold height.
-  \item \textbf{Lindzen (1981)}: Orographic GWD with critical-level absorption.
-  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved saturation.
-  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD.
+  \item \textbf{Lindzen (1981)}: Orographic GWD with critical-level absorption \citep{Lindzen1981}.
+  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved saturation \citep{McFarlane1987}.
+  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD \citep{Hines1997}.
   \item \textbf{Prognostic Spectral}: Multi-azimuthal, multi-wavenumber spectrum with prognostic wave flux and vertical propagation via \texttt{jax.lax.scan}.
   \item \textbf{ML Emulator}: Equinox MLP surrogate for learned GWD.
 \end{itemize}
@@ -1010,11 +1038,11 @@ Six GWD schemes are available:
 
 Five microphysics schemes:
 \begin{itemize}[nosep]
-  \item \textbf{Kessler (1969)}: Warm-rain autoconversion with threshold cloud water.
-  \item \textbf{Seifert--Beheng (2001)}: Two-moment warm rain with prognostic number concentration.
-  \item \textbf{Morrison (2005)}: Double-moment ice + liquid scheme.
-  \item \textbf{Thompson}: Hybrid-moment scheme with ice crystal habits.
-  \item \textbf{Sundqvist (1988)} and \textbf{Xu--Randall (1996)} cloud fraction diagnostics.
+  \item \textbf{Kessler (1969)}: Warm-rain autoconversion with threshold cloud water \citep{Kessler1969}.
+  \item \textbf{Seifert--Beheng (2001)}: Two-moment warm rain with prognostic number concentration \citep{SeifertBeheng2001}.
+  \item \textbf{Morrison (2005)}: Double-moment ice + liquid scheme \citep{Morrison2005}.
+  \item \textbf{Thompson}: Hybrid-moment scheme with ice crystal habits \citep{Thompson2008}.
+  \item \textbf{Sundqvist (1988)} and \textbf{Xu--Randall (1996)} cloud fraction diagnostics \citep{Sundqvist1989,XuRandall1996}.
 \end{itemize}
 \texttt{cloud\_fraction.compute\_cloud\_properties} dispatches on
 \texttt{config.scheme} and accepts only \texttt{"sundqvist"} or
@@ -1032,7 +1060,11 @@ Five microphysics schemes:
 \subsection{Boussinesq Hydrostatic Primitive Equations}
 %-----------------------------------------------------------------------------
 
-In vector-invariant form on the cubed sphere:
+The ocean solves the hydrostatic Boussinesq primitive equations in the
+finite-volume, split-explicit free-surface formulation of
+\citet{Marshall1997}, in which density variations are retained only in
+the buoyancy term and the fast external (barotropic) mode is integrated
+on a short time level.  In vector-invariant form on the cubed sphere:
 \begin{align}
   \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x} - \frac{1}{\rho_0}\frac{\pp p'}{\pp x} + A_h\nabla^2 u + \frac{\pp}{\pp z}\!\Bigl(A_v\frac{\pp u}{\pp z}\Bigr) - w\frac{\pp u}{\pp z}, \\
   \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp K}{\pp y} - \frac{1}{\rho_0}\frac{\pp p'}{\pp y} + A_h\nabla^2 v + \frac{\pp}{\pp z}\!\Bigl(A_v\frac{\pp v}{\pp z}\Bigr) - w\frac{\pp v}{\pp z}.
@@ -1073,7 +1105,7 @@ where $R_u=\bar U^n+\alpha\bar V^n-\Delta t_s\,g\,\pp\eta/\pp x$ and $R_v=\bar V
 %-----------------------------------------------------------------------------
 
 The ocean prognostic temperature variable $T$ is \textbf{potential temperature}
-[degC].  The Wright~(1997) EOS computes in-situ density directly from
+[degC].  The \citet{Wright1997} equation of state computes in-situ density directly from
 potential temperature $\theta$, salinity $S$~[PSU], and pressure $p$~[Pa]:
 \begin{equation}
   \rho = \frac{p+p_0(\theta,S)}{\lambda(\theta,S)+\alpha_0(\theta,S)\,(p+p_0)},
@@ -1119,7 +1151,8 @@ The z-star coordinate supports $N_{\mathrm{lev}}=1$, reducing exactly to the non
 Three vertical mixing schemes are available:
 
 \subsubsection{K-Profile Parameterisation (KPP, Large et al.\ 1994)}
-Boundary-layer depth $h_{\mathrm{bl}}$ diagnosed from the bulk Richardson number criterion $\mathrm{Ri}_b(h)=\mathrm{Ri}_c=0.3$.  Within the boundary layer, diffusivity follows a cubic shape function:
+The K-profile parameterisation \citep{LMD1994} diagnoses the boundary-layer
+depth $h_{\mathrm{bl}}$ from the bulk Richardson number criterion $\mathrm{Ri}_b(h)=\mathrm{Ri}_c=0.3$.  Within the boundary layer, diffusivity follows a cubic shape function:
 \begin{equation}
   K(z) = h_{\mathrm{bl}}\,w_*\,G(\sigma), \qquad G(\sigma)=\sigma(1-\sigma)^2, \qquad \sigma=-z/h_{\mathrm{bl}},
 \end{equation}
@@ -1145,7 +1178,7 @@ $F_h = A_h\,\nabla^2\phi$ with constant or Smagorinsky-type coefficient.
 $F_h = -A_4\,\nabla^4\phi$, providing scale-selective damping of grid-scale noise.
 
 \subsubsection{Gent--McWilliams / Redi (GM/Redi)}
-Mesoscale eddy parameterisation with bolus velocity $\bm v^*=-\kappa_{\mathrm{GM}}\,\nabla_h s$ where $s$ is the isopycnal slope.  Isopycnal diffusion (Redi) rotates the diffusion tensor to align with isopycnal surfaces.  Default $\kappa_{\mathrm{GM}}=1000$~m$^2$\,s$^{-1}$.
+Mesoscale eddy parameterisation \citep{GM1990} with bolus velocity $\bm v^*=-\kappa_{\mathrm{GM}}\,\nabla_h s$ where $s$ is the isopycnal slope; the adiabatic stirring by unresolved eddies is represented as an advective flattening of isopycnals.  Isopycnal diffusion rotates the diffusion tensor to align with isopycnal surfaces \citep{Redi1982}.  Default $\kappa_{\mathrm{GM}}=1000$~m$^2$\,s$^{-1}$.
 
 %-----------------------------------------------------------------------------
 \subsection{Ocean Bottom Drag}
@@ -1203,8 +1236,8 @@ Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-l
 
 Tracer transport in \texttt{src/legoesm/ocean/advection.py} and
 \texttt{advection\_som.py} provides upwind, TVD (Van Leer / Sweby),
-DST3, PPM, PPM-FCT, WENO5/7, and Prather (1986) Second-Order Moments
-(SOM) schemes.  The volume-weighted variance $\Var(T)$ on the Eady
+DST3, PPM, PPM-FCT, WENO5/7, and Second-Order Moments
+(SOM) schemes \citep{Prather1986}.  The volume-weighted variance $\Var(T)$ on the Eady
 uniform channel ranks them: \texttt{som}\,+\,Smagorinsky
 ($C_{\mathrm{Smag}}{=}0.2$) preserves $97.1\%$ of $\Var(T)$ at
 600~d in the weak-forcing regime; \texttt{tvd} preserves $94\%$ at
@@ -1224,10 +1257,9 @@ supported on the lat-lon C-grid via \texttt{src/legoesm/ocean/bathymetry.py}
 (auto-detect ETOPO/GEBCO/ERDDAP/CF, Laplacian smoothing, MEO
 $r$-cap, polar-cap mask, isolated-basin filling, strait
 enforcement).  Stability conditioners: AL81 12-corner-triad
-PV-flux closure with Le Sommer (2009) partial-cell extension
-(\texttt{pv\_flux\_al81\_partial\_cell}); MOM6-style $\cos^4\phi$
-biharmonic-viscosity scaling (\texttt{biharmonic\_scaling\_factor},
-Griffies \& Hallberg 2000); SMC03 pressure-gradient force; implicit
+PV-flux closure with partial-cell extension
+\citep[][\texttt{pv\_flux\_al81\_partial\_cell}]{LeSommer2009}; MOM6-style $\cos^4\phi$
+biharmonic-viscosity scaling \citep[][\texttt{biharmonic\_scaling\_factor}]{GriffiesHallberg2000}; SMC03 pressure-gradient force; implicit
 Crank--Nicolson barotropic solver.  Validated 20-yr global-overturning
 spinup at $1^\circ$ delivers canonical thermohaline structure
 (branch \texttt{realistic-geometry-full}, PR \#224).
@@ -1240,7 +1272,7 @@ spinup at $1^\circ$ delivers canonical thermohaline structure
 \subsection{SSP-RK3 (Shu--Osher 1988)}
 %-----------------------------------------------------------------------------
 
-The three-stage strong-stability-preserving Runge--Kutta method:
+The three-stage strong-stability-preserving Runge--Kutta method \citep{ShuOsher1988}, whose convex-combination structure guarantees that the total-variation-diminishing property of the forward-Euler step is inherited at higher order:
 \begin{align}
   \bm u^{(1)} &= \bm u^n + \Delta t\,F(\bm u^n), \\
   \bm u^{(2)} &= \tfrac{3}{4}\bm u^n + \tfrac{1}{4}\bm u^{(1)} + \tfrac{1}{4}\Delta t\,F(\bm u^{(1)}), \\
@@ -1252,7 +1284,7 @@ SSP-RK(4,3) and SSP-RK(5,4) variants are also available.
 \subsection{Robert-Asselin-Williams (RAW) Time Filter (v3.7)}
 %-----------------------------------------------------------------------------
 
-The leapfrog scheme used by the semi-implicit spectral PE solver requires a time filter to damp the computational mode.  The Williams (2009) modification of the Robert--Asselin filter splits the correction between the current and next time levels, restoring second-order accuracy:
+The leapfrog scheme used by the semi-implicit spectral PE solver requires a time filter to damp the computational mode.  The \citet{Williams2009} modification of the Robert--Asselin filter splits the correction between the current and next time levels, restoring second-order accuracy:
 \begin{align}
   d^n &= \frac{\gamma}{2}\bigl(X^{n-1}-2X^n+X^{n+1}\bigr), \\
   X^n_{\mathrm{filt}} &= X^n + (1-\alpha)\,d^n, \\
@@ -1325,7 +1357,10 @@ All slab surface tiles (land, sea ice, lake) recompute $q_{\mathrm{sfc}}$ from t
 
 \subsubsection{EVP Rheology (Hunke \& Dukowicz 1997)}
 
-When \texttt{dynamics="evp"}, the ice momentum equation is
+The elastic--viscous--plastic rheology \citep{HunkeDukowicz1997} adds an
+artificial elastic term to the viscous--plastic ice stress so that the
+momentum equation can be subcycled explicitly, avoiding an implicit
+solve.  When \texttt{dynamics="evp"}, the ice momentum equation is
 \begin{equation}
   m\,\frac{\pp \bm{u}_i}{\pp t} = \bm{\tau}_a + \bm{\tau}_w - mf\hat{\bm{k}}\times\bm{u}_i - mg\nabla\eta + \nabla\cdot\bm{\sigma},
 \end{equation}
@@ -1337,7 +1372,7 @@ The elastic term provides subcycling stability ($N_{\mathrm{evp}}=120$ substeps)
 
 \subsubsection{Multi-category ice}
 
-For $N_{\mathrm{cat}}>1$, per-category state $(h_k,T_k,c_k)$ evolves independently under thermodynamics, then Lipscomb~(2001) linear remapping redistributes ice across thickness categories.
+For $N_{\mathrm{cat}}>1$, per-category state $(h_k,T_k,c_k)$ evolves independently under thermodynamics, then the linear remapping of \citet{Lipscomb2001} redistributes ice across thickness categories.
 
 %-----------------------------------------------------------------------------
 \subsection{Land Carbon Cycle and Stomatal Conductance}
@@ -1347,23 +1382,26 @@ For $N_{\mathrm{cat}}>1$, per-category state $(h_k,T_k,c_k)$ evolves independent
 Six prognostic pools: labile $C_{\mathrm{lab}}$, foliage $C_f$, root $C_r$, wood $C_w$, litter $C_{\mathrm{lit}}$, soil organic matter $C_{\mathrm{SOM}}$.  GPP via light-use efficiency; decomposition via $Q_{10}$ temperature sensitivity with moisture limitation.
 
 \subsubsection{Farquhar (1980) Photosynthesis}
-Assimilation rate:
+The \citet{Farquhar1980} biochemical model expresses the leaf
+assimilation rate as the smooth minimum of a Rubisco-limited rate
+$W_c$ and an electron-transport-limited rate $W_j$, less leaf
+respiration $R_d$:
 \begin{equation}
   A = \min(W_c,\, W_j) - R_d, \qquad
   W_c = V_{c,\max}\frac{C_i - \Gamma^*}{C_i + K_c(1+O/K_o)}, \qquad
   W_j = \frac{J\,(C_i - \Gamma^*)}{4(C_i + 2\Gamma^*)},
 \end{equation}
-where the minimum is a smooth (differentiable) function.  $V_{c,\max}$ and $J_{\max}$ follow peaked Arrhenius temperature responses (Bernacchi et al.\ 2001).  Soil moisture stress: $V_{c,\max}\leftarrow V_{c,\max}\,\beta_{\mathrm{soil}}$.
+where the minimum is a smooth (differentiable) function.  $V_{c,\max}$ and $J_{\max}$ follow peaked Arrhenius temperature responses \citep{Bernacchi2001}.  Soil moisture stress: $V_{c,\max}\leftarrow V_{c,\max}\,\beta_{\mathrm{soil}}$.
 
 \subsubsection{Stomatal conductance}
 
-\paragraph{Ball--Berry (1987):}
+\paragraph{Ball--Berry \citep{Ball1987}:}
 $g_s = g_0 + g_1\,A\,\mathrm{RH}/C_s.$
 
-\paragraph{Medlyn (2011):}
+\paragraph{Medlyn \citep{Medlyn2011}:}
 $g_s = g_0 + 1.6\bigl(1+g_1/\!\sqrt{\mathrm{VPD}}\bigr)\,A/C_s.$
 
-\paragraph{Jarvis (1976):}
+\paragraph{Jarvis \citep{Jarvis1976}:}
 $g_s = g_{s,\max}\,f(\mathrm{PAR})\,f(T)\,f(\mathrm{VPD})\,f(\theta)$ \quad (CO$_2$-independent; used when carbon cycle is inactive).
 
 The coupled $A$--$g_s$--$C_i$ system is solved by 5 fixed-point iterations (unrolled for JAX JIT).
@@ -1404,7 +1442,7 @@ Surface fluxes are area-weighted blends over ocean, land, sea-ice, and lake tile
 Fluxes are time-averaged over each coupling window before being passed to the atmosphere.
 
 \paragraph{Ocean albedo.}
-The constant ocean albedo $\alpha_{\mathrm{ocn}}$ is controlled by \texttt{CouplerConfig.ocean\_albedo} (default 0.06).  When \texttt{ocean\_albedo\_config.method="zenith"}, the Briegleb~(1992) zenith-angle formula is used:
+The constant ocean albedo $\alpha_{\mathrm{ocn}}$ is controlled by \texttt{CouplerConfig.ocean\_albedo} (default 0.06).  When \texttt{ocean\_albedo\_config.method="zenith"}, a Briegleb-type zenith-angle formula is used \citep{Briegleb1986}:
 \begin{equation}
   \alpha_{\mathrm{ocn}} = \frac{0.026}{1.1\,\mu_0^{1.7}+0.065} + 0.15\,(\mu_0-0.1)(\mu_0-0.5)(\mu_0-1.0),
 \end{equation}
@@ -1424,7 +1462,14 @@ with surface energy balance driving the epilimnion temperature and mixing flux $
 \section{Machine Learning: Spherical Fourier Neural Operator}
 %=============================================================================
 
-The SFNO (ACE/FourCastNet v2 style) operates on the Gaussian grid.
+The Spherical Fourier Neural Operator \citep{Bonev2023} generalises the
+Fourier neural operator \citep{Li2021} to the sphere by replacing the
+planar FFT with a spherical-harmonic transform, so the learned global
+convolution is rotation-equivariant and free of the polar artefacts a
+lat-lon FFT would introduce; it provides the learned-dynamics backbone
+in the same spirit as the neural general circulation model of
+\citet{Kochkov2024}.  The SFNO (ACE/FourCastNet v2 style) operates on
+the Gaussian grid.
 
 \subsection{Architecture}
 \begin{enumerate}[nosep]
@@ -1456,7 +1501,7 @@ where $W_{nm}\in\mathbb R^{n_{\mathrm{emb}}\times n_{\mathrm{emb}}}$ is a learna
 Equinox MLP column model with hybrid mode blending learned corrections with conventional physics via a configurable blending coefficient.
 
 \subsubsection{LearnedColumn}
-Per-column physics replacement following Rasp et al.\ (2018), mapping the full column state to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
+Per-column physics replacement following \citet{Rasp2018}, mapping the full column state to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
 
 %=============================================================================
 \section{Conservation Corrections}
@@ -1516,8 +1561,9 @@ Two schemes: abiotic (DIC + ALK only) and NPZD ecosystem.
 
 \subsection{Carbonate Chemistry and Air-Sea CO$_2$ Exchange}
 
-The ocean surface $p$CO$_2$ is computed from DIC, ALK, $T$, $S$ via carbonate equilibria.
-Air-sea flux (Wanninkhof 2014):
+The ocean surface $p$CO$_2$ is computed from DIC, ALK, $T$, $S$ via the
+carbonate-system solution of \citet{Follows2006}.
+Air-sea flux \citep{Wanninkhof2014}:
 \begin{equation}
   F_{\mathrm{CO}_2} = k_w\,K_0\,(p\mathrm{CO}_{2,\mathrm{ocean}} - p\mathrm{CO}_{2,\mathrm{atm}}),
 \end{equation}
@@ -1525,7 +1571,7 @@ where $k_w = 0.251\,U_{10}^2\,(\mathrm{Sc}/660)^{-1/2}$ is the gas transfer velo
 
 \subsection{NPZD Ecosystem Model}
 
-Four biological tracers: NO$_3$, phytoplankton $P$, zooplankton $Z$, detritus $D$ (Fasham et al.\ 1990).
+Four biological tracers: NO$_3$, phytoplankton $P$, zooplankton $Z$, detritus $D$ \citep{Fasham1990}.
 \begin{align}
   \frac{\pp P}{\pp t} &= \mu_P\,P - G - m_P\,P, \\
   \frac{\pp Z}{\pp t} &= \gamma_Z\,G - m_Z\,Z^2, \\
@@ -1613,7 +1659,7 @@ The \texttt{run\_omip.py} script provides a complete Ocean Model Intercomparison
 \section{4D-Var Data Assimilation (v3.9)}
 %=============================================================================
 
-The model includes a fully differentiable 4D-Var data assimilation system that exploits JAX's automatic differentiation to compute exact gradients of the cost function without hand-coded adjoints.
+The model includes a fully differentiable 4D-Var data assimilation system \citep{Courtier1994,Rabier2000} that exploits JAX's automatic differentiation to compute exact gradients of the cost function without hand-coded adjoints, replacing the conventional separately-maintained tangent-linear and adjoint models.
 
 \subsection{Cost Function}
 
@@ -1642,7 +1688,7 @@ Four background error covariance formulations are implemented:
   \item \textbf{Diagonal}: $\bm B = \mathrm{diag}(\sigma_b^2)$, the simplest variance-only model.
   \item \textbf{Diffusion}: $\bm B = \bm\Sigma\,\bm C\,\bm\Sigma$ where $\bm C$ is a correlation matrix defined implicitly via iterated Laplacian diffusion on the model grid.
   \item \textbf{Spectral}: $\bm B$ is diagonal in spectral space, with variance specified per total wavenumber; correlations arise naturally from the spectral truncation.
-  \item \textbf{Hybrid}: $\bm B = \beta_1\bm B_{\mathrm{static}} + \beta_2\bm B_{\mathrm{ensemble}}$, blending a static covariance with flow-dependent ensemble covariance.
+  \item \textbf{Hybrid}: $\bm B = \beta_1\bm B_{\mathrm{static}} + \beta_2\bm B_{\mathrm{ensemble}}$, blending a static covariance with flow-dependent ensemble covariance, the latter spatially localised by a compactly supported \citet{GaspariCohn1999} correlation function to suppress spurious long-range sampling error.
 \end{enumerate}
 
 \subsection{Observation Operators}
@@ -1666,114 +1712,364 @@ For operational-style cycling, the analysis from each window serves as the backg
 \section{References}
 %=============================================================================
 
-\begin{description}[style=nextline,font=\normalfont]
-\item[Audusse, E., F.\ Bouchut, M.-O.\ Bristeau, R.\ Klein, and B.\ Perthame (2004)]
-A fast and stable well-balanced scheme with hydrostatic reconstruction for shallow water flows.
+\begin{thebibliography}{99}
+
+\bibitem[Audusse et al.(2004)]{Audusse2004}
+Audusse, E., F.~Bouchut, M.-O.~Bristeau, R.~Klein, and B.~Perthame, 2004:
+A fast and stable well-balanced scheme with hydrostatic reconstruction for
+shallow water flows.
 \textit{SIAM J.\ Sci.\ Comput.}, \textbf{25}, 2050--2065.
 
-\item[Ball, J.T., I.E.\ Woodrow, and J.A.\ Berry (1987)]
-A model predicting stomatal conductance and its contribution to the control of photosynthesis under different environmental conditions.
+\bibitem[Ball et al.(1987)]{Ball1987}
+Ball, J.T., I.E.~Woodrow, and J.A.~Berry, 1987:
+A model predicting stomatal conductance and its contribution to the control
+of photosynthesis under different environmental conditions.
 \textit{Prog.\ in Photosynthesis Res.}, \textbf{4}, 221--224.
 
-\item[Bernacchi, C.J., E.L.\ Singsaas, C.\ Pimentel, A.R.\ Portis, and S.P.\ Long (2001)]
-Improved temperature response functions for models of Rubisco-limited photosynthesis.
+\bibitem[Bernacchi et al.(2001)]{Bernacchi2001}
+Bernacchi, C.J., E.L.~Singsaas, C.~Pimentel, A.R.~Portis, and S.P.~Long, 2001:
+Improved temperature response functions for models of Rubisco-limited
+photosynthesis.
 \textit{Plant Cell Environ.}, \textbf{24}, 253--259.
 
-\item[Bourke, W.\ (1972)]
+\bibitem[Bourke(1972)]{Bourke1972}
+Bourke, W., 1972:
 An efficient, one-level, primitive-equation spectral model.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 683--689.
 
-\item[Businger, J.A., J.C.\ Wyngaard, Y.\ Izumi, and E.F.\ Bradley (1971)]
+\bibitem[Businger et al.(1971)]{Businger1971}
+Businger, J.A., J.C.~Wyngaard, Y.~Izumi, and E.F.~Bradley, 1971:
 Flux-profile relationships in the atmospheric surface layer.
 \textit{J.\ Atmos.\ Sci.}, \textbf{28}, 181--189.
 
-\item[Colella, P.\ and P.R.\ Woodward (1984)]
+\bibitem[Colella and Woodward(1984)]{ColellaWoodward1984}
+Colella, P.\ and P.R.~Woodward, 1984:
 The Piecewise Parabolic Method (PPM) for gas-dynamical simulations.
 \textit{J.\ Comput.\ Phys.}, \textbf{54}, 174--201.
 
-\item[Farquhar, G.D., S.\ von Caemmerer, and J.A.\ Berry (1980)]
-A biochemical model of photosynthetic CO$_2$ assimilation in leaves of C3 species.
+\bibitem[Fairall et al.(2003)]{Fairall2003}
+Fairall, C.W., E.F.~Bradley, J.E.~Hare, A.A.~Grachev, and J.B.~Edson, 2003:
+Bulk parameterization of air--sea fluxes: Updates and verification for the
+COARE algorithm.
+\textit{J.\ Climate}, \textbf{16}, 571--591.
+
+\bibitem[Farquhar et al.(1980)]{Farquhar1980}
+Farquhar, G.D., S.~von Caemmerer, and J.A.~Berry, 1980:
+A biochemical model of photosynthetic CO$_2$ assimilation in leaves of
+C3 species.
 \textit{Planta}, \textbf{149}, 78--90.
 
-\item[Fasham, M.J.R., H.W.\ Ducklow, and S.M.\ McKelvie (1990)]
+\bibitem[Fasham et al.(1990)]{Fasham1990}
+Fasham, M.J.R., H.W.~Ducklow, and S.M.~McKelvie, 1990:
 A nitrogen-based model of plankton dynamics in the oceanic mixed layer.
 \textit{J.\ Mar.\ Res.}, \textbf{48}, 591--639.
 
-\item[Fairall, C.W., E.F.\ Bradley, J.E.\ Hare, A.A.\ Grachev, and J.B.\ Edson (2003)]
-Bulk parameterization of air--sea fluxes: Updates and verification for the COARE algorithm.
-\textit{J.\ Climate}, \textbf{16}, 571--591.
-
-\item[Frierson, D.M.W., I.M.\ Held, and P.\ Zurita-Gotor (2006)]
-A gray-radiation aquaplanet moist GCM. Part~I: Static stability and eddy scale.
+\bibitem[Frierson et al.(2006)]{Frierson2006}
+Frierson, D.M.W., I.M.~Held, and P.~Zurita-Gotor, 2006:
+A gray-radiation aquaplanet moist GCM. Part~I: Static stability and
+eddy scale.
 \textit{J.\ Atmos.\ Sci.}, \textbf{63}, 2548--2566.
 
-\item[Frierson, D.M.W.\ (2007)]
-The dynamics of idealized convection schemes and their effect on the zonally averaged tropical circulation.
+\bibitem[Frierson(2007)]{Frierson2007}
+Frierson, D.M.W., 2007:
+The dynamics of idealized convection schemes and their effect on the
+zonally averaged tropical circulation.
 \textit{J.\ Atmos.\ Sci.}, \textbf{64}, 1959--1976.
 
-\item[Jiang, G.-S.\ and C.-W.\ Shu (1996)]
-Efficient implementation of weighted ENO schemes.
-\textit{J.\ Comput.\ Phys.}, \textbf{126}, 202--228.
+\bibitem[Gent and McWilliams(1990)]{GM1990}
+Gent, P.R.\ and J.C.~McWilliams, 1990:
+Isopycnal mixing in ocean circulation models.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{20}, 150--155.
 
-\item[Hunke, E.C.\ and J.K.\ Dukowicz (1997)]
+\bibitem[Griffies and Hallberg(2000)]{GriffiesHallberg2000}
+Griffies, S.M.\ and R.W.~Hallberg, 2000:
+Biharmonic friction with a Smagorinsky-like viscosity for use in
+large-scale eddy-permitting ocean models.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{128}, 2935--2946.
+
+\bibitem[Held and Suarez(1994)]{HeldSuarez1994}
+Held, I.M.\ and M.J.~Suarez, 1994:
+A proposal for the intercomparison of the dynamical cores of atmospheric
+general circulation models.
+\textit{Bull.\ Amer.\ Meteor.\ Soc.}, \textbf{75}, 1825--1830.
+
+\bibitem[Prather(1986)]{Prather1986}
+Prather, M.J., 1986:
+Numerical advection by conservation of second-order moments.
+\textit{J.\ Geophys.\ Res.}, \textbf{91} (D6), 6671--6681.
+
+\bibitem[Hunke and Dukowicz(1997)]{HunkeDukowicz1997}
+Hunke, E.C.\ and J.K.~Dukowicz, 1997:
 An elastic-viscous-plastic model for sea ice dynamics.
 \textit{J.\ Phys.\ Oceanogr.}, \textbf{27}, 1849--1867.
 
-\item[Held, I.M.\ and M.J.\ Suarez (1994)]
-A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models.
-\textit{Bull.\ Amer.\ Meteor.\ Soc.}, \textbf{75}, 1825--1830.
+\bibitem[Jiang and Shu(1996)]{JiangShu1996}
+Jiang, G.-S.\ and C.-W.~Shu, 1996:
+Efficient implementation of weighted ENO schemes.
+\textit{J.\ Comput.\ Phys.}, \textbf{126}, 202--228.
 
-\item[Large, W.G.\ and S.G.\ Yeager (2004)]
-Diurnal to decadal global forcing for ocean and sea-ice models: The data sets and flux climatologies.
+\bibitem[Kessler(1969)]{Kessler1969}
+Kessler, E., 1969:
+On the Distribution and Continuity of Water Substance in Atmospheric
+Circulations.
+\textit{Meteor.\ Monogr.}, No.~32, Amer.\ Meteor.\ Soc., 84~pp.
+
+\bibitem[Le Sommer et al.(2009)]{LeSommer2009}
+Le Sommer, J., T.~Penduff, S.~Theetten, G.~Madec, and B.~Barnier, 2009:
+How momentum advection schemes influence current--topography interactions at
+eddy permitting resolution.
+\textit{Ocean Modelling}, \textbf{29}, 1--14.
+
+\bibitem[Large et al.(1994)]{LMD1994}
+Large, W.G., J.C.~McWilliams, and S.C.~Doney, 1994:
+Oceanic vertical mixing: A review and a model with a nonlocal boundary
+layer parameterization.
+\textit{Rev.\ Geophys.}, \textbf{32}, 363--403.
+
+\bibitem[Large and Yeager(2004)]{LargeYeager2004}
+Large, W.G.\ and S.G.~Yeager, 2004:
+Diurnal to decadal global forcing for ocean and sea-ice models: The data
+sets and flux climatologies.
 \textit{NCAR Technical Note}, NCAR/TN-460+STR.
 
-\item[Lin, S.-J.\ (2004)]
+\bibitem[Lin(2004)]{Lin2004}
+Lin, S.-J., 2004:
 A ``vertically Lagrangian'' finite-volume dynamical core for global models.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{132}, 2293--2307.
 
-\item[Lipscomb, W.H.\ (2001)]
+\bibitem[Lipscomb(2001)]{Lipscomb2001}
+Lipscomb, W.H., 2001:
 Remapping the thickness distribution in sea ice models.
 \textit{J.\ Geophys.\ Res.}, \textbf{106}(C7), 13989--14000.
 
-\item[Louis, J.-F.\ (1979)]
+\bibitem[Louis(1979)]{Louis1979}
+Louis, J.-F., 1979:
 A parametric model of vertical eddy fluxes in the atmosphere.
 \textit{Bound.-Layer Meteor.}, \textbf{17}, 187--202.
 
-\item[Medlyn, B.E.\ et al.\ (2011)]
-Reconciling the optimal and empirical approaches to modelling stomatal conductance.
+\bibitem[Medlyn et al.(2011)]{Medlyn2011}
+Medlyn, B.E., et al., 2011:
+Reconciling the optimal and empirical approaches to modelling stomatal
+conductance.
 \textit{Global Change Biol.}, \textbf{17}, 2134--2144.
 
-\item[Mouallem, J., L.M.\ Harris, and R.\ Benson (2023)]
+\bibitem[Morrison et al.(2005)]{Morrison2005}
+Morrison, H., J.A.~Curry, and V.I.~Khvorostyanov, 2005:
+A new double-moment microphysics parameterization for application in
+cloud and climate models. Part~I: Description.
+\textit{J.\ Atmos.\ Sci.}, \textbf{62}, 1665--1677.
+
+\bibitem[Pincus et al.(2019)]{Pincus2019}
+Pincus, R., E.J.~Mlawer, and J.S.~Delamere, 2019:
+Balancing accuracy, efficiency, and flexibility in radiation calculations
+for dynamical models.
+\textit{J.\ Adv.\ Model.\ Earth Syst.}, \textbf{11}, 3074--3089.
+
+\bibitem[Mouallem et al.(2023)]{Mouallem2023}
+Mouallem, J., L.M.~Harris, and R.~Benson, 2023:
 A duo-grid methodology for cubed-sphere shallow water models.
 \textit{J.\ Comput.\ Phys.}, \textbf{485}, 112097.
 
-\item[Putman, W.M.\ and S.-J.\ Lin (2007)]
+\bibitem[Putman and Lin(2007)]{PutmanLin2007}
+Putman, W.M.\ and S.-J.~Lin, 2007:
 Finite-volume transport on various cubed-sphere grids.
 \textit{J.\ Comput.\ Phys.}, \textbf{227}, 55--78.
 
-\item[Shu, C.-W.\ and S.\ Osher (1988)]
-Efficient implementation of essentially non-oscillatory shock-capturing schemes.
+\bibitem[Seifert and Beheng(2001)]{SeifertBeheng2001}
+Seifert, A.\ and K.D.~Beheng, 2001:
+A two-moment cloud microphysics parameterization for mixed-phase clouds.
+\textit{Meteor.\ Atmos.\ Phys.}, \textbf{73}, 67--88.
+
+\bibitem[Shu and Osher(1988)]{ShuOsher1988}
+Shu, C.-W.\ and S.~Osher, 1988:
+Efficient implementation of essentially non-oscillatory shock-capturing
+schemes.
 \textit{J.\ Comput.\ Phys.}, \textbf{77}, 439--471.
 
-\item[Simmons, A.J.\ and D.M.\ Burridge (1981)]
-An energy and angular-momentum conserving vertical finite-difference scheme and hybrid vertical coordinates.
+\bibitem[Simmons and Burridge(1981)]{SimmonsBurridge1981}
+Simmons, A.J.\ and D.M.~Burridge, 1981:
+An energy and angular-momentum conserving vertical finite-difference
+scheme and hybrid vertical coordinates.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{109}, 758--766.
 
-\item[Skamarock, W.C.\ and J.B.\ Klemp (2008)]
-A time-split nonhydrostatic atmospheric model for weather research and forecasting applications.
+\bibitem[Skamarock and Klemp(2008)]{SkamarockKlemp2008}
+Skamarock, W.C.\ and J.B.~Klemp, 2008:
+A time-split nonhydrostatic atmospheric model for weather research and
+forecasting applications.
 \textit{J.\ Comput.\ Phys.}, \textbf{227}, 3465--3485.
 
-\item[van Leer, B.\ (1979)]
-Towards the ultimate conservative difference scheme. V.\ A second-order sequel to Godunov's method.
+\bibitem[van Leer(1979)]{vanLeer1979}
+van Leer, B., 1979:
+Towards the ultimate conservative difference scheme. V.\ A second-order
+sequel to Godunov's method.
 \textit{J.\ Comput.\ Phys.}, \textbf{32}, 101--136.
 
-\item[Wanninkhof, R.\ (2014)]
+\bibitem[Wanninkhof(2014)]{Wanninkhof2014}
+Wanninkhof, R., 2014:
 Relationship between wind speed and gas exchange over the ocean revisited.
 \textit{Limnol.\ Oceanogr.\ Methods}, \textbf{12}, 351--362.
 
-\item[Wright, D.G.\ (1997)]
+\bibitem[Williams(2009)]{Williams2009}
+Williams, P.D., 2009:
+A proposed modification to the Robert--Asselin time filter.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{137}, 2538--2546.
+
+\bibitem[Williamson et al.(1992)]{Williamson1992}
+Williamson, D.L., J.B.~Drake, J.J.~Hack, R.~Jakob, and P.N.~Swarztrauber, 1992:
+A standard test set for numerical approximations to the shallow water
+equations in spherical geometry.
+\textit{J.\ Comput.\ Phys.}, \textbf{102}, 211--224.
+
+\bibitem[Wright(1997)]{Wright1997}
+Wright, D.G., 1997:
 An equation of state for use in ocean models: Eckart's formula revisited.
 \textit{J.\ Atmos.\ Ocean.\ Tech.}, \textbf{14}, 735--740.
-\end{description}
+
+\bibitem[Bonev et al.(2023)]{Bonev2023}
+Bonev, B., T.~Kurth, C.~Hundt, J.~Pathak, M.~Baust, K.~Kashinath, and
+A.~Anandkumar, 2023:
+Spherical Fourier neural operators: Learning stable dynamics on the sphere.
+\textit{Proc.\ 40th Int.\ Conf.\ on Machine Learning (ICML)}, PMLR~202,
+2806--2823.
+
+\bibitem[Courtier et al.(1994)]{Courtier1994}
+Courtier, P., J.-N.~Th\'epaut, and A.~Hollingsworth, 1994:
+A strategy for operational implementation of 4D-Var, using an incremental
+approach.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{120}, 1367--1387.
+
+\bibitem[Follows et al.(2006)]{Follows2006}
+Follows, M.J., T.~Ito, and S.~Dutkiewicz, 2006:
+On the solution of the carbonate chemistry system in ocean biogeochemistry
+models.
+\textit{Ocean Modelling}, \textbf{12}, 290--301.
+
+\bibitem[Gaspari and Cohn(1999)]{GaspariCohn1999}
+Gaspari, G.\ and S.E.~Cohn, 1999:
+Construction of correlation functions in two and three dimensions.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{125}, 723--757.
+
+\bibitem[Kochkov et al.(2024)]{Kochkov2024}
+Kochkov, D., et al., 2024:
+Neural general circulation models for weather and climate.
+\textit{Nature}, \textbf{632}, 1060--1066.
+
+\bibitem[Li et al.(2021)]{Li2021}
+Li, Z., N.~Kovachki, K.~Azizzadenesheli, B.~Liu, K.~Bhattacharya, A.~Stuart,
+and A.~Anandkumar, 2021:
+Fourier neural operator for parametric partial differential equations.
+\textit{Proc.\ Int.\ Conf.\ on Learning Representations (ICLR)}.
+
+\bibitem[Lin and Rood(1996)]{LinRood1996}
+Lin, S.-J.\ and R.B.~Rood, 1996:
+Multidimensional flux-form semi-Lagrangian transport schemes.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{124}, 2046--2070.
+
+\bibitem[Lindzen(1981)]{Lindzen1981}
+Lindzen, R.S., 1981:
+Turbulence and stress owing to gravity wave and tidal breakdown.
+\textit{J.\ Geophys.\ Res.}, \textbf{86}(C10), 9707--9714.
+
+\bibitem[Marshall et al.(1997)]{Marshall1997}
+Marshall, J., A.~Adcroft, C.~Hill, L.~Perelman, and C.~Heisey, 1997:
+A finite-volume, incompressible Navier--Stokes model for studies of the ocean
+on parallel computers.
+\textit{J.\ Geophys.\ Res.}, \textbf{102}(C3), 5753--5766.
+
+\bibitem[McFarlane(1987)]{McFarlane1987}
+McFarlane, N.A., 1987:
+The effect of orographically excited gravity wave drag on the general
+circulation of the lower stratosphere and troposphere.
+\textit{J.\ Atmos.\ Sci.}, \textbf{44}, 1775--1800.
+
+\bibitem[Mlawer et al.(1997)]{Mlawer1997}
+Mlawer, E.J., S.J.~Taubman, P.D.~Brown, M.J.~Iacono, and S.A.~Clough, 1997:
+Radiative transfer for inhomogeneous atmospheres: RRTM, a validated
+correlated-$k$ model for the longwave.
+\textit{J.\ Geophys.\ Res.}, \textbf{102}(D14), 16663--16682.
+
+\bibitem[Rabier et al.(2000)]{Rabier2000}
+Rabier, F., H.~J\"arvinen, E.~Klinker, J.-F.~Mahfouf, and A.~Simmons, 2000:
+The ECMWF operational implementation of four-dimensional variational
+assimilation. Part~I: Experimental results with simplified physics.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{126}, 1143--1170.
+
+\bibitem[Redi(1982)]{Redi1982}
+Redi, M.H., 1982:
+Oceanic isopycnal mixing by coordinate rotation.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{12}, 1154--1158.
+
+\bibitem[Ronchi et al.(1996)]{Ronchi1996}
+Ronchi, C., R.~Iacono, and P.S.~Paolucci, 1996:
+The ``cubed sphere'': A new method for the solution of partial differential
+equations in spherical geometry.
+\textit{J.\ Comput.\ Phys.}, \textbf{124}, 93--114.
+
+\bibitem[Sadourny(1972)]{Sadourny1972}
+Sadourny, R., 1972:
+Conservative finite-difference approximations of the primitive equations on
+quasi-uniform spherical grids.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 136--144.
+
+\bibitem[Skamarock et al.(2012)]{Skamarock2012}
+Skamarock, W.C., J.B.~Klemp, M.G.~Duda, L.D.~Fowler, S.-H.~Park, and
+T.D.~Ringler, 2012:
+A multiscale nonhydrostatic atmospheric model using centroidal Voronoi
+tesselations and C-grid staggering.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{140}, 3090--3105.
+
+\bibitem[Smagorinsky(1963)]{Smagorinsky1963}
+Smagorinsky, J., 1963:
+General circulation experiments with the primitive equations. I.\ The basic
+experiment.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{91}, 99--164.
+
+\bibitem[Sundqvist et al.(1989)]{Sundqvist1989}
+Sundqvist, H., E.~Berge, and J.E.~Kristj\'ansson, 1989:
+Condensation and cloud parameterization studies with a mesoscale numerical
+weather prediction model.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{117}, 1641--1657.
+
+\bibitem[Thompson et al.(2008)]{Thompson2008}
+Thompson, G., P.R.~Field, R.M.~Rasmussen, and W.D.~Hall, 2008:
+Explicit forecasts of winter precipitation using an improved bulk
+microphysics scheme. Part~II: Implementation of a new snow parameterization.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{136}, 5095--5115.
+
+\bibitem[Briegleb et al.(1986)]{Briegleb1986}
+Briegleb, B.P., P.~Minnis, V.~Ramanathan, and E.~Harrison, 1986:
+Comparison of regional clear-sky albedos inferred from satellite observations
+and model computations.
+\textit{J.\ Climate Appl.\ Meteor.}, \textbf{25}, 214--226.
+
+\bibitem[Hines(1997)]{Hines1997}
+Hines, C.O., 1997:
+Doppler-spread parameterization of gravity-wave momentum deposition in the
+middle atmosphere.
+\textit{J.\ Atmos.\ Solar-Terr.\ Phys.}, \textbf{59}, 371--400.
+
+\bibitem[Jarvis(1976)]{Jarvis1976}
+Jarvis, P.G., 1976:
+The interpretation of the variations in leaf water potential and stomatal
+conductance found in canopies in the field.
+\textit{Philos.\ Trans.\ Roy.\ Soc.\ London B}, \textbf{273}, 593--610.
+
+\bibitem[Kuo(1974)]{Kuo1974}
+Kuo, H.L., 1974:
+Further studies of the parameterization of the influence of cumulus
+convection on large-scale flow.
+\textit{J.\ Atmos.\ Sci.}, \textbf{31}, 1232--1240.
+
+\bibitem[Rasp et al.(2018)]{Rasp2018}
+Rasp, S., M.S.~Pritchard, and P.~Gentine, 2018:
+Deep learning to represent subgrid processes in climate models.
+\textit{Proc.\ Natl.\ Acad.\ Sci.\ USA}, \textbf{115}, 9684--9689.
+
+\bibitem[Xu and Randall(1996)]{XuRandall1996}
+Xu, K.-M.\ and D.A.~Randall, 1996:
+A semiempirical cloudiness parameterization for use in climate models.
+\textit{J.\ Atmos.\ Sci.}, \textbf{53}, 3084--3102.
+
+\end{thebibliography}
 
 \end{document}
