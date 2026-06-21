@@ -1234,6 +1234,13 @@ class PhysicsPipeline:
         separate path (forward-mode / finite-diff on the 2 scalars), NOT this
         rollout adjoint.  Default False (full adjoint, unchanged behavior).
 
+        SCOPE: this also makes the slab-land skin temperature ``T_land_new``
+        forward-only — it is a ``compute_radiation_core`` output, so leaving it
+        differentiable would drag the rrtmgp adjoint back in.  Intended (the
+        radiation-driven land skin update is forcing too); moot for ocean-only
+        AIMIP (``T_land`` inert).  A land run needing differentiable skin-T
+        must use the full adjoint (False).
+
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
         solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
@@ -1320,6 +1327,10 @@ class PhysicsPipeline:
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
                 # expensive rrtmgp adjoint never enters the rollout backward
                 # graph (the dominant, grid-size-scaling compile cost).
+                # T_land_new is included (it is a radiation-core output;
+                # leaving it differentiable re-introduces the rrtmgp adjoint)
+                # -> the slab-land skin update is forward-only too. Moot for
+                # ocean-only AIMIP; see build_step_unified docstring SCOPE.
                 if rad_stop_gradient:
                     (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
                      lw_up_toa, sw_down_toa, T_land_new) = jax.lax.stop_gradient(
