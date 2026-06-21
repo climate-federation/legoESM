@@ -40,8 +40,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.precision import PrecisionPolicy, set_policy
-set_policy(PrecisionPolicy.fp64())
+# Precision policy is applied from --precision in main() via
+# legoesm.runtime.precision.apply_precision (default fp64 == prior behavior:
+# OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
+# fp64/mixed accumulate+control roles stay exact regardless of mode;
+# apply_precision installs the per-module mixed overrides when requested.
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
     VerticalMixingConfig,
@@ -86,6 +89,7 @@ class OMIPRunConfig(NamedTuple):
     restart_buffer_seconds: float
     seed: int
     vertical_mixing: VerticalMixingConfig
+    precision: str = "fp64"
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -119,7 +123,22 @@ def build_config_from_args(args) -> OMIPRunConfig:
         restart_buffer_seconds=args.restart_buffer_seconds,
         seed=args.seed,
         vertical_mixing=build_vertical_mixing_config_from_args(args),
+        precision=args.precision,
     )
+
+
+def apply_run_precision(args) -> None:
+    """Apply the ``--precision`` policy globally (idempotent).
+
+    Called from BOTH ``main()`` and ``run_omip_single()`` so that a direct
+    in-process ``run_omip_single()`` caller cannot silently run at the wrong
+    (default) precision: the unconditional module-import ``set_policy(fp64)``
+    was removed, so the policy is now applied at every model-building entry
+    point. The canonical bridge sets the global policy + x64 and installs the
+    mixed-mode per-module overrides; unknown modes raise (dispatch-hardening).
+    """
+    from legoesm.runtime.precision import apply_precision
+    apply_precision(args.precision)
 
 
 # ===========================================================================
@@ -150,6 +169,16 @@ def parse_args(argv: list[str] | None = None):
                    help="Wallclock buffer [s] reserved for restart writes")
     p.add_argument("--seed", type=int, default=0,
                    help="Master RNG seed for reproducibility metadata")
+    p.add_argument("--precision", type=str, default="fp64",
+                   choices=["fp32", "fp64", "mixed"],
+                   help=(
+                       "Precision policy (default fp64 = prior OMIP behavior): "
+                       "fp32 (storage+compute float32), fp64 (all float64), or "
+                       "mixed (fp32 storage/compute, fp64 accumulate/control + "
+                       "fp64 overrides on the precision-sensitive ocean kernels "
+                       "barotropic_solver/pressure_gradient/equation_of_state/"
+                       "coriolis). NOTE: mixed is NOT yet validated for "
+                       "century-scale OMIP drift — see scripts/validate/."))
     p.add_argument("--woa-t", type=str, default=None,
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
@@ -2934,6 +2963,11 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
+    # Apply precision BEFORE any model state is built. Idempotent + safe for
+    # both main() (which also calls it) and direct in-process callers that
+    # invoke run_omip_single() without going through main() — the module no
+    # longer force-applies fp64 at import (codex 2026-06-21).
+    apply_run_precision(args)
     run_config = build_config_from_args(args)
     # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
     # ``--resolution 16`` was applied verbatim to every grid
@@ -3748,6 +3782,11 @@ def print_summary():
 def main():
     args = parse_args()
 
+    # Apply the precision policy before any model state is built. Default
+    # fp64 reproduces the prior unconditional behavior exactly. run_omip_single
+    # re-applies it idempotently so direct callers are also covered.
+    apply_run_precision(args)
+
     # ``--grid all`` runs every grid.  cubed_sphere is now stable on
     # the FC-Gram spectral baroclinic backend (see _create_setup) so
     # it is included in the default matrix.
@@ -3757,6 +3796,7 @@ def main():
     print(f"  Grids: {', '.join(grids)}")
     print(f"  Days: {'30 (quick)' if args.quick else args.days}")
     print(f"  Physics: {args.physics}")
+    print(f"  Precision: {args.precision}")
 
     for grid_type in grids:
         try:
