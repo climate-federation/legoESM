@@ -29,13 +29,12 @@ from legoesm.ocean.eos import (
     compute_ocean_rho,
     rho_0 as _RHO_0,
     c_sw as _C_SW,
-    thermal_expansion_coeff,
-    haline_contraction_coeff,
 )
 from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
@@ -72,40 +71,16 @@ def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d):
     channel is absent (the KPP caller treats ``None`` Q_sfc_S as "diagnose the
     non-local flux from the gradient").
     """
-    Q_sfc_T = None
-    B_f = None
-    if q_net is not None:
-        Q_sfc_T = q_net / (_RHO_0 * _C_SW)
-        T_sfc = T_3d[..., 0]
-        S_sfc = S_3d[..., 0]
-        p_sfc = jnp.zeros_like(T_sfc)
-        alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-        B_f = -constants.g * alpha * Q_sfc_T
-
-    Q_sfc_S = None
-    if fw is not None or salt is not None:
-        S_sfc = S_3d[..., 0]
-        T_sfc = T_3d[..., 0]
-        p_sfc = jnp.zeros_like(T_sfc)
-        beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-        B_salt = jnp.zeros_like(S_sfc)
-        # Explicit ZERO non-local salinity flux baseline (see docstring): the
-        # real salt is handled by the explicit floored-h_k source, so the KPP
-        # non-local salt flux must start at 0 rather than be gradient-diagnosed.
-        Q_sfc_S = jnp.zeros_like(S_sfc)
-        if fw is not None:
-            # Freshwater dilution (virtual salt): stabilizing on melt; feeds
-            # both the surface buoyancy and the KPP non-local redistribution.
-            Q_sfc_S = -S_sfc * jnp.asarray(fw, S_sfc.dtype) / _RHO_0
-            B_salt = B_salt + constants.g * beta * Q_sfc_S
-        if salt is not None:
-            # Real brine salt-mass flux: destabilizing; surface BUOYANCY ONLY
-            # (NOT Q_sfc_S) for partial-cell mass-conservation (see docstring).
-            B_salt = B_salt + constants.g * beta * (
-                jnp.asarray(salt, S_sfc.dtype) * 1.0e3 / _RHO_0)
-        B_f = B_salt if B_f is None else (B_f + B_salt)
-
-    return B_f, Q_sfc_T, Q_sfc_S
+    # Grid-agnostic kernel (#518 item 1).  MPAS convention: the real salt-mass
+    # flux feeds the surface buoyancy ONLY (real_salt_in_qs=False); the floored
+    # non-local Q_sfc_S carries the freshwater term only.  Pass the MPAS module
+    # constants (== canonical defaults) as the constant source.
+    return surface_buoyancy_flux(
+        q_net, fw, salt,
+        T_3d[..., 0], S_3d[..., 0],
+        g=constants.g, rho_0=_RHO_0, c_sw=_C_SW,
+        real_salt_in_qs=False,
+    )
 
 
 def _vertical_diffusion_edge_partial(
