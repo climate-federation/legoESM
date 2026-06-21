@@ -148,6 +148,34 @@ energy-limited slab (−20 K/yr); the MOST scheme computes w* self-consistently
 from the buoyancy flux. The 30d coare3 experiment will show whether stronger,
 *conservative* evaporation warms+moistens the air faster than it cools the slab.
 
+## coare3 surface-flux EXPERIMENT — VALIDATED net win (job 8535204, 30d)
+Combined config + `--surface-bulk-scheme coare3` (after fixing a float32 MOST
+`fori_loop` carry-dtype crash, commit 372ee6a64). vs the constant-scheme run
+(first 30d, area-weighted):
+
+| metric | constant | coare3 | verdict |
+|---|---|---|---|
+| **SST drift** | −7.2 K/yr | **−3.2 K/yr** | ✓✓ halved |
+| hfls (global) | 41 | **55** W/m² | ✓ toward Earth ~80 |
+| hfls (tropics) | 10 | **21** | ✓ doubled |
+| global tas | 10.4°C | **11.9°C** | ✓ +1.5 K warmer |
+| tropics tas–tos gap | +12.9 | **+11.3** | ✓ shrunk |
+| CWV / precip | 20.7 / 1.71 | **21.8 / 1.90** | ✓ |
+| R_TOA | +15 | +8.7 W/m² | ✓ toward balance |
+| **planetary albedo** | 28.6% | **35.4%** | ✗ overshoot |
+
+The evaporation lever works exactly as the air-sea-decoupling diagnosis
+predicted: the self-consistent MOST convective-gustiness w* doubles tropical
+evaporation, warms+moistens the column, shrinks the tas–tos gap, and **halves
+the cold SST drift**. The prior ad-hoc gustiness dead-end (gustiness=5 → −20
+K/yr WORSE) is REVERSED here — because (a) the flux is applied conservatively to
+BOTH the atmosphere and the slab budget and (b) w* is derived self-consistently
+from the buoyancy flux, not bumped.
+NEW TENSION: more moisture → more (reflective) low cloud → **albedo 28.6→35.4%**
+(too high; the same SW/LW tension as the thin-cirrus tuning). The net is still a
+clear improvement (warmer, moister, half the drift), but the albedo overshoot
+now caps further warming → the next lever.
+
 ## Open / next levers (ranked by the combined-run diagnosis)
 The combined run isolates the residual to **spin-up of the slow surface
 reservoirs**, dominated by cold land + over-grown sea ice (tos warm, tas cold).
