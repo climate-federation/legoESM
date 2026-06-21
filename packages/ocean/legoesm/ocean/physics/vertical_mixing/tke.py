@@ -114,14 +114,6 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
-# Fixed TKE mixing constants + Bryan-Lewis background-diffusivity depth profile.
-_GALPERIN_RI_COEFF = 6.6
-_BG_DIFF_A = 0.8
-_BG_DIFF_B = 1.05
-_BG_DIFF_DEPTH_M = 2500.0
-_BG_DIFF_WIDTH_M = 222.2
-_BG_DIFF_SCALE = 1.0e-4
-
 class TKEOutput(NamedTuple):
     """Output of :func:`tke_vertical_mixing`."""
     K_M: jnp.ndarray       # (..., nlev-1) momentum eddy viscosity at interfaces
@@ -796,14 +788,16 @@ def _prandtl_number(
         return jnp.full_like(kappaM, cfg.Prandtl_tke0)
     if cfg.prandtl_mode == "richardson":
         Ri = N2 / jnp.maximum(shear_sq, 1e-12)
-        return jnp.maximum(1.0, jnp.minimum(10.0, _GALPERIN_RI_COEFF * Ri))
+        return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * Ri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "
         f"'constant' or 'richardson'."
     )
 
 
-def _bryan_lewis_kappaH_floor(z_interface: jnp.ndarray) -> jnp.ndarray:
+def _bryan_lewis_kappaH_floor(
+    z_interface: jnp.ndarray, cfg: TKEConfig,
+) -> jnp.ndarray:
     r"""Bryan & Lewis (1979) depth-dependent tracer-diffusivity floor.
 
     Veros ``enable_kappaH_profile`` (``veros/core/tke.py:94-102``):
@@ -815,13 +809,17 @@ def _bryan_lewis_kappaH_floor(z_interface: jnp.ndarray) -> jnp.ndarray:
 
     with ``z`` the interface position [m] (negative downward; Veros uses
     ``-zw`` with ``zw < 0``). Mainly raises the abyssal diffusivity below
-    ~2500 m. Pure arithmetic -> differentiable.
+    ~2500 m. Pure arithmetic -> differentiable.  The fit coefficients are
+    ``TKEConfig.bg_diff_*`` (#518 item 10): the amp/arctan-coeff/depth/width
+    are the fixed Bryan-Lewis published profile, ``bg_diff_scale`` the
+    abyssal-floor amplitude.
     """
     # -z = depth (positive); Veros's argument is (-zw - 2500)/222.2 with
     # zw the (negative) interface height -> here z_interface plays zw.
     depth = -z_interface
-    return (_BG_DIFF_A + _BG_DIFF_B / jnp.pi
-            * jnp.arctan((depth - _BG_DIFF_DEPTH_M) / _BG_DIFF_WIDTH_M)) * _BG_DIFF_SCALE
+    return (cfg.bg_diff_amp + cfg.bg_diff_arctan_coeff / jnp.pi
+            * jnp.arctan((depth - cfg.bg_diff_depth_m) / cfg.bg_diff_width_m)
+            ) * cfg.bg_diff_scale
 
 
 def compute_K_from_tke(
@@ -908,7 +906,7 @@ def compute_K_from_tke(
         # the abyssal tracer floor below ~2500 m. Requires the interface
         # depths.
         if cfg.enable_kappaH_profile and z_interface is not None:
-            K_H = jnp.maximum(K_H, _bryan_lewis_kappaH_floor(z_interface))
+            K_H = jnp.maximum(K_H, _bryan_lewis_kappaH_floor(z_interface, cfg))
     return K_M, K_H
 
 
