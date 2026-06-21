@@ -40,6 +40,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_coupled")
 
+_LAND_SCHEMES = ("slab", "multilayer")
+
+
+def land_scheme_overrides(land_scheme: str) -> dict:
+    """CoupledConfig overrides selecting the land surface model.
+
+    The coupler dispatches on the land-config TYPE, so the (land_mode,
+    land_config) pair must agree: ``MultiLayerLandConfig`` -> 8-layer soil
+    thermal + Richards soil-moisture column tile; ``LandConfig`` -> 1-layer slab.
+    Raises on an unknown scheme (dispatch hardening)."""
+    from legoesm.land.config import LandConfig, MultiLayerLandConfig
+    if land_scheme == "multilayer":
+        return {"land_mode": "multilayer", "land_config": MultiLayerLandConfig()}
+    if land_scheme == "slab":
+        return {"land_mode": "slab", "land_config": LandConfig()}
+    raise ValueError(
+        f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -171,6 +189,12 @@ def main():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
+                        default="slab",
+                        help="Land surface model over continents (--ocean-ic woa). "
+                             "'slab' = 1-layer bucket; 'multilayer' = 8-layer soil "
+                             "thermal + Richards soil moisture (column land). Both "
+                             "route through the coupler land tile.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -428,15 +452,15 @@ def main():
                         f"atm lat-lon -> tripole cross-grid remap")
         if args.ocean_ic == "woa":
             # Realistic WOA cold start: observed T/S + WOA-derived continents.
-            from legoesm.land.config import LandConfig
             overrides["woa_t_path"] = args.woa_t_path
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
-            # and enable a slab land tile over the continents (f_land>0 with
+            # and enable a land tile over the continents (f_land>0 with
             # land_mode='none' would try to run an unused land model).
             overrides["f_land_mode"] = "from_ocean"
-            overrides["land_mode"] = "slab"
-            overrides["land_config"] = LandConfig()
+            # Select the land surface model (coupler dispatches on the config
+            # type: MultiLayerLandConfig -> Richards column tile, else slab).
+            overrides.update(land_scheme_overrides(args.land_scheme))
             # With real continents the atmospheric radiative surface boundary
             # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
             # ocean SST everywhere (else land cells radiate at the dynamic-ocean
