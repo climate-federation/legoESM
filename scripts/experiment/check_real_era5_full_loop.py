@@ -42,7 +42,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _run_coupled(c_k, *, resolution, nlev):
-    """A tiny single-state coupled (CMIP) clubb_lite run at the given C_K (no time-mean)."""
+    """A tiny single-state coupled (CMIP) clubb_lite run at the given C_K (no time-mean).
+
+    ``c_k`` may be a SCALAR (the baseline / a uniform C_K) OR a per-column ``(n_columns,)``
+    field — the correction loop injects a per-column C_K for the re-run, and clubb_lite
+    broadcasts it via ``broadcast_column_param`` (iter 507: ``float(c_k)`` crashed on the
+    1-D field, so the per-column re-run was never actually exercised by this tool)."""
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
     from legoesm.driver.config import (
         DycoreConfig,
@@ -53,6 +58,7 @@ def _run_coupled(c_k, *, resolution, nlev):
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
+    c_k_arg = c_k if getattr(c_k, "ndim", 0) > 0 else float(c_k)
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=int(resolution), nlev=int(nlev)),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
@@ -60,7 +66,7 @@ def _run_coupled(c_k, *, resolution, nlev):
         output=OutputConfig(diag_days=1), radiation="gray", days=1,
         turbulence="clubb_lite",
         turbulence_override=TurbulenceConfig(
-            scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=float(c_k))))
+            scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=c_k_arg)))
     driver = CoupledESMDriver(atm, PRESETS["aquaplanet"](), ocean_grid=None)
     driver.setup()
     driver.run()
@@ -130,9 +136,17 @@ def main(argv: list[str] | None = None) -> int:
             dd._atm.q_v, sst_K=dd._ocean_state.T_sfc.data),
         coordinate=sigma)
 
+    # Use the DIMENSIONALLY-CORRECT clubb_coefficient diagnosis (C_K = K_m/(ℓ·√wp2)),
+    # threading the GCM's l_mix_max so the diagnosed ℓ matches the model's — exactly as the
+    # production campaign/OSSE do (auto-populate, iter 379). The legacy "eddy_diffusivity"
+    # diagnoses a DIMENSIONAL K [m²/s] that CANNOT be injected as the dimensionless
+    # clubb_lite_C_K (it just saturates the bounds-clamp) — iter-503 wrongly used it, so this
+    # tool now validates the production-correct path (iter 507).
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma,
         les_config=ColumnLESConfig(regime=fast_validation_les_regime(),
+                                   diagnosis_method="clubb_coefficient",
+                                   clubb_l_mix_max=CLUBBLiteConfig().l_mix_max,
                                    gate_les_realism=False),
         run_les_fn=partial(run_forced_les, dt_s=0.5, n_steps=2))
 
@@ -141,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     res = run_correction_iteration(
         CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
         promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4,
-        diagnosis_method="eddy_diffusivity", les_budget=int(args.n_worst))
+        diagnosis_method="clubb_coefficient", les_budget=int(args.n_worst))
 
     base, upd = float(res.bias.baseline_bias), float(res.bias.updated_bias)
     ran = np.isfinite(base) and np.isfinite(upd) and res.n_corrected >= 1

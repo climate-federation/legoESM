@@ -9,6 +9,7 @@ that every ``from ... import`` in the module resolves and that it runs as a bare
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from scripts.experiment.check_real_era5_full_loop import _build_arg_parser
@@ -85,3 +86,40 @@ def test_run_coupled_builds_clubb_lite_config():
     assert atm.turbulence == "clubb_lite"
     assert atm.turbulence_override.scheme == "clubb_lite"
     assert atm.turbulence_override.clubb_lite.C_K == pytest.approx(0.7)
+
+
+def test_run_coupled_accepts_per_column_ck_field():
+    """The correction loop injects a per-column ``(n_columns,)`` C_K field for the re-run;
+    ``_run_coupled`` must pass it THROUGH to clubb_lite (which broadcasts it), NOT ``float()``
+    it (iter 507: ``float(1-D array)`` crashed, so the per-column re-run was never exercised).
+    Monkeypatch the driver so this checks the array plumbing without running the model."""
+    import jax.numpy as jnp
+
+    import scripts.experiment.check_real_era5_full_loop as mod
+
+    captured = {}
+
+    class _FakeDriver:
+        def __init__(self, atm, ocean, *, ocean_grid):
+            captured["atm"] = atm
+
+        def setup(self):
+            pass
+
+        def run(self):
+            pass
+
+    import legoesm.driver.coupled_esm_driver as drv_mod
+
+    field = jnp.asarray([0.2, 0.3, 0.4, 0.5])
+    orig = drv_mod.CoupledESMDriver
+    drv_mod.CoupledESMDriver = _FakeDriver
+    try:
+        mod._run_coupled(field, resolution=4, nlev=10)   # MUST NOT raise on the 1-D field
+    finally:
+        drv_mod.CoupledESMDriver = orig
+
+    injected = captured["atm"].turbulence_override.clubb_lite.C_K
+    # the per-column field reaches the config UN-collapsed (not floated to a scalar)
+    assert jnp.ndim(injected) == 1
+    np.testing.assert_allclose(np.asarray(injected), np.asarray(field))

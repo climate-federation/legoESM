@@ -61,7 +61,10 @@ def reduce_column_diagnosis(
     """Reduce one column's LES diagnosis to ``(value, valid)`` scalars.
 
     * ``"eddy_diffusivity"`` — the valid-level mean of the DIMENSIONAL ``K``
-      [m²/s] profile (a representative column eddy diffusivity).
+      [m²/s] profile (a representative column eddy diffusivity). LEGACY: a
+      dimensional ``K`` CANNOT be injected as the dimensionless ``clubb_lite_C_K``
+      (it would just saturate the bounds-clamp); use ``"clubb_coefficient"`` for
+      the ``clubb_lite_C_K`` promotion.
     * ``"clubb_coefficient"`` — the valid-level mean of the DIMENSIONLESS CLUBB
       ``C_K`` profile (the actual GCM coefficient, ``K_m = C_K·ℓ·√wp2``); the
       dimensionally-correct target for the ``clubb_lite_C_K`` promotion.
