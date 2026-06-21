@@ -316,6 +316,83 @@ def test_full_loop_real_model_real_les_rerun_and_gate(surface_flux):
     assert res.n_corrected >= 1
 
 
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_loop_ocean_only_excludes_masked_columns():
+    """REGRESSION (iter 487): the FULL EXECUTION loop with a grid-shaped ocean valid_mask —
+    the realistic ``--ocean-only`` path through run → compare → RANK → LES → diagnose →
+    re-run → GATE. The iter-484 bug was a mask-SHAPE crash at HARNESS CONSTRUCTION; the
+    smoke (484/485/486) exercises the dry-run preamble — this is the first test of the mask
+    through EXECUTION (it flows to BOTH the ranking AND the gate, which reads
+    ``baseline.valid_mask``, iter 451). Non-vacuous: the LARGEST bias is in a MASKED ('land')
+    column, so ocean-only MUST exclude it from the worst-column manifest (without the mask it
+    would be the #1 worst)."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+
+    from scripts.run.run_correction_campaign import make_les_diagnose_fn
+
+    driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=0.4))
+    a = driver._atm
+    model0 = column_state_from_hydrostatic(
+        a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    n_lat, n_lon, _ = model0.T.shape
+    sigma, grid = a.sigma, a.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    # The LARGEST bias is at the MASKED ('land') peak; a smaller bias at an ocean column.
+    r0, c0 = n_lat // 2, n_lon // 2          # masked land peak (T bias 5 K)
+    r1, c1 = 0, 0                            # ocean column (T bias 3 K)
+    bias = np.zeros((n_lat, n_lon))
+    bias[r0, c0] = 5.0
+    bias[r1, c1] = 3.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+    # Grid-shaped ocean mask (the iter-484 fix shape), excluding the land peak.
+    ocean_mask = jnp.ones((n_lat, n_lon), bool).at[r0, c0].set(False)
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb)
+        aa = d._atm
+        return column_state_from_hydrostatic(
+            aa.state, aa.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=2,
+        valid_mask=ocean_mask, run_amip_fn=_run, coordinate=sigma)
+
+    # RANKING: the masked land peak (LARGEST bias) is EXCLUDED; the ocean bias IS ranked.
+    cr = compare_fn(CLUBBLiteConfig(C_K=0.4))
+    worst_flat = {int(rec.flat_index) for rec in cr.manifest}
+    assert (r0 * n_lon + c0) not in worst_flat              # ocean-only excluded the land peak
+    assert (r1 * n_lon + c1) in worst_flat                  # the ocean column IS a worst column
+
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    # FULL LOOP: the grid-shaped mask flows through compare → rank → LES → re-run → gate
+    # (the gate reads baseline.valid_mask) with NO shape crash — the iter-484 EXECUTION analog.
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4,
+        diagnosis_method="eddy_diffusivity", les_budget=2)
+    assert np.isfinite(float(res.bias.baseline_bias))
+    assert np.isfinite(float(res.bias.updated_bias))
+    assert isinstance(bool(res.bias.improved), bool)
+    assert res.n_corrected >= 1
+    # The masked land peak is NEVER corrected — it keeps the background coefficient.
+    assert float(np.asarray(res.feedback_field).reshape(n_lat, n_lon)[r0, c0]) == \
+        pytest.approx(0.4)
+
+
 def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
     """A base AMIP ``ExperimentConfig`` with a forcing BUILT from the synthetic local ERA5
     archive and injected via the shared ``apply_amip_forcing_to_config`` (the turnkey path)."""
