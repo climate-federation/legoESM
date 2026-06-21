@@ -54,6 +54,15 @@ class SimpleOceanConfig(NamedTuple):
     # CAM surface-energy audit: the coupled dry column is an LW/cloud-opacity
     # (atmospheric emissivity) problem, not a surface-wind problem.
     gustiness: float = 1.0
+    # Air-sea turbulent bulk-flux algorithm for the slab/two-layer heat budget:
+    # "constant" (neutral Ch_ocean + gustiness floor; DEFAULT, byte-identical) |
+    # "coare3" | "large_yeager".  The MOST schemes add the free-convection
+    # velocity scale w* (computed self-consistently from the buoyancy flux), so
+    # the slab heat LOSS matches the heat the atmosphere surface layer GAINS when
+    # both are set to the same scheme (interface energy consistency; run_coupled
+    # wires --surface-bulk-scheme into both).  z_ref / n_iter use the
+    # ``compute_most_fluxes`` defaults (10 m / 5), matching SurfaceLayerConfig.
+    bulk_scheme: str = "constant"
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
@@ -122,6 +131,49 @@ def init_slab_state(
 # Slab ocean physics
 # ============================================================================
 
+def _ocean_turbulent_fluxes(
+    T_sfc: jnp.ndarray,
+    q_sfc: jnp.ndarray,
+    forcing: AtmToSurface,
+    config: SimpleOceanConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Sensible + latent surface fluxes (positive upward) for the slab/two-layer
+    ocean heat budget.
+
+    Mirrors the atmosphere surface-layer dispatch
+    (``turbulence/surface_layer.compute_surface_fluxes``) so the turbulent heat
+    LEAVING the slab matches the heat ENTERING the atmosphere when both are set
+    to the same ``bulk_scheme`` (interface energy consistency).  The slab has no
+    surface current, so the relative wind equals the atmospheric wind.
+
+    * ``"constant"`` — neutral coefficient ``Ch_ocean`` with the sub-grid
+      gustiness floor (the legacy path; byte-identical default).
+    * ``"coare3"`` / ``"large_yeager"`` — stability-dependent MOST.  MOST
+      derives its own convective gustiness (w*) from the buoyancy flux, so
+      ``apply_gustiness`` is NOT applied here (it would double-count).
+    """
+    rho = forcing.rho_lowest
+    if config.bulk_scheme == "constant":
+        wind = apply_gustiness(
+            forcing.u_lowest, forcing.v_lowest, config.gustiness,
+        )
+        shflx = rho * constants.c_pd * config.Ch_ocean * wind * (T_sfc - forcing.T_lowest)
+        lhflx = rho * constants.L_v * config.Ch_ocean * wind * (q_sfc - forcing.q_lowest)
+        return shflx, lhflx
+    if config.bulk_scheme in ("coare3", "large_yeager"):
+        from legoesm.core.bulk_flux import compute_most_fluxes
+        _tx, _ty, shflx, lhflx, _ust = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
+            scheme=config.bulk_scheme,
+        )
+        return shflx, lhflx
+    raise ValueError(
+        f"Unknown SimpleOceanConfig.bulk_scheme {config.bulk_scheme!r}; "
+        f"expected 'constant', 'coare3', or 'large_yeager'."
+    )
+
+
 def _slab_step(
     state: SlabOceanState,
     forcing: AtmToSurface,
@@ -131,18 +183,12 @@ def _slab_step(
     """Single mixed-layer energy balance step."""
     T_sfc = state.T_sfc.data
 
-    # Smooth wind floor
-    wind = apply_gustiness(
-        forcing.u_lowest, forcing.v_lowest, config.gustiness,
-    )
-
     # Surface humidity: saturated
     q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
 
-    # Bulk fluxes (positive upward)
-    rho = forcing.rho_lowest
-    shflx = rho * constants.c_pd * config.Ch_ocean * wind * (T_sfc - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ocean * wind * (q_sfc - forcing.q_lowest)
+    # Bulk turbulent fluxes (positive upward); scheme-consistent with the
+    # atmosphere surface layer (see _ocean_turbulent_fluxes).
+    shflx, lhflx = _ocean_turbulent_fluxes(T_sfc, q_sfc, forcing, config)
 
     # Radiation
     sw_net = (1.0 - config.albedo_ocean) * forcing.sw_down
@@ -191,18 +237,12 @@ def _two_layer_step(
     T_sfc = state.T_sfc.data
     T_deep = state.T_deep.data
 
-    # Smooth wind floor
-    wind = apply_gustiness(
-        forcing.u_lowest, forcing.v_lowest, config.gustiness,
-    )
-
     # Surface humidity: saturated
     q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
 
-    # Bulk fluxes (positive upward)
-    rho = forcing.rho_lowest
-    shflx = rho * constants.c_pd * config.Ch_ocean * wind * (T_sfc - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ocean * wind * (q_sfc - forcing.q_lowest)
+    # Bulk turbulent fluxes (positive upward); scheme-consistent with the
+    # atmosphere surface layer (see _ocean_turbulent_fluxes).
+    shflx, lhflx = _ocean_turbulent_fluxes(T_sfc, q_sfc, forcing, config)
 
     # Radiation
     sw_net = (1.0 - config.albedo_ocean) * forcing.sw_down

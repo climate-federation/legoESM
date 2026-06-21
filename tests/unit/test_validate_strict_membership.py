@@ -86,3 +86,34 @@ def test_bad_discretization_raises() -> None:
         ExperimentConfig(
             dycore=DycoreConfig(discretization="bogus")
         ).validate_strict()
+
+
+# ---- surface bulk-flux scheme membership ----
+@pytest.mark.parametrize("scheme", ["constant", "coare3", "large_yeager"])
+def test_every_surface_bulk_scheme_accepted(scheme: str) -> None:
+    # A non-"constant" scheme requires a turbulence scheme (the atmosphere
+    # surface layer it upgrades); pair it with one so the membership check is
+    # what's exercised, not the turbulence guard.
+    turb = "none" if scheme == "constant" else "holtslag_boville"
+    ExperimentConfig(
+        surface_bulk_scheme=scheme, turbulence=turb
+    ).validate_strict()
+
+
+def test_bad_surface_bulk_scheme_raises() -> None:
+    with pytest.raises(ValueError, match="surface_bulk_scheme"):
+        ExperimentConfig(surface_bulk_scheme="bulk_richardson").validate_strict()
+
+
+def test_non_constant_surface_bulk_requires_turbulence() -> None:
+    # A MOST surface scheme upgrades the atmosphere surface layer via the
+    # turbulence config; turbulence='none' would leave the atmosphere on its
+    # fallback flux while the ocean tile switches => reject loudly.
+    with pytest.raises(ValueError, match="surface_bulk_scheme"):
+        ExperimentConfig(
+            surface_bulk_scheme="coare3", turbulence="none"
+        ).validate_strict()
+    # With a turbulence scheme present it is accepted.
+    ExperimentConfig(
+        surface_bulk_scheme="coare3", turbulence="holtslag_boville"
+    ).validate_strict()
