@@ -198,6 +198,7 @@ def land_albedo(
     snow_depth: jnp.ndarray,
     snow_age: jnp.ndarray,
     config: LandAlbedoConfig = LandAlbedoConfig(),
+    base_albedo: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute land surface albedo with snow feedback.
 
@@ -218,7 +219,11 @@ def land_albedo(
     alpha : jnp.ndarray
         Land surface albedo.
     """
-    alpha_veg = land_vegetation_albedo(lat, config)
+    # Snow-free base: a per-cell map (e.g. CLM PFT albedo) if supplied, else the
+    # latitude-band vegetation albedo.  Snow albedo always blends on top, so a real
+    # albedo map and the snow feedback coexist (bright deserts AND bright ice sheets).
+    alpha_veg = (land_vegetation_albedo(lat, config) if base_albedo is None
+                 else base_albedo)
     alpha_snow = snow_albedo(snow_age, config)
     f_snow = snow_cover_fraction(snow_depth, config)
     return alpha_veg * (1.0 - f_snow) + alpha_snow * f_snow

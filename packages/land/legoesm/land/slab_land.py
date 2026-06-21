@@ -97,8 +97,11 @@ def step_land(
 
     # --- Surface albedo (from current snow state + surviving fresh snow) ---
     if config.snow_albedo_feedback and lat is not None:
+        # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied,
+        # else the latitude-band default; snow albedo blends on top either way.
+        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_soil.shape)
         alpha = compute_land_albedo(
-            lat, snow_for_albedo, snow_age, config.land_albedo,
+            lat, snow_for_albedo, snow_age, config.land_albedo, base_albedo=_base,
         )
     else:
         alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
