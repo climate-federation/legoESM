@@ -27,7 +27,10 @@ Parallelism strategies
 
 7. **Voronoi mesh decomposition**:
    ``partition_voronoi_mesh()`` partitions unstructured MPAS/Voronoi
-   meshes via geometric bisection or METIS, with halo exchange via
+   meshes via a capability-aware ``method="auto"`` default (METIS graph
+   partition when ``pymetis`` is present — the ``[mesh]`` extra — else
+   geometric RCB), or an explicit ``"sfc"`` Hilbert space-filling-curve
+   partitioner; local arrays use owned-first indexing. Halo exchange via
    ``VoronoiHaloExchange``.
 
 8. **Ensemble parallelism**:

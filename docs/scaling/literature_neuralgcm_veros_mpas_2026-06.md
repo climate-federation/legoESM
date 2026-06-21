@@ -92,6 +92,16 @@ them) — MPAS-O uses ocean-only meshes. At ≤32 ranks try a **Hilbert SFC
 ordering first** (trivially contiguous, captures most of METIS); reach
 for weighted METIS only if straggler imbalance is MEASURED.
 
+**IMPLEMENTED 2026-06-21** (branch `perf/voronoi-graph-partition-sfc`): the
+METIS-k-way and Hilbert-SFC recommendations above are now in
+`parallel/voronoi_partition.py`. `method="auto"` (default) uses METIS when
+`pymetis` is present else RCB; `method="sfc"` gives the dependency-free Hilbert
+contiguous partition; `reorder_voronoi_for_sharding()` Hilbert-orders cells
+within each shard so a plain 1-D `NamedSharding` chunk is spatially compact.
+Remaining open from this item: wet/dry dead-cell culling from the partition
+graph (ocean-only meshes) and weighted/straggler-driven METIS — still
+conditional on MEASURED imbalance.
+
 ### 6. Transform/precision levers (spectral atm path only) — Wall C. LOW-MEDIUM.
 NeuralGCM: spherical-harmonic transform as DENSE einsum (not FFT) on the
 matmul unit, at **TF32/bf16 (3-pass) not f32 (6-pass)**. The precision
