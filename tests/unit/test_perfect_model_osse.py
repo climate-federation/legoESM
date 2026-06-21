@@ -666,3 +666,21 @@ def test_osse_no_change_notes_a_trivial_initial_bias():
 
     # the threshold is configurable: a higher floor flags the 1.0 case too
     assert "NOTE: the initial bias" in osse_verdict(_r(1.0), min_meaningful_bias=2.0).message
+
+
+def test_multi_osse_no_change_notes_a_trivial_initial_bias():
+    """The multi-coefficient verdict shares the trivial-initial-bias note via the same
+    _trivial_bias_note helper (iter 516): a near-zero initial bias appends the config-not-loop
+    guidance; the status stays no_change; a meaningful bias gets no note."""
+    def _r(initial_bias):
+        per = {"clubb_lite_C_K": CoefRecovery(
+            field="C_K", true_value=0.5, initial_value=0.3, recovered_value=0.3,
+            initial_param_error=0.2, final_param_error=0.2, param_error_reduced=False)}
+        return MultiOSSEResult(
+            initial_bias=initial_bias, final_bias=initial_bias, bias_reduction=0.0,
+            bias_reduced=False, per_coefficient=per, all_recovered=False,
+            n_rounds=1, n_accepted=0, summary=None)
+
+    trivial = multi_osse_verdict(_r(0.0025))
+    assert trivial.status == "no_change" and "rrtmgp" in trivial.message
+    assert "NOTE: the initial bias" not in multi_osse_verdict(_r(1.0)).message

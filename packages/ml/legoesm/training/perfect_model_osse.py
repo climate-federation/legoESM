@@ -246,6 +246,22 @@ def _diverged_verdict(*biases: float) -> OSSEVerdict | None:
     return None
 
 
+def _trivial_bias_note(initial_bias: float, min_meaningful_bias: float) -> str:
+    """The actionable note appended to a ``no_change`` verdict when the twin's INITIAL bias is
+    too small for recovery to be meaningful — C_K has little leverage in this config (idealized
+    radiation / too-small a perturbation), so the verdict reflects the CONFIG, not the loop
+    (iters 412/514/515).  Empty string when the bias is meaningful.  Shared by the single- and
+    multi-coefficient verdicts so the guidance cannot drift."""
+    if abs(initial_bias) >= min_meaningful_bias:
+        return ""
+    return (
+        f" NOTE: the initial bias {initial_bias:.4g} is below {min_meaningful_bias:g} — the "
+        "biased run barely differs from truth, so C_K has little leverage in THIS config "
+        "(idealized radiation, or too-small a perturbation), and this verdict reflects the "
+        "CONFIG, not the loop (iters 412/514). Use rrtmgp / a larger perturbation for a "
+        "meaningful go/no-go.")
+
+
 def osse_verdict(result: OSSEResult,
                  *, min_meaningful_bias: float = _MIN_MEANINGFUL_BIAS) -> OSSEVerdict:
     """Classify a perfect-model OSSE into a go/no-go verdict for the real campaign.
@@ -288,20 +304,13 @@ def osse_verdict(result: OSSEResult,
             "LES->GCM closure transfer before trusting a real-ERA5 improvement.")
     # A NEAR-ZERO initial bias means the twin had almost nothing to recover, so "no_change"
     # likely reflects the CONFIG (C_K has little leverage), NOT a broken loop — append an
-    # actionable note rather than letting the operator "fix" a loop that is fine (iter 515).
-    config_note = ""
-    if abs(result.initial_bias) < min_meaningful_bias:
-        config_note = (
-            f" NOTE: the initial bias {result.initial_bias:.4g} is below {min_meaningful_bias:g}"
-            " — the biased run barely differs from truth, so C_K has little leverage in THIS "
-            "config (idealized radiation, or too-small a --biased-ck perturbation), and this "
-            "verdict reflects the CONFIG, not the loop (iters 412/514). Use rrtmgp / a larger "
-            "perturbation for a meaningful go/no-go.")
+    # actionable note rather than letting the operator "fix" a loop that is fine (iter 515/516).
     return OSSEVerdict(
         "no_change",
         f"no accepted round reduced the bias (kept {result.n_accepted}/"
         f"{result.n_rounds}); the LES diagnosis did not recover the parameter in "
-        f"this perfect-model setup — fix that before spending HPC on real ERA5.{config_note}")
+        "this perfect-model setup — fix that before spending HPC on real ERA5."
+        + _trivial_bias_note(result.initial_bias, min_meaningful_bias))
 
 
 # --------------------------------------------------------------------------- #
@@ -647,7 +656,8 @@ def run_multi_perfect_model_osse(
     )
 
 
-def multi_osse_verdict(result: MultiOSSEResult) -> OSSEVerdict:
+def multi_osse_verdict(result: MultiOSSEResult,
+                       *, min_meaningful_bias: float = _MIN_MEANINGFUL_BIAS) -> OSSEVerdict:
     """Classify a multi-coefficient OSSE; ``recovered`` requires ALL coefficients.
 
     Same partition as :func:`osse_verdict` but ``recovered`` demands the bias fell
@@ -682,4 +692,5 @@ def multi_osse_verdict(result: MultiOSSEResult) -> OSSEVerdict:
         "no_change",
         f"no accepted round reduced the bias (kept {result.n_accepted}/"
         f"{result.n_rounds}); the simultaneous LES diagnosis did not recover the "
-        "coefficients in this perfect-model setup.")
+        "coefficients in this perfect-model setup."
+        + _trivial_bias_note(result.initial_bias, min_meaningful_bias))
