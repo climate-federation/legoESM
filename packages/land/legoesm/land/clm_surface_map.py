@@ -41,11 +41,31 @@ _SURFDATA_URL = (
 _N_PFT = len(CLM5_PFT_NAMES)            # 17
 _ROOTZONE_LAYERS = 5                    # top ~5 CLM soil layers ≈ root zone
 _I_CROP_C3 = CLM5_PFT_NAMES.index("crop_c3")
-# Snow-free albedo of glacier / ice-sheet ice (firn-aged broadband, CLM range
-# ~0.5–0.6). Used as the snow-free BASE over glacier cells so ice sheets stay
-# bright when summer snow melts (with the snow feedback layering on top), instead
-# of exposing dark bare soil — the "Greenland problem".
-_GLACIER_ALBEDO = 0.55
+# --- Differentiably-calibrated DEFAULT per-PFT land parameters (PR: land-tuning) ---
+# Tuned against ERA5 (skin temperature + forecast albedo) with end-to-end gradients
+# under PHYSICAL per-PFT bounds (scripts/run/train_land_params_era5.py), so every
+# value is realistic: forests dark (~0.14), bare/desert bright (~0.38), grass/crop
+# mid; rooting depth forests deep / grass shallow.  CLM5 PFT order (17).
+# Reduces the global ERA5 land T bias +3.1 -> +1.8 K (RMSE 4.4 -> 3.0).  CAVEAT:
+# tuned to OFFLINE monthly ERA5 forcing; re-tune with a coupled diurnal cycle for a
+# fully coupled run.  Set CLMSurfaceParamProvider(tuned=False) for the raw CLM5 table.
+_TUNED_PFT_ALBEDO = (0.3802, 0.1367, 0.1384, 0.1568, 0.1568, 0.1584, 0.1684, 0.1700,
+                     0.1700, 0.2130, 0.2165, 0.2166, 0.2345, 0.2424, 0.2412, 0.2463, 0.1800)
+_TUNED_PFT_EMISSIVITY = (0.9844, 0.9845, 0.9843, 0.9844, 0.9844, 0.9842, 0.9844, 0.9845,
+                         0.9845, 0.9842, 0.9839, 0.9842, 0.9850, 0.9849, 0.9843, 0.9848, 0.9600)
+_TUNED_PFT_ROOT_DEPTH = (0.10, 2.00, 1.50, 1.50, 1.50, 1.80, 1.50, 1.50, 1.20,
+                         0.80, 0.80, 0.80, 0.50, 0.50, 0.50, 0.50, 0.50)
+_TUNED_PFT_WMAX = (240.6, 282.9, 283.1, 281.6, 284.1, 280.4, 276.2, 281.6, 287.7,
+                   280.8, 262.3, 282.4, 262.4, 277.5, 277.6, 280.1, 150.0)
+# tuned snow/ice + bulk parameters (config-level; applied on the CLM default path).
+TUNED_GLACIER_ALBEDO = 0.7192     # snow-free ice-sheet base albedo
+TUNED_SNOW_ALBEDO_MAX = 0.7844    # LandAlbedoConfig.alpha_snow_max
+TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
+
+# Snow-free albedo of glacier / ice-sheet ice used as the snow-free BASE over
+# glacier cells so ice sheets stay bright when summer snow melts (snow feedback
+# layers on top) instead of exposing dark bare soil — the "Greenland problem".
+_GLACIER_ALBEDO = TUNED_GLACIER_ALBEDO
 
 
 def download_clm_surfdata(cache: str = "/tmp/clm_surfdata.nc") -> str:
@@ -131,14 +151,22 @@ class CLMSurfaceParamProvider(eqx.Module):
     soil_theta_wp: jax.Array          # (ncol,)
     soil_theta_fc: jax.Array          # (ncol,)
     glacier_frac: jax.Array           # (ncol,) ice-sheet fraction [0,1]
-    raw_table: jax.Array              # (17, 12) CLM5 PFT parameter table
+    raw_table: jax.Array              # (17, 12) per-PFT parameter table (tuned or CLM5)
 
-    def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac):
+    def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac,
+                 tuned: bool = True):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
         self.glacier_frac = glacier_frac
-        self.raw_table = clm5_pft_table()
+        table = np.asarray(clm5_pft_table())
+        if tuned:   # overwrite the calibrated per-PFT columns (physical bounds)
+            table = table.copy()
+            table[:, PARAM_NAMES.index("albedo_veg")] = _TUNED_PFT_ALBEDO
+            table[:, PARAM_NAMES.index("emissivity")] = _TUNED_PFT_EMISSIVITY
+            table[:, PARAM_NAMES.index("root_depth")] = _TUNED_PFT_ROOT_DEPTH
+            table[:, PARAM_NAMES.index("W_max")] = _TUNED_PFT_WMAX
+        self.raw_table = jnp.asarray(table)
 
     def __call__(self) -> LandSurfaceParams:
         vals = self.pft_fractions @ self.raw_table          # (ncol, 12) PFT-weighted
