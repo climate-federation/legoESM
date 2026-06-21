@@ -209,21 +209,27 @@ def make_sfno_step_unified_latlon(
         # is None flips the carry pytree (None->Array) and breaks the scan.
         if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
             out_ll = out_ll._replace(conv_prog=conv_prog)
-        # Flux head -> held_*: regrid the SFNO's predicted Gaussian-grid
-        # fluxes back to lat-lon so the radiation-flux loss supervises them.
-        # (flux_head=None -> sfno_out fluxes are zeros -> regridded zeros, the
-        # legacy passthrough-equivalent.)  held_dT_rad stays at its IC value
-        # (0): the SFNO dT_dt is the TOTAL tendency and already includes
-        # radiative heating.  sw_down_toa (insolation) is external forcing.
-        del held_sw_net_sfc, held_lw_net_sfc, held_sw_up_toa, held_lw_up_toa
-        held_new = (
-            held_dT_rad,
-            _to_latlon(sfno_out.sw_net_sfc, p_s.shape),
-            _to_latlon(sfno_out.lw_net_sfc, p_s.shape),
-            _to_latlon(sfno_out.sw_up_toa, p_s.shape),
-            _to_latlon(sfno_out.lw_up_toa, p_s.shape),
-            held_sw_down_toa,
-        )
+        # Flux head -> held_*: when present, regrid the SFNO's predicted
+        # Gaussian-grid fluxes back to lat-lon so the radiation-flux loss
+        # supervises them.  held_dT_rad stays at its IC value (0): the SFNO
+        # dT_dt is the TOTAL tendency and already includes radiative heating.
+        # sw_down_toa (insolation) is external forcing -> passthrough.  With
+        # NO flux head, pass the incoming held through unchanged (state-only,
+        # the legacy behavior) — writing zeros would make any active flux loss
+        # a constant penalty with no trainable path.  ``flux_head`` is static
+        # at build time, so this is a Python branch (no per-step trace cost).
+        if sfno_physics.flux_head is not None:
+            held_new = (
+                held_dT_rad,
+                _to_latlon(sfno_out.sw_net_sfc, p_s.shape),
+                _to_latlon(sfno_out.lw_net_sfc, p_s.shape),
+                _to_latlon(sfno_out.sw_up_toa, p_s.shape),
+                _to_latlon(sfno_out.lw_up_toa, p_s.shape),
+                held_sw_down_toa,
+            )
+        else:
+            held_new = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
         return out_ll, held_new
 
     return step_unified

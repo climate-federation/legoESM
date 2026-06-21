@@ -353,6 +353,54 @@ class TestSFNOCoupling:
         assert float(jnp.abs(out1.sw_net_sfc).max()) > 0.0
         assert out1.sw_up_toa.shape == (nlat, nlon)
 
+    def test_latlon_bridge_passthrough_when_no_flux_head(self):
+        """Bridge with flux_head=None must PASS the incoming held_* through
+        (state-only), not overwrite with zeros (codex: else a flux loss is a
+        constant penalty with no gradient)."""
+        import numpy as np
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.training.sfno_dycore_coupling import (
+            SFNOPhysics, make_sfno_step_unified_latlon,
+        )
+
+        nlev = 4
+        ll = create_latlon_grid(n_lat=8)
+        gauss = create_gaussian_grid(n_max=8, dealiasing="quadratic")
+        spec = PE3DChannelSpec(nlev=nlev)
+        cfg = SFNOConfig(in_channels=spec.n_channels, out_channels=spec.n_channels,
+                         embed_dim=16, n_blocks=1, residual_prediction=False)
+        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(0))
+        sphys = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)  # NO flux head
+
+        llat, llon = np.asarray(ll.lat), np.asarray(ll.lon)
+        glat, glon = np.asarray(gauss.lat), np.asarray(gauss.lon)
+        g2 = np.meshgrid(glat, glon, indexing="ij")
+        l2 = np.meshgrid(llat, llon, indexing="ij")
+        w_ll2g = compute_latlon_to_voronoi_weights(llat, llon, g2[0].ravel(), g2[1].ravel())
+        w_g2ll = compute_latlon_to_voronoi_weights(glat, glon, l2[0].ravel(), l2[1].ravel())
+        step = make_sfno_step_unified_latlon(
+            sphys, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon))
+
+        nlat_ll, nlon_ll = int(ll.n_lat), int(ll.n_lon)
+        s3, s2 = (nlat_ll, nlon_ll, nlev), (nlat_ll, nlon_ll)
+        T = jnp.full(s3, 280.0); z3 = jnp.zeros(s3); p_s = jnp.full(s2, 1.0e5)
+        lat = jnp.zeros(s2)
+        # distinct nonzero held inputs to detect passthrough vs overwrite
+        h_swn, h_lwn = jnp.full(s2, 11.0), jnp.full(s2, 22.0)
+        h_swt, h_lwt = jnp.full(s2, 33.0), jnp.full(s2, 44.0)
+        tail = (z3, z3, jnp.zeros(s2), jnp.zeros(s2), lat, lat, 0.0, 0.0, 600.0,
+                jnp.zeros(s2), jnp.array(1361.0), z3, jnp.zeros(s2),
+                jnp.zeros(s3), h_swn, h_lwn, h_swt, h_lwt, jnp.zeros(s2))
+        _, held_new = step(jnp.bool_(True), T, p_s, z3, z3, z3, None, *tail)
+        assert jnp.array_equal(held_new[1], h_swn)
+        assert jnp.array_equal(held_new[2], h_lwn)
+        assert jnp.array_equal(held_new[3], h_swt)
+        assert jnp.array_equal(held_new[4], h_lwt)
+
 
 # ---------------------------------------------------------------------------
 # 7. era5_to_state
