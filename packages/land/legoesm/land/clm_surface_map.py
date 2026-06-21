@@ -41,6 +41,11 @@ _SURFDATA_URL = (
 _N_PFT = len(CLM5_PFT_NAMES)            # 17
 _ROOTZONE_LAYERS = 5                    # top ~5 CLM soil layers ≈ root zone
 _I_CROP_C3 = CLM5_PFT_NAMES.index("crop_c3")
+# Snow-free albedo of glacier / ice-sheet ice (firn-aged broadband, CLM range
+# ~0.5–0.6). Used as the snow-free BASE over glacier cells so ice sheets stay
+# bright when summer snow melts (with the snow feedback layering on top), instead
+# of exposing dark bare soil — the "Greenland problem".
+_GLACIER_ALBEDO = 0.55
 
 
 def download_clm_surfdata(cache: str = "/tmp/clm_surfdata.nc") -> str:
@@ -83,6 +88,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     pct_nat = ds["PCT_NAT_PFT"].values            # (n_natpft, nlat, nlon), % of natveg
     pct_natveg = ds["PCT_NATVEG"].values          # (nlat, nlon), % of gridcell
     pct_crop = ds["PCT_CROP"].values              # (nlat, nlon), % of gridcell
+    pct_glacier = ds["PCT_GLACIER"].values        # (nlat, nlon), % of gridcell (ice sheet)
     n_nat = pct_nat.shape[0]
     # root-zone mean sand/clay (top layers)
     sand = ds["PCT_SAND"].values[:_ROOTZONE_LAYERS].mean(0)   # (nlat, nlon)
@@ -92,6 +98,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     pct_nat_c = _nearest_regrid(slat, slon, pct_nat, tgt_lat_deg, tgt_lon_deg)  # (n_nat, ncol)
     natveg_c = _nearest_regrid(slat, slon, pct_natveg, tgt_lat_deg, tgt_lon_deg)
     crop_c = _nearest_regrid(slat, slon, pct_crop, tgt_lat_deg, tgt_lon_deg)
+    glac_c = _nearest_regrid(slat, slon, pct_glacier, tgt_lat_deg, tgt_lon_deg)
     sand_c = _nearest_regrid(slat, slon, sand, tgt_lat_deg, tgt_lon_deg)
     clay_c = _nearest_regrid(slat, slon, clay, tgt_lat_deg, tgt_lon_deg)
     ncol = natveg_c.shape[0]
@@ -110,6 +117,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     vg = soil_texture.vg_params_from_index(tex)
     wp, fc = soil_texture.wilting_field_capacity(vg)
     return dict(pft_fractions=jnp.asarray(fr), texture_index=np.asarray(tex),
+                glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
                 theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
 
 
@@ -122,12 +130,14 @@ class CLMSurfaceParamProvider(eqx.Module):
     pft_fractions: jax.Array          # (ncol, 17)
     soil_theta_wp: jax.Array          # (ncol,)
     soil_theta_fc: jax.Array          # (ncol,)
+    glacier_frac: jax.Array           # (ncol,) ice-sheet fraction [0,1]
     raw_table: jax.Array              # (17, 12) CLM5 PFT parameter table
 
-    def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc):
+    def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
+        self.glacier_frac = glacier_frac
         self.raw_table = clm5_pft_table()
 
     def __call__(self) -> LandSurfaceParams:
@@ -136,6 +146,11 @@ class CLMSurfaceParamProvider(eqx.Module):
         # soil (not vegetation) properties come from the reference soil map
         params["theta_wp"] = self.soil_theta_wp
         params["theta_fc"] = self.soil_theta_fc
+        # Glacier / ice-sheet cells: blend the snow-free base albedo toward ice so
+        # ice sheets stay bright when summer snow melts (the snow feedback layers on
+        # top of this base) instead of exposing dark bare soil — the Greenland fix.
+        fg = self.glacier_frac
+        params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * _GLACIER_ALBEDO
         return LandSurfaceParams(**params)
 
 
@@ -160,4 +175,5 @@ def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = N
     target columns (downloads the surfdata file if ``surfdata_path`` is None)."""
     path = surfdata_path or download_clm_surfdata()
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
-    return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"])
+    return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
+                                   m["glacier_frac"])
