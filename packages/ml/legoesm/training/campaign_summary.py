@@ -262,8 +262,8 @@ _TRADEOFF_FRACTION_WARN = 0.05
 class CampaignHealth(NamedTuple):
     """A one-look verdict on whether the corrections are working + why/why not."""
 
-    status: str     # improved | stalled | clamp_limited | no_valid_diagnoses |
-                    # non_finite_bias | no_rounds
+    status: str     # improved | worsened | stalled | clamp_limited |
+                    # no_valid_diagnoses | non_finite_bias | no_rounds
     message: str    # actionable one-line explanation
 
     @property
@@ -317,6 +317,12 @@ def campaign_health(
       per-variable trade-off note (:func:`_per_variable_tradeoff_note`) flags variables
       whose GLOBAL RMSE rose by ≥ ``tradeoff_fraction_warn`` while the combined fell —
       the metric-gaming case the per-variable summary exists to expose.
+    * ``"worsened"`` — the final bias is ABOVE the start (a NEGATIVE reduction): the
+      accepted corrections made the bias WORSE.  Only possible with
+      ``accept_only_if_improved=False`` (``--keep-worsening-rounds``); the monotonic gate
+      otherwise guarantees a non-negative reduction.  Surfaced as its OWN verdict before
+      the non-improving branches so a GROWN bias is never misreported as "stalled: reduced
+      -50%"; do NOT deploy.
     * ``"no_valid_diagnoses"`` — the bias did NOT improve AND LES ran but EVERY
       diagnosis was rejected by the realism gate (``n_diagnoses_valid_total == 0`` with
       ``n_diagnosed_total > 0``): no column was corrected, so the root cause is the LES
@@ -374,6 +380,21 @@ def campaign_health(
             summary.per_variable, tradeoff_fraction_warn)
         return CampaignHealth(
             "improved", f"Bias reduced {red} ({acc}).{note}{tradeoff}")
+    # A NEGATIVE reduction means the final bias is ABOVE the start — the accepted
+    # corrections made it WORSE (only possible with accept_only_if_improved=False /
+    # --keep-worsening-rounds; the monotonic gate otherwise guarantees reduction >= 0).
+    # Surface it as its OWN verdict before the stalled/clamp branches: "stalled: reduced
+    # -50%" would misreport a GROWN bias as a reduction. Something WAS applied (an all-
+    # rejected campaign leaves the bias unchanged, not worse), so this precedes
+    # no_valid_diagnoses/clamp_limited (both of which assume a non-improving but not-worse
+    # bias).
+    if summary.fractional_reduction < 0.0:
+        return CampaignHealth(
+            "worsened",
+            f"Bias INCREASED {-summary.fractional_reduction:.0%} ({acc}) — the accepted "
+            "corrections left the final bias ABOVE the start (only possible with "
+            "--keep-worsening-rounds); do NOT deploy. Drop --keep-worsening-rounds or "
+            "check the LES->GCM transfer.")
     if summary.n_diagnosed_total > 0 and summary.n_diagnoses_valid_total == 0:
         return CampaignHealth(
             "no_valid_diagnoses",

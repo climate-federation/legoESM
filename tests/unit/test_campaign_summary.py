@@ -296,6 +296,20 @@ def test_campaign_health_stalled():
     assert "not improving" in h.message
 
 
+def test_campaign_health_worsened_when_final_bias_exceeds_start():
+    """With --keep-worsening-rounds (accept_only_if_improved=False) an accepted round can
+    leave the FINAL bias ABOVE the start (a negative reduction). That must be its OWN
+    'worsened' verdict (not ok), never misreported as 'stalled: reduced -50%' — a GROWN bias
+    is a do-NOT-deploy signal distinct from a stalled small-positive reduction. The monotonic
+    gate otherwise guarantees a non-negative reduction, so this only arises with the flag."""
+    ck = jnp.array([[0.4, 0.5], [0.6, 0.7]])             # in-bounds (no clamp interference)
+    s = summarize_campaign(_multi_result(ck, [(1.0, 1.5)], (True,)))   # 1.0 -> 1.5 = worse
+    assert s.fractional_reduction == pytest.approx(-0.5)
+    h = campaign_health(s)
+    assert h.status == "worsened" and not h.ok
+    assert "INCREASED 50%" in h.message and "do NOT deploy" in h.message
+
+
 def test_campaign_health_improved_threshold_is_inclusive():
     """The 'improved' verdict uses ``fractional_reduction >= min_fractional_reduction``
     (INCLUSIVE): a campaign sitting EXACTLY at the threshold is 'improved', not
