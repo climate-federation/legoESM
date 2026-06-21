@@ -177,6 +177,54 @@ def column_les_realism_breakdown(
         moisture_physical=moisture_physical, rh_ok=rh_ok, overall=overall)
 
 
+class RealismRejectionSummary(NamedTuple):
+    """Per-mode rejection COUNTS over a batch of column LESs — the campaign-report aggregation
+    of :class:`LESRealismBreakdown` (iter 509).  Each ``n_*`` counts columns FAILING that
+    criterion (a column can fail several, so the failure counts need not sum to
+    ``n_rejected``).  Host-side plain ``int``\\ s, for a per-round log line."""
+
+    n_total: int             # columns examined
+    n_realistic: int         # passed every criterion (== valid for the realism gate)
+    n_rejected: int          # failed ≥1 criterion (n_total − n_realistic)
+    n_not_turbulent: int     # dead / laminar (peak w'² below the floor)
+    n_not_finite: int        # blown up (a non-finite field)
+    n_thermo_drift: int      # mean-θ′ drifted off the GCM column
+    n_moisture_runaway: int  # q_v outside [−tol, q_v_max]
+    n_supersaturated: int    # over the opt-in RH cap (0 unless rh_max was set)
+
+
+def summarize_realism_breakdowns(breakdown: LESRealismBreakdown) -> RealismRejectionSummary:
+    """Aggregate a STACKED :class:`LESRealismBreakdown` (each field a ``(n_columns,)`` boolean
+    array — e.g. ``jax.vmap(column_les_realism_breakdown)`` over the worst-column LES states)
+    into per-mode rejection counts for the campaign's per-round report.  Answers the "few/no
+    valid diagnoses — WHY?" question (iter 507/508): the operator sees whether the columns
+    stayed laminar (refine/lengthen the LES), blew up (CFL/forcing), drifted, or ran away.
+
+    Usage::
+
+        bd = jax.vmap(lambda s: column_les_realism_breakdown(s, hc))(worst_column_states)
+        summary = summarize_realism_breakdowns(bd)   # RealismRejectionSummary(n_not_turbulent=…)
+
+    Host-side: returns concrete ``int``\\ s (a ``jnp.sum`` materialised once per round), so call
+    it on FINISHED diagnostics, not inside a traced ``scan``."""
+    def _false(x):
+        return int(jnp.sum(~jnp.asarray(x, dtype=bool)))
+
+    overall = jnp.asarray(breakdown.overall, dtype=bool)
+    n_total = int(overall.size)
+    n_realistic = int(jnp.sum(overall))
+    return RealismRejectionSummary(
+        n_total=n_total,
+        n_realistic=n_realistic,
+        n_rejected=n_total - n_realistic,
+        n_not_turbulent=_false(breakdown.turbulent),
+        n_not_finite=_false(breakdown.finite),
+        n_thermo_drift=_false(breakdown.thermo_consistent),
+        n_moisture_runaway=_false(breakdown.moisture_physical),
+        n_supersaturated=_false(breakdown.rh_ok),
+    )
+
+
 def column_les_realism(les_state, height_coord, *, wp2_floor: float = _REALISM_WP2_FLOOR,
                        theta_drift_rms_max_K: float = _THETA_DRIFT_RMS_MAX_K,
                        q_v_max: float = _Q_V_MAX_KG_KG, qv_slot: int = 0,

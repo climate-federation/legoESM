@@ -648,3 +648,52 @@ def test_realism_breakdown_each_flag_is_load_bearing():
     assert bool(column_les_realism(state, hc)) == bool(healthy.overall)
     assert bool(column_les_realism(
         state._replace(w=state.w.replace(data=jnp.zeros_like(state.w.data))), hc)) is False
+
+
+def test_summarize_realism_breakdowns_counts_each_mode():
+    """summarize_realism_breakdowns aggregates a STACKED breakdown into per-mode rejection
+    counts (iter 509) — the campaign-report 'WHY are columns invalid' line. Failure counts
+    are per-criterion (a column can fail several), independent of n_rejected."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        LESRealismBreakdown,
+        summarize_realism_breakdowns,
+    )
+
+    bd = LESRealismBreakdown(
+        turbulent=jnp.asarray([True, False, True, True]),
+        finite=jnp.asarray([True, True, False, True]),
+        thermo_consistent=jnp.asarray([True, True, True, True]),
+        moisture_physical=jnp.asarray([True, True, True, False]),
+        rh_ok=jnp.asarray([True, True, True, True]),
+        overall=jnp.asarray([True, False, False, False]),   # AND of the columns above
+    )
+    s = summarize_realism_breakdowns(bd)
+    assert (s.n_total, s.n_realistic, s.n_rejected) == (4, 1, 3)
+    assert s.n_not_turbulent == 1
+    assert s.n_not_finite == 1
+    assert s.n_moisture_runaway == 1
+    assert s.n_thermo_drift == 0
+    assert s.n_supersaturated == 0
+    assert all(isinstance(v, int) for v in s)               # host-side ints, for a log line
+
+
+def test_summarize_over_vmapped_breakdowns_end_to_end():
+    """The intended operator pattern composes: vmap column_les_realism_breakdown over a STACK
+    of worst-column LES states, then summarize. A healthy + a dead (w≡0) column → 1 realistic,
+    1 rejected for being laminar."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        column_les_realism_breakdown,
+        summarize_realism_breakdowns,
+    )
+
+    state, hc = _les_state_with_shear()
+    dead = state._replace(w=state.w.replace(data=jnp.zeros_like(state.w.data)))
+    stacked = jax.tree_util.tree_map(lambda a, b: jnp.stack([a, b]), state, dead)
+
+    bd = jax.vmap(lambda s: column_les_realism_breakdown(s, hc))(stacked)
+    summary = summarize_realism_breakdowns(bd)
+    assert summary.n_total == 2
+    assert summary.n_realistic == 1            # the healthy column
+    assert summary.n_rejected == 1
+    assert summary.n_not_turbulent == 1        # the dead column, for being laminar
+    assert summary.n_not_finite == 0
