@@ -477,9 +477,14 @@ def cross_res_osse_verdict(result: CrossResOSSEResult) -> OSSEVerdict:
 
     * ``transferred`` — the fine grid is well COVERED by the coarse env hull AND
       the fine bias fell: the env-kernel deploy generalizes across resolution.
-    * ``no_transfer`` — well covered but the fine bias did NOT fall: the env→coef
-      map is in-domain yet did not help (suspect the closure transfer, as for the
-      same-grid ``bias_only``).
+    * ``no_transfer`` — well covered but the fine bias did NOT fall (stayed within a
+      ``_REL_TOL`` band): the env→coef map is in-domain yet did not help (suspect the
+      closure transfer, as for the same-grid ``bias_only``).
+    * ``worsened`` — well covered AND the fine bias ROSE (corrected strictly above
+      uncorrected): unlike the same-grid ``worsened`` (a gate anomaly), a cross-res
+      deploy is a single un-gated application, so an in-domain kernel CAN actively
+      RAISE the fine bias — a harmful closure-transfer failure, a stronger do-NOT-deploy
+      than the merely-unhelpful ``no_transfer``.
     * ``out_of_hull`` — coverage below threshold: the fine climate lies outside the
       coarse-sampled environment, so the kernel extrapolates and any bias change is
       untrustworthy (a fall here likely reflects background/mean regression, not
@@ -509,6 +514,20 @@ def cross_res_osse_verdict(result: CrossResOSSEResult) -> OSSEVerdict:
             f"on {result.n_fine_columns} columns (in_hull="
             f"{result.fraction_in_hull:.2g}); the deploy generalizes across "
             "resolution — a cheap low-res campaign can inform the high-res run.")
+    # A cross-res deploy is a SINGLE un-gated application (no monotonic gate), so an
+    # in-domain kernel can RAISE the fine bias. Flag that ACTIVELY-HARMFUL case distinctly
+    # from the merely-unhelpful (flat) no_transfer — the operator must not read "did NOT
+    # lower" as "no harm" when the deploy actually made the fine grid WORSE (the iter-480
+    # honest-negative-verdict theme, carried to the cross-res deploy).
+    if result.fine_bias_corrected > result.fine_bias_uncorrected + _REL_TOL * max(
+            abs(result.fine_bias_uncorrected), _REL_TOL):
+        return OSSEVerdict(
+            "worsened",
+            f"the coarse-learned env-kernel INCREASED the well-covered fine-grid bias "
+            f"{result.fine_bias_uncorrected:.4g} -> {result.fine_bias_corrected:.4g} "
+            f"(in_hull={result.fraction_in_hull:.2g}) — the deploy is ACTIVELY HARMFUL "
+            "across resolution (an in-domain closure-transfer failure), not merely "
+            "unhelpful; do NOT deploy.")
     return OSSEVerdict(
         "no_transfer",
         f"the fine grid is well covered (in_hull={result.fraction_in_hull:.2g}) but "

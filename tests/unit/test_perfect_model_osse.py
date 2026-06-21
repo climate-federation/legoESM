@@ -556,6 +556,25 @@ def test_cross_resolution_kernel_transfers_and_lowers_fine_bias():
     assert v.status == "transferred" and v.ok
 
 
+def test_cross_resolution_in_hull_but_worsened_is_flagged_harmful():
+    """A WELL-COVERED fine grid whose bias the kernel RAISES is 'worsened' (actively
+    harmful), distinct from the merely-unhelpful 'no_transfer'. A cross-res deploy is a
+    single un-gated application, so an in-domain kernel CAN make the fine bias worse, and
+    the operator must not read 'did not lower' as 'no harm' (the iter-480 honest-negative
+    theme, carried to the cross-res deploy)."""
+    base = _cross_res(_FINE_ENV, (2, 4))            # well-covered (in_hull >= 0.8)
+    assert base.fraction_in_hull >= 0.8
+    worse = base._replace(fine_bias_uncorrected=1.0, fine_bias_corrected=1.5,
+                          fine_bias_reduction=-0.5, fine_bias_reduced=False)
+    v = cross_res_osse_verdict(worse)
+    assert v.status == "worsened" and not v.ok
+    assert "ACTIVELY HARMFUL" in v.message and "do NOT deploy" in v.message
+    # A FLAT (within-tol) corrected bias stays 'no_transfer', NOT 'worsened'.
+    flat = base._replace(fine_bias_uncorrected=1.0, fine_bias_corrected=1.0,
+                         fine_bias_reduction=0.0, fine_bias_reduced=False)
+    assert cross_res_osse_verdict(flat).status == "no_transfer"
+
+
 def test_cross_resolution_out_of_hull_is_untrusted():
     """A fine grid whose climate lies OUTSIDE the coarse-sampled env → low coverage
     → 'out_of_hull' verdict (the kernel extrapolates; not trustworthy)."""
