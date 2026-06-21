@@ -2029,6 +2029,12 @@ def _dry_run_report(dry: CampaignDryRun, *, mode: str, out: str,
         f"(≤ {dry.n_iterations * dry.les_per_round} LES total)"
         + _dry_run_era5_line(era5)
         + _dry_run_amip_forcing_line(amip_forcing) + "\n"
+        # The dominant runtime cost is the LES spin-off (a 3D plane LES per worst column), NOT
+        # the AMIP/CMIP model runs — measured (iter 499/501): even a tiny res-4 gray campaign was
+        # >10 min CPU, LES-dominated. Surface it so the operator budgets HPC on the LES count.
+        "  COST: the LES spin-offs dominate the runtime (each is a 3D plane LES; the AMIP/CMIP "
+        f"runs are a small fraction) — budget HPC on the ≤ "
+        f"{dry.n_iterations * dry.les_per_round} LES total (iter 499/501).\n"
         f"  would write → {out}\n"
         "  (re-run without --dry-run to execute the multi-day campaign.)"
     )

@@ -669,6 +669,10 @@ def test_dry_run_report_formats():
     assert "/scratch/run/corrected.json" in rep
     # compute estimate (10 rounds × 8 LES = 80 LES total) — the launch decision input.
     assert "10 rounds" in rep and "8 LES/round" in rep and "80 LES total" in rep
+    # The LES spin-off is the DOMINANT runtime cost (iter 499/501 measured even a tiny
+    # res-4 gray campaign as LES-dominated, >10 min CPU); the dry-run surfaces it so the
+    # operator budgets HPC on the LES count, not the (small) model-run fraction.
+    assert "COST" in rep and "LES spin-offs dominate" in rep
     # The spin-off LES surface-flux BC (iter 364) is a MATERIAL physics setting; the
     # pre-flight surfaces it so an operator confirms ON/off before the multi-day run
     # (iter 403). Default-constructed ⇒ off.
