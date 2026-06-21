@@ -1242,3 +1242,81 @@ def test_column_les_cli_main_wiring_monkeypatched(tmp_path, monkeypatch):
     loaded = np.load(out)
     assert set(loaded.files) == {"(0, 0)", "(1, 2)"}  # one saved coefficient per column
     np.testing.assert_allclose(loaded["(0, 0)"], [1.5, 2.5])
+
+
+def test_realism_verdict_names_failing_criteria():
+    """_realism_verdict (iter 511) turns a LESRealismBreakdown into the operator's per-column
+    debug line: REALISTIC when all pass, else REJECTED naming each failing mode — so a debug
+    run says whether a diagnosed coefficient can be believed and, if not, why."""
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import LESRealismBreakdown
+
+    from scripts.run.run_column_les import _realism_verdict
+
+    def _bd(turbulent=True, finite=True, thermo=True, moisture=True, rh=True):
+        flags = (turbulent, finite, thermo, moisture, rh)
+        return LESRealismBreakdown(
+            turbulent=jnp.asarray(turbulent), finite=jnp.asarray(finite),
+            thermo_consistent=jnp.asarray(thermo), moisture_physical=jnp.asarray(moisture),
+            rh_ok=jnp.asarray(rh), overall=jnp.asarray(all(flags)))
+
+    assert _realism_verdict(_bd()) == "REALISTIC"
+    assert _realism_verdict(_bd(turbulent=False)) == "REJECTED(not_turbulent)"
+    assert _realism_verdict(_bd(finite=False)) == "REJECTED(not_finite)"
+    assert _realism_verdict(_bd(moisture=False)) == "REJECTED(moisture_runaway)"
+    # multiple failures are all named, in declared order
+    assert _realism_verdict(_bd(turbulent=False, thermo=False)) == \
+        "REJECTED(not_turbulent,thermo_drift)"
+
+
+def test_column_les_cli_reports_realism_when_les_runs(tmp_path, monkeypatch, capsys):
+    """When process_column actually invokes run_les_fn (the real LES path), main() CAPTURES
+    the finished state + height_coord and reports the per-column realism verdict (iter 511) —
+    exercising the capture→breakdown→output wiring, not just the mocked no-LES path."""
+    from types import SimpleNamespace
+
+    import legoesm.atmosphere.dynamics.column_les as cl
+    import legoesm.atmosphere.dynamics.column_les_diagnosis as cld
+    import legoesm.driver.restart as restart_mod
+    import legoesm.grids.factory as gf
+    import legoesm.grids.vertical as gv
+    import legoesm.training.column_manifest as cm
+
+    import scripts.run.run_column_les as cli
+
+    fake_state = SimpleNamespace(
+        T=jnp.zeros((1, 1, 5)), u=jnp.zeros((1, 1, 5)),
+        v=jnp.zeros((1, 1, 5)), p_s=jnp.zeros((1, 1)))
+    monkeypatch.setattr(gf, "create_grid", lambda gt, resolution: object())
+    monkeypatch.setattr(gv, "create_sigma_coordinate", lambda nlev: object())
+    monkeypatch.setattr(restart_mod, "load_restart",
+                        lambda path, g, s, strict: (fake_state, jnp.zeros((1, 1, 5))))
+    monkeypatch.setattr(cm, "read_manifest",
+                        lambda path: [SimpleNamespace(grid_index=(0, 0))])
+
+    les_final = object()                                  # the "finished LES state" sentinel
+    monkeypatch.setattr(cl, "run_forced_les",
+                        lambda setup, *, dt_s, n_steps: les_final)
+
+    def fake_process_column(rec, *, run_les_fn, **kwargs):  # noqa: ARG001
+        run_les_fn(SimpleNamespace(height_coord="HC"))     # triggers _run → captures les_final
+        return "diag"
+
+    monkeypatch.setattr(cl, "process_column", fake_process_column)
+    monkeypatch.setattr(cl, "coefficient_value", lambda diag, method: np.asarray([1.0]))
+
+    seen = {}
+
+    def fake_breakdown(state, hc):
+        seen["state"], seen["hc"] = state, hc
+        true = jnp.asarray(True)
+        return SimpleNamespace(overall=true, turbulent=true, finite=true,
+                               thermo_consistent=true, moisture_physical=true, rh_ok=true)
+
+    monkeypatch.setattr(cld, "column_les_realism_breakdown", fake_breakdown)
+
+    rc = cli.main(["--manifest", "m", "--restart", "r", "--resolution", "8",
+                   "--nlev", "5", "--out", str(tmp_path / "c.npz"),
+                   "--method", "clubb_coefficient"])
+    assert rc == 0
+    assert seen["state"] is les_final and seen["hc"] == "HC"   # captured state reached it
+    assert "realism: REALISTIC" in capsys.readouterr().out

@@ -13,6 +13,24 @@ from __future__ import annotations
 import argparse
 
 
+def _realism_verdict(breakdown) -> str:
+    """One-line operator verdict from a ``LESRealismBreakdown`` (iter 508/511): ``REALISTIC``,
+    or ``REJECTED(<failing criteria>)`` naming WHY the spin-off LES is untrustworthy — so the
+    per-column debug run says whether a diagnosed coefficient can be believed and, if not,
+    which mode fired (no turbulence / blow-up / θ-drift / moisture runaway / supersaturation).
+    """
+    if bool(breakdown.overall):
+        return "REALISTIC"
+    reasons = [name for name, ok in (
+        ("not_turbulent", breakdown.turbulent),
+        ("not_finite", breakdown.finite),
+        ("thermo_drift", breakdown.thermo_consistent),
+        ("moisture_runaway", breakdown.moisture_physical),
+        ("supersaturated", breakdown.rh_ok),
+    ) if not bool(ok)]
+    return "REJECTED(" + ",".join(reasons) + ")"
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Column-LES spin-off + coefficient.")
     p.add_argument("--manifest", required=True, help="worst-column JSON manifest")
@@ -45,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         process_column,
         run_forced_les,
     )
+    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        column_les_realism_breakdown,
+    )
     from legoesm.driver.restart import load_restart
     from legoesm.grids.factory import create_grid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -59,8 +80,16 @@ def main(argv: list[str] | None = None) -> int:
     config = ColumnLESConfig(diagnosis_method=args.method)
     n_steps = int(args.hours * 3600.0 / args.dt)
 
+    # Capture the finished LES state (the run_les_fn return) so the CLI can report the
+    # per-column realism breakdown — the SAME default-threshold gate process_column applied
+    # — without threading it through the library (iter 511). The loop is host-side (one
+    # process_column per column), so a concrete capture is safe.
+    captured: dict = {}
+
     def _run(setup: ColumnLESSetup):
-        return run_forced_les(setup, dt_s=args.dt, n_steps=n_steps)
+        final_state = run_forced_les(setup, dt_s=args.dt, n_steps=n_steps)
+        captured["state"], captured["hc"] = final_state, setup.height_coord
+        return final_state
 
     results = {}
     for rec in records:
@@ -71,8 +100,15 @@ def main(argv: list[str] | None = None) -> int:
         results[str(tuple(rec.grid_index))] = np.asarray(
             coefficient_value(diag, config.diagnosis_method)
         )
+        # The realism verdict reflects the finished LES state, so it is shown only when the
+        # LES actually ran (``_run`` was invoked → ``captured`` populated); a real run always
+        # populates it.
+        realism = ""
+        if "state" in captured:
+            realism = " — realism: " + _realism_verdict(
+                column_les_realism_breakdown(captured["state"], captured["hc"]))
         print(f"[column-LES] {rec.grid_index} "
-              f"({rec.regime if hasattr(rec, 'regime') else ''}) diagnosed.")
+              f"({rec.regime if hasattr(rec, 'regime') else ''}) diagnosed{realism}.")
     np.savez(args.out, **results)
     print(f"[column-LES] wrote {len(results)} column coefficients to {args.out}")
     return 0
