@@ -52,6 +52,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
 
@@ -82,7 +83,10 @@ def external_surface_forcing(
     dtype = u.dtype
 
     is_ocean = dz_0 > min_wet_cell_thickness_m
-    dz_safe = jnp.maximum(dz_0, 1.0e-10)
+    # Wet-cell flux→tendency reciprocals (#518: shared helper; eos rho_0/c_sw).
+    # inv_rho_dz serves BOTH the momentum and the salt (virtual+real) paths.
+    inv_rho_dz, inv_rho_csw_dz = surface_tendency_factors(
+        is_ocean, dz_0, rho_0_ref, c_sw)
     zT = jnp.zeros_like(dz_0)
 
     tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
@@ -92,7 +96,6 @@ def external_surface_forcing(
     salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
     # --- Momentum: ocean reaction = -tau (atmosphere convention) ---
-    inv_rho_dz = jnp.where(is_ocean, 1.0 / (rho_0_ref * dz_safe), 0.0)
     if tau_x is not None:
         du_dt_T = -jnp.asarray(tau_x, dtype) * inv_rho_dz
     else:
@@ -129,7 +132,6 @@ def external_surface_forcing(
 
     # --- Heat: dT/dt = q_net / (rho_0 c_sw dz_0) ---
     if q_net is not None:
-        inv_rho_csw_dz = jnp.where(is_ocean, 1.0 / (rho_0_ref * c_sw * dz_safe), 0.0)
         dT_top = jnp.asarray(q_net, dtype) * inv_rho_csw_dz
         Q_net = jnp.asarray(q_net, dtype)
     else:
@@ -138,12 +140,12 @@ def external_surface_forcing(
     dT_dt = jnp.pad(dT_top[..., None], (*pad_T, (0, nlev - 1)))
 
     # --- Salinity: virtual salt (freshwater) + real salt mass ---
-    inv_rho_dz_T = jnp.where(is_ocean, 1.0 / (rho_0_ref * dz_safe), 0.0)
+    # Reuses inv_rho_dz (same 1/(rho_0*dz) factor as momentum).
     dS_top = zT
     if fw is not None:
-        dS_top = dS_top - S[..., 0] * jnp.asarray(fw, dtype) * inv_rho_dz_T
+        dS_top = dS_top - S[..., 0] * jnp.asarray(fw, dtype) * inv_rho_dz
     if salt is not None:
-        dS_top = dS_top + jnp.asarray(salt, dtype) * 1.0e3 * inv_rho_dz_T
+        dS_top = dS_top + jnp.asarray(salt, dtype) * 1.0e3 * inv_rho_dz
     dS_dt = jnp.pad(dS_top[..., None], (*pad_T, (0, nlev - 1)))
 
     return SurfaceForcingOutput(
