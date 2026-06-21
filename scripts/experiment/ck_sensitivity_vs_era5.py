@@ -227,8 +227,35 @@ def format_per_level_report(per_level: dict, sigma_full: Any) -> list[str]:
     return lines
 
 
+def _build_ck_atm_config(c_k: float, *, resolution: int, nlev: int, days: int,
+                         radiation: str, land_mask_path: str, grid_type: str):
+    """The clubb_lite ``ExperimentConfig`` the C_K-sensitivity twin runs at ``c_k`` — pure
+    (no driver/run), so the GRID-TYPE threading is unit-testable without a model run.
+
+    ``grid_type`` (default ``latlon``; also ``cubed_sphere``/``gaussian``) MUST match the
+    campaign's grid so the go/no-go measures the C_K sensitivity on the SAME grid the campaign
+    ranks over (iter 493 — the campaign config generator gained ``--grid-type`` in iter 485)."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
+    )
+
+    return ExperimentConfig(
+        grid=GridConfig(grid_type=str(grid_type), resolution=resolution, nlev=nlev),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        output=OutputConfig(diag_days=max(days, 1)), radiation=radiation, days=days,
+        turbulence="clubb_lite", land_mask_path=land_mask_path,
+        turbulence_override=TurbulenceConfig(
+            scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=float(c_k))))
+
+
 def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
-                     radiation: str = "gray", land_mask_path: str = ""):
+                     radiation: str = "gray", land_mask_path: str = "",
+                     grid_type: str = "latlon"):
     """A tiny coupled (CMIP) clubb_lite run at the given C_K → (ColumnState, grid, sigma,
     land_fraction).
 
@@ -240,32 +267,24 @@ def _run_model_state(c_k: float, *, resolution: int, nlev: int, days: int,
     ``land_mask_path`` (default ``""`` = flat/aquaplanet) gives the model the SAME land/sea
     distribution as the realistic campaign so the returned static ``land_fraction`` can
     build the ocean-only mask the campaign ranks over; an empty path keeps the flat model
-    (all-ocean land fraction → an ocean-only restriction is a safe no-op)."""
+    (all-ocean land fraction → an ocean-only restriction is a safe no-op).  ``grid_type``
+    matches the campaign's grid family (iter 493)."""
     import jax
     jax.config.update("jax_enable_x64", True)
-    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig, TurbulenceConfig
-    from legoesm.driver.config import (
-        DycoreConfig,
-        ExperimentConfig,
-        GridConfig,
-        OutputConfig,
-    )
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
 
-    atm = ExperimentConfig(
-        grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
-                            discretization="finite_volume"),
-        output=OutputConfig(diag_days=max(days, 1)), radiation=radiation, days=days,
-        turbulence="clubb_lite", land_mask_path=land_mask_path,
-        turbulence_override=TurbulenceConfig(
-            scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=float(c_k))))
-    driver = CoupledESMDriver(
-        atm, PRESETS["aquaplanet"](),
-        ocean_grid=create_latlon_grid(n_lat=resolution, n_lon=2 * resolution))
+    atm = _build_ck_atm_config(
+        c_k, resolution=resolution, nlev=nlev, days=days, radiation=radiation,
+        land_mask_path=land_mask_path, grid_type=grid_type)
+    # latlon: the explicit (resolution, 2*resolution) ocean grid the iter-445 real-run
+    # validation used. Non-latlon: ocean_grid=None ⇒ the coupled driver uses its OWN atm grid
+    # (same-grid identity coupling), so the aquaplanet SST source works on ANY grid family.
+    ocean_grid = (create_latlon_grid(n_lat=resolution, n_lon=2 * resolution)
+                  if grid_type == "latlon" else None)
+    driver = CoupledESMDriver(atm, PRESETS["aquaplanet"](), ocean_grid=ocean_grid)
     driver.setup()
     driver.run()
     a = driver._atm
@@ -295,6 +314,10 @@ def _build_arg_parser():
                    help="the two C_K values to contrast")
     p.add_argument("--resolution", type=int, default=8)
     p.add_argument("--nlev", type=int, default=5)
+    p.add_argument("--grid-type", default="latlon",
+                   choices=("latlon", "cubed_sphere", "gaussian"),
+                   help="model grid family — MATCH the campaign's --grid-type so the go/no-go "
+                        "measures the C_K sensitivity on the SAME grid (default latlon)")
     p.add_argument("--days", type=int, default=1)
     p.add_argument("--radiation", default="gray",
                    help="radiation scheme for the sensitivity runs (default gray; pass "
@@ -413,10 +436,12 @@ def main(argv: list[str] | None = None) -> int:
         for days in days_list:
             m_lo, grid, sigma, f_land = _run_model_state(
                 ck_lo, resolution=args.resolution, nlev=args.nlev, days=days,
-                radiation=args.radiation, land_mask_path=args.land_mask_path)
+                radiation=args.radiation, land_mask_path=args.land_mask_path,
+                grid_type=args.grid_type)
             m_hi, _, _, _ = _run_model_state(
                 ck_hi, resolution=args.resolution, nlev=args.nlev, days=days,
-                radiation=args.radiation, land_mask_path=args.land_mask_path)
+                radiation=args.radiation, land_mask_path=args.land_mask_path,
+                grid_type=args.grid_type)
             if "ref" not in ref_box:                 # grid/sigma depend only on res/nlev
                 ref_box["ref"] = _build_reference(grid, sigma)
             pl = _bl_per_level(m_lo, m_hi, grid, ref_box["ref"],
@@ -452,10 +477,12 @@ def main(argv: list[str] | None = None) -> int:
 
     m_lo, grid, sigma, f_land = _run_model_state(
         ck_lo, resolution=args.resolution, nlev=args.nlev, days=args.days,
-        radiation=args.radiation, land_mask_path=args.land_mask_path)
+        radiation=args.radiation, land_mask_path=args.land_mask_path,
+        grid_type=args.grid_type)
     m_hi, _, _, _ = _run_model_state(
         ck_hi, resolution=args.resolution, nlev=args.nlev, days=args.days,
-        radiation=args.radiation, land_mask_path=args.land_mask_path)
+        radiation=args.radiation, land_mask_path=args.land_mask_path,
+        grid_type=args.grid_type)
     ref = _build_reference(grid, sigma)
     ocean_mask = _ocean_mask(f_land)
 

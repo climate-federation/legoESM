@@ -217,3 +217,27 @@ def test_format_per_level_report_degenerate_all_nan_fraction_no_flag_no_crash():
     lines = format_per_level_report(pl, np.array([0.1, 0.5, 0.95]))
     assert len(lines) == 3
     assert all("most C_K-controllable" not in ln for ln in lines)
+
+
+def test_build_ck_atm_config_matches_the_campaign_grid_type(tmp_path):
+    """The C_K-sensitivity twin's config carries the SAME grid family as the campaign (iter
+    493) — the inline config was hardcoded latlon, so a cubed-sphere/Gaussian campaign's
+    go/no-go was measured on the WRONG grid. Pure (no model run), so the grid-type threading
+    + the C_K override are unit-testable; each builds + validate_strict-passes."""
+    from scripts.experiment.ck_sensitivity_vs_era5 import (
+        _build_arg_parser,
+        _build_ck_atm_config,
+    )
+
+    for gt in ("latlon", "cubed_sphere", "gaussian"):
+        cfg = _build_ck_atm_config(0.7, resolution=4, nlev=5, days=1, radiation="gray",
+                                   land_mask_path="", grid_type=gt)
+        cfg.validate_strict()                              # builds a schema-valid config
+        assert cfg.grid.grid_type == gt                   # the campaign's grid family
+        assert cfg.turbulence == "clubb_lite"
+        assert float(cfg.turbulence_override.clubb_lite.C_K) == 0.7   # the C_K under test
+    # the CLI exposes --grid-type and defaults to latlon (back-compat)
+    p = _build_arg_parser()
+    base = ["--local-era5-dir", str(tmp_path), "--local-era5-date", "20200101"]
+    assert p.parse_args(base).grid_type == "latlon"
+    assert p.parse_args(base + ["--grid-type", "cubed_sphere"]).grid_type == "cubed_sphere"

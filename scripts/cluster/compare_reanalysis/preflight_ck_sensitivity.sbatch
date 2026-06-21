@@ -41,6 +41,9 @@ ARGS=(--local-era5-dir "$LOCAL_ERA5_DIR" --local-era5-date "$LOCAL_ERA5_DATE"
 if [ -n "${OCEAN_ONLY:-}" ]; then ARGS+=(--ocean-only); fi
 if [ -n "${LAND_MASK_PATH:-}" ]; then ARGS+=(--land-mask-path "$LAND_MASK_PATH"); fi
 if [ -n "${MAX_LAND_FRACTION:-}" ]; then ARGS+=(--max-land-fraction "$MAX_LAND_FRACTION"); fi
+# GRID_TYPE matches the campaign's grid family (latlon/cubed_sphere/gaussian, iter 493) so the
+# go/no-go measures the C_K sensitivity on the SAME grid the campaign ranks over.
+if [ -n "${GRID_TYPE:-}" ]; then ARGS+=(--grid-type "$GRID_TYPE"); fi
 
 echo "=== HOST ==="; hostname; date
 # Run the REALISTIC (rrtmgp) two-C_K sensitivity vs real ERA5; the tool's exit code IS the

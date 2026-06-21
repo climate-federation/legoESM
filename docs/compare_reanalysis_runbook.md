@@ -126,6 +126,9 @@ total.
 > To MATCH an ocean-only campaign, pass the same env vars to the pre-flight wrapper as to the
 > campaign one: `OCEAN_ONLY=1 LAND_MASK_PATH=<mask> MAX_LAND_FRACTION=<thr>` (iter 478) — both
 > launchers then score the same ocean columns, so the go/no-go reflects the campaign's domain.
+> For a NON-lat-lon campaign also set `GRID_TYPE=cubed_sphere` (or `gaussian`, iter 493) so the
+> sensitivity is measured on the campaign's grid family (the OSSE pre-flight already uses the
+> exact `--config`, so it is grid-faithful by construction).
 >
 > *Tip:* run the **gray** pre-flight FIRST as a quick (minutes, interactive) chain sanity-check —
 > it reports NO-GO with the per-level BL-localization, so a clean run confirms the real-ERA5
