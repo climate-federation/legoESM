@@ -5404,6 +5404,14 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Persist the lagged convective-cloud precip ACROSS segment
+                # boundaries (radiation runs before convection; without this the
+                # lag would reset to zeros at step 0 of every segment).  Only the
+                # single-member path is threaded (ensemble carries an extra axis
+                # pack_carry doesn't expect); ensemble runs are not the realism
+                # target, so they reset per segment.
+                conv_precip_prev=(getattr(self, "_conv_precip_prev", None)
+                                  if self._ensemble_size == 1 else None),
                 T_land=T_land,
                 tke=phys_tke,
                 qke=phys_qke,
@@ -5459,6 +5467,11 @@ class ModelDriver:
                     carry = run_segment.run_rad(carry, forcing)
             else:
                 carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
+
+            # Carry the lagged convective-cloud precip into the next segment
+            # (single-member only — see pack_carry above).
+            if self._ensemble_size == 1:
+                self._conv_precip_prev = carry.conv_precip_prev
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)

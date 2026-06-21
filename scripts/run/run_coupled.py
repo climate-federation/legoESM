@@ -146,6 +146,14 @@ def main():
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
                         help="Cloud-fraction scheme (default: sundqvist)")
+    parser.add_argument("--convective-cloud", dest="convective_cloud",
+                        action="store_true", default=False,
+                        help="Add a bounded Slingo(1987) convective cumulus "
+                             "cloud-fraction source driven by the (lagged) "
+                             "convective precip — restores the tropical "
+                             "cloud-radiative effect the adjustment convection "
+                             "scheme (sbm) + RH-based cloud miss (the ~4.5 K "
+                             "coupled cold-bias fix).  Default off.")
     parser.add_argument("--microphysics", default="morrison",
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
@@ -412,6 +420,7 @@ def main():
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
+        convective_cloud=args.convective_cloud,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,

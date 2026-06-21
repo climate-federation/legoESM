@@ -796,6 +796,9 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
                           else (phys_out.gwd_spectrum
                                 if phys_out.gwd_spectrum is not None
                                 else carry.gwd_spectrum)),
+            # Lagged total precip for the convective cloud (mirrors the
+            # compiled _single_step rebuild).
+            conv_precip_prev=precip_step,
         )
     return carry
 

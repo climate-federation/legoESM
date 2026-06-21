@@ -215,7 +215,12 @@ def convective_cloud_fraction(
     Parameters
     ----------
     conv_precip : jnp.ndarray
-        Column convective precipitation rate [kg/m²/s], shape (ncol,).
+        Column precipitation rate [kg/m²/s] used as the cumulus-activity proxy,
+        shape (ncol,).  The coupled driver passes the (lagged) TOTAL column
+        precip — in the convecting tropics this is dominated by convection (the
+        target regime); precipitating extratropical columns also gain a modest
+        capped cover, which is physically reasonable (rain ⇒ cloud).  Swap in a
+        convective-only rate here if extratropical over-clouding appears.
     p_full : jnp.ndarray
         Full-level pressure [Pa], shape (ncol, nlev).
     config : CloudConfig
