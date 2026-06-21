@@ -334,6 +334,20 @@ build_driver, _ = make_base_driver_builder("cmip", coupled_preset=PRESETS["aquap
 > returned `coverage` (`fraction_in_hull`) — pass `min_fraction_covered=` to fail loud on an
 > out-of-hull (near-no-op) transfer — and **validate the transfer first** with
 > `run_perfect_model_osse.py --fine-resolution` (the twin go/no-go for this exact path).
+>
+> **Turnkey CLI preflight (`check_cross_grid_deploy.py`, iter 483).** The command-line analog
+> of `check_campaign_deploy.py` for the cross-grid path — no Python needed:
+> ```bash
+> $PY scripts/experiment/check_cross_grid_deploy.py --kernel <out>.env_kernel.json \
+>     --target-base-config <target_config>.json --target-restart <target_run>.npz \
+>     --sst-npz <target_sst>.npz   # [--min-fraction-covered 0.8] [--allow-approximate-sst]
+> ```
+> The target grid/nlev/vertical-coord come from `--target-base-config`; `--sst-npz` supplies the
+> kernel's *dominant* predictor (the target run's prescribed/coupled SST) and is REQUIRED unless
+> `--allow-approximate-sst` (else it fails loud — a deploy on a fabricated SST is untrustworthy).
+> It reports the per-column override range + `coverage` (`fraction_covered`/`fraction_in_hull`/
+> `sst_from_model`); like the same-grid path the override is NOT serialized — inject it at runtime
+> via `apply_env_kernel_override(kernel, target_env)` in the production driver.
 
 ## 6. Verify on a HELD-OUT window (the rigorous check)
 

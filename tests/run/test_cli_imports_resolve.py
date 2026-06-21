@@ -30,6 +30,7 @@ _CLIS = (
     "scripts/run/run_column_les.py",
     "scripts/validate/run_perfect_model_osse.py",
     "scripts/validate/compare_amip_era5.py",
+    "scripts/experiment/check_cross_grid_deploy.py",
 )
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,6 +110,7 @@ _SCRIPT_CLIS = (
     "scripts/validate/run_perfect_model_osse.py",
     "scripts/experiment/smoke_compare_reanalysis.py",
     "scripts/experiment/check_campaign_deploy.py",
+    "scripts/experiment/check_cross_grid_deploy.py",
 )
 
 
