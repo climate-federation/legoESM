@@ -597,7 +597,9 @@ def init_multilayer_land_state(
         theta_init = 0.5 * config.hydraulics.theta_sat
 
     T_soil = jnp.full((ncol, nlayers), T_init)
-    theta_soil = jnp.full((ncol, nlayers), theta_init)
+    # broadcast_to (not full) so a PER-COLUMN theta_init (ncol,1) from a spatial
+    # theta_sat works; scalar theta_init broadcasts identically.
+    theta_soil = jnp.broadcast_to(jnp.asarray(theta_init), (ncol, nlayers))
     psi_soil = psi_from_theta(theta_soil, config.hydraulics)
 
     return MultiLayerLandState(

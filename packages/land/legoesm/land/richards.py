@@ -124,7 +124,10 @@ def solve_richards(
     # producing artificially-enhanced infiltration.  Using ``abs(psi)``
     # would always increase the capacity, which is wrong for ponded
     # cells (Codex GPT-5 review caught the sign).
-    K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], hydro_config)
+    # Keep the column axis (``[:, :1]`` not ``[:, 0]``) so a PER-COLUMN
+    # ``hydro_config`` (van-Genuchten fields shaped ``(ncol, 1)`` for spatial soil)
+    # broadcasts; squeeze back to ``(ncol,)``.  Bit-identical for a scalar config.
+    K_top = hydraulic_conductivity(psi[:, :1], theta[:, :1], hydro_config)[:, 0]
     head_grad = psi[:, 0] / (0.5 * dz[0])
     infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
 

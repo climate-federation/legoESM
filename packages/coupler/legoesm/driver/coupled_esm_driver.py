@@ -532,6 +532,20 @@ class CoupledESMDriver:
             carbon_cfg = CarbonConfig(scheme="differland")
             land_cfg = land_cfg._replace(carbon=carbon_cfg)
 
+        # Spatial soil hydraulics from the CLM reference map (per-column van-
+        # Genuchten retention) for the Richards multilayer land.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"
+                and self._atm._grid_lat is not None):
+            from legoesm.land.clm_surface_map import (
+                download_clm_surfdata, load_clm_surface, clm_hydraulics_config)
+            lat = self._atm._grid_lat; lon = self._atm._grid_lon
+            lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            land_cfg = land_cfg._replace(hydraulics=clm_hydraulics_config(smap))
+            logger.info("  Soil: CLM reference van-Genuchten map (per-column)")
+
         self._land_cfg = land_cfg  # store for diagnostics
 
         # PFT parameter provider (if requested and land is active)

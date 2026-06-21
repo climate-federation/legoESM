@@ -139,6 +139,21 @@ class CLMSurfaceParamProvider(eqx.Module):
         return LandSurfaceParams(**params)
 
 
+def clm_hydraulics_config(surface_map: dict):
+    """Per-column :class:`SoilHydraulicsConfig` from a :func:`load_clm_surface`
+    result — the reference-soil van-Genuchten retention map, shaped ``(ncol, 1)``
+    so it broadcasts over soil layers in the Richards/thermal solvers (the solver
+    is per-column heterogeneous; per-layer would need ``(ncol, n_layers)``).
+
+    Drop into ``MultiLayerLandConfig(hydraulics=...)`` for spatially-varying soil
+    hydrology; the non-VG fields keep their (scalar) defaults."""
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+    col = lambda k: jnp.asarray(surface_map[k]).reshape(-1, 1)
+    return SoilHydraulicsConfig(
+        theta_r=col("theta_r"), theta_sat=col("theta_sat"),
+        alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
+
+
 def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None
                          ) -> CLMSurfaceParamProvider:
     """Build the default CLM PFT + reference-soil parameter provider for the given
