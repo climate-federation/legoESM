@@ -31,6 +31,7 @@ _CLIS = (
     "scripts/validate/run_perfect_model_osse.py",
     "scripts/validate/compare_amip_era5.py",
     "scripts/experiment/check_cross_grid_deploy.py",
+    "scripts/experiment/check_real_era5_full_loop.py",
 )
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -111,6 +112,7 @@ _SCRIPT_CLIS = (
     "scripts/experiment/smoke_compare_reanalysis.py",
     "scripts/experiment/check_campaign_deploy.py",
     "scripts/experiment/check_cross_grid_deploy.py",
+    "scripts/experiment/check_real_era5_full_loop.py",
 )
 
 
