@@ -393,6 +393,31 @@ def test_column_environment_grid_shapes_and_sst():
     assert bool(jnp.all(length_scales > 0))
 
 
+def test_column_environment_grid_handles_a_3d_cubed_sphere_shape():
+    """column_environment_grid flattens any leading column dims ROW-MAJOR (iter 497) — the
+    cubed-sphere (6,n,n) horizontal, NOT just lat-lon's (nlat,nlon). The flattening MUST match
+    the worst-column ranking's row-major column-order contract (else the cross-grid env-kernel
+    would mispair env tags with columns), so the per-column SST predictor equals the row-major-
+    flattened sst_K. Pure (no model run) — the env predictors are computed per column, so this
+    locks the cubed-sphere env-kernel path's predictors without the slow full loop."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.compare_reanalysis import ColumnState
+
+    npanel, n, nlev = 6, 2, 5
+    sigma = create_sigma_coordinate(nlev)
+    # a DISTINCT SST per cubed-sphere column so the row-major flattening is checkable
+    sst = jnp.arange(npanel * n * n, dtype=jnp.float64).reshape(npanel, n, n) + 290.0
+    model = ColumnState(
+        T=jnp.full((npanel, n, n, nlev), 280.0), q_v=jnp.full((npanel, n, n, nlev), 5e-3),
+        u=jnp.full((npanel, n, n, nlev), 5.0), v=jnp.zeros((npanel, n, n, nlev)),
+        p_s=jnp.full((npanel, n, n), 1.0e5), sst_K=sst)
+    grid_env, length_scales = column_environment_grid(model, sigma)
+    assert grid_env.shape == (npanel * n * n, 3)          # (6*n*n, 3): 3-D leading dims flattened
+    assert length_scales.shape == (3,) and bool(jnp.all(jnp.isfinite(grid_env)))
+    # the SST predictor (col 0) is the ROW-MAJOR-flattened sst_K — the ranking's column order
+    np.testing.assert_allclose(np.asarray(grid_env[:, 0]), np.asarray(sst).reshape(-1))
+
+
 def test_column_environment_grid_warns_on_sst_fallback():
     """The SECOND SST-fallback path (iter 281, symmetric with the compare path): when
     sst_K is None the env-kernel grid SST tag falls back to lowest-level AIR TEMPERATURE
