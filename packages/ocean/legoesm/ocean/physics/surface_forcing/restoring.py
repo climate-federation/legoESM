@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from legoesm.ocean.physics.surface_forcing.config import RestoringConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
+from legoesm.ocean.physics.surface_forcing._shared import linear_relaxation
 
 
 def _make_target(cfg: RestoringConfig, lat, dtype, kind: str):
@@ -110,8 +111,13 @@ def restoring_surface_forcing(
         eff_tau_T = cfg.tau_T
         eff_tau_S = cfg.tau_S
 
-    surf_dT = -(T[..., 0] - T_star) / eff_tau_T
-    surf_dS = -(S[..., 0] - S_star) / eff_tau_S
+    # Newtonian relaxation toward the zonal target (shared kernel, #518 item 9).
+    # ``neg_field_minus_target`` reproduces the prior -(f - target)/tau form
+    # bit-for-bit.
+    surf_dT = linear_relaxation(
+        T[..., 0], T_star, eff_tau_T, numerator="neg_field_minus_target")
+    surf_dS = linear_relaxation(
+        S[..., 0], S_star, eff_tau_S, numerator="neg_field_minus_target")
 
     if cfg.subtract_qsr:
         if sw_down is None:

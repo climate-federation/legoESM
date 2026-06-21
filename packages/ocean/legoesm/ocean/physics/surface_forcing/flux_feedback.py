@@ -87,7 +87,10 @@ from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
     shortwave_penetration_tendency,
 )
-from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
+from legoesm.ocean.physics.surface_forcing._shared import (
+    linear_relaxation,
+    surface_tendency_factors,
+)
 from legoesm.ocean.physics.surface_forcing.config import FluxFeedbackConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
@@ -356,7 +359,9 @@ def flux_feedback_surface_forcing(
             dS_top = (jnp.asarray(S_p, dtype)
                       * (jnp.asarray(S_t, dtype) - S_surf) * inv_dz)
         else:
-            dS_top = (jnp.asarray(S_t, dtype) - S_surf) / cfg.tau_restore_s * mask
+            # Scalar SSS restoring (shared kernel, #518 item 9).
+            dS_top = linear_relaxation(
+                S_surf, jnp.asarray(S_t, dtype), cfg.tau_restore_s) * mask
     else:
         dS_top = zT
 

@@ -26,6 +26,37 @@ import jax.numpy as jnp
 _DZ_FLOOR_M = 1.0e-10
 
 
+def linear_relaxation(field, target, tau, *, numerator: str = "target_minus_field"):
+    """Linear (Newtonian) relaxation rate driving ``field`` toward ``target`` on
+    the e-folding timescale ``tau`` [s] (``tau > 0``) (#518 item 9).
+
+    Single source for the relaxation forms in ``restoring.py`` (SST / SSS sponge)
+    and ``flux_feedback.py`` (scalar SSS restoring).  The result is positive when
+    the field is below target; callers that need a masked rate multiply by their
+    own wet/ocean mask.
+
+    ``numerator`` selects the EXACT float-expression form so each call site stays
+    byte-identical to its prior inline code (the two forms are equal except for a
+    sign-of-zero when ``field == target`` exactly — preserved bit-for-bit):
+
+    * ``"target_minus_field"`` (default): ``(target - field) / tau`` —
+      flux_feedback's form.
+    * ``"neg_field_minus_target"``: ``-(field - target) / tau`` — restoring's
+      form.
+
+    Static Python string ``numerator`` (a feature-gating branch on a compile-time
+    constant, per the JAX rules) — NOT a traced selector.
+    """
+    if numerator == "target_minus_field":
+        return (target - field) / tau
+    if numerator == "neg_field_minus_target":
+        return -(field - target) / tau
+    raise ValueError(
+        f"Unknown numerator={numerator!r}; expected 'target_minus_field' "
+        f"or 'neg_field_minus_target'."
+    )
+
+
 def surface_tendency_factors(is_ocean, dz_0, rho_0, c_sw, *, dz_floor=_DZ_FLOOR_M):
     """Wet-cell flux→tendency reciprocals ``(inv_rho_dz, inv_rho_csw_dz)``.
 

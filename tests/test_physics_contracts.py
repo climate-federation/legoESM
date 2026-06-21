@@ -151,6 +151,7 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/output.py",
         "packages/ocean/legoesm/ocean/physics/mpas_physics.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/__init__.py",
+        "packages/ocean/legoesm/ocean/physics/surface_forcing/_shared.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/config.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/output.py",
