@@ -285,3 +285,10 @@ shrink.
   melt, **freeze→melt round-trip conserves**, d/dT) + 2 column tests
   (warm cell melts carried ice with closure; cold cell preserves ice). 91
   fast_sbm tests green.
+
+## References
+
+- Bigg, E. K., 1953: The supercooling of water. *Proceedings of the Physical Society B*, 66, 688–694.
+- Khain, A. P., Pokrovsky, A., Pinsky, M., Seifert, A. & Phillips, V., 2004: Simulation of effects of atmospheric aerosols on deep turbulent convective clouds using a spectral microphysics mixed-phase cumulus cloud model. Part I. *Journal of the Atmospheric Sciences*, 61, 2963–2982.
+- Locatelli, J. D. & Hobbs, P. V., 1974: Fall speeds and masses of solid precipitation particles. *Journal of Geophysical Research*, 79, 2185–2197.
+- Shpund, J., Khain, A., Lynn, B., Fan, J., Han, B., Ryzhkov, A., Snyder, J., Dudhia, J. & Gill, D., 2019: Simulating a mesoscale convective system using WRF with a new spectral bin microphysics. *Journal of Geophysical Research: Atmospheres*, 124, 9800–9824.

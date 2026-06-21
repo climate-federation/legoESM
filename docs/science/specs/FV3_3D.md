@@ -3,7 +3,9 @@
 Goal: solve cube-edge artifacts in the 3D atmospheric cubed-sphere paths
 (`primitive_eq_cdgrid.py` hydrostatic + `compressible_euler_cdgrid.py`
 non-hydrostatic) with **perfect conservation and no edge effects**, by
-being faithful to the GFDL FV3 Fortran reference at
+being faithful to the GFDL FV3 Fortran reference (vertically-Lagrangian
+finite-volume core, Lin 2004; cubed-sphere transport, Putman & Lin 2007;
+Harris et al. 2021) at
 `../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 
 The shallow-water FV3 path is "decent"; the 3D atmospheric paths produce
@@ -5341,4 +5343,13 @@ narrow the FV3-fidelity asymmetry between the two 3D paths, which
 is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
+
+## References
+
+- Colella, P. & Woodward, P. R., 1984: The Piecewise Parabolic Method (PPM) for gas-dynamical simulations. *Journal of Computational Physics*, 54, 174–201.
+- Harris, L. et al., 2021: GFDL SHiELD: A unified system for weather-to-seasonal prediction. *Journal of Advances in Modeling Earth Systems*, 13, e2020MS002223.
+- Lin, S.-J., 2004: A vertically Lagrangian finite-volume dynamical core for global models. *Monthly Weather Review*, 132, 2293–2307.
+- Putman, W. M. & Lin, S.-J., 2007: Finite-volume transport on various cubed-sphere grids. *Journal of Computational Physics*, 227, 55–78.
+- Skamarock, W. C. & Klemp, J. B., 2008: A time-split nonhydrostatic atmospheric model for weather research and forecasting applications. *Journal of Computational Physics*, 227, 3465–3485.
+- Smagorinsky, J., 1963: General circulation experiments with the primitive equations. I. The basic experiment. *Monthly Weather Review*, 91, 99–164.
 

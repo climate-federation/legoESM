@@ -9,7 +9,8 @@ Single source of truth: `scripts/matrix/run_atmosphere_test_matrix.py`.
 | MPAS | `icosahedral` | `MPAS{ShallowWater,PrimitiveEquation,CompressibleEuler}` |
 | Spectral | `spectral` | `Spectral{ShallowWater,PrimitiveEquation,CompressibleEuler}` |
 
-Ladder: SW Williamson (W2/W5/W6/cosine_bell) → Hydrostatic (HS, baroclinic,
+Ladder: SW Williamson (W2/W5/W6/cosine_bell; Williamson et al. 1992) →
+Hydrostatic (HS Held-Suarez 1994, baroclinic Jablonowski-Williamson 2006,
 DCMIP transport, AMIP, topo, gravity wave, Rossby-Haurwitz) → NH (DCMIP-2025
 TC1/TC2a/TC3).
 
@@ -165,3 +166,9 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 62   | 100-step lat-lon PE long-run guard (`test_long_run_mass_conservation_latlon_pe`).  Exercises iter-2/12 `_apply_safety_rails` over the 100-step horizon.  Drift `1.61e-16` on 36x72, dt=40.4s.  Long-run coverage now 7 tests. | locks lat-lon PE long-run |
 | 63   | 100-step MPAS PE long-run guard (`test_long_run_mass_conservation_mpas_pe`).  Drift `1.61e-16` on level-4 Voronoi + 10 sigma levels.  Completes the PE long-run matrix (cube / lat-lon / MPAS / spectral all covered).  8 long-run tests total. | locks MPAS PE long-run |
 | 64   | SW long-run guards for lat-lon (`1.79e-16`) and MPAS (`1.79e-16`).  Completes SW long-run matrix for the three anchored SW grids (spectral SW has no anchor since baseline is already bit-clean).  10 long-run tests total. | locks SW lat-lon + MPAS long-run |
+
+## References
+
+- Held, I. M. & Suarez, M. J., 1994: A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models. *Bulletin of the American Meteorological Society*, 75, 1825–1830.
+- Jablonowski, C. & Williamson, D. L., 2006: A baroclinic instability test case for atmospheric model dynamical cores. *Quarterly Journal of the Royal Meteorological Society*, 132, 2943–2975.
+- Williamson, D. L., Drake, J. B., Hack, J. J., Jakob, R. & Swarztrauber, P. N., 1992: A standard test set for numerical approximations to the shallow water equations in spherical geometry. *Journal of Computational Physics*, 102, 211–224.

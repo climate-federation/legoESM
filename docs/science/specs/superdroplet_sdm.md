@@ -240,3 +240,10 @@ not a complete precipitating microphysics for a full climate run.
 5. switchable wiring (config/factory/validate_strict/slot map) + column operator + integration test + matrix entry. codex. commit.
 6. conservation + differentiability (condensation grad) checks; docs. codex. commit.
 ```
+
+## References
+
+- Arabas, S. & Shima, S., 2017: On the CCN (de)activation nonlinearities. *Nonlinear Processes in Geophysics*, 24, 535–542.
+- Golovin, A. M., 1963: The solution of the coagulation equation for cloud droplets in a rising air current. *Izv. Geophys. Ser.*, 5, 482–487.
+- Scott, W. T., 1968: Analytic studies of cloud droplet coalescence I. *Journal of the Atmospheric Sciences*, 25, 54–65.
+- Shima, S., Kusano, K., Kawano, A., Sugiyama, T. & Kawahara, S., 2009: The super-droplet method for the numerical simulation of clouds and precipitation: a particle-based and probabilistic microphysics model coupled with a non-hydrostatic model. *Quarterly Journal of the Royal Meteorological Society*, 135, 1307–1320.

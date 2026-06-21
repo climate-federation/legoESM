@@ -1,8 +1,8 @@
 # new_test_dycores — FV3 cube parity vs latlon/MPAS/spectral
 
 Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
-Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
-Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
+Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/` (FV3 finite-volume core, Lin 2004; Putman & Lin 2007).
+Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration. Test cases: shallow-water W2/W5/W6/cosine-bell (Williamson et al. 1992), hydrostatic baroclinic wave (Jablonowski-Williamson 2006), Held-Suarez (Held & Suarez 1994), and NH DCMIP-2025 TC1/TC2/TC3.
 
 ## CRITICAL FINDING (iter-102 + iter-123): NH cube TC2 AND TC3 full-mode BLOWUP
 
@@ -409,3 +409,12 @@ Closed items (formerly queued):
 - ~~iter-64 nord_v=1 TC1 probe~~ — **resolved by iter-81** as duration-mismatch artifact, not config issue.
 - ~~iter-45 visual artifact inspection~~ — addressed by iter-58/59 numerical work; visual would require additional plotting work.
 - ~~Cube CB structural tracer del-4 op~~ — iter-58/59 cumulative 20.8 % L2 improvement makes this no longer the highest-value action.
+
+## References
+
+- Colella, P. & Woodward, P. R., 1984: The Piecewise Parabolic Method (PPM) for gas-dynamical simulations. *Journal of Computational Physics*, 54, 174–201.
+- Held, I. M. & Suarez, M. J., 1994: A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models. *Bulletin of the American Meteorological Society*, 75, 1825–1830.
+- Jablonowski, C. & Williamson, D. L., 2006: A baroclinic instability test case for atmospheric model dynamical cores. *Quarterly Journal of the Royal Meteorological Society*, 132, 2943–2975.
+- Lin, S.-J., 2004: A vertically Lagrangian finite-volume dynamical core for global models. *Monthly Weather Review*, 132, 2293–2307.
+- Putman, W. M. & Lin, S.-J., 2007: Finite-volume transport on various cubed-sphere grids. *Journal of Computational Physics*, 227, 55–78.
+- Williamson, D. L., Drake, J. B., Hack, J. J., Jakob, R. & Swarztrauber, P. N., 1992: A standard test set for numerical approximations to the shallow water equations in spherical geometry. *Journal of Computational Physics*, 102, 211–224.

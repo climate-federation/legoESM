@@ -28,7 +28,7 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 
 ## Definition of done
 
-30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=20 s + N_ACOUSTIC=12, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler + Smagorinsky LES + surface fluxes, Van Leer TVD horizontal advection, β=0.2 acoustic off-centering) must:
+30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=20 s + N_ACOUSTIC=12, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler warm-rain microphysics (Kessler 1969) + Smagorinsky LES (Smagorinsky 1963) + surface fluxes, Van Leer TVD horizontal advection (Van Leer 1977), β=0.2 acoustic off-centering) must:
 
 (iter-82: dt refreshed 1 s → 5 s per iter-9 F10 finding + iter-14/iter-38/iter-63 production-scale verification; the iter-1 dt=1 s was set against the bubble-IC F1 instability that F7 then disproved.)
 
@@ -70,6 +70,8 @@ Measured by `diag_bare_dycore_stability.py` with same Wing 2018 IC production dr
 **Per-step amplification ratio at dt=2 s** ≈ 1.30 (constant step 50 to 100). Mode period ≈ Brunt-Väisälä N⁻¹ ≈ 70 s. Saturates ~180 m/s independent of initial bubble amplitude (tested 0.05 K vs 0.5 K) — classic numerical mode saturation, not physical growth.
 
 ### F2. KW78 implicit buoyancy at *substep* level too small to help
+
+(KW78 = Klemp & Wilhelmson 1978 time-split compressible scheme; SK08 = Skamarock & Klemp 2008 off-centered forward-backward acoustic substep, used elsewhere in this doc.)
 
 KW78 adds three tridiagonal bands proportional to
 `κ = 0.25 dt_s² g / (θ₀_half J)` × dθ_ref/dz.
@@ -1792,4 +1794,13 @@ history (commits in the e6befce7..58db0859 range). One-line summary per iter:
 | 23 | CFL formula advisory in `run_rce.py`. iter-13 C48 dt=300 ratio=1.32× same as PASS C24 → formula informational. |
 | 24 | Refactor: auto-dt extracted to `legoesm.driver.rce_dt.auto_dt_rce`. |
 | 25 | Codex HIGH#1 (broad `except` → `ImportError`) + HIGH#2 (`auto_dt_rce` missing from public API) + MEDIUM (text-match test → behavioural identity check). |
+
+## References
+
+- Kessler, E., 1969: On the distribution and continuity of water substance in atmospheric circulations. *Meteorological Monographs*, 10, 1–84.
+- Klemp, J. B. & Wilhelmson, R. B., 1978: The simulation of three-dimensional convective storm dynamics. *Journal of the Atmospheric Sciences*, 35, 1070–1096.
+- Skamarock, W. C. & Klemp, J. B., 2008: A time-split nonhydrostatic atmospheric model for weather research and forecasting applications. *Journal of Computational Physics*, 227, 3465–3485.
+- Smagorinsky, J., 1963: General circulation experiments with the primitive equations. I. The basic experiment. *Monthly Weather Review*, 91, 99–164.
+- Van Leer, B., 1977: Towards the ultimate conservative difference scheme. IV. A new approach to numerical convection. *Journal of Computational Physics*, 23, 276–299.
+- Wing, A. A., Reed, K. A., Satoh, M., Stevens, B., Bony, S. & Ohno, T., 2018: Radiative-Convective Equilibrium Model Intercomparison Project. *Geoscientific Model Development*, 11, 793–813, doi:10.5194/gmd-11-793-2018.
 

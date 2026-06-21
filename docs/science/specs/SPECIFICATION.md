@@ -968,9 +968,9 @@ Integration signatures by model type:
 | Scheme | File | Description |
 |--------|------|-------------|
 | **Gray** | `gray.py` | Frierson (2006) two-stream gray radiation |
-| **RRTMGP** | `rrtmgp_radiation.py` | Full correlated-k radiative transfer (bundled jax-rrtmgp) |
+| **RRTMGP** | `rrtmgp_radiation.py` | Full correlated-k radiative transfer (RRTMGP, Pincus et al. 2019; bundled jax-rrtmgp) |
 
-RRTMGP bundle (`rrtmgp/`): Complete JAX port of RTE-RRTMGP including gas optics, cloud optics, shortwave/longwave solvers, and configuration management.
+RRTMGP bundle (`rrtmgp/`): Complete JAX port of RTE-RRTMGP (Pincus et al. 2019) including gas optics, cloud optics, shortwave/longwave solvers, and configuration management.
 
 Supporting: `solar.py` — solar geometry (zenith angle, insolation).
 
@@ -2620,6 +2620,41 @@ Run for 15 days. Validate:
 | Grids | 4 (cubed-sphere, lat-lon, Gaussian, Voronoi/MPAS) |
 | Time integrators | 6 (SSP-RK3, SSP-RK34, SSP-RK54, split-explicit, semi-implicit, leapfrog-RAW) |
 | Discretization families | 6 (C-D grid FV3, FV/PPM, spectral, FC-Gram, C-grid, MPAS/Voronoi) |
+
+---
+
+## References
+
+- Ball, J. T., Woodrow, I. E. & Berry, J. A., 1987: A model predicting stomatal conductance and its contribution to the control of photosynthesis under different environmental conditions. *Progress in Photosynthesis Research*, 4, 221–224.
+- Bourke, W., 1972: An efficient, one-level, primitive-equation spectral model. *Monthly Weather Review*, 100, 683–689.
+- Briegleb, B. P., 1992: Delta-Eddington approximation for solar radiation in the NCAR Community Climate Model. *Journal of Geophysical Research*, 97, 7603–7612.
+- Colella, P. & Woodward, P. R., 1984: The Piecewise Parabolic Method (PPM) for gas-dynamical simulations. *Journal of Computational Physics*, 54, 174–201.
+- Fairall, C. W., Bradley, E. F., Hare, J. E., Grachev, A. A. & Edson, J. B., 2003: Bulk parameterization of air-sea fluxes: Updates and verification for the COARE algorithm. *Journal of Climate*, 16, 571–591.
+- Farquhar, G. D., von Caemmerer, S. & Berry, J. A., 1980: A biochemical model of photosynthetic CO₂ assimilation in leaves of C3 species. *Planta*, 149, 78–90.
+- Fasham, M. J. R., Ducklow, H. W. & McKelvie, S. M., 1990: A nitrogen-based model of plankton dynamics in the oceanic mixed layer. *Journal of Marine Research*, 48, 591–639.
+- Frierson, D. M. W., Held, I. M. & Zurita-Gotor, P., 2006: A gray-radiation aquaplanet moist GCM. Part I: Static stability and eddy scale. *Journal of the Atmospheric Sciences*, 63, 2548–2566.
+- Hines, C. O., 1997: Doppler-spread parameterization of gravity-wave momentum deposition in the middle atmosphere. *Journal of Atmospheric and Solar-Terrestrial Physics*, 59, 371–400.
+- Hunke, E. C. & Dukowicz, J. K., 1997: An elastic-viscous-plastic model for sea ice dynamics. *Journal of Physical Oceanography*, 27, 1849–1867.
+- Jablonowski, C. & Williamson, D. L., 2006: A baroclinic instability test case for atmospheric model dynamical cores. *Quarterly Journal of the Royal Meteorological Society*, 132, 2943–2975.
+- Jarvis, P. G., 1976: The interpretation of the variations in leaf water potential and stomatal conductance found in canopies in the field. *Philosophical Transactions of the Royal Society B*, 273, 593–610.
+- Kessler, E., 1969: On the distribution and continuity of water substance in atmospheric circulations. *Meteorological Monographs*, 10, 1–84.
+- Kuo, H. L., 1974: Further studies of the parameterization of the influence of cumulus convection on large-scale flow. *Journal of the Atmospheric Sciences*, 31, 1232–1240.
+- Large, W. G. & Yeager, S. G., 2004: Diurnal to decadal global forcing for ocean and sea-ice models: The data sets and flux climatologies. NCAR Technical Note NCAR/TN-460+STR.
+- Lin, S.-J., 2004: A vertically Lagrangian finite-volume dynamical core for global models. *Monthly Weather Review*, 132, 2293–2307.
+- Lindzen, R. S., 1981: Turbulence and stress owing to gravity wave and tidal breakdown. *Journal of Geophysical Research*, 86, 9707–9714.
+- Lipscomb, W. H., 2001: Remapping the thickness distribution in sea ice models. *Journal of Geophysical Research*, 106, 13989–14000.
+- McFarlane, N. A., 1987: The effect of orographically excited gravity wave drag on the general circulation of the lower stratosphere and troposphere. *Journal of the Atmospheric Sciences*, 44, 1775–1800.
+- Medlyn, B. E. et al., 2011: Reconciling the optimal and empirical approaches to modelling stomatal conductance. *Global Change Biology*, 17, 2134–2144.
+- Morrison, H., Curry, J. A. & Khvorostyanov, V. I., 2005: A new double-moment microphysics parameterization for application in cloud and climate models. Part I. *Journal of the Atmospheric Sciences*, 62, 1665–1677.
+- Pincus, R., Mlawer, E. J. & Delamere, J. S., 2019: Balancing accuracy, efficiency, and flexibility in radiation calculations for dynamical models. *Journal of Advances in Modeling Earth Systems*, 11, 3074–3089.
+- Putman, W. M. & Lin, S.-J., 2007: Finite-volume transport on various cubed-sphere grids. *Journal of Computational Physics*, 227, 55–78.
+- Seifert, A. & Beheng, K. D., 2001: A double-moment parameterization for simulating autoconversion, accretion and selfcollection. *Atmospheric Research*, 59–60, 265–281.
+- Skamarock, W. C. & Klemp, J. B., 2008: A time-split nonhydrostatic atmospheric model for weather research and forecasting applications. *Journal of Computational Physics*, 227, 3465–3485.
+- Sundqvist, H., Berge, E. & Kristjánsson, J. E., 1989: Condensation and cloud parameterization studies with a mesoscale numerical weather prediction model. *Monthly Weather Review*, 117, 1641–1657.
+- Thompson, G., Field, P. R., Rasmussen, R. M. & Hall, W. D., 2008: Explicit forecasts of winter precipitation using an improved bulk microphysics scheme. Part II. *Monthly Weather Review*, 136, 5095–5115.
+- Wanninkhof, R., 2014: Relationship between wind speed and gas exchange over the ocean revisited. *Limnology and Oceanography: Methods*, 12, 351–362.
+- Williams, P. D., 2009: A proposed modification to the Robert-Asselin time filter. *Monthly Weather Review*, 137, 2538–2546.
+- Williamson, D. L., Drake, J. B., Hack, J. J., Jakob, R. & Swarztrauber, P. N., 1992: A standard test set for numerical approximations to the shallow water equations in spherical geometry. *Journal of Computational Physics*, 102, 211–224.
 
 ---
 

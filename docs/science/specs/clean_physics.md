@@ -454,3 +454,34 @@ Validated: 69/69 coupler unit tests pass.
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
 Next compression at iter-130.
+
+## References
+
+- Colella, P. & Woodward, P. R., 1984: The Piecewise Parabolic Method (PPM) for gas-dynamical simulations. *Journal of Computational Physics*, 54, 174–201.
+- Emanuel, K. A., 1991: A scheme for representing cumulus convection in large-scale models. *Journal of the Atmospheric Sciences*, 48, 2313–2335.
+- Farquhar, G. D., von Caemmerer, S. & Berry, J. A., 1980: A biochemical model of photosynthetic CO₂ assimilation in leaves of C3 species. *Planta*, 149, 78–90.
+- Gent, P. R. & McWilliams, J. C., 1990: Isopycnal mixing in ocean circulation models. *Journal of Physical Oceanography*, 20, 150–155.
+- Golaz, J.-C., Larson, V. E. & Cotton, W. R., 2002: A PDF-based model for boundary layer clouds. Part I: Method and model description (CLUBB). *Journal of the Atmospheric Sciences*, 59, 3540–3551.
+- Hines, C. O., 1997: Doppler-spread parameterization of gravity-wave momentum deposition in the middle atmosphere. *Journal of Atmospheric and Solar-Terrestrial Physics*, 59, 371–400.
+- Holtslag, A. A. M. & Boville, B. A., 1993: Local versus nonlocal boundary-layer diffusion in a global climate model. *Journal of Climate*, 6, 1825–1842.
+- Hong, S.-Y., Noh, Y. & Dudhia, J., 2006: A new vertical diffusion package with an explicit treatment of entrainment processes (YSU). *Monthly Weather Review*, 134, 2318–2341.
+- Hunke, E. C. & Dukowicz, J. K., 1997: An elastic-viscous-plastic model for sea ice dynamics. *Journal of Physical Oceanography*, 27, 1849–1867.
+- Kain, J. S. & Fritsch, J. M., 1990: A one-dimensional entraining/detraining plume model and its application in convective parameterization. *Journal of the Atmospheric Sciences*, 47, 2784–2802.
+- Kessler, E., 1969: On the distribution and continuity of water substance in atmospheric circulations. *Meteorological Monographs*, 10, 1–84.
+- Kuo, H. L., 1974: Further studies of the parameterization of the influence of cumulus convection on large-scale flow. *Journal of the Atmospheric Sciences*, 31, 1232–1240.
+- Large, W. G., McWilliams, J. C. & Doney, S. C., 1994: Oceanic vertical mixing: A review and a model with a nonlocal boundary layer parameterization (KPP). *Reviews of Geophysics*, 32, 363–403.
+- Lindzen, R. S., 1981: Turbulence and stress owing to gravity wave and tidal breakdown. *Journal of Geophysical Research*, 86, 9707–9714.
+- Louis, J.-F., 1979: A parametric model of vertical eddy fluxes in the atmosphere. *Boundary-Layer Meteorology*, 17, 187–202.
+- McFarlane, N. A., 1987: The effect of orographically excited gravity wave drag on the general circulation of the lower stratosphere and troposphere. *Journal of the Atmospheric Sciences*, 44, 1775–1800.
+- Morrison, H., Curry, J. A. & Khvorostyanov, V. I., 2005: A new double-moment microphysics parameterization for application in cloud and climate models. Part I. *Journal of the Atmospheric Sciences*, 62, 1665–1677.
+- Redi, M. H., 1982: Oceanic isopycnal mixing by coordinate rotation. *Journal of Physical Oceanography*, 12, 1154–1158.
+- Seifert, A. & Beheng, K. D., 2001: A double-moment parameterization for simulating autoconversion, accretion and selfcollection. *Atmospheric Research*, 59–60, 265–281.
+- Sundqvist, H., Berge, E. & Kristjánsson, J. E., 1989: Condensation and cloud parameterization studies with a mesoscale numerical weather prediction model. *Monthly Weather Review*, 117, 1641–1657.
+- Thompson, G., Field, P. R., Rasmussen, R. M. & Hall, W. D., 2008: Explicit forecasts of winter precipitation using an improved bulk microphysics scheme. Part II. *Monthly Weather Review*, 136, 5095–5115.
+- Tiedtke, M., 1989: A comprehensive mass flux scheme for cumulus parameterization in large-scale models. *Monthly Weather Review*, 117, 1779–1800.
+- Visbeck, M., Marshall, J., Haine, T. & Spall, M., 1997: Specification of eddy transfer coefficients in coarse-resolution ocean circulation models. *Journal of Physical Oceanography*, 27, 381–402.
+- Wright, D. G., 1997: An equation of state for use in ocean models: Eckart's formula revisited. *Journal of Atmospheric and Oceanic Technology*, 14, 735–740.
+- Zhang, G. J. & McFarlane, N. A., 1995: Sensitivity of climate simulations to the parameterization of cumulus convection in the Canadian Climate Centre general circulation model. *Atmosphere-Ocean*, 33, 407–446.
+
+<!-- TODO-CITE: Bechtold convection scheme — needs author/year (Bechtold et al.) -->
+<!-- TODO-CITE: Briegleb 1992 ocean albedo — JGR vol/pages not verified here -->

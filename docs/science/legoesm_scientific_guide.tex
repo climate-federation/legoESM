@@ -288,8 +288,14 @@ runners.
 \label{sec:cubed-sphere}
 
 Six faces of a cube are mapped to the sphere via \textbf{gnomonic (central)
-projection}.  Let $(\alpha_x,\alpha_y)\in[-\pi/4,\pi/4]^2$ be gnomonic
-coordinates on a face.
+projection} \citep{Ronchi1996,PutmanLin2007}.  This quasi-uniform tiling avoids
+the polar singularity and convergence of meridians inherent to a latitude--longitude
+mesh, so the maximum stable timestep is set by a near-uniform grid spacing rather
+than by the vanishing zonal spacing at the poles.  Let
+$(\alpha_x,\alpha_y)\in[-\pi/4,\pi/4]^2$ be the equiangular gnomonic
+coordinates on a face; great circles map to straight lines in $(\alpha_x,\alpha_y)$,
+which is what makes the projection convenient for conservative finite-volume
+discretisation \citep{Sadourny1972}.
 
 \subsection{Face-to-Cartesian Mapping}
 
@@ -308,6 +314,12 @@ $\phi=\arcsin(\hat z)$.
   \qquad D = \sqrt{1+\tan^2\!\alpha_x+\tan^2\!\alpha_y},
   \qquad \Delta\alpha=\frac{\pi}{2n}.
 \end{equation}
+Here $R$ is the planetary radius, $\Delta\alpha$ the uniform angular cell width
+for a C$n$ face of $n\times n$ cells, and the metric factor $D$ is the distance
+from the cube centre to the projected point.  The $D^{-3}$ weighting concentrates
+area away from the face centres and is exactly the Jacobian of the gnomonic map;
+integrating $\Delta A$ over the six faces recovers $4\pi R^2$, which is the
+discrete area-conservation property the finite-volume operators rely on.
 
 \subsection{Grid Spacing}
 
@@ -339,7 +351,11 @@ Wind rotation between geographic $(u_E,v_N)$ and grid-aligned $(u_g,v_g)$:
 
 Scalar fields are exchanged directly across the six-face connectivity table.
 Vector fields are first rotated to geographic components, padded as scalars,
-then rotated back.  Two halo widths are supported: halo\,=\,1 for second-order
+then rotated back, because the grid-aligned basis is discontinuous across a
+panel edge and a naive copy of $(u_g,v_g)$ would inject a spurious rotation at
+the seam.  A discrete duo-grid treatment of the panel edges removes the residual
+edge imprint that a single-grid halo leaves on differential operators
+\citep{Mouallem2023}.  Two halo widths are supported: halo\,=\,1 for second-order
 and MUSCL stencils, and halo\,=\,2 for PPM/WENO5 and biharmonic operators.
 
 \paragraph{Native 4D halo exchange.}
@@ -363,8 +379,12 @@ only in diagnostics and are not differentiable.
 \section{Gaussian Grid and Spectral Transforms}
 \label{sec:spectral-grid}
 
-The spectral dynamical cores use a Gaussian grid with triangular truncation
-at total wavenumber $n_{\max}$.
+The spectral dynamical cores represent fields by their spherical-harmonic
+coefficients and use a Gaussian grid with triangular truncation at total
+wavenumber $n_{\max}$ \citep{Bourke1972,HoskinsSimmons1975}.  Triangular
+truncation is chosen because it is isotropic: the retained set of harmonics is
+invariant under rotation of the sphere, so no direction is preferentially
+resolved.
 
 \subsection{Grid Dimensions}
 \begin{equation}
@@ -372,8 +392,12 @@ at total wavenumber $n_{\max}$.
   \qquad n_{\mathrm{lon}} = 2\,n_{\mathrm{lat}},
   \qquad n_{\mathrm{sh}} = \frac{(n_{\max}+1)(n_{\max}+2)}{2}.
 \end{equation}
+Here $n_{\mathrm{lat}}$, $n_{\mathrm{lon}}$, and $n_{\mathrm{sh}}$ are the number
+of latitudes, longitudes, and retained spectral coefficients.  The $\tfrac{3}{2}$
+factor is the standard transform-grid choice that makes the Gaussian quadrature
+exact for the quadratic (advective) products, eliminating spectral aliasing.
 Latitudes are Gaussian quadrature points $\mu_k=\sin\phi_k$ with weights
-$w_k$; longitudes are equispaced.
+$w_k$; longitudes are equispaced so the zonal direction can be treated by FFT.
 
 \subsection{Associated Legendre Polynomials}
 
@@ -395,6 +419,10 @@ meridional gradients.
   \hat f_{nm} = 2\pi\sum_k w_k\,P_n^m(\mu_k)\,\tilde f_m(\mu_k),
   \qquad \tilde f_m = \frac{1}{n_{\mathrm{lon}}}\,\mathrm{FFT}[f]_m.
 \end{equation}
+The transform is split into a fast Fourier transform in longitude followed by a
+Gaussian-quadrature sum over latitude $\mu_k$ weighted by $w_k$ and the Legendre
+function $P_n^m$ \citep{Bourke1972}.  Because the quadrature is exact at this
+resolution, analysis followed by synthesis returns the resolved field to round-off.
 
 \paragraph{Synthesis (spectral $\to$ grid).}
 \begin{equation}
@@ -438,8 +466,14 @@ near the poles.
 \label{sec:voronoi-grid}
 
 An unstructured Voronoi tessellation generated from an icosahedral parent
-mesh.  The TRiSK (Thuburn--Ringler--Skamarock--Klemp) scheme provides
-mimetic discrete operators on this grid:
+mesh \citep{Skamarock2012}.  The TRiSK (Thuburn--Ringler--Skamarock--Klemp)
+scheme provides mimetic discrete operators on this C-grid
+\citep{Thuburn2009,Ringler2010}.  Mimetic here means the discrete divergence,
+gradient, and curl satisfy the same vector-calculus identities as their
+continuous counterparts ($\divg\,\grad\times=0$ and $\grad\times\grad=0$ to
+machine precision), which in turn guarantees discrete conservation of mass and
+potential vorticity and suppresses the spurious computational modes that a
+non-mimetic C-grid would admit.  The placement is
 \begin{itemize}[nosep]
   \item Scalars (height, tracers, pressure) at cell centres;
   \item Normal velocity at edges;
@@ -461,7 +495,10 @@ $\sigma_k=(\sigma_{k-1/2}+\sigma_{k+1/2})/2$.
 
 \subsubsection{Simmons--Burridge Geopotential}
 
-The geopotential at full level $k$ is
+The vertical finite differencing follows \citet{SimmonsBurridge1981}, which is
+constructed so that the discrete pressure-gradient and energy-conversion terms
+conserve total energy under adiabatic, frictionless flow.  The geopotential at
+full level $k$ is
 \begin{equation}
   \Phi_k = \Phi_s + \Rd\!\sum_{k'=k+1}^{N-1}T_{k'}\ln\frac{\sigma_{k'+1/2}}{\sigma_{k'-1/2}}
   + \alpha_k\,\Rd\,T_k,
@@ -471,6 +508,10 @@ where the Simmons--Burridge coefficient is
   \alpha_k = 1 - \frac{\sigma_{k-1/2}}{\Delta\sigma_k}
   \ln\frac{\sigma_{k+1/2}}{\sigma_{k-1/2}}.
 \end{equation}
+Here $\Phi_s$ is the surface geopotential, $\Rd$ the dry gas constant, $T_{k'}$
+the layer temperature, and $\alpha_k$ the Simmons--Burridge weighting that
+distributes the within-layer geopotential increment consistently with the
+hydrostatic relation, so that the discrete hydrostatic balance is exact.
 
 \subsubsection{Sigma-Dot (Vertical Velocity)}
 \begin{equation}
@@ -492,10 +533,13 @@ where the Simmons--Burridge coefficient is
 \begin{equation}
   p(k) = A(k)\,p_{\mathrm{ref}} + B(k)\,p_s,
 \end{equation}
-where $A(k)\to 1,\,B(k)\to 0$ at the model top (pure pressure levels)
+where $A(k)$ and $B(k)$ are the prescribed hybrid coefficients with
+$A(k)\to 1,\,B(k)\to 0$ at the model top (pure pressure levels)
 and $A(k)\to 0,\,B(k)\to 1$ near the surface (pure sigma).
-This eliminates large pressure-gradient force errors over steep topography
-that afflict the pure sigma coordinate.
+Flattening the upper levels to pressure surfaces eliminates the large
+pressure-gradient force errors over steep topography that afflict the pure
+sigma coordinate, where the two large terms of the pressure gradient must
+cancel along a steeply sloping surface.
 
 \subsection{Terrain-Following Height Coordinate ($z^*$)}
 
@@ -513,7 +557,11 @@ The ocean uses a dynamic $z^*$ coordinate with free-surface elevation $\eta$:
 \begin{equation}
   J(\eta) = \frac{\eta+H}{H_{\max}},
 \end{equation}
-where $H$ is the resting depth.
+where $H$ is the resting depth and $J$ the layer-thickness Jacobian.  Stretching
+each column by $J(\eta)$ lets every level dilate uniformly with the moving free
+surface, so the coordinate stays a smooth function of the surface state, in the
+same spirit as the Lagrangian-then-remap vertical treatment of the finite-volume
+atmosphere core \citep{Lin2004}.
 
 
 % #############################################################################
@@ -524,8 +572,12 @@ where $H$ is the resting depth.
 \section{Physics Pipeline}
 
 The \texttt{PhysicsPipeline} class composes all physical parameterisations
-into a single callable that is invoked once per dynamics timestep.  The
-calling sequence within a single step is:
+into a single callable that is invoked once per dynamics timestep.  The ordering
+is not arbitrary: each parameterisation operates on the state already updated by
+the preceding ones, so radiation sets the column heating that drives convection,
+convection conditions the moisture field seen by the microphysics, and the
+boundary layer mixes the resulting profiles before the surface fluxes close the
+column energy and water budgets.  The calling sequence within a single step is:
 
 \begin{enumerate}[nosep]
   \item \textbf{Dynamics step}: Update winds, temperature, surface pressure,
@@ -563,10 +615,14 @@ discretisation.
 \section{Time-Split vs Process-Split}
 
 legoESM uses \textbf{time-split} coupling: dynamics and physics operate
-sequentially within each timestep.  Physics tendencies are computed from
-the dynamics-updated state and applied as a forward-Euler update.  This
-is natural for the finite-volume dycores that use a Lagrangian vertical
-coordinate internally.
+sequentially within each timestep, so the physics sees the fully advected state
+rather than a partial tendency.  Physics tendencies are computed from
+the dynamics-updated state and applied as a forward-Euler update.  In
+process-split coupling, by contrast, dynamics and physics tendencies are
+evaluated from the same time-level state and summed; the sequential update
+chosen here keeps each parameterisation consistent with the column the previous
+one produced, and is natural for the finite-volume dycores that remap onto a
+Lagrangian vertical coordinate internally before physics is applied.
 
 
 % #############################################################################
@@ -583,7 +639,12 @@ then by discretisation.
 \section{Shallow Water Equations}
 \label{sec:sw}
 
-The rotating shallow water equations in \textbf{vector-invariant form}:
+The shallow water system is the canonical proving ground for horizontal
+dynamical cores: it retains the rotational and gravity-wave dynamics that
+control the fast modes of the full equations while collapsing the vertical
+structure to a single layer, so the standard test set of \citet{Williamson1992}
+can isolate grid imprinting, dispersion, and conservation errors. The rotating
+shallow water equations in \textbf{vector-invariant form}:
 \begin{align}
   \frac{\pp h}{\pp t} &= -\divg(h\,\vect{v}),
   \label{eq:sw-mass}\\
@@ -592,14 +653,29 @@ The rotating shallow water equations in \textbf{vector-invariant form}:
   \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} + D_v,
   \label{eq:sw-v}
 \end{align}
-where $B=\half(u^2+v^2)+g(h+h_s)$ is the Bernoulli function,
+where $h$ is the fluid depth, $\vect{v}=(u,v)$ the horizontal velocity,
+$f$ the Coriolis parameter, $g$ gravity, and $h_s$ the bottom topography.
+$B=\half(u^2+v^2)+g(h+h_s)$ is the Bernoulli function,
 $\zeta=\pp v/\pp x - \pp u/\pp y$ is the relative vorticity,
-and $D_u,D_v$ represent hyperdiffusion.
+and $D_u,D_v$ represent hyperdiffusion. The first equation expresses exact mass
+(volume) conservation in flux form; the momentum equations express the balance
+between the absolute-vorticity ($\zeta+f$) flux, the Bernoulli gradient that
+combines kinetic energy and free-surface pressure, and scale-selective
+dissipation. Writing the advection through $(\zeta+f)$ rather than as
+$\vect{v}\cdot\grad\vect{v}$ keeps the Coriolis and metric terms in a single
+discretely consistent operator, which is what permits simultaneous mass,
+energy, and potential-enstrophy control on the staggered grids below.
 
 \subsection{C-D Grid Cubed-Sphere Discretisation}
 
-This is the primary shallow water solver, using the FV3-style C-D grid
-staggering of \citet{Lin2004} and \citet{PutmanLin2007}.
+This is the primary shallow water solver. It maps the equations onto the
+gnomonic cubed sphere \citep{Ronchi1996,PutmanLin2007}, a quasi-uniform tiling
+of six logically rectangular panels that avoids the polar singularity of the
+lat-lon mesh, and uses the FV3-style C-D grid staggering of \citet{Lin2004} and
+\citet{PutmanLin2007}. The C-D arrangement carries momentum on the D-grid (so
+vorticity is cleanly defined at corners) while diagnosing C-grid mass fluxes for
+transport, combining the favourable geostrophic adjustment of the C-grid with
+the well-resolved vorticity dynamics of the D-grid.
 
 \paragraph{Prognostic variables.}
 D-grid winds $(u_d,v_d)$ at cell corners, shape $(6,n\!+\!1,n\!+\!1)$;
@@ -613,9 +689,14 @@ corner dual-cell area:
   \approx \frac{1}{A_c}\bigl[u^D_{i,j}\Delta x - u^D_{i+1,j}\Delta x
   + v^D_{i,j+1}\Delta y - v^D_{i,j}\Delta y\bigr].
 \end{equation}
-This circulation-based discretisation is exact on the D-grid and
-\textbf{eliminates the Hollingsworth--Kallberg instability} that plagues
-A-grid vorticity operators.
+Here $A_c$ is the corner dual-cell area and $\Delta x,\Delta y$ are the local
+edge lengths. Because vorticity is defined as the line integral of the
+tangential wind around the dual cell, the discrete curl inherits the
+Stokes-theorem identity exactly, so the kinetic-energy and enstrophy budgets
+remain mutually consistent. This circulation-based discretisation is exact on
+the D-grid and \textbf{eliminates the Hollingsworth--Kallberg instability} that
+plagues A-grid vorticity operators, in which a vorticity stencil inconsistent
+with the kinetic-energy gradient feeds a spurious symmetric-instability mode.
 
 \paragraph{Arakawa--Lamb gradient.}
 The Bernoulli gradient at D-grid corners uses a 4-point average:
@@ -677,7 +758,8 @@ Kinetic energy is computed from A-grid velocities at cell centres, with
 an optional 4th-order averaging stencil (\texttt{a2b\_ord4}).
 
 \paragraph{Duo-grid sub-grid metrics (Mouallem et al.\ 2023).}
-The cubed-sphere C-D grid computes 9-point sub-grid angle metrics per cell:
+Following the duo-grid construction of \citet{Mouallem2023}, the cubed-sphere
+C-D grid computes 9-point sub-grid angle metrics per cell:
 \begin{equation}
   \sin\alpha_{\mathrm{sg}},\;\cos\alpha_{\mathrm{sg}} \in \mathbb{R}^{6 \times n \times n \times 9},
 \end{equation}
@@ -694,7 +776,8 @@ non-orthogonality.  Additional C-D grid metrics:
 
 \paragraph{Fidelity calibration and 3D edge-artifact sentinels.}
 The C-D-grid FV3 port is gated on a dual-target Williamson 2 / Williamson 5
-calibration: at C36 with $\Delta t=300$~s the production knobs
+calibration drawn from the standard sphere test set
+\citep{Williamson1992}: at C36 with $\Delta t=300$~s the production knobs
 \texttt{div\_damp\_order = 8} and \texttt{damp\_v = 0.030} (iter-1030)
 satisfy both criteria simultaneously --- Williamson 2 v-wind error
 $|v_{\mathrm{ll}}|<0.119$~m\,s$^{-1}$ and Williamson 5 day-5 height
@@ -717,14 +800,25 @@ damps meridional wavelengths near the poles to maintain CFL stability.
 \subsection{C-Grid Lat-Lon Discretisation}
 
 Height at cell centres; $u$ at longitude interfaces; $v$ at latitude
-interfaces.  Advantages: exact pressure gradient (just cell differences),
+interfaces.  The operators follow the energy- and enstrophy-conserving
+finite-difference construction of \citet{Sadourny1972} for the sphere.
+Advantages: exact pressure gradient (just cell differences),
 mass flux naturally at cell interfaces (no interpolation), and better
-gravity wave dispersion.  The Coriolis term requires 4-point interpolation.
+gravity wave dispersion.  The Coriolis term requires 4-point interpolation,
+which is the price the C-grid pays for placing $u$ and $v$ on different
+interfaces; the interpolation weights are chosen to preserve the discrete
+energy conversion between kinetic and potential reservoirs.
 
 \subsection{TRiSK Discretisation on Voronoi Mesh}
 
-Following \citet{Ringler2010}, the discrete operators on the Voronoi
-mesh are:
+The unstructured Spherical Centroidal Voronoi Tessellation places scalars at
+cell centres and the normal velocity component $u_e$ on edges. The TRiSK
+(Thuburn--Ringler--Skamarock--Klemp) family of mimetic operators
+\citep{Thuburn2009,Ringler2010} is built so that the discrete divergence, curl,
+and gradient satisfy the same vector-calculus identities as the continuum
+($\divg\curl=0$, $\curl\grad=0$), guaranteeing exact mass conservation and a
+consistent potential-vorticity budget on a fully unstructured mesh. Following
+\citet{Ringler2010}, the discrete operators on the Voronoi mesh are:
 \begin{align}
   \text{Divergence at cell } c: &\quad
     (\divg\vect{u})_c = \frac{1}{A_c}\sum_e n_{e,c}\,u_e\,l_e, \\
@@ -739,15 +833,22 @@ cell/vertex areas.
 
 \subsection{Spectral Shallow Water}
 
-Vorticity--divergence formulation on the Gaussian grid:
+The state is represented by spherical-harmonic coefficients and advanced in the
+vorticity--divergence formulation of \citet{Bourke1972}, in which the prognostic
+scalars $\hat\zeta$ and $\hat\delta$ replace the vector momentum and the
+horizontal Laplacian is diagonal in spectral space:
 \begin{align}
   \frac{\pp\hat\zeta}{\pp t} &= -\widehat{\divg[(\zeta+f)\vect{v}]}, \\
   \frac{\pp\hat\delta}{\pp t} &= \widehat{\curl[(\zeta+f)\vect{v}]}
     - \nabla^2\widehat{(E+\Phi+\Phi_s)}, \\
   \frac{\pp\hat\Phi}{\pp t} &= -\widehat{\divg(\Phi\,\vect{v})},
 \end{align}
-where $E=\half(u^2+v^2)$ and $\Phi=g\,h$.  Pseudospectral: nonlinear
-products computed on the grid, then transformed to spectral space.
+where $E=\half(u^2+v^2)$ is the kinetic energy, $\Phi=g\,h$ the free-surface
+geopotential, $\Phi_s$ the surface geopotential, and the hat denotes the
+forward spherical-harmonic transform. Pseudospectral: nonlinear products are
+computed on the grid, where they are local and cheap, then transformed back to
+spectral space, where the linear gravity-wave and diffusion terms are exact and
+free of grid imprinting.
 
 
 % ---------------------------------------------------------------------------
@@ -774,9 +875,19 @@ In $\sigma$-coordinates:
   + \kappa\,T\,\frac{\omega}{p} + Q,
   \label{eq:pe-T}
 \end{align}
-where $B=K+\Phi$, $K=\half(u^2+v^2)$, and $\kappa=\Rd/\cpd$.
+Here $\sigma=p/p_s$ is the terrain-following vertical coordinate, $\dot\sigma$
+the associated vertical velocity, $\omega=\dd p/\dd t$ the pressure velocity,
+$\Phi$ the geopotential, $\Rd$ the dry gas constant, and $Q$ the diabatic
+heating from physics; $B=K+\Phi$, $K=\half(u^2+v^2)$, and $\kappa=\Rd/\cpd$.
+The surface-pressure tendency~\eqref{eq:pe-ps} is the vertically integrated mass
+continuity that closes the hydrostatic system: with the vertical momentum
+equation replaced by hydrostatic balance, mass divergence in the column---rather
+than vertical acceleration---sets the surface pressure. The pressure-gradient
+force splits into the along-$\sigma$ Bernoulli gradient and the
+$\Rd T\,\grad\ln p_s$ term that accounts for the tilt of the $\sigma$ surfaces.
 The adiabatic heating term $\kappa T\omega/p$ represents compression
-warming during descent.
+warming during descent and is the thermodynamic counterpart of the work done by
+the pressure-gradient force.
 
 \subsection{C-D Grid Cubed-Sphere Discretisation}
 \label{sec:pe-cdgrid}
@@ -785,7 +896,8 @@ Prognostic state: $u_d,v_d$ at D-grid corners $(6,n\!+\!1,n\!+\!1,N_{\mathrm{lev
 $T$ and $p_s$ at cell centres.  Spatial operators are identical to the
 shallow water C-D grid (Section~\ref{sec:sw}), extended to 3D with:
 \begin{itemize}[nosep]
-  \item Simmons--Burridge geopotential integration (Section~\ref{sec:vertical});
+  \item Simmons--Burridge energy-conserving geopotential integration
+    \citep{SimmonsBurridge1981} (Section~\ref{sec:vertical});
   \item Sigma-dot computation with discrete continuity closure;
   \item Upwind vertical advection: $-\dot\sigma\,\pp f/\pp\sigma$.
 \end{itemize}
@@ -836,9 +948,13 @@ yields a Helmholtz equation per spectral mode:
   \hat\delta^{n+1} = \hat\delta^{\mathrm{explicit}},
 \end{equation}
 where $\lambda_n = n(n+1)/a^2$ is the Laplacian eigenvalue and $\mathbf{\Gamma}$
-is the vertical coupling matrix.  This is pre-factored (LU decomposition)
-for each wavenumber $n$ at initialisation, removing the gravity-wave CFL
-constraint and allowing 3--4$\times$ larger timesteps.
+is the vertical coupling matrix built from the energy-conserving vertical
+finite differences of \citet{SimmonsBurridge1981}. Because the harmonics
+diagonalise the horizontal Laplacian, the implicit system decouples by
+wavenumber into a small block-tridiagonal solve in the vertical; this is
+pre-factored (LU decomposition) for each wavenumber $n$ at initialisation,
+removing the gravity-wave CFL constraint and allowing 3--4$\times$ larger
+timesteps.
 
 \paragraph{Verification (v3.9).}
 A comprehensive spectral dycore test suite validates conservation
@@ -856,18 +972,27 @@ $\sigma$ cutoff.
 
 \subsection{MPAS/Voronoi Discretisation}
 
-TRiSK operators (Section~\ref{sec:sw}) extended to 3D.  Uses RK4 or
-SSP-RK3 time stepping with energy- or enstrophy-conserving potential
-vorticity flux options.
+TRiSK operators (Section~\ref{sec:sw}) extended to 3D, following the MPAS
+atmosphere formulation of \citet{Skamarock2012}.  Uses RK4 or SSP-RK3
+\citep{ShuOsher1988} time stepping with energy- or enstrophy-conserving
+potential vorticity flux options; the choice of PV flux selects which
+quadratic invariant the discretisation conserves to round-off, trading
+energetic fidelity against the enstrophy control that suppresses spurious
+grid-scale vorticity.
 
 
 % ---------------------------------------------------------------------------
 \section{Non-Hydrostatic Compressible Euler Equations}
 \label{sec:nh}
 
-In the $z^*$ terrain-following coordinate, the prognostic variables are
-perturbations from a hydrostatically balanced reference state
-$(\rho_0,\theta_0,\pi_0)$:
+Dropping the hydrostatic approximation restores vertically propagating acoustic
+and gravity waves, so the core integrates the fully compressible Euler equations
+with a split-explicit, height-based formulation in the manner of the WRF/MPAS
+nonhydrostatic solvers \citep{Klemp2007,SkamarockKlemp2008}. In the $z^*$
+terrain-following coordinate, the prognostic variables are perturbations from a
+hydrostatically balanced reference state $(\rho_0,\theta_0,\pi_0)$, which
+removes the dominant hydrostatic balance from the pressure-gradient and buoyancy
+terms and leaves only the dynamically active residuals:
 
 \begin{align}
   \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x}
@@ -887,8 +1012,15 @@ $(\rho_0,\theta_0,\pi_0)$:
   + \frac{\pp(\rho w)}{\pp z^*}\Bigr],
   \label{eq:nh-rho}
 \end{align}
-where $r(z)$ is the Rayleigh sponge coefficient and the Exner function
-perturbation is
+Here $w$ is the vertical velocity, $\theta'$ and $\rho'$ the potential-temperature
+and density perturbations, $\pi'$ the Exner-pressure perturbation, $J$ the
+Jacobian of the terrain-following map, $K$ the horizontal kinetic energy, and
+$r(z)$ the Rayleigh sponge coefficient. The horizontal momentum equations carry
+the non-hydrostatic pressure gradient $\cpd\theta\,\grad\pi'$ in place of the
+geopotential gradient, the $w$ equation balances the same vertical
+pressure-gradient force against buoyancy $-g\,\theta'/\theta_0$, and the density
+equation is the unapproximated mass continuity. The Exner perturbation closes
+the system through the equation of state:
 \begin{equation}
   \pi' = \pi_0\Bigl[\Bigl(1+\frac{\rho'}{\rho_0}\Bigr)\!
   \Bigl(1+\frac{\theta'}{\theta_0}\Bigr)\Bigr]^{\Rd/\cvd}-\pi_0.
@@ -896,11 +1028,22 @@ perturbation is
 
 \subsection{Split-Explicit Time Integration}
 
+Acoustic modes propagate roughly an order of magnitude faster than the
+meteorologically relevant advective and gravity-wave modes, so an explicit
+single-rate scheme would be acoustically CFL-limited and wasteful. The core
+therefore time-splits the integration \citep{WickerSkamarock2002,Klemp2007}:
+the slow, meteorologically important terms are advanced on the long RK3 step,
+while the acoustically active terms are sub-cycled on short forward--backward
+substeps.
+
 \paragraph{Slow modes} (SSP-RK3): advection, Coriolis, horizontal pressure
 gradient force, and diffusion.
 
 \paragraph{Fast modes} (forward--backward acoustic substeps):
-vertical sound/gravity waves.  Typically $N_s=6$ substeps per RK stage.
+vertical sound/gravity waves.  Typically $N_s=6$ substeps per RK stage. The
+forward--backward ordering---updating $w$ from the current pressure, then the
+density and temperature from the just-updated $w$---makes the vertical acoustic
+substep implicitly stable without a tridiagonal solve.
 
 \paragraph{Forward step (vertical velocity).}
 \begin{equation}
@@ -947,7 +1090,7 @@ $K_h = K_m/\mathrm{Pr}$.
 
 \begin{description}
 \item[CRM (convection-permitting), $\Delta x\sim 1$--$4$\,km.]
-The Smagorinsky--Lilly eddy viscosity
+The Smagorinsky--Lilly eddy viscosity \citep{Smagorinsky1963}
 \begin{equation}
   K_m = (C_s\Delta)^2\,
   \sqrt{\max\!\bigl(0,\;|S|^2 - \mathrm{Pr}\,N^2\bigr)},
@@ -991,13 +1134,24 @@ time-integration error.
 \section{Finite-Volume Transport}
 \label{sec:fv-transport}
 
+Scalar advection in the finite-volume cores is cast in flux form, so the
+cell-averaged tracer changes only through fluxes across its faces; this enforces
+discrete conservation by construction. The remaining task is to reconstruct the
+sub-grid profile used to evaluate those face fluxes, trading formal order of
+accuracy against the monotonicity needed to keep tracers (mixing ratios,
+densities) physically bounded. The cores offer a hierarchy of reconstructions of
+increasing order.
+
 \subsection{MUSCL Reconstruction (2nd Order)}
 
 Piecewise-linear reconstruction with slope limiting \citep{vanLeer1979}:
 \begin{equation}
   q_L = q_i + \half\,\phi_i, \qquad q_R = q_{i+1} - \half\,\phi_{i+1},
 \end{equation}
-with minmod or MC (monotonised central) limiters.
+with minmod or MC (monotonised central) limiters. The limiter $\phi$ reduces the
+cell slope wherever it would create a new extremum, yielding a second-order,
+total-variation-diminishing scheme that suppresses the spurious oscillations of
+unlimited centred differences near sharp gradients.
 
 \subsection{PPM Reconstruction (4th Order)}
 
@@ -1009,7 +1163,11 @@ monotone parabola in each cell.  Fourth-order edge values:
 \end{equation}
 Monotonicity constraint:
 $\hat q_{i+1/2} \leftarrow \mathrm{median}(\hat q_{i+1/2},\,q_i,\,q_{i+1})$.
-Colella--Woodward limiting prevents new extrema in the parabolic profile.
+Colella--Woodward limiting prevents new extrema in the parabolic profile. The
+parabolic in-cell profile delivers fourth-order accuracy in smooth flow while
+the edge-value clipping and the flattening of the parabola near discontinuities
+preserve monotonicity, making PPM the default tracer scheme where both accuracy
+and positivity matter.
 
 \subsection{WENO5 Reconstruction (5th Order)}
 
@@ -1021,14 +1179,25 @@ local smoothness \citep{JiangShu1996}:
   \alpha_k = \frac{d_k}{(\varepsilon+\beta_k)^2},
 \end{equation}
 where $d_k$ are ideal weights $(1/10,\,6/10,\,3/10)$ and $\beta_k$ are
-smoothness indicators.
+smoothness indicators. The nonlinear weights $\omega_k$ collapse onto the
+optimal fifth-order stencil in smooth regions but smoothly drop any sub-stencil
+that straddles a discontinuity, giving high order without the Gibbs oscillations
+of a fixed wide stencil; $\varepsilon$ is a small floor preventing division by
+zero where the field is locally constant.
 
 \subsection{Rusanov Flux}
+
+The reconstructed left and right interface states $(q_L,q_R)$ are combined into a
+single-valued face flux by a local Lax--Friedrichs (Rusanov) approximate Riemann
+solver:
 \begin{equation}
   F = \half(h_L u_L + h_R u_R) - \half\,\alpha\,(h_R-h_L),
   \qquad \alpha=\max\!\bigl(|u_L|+c_L,\;|u_R|+c_R\bigr),
 \end{equation}
-where $c=\sqrt{g\,h}$ is the gravity-wave speed.
+where $c=\sqrt{g\,h}$ is the gravity-wave speed. The first term is the centred
+average and the second is an upwind dissipation proportional to the maximum
+local signal speed $\alpha$, which provides exactly enough numerical viscosity
+to stabilise the discontinuity while remaining conservative.
 
 
 % ---------------------------------------------------------------------------
@@ -1037,8 +1206,12 @@ where $c=\sqrt{g\,h}$ is the gravity-wave speed.
 
 \subsection{SSP-RK3}
 
-The three-stage strong-stability-preserving Runge--Kutta method
-\citep{ShuOsher1988}:
+The three-stage strong-stability-preserving (SSP) Runge--Kutta method
+\citep{ShuOsher1988} is the workhorse explicit integrator. Each stage is a
+convex combination of forward-Euler updates, so any monotonicity or
+positivity property that holds for a single forward-Euler step under the
+stage CFL also holds for the full higher-order step---exactly the guarantee the
+limited finite-volume reconstructions above need:
 \begin{align}
   \vect{u}^{(1)} &= \vect{u}^n + \Delta t\,F(\vect{u}^n), \\
   \vect{u}^{(2)} &= \tfrac{3}{4}\vect{u}^n + \tfrac{1}{4}\vect{u}^{(1)}
@@ -1050,9 +1223,13 @@ SSP-RK(4,3) and SSP-RK(5,4) variants are also available.
 
 \subsection{Robert--Asselin--Williams (RAW) Time Filter}
 
-The leapfrog scheme used by the semi-implicit spectral PE solver requires
-a time filter to damp the computational mode.  The \citet{Williams2009}
-modification:
+The leapfrog scheme used by the semi-implicit spectral PE solver supports two
+time levels and therefore admits a spurious computational mode that must be
+damped. The classical Robert--Asselin filter \citep{Asselin1972} suppresses
+this mode but at the cost of degrading the scheme to first-order accuracy and
+spuriously damping the physical mode. The \citet{Williams2009} modification
+distributes the filter increment across the time levels to recover second-order
+accuracy:
 \begin{align}
   d^n &= \frac{\gamma}{2}\bigl(X^{n-1}-2X^n+X^{n+1}\bigr), \\
   X^n_{\mathrm{filt}} &= X^n + (1-\alpha)\,d^n, \\
@@ -1063,12 +1240,15 @@ preserving the damping of the computational mode.
 
 \subsection{CFL Conditions and Adaptive Hyperdiffusion}
 
-The CFL-limited timestep:
+For an explicit core the timestep is bounded so that the fastest signal
+crosses at most a fraction $C_{\mathrm{CFL}}$ of the smallest grid cell per step:
 \begin{equation}
   \Delta t_{\max} = \frac{C_{\mathrm{CFL}}\,\Delta x_{\min}}
   {(u_{\max}+c_{\mathrm{gw}})\sqrt{n_{\mathrm{dim}}}},
 \end{equation}
-where $c_{\mathrm{gw}}=\sqrt{gH}$ is the gravity wave speed.
+where $c_{\mathrm{gw}}=\sqrt{gH}$ is the gravity wave speed, $u_{\max}$ the peak
+advective speed, and the $\sqrt{n_{\mathrm{dim}}}$ factor accounts for
+simultaneous propagation along each dimension on a multidimensional grid.
 
 The maximum stable hyperdiffusion coefficient for $p$-th order:
 \begin{equation}
@@ -1091,25 +1271,43 @@ $2\Delta x$ waves is $\tau_{\mathrm{efold}} = \Delta x^{2p}/\nu_p$.
 
 \subsection{Saturation Mixing Ratio}
 
-Using the Tetens (August--Roche--Magnus) formula:
+The saturation vapour pressure $e_s$ sets the moisture capacity of the air
+and underlies condensation, evaporation, and convective triggering. It is
+obtained from the empirical Tetens (August--Roche--Magnus) fit, which
+approximates the Clausius--Clapeyron integral over liquid water:
 \begin{equation}
   e_s(T) = 611.2\exp\!\Bigl(\frac{17.67\,T_c}{T_c+243.5}\Bigr),
   \qquad q_s = \frac{\varepsilon\,e_s}{p-e_s},
   \qquad \varepsilon=\Rd/\Rv\approx 0.622,
 \end{equation}
-where $T_c = T - 273.15$~K.  Over ice, the Clausius--Clapeyron form is
-used:
+where $T_c = T - 273.15$~K is the Celsius temperature, $p$ the total
+pressure, and $\varepsilon$ the ratio of dry-air to vapour gas constants
+that converts the partial-pressure ratio into a saturation mixing ratio
+$q_s$.  Over ice the latent heat of sublimation $\Ls$ is larger, so the
+saturation curve is steeper; we evaluate it directly from the
+Clausius--Clapeyron form referenced to the freezing point
+$T_{\mathrm{freeze}}$:
 \begin{equation}
   e_{s,i}(T) = 611.2\exp\!\Bigl[\frac{\Ls}{\Rv}
   \Bigl(\frac{1}{T_{\mathrm{freeze}}}-\frac{1}{T}\Bigr)\Bigr].
 \end{equation}
 
 \subsection{Virtual Temperature}
+
+The buoyancy of moist, condensate-laden air is governed by the virtual
+temperature $T_v$, which is the temperature dry air would need to match the
+density of the moist parcel. Water vapour lightens the parcel (positive
+$0.608\,q_v$) while suspended condensate loads it (negative $q_c,q_r,q_i$):
 \begin{equation}
   T_v = T\,(1 + 0.608\,q_v - q_c - q_r - q_i).
 \end{equation}
 
 \subsection{Moist Adiabatic Lapse Rate}
+
+When a saturated parcel rises, condensation releases latent heat and damps
+the cooling relative to the dry-adiabatic rate. The moist lapse rate
+$\Gamma_m$ balances adiabatic expansion against this latent-heat feedback,
+the correction terms in numerator and denominator scaling with $\Lv q_s$:
 \begin{equation}
   \Gamma_m = \frac{\Rd T}{\cpd p}\,
   \frac{1+\Lv q_s/(\Rd T)}{1+\Lv^2 q_s/(\cpd\Rv T^2)}.
@@ -1123,9 +1321,19 @@ used:
 \subsection{Gray Two-Stream Radiation}
 \label{sec:gray-rad}
 
-Following \citet{Frierson2006}:
+The gray scheme replaces spectrally-resolved transfer with a single
+broadband longwave channel whose optical depth is prescribed analytically,
+following the aquaplanet formulation of \citet{Frierson2006}. This yields a
+smooth, inexpensive, and fully differentiable radiative forcing suitable for
+idealised and process-study configurations.
 
 \subsubsection{Longwave Optical Depth}
+
+The total longwave optical depth $\tau$ is the integral of absorber along
+the path. A prescribed background term, scaled to be larger in the tropics
+($\phi$ latitude) and to increase toward the surface in $\sigma$, is
+augmented by an interactive water-vapour contribution proportional to the
+column vapour mass:
 \begin{equation}
   \tau(\sigma,\phi) = \bigl[f_l\,\sigma+(1-f_l)\,\sigma^4\bigr]
   \bigl[\tau_e+(\tau_p-\tau_e)\sin^2\!\phi\bigr]
@@ -1138,25 +1346,40 @@ $\tau_{\mathrm{moist}}=0.0115$~m$^2$\,kg$^{-1}$.
 
 \subsubsection{Two-Stream Longwave Fluxes}
 
-Layer transmittance and emissivity:
+Each layer absorbs and re-emits in the gray band. Its transmittance
+$\mathcal{T}_k$ follows Beer's law in the layer optical depth
+$\Delta\tau_k$, and by Kirchhoff's law the emissivity $\varepsilon_k$ is its
+complement:
 \begin{equation}
   \mathcal{T}_k = e^{-D\,\Delta\tau_k},
   \qquad \varepsilon_k = 1-\mathcal{T}_k,
   \qquad D=1.66.
 \end{equation}
 The diffusivity factor $D\approx 5/3$ accounts for the hemispheric-mean
-angular integration.
+angular integration, converting the slant-path absorption into an effective
+vertical two-stream transfer.
 
-Upward sweep from surface ($F^\uparrow_{\mathrm{sfc}}=\varepsilon_s\,\SB\,T_s^4$):
+The hemispheric fluxes are then accumulated by two sweeps that propagate
+boundary emission through the absorbing/emitting column. The upward stream
+starts from surface emission
+($F^\uparrow_{\mathrm{sfc}}=\varepsilon_s\,\SB\,T_s^4$, with $\SB$ the
+Stefan--Boltzmann constant and $T_s$ the surface temperature) and gains each
+layer's Planck source:
 \begin{equation}
   F^\uparrow_k = \mathcal{T}_k\,F^\uparrow_{k+1} + \varepsilon_k\,\SB\,T_k^4.
 \end{equation}
-Downward sweep from TOA ($F^\downarrow_0=0$):
+The downward stream starts from a dark top of atmosphere ($F^\downarrow_0=0$)
+and accumulates emission on the way down:
 \begin{equation}
   F^\downarrow_k = \mathcal{T}_k\,F^\downarrow_{k-1} + \varepsilon_k\,\SB\,T_k^4.
 \end{equation}
 
 \subsubsection{Shortwave (Beer--Lambert)}
+
+Solar heating is treated as a single attenuated beam. The top-of-atmosphere
+flux $S_0/4$ (the diurnal- and geometry-averaged solar constant) is absorbed
+exponentially with depth, and a fixed surface albedo $\alpha_s$ reflects the
+remainder back to space:
 \begin{equation}
   F^\downarrow_{\mathrm{SW}}(k) = \frac{S_0}{4}\,
   e^{-\tau_{\mathrm{SW},0}\,\sigma_k},
@@ -1167,17 +1390,30 @@ with $\tau_{\mathrm{SW},0}=0.22$, $S_0=1361$~W\,m$^{-2}$, $\alpha_s=0.31$.
 Only the downward beam is absorbed; reflected SW escapes to space.
 
 \subsubsection{Heating Rate}
+
+The radiative temperature tendency follows from energy conservation: the
+heating of a layer equals the convergence of the net radiative flux
+$F^\uparrow_{\mathrm{net}}$ across its interfaces, divided by its heat
+capacity per unit area $\cpd\,\Delta p/g$:
 \begin{equation}
   \frac{\dd T}{\dd t}\bigg|_{\mathrm{rad},k}
   = \frac{g}{\cpd}\,
   \frac{F^{\uparrow}_{\mathrm{net},k+1/2}-F^{\uparrow}_{\mathrm{net},k-1/2}}
   {p_{k+1/2}-p_{k-1/2}}.
 \end{equation}
+Writing the heating as a flux difference makes it conservative by
+construction: summing over the column telescopes to the net top-of-atmosphere
+minus surface flux.
 
 \subsection{RRTMGP Correlated-$k$ Radiation}
 \label{sec:rrtmgp}
 
-The RRTMGP backend uses JAX-RRTMGP with:
+For realistic radiative transfer the model offers a correlated-$k$ backend
+that resolves the spectral dependence of gaseous absorption. It descends
+from the RRTM longwave model of \citet{Mlawer1997} and its modern,
+accelerator-friendly RRTMGP reformulation \citep{Pincus2019}, in which
+line-by-line absorption is reorganised into a small set of pseudo-monochromatic
+$g$-points per band. The RRTMGP backend uses JAX-RRTMGP with:
 \begin{itemize}[nosep]
   \item 128 LW and 112 SW $g$-points for correlated-$k$ gas absorption;
   \item Two-stream delta-Eddington radiative transfer equation;
@@ -1210,9 +1446,17 @@ Five convection schemes are available, all fully JAX-differentiable.
 \subsection{Simplified Betts--Miller (SBM) Relaxation}
 \label{sec:sbm}
 
-Following \citet{Frierson2007}:
+The SBM scheme is an adjustment closure: rather than resolving updraughts, it
+relaxes temperature and moisture toward a post-convective reference profile.
+It follows the convective-adjustment philosophy of \citet{BettsMiller1986} in
+the simplified, single-timescale form of \citet{Frierson2007}.
 
 \subsubsection{CAPE Computation}
+
+The available energy for convection is the convective available potential
+energy (CAPE), the vertically integrated buoyancy of an ascending parcel
+relative to its environment. Only positively buoyant layers
+($T_{\mathrm{parcel}}>T_{\mathrm{env}}$) contribute:
 \begin{equation}
   \mathrm{CAPE} = \Rd\sum_k
   \max\!\bigl(0,\;T_{\mathrm{parcel},k}-T_{\mathrm{env},k}\bigr)\,
@@ -1220,6 +1464,11 @@ Following \citet{Frierson2007}:
 \end{equation}
 
 \subsubsection{Smooth Trigger}
+
+Convection is switched on by a trigger function $\mathcal{F}$ that activates
+once CAPE exceeds a threshold $\mathrm{CAPE}_c$. A sigmoid $\sigma$ of
+sharpness $\kappa_s$ replaces the discontinuous on/off switch, keeping the
+parameterisation differentiable for end-to-end training:
 \begin{equation}
   \mathcal{F} = \sigma\!\bigl(\kappa_s(\mathrm{CAPE}-\mathrm{CAPE}_c)\bigr),
   \qquad \kappa_s=0.01\;\text{(J/kg)}^{-1}.
@@ -1233,7 +1482,11 @@ moist enthalpy is conserved:
   \sum_k\bigl[\cpd(T_{\mathrm{ref},k}-T_k)
   +\Lv(q_{\mathrm{ref},k}-q_{v,k})\bigr]\,\Delta p_k = 0.
 \end{equation}
-Tendencies:
+This constraint guarantees that the latent heat released by drying the
+column exactly matches the sensible heating, so the adjustment redistributes
+energy without spuriously creating or destroying it. The state is then
+relaxed toward the reference on a fixed convective timescale $\tau_c$, gated
+by the trigger $\mathcal{F}$:
 \begin{equation}
   \frac{\dd T}{\dd t} = \mathcal{F}\,\frac{T_{\mathrm{ref}}-T}{\tau_c},
   \qquad
@@ -1242,6 +1495,10 @@ Tendencies:
 \end{equation}
 
 \subsubsection{Precipitation}
+
+Because the column dries during adjustment, surface precipitation is just the
+mass of vapour removed per unit area, recovered by integrating the moisture
+tendency over the column:
 \begin{equation}
   P = -\frac{1}{g}\sum_k \frac{\dd q_v}{\dd t}\,\Delta p_k.
 \end{equation}
@@ -1262,17 +1519,26 @@ with $\alpha_{\mathrm{heat}}=0.75$ and $\tau_c=3600$~s.
 
 \subsection{Mass-Flux Convection (Arakawa--Wu Type)}
 
-A prognostic base mass flux $M_c$ relaxes toward an equilibrium value:
+In contrast to adjustment schemes, the mass-flux approach explicitly carries
+a cloud-base convective mass flux and an entraining updraught, in the spirit
+of the bulk mass-flux closures of \citet{Tiedtke1989} and
+\citet{ZhangMcFarlane1995}. A prognostic base mass flux $M_c$ relaxes toward
+an equilibrium value set by CAPE:
 \begin{equation}
   M_{\mathrm{eq}} = \sigma\!\bigl[(\mathrm{CAPE}-\mathrm{CAPE}_{\mathrm{thresh}})
   /\mathrm{scale}\bigr]\cdot M_{\mathrm{scale}},
   \qquad
   \frac{\dd M_c}{\dd t} = \frac{M_{\mathrm{eq}}-M_c}{\tau_{\mathrm{adj}}}.
 \end{equation}
+The prognostic relaxation on timescale $\tau_{\mathrm{adj}}$ lets the cloud
+ensemble respond to large-scale destabilisation with a finite memory rather
+than instantaneously equilibrating CAPE.
 
 The mass-flux profile is sinusoidal:
 $m(p) = \sin[\pi(p_{\mathrm{base}}-p)/\Delta p]$.
-The entraining updraft uses exponential dilution:
+The entraining updraft uses exponential dilution: as the plume rises it mixes
+in environmental air at rate $\epsilon_0$, so its properties interpolate
+between the undilute moist-adiabatic value and the environment:
 \begin{equation}
   T_u(z) = e^{-\epsilon_0 z}\,T_{\mathrm{moist}}
   + (1-e^{-\epsilon_0 z})\,T_{\mathrm{env}},
@@ -1325,11 +1591,16 @@ enthalpy.  Uses sigmoid activation for smooth, differentiable blending.
 
 \subsection{Kessler Warm-Rain Scheme}
 
-Prognostic variables: $q_c$ (cloud water), $q_r$ (rain).
+The single-moment Kessler scheme \citep{Kessler1969} is the canonical
+warm-rain bulk parameterisation, tracking only condensate mass through the
+sequence saturation adjustment $\to$ autoconversion $\to$ accretion $\to$
+evaporation $\to$ sedimentation. Prognostic variables: $q_c$ (cloud water),
+$q_r$ (rain).
 
 \paragraph{Saturation adjustment.}
-The saturation excess is converted to a tendency (rate) by dividing by the
-time step $\Delta t$:
+Supersaturation is removed by converting the excess vapour above $q_s$ into
+cloud water. The saturation excess is converted to a tendency (rate) by
+dividing by the time step $\Delta t$:
 \begin{equation}
   \frac{\dd q_v}{\dd t}\bigg|_{\mathrm{sat}}
   = -\frac{\sigma(\kappa_s(q_v-q_s))\cdot(q_v-q_s)}{\Delta t},
@@ -1338,6 +1609,9 @@ with sigmoid sharpness $\kappa_s$.  This ensures all microphysics outputs
 have consistent units of kg\,kg$^{-1}$\,s$^{-1}$.
 
 \paragraph{Autoconversion (cloud $\to$ rain).}
+Once cloud water exceeds a threshold $q_{c,\mathrm{thresh}}$, collision and
+coalescence initiate rain at rate $k_{\mathrm{auto}}$; the \texttt{softplus}
+smooths the Kessler threshold so the onset stays differentiable:
 \begin{equation}
   \frac{\dd q_c}{\dd t}\bigg|_{\mathrm{auto}}
   = -k_{\mathrm{auto}}\,\mathrm{softplus}(q_c - q_{c,\mathrm{thresh}}),
@@ -1346,6 +1620,9 @@ have consistent units of kg\,kg$^{-1}$\,s$^{-1}$.
 \end{equation}
 
 \paragraph{Accretion (collection of cloud by rain).}
+Existing raindrops sweep up cloud droplets at a rate set by the product of
+cloud and rain content, the fractional power on $q_r$ reflecting the
+mass-weighted fall-speed/cross-section of the rain spectrum:
 \begin{equation}
   \frac{\dd q_c}{\dd t}\bigg|_{\mathrm{accr}}
   = -k_{\mathrm{accr}}\,q_c\,q_r^{0.875},
@@ -1366,9 +1643,15 @@ $\dd T/\dd t = (\Lv/\cpd)\cdot(\text{condensation} - \text{evaporation})$.
 
 \subsection{Seifert--Beheng Two-Moment Warm Rain}
 
-Prognostic mass ($q_c,q_r$) and number concentration ($N_c,N_r$).
+The two-moment scheme of \citet{SeifertBeheng2001} predicts both mass and
+number, allowing the mean droplet size, and hence autoconversion efficiency,
+to evolve with the drop spectrum rather than being fixed. Prognostic mass
+($q_c,q_r$) and number concentration ($N_c,N_r$).
 
 \paragraph{Autoconversion.}
+Autoconversion is keyed to the mean droplet mass $x_c=q_c\rho/N_c$: rain forms
+efficiently only once droplets grow past the separation mass $x^*$, the
+sigmoid $\sigma$ providing a smooth onset in place of a hard size cutoff:
 \begin{equation}
   \frac{\dd q_c}{\dd t}\bigg|_{\mathrm{auto}}
   = -k_{\mathrm{au}}\,q_c^2\,
@@ -1390,9 +1673,13 @@ is the separation mass, and the sigmoid onset replaces the hard threshold.
 
 \subsection{Morrison Double-Moment (Ice + Liquid)}
 
-Extends the warm-rain scheme with ice-phase processes:
+The Morrison two-moment scheme \citep{Morrison2005} extends the warm-rain
+spectrum to mixed-phase clouds, adding prognostic cloud ice and snow and the
+ice-microphysical pathways that convert between them:
 
-\paragraph{Ice nucleation (Cooper 1986).}
+\paragraph{Ice nucleation \citep{Cooper1986}.}
+The number of activated ice crystals rises exponentially as temperature falls
+below freezing, following the Cooper diagnostic:
 \begin{equation}
   N_{i,\mathrm{target}} = \frac{N_{i,0}}{\rho}\,
   \exp\!\bigl[a_C(T_{\mathrm{freeze}}-T)\bigr].
@@ -1428,8 +1715,10 @@ Melting: sigmoid-activated near $T_{\mathrm{freeze}}$.
 
 \subsection{Thompson Hybrid-Moment Microphysics}
 
-Extends Morrison with graupel.  Rimed ice exceeding a critical threshold
-converts to graupel:
+The Thompson scheme \citep{Thompson2008} adds a graupel category, predicting
+number for cloud ice and rain while diagnosing the remaining species. Rimed
+ice exceeding a critical threshold converts to graupel, the sigmoid gating
+the conversion smoothly above $R_{\mathrm{thresh}}$:
 \begin{equation}
   \frac{\dd q_g}{\dd t}\bigg|_{\mathrm{rime}}
   = f_g\,\frac{\dd q_i}{\dd t}\bigg|_{\mathrm{rime}}
@@ -1459,16 +1748,22 @@ Thompson & Hybrid & $+q_g$ & Graupel, riming \\
 
 \subsection{Sundqvist (1988)}
 
-Diagnostic cloud fraction based on a relative humidity threshold:
+The Sundqvist closure \citep{Sundqvist1989} diagnoses cloud fraction from
+grid-mean relative humidity, assuming subgrid moisture variability fills the
+cell with cloud as RH rises from a critical value $\mathrm{RH}_{\mathrm{crit}}$
+to saturation:
 \begin{equation}
   c_f = \mathrm{clamp}\!\Bigl(\frac{\mathrm{RH}-\mathrm{RH}_{\mathrm{crit}}}
   {1-\mathrm{RH}_{\mathrm{crit}}},\;0,\;1\Bigr),
   \qquad \mathrm{RH}_{\mathrm{crit}}=0.8.
 \end{equation}
+The clamp ensures $c_f\in[0,1]$, with clear skies below threshold and full
+overcast at saturation.
 
-\subsection{Xu--Randall (1996)}
+\subsection{Xu--Randall}
 
-Combines relative humidity and condensate amount:
+\citet{XuRandall1996} combine relative humidity and condensate amount, so that cloud fraction
+responds both to ambient RH and to the presence of condensate $q_c$:
 \begin{equation}
   c_f = \mathrm{RH}^p\,\Bigl[1-\exp\!\Bigl(
   -\frac{\alpha\,q_c}{(1-\mathrm{RH})\,q_s}\Bigr)\Bigr],
@@ -1494,13 +1789,27 @@ rest of the \texttt{integration.py} factory contract.
 
 \subsection{Louis (1979) Local Closure}
 
+The Louis scheme \citep{Louis1979} is a first-order local closure: eddy
+diffusivities are set point-by-point from the local shear, mixing length, and
+stability, with no nonlocal transport. It is robust and inexpensive, which is
+why it remains a standard fallback above the boundary layer.
+
 \subsubsection{Mixing Length}
+
+The mixing length $l$ interpolates between the surface-layer scaling
+$\kappa_{\mathrm{vK}}z$ near the ground and an asymptotic ceiling $l_{\max}$
+aloft, where $\kappa_{\mathrm{vK}}$ is the von K\'arm\'an constant:
 \begin{equation}
   l = \frac{\kappa_{\mathrm{vK}}\,z}{1+\kappa_{\mathrm{vK}}\,z/l_{\max}},
   \qquad \kappa_{\mathrm{vK}}=0.4,\quad l_{\max}=300\;\text{m}.
 \end{equation}
 
 \subsubsection{Richardson Number}
+
+The gradient Richardson number $\mathrm{Ri}$ measures the competition between
+stabilising buoyancy ($N^2$, the squared Brunt--V\"ais\"al\"a frequency in
+virtual potential temperature $\theta_v$) and destabilising shear ($S^2$);
+turbulence is suppressed where $\mathrm{Ri}$ is large and positive:
 \begin{equation}
   \mathrm{Ri} = \frac{N^2}{S^2}, \qquad
   N^2 = \frac{g}{\theta_v}\frac{\pp\theta_v}{\pp z}, \qquad
@@ -1521,9 +1830,16 @@ with $b=c=d=5$.  Eddy diffusivities: $K_m=l^2\,S\,f_m$, $K_h=K_m$.
 
 \subsection{Holtslag--Boville Nonlocal K-Profile}
 
+Convective boundary layers transport heat and moisture even against the local
+gradient, which a purely local closure cannot capture. The nonlocal
+K-profile scheme \citep{HoltslagBoville1993} instead prescribes the
+diffusivity as a fixed-shape profile spanning the diagnosed PBL depth,
+optionally with a countergradient correction.
+
 \subsubsection{PBL Height Diagnosis}
 
-Bulk Richardson number:
+The PBL top is found from the bulk Richardson number, which compares the
+buoyancy deficit relative to the surface against the bulk wind shear:
 \begin{equation}
   \mathrm{Ri}_{\mathrm{bulk}}(z) = \frac{g}{\theta_{v,\mathrm{sfc}}}\,
   \frac{(\theta_v-\theta_{v,\mathrm{sfc}})\,z}{|\vect{V}|^2}.
@@ -1533,6 +1849,10 @@ crosses $\mathrm{Ri}_{\mathrm{crit}}=0.3$ (LMD94 default), using
 sigmoid-weighted averaging for a smooth, differentiable diagnosis.
 
 \subsubsection{K-Profile Inside PBL}
+
+Within the PBL the diffusivity follows the cubic O'Brien-type profile: it
+scales with the friction velocity $u_*$ and vanishes at both the surface and
+$z=h$, peaking in the mixed layer:
 \begin{equation}
   K_m = \kappa_{\mathrm{vK}}\,u_*\,z\,(1-z/h)^2.
 \end{equation}
@@ -1565,23 +1885,42 @@ with the Thomas algorithm:
 \label{sec:surface}
 
 \subsection{Neutral Bulk Aerodynamic Fluxes}
+
+Surface fluxes are parameterised by bulk aerodynamic formulae, in which each
+flux is the product of air density $\rho$, a transfer coefficient, the wind
+speed $|\vect{V}|$, and the air--surface difference of the transported
+quantity. Momentum stress $(\tau_x,\tau_y)$, sensible heat $\mathrm{SH}$, and
+latent heat $\mathrm{LH}$ follow the same structure:
 \begin{align}
   \tau_x &= -\rho\,C_D\,|\vect{V}|\,u, &
   \tau_y &= -\rho\,C_D\,|\vect{V}|\,v, \\
   \mathrm{SH} &= \rho\,\cpd\,C_H\,|\vect{V}|\,(T_s-T_a), &
   \mathrm{LH} &= \rho\,\Lv\,C_E\,|\vect{V}|\,(q_s-q_a),
 \end{align}
-with $C_D=C_H=C_E=1.5\times10^{-3}$.
+with $C_D=C_H=C_E=1.5\times10^{-3}$. The neutral limit takes these
+coefficients as constants; the next section makes them stability-dependent.
 
 \subsection{Monin--Obukhov Similarity Theory (MOST)}
 
+Monin--Obukhov similarity theory \citep{MoninObukhov1954} organises
+surface-layer turbulence around a single stability parameter $\zeta=z/L$,
+making the transfer coefficients functions of stability rather than constants.
+
 \paragraph{Obukhov length.}
+The Obukhov length $L$ is the height at which buoyant and shear production of
+turbulence are comparable; it is built from the friction velocity $u_*$ and
+the turbulent scales $\theta_*,q_*$ of temperature and humidity:
 \begin{equation}
   L = -\frac{u_*^3\,T_v}
   {\kappa_{\mathrm{vK}}\,g\,(\theta_*+0.61\,T_a\,q_*)}.
 \end{equation}
 
 \paragraph{Businger--Dyer stability functions.}
+The integrated stability corrections $\psi_m,\psi_h$ modify the neutral
+logarithmic profile: convex unstable forms ($\zeta<0$) enhance mixing while
+the linear stable branch ($\zeta\ge0$) of \citet{Businger1971} suppresses it.
+For strongly stable conditions the \citet{Beljaars1995} formulation prevents
+the fluxes from collapsing to zero:
 \begin{equation}
   \psi_m(\zeta) = \begin{cases}
     2\ln\!\bigl(\frac{1+x}{2}\bigr)+\ln\!\bigl(\frac{1+x^2}{2}\bigr)
@@ -1597,19 +1936,23 @@ with $C_D=C_H=C_E=1.5\times10^{-3}$.
 \end{equation}
 
 \paragraph{Transfer coefficients.}
+The coefficients then follow from the stability-corrected logarithmic
+profiles, with $z_0$ and $z_{0t}$ the momentum and thermal roughness lengths:
 \begin{equation}
   C_D = \Bigl[\frac{\kappa_{\mathrm{vK}}}
   {\ln(z/z_0)-\psi_m(\zeta)}\Bigr]^2, \qquad
   C_H = \frac{\kappa_{\mathrm{vK}}^2}
   {[\ln(z/z_0)-\psi_m(\zeta)][\ln(z/z_{0t})-\psi_h(\zeta)]}.
 \end{equation}
-
+Because $\zeta$ itself depends on the fluxes, this is a fixed-point problem.
 The iterative solver (5 iterations via \texttt{jax.lax.fori\_loop}) is
 fully differentiable.
 
 \subsection{COARE 3.0 Roughness}
 
-Over ocean \citep{Fairall2003}:
+Over ocean the momentum roughness is sea-state dependent, combining a
+wind-driven Charnock term with a viscous smooth-flow limit, following the
+COARE 3.0 algorithm \citep{Fairall2003}:
 \begin{equation}
   z_0 = \alpha_c\,\frac{u_*^2}{g}+0.11\,\frac{\nu}{u_*},
   \qquad
@@ -1619,9 +1962,15 @@ Over ocean \citep{Fairall2003}:
 where $\alpha_c=0.011$ is the Charnock parameter.
 
 \subsection{Large \& Yeager (2004) Roughness}
+
+An alternative parameterises the neutral $10$-m drag coefficient $C_{DN}$
+directly as a function of the neutral wind speed $U_{10N}$, following the CORE
+bulk formulae of \citet{LargeYeager2004}:
 \begin{equation}
   C_{DN}\times10^3 = \frac{2.7}{U_{10N}}+0.142+0.0764\,U_{10N}.
 \end{equation}
+The three terms capture the low-wind viscous regime, a roughly constant
+mid-wind plateau, and the linear growth of drag in high winds.
 
 
 % ---------------------------------------------------------------------------
@@ -1630,24 +1979,39 @@ where $\alpha_c=0.011$ is the Charnock parameter.
 
 \subsection{Orographic GWD (Lindzen 1981)}
 
+Stably-stratified flow over topography launches vertically-propagating gravity
+waves that carry momentum upward and deposit it where they break, decelerating
+the resolved flow. The launch stress follows the orographic drag closure of
+\citet{McFarlane1987} and the saturation/wave-breaking criterion of
+\citet{Lindzen1981}.
+
 \paragraph{Surface stress.}
+The launched stress $\tau_0$ scales with density, the Brunt--V\"ais\"al\"a
+frequency $N$, the horizontal wavenumber $k$, the squared obstacle height
+$h_{\mathrm{topo}}^2$, and the low-level wind $U$:
 \begin{equation}
   \tau_0 = \rho\,N\,k\,h_{\mathrm{topo}}^2\,U,
   \qquad N = \sqrt{\frac{g}{\theta}\frac{\dd\theta}{\dd z}}.
 \end{equation}
 
 \paragraph{Saturation criterion.}
-Waves break when the Froude number $\mathrm{Fr}=U/(N\,h_{\mathrm{topo}})$
-drops below a critical value.  Stress is capped at the saturation value
-$\tau_{\mathrm{sat}}=\rho\,|U|^3\,k/N$.
+As the wave amplitude grows with height it eventually overturns the local
+stratification. Waves break when the Froude number
+$\mathrm{Fr}=U/(N\,h_{\mathrm{topo}})$ drops below a critical value.  Stress is
+capped at the saturation value $\tau_{\mathrm{sat}}=\rho\,|U|^3\,k/N$, so that
+the excess momentum flux is deposited locally.
 
 \paragraph{Momentum deposition.}
+The drag on the resolved flow is the vertical divergence of the wave stress:
+where $\tau$ decreases with height, momentum is delivered to the mean flow:
 \begin{equation}
   \frac{\dd u}{\dd t}\bigg|_{\mathrm{GWD}} = -\frac{1}{\rho}\,
   \frac{\dd\tau}{\dd z}.
 \end{equation}
 
 \paragraph{Frictional heating.}
+Energy conservation requires that the kinetic energy lost to wave drag reappear
+as heat, recovered from the dot product of wind and momentum tendency:
 \begin{equation}
   \frac{\dd T}{\dd t}\bigg|_{\mathrm{GWD}} =
   -\frac{1}{\cpd}\Bigl(u\,\frac{\dd u}{\dd t}+v\,\frac{\dd v}{\dd t}\Bigr).
@@ -1658,9 +2022,14 @@ $\tau_{\mathrm{sat}}=\rho\,|U|^3\,k/N$.
 \section{Held--Suarez Forcing}
 \label{sec:held-suarez}
 
-The idealised forcing benchmark of \citet{HeldSuarez1994}:
+The idealised forcing benchmark of \citet{HeldSuarez1994} replaces full
+physics with analytic relaxation, providing a reproducible test of a dry
+dynamical core's general circulation.
 
 \paragraph{Equilibrium temperature.}
+The radiative-equilibrium target $T_{\mathrm{eq}}$ imposes an equator-to-pole
+contrast ($\Delta T_y$) and a static-stability gradient ($\Delta\theta_z$),
+floored at $200$~K to mimic the stratosphere:
 \begin{equation}
   T_{\mathrm{eq}} = \max\!\Bigl(200,\;
   \bigl[315-\Delta T_y\sin^2\!\phi
@@ -1670,6 +2039,9 @@ The idealised forcing benchmark of \citet{HeldSuarez1994}:
 with $\Delta T_y=60$~K, $\Delta\theta_z=10$~K.
 
 \paragraph{Newtonian relaxation.}
+Temperature is restored toward $T_{\mathrm{eq}}$ at a rate $k_T$ that is fast
+in the tropical boundary layer (mimicking strong surface coupling) and slow in
+the free atmosphere, the transition keyed to $\sigma_b$:
 \begin{equation}
   \frac{\dd T}{\dd t} = -k_T(\sigma,\phi)\,(T-T_{\mathrm{eq}}),
   \qquad
@@ -1679,6 +2051,8 @@ with $\Delta T_y=60$~K, $\Delta\theta_z=10$~K.
 with $k_a=1/(40\;\text{day})$, $k_s=1/(4\;\text{day})$, $\sigma_b=0.7$.
 
 \paragraph{Rayleigh friction.}
+Low-level momentum is damped to represent boundary-layer drag, again confined
+below $\sigma_b$:
 \begin{equation}
   \frac{\dd\vect{v}}{\dd t} = -k_v(\sigma)\,\vect{v},
   \qquad
@@ -1696,11 +2070,13 @@ Constant eddy diffusivity: $K_m = K_h = \mathrm{const}$.
 Nonlocal K-profile boundary-layer scheme with explicit entrainment at the PBL top, following \citet{HoltslagBoville1993} with enhanced counter-gradient terms.
 
 \subsection{CLUBB-lite}
-Higher-order prognostic moment closure with five variables:
+A reduced higher-order closure in the spirit of CLUBB \citep{Golaz2002},
+carrying five prognostic second moments:
 $\overline{w'^2}$, $\overline{\theta_l'^2}$, $\overline{r_t'^2}$,
 $\overline{w'\theta_l'}$, $\overline{w'r_t'}$.
-Cloud fraction is diagnosed via an assumed bivariate Gaussian PDF of
-$\theta_l$ and $r_t$.
+Cloud fraction and condensate are diagnosed by integrating an assumed
+bivariate Gaussian PDF of $\theta_l$ and $r_t$, unifying boundary-layer
+turbulence and shallow-cloud closure in a single framework.
 
 \subsection{EDMF Turbulence}
 Eddy-diffusivity mass-flux unified boundary-layer framework combining
@@ -1709,8 +2085,8 @@ updraft mass flux (for strongly convective conditions) in a single scheme.
 
 \section{Additional Convection Schemes}
 
-\subsection{Kuo (1974)}
-Column moisture-excess scheme activating when column-integrated moisture
+\subsection{Kuo}
+The \citet{Kuo1974} column moisture-excess scheme activates when column-integrated moisture
 convergence exceeds a threshold.  Excess moisture is partitioned between
 heating (fraction $\alpha_{\mathrm{heat}}$) and moistening
 ($1-\alpha_{\mathrm{heat}}$).
@@ -1724,20 +2100,27 @@ with smooth sigmoid activation for JAX differentiability.
 Six GWD parameterisations are available:
 \begin{enumerate}[nosep]
   \item \textbf{Rayleigh friction}: Linear damping above a threshold height.
-  \item \textbf{Lindzen (1981)}: Orographic GWD with saturation and critical-level absorption.
-  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved wave saturation.
-  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions.
-  \item \textbf{Prognostic Spectral}: Multi-azimuthal ($N_{\mathrm{az}}$), multi-wavenumber ($N_k$) spectrum with prognostic wave momentum flux and vertical propagation via \texttt{jax.lax.scan}.
+  \item \textbf{Lindzen (1981)}: Orographic GWD with saturation and critical-level absorption \citep{Lindzen1981}.
+  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved wave saturation \citep{McFarlane1987}.
+  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions \citep{Hines1997}.
+  \item \textbf{Prognostic Spectral}: Multi-azimuthal ($N_{\mathrm{az}}$), multi-wavenumber ($N_k$) spectrum with prognostic wave momentum flux and vertical propagation via \texttt{jax.lax.scan}, following the spectral non-orographic approach of \citet{AlexanderDunkerton1999}.
   \item \textbf{ML Emulator}: Equinox MLP surrogate mapping column state to GWD tendencies.
 \end{enumerate}
 
 \section{Neural and Learned Physics}
 
+Because every parameterisation above is differentiable, learned components can
+be substituted for, or blended with, the physical schemes and trained
+end-to-end through the dynamical core. This mirrors the hybrid neural--physical
+modelling strategy of \citet{Kochkov2024}; related operator-learning work uses
+Fourier neural operators \citep{Li2021} and their spherical variant
+\citep{Bonev2023} for the global maps (see Chapter~\ref{ch:ml}).
+
 \subsection{NeuralPhysics}
 An Equinox MLP column model that maps the column state (temperature, moisture, wind, surface fluxes) to physics tendencies.  Hybrid mode blends learned corrections with conventional parameterisation output via a configurable blending coefficient.
 
 \subsection{LearnedColumn}
-Per-column physics replacement following Rasp et al.\ (2018), mapping the full column state vector to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
+Per-column physics replacement following \citet{Rasp2018}, mapping the full column state vector to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
 
 
 % #############################################################################
@@ -1747,7 +2130,14 @@ Per-column physics replacement following Rasp et al.\ (2018), mapping the full c
 
 \section{Boussinesq Hydrostatic Primitive Equations}
 
-In vector-invariant form on the cubed sphere:
+The ocean dynamical core integrates the hydrostatic Boussinesq primitive
+equations in finite-volume form \citep{Marshall1997}, in which the full
+in-situ density is replaced by a constant reference density $\rho_0$ in
+the inertial terms while density variations are retained only in the
+buoyancy (pressure-gradient) term.  Writing the horizontal momentum
+balance in vector-invariant form on the cubed sphere isolates the
+absolute vorticity and kinetic-energy gradient, which keeps the
+advection operator energy- and enstrophy-aware on the staggered grid:
 \begin{align}
   \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x}
   - \frac{1}{\rho_0}\frac{\pp p'}{\pp x}
@@ -1758,10 +2148,27 @@ In vector-invariant form on the cubed sphere:
   + A_h\nabla^2 v + \frac{\pp}{\pp z}\!\Bigl(A_v\frac{\pp v}{\pp z}\Bigr)
   - w\frac{\pp v}{\pp z}.
 \end{align}
-The Coriolis force is split: depth-mean $f\vect{v}$ in the barotropic
-substeps, baroclinic shear $f\vect{v}'$ in the slow tendencies.
+Here $u,v$ are the horizontal velocity components, $\zeta$ the relative
+vorticity, $f$ the Coriolis parameter, $K=\half(u^2+v^2)$ the kinetic
+energy per unit mass, $p'$ the baroclinic pressure perturbation, and
+$A_h,A_v$ the lateral and vertical eddy viscosities; the final term
+$-w\,\pp u/\pp z$ is vertical advection of momentum.  Each line therefore
+expresses the local acceleration as the sum of Coriolis, kinetic-energy
+gradient, pressure-gradient, lateral- and vertical-diffusion, and
+vertical-advection contributions.  The Coriolis force is split: depth-mean
+$f\vect{v}$ in the barotropic substeps, baroclinic shear $f\vect{v}'$ in
+the slow tendencies, so that the fast surface-gravity-wave Coriolis
+rotation is treated at the short barotropic step.
 
 \subsection{Tracer Equations (Skew-Symmetric)}
+
+Each active and passive tracer $\phi$ (potential temperature, salinity,
+biogeochemical fields) obeys an advection--diffusion balance.  The
+horizontal advection is written in skew-symmetric form, averaging the
+advective $-\vect{v}\!\cdot\!\grad\phi$ and flux $-\divg(\phi\,\vect{v})$
+operators; because the velocity field is discretely non-divergent, this
+combination conserves both the tracer mean and its variance, suppressing
+the spurious extrema a one-sided form would generate:
 \begin{equation}
   \frac{\pp\phi}{\pp t} = \half\Bigl[-\vect{v}\!\cdot\!\grad\phi
   - \divg(\phi\,\vect{v})\Bigr]
@@ -1769,23 +2176,41 @@ substeps, baroclinic shear $f\vect{v}'$ in the slow tendencies.
   + K_h\nabla^2\phi
   + \frac{\pp}{\pp z}\!\Bigl(K_v\frac{\pp\phi}{\pp z}\Bigr).
 \end{equation}
+The remaining terms are vertical advection and the lateral ($K_h$) and
+vertical ($K_v$) diffusive fluxes.
 
 \subsection{Free-Surface Equation}
+
+Vertically integrating the continuity equation gives the prognostic
+free-surface height $\eta$, whose tendency is the column-summed
+horizontal volume-flux divergence:
 \begin{equation}
   \frac{\pp\eta}{\pp t} = -\sum_k \divg(h_k\,\vect{v}_k).
 \end{equation}
+This sets the fast external-gravity-wave mode that the barotropic solver
+below integrates with a short substep.
 
 
 \section{Barotropic Solver}
 \label{sec:barotropic}
 
-Split-explicit forward--backward substeps:
+To avoid resolving the fast surface-gravity wave at the slow baroclinic
+timestep, the depth-integrated (barotropic) mode is advanced separately
+with a split-explicit forward--backward integrator
+\citep{ShchepetkinMcWilliams2005}, sub-cycled many short substeps
+$\Delta t_s$ per baroclinic step.  The barotropic state is the surface
+height $\eta$ and the depth-mean transport $\bar{\vect{V}}$, forced by the
+slow tendency $\vect{F}_{\mathrm{slow}}$ that carries the vertically
+integrated baroclinic pressure gradient and advection:
 \begin{equation}
   \frac{\pp\eta}{\pp t} = -\divg(H\,\bar{\vect{V}}),
   \qquad
   \frac{\pp\bar{\vect{V}}}{\pp t} = f\hat{\vect{k}}\times\bar{\vect{V}}
   - g\grad\eta + \vect{F}_{\mathrm{slow}}.
 \end{equation}
+The forward--backward ordering (update $\eta$ first, then use the new
+$\eta$ in the momentum step) damps the computational mode and extends the
+stable substep relative to a centred scheme.
 
 \paragraph{Semi-implicit Coriolis.}
 With $\alpha=\half f\,\Delta t_s$:
@@ -1795,16 +2220,24 @@ With $\alpha=\half f\,\Delta t_s$:
   \bar V^{n+1} = \frac{R_v-\alpha\,R_u}{1+\alpha^2},
 \end{equation}
 where $R_u=\bar U^n+\alpha\bar V^n-\Delta t_s\,g\,\pp\eta/\pp x$ and
-$R_v=\bar V^n-\alpha\bar U^n-\Delta t_s\,g\,\pp\eta/\pp y$.
+$R_v=\bar V^n-\alpha\bar U^n-\Delta t_s\,g\,\pp\eta/\pp y$.  Treating the
+Coriolis rotation implicitly over the substep prevents the inertial
+oscillation from being amplified by the many barotropic sub-cycles and
+keeps the substep stability set by the gravity-wave CFL alone.
 
 
 \section{Equation of State (Wright 1997)}
 \label{sec:eos}
 
 The ocean prognostic temperature variable $T$ is \textbf{potential
-temperature} [degC].  The Wright~(1997) EOS computes in-situ density
-$\rho(\theta,S,p)$ directly from potential temperature $\theta$,
-salinity $S$~[PSU], and pressure $p$~[Pa]:
+temperature} [degC].  The Wright~(1997) EOS \citep{Wright1997} computes
+in-situ density $\rho(\theta,S,p)$ directly from potential temperature
+$\theta$, salinity $S$~[PSU], and pressure $p$~[Pa].  This rational-function
+fit captures the leading nonlinearity of seawater density (thermobaricity
+and cabbeling), which drives the buoyancy term in the momentum equations;
+a higher-order TEOS-10 polynomial alternative \citep{Roquet2015,
+McDougallBarker2011} is available where conservative temperature is the
+prognostic variable:
 \begin{equation}
   \rho = \frac{p+p_0(\theta,S)}{\lambda(\theta,S)+\alpha_0(\theta,S)\,(p+p_0)},
 \end{equation}
@@ -1814,19 +2247,31 @@ where
   p_0 &= (b_0+b_4 S)+\theta(b_1+\theta(b_2+b_3 \theta)+b_5 S), \\
   \lambda &= (c_0+c_4 S)+\theta(c_1+\theta(c_2+c_3 \theta)+c_5 S).
 \end{align}
-Coefficients follow the MOM6 implementation.  The density perturbation
-$\rho'=\rho(\theta,S,p)-\rho_0$ is used in the pressure gradient computation.
+Here $\alpha_0$, $p_0$ and $\lambda$ are low-order polynomials in
+$(\theta,S)$ with coefficients $a_i,b_i,c_i$.  Coefficients follow the
+MOM6 implementation.  Only the density perturbation
+$\rho'=\rho(\theta,S,p)-\rho_0$ enters the pressure-gradient computation,
+consistent with the Boussinesq approximation in which $\rho_0$ carries the
+inertia and $\rho'$ supplies the buoyancy.
 
 
 \section{Hydrostatic Pressure and Vertical Velocity}
 
-Baroclinic pressure by downward integration:
+Under the hydrostatic approximation the vertical momentum equation reduces
+to the balance between the vertical pressure gradient and buoyancy, so the
+baroclinic pressure at level $k$ follows from downward integration of the
+density perturbation, with the surface load $\rho_0 g\eta$ as the upper
+boundary value and a half-cell term that centres the pressure within the
+$k$-th layer:
 \begin{equation}
   p'_k = \rho_0 g\eta + \sum_{k'=0}^{k-1}\rho'_{k'}\,g\,\Delta z_{k'}
   + \half\rho'_k\,g\,\Delta z_k.
 \end{equation}
 
-Vertical velocity diagnosed bottom-up from $w(\text{floor})=0$:
+The vertical velocity is not prognostic; it is diagnosed from continuity
+by integrating the horizontal-flux divergence upward from the rigid floor
+($w=0$ at the bottom), so that the discrete velocity field remains
+non-divergent layer by layer:
 \begin{equation}
   w_{k-1/2} = -\sum_{k'=k}^{N-1}\divg(h_{k'}\,\vect{v}_{k'}).
 \end{equation}
@@ -1848,6 +2293,13 @@ crosses $\mathrm{Ri}_{\mathrm{crit}}=0.3$ (LMD94 default):
 using sigmoid-weighted averaging for a differentiable diagnosis.
 
 \subsection{K-Profile Shape}
+
+Within the diagnosed boundary layer the eddy diffusivity is prescribed as
+a smooth cubic shape function $G(\sigma)$ scaled by the layer depth $h$
+and the turbulent velocity scale $w_s$, where $\sigma=z/h$ is the
+fractional depth.  The shape vanishes at the surface and at the layer base
+and peaks in the interior, matching the observed near-surface turbulent
+diffusivity profile:
 \begin{equation}
   K_m(\sigma) = h\,w_s(\sigma)\,G(\sigma),
   \qquad G(\sigma) = \sigma(1-\sigma)^2,
@@ -1879,12 +2331,26 @@ and only under unstable forcing.
 \section{Lateral Mixing}
 \label{sec:lateral}
 
+Lateral mixing supplies the subgrid closure for unresolved horizontal
+stirring and, in eddy-permitting configurations, the scale-selective
+dissipation that controls the grid-scale noise the advection scheme
+cannot.
+
 \subsection{Harmonic (Laplacian) Diffusion}
+
+The simplest closure is a constant-coefficient Laplacian diffusion, which
+damps all scales monotonically:
 \begin{equation}
   D_h = A_h\,\nabla^2\phi.
 \end{equation}
 
 \subsection{Biharmonic ($\nabla^4$) Diffusion}
+
+A biharmonic operator is more scale-selective: it leaves the resolved
+large scales nearly untouched while strongly damping the $2\Delta x$
+computational mode, which is preferred for eddying solutions.  The
+coefficient $A_4$ may be set by a Smagorinsky-like strain-rate closure
+following \citet{GriffiesHallberg2000}:
 \begin{equation}
   D_h = -A_4\,\nabla^4\phi.
 \end{equation}
@@ -1897,8 +2363,14 @@ tracer transport via an additional advective flux (bolus velocity)
 \begin{equation}
   \vect{u}^* = -\kappa_{\mathrm{GM}}\,\grad_h s,
 \end{equation}
-where $s=-\grad_h\rho/(\pp\rho/\pp z)$ is the isopycnal slope.
-The Redi diffusion tensor rotates lateral mixing along isopycnal surfaces.
+where $s=-\grad_h\rho/(\pp\rho/\pp z)$ is the isopycnal slope and
+$\kappa_{\mathrm{GM}}$ the thickness diffusivity.  This adiabatic eddy
+transport flattens isopycnals and extracts available potential energy,
+mimicking baroclinic-eddy restratification.  The accompanying Redi
+diffusion tensor \citep{Redi1982} rotates the lateral diffusion to act
+along isopycnal surfaces rather than along geopotentials, which suppresses
+the spurious diapycnal mixing a horizontal Laplacian would otherwise
+introduce on sloping density surfaces.
 
 
 \section{Tracer Advection Schemes}
@@ -1921,18 +2393,21 @@ closed-domain zero-$K_h$ Eady setups).
 Scheme & Order / halo & Notes \\
 \midrule
 \texttt{upwind}      & 1, $h{=}1$ & Donor-cell; most diffusive but unconditionally stable. \\
-\texttt{tvd}         & 2, $h{=}2$ & Van Leer / Sweby slope-limited flux; total-variation diminishing. \\
+\texttt{tvd}         & 2, $h{=}2$ & Van Leer / Sweby slope-limited flux \citep{vanLeer1979}; total-variation diminishing. \\
 \texttt{dst3}        & 3, $h{=}2$ & Direct-space-time third-order, used in vertical advection. \\
-\texttt{ppm}         & 4, $h{=}2$ & Parabolic Piecewise Method (Colella--Woodward 1984). \\
+\texttt{ppm}         & 4, $h{=}2$ & Parabolic Piecewise Method \citep{ColellaWoodward1984}. \\
 \texttt{ppm\_fct}    & 4, $h{=}2$ & PPM with Zalesak FCT limiter (sign-split limiter pending, \#9). \\
-\texttt{weno5/weno7} & 5/7, $h{=}3/4$ & WENO smoothness-weighted reconstructions. \\
-\texttt{som}         & Prather 9-moment & Second-Order Moments; advects all 9 sub-cell moments per tracer. \\
+\texttt{weno5/weno7} & 5/7, $h{=}3/4$ & WENO smoothness-weighted reconstructions \citep{JiangShu1996}. \\
+\texttt{som}         & Prather 9-moment & Second-Order Moments \citep{Prather1986}; advects all 9 sub-cell moments per tracer. \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 \paragraph{SOM (Prather 1986).}
-The SOM solver in \texttt{advection\_som.py} carries the cell mean and
+The second-order-moment scheme \citep{Prather1986} attains very low
+numerical diffusion by transporting the sub-cell tracer distribution
+explicitly rather than reconstructing it each step.  The SOM solver in
+\texttt{advection\_som.py} carries the cell mean and
 nine sub-cell moments $\{S_x, S_y, S_z, S_{xx}, S_{yy}, S_{zz},
 S_{xy}, S_{xz}, S_{yz}\}$, performs operator-split donor/receiver
 sweeps (\texttt{\_som\_x\_sweep}, \texttt{\_som\_y\_sweep},
@@ -1979,7 +2454,13 @@ methodology and 2D/3D test runners are documented in
 
 \section{Slab and Two-Layer Ocean}
 
-For idealised experiments, a simple mixed-layer energy balance:
+For idealised experiments that do not require the full dynamical ocean, a
+slab mixed layer evolves the surface temperature $T_s$ from the column
+energy balance: net shortwave and longwave radiation, sensible (SH) and
+latent (LH) turbulent fluxes, a prescribed ocean-heat-transport
+convergence $Q_{\mathrm{flux}}$ that closes the climatological energy
+budget, and a restoring exchange $K_{\mathrm{mix}}(T_{\mathrm{deep}}-T_s)$
+with the deep reservoir:
 \begin{equation}
   C_{\mathrm{mix}}\,\frac{\dd T_s}{\dd t}
   = \mathrm{SW}_{\mathrm{net}} + \mathrm{LW}_{\mathrm{net}}
@@ -1987,7 +2468,9 @@ For idealised experiments, a simple mixed-layer energy balance:
   + Q_{\mathrm{flux}} + K_{\mathrm{mix}}(T_{\mathrm{deep}}-T_s),
 \end{equation}
 where $C_{\mathrm{mix}}=\rho_{\mathrm{ocn}}\,c_{\mathrm{ocn}}\,h_{\mathrm{mix}}$
-is the mixed-layer heat capacity.
+is the mixed-layer heat capacity set by the mixed-layer depth
+$h_{\mathrm{mix}}$, which fixes the thermal inertia and hence the seasonal
+SST response.
 
 
 \section{Realistic-Geometry Spinup on ETOPO Bathymetry}
@@ -2079,7 +2562,11 @@ for the year-by-year diagnostics.
 
 \subsection{Gas Transfer Velocity}
 
-Following \citet{Wanninkhof2014}:
+Air--sea CO$_2$ exchange is parameterised as a bulk flux proportional to a
+gas transfer (piston) velocity $k_w$, which the quadratic wind-speed
+relation of \citet{Wanninkhof2014} ties to the 10\,m wind $U_{10}$ and the
+CO$_2$ Schmidt number $\mathrm{Sc}$, normalised to its reference value of
+660:
 \begin{equation}
   k_w = 0.251\,U_{10}^2\,\Bigl(\frac{\mathrm{Sc}}{660}\Bigr)^{-1/2},
 \end{equation}
@@ -2090,20 +2577,35 @@ where the Schmidt number is a polynomial function of temperature:
 \end{equation}
 
 \subsection{Net Air--Sea Flux}
+
+The net flux is the piston velocity times the air--sea difference in CO$_2$
+partial pressure, converted to a concentration gradient by the
+temperature- and salinity-dependent Henry's-law solubility $K_0$; the sign
+convention makes $F_{\mathrm{CO}_2}>0$ an outgassing from a supersaturated
+ocean:
 \begin{equation}
   F_{\mathrm{CO}_2} = k_w\,K_0\,
   (p\mathrm{CO}_{2,\mathrm{ocean}} - p\mathrm{CO}_{2,\mathrm{atm}}),
 \end{equation}
 where $K_0$ is Henry's law solubility.  The ocean surface $p$CO$_2$ is
-computed from DIC, ALK, $T$, $S$ via carbonate equilibria using
-Newton--Raphson iteration.
+computed from DIC, ALK, $T$, $S$ via the carbonate equilibria, solved for
+$[\mathrm{H}^+]$ with the Newton--Raphson iteration of \citet{Follows2006},
+which exploits the near-linear dependence of total alkalinity on $\mathrm{H}^+$
+to converge in a few steps within the JIT-compiled column loop.
 
 
 \section{NPZD Ecosystem Model}
 \label{sec:npzd}
 
-Four biological tracers: NO$_3$ (nutrients), $P$ (phytoplankton),
-$Z$ (zooplankton), $D$ (detritus), following \citet{Fasham1990}:
+The ecosystem closure carries four biological tracers, NO$_3$ (nutrients),
+$P$ (phytoplankton), $Z$ (zooplankton), and $D$ (detritus), exchanging
+nitrogen along a single trophic chain following \citet{Fasham1990}.  Each
+budget balances the source and sink terms of the cycle: phytoplankton gain
+by growth $\mu_P P$ and lose to grazing $G$ and mortality; grazed nitrogen
+is partitioned between assimilated zooplankton biomass (efficiency
+$\gamma_Z$) and egested detritus; detritus remineralises at rate $r_D$ and
+sinks at speed $w_s$; and nitrate is drawn down by uptake and replenished
+by remineralisation, closing the nitrogen budget:
 \begin{align}
   \frac{\pp P}{\pp t} &= \mu_P\,P - G - m_P\,P, \\
   \frac{\pp Z}{\pp t} &= \gamma_Z\,G - m_Z\,Z^2, \\
@@ -2113,6 +2615,11 @@ $Z$ (zooplankton), $D$ (detritus), following \citet{Fasham1990}:
 \end{align}
 
 \paragraph{Phytoplankton growth.}
+The growth rate multiplies the maximum rate $\mu_{\max}$ by a temperature
+factor $f(T)$ and the more limiting of nutrient and light availability
+(Liebig's law of the minimum), with the nutrient limitation a
+Michaelis--Menten saturation in NO$_3$ and the light limitation a
+saturating function of photosynthetically available radiation (PAR):
 \begin{equation}
   \mu_P = \mu_{\max}\,f(T)\,\min(L_N,\,L_I),
   \qquad L_N = \frac{\mathrm{NO}_3}{k_N+\mathrm{NO}_3},
@@ -2120,6 +2627,9 @@ $Z$ (zooplankton), $D$ (detritus), following \citet{Fasham1990}:
 \end{equation}
 
 \paragraph{Grazing (Holling III).}
+Zooplankton grazing uses a Holling type-III (sigmoidal) functional
+response, whose $P^2$ numerator gives a low-prey refuge that stabilises the
+predator--prey oscillation:
 \begin{equation}
   G = g_{\max}\,\frac{P^2}{K_g+P^2}\,Z.
 \end{equation}
@@ -2129,48 +2639,84 @@ Redfield stoichiometry ($R_{C:N}=6.625$) couples biology to DIC/ALK.
 
 \section{Ocean Bottom Drag}
 
-Two formulations:
+The bottom stress $\vect{\tau}_b$ removes momentum from the lowest wet
+layer and is the main sink for the barotropic flow; two formulations are
+available.
 
 \paragraph{Linear drag.}
-$\vect{\tau}_b = -r\,\vect{u}_b$, with configurable coefficient $r$.
+A Rayleigh (linear) drag $\vect{\tau}_b = -r\,\vect{u}_b$, with configurable
+coefficient $r$, is the simplest closure and keeps the momentum operator
+linear for idealised spin-down problems.
 
 \paragraph{Quadratic drag.}
-$\vect{\tau}_b = -C_d\,|\vect{u}_b|\,\vect{u}_b$, with $C_d = 2.5\times10^{-3}$ (default).
+The quadratic law $\vect{\tau}_b = -C_d\,|\vect{u}_b|\,\vect{u}_b$, with
+$C_d = 2.5\times10^{-3}$ (default), follows the turbulent log-layer scaling
+and is preferred for realistic geometry where bottom speeds vary widely.
 
 \section{Ocean Surface Forcing}
 
-Three modes are available:
+The surface boundary condition supplies the momentum, heat, and freshwater
+fluxes that drive the ocean.  Three modes are available, trading physical
+fidelity against simplicity:
 \begin{itemize}[nosep]
   \item \textbf{Prescribed}: Fixed wind stress ($\tau_x$, $\tau_y$) and heat flux with latitudinal profiles.
   \item \textbf{Restoring}: SST/SSS restoring toward climatology (Haney-style) with cosine latitude temperature profile ($25^\circ$C at equator, $0^\circ$C at poles).
-  \item \textbf{Bulk formulas}: COARE-like air--sea fluxes with drag ($C_D$), Stanton ($C_H$), and Dalton ($C_E$) coefficients, reference height, and stability corrections.
+  \item \textbf{Bulk formulas}: COARE-like air--sea fluxes with drag ($C_D$), Stanton ($C_H$), and Dalton ($C_E$) coefficients, reference height, and stability corrections, in the CORE forced-ocean configuration of \citet{LargeYeager2004}.
 \end{itemize}
+The bulk mode lets the ocean feed back on its own fluxes (a warmer surface
+reduces sensible/latent loss), which a prescribed-flux setup cannot, and is
+the standard choice for hindcast spinups.
 
 \section{Shortwave Penetration}
 
-Subsurface shortwave absorption follows the Jerlov (1968) water type classification with five types (I, IA, IB, II, III).  Each type defines a two-band exponential decay profile:
+Solar radiation that penetrates the surface heats a finite layer rather
+than just the top cell, which controls the near-surface stratification and
+mixed-layer heat budget.  Subsurface shortwave absorption follows the
+Jerlov water-type classification \citep{Jerlov1976}
+with five types (I, IA, IB, II, III).  Each type defines a two-band
+exponential decay profile \citep{PaulsonSimpson1977}, splitting the flux into a rapidly attenuated
+red band and a more penetrating blue-green band:
 \begin{equation}
   I(z) = I_0\bigl[R\,e^{-z/\zeta_1} + (1-R)\,e^{-z/\zeta_2}\bigr],
 \end{equation}
-where $R$, $\zeta_1$, $\zeta_2$ depend on the water type.
+where the partition $R$ and the two e-folding depths $\zeta_1,\zeta_2$
+depend on the water type (clearer water gives larger $\zeta_2$ and deeper
+heating).
 
 \section{Ocean Convection}
 
+Static instability ($N^2<0$) must be removed rapidly to represent deep
+convective overturning; two closures are provided.
+
 \subsection{Enhanced Diffusion}
-Convective adjustment via enhanced diffusivity where $N^2 < 0$:
-$K_{\mathrm{conv}} = K_{\mathrm{max}}$ in statically unstable regions, with smooth transitions.
+The simplest is convective adjustment by enhanced diffusivity: wherever the
+stratification is statically unstable ($N^2 < 0$), the vertical diffusivity
+is raised to $K_{\mathrm{conv}} = K_{\mathrm{max}}$, with smooth (sigmoid)
+transitions to keep the closure differentiable, so that the unstable column
+mixes back toward neutral within a few steps.
 
 \subsection{Plume Model}
-Entraining mass-flux ocean convection with entrainment rate $\alpha_{\mathrm{plume}}=0.1$ and background detrainment $\varepsilon=10^{-3}$~m$^{-1}$.
+A more physical alternative is an entraining mass-flux plume that carries
+dense surface water downward, with entrainment rate
+$\alpha_{\mathrm{plume}}=0.1$ diluting the plume with ambient water and a
+background detrainment $\varepsilon=10^{-3}$~m$^{-1}$ depositing it,
+resolving the convective transport rather than only diffusing the
+instability away.
 
 \section{Richardson-Number Vertical Mixing}
 
-Interior shear-driven diffusivity:
+Below the surface boundary layer, mixing is driven by shear instability,
+parameterised so that the diffusivity decreases monotonically with the
+gradient Richardson number $\mathrm{Ri}=N^2/S^2$, the ratio of stabilising
+buoyancy stratification $N^2$ to destabilising vertical shear $S^2$:
 \begin{equation}
   K_v = K_{v,0}\,(1 + 5\,\mathrm{Ri})^{-1},
   \qquad \mathrm{Ri} = \frac{N^2}{S^2},
 \end{equation}
-complementing KPP boundary-layer mixing with interior shear instability parameterisation.
+so that low-$\mathrm{Ri}$ (strongly sheared) regions mix toward the maximum
+$K_{v,0}$ while well-stratified, weakly sheared interior layers approach
+the molecular background.  This complements the KPP boundary-layer scheme
+of Section~\ref{sec:kpp} with an interior shear-instability closure.
 
 
 % #############################################################################
@@ -2187,6 +2733,13 @@ complementing KPP boundary-layer mixing with interior shear instability paramete
   + \varepsilon_l(\mathrm{LW}^\downarrow-\SB T_s^4)
   - \mathrm{SH} - \mathrm{LH}.
 \end{equation}
+This is the surface energy balance for a slab of heat capacity $C_s d_s$:
+absorbed shortwave $(1-\alpha_l)\mathrm{SW}^\downarrow$ (with albedo $\alpha_l$),
+net longwave (downwelling $\mathrm{LW}^\downarrow$ minus emission
+$\varepsilon_l\SB T_s^4$ at emissivity $\varepsilon_l$), and turbulent sensible
+$\mathrm{SH}$ and latent $\mathrm{LH}$ losses sum to the storage tendency.  The
+finite slab heat capacity gives the surface a diurnal memory rather than forcing
+instantaneous radiative equilibrium.
 
 \subsection{Bucket Hydrology}
 \begin{equation}
@@ -2220,9 +2773,15 @@ surface heat flux and geothermal flux boundary conditions.
   \!\Bigl[K(\psi)\,\Bigl(\frac{\pp\psi}{\pp z}+1\Bigr)\Bigr],
 \end{equation}
 where $\theta$ is volumetric water content, $\psi$ is matric potential,
-and $K(\psi)$ is hydraulic conductivity.
+and $K(\psi)$ is hydraulic conductivity.  This is the mixed form of the Richards
+equation: vertical water flux is driven by the sum of the matric-potential
+gradient $\pp\psi/\pp z$ and the unit gravitational gradient, so that under
+saturated, hydrostatic conditions ($\pp\psi/\pp z=-1$) the flux vanishes.
 
-Six water retention curves are available:
+The closure relating $\psi$ and $K$ to $\theta$ requires a water-retention
+curve.  Six are available; the default van Genuchten form \citep{VanGenuchten1980}
+gives a smooth, differentiable $\psi(\theta)$ with a continuous derivative at
+saturation, which is important for stable implicit solves and for autodiff:
 \begin{center}
 \begin{tabular}{ll}
 \toprule
@@ -2278,34 +2837,50 @@ Exponential $Q_{10}$ temperature sensitivity with moisture limitation.
 
 \subsection{Farquhar (1980) Photosynthesis}
 
-Assimilation rate:
+The biochemical C3 photosynthesis model of \citet{Farquhar1980} represents
+net assimilation as the slower of two co-limiting processes minus respiration:
 \begin{equation}
   A = \min(W_c,\, W_j) - R_d,
 \end{equation}
-where:
+where $A$ is net assimilation, $W_c$ the Rubisco-limited and $W_j$ the
+light- (RuBP-regeneration-)limited gross rate, and $R_d$ leaf dark respiration:
 \begin{align}
   W_c &= V_{c,\max}\frac{C_i - \Gamma^*}{C_i + K_c(1+O/K_o)},
   & &\text{(Rubisco-limited)}, \\
   W_j &= \frac{J\,(C_i - \Gamma^*)}{4(C_i + 2\Gamma^*)},
   & &\text{(light-limited)}.
 \end{align}
-$V_{c,\max}$ and $J_{\max}$ follow peaked Arrhenius temperature responses
-\citep{Bernacchi2001}.  The minimum is implemented as a smooth (differentiable)
-function.
+Here $C_i$ is the intercellular CO$_2$, $\Gamma^*$ the CO$_2$ compensation point,
+$K_c$ and $K_o$ the Michaelis constants for carboxylation and oxygenation, $O$
+the oxygen concentration, and $J$ the electron-transport rate.  The maximum
+carboxylation capacity $V_{c,\max}$ and $J_{\max}$ follow peaked Arrhenius
+temperature responses \citep{Bernacchi2001}, capturing the decline of enzyme
+activity at high leaf temperature.  The co-limitation minimum is implemented as a
+smooth (differentiable) function so the assimilation rate remains
+gradient-friendly through the transition between the two regimes.
 
 \subsection{Stomatal Conductance}
 
-Three models couple stomata to photosynthesis:
+Three models couple stomata to photosynthesis.  The first two are empirical
+optimality relations in which conductance $g_s$ scales with assimilation $A$ and
+a humidity term, with $g_0$ the residual (cuticular) conductance and $g_1$ the
+slope; closing the loop with the diffusion constraint $A=g_s(C_s-C_i)/1.6$ ties
+the carbon and water exchange consistently.
 
 \paragraph{Ball--Berry (1987).}
-$g_s = g_0 + g_1\,A\,\mathrm{RH}/C_s$.
+$g_s = g_0 + g_1\,A\,\mathrm{RH}/C_s$, with conductance proportional to relative
+humidity $\mathrm{RH}$ at the leaf surface \citep{Ball1987}.
 
 \paragraph{Medlyn (2011).}
-$g_s = g_0 + 1.6\bigl(1+g_1/\!\sqrt{\mathrm{VPD}}\bigr)\,A/C_s$.
+$g_s = g_0 + 1.6\bigl(1+g_1/\!\sqrt{\mathrm{VPD}}\bigr)\,A/C_s$, derived from
+stomatal optimisation theory and expressed through vapour-pressure deficit
+$\mathrm{VPD}$ rather than relative humidity \citep{Medlyn2011}.
 
 \paragraph{Jarvis (1976).}
-$g_s = g_{s,\max}\,f(\mathrm{PAR})\,f(T)\,f(\mathrm{VPD})\,f(\theta)$
-(CO$_2$-independent; for when the carbon cycle is inactive).
+$g_s = g_{s,\max}\,f(\mathrm{PAR})\,f(T)\,f(\mathrm{VPD})\,f(\theta)$,
+a multiplicative environmental-stress reduction of a maximum conductance
+(CO$_2$-independent; for when the carbon cycle is inactive), following the
+\citet{Jarvis1976} formulation.
 
 The coupled $A$--$g_s$--$C_i$ system is solved by 5 fixed-point
 iterations, unrolled for JAX JIT compatibility.
@@ -2379,18 +2954,31 @@ Net primary production ($\mathrm{NPP}=\mathrm{GPP}-R_a$) is allocated sequential
 
 \section{Thermodynamic Slab}
 
+The thermodynamics follow the zero-layer slab tradition of \citet{Semtner1976},
+with the energy-conserving enthalpy refinements of \citet{BitzLipscomb1999}.
+
 \subsection{Surface Temperature}
 \begin{equation}
   \rho_i\,c_i\,\frac{h_{\mathrm{eff}}}{2}\,\frac{\dd T_i}{\dd t}
   = Q_{\mathrm{sfc}} - \frac{k_i(T_f-T_i)}{h_{\mathrm{eff}}},
   \qquad h_{\mathrm{eff}}=\max(h_i,h_{\min}).
 \end{equation}
+The ice surface temperature $T_i$ responds to the net surface flux $Q_{\mathrm{sfc}}$
+balanced against conduction of heat from the freezing ocean interface at $T_f$
+through the ice of effective thickness $h_{\mathrm{eff}}$ with conductivity
+$k_i$.  The floor $h_{\min}$ keeps the conductive flux finite for vanishingly
+thin ice.
 
 \subsection{Growth and Melt}
 \begin{equation}
   \frac{\dd h_i}{\dd t} = \frac{F_{\mathrm{cond}}-F_{\mathrm{ocean}}}
   {\rho_i\,\Lf}.
 \end{equation}
+The ice thickness $h_i$ grows when the conductive flux $F_{\mathrm{cond}}$
+extracting heat upward exceeds the ocean heat flux $F_{\mathrm{ocean}}$ supplied
+from below; the imbalance is converted to mass through the latent heat of fusion
+$\Lf$.  The sign convention therefore ties freezing and melting directly to the
+column energy budget.
 
 \subsection{Concentration}
 \begin{equation}
@@ -2403,28 +2991,42 @@ Net primary production ($\mathrm{NPP}=\mathrm{GPP}-R_a$) is allocated sequential
 
 \section{EVP Rheology}
 
-Following \citet{HunkeDukowicz1997}, the ice momentum equation is
+Following the elastic--viscous--plastic (EVP) rheology of
+\citet{HunkeDukowicz1997}, the ice momentum equation is
 \begin{equation}
   m\,\frac{\pp\vect{u}_i}{\pp t} = \vect{\tau}_a + \vect{\tau}_w
   - mf\hat{\vect{k}}\times\vect{u}_i
   - mg\grad\eta + \divg\bm{\sigma},
 \end{equation}
-where $\bm{\sigma}$ is the internal stress tensor from an elliptic yield
-curve with eccentricity $e=2$.  Ice strength:
+where $m$ is the ice mass per unit area, $\vect{u}_i$ the ice velocity,
+$\vect{\tau}_a$ and $\vect{\tau}_w$ the air and ocean stresses, $f$ the Coriolis
+parameter, $\eta$ the sea-surface height, and $\bm{\sigma}$ the internal stress
+tensor from an elliptic yield curve with eccentricity $e=2$.  The plastic limit
+is the physical target; the elastic term is a numerical regularisation that lets
+the equation be advanced by explicit subcycling rather than an implicit solve.
+Ice strength:
 \begin{equation}
   P = P^*\,h\,\exp\!\big(-C(1-c)\big),
   \qquad P^*=27.5\;\text{kPa},\; C=20.
 \end{equation}
-The elastic term provides subcycling stability ($N_{\mathrm{evp}}=120$
-substeps).
+Here $P^*$ is the ice-strength parameter and $C$ the concentration-decay
+constant, so the plastic strength rises with thickness $h$ and falls as the pack
+opens ($c\to0$).  The elastic term provides subcycling stability
+($N_{\mathrm{evp}}=120$ substeps); the modified (mEVP) formulation
+\citep{Bouillon2013} recasts the relaxation so that the subcycled solution
+converges to the same viscous--plastic limit independently of the substep count.
 
 
 \section{Multi-Category Ice Thickness Distribution}
 
-For $N_{\mathrm{cat}}>1$, per-category state $(h_k,T_k,c_k)$ evolves
-independently under thermodynamics, then \citet{Lipscomb2001} linear
-remapping redistributes ice across thickness categories, maintaining a
-well-resolved thickness distribution.
+The subgrid ice-thickness distribution theory of \citet{Thorndike1975} treats
+the ice pack as a probability distribution over thickness rather than a single
+mean floe, which is essential because growth, melt, and the conductive flux are
+all strongly nonlinear in thickness.  For $N_{\mathrm{cat}}>1$, per-category
+state $(h_k,T_k,c_k)$ evolves independently under thermodynamics, then the
+\citet{Lipscomb2001} linear remapping redistributes ice across thickness
+categories, conservatively maintaining a well-resolved thickness distribution
+without the numerical diffusion of a simple rebinning.
 
 
 \section{Free-Drift Dynamics}
@@ -2455,16 +3057,25 @@ Fluxes are area-weighted blends over ocean, land, sea-ice, and lake tiles:
   + f_{\mathrm{ice}}\,X_{\mathrm{ice}}
   + f_{\mathrm{lake}}\,X_{\mathrm{lake}}.
 \end{equation}
-Tile fractions satisfy $\sum f_i = 1$ with consistency checks.
+Here $X$ is any surface flux (momentum, sensible heat, latent heat, or a
+radiative quantity) and $f_{\mathrm{ocn}},f_{\mathrm{land}},f_{\mathrm{ice}},
+f_{\mathrm{lake}}$ are the fractional areas of each subgrid tile within the grid
+cell.  Each tile carries its own surface temperature and roughness and is run
+through its own bulk-flux closure, then the fluxes are aggregated by area; the
+constraint $\sum f_i = 1$ guarantees that the blended flux conserves the
+grid-cell energy and momentum budgets.
 
 \section{Ocean Albedo}
 
-The Briegleb (1992) zenith-angle-dependent formula:
+The ocean surface albedo uses the \citet{Briegleb1986} zenith-angle-dependent
+formula:
 \begin{equation}
   \alpha_{\mathrm{ocn}} = \frac{0.026}{1.1\,\mu_0^{1.7}+0.065}
   + 0.15\,(\mu_0-0.1)(\mu_0-0.5)(\mu_0-1.0),
 \end{equation}
-where $\mu_0=\cos\theta_z$.
+where $\mu_0=\cos\theta_z$ is the cosine of the solar zenith angle.  Albedo rises
+sharply at low sun ($\mu_0\to0$), reproducing the strong glint of the ocean
+under grazing illumination that a constant albedo would miss.
 
 \section{Lake Model}
 
@@ -2477,7 +3088,10 @@ The epilimnion temperature evolves under the surface energy budget:
   \rho_w\,c_w\,h_{\mathrm{epi}}\,\frac{\dd T_{\mathrm{epi}}}{\dd t}
   = \mathrm{SW}_{\mathrm{net}} + \mathrm{LW}_{\mathrm{net}} - \mathrm{SH} - \mathrm{LH} - F_{\mathrm{mix}},
 \end{equation}
-where the mixing flux between the two layers is
+The mixed epilimnion of depth $h_{\mathrm{epi}}$, density $\rho_w$, and specific
+heat $c_w$ stores the net surface radiation and turbulent fluxes, less the
+downward mixing flux $F_{\mathrm{mix}}$ that ventilates heat into the
+hypolimnion.  The mixing flux between the two layers is
 \begin{equation}
   F_{\mathrm{mix}} = \rho_w\,c_w\,k_{\mathrm{eff}}\,\frac{T_{\mathrm{epi}}-T_{\mathrm{hypo}}}{d_{\mathrm{mid}}},
 \end{equation}
@@ -2485,8 +3099,12 @@ with wind-enhanced effective diffusivity
 $k_{\mathrm{eff}} = k_{\mathrm{mix}}\,(1+\alpha_{\mathrm{wind}}\,|\vect{V}|)$.
 
 \subsection{Freezing}
-Lake temperature is clamped at $T_f = 273.15$~K.  Bulk flux options:
-constant coefficients or iterative Monin--Obukhov similarity theory.
+Lake temperature is clamped at $T_f = 273.15$~K, the freezing point of fresh
+water, below which further cooling is diverted into ice formation rather than
+temperature.  Two surface bulk-flux options are provided: fixed exchange
+coefficients, or an iterative scheme based on Monin--Obukhov similarity theory
+\citep{MoninObukhov1954}, which makes the turbulent exchange coefficients depend
+on the surface-layer stability rather than holding them constant.
 
 
 % #############################################################################
@@ -2495,6 +3113,16 @@ constant coefficients or iterative Monin--Obukhov similarity theory.
 % #############################################################################
 
 \section{Spherical Fourier Neural Operator (SFNO)}
+
+The Spherical Fourier Neural Operator \citep{Bonev2023} extends the Fourier
+neural operator \citep{Li2021} from the periodic torus to the sphere by
+replacing the planar FFT with the spherical-harmonic transform, so the learned
+convolution kernel is rotationally consistent and free of the seam artifacts a
+flat-FFT operator would imprint at the poles.  Because the spectral convolution
+acts globally in one layer, the operator captures the long-range teleconnections
+that a purely local convolution cannot, which is what makes it attractive as a
+learned dynamical core or hybrid physics emulator in the spirit of
+\citet{Kochkov2024}.
 
 \subsection{Architecture}
 \begin{enumerate}[nosep]
@@ -2517,8 +3145,13 @@ In the SH coefficient space:
 \begin{equation}
   \hat f_{nm}^{\mathrm{out}} = W_{nm}\,\hat f_{nm}^{\mathrm{in}},
 \end{equation}
-where $W_{nm}\in\mathbb{R}^{n_{\mathrm{emb}}\times n_{\mathrm{emb}}}$ is a
-learnable weight matrix per wavenumber pair.
+where $\hat f_{nm}^{\mathrm{in}}$ and $\hat f_{nm}^{\mathrm{out}}$ are the input
+and output spherical-harmonic coefficients at total wavenumber $n$ and zonal
+wavenumber $m$, and $W_{nm}\in\mathbb{R}^{n_{\mathrm{emb}}\times n_{\mathrm{emb}}}$
+is a learnable weight matrix per wavenumber pair.  Mixing channels independently
+at each $(n,m)$ makes the operation a true spectral convolution: it is diagonal
+in the harmonic index, so the cost stays linear in the number of retained modes
+while the kernel still couples every grid point through the inverse transform.
 
 The SFNO can serve as a learned dynamical core or physics emulator within
 the legoESM framework, sharing the same spectral transform infrastructure
@@ -2533,8 +3166,13 @@ as the conventional spectral cores.
 \section{Incremental 4D-Var}
 
 legoESM provides a fully implemented incremental 4D-Var data assimilation
-system, leveraging JAX's automatic differentiation to compute exact
-adjoints without hand-coded tangent-linear or adjoint models.
+system \citep{Courtier1994,Rabier2000}, leveraging JAX's automatic
+differentiation to compute exact adjoints without hand-coded tangent-linear or
+adjoint models.  The incremental formulation of \citet{Courtier1994} linearises
+the analysis problem about a background trajectory and solves for an increment,
+which keeps the inner minimisation quadratic and tractable while the outer loop
+relinearises about the updated state; here the JAX adjoint supplies the exact
+gradient that the inner loop requires.
 
 \subsection{Control Vector}
 
@@ -2557,9 +3195,14 @@ The cost function minimises the sum of background and observation terms:
   \mathbf{R}_i^{-1}(\mathcal{H}_i[\mathcal{M}_{t_0\to t_i}(\vect{x})]-\vect{y}_i),
 \end{equation}
 where $\vect{x}_b$ is the background state, $\mathbf{B}$ is the background
-error covariance, $\mathcal{M}$ is the forward model, $\mathcal{H}_i$ are
-observation operators, $\vect{y}_i$ are observations, and $\mathbf{R}_i$
-are observation error covariances.
+error covariance, $\mathcal{M}_{t_0\to t_i}$ is the forward model propagating
+the state from the analysis time $t_0$ to observation time $t_i$,
+$\mathcal{H}_i$ are observation operators, $\vect{y}_i$ are observations, and
+$\mathbf{R}_i$ are observation error covariances.  The first term penalises
+departure from the prior weighted by its inverse covariance; the second
+penalises model--observation mismatch summed over the assimilation window, so
+the minimiser of $J$ is the trajectory that best reconciles the background with
+all observations distributed in time \citep{Rabier2000}.
 
 \subsection{Background Error Covariance}
 
@@ -2571,6 +3214,12 @@ Four $\mathbf{B}$ matrix families:
   \item \textbf{Hybrid}: Linear combination of flow-dependent ensemble
     covariance and static $\mathbf{B}$.
 \end{itemize}
+The hybrid family blends a static climatological $\mathbf{B}$ with a
+flow-dependent ensemble estimate; because a finite ensemble produces spurious
+long-range correlations, the ensemble term is tapered by a compactly supported
+Gaspari--Cohn correlation function \citep{GaspariCohn1999}, which sets distant
+covariances exactly to zero while keeping the localised matrix positive
+definite.
 
 \subsection{Minimisation}
 
@@ -2607,7 +3256,12 @@ IAU window of $N_{\mathrm{IAU}}$ timesteps:
   \vect{x}^{n+1} = \mathcal{M}(\vect{x}^n) + \frac{\delta\vect{x}}{N_{\mathrm{IAU}}},
   \qquad n = 0,\ldots,N_{\mathrm{IAU}}-1.
 \end{equation}
-This produces dynamically balanced analyses and is the default cycling mode.
+Here $\vect{x}_a$ and $\vect{x}_b$ are the analysis and background states and
+$\delta\vect{x}/N_{\mathrm{IAU}}$ is the fraction of the increment injected each
+step.  Spreading the correction over the window lets the model's fast adjustment
+processes absorb it in balance, so the gravity-wave noise that an instantaneous
+insertion would excite is suppressed; this produces dynamically balanced
+analyses and is the default cycling mode.
 
 
 % #############################################################################
@@ -2617,13 +3271,21 @@ This produces dynamically balanced analyses and is the default cycling mode.
 
 \section{Atmospheric Mass Conservation}
 
-Dry-air mass is corrected by a uniform adjustment to $p_s$:
+Because surface pressure measures the column-integrated mass, any residual
+imbalance left by the transport and physics updates appears as a drift in the
+global mean $p_s$.  Dry-air mass is restored by a uniform adjustment to $p_s$:
 \begin{equation}
   \Delta\bar p = \frac{\sum_i A_i\,p_{s,i}^{\mathrm{new}} - M_{\mathrm{target}}}
   {\sum_i A_i},
   \qquad
   p_{s,i}^{\mathrm{corr}} = p_{s,i}^{\mathrm{new}} - \Delta\bar p.
 \end{equation}
+Here $A_i$ is the cell area, $p_{s,i}^{\mathrm{new}}$ the uncorrected surface
+pressure, and $M_{\mathrm{target}}$ the area-integrated mass to be conserved;
+$\Delta\bar p$ is the area-weighted mean error subtracted uniformly from every
+column.  A spatially constant offset removes the global drift without altering
+horizontal pressure gradients, so the geostrophic balance and wind field are
+left untouched.
 
 \paragraph{Initial-mass anchoring.}
 For long integrations, $M_{\mathrm{target}}=M_0=\sum_i A_i\,p_{s,i}^{\mathrm{init}}$
@@ -2631,10 +3293,17 @@ prevents cumulative $O(\varepsilon)$ drift.  All accumulations use float64.
 
 \paragraph{Moisture conservation.}
 Column moisture is rescaled:
-$q^{\mathrm{corr}}=q^{\mathrm{new}}\cdot Q_{\mathrm{old}}/Q_{\mathrm{new}}$.
+$q^{\mathrm{corr}}=q^{\mathrm{new}}\cdot Q_{\mathrm{old}}/Q_{\mathrm{new}}$,
+where $Q_{\mathrm{old}}$ and $Q_{\mathrm{new}}$ are the global water masses
+before and after the update.  Multiplicative rescaling preserves the sign and
+relative vertical structure of $q$, so positivity is maintained while the total
+water is exactly restored.
 
 \section{Ocean Conservation}
 
+The ocean's free surface plays the role surface pressure plays in the
+atmosphere: the global-mean elevation $\eta$ records the total volume, so a
+volume drift is removed by a uniform shift of $\eta$.
 Volume: $\eta^{\mathrm{corr}}=\eta^{\mathrm{new}}
 +(\sum\eta_{\mathrm{old}}\,A-\sum\eta_{\mathrm{new}}\,A)/\sum A$.
 
@@ -2649,8 +3318,12 @@ All three grids (cubed-sphere, lat-lon, MPAS) compute corrections simultaneously
 \label{ch:training}
 % #############################################################################
 
-The \texttt{training/} module provides end-to-end differentiable training
-pipelines for three modes:
+Because every component is written in differentiable JAX, the gradient of a
+trajectory loss with respect to model parameters is available exactly through
+the compiled time-stepping kernel, with no hand-coded adjoint.  This turns
+parameter estimation, neural-network coupling, and hybrid learned--physical
+modelling into a single optimisation problem.  The \texttt{training/} module
+provides end-to-end differentiable training pipelines for three modes:
 
 \section{Physics Parameter Tuning}
 
@@ -2938,13 +3611,19 @@ The legoESM codebase comprises approximately 385~source modules
 \label{sec:williamson}
 
 The shallow water dynamical cores are verified against the standard
-Williamson test suite \citep{Williamson1992}, including:
+Williamson test suite \citep{Williamson1992}, the community benchmark set that
+isolates the distinct error modes of a horizontal core:
 \begin{itemize}[nosep]
   \item \textbf{Case 1}: Advection of a cosine bell;
   \item \textbf{Case 2}: Global steady-state nonlinear geostrophic flow;
   \item \textbf{Case 5}: Zonal flow over an isolated mountain;
   \item \textbf{Case 6}: Rossby--Haurwitz wave.
 \end{itemize}
+Each case probes a different property: Case~1 has an exact solution so it
+measures pure advective accuracy and shape preservation; Case~2 is a steady
+geostrophic state whose departure norm exposes spurious grid imprinting; Case~5
+and the Rossby--Haurwitz wave of Case~6 test the nonlinear response to
+topography and the maintenance of a propagating planetary wave.
 A comprehensive diagnostic suite (\texttt{williamson\_diagnostic.py})
 computes $L_1$, $L_2$, and $L_\infty$ error norms against analytical
 solutions where available, and performs cross-discretisation comparison
@@ -2960,8 +3639,11 @@ equation) are validated by a dedicated comprehensive test suite covering:
   \item \textbf{Conservation}: Total mass, energy, and enstrophy
     conservation to machine precision (shallow water) and within
     bounded drift (primitive equation with hyperdiffusion);
-  \item \textbf{Stability}: Long-integration stability under
-    Held--Suarez forcing at T21/L40 and T42/L40 resolutions;
+  \item \textbf{Stability}: Long-integration stability under the dry
+    Held--Suarez forcing \citep{HeldSuarez1994} --- Newtonian relaxation to a
+    prescribed radiative-equilibrium temperature plus boundary-layer Rayleigh
+    drag --- at T21/L40 and T42/L40 resolutions, which exercises the core's
+    climate-statistics fidelity without any physics parameterisation;
   \item \textbf{Spectral convergence}: Verification that error norms
     decrease with increasing truncation wavenumber;
   \item \textbf{Semi-implicit correctness}: Validation that the implicit
@@ -3284,6 +3966,288 @@ equations in spherical geometry.
 Wright, D.G., 1997:
 An equation of state for use in ocean models: Eckart's formula revisited.
 \textit{J.\ Atmos.\ Ocean.\ Tech.}, \textbf{14}, 735--740.
+
+% ===========================================================================
+% Additional references (cite-every-scheme pass). Entries flagged
+% ``% [verify]'' have author/year/title/journal confirmed but volume/page
+% numbers that should be checked against the original before publication.
+% ===========================================================================
+
+\bibitem[Alexander and Dunkerton(1999)]{AlexanderDunkerton1999}
+Alexander, M.J.\ and T.J.~Dunkerton, 1999:
+A spectral parameterization of mean-flow forcing due to breaking gravity
+waves.
+\textit{J.\ Atmos.\ Sci.}, \textbf{56}, 4167--4182.
+
+\bibitem[Asselin(1972)]{Asselin1972}
+Asselin, R., 1972:
+Frequency filter for time integrations.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 487--490.
+
+\bibitem[Beljaars(1995)]{Beljaars1995}
+Beljaars, A.C.M., 1995:
+The parametrization of surface fluxes in large-scale models under free
+convection.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{121}, 255--270.
+
+\bibitem[Betts and Miller(1986)]{BettsMiller1986}
+Betts, A.K.\ and M.J.~Miller, 1986:
+A new convective adjustment scheme. Part~II: Single column tests using GATE
+wave, BOMEX, ATEX and arctic air-mass data sets.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{112}, 693--709.
+
+\bibitem[Bitz and Lipscomb(1999)]{BitzLipscomb1999}
+Bitz, C.M.\ and W.H.~Lipscomb, 1999:
+An energy-conserving thermodynamic model of sea ice.
+\textit{J.\ Geophys.\ Res.}, \textbf{104}(C7), 15669--15677.
+
+\bibitem[Bonev et al.(2023)]{Bonev2023}
+Bonev, B., T.~Kurth, C.~Hundt, J.~Pathak, M.~Baust, K.~Kashinath, and
+A.~Anandkumar, 2023:
+Spherical Fourier neural operators: Learning stable dynamics on the sphere.
+\textit{Proc.\ 40th Int.\ Conf.\ on Machine Learning (ICML)}, PMLR~202,
+2806--2823.
+
+\bibitem[Bouillon et al.(2013)]{Bouillon2013}
+Bouillon, S., T.~Fichefet, V.~Legat, and G.~Madec, 2013:
+The elastic--viscous--plastic method revisited.
+\textit{Ocean Modelling}, \textbf{71}, 2--12.
+
+\bibitem[Courtier et al.(1994)]{Courtier1994}
+Courtier, P., J.-N.~Th\'epaut, and A.~Hollingsworth, 1994:
+A strategy for operational implementation of 4D-Var, using an incremental
+approach.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{120}, 1367--1387.
+
+\bibitem[Follows et al.(2006)]{Follows2006}
+Follows, M.J., T.~Ito, and S.~Dutkiewicz, 2006:
+On the solution of the carbonate chemistry system in ocean biogeochemistry
+models.
+\textit{Ocean Modelling}, \textbf{12}, 290--301.
+
+\bibitem[Gaspari and Cohn(1999)]{GaspariCohn1999}
+Gaspari, G.\ and S.E.~Cohn, 1999:
+Construction of correlation functions in two and three dimensions.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{125}, 723--757.
+
+\bibitem[Golaz et al.(2002)]{Golaz2002}
+Golaz, J.-C., V.E.~Larson, and W.R.~Cotton, 2002:
+A PDF-based model for boundary layer clouds. Part~I: Method and model
+description.
+\textit{J.\ Atmos.\ Sci.}, \textbf{59}, 3540--3551.
+
+\bibitem[Khairoutdinov and Kogan(2000)]{KhairoutdinovKogan2000}
+Khairoutdinov, M.\ and Y.~Kogan, 2000:
+A new cloud physics parameterization in a large-eddy simulation model of
+marine stratocumulus.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{128}, 229--243.
+
+\bibitem[Klemp et al.(2007)]{Klemp2007}
+Klemp, J.B., W.C.~Skamarock, and J.~Dudhia, 2007:
+Conservative split-explicit time integration methods for the compressible
+nonhydrostatic equations.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{135}, 2897--2913.
+
+\bibitem[Kochkov et al.(2024)]{Kochkov2024}
+Kochkov, D., et al., 2024:
+Neural general circulation models for weather and climate.
+\textit{Nature}, \textbf{632}, 1060--1066.
+
+\bibitem[Li et al.(2021)]{Li2021}
+Li, Z., N.~Kovachki, K.~Azizzadenesheli, B.~Liu, K.~Bhattacharya, A.~Stuart,
+and A.~Anandkumar, 2021:
+Fourier neural operator for parametric partial differential equations.
+\textit{Proc.\ Int.\ Conf.\ on Learning Representations (ICLR)}.
+
+\bibitem[Lin and Rood(1996)]{LinRood1996}
+Lin, S.-J.\ and R.B.~Rood, 1996:
+Multidimensional flux-form semi-Lagrangian transport schemes.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{124}, 2046--2070.
+
+\bibitem[Lindzen(1981)]{Lindzen1981}
+Lindzen, R.S., 1981:
+Turbulence and stress owing to gravity wave and tidal breakdown.
+\textit{J.\ Geophys.\ Res.}, \textbf{86}(C10), 9707--9714.
+
+\bibitem[Marshall et al.(1997)]{Marshall1997}
+Marshall, J., A.~Adcroft, C.~Hill, L.~Perelman, and C.~Heisey, 1997:
+A finite-volume, incompressible Navier--Stokes model for studies of the ocean
+on parallel computers.
+\textit{J.\ Geophys.\ Res.}, \textbf{102}(C3), 5753--5766.
+
+\bibitem[McDougall and Barker(2011)]{McDougallBarker2011}
+McDougall, T.J.\ and P.M.~Barker, 2011:
+Getting started with TEOS-10 and the Gibbs Seawater (GSW) Oceanographic
+Toolbox.
+SCOR/IAPSO WG127, 28~pp.
+
+\bibitem[McFarlane(1987)]{McFarlane1987}
+McFarlane, N.A., 1987:
+The effect of orographically excited gravity wave drag on the general
+circulation of the lower stratosphere and troposphere.
+\textit{J.\ Atmos.\ Sci.}, \textbf{44}, 1775--1800.
+
+\bibitem[Mlawer et al.(1997)]{Mlawer1997}
+Mlawer, E.J., S.J.~Taubman, P.D.~Brown, M.J.~Iacono, and S.A.~Clough, 1997:
+Radiative transfer for inhomogeneous atmospheres: RRTM, a validated
+correlated-$k$ model for the longwave.
+\textit{J.\ Geophys.\ Res.}, \textbf{102}(D14), 16663--16682.
+
+\bibitem[Monin and Obukhov(1954)]{MoninObukhov1954}
+Monin, A.S.\ and A.M.~Obukhov, 1954:
+Basic laws of turbulent mixing in the surface layer of the atmosphere.
+\textit{Tr.\ Akad.\ Nauk SSSR Geophiz.\ Inst.}, \textbf{24}(151), 163--187.
+
+\bibitem[Rabier et al.(2000)]{Rabier2000}
+Rabier, F., H.~J\"arvinen, E.~Klinker, J.-F.~Mahfouf, and A.~Simmons, 2000:
+The ECMWF operational implementation of four-dimensional variational
+assimilation. Part~I: Experimental results with simplified physics.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{126}, 1143--1170.
+
+\bibitem[Redi(1982)]{Redi1982}
+Redi, M.H., 1982:
+Oceanic isopycnal mixing by coordinate rotation.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{12}, 1154--1158.
+
+\bibitem[Ronchi et al.(1996)]{Ronchi1996}
+Ronchi, C., R.~Iacono, and P.S.~Paolucci, 1996:
+The ``cubed sphere'': A new method for the solution of partial differential
+equations in spherical geometry.
+\textit{J.\ Comput.\ Phys.}, \textbf{124}, 93--114.
+
+\bibitem[Roquet et al.(2015)]{Roquet2015}
+Roquet, F., G.~Madec, T.J.~McDougall, and P.M.~Barker, 2015:
+Accurate polynomial expressions for the density and specific volume of
+seawater using the TEOS-10 standard.
+\textit{Ocean Modelling}, \textbf{90}, 29--43.
+
+\bibitem[Sadourny(1972)]{Sadourny1972}
+Sadourny, R., 1972:
+Conservative finite-difference approximations of the primitive equations on
+quasi-uniform spherical grids.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 136--144.
+
+\bibitem[Semtner(1976)]{Semtner1976}
+Semtner, A.J., 1976:
+A model for the thermodynamic growth of sea ice in numerical investigations
+of climate.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{6}, 379--389.
+
+\bibitem[Shchepetkin and McWilliams(2005)]{ShchepetkinMcWilliams2005}
+Shchepetkin, A.F.\ and J.C.~McWilliams, 2005:
+The Regional Oceanic Modeling System (ROMS): A split-explicit, free-surface,
+topography-following-coordinate oceanic model.
+\textit{Ocean Modelling}, \textbf{9}, 347--404.
+
+\bibitem[Skamarock et al.(2012)]{Skamarock2012}
+Skamarock, W.C., J.B.~Klemp, M.G.~Duda, L.D.~Fowler, S.-H.~Park, and
+T.D.~Ringler, 2012:
+A multiscale nonhydrostatic atmospheric model using centroidal Voronoi
+tesselations and C-grid staggering.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{140}, 3090--3105.
+
+\bibitem[Smagorinsky(1963)]{Smagorinsky1963}
+Smagorinsky, J., 1963:
+General circulation experiments with the primitive equations. I.\ The basic
+experiment.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{91}, 99--164.
+
+\bibitem[Smolarkiewicz(1984)]{Smolarkiewicz1984}
+Smolarkiewicz, P.K., 1984:
+A fully multidimensional positive definite advection transport algorithm
+with small implicit diffusion.
+\textit{J.\ Comput.\ Phys.}, \textbf{54}, 325--362.
+
+\bibitem[Sundqvist et al.(1989)]{Sundqvist1989}
+Sundqvist, H., E.~Berge, and J.E.~Kristj\'ansson, 1989:
+Condensation and cloud parameterization studies with a mesoscale numerical
+weather prediction model.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{117}, 1641--1657.
+
+\bibitem[Thompson et al.(2008)]{Thompson2008}
+Thompson, G., P.R.~Field, R.M.~Rasmussen, and W.D.~Hall, 2008:
+Explicit forecasts of winter precipitation using an improved bulk
+microphysics scheme. Part~II: Implementation of a new snow parameterization.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{136}, 5095--5115.
+
+\bibitem[Thorndike et al.(1975)]{Thorndike1975}
+Thorndike, A.S., D.A.~Rothrock, G.A.~Maykut, and R.~Colony, 1975:
+The thickness distribution of sea ice.
+\textit{J.\ Geophys.\ Res.}, \textbf{80}, 4501--4513.
+
+\bibitem[Thuburn et al.(2009)]{Thuburn2009}
+Thuburn, J., T.D.~Ringler, W.C.~Skamarock, and J.B.~Klemp, 2009:
+Numerical representation of geostrophic modes on arbitrarily structured
+C-grids.
+\textit{J.\ Comput.\ Phys.}, \textbf{228}, 8321--8335.
+
+\bibitem[Tiedtke(1989)]{Tiedtke1989}
+Tiedtke, M., 1989:
+A comprehensive mass flux scheme for cumulus parameterization in large-scale
+models.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{117}, 1779--1800.
+
+\bibitem[Wicker and Skamarock(2002)]{WickerSkamarock2002}
+Wicker, L.J.\ and W.C.~Skamarock, 2002:
+Time-splitting methods for elastic models using forward time schemes.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{130}, 2088--2097.
+
+\bibitem[Zhang and McFarlane(1995)]{ZhangMcFarlane1995}
+Zhang, G.J.\ and N.A.~McFarlane, 1995:
+Sensitivity of climate simulations to the parameterization of cumulus
+convection in the Canadian Climate Centre general circulation model.
+\textit{Atmos.--Ocean}, \textbf{33}, 407--446.
+
+% --- references resolved from per-chapter scheme markers ---
+
+\bibitem[Briegleb et al.(1986)]{Briegleb1986}
+Briegleb, B.P., P.~Minnis, V.~Ramanathan, and E.~Harrison, 1986:
+Comparison of regional clear-sky albedos inferred from satellite observations
+and model computations.
+\textit{J.\ Climate Appl.\ Meteor.}, \textbf{25}, 214--226.
+
+\bibitem[Cooper(1986)]{Cooper1986}
+Cooper, W.A., 1986:
+Ice initiation in natural clouds.
+\textit{Meteor.\ Monogr.}, \textbf{21}(43), 29--32, Amer.\ Meteor.\ Soc.
+
+\bibitem[Hines(1997)]{Hines1997}
+Hines, C.O., 1997:
+Doppler-spread parameterization of gravity-wave momentum deposition in the
+middle atmosphere.
+\textit{J.\ Atmos.\ Solar-Terr.\ Phys.}, \textbf{59}, 371--400.
+
+\bibitem[Jarvis(1976)]{Jarvis1976}
+Jarvis, P.G., 1976:
+The interpretation of the variations in leaf water potential and stomatal
+conductance found in canopies in the field.
+\textit{Philos.\ Trans.\ Roy.\ Soc.\ London B}, \textbf{273}, 593--610.
+
+\bibitem[Jerlov(1976)]{Jerlov1976}
+Jerlov, N.G., 1976:
+\textit{Marine Optics.}
+Elsevier Oceanography Series, Vol.~14, 231~pp.
+
+\bibitem[Kuo(1974)]{Kuo1974}
+Kuo, H.L., 1974:
+Further studies of the parameterization of the influence of cumulus
+convection on large-scale flow.
+\textit{J.\ Atmos.\ Sci.}, \textbf{31}, 1232--1240.
+
+\bibitem[Paulson and Simpson(1977)]{PaulsonSimpson1977}
+Paulson, C.A.\ and J.J.~Simpson, 1977:
+Irradiance measurements in the upper ocean.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{7}, 952--956.
+
+\bibitem[Rasp et al.(2018)]{Rasp2018}
+Rasp, S., M.S.~Pritchard, and P.~Gentine, 2018:
+Deep learning to represent subgrid processes in climate models.
+\textit{Proc.\ Natl.\ Acad.\ Sci.\ USA}, \textbf{115}, 9684--9689.
+
+\bibitem[Xu and Randall(1996)]{XuRandall1996}
+Xu, K.-M.\ and D.A.~Randall, 1996:
+A semiempirical cloudiness parameterization for use in climate models.
+\textit{J.\ Atmos.\ Sci.}, \textbf{53}, 3084--3102.
 
 \end{thebibliography}
 

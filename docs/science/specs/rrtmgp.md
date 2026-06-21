@@ -1,6 +1,8 @@
 # RRTMGP Faithfulness Audit — Tracking
 
-Goal: `src/.../rrtmgp/` faithful to
+Goal: `src/.../rrtmgp/` faithful to RTE-RRTMGP (correlated-k gas optics +
+two-stream RTE; Pincus et al. 2019, building on the RRTM longwave
+correlated-k method of Mlawer et al. 1997),
 https://github.com/earth-system-radiation/rte-rrtmgp, fully JAX-
 differentiable, mixed-precision-safe, MPI/GPU-scalable.
 
@@ -148,3 +150,8 @@ shard-equivalence + iter-13/15 end-to-end pins.
   reachable via the public API/shim.
 - LW aerosol scattering (ssa/asymmetry inputs) + per-band/species optical-
   property table (only the pure-absorbing ssa=0 limit is wired).
+
+## References
+
+- Mlawer, E. J., Taubman, S. J., Brown, P. D., Iacono, M. J. & Clough, S. A., 1997: Radiative transfer for inhomogeneous atmospheres: RRTM, a validated correlated-k model for the longwave. *Journal of Geophysical Research*, 102, 16663–16682.
+- Pincus, R., Mlawer, E. J. & Delamere, J. S., 2019: Balancing accuracy, efficiency, and flexibility in radiation calculations for dynamical models. *Journal of Advances in Modeling Earth Systems*, 11, 3074–3089.
