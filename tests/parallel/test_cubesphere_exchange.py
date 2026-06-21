@@ -565,3 +565,109 @@ class TestTracerLeakFree:
         finally:
             deactivate_spmd_halo_backend()
             _cache.clear()
+
+
+def _make_nway_mesh(n):
+    """Create an n-device face-axis mesh on CPU (skip if too few devices)."""
+    devices = jax.devices("cpu")
+    if len(devices) < n:
+        pytest.skip(
+            f"Need at least {n} CPU devices "
+            f"(set XLA_FLAGS=--xla_force_host_platform_device_count={n})")
+    return jax.sharding.Mesh(
+        np.array(devices[:n]).reshape(n), axis_names=("face",))
+
+
+class TestNonDivisorFallback:
+    """A4: a face mesh whose device count does NOT divide 6 (e.g. an 8-chip
+    TPU slice) must either RAISE (default — dispatch-hardening, no silent
+    degradation) or, opt-in via ``allow_replicated_fallback``, run the cube
+    halo REPLICATED on the serial local pad body (bit-identical to
+    single-device). It must never silently half-activate or crash in XLA.
+    """
+
+    def test_predicate_divisor_vs_nondivisor(self):
+        from legoesm.parallel.cubesphere_exchange import (
+            _mesh_supports_face_exchange)
+        for n in (1, 2, 3, 6):
+            assert _mesh_supports_face_exchange(_make_nway_mesh(n)) is True
+        for n in (4, 5, 7, 8):
+            assert _mesh_supports_face_exchange(_make_nway_mesh(n)) is False
+
+    def test_predicate_tiled_mesh_supported(self):
+        # A (6, kt, kt) sub-face tile is supported even though 24 does not
+        # divide 6.
+        devices = jax.devices("cpu")
+        if len(devices) < 24:
+            pytest.skip("Need 24 CPU devices for a (6,2,2) tiled mesh")
+        from legoesm.parallel.cubesphere_exchange import (
+            _mesh_supports_face_exchange)
+        mesh = jax.sharding.Mesh(
+            np.array(devices[:24]).reshape(6, 2, 2),
+            axis_names=("face", "ti", "tj"))
+        assert _mesh_supports_face_exchange(mesh) is True
+
+    def test_non_divisor_raises_without_flag(self):
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend, _cache)
+        from legoesm.grids.halo import get_halo_backend
+        mesh8 = _make_nway_mesh(8)
+        _cache.clear()
+        deactivate_spmd_halo_backend()  # known-local baseline
+        try:
+            with pytest.raises(ValueError, match="divides 6"):
+                activate_spmd_halo_backend(mesh8, n=8)
+            # The raise fires before any global mutation: state untouched.
+            assert get_halo_backend() == "local"
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
+
+    def test_non_divisor_fallback_is_local(self):
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+            get_spmd_mesh, _cache)
+        from legoesm.grids.halo import get_halo_backend
+        mesh8 = _make_nway_mesh(8)
+        _cache.clear()
+        try:
+            activate_spmd_halo_backend(
+                mesh8, n=8, allow_replicated_fallback=True)  # MUST NOT raise
+            assert get_halo_backend() == "local"
+            assert get_spmd_mesh() is None
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
+
+    def test_fallback_pad_matches_local_reference(self):
+        # The replicated fallback IS the serial local body -> bit-identical.
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend, _cache)
+        from legoesm.grids.halo import pad_halo_4d, pad_halo_local_4d
+        mesh8 = _make_nway_mesh(8)
+        _cache.clear()
+        data = jax.random.normal(jax.random.PRNGKey(7), (6, 8, 8, 3))
+        ref = np.array(pad_halo_local_4d(data))
+        try:
+            activate_spmd_halo_backend(
+                mesh8, n=8, allow_replicated_fallback=True)
+            got = np.array(pad_halo_4d(data))
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
+        np.testing.assert_array_equal(got, ref)
+
+    def test_divisor_path_still_activates_spmd(self, mesh_6):
+        # Regression: the fallback must NOT steal the divisor (sharded) path.
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+            get_spmd_mesh, _cache)
+        from legoesm.grids.halo import get_halo_backend
+        _cache.clear()
+        try:
+            activate_spmd_halo_backend(mesh_6, n=8)
+            assert get_halo_backend() == "spmd"
+            assert get_spmd_mesh() is not None
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
