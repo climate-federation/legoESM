@@ -890,3 +890,110 @@ def regrid_faces_to_latlon(
         field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
 
     return lon_cent, lat_cent, field_ll
+
+
+def regrid_scalar_nan_aware(
+    field: jnp.ndarray,
+    regrid_weights: RegridWeights,
+) -> jnp.ndarray:
+    """NaN-aware version of :func:`regrid_scalar` (KD-tree IDW).
+
+    Missing source cells (``NaN``) are dropped from each target's neighbour set
+    and the inverse-distance weights renormalised over the valid neighbours, so a
+    target becomes ``NaN`` only when *all* its neighbours are missing.  For
+    land-only source data (ocean = NaN) this stops ocean NaN bleeding into coastal
+    target cells — the same role conservative regridding plays for regular
+    lat-lon, but for arbitrary (cubed-sphere / MPAS) targets via point neighbours.
+    """
+    spatial_size = regrid_weights.src_flat_size
+    if field.size == spatial_size:
+        flat = field.ravel(); extra_dims = ()
+    else:
+        n_trailing = field.size // spatial_size
+        flat = field.reshape(spatial_size, n_trailing); extra_dims = flat.shape[1:]
+
+    idx = regrid_weights.src_indices               # (n_target, k)
+    w = regrid_weights.weights                     # (n_target, k)
+    gathered = flat[idx]                            # (..., k[, n_extra])
+    if len(extra_dims) == 0:
+        valid = jnp.isfinite(gathered)             # (n_target, k)
+        wv = w * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-1)
+        den = jnp.sum(wv, axis=-1)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape)
+    else:
+        valid = jnp.isfinite(gathered)             # (n_target, k, n_extra)
+        wv = w[..., None] * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-2)
+        den = jnp.sum(wv, axis=-2)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape + extra_dims)
+
+
+
+def _cell_edges(centers):
+    """Cell edges (n+1) from 1-D cell centres (works for ascending or descending)."""
+    c = np.asarray(centers, dtype=np.float64)
+    mid = 0.5 * (c[:-1] + c[1:])
+    return np.concatenate([[2.0 * c[0] - mid[0]], mid, [2.0 * c[-1] - mid[-1]]])
+
+
+def _overlap_matrix(src_edges, tgt_edges, periodic_span=None):
+    """``(n_tgt, n_src)`` overlap length of each target cell with each source cell.
+
+    Cells are taken as ``[min(edge_i, edge_{i+1}), max(...)]`` so the result is
+    orientation-independent.  ``periodic_span`` (e.g. 360 for longitude) adds the
+    wrapped overlaps so cells straddling the seam are handled.
+    """
+    s_lo = np.minimum(src_edges[:-1], src_edges[1:]); s_hi = np.maximum(src_edges[:-1], src_edges[1:])
+    t_lo = np.minimum(tgt_edges[:-1], tgt_edges[1:]); t_hi = np.maximum(tgt_edges[:-1], tgt_edges[1:])
+
+    def _ov(shift):
+        lo = np.maximum(t_lo[:, None], s_lo[None, :] + shift)
+        hi = np.minimum(t_hi[:, None], s_hi[None, :] + shift)
+        return np.clip(hi - lo, 0.0, None)
+
+    if periodic_span:
+        return _ov(0.0) + _ov(periodic_span) + _ov(-periodic_span)
+    return _ov(0.0)
+
+
+def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
+    """First-order **conservative**, NaN-aware regrid between regular lat-lon grids.
+
+    Each target cell value is the source-cell-area-weighted mean over the source
+    cells it overlaps, using ``sin(lat)`` (true area) for the latitude weight and
+    periodic longitude overlap.  **NaN-aware**: missing source cells (e.g. ocean)
+    are dropped and the weights renormalised over the valid overlap, so NaNs never
+    bleed into a partially-covered (coastal) target cell — a target is NaN only
+    when *all* its overlapping source cells are missing.  Conserves the
+    area-integral over the valid region.
+
+    Parameters
+    ----------
+    field : array ``(n_src_lat, n_src_lon)`` or ``(n_src_lat, n_src_lon, L)``
+    src_lat, src_lon, tgt_lat, tgt_lon : 1-D cell centres [deg]
+
+    Returns
+    -------
+    array ``(n_tgt_lat, n_tgt_lon[, L])``
+    """
+    field = np.asarray(field, dtype=np.float64)
+    has_layers = field.ndim == 3
+    v = field if has_layers else field[:, :, None]            # (ns_lat, ns_lon, L)
+
+    # Latitude weight uses sin(lat) (true cell-area measure); longitude is periodic.
+    w_lat = _overlap_matrix(np.sin(np.deg2rad(_cell_edges(src_lat))),
+                            np.sin(np.deg2rad(_cell_edges(tgt_lat))))   # (n_tgt_lat, n_src_lat)
+    w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon),
+                            periodic_span=360.0)                        # (n_tgt_lon, n_src_lon)
+
+    valid = np.isfinite(v).astype(np.float64)
+    fv = np.where(valid > 0, v, 0.0)
+    # contract source lat then source lon (separable -> cheap)
+    num = np.einsum("bj,aj L -> ab L", w_lon, np.einsum("as,sj L -> aj L", w_lat, fv))
+    den = np.einsum("bj,aj L -> ab L", w_lon, np.einsum("as,sj L -> aj L", w_lat, valid))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(den > 0.0, num / np.maximum(den, 1e-300), np.nan)
+    return out if has_layers else out[:, :, 0]
