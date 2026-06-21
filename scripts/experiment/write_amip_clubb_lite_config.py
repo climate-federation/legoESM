@@ -28,6 +28,7 @@ from legoesm.driver.config import (
     DycoreConfig,
     ExperimentConfig,
     GridConfig,
+    OutputConfig,
     experiment_config_to_dict,
 )
 
@@ -41,6 +42,7 @@ _STARTER_RESOLUTION_MAX = 16
 def build_amip_clubb_lite_config(
     *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray",
     days: int = 200, land_mask_path: str = "", grid_type: str = "latlon",
+    diag_days: int | None = None,
 ) -> ExperimentConfig:
     """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
 
@@ -73,11 +75,17 @@ def build_amip_clubb_lite_config(
             "carries prognostic physics state the spectral run loop (which 'gaussian' "
             "requires) does not thread (issue #405), so the model build fails. Use 'latlon' "
             "or 'cubed_sphere'.")
+    # diag_days is the campaign time-mean's diagnostic CADENCE: it samples at each diag_days
+    # boundary, so a run needs days > diag_days for ≥1 sample. None ⇒ the OutputConfig default
+    # (5 → ~40 samples over the 200-day default); lower it (e.g. 1) for a fast full-loop TEST
+    # where days can then be small, raise it for a sparser climatology (iter 501).
+    _diag_days = OutputConfig().diag_days if diag_days is None else int(diag_days)
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type=str(grid_type), resolution=int(resolution),
                         nlev=int(nlev)),
         dycore=DycoreConfig(
             dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
+        output=OutputConfig(diag_days=_diag_days),
         radiation=radiation,
         turbulence="clubb_lite",
         days=int(days),
@@ -107,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--days", type=int, default=200,
                    help="run length = the CLIMATOLOGY WINDOW the time-mean is computed over "
                         "(default 200; keep it long + aligned to the ERA5 window)")
+    p.add_argument("--diag-days", type=int, default=None,
+                   help="diagnostic CADENCE [days]: the campaign time-mean samples every "
+                        "diag_days, so --days must exceed it (default 5 -> ~40 samples over 200 "
+                        "days; lower to e.g. 1 for a fast full-loop test with small --days)")
     p.add_argument("--land-mask-path", default="",
                    help="optional land-sea fraction file: sets a real land mask so the model "
                         "runs land physics over land and --ocean-only can exclude land columns. "
@@ -125,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
                 "land-sea fraction file (or omit it for a flat no-land config).")
     cfg = build_amip_clubb_lite_config(
         resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation,
-        days=args.days, land_mask_path=args.land_mask_path, grid_type=args.grid_type)
+        days=args.days, land_mask_path=args.land_mask_path, grid_type=args.grid_type,
+        diag_days=args.diag_days)
     with open(args.out, "w") as f:
         json.dump(experiment_config_to_dict(cfg), f, indent=2)
     print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "

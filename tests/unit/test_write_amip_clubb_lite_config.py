@@ -88,6 +88,25 @@ def test_days_not_exceeding_the_diagnostic_cadence_warns(tmp_path, capsys):
     assert "diagnostic cadence" not in capsys.readouterr().out   # a long run does not warn
 
 
+def test_diag_days_cadence_is_configurable(tmp_path, capsys):
+    """--diag-days (iter 501) exposes the diagnostic CADENCE so a fast full-loop TEST can use a
+    SMALL --days (days must exceed diag_days for the time-mean to fire a boundary). Threads to
+    output.diag_days; lowering it makes a previously-warning short run runnable (no warning)."""
+    from scripts.experiment.write_amip_clubb_lite_config import (
+        build_amip_clubb_lite_config,
+        main,
+    )
+
+    assert build_amip_clubb_lite_config(diag_days=1, days=2).output.diag_days == 1
+    assert build_amip_clubb_lite_config().output.diag_days == 5   # None => the default cadence
+    out = tmp_path / "fast.json"
+    # --days 2 with the DEFAULT cadence (5) would warn; with --diag-days 1 it is runnable + silent
+    assert main([str(out), "--resolution", "4", "--nlev", "5", "--days", "2",
+                 "--diag-days", "1"]) == 0
+    w = capsys.readouterr().out
+    assert "diagnostic cadence" not in w                         # 2 > 1 => runnable, no warning
+
+
 def test_config_round_trips_and_launcher_accepts_it(tmp_path):
     """The emitted JSON loads back into an ExperimentConfig AND make_clubb_build_driver
     accepts it — the exact contract the campaign ``--config`` path requires."""
