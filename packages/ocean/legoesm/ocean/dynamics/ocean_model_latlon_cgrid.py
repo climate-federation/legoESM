@@ -1362,6 +1362,35 @@ class LatLonCGridOceanModel:
                     "the Matsuno split scheme for the vertex-f energy-conserving "
                     "Coriolis.")
 
+        # barotropic_slow_forcing_ab2 (AB2 time-centering of the depth-mean
+        # barotropic forcing F_slow) is only well-posed alongside the
+        # explicit_ab2 Coriolis routing, and only with ab2_scope="total".
+        # Validate on the static config at construction (dispatch-hardening):
+        # reject the silent-misconfiguration combinations rather than producing
+        # a Coriolis-free or time-inconsistent barotropic forcing.
+        if getattr(config, "barotropic_slow_forcing_ab2", False):
+            if _cor_scheme != "explicit_ab2":
+                raise ValueError(
+                    'barotropic_slow_forcing_ab2=True requires '
+                    'coriolis_scheme="explicit_ab2": the AB2 time-centering of '
+                    "the barotropic slow forcing only carries the planetary "
+                    "Coriolis to the barotropic mode when f×u enters du_dt "
+                    "(explicit_ab2, whose depth-mean lands in F_slow). Under "
+                    "matsuno_split the in-substep f·V_at_u 4-point average (the "
+                    "2Δx rotational null mode) is still active AND F_slow has no "
+                    "Coriolis, so the flag would AB2-extrapolate a Coriolis-free "
+                    "forcing while the null mode persists — a silent no-op cure. "
+                    f"Got coriolis_scheme={_cor_scheme!r}.")
+            if getattr(config, "ab2_scope", "total") == "advective":
+                raise ValueError(
+                    'barotropic_slow_forcing_ab2=True is not supported with '
+                    'ab2_scope="advective": the stored AB2 prev is F_slow BEFORE '
+                    "the du_diss depth-mean is folded in, so under advective "
+                    "scope the dissipative depth-mean would be applied "
+                    "un-time-centered while the prev omits it (an inconsistent "
+                    'AB2). Use ab2_scope="total" (dissipative terms then enter '
+                    "du_dt and AB2-extrapolate with everything; §5 uses total).")
+
         # AB2 extrapolation scope (Veros-faithful dissipative placement). The
         # "advective" scope withholds the dissipative tendencies from the AB2
         # extrapolation and applies them at weight 1.0; it is meaningless
@@ -1763,6 +1792,42 @@ class LatLonCGridOceanModel:
             F_slow_v = F_slow_v - nu4 * scale_v_b * bilap_V.astype(F_slow_v.dtype)
             F_slow_u = F_slow_u * state.u_mask.data
             F_slow_v = F_slow_v * state.v_mask.data
+
+        # AB2 time-centering of the barotropic slow forcing (matches the
+        # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral).
+        # F_slow_eff = (3/2+ε)·F_slow^n − (1/2+ε)·F_slow^{n-1}, applied to the
+        # barotropic forcing ONLY (du_dt_pert above keeps the current-time
+        # baroclinic perturbation).  The ε = ab2_epsilon robustification is the
+        # SAME χ-stabilised AB2 the outer baroclinic integrator uses (a_n/a_p at
+        # ~L4093) and that Oceananigans applies to Gᵁ — bare (3/2,1/2) AB2 is the
+        # marginally-unstable form, so robustifying matters on this barotropic
+        # mode.  Cold start (prev=zeros) gives (3/2+ε)·F_slow ≈ 1.6× on step 1 —
+        # the SAME first-step convention as the outer AB2 (not forward-Euler).
+        # ``_F_slow_*_cur`` (current values) are stored as next-step prev below.
+        # Default off ⇒ bit-identical (the branch is not traced).
+        _F_slow_u_cur = F_slow_u
+        _F_slow_v_cur = F_slow_v
+        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+            _fpu = state.F_slow_u_prev
+            _fpv = state.F_slow_v_prev
+            if _fpu is None or _fpv is None:
+                # `None` is a static pytree-structure value (not traced), so this
+                # raises cleanly at trace time with an actionable message instead
+                # of a cryptic lax.scan "carry structure changed" error: the
+                # storage block below ALWAYS writes a Field, so an unseeded
+                # first step (prev=None) would flip None→Field between scan
+                # iterations.  The driver MUST seed zeros Fields (see
+                # build_silvestri_baroclinic_jet_setup).
+                raise ValueError(
+                    "barotropic_slow_forcing_ab2=True requires the state's "
+                    "F_slow_u_prev/F_slow_v_prev to be seeded (zeros Field) "
+                    "before stepping: the AB2 needs a stable pytree carry under "
+                    "lax.scan (a None→Field transition breaks the scan). Seed "
+                    "them as in build_silvestri_baroclinic_jet_setup.")
+            _eps = self.config.ab2_epsilon
+            _an, _ap = 1.5 + _eps, 0.5 + _eps
+            F_slow_u = (_an * F_slow_u - _ap * _fpu.data) * state.u_mask.data
+            F_slow_v = (_an * F_slow_v - _ap * _fpv.data) * state.v_mask.data
 
         # Outer baroclinic momentum integrator (NEMO-mirror, #RK3).  The
         # cold-start amplifiers (pressure gradient + KE gradient + relative
@@ -2520,6 +2585,25 @@ class LatLonCGridOceanModel:
                         data=_S_flux_div_cur, name="S_flux_div_prev",
                         dims=_dims_fd, units="m/s"),
                 )
+
+        # Store the current barotropic slow forcing as next-step prev for the
+        # AB2 time-centering.  Pytree-stable: the apply block above REQUIRES the
+        # prev to be a seeded Field when the flag is on (it raises on None), so
+        # this storage is always Field→Field across scan iterations.  ``_F_slow_
+        # *_cur`` is the CURRENT (non-extrapolated) value, captured BEFORE the
+        # du_diss depth-mean fold (ab2_scope="advective" is rejected upstream, so
+        # under the supported ab2_scope="total" path du_diss is None and there is
+        # nothing extra to fold).
+        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+            from legoesm.core.field import Field as _Field_fs
+            state_new = state_new._replace(
+                F_slow_u_prev=_Field_fs(
+                    data=_F_slow_u_cur, name="F_slow_u_prev",
+                    dims=("lat", "lon_u"), units="m/s^2"),
+                F_slow_v_prev=_Field_fs(
+                    data=_F_slow_v_cur, name="F_slow_v_prev",
+                    dims=("lat_v", "lon"), units="m/s^2"),
+            )
 
         # Include vertical velocity diagnostic in state
         # w_baro has shape (..., nlev+1) on half levels, interpolate to full levels (..., nlev)

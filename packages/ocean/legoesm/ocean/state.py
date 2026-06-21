@@ -435,6 +435,11 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # Previous-step barotropic slow forcing (depth-mean tendency) for the
+    # AB2 time-centering of F_slow (matches Oceananigans' AB2-extrapolated Gᵁ).
+    # Only used when barotropic_slow_forcing_ab2=True; None otherwise (default).
+    F_slow_u_prev: object = None
+    F_slow_v_prev: object = None
     # Rigid-lid barotropic streamfunction state (config.barotropic_solver ==
     # "rigid_lid").  ``psi`` is the vertex-point streamfunction [m^3/s], shape
     # (n_lat+1, n_lon+1).  ``dpsi``/``dpsi_prev`` are the interior streamfunction
@@ -957,6 +962,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # strict no-op where there is no land (periodic/global aquaplanet).  Default
     # ON: the masked cold-cell contamination is a bug for any masked-land run.
     tracer_wall_neumann_fill: bool = True
+    # AB2 time-centering of the barotropic slow forcing F_slow (matches the
+    # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
+    # tendency, vs legoESM's default current-time depth-mean).  Investigated for
+    # the §5 no-in-substep-Coriolis path's barotropic geostrophic balance
+    # (docs/issues/barotropic_mode_noise.md). Default False = bit-identical.
+    barotropic_slow_forcing_ab2: bool = False
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.

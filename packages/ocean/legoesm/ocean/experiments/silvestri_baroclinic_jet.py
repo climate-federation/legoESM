@@ -21,16 +21,35 @@ surface, WENO7 tracer, RK3 + AB2, smc03 PGF, linear EOS, vertical background ν/
 no GM/KPP); the momentum scheme is selected by ``apply_silvestri_scheme`` (UP3/
 W9V/W9D/SM2/QG2). Resolutions 1/8°,1/16°,1/32° (Ny=20/res), L_d≈5.5→6.75 km.
 
-Barotropic solver (turbulent-stage fix): ``explicit_substep`` (split-explicit
-free surface = what the Oceananigans oracle uses).  The earlier ``implicit_cn``
-choice was found — by a validated state-bridge against the oracle — to SOURCE the
-eddy-scale 2Δx barotropic grid mode: single-step Crank–Nicolson is neutral at the
-Nyquist (|amp|=1, θ=0.55), so it never damps the 2Δx mode the eddy field projects
-onto the barotropic flow each step; it accumulates over the spin-up (~25× the
-oracle's grid-noise by day 50) and blows up (~day 72).  The split-explicit
-substep time-filter damps it, so all five schemes now run eddy-resolving with NO
-closure and NO viscosity backstop, tracking the oracle's bounded 80-day
-trajectory.  (``barotropic_div_damp`` stays 0 — the substep filter alone suffices.)
+Turbulent-stage fix (FAITHFUL, NO dissipation backstop — barotropic_diffusion_alpha=0).
+The eddy-resolving jet blew up at the turbulent stage (~day 72) from the C-grid
+**barotropic Coriolis 2Δx rotational null mode** (docs/issues/barotropic_mode_noise.md
+§A), diagnosed by a validated state-bridge against the Oceananigans oracle: the
+in-substep 4-point ``f·V_at_u`` annihilates the 2Δx-in-lon barotropic mode, leaving
+it unconstrained to grow under the eddy field.  Cure = the Oceananigans split-explicit
+architecture (NO in-substep barotropic Coriolis):
+  * ``coriolis_scheme="explicit_ab2"`` routes the planetary f×u to the barotropic mode
+    through ``F_slow`` (depth-mean of du_dt) and gates the in-substep Coriolis OFF —
+    no 2Δx null mode;
+  * ``barotropic_slow_forcing_ab2=True`` AB2 time-centers ``F_slow`` to match
+    Oceananigans' AB2-extrapolated ``Gᵁ`` — this keeps the barotropic eta–U geostrophic
+    balance (without it the SSH drifts and blows ~day 38).
+
+SCOPE / KNOWN LIMITATION (honest):  This Coriolis fix removes the EARLY barotropic
+failures (the d38 SSH drift and the d54 2Δx null mode).  W9V then tracks the oracle to
+~day 50 and survives the 80-day target at ``barotropic_diffusion_alpha=0`` (NO
+SSH-diffusion / viscosity backstop) — validated to 80 d by
+``scripts/tmp/_silvestri_eps_validate.py``.  BUT a SEPARATE, filter-independent
+eddy-scale instability remains: once the eddy field reaches the oracle's saturation
+amplitude (~0.10 m/s) around day 55, legoESM fails to equilibrate and runs away to
+blow-up at ~day 90 (cosine) / ~day 104 (power_law) — both filters diverge at day 55, so
+this is NOT a barotropic-Coriolis or time-filter issue.  The oracle saturates at
+~0.10 m/s and runs indefinitely; legoESM reaches ~0.7 m/s by day 80 (7× over-energetic,
+mid-runaway).  This residual is the documented WENO-momentum / eddy-equilibration
+problem (interior 2Δx under-dissipation / inverse-cascade arrest), a separate effort.
+The no-closure WENO/UP3 schemes are correctly more energetic than the closure SM2/QG2
+through the tracked window.  For a stable long run, use a small ``barotropic_diffusion_
+alpha`` (oracle amplitude at ~0.005) until the eddy-equilibration fix lands.
 """
 
 from __future__ import annotations
@@ -53,7 +72,16 @@ class SilvestriJetConfig(NamedTuple):
     lat_north: float = -40.0
     lat_center: float = -50.0        # φ₀
     lon_west: float = -10.0
-    lon_east: float = 10.0           # 20° periodic
+    lon_east: float = 10.0           # 20° periodic (FIDELITY NOTE below)
+    # FIDELITY CAVEAT vs the Oceananigans oracle: the oracle is a 16°-zonal
+    # CARTESIAN β-plane (Lx = deg2rad(16)·R·cos50 ≈ 1145 km, 128 pts ⇒ 1/8°);
+    # this experiment is a 20°-zonal SPHERICAL lat-lon periodic channel (~0.156°
+    # zonal at 128 pts, cos(lat)-varying width).  So the cured §5 run TRACKS A
+    # BOUNDED TURBULENT TRAJECTORY in the same physical regime — it is NOT a
+    # bit-for-bit oracle match (different grid geometry + 25% wider, coarser
+    # zonal channel).  Matching the oracle's 16° β-plane is a separate fidelity
+    # task; the faithful barotropic-Coriolis cure (survives 80 d at α=0) is
+    # validated here on the spherical channel.
     H_max: float = 1000.0            # 1 km deep
     N2: float = 4.0e-6               # background stratification [1/s²]
     delta_b: float = 5.0e-3          # front buoyancy jump [m/s²] (≈2.5°C)
@@ -249,11 +277,29 @@ def build_silvestri_baroclinic_jet_setup(
                                   dz_surface=_dz, dz_deep=_dz)
 
     base_config = LatLonCGridOceanConfig(
-        # Split-explicit free surface (= the Oceananigans oracle's barotropic
-        # treatment).  implicit_cn was found to SOURCE the eddy-scale 2Δx
-        # barotropic grid mode and blow up at ~day 72 (see module docstring);
-        # the substep time-filter damps it, matching the oracle's bounded run.
+        # FAITHFUL barotropic stack = the Oceananigans split-explicit oracle's,
+        # with NO dissipation backstop (barotropic_diffusion_alpha=0). The
+        # eddy-resolving turbulent blow-up was the C-grid barotropic Coriolis
+        # 2Δx rotational null mode (docs/issues/barotropic_mode_noise.md §A):
+        # the in-substep 4-point f·V_at_u annihilates the 2Δx-in-lon mode →
+        # unconstrained → grows under the eddies → blows ~day 72. Cure (matches
+        # Oceananigans, which has NO in-substep barotropic Coriolis):
+        #   * coriolis_scheme="explicit_ab2" — route the planetary f×u to the
+        #     barotropic mode via F_slow (depth-mean of du_dt), gate the
+        #     in-substep f·V_at_u OFF → no null mode;
+        #   * barotropic_slow_forcing_ab2=True — AB2 time-center F_slow to match
+        #     Oceananigans' AB2-extrapolated Gᵁ → keeps the barotropic eta-U
+        #     geostrophic balance (without it the SSH drifts → blows ~day 38).
+        # This removes the EARLY barotropic failures and W9V survives the 80-d
+        # target at alpha=0, but a SEPARATE eddy-scale instability (filter-
+        # independent, onset ~day 55 at the oracle's ~0.1 m/s saturation
+        # amplitude) blows the run at ~day 90 — see the module docstring SCOPE
+        # note. NOT a complete §5 cure; the residual is the WENO/eddy-
+        # equilibration problem, a separate effort.
         barotropic_solver="explicit_substep",
+        coriolis_scheme="explicit_ab2",
+        barotropic_slow_forcing_ab2=True,
+        barotropic_diffusion_alpha=0.0,      # NO SSH-diffusion backstop (faithful)
         tracer_advection="weno7",            # paper: 7th-order WENO tracer (all cases)
         tracer_time_integrator="rk3",
         outer_integrator="ab2",
@@ -286,6 +332,24 @@ def build_silvestri_baroclinic_jet_setup(
             A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5)
 
     initial_state, wall_mask = _build_initial_state(grid, z_coord, config)
+
+    # Seed the AB2 barotropic-slow-forcing prev fields (zeros) so the lax.scan
+    # carry pytree is stable from step 1 (the model step stores a Field each
+    # step when barotropic_slow_forcing_ab2 is on; with prev=zeros the first
+    # step is (3/2+ε)·F_slow ≈ 1.6× — the SAME AB2 cold-start convention as the
+    # outer baroclinic integrator, transient and negligible on the near-balanced
+    # IC).  Required: any driver using barotropic_slow_forcing_ab2 under
+    # lax.scan MUST seed these (else a step-1 None→Field transition breaks the
+    # scan carry); build_silvestri does it here.  No-op for the default stack.
+    if getattr(model_config, "barotropic_slow_forcing_ab2", False):
+        from legoesm.core.field import Field as _Field_fs0
+        _z_u = jnp.zeros_like(initial_state.u.data[:, :, 0])
+        _z_v = jnp.zeros_like(initial_state.v.data[:, :, 0])
+        initial_state = initial_state._replace(
+            F_slow_u_prev=_Field_fs0(data=_z_u, name="F_slow_u_prev",
+                                     dims=("lat", "lon_u"), units="m/s^2"),
+            F_slow_v_prev=_Field_fs0(data=_z_v, name="F_slow_v_prev",
+                                     dims=("lat_v", "lon"), units="m/s^2"))
 
     # Restoring targets = the (zonally-uniform) initial zonal-mean profiles.
     restoring = SilvestriRestoring(
