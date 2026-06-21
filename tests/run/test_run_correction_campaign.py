@@ -4196,10 +4196,12 @@ def test_print_realism_summary_uses_prefix_and_skips_empty(capsys):
     assert "[osse] LES realism:" in out and "1x laminar" in out
 
 
-def test_realism_capture_is_wired_into_build_run_setup(monkeypatch):
+def test_realism_capture_is_wired_into_build_run_setup(monkeypatch, capsys):
     """_build_run_setup wraps run_les in a _RealismCapture (iter 520) so BOTH the campaign and
-    the OSSE capture realism without per-main wrapping — verified on the returned run_les
-    without running the heavy setup body (the heavy deps are monkeypatched)."""
+    the OSSE capture realism without per-main wrapping; and it surfaces the iter-515 IDEALIZED-
+    radiation launch warning (the base config here is gray) — both verified on one
+    _build_run_setup call without running the heavy setup body (the heavy deps are
+    monkeypatched)."""
     import scripts.run.run_correction_campaign as rcc
 
     monkeypatch.setattr(rcc, "load_base_config_and_grid", lambda cfg: (SimpleNamespace(
@@ -4218,3 +4220,7 @@ def test_realism_capture_is_wired_into_build_run_setup(monkeypatch):
     run_les = rcc._build_run_setup(args)[5]
     assert isinstance(run_les, rcc._RealismCapture)
     assert run_les.breakdowns == []
+    # The shared preamble surfaces the iter-515 idealized-radiation warning at LAUNCH (gray →
+    # the bias is C_K-insensitive), for BOTH the campaign and the OSSE.
+    out = capsys.readouterr().out
+    assert "IDEALIZED" in out and "rrtmgp" in out
