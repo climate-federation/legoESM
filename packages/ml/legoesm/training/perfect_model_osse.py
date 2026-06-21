@@ -37,6 +37,14 @@ from legoesm.training.correction_loop import run_correction_campaign
 # magnitude) counts as "no change", not a real improvement — guards float noise.
 _REL_TOL = 1e-6
 
+# Heuristic combined-score below which the twin's INITIAL bias (biased vs truth) is too small
+# for a recovery to be meaningful — so a "no_change" verdict likely reflects the CONFIG
+# (C_K has little leverage: idealized radiation, or too-small a perturbation), NOT the loop.
+# iter-514 measured ~0.0025 for a 40% C_K change under gray, vs an ~11 real-ERA5 idealization
+# bias; 0.01 separates those. Advisory only (notes a "no_change" message; does NOT change the
+# status), so a slightly-off value is low-stakes. Configurable via osse_verdict's kwarg.
+_MIN_MEANINGFUL_BIAS = 0.01
+
 
 def _assert_pseudo_truth_finite(reference: Any, name: str) -> None:
     """Fail loud if a pseudo-truth model run (``run_fn(true_config)``) DIVERGED.
@@ -238,7 +246,8 @@ def _diverged_verdict(*biases: float) -> OSSEVerdict | None:
     return None
 
 
-def osse_verdict(result: OSSEResult) -> OSSEVerdict:
+def osse_verdict(result: OSSEResult,
+                 *, min_meaningful_bias: float = _MIN_MEANINGFUL_BIAS) -> OSSEVerdict:
     """Classify a perfect-model OSSE into a go/no-go verdict for the real campaign.
 
     * ``recovered`` — bias fell AND the corrected coefficient moved toward the
@@ -277,11 +286,22 @@ def osse_verdict(result: OSSEResult) -> OSSEVerdict:
             f"the parameter did NOT recover (error {result.initial_param_error:.4g} "
             f"-> {result.final_param_error:.4g}); suspect compensating errors / the "
             "LES->GCM closure transfer before trusting a real-ERA5 improvement.")
+    # A NEAR-ZERO initial bias means the twin had almost nothing to recover, so "no_change"
+    # likely reflects the CONFIG (C_K has little leverage), NOT a broken loop — append an
+    # actionable note rather than letting the operator "fix" a loop that is fine (iter 515).
+    config_note = ""
+    if abs(result.initial_bias) < min_meaningful_bias:
+        config_note = (
+            f" NOTE: the initial bias {result.initial_bias:.4g} is below {min_meaningful_bias:g}"
+            " — the biased run barely differs from truth, so C_K has little leverage in THIS "
+            "config (idealized radiation, or too-small a --biased-ck perturbation), and this "
+            "verdict reflects the CONFIG, not the loop (iters 412/514). Use rrtmgp / a larger "
+            "perturbation for a meaningful go/no-go.")
     return OSSEVerdict(
         "no_change",
         f"no accepted round reduced the bias (kept {result.n_accepted}/"
         f"{result.n_rounds}); the LES diagnosis did not recover the parameter in "
-        "this perfect-model setup — fix that before spending HPC on real ERA5.")
+        f"this perfect-model setup — fix that before spending HPC on real ERA5.{config_note}")
 
 
 # --------------------------------------------------------------------------- #

@@ -642,3 +642,27 @@ def test_last_accepted_env_kernel_skips_rejected_final_round():
     # No kernel anywhere ⇒ None.
     r3 = r._replace(iterations=(_cres(None),), accepted=(True,))
     assert last_accepted_env_kernel(r3) is None
+
+
+def test_osse_no_change_notes_a_trivial_initial_bias():
+    """A no_change verdict on a NEAR-ZERO initial bias appends an actionable note that the
+    CONFIG (C_K leverage: idealized radiation / too-small a perturbation), not the loop, is the
+    issue (iter 515) — but the STATUS stays no_change (so go/no-go gating is unchanged), and a
+    meaningful-bias no_change does NOT get the note."""
+    def _r(initial_bias):
+        return OSSEResult(
+            initial_bias=initial_bias, final_bias=initial_bias, bias_reduction=0.0,
+            bias_reduced=False, true_value=0.5, initial_value=0.3, recovered_value=0.3,
+            initial_param_error=0.2, final_param_error=0.2, param_error_reduced=False,
+            n_rounds=1, n_accepted=0, summary=None)
+
+    trivial = osse_verdict(_r(0.0025))          # the iter-514 gray-twin scale
+    assert trivial.status == "no_change" and not trivial.ok
+    assert "config" in trivial.message.lower() and "rrtmgp" in trivial.message
+
+    meaningful = osse_verdict(_r(1.0))
+    assert meaningful.status == "no_change"
+    assert "NOTE: the initial bias" not in meaningful.message
+
+    # the threshold is configurable: a higher floor flags the 1.0 case too
+    assert "NOTE: the initial bias" in osse_verdict(_r(1.0), min_meaningful_bias=2.0).message
