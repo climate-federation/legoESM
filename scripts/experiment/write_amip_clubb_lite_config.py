@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             "config is fine only for an aquaplanet smoke.")
     if args.resolution <= _STARTER_RESOLUTION_MAX:
         print(
-            f"[config] NOTE: latlon resolution {args.resolution} is a COARSE STARTER "
+            f"[config] NOTE: {args.grid_type} resolution {args.resolution} is a COARSE STARTER "
             "(fine for a smoke / dry-run). For a PRODUCTION ERA5 comparison scale "
             "--resolution / --nlev UP — and lower --dt to keep the CFL stable (a too-large "
             "dt at higher resolution diverges, and the campaign's baseline-divergence guard "

@@ -12,11 +12,12 @@ import numpy as np
 import pytest
 
 
-def _base_config(tmp_path, resolution=8, nlev=5):
+def _base_config(tmp_path, resolution=8, nlev=5, grid_type="latlon"):
     from scripts.experiment.write_amip_clubb_lite_config import main as cfg_main
 
     cfg = tmp_path / "base.json"
-    assert cfg_main([str(cfg), "--resolution", str(resolution), "--nlev", str(nlev)]) == 0
+    assert cfg_main([str(cfg), "--resolution", str(resolution), "--nlev", str(nlev),
+                     "--grid-type", grid_type]) == 0
     return str(cfg)
 
 
@@ -189,6 +190,30 @@ def test_build_deployed_config_carries_the_override_and_validates(tmp_path):
     assert ck.shape == (128,)
     assert ck.min() == pytest.approx(0.31) and ck.max() == pytest.approx(0.59)
     assert tuple(dgrid.grid_shape_2d) == (8, 16)
+
+
+def test_build_deployed_config_on_a_cubed_sphere_grid(tmp_path):
+    """REGRESSION (iter 498): the same-grid deploy works on a CUBED-SPHERE base config — the
+    per-column field is `(6*n*n,)` flat, but the grid_shape is the 3-D `(6,n,n)` (NOT lat-lon's
+    `(nlat,nlon)`), so the deploy + the deploy-check must handle a 3-D grid_shape (the iter-484
+    flat-vs-grid bug class, here in the deploy). The campaign RE-RUN applies the field on
+    cubed-sphere (iter 496); this locks the deploy-check an operator runs on the OUTPUT."""
+    from scripts.experiment.check_campaign_deploy import build_deployed_config, check_deploy
+    from scripts.run.run_correction_campaign import load_base_config_and_grid
+
+    cfg = _base_config(tmp_path, resolution=4, grid_type="cubed_sphere")
+    base_cfg, grid, _ = load_base_config_and_grid(cfg)
+    ncol = int(np.prod(grid.grid_shape_2d))                  # 6*4*4 = 96 columns
+    out = _campaign_output(tmp_path, base_cfg, grid, lo=0.31, hi=0.59)
+
+    deployed, dgrid = build_deployed_config(cfg, out)
+    ck = np.asarray(deployed.turbulence_override.clubb_lite.C_K)
+    assert ck.shape == (ncol,)                              # the flat (6*n*n,) per-column field
+    assert ck.min() == pytest.approx(0.31) and ck.max() == pytest.approx(0.59)
+    assert tuple(dgrid.grid_shape_2d) == (6, 4, 4)          # the 3-D cubed-sphere grid shape
+    # the deploy-check reports the 3-D grid_shape + the column count (no 2-D assumption)
+    stats = check_deploy(cfg, out)
+    assert stats["grid_shape"] == (6, 4, 4) and stats["n_columns"] == ncol
 
 
 def test_build_env_kernel_deployed_override_cross_grid(tmp_path):
