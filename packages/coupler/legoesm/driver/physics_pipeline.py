@@ -179,6 +179,11 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Opt-in convective cumulus cloud-fraction source (set by
+        # build_physics_pipeline from ExperimentConfig.convective_cloud).
+        # When True, compute_radiation_core feeds the lagged convective precip
+        # to the cloud diagnosis so the convecting tropics get radiative cloud.
+        self._cloud_convective = False
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -955,7 +960,8 @@ class PhysicsPipeline:
                                cloud_scheme="none",
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
-                               sfc_T_override=None):
+                               sfc_T_override=None,
+                               conv_precip=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1062,7 +1068,19 @@ class PhysicsPipeline:
                 compute_cloud_properties,
             )
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            cloud_config = CloudConfig(scheme=cloud_scheme)
+            # ``convective_cloud`` (opt-in) adds a bounded cumulus cloud cover
+            # from the lagged convective precip so the convecting tropics get
+            # radiative cloud the RH-based stratiform scheme misses.  Default
+            # False => CloudConfig defaults (no convective term, no guard).
+            cloud_config = CloudConfig(
+                scheme=cloud_scheme,
+                convective_cloud=getattr(self, "_cloud_convective", False),
+            )
+            # Column convective precip [kg/m²/s] for the convective cloud cover;
+            # flattened to the (ncol,) column layout like the other inputs.
+            conv_precip_col = (
+                None if conv_precip is None else ad.flatten_2d(conv_precip)
+            )
             # When no microphysics is wired (``self.micro_fn is None``)
             # the prognostic ``q_c`` is a zero tracer and feeding it to
             # ``compute_cloud_properties`` short-circuits the diagnostic
@@ -1113,6 +1131,7 @@ class PhysicsPipeline:
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
                 n_cloud=n_cloud_col, n_ice=n_ice_col,
+                conv_precip=conv_precip_col,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -2053,6 +2072,7 @@ def build_physics_pipeline(grid, sigma, config):
         column_mesh=column_mesh,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma

@@ -273,6 +273,14 @@ class ExperimentConfig(NamedTuple):
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
+    # convection scheme (sbm) holds the column subsaturated, so the convecting
+    # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
+    # True, the convective precip rate drives a bounded cumulus cover in the
+    # cloud diagnosis (see CloudConfig.convective_cloud).  Default False =>
+    # byte-identical to the validated stratiform-only path.
+    convective_cloud: bool = False
     microphysics: str = "none"
     # Aerosol-CCN coupling: diagnose the specified cloud-droplet number
     # from the prescribed aerosol optical depth (Andreae 2009 AOT–CCN
