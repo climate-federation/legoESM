@@ -48,6 +48,7 @@ from scripts.run.run_correction_campaign import (  # noqa: E402
     build_distributed_multi_correction_campaign,
     build_multi_correction_campaign,
     compose_compare_fn,
+    fast_validation_les_regime,
     grid_latlon_deg,
     load_base_config_and_grid,
     make_base_driver_builder,
@@ -4054,3 +4055,28 @@ def test_campaign_output_dict_scalar_single_field_is_rejected_by_deploy():
     assert not isinstance(loaded["C_K"], list)            # a bare float, NOT [0.4]
     with pytest.raises(ValueError, match="1-D per-column"):
         corrected_clubb_config(loaded)
+
+
+def test_fast_validation_les_regime_is_tiny_valid_and_shared():
+    """The shared WIRING-smoke regime (iter 504) is a single tiny box for BOTH the shallow
+    and deep selectors, passes the production regime validator, and is FAR smaller than the
+    production default — so it is unmistakably a composition pre-flight, not a science
+    regime. Centralising it here means the real-ERA5 full-loop check + the OSSE --quick
+    smoke share ONE definition (no duplicated LES dimensions)."""
+    from legoesm.atmosphere.dynamics.les_regime import (
+        LESRegimeConfig,
+        validate_regime_config,
+    )
+
+    regime = fast_validation_les_regime()
+    validate_regime_config(regime)                        # must not raise (self-validating)
+    assert regime.shallow == regime.deep                  # one tiny box for both selectors
+    tiny = regime.shallow
+    assert (tiny.nx, tiny.ny, tiny.nlev) == (8, 8, 8)
+    assert tiny.dz_sfc_m * tiny.nlev < tiny.domain_top_m  # the invariant the validator checks
+
+    # Dramatically cheaper than the production default (the whole point of the fast smoke).
+    prod = LESRegimeConfig()
+    cells = lambda r: r.nx * r.ny * r.nlev  # noqa: E731
+    assert cells(tiny) * 100 < cells(prod.shallow)
+    assert cells(tiny) * 100 < cells(prod.deep)

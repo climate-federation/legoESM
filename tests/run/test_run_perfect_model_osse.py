@@ -114,6 +114,40 @@ def test_surface_flux_flag_parsed():
     assert p.parse_args(base + ["--surface-flux"]).surface_flux is True
 
 
+def test_quick_flag_parsed_and_defaults_off():
+    """The OSSE CLI exposes --quick (iter 504): the fast single-coefficient WIRING smoke that
+    swaps the production LES for the tiny shared validation regime. Off by default so the
+    normal invocation stays the production go/no-go (back-compat)."""
+    p = _build_argparser()
+    base = ["--config", "c.json", "--true-ck", "0.2", "--biased-ck", "0.1"]
+    assert p.parse_args(base).quick is False
+    assert p.parse_args(base + ["--quick"]).quick is True
+
+
+def test_quick_rejected_with_multi_or_cross_resolution():
+    """--quick is single-coefficient only: combining it with --coefficients (multi) or
+    --fine-resolution (cross-resolution) fails LOUD rather than silently running the slow
+    production LES the operator meant to skip. Guard is pure + runs before the heavy setup."""
+    import pytest
+
+    from scripts.validate.run_perfect_model_osse import _reject_quick_with_multi_or_cross
+
+    p = _build_argparser()
+    base = ["--config", "c.json"]
+    # single-coefficient --quick is allowed (no raise)
+    _reject_quick_with_multi_or_cross(
+        p.parse_args(base + ["--true-ck", "0.2", "--biased-ck", "0.1", "--quick"]))
+    with pytest.raises(SystemExit, match="incompatible"):
+        _reject_quick_with_multi_or_cross(
+            p.parse_args(base + ["--coefficients", "C_K,Pr_t", "--quick"]))
+    with pytest.raises(SystemExit, match="incompatible"):
+        _reject_quick_with_multi_or_cross(p.parse_args(
+            base + ["--true-ck", "0.2", "--biased-ck", "0.1",
+                    "--fine-resolution", "8", "--quick"]))
+    # WITHOUT --quick the same multi/cross args are fine (the guard is --quick-scoped)
+    _reject_quick_with_multi_or_cross(p.parse_args(base + ["--coefficients", "C_K,Pr_t"]))
+
+
 def test_build_osse_harness_returns_the_shared_wiring():
     """_build_osse_harness (iter 291) factors the driver/LES harness shared by the single
     + multi OSSE builders (byte-identical before): a callable run_fn / build_compare_fn /

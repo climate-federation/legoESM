@@ -78,10 +78,6 @@ def main(argv: list[str] | None = None) -> int:
     import jax.numpy as jnp
     import numpy as np
     from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
-    from legoesm.atmosphere.dynamics.les_regime import (
-        LESRegimeConfig,
-        LESResolutionConfig,
-    )
     from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.training.compare_reanalysis import (
         column_state_from_carry,
@@ -95,7 +91,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     from scripts.data.load_local_era5 import open_local_era5_dataset
-    from scripts.run.run_correction_campaign import make_les_diagnose_fn
+    from scripts.run.run_correction_campaign import (
+        fast_validation_les_regime,
+        make_les_diagnose_fn,
+    )
     from scripts.validate.compare_amip_era5 import canonical_grid_type, select_era5_regrid
 
     print("[real-loop] baseline coupled model (res "
@@ -131,11 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             dd._atm.q_v, sst_K=dd._ocean_state.T_sfc.data),
         coordinate=sigma)
 
-    small = LESResolutionConfig(dx_m=50.0, nx=8, ny=8, nlev=8, domain_top_m=2000.0,
-                                dz_sfc_m=50.0)
     diagnose_fn = make_les_diagnose_fn(
         grid, sigma,
-        les_config=ColumnLESConfig(regime=LESRegimeConfig(shallow=small, deep=small),
+        les_config=ColumnLESConfig(regime=fast_validation_les_regime(),
                                    gate_les_realism=False),
         run_les_fn=partial(run_forced_les, dt_s=0.5, n_steps=2))
 

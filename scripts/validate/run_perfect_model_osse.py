@@ -343,7 +343,29 @@ def _build_argparser():  # pragma: no cover - thin CLI plumbing
                         "go/no-go faithfully predicts the REALISTIC diagnosis path (it changes "
                         "HOW the closure is diagnosed, not just which columns). The OSSE twin's "
                         "runs carry SST, so the shared make_les_diagnose_fn threads it.")
+    p.add_argument("--quick", action="store_true",
+                   help="WIRING SMOKE ONLY (single-coefficient mode): replace the production "
+                        "LES with the tiny shared fast_validation_les_regime so the WHOLE OSSE "
+                        "harness (truth run -> biased run -> spin-off LES -> diagnose -> gate) "
+                        "runs in MINUTES on a small config. The under-resolved LES gives a "
+                        "GARBAGE coefficient, so the recovery/bias verdict is NOT meaningful — "
+                        "the exit code reflects only whether the harness COMPOSED end-to-end. "
+                        "Drop --quick (production LES) for the real go/no-go.")
     return p
+
+
+def _reject_quick_with_multi_or_cross(args: Any) -> None:
+    """``--quick`` (the fast single-coefficient WIRING smoke) is incompatible with the
+    multi-coefficient (``--coefficients``) and cross-resolution (``--fine-resolution``)
+    modes — fail LOUD rather than silently ignoring ``--quick`` (which would run the slow
+    production LES the operator was trying to avoid).  Pure + called BEFORE the heavy
+    ``_build_run_setup`` so the misuse is caught instantly and is unit-testable."""
+    if getattr(args, "quick", False) and (
+            args.coefficients is not None or args.fine_resolution is not None):
+        raise SystemExit(
+            "--quick (the fast single-coefficient WIRING smoke) is incompatible with "
+            "--coefficients / --fine-resolution. Run the single-coefficient OSSE for the "
+            "wiring smoke, or drop --quick for the production multi/cross-resolution go/no-go.")
 
 
 def _resolve_fine_resolution(fine_resolution: int, coarse_resolution: int) -> int:
@@ -476,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     from scripts.run.run_correction_campaign import _area_weights, _build_run_setup
 
     args = _build_argparser().parse_args(argv)
+    _reject_quick_with_multi_or_cross(args)   # fail fast before the heavy setup (iter 504)
     # Shared run-setup preamble (iter 295): config/grid/sigma + driver builder (with the
     # RESOLVED coupled preset — the OSSE previously passed the RAW --coupled-preset name to
     # make_base_driver_builder, the iter-240 'str' has no attribute ocean_mode crash in
@@ -506,14 +529,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
             "the single-coefficient OSSE requires --true-ck and --biased-ck (or pass "
             "--coefficients for the simultaneous multi-coefficient mode).")
     field = METHOD_PROMOTION[args.diagnosis_method][1]
+    # --quick swaps in the tiny shared validation regime (wiring smoke); production otherwise.
+    les_kwargs = dict(diagnosis_method=args.diagnosis_method, surface_flux=args.surface_flux)
+    if args.quick:
+        from scripts.run.run_correction_campaign import fast_validation_les_regime
+        les_kwargs["regime"] = fast_validation_les_regime()
     result = build_perfect_model_osse(
         base_atm_config=base_cfg, build_base_driver=build_base_driver,
         extract_column_state=extract_fn, sigma=sigma, grid=grid,
         area_weights=_area_weights(grid),
         true_clubb=CLUBBLiteConfig(**{field: args.true_ck}),
         biased_clubb=CLUBBLiteConfig(**{field: args.biased_ck}),
-        les_config=ColumnLESConfig(diagnosis_method=args.diagnosis_method,
-                                   surface_flux=args.surface_flux),
+        les_config=ColumnLESConfig(**les_kwargs),
         run_les_fn=run_les, n_worst=args.n_worst, n_iterations=args.iterations,
         phis=phis)
 
@@ -524,6 +551,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
           f"(kept {result.n_accepted}/{result.n_rounds}); param error "
           f"{result.initial_param_error:.4g} -> {result.final_param_error:.4g}")
     print(f"[osse] {verdict.status.upper()}: {verdict.message}")
+    if args.quick:
+        import math
+        ran = math.isfinite(result.initial_bias) and math.isfinite(result.final_bias)
+        print("[osse] *** --quick WIRING SMOKE ***: the tiny validation LES is DELIBERATELY "
+              "under-resolved, so the recovery/bias verdict above is NOT meaningful. This "
+              "exit code reflects only whether the OSSE harness COMPOSED end-to-end; run "
+              "WITHOUT --quick (production LES) for the real go/no-go.")
+        return 0 if ran else 1
     return 0 if verdict.ok else 1
 
 

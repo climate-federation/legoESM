@@ -184,6 +184,37 @@ def make_les_diagnose_fn(
     return diagnose_fn
 
 
+def fast_validation_les_regime() -> Any:
+    """A TINY (8x8x8, dx=50 m, 2 km top) LES regime for WIRING / COMPOSITION validation ONLY.
+
+    Both the shallow AND the deep regime are this same small box, so a spin-off LES finishes
+    in SECONDS — turning the multi-minute production LES (shallow 128x128x60 / deep
+    256x256x80) into a fast pre-flight that still exercises the WHOLE loop end-to-end (column
+    forcing extract -> plane LES -> closure diagnosis -> monotonic gate).
+
+    It is DELIBERATELY under-resolved: the diagnosed closure coefficient is GARBAGE (the
+    realism gate rejects it), so this is NOT a science regime and must NEVER drive an actual
+    parameter diagnosis or a go/no-go verdict — it answers ONLY "does the harness COMPOSE on
+    this config?".  The production diagnosis / go/no-go uses the default ``ColumnLESConfig``
+    regime.  Shared by the fast complete-loop validators (the real-ERA5 full-loop check and
+    the OSSE ``--quick`` wiring smoke) so the tiny-regime numerics live in ONE place — no
+    duplicated LES dimensions across scripts (iter 504).  Self-validating: the tiny dims are
+    run through ``validate_regime_config`` so a future edit that violates the regime
+    invariants (e.g. ``dz_sfc_m * nlev >= domain_top_m``) fails LOUD here, not deep in a run.
+    """
+    from legoesm.atmosphere.dynamics.les_regime import (
+        LESRegimeConfig,
+        LESResolutionConfig,
+        validate_regime_config,
+    )
+
+    tiny = LESResolutionConfig(dx_m=50.0, nx=8, ny=8, nlev=8, domain_top_m=2000.0,
+                               dz_sfc_m=50.0)
+    regime = LESRegimeConfig(shallow=tiny, deep=tiny)
+    validate_regime_config(regime)
+    return regime
+
+
 # Coefficient name → (promotion_key, LES diagnosis method) for the multi campaign.
 COEFFICIENT_SPEC_MAP = {
     "C_K": ("clubb_lite_C_K", "clubb_coefficient"),
