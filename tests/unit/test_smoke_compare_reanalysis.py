@@ -36,6 +36,26 @@ def test_run_smoke_validates_realistic_ocean_only_surface_flux_flags(tmp_path):
     assert rc == 0
 
 
+def test_run_smoke_ocean_only_with_a_real_land_mask_excludes_land(tmp_path, capsys):
+    """REGRESSION (iter 486): with a real (synthetic) land mask, --ocean-only must rank a
+    STRICT SUBSET of columns (land EXCLUDED), validating the full harness on a NON-trivial
+    mask — not the flat-config all-ocean no-op the other ocean-only smoke exercises."""
+    from scripts.data.make_synthetic_land_mask import main as mask_main
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    mask = tmp_path / "land.nc"
+    assert mask_main([str(mask)]) == 0
+    rc = run_smoke(str(tmp_path), resolution=8, nlev=5, era5_nlat=8, era5_nlon=16,
+                   ocean_only=True, land_mask_path=str(mask))
+    assert rc == 0
+    out = capsys.readouterr().out
+    import re
+    m = re.search(r"ranking the (\d+) ocean columns .* of (\d+) total", out)
+    assert m is not None, out
+    n_ocean, n_total = int(m.group(1)), int(m.group(2))
+    assert 0 < n_ocean < n_total                          # land columns were EXCLUDED
+
+
 def test_run_smoke_ocean_only_on_a_cubed_sphere_grid(tmp_path):
     """REGRESSION (iter 485): --ocean-only must validate end-to-end on a CUBED-SPHERE grid
     too. The iter-484 flat-mask bug was grid-shape-specific — the fix reshapes the mask to the

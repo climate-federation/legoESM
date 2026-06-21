@@ -50,6 +50,7 @@ def run_smoke(
     surface_flux: bool = False,
     align_insolation: bool = False,
     grid_type: str = "latlon",
+    land_mask_path: str = "",
 ) -> int:
     """Generate a config (+ synthetic ERA5 unless ``era5_zarr`` is given), then dry-run.
 
@@ -78,9 +79,11 @@ def run_smoke(
     work.mkdir(parents=True, exist_ok=True)
     config_path = work / "amip_clubb_lite.json"
 
-    rc = config_main(
-        [str(config_path), "--resolution", str(resolution), "--nlev", str(nlev),
-         "--grid-type", grid_type])
+    config_argv = [str(config_path), "--resolution", str(resolution), "--nlev", str(nlev),
+                   "--grid-type", grid_type]
+    if land_mask_path:                                  # a real land mask => --ocean-only
+        config_argv += ["--land-mask-path", land_mask_path]   # actually EXCLUDES land columns
+    rc = config_main(config_argv)
     if rc != 0:
         raise RuntimeError(f"config generation failed (exit {rc})")
 
@@ -138,13 +141,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--align-insolation", action="store_true",
                    help="forward --align-insolation to the dry-run (validate the "
                         "seasonal-insolation alignment flag)")
+    p.add_argument("--land-mask-path", default="",
+                   help="a land-sea mask NetCDF (e.g. from make_synthetic_land_mask.py) so "
+                        "--ocean-only ACTUALLY excludes land columns (else the flat config is "
+                        "all-ocean and --ocean-only is a no-op)")
     args = p.parse_args(argv)
 
     def _go(wd: str) -> int:
         rc = run_smoke(wd, era5_zarr=args.era5_zarr, mode=args.mode,
                        resolution=args.resolution, nlev=args.nlev,
                        ocean_only=args.ocean_only, surface_flux=args.surface_flux,
-                       align_insolation=args.align_insolation, grid_type=args.grid_type)
+                       align_insolation=args.align_insolation, grid_type=args.grid_type,
+                       land_mask_path=args.land_mask_path)
         era5_kind = "REAL ERA5" if args.era5_zarr else "synthetic ERA5"
         if rc == 0:
             print(f"[smoke] PASS: config -> {era5_kind} -> campaign --dry-run "

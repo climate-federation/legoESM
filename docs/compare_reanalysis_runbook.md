@@ -43,6 +43,14 @@ $PY scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.j
 > or a **CMIP6 `sftlf`** (percent 0–100) both work; `load_land_fraction` auto-detects the variable,
 > rescales percent→fraction, and regrids to the model grid (the end-to-end `land_mask_path →
 > static_land_fraction → ocean_valid_mask` chain is locked by a test, iter 455).
+>
+> **No real mask yet? Generate a synthetic one (iter 486).** To TEST the realistic ocean-only
+> path (the mask actually EXCLUDING land columns, not the flat all-ocean no-op) without a real
+> download: `python scripts/data/make_synthetic_land_mask.py /tmp/land.nc` writes an idealized
+> lat-lon `lsm` (a NH land band) that regrids to any model grid as a land/ocean mix, then
+> `smoke_compare_reanalysis.py --ocean-only --land-mask-path /tmp/land.nc` ranks a strict SUBSET
+> (land excluded) through the full harness. NOT a real distribution — for production extract the
+> invariant `128_172_lsm` from the local NCAR-RDA ERA5 archive (or a CMIP6 `sftlf`).
 
 ## 1. Preflight the SETUP (seconds, no model run)
 
