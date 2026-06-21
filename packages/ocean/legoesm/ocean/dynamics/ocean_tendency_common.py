@@ -596,3 +596,52 @@ def bbl_distributed_drag_face_column(
     total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
     h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, eps), H_BBL)
     return -drag_r * u_field * overlap / (h_safe * h_bbl_eff)
+
+
+def masked_background_vmix_coefficient(
+    background: jnp.ndarray | float,
+    bottom_level: jnp.ndarray,
+    n_half: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-column background vertical-mixing coefficient zeroed below seafloor.
+
+    Builds the constant background diffusivity / viscosity floor on the
+    HALF-LEVELS (interfaces) of an MPAS partial-cell column and zeros it at
+    every interface that lies below the deepest active full level.  Interface
+    ``k`` couples full levels ``k`` and ``k + 1``; it is *active* only when
+    ``k < bottom_level`` (so both coupled cells are at or above the seafloor).
+    Interfaces at/below the seafloor must carry EXACTLY zero coefficient, or
+    the backward-Euler tridiagonal solver — fed the floored ``dz = 1e-10`` of
+    a dry cell — sees ``dt·K/dz² ~ 1e20`` coefficients, goes singular, and
+    produces NaN (see ``ocean_model_mpas`` §2a/§3a).
+
+    This is the genuinely-shared composition between the MPAS tracer (per
+    cell, ``bottom_level = z_coord.bottom_level``) and momentum (per edge,
+    ``bottom_level = compute_max_level_edge_bot(...)``) implicit-mixing
+    coefficient builds — the only byte-identical-mergeable sub-part of the
+    two assemblies (the surrounding KPP/convection composition and the
+    lat-lon C-grid analogue differ structurally; see the #517-item-6 report).
+
+    Parameters
+    ----------
+    background : float or jax.Array
+        Scalar background coefficient (``config.K_v`` for tracers,
+        ``config.A_v`` for momentum) [m²/s].
+    bottom_level : jax.Array, shape (n_col,)
+        Index of the deepest active full level per column.
+    n_half : int
+        Number of half-levels (interfaces), ``= nlev - 1``.
+
+    Returns
+    -------
+    coeff : jax.Array, shape (n_col, n_half)
+        ``background`` on active interfaces, ``0.0`` below the seafloor.
+    active_half : jax.Array (bool), shape (n_col, n_half)
+        The active-interface mask ``k < bottom_level`` — returned so the
+        caller can reuse it for the convection / KPP profile masking with
+        the SAME seafloor definition (cast to the working dtype as needed).
+    """
+    k_half = jnp.arange(n_half, dtype=jnp.int32)
+    active_half = k_half[None, :] < bottom_level[:, None].astype(jnp.int32)
+    coeff = jnp.where(active_half, background, 0.0)
+    return coeff, active_half

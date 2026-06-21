@@ -51,6 +51,9 @@ from legoesm.ocean.physics.vertical_mixing import (
     implicit_vertical_diffusion_ocean,
     build_dz_half,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    masked_background_vmix_coefficient,
+)
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -392,15 +395,11 @@ class MPASOceanModel:
             # full level; interfaces below that must have K=0 to prevent
             # the tridiagonal solver from seeing huge coefficients.
             if hasattr(z_coord, 'bottom_level'):
-                nlev_c = T_new.shape[1]
-                k_half_c = jnp.arange(nlev_c - 1, dtype=jnp.int32)
-                bot_c = z_coord.bottom_level  # (nCells,)
-                _active_half_c = (k_half_c[None, :] < bot_c[:, None])
-                K_v_cell = jnp.where(
-                    _active_half_c,
-                    config.K_v,
-                    0.0,
-                )  # (nCells, nlev-1)
+                # Background K_v on active interfaces, zeroed below the
+                # seafloor (shared MPAS cell/edge helper — #517 item 6).
+                K_v_cell, _active_half_c = masked_background_vmix_coefficient(
+                    config.K_v, z_coord.bottom_level, T_new.shape[1] - 1,
+                )  # (nCells, nlev-1); _active_half_c reused by convection
             else:
                 K_v_cell = jnp.full(
                     (T_new.shape[0], T_new.shape[1] - 1),
@@ -551,16 +550,14 @@ class MPASOceanModel:
             # (where dz=1e-10) gets coefficients ~dt*K/dz^2 ~ 3e20,
             # making the system singular and producing NaN.
             if isinstance(z_coord, OceanPartialCellCoordinate):
-                nlev_e = u_star.shape[1]
-                k_half = jnp.arange(nlev_e - 1, dtype=bot_e.dtype)
-                active_half_edge = (k_half[None, :] < bot_e[:, None]).astype(
-                    u_star.dtype,
-                )
-                A_v_edge = jnp.where(
-                    active_half_edge > 0.5,
-                    config.A_v,
-                    0.0,
+                # Background A_v on active interfaces, zeroed below the
+                # seafloor (shared MPAS cell/edge helper — #517 item 6).
+                # ``active_half_edge`` is cast to the velocity dtype to match
+                # the float mask reused by the KPP-edge masking below.
+                A_v_edge, _active_half_edge_b = masked_background_vmix_coefficient(
+                    config.A_v, bot_e, u_star.shape[1] - 1,
                 )  # (nEdges, nlev-1)
+                active_half_edge = _active_half_edge_b.astype(u_star.dtype)
             else:
                 A_v_edge = jnp.full(
                     (u_star.shape[0], u_star.shape[1] - 1),
