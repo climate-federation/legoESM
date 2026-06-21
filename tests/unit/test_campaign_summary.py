@@ -294,6 +294,10 @@ def test_campaign_health_stalled():
     h = campaign_health(s)
     assert h.status == "stalled" and not h.ok
     assert "not improving" in h.message
+    # The verdict points at BOTH causes (iter 519): the LES->GCM transfer AND a
+    # C_K-INSENSITIVE config (idealized radiation), so an operator who ran gray and missed
+    # the launch warning is not sent to debug the transfer when rrtmgp is the real fix.
+    assert "C_K-INSENSITIVE" in h.message and "rrtmgp" in h.message
 
 
 def test_campaign_health_worsened_when_final_bias_exceeds_start():

@@ -337,7 +337,9 @@ def campaign_health(
       range, so widen the bounds or check the diagnosis.
     * ``"stalled"`` — the bias did not improve and neither the LES-validity nor the
       clamp is the cause, so the corrections are not improving the bias (check the
-      LES↔GCM transfer or config).
+      LES↔GCM transfer or config) — OR the bias is C_K-INSENSITIVE under idealized
+      radiation (gray gives the bias little C_K leverage; iters 412/514/515), in which
+      case no C_K can reduce it and rrtmgp is required (the launch warning flags this).
     * ``"no_rounds"`` — the campaign ran no rounds.
     * ``"non_finite_bias"`` — the reported initial or final bias is NaN/inf: the MODEL
       RUN almost certainly DIVERGED (numerical blow-up → NaN state → NaN bias) or the
@@ -416,5 +418,7 @@ def campaign_health(
             f"or check the diagnosis. Bias reduced {red} ({acc}).")
     return CampaignHealth(
         "stalled",
-        f"Bias reduced only {red} ({acc}) — the corrections are not improving "
-        f"the bias; check the LES↔GCM transfer or the config.")
+        f"Bias reduced only {red} ({acc}) — the corrections are not improving the bias; "
+        "check the LES↔GCM transfer, OR the bias may be C_K-INSENSITIVE under this config "
+        "(idealized radiation gives the bias little C_K leverage — see the launch warning; "
+        "iters 412/514/515), in which case NO C_K can reduce it: use rrtmgp.")
