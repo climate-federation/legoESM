@@ -107,6 +107,38 @@ def test_depth_mean_axis1_mpas():
     assert jnp.array_equal(out, ref)
 
 
+def test_depth_mean_fused_flag_selects_reduction_topology():
+    # BYTE-IDENTITY (#517 codex HIGH): the `fused` flag must reproduce the
+    # call site's ORIGINAL reduction shape.  `fused=False` (split-origin
+    # sites: barotropic_implicit U_bar, rigid_lid U_old/V_old, _split)
+    # must equal TWO independent sums; `fused=True` (already-stacked sites)
+    # must equal the ONE stacked reduction.  Both checked under jit, since
+    # XLA fusion is where split-vs-fused can drift in the full step.
+    g = _rng(61)
+    field = jnp.asarray(g.normal(size=(4, 5, 7)))
+    h = jnp.asarray(g.uniform(0.0, 50.0, size=(4, 5, 7)))
+    floor = 1e-10
+
+    def split_ref(field, h):
+        return (jnp.sum(field * h, axis=-1)
+                / jnp.maximum(jnp.sum(h, axis=-1), floor))
+
+    def fused_ref(field, h):
+        pair = jnp.sum(jnp.stack([field * h, h], axis=-1), axis=-2)
+        return pair[..., 0] / jnp.maximum(pair[..., 1], floor)
+
+    f_split = jax.jit(lambda a, b: depth_mean(a, b, floor, fused=False))
+    f_fused = jax.jit(lambda a, b: depth_mean(a, b, floor, fused=True))
+    assert jnp.array_equal(f_split(field, h), jax.jit(split_ref)(field, h))
+    assert jnp.array_equal(f_fused(field, h), jax.jit(fused_ref)(field, h))
+    # keepdims variant (the _split baroclinic decomposition site).
+    out_kd = depth_mean(field, h, floor, keepdims=True, fused=False)
+    ref_kd = (jnp.sum(field * h, axis=-1, keepdims=True)
+              / jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), floor))
+    assert jnp.array_equal(out_kd, ref_kd)
+    assert out_kd.shape == ref_kd.shape
+
+
 # ---------------------------------------------------------------------
 # depth_average_to_faces (item 1)
 # ---------------------------------------------------------------------

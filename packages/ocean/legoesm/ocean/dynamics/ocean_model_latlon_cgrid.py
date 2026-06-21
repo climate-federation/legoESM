@@ -2470,8 +2470,10 @@ class LatLonCGridOceanModel:
                                       else state.S_flux_div_prev)
                         if prev_field is not None:
                             fd_prev = prev_field.data
-                            effective_fd = ((1.5 + eps) * total_flux_div
-                                            - (0.5 + eps) * fd_prev)
+                            # (#517 item 8: shared ab2_blend; eps verbatim
+                            # → bit-identical.)
+                            effective_fd = ab2_blend(total_flux_div, fd_prev,
+                                                     eps)
                         else:
                             # First step: fall back to Euler
                             effective_fd = total_flux_div
@@ -2864,8 +2866,8 @@ class LatLonCGridOceanModel:
         dtke_prev = (state.dtke.data.astype(dtype)
                      if state.dtke is not None else jnp.zeros_like(dtke_now))
         eps = self.config.ab2_epsilon
-        tke_out = tke_new + dt * ((1.5 + eps) * dtke_now
-                                  - (0.5 + eps) * dtke_prev)
+        # (#517 item 8: shared ab2_blend; eps verbatim → bit-identical.)
+        tke_out = tke_new + dt * ab2_blend(dtke_now, dtke_prev, eps)
         dtke_field = Field(data=dtke_now, name="dtke",
                            dims=("lat", "lon", "level"), units="m^2/s^3")
         return tke_out, dtke_field
@@ -4133,8 +4135,10 @@ class LatLonCGridOceanModel:
 
         def _split(field, h_face):
             # (#517 item 5: shared depth_mean; floor 1.0e-10 + keepdims
-            # passed verbatim → bit-identical.)
-            bt = depth_mean(field, h_face, 1.0e-10, keepdims=True)
+            # passed verbatim → bit-identical.)  Was open-coded as TWO
+            # separate sums → fused=False (byte-identity reduction topology).
+            bt = depth_mean(field, h_face, 1.0e-10, keepdims=True,
+                            fused=False)
             return field - bt, bt          # (baroclinic deviation, barotropic mean)
 
         # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-

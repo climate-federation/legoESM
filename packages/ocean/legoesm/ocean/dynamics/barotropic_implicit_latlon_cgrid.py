@@ -120,7 +120,9 @@ def _depth_average_to_faces(
     h_u = jnp.concatenate([h_u_inner, h_u_inner[:, 0:1, :]], axis=1)
     # Barotropic-mean face velocity (#517 item 1: shared
     # depth_average_to_faces; floor = min_water_col → bit-identical).
-    U_bar = depth_average_to_faces(u_3d, h_u, u_mask, min_water_col)
+    # U_bar was open-coded as TWO separate sums → fused=False (byte-identity).
+    U_bar = depth_average_to_faces(u_3d, h_u, u_mask, min_water_col,
+                                   fused=False)
 
     # Cell-pad-first (PR357 Bug-2 pattern): pad the cell thickness so the
     # v-face min at a partition cut uses the neighbour rank's adjacent

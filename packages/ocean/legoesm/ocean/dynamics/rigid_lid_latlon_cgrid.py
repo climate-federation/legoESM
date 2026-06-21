@@ -528,9 +528,12 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
 
     # Old barotropic (depth-mean) of the predicted velocity -> baroclinic dev.
     # (#517 items 1/5: shared depth_average_to_faces; floor = _DEPTH_FLOOR
-    # passed verbatim → bit-identical.)
-    U_old = depth_average_to_faces(u_3d, h_u, u_mask, _DEPTH_FLOOR)  # (n_lat, n_lon+1)
-    V_old = depth_average_to_faces(v_3d, h_v, v_mask, _DEPTH_FLOOR)  # (n_lat+1, n_lon)
+    # passed verbatim → bit-identical.)  U_old/V_old were open-coded as TWO
+    # separate sums → fused=False (byte-identity reduction topology).
+    U_old = depth_average_to_faces(u_3d, h_u, u_mask, _DEPTH_FLOOR,
+                                   fused=False)  # (n_lat, n_lon+1)
+    V_old = depth_average_to_faces(v_3d, h_v, v_mask, _DEPTH_FLOOR,
+                                   fused=False)  # (n_lat+1, n_lon)
     u_prime = u_3d - U_old[..., jnp.newaxis]
     v_prime = v_3d - V_old[..., jnp.newaxis]
 

@@ -397,6 +397,7 @@ def depth_mean(
     *,
     axis: int = -1,
     keepdims: bool = False,
+    fused: bool = True,
 ) -> jnp.ndarray:
     """Thickness-weighted column mean ``Σ_k(field·h_face) / max(Σ_k h_face, floor)``.
 
@@ -410,6 +411,26 @@ def depth_mean(
     applied — use :func:`depth_average_to_faces` when a face mask is
     required (it multiplies the mean by the mask afterwards, matching the
     original ``... * u_mask`` call sites).
+
+    NOTE on ``fused`` (BYTE-IDENTITY — reduction topology):  the original
+    call sites split into two families that XLA can compile to *bit-
+    different* results in the full step (it reassociates the level-axis
+    accumulation differently depending on the surrounding fused kernel —
+    a ~1e-10 drift observed on the MPAS seamount path):
+
+    * ``fused=True`` (default): ONE stacked column reduction
+      ``jnp.sum(jnp.stack([field·h, h]), axis)`` — reproduces the sites
+      that were already written with the fused stack (the
+      ``ocean_model_latlon_cgrid`` barotropic split, ``barotropic_implicit``
+      ``V_bar``).
+    * ``fused=False``: TWO independent ``jnp.sum`` calls — reproduces the
+      sites that were open-coded as separate sums (``barotropic_implicit``
+      ``U_bar``, ``rigid_lid`` ``U_old``/``V_old``, the ``_split`` baroclinic
+      decomposition).
+
+    Each call site selects the flag matching its ORIGINAL form so the
+    result is bit-identical on every backend — do NOT change a site's flag
+    to "tidy up", it changes answers.
 
     Parameters
     ----------
@@ -441,11 +462,18 @@ def depth_mean(
     # in the MPAS seamount path).  Stacking on a NEW trailing axis and
     # reducing the level axis ``axis`` reproduces the original exactly;
     # the stack ORDER does not matter (both slices reduce independently).
-    fused = jnp.stack([field * h_face, h_face], axis=-1)
-    pair = jnp.sum(fused, axis=axis if axis >= 0 else axis - 1,
-                   keepdims=keepdims)
-    num = pair[..., 0]
-    denom = jnp.maximum(pair[..., 1], min_water_column_m)
+    if fused:
+        stacked = jnp.stack([field * h_face, h_face], axis=-1)
+        pair = jnp.sum(stacked, axis=axis if axis >= 0 else axis - 1,
+                       keepdims=keepdims)
+        num = pair[..., 0]
+        denom = jnp.maximum(pair[..., 1], min_water_column_m)
+        return num / denom
+    # Split form: two independent reductions (matches the open-coded
+    # ``jnp.sum(field·h)/max(jnp.sum(h), floor)`` sites bit-for-bit).
+    num = jnp.sum(field * h_face, axis=axis, keepdims=keepdims)
+    denom = column_depth(h_face, min_water_column_m, axis=axis,
+                         keepdims=keepdims)
     return num / denom
 
 
@@ -456,6 +484,7 @@ def depth_average_to_faces(
     min_water_column_m: jnp.ndarray | float,
     *,
     axis: int = -1,
+    fused: bool = True,
 ) -> jnp.ndarray:
     """Masked thickness-weighted depth mean ``depth_mean(field, h_face) · mask``.
 
@@ -483,13 +512,20 @@ def depth_average_to_faces(
         Column-depth floor passed verbatim to :func:`column_depth`.
     axis : int, default -1
         Vertical (level) axis.
+    fused : bool, default True
+        Reduction topology — forwarded to :func:`depth_mean`.  ``True`` for
+        the already-fused-stack sites (``ocean_model`` split, ``V_bar``);
+        ``False`` for the open-coded separate-sum sites (``U_bar``,
+        ``U_old``/``V_old``).  See :func:`depth_mean` for the byte-identity
+        rationale.
 
     Returns
     -------
     jax.Array
         ``Σ_k(field·h_face) / max(Σ_k h_face, floor) · mask``.
     """
-    return depth_mean(field, h_face, min_water_column_m, axis=axis) * mask
+    return depth_mean(field, h_face, min_water_column_m, axis=axis,
+                      fused=fused) * mask
 
 
 def apply_sponge_tracer_relaxation(
