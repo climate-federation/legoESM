@@ -163,6 +163,28 @@ def test_preflight_sbatch_flags_are_valid_cli_options():
         f"{unknown} — a renamed/removed option would break the batch pre-flight at argparse.")
 
 
+def test_osse_preflight_sbatch_flags_are_valid_cli_options():
+    """The PERFECT-MODEL OSSE go/no-go SLURM wrapper (iter 491: the twin runs the model
+    multiple times -> compute-node batch job) passes run_perfect_model_osse-CLI flags; a
+    renamed/removed CLI option would break the batch pre-flight at argparse. Locks the
+    sbatch↔CLI contract (mirrors the ck-sensitivity + campaign tests)."""
+    from scripts.validate.run_perfect_model_osse import _build_argparser as _osse_parser
+
+    sbatch = _REPO / "scripts/cluster/compare_reanalysis/preflight_osse.sbatch"
+    assert sbatch.is_file(), f"missing OSSE pre-flight launcher at {sbatch}"
+    flags: set[str] = set()
+    for line in sbatch.read_text().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        flags.update(_FLAG_RE.findall(line))
+    assert flags, "no flags parsed from the OSSE pre-flight sbatch (regex/file broken?)"
+    valid = {opt for action in _osse_parser()._actions for opt in action.option_strings}
+    unknown = sorted(f for f in flags if f not in valid)
+    assert not unknown, (
+        f"the OSSE pre-flight sbatch passes flag(s) the run_perfect_model_osse CLI does not "
+        f"define: {unknown} — a renamed/removed option would break the batch pre-flight.")
+
+
 # Detect a top-level OR function-scope ``from scripts.* import`` / ``import scripts.*``.
 _IMPORTS_SCRIPTS_RE = re.compile(r"^\s*(?:from\s+scripts[.\s]|import\s+scripts\b)", re.M)
 

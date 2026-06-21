@@ -132,6 +132,16 @@ total.
 > ingest + model + compare are wired end-to-end before you submit the compute-heavy rrtmgp job
 > (validated iter 445: res 4 / nlev 10 / days 1 vs 20170901 ERA5 → exit 1, mean bias 11.25,
 > most-controllable level σ=0.97 in the BL).
+>
+> **The OTHER go/no-go — the perfect-model OSSE (iter 491).** Complementary to the C_K-sensitivity
+> pre-flight (which asks "can the loop move the REAL bias?"), the OSSE asks "does the loop RECOVER
+> a KNOWN coefficient in a controlled twin?" — it needs NO real ERA5 (the model's own run with a
+> known C_K is the pseudo-truth) but runs the model several times, so it is also a compute-node
+> batch job. The turnkey wrapper `scripts/cluster/compare_reanalysis/preflight_osse.sbatch` runs
+> `run_perfect_model_osse.py` and exits 0 (GO — recovered) / 1 (NO-GO), so it too can gate the
+> campaign as a dependency. Set `CONFIG=<base>.json` and (for parity with the realistic campaign)
+> `SURFACE_FLUX=1`; `COEFFICIENTS=C_K,Pr_t,C_eps` validates the multi-coefficient campaign, and
+> `FINE_RESOLUTION=<N>` validates the cross-grid env-kernel transfer.
 
 ## 2. Launch the campaign (resumable, self-requeuing)
 
