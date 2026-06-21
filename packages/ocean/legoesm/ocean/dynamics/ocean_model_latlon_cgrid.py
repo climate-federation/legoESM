@@ -110,6 +110,7 @@ def _compute_advection_flux_div(
     h_v_old: jnp.ndarray,
     grid,
     dt: float,
+    recon_fill_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
 
@@ -135,6 +136,23 @@ def _compute_advection_flux_div(
     AB2 linear combination is NOT guaranteed monotone.  This is a
     known limitation shared with MITgcm.
     """
+    # Wall tracer BC (#480): zero-gradient (Neumann) fill the RECONSTRUCTION
+    # tracer over the dead cells so the flux-form face reconstructions (esp. the
+    # wide WENO stencil) see a flat extension across solid walls / topographic
+    # steps instead of the masked cold cell (T=0).  The mass-flux carries the
+    # wall masking (zero normal flux), so this conserves the wet-domain tracer
+    # and is a strict no-op where there is no land.  ``None`` => disabled.
+    # NOTE: the filled ``tr`` feeds BOTH the horizontal AND the vertical
+    # reconstruction below; that is safe because neumann_fill_cgrid only
+    # overwrites DEAD cells (mask < 0.5) — every WET column is bit-identical, so
+    # the vertical flux differs only in dead cells, which the caller's
+    # active_3d / mass_flux gating discards.  (If a future caller passes a mask
+    # that modifies a wet cell, this invariant must be revisited.)
+    if recon_fill_mask is not None:
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            neumann_fill_cgrid,
+        )
+        tr = neumann_fill_cgrid(tr, recon_fill_mask, grid=grid)
 
     if tracer_advection == "ppm_fct":
         from legoesm.ocean.advection import fct_tracer_advection
@@ -268,6 +286,7 @@ def _compute_advection_flux_div_pair(
     h_v_old: jnp.ndarray,
     grid,
     dt: float,
+    recon_fill_mask: jnp.ndarray | None = None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -305,15 +324,31 @@ def _compute_advection_flux_div_pair(
             _compute_advection_flux_div(
                 tr_a, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+                recon_fill_mask=recon_fill_mask,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+                recon_fill_mask=recon_fill_mask,
             ),
         )
 
     nlev = tr_a.shape[-1]
-    trs = jnp.concatenate([tr_a, tr_b], axis=-1)
+    # Wall tracer BC (#480): fill the HORIZONTAL reconstruction tracer over the
+    # dead cells (see _compute_advection_flux_div).  Vertical advection (below)
+    # is per-column, so it keeps the original tr_a/tr_b.  The mask is a 2D / 3D
+    # (singleton-level) mask that broadcasts over the stacked 2*nlev axis, or a
+    # full per-level (…,nlev) mask that must be re-stacked to (…,2*nlev).
+    trs_h = jnp.concatenate([tr_a, tr_b], axis=-1)
+    if recon_fill_mask is not None:
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            neumann_fill_cgrid,
+        )
+        mask_h = recon_fill_mask
+        if mask_h.ndim == trs_h.ndim and mask_h.shape[-1] == nlev:
+            mask_h = jnp.concatenate([mask_h, mask_h], axis=-1)
+        trs_h = neumann_fill_cgrid(trs_h, mask_h, grid=grid)
+    trs = trs_h
     mfu2 = jnp.concatenate([mass_flux_u, mass_flux_u], axis=-1)
     mfv2 = jnp.concatenate([mass_flux_v, mass_flux_v], axis=-1)
 
@@ -433,6 +468,7 @@ def _ssp_rk3_tracer_pair_step(
     grid,
     dt: float,
     active_3d: jnp.ndarray,
+    recon_fill_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
 
@@ -441,12 +477,17 @@ def _ssp_rk3_tracer_pair_step(
     two flux divergences come from ONE
     :func:`_compute_advection_flux_div_pair` call (3 fused horizontal
     reconstructions + pads per step instead of 6).
+
+    ``recon_fill_mask`` (#480) is forwarded to every stage's reconstruction
+    so each RK3 sub-stage sees the zero-gradient wall fill; the flux-form
+    stage updates / land-gating still use the ORIGINAL (un-filled) tracer.
     """
 
     def _flux_div_pair(a_val, b_val):
         (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            recon_fill_mask=recon_fill_mask,
         )
         return dh_a + dv_a, dh_b + dv_b
 
@@ -2365,6 +2406,27 @@ class LatLonCGridOceanModel:
                         dims=_dims_fd, units="m/s"),
                 )
 
+            # Wall tracer BC (#480): the flux-form reconstructions read the
+            # RAW tracer, whose land cells hold the masked fill value (T=0)
+            # — a cold cell that the WIDE WENO stencil at the first wet
+            # faces pulls in, manufacturing a spurious near-wall tracer
+            # front.  Under a 2Δx-in-lon v perturbation this front sources
+            # an un-dissipatable grid mode at free-slip walls (the §5
+            # eddy-permitting blow-up).  Oceananigans' clean grid-edge wall
+            # has no such cold cell.  Faithful cure: zero-gradient (Neumann)
+            # fill the tracer over the DEAD cells INSIDE the reconstruction (see
+            # _compute_advection_flux_div) so the stencil sees a flat extension
+            # = the physical no-flux insulating wall, while the flux-form
+            # UPDATE / gating below keeps the ORIGINAL dead-cell value.  Use the
+            # per-level ``active_3d`` (= is_active) mask, NOT the 2D surface
+            # land_mask, so the fill also cleans TOPOGRAPHIC-STEP dead cells in
+            # partial-cell runs (flat-bottom: active_3d is (n_lat,n_lon,1) and
+            # the fill is bit-identical to the 2D-mask path).
+            _wall_fill_mask = (
+                active_3d if getattr(self.config, "tracer_wall_neumann_fill", True)
+                else None
+            )
+
             # T+S pair fast path: ONE fused horizontal reconstruction +
             # N-S pad per stage for both tracers (level-axis stack; see
             # _compute_advection_flux_div_pair).  Bit-identical to the
@@ -2375,7 +2437,7 @@ class LatLonCGridOceanModel:
                     T_mid, S_mid, _adv,
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_k_new, h_u_old, h_v_old,
-                    _grid, dt, active_3d,
+                    _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                 )
                 _pair_divs = (None, None)
             else:
@@ -2383,6 +2445,7 @@ class LatLonCGridOceanModel:
                     T_mid, S_mid, _adv,
                     mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
+                    recon_fill_mask=_wall_fill_mask,
                 )
 
             for tr_name in ['T', 'S']:
