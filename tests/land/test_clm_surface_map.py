@@ -20,6 +20,9 @@ def _write_synthetic_surfdata(path, nlat=6, nlon=8, n_nat=15, nlev=10):
          "PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), nat),
          "PCT_NATVEG": (("lsmlat", "lsmlon"), np.full((nlat, nlon), 80.0)),
          "PCT_CROP": (("lsmlat", "lsmlon"), np.full((nlat, nlon), 10.0)),
+         "PCT_GLACIER": (("lsmlat", "lsmlon"),
+                         np.where(LA > 70, 100.0, 0.0)),   # ice sheet poleward of 70
+
          "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"),
                       rng.uniform(20, 80, (nlev, nlat, nlon))),
          "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"),
@@ -42,12 +45,16 @@ def test_load_and_provider(tmp_path):
     assert np.all(fr >= 0.0)
     assert np.all(np.asarray(m["theta_fc"]) > np.asarray(m["theta_wp"]))
 
-    prov = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"])
+    prov = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
+                                   m["glacier_frac"])
     p = prov()
     assert isinstance(p, LandSurfaceParams)
     assert p.albedo_veg.shape == (ncol,)
-    # PFT-weighted params stay within the CLM5 table envelope
-    assert float(jnp.min(p.albedo_veg)) >= 0.05 and float(jnp.max(p.albedo_veg)) <= 0.40
+    # PFT-weighted params stay within the CLM5 table envelope, EXCEPT glacier cells
+    # whose albedo is raised toward ice (Greenland fix). Non-glacier in [0.05,0.40].
+    nonglac = np.asarray(m["glacier_frac"]) < 0.5
+    assert float(jnp.min(p.albedo_veg)) >= 0.05
+    assert np.all(np.asarray(p.albedo_veg)[nonglac] <= 0.40 + 1e-9)
     assert float(jnp.min(p.Vc_max25)) >= 0.0
     # soil props came from the reference map, not the PFT table
     assert np.allclose(np.asarray(p.theta_wp), np.asarray(m["theta_wp"]))
@@ -63,6 +70,25 @@ def test_crop_fraction_goes_to_crop_slot(tmp_path):
     fr = np.asarray(m["pft_fractions"])
     i_crop = CLM5_PFT_NAMES.index("crop_c3")
     assert np.all(fr[:, i_crop] > 0.0)                    # 10% crop everywhere
+
+
+def test_glacier_raises_albedo(tmp_path):
+    """Glacier (ice-sheet) cells get a bright ice base albedo (Greenland fix),
+    well above any vegetated PFT albedo; non-glacier cells unchanged."""
+    from legoesm.land.clm_surface_map import (
+        load_clm_surface, CLMSurfaceParamProvider, _GLACIER_ALBEDO)
+    f = str(tmp_path / "g.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(85, -85, 8); lon = np.linspace(0, 315, 8)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    p = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
+                                m["glacier_frac"])()
+    fg = np.asarray(m["glacier_frac"]); alb = np.asarray(p.albedo_veg)
+    full_ice = fg > 0.99
+    assert full_ice.any()
+    assert np.allclose(alb[full_ice], _GLACIER_ALBEDO, atol=1e-6)   # 100% glacier -> ice albedo
+    assert np.all(alb[fg < 0.01] < _GLACIER_ALBEDO)                 # non-glacier darker
 
 
 if __name__ == "__main__":
