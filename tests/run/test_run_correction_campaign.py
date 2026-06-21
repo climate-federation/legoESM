@@ -3373,6 +3373,22 @@ def test_spinup_warning_line_fires_for_multiday_run_without_exclusion():
     assert _spinup_warning_line(0.0, _SPINUP_WARN_DAYS - 1) is None   # short test → silent
 
 
+def test_days_below_cadence_warning_fires_at_launch():
+    """REGRESSION (iter 499/500): days <= the diagnostic cadence (output.diag_days) warns at
+    LAUNCH — the model climatology time-mean fires no segment boundary and a REAL run fails
+    loud, but the --dry-run (which never runs the time-mean) would otherwise PASS it (the
+    iter-484 dry-run-false-confidence class). The launch note loop runs before the dry-run
+    short-circuit, so the dry-run surfaces it too. getattr-guarded for stubbed configs."""
+    from scripts.run.run_correction_campaign import _days_below_cadence_warning
+
+    w = _days_below_cadence_warning(5, 5)                  # days == cadence → no boundary → warns
+    assert w is not None and "diagnostic cadence" in w and "no segment boundary" in w
+    assert _days_below_cadence_warning(3, 5) is not None   # days < cadence → warns
+    assert _days_below_cadence_warning(200, 5) is None     # a real window → silent
+    assert _days_below_cadence_warning(0, 5) is None       # missing/zero → silent (stub-safe)
+    assert _days_below_cadence_warning(6, None) is None    # no cadence (stub) → silent
+
+
 def test_run_multi_main_forwards_valid_mask_to_the_builder(monkeypatch):
     """The multi-coefficient main forwards the ocean-only valid_mask to
     build_multi_correction_campaign (iter 466 fix): it previously dropped it silently, so

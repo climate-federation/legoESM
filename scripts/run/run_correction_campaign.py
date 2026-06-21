@@ -902,6 +902,21 @@ def _spinup_warning_line(spinup_days, days) -> str | None:
 _OFFLINE_FORCING_SPAN_DAYS = 31
 
 
+def _days_below_cadence_warning(days, diag_days) -> str | None:
+    """Launch warning when the run length is <= the diagnostic cadence (``output.diag_days``):
+    the model climatology TIME-MEAN samples at each segment boundary, so a run shorter than ONE
+    cadence fires NO boundary and a REAL run FAILS LOUD ('no segment boundary fired').  The
+    ``--dry-run`` does NOT run the time-mean, so it would otherwise PASS a config that cannot
+    actually run (the iter-484/499 dry-run-false-confidence class) — surface it at LAUNCH.
+    Returns the note, or ``None`` (runnable, or a getattr-missing stub)."""
+    if not days or not diag_days or int(days) > int(diag_days):
+        return None
+    return (f"[campaign] WARNING: days={int(days)} <= the {int(diag_days)}-day diagnostic cadence "
+            "(output.diag_days): the model climatology time-mean fires NO segment boundary, so a "
+            f"REAL run FAILS LOUD ('no segment boundary fired'). Use days > {int(diag_days)} "
+            "(regenerate with write_amip_clubb_lite_config.py --days N).")
+
+
 def _offline_forcing_window_warning(days, *, span_days=_OFFLINE_FORCING_SPAN_DAYS) -> str | None:
     """Warn when an OFFLINE single-month AMIP forcing (``--amip-forcing-from-local-era5``) drives a
     run LONGER than its ~1-month coverage (iter 458): ``get_forcing_at_time`` then CYCLICALLY WRAPS
@@ -1021,6 +1036,9 @@ def _build_run_setup(args):
         bool(getattr(base_cfg, "land_mask_path", "")))
     for _note in (_spinup_warning_line(getattr(args, "spinup_days", 0.0),
                                        getattr(base_cfg, "days", 0)),
+                  _days_below_cadence_warning(
+                      getattr(base_cfg, "days", 0),
+                      getattr(getattr(base_cfg, "output", None), "diag_days", 0)),
                   _insolation_season_note(_insol_date),
                   _offline_forcing_note,
                   _ref_window_note,
