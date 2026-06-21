@@ -393,6 +393,88 @@ def test_full_loop_ocean_only_excludes_masked_columns():
         pytest.approx(0.4)
 
 
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_loop_environment_strategy_builds_a_deployable_kernel():
+    """REGRESSION (iter 488): the env-kernel feedback strategy (--feedback-strategy
+    environment, the cross-grid deploy's UPSTREAM) through a REAL model loop. The kernel BUILD
+    is unit-tested from synthetic records (test_feedback_assembly) and the cross-resolution
+    OSSE uses SYNTHETIC env functions — but the campaign building the kernel from a REAL run's
+    worst-column env tags (with the REAL prescribed/coupled SST, the kernel's DOMINANT
+    predictor, threaded by amip/cmip_column_state) was untested end-to-end. Uses the SAME
+    env_grid_fn the campaign builds (maybe_env_grid_fn → column_environment_grid with the
+    coordinate's hybrid-correct default pressures, consistent with the deploy). Asserts the
+    loop produces a NON-None EnvKernel that round-trips (the on-disk env_kernel.json contract)
+    AND DEPLOYS — apply_env_kernel_override yields a finite per-column override on the model's
+    own environment (the cross-grid deploy's core operation)."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+    from legoesm.training.deploy_correction import (
+        apply_env_kernel_override,
+        env_kernel_from_dict,
+        env_kernel_to_dict,
+    )
+    from legoesm.training.feedback_assembly import column_environment_grid
+
+    from scripts.run.run_correction_campaign import make_les_diagnose_fn, maybe_env_grid_fn
+
+    driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=0.4))
+    a = driver._atm
+    model0 = column_state_from_hydrostatic(
+        a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    n_lat, n_lon, _ = model0.T.shape
+    sigma, grid = a.sigma, a.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    bias = np.zeros((n_lat, n_lon))
+    bias[n_lat // 2, n_lon // 2] = 5.0
+    bias[0, 0] = 3.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[:, :, None])
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb)
+        aa = d._atm
+        return column_state_from_hydrostatic(
+            aa.state, aa.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones((n_lat, n_lon)), n_worst=3,
+        run_amip_fn=_run, coordinate=sigma)
+
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    # The SAME env_grid_fn the campaign builds for --feedback-strategy environment.
+    env_grid_fn = maybe_env_grid_fn("environment", sigma)
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=(n_lat, n_lon), background=0.4,
+        diagnosis_method="eddy_diffusivity", les_budget=3,
+        feedback_strategy="environment", env_grid_fn=env_grid_fn)
+
+    # The env-kernel was BUILT from the REAL run's worst-column env tags.
+    assert res.env_kernel is not None
+    # It round-trips through the on-disk <out>.env_kernel.json contract ...
+    kernel = env_kernel_from_dict(env_kernel_to_dict(res.env_kernel))
+    assert kernel.field == "C_K"
+    # ... and DEPLOYS: evaluating it on the model's OWN environment yields a finite per-column
+    # override (the cross-grid deploy's core operation; same default hybrid pressures).
+    grid_env, _ = column_environment_grid(model0, sigma)
+    override, coverage = apply_env_kernel_override(kernel, grid_env)
+    ck = np.asarray(override.clubb_lite.C_K)
+    assert ck.shape == (n_lat * n_lon,) and bool(np.all(np.isfinite(ck)))
+    assert 0.0 <= float(coverage["fraction_covered"]) <= 1.0
+
+
 def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
     """A base AMIP ``ExperimentConfig`` with a forcing BUILT from the synthetic local ERA5
     archive and injected via the shared ``apply_amip_forcing_to_config`` (the turnkey path)."""
