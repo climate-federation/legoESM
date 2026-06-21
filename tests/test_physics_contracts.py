@@ -220,7 +220,6 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vreman.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py",
-        "packages/ocean/legoesm/ocean/physics/bottom_drag/quadratic.py",
         "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py",
         "packages/ocean/legoesm/ocean/physics/convection/plume.py",
         "packages/ocean/legoesm/ocean/physics/ice_shelf.py",
