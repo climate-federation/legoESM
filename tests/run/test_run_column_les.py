@@ -1351,3 +1351,20 @@ def test_run_pipeline_excludes_the_top_sponge_layer(monkeypatch):
     assert sponge.any() and (~sponge).any()               # non-vacuous: both sides present
     assert not valid[sponge].any()                        # sponge excluded
     assert valid[~sponge].all()                           # below-sponge UNCHANGED (precise z_max)
+
+
+def test_valid_levels_note_distinguishes_diagnosis_rejection():
+    """_valid_levels_note (iter 524) reports 'N/M valid diagnosis levels' for a per-level
+    diagnosis, so a REALISTIC LES with 0 valid levels points at the DIAGNOSIS validity (not the
+    realism gate, iter 507); empty for a scalar diagnosis (entrainment)."""
+    from types import SimpleNamespace
+
+    from scripts.run.run_column_les import _valid_levels_note
+
+    prof = SimpleNamespace(valid=jnp.asarray([True, True, False, False]))
+    assert _valid_levels_note(prof) == " — 2/4 valid diagnosis levels"
+    none_valid = SimpleNamespace(valid=jnp.zeros(7, dtype=bool))
+    assert _valid_levels_note(none_valid) == " — 0/7 valid diagnosis levels"
+    # scalar diagnosis (entrainment w_e) → no per-level count
+    assert _valid_levels_note(SimpleNamespace(valid=jnp.asarray(True))) == ""
+    assert _valid_levels_note(SimpleNamespace()) == ""              # no .valid → empty

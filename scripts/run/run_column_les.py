@@ -31,6 +31,20 @@ def _realism_verdict(breakdown) -> str:
     return "REJECTED(" + ",".join(reasons) + ")"
 
 
+def _valid_levels_note(diagnosis) -> str:
+    """`' — N/M valid diagnosis levels'` for a per-level (profile) diagnosis (iter 524): when
+    the realism verdict is REALISTIC yet N=0, the rejection is the DIAGNOSIS validity
+    (insufficient resolved shear/variance for a down-gradient closure, too few valid levels, or
+    the top-sponge exclusion) — NOT the realism gate, so the operator looks at the LES
+    resolution/forcing, not turbulence development (iter 507's actual '0 valid' cause). Empty
+    for a SCALAR diagnosis (entrainment ``w_e`` — a single inversion level, not a column
+    average)."""
+    valid = getattr(diagnosis, "valid", None)
+    if valid is None or getattr(valid, "ndim", 0) == 0:
+        return ""
+    return f" — {int(valid.sum())}/{int(valid.size)} valid diagnosis levels"
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Column-LES spin-off + coefficient.")
     p.add_argument("--manifest", required=True, help="worst-column JSON manifest")
@@ -107,8 +121,9 @@ def main(argv: list[str] | None = None) -> int:
         if "state" in captured:
             realism = " — realism: " + _realism_verdict(
                 column_les_realism_breakdown(captured["state"], captured["hc"]))
+        levels = _valid_levels_note(diag)   # REALISTIC + 0 valid levels ⇒ a DIAGNOSIS rejection
         print(f"[column-LES] {rec.grid_index} "
-              f"({rec.regime if hasattr(rec, 'regime') else ''}) diagnosed{realism}.")
+              f"({rec.regime if hasattr(rec, 'regime') else ''}) diagnosed{realism}{levels}.")
     np.savez(args.out, **results)
     print(f"[column-LES] wrote {len(results)} column coefficients to {args.out}")
     return 0
