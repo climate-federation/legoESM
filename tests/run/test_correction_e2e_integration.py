@@ -154,9 +154,11 @@ def test_full_pipeline_real_model_and_les():
     assert float(corrected.C_K[int(rec.flat_index)]) != background
 
 
-def _run_clubb_coupled(clubb, *, resolution=4, nlev=5, days=1):
+def _run_clubb_coupled(clubb, *, resolution=4, nlev=5, days=1, grid_type="latlon"):
     """A real tiny coupled (CMIP) run whose clubb_lite turbulence uses the given
-    ``CLUBBLiteConfig`` (scalar OR per-column C_K)."""
+    ``CLUBBLiteConfig`` (scalar OR per-column C_K).  ``grid_type`` (default latlon) also
+    accepts ``cubed_sphere`` — then ``ocean_grid=None`` so the coupled driver uses its OWN
+    atm grid (same-grid identity coupling, the iter-493 pattern)."""
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.driver.config import (
         DycoreConfig,
@@ -169,15 +171,15 @@ def _run_clubb_coupled(clubb, *, resolution=4, nlev=5, days=1):
     from legoesm.grids.latlon import create_latlon_grid
 
     atm = ExperimentConfig(
-        grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
+        grid=GridConfig(grid_type=grid_type, resolution=resolution, nlev=nlev),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=max(days, 1)), radiation="gray", days=days,
         turbulence="clubb_lite",
         turbulence_override=TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb))
-    driver = CoupledESMDriver(
-        atm, PRESETS["aquaplanet"](),
-        ocean_grid=create_latlon_grid(n_lat=resolution, n_lon=2 * resolution))
+    ocean_grid = (create_latlon_grid(n_lat=resolution, n_lon=2 * resolution)
+                  if grid_type == "latlon" else None)
+    driver = CoupledESMDriver(atm, PRESETS["aquaplanet"](), ocean_grid=ocean_grid)
     driver.setup()
     driver.run()
     return driver
@@ -390,6 +392,80 @@ def test_full_loop_ocean_only_excludes_masked_columns():
     assert res.n_corrected >= 1
     # The masked land peak is NEVER corrected — it keeps the background coefficient.
     assert float(np.asarray(res.feedback_field).reshape(n_lat, n_lon)[r0, c0]) == \
+        pytest.approx(0.4)
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("error::FutureWarning")
+def test_full_loop_ocean_only_on_cubed_sphere():
+    """REGRESSION (iter 496): the ocean-only EXECUTION on a CUBED-SPHERE grid — the LAST
+    untested realistic combination. iter 487 tested ocean-only execution on LATLON; iter 495
+    locked the cubed-sphere model RUN alone; this runs the FULL loop (run → compare → RANK →
+    LES → re-run → gate) with a 3-D (6,n,n) grid-shaped ocean mask. The iter-484 mask-shape fix
+    reshapes to the grid shape, which for cubed-sphere is (6,n,n) — a DIFFERENT shape than
+    lat-lon's (nlat,nlon); the ranking flattens it (row-major) + the gate broadcasts it. The LES
+    spin-off uses the cubed-sphere extractor. Non-vacuous: the LARGEST bias is in a MASKED
+    column, so ocean-only must exclude it from the worst columns."""
+    from functools import partial as _partial
+
+    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig, run_forced_les
+    from legoesm.training.compare_reanalysis import column_state_from_hydrostatic
+    from legoesm.training.correction_loop import make_compare_fn, run_correction_iteration
+
+    from scripts.run.run_correction_campaign import make_les_diagnose_fn
+
+    driver = _run_clubb_coupled(CLUBBLiteConfig(C_K=0.4), grid_type="cubed_sphere")
+    a = driver._atm
+    model0 = column_state_from_hydrostatic(
+        a.state, a.q_v, sst_K=driver._ocean_state.T_sfc.data)
+    horiz = tuple(int(d) for d in model0.T.shape[:-1])    # (6, n, n)
+    assert len(horiz) == 3 and horiz[0] == 6              # genuinely a cubed-sphere column grid
+    sigma, grid = a.sigma, a.grid
+    rad2deg = 180.0 / float(jnp.pi)
+
+    # The LARGEST bias at a MASKED ('land') column; a smaller bias at an ocean column.
+    masked_idx, ocean_idx = (0, 0, 0), (1, 0, 0)
+    bias = np.zeros(horiz)
+    bias[masked_idx] = 5.0
+    bias[ocean_idx] = 3.0
+    reference = model0._replace(T=model0.T - jnp.asarray(bias)[..., None])
+    ocean_mask = jnp.ones(horiz, bool).at[masked_idx].set(False)   # 3-D (6,n,n) grid-shaped
+
+    def _run(clubb):
+        d = _run_clubb_coupled(clubb, grid_type="cubed_sphere")
+        aa = d._atm
+        return column_state_from_hydrostatic(
+            aa.state, aa.q_v, sst_K=d._ocean_state.T_sfc.data)
+
+    compare_fn = make_compare_fn(
+        reference=reference, sigma_full=jnp.asarray(sigma.sigma_full),
+        sigma_half=jnp.asarray(sigma.sigma_half),
+        lat_deg=jnp.asarray(grid.grid_lat) * rad2deg,
+        lon_deg=jnp.asarray(grid.grid_lon) * rad2deg,
+        area_weights=jnp.ones(horiz), n_worst=2,
+        valid_mask=ocean_mask, run_amip_fn=_run, coordinate=sigma)
+
+    # RANKING on (6,n,n): the masked land peak (LARGEST bias) is EXCLUDED; the ocean bias ranked.
+    cr = compare_fn(CLUBBLiteConfig(C_K=0.4))
+    worst_flat = {int(rec.flat_index) for rec in cr.manifest}
+    assert int(np.ravel_multi_index(masked_idx, horiz)) not in worst_flat
+    assert int(np.ravel_multi_index(ocean_idx, horiz)) in worst_flat
+
+    les_cfg = ColumnLESConfig(regime=_SMALL_REGIME, gate_les_realism=False)
+    diagnose_fn = make_les_diagnose_fn(
+        grid, sigma, les_config=les_cfg,
+        run_les_fn=_partial(run_forced_les, dt_s=0.5, n_steps=2))
+
+    # FULL LOOP: the 3-D mask flows through compare → rank → LES → re-run → gate with no crash.
+    res = run_correction_iteration(
+        CLUBBLiteConfig(C_K=0.4), compare_fn=compare_fn, diagnose_fn=diagnose_fn,
+        promotion_key="clubb_lite_C_K", grid_shape=horiz, background=0.4,
+        diagnosis_method="eddy_diffusivity", les_budget=2)
+    assert np.isfinite(float(res.bias.baseline_bias))
+    assert np.isfinite(float(res.bias.updated_bias))
+    assert res.n_corrected >= 1
+    # The masked land peak keeps the background coefficient (never corrected).
+    assert float(np.asarray(res.feedback_field).reshape(horiz)[masked_idx]) == \
         pytest.approx(0.4)
 
 
