@@ -938,6 +938,25 @@ class LatLonCGridOceanConfig(NamedTuple):
     #              (Eq 44). The paper notes the divergence choice "has a large
     #              impact on the solution" (W9D is markedly more dissipative).
     weno_smoothness: str = "split"
+    # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
+    # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
+    # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant
+    # momentum + free-slip walls (e.g. the Silvestri §5 jet), where the rotational
+    # 2dx wall mode is un-dissipatable by advection (no zonal velocity). NOT a
+    # domain viscosity/closure — a boundary Shapiro filter on the wall rows only.
+    wall_grid_filter_rate_s: float = 0.0
+    # GH #480 (faithful root fix): zero-gradient (Neumann) fill the tracer over
+    # land BEFORE the flux-form advection reconstruction, so the wide WENO
+    # stencil at the first wet faces sees a flat extension instead of the masked
+    # cold land cell (T=0).  The masked cold cell otherwise manufactures a
+    # spurious near-wall tracer front that a 2dx-in-lon v perturbation amplifies
+    # into an un-dissipatable grid mode at free-slip walls (the §5 eddy-permitting
+    # blow-up).  This is the physical no-flux insulating wall = Oceananigans'
+    # clean grid-edge wall; the wall-face flux stays zero (mass_flux_u/v), so
+    # wet-domain tracer is conserved and interior values are unchanged.  It is a
+    # strict no-op where there is no land (periodic/global aquaplanet).  Default
+    # ON: the masked cold-cell contamination is a bug for any masked-land run.
+    tracer_wall_neumann_fill: bool = True
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.

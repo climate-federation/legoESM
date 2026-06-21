@@ -2720,8 +2720,22 @@ Each face can be further tiled into sub-face patches.
 patches; \texttt{gather\_to\_global()} is used only for I/O.
 
 \paragraph{Voronoi/MPAS.}
-RCB geometric partitioner (no external dependencies) or METIS graph
-partitioner.  Two-layer halo for biharmonic operators.
+The unstructured cell graph is partitioned by a capability-aware
+\texttt{method="auto"} default: METIS $k$-way graph partitioning (via the
+optional \texttt{pymetis} dependency, \texttt{pip install -e ".[mesh]"}) when
+available, otherwise the dependency-free recursive coordinate bisection (RCB)
+geometric partitioner.  Graph partitioning minimizes the edge cut, reducing both
+load imbalance and halo (communication) volume on irregular or
+variable-resolution meshes; on the near-uniform icosahedral mesh RCB is already
+well balanced, so the METIS advantage grows with rank count (the
+boundary/interior ratio rises).  A third \texttt{method="sfc"} orders cells along
+a Hilbert space-filling curve and assigns balanced contiguous chunks --- a
+dependency-free yet locality-preserving alternative.  Independently,
+\texttt{reorder\_voronoi\_for\_sharding} orders cells \emph{within} each shard
+along the Hilbert curve so every contiguous \texttt{NamedSharding} chunk is
+spatially compact (cache and GPU memory locality).  Each rank's local arrays use
+\emph{owned-first} indexing (owned cells precede halo cells), so owned-cell loops
+are a contiguous slice.  A two-layer halo supports biharmonic operators.
 
 \section{MPI Differentiability}
 

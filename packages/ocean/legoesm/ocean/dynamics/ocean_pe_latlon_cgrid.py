@@ -532,7 +532,12 @@ def neumann_fill_cgrid(
     Parameters
     ----------
     f : (n_lat, n_lon, ...) field at cell centers.
-    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land).
+    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land), OR a per-level
+        (n_lat, n_lon, nlev) / (n_lat, n_lon, 1) mask matching the field rank
+        (e.g. ``is_active`` for partial-cell topography). A lower-rank mask is
+        broadcast over the level axis (the historical 2D behaviour); a
+        rank-matching mask is applied per level (fills topographic-step dead
+        cells, not just lateral walls).
     grid : optional LatLonGrid or LatLonCGridGeometry.
         When provided and a tripolar fold is active, the north neighbor
         of the fold row uses the fold-partner cell instead of repeating
@@ -620,7 +625,12 @@ def neumann_fill_cgrid(
 
         is_land = m < 0.5
 
-        if f.ndim > 2:
+        # Broadcast a LOWER-rank (2D) mask up to the field's level axis. A mask
+        # whose rank already MATCHES the field (a 3D per-level ``is_active`` /
+        # partial-cell mask, possibly with a singleton level axis) is used as-is
+        # and broadcasts elementwise — this lets the fill clean dead cells at
+        # TOPOGRAPHIC STEPS, not just lateral walls (#480 partial-cell coverage).
+        if f.ndim > 2 and m.ndim < f.ndim:
             m_s_e = m_s[..., jnp.newaxis]
             m_n_e = m_n[..., jnp.newaxis]
             m_w_e = m_w[..., jnp.newaxis]
@@ -638,7 +648,7 @@ def neumann_fill_cgrid(
         nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
 
         has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
-        if f.ndim > 2:
+        if f.ndim > 2 and m.ndim < f.ndim:
             has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
         else:
             has_any_nbr_e = has_any_nbr
@@ -1830,6 +1840,64 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         du_dt = du_dt + diag_Dterm_u
         dv_dt = dv_dt + diag_Dterm_v
     return du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v
+
+
+_WALL_FILTER_ROWS = 8   # GH #480: width of the N/S wall band the filter acts on.
+
+
+def _bc_wall_grid_filter(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, rate_s, _mom_adv):
+    """GH #480: N/S free-slip-wall 2dx-in-lon grid-mode filter (Stage 8b).
+
+    At a free-slip N/S wall the vector-invariant WENO momentum advection grows a
+    2dx-in-lon, v-dominant, ROTATIONAL grid mode that is UN-DISSIPATABLE by the
+    scheme: the mode has ~zero zonal velocity, so meridional upwinding (large v)
+    only damps lat structure and the vorticity flux that would damp the lon mode
+    is multiplied by an x-mass-flux ≈ 0. It grows ONLY in the first/last
+    ``_WALL_FILTER_ROWS`` rows (interior stays clean) and NaNs ~day 11.
+
+    This adds a BOUNDARY-LOCALISED 2dx-in-lon Shapiro filter ``-rate·hp_lon(·)``
+    on those wall rows only — identically zero in the interior, so it is NOT a
+    domain viscosity/closure. ``rate_s`` is ``config.wall_grid_filter_rate_s``
+    [1/s]; ``rate_s <= 0`` (the default) is a no-op (bit-identical), so production
+    paths are unaffected unless the run explicitly enables it (eddy-permitting
+    channel jets with free-slip walls, e.g. Silvestri §5).
+
+    SPMD/MPI-correct: the wall band is applied only at the TRUE domain south/north
+    ends, NOT at every rank's array ends (which under lat-band sharding are real
+    interior cuts). Serial/MPI use the static ``lat_ends_are_poles()``; the SPMD
+    ``shard_map`` selects the edge bands data-dependently via
+    ``spmd_pole_end_masks()`` (same pattern as ``neumann_fill_cgrid``).
+
+    Returns ``(du_dt, dv_dt)``.
+    """
+    if rate_s <= 0.0 or _mom_adv not in ("weno5", "weno7", "weno9"):
+        return du_dt, dv_dt
+    nw = _WALL_FILTER_ROWS
+    # Function-scope imports (avoid top-level ocean->core.parallel coupling).
+    from legoesm.grids.operators_latlon_cgrid import lat_ends_are_poles
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    south_end, north_end = lat_ends_are_poles()        # static: serial=(T,T), MPI=per-rank
+    _spmd = spmd_pole_end_masks()                       # (s_mask,n_mask) under SPMD else None
+    s_gate = _spmd[0] if _spmd is not None else True    # traced under SPMD, else Python True
+    n_gate = _spmd[1] if _spmd is not None else True
+
+    def _hp_lon(f):  # 2dx-in-lon high-pass (periodic in longitude)
+        return (2.0 * f - jnp.roll(f, 1, axis=1) - jnp.roll(f, -1, axis=1)) * 0.25
+
+    def _wall_band(n):
+        # South/north bands are set only on rows that are TRUE domain ends
+        # (static gate), then masked data-dependently for SPMD (s_gate/n_gate).
+        south = jnp.zeros((n,), dtype=du_dt.dtype)
+        north = jnp.zeros((n,), dtype=du_dt.dtype)
+        if south_end:
+            south = south.at[:nw].set(1.0)
+        if north_end:
+            north = north.at[n - nw:].set(1.0)
+        return (south[:, None, None] * s_gate) + (north[:, None, None] * n_gate)
+
+    du_dt = du_dt - rate_s * _wall_band(du_dt.shape[0]) * _hp_lon(u) * u_mask_3d
+    dv_dt = dv_dt - rate_s * _wall_band(dv_dt.shape[0]) * _hp_lon(v) * v_mask_3d
+    return du_dt, dv_dt
 
 
 def _bc_vertical_momentum_advection(
@@ -3265,6 +3333,20 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
+    )
+
+    # --- Stage 8b: GH #480 N/S free-slip-wall grid-mode filter. ---
+    # At a free-slip N/S wall the 2dx-in-lon, v-dominant, ROTATIONAL grid mode
+    # (which has ~zero zonal velocity) is UN-DISSIPATABLE by the vector-invariant
+    # WENO advection — meridional upwinding (large v) only damps lat structure,
+    # the vorticity flux that would damp the lon mode is x mass-flux≈0. It grows
+    # ONLY in the first/last few wall rows (interior is clean) and NaNs day 11.
+    # This is a BOUNDARY-LOCALISED 2dx Shapiro filter on the wall rows only (NOT a
+    # domain viscosity / closure): identically zero in the interior. Validated:
+    # §5 W9V no-closure survives 16 d at the Oceananigans-oracle amplitude (~0.06).
+    du_dt, dv_dt = _bc_wall_grid_filter(
+        du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d,
+        getattr(config, "wall_grid_filter_rate_s", 0.0), _mom_adv,
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---

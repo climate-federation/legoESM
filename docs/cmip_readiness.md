@@ -127,7 +127,7 @@ Status of legoESM components for CMIP-class production experiments.
 | Sub-face tiling | Done | Multiples of 6 devices |
 | Lat-lon / level sharding | Done | Domain decomposition |
 | MPI halo exchange (structured) | Done | mpi4jax, validated with `mpirun -np 2/3/6` |
-| Voronoi mesh decomposition | Done | RCB + METIS, 2-layer halo, entity ownership |
+| Voronoi mesh decomposition | Done | `auto` (METIS when `pymetis` present, else RCB) + Hilbert SFC, 2-layer halo, owned-first entity ownership |
 | Voronoi halo exchange (MPI) | Done | mpi4jax sendrecv, entity-type tagging |
 | Ensemble parallelism | Done | vmap + NamedSharding + scan, gradient checkpointing |
 | Apple Silicon Metal | Done | Metal/CPU hybrid routing |

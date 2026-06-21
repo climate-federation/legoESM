@@ -201,8 +201,8 @@ legoESM is a fully differentiable Earth System Model implemented in JAX, compris
 - Level-parallel spectral transforms
 
 ### Voronoi Mesh Decomposition (`parallel/voronoi_partition.py`)
-- Recursive Coordinate Bisection (RCB) partitioner
-- METIS graph partitioner (optional)
+- Capability-aware `method="auto"` default: METIS graph partitioner when `pymetis` (the `[mesh]` extra) is present, else Recursive Coordinate Bisection (RCB)
+- Hilbert space-filling-curve partitioner (`method="sfc"`) + within-shard Hilbert ordering in `reorder_voronoi_for_sharding()`
 - 2-layer halo depth, entity ownership rules
 - `VoronoiPartition`, `HaloCommSchedule` data structures
 - `build_local_mesh()`, `scatter_to_local()` utilities

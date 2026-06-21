@@ -33,10 +33,17 @@ Hardware: Ginsburg — CPU-MPI nodes (≤16 ranks/node policy, Gloo/TCP, no IB) 
    edge-cut-min win GROWS with rank (boundary/interior ratio), so >np16 likely
    approaches the +5-20% range. RCB is already well-balanced on the near-uniform
    icosahedral mesh, so the low-rank win is ~0; the gain is high-rank only. Kept
-   OPT-IN (`method="metis"` / `LEGOESM_VORONOI_PARTITION=metis`); NOT flipped to
-   default — pymetis is not in the shared/production venv (installed in the
-   campaign's `legoesm-mpi` venv only), and a ~2% gain doesn't justify a hard
-   dep. Recommend metis for large multi-node MPAS runs where pymetis is present.
+   **UPDATE 2026-06-21 — flipped to a capability-gated `method="auto"` default**
+   (branch `perf/voronoi-graph-partition-sfc`): `auto` selects METIS when
+   `pymetis` is importable, else falls back to geometric RCB. The win is now
+   realized automatically wherever pymetis is present (the `[mesh]` extra) with NO
+   hard dependency and byte-identical behavior where it is absent
+   (dev/CI/shared venv), so the earlier "not worth a hard dep" objection no longer
+   applies. Also added a dependency-free `method="sfc"` (Hilbert space-filling
+   curve) for locality-preserving contiguous partitions, and
+   `reorder_voronoi_for_sharding` now Hilbert-orders cells within each shard.
+   Still install `[mesh]` for large multi-node MPAS where the high-rank edge-cut
+   win (>np16, trending +5–20%) matters.
 4. Root-only/gathered checkpoint + diagnostics writers — `scripts/run/run_omip.py`
    / matrix I/O; big wall-clock only at high output cadence, ~0 step-kernel gain.
 5. Tripole wiring (lat-lon C-grid) — capability (eORCA scaling), not speedup.
