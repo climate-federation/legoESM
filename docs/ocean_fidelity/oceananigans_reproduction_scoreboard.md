@@ -15,7 +15,7 @@ All numbers below come from real legoESM runs vs the real Oceananigans reference
 | # | case | bar | measured (real run vs real oracle) | status |
 |---|------|-----|-------------------------------------|--------|
 | 1 | barotropic_gyre | surface-u pattern_corr ≥ 0.90 at matched time AND max\|u\| within 2× over a ≥20-day stable window | **day-10 corr 0.929**, max\|u\| 0.337 vs 0.606 (0.56×), stable d1–20 (`explicit_substep`) | **PASS** |
-| 2 | bickley_jet | surface vorticity pattern_corr ≥ 0.85 at eddy-developed time | linear phase **bit-identical** (t6 5790 vs 5791); phase-matched corr **0.39** at eddy-developed state | **NOT MET** — pointwise bar physically unattainable (chaos); statistical residual = 2Δx mode |
+| 2 | bickley_jet | surface vorticity pattern_corr ≥ 0.85 at eddy-developed time | linear phase **bit-identical** (t6 5790 vs 5791); enstrophy-decay ens_ratio **1.005/1.25/1.09/1.28** through t24 (faithful matched-Coriolis config, ~2× better than explicit_ab2); phase-matched corr **0.39** at eddy-developed state | **NOT MET** — pointwise bar physically unattainable (chaos); statistical match now ~10–28% through t24, residual 2Δx bounce at t30 |
 | 3 | silvestri §5 jet | stays finite while oracle stable AND domain-max\|u\| within 2× | blows up at α=0 (barotropic-Coriolis 2Δx null mode) | **NOT MET** — research-level |
 
 Promise `OCEANANIGANS_EXPERIMENTS_FAITHFULLY_REPRODUCED` requires all three rows
@@ -56,20 +56,25 @@ The bickley eddy-regime and §5 share one root cause. Exhaustive isolation:
   deconvolution removal still helps and is faithful — t12 ens 5019→4511 — but is
   not the lever.) This corrects the long-standing "WENO-momentum residual"
   hypothesis.
-- **The lever is the barotropic / free-surface solver.** Oceananigans'
-  `ImplicitFreeSurface` is a backward-Euler Helmholtz solve. legoESM's two
-  solvers have complementary flaws: `explicit_substep` is stable but
-  under-dissipative; `implicit_cn` (θ≈0.7) matches the oracle's enstrophy decay
-  through the roll-up (t6 5786≈5791, t12 3186, t18 2624 vs 2835, 2444) but the
-  late-time enstrophy **bounces back up** (t24 3407 vs oracle's monotonic 2080).
-- **The bounce is the rotational 2Δx barotropic-Coriolis null mode**, which the
-  free-surface off-centering θ provably cannot damp (θ damps the divergent
-  gravity-wave mode, not the rotational mode). This is the same mode that blows
-  up §5 at α=0.
+- **The lever is the barotropic / free-surface solver — specifically the Coriolis
+  SCHEME.** Oceananigans' `ImplicitFreeSurface` is a backward-Euler Helmholtz
+  solve and its `HydrostaticSphericalCoriolis` is `EnstrophyConserving` (f & ζ
+  co-located at the FF vertex). The bickley driver's old `explicit_ab2`
+  (4-point FACE-f Coriolis, flagged [APPROX]) supports a rotational **2Δx null
+  mode** that drives a spurious late-time enstrophy GROWTH — the eddy-regime
+  under-dissipation. Switching to the FAITHFUL scheme types — `matsuno_split`
+  (matched vertex-f Coriolis) + `implicit_cn` backward-Euler (θ=1.0) — roughly
+  HALVES it (ens_ratio t12 1.77→1.25) and pushes the 2Δx bounce t24→t30
+  (commit 0d73fd48f). The bounce is NOT eliminated.
+- **The residual bounce is the rotational 2Δx barotropic-Coriolis null mode**,
+  which θ provably cannot damp (θ damps the divergent gravity-wave mode, not the
+  rotational mode). This is the same mode that blows up §5 at α=0.
 
-**Next (research-level):** a barotropic scheme that damps the rotational 2Δx mode
-while staying strongly dissipative and conservative, matching `ImplicitFreeSurface`.
-Tracked by the standing §5 barotropic-Coriolis redesign on
+**Next (research-level):** (a) test §5 with `coriolis_scheme="matsuno_split"`
+(it currently uses `explicit_ab2`; the matched form should delay/reduce the
+blow-up — directly bears on CASE 3); (b) a barotropic scheme that fully damps the
+rotational 2Δx mode while staying strongly dissipative and conservative, matching
+`ImplicitFreeSurface`. Tracked by the standing §5 barotropic-Coriolis redesign on
 `fix/silvestri-turbulent-dissipation`.
 
 Oracle source consulted:
