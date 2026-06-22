@@ -67,6 +67,11 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-mpi}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
+# Runtime MPI stack: load the SAME GNU cray-mpich that mpi4py/mpi4jax were BUILT
+# against (README Step 2), so `mpiexec` and libmpi match the build ABI. Without
+# this the multi-rank halo exchange fails to find/link the right MPI at runtime.
+module load gcc cray-mpich 2>/dev/null || true
+
 # --- Benchmark configuration (overridable via `qsub -v NAME=value`) ----------
 GRID="${GRID:-latlon}"              # latlon | icosahedral (genuine MPI); cs/spectral = rank-1 only
 PHYSICS="${PHYSICS:-held_suarez}"   # held_suarez (dry, robust) | moist (AMIP-like: moisture + Kessler)
