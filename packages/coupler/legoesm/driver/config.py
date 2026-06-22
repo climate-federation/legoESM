@@ -315,6 +315,12 @@ class ExperimentConfig(NamedTuple):
     # consistency the coupler ocean tile (CouplerConfig.bulk_scheme) MUST use the
     # same scheme — run_coupled wires both together.
     surface_bulk_scheme: str = "constant"
+    # COARE 3.0 convective-gustiness BL depth z_i [m] for the MOST surface
+    # fluxes (coare3/large_yeager): 0/None = off (byte-identical), ~600 = enable
+    # the w* free-convection gust that lets a calm warm ocean evaporate
+    # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
+    # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
+    surface_gustiness_zi: float | None = None
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation

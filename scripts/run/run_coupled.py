@@ -153,6 +153,16 @@ def main():
                              "evaporation over a calm, convectively-unstable warm "
                              "ocean (cold/dry surface-air bias). Requires a "
                              "turbulence scheme (not --turbulence none).")
+    parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi",
+                        type=float, default=None,
+                        help="COARE 3.0 convective-gustiness boundary-layer depth "
+                             "z_i [m] for the MOST surface fluxes (needs "
+                             "--surface-bulk-scheme coare3/large_yeager). 0/unset "
+                             "= off (byte-identical); ~600 enables the w* "
+                             "free-convection gust so a calm warm ocean evaporates "
+                             "(fixes the persistent tropical hfls<<Earth / R_TOA "
+                             "imbalance). Applied to the atmosphere surface layer "
+                             "AND the slab ocean heat budget (kept consistent).")
     parser.add_argument("--gravity-wave-drag", default="hines",
                         choices=["rayleigh", "lindzen", "mcfarlane", "hines",
                                  "prognostic_spectral", "e3sm_cam", "ml_emulator",
@@ -472,6 +482,7 @@ def main():
         convection=args.convection,
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_gustiness_zi=args.surface_gustiness_zi,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
         convective_cloud=args.convective_cloud,
@@ -551,12 +562,14 @@ def main():
             # Match the slab heat-budget turbulent fluxes to the atmosphere
             # surface layer (interface energy consistency); see SimpleOceanConfig.
             bulk_scheme=args.surface_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.surface_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"

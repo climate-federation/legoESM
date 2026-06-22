@@ -32,6 +32,20 @@ def test_resolve_turbulence_propagates_surface_bulk_scheme(scheme: str) -> None:
     assert turb_config.surface.bulk_scheme == scheme
 
 
+def test_resolve_turbulence_threads_gustiness_zi() -> None:
+    # surface_gustiness_zi must reach the turbulence scheme's SurfaceLayerConfig.
+    cfg = ExperimentConfig(
+        turbulence="holtslag_boville", surface_bulk_scheme="coare3",
+        surface_gustiness_zi=600.0,
+    )
+    _fn, turb_config = _resolve_turbulence(cfg)
+    assert turb_config.surface.gustiness_w_zi == 600.0
+    # default None => unchanged (0.0)
+    cfg0 = ExperimentConfig(turbulence="holtslag_boville")
+    _fn0, tc0 = _resolve_turbulence(cfg0)
+    assert tc0.surface.gustiness_w_zi == 0.0
+
+
 def test_resolve_turbulence_default_constant_unchanged() -> None:
     # Default surface_bulk_scheme="constant" => resolved config untouched.
     cfg = ExperimentConfig(turbulence="holtslag_boville")
