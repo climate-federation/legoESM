@@ -235,6 +235,32 @@ scheme's runaway. The fast-physics realism goal is met + merged (PR #563).
    gustiness/effective-wind floor should now shed the ocean's excess to the
    atmosphere (closes BOTH R_TOA and the gap) — but validate vs SST drift.
 
+## Convective gustiness (COARE w*) — THE air-sea-coupling fix (job 8537518, 30d)
+The 180d diagnosis (calm warm ocean barely evaporates; the MOST solver was
+MISSING the COARE free-convection velocity scale w*) → implemented `w* =
+(g·z_i·<w'θv'>/θv)^(1/3)`, `U_eff = √(|U|²+(β·w*)²)`, opt-in `--gustiness-zi`
+(z_i = BL depth; commits d07dfc3ef + 0b72144c1). zi=600 vs no-gust (30d):
+
+| metric | no-gust | **zi=600** | Earth |
+|---|---|---|---|
+| hfls | 51 | **77.9 W/m²** | ~80–120 ✓✓ |
+| tropics tas–tos gap | +11.2 | **+5.8** | ~1 ✓✓ (halved) |
+| precip | 1.90 | **2.76 mm/d** | ~2.7 ✓✓ |
+| `<R_TOA>` | +19 | **+10.4** | ~0 ✓ |
+| tropics tas | 17.6 | 22.5 °C | ~26 |
+| CWV | 22.0 | 32.3 | ~25 (now high) |
+| albedo | 31.3 | 35.7% | ~30 ✗ overshoot |
+| SST drift | −2.2 | −7.2 K/yr | ~0 ✗ |
+
+**VALIDATED: gustiness is THE fix for the air-sea decoupling** — hfls + precip
+Earth-like, the tas–tos gap halved, R_TOA toward balance, the cold column warmed
++7 K (257→265 K col-T). But **zi=600 OVERSHOOTS**: over-evaporates → over-cools
+the slab (−7.2, the old gustiness regime re-appears now that fluxes are strong)
++ over-moistens (CWV 32) → over-clouds (albedo 35.7). The sweet spot is between
+0 and 600 → **zi=300 running (job 8538045)** to balance hfls/gap gains vs
+slab-drift/albedo. Likely pair with `--q-c-diagnostic` (thinner cloud) to hold
+albedo ~30 as before. The lever + wiring are shipped; only the z_i value tunes.
+
 ## Equilibration confirmed (180d, best config) + status
 **Merged to main (PR #563).** A 180-day run of the best config
 (coare3 + `--q-c-diagnostic 5e-4` + combined preset) bottoms out near Day
