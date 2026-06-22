@@ -203,21 +203,27 @@ albedo.** R_TOA +19 (net-in) is the cost of the thinner cloud — it keeps the
 system warming toward equilibrium. RECOMMENDED coupled config:
 `--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4` (+ the combined preset).
 
-## Open / next levers (ranked by the combined-run diagnosis)
-The combined run isolates the residual to **spin-up of the slow surface
-reservoirs**, dominated by cold land + over-grown sea ice (tos warm, tas cold).
-So:
-1. **Long run to equilibrium** (definitive): R_TOA=+17.8 predicts warm-back;
-   a multi-year (≥1 yr) run is the real "is it realistic at equilibrium" test.
-   90d=5.7h ⇒ 1yr≈23h (fits 72h walltime). Restart-chaining for multi-year.
-2. **Warm-start the surface** so it doesn't overshoot cold from the T=300 IC:
-   init slab at observed SST + soil at observed soil-T (kills the artificial
-   300→254 cooling transient; the run that converges fastest to realistic).
-3. Reduce the sea-ice over-growth (siconc 16.5% vs ~6%): the cold high-lat
-   air over-freezes; warmer equilibrium should self-correct, but check the
-   ice-albedo feedback isn't latching.
-4. Small extra LW trapping (`conv_cloud_max` 0.15→~0.18, albedo headroom to 30%)
-   to accelerate warming — secondary to spin-up.
+## Equilibration confirmed (180d, best config) + status
+**Merged to main (PR #563).** A 180-day run of the best config
+(coare3 + `--q-c-diagnostic 5e-4` + combined preset) bottoms out near Day
+90–100 (~257 K column-T) then **warms back** (Day 130: 257.2 K and rising) under
+R_TOA ≈ +19 W/m² — a stable Earth-like climate, NOT the constant scheme's runaway
+cold drift (254 K and falling at Day 90). The fast physics is Earth-like; the
+remaining residual is spin-up time + a still-too-cold near-surface air over land
+and a low hfls (51 vs ~80).
+
+## Open / next levers
+1. **Soil warm-start SHIPPED** (`--warm-start-soil`, opt-in, byte-identical):
+   init the land soil at the atmosphere's lat-structured near-surface air T (t=0)
+   instead of uniform 280 K (tropical soil was ~18 K too cold → months of
+   cold-spin). `init_multilayer_land_state`/`init_surface_state` now accept a
+   per-column array; validation run 8536696 (best config + warm-start) pending.
+2. **Tune against the EQUILIBRATED state** (not the spin-up transient): analyse
+   the Day-150–180 biases of the 180d run → target the dominant remaining bias
+   (likely the tropics tas–tos gap / hfls 51<80 surface-air coupling).
+3. Reduce sea-ice over-growth (siconc 16.5% vs ~6%): warmer equilibrium should
+   self-correct; check the ice-albedo feedback isn't latching.
+4. Multi-year / restart-chained run for full slab+soil equilibrium.
 
 ## Key files
 - `packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py`
