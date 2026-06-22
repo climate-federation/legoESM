@@ -71,12 +71,15 @@ def _ensure_clm_initialized() -> None:
     MLpftconMod.MLpftcon = MLpftconMod.Init()
     LookupPsihatINI()
 
-    # Initialize orbital parameters for year 2000.
+    # Initialize orbital parameters for year 2001 (non-leap, 365 days).
+    # Must match the start_date_ymd=20010101 epoch used in _setup_clm_time so
+    # that CLM's shr_orb_cosz gets consistent orbital geometry (year 2000 is
+    # a leap year and shifts caldays after Feb 28 by one day).
     from clm_share.shr_orb_mod import shr_orb_params
     import clm_src_utils.clm_varorb as _varorb
 
     # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
-    eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2000)
+    eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)
     _varorb.eccen = float(eccen)
     _varorb.obliqr = float(obliqr)
     _varorb.mvelpp = float(mvelpp)
@@ -167,11 +170,17 @@ def _setup_clm_topology(
         for j in range(1, n_layers + 1):
             dz_np[c, j] = float(dz_soil[j - 1])
             z_np[c, j] = float(z_soil[j - 1])
-        # Interface depths: zi[c, 0] = 0 (surface), zi[c, j] = z[c, j] + dz[c, j]/2
+        # Fill remaining CLM soil layers (n_layers+1..nlevsoi) with the deepest
+        # legoESM layer rather than leaving them as NaN.  SoilResistance reads
+        # dz[c, j] for all j=1..nlevsoi; NaN propagates to gradients via jnp.where.
+        for j in range(n_layers + 1, nlevsoi + 1):
+            dz_np[c, j] = float(dz_soil[-1])
+            z_np[c, j] = float(z_soil[-1]) + float(dz_soil[-1]) * (j - n_layers)
+        # Interface depths: zi[c, 0] = 0 (surface), zi[c, j] = cumulative depth
         zi_np[c, 0] = 0.0
         cum = 0.0
-        for j in range(1, n_layers + 1):
-            cum += float(dz_soil[j - 1])
+        for j in range(1, nlevsoi + 1):
+            cum += dz_np[c, j]
             zi_np[c, j] = cum
         nbedrock_np[c] = n_layers
 
@@ -221,12 +230,14 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     # Encode actual day-of-year into itim so that get_curr_calday returns
     # the correct calendar day for solar zenith computation.
     _tm.itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
-    _tm.start_date_ymd = 20000101
+    # Use year 2001 (non-leap) as the reference epoch for both start_date and
+    # curr_date.  Year 2000 is a leap year (366 days); the CLM time manager's
+    # get_curr_date() recomputes curr_date_ymd from itim*dtstep using isleap(),
+    # so keeping start_date_ymd=20000101 caused all caldays after Feb 28 to be
+    # 1 day behind (Apr 30 instead of May 1 for doy=120).
+    _tm.start_date_ymd = 20010101
     _tm.start_date_tod = 0
-    # Derive curr_date_ymd from doy so CLM phenology sees the correct calendar
-    # date (not hardcoded Jan 1).  Use year 2001 (non-leap, 365 days) so that
-    # timedelta(doy) maps doy=0→Jan1, doy=59→Mar1 with no leap-year offset.
-    # Year 2000 (leap) shifted all dates after Feb 28 by 1 day.
+    # Derive curr_date_ymd from doy (non-leap 2001 epoch).
     import datetime as _dt
     _jan1 = _dt.date(2001, 1, 1)
     _curr = _jan1 + _dt.timedelta(days=int(doy))
@@ -488,26 +499,28 @@ def _build_stubs(
 
     for i in range(ncol):
         p = i + 1  # 1-based patch = column
-        for j in range(1, min(n_layers, nlevsoi) + 1):
-            jl = j - 1  # 0-based legoESM index
-            if psi_soil is not None:
+        # Fill all nlevsoi layers so that layers beyond n_layers don't stay at
+        # smp=0 mm (saturated) which biases btran via the weighted-average.
+        for j in range(1, nlevsoi + 1):
+            jl = min(j - 1, n_layers - 1)  # clamp to deepest legoESM layer
+            if psi_soil is not None and j - 1 < psi_soil.shape[1]:
                 # psi [m] → smp_l [mm]; preserve sign (negative for unsaturated)
-                smp_l_col = smp_l_col.at[p, j].set(psi_soil[i, jl] * 1000.0)
+                smp_l_col = smp_l_col.at[p, j].set(psi_soil[i, j - 1] * 1000.0)
             else:
-                # Use config default (-3000 mm ≈ -0.029 MPa, ~50% field capacity).
-                # Previous default was -1000 mm (near-saturation) which masked drought stress.
                 smp_l_col = smp_l_col.at[p, j].set(float(canopy_config.smp_default_mm))
 
-            if soil_hydraulics is not None and psi_soil is not None and theta_soil is not None:
+            if (soil_hydraulics is not None and psi_soil is not None
+                    and theta_soil is not None and j - 1 < theta_soil.shape[1]):
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
-                K = hydraulic_conductivity(psi_soil[i, jl], theta_soil[i, jl], soil_hydraulics)
+                K = hydraulic_conductivity(psi_soil[i, j - 1], theta_soil[i, j - 1],
+                                           soil_hydraulics)
                 hk_l_col = hk_l_col.at[p, j].set(float(K) * 1000.0)  # m/s → mm/s
             else:
-                # Use config default (1e-5 mm/s ≈ silty clay loam at moderate dryness).
-                # Previous default (1e-4) was 10× too high.
                 hk_l_col = hk_l_col.at[p, j].set(float(canopy_config.hk_default_mm_s))
 
-            rootfr_patch = rootfr_patch.at[p, j].set(float(root_frac_np[jl]))
+            # rootfr only set for layers where legoESM has data
+            if jl < len(root_frac_np):
+                rootfr_patch = rootfr_patch.at[p, j].set(float(root_frac_np[jl]))
 
     # ---- Soil evaporative resistance (Sellers-Lockwood formula) ----
     # The CLM-ML SurfaceResistanceMod uses rs = exp(8.206 - 4.255*Se) [s/m]
