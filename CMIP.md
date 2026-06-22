@@ -176,6 +176,30 @@ NEW TENSION: more moisture → more (reflective) low cloud → **albedo 28.6→3
 clear improvement (warmer, moister, half the drift), but the albedo overshoot
 now caps further warming → the next lever.
 
+### Albedo recovery — coare3 + thinner cloud = BEST config (job 8535243, 30d)
+Exposed the cloud SW/LW knob as CLI overrides (`--rh-crit`/`--q-c-diagnostic`/
+`--conv-cloud-max`, opt-in, default = CloudConfig default = byte-identical;
+commit 96263e5d6) and ran coare3 + `--q-c-diagnostic 5e-4` (cloud optically
+thinner ⇒ less SW reflection, still LW-active). Full 3-way (first 30d):
+
+| metric | constant | coare3 | **coare3 + q_c 5e-4** |
+|---|---|---|---|
+| planetary albedo | 28.6% | 35.4% | **31.3%** ✓ Earth-like (overshoot recovered) |
+| **SST drift** | −7.2 | −3.2 | **−2.2 K/yr** ✓✓ best (3.3× better than original) |
+| CWV | 20.7 | 21.8 | **22.0** ✓ |
+| tropics tas–tos gap | +12.9 | +11.3 | **+11.2** ✓ |
+| hfls (global) | 41 | 55 | 51 W/m² |
+| R_TOA | +15 | +8.7 | +19.2 W/m² |
+
+**The two levers COMPOSE into the most realistic coupled config to date.** coare3
+fixes the air-sea decoupling (stronger evaporation, warmer/moister column,
+halves the drift); the thinner cloud recovers the albedo (35→31%, Earth-like)
+AND further cuts the drift (less SW reflected → more SW into the surface →
+−3.2→−2.2 K/yr). **SST drift cut from the original −7.2 to −2.2 K/yr at Earth-like
+albedo.** R_TOA +19 (net-in) is the cost of the thinner cloud — it keeps the
+system warming toward equilibrium. RECOMMENDED coupled config:
+`--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4` (+ the combined preset).
+
 ## Open / next levers (ranked by the combined-run diagnosis)
 The combined run isolates the residual to **spin-up of the slow surface
 reservoirs**, dominated by cold land + over-grown sea ice (tos warm, tas cold).
