@@ -58,6 +58,30 @@ def test_joint_parameterization_requires_mass_flux_and_louis():
         _postprocess_args(args, parser)
 
 
+def test_precision_flag_flows_to_config_and_validates():
+    parser = build_arg_parser()
+    for mode in ("fp32", "fp64", "mixed"):
+        args = parser.parse_args(["--dataset", "analytical",
+                                  "--precision", mode])
+        args = _postprocess_args(args, parser)
+        cfg = build_config_from_args(args)
+        assert cfg.precision == mode
+        cfg.validate_strict()  # membership-validated scheme Literal
+
+
+def test_precision_default_is_fp32():
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    assert build_config_from_args(args).precision == "fp32"
+
+
+def test_precision_unknown_mode_rejected():
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical", "--precision", "bf16"])
+
+
 def test_spectral_postprocess_promotes_gaussian_grid():
     parser = build_arg_parser()
     args = parser.parse_args([

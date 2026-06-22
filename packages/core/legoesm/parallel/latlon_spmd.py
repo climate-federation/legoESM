@@ -52,6 +52,45 @@ def latlon_band_perms(n_dev: int):
     return perm_north, perm_south
 
 
+def reconstruct_vface_lower(v_lower, axis: str, perm_north):
+    """Rebuild the ``n_lat+1`` staggered v-faces from the ``n_lat``-row
+    ``v_lower`` representation, INSIDE a ``shard_map`` over ``axis``.
+
+    The staggered meridional velocity ``v`` has a leading dim ``n_lat+1`` (faces
+    at latitude interfaces), coprime with ``n_lat`` for ``N>1`` so it cannot be
+    sharded directly; it is carried as ``v_lower = v[:n_lat]`` (``n_lat`` rows,
+    divisible by ``N``). Each band's NORTH boundary face is the next band's
+    ``v_lower[0]`` (= the shared global interface row), lifted down via
+    ``ppermute(..., perm_north)``; the north-most band has no neighbour there and
+    receives the pole-wall zero (the ppermute non-target). Pure array core (no
+    Field/state coupling) shared by the ocean and atmosphere lat-band SPMD steps
+    so the v-stagger numerics are written ONCE (factored from the ocean step's
+    ``_reconstruct_v`` closure). AD-safe: ``ppermute`` is self-transposing.
+
+    Parameters
+    ----------
+    v_lower : array ``(n_lat_band, n_lon[, nlev])``
+    axis : the ``shard_map`` mesh axis name (``"lat"``).
+    perm_north : the ``(src, dst)`` pairs from :func:`latlon_band_perms`.
+
+    Returns
+    -------
+    array ``(n_lat_band + 1, n_lon[, nlev])`` — the band's full v-faces.
+    """
+    boundary = jax.lax.ppermute(v_lower[0:1], axis, perm_north)
+    return jnp.concatenate([v_lower, boundary], axis=0)
+
+
+def to_vface_lower(v_full):
+    """Inverse of :func:`reconstruct_vface_lower`: drop the north boundary face
+    (owned by the next band) to return to the ``n_lat``-row ``v_lower``.
+
+    Round-trip identity ``to_vface_lower(reconstruct_vface_lower(v_lower)) ==
+    v_lower`` holds whenever the top boundary face is the pole-wall zero (true
+    after any step that zeroes v at the pole)."""
+    return v_full[:-1]
+
+
 def _pole_fold(rows, negate: bool):
     """Serial pole fold of ``rows`` (lat-mirror + 180 deg lon roll [+ sign]).
 
