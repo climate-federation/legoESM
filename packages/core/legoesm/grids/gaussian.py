@@ -102,6 +102,49 @@ def _sh_gemm_enabled() -> bool:
         "0", "", "false", "no", "off")
 
 
+def _sh_gemm_bf16_enabled() -> bool:
+    """True when the SH-GEMM Legendre contraction should run in bfloat16.
+
+    Sub-mode of ``LEGOESM_SH_GEMM`` (no effect unless the GEMM path is also
+    enabled): casts the Legendre matmul operands to bf16 with fp32 accumulate
+    — the MXU/tensor-core reduced-precision throughput path on Ampere+/TPU.
+    Read at trace time (static Python bool), same discipline as
+    :func:`_sh_gemm_enabled`.
+
+    FORWARD / INFERENCE-ONLY: bf16 yields ~3-decimal-digit gradients, so this
+    must NOT be enabled on the differentiable-training path. The FFT stays
+    complex128 and the semi-implicit solve is untouched — only the Legendre
+    contraction is reduced-precision."""
+    return os.environ.get("LEGOESM_SH_GEMM_BF16", "0").strip().lower() not in (
+        "0", "", "false", "no", "off")
+
+
+def _legendre_contract(
+    spec: str, mat_real: jax.Array, field: jax.Array, compute_bf16: bool,
+) -> jax.Array:
+    """``jnp.einsum(spec, mat_real, field)`` with an optional bf16 compute path.
+
+    ``mat_real`` is a REAL Legendre matrix; ``field`` may be real or complex.
+    When ``compute_bf16`` is False this is byte-for-byte the default einsum (so
+    the non-bf16 GEMM path stays bit-identical to the legacy reduction). When
+    True, operands are cast to bfloat16 and accumulated in float32 (the
+    ``preferred_element_type``); a complex ``field`` is contracted as two real
+    matmuls (W·(a+ib) = W·a + i·W·b, the Legendre matrix being real) so bf16
+    never has to represent a complex value. The result is upcast back to the
+    field's dtype."""
+    if not compute_bf16:
+        return jnp.einsum(spec, mat_real, field)
+    m16 = mat_real.astype(jnp.bfloat16)
+    if jnp.iscomplexobj(field):
+        re = jnp.einsum(spec, m16, field.real.astype(jnp.bfloat16),
+                        preferred_element_type=jnp.float32)
+        im = jnp.einsum(spec, m16, field.imag.astype(jnp.bfloat16),
+                        preferred_element_type=jnp.float32)
+        return (re + 1j * im).astype(field.dtype)
+    return jnp.einsum(spec, m16, field.astype(jnp.bfloat16),
+                      preferred_element_type=jnp.float32).astype(field.dtype)
+
+
 def _flat_to_bym(
     mat: jax.Array, ms: jax.Array, ls: jax.Array, n_max: int,
 ) -> jax.Array:
@@ -128,7 +171,8 @@ def _analysis_legendre_gemm(
     ``Σ_lat W[:,k,None]·f_m[:,m(k)]`` but via one batched ``dot_general`` over
     m.  Caller applies the ``2π`` prefactor (matching the legacy kernels)."""
     W_bym = _flat_to_bym(W, ms, ls, n_max)            # (m, n, lat)
-    coeffs_bym = jnp.einsum("mnl,lmv->mnv", W_bym, f_m)  # (m, n, nlev)
+    coeffs_bym = _legendre_contract(
+        "mnl,lmv->mnv", W_bym, f_m, _sh_gemm_bf16_enabled())  # (m, n, nlev)
     return coeffs_bym[ms, ls, :]                       # (n_sh, nlev)
 
 
@@ -148,7 +192,8 @@ def _synthesis_legendre_gemm(
     coeffs_bym = jnp.zeros(
         (n_max + 1, n_max + 1, nlev), dtype=coeffs.dtype,
     ).at[ms, ls, :].set(coeffs)                        # (m, n, nlev)
-    return jnp.einsum("mnl,mnv->lmv", P_bym, coeffs_bym)  # (n_lat, n_max+1, nlev)
+    return _legendre_contract(
+        "mnl,mnv->lmv", P_bym, coeffs_bym, _sh_gemm_bf16_enabled())  # (n_lat,n_max+1,nlev)
 
 
 # =============================================================================

@@ -35,6 +35,7 @@ from legoesm.grids.gaussian import (
     _flat_to_bym,
     _sh_idx,
     _sh_gemm_enabled,
+    _sh_gemm_bf16_enabled,
 )
 
 
@@ -271,3 +272,69 @@ def test_analysis_dmu_grad_matches_default(monkeypatch):
     g_gemm = jax.grad(loss)(field)
     assert bool(jnp.all(jnp.isfinite(g_gemm))), "dmu-analysis grad non-finite"
     _assert_close(g_gemm, g_def, tol=1e-10, label="dmu-analysis grad")
+
+
+# ----------------------------------------------------------------------
+# A3 bf16: the Legendre contraction in bfloat16 (fp32 accumulate) — the
+# MXU/tensor-core reduced-precision throughput path. A BOUND vs f64, not
+# equality; default OFF must be byte-identical; forward/inference-only.
+# ----------------------------------------------------------------------
+
+def test_sh_gemm_bf16_env_parse(monkeypatch):
+    for val in ("0", "false", "False", "no", "off", ""):
+        monkeypatch.setenv("LEGOESM_SH_GEMM_BF16", val)
+        assert _sh_gemm_bf16_enabled() is False, f"{val!r} wrongly enabled bf16"
+    for val in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("LEGOESM_SH_GEMM_BF16", val)
+        assert _sh_gemm_bf16_enabled() is True, f"{val!r} should enable bf16"
+
+
+def test_sh_gemm_bf16_default_off_is_byte_identical(monkeypatch):
+    """bf16 OFF (default) leaves the f64 GEMM path byte-for-byte unchanged."""
+    grid = _grid()
+    coeffs = _rand_coeffs(grid)
+    field = _rand_field(grid)
+    monkeypatch.setenv("LEGOESM_SH_GEMM", "1")
+    monkeypatch.delenv("LEGOESM_SH_GEMM_BF16", raising=False)
+    s_a, a_a = sh_synthesis_3d(grid, coeffs), sh_analysis_3d(grid, field)
+    monkeypatch.setenv("LEGOESM_SH_GEMM_BF16", "0")
+    s_b, a_b = sh_synthesis_3d(grid, coeffs), sh_analysis_3d(grid, field)
+    assert float(jnp.max(jnp.abs(s_a - s_b))) == 0.0, "bf16=0 changed synthesis"
+    assert float(jnp.max(jnp.abs(a_a - a_b))) == 0.0, "bf16=0 changed analysis"
+
+
+def test_sh_gemm_bf16_relative_accuracy(monkeypatch):
+    """bf16 matches the f64 GEMM to a BOUND (~1e-2 rel), and is genuinely
+    lossy (not silently exact). A sanity bound that catches a gross error
+    (wrong matrix, broken complex split) — NOT a parity claim."""
+    grid = _grid()
+    field = _rand_field(grid)
+    coeffs = _rand_coeffs(grid)
+    monkeypatch.setenv("LEGOESM_SH_GEMM", "1")
+    monkeypatch.delenv("LEGOESM_SH_GEMM_BF16", raising=False)
+    a_f64 = sh_analysis_3d(grid, field)
+    s_f64 = sh_synthesis_3d(grid, coeffs)
+    monkeypatch.setenv("LEGOESM_SH_GEMM_BF16", "1")
+    a_bf16 = sh_analysis_3d(grid, field)
+    s_bf16 = sh_synthesis_3d(grid, coeffs)
+    for got, ref, lbl in ((a_bf16, a_f64, "analysis"), (s_bf16, s_f64, "synthesis")):
+        err = float(jnp.max(jnp.abs(got - ref)))
+        scale = float(jnp.max(jnp.abs(ref)))
+        assert err <= 5e-2 * max(scale, 1.0), f"bf16 {lbl} {err} (scale {scale})"
+        assert err > 0.0, f"bf16 {lbl} suspiciously exact — bf16 not engaged"
+        assert got.dtype == ref.dtype, f"bf16 {lbl} changed output dtype"
+
+
+def test_sh_gemm_bf16_grad_finite(monkeypatch):
+    """grad through the bf16 contraction is finite. bf16 is NOT for training
+    (lossy gradients), but differentiating it must not produce NaN/Inf."""
+    grid = _grid()
+    field = _rand_field(grid)
+    monkeypatch.setenv("LEGOESM_SH_GEMM", "1")
+    monkeypatch.setenv("LEGOESM_SH_GEMM_BF16", "1")
+
+    def loss(x):
+        return jnp.sum(jnp.abs(sh_analysis_3d(grid, x)) ** 2)
+
+    g = jax.grad(loss)(field)
+    assert bool(jnp.all(jnp.isfinite(g))), "bf16 analysis grad non-finite"
