@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N legoesm_amip_gpu_scaling
+#PBS -N legoesm_gpu_scaling
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=premium
@@ -31,11 +31,11 @@
 #   * For a quick single-GPU baseline: set `select=1:ncpus=16:ngpus=1:mem=120GB`.
 #
 # SUBMIT:
-#   qsub scripts/cluster/scaling_derecho/amip_gpu_scaling.pbs
+#   qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs
 #
 # OVERRIDE knobs at submit time (no need to edit the file):
 #   qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both \
-#        scripts/cluster/scaling_derecho/amip_gpu_scaling.pbs
+#        scripts/cluster/scaling_derecho/gpu_scaling.pbs
 # ===========================================================================
 
 set -uo pipefail
@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # (inherited from the submit shell via PBS env export, or a reused interactive
 # shell) can NEVER silently run this GPU benchmark on the CPU. Unconditional on
 # purpose -- a GPU job must always use cuda. Symmetric with the cpu pin in
-# cpu_mpi_scaling.pbs.
+# cpu_scaling.pbs.
 export JAX_PLATFORMS=cuda
 export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 # shellcheck source=_env.sh

@@ -5,9 +5,9 @@ GPU (`deg*` nodes: 4× A100-40GB) and CPU-MPI (`main` queue: 128-core EPYC nodes
 
 ```
 scaling_derecho/
-├── _env.sh               # shared env, sourced by both jobs (edit 2 values, see below)
-├── amip_gpu_scaling.pbs  # GPU weak+strong (queue main, gpu nodes; single-process multi-GPU)
-└── cpu_mpi_scaling.pbs   # CPU weak+strong over MPI ranks (queue main; latlon/icosahedral)
+├── _env.sh         # shared env, sourced by both jobs (edit 2 values, see below)
+├── gpu_scaling.pbs # GPU weak+strong (queue main, gpu nodes; single-process multi-GPU)
+└── cpu_scaling.pbs # CPU weak+strong over MPI ranks (queue main; latlon/icosahedral)
 ```
 
 The two jobs need **two different conda envs** — GPU JAX and CPU+MPI JAX are
@@ -157,8 +157,8 @@ mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \
 ## Step 4 — Submit the full sweeps
 
 ```bash
-qsub scripts/cluster/scaling_derecho/amip_gpu_scaling.pbs    # GPU weak+strong (1->2->4 A100)
-qsub scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs     # CPU weak+strong (ranks 1,2,4,...)
+qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs    # GPU weak+strong (1->2->4 A100)
+qsub scripts/cluster/scaling_derecho/cpu_scaling.pbs     # CPU weak+strong (ranks 1,2,4,...)
 ```
 
 Override knobs without editing files (`qsub -v NAME=value,...`):
@@ -174,9 +174,9 @@ Override knobs without editing files (`qsub -v NAME=value,...`):
 
 Examples:
 ```bash
-qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both scripts/cluster/scaling_derecho/amip_gpu_scaling.pbs
-qsub -v PHYSICS=moist,MAX_RANKS=128 scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs
-qsub -v GRID=icosahedral scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs
+qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both scripts/cluster/scaling_derecho/gpu_scaling.pbs
+qsub -v PHYSICS=moist,MAX_RANKS=128 scripts/cluster/scaling_derecho/cpu_scaling.pbs
+qsub -v GRID=icosahedral scripts/cluster/scaling_derecho/cpu_scaling.pbs
 ```
 
 ---
