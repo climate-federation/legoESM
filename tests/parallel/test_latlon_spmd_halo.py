@@ -258,3 +258,46 @@ def test_zero_polar_lat_ends_backend_dispatch_matches_serial():
     # would have zeroed every band's ends — e.g. row NL = band-1 start).
     assert float(np.max(np.abs(out[NL]))) > 1e-6, (
         "interior cut row was wrongly zeroed (local-branch leak)")
+
+
+# ---------------------------------------------------------------------------
+# apply_pole_end_masks — the shared SPMD pole-wall zeroing core (used by
+# zero_polar_lat_ends_band_spmd AND the atm PE v-tendency pole clamp).  Masks
+# are ARGUMENTS, so this is a device-free unit test: the (south, north) bool
+# pair fully determines which band-end rows are zeroed.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("south,north", [
+    (True, False),    # south-pole band: zero row 0 only
+    (False, True),    # north-pole band: zero row -1 only
+    (False, False),   # INTERIOR cut band: zero NOTHING (keeps cut gradient)
+    (True, True),     # single-band / serial: both ends
+])
+def test_apply_pole_end_masks(south, north):
+    from legoesm.parallel.latlon_spmd import apply_pole_end_masks
+    rng = np.random.default_rng(7)
+    field = jnp.asarray(rng.standard_normal((6, 4, 3)))
+    out = np.asarray(apply_pole_end_masks(field, (south, north), offset=0))
+    ref = np.array(field)
+    if south:
+        ref[0] = 0.0
+    if north:
+        ref[-1] = 0.0
+    np.testing.assert_array_equal(out, ref)
+    # Non-vacuity: an INTERIOR row (row 2) is NEVER touched on any mask combo.
+    np.testing.assert_array_equal(out[2], np.asarray(field)[2])
+
+
+def test_apply_pole_end_masks_offset():
+    """offset>0 (MPI-style halo pad) zeros the OFFSET-th and (n-1-offset)-th
+    rows, leaving the halo rows themselves untouched."""
+    from legoesm.parallel.latlon_spmd import apply_pole_end_masks
+    rng = np.random.default_rng(11)
+    field = jnp.asarray(rng.standard_normal((7, 4)))
+    out = np.asarray(apply_pole_end_masks(field, (True, True), offset=1))
+    ref = np.array(field)
+    ref[1] = 0.0        # south pole one halo row in
+    ref[-2] = 0.0       # north pole one halo row in
+    np.testing.assert_array_equal(out, ref)
+    # halo rows (0 and -1) are untouched
+    np.testing.assert_array_equal(out[0], np.asarray(field)[0])
+    np.testing.assert_array_equal(out[-1], np.asarray(field)[-1])

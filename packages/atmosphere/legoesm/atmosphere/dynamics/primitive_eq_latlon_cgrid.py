@@ -654,12 +654,28 @@ def cgrid_latlon_hydrostatic_tendencies(
     # boundary ranks zero the actual global poles; interior ranks pass
     # through unchanged (their band-edge v-faces are shared with the
     # neighbour rank and kept consistent by halo exchange).
-    dv_dt = _zero_v_at_pole(
-        dv_dt,
-        south=config.pole_v_bc[0],
-        north=config.pole_v_bc[1],
-        offset=config.pole_v_bc_offset,
-    )
+    #
+    # Under single-program lat-band SPMD the SAME compiled body runs on every
+    # band, so config.pole_v_bc is (True, True) on ALL bands — the static
+    # _zero_v_at_pole would then zero every INTERIOR band cut's v-row (the
+    # SPMD-blind bug: the cut v-tendency was wrong by ~1e-3 while interior
+    # rows were machine-exact).  Select the physical-pole zeroing per band via
+    # the traced axis_index masks; interior cuts pass through so their cut row
+    # keeps the cross-band meridional v-tendency (function-scope import:
+    # atmosphere -> core.parallel; returns None off the SPMD backend).
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
+    if _spmd_pm is not None:
+        from legoesm.parallel.latlon_spmd import apply_pole_end_masks
+        dv_dt = apply_pole_end_masks(
+            dv_dt, _spmd_pm, offset=config.pole_v_bc_offset)
+    else:
+        dv_dt = _zero_v_at_pole(
+            dv_dt,
+            south=config.pole_v_bc[0],
+            north=config.pole_v_bc[1],
+            offset=config.pole_v_bc_offset,
+        )
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
