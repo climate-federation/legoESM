@@ -1283,6 +1283,15 @@ def _bc_vertical_and_depthmean_velocity(
     # --- 4b. Depth-mean velocity (for diagnostics / KE gradient) ---
     # Fuse num/denom reductions per face — both share their h_u/h_v
     # weight on the level axis.
+    # NOTE (#517 item 1): deliberately LEFT INLINE, not routed through the
+    # shared ``depth_average_to_faces``.  This face depth-mean feeds the
+    # large compiled ``latlon_cgrid_ocean_baroclinic_tendencies`` and the
+    # ``u_prime``/``v_prime`` below; moving the identical arithmetic behind
+    # a function-call boundary shifts XLA's fusion of the surrounding ops
+    # and perturbs the tendency at ~1e-12 (caught by the strict
+    # ``test_baroclinic_decomposition_bit_identical`` golden gate) — the
+    # same reduction-topology sensitivity that keeps the MPAS depth-average
+    # sites verbatim.  Bit-identity here outranks the dedup.
     _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
     U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
     _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)

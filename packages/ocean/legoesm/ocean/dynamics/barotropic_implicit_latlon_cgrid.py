@@ -84,6 +84,9 @@ from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_end
 from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    depth_average_to_faces,
+)
 
 
 def _depth_average_to_faces(
@@ -115,8 +118,11 @@ def _depth_average_to_faces(
     # active-vs-inactive partial-cell faces (one side has h=0).
     h_u_inner = jnp.minimum(jnp.roll(h_k, 1, axis=1), h_k)
     h_u = jnp.concatenate([h_u_inner, h_u_inner[:, 0:1, :]], axis=1)
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
+    # Barotropic-mean face velocity (#517 item 1: shared
+    # depth_average_to_faces; floor = min_water_col → bit-identical).
+    # U_bar was open-coded as TWO separate sums → fused=False (byte-identity).
+    U_bar = depth_average_to_faces(u_3d, h_u, u_mask, min_water_col,
+                                   fused=False)
 
     # Cell-pad-first (PR357 Bug-2 pattern): pad the cell thickness so the
     # v-face min at a partition cut uses the neighbour rank's adjacent
@@ -129,9 +135,7 @@ def _depth_average_to_faces(
     if fold_is_local(grid):
         north_row = jnp.minimum(h_k[-1:], fold_vface_row(h_k, grid))
         h_v = jnp.concatenate([h_v[:-1], north_row], axis=0)
-    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
-    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
-    V_bar = _v_pair[..., 1] / H_v * v_mask
+    V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
 
     return U_bar, V_bar
 
