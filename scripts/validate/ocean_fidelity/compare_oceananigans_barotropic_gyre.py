@@ -63,15 +63,25 @@ def build_gyre():
     grid, wall_mask = create_regional_latlon_grid(
         NY, NX, LAT_S, LAT_N, lon_west=LON_W, lon_east=LON_E, periodic_x=False)
     z_coord = create_ocean_z_star(n_levels=1, H_max=H_DEPTH)
+    baro = os.environ.get("BARO_SOLVER", "implicit_cn")
+    mom = os.environ.get("MOM_ADV", "vector_invariant")
+    extra = {}
+    if baro == "explicit_substep":
+        # split-explicit free surface (closer to Oceananigans ImplicitFreeSurface
+        # spin-up than implicit_cn); alpha=0 = no SSH-diffusion backstop.
+        extra["barotropic_diffusion_alpha"] = float(
+            os.environ.get("BARO_ALPHA", "0.0"))
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
         g=G_REDUCED, rho_0=1000.0,
         A_h=A_H, K_h=0.0,
-        momentum_advection="vector_invariant",
-        barotropic_solver="implicit_cn",
+        momentum_advection=mom,
+        barotropic_solver=baro,
         bottom_drag_r=MU_DRAG,
         tracer_advection="centered",   # homogeneous: tracer inert
+        **extra,
     )
+    print(f"[cfg] baro={baro} mom={mom} extra={extra}", flush=True)
     state = rest_state_latlon_cgrid_ocean(grid, z_coord, land_mask_override=wall_mask)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     return grid, wall_mask, state, model
