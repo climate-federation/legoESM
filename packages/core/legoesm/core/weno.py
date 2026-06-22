@@ -497,6 +497,78 @@ def weno_reconstruct_split(
     return f_plus, f_minus
 
 
+def weno_reconstruct_split2(
+    phi_stencil: list | tuple,
+    psi1_stencil: list | tuple,
+    psi2_stencil: list | tuple,
+    order: int = 5,
+    epsilon: float | None = None,
+) -> tuple:
+    """Dual-smoothness WENO-Z reconstruction {phi; (psi1, psi2)} matching
+    Oceananigans' ``VelocityStencil`` (weno_interpolants.jl ``beta_sum``).
+
+    Computes the smoothness betas from *both* psi1 and psi2 (typically the
+    two velocity components interpolated to the reconstruction nodes),
+    AVERAGES the betas per sub-stencil ``β = (β₁ + β₂) / 2``, forms ONE
+    weight set, and does ONE reconstruction of *phi*.
+
+    This is the faithful form of Silvestri et al. (2024) Eq. 43.  It is
+    NOT the same as averaging two independent reconstructions
+    ``0.5·(recon(β₁) + recon(β₂))`` — because the WENO-Z weights are
+    nonlinear in β, ``ω((β₁+β₂)/2) ≠ (ω(β₁)+ω(β₂))/2``.  Averaging the
+    reconstructions dilutes the implicit dissipation when one component is
+    rough (2Δx) but the other smooth, letting the grid mode grow; averaging
+    the betas (this function) preserves the upwind dissipation.
+
+    Parameters
+    ----------
+    phi_stencil : sequence of arrays
+        Stencil values of the field to reconstruct (e.g. vorticity ζ).
+    psi1_stencil, psi2_stencil : sequence of arrays
+        Stencil values of the two smoothness fields.  Same length as phi.
+    order : {5, 7, 9}
+    epsilon : float, optional
+
+    Returns
+    -------
+    (f_plus, f_minus) : tuple of arrays
+        Left-biased and right-biased reconstructions of *phi* at i+1/2.
+    """
+    phi = list(phi_stencil)
+    psi1 = list(psi1_stencil)
+    psi2 = list(psi2_stencil)
+    if order not in _CONFIGS:
+        raise ValueError(f"Unsupported WENO order {order}; must be 5, 7, or 9")
+    recon_l, recon_r, beta_l_tab, beta_r_tab, copt, k = _CONFIGS[order]
+    expected_len = 2 * k
+    for name, seq in (("phi", phi), ("psi1", psi1), ("psi2", psi2)):
+        if len(seq) != expected_len:
+            raise ValueError(
+                f"WENO{order} requires {expected_len} {name} stencil values, "
+                f"got {len(seq)}")
+    if epsilon is None:
+        epsilon = _default_eps(phi[0])
+
+    # Betas from each smoothness field, then per-sub-stencil average
+    # (Oceananigans beta_sum: (β₁ + β₂)/2).
+    betas_l_1 = _compute_betas_left(psi1, k, beta_l_tab)
+    betas_l_2 = _compute_betas_left(psi2, k, beta_l_tab)
+    betas_r_1 = _compute_betas_right(psi1, k, beta_r_tab)
+    betas_r_2 = _compute_betas_right(psi2, k, beta_r_tab)
+    betas_l = [0.5 * (b1 + b2) for b1, b2 in zip(betas_l_1, betas_l_2)]
+    betas_r = [0.5 * (b1 + b2) for b1, b2 in zip(betas_r_1, betas_r_2)]
+
+    w_l = _weno_z_weights(betas_l, copt, _tau_z(betas_l), epsilon)
+    w_r = _weno_z_weights(betas_r, copt, _tau_z(betas_r), epsilon)
+
+    rec_l = _reconstruct_left(recon_l, phi)
+    rec_r = _reconstruct_right(recon_r, phi, k)
+
+    f_plus = sum(w * r for w, r in zip(w_l, rec_l))
+    f_minus = sum(w * r for w, r in zip(w_r, rec_r))
+    return f_plus, f_minus
+
+
 # ===================================================================
 #  Convenience: upwind flux from left/right reconstructions
 # ===================================================================

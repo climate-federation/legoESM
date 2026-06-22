@@ -679,6 +679,8 @@ def _weno_zeta_at_u(
     order: int = 5,
     u_smooth: jnp.ndarray | None = None,
     smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
@@ -713,9 +715,18 @@ def _weno_zeta_at_u(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
     # Convert point values to cell averages along the meridional
-    # reconstruction axis before WENO.
-    from legoesm.core.weno import point_to_cellavg_bounded
+    # reconstruction axis before WENO.  Faithful Oceananigans path
+    # (convert_to_cellavg=False): feed the vertex grid values DIRECTLY to the
+    # finite-volume WENO reconstruction (Oceananigans, a FV code, reconstructs
+    # nodal grid values directly with no point->cellavg pre-filter; that
+    # pre-filter is a mild grid-scale low-pass that suppresses the WENO's
+    # nonlinear ENO dissipation — see _weno_cell_to_uface).
     conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+    else:
+        def point_to_cellavg_bounded(a, axis=0, order=0):
+            return a
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
 
@@ -741,12 +752,10 @@ def _weno_zeta_at_u(
     psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
-    phi_plus_v, phi_minus_v = weno_reconstruct_split(
-        phi_stencil, psi_v_stencil, order=order)
-    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
-
     if u_smooth is None:
-        return result_v
+        phi_plus_v, phi_minus_v = weno_reconstruct_split(
+            phi_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
 
     # ⟨u⟩_j: u averaged in latitude to vertex positions.
     n_lon_u = u_smooth.shape[1]  # n_lon+1
@@ -761,6 +770,18 @@ def _weno_zeta_at_u(
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil: average the smoothness betas
+        # of ⟨v⟩ and ⟨u⟩ per sub-stencil, then ONE reconstruction (NOT an
+        # average of two independent reconstructions, which under-dissipates).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_v_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
+    phi_plus_v, phi_minus_v = weno_reconstruct_split(
+        phi_stencil, psi_v_stencil, order=order)
+    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
         phi_stencil, psi_u_stencil, order=order)
     result_u = weno_upwind(phi_plus_u, phi_minus_u, v_at_u)
@@ -775,6 +796,8 @@ def _weno_zeta_at_v(
     order: int = 5,
     v_smooth: jnp.ndarray | None = None,
     smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
@@ -810,8 +833,13 @@ def _weno_zeta_at_v(
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
     # Convert point values to cell averages along zonal axis (periodic).
-    from legoesm.core.weno import point_to_cellavg_periodic
+    # Faithful Oceananigans path (convert_to_cellavg=False): see _weno_zeta_at_u.
     conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+    else:
+        def point_to_cellavg_periodic(a, axis=1, order=0):
+            return a
 
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
@@ -832,12 +860,10 @@ def _weno_zeta_at_v(
     psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
-    phi_plus_u, phi_minus_u = weno_reconstruct_split(
-        phi_stencil, psi_u_stencil, order=order)
-    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
-
     if v_smooth is None:
-        return result_u
+        phi_plus_u, phi_minus_u = weno_reconstruct_split(
+            phi_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
 
     # ⟨v⟩_i: v averaged in longitude to vertex positions.
     v_w = jnp.roll(v_smooth, 1, axis=1)
@@ -850,6 +876,16 @@ def _weno_zeta_at_v(
     psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil (see _weno_zeta_at_u).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_u_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
+    phi_plus_u, phi_minus_u = weno_reconstruct_split(
+        phi_stencil, psi_u_stencil, order=order)
+    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
         phi_stencil, psi_v_stencil, order=order)
     result_v = weno_upwind(phi_plus_v, phi_minus_v, u_at_v)
@@ -988,6 +1024,7 @@ def _weno_cell_to_uface(
     psi: jnp.ndarray,
     u_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to u-faces (zonal, periodic).
 
@@ -1011,10 +1048,24 @@ def _weno_cell_to_uface(
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8, 9: 8}[order]
-    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
-    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+        psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    else:
+        # Faithful Oceananigans path: the grid values are fed DIRECTLY to the
+        # finite-volume WENO reconstruction.  Oceananigans is a finite-volume
+        # code and reconstructs the nodal grid values directly with the same
+        # Balsara-Shu cell-avg->face coefficients; it has NO point->cellavg
+        # pre-filter.  legoESM's point_to_cellavg is a mild grid-scale low-pass
+        # (measured Nyquist gain ~0.79) that pre-smooths the field the WENO
+        # smoothness indicators see -> weights stay nearer optimal -> the
+        # nonlinear ENO dissipation is SUPPRESSED at the grid scale.  Removing
+        # it restores the standard FV-WENO operator (verified more dissipative
+        # on the 2Δx mode), matching the oracle.
+        phi_avg = phi
+        psi_avg = psi
 
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
@@ -1042,6 +1093,7 @@ def _weno_cell_to_vface(
     psi: jnp.ndarray,
     v_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to v-faces (meridional, wall BC).
 
@@ -1068,10 +1120,15 @@ def _weno_cell_to_vface(
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8, 9: 8}[order]
-    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
-    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+        psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    else:
+        # Faithful Oceananigans path (see _weno_cell_to_uface).
+        phi_avg = phi
+        psi_avg = psi
 
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
@@ -1341,12 +1398,24 @@ def _bc_ke_and_pressure_gradients(
         delta_v_sq_cell = neumann_fill_cgrid(delta_v_sq_cell, mask, grid=grid)
         v_avg_cell = neumann_fill_cgrid(v_avg_cell, mask, grid=grid)
 
+        # Faithful Oceananigans FV-WENO: feed the cell-centred δu²/δv² grid
+        # values DIRECTLY to the finite-volume WENO reconstruction
+        # (convert_to_cellavg=False).  Oceananigans (a finite-volume code)
+        # reconstructs the grid values directly with the same Balsara-Shu FV
+        # coefficients and has NO point->cellavg pre-filter.  legoESM's
+        # point_to_cellavg is a mild grid-scale low-pass (Nyquist gain ~0.79)
+        # that pre-smooths the field, so the WENO smoothness indicators see a
+        # smoother field and keep near-optimal weights — suppressing the
+        # nonlinear ENO dissipation at the grid scale.  Removing it restores the
+        # standard, more-dissipative FV-WENO operator (verified on the 2Δx mode).
         # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
         delta_u_sq_at_uface = _weno_cell_to_uface(
-            delta_u_sq_cell, u_avg_cell, u, order=5)        # (n_lat, n_lon+1, nlev)
+            delta_u_sq_cell, u_avg_cell, u, order=5,
+            convert_to_cellavg=False)                       # (n_lat, n_lon+1, nlev)
         # WENO upwind of δ_j v² to v-faces.
         delta_v_sq_at_vface = _weno_cell_to_vface(
-            delta_v_sq_cell, v_avg_cell, v, order=5)        # (n_lat+1, n_lon, nlev)
+            delta_v_sq_cell, v_avg_cell, v, order=5,
+            convert_to_cellavg=False)                       # (n_lat+1, n_lon, nlev)
 
         # Convert "δ across one cell" → "gradient at face" by dividing
         # by dx_u (cell width at u-face latitude) and dy_v (distance
@@ -1763,12 +1832,20 @@ def _bc_pv_flux(
         vtx_mask = (vertex_mask if vertex_mask is not None
                     else compute_vertex_mask(mask, grid=grid))
         q_filled = _neumann_fill_vertex(q, vtx_mask)
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): reconstruct
+        # the vertex PV grid values directly (convert_to_cellavg=False), and use
+        # the VelocityStencil beta-average form (beta_average=True) — average the
+        # smoothness betas of ⟨u⟩ and ⟨v⟩ per sub-stencil and reconstruct ONCE,
+        # rather than averaging two independent reconstructions (which is
+        # nonlinearly under-dissipative).  Matches weno_interpolants.jl::beta_sum.
         q_at_u = _weno_zeta_at_u(
             q_filled, v, v_at_u, order=_weno_order, u_smooth=u,
-            smoothness=weno_smoothness)
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
         q_at_v = _weno_zeta_at_v(
             q_filled, u, u_at_v, order=_weno_order, v_smooth=v,
-            smoothness=weno_smoothness)
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
@@ -1831,10 +1908,15 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         # Matching direction (WENO upwind), cross direction (centered).
         # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
         # W9V has D=WENO9, paired with the order-9 vorticity flux).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order)
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): the
+        # divergence-flux grid values are reconstructed directly
+        # (convert_to_cellavg=False), no point->cellavg deconvolution.
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order,
+                                      convert_to_cellavg=False)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order))
+                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order,
+                                        convert_to_cellavg=False))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u

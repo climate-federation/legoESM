@@ -990,3 +990,80 @@ class TestFullTendencyWENODK:
         assert du_diff > 1e-15 or dv_diff > 1e-15, (
             f"WENO and centered tendencies are identical: "
             f"du_diff={du_diff}, dv_diff={dv_diff}")
+
+
+class TestFaithfulFVWenoReconstruction:
+    """Faithful Oceananigans FV-WENO momentum reconstruction: feed grid values
+    directly (convert_to_cellavg=False) and use the VelocityStencil beta-average
+    (beta_average=True).  These pin the NEW production branches in
+    _weno_cell_to_uface / _weno_zeta_at_u (used by momentum_advection=weno5/7/9).
+    """
+
+    def test_cell_to_uface_no_deconv_is_gridscale_only_change(self):
+        """convert_to_cellavg=False (faithful FV-WENO, no point->cellavg
+        pre-filter) differs from the legacy pre-smoothed path ONLY at the grid
+        scale: the two reconstructions diverge on a pure 2Δx-lon mode but agree
+        to high order on a smooth field (the pre-filter is ~unity away from
+        Nyquist).  Faithfulness to Oceananigans (which has no pre-filter) is the
+        rationale; the net grid-scale dissipation effect is a property of the
+        full composite operator, verified at the §5 integration level."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_cell_to_uface,
+        )
+        n_lat, n_lon, nlev = 8, 32, 3
+        i = jnp.arange(n_lon, dtype=jnp.float64)
+        psi = jnp.ones((n_lat, n_lon, nlev))
+        u = jnp.ones((n_lat, n_lon + 1, nlev))  # +x upwind
+        # (a) pure 2Δx-lon (Nyquist) mode → the two paths MUST differ.
+        phi_2dx = jnp.broadcast_to(
+            ((-1.0) ** i)[jnp.newaxis, :, jnp.newaxis],
+            (n_lat, n_lon, nlev)).astype(jnp.float64)
+        f_legacy = _weno_cell_to_uface(phi_2dx, psi, u, order=5,
+                                       convert_to_cellavg=True)
+        f_fv = _weno_cell_to_uface(phi_2dx, psi, u, order=5,
+                                   convert_to_cellavg=False)
+        assert bool(jnp.all(jnp.isfinite(f_fv)))
+        grid_diff = float(jnp.max(jnp.abs(f_fv - f_legacy)))
+        assert grid_diff > 1e-3, (
+            "faithful FV path is a no-op vs legacy on the grid mode")
+        # (b) smooth low-k mode → the two paths agree closely (grid-scale-only
+        # change; both high-order accurate where the pre-filter is ~unity).
+        phi_smooth = jnp.broadcast_to(
+            jnp.cos(2 * jnp.pi * 1 * i / n_lon)[jnp.newaxis, :, jnp.newaxis],
+            (n_lat, n_lon, nlev)).astype(jnp.float64)
+        g_legacy = _weno_cell_to_uface(phi_smooth, psi, u, order=5,
+                                       convert_to_cellavg=True)
+        g_fv = _weno_cell_to_uface(phi_smooth, psi, u, order=5,
+                                   convert_to_cellavg=False)
+        smooth_diff = float(jnp.max(jnp.abs(g_fv - g_legacy)))
+        assert smooth_diff < 0.1 * grid_diff, (
+            f"change is not grid-scale-localised: smooth_diff={smooth_diff} "
+            f"vs grid_diff={grid_diff}")
+
+    def test_zeta_beta_average_differs_and_finite(self):
+        """beta_average=True (Oceananigans VelocityStencil: average the betas of
+        ⟨u⟩ and ⟨v⟩, ONE reconstruction) must differ from the legacy
+        average-of-two-reconstructions and stay finite, on a noisy field."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_zeta_at_u,
+        )
+        n_lat, n_lon, nlev = 12, 16, 4
+        k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(7), 4)
+        zeta = jax.random.uniform(k1, (n_lat + 1, n_lon + 1, nlev),
+                                  minval=-1e-4, maxval=1e-4)
+        v_prime = jax.random.uniform(k2, (n_lat + 1, n_lon, nlev),
+                                     minval=-0.2, maxval=0.2)
+        v_at_u = jax.random.uniform(k3, (n_lat, n_lon + 1, nlev),
+                                    minval=-0.2, maxval=0.2)
+        u_smooth = jax.random.uniform(k4, (n_lat, n_lon + 1, nlev),
+                                      minval=-0.2, maxval=0.2)
+        common = dict(order=9, u_smooth=u_smooth, smoothness="split",
+                      convert_to_cellavg=False)
+        r_avg = _weno_zeta_at_u(zeta, v_prime, v_at_u,
+                                beta_average=True, **common)
+        r_legacy = _weno_zeta_at_u(zeta, v_prime, v_at_u,
+                                   beta_average=False, **common)
+        assert bool(jnp.all(jnp.isfinite(r_avg)))
+        assert r_avg.shape == r_legacy.shape
+        assert float(jnp.max(jnp.abs(r_avg - r_legacy))) > 1e-12, (
+            "beta_average=True is a no-op vs the reconstruction-average")
