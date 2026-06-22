@@ -741,5 +741,43 @@ class TestSolarGeometry(unittest.TestCase):
             self.assertLessEqual(float(lon_out[i]), 180.0)
 
 
+    def test_stflx_folded_into_reported_shflx(self):
+        """stflx_air + stflx_veg are folded into shflx in step_multilayer_land.
+
+        TileResponse.shflx must equal surface_out.shflx + stflx_air + stflx_veg
+        so the coupler energy budget Rnet = SH_reported + LH + G_soil closes.
+        """
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _ensure_clm_initialized
+        from legoesm.land.multilayer_land import (
+            step_multilayer_land_with_diagnostics,
+            init_multilayer_land_state,
+        )
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+        _ensure_clm_initialized()
+        ncol = NCOL
+        config = MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())
+        state = init_multilayer_land_state(ncol, config)
+        forcing = _make_forcing(ncol)
+
+        _, response, _, surface_out = step_multilayer_land_with_diagnostics(
+            state, forcing, config, U_min=0.1, dt=1800.0,
+            lat=jnp.full(ncol, 38.47), doy=120.5,
+        )
+
+        if surface_out.stflx_air is not None and surface_out.stflx_veg is not None:
+            expected_shflx = (surface_out.shflx
+                              + surface_out.stflx_air
+                              + surface_out.stflx_veg)
+            np.testing.assert_allclose(
+                np.array(response.shflx),
+                np.array(expected_shflx),
+                rtol=1e-6,
+                err_msg="TileResponse.shflx should equal shflx + stflx_air + stflx_veg",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

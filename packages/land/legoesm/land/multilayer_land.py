@@ -290,6 +290,15 @@ def _step_multilayer_land_impl(
     # Shared post-flux pipeline
     # =================================================================
     shflx = surface_out.shflx
+    # CLM-ML tracks transient canopy heat storage (stflx_air + stflx_veg)
+    # separately from the aerodynamic SH to the atmosphere.  Fold these
+    # into the reported shflx so the coupler's energy budget closes:
+    #   Rnet = SH_reported + LH + G_soil  (per timestep)
+    # Magnitude is small (~1–10 W/m²) relative to typical SH (50–200 W/m²).
+    if (isinstance(config.surface_scheme, CLMMLCanopyConfig)
+            and surface_out.stflx_air is not None
+            and surface_out.stflx_veg is not None):
+        shflx = shflx + surface_out.stflx_air + surface_out.stflx_veg
     lhflx = surface_out.lhflx
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y

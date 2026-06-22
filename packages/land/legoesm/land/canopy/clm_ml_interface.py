@@ -961,8 +961,16 @@ def compute_clm_ml_canopy_fluxes(
         Must supply ``LAI``, ``SAI``, ``htop`` for the canopy scheme.
     w_frac_rz:
         Root-zone soil-moisture stress fraction [0–1], shape ``(ncol,)``.
+        **Not forwarded to CLM-ML-JAX.** CLM-ML computes its own hydraulic
+        water-stress (btran) internally from the ``smp_l_col`` derived from
+        ``psi_soil``.  Both scalars represent the same physical state, so no
+        inconsistency arises; the legoESM diagnostic value is simply unused.
     wind_speed:
         Scalar wind speed [m/s], shape ``(ncol,)``.
+        **Not forwarded to CLM-ML-JAX.** CLM-ML derives wind speed internally
+        from ``forc_u_grc = forcing.u_lowest`` and ``forc_v_grc = forcing.v_lowest``.
+        Pass this argument only if the caller wants to document the intended
+        wind forcing; the value is ignored.
     canopy_state:
         Previous-step canopy state.  ``None`` or ``mlcanopy is None``
         triggers cold-start allocation.
