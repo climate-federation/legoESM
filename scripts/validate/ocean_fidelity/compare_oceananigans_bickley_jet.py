@@ -84,10 +84,24 @@ def build_bickley():
         eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
         g=G, rho_0=1000.0, A_h=0.0, K_h=0.0,
         momentum_advection=os.environ.get("MOM_ADV", "weno9"),
-        barotropic_solver=os.environ.get("BARO_SOLVER", "explicit_substep"),
+        # FAITHFUL eddy-regime config (matches Oceananigans' scheme TYPES):
+        #  - coriolis_scheme="matsuno_split" = the MATCHED vertex-f Coriolis
+        #    (closest to Oceananigans HydrostaticSphericalCoriolis EnstrophyConserving,
+        #    f & zeta co-located at the FF vertex). The default explicit_ab2 4-point
+        #    FACE-f average supports a rotational 2dx null mode that drives a
+        #    SPURIOUS late-time enstrophy GROWTH; the matched form suppresses it
+        #    (under-dissipation t12 4511->2992, bounce pushed t24->t30).
+        #  - barotropic_solver="implicit_cn" = the ImplicitFreeSurface analog
+        #    (backward-Euler theta=1.0 below); explicit_substep under-dissipates
+        #    the roll-up. These are FAITHFUL scheme-type choices, NOT tuning.
+        coriolis_scheme=os.environ.get("CORIOLIS_SCHEME", "matsuno_split"),
+        barotropic_solver=os.environ.get("BARO_SOLVER", "implicit_cn"),
         bottom_drag_r=0.0, tracer_advection="weno7",
         weno_smoothness="split",
     )
+    # ImplicitFreeSurface is fully implicit (backward Euler) -> theta=1.0.
+    cfg = cfg._replace(barotropic_implicit_theta_eta=1.0,
+                       barotropic_implicit_theta_pgf=1.0)
     state = rest_state_latlon_cgrid_ocean(grid, z_coord, land_mask_override=wall_mask)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     return grid, wall_mask, z_coord, state, model
