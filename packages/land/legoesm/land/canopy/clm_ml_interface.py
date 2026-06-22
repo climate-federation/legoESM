@@ -1026,7 +1026,21 @@ def compute_clm_ml_canopy_fluxes(
 
     if lon is not None:
         lon_deg = np.array(lon, dtype=np.float64)
-        cos_zen = _compute_cos_zenith(lat_deg, lon_deg, doy)
+        # Use CLM's own Kepler shr_orb_cosz at caldaym1 — same declination and
+        # phase as CLM's internal solar_zen_forcing, so SW partitioning is
+        # consistent with beam extinction kb=0.5/coszen in MLCanopyFluxes.
+        from clm_share.shr_orb_mod import shr_orb_cosz as _clm_cosz, shr_orb_decl as _clm_decl
+        import clm_src_utils.clm_varorb as _varorb_loc
+        _declinm1, _ = _clm_decl(_caldaym1, _varorb_loc.eccen, _varorb_loc.mvelpp,
+                                  _varorb_loc.lambm0, _varorb_loc.obliqr)
+        _pi = np.pi
+        cos_zen = np.maximum(np.array([
+            float(_clm_cosz(_caldaym1,
+                            float(lat_deg[i]) * _pi / 180.0,
+                            float(lon_deg[i]) * _pi / 180.0,
+                            float(_declinm1)))
+            for i in range(ncol)
+        ], dtype=np.float64), 0.0)
     else:
         # Use coupler-provided cos_zenith directly — avoids 100× error in beam
         # extinction (kb=0.5/coszen) that occurs when lon defaults to 0° (Greenwich).
