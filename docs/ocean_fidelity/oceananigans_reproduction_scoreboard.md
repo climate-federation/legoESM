@@ -70,12 +70,23 @@ The bickley eddy-regime and §5 share one root cause. Exhaustive isolation:
   which θ provably cannot damp (θ damps the divergent gravity-wave mode, not the
   rotational mode). This is the same mode that blows up §5 at α=0.
 
-**Next (research-level):** (a) test §5 with `coriolis_scheme="matsuno_split"`
-(it currently uses `explicit_ab2`; the matched form should delay/reduce the
-blow-up — directly bears on CASE 3); (b) a barotropic scheme that fully damps the
-rotational 2Δx mode while staying strongly dissipative and conservative, matching
-`ImplicitFreeSurface`. Tracked by the standing §5 barotropic-Coriolis redesign on
-`fix/silvestri-turbulent-dissipation`.
+**Important distinction (bickley vs §5 handle the barotropic 2Δx mode
+differently):** §5's `explicit_ab2` is ALREADY the barotropic-2Δx cure — it gates
+the in-substep f·V_at_u OFF and routes planetary f×u via F_slow +
+`barotropic_slow_forcing_ab2=True` (matching Oceananigans, which has no in-substep
+barotropic Coriolis). So `matsuno_split` would RE-INTRODUCE the in-substep
+barotropic Coriolis and make §5 WORSE — do NOT apply it there. The §5 residual
+(blow-up ~day 90) is a SEPARATE eddy-scale instability, not the barotropic 2Δx
+mode. The bickley driver hit the 2Δx mode only because its canonical config used
+the un-gated `explicit_ab2`; `matsuno_split` (matched vertex-f Coriolis) is one
+faithful cure, the §5-style gating + F_slow is another (it needs the setup's
+F_slow state fields, so it is not a drop-in config override on the bickley
+rest-state).
+
+**Next (research-level):** a barotropic scheme that fully damps the rotational
+2Δx mode while staying strongly dissipative and conservative, matching
+`ImplicitFreeSurface`, AND the separate §5 eddy-scale instability. Tracked by the
+standing §5 effort on `fix/silvestri-turbulent-dissipation`.
 
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
