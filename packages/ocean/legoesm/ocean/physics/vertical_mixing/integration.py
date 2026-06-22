@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax.numpy as jnp
-
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    thermal_expansion_coeff,
-    haline_contraction_coeff,
 )
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
@@ -19,6 +15,7 @@ from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
 
@@ -143,50 +140,17 @@ def _make_kpp(config: VerticalMixingConfig,
         fw    = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
         salt  = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
-        # Surface kinematic heat flux: Q_T = q_net / (rho_0 * c_sw)  [K m/s]
-        # KPP convention: positive Q_T heats the ocean.
-        Q_sfc_T = None
-        B_f = None
-        if q_net is not None:
-            Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
-            # Surface thermal expansion at the top layer.
-            T_sfc = state.T.data[..., 0]
-            S_sfc = state.S.data[..., 0]
-            p_sfc = jnp.zeros_like(T_sfc)
-            alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-            # Buoyancy flux from heat: B_heat = g * alpha * Q_T  (positive
-            # Q_T = warming = lighter water at top = stabilizing).  KPP
-            # convention is B_f > 0 = unstable (cooling-driven), so we
-            # keep the *negative* of the heat-driven contribution.
-            B_f = -constants_config.g * alpha * Q_sfc_T
-
-        # Surface kinematic salt flux from freshwater: Q_S = -S_sfc * F_fw
-        # / rho_0  [PSU m/s].  Net P-E entering ocean (F_fw > 0) freshens
-        # the surface, hence the negative sign.
-        Q_sfc_S = None
-        if fw is not None or salt is not None:
-            S_sfc = state.S.data[..., 0]
-            T_sfc = state.T.data[..., 0]
-            p_sfc = jnp.zeros_like(T_sfc)
-            beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            # Kinematic surface salt flux [PSU·m/s] = freshwater virtual-salt
-            # (-S*fw/rho) PLUS the REAL salt-mass flux (+salt*1e3/rho).
-            Q_sfc_S = jnp.zeros_like(S_sfc)
-            if fw is not None:
-                Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
-            if salt is not None:
-                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
-            # Salt-driven surface buoyancy flux (KPP convention,
-            # B_f > 0 = unstable):
-            #   B_f = -g*(alpha*Q_T - beta*Q_S) = -g*alpha*Q_T + g*beta*Q_S
-            # so the salt contribution is +g*beta*Q_S, NOT -g*beta*Q_S.
-            # Sanity check: freshening (fw>0) gives Q_sfc_S<0 (salt flux
-            # INTO ocean is negative) → B_salt = +g*beta*(neg) < 0
-            # (stabilizing, lighter water on top).  Brine rejection / a
-            # positive real salt flux gives Q_sfc_S>0 → B_salt > 0
-            # (destabilizing).
-            B_salt = constants_config.g * beta * Q_sfc_S
-            B_f = B_salt if B_f is None else (B_f + B_salt)
+        # Surface buoyancy + kinematic T/S fluxes (shared grid-agnostic kernel,
+        # #518 item 1).  Lat-lon convention: the real salt-mass flux feeds BOTH
+        # the surface buoyancy and the non-local Q_sfc_S (real_salt_in_qs=True).
+        B_f, Q_sfc_T, Q_sfc_S = surface_buoyancy_flux(
+            q_net, fw, salt,
+            state.T.data[..., 0], state.S.data[..., 0],
+            g=constants_config.g,
+            rho_0=constants_config.rho_0,
+            c_sw=constants_config.c_sw,
+            real_salt_in_qs=True,
+        )
 
         # KPP expects u, v at cell centers (same shape as T).
         # On C-grids, u is (n_lat, n_lon+1, nlev) and v is

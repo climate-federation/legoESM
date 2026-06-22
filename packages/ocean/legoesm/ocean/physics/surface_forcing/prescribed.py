@@ -5,7 +5,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
-from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
+from legoesm.ocean.physics.surface_forcing._shared import (
+    WindStressConvention,
+    surface_tendency_factors,
+    wind_stress_sign,
+)
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.surface_forcing.wind_profiles import compute_wind_stress
@@ -57,8 +61,11 @@ def prescribed_surface_forcing(
     tau_x, tau_y = compute_wind_stress(grid.grid_lat, cfg)
 
     # T-point tendencies (cell-center stagger).  Zero on land via inv_rho_dz.
-    du_dt_T = tau_x * inv_rho_dz   # T-point shape
-    dv_dt_T = tau_y * inv_rho_dz   # T-point shape
+    # OCEAN_DIRECT convention (+tau on-ocean), named for self-documentation
+    # (#518 item 11); sign is a static +1.0 — behaviour unchanged.
+    _tau_sign = wind_stress_sign(WindStressConvention.OCEAN_DIRECT)
+    du_dt_T = _tau_sign * tau_x * inv_rho_dz   # T-point shape
+    dv_dt_T = _tau_sign * tau_y * inv_rho_dz   # T-point shape
 
     # Detect C-grid staggering: lat-lon C-grid has u at (n_lat, n_lon+1)
     # and v at (n_lat+1, n_lon), while T is at (n_lat, n_lon).  On A-grid

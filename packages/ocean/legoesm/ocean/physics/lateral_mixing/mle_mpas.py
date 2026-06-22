@@ -44,19 +44,23 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
     face_mld,
     mle_coefficient,
     mle_mld_and_buoyancy,
+    mle_streamfunction_magnitude,
     mle_vertical_structure,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.vertical import compute_layer_thickness, compute_ocean_jacobian
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    EPS_DIV as _EPS_DIV,
+)
 
 if TYPE_CHECKING:
     from legoesm.grids.voronoi import VoronoiMesh
     from legoesm.ocean.vertical import OceanZStarCoordinate
 
-# Safety floor for divisions (matches the C-grid MLE module).
-_EPS_DIV = 1e-10
+# Safety floor for divisions: shared _gm_redi_common.EPS_DIV = 1e-10
+# (#518 item 11; matches the C-grid MLE module).
 
 
 __physics_contract__ = {
@@ -243,7 +247,9 @@ def mle_tracer_tendency_mpas(
     rc_f = mle_coefficient(cfg.ce, cfg.lat_ref_deg)            # constant [s/m]
     # psim_e = rc_f * H_e^2 * dvEdge * dbm/dn * min(111km, dcEdge)  [m^3/s]
     # (dvEdge is the cross-face width, the Voronoi analogue of e2u.)
-    psim_e = rc_f * H_e * H_e * mesh.dvEdge * dbm_de * cap_e    # (nEdges,)
+    # Shared kernel (#518 item 9).
+    psim_e = mle_streamfunction_magnitude(
+        rc_f, H_e, mesh.dvEdge, dbm_de, cap_e)                  # (nEdges,)
 
     # --- Convection gate (NEMO nn_conv=1): no MLE where the ML-integrated N^2
     # of either neighbour column is negative (statically unstable). ---

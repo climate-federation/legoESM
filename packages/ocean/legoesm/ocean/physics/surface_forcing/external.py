@@ -52,7 +52,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
-from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
+from legoesm.ocean.physics.surface_forcing._shared import (
+    WindStressConvention,
+    surface_tendency_factors,
+    wind_stress_sign,
+)
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
 
@@ -96,12 +100,15 @@ def external_surface_forcing(
     salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
     # --- Momentum: ocean reaction = -tau (atmosphere convention) ---
+    # ATMOSPHERE_REACTION convention, named for self-documentation (#518 item
+    # 11); sign is a static -1.0 — behaviour unchanged (-1.0*x == -x).
+    _tau_sign = wind_stress_sign(WindStressConvention.ATMOSPHERE_REACTION)
     if tau_x is not None:
-        du_dt_T = -jnp.asarray(tau_x, dtype) * inv_rho_dz
+        du_dt_T = _tau_sign * jnp.asarray(tau_x, dtype) * inv_rho_dz
     else:
         du_dt_T = zT
     if tau_y is not None:
-        dv_dt_T = -jnp.asarray(tau_y, dtype) * inv_rho_dz
+        dv_dt_T = _tau_sign * jnp.asarray(tau_y, dtype) * inv_rho_dz
     else:
         dv_dt_T = zT
 

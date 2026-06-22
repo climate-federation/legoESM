@@ -42,6 +42,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 )
 from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    EPS_DIV as _EPS_DIV,
     compute_visbeck_kappa_gm,
     dm95_taper_scalar,
     validate_adjoint_stabilization,
@@ -56,8 +57,6 @@ if TYPE_CHECKING:
 
 
 _PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
-
-_EPS_DIV = 1e-30
 
 
 def _not_implemented(name: str) -> None:
