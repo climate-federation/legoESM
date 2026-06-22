@@ -822,7 +822,7 @@ def _extract_surface_fluxes(
 
     # Friction velocity → momentum flux components
     ustar = jnp.stack([mlcanopy.ustar_canopy[i + 1] for i in range(ncol)])
-    rho_a = forcing.p_surface / (constants.R_d * forcing.T_lowest)  # kg/m³
+    rho_a = forcing.rho_lowest  # moist air density, includes virtual-T correction
     tau_total = rho_a * ustar ** 2  # [N/m²]
     # Split tau between x and y proportional to wind components
     u = forcing.u_lowest

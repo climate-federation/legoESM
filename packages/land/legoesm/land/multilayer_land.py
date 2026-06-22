@@ -434,33 +434,39 @@ def _step_multilayer_land_impl(
     )
 
     # --- Post-step q_surface ---
-    # Reuse the same Audit #6 / Iter-65 1e-3 floor as the pre-step branch
-    # above so degenerate PFT cells cannot blow up beta_root_new propagating
-    # into the q_surface reported back to the atmosphere.
-    theta_new = richards_out.theta_new
-    _denom_new = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
-    )
-    beta_root_new = jnp.clip(
-        (theta_new - theta_wp_c[:, None]) / _denom_new,
-        0.0, 1.0,
-    )
-    w_frac_rz_new = jnp.clip(
-        jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0)
-    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
-    # SimpleSEB: stomatal_ratio carries the stomatal limitation through
-    # the updated moisture state.  Canopy: stomatal_ratio = 1 (LE is
-    # computed from leaf-level gradients, not via beta * q_sat).
-    stom_ratio = surface_out.stomatal_ratio
-    if stom_ratio is None:
-        stom_ratio = jnp.ones_like(beta_soil_new)
-    beta_new = stom_ratio * beta_soil_new
     q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-    q_sfc_new = beta_effective_new * q_sat_sfc_new
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
+        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
+        # Use it directly so the coupler sees the same humidity as CLM-ML used
+        # for soil evaporation.  Override with q_sat_ice over snow (physically
+        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+        q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+    else:
+        # SimpleSEB / TwoLeafCanopy: recompute beta·qsat with updated moisture.
+        # Reuse the same Audit #6 / Iter-65 1e-3 floor so degenerate PFT cells
+        # cannot blow up beta_root_new propagating into the reported q_surface.
+        theta_new = richards_out.theta_new
+        _denom_new = jnp.maximum(
+            theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
+        )
+        beta_root_new = jnp.clip(
+            (theta_new - theta_wp_c[:, None]) / _denom_new,
+            0.0, 1.0,
+        )
+        w_frac_rz_new = jnp.clip(
+            jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0)
+        beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
+        # stomatal_ratio carries the stomatal limitation through updated moisture.
+        stom_ratio = surface_out.stomatal_ratio
+        if stom_ratio is None:
+            stom_ratio = jnp.ones_like(beta_soil_new)
+        beta_new = stom_ratio * beta_soil_new
+        beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
+        q_sfc_new = beta_effective_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
