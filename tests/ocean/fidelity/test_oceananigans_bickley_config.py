@@ -62,6 +62,19 @@ def test_faithful_eddy_config_is_default(bickley_module):
     assert cfg.momentum_advection == "weno9"
 
 
+def test_bickley_depth_matches_oracle(bickley_module):
+    """Depth MUST be H=1 (matching the Oceananigans z=(0,1) reference), NOT the
+    rest-state default 5500 m. A 5500x depth gives a 74x-too-fast gravity wave that
+    over-damps the free surface -- the depth-mismatch bug the geostrophic-adjustment
+    test exposed (it inflated the bickley enstrophy residual to 1.25 at t12 vs the
+    correct ~1.02)."""
+    import numpy as np
+    _grid, _wall, _z, state, _model = bickley_module.build_bickley()
+    h = float(np.abs(np.asarray(state.H_bathy.data)).max())
+    assert h < 2.0, f"bickley H_bathy max={h} (expected ~1, NOT the 5500 m default)"
+
+
+
 def test_env_overrides_still_work(bickley_module, monkeypatch):
     """The CORIOLIS_SCHEME / BARO_SOLVER escape hatches remain (for A/B testing
     the un-faithful config), so the faithful default is a choice, not a lock-in."""

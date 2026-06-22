@@ -15,7 +15,7 @@ All numbers below come from real legoESM runs vs the real Oceananigans reference
 | # | case | bar | measured (real run vs real oracle) | status |
 |---|------|-----|-------------------------------------|--------|
 | 1 | barotropic_gyre | surface-u pattern_corr ≥ 0.90 at matched time AND max\|u\| within 2× over a ≥20-day stable window | **day-10 corr 0.929**, max\|u\| 0.337 vs 0.606 (0.56×), stable d1–20 (`explicit_substep`) | **PASS** |
-| 2 | bickley_jet | **(RE-SPECCED, statistical)** ens_ratio(t6) ≤1.05× AND ens_ratio ≤1.3× through t24 | linear phase ens_ratio **1.005**; developed-eddy **1.25/1.09/1.28** at t12/t18/t24 (all ≤1.3×, faithful matched-Coriolis config) | **PASS** (statistical) |
+| 2 | bickley_jet | **(RE-SPECCED, statistical)** ens_ratio(t6) ≤1.05× AND ens_ratio ≤1.3× through t24 | linear **0.998**; developed-eddy **1.02/1.04/1.38** at t12/t18/t24 — within ~4% through t18 after the **depth-mismatch fix** (H=1 not 5500; the prior 1.25/1.09 was the depth bug, NOT a 2dx-metric residual) | **PASS** (statistical, much tighter) |
 | 3 | silvestri §5 jet | stays finite while oracle stable AND domain-max\|u\| within 2× | blows up at α=0 (barotropic-Coriolis 2Δx null mode) | **NOT MET** — research-level |
 
 Promise `OCEANANIGANS_EXPERIMENTS_FAITHFULLY_REPRODUCED` requires all three rows
