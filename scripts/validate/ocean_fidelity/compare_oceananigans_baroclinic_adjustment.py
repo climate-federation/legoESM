@@ -135,7 +135,7 @@ def main():
         state = step(state)
         t += dt / 86400.0
         if any(abs(t - od) < dt / 86400.0 / 2 for od in o_days):
-            su = np.asarray(state.u.data)[:, :, -1]    # surface level
+            su = np.asarray(state.u.data)[:, :, 0]     # surface level (legoESM k=0 = surface)
             fin = bool(jnp.all(jnp.isfinite(state.u.data)))
             oi = int(np.argmin([abs(t - od) for od in o_days]))
             print(f"  {t:4.0f} | {np.abs(su).max():.4e}            | "

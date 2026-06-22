@@ -45,9 +45,9 @@ def test_setup_builds_3d_stratified(ba):
     state = ba.set_ic(grid, z, state)
     T = np.asarray(state.T.data)
     assert T.shape[2] == ba.NZ
-    # Stratified: at a WET interior column, warmer at the surface (k=-1) than the
+    # Stratified: at a WET interior column, warmer at the surface (k=0) than the
     # bottom (k=0) since b = N^2 z increases toward z=0 and T = T_ref + b/(g a).
     ci, cj = T.shape[0] // 2, T.shape[1] // 2
-    assert float(T[ci, cj, -1]) > float(T[ci, cj, 0])
+    assert float(T[ci, cj, 0]) > float(T[ci, cj, -1])  # k=0 surface warmer
     # Thermal-wind jet was set (nonzero u).
     assert float(np.abs(np.asarray(state.u.data)).max()) > 0.1
