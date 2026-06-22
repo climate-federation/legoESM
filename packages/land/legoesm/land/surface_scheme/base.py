@@ -106,3 +106,13 @@ class SurfaceFluxOutput(NamedTuple):
     # gradients directly and q_surface is derived from the converged
     # skin T, not from a beta * q_sat product.
     stomatal_ratio: jax.Array | None = None
+
+    # ---- Canopy heat storage (CLM-ML only) ----
+    # stflx_air: canopy air-space sensible heat storage [W/m^2], positive when
+    #   the air is warming (net heat stored in the canopy air column).
+    # stflx_veg: vegetation biomass sensible heat storage [W/m^2].
+    # Both are required for full energy balance closure:
+    #   Rnet = SH + LH + G_soil + stflx_air + stflx_veg
+    # None for SimpleSEB (negligible for thin canopies without explicit storage).
+    stflx_air: jax.Array | None = None
+    stflx_veg: jax.Array | None = None

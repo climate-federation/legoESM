@@ -22,3 +22,10 @@ class CanopyState(NamedTuple):
 
     #: mlcanopy_type instance from clm_ml_jax (Any to keep import lazy).
     mlcanopy: Any
+
+    #: 10-day running mean of near-surface air temperature [K], shape (ncol,).
+    #: Carried explicitly here (not read from mlcanopy.tacclim_forcing) to
+    #: avoid double-filtering: MLCanopyFluxes copies the input t_a10_patch
+    #: directly into tacclim_forcing on output — reading it back would apply
+    #: the exponential filter twice per step (effective e-folding ~20d not 10d).
+    t_a10_arr: Any = None  # None → cold start (use T_lowest on first step)

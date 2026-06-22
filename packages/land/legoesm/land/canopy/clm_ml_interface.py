@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _CLM_INITIALIZED: bool = False
-_CLM_STEP_COUNTER: int = 0  # incremented each call; feeds clm_time_manager.itim
 
 
 # ---------------------------------------------------------------------------
@@ -764,13 +763,37 @@ def _extract_surface_fluxes(
     # Surface temperature: use soil surface T (updated by CLM-ML)
     T_surface = jnp.stack([mlcanopy.tg_soil[i + 1] for i in range(ncol)])
 
-    # q_surface: saturation at soil surface T
-    q_surface = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    # q_surface: surface specific humidity [kg/kg].
+    # CLM-ML computes rhg_soil = exp(psis*Mw/(R*Tg)) (Philip formula) for the
+    # soil surface relative humidity.  Using qsat(Tg) ignores this and
+    # overestimates soil evaporation by ~30% at smp=-50000 mm (rhg≈0.70).
+    # Use rhg_soil from mlcanopy if available; fall back to qsat only if absent.
+    q_sat_surface = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    if hasattr(mlcanopy, "rhg_soil"):
+        rhg = jnp.stack([mlcanopy.rhg_soil[i + 1] for i in range(ncol)])
+        # Clamp rhg to [0, 1] — spval=1e36 indicates uninitialised
+        rhg = jnp.clip(rhg, 0.0, 1.0)
+        q_surface = rhg * q_sat_surface
+    else:
+        q_surface = q_sat_surface
 
     # Emissivity and roughness from canopy
     emissivity = jnp.full(ncol, float(land_config.emissivity_land)
                           if hasattr(land_config, "emissivity_land") else 0.96)
     z0 = jnp.stack([mlcanopy.z0m_canopy[i + 1] for i in range(ncol)])
+
+    # Canopy heat storage: needed for energy balance closure in the coupler.
+    # Rnet = SH + LH + G_soil + stflx_air + stflx_veg
+    # Extract from mlcanopy if the fields exist (they are always computed by
+    # MLCanopyFluxes but named differently in old CLM-ML-JAX versions).
+    if hasattr(mlcanopy, "stflx_air_canopy"):
+        stflx_air = jnp.stack([mlcanopy.stflx_air_canopy[i + 1] for i in range(ncol)])
+    else:
+        stflx_air = None
+    if hasattr(mlcanopy, "stflx_veg_canopy"):
+        stflx_veg = jnp.stack([mlcanopy.stflx_veg_canopy[i + 1] for i in range(ncol)])
+    else:
+        stflx_veg = None
 
     return SurfaceFluxOutput(
         shflx=shflx,
@@ -787,8 +810,9 @@ def _extract_surface_fluxes(
         emissivity=emissivity,
         z0=z0,
         gpp=gpp,
-        # CLM-ML doesn't return stomatal ratio in the same way; set to 1
         stomatal_ratio=jnp.ones(ncol),
+        stflx_air=stflx_air,
+        stflx_veg=stflx_veg,
     )
 
 
@@ -860,8 +884,6 @@ def compute_clm_ml_canopy_fluxes(
     new_canopy_state : CanopyState
         Updated prognostic state to carry forward to the next step.
     """
-    global _CLM_STEP_COUNTER
-
     # ---- Phase-1 CLM initialization (once) ----
     _ensure_clm_initialized()
 
@@ -871,7 +893,6 @@ def compute_clm_ml_canopy_fluxes(
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
-    _CLM_STEP_COUNTER += 1
 
     # ---- Build soil grid data ----
     grid = make_soil_grid(land_config.soil_grid)
@@ -897,29 +918,23 @@ def compute_clm_ml_canopy_fluxes(
     _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
                         pft_clm=int(canopy_config.pft_clm))
     # doy → correct calday inside CLM (fixes wrong solar zenith bug)
-    _setup_clm_time(dt, doy, _CLM_STEP_COUNTER)
+    _setup_clm_time(dt, doy, 0)
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
-    # MLCanopyFluxes stores the acclimation temperature in tacclim_forcing, not
-    # t_a10_patch (which is an input, not output).  We implement the running mean
-    # update ourselves here using an exponential filter with 10-day e-folding:
-    #   T_a10_new = alpha * T_now + (1 - alpha) * T_a10_old
-    #   alpha = dt / (10 * 86400)
-    # On first call (canopy_state=None), initialize to T_lowest (cold start).
+    # MLCanopyFluxes copies t_a10_patch into tacclim_forcing on output — reading
+    # it back would apply the filter twice per step (effective ~20d, not 10d).
+    # Instead we carry the running mean explicitly in CanopyState.t_a10_arr and
+    # update it here:
+    #   T_a10_new = (1 - alpha) * T_a10_old + alpha * T_lowest
+    #   alpha = dt / (10 * 86400)  (10-day e-folding, CLM default)
     T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
-    if canopy_state is not None and canopy_state.mlcanopy is not None:
-        prior = canopy_state.mlcanopy
-        # tacclim_forcing holds the previous acclimation temperature per patch
-        if hasattr(prior, "tacclim_forcing"):
-            t_a10_prev = np.array(
-                [float(prior.tacclim_forcing[i + 1]) for i in range(ncol)]
-            )
-        else:
-            t_a10_prev = T_lowest_np
-        alpha = min(dt / (10.0 * 86400.0), 1.0)
-        t_a10_now = (alpha * T_lowest_np + (1.0 - alpha) * t_a10_prev).astype(np.float64)
+    alpha = min(dt / (10.0 * 86400.0), 1.0)
+    if canopy_state is not None and canopy_state.t_a10_arr is not None:
+        t_a10_prev = np.array(canopy_state.t_a10_arr, dtype=np.float64)
+        t_a10_now = ((1.0 - alpha) * t_a10_prev + alpha * T_lowest_np).astype(np.float64)
     else:
-        t_a10_now = T_lowest_np
+        # Cold start: initialize to instantaneous T (will converge in ~10 days)
+        t_a10_now = T_lowest_np.copy()
     t_a10_prior = jnp.array(t_a10_now)
 
     # ---- Build stub CLM instances ----
@@ -979,4 +994,4 @@ def compute_clm_ml_canopy_fluxes(
     surface_out = _extract_surface_fluxes(
         mlcanopy_new, ncol, forcing, land_config, land_params)
 
-    return surface_out, CanopyState(mlcanopy=mlcanopy_new)
+    return surface_out, CanopyState(mlcanopy=mlcanopy_new, t_a10_arr=t_a10_now)
