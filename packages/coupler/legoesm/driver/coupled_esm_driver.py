@@ -537,12 +537,16 @@ class CoupledESMDriver:
         # + bulk-transfer values tuned vs ERA5 under physical bounds).
         if (cfg.land_mode != "none"
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
-            from legoesm.land.clm_surface_map import TUNED_CH, TUNED_SNOW_ALBEDO_MAX
+            import legoesm.land.clm_surface_map as _csm
+            if cfg.land_mode == "multilayer":
+                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+            else:
+                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
             land_cfg = land_cfg._replace(
-                Ch_land=TUNED_CH, Cd_land=TUNED_CH, snow_albedo_feedback=True,
-                land_albedo=land_cfg.land_albedo._replace(
-                    alpha_snow_max=TUNED_SNOW_ALBEDO_MAX))
-            logger.info("  Land: ERA5-calibrated Ch/snow params (CLM default path)")
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
+                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+            logger.info(f"  Land: ERA5-calibrated Ch/snow params "
+                        f"({cfg.land_mode} CLM default path)")
 
         # Spatial soil hydraulics from the CLM reference map (per-column van-
         # Genuchten retention) for the Richards multilayer land.
@@ -680,9 +684,13 @@ class CoupledESMDriver:
             lon = self._atm._grid_lon
             lat_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
-            provider = clm_surface_provider(lat_deg, lon_deg)
+            # Use the calibration matched to the active land scheme (each tuned its
+            # surface-energy params against a different soil forward).
+            variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
+                       else "slab")
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
-                        f"reference soil), {lat_deg.size} columns")
+                        f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider
         if source != "analytical":
             raise ValueError(

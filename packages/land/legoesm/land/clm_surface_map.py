@@ -62,6 +62,36 @@ TUNED_GLACIER_ALBEDO = 0.7192     # snow-free ice-sheet base albedo
 TUNED_SNOW_ALBEDO_MAX = 0.7844    # LandAlbedoConfig.alpha_snow_max
 TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 
+# --- MULTILAYER (8-layer Richards) default per-PFT + snow/ice parameters ----------
+# A SEPARATE calibration from the slab set above: the deep-soil forward equilibrates
+# the column under annual-mean forcing and freezes the annual-mean soil moisture, so
+# the surface-energy params absorb a different residual than the 1-layer slab does
+# (scripts/run/train_multilayer_land_era5.py).  Selected via
+# CLMSurfaceParamProvider(variant="multilayer"); the slab set stays the default so
+# existing slab runs do not regress.  CLM5 PFT order (17).
+_TUNED_PFT_ALBEDO_MULTILAYER = (0.3740, 0.1386, 0.1381, 0.1570, 0.1587, 0.1591, 0.1693,
+                                0.1700, 0.1700, 0.2154, 0.2181, 0.2105, 0.2330, 0.2456,
+                                0.2463, 0.2530, 0.1800)
+_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9846, 0.9880, 0.9844, 0.9848, 0.9881, 0.9877,
+                                    0.9880, 0.9880, 0.9866, 0.9871, 0.9876, 0.9825,
+                                    0.9848, 0.9877, 0.9879, 0.9875, 0.9600)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.05, 2.80, 1.15, 0.70, 3.66, 3.70, 2.80, 2.83, 0.65,
+                                    1.85, 1.80, 0.69, 0.96, 1.31, 1.37, 1.27, 0.50)
+TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7145
+TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.8347
+TUNED_CH_MULTILAYER = 0.004872
+
+# Per-variant lookup: snow-free per-PFT (albedo, emissivity, root_depth) columns +
+# glacier ice base albedo.  The slab W_max is reused for both (W_max is the bucket
+# store of the 1-layer slab; the Richards multilayer ignores it -> it gets no
+# gradient in the multilayer calibration, so there is nothing distinct to bake).
+_VARIANT_TUNED = {
+    "slab": (_TUNED_PFT_ALBEDO, _TUNED_PFT_EMISSIVITY, _TUNED_PFT_ROOT_DEPTH,
+             TUNED_GLACIER_ALBEDO),
+    "multilayer": (_TUNED_PFT_ALBEDO_MULTILAYER, _TUNED_PFT_EMISSIVITY_MULTILAYER,
+                   _TUNED_PFT_ROOT_DEPTH_MULTILAYER, TUNED_GLACIER_ALBEDO_MULTILAYER),
+}
+
 # Snow-free albedo of glacier / ice-sheet ice used as the snow-free BASE over
 # glacier cells so ice sheets stay bright when summer snow melts (snow feedback
 # layers on top) instead of exposing dark bare soil — the "Greenland problem".
@@ -152,20 +182,28 @@ class CLMSurfaceParamProvider(eqx.Module):
     soil_theta_fc: jax.Array          # (ncol,)
     glacier_frac: jax.Array           # (ncol,) ice-sheet fraction [0,1]
     raw_table: jax.Array              # (17, 12) per-PFT parameter table (tuned or CLM5)
+    _glacier_albedo: float = eqx.field(static=True)   # snow-free ice base albedo
 
     def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac,
-                 tuned: bool = True):
+                 tuned: bool = True, variant: str = "slab"):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
         self.glacier_frac = glacier_frac
+        self._glacier_albedo = TUNED_GLACIER_ALBEDO
         table = np.asarray(clm5_pft_table())
         if tuned:   # overwrite the calibrated per-PFT columns (physical bounds)
+            if variant not in _VARIANT_TUNED:
+                raise ValueError(
+                    f"unknown tuned variant {variant!r}; expected one of "
+                    f"{sorted(_VARIANT_TUNED)}")
+            alb, emis, root, glac_alb = _VARIANT_TUNED[variant]
             table = table.copy()
-            table[:, PARAM_NAMES.index("albedo_veg")] = _TUNED_PFT_ALBEDO
-            table[:, PARAM_NAMES.index("emissivity")] = _TUNED_PFT_EMISSIVITY
-            table[:, PARAM_NAMES.index("root_depth")] = _TUNED_PFT_ROOT_DEPTH
+            table[:, PARAM_NAMES.index("albedo_veg")] = alb
+            table[:, PARAM_NAMES.index("emissivity")] = emis
+            table[:, PARAM_NAMES.index("root_depth")] = root
             table[:, PARAM_NAMES.index("W_max")] = _TUNED_PFT_WMAX
+            self._glacier_albedo = glac_alb
         self.raw_table = jnp.asarray(table)
 
     def __call__(self) -> LandSurfaceParams:
@@ -178,7 +216,7 @@ class CLMSurfaceParamProvider(eqx.Module):
         # ice sheets stay bright when summer snow melts (the snow feedback layers on
         # top of this base) instead of exposing dark bare soil — the Greenland fix.
         fg = self.glacier_frac
-        params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * _GLACIER_ALBEDO
+        params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * self._glacier_albedo
         return LandSurfaceParams(**params)
 
 
@@ -197,11 +235,14 @@ def clm_hydraulics_config(surface_map: dict):
         alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
 
 
-def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None
-                         ) -> CLMSurfaceParamProvider:
+def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None,
+                         variant: str = "slab") -> CLMSurfaceParamProvider:
     """Build the default CLM PFT + reference-soil parameter provider for the given
-    target columns (downloads the surfdata file if ``surfdata_path`` is None)."""
+    target columns (downloads the surfdata file if ``surfdata_path`` is None).
+
+    ``variant`` selects the baked tuned set: ``"slab"`` (default, 1-layer slab land)
+    or ``"multilayer"`` (8-layer Richards land)."""
     path = surfdata_path or download_clm_surfdata()
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
-                                   m["glacier_frac"])
+                                   m["glacier_frac"], variant=variant)
