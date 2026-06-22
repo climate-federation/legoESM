@@ -1,12 +1,16 @@
 #!/bin/bash -l
 #PBS -N legoesm_amip_gpu_scaling
 #PBS -A P08010000
-#PBS -q casper
-#PBS -l select=1:ncpus=16:ngpus=4:gpu_type=cc80:mem=200GB
+#PBS -q main
+#PBS -l job_priority=premium
+#PBS -l select=1:ncpus=64:ngpus=4:mem=480GB
+#PBS -l gpu_type=a100
 #PBS -l walltime=04:00:00
 #PBS -j oe
+#PBS -k eod
 # ===========================================================================
-# AMIP-representative GPU weak+strong scaling on NCAR Casper (A100 / cc80).
+# AMIP-representative GPU weak+strong scaling on NCAR Derecho GPU nodes
+# (deg*: 1x 64-core EPYC Milan + 4x NVIDIA A100-40GB, queue `main`).
 #
 # Runs scripts/bench/run_levante_gpu_scaling.py on the cubed-sphere dycore with
 # moist GCM physics -- the one grid that supports BOTH single-process
@@ -18,12 +22,13 @@
 #
 # ---------------------------------------------------------------------------
 # RESOURCES -- VERIFY before submit:
-#   * Confirm Casper actually has A100 (cc80) nodes with the ngpus you request.
-#     A single full node is required for the multi-GPU sweep. If your A100
-#     node has a different GPU count, edit ONLY the `select=` line above --
-#     `--n-gpus 0` below auto-detects whatever PBS gives you, so the Python
-#     side stays in sync automatically.
-#   * For a quick single-GPU baseline: set `select=1:ncpus=4:ngpus=1:...`.
+#   * Derecho GPU nodes are 1 socket / 64 cores + 4x A100-40GB. The request
+#     above takes a full node (ngpus=4) for the multi-GPU sweep.
+#   * `gpu_type=a100` and `job_priority` follow NCAR Derecho GPU conventions;
+#     if a job will not schedule, confirm these tokens with `qstat -Qf main`
+#     / NCAR docs and adjust. `--n-gpus 0` below auto-detects whatever PBS
+#     gives you, so editing ONLY the `select=` line keeps the Python in sync.
+#   * For a quick single-GPU baseline: set `select=1:ncpus=16:ngpus=1:mem=120GB`.
 #
 # SUBMIT:
 #   qsub scripts/cluster/scaling_derecho/amip_gpu_scaling.pbs
