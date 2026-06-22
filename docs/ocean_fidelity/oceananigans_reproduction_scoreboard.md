@@ -124,21 +124,23 @@ staggering, collocation) on legoESM's **latlon C-grid** vs the oracle's
 **Cartesian RectilinearGrid beta-plane**. CASE 2's bickley enstrophy excess and
 CASE 3's §5 wall blow-up are the SAME residual (2Δx grid-scale under-dissipation).
 
-**Quantified grid-level faithfulness gap:** legoESM §5 runs on a TRUE latlon grid
-(lat −60→−40) with cos(lat) dx varying **~47%** across the channel; the oracle's
-uniform Cartesian RectilinearGrid beta-plane has ZERO metric variation. This is
-the concrete grid-level unfaithfulness plausibly driving the 2Δx-mode
-under-dissipation in the vector-invariant momentum metrics.
+**Shared residual vs §5-specific catastrophe (bickley-to-t60 refinement):** the
+2Δx grid-scale under-dissipation is REAL and SHARED — bickley's enstrophy excess
+re-emerges and grows to ~1.9× over t30–t60 (CASE 2's bar correctly scoped to t24,
+the eddy-development window). BUT bickley stays FINITE to t60 while §5 blows up,
+and bickley has LARGER metric variation (6× cos(lat)) than §5 (47%) — so metric
+variation *magnitude* does NOT predict severity. The §5 CATASTROPHE = the shared
+2Δx under-dissipation × the FREE-SLIP WALLS (where the 2Δx-in-lon mode
+concentrates) × SUSTAINED turbulent forcing (the restored jet keeps the eddies at
+the walls; bickley's just decay).
 
-**Next (research-level):** reproduce §5 on a uniform-metric (Cartesian
-beta-plane) ocean C-grid matching the oracle's RectilinearGrid (needs Cartesian-
-C-grid ocean infra — `LatLonCGridOceanModel` is latlon-tied), OR fix the latlon
-C-grid vector-invariant momentum metric operators so the 2Δx-in-lon dissipation
-is metric-invariant. The 1D WENO kernel is DONE (coefficient-faithful); the
-grid/metric application is the open work. Tracked by the standing §5 effort on
-`fix/silvestri-turbulent-dissipation`. (The verified §5-oracle-uses-
-ImplicitFreeSurface finding stands and corrects the setup comment — not the
-blow-up lever.)
+**Next (research-level):** the §5 fix needs the free-slip-wall 2Δx-in-lon mode
+treatment at sustained turbulent amplitude (GH#480's `wall_grid_filter` only
+survives 16 d), on the latlon C-grid vector-invariant momentum — NOT merely
+uniform metrics, and NOT the 1D WENO kernel (coefficient-faithful, done). Tracked
+by the standing §5 effort on `fix/silvestri-turbulent-dissipation`. (The verified
+§5-oracle-uses-ImplicitFreeSurface finding stands and corrects the setup comment —
+not the blow-up lever.)
 
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
