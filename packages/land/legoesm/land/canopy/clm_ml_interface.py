@@ -497,12 +497,24 @@ def _build_stubs(
     root_frac_np = np.exp(-z_centers / root_depth)
     root_frac_np = root_frac_np / root_frac_np.sum()
 
+    # Pad root fraction to nlevsoi layers and renormalize so sum == 1.0.
+    # When n_layers < nlevsoi, the deepest legoESM fraction is replicated into
+    # extra CLM layers; without renormalization sum(rootfr) > 1 and btran is
+    # overweighted.
+    n_clm_soil = nlevsoi
+    rootfr_padded = np.zeros(n_clm_soil, dtype=np.float64)
+    for j in range(n_clm_soil):
+        jl = min(j, n_layers - 1)
+        rootfr_padded[j] = float(root_frac_np[jl])
+    rootfr_total = rootfr_padded.sum()
+    if rootfr_total > 0:
+        rootfr_padded /= rootfr_total  # guarantee sum == 1.0
+
     for i in range(ncol):
         p = i + 1  # 1-based patch = column
         # Fill all nlevsoi layers so that layers beyond n_layers don't stay at
         # smp=0 mm (saturated) which biases btran via the weighted-average.
         for j in range(1, nlevsoi + 1):
-            jl = min(j - 1, n_layers - 1)  # clamp to deepest legoESM layer
             if psi_soil is not None and j - 1 < psi_soil.shape[1]:
                 # psi [m] → smp_l [mm]; preserve sign (negative for unsaturated)
                 smp_l_col = smp_l_col.at[p, j].set(psi_soil[i, j - 1] * 1000.0)
@@ -518,9 +530,7 @@ def _build_stubs(
             else:
                 hk_l_col = hk_l_col.at[p, j].set(float(canopy_config.hk_default_mm_s))
 
-            # rootfr only set for layers where legoESM has data
-            if jl < len(root_frac_np):
-                rootfr_patch = rootfr_patch.at[p, j].set(float(root_frac_np[jl]))
+            rootfr_patch = rootfr_patch.at[p, j].set(rootfr_padded[j - 1])
 
     # ---- Soil evaporative resistance (Sellers-Lockwood formula) ----
     # The CLM-ML SurfaceResistanceMod uses rs = exp(8.206 - 4.255*Se) [s/m]

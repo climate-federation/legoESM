@@ -482,6 +482,39 @@ class TestConfig(unittest.TestCase):
         self.assertLess(cfg.albgrd_nir_default, 0.40)   # NIR < 0.40 for moist soil
 
 
+class TestRootFractionNormalization(unittest.TestCase):
+    """rootfr_padded must sum to 1.0 even when n_layers != nlevsoi."""
+
+    def _make_rootfr_padded(self, n_layers, nlevsoi=10):
+        import numpy as np
+        z = np.cumsum([0.1] * n_layers) - 0.05
+        root_frac = np.exp(-z / 1.0)
+        root_frac /= root_frac.sum()
+        rootfr_padded = np.zeros(nlevsoi, dtype=np.float64)
+        for j in range(nlevsoi):
+            jl = min(j, n_layers - 1)
+            rootfr_padded[j] = float(root_frac[jl])
+        total = rootfr_padded.sum()
+        if total > 0:
+            rootfr_padded /= total
+        return rootfr_padded
+
+    def test_normalization_fewer_legoesm_layers(self):
+        """n_layers=8 < nlevsoi=10: padded rootfr must still sum to 1."""
+        rf = self._make_rootfr_padded(8, 10)
+        self.assertAlmostEqual(rf.sum(), 1.0, places=10)
+
+    def test_normalization_exact_match(self):
+        """n_layers == nlevsoi: rootfr sum still 1."""
+        rf = self._make_rootfr_padded(10, 10)
+        self.assertAlmostEqual(rf.sum(), 1.0, places=10)
+
+    def test_normalization_more_legoesm_layers(self):
+        """n_layers=15 > nlevsoi=10: truncated rootfr renormalized to 1."""
+        rf = self._make_rootfr_padded(15, 10)
+        self.assertAlmostEqual(rf.sum(), 1.0, places=10)
+
+
 class TestSolarGeometry(unittest.TestCase):
     """Unit tests for solar zenith and SW beam-fraction helpers."""
 
