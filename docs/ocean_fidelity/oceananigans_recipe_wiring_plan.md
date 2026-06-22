@@ -186,10 +186,14 @@ decays gradually (0.099→0.052 over 40 steps). So the implicit_cn free-surface
 SOLVE is **catastrophically over-damping the η field**, killing the pressure
 gradient before the geostrophic flow can develop. θ-INDEPENDENT (even θ=0.5 gives
 max|u| 1.8e-4 vs oracle 3.4e-2 — ~200× weak). The Crank-Nicolson PG itself is
-correct (net `−g·dt·[(1−θ)∂η_old+θ∂η_new]`, not cancelled); the bug is the η
-over-damping in the implicit Helmholtz update (with `1/(gΔt²)=1e4` the solve
-SHOULD give η_new≈η_old, but legoESM loses 88%). `explicit_substep` preserves the
-coupling (drives 3e-3) but is gravity-wave CFL-unstable at dt=0.01.
+correct (net `−g·dt·[(1−θ)∂η_old+θ∂η_new]`, not cancelled). **BOTH legoESM
+barotropic solvers over-damp η** — explicit_substep (dt=0.002, stable) also
+collapses η 0.099→0.037 by t=0.1 (vs oracle 0.095) and drives only u~4e-4. So it
+is a GENERAL legoESM free-surface over-damping of the η field, NOT implicit_cn-
+specific. The barotropic solver DOES use `state.eta` (u develops ~1e-4/step), but
+the η bump radiates/damps ~10-20× too fast vs the oracle (which preserves ~95% of
+the bump at t=0.1, physically correct for the slow gravity-wave radiation of a
+0.5-rad bump at c=1).
 
 This is high-impact node #1 AND the suspected §5/bickley eddy-residual home,
 reproduced in a clean deterministic test. NEXT: debug the implicit_cn Helmholtz
