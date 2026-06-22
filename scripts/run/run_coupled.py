@@ -151,6 +151,24 @@ def main():
                              "cloud-radiative effect the adjustment convection "
                              "scheme (sbm) + RH-based cloud miss (the ~4.5 K "
                              "coupled cold-bias fix).  Default off.")
+    parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float,
+                        default=None,
+                        help="Override Sundqvist critical RH (CloudConfig."
+                             "rh_crit). HIGHER => less stratiform cloud => LOWER "
+                             "planetary albedo. Range [0.5, 0.99]. Default: "
+                             "CloudConfig default (byte-identical). The SW knob "
+                             "for the coare3 moisture-driven albedo overshoot.")
+    parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic",
+                        type=float, default=None,
+                        help="Override diagnostic in-cloud condensate [kg/kg] "
+                             "(CloudConfig.q_c_diagnostic). LOWER => optically "
+                             "THINNER cloud => lower albedo, still LW-active. "
+                             "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+    parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
+                        type=float, default=None,
+                        help="Override convective (Slingo) cloud-cover cap "
+                             "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
+                             "Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
@@ -414,6 +432,9 @@ def main():
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
         convective_cloud=args.convective_cloud,
+        cloud_rh_crit=args.cloud_rh_crit,
+        cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
+        cloud_conv_cloud_max=args.cloud_conv_cloud_max,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,

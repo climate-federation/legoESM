@@ -281,6 +281,20 @@ class ExperimentConfig(NamedTuple):
     # cloud diagnosis (see CloudConfig.convective_cloud).  Default False =>
     # byte-identical to the validated stratiform-only path.
     convective_cloud: bool = False
+    # Optional cloud-tuning overrides for the diagnostic stratiform/convective
+    # cloud (None => CloudConfig defaults => byte-identical).  Exposed so a
+    # coupled run can trade SW (planetary albedo) vs LW (greenhouse / surface
+    # LW_down) without editing CloudConfig in source:
+    #   cloud_rh_crit        — Sundqvist critical RH; HIGHER => less stratiform
+    #                          cloud (lower albedo).  Bounds (0.5, 0.99).
+    #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
+    #                          optically THINNER cloud (lower albedo, still
+    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
+    cloud_rh_crit: float | None = None
+    cloud_q_c_diagnostic: float | None = None
+    cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
     # Aerosol-CCN coupling: diagnose the specified cloud-droplet number
     # from the prescribed aerosol optical depth (Andreae 2009 AOT–CCN
@@ -600,6 +614,18 @@ class ExperimentConfig(NamedTuple):
                 f"surface layer uses the same bulk-flux algorithm as the ocean "
                 f"tile; got turbulence='none'."
             )
+        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        for _f, _lo, _hi in (
+            ("cloud_rh_crit", 0.5, 0.99),
+            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            ("cloud_conv_cloud_max", 0.1, 1.0),
+        ):
+            _v = getattr(self, _f)
+            if _v is not None and not (_lo <= _v <= _hi):
+                errors.append(
+                    f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
