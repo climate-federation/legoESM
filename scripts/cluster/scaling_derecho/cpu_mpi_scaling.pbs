@@ -46,9 +46,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # CPU/MPI env: force the CPU backend and pick the mpi-enabled conda env BEFORE
-# sourcing _env.sh (which respects pre-set values). The harness also sets
-# JAX_PLATFORMS=cpu internally; this keeps the rest of _env.sh consistent.
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
+# sourcing _env.sh. Unconditional cpu pin so a stale JAX_PLATFORMS=cuda (from the
+# submit shell via PBS env export, or a reused interactive shell) can never push
+# this MPI job onto the GPU. Symmetric with the cuda pin in amip_gpu_scaling.pbs.
+export JAX_PLATFORMS=cpu
 export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-mpi}"
 # shellcheck source=_env.sh
 source "${SCRIPT_DIR}/_env.sh"

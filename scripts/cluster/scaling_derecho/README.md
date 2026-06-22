@@ -123,10 +123,18 @@ rather than true comms cost. The GPU sweep is unaffected — run it first.
 
 ## Step 3 — Smoke-test each path interactively (before batch)
 
+> When sourcing `_env.sh` interactively, set `JAX_PLATFORMS` yourself first —
+> `_env.sh` keeps an already-set value, so a stale `cpu`/`cuda` from earlier in
+> the same shell would leak in (and a GPU run on `cpu` fails silently). The
+> batch `.pbs` jobs pin it unconditionally, so this only matters interactively.
+> Always confirm with `python -c "import jax; print(jax.default_backend())"`.
+
 **GPU** (on a `deg*` node, env `legoesm-gpu`):
 ```bash
+export JAX_PLATFORMS=cuda
 export LEGOESM_CONDA_ENV=legoesm-gpu
 source scripts/cluster/scaling_derecho/_env.sh
+python -c "import jax; print(jax.default_backend())"      # MUST print: gpu
 python scripts/bench/run_levante_gpu_scaling.py \
     --grid cubed-sphere --physics gray_sbm --mode strong --precision float32 \
     --n-gpus 1 --n-timing 10
@@ -136,6 +144,7 @@ python scripts/bench/run_levante_gpu_scaling.py \
 ```bash
 qsub -I -A P08010000 -q main -l job_priority=premium \
      -l select=1:ncpus=128:mpiprocs=128 -l walltime=00:30:00
+export JAX_PLATFORMS=cpu
 export LEGOESM_CONDA_ENV=legoesm-mpi
 source scripts/cluster/scaling_derecho/_env.sh
 mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \

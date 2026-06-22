@@ -41,6 +41,14 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# Force the CUDA backend BEFORE sourcing _env.sh so a stale JAX_PLATFORMS=cpu
+# (inherited from the submit shell via PBS env export, or a reused interactive
+# shell) can NEVER silently run this GPU benchmark on the CPU. Unconditional on
+# purpose -- a GPU job must always use cuda. Symmetric with the cpu pin in
+# cpu_mpi_scaling.pbs.
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 # shellcheck source=_env.sh
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
