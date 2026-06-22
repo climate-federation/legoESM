@@ -128,6 +128,23 @@ def _training_loop(
     opt_state = optimizer.init(eqx.filter(params, eqx.is_inexact_array))
     loss_history = []
 
+    # Build the value-and-grad ONCE and JIT it, with (params, ic, target,
+    # forcing) all as traced arguments.  Critical for the rrtmgp cost: the
+    # differentiable rollout's reverse-mode HLO (dominated by rrtmgp) is huge
+    # and compiles for HOURS at high resolution.  The old code rebuilt the
+    # segment inside loss_fn and called an UN-jitted value_and_grad every
+    # sample/epoch -> that ~hours compile was paid EVERY iteration (measured
+    # ~3 h/epoch at n_lat=48).  filter_jit keys on shapes/structure, which are
+    # identical across samples and epochs, so the compile happens ONCE and
+    # every subsequent step reuses it (CLAUDE.md: build once, pass changing
+    # values as args).  make_loss_fn ignores its first arg; we differentiate
+    # the explicit ``p`` (filter_value_and_grad differentiates arg 0 only,
+    # so ic/target/forcing are non-differentiated traced inputs).
+    def _loss_scalar(p, ic, target, forcing):
+        return make_loss_fn(p, ic, target, forcing)(p)
+
+    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(_loss_scalar))
+
     for epoch in range(n_epochs):
         epoch_loss = 0.0
         t0 = time.time()
@@ -135,8 +152,7 @@ def _training_loop(
         for sample_idx, (ic, target, forcing) in enumerate(
             zip(initial_carries, target_carries, forcings)
         ):
-            loss_fn = make_loss_fn(params, ic, target, forcing)
-            loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+            loss, grads = value_and_grad(params, ic, target, forcing)
 
             # --- NaN / Inf detection (outside JIT, values are materialized) ---
             loss_val = float(loss)
