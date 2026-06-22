@@ -161,6 +161,30 @@ Implications:
   Oceananigans) makes §5 LESS dissipative, so the §5 fix is NOT the D-term; the
   D-term is just a faithfulness mismatch to expose as a recipe option.
 
+### 3f. RESOLVED 2026-06-22 — the "free-surface over-damping" was a DEPTH-MISMATCH bug
+
+The §3e investigation (below) found legoESM over-damping η. ROOT CAUSE turned out to
+be a **depth mismatch in the bickley test setup**, NOT a dycore bug: `build_bickley`
+called `rest_state_latlon_cgrid_ocean(...)` which defaults `H_max=5500.0 m`, so the
+barotropic depth was **H≈5500** while the Oceananigans reference uses z=(0,1), H=1.
+Gravity-wave speed √(gH)=74 (not 1) → the implicit free surface over-damps η AND
+explicit_substep is CFL-unstable at dt=0.01. The bickley ENSTROPHY comparison didn't
+catch it (enstrophy is H-insensitive); the geostrophic-adjustment test did
+(`HELM_DBG` showed `max|H_u|=5500`). FIX: `rest_state_latlon_cgrid_ocean(..., H_max=1.0)`.
+
+After the fix:
+- **Geostrophic adjustment MATCHES Oceananigans**: corr(η)=0.997, corr(u)=0.99,
+  max|u| within 3% over 40 steps (was corr 0.6→−0.8, u ~100× weak). The free-surface
+  predictor-corrector coupling is FAITHFUL.
+- **Bickley enstrophy match dramatically improves**: ens_ratio t6/t12/t18 =
+  0.998/1.019/1.040 (was 0.998/1.25/1.09) — within ~4% through t18 (was 9–25%). So
+  the depth bug was the DOMINANT source of the "bickley 2dx under-dissipation"
+  residual previously attributed to the C-grid metric. (t24 1.376 remains = the
+  late-time chaotic divergence.)
+- ⇒ The "interior eddy 2dx under-dissipation" unified residual is LARGELY the depth
+  bug. NEXT: check whether §5 has an analogous depth/setup mismatch vs its oracle
+  (silvestri_jet.jl Lz=1 km) — if so, the §5 blow-up may also shrink dramatically.
+
 ### 3e. Phase-2 free-surface COUPLING result (2026-06-22) — the §5-residual node, localized
 
 Harness: `scripts/data/generate_oceananigans_geostrophic_adjustment_reference.jl`
