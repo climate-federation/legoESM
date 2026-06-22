@@ -155,18 +155,22 @@ class TestCLMMLInterface(unittest.TestCase):
 
     @pytest.mark.timeout(120)
     def test_energy_balance_closure(self):
-        """Net radiation ~ SH + LH + G (within 10 W/m² for cold-start).
+        """CLM-ML internal energy balance: Rnet = SH + LH + G + stflx_air + stflx_veg.
 
-        CLM-ML-JAX iterates to convergence internally, but on a cold start
-        with a single Euler step residuals of O(5–10 W/m²) are acceptable.
+        The complete CLM-ML identity includes canopy heat storage (stflx_air +
+        stflx_veg).  Testing the surface_out fields directly (before the coupler
+        stflx fold) requires including these terms in the residual.
         """
         surface_out, _ = _call_interface()
-        # net_rad = sw_net + lw_net (both positive-into-surface)
         net_rad = surface_out.sw_net + surface_out.lw_net
-        # Energy balance: net_rad = SH + LH + G
-        #   shflx, lhflx > 0 = into atmosphere (away from surface)
-        #   G_soil > 0 = into soil (away from surface)
-        residual = jnp.abs(net_rad - surface_out.shflx - surface_out.lhflx - surface_out.G_soil)
+        stflx = jnp.zeros_like(surface_out.shflx)
+        if surface_out.stflx_air is not None:
+            stflx = stflx + surface_out.stflx_air
+        if surface_out.stflx_veg is not None:
+            stflx = stflx + surface_out.stflx_veg
+        residual = jnp.abs(
+            net_rad - surface_out.shflx - surface_out.lhflx - surface_out.G_soil - stflx
+        )
         max_res = float(jnp.max(residual))
         self.assertLess(
             max_res, 50.0,   # loose on cold start; tightened in integration test
