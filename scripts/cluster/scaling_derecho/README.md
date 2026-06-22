@@ -18,7 +18,7 @@ submit (Step 4).
 
 ## Step 0 — Edit `_env.sh`
 
-Set the two marked values; the account (`P08010000`) and `$SCRATCH` are preset:
+Set the two marked values; the account and `$SCRATCH` are preset:
 
 - `LEGOESM_REPO` → your clone path, e.g. `/glade/work/$USER/legoESM`
 - `LEGOESM_CONDA_ENV` → leave default; each job overrides it (`legoesm-gpu` / `legoesm-mpi`).
@@ -50,7 +50,7 @@ active conda env.
 Build it in an interactive GPU session so the CUDA build sees a real A100:
 
 ```bash
-qsub -I -A P08010000 -q main -l job_priority=premium \
+qsub -I -A $PROJECT -q main -l job_priority=premium \
      -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB -l walltime=00:40:00
 # on the deg* node:
 module load conda cuda
@@ -142,7 +142,7 @@ python scripts/bench/run_levante_gpu_scaling.py \
 
 **CPU-MPI** (interactive `main` node, env `legoesm-mpi`):
 ```bash
-qsub -I -A P08010000 -q main -l job_priority=premium \
+qsub -I -A $PROJECT -q main -l job_priority=premium \
      -l select=1:ncpus=128:mpiprocs=128 -l walltime=00:30:00
 export JAX_PLATFORMS=cpu
 export LEGOESM_CONDA_ENV=legoesm-mpi
