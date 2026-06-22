@@ -134,6 +134,33 @@ like legoESM. So the high-impact nodes are:
 4. **Vorticity-flux form** — relative-ζ × transport velocity vs legoESM PV `q=ζ/h`.
 5. **Time-stepper** — QuasiAB2 (χ=0.1, Gⁿ from prior step) vs legoESM AB2.
 
+### 3d. Phase-1 tendency-match RESULTS (2026-06-22) — momentum tendency mostly MATCHES
+
+Harness: `scripts/data/generate_oceananigans_tendency_reference.jl` (dumps Oceananigans
+one-step Gu/Gv from the bickley IC) + `scripts/validate/ocean_fidelity/compare_oceananigans_tendency.py`
+(legoESM du_dt from the same IC; IC alignment validated at corr 1.0000). At the IC
+η=0 + buoyancy=nothing → PGF=0, so this isolates ADVECTION + CORIOLIS.
+
+Findings:
+- **Gv matches at 0.9998** (nrmse 0.004) once legoESM's planetary Coriolis is added
+  (legoESM applies f×u OUTSIDE du_dt — it has NO coriolis diagnostic term; the
+  face-f `coriolis_cgrid` already reproduces Oceananigans' Gv for this flow).
+- **Gu matches at 0.9962** (nrmse 0.009) **once the additive Silvestri D-term is
+  dropped**. WITH the D-term, Gu is corr 0.975 / +40% magnitude. Decomposition:
+  vortcor 0.196, KE-grad 0.109, **Dterm 0.079** (≈ the whole Gu excess).
+- ⇒ **the legoESM momentum-tendency wiring already MATCHES Oceananigans** for
+  advection+Coriolis, with ONE extra node: the **additive D-term** (Oceananigans
+  folds divergence into the OnlySelfUpwinding — no separate additive term).
+
+Implications:
+- The instantaneous momentum dynamics are faithful → the §5 interior-2dx residual
+  is NOT the advection/Coriolis tendency. It is in the parts NOT yet tendency-matched:
+  the **free-surface predictor-corrector coupling** (needs an η≠0 reference) and the
+  **time-stepper** — consistent with the wiring diff's high-impact node #1.
+- The D-term ADDS dissipation yet §5 still blows up → removing it (to match
+  Oceananigans) makes §5 LESS dissipative, so the §5 fix is NOT the D-term; the
+  D-term is just a faithfulness mismatch to expose as a recipe option.
+
 ## 5. Phased plan
 
 - **Phase 0 — wiring diagrams + diff** (in progress): finish 3b, complete 3c, rank
