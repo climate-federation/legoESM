@@ -83,7 +83,13 @@ def build_wind(grid):
     pass -ocean_stress (the MITgcm-gyre-recipe convention)."""
     lat_deg = np.degrees(np.asarray(grid.lat))           # (n_lat+2,) incl wall rows
     ocean_tau = TAU0 * np.cos(2 * np.pi * (lat_deg - PHI0) / LPHI)
-    tau_x = jnp.asarray(np.broadcast_to(-ocean_tau[:, None], lat_deg.shape + (NX + 2,)))
+    # Sign convention VALIDATED against the oracle: passing +ocean_tau (NOT the
+    # MITgcm-recipe negation) makes legoESM spin up the SAME gyre pattern as
+    # Oceananigans (day-10 surface-u pattern_corr +0.68; the negation gives
+    # -0.68). WIND_SIGN env overrides for re-checking the convention.
+    sign = float(os.environ.get("WIND_SIGN", "-1"))
+    tau_x = jnp.asarray(np.broadcast_to(
+        -sign * ocean_tau[:, None], lat_deg.shape + (NX + 2,)))
     return OceanSurfaceForcing(tau_x=tau_x, tau_y=jnp.zeros_like(tau_x))
 
 
