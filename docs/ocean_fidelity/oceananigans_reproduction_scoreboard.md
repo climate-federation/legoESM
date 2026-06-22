@@ -105,14 +105,22 @@ barotropic Coriolis 2Δx mode that §5's `explicit_ab2`+gating+F_slow cures. A
 clean ImplicitFreeSurface match (implicit FS + Coriolis purely in the 3D
 momentum, NO in-substep barotropic term) is not reachable via config flags.
 
-**Next (research-level):** a faithful no-in-substep-barotropic-Coriolis implicit
-free-surface solver matching `ImplicitFreeSurface`, OR a barotropic scheme that
-damps the residual 2Δx / eddy-scale instability at α=0 under the existing
-split-explicit stack. Tracked by the standing §5 effort on
-`fix/silvestri-turbulent-dissipation`. The verified finding stands: the §5 oracle
-uses ImplicitFreeSurface, so legoESM's split-explicit §5 stack is unfaithful at
-the solver level even though it survives longer than the (confounded) implicit_cn
-attempt.
+**Clean follow-up (free-surface isolated, no Coriolis confound):** switching ONLY
+the free surface to `implicit_cn` while keeping §5's native faithful
+`explicit_ab2`+F_slow Coriolis blew **day 79 ≈ the baseline's day 82** — identical
+instability onset (day 55, max|u|~0.12) and blow-up. **DECISIVE: the free-surface
+solver is NOT the §5 blow-up lever.** The §5 residual is the eddy/wall-scale
+momentum instability, independent of the barotropic free surface — most likely
+the GH#480 boundary-localized 2Δx-in-lon mode at the N/S free-slip walls, not
+fully suppressed at α=0.
+
+**Next (research-level):** CASE-3 leads are now exhausted at the config +
+GPU-experiment level (WENO momentum, Coriolis scheme, free-surface solver — all
+ruled out). The residual is a genuine research-level wall/eddy-scale
+WENO-momentum instability at α=0. Tracked by the standing §5 effort on
+`fix/silvestri-turbulent-dissipation`. (The verified finding that the §5 oracle
+uses ImplicitFreeSurface still stands and corrects the setup comment — it is just
+not the blow-up lever.)
 
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
