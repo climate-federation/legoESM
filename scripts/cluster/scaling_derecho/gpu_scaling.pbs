@@ -41,7 +41,19 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# PBS copies this script to a spool dir before running it, so $0 / BASH_SOURCE
+# do NOT point at the repo. Locate _env.sh from the submit dir ($PBS_O_WORKDIR)
+# instead -- works whether you qsub from the repo root or this job's own dir.
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    echo "       qsub from the repo root or from scripts/cluster/scaling_derecho/." >&2
+    exit 1
+fi
 
 # Force the CUDA backend BEFORE sourcing _env.sh so a stale JAX_PLATFORMS=cpu
 # (inherited from the submit shell via PBS env export, or a reused interactive

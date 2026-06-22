@@ -12,6 +12,10 @@ export PBS_ACCOUNT="${PBS_ACCOUNT:-P08010000}"
 REPO="${LEGOESM_REPO:-/glade/work/$USER/legoESM}"
 export REPO
 
+# NCAR normally exports $SCRATCH; default it defensively so the job scripts'
+# `set -u` can't abort on an unset $SCRATCH (used below + for OUTDIR).
+export SCRATCH="${SCRATCH:-/glade/derecho/scratch/$USER}"
+
 # --- (3) Conda env that has JAX with CUDA support -- EDIT to your env name ---
 CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 
