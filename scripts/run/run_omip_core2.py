@@ -1209,7 +1209,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     made SSS only informational). Curvilinear -> model grid via the same IDW used
     for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
     import xarray as xr
-    from legoesm.ocean.bathymetry import laplacian_smooth_2d
+    from legoesm.ocean.bathymetry import (
+        laplacian_smooth_2d, laplacian_smooth_voronoi)
     ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
@@ -1247,10 +1248,22 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
         Rm = np.maximum(Rm, 0.0)
         # COASTAL SPREAD (codex conservation flag + SSS-quality): the NN/IDW
         # regrid concentrates each river in ~1 model cell -> over-fresh spots that
-        # hurt SSS. Spread over a coastal band via ocean-masked averaging.
+        # hurt SSS. Spread over a coastal band via ocean-masked averaging, then
+        # the area-conservative renorm below restores the exact source total.
+        # MPAS uses the Voronoi-topology smoother (cellsOnCell neighbour-average);
+        # the structured laplacian_smooth_2d does NOT apply to an unstructured mesh
+        # (the reason MPAS was previously left UN-spread -> big rivers like the
+        # Amazon/Arctic over-concentrated in the ~4 IDW cells -> local -2 to -3 PSU
+        # over-freshening; lat-lon/cube were smoothed but MPAS was not).
         if ocean is not None and spread_passes > 0:
+            _is_voronoi = (grid_type == "mpas")
+            _coc = np.asarray(grid.cellsOnCell) if _is_voronoi else None
+            _nec = np.asarray(grid.nEdgesOnCell) if _is_voronoi else None
             for _ in range(int(spread_passes)):
-                sm = np.asarray(laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
+                if _is_voronoi:
+                    sm = np.asarray(laplacian_smooth_voronoi(Rm, _coc, _nec, 1))
+                else:
+                    sm = np.asarray(laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
                 Rm = np.where(ocean, sm, 0.0)
         # AREA-CONSERVATIVE renorm (replaces the old cell-SUM renorm and now runs
         # on EVERY grid incl. MPAS spread_passes=0): scale the regridded runoff so
@@ -2337,6 +2350,14 @@ def main() -> int:
                         "single surface cell — fixes the too-fresh/too-shallow "
                         "Amazon-type plume. Column-integral salt unchanged. "
                         "Default None = legacy top-cell (bit-exact).")
+    p.add_argument("--runoff-spread-passes", type=int, default=None,
+                   help="HORIZONTAL coastal-spread passes for the regridded "
+                        "runoff (ocean-masked neighbour-average; Voronoi-topology "
+                        "on MPAS, structured laplacian elsewhere). Default None = "
+                        "4 on MPAS (big rivers over-concentrate in ~4 IDW cells), "
+                        "2 on lat-lon/cube. The area-conservative renorm keeps the "
+                        "global total exact. Distinct from --runoff-depth-spread-m "
+                        "(VERTICAL spread).")
     p.add_argument("--river-mouth-restoring-gate", action="store_true",
                    help="Disable SSS restoring at river-mouth cells (runoff > "
                         "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
@@ -3025,10 +3046,19 @@ def main() -> int:
     if args.runoff:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--runoff: not wired for the cube (parked grid).")
-        # MPAS uses the 1-D apply_runoff_step_mpas + spread_passes=0 (the
-        # laplacian_smooth_2d coastal-spread is structured-only; the IDW k=4
-        # regrid already spreads each river to the nearest cells).
-        _spread = 0 if app_grid_type == "mpas" else 2
+        # Coastal-spread passes: MPAS now uses the Voronoi-topology smoother in
+        # load_runoff_monthly (cellsOnCell neighbour-average), so it gets the SAME
+        # spreading the structured grids always had.  MPAS needs MORE passes than
+        # lat-lon: the IDW k=4 regrid concentrates each river into ~4 Voronoi cells,
+        # so un-spread the Amazon/Arctic over-freshen their mouths by -2 to -3 PSU
+        # (regional SSS-band diagnostic); a wider coastal band fixes it.  The
+        # area-conservative renorm keeps the global total exact regardless.
+        if args.runoff_spread_passes is not None and int(args.runoff_spread_passes) < 0:
+            raise SystemExit(
+                "--runoff-spread-passes must be >= 0 "
+                f"(got {args.runoff_spread_passes})")
+        _spread = int(args.runoff_spread_passes) if args.runoff_spread_passes is not None \
+            else (4 if app_grid_type == "mpas" else 2)
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
