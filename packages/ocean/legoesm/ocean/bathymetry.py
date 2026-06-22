@@ -374,7 +374,7 @@ def laplacian_smooth_2d(arr: np.ndarray, passes: int, is_cubed: bool) -> np.ndar
     return result
 
 
-def _laplacian_smooth_voronoi(
+def laplacian_smooth_voronoi(
     arr: np.ndarray,
     cells_on_cell: np.ndarray,
     n_edges_on_cell: np.ndarray,
@@ -1146,7 +1146,7 @@ def load_bathymetry_mpas(
     # Smoothing on Voronoi mesh topology
     cells_on_cell = np.asarray(mesh.cellsOnCell)
     n_edges_on_cell = np.asarray(mesh.nEdgesOnCell)
-    depth = _laplacian_smooth_voronoi(
+    depth = laplacian_smooth_voronoi(
         depth, cells_on_cell, n_edges_on_cell, cfg.smoothing_passes,
     )
 

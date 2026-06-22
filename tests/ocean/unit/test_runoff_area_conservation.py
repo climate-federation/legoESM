@@ -72,3 +72,31 @@ def test_nemo_cell_area_metric_shape_and_total():
     earth = 4.0 * np.pi * (constants.R_earth ** 2)     # ~5.10e14 m^2
     assert abs(total - earth) / earth < 0.05           # eORCA1 tiles the globe
     assert float(A.max()) < 1.0e11                     # no dateline-seam blow-up cell
+
+
+def test_voronoi_runoff_spread_conserves_and_widens():
+    """The MPAS runoff coastal-spread path: a single-cell river spike, after the
+    Voronoi neighbour-average smooth (ocean-masked) + the area-conservative
+    renorm, MUST (a) spread to neighbours (the over-concentration fix) and
+    (b) preserve the area-integral exactly (the conservation guarantee).
+    Mirrors load_runoff_monthly's MPAS branch on a synthetic ring mesh."""
+    from legoesm.ocean.bathymetry import laplacian_smooth_voronoi
+    scale = _scale()
+    # ring of N cells; each cell's 2 neighbours are c-1, c+1 (periodic)
+    N = 12
+    coc = np.stack([(np.arange(N) - 1) % N, (np.arange(N) + 1) % N], axis=0)  # (2,N)
+    nec = np.full(N, 2, dtype=np.int64)
+    area = np.full(N, 3.0)                      # uniform cell area
+    ocean = np.ones(N, dtype=bool)
+    Rm = np.zeros(N); Rm[0] = 10.0             # all discharge in one cell
+    F_src = float((Rm * area * ocean).sum())   # the source integral to preserve
+    for _ in range(4):                         # MPAS spread passes
+        sm = np.asarray(laplacian_smooth_voronoi(Rm, coc, nec, 1))
+        Rm = np.where(ocean, sm, 0.0)
+    Rm = scale(Rm, area, ocean, F_src)
+    # (b) conservation: the area-integral is exactly the source total
+    assert abs(float((Rm * area * ocean).sum()) - F_src) / F_src < 1e-12
+    # (a) widened: the spike spread to neighbours and the peak dropped
+    assert Rm[1] > 0 and Rm[N - 1] > 0
+    assert Rm[0] < 10.0
+    assert int((Rm > 1e-9).sum()) >= 5         # spread to a coastal band

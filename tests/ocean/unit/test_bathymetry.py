@@ -31,7 +31,7 @@ from legoesm.ocean.bathymetry import (
     enforce_straits,
     rest_state_ocean_realistic,
     laplacian_smooth_2d,
-    _laplacian_smooth_voronoi,
+    laplacian_smooth_voronoi,
     _derive_ocean_fraction,
     _regrid_bathymetry,
     _fill_isolated_basins,
@@ -243,7 +243,7 @@ class TestSmoothing:
             cells_on_cell[0, c] = (c + 1) % nCells
             cells_on_cell[1, c] = (c - 1) % nCells
 
-        smoothed = _laplacian_smooth_voronoi(
+        smoothed = laplacian_smooth_voronoi(
             arr, cells_on_cell, n_edges_on_cell, passes=3,
         )
         assert np.var(smoothed) < np.var(arr)
