@@ -73,9 +73,10 @@ KNOWN_CASES: dict[str, OceananigansCaseSpec] = {
     ),
     "bickley_jet": OceananigansCaseSpec(
         name="bickley_jet",
-        # Barotropic shear instability: isolates the eddy-regime momentum
-        # (vector-invariant) advection without baroclinic/free-surface coupling.
-        prognostic_fields=("u", "v", "eta"),
+        # Barotropic shear instability: isolates the eddy-regime vector-invariant
+        # momentum advection. Deterministic twin (same IC both codes); compare the
+        # relative vorticity zeta. u,v at faces; zeta at the FF vertex.
+        prognostic_fields=("u", "v", "zeta"),
         grid_fields=_DEFAULT_GRID_FIELDS,
         default_delta_t_s=0.0,
         cyclic_x=True,  # zonally periodic jet
