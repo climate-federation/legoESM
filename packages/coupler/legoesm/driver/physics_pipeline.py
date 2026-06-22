@@ -184,6 +184,11 @@ class PhysicsPipeline:
         # When True, compute_radiation_core feeds the lagged convective precip
         # to the cloud diagnosis so the convecting tropics get radiative cloud.
         self._cloud_convective = False
+        # Optional cloud-tuning overrides (None => CloudConfig default =>
+        # byte-identical); set by build_physics_pipeline from ExperimentConfig.
+        self._cloud_rh_crit = None
+        self._cloud_q_c_diagnostic = None
+        self._cloud_conv_cloud_max = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -1079,10 +1084,21 @@ class PhysicsPipeline:
             # degrade to no convective cloud rather than tripping the loud
             # compute_cloud_properties guard.  The guard still fires for a
             # direct convective_cloud=True + conv_precip=None misconfiguration.
+            # Optional cloud-tuning overrides (None => CloudConfig default =>
+            # byte-identical).  The SW/LW knob for e.g. the coare3 moisture-
+            # driven albedo overshoot (raise rh_crit / lower q_c_diagnostic).
+            _cc_over = {}
+            if getattr(self, "_cloud_rh_crit", None) is not None:
+                _cc_over["rh_crit"] = self._cloud_rh_crit
+            if getattr(self, "_cloud_q_c_diagnostic", None) is not None:
+                _cc_over["q_c_diagnostic"] = self._cloud_q_c_diagnostic
+            if getattr(self, "_cloud_conv_cloud_max", None) is not None:
+                _cc_over["conv_cloud_max"] = self._cloud_conv_cloud_max
             cloud_config = CloudConfig(
                 scheme=cloud_scheme,
                 convective_cloud=(getattr(self, "_cloud_convective", False)
                                   and conv_precip is not None),
+                **_cc_over,
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -2094,6 +2110,9 @@ def build_physics_pipeline(grid, sigma, config):
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
+    pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
+    pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
+    pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma
