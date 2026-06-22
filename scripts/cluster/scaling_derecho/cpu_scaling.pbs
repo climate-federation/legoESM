@@ -111,9 +111,12 @@ echo "=== SWEEP: $N_CASES cases ==="
 cat "$CASE_FILE"
 
 # --- 2) Run each case under mpiexec with its matched rank count ---------------
+# Read the case list on FD 9 (not stdin): mpiexec/MPICH consume stdin, which
+# would otherwise swallow the rest of the file and end the loop after case 0.
+# Also give mpiexec its own /dev/null stdin so it never blocks on or eats input.
 rc_all=0
 i=0
-while IFS= read -r CASE; do
+while IFS= read -r -u 9 CASE; do
     [ -z "$CASE" ] && continue
     N_RANKS=$("$PY" -c 'import sys,json; print(json.loads(sys.argv[1])["n_ranks"])' "$CASE")
     echo "--- case $i: n_ranks=$N_RANKS ---"
@@ -122,14 +125,14 @@ while IFS= read -r CASE; do
         --case "$CASE" \
         --n-warmup "$N_WARMUP" \
         --n-timing "$N_TIMING" \
-        --output-dir "$OUTDIR"
+        --output-dir "$OUTDIR" < /dev/null
     rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "case $i FAILED rc=$rc"
         rc_all=$rc
     fi
     i=$((i + 1))
-done < "$CASE_FILE"
+done 9< "$CASE_FILE"
 
 echo "=== DONE rc=$rc_all ==="
 echo "results under: $OUTDIR"
