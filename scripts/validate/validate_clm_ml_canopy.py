@@ -792,7 +792,7 @@ def residual_analysis(ref, jax, t, label, unit, fname):
     n_lag = min(100, len(resid) // 2)
     acf_vals = [np.corrcoef(resid[:-k], resid[k:])[0, 1] for k in range(1, n_lag + 1)]
     axes[2].stem(range(1, n_lag + 1), acf_vals, markerfmt="C0o", linefmt="C0-",
-                 basefmt="k-", use_line_collection=True)
+                 basefmt="k-")
     conf = 1.96 / np.sqrt(len(resid))
     axes[2].axhline(conf, color="r", linewidth=0.8, linestyle="--")
     axes[2].axhline(-conf, color="r", linewidth=0.8, linestyle="--")

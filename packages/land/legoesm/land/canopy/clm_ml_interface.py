@@ -35,7 +35,7 @@ from legoesm.land.surface_scheme import SurfaceFluxOutput
 from legoesm.thermo import saturation_mixing_ratio
 
 if TYPE_CHECKING:
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.land.config import MultiLayerLandConfig
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def _setup_clm_topology(
     from clm_src_main import GridcellType as _grc_mod
     from clm_src_main.ColumnType import column_type
     from clm_src_main.PatchType import patch
-    from clm_src_main.clm_varpar import nlevsno, nlevgrnd
+    from clm_src_main.clm_varpar import nlevsno, nlevgrnd, nlevsoi
     from clm_src_main.clm_varcon import ispval
 
     n_layers = len(dz_soil)

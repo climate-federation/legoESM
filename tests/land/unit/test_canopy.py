@@ -43,7 +43,7 @@ NCOL = 2   # minimal column count for tests
 # ---------------------------------------------------------------------------
 
 def _make_forcing(ncol: int = NCOL):
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     return AtmToSurface(
         sw_down=jnp.full(ncol, 400.0),          # daytime: positive PAR
         lw_down=jnp.full(ncol, 350.0),
@@ -394,7 +394,7 @@ class TestDispatch(unittest.TestCase):
             step_multilayer_land,
             init_multilayer_land_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         ncol = 4
         config = MultiLayerLandConfig()
