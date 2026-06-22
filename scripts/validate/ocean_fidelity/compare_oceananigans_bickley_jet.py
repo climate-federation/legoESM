@@ -134,18 +134,43 @@ def main():
     o_times = np.asarray(res.times_s)
     print(f"[oracle] times={o_times}, zeta shape={res.variables['zeta'].shape}", flush=True)
 
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import curl_vertex_cgrid
+
+    def lego_zeta_interior():
+        z = np.asarray(curl_vertex_cgrid(state.u.data, state.v.data, grid))
+        # zeta at vertices (n_lat+1, n_lon+1[,1]); match the oracle's (nlat_f, nlon_f).
+        z = z[..., 0] if z.ndim == 3 else z
+        return z
+
+    o_zeta = np.asarray(res.variables["zeta"])          # (time, z, lat_f, lon_f)
+    o_nlat_f, o_nlon_f = o_zeta.shape[2], o_zeta.shape[3]
+
     step = jax.jit(lambda s: model.step(s, dt, surface_forcing=None))
+    print("\n  t_oracle | pattern_corr(zeta) | lego max|zeta| | oracle max|zeta|",
+          flush=True)
     t = 0.0
+    targets = [ot for ot in o_times if 0 < ot <= stop + 1e-9]
+    ti = 0
     for it in range(1, nsteps + 1):
         state = step(state)
         t += dt
-        if it % spd == 0 or it == nsteps:
-            umax = float(jnp.max(jnp.abs(state.u.data)))
-            fin = bool(jnp.all(jnp.isfinite(state.u.data)))
-            print(f"  t={t:6.2f}  max|u|={umax:.4e}  finite={fin}", flush=True)
-            if not fin:
-                print("  >>> legoESM blew", flush=True)
+        if ti < len(targets) and t >= targets[ti] - dt / 2:
+            if not bool(jnp.all(jnp.isfinite(state.u.data))):
+                print(f"  t={t:.1f}  >>> legoESM blew", flush=True)
                 break
+            zl = lego_zeta_interior()
+            # crop both to the common interior (strip walls / extra faces)
+            nlat = min(zl.shape[0], o_nlat_f)
+            nlon = min(zl.shape[1], o_nlon_f)
+            o_idx = int(np.argmin([abs(targets[ti] - ot) for ot in o_times]))
+            zo = o_zeta[o_idx, 0]
+            m = compare_field(zl[1:nlat, :nlon], zo[1:nlat, :nlon])
+            print(f"   {targets[ti]:6.1f}  |   {m.pattern_corr:+.4f}        | "
+                  f"{np.max(np.abs(zl)):.2f}        |  {np.max(np.abs(zo)):.2f}",
+                  flush=True)
+            ti += 1
+        if ti >= len(targets):
+            break
 
 
 if __name__ == "__main__":

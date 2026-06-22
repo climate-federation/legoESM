@@ -55,12 +55,17 @@ model = HydrostaticFreeSurfaceModel(grid; momentum_advection,
                                     free_surface, tracers = :c, buoyancy = nothing)
 set!(model, u = uᵢ, v = vᵢ, c = cᵢ)
 
-gw = sqrt(model.free_surface.gravitational_acceleration)
-Δt = 0.1 * Array(model.grid.Δxᶜᶠᵃ.parent)[5] / gw
-simulation = Simulation(model, Δt = Δt, stop_time = stop_time)
+# Unit sphere, Nh lon points: interior dx ~ 2*pi*radius/Nh ~ 0.1; gravity wave
+# speed sqrt(g). Safe initial dt; the wizard adapts up to max_Δt.
+Δt0 = 0.005
+simulation = Simulation(model, Δt = Δt0, stop_time = stop_time)
 
-progress(sim) = @printf("t=%.1f iter=%d max|u|=%.3f max|eta|=%.3e\n",
-                        time(sim), iteration(sim),
+# Adaptive dt (as in the original spherical_bickley_jet.jl) — a fixed dt NaNs.
+wizard = TimeStepWizard(cfl = 0.2, max_change = 1.1, max_Δt = 0.5)
+simulation.callbacks[:wizard] = Callback(wizard, IterationInterval(10))
+
+progress(sim) = @printf("t=%.2f iter=%d dt=%.3e max|u|=%.3f max|eta|=%.3e\n",
+                        time(sim), iteration(sim), sim.Δt,
                         maximum(abs, model.velocities.u),
                         maximum(abs, model.free_surface.displacement))
 simulation.callbacks[:progress] = Callback(progress, IterationInterval(200))
@@ -73,6 +78,6 @@ simulation.output_writers[:fields] =
     NetCDFWriter(model, outputs; filename = nc,
                  schedule = TimeInterval(dump_dt), overwrite_existing = true)
 
-@info "Running Oceananigans bickley_jet -> $nc (stop=$stop_time, dump=$dump_dt, Nh=$Nh, dt=$Δt)"
+@info "Running Oceananigans bickley_jet -> $nc (stop=$stop_time, dump=$dump_dt, Nh=$Nh, dt=$Δt0)"
 run!(simulation)
 @info "DONE: wrote $nc"
