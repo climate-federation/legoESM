@@ -145,9 +145,16 @@ def main():
     o_zeta = np.asarray(res.variables["zeta"])          # (time, z, lat_f, lon_f)
     o_nlat_f, o_nlon_f = o_zeta.shape[2], o_zeta.shape[3]
 
+    def enstrophy(z):
+        return float(np.sum(z.astype(np.float64) ** 2))
+
+    # Oracle enstrophy trajectory (statistical fidelity: does legoESM DECAY at
+    # the same rate? pointwise pattern MUST decorrelate for chaotic turbulence).
+    o_ens = {float(res.times_s[i]): enstrophy(o_zeta[i, 0]) for i in range(len(res.times_s))}
+
     step = jax.jit(lambda s: model.step(s, dt, surface_forcing=None))
-    print("\n  t_oracle | pattern_corr(zeta) | lego max|zeta| | oracle max|zeta|",
-          flush=True)
+    print("\n  t_oracle | corr(zeta) | lego_enstrophy | oracle_enstrophy | "
+          "ens_ratio(lego/oracle)", flush=True)
     t = 0.0
     targets = [ot for ot in o_times if 0 < ot <= stop + 1e-9]
     ti = 0
@@ -166,9 +173,10 @@ def main():
             zo = o_zeta[o_idx, 0]
             zl_a = zl[1:1 + o_nlat_f, :o_nlon_f]
             m = compare_field(zl_a, zo)
-            print(f"   {targets[ti]:6.1f}  |   {m.pattern_corr:+.4f}        | "
-                  f"{np.max(np.abs(zl)):.2f}        |  {np.max(np.abs(zo)):.2f}",
-                  flush=True)
+            el = enstrophy(zl_a)
+            eo = o_ens[float(o_times[o_idx])]
+            print(f"   {targets[ti]:6.1f}  |  {m.pattern_corr:+.4f}   | "
+                  f"{el:12.2f} | {eo:14.2f} | {el / eo:.3f}", flush=True)
             ti += 1
         if ti >= len(targets):
             break
