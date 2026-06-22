@@ -259,9 +259,10 @@ def _plot(clim, mT, skt, cols, scheme):  # pragma: no cover - I/O
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from legoesm import constants
     lat1, lon1 = clim["lat"], clim["lon"]; nlat, nlon = lat1.size, lon1.size
-    Tm = np.full(nlat * nlon, np.nan); Tm[cols] = mT.mean(0) - 273.15
-    Ts = np.full(nlat * nlon, np.nan); Ts[cols] = skt.mean(0) - 273.15
+    Tm = np.full(nlat * nlon, np.nan); Tm[cols] = mT.mean(0) - constants.T_freeze
+    Ts = np.full(nlat * nlon, np.nan); Ts[cols] = skt.mean(0) - constants.T_freeze
     Tm = Tm.reshape(nlat, nlon); Ts = Ts.reshape(nlat, nlon)
     fig, ax = plt.subplots(1, 3, figsize=(20, 4.5))
     for a, d, t, cm, vlo, vhi in [
