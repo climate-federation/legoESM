@@ -159,12 +159,13 @@ def main():
                 print(f"  t={t:.1f}  >>> legoESM blew", flush=True)
                 break
             zl = lego_zeta_interior()
-            # crop both to the common interior (strip walls / extra faces)
-            nlat = min(zl.shape[0], o_nlat_f)
-            nlon = min(zl.shape[1], o_nlon_f)
+            # Alignment validated against the t=0 IC (corr 0.9999): legoESM
+            # interior lat-vertices start at row 1 (skip the 1 wall row); lon
+            # vertices 0:nlon_f match the oracle's periodic faces.
             o_idx = int(np.argmin([abs(targets[ti] - ot) for ot in o_times]))
             zo = o_zeta[o_idx, 0]
-            m = compare_field(zl[1:nlat, :nlon], zo[1:nlat, :nlon])
+            zl_a = zl[1:1 + o_nlat_f, :o_nlon_f]
+            m = compare_field(zl_a, zo)
             print(f"   {targets[ti]:6.1f}  |   {m.pattern_corr:+.4f}        | "
                   f"{np.max(np.abs(zl)):.2f}        |  {np.max(np.abs(zo)):.2f}",
                   flush=True)
