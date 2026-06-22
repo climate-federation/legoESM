@@ -114,13 +114,23 @@ momentum instability, independent of the barotropic free surface — most likely
 the GH#480 boundary-localized 2Δx-in-lon mode at the N/S free-slip walls, not
 fully suppressed at α=0.
 
-**Next (research-level):** CASE-3 leads are now exhausted at the config +
-GPU-experiment level (WENO momentum, Coriolis scheme, free-surface solver — all
-ruled out). The residual is a genuine research-level wall/eddy-scale
-WENO-momentum instability at α=0. Tracked by the standing §5 effort on
-`fix/silvestri-turbulent-dissipation`. (The verified finding that the §5 oracle
-uses ImplicitFreeSurface still stands and corrects the setup comment — it is just
-not the blow-up lever.)
+**Residual located (coefficient-level source comparison):** legoESM's WENO-9
+reconstruction is FAITHFUL at the formula level — optimal weights match
+Oceananigans' `C★` (same set, stencil-ordering convention only), smoothness =
+Don&Borges, reconstruction = standard Lagrange in both. So the 2Δx-dissipation
+residual is **NOT in the WENO kernel** — it is in the **C-grid application** of
+the vector-invariant momentum (discrete curl / KE-gradient metric operators,
+staggering, collocation) on legoESM's **latlon C-grid** vs the oracle's
+**Cartesian RectilinearGrid beta-plane**. CASE 2's bickley enstrophy excess and
+CASE 3's §5 wall blow-up are the SAME residual (2Δx grid-scale under-dissipation).
+
+**Next (research-level):** the vector-invariant momentum's C-grid metric /
+collocation at the 2Δx scale (NOT the 1D WENO kernel, which is bit-faithful) —
+why the discrete curl/KE-gradient on a latlon C-grid under-dissipates the 2Δx-in-
+lon mode vs a Cartesian FV grid. Tracked by the standing §5 effort on
+`fix/silvestri-turbulent-dissipation`. (The verified §5-oracle-uses-
+ImplicitFreeSurface finding stands and corrects the setup comment — not the
+blow-up lever.)
 
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
