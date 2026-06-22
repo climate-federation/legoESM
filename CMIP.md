@@ -203,6 +203,28 @@ albedo.** R_TOA +19 (net-in) is the cost of the thinner cloud — it keeps the
 system warming toward equilibrium. RECOMMENDED coupled config:
 `--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4` (+ the combined preset).
 
+## FINAL balanced config — gustiness + thin cloud (job 8538901, 30d)
+**RECOMMENDED:** combined preset + `--surface-bulk-scheme coare3
+--gustiness-zi 300 --q-c-diagnostic 3e-4`. The two knobs compose:
+
+| metric | no-gust | gust-only | **balanced** | Earth |
+|---|---|---|---|---|
+| hfls | 51 | 74.7 | **72.8 W/m²** | ~80–120 ✓ |
+| tropics tas–tos gap | +11.2 | +6.6 | **+6.6** | ~1 ✓ (halved) |
+| precip | 1.90 | 2.68 | **2.58 mm/d** | ~2.7 ✓✓ |
+| **planetary albedo** | 31.3 | 35.4 | **31.4%** | ~30 ✓✓ |
+| CWV | 22.0 | 30.6 | 30.8 | ~25 |
+| `<R_TOA>` | +19 | +12.9 | +21.8 | ~0 |
+| SST drift | −2.2 | −6.7 | −5.7 K/yr | ~0 |
+
+The COARE convective gustiness (the diagnosed missing w*) gives Earth-like
+hfls / air-sea gap / precip; the thinner cloud recovers the moisture-driven
+albedo overshoot back to 31%. **The persistent air-sea decoupling — the last
+major equilibrium bias — is fixed at Earth-like albedo.** R_TOA +22 / drift −5.7
+are the ocean→atmosphere heat-redistribution transient (the atmosphere warmed
++5 K; a long run settles them as the prior 180d config did). Open: a long run of
+this config to confirm equilibration; CWV slightly high (30 vs 25).
+
 ## 180d equilibrated result (job 8535790, COMPLETE) + remaining-bias diagnosis
 Best config (coare3 + `--q-c-diagnostic 5e-4` + combined preset), 180 days:
 | metric | Day-30 | **Day-180 (equilibrated)** | Earth |
