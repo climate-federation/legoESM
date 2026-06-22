@@ -941,7 +941,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
-                     runoff_depth_spread_m=None, mle=None):
+                     runoff_depth_spread_m=None, mle=None,
+                     vertical_mixing=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -966,6 +967,11 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
         dz_ref_override=dz_ref_override,
+        # KPP boundary-layer-depth sensitivity override (Ri_crit / Cv).  None
+        # -> _create_setup builds the default KPPConfig (byte-identical to the
+        # pre-flag runs); a custom VerticalMixingConfig deepens/shoals the
+        # diagnosed-too-shallow subtropical mixed layer (MLD ~half of NEMO).
+        vertical_mixing=vertical_mixing,
     )
     # Faithful EXTERNAL surface-forcing contract: the CORE-II tau/q_net from
     # compute_omip2_surface_forcing is deposited by mpas_physics (it negates +
@@ -1128,6 +1134,70 @@ def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
     if cur > 0.0:
         return field * (float(target_integral) / cur)
     return field
+
+
+# --- KPP boundary-layer-depth sensitivity (vmix structural-residual lever) ---
+# Diagnosis (2026-06-22): the OMIP subtropical mixed layer is ~half of NEMO
+# (MLD bias -35 m NH-subtropics, model-wide MPAS == tripole, NOT spin-up), so
+# surface heat + freshwater fluxes are trapped in a too-thin top layer -> the
+# subtropical surface warm+fresh bias.  KPP sets h_bl where the bulk Richardson
+# number Ri_b crosses ``Ri_crit``; deepening the layer is a one-knob lever via
+# Ri_crit (the threshold) or Cv (the unresolved-shear V_t^2 coefficient).  These
+# helpers expose the two knobs WITHOUT mutating the production KPPConfig default.
+#
+# Accepted ranges (reject parameter-abuse runs that collapse the experiment):
+#   Ri_crit -> the KPPConfig ``__param_spec__`` tunable-tier-2 bounds
+#              (Large et al. 1994); outside this the BL diagnosis is unphysical.
+#   Cv      -> Cv is NOMINALLY a FIXED LMD94 constant (1.6, no tunable bound in
+#              the spec); this band is an EXPLICIT experimental sensitivity
+#              range, intentionally wider, not a tuning tier.
+_KPP_RI_CRIT_RANGE = (0.099, 0.9)
+_KPP_CV_RANGE = (0.5, 5.0)
+
+
+def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
+    """Build a KPP ``VerticalMixingConfig`` overriding ONLY the CLI-set knobs.
+
+    Returns ``None`` when neither knob is given so the caller falls through to
+    ``_create_setup``'s default ``VerticalMixingConfig(scheme="kpp")`` — i.e.
+    byte-for-byte the pre-flag config (no silent re-defaulting of the other
+    KPP fields).  ``Ri_crit`` / ``Cv`` must be finite and within their accepted
+    range (see ``_KPP_RI_CRIT_RANGE`` / ``_KPP_CV_RANGE``)."""
+    if kpp_ri_crit is None and kpp_cv is None:
+        return None
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, VerticalMixingConfig,
+    )
+
+    def _check(name, val, rng):
+        lo, hi = rng
+        if not (np.isfinite(val) and lo <= val <= hi):
+            raise ValueError(
+                f"--{name} must be finite and within [{lo}, {hi}] "
+                f"(physical KPP boundary-layer range); got {val!r}.")
+
+    kpp = KPPConfig()
+    if kpp_ri_crit is not None:
+        _check("kpp-ri-crit", kpp_ri_crit, _KPP_RI_CRIT_RANGE)
+        kpp = kpp._replace(Ri_crit=float(kpp_ri_crit))
+    if kpp_cv is not None:
+        _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
+        kpp = kpp._replace(Cv=float(kpp_cv))
+    return VerticalMixingConfig(scheme="kpp", kpp=kpp)
+
+
+def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
+    """Reject the KPP override flags on grids whose CORE-II builder does not yet
+    thread ``vertical_mixing`` (a flag that silently does nothing is the
+    dispatch footgun CLAUDE.md forbids).  Only ``--grid mpas`` is wired for the
+    verify-first MLD sensitivity; the other builders are extended once the lever
+    is confirmed."""
+    if (kpp_ri_crit is not None or kpp_cv is not None) and grid != "mpas":
+        raise SystemExit(
+            f"--kpp-ri-crit/--kpp-cv are wired for --grid mpas only "
+            f"(the MLD-deepening sensitivity), not --grid {grid!r}. The "
+            f"tripole/latlon_bathy/cubed_sphere builders thread the KPP "
+            f"override in a follow-up once the lever is confirmed.")
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
@@ -2455,6 +2525,17 @@ def main() -> int:
                         "--convection enhanced_diffusion (default 1.0).")
     p.add_argument("--convection-K-bg", type=float, default=1e-5,
                    help="Background diffusivity K_bg [m^2/s] for convection.")
+    p.add_argument("--kpp-ri-crit", type=float, default=None,
+                   help="Override the KPP critical bulk Richardson number "
+                        "(default 0.3 = LMD94/MOM6). RAISING it deepens the "
+                        "boundary layer -- the lever for the diagnosed "
+                        "subtropical MLD ~half of NEMO (surface warm+fresh "
+                        "trap). --grid mpas only (verify-first sensitivity).")
+    p.add_argument("--kpp-cv", type=float, default=None,
+                   help="Override the KPP unresolved-shear coefficient Cv "
+                        "(default 1.6). RAISING it increases V_t^2 -> deeper "
+                        "boundary layer (same MLD-deepening lever as "
+                        "--kpp-ri-crit). --grid mpas only.")
     p.add_argument("--mle", action="store_true",
                    help="Enable the Fox-Kemper mixed-layer-eddy (MLE) "
                         "restratification (NEMO tramle nn_mle=1): a bolus "
@@ -2506,6 +2587,9 @@ def main() -> int:
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
     args = p.parse_args()
+
+    # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
+    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
 
     if args.ice_thermo:   # codex LOW: reject unphysical prescribed-ice params early
         if not (0.0 <= float(args.ice_thermo_sw_trans) <= 1.0):
@@ -2698,6 +2782,7 @@ def main() -> int:
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
         )
         app_grid_type = "mpas"
     else:
@@ -3388,6 +3473,18 @@ def main() -> int:
                     _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
                 sf, fw = _route_ice_response_to_ocean(
                     sf, fw, ice_resp, state.land_mask.data, _ice_conc)
+            if step == 1 and fw is not None:                 # [fwbudget] DIAG (temp)
+                _Ab = np.asarray(grid.areaCell if hasattr(grid, "areaCell")
+                                 else grid.area)
+                _wb = np.asarray(state.land_mask.data) > 0.5
+                _ig = lambda _x: (float((np.asarray(_x) * _Ab * _wb).sum()) / 1.0e9
+                                  if _x is not None else 0.0)   # noqa: E731
+                _P, _E, _Rn, _Ic = (_ig(fw.precip), _ig(fw.evap),
+                                     _ig(fw.runoff), _ig(fw.ice_fw))
+                print(f"[fwbudget] {app_grid_type}: P={_P:+.4f} E={_E:+.4f} "
+                      f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
+                      f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
+                      f"area-wtd over wet)", flush=True)
             state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
