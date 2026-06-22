@@ -299,6 +299,13 @@ def compute_most_fluxes(
     q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
 
     carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
+    # The MOST iteration mixes the (possibly float32) input state with float64
+    # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
+    # carry leaf would silently promote float32 -> float64 mid-loop and trip
+    # ``fori_loop``'s equal-types invariant.  This only bites the float32
+    # atmosphere coupled path; the OMIP ocean path runs float64 so the re-casts
+    # below are no-ops (byte-identical).  Pin each leaf back to its input dtype.
+    _carry_dtypes = tuple(c.dtype for c in carry)
 
     def body_fn(i, carry):
         u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
@@ -432,7 +439,12 @@ def compute_most_fluxes(
         return (u_star_new, z0_new, z0_t_new, z0_q_new,
                 theta_star_new, q_star_new)
 
-    carry = jax.lax.fori_loop(0, n_iter, body_fn, carry)
+    def _body_fn_dtype_stable(i, carry):
+        out = body_fn(i, carry)
+        return tuple(jnp.asarray(o).astype(d)
+                     for o, d in zip(out, _carry_dtypes))
+
+    carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
     u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
 
     # Fluxes from scaling parameters

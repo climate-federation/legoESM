@@ -1342,6 +1342,14 @@ class ModelDriver:
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
         )
+        # Register per-cell horizontal areas so every global-mean diagnostic
+        # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
+        # unweighted ``jnp.mean`` over-weights the polar rows (each cell counts
+        # equally despite spanning ~cos(lat) less area), which biased <rsdt> to
+        # ~281 W/m² and faked a -36 W/m² "cold drift" where the area-weighted
+        # TOA budget is near balance.  ``grid_area`` is grid-agnostic (lat-lon
+        # (n_lat,n_lon), cube (6,n,n)); grids without it keep the plain mean.
+        self.diagnostics.set_area_weights(getattr(self.grid, "grid_area", None))
         # Configure CMIP spatial regridding weights
         if self.config.output.cmip_output:
             self.diagnostics.set_cmip_grid_info(
@@ -5396,6 +5404,14 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Persist the lagged convective-cloud precip ACROSS segment
+                # boundaries (radiation runs before convection; without this the
+                # lag would reset to zeros at step 0 of every segment).  Only the
+                # single-member path is threaded (ensemble carries an extra axis
+                # pack_carry doesn't expect); ensemble runs are not the realism
+                # target, so they reset per segment.
+                conv_precip_prev=(getattr(self, "_conv_precip_prev", None)
+                                  if self._ensemble_size == 1 else None),
                 T_land=T_land,
                 tke=phys_tke,
                 qke=phys_qke,
@@ -5451,6 +5467,11 @@ class ModelDriver:
                     carry = run_segment.run_rad(carry, forcing)
             else:
                 carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
+
+            # Carry the lagged convective-cloud precip into the next segment
+            # (single-member only — see pack_carry above).
+            if self._ensemble_size == 1:
+                self._conv_precip_prev = carry.conv_precip_prev
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)

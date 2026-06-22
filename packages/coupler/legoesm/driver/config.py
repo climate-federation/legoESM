@@ -273,6 +273,28 @@ class ExperimentConfig(NamedTuple):
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
+    # convection scheme (sbm) holds the column subsaturated, so the convecting
+    # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
+    # True, the convective precip rate drives a bounded cumulus cover in the
+    # cloud diagnosis (see CloudConfig.convective_cloud).  Default False =>
+    # byte-identical to the validated stratiform-only path.
+    convective_cloud: bool = False
+    # Optional cloud-tuning overrides for the diagnostic stratiform/convective
+    # cloud (None => CloudConfig defaults => byte-identical).  Exposed so a
+    # coupled run can trade SW (planetary albedo) vs LW (greenhouse / surface
+    # LW_down) without editing CloudConfig in source:
+    #   cloud_rh_crit        — Sundqvist critical RH; HIGHER => less stratiform
+    #                          cloud (lower albedo).  Bounds (0.5, 0.99).
+    #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
+    #                          optically THINNER cloud (lower albedo, still
+    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
+    cloud_rh_crit: float | None = None
+    cloud_q_c_diagnostic: float | None = None
+    cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
     # Aerosol-CCN coupling: diagnose the specified cloud-droplet number
     # from the prescribed aerosol optical depth (Andreae 2009 AOT–CCN
@@ -284,6 +306,15 @@ class ExperimentConfig(NamedTuple):
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
+    # Surface-layer bulk-flux algorithm (SurfaceLayerConfig.bulk_scheme):
+    # "constant" (neutral coefficients; DEFAULT, byte-identical) | "coare3" |
+    # "large_yeager".  The constant scheme has NO convective-gustiness term, so
+    # evaporation over a calm, convectively-unstable warm tropical ocean is
+    # anemic (cold/dry surface-air bias).  The stability-dependent MOST schemes
+    # add the free-convection velocity scale w*.  For interface energy
+    # consistency the coupler ocean tile (CouplerConfig.bulk_scheme) MUST use the
+    # same scheme — run_coupled wires both together.
+    surface_bulk_scheme: str = "constant"
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
@@ -564,6 +595,37 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
+        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        if self.surface_bulk_scheme not in _valid_surface_bulk:
+            errors.append(
+                f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
+                f"got {self.surface_bulk_scheme!r}"
+            )
+        # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
+        # (via _resolve_turbulence on the turbulence config).  With
+        # turbulence="none" there is no SurfaceLayerConfig to update, so the
+        # atmosphere would silently stay on its fallback fluxes while the
+        # ocean/coupler tiles switch to MOST — an inconsistent interface.  Reject
+        # loudly (codex review HIGH#2).
+        if self.surface_bulk_scheme != "constant" and self.turbulence == "none":
+            errors.append(
+                f"surface_bulk_scheme={self.surface_bulk_scheme!r} requires a "
+                f"turbulence scheme (turbulence != 'none') so the atmosphere "
+                f"surface layer uses the same bulk-flux algorithm as the ocean "
+                f"tile; got turbulence='none'."
+            )
+        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        for _f, _lo, _hi in (
+            ("cloud_rh_crit", 0.5, 0.99),
+            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            ("cloud_conv_cloud_max", 0.1, 1.0),
+        ):
+            _v = getattr(self, _f)
+            if _v is not None and not (_lo <= _v <= _hi):
+                errors.append(
+                    f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",

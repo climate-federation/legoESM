@@ -19,6 +19,8 @@ from legoesm import constants
 from legoesm.diagnostics.energy_budget import (
     EnergyBudget,
     EnergyBudgetTracker,
+    area_weighted_mean,
+    area_weighted_profile,
     column_dry_static_energy,
     column_moist_static_energy,
     surface_energy_flux,
@@ -419,3 +421,143 @@ class TestEnergyBudgetTracker:
                                 *fluxes, elapsed_seconds=0.0)
         # c_p * T * p_s / g ≈ 1005 * 280 * 1e5 / 9.81 ≈ 2.87e9 J/m²
         assert 1e9 < budget.column_energy < 5e9
+
+
+class TestAreaWeightedMean:
+    """Tests for the area-weighted global-mean helper.
+
+    The bug it fixes: a plain ``jnp.mean`` over a lat-lon grid weights each
+    cell equally, so the polar rows (spanning ~cos(lat) less area) over-count
+    and bias every global mean toward the cold high latitudes — on a coupled
+    run this faked a -36 W/m² TOA "cold drift" where the area-weighted budget
+    is near balance.
+    """
+
+    def test_none_area_is_plain_mean(self):
+        f = jnp.arange(12.0).reshape(3, 4)
+        npt.assert_allclose(float(area_weighted_mean(f, None)), float(jnp.mean(f)))
+
+    def test_uniform_area_equals_plain_mean(self):
+        # Cube cells are ~equal area: a uniform weight must reproduce jnp.mean.
+        f = jnp.asarray([[1.0, 2.0], [3.0, 4.0]])
+        npt.assert_allclose(
+            float(area_weighted_mean(f, jnp.ones_like(f))), float(jnp.mean(f)),
+        )
+
+    def test_unnormalized_weight_ok(self):
+        # Weight need not sum to 1; only ratios matter.
+        f = jnp.asarray([[1.0, 3.0]])
+        w = jnp.asarray([[2.0, 6.0]])  # 8x the canonical weight
+        npt.assert_allclose(
+            float(area_weighted_mean(f, w)), (1.0 * 2 + 3.0 * 6) / 8.0,
+        )
+
+    def test_latlon_cos_lat_recovers_s0_over_4(self):
+        """Synthetic equinox TOA insolation (S_0/pi)*cos(lat) area-averages to S_0/4.
+
+        This is the exact failure mode that produced <rsdt>~281: the
+        unweighted mean lands at S_0*2/pi^2 ~ 276; the cos(lat) area-weighted
+        mean recovers the energy-conserving S_0/4 = 340.
+        """
+        lat = jnp.deg2rad(jnp.linspace(-89.0, 89.0, 90))
+        S0 = constants.S_0
+        rsdt = (S0 / jnp.pi) * jnp.cos(lat)[:, None] * jnp.ones((1, 6))
+        area = jnp.cos(lat)[:, None] * jnp.ones((1, 6))
+        unweighted = float(jnp.mean(rsdt))
+        weighted = float(area_weighted_mean(rsdt, area))
+        # Unweighted under-reads; area-weighted nails S_0/4 (uniform-lat
+        # quadrature of cos^2 vs cos is exact to <1 W/m² at 90 bands).
+        assert unweighted < S0 / 4 - 50.0
+        npt.assert_allclose(weighted, S0 / 4.0, atol=1.0)
+
+    def test_trailing_vertical_axis_averaged_uniformly(self):
+        # A (H..., nlev) field: vertical averaged uniformly, horizontal
+        # area-weighted. A constant field returns the constant.
+        f = jnp.ones((3, 4, 7)) * 5.0
+        area = jnp.cos(jnp.deg2rad(jnp.linspace(-80, 80, 3)))[:, None] * jnp.ones((1, 4))
+        npt.assert_allclose(float(area_weighted_mean(f, area)), 5.0)
+
+    def test_shape_mismatch_falls_back_to_plain_mean(self):
+        # An ocean field on a different grid than the supplied area must not
+        # broadcast silently — it falls back to an unweighted mean.
+        f = jnp.arange(20.0).reshape(5, 4)
+        area = jnp.ones((3, 4))  # wrong horizontal shape
+        npt.assert_allclose(float(area_weighted_mean(f, area)), float(jnp.mean(f)))
+
+    def test_profile_retains_vertical_and_weights_horizontal(self):
+        lat = jnp.deg2rad(jnp.linspace(-89.0, 89.0, 90))
+        area = jnp.cos(lat)[:, None] * jnp.ones((1, 6))
+        # Per-level constant -> profile equals that constant at every level.
+        field = jnp.ones((90, 6, 3)) * jnp.asarray([2.0, 4.0, 6.0])
+        prof = area_weighted_profile(field, area)
+        assert prof.shape == (3,)
+        npt.assert_allclose(prof, jnp.asarray([2.0, 4.0, 6.0]), atol=1e-10)
+
+    def test_profile_none_area_is_plain_horizontal_mean(self):
+        field = jnp.arange(2 * 3 * 4.0).reshape(2, 3, 4)
+        npt.assert_allclose(
+            area_weighted_profile(field, None), jnp.mean(field, axis=(0, 1)),
+        )
+
+    def test_profile_shape_mismatch_falls_back(self):
+        # Mismatched horizontal area must not broadcast: fall back to a plain
+        # horizontal mean (same guard as the scalar helper).
+        field = jnp.arange(5 * 4 * 3.0).reshape(5, 4, 3)
+        area = jnp.ones((3, 4))  # wrong horizontal shape
+        npt.assert_allclose(
+            area_weighted_profile(field, area), jnp.mean(field, axis=(0, 1)),
+        )
+
+
+class TestTrackerAreaWeighting:
+    """The trackers must thread ``area_weights`` into their global means."""
+
+    def test_energy_tracker_area_weights_change_toa(self):
+        nlat, nlon = 16, 8
+        lat = jnp.deg2rad(jnp.linspace(-84.0, 84.0, nlat))
+        nlev = 6
+        sigma_full, dsigma = _make_sigma(nlev)
+        shp = (nlat, nlon, nlev)
+        T = jnp.ones(shp) * 280.0
+        q_v = jnp.ones(shp) * 1e-3
+        u = jnp.zeros(shp)
+        v = jnp.zeros(shp)
+        phis = jnp.zeros((nlat, nlon))
+        p_s = jnp.ones((nlat, nlon)) * 1e5
+        # Latitudinally varying TOA SW down so weighting actually matters.
+        sw_down = (jnp.cos(lat)[:, None] * jnp.ones((1, nlon))) * 400.0
+        sw_up = jnp.ones((nlat, nlon)) * 80.0
+        lw_up = jnp.ones((nlat, nlon)) * 240.0
+        sw_sfc = jnp.ones((nlat, nlon)) * 150.0
+        lw_sfc = jnp.ones((nlat, nlon)) * -50.0
+        area = jnp.cos(lat)[:, None] * jnp.ones((1, nlon))
+
+        plain = EnergyBudgetTracker().update(
+            T, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            sw_down, sw_up, lw_up, sw_sfc, lw_sfc, elapsed_seconds=0.0,
+        )
+        wtd = EnergyBudgetTracker().update(
+            T, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            sw_down, sw_up, lw_up, sw_sfc, lw_sfc, elapsed_seconds=0.0,
+            area_weights=area,
+        )
+        # cos(lat) weight emphasises the bright equator -> larger <SW_down>.
+        assert wtd.toa_sw_down > plain.toa_sw_down + 5.0
+        # The flat fields are unchanged by weighting.
+        npt.assert_allclose(wtd.toa_sw_up, plain.toa_sw_up, atol=1e-6)
+
+    def test_moisture_tracker_accepts_area_weights(self):
+        nlat, nlon, nlev = 8, 4, 5
+        _, dsigma = _make_sigma(nlev)
+        q_v = jnp.ones((nlat, nlon, nlev)) * 5e-3
+        p_s = jnp.ones((nlat, nlon)) * 1e5
+        precip = jnp.ones((nlat, nlon)) * 1e-5
+        lat = jnp.deg2rad(jnp.linspace(-80, 80, nlat))
+        area = jnp.cos(lat)[:, None] * jnp.ones((1, nlon))
+        from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
+        b = MoistureBudgetTracker().update(
+            q_v, p_s, dsigma, precip, elapsed_seconds=0.0, area_weights=area,
+        )
+        # Uniform fields: weighting leaves the means physically sensible.
+        assert b.precip_rate > 0.0
+        assert b.column_water > 0.0

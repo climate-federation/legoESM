@@ -138,6 +138,21 @@ def main():
                                  "mynn25", "clubb", "edmf", "none"],
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
+    parser.add_argument("--surface-bulk-scheme", default="constant",
+                        choices=["constant", "coare3", "large_yeager"],
+                        help="Air-sea surface bulk-flux algorithm. Applied "
+                             "CONSISTENTLY to the atmosphere surface layer, the "
+                             "slab/two-layer ocean heat budget, and the coupler "
+                             "ocean tile (so the turbulent heat leaving the ocean "
+                             "matches the heat entering the atmosphere). "
+                             "NOTE: the land / lake / sea-ice tiles keep their "
+                             "own bulk_scheme. 'constant' (default, byte-"
+                             "identical) = neutral coefficients, no gustiness. "
+                             "'coare3'/'large_yeager' = stability-dependent MOST "
+                             "with convective-gustiness w* — fixes anemic "
+                             "evaporation over a calm, convectively-unstable warm "
+                             "ocean (cold/dry surface-air bias). Requires a "
+                             "turbulence scheme (not --turbulence none).")
     parser.add_argument("--gravity-wave-drag", default="hines",
                         choices=["rayleigh", "lindzen", "mcfarlane", "hines",
                                  "prognostic_spectral", "e3sm_cam", "ml_emulator",
@@ -146,6 +161,32 @@ def main():
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
                         help="Cloud-fraction scheme (default: sundqvist)")
+    parser.add_argument("--convective-cloud", dest="convective_cloud",
+                        action="store_true", default=False,
+                        help="Add a bounded Slingo(1987) convective cumulus "
+                             "cloud-fraction source driven by the (lagged) "
+                             "convective precip — restores the tropical "
+                             "cloud-radiative effect the adjustment convection "
+                             "scheme (sbm) + RH-based cloud miss (the ~4.5 K "
+                             "coupled cold-bias fix).  Default off.")
+    parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float,
+                        default=None,
+                        help="Override Sundqvist critical RH (CloudConfig."
+                             "rh_crit). HIGHER => less stratiform cloud => LOWER "
+                             "planetary albedo. Range [0.5, 0.99]. Default: "
+                             "CloudConfig default (byte-identical). The SW knob "
+                             "for the coare3 moisture-driven albedo overshoot.")
+    parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic",
+                        type=float, default=None,
+                        help="Override diagnostic in-cloud condensate [kg/kg] "
+                             "(CloudConfig.q_c_diagnostic). LOWER => optically "
+                             "THINNER cloud => lower albedo, still LW-active. "
+                             "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+    parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
+                        type=float, default=None,
+                        help="Override convective (Slingo) cloud-cover cap "
+                             "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
+                             "Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
@@ -204,6 +245,16 @@ def main():
                              "classification + reference soil map (downloaded + "
                              "cached on first use). 'analytical' = latitude-band "
                              "PFT fractions, no soil map.")
+    parser.add_argument("--snow-albedo-feedback", dest="snow_albedo_feedback",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable the land snow-albedo feedback + latitude-"
+                             "varying vegetation albedo (surface_albedo: veg "
+                             "0.15 tropics / 0.20 midlat / 0.25 highlat, with "
+                             "snow-covered land brightening toward ~0.6-0.8).  "
+                             "OFF (default) leaves land at a constant 0.2 — too "
+                             "DARK over snow-covered high-latitude land (should "
+                             "be bright snow).  Recommended ON for realistic "
+                             "land/cryosphere surface albedo.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -410,8 +461,13 @@ def main():
         ic_path=args.ic_path,
         convection=args.convection,
         turbulence=args.turbulence,
+        surface_bulk_scheme=args.surface_bulk_scheme,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
+        convective_cloud=args.convective_cloud,
+        cloud_rh_crit=args.cloud_rh_crit,
+        cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
+        cloud_conv_cloud_max=args.cloud_conv_cloud_max,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,
@@ -482,11 +538,15 @@ def main():
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
+            # Match the slab heat-budget turbulent fluxes to the atmosphere
+            # surface layer (interface energy consistency); see SimpleOceanConfig.
+            bulk_scheme=args.surface_bulk_scheme,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
+            bulk_scheme=args.surface_bulk_scheme,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"
@@ -506,12 +566,38 @@ def main():
 
     coupled_cfg = PRESETS[args.preset](**overrides)
 
+    # Land snow-albedo feedback + lat-varying vegetation albedo (opt-in): the
+    # presets build the land config with snow_albedo_feedback=False, which holds
+    # land at a constant 0.2 — too dark over snow-covered high-latitude land.
+    # Enabling it activates the surface_albedo veg-by-latitude + snow-brightening
+    # scheme (both slab and multilayer land read config.snow_albedo_feedback).
+    if (getattr(args, "snow_albedo_feedback", False)
+            and coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                snow_albedo_feedback=True))
+        logger.info("  Land albedo: snow-albedo feedback + lat-varying "
+                    "vegetation albedo ENABLED")
+
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
+    # Keep the coupler ocean-tile bulk-flux scheme consistent with the
+    # atmosphere surface layer (interface energy balance: the flux leaving the
+    # slab must match the flux entering the atmosphere).  Only override when the
+    # user opts out of "constant" so the default run stays byte-identical (the
+    # driver builds the default CouplerConfig when coupler_config is None).
+    coupler_config = None
+    if args.surface_bulk_scheme != "constant":
+        from legoesm.coupler.config import CouplerConfig
+        coupler_config = CouplerConfig(bulk_scheme=args.surface_bulk_scheme)
+        logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
+                    "ocean tile)", args.surface_bulk_scheme)
+
     driver = CoupledESMDriver(
-        atm_config, coupled_cfg, ocean_grid=ocean_grid_obj,
-        output_dir=args.output,
+        atm_config, coupled_cfg, coupler_config=coupler_config,
+        ocean_grid=ocean_grid_obj, output_dir=args.output,
     )
 
     t0 = time.time()
