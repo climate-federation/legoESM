@@ -64,9 +64,13 @@ class OceananigansNetCDF(NamedTuple):
     attrs: dict
 
 
-# Coordinate vectors Oceananigans writes for a LatitudeLongitudeGrid /
-# RectilinearGrid. A given file carries only the coords its dumped fields need.
-_KNOWN_COORDS: tuple[str, ...] = ("xC", "xF", "yC", "yF", "zC", "zF")
+# Oceananigans names its staggered coordinate vectors by location code, and the
+# scheme has changed across versions:
+#   - older: ``xC/xF, yC/yF, zC/zF``
+#   - v0.110.x (LatitudeLongitudeGrid): ``λ_caa/λ_faa`` (lon Center/Face),
+#     ``φ_aca/φ_afa`` (lat Center/Face), ``z_aac/z_aaf`` (depth Center/Face).
+# Rather than hard-code a list (which silently drops coords on a version bump),
+# the reader captures EVERY 1-D coordinate/variable generically (see below).
 
 
 def read_oceananigans_netcdf(
@@ -122,11 +126,19 @@ def read_oceananigans_netcdf(
         var_arrays = {
             name: np.asarray(ds[name].values) for name in selected
         }
-        coords = {
-            name: np.asarray(ds[name].values)
-            for name in _KNOWN_COORDS
-            if name in ds.coords or name in ds.variables
-        }
+        # Capture every 1-D coordinate vector generically (version-agnostic):
+        # both xarray coords and any 1-D data variable whose name matches its
+        # single dimension (Oceananigans writes coord vectors as such).
+        coords: dict = {}
+        for name in ds.coords:
+            arr = np.asarray(ds[name].values)
+            if arr.ndim == 1:
+                coords[str(name)] = arr
+        for name in ds.variables:
+            v = ds[name]
+            if (str(name) not in coords and v.ndim == 1
+                    and v.dims[0] == name):
+                coords[str(name)] = np.asarray(v.values)
         times = (
             np.asarray(ds["time"].values)
             if "time" in ds.variables or "time" in ds.coords

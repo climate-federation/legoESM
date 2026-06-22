@@ -59,8 +59,9 @@ _DEFAULT_GRID_FIELDS: tuple[str, ...] = ("xC", "xF", "yC", "yF", "zC", "zF")
 KNOWN_CASES: dict[str, OceananigansCaseSpec] = {
     "barotropic_gyre": OceananigansCaseSpec(
         name="barotropic_gyre",
-        # Homogeneous wind-driven gyre: barotropic flow + free surface only.
-        prognostic_fields=("u", "v", "eta"),
+        # Homogeneous wind-driven gyre: barotropic flow (velocities). The 2-D
+        # free surface eta is a follow-up (v0.110.x NetCDFWriter z-coord quirk).
+        prognostic_fields=("u", "v"),
         grid_fields=_DEFAULT_GRID_FIELDS,
         default_delta_t_s=0.0,
         cyclic_x=False,  # longitude (-30, 30) Bounded
@@ -211,10 +212,20 @@ def load_oceananigans_reference(
         times = np.arange(any_field.shape[0], dtype=float) * dt
 
     sizes = raw.sizes
+
+    def _first(*names, default=None):
+        for n in names:
+            if n in sizes:
+                return sizes[n]
+        return default
+
+    # Version-agnostic CENTRE-point counts. Old scheme: xC/yC/zC; v0.110.x
+    # LatitudeLongitudeGrid: lon centre ``λ_caa``, lat centre ``φ_aca``, depth
+    # centre ``z_aac`` (Face variants ``λ_faa``/``φ_afa``/``z_aaf`` are N+1).
     grid_metadata = {
-        "nx": sizes.get("xC", sizes.get("xF")),
-        "ny": sizes.get("yC", sizes.get("yF")),
-        "nz": sizes.get("zC", sizes.get("zF", 1)),
+        "nx": _first("xC", "λ_caa", "xF", "λ_faa"),
+        "ny": _first("yC", "φ_aca", "yF", "φ_afa"),
+        "nz": _first("zC", "z_aac", "zF", "z_aaf", default=1),
         "sizes": sizes,
         "cyclic_x": spec.cyclic_x,
     }
