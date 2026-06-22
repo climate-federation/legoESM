@@ -31,6 +31,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.ocean.experiments.idealized_ic import coriolis_f_safe
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +187,7 @@ def _build_initial_state(grid, z_coord, config: SilvestriJetConfig):
     y = R * lat_rad                                          # (n_lat,)
     dBdy = np.gradient(B, y)                                 # (n_lat,)
     dbdy = config.delta_b * dBdy                             # ∂b/∂y (z-independent)
-    f_lat = 2.0 * constants.Omega * np.sin(lat_rad)         # (n_lat,)
-    f_safe = np.where(np.abs(f_lat) < 1e-12, np.sign(f_lat + 1e-30) * 1e-12, f_lat)
+    f_safe = coriolis_f_safe(lat_rad)                       # (n_lat,) equator-safe
     H = config.H_max
     # u depth-linear, zero at the bottom FACE z=−H (z_full is cell-centred, so
     # the deepest cell carries a small residual u — vanishing is at the face).

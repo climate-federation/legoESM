@@ -110,7 +110,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
 
@@ -129,6 +128,13 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     get_periodic_interval_weights,
 )
 
+# Shared global-recipe builders (state seeding, GM/EKE delta, area weights).
+from legoesm.ocean.fidelity.veros_global_common import (
+    build_veros_global_state,
+    gm_redi_eke_isopycnal_on,
+    veros_area_t_generic,
+)
+
 # Shape-generic layout bridges, shared via fidelity.veros_layout (DEDUP NOTE
 # resolved); re-exported under the recipe's ``_1deg`` names (scripts/tests use them).
 from legoesm.ocean.fidelity.veros_layout import (
@@ -139,7 +145,6 @@ from legoesm.ocean.fidelity.veros_layout import (
 )
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
 from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -394,9 +399,7 @@ def veros_area_t_1deg(
 ) -> np.ndarray:
     """Veros T-cell area column weights ``dxt·dyt·cost`` [m**2] for the
     uniform 1-degree grid (per-latitude row; broadcast over x)."""
-    degtom = r_earth * np.pi / 180.0
-    return (DXT_DEG * degtom) * (DYT_DEG * degtom) * np.cos(
-        np.deg2rad(np.asarray(yt_deg)))
+    return veros_area_t_generic(yt_deg, DXT_DEG, DYT_DEG, r_earth)
 
 
 # ---------------------------------------------------------------------------
@@ -408,18 +411,12 @@ def veros_area_t_1deg(
 # like ACC/global_flexible; the 4deg's False was the settings default) ⇒
 # K_iso = K_gm (the Redi tracer diffusivity follows the prognostic GM
 # coefficient).
-GLOBAL_1DEG_EKE_CONFIG = GLOBAL4_EKE_CONFIG._replace(
-    isopycnal_diffusion=True,     # *** the flip back vs global_4deg ***
-)
-
 # GM/Redi: K_iso_0=1000, K_iso_steep=50, iso_dslope=iso_slopec=0.005 ⇒
 # S_max=5e-3, taper_width_frac=1.0 (established mapping S_max=iso_slopec,
-# frac=iso_dslope/iso_slopec) — the global_flexible values.
-GLOBAL_1DEG_GM_REDI_CONFIG = GLOBAL4_GM_REDI_CONFIG._replace(
-    S_max=5.0e-3,                 # Veros iso_slopec   (4deg: 1e-3)
-    taper_width_frac=1.0,         # iso_dslope/iso_slopec (4deg: 4.0)
-    K_iso_steep=50.0,             # Veros K_iso_steep  (4deg: 1000)
-    eke=GLOBAL_1DEG_EKE_CONFIG,
+# frac=iso_dslope/iso_slopec) — the global_flexible values.  The exact same
+# delta pair is shared with global_flexible via gm_redi_eke_isopycnal_on.
+GLOBAL_1DEG_GM_REDI_CONFIG, GLOBAL_1DEG_EKE_CONFIG = gm_redi_eke_isopycnal_on(
+    GLOBAL4_GM_REDI_CONFIG, GLOBAL4_EKE_CONFIG,
 )
 
 # TKE: the setup repeats the global_4deg block (c_k=0.1, c_eps=0.7,
@@ -451,40 +448,12 @@ def build_global_1deg_state(
     """Initial state: file T/S (legoESM order/shape) masked by the active
     cells, rest velocity, rigid-lid eta ≡ 0, TKE/EKE carry fields seeded
     (the 4deg seeding convention — see its docstring)."""
-    nz = z_coord.n_levels
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        S_uniform=35.0, H_max=float(z_coord.H_max),
-        land_mask_override=jnp.asarray(land_mask),
-        H_bathy_override=jnp.asarray(H_bathy),
+    return build_veros_global_state(
+        grid, z_coord, land_mask, H_bathy,
+        tke_config=GLOBAL_1DEG_TKE_CONFIG,
+        eke_config=GLOBAL_1DEG_EKE_CONFIG,
+        T_init=T_init, S_init=S_init,
     )
-    is_active = jnp.asarray(z_coord.is_active, dtype=state.T.data.dtype)
-    if T_init is not None:
-        state = state._replace(
-            T=state.T.replace(data=jnp.asarray(T_init) * is_active))
-    if S_init is not None:
-        state = state._replace(
-            S=state.S.replace(data=jnp.asarray(S_init) * is_active))
-
-    lm = state.land_mask.data
-    dtype = state.T.data.dtype
-    wet3 = (lm[:, :, jnp.newaxis] > 0.5) * jnp.ones((1, 1, nz - 1), dtype=dtype)
-
-    tke0 = GLOBAL_1DEG_TKE_CONFIG.tke_background * wet3
-    state = state._replace(
-        tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        dtke=Field(data=jnp.zeros_like(tke0), name="dtke",
-                   dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    eke0 = GLOBAL_1DEG_EKE_CONFIG.e_min * wet3
-    state = state._replace(
-        eke=Field(data=eke0, name="eke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        eke_diss=Field(data=jnp.zeros_like(eke0), name="eke_diss",
-                       dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    return state
 
 
 # ---------------------------------------------------------------------------
