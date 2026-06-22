@@ -290,7 +290,7 @@ class CLMMLCanopyConfig(NamedTuple):
     # CLM PFT index (1-based, 0=bare).  Controls Vcmax25, plant hydraulic
     # parameters, beta-distribution PAD shape, and canopy height defaults
     # from the MLpftcon lookup table.
-    #   7  = broadleaf deciduous temperate tree (DBT) — default for forests
+    #   7  = broadleaf deciduous temperate tree (BDT) — default for forests
     #   13 = C3 non-arctic grass — CLM default grass PFT
     # When in doubt, choose the PFT whose Vcmax25 and htop match the site.
     pft_clm: int = 7
@@ -306,11 +306,12 @@ class CLMMLCanopyConfig(NamedTuple):
     f_dir: float = -1.0         # -1 → auto-estimated from zenith + clearness
 
     # Default soil matric potential [mm] when psi_soil is not provided.
-    # -3000 mm ≈ -0.029 MPa corresponds to ~50% field capacity for a
-    # medium-texture soil — a physically defensible "unknown soil" state.
-    # The Fortran standalone uses -10 000 to -40 000 mm (0.1–0.4 MPa
-    # suction) for a California walnut orchard in May.
-    smp_default_mm: float = -3000.0
+    # -50 000 mm = -0.49 MPa — moderate stress, mid-range of plant-available water
+    # (FC ≈ -33 kPa = -3 400 mm; permanent wilting point ≈ -1.5 MPa = -153 000 mm).
+    # Previous value (-3 000 mm = -0.029 MPa) was at field capacity and kept
+    # btran≈1 (no plant stress) for all May timesteps in the CHATS7 default run.
+    # The Fortran standalone uses -10 000 to -40 000 mm for a California walnut.
+    smp_default_mm: float = -50_000.0
 
     # Default unsaturated hydraulic conductivity [mm/s].
     # 1e-5 mm/s ≈ 0.86 mm/day, representative of silty clay loam at

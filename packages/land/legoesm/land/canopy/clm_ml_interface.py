@@ -224,7 +224,13 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     _tm.itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
     _tm.start_date_ymd = 20000101
     _tm.start_date_tod = 0
-    _tm.curr_date_ymd = 20000101
+    # Derive curr_date_ymd from doy so CLM phenology sees the correct calendar
+    # date (not hardcoded Jan 1).  doy 0-based in a non-leap year → add 1 for
+    # CLM's 1-based day.  day_of_year 1..365 → YYYYMMDD in year 2000.
+    import datetime as _dt
+    _jan1 = _dt.date(2000, 1, 1)
+    _curr = _jan1 + _dt.timedelta(days=int(doy))
+    _tm.curr_date_ymd = int(_curr.strftime("%Y%m%d"))
     _tm.curr_date_tod = int((doy * 86400.0) % 86400)
 
 
@@ -249,8 +255,10 @@ def _compute_cos_zenith(
     cos_zen : np.ndarray  shape (ncol,), clamped to [0, 1]
     """
     lat_r = np.deg2rad(lat_deg)
-    # Solar declination (Spencer 1971)
-    B = 2.0 * np.pi * (doy - 1.0) / 365.0
+    # Solar declination — Spencer (1971).
+    # doy is 0-based (0.0 = Jan 1 00:00), so Spencer's d_n = doy + 1 and
+    # B = 2π*(d_n-1)/365 = 2π*doy/365.  The previous (doy-1) was wrong by 1 day.
+    B = 2.0 * np.pi * doy / 365.0
     decl = (0.006918
             - 0.399912 * np.cos(B)
             + 0.070257 * np.sin(B)
@@ -274,32 +282,35 @@ def _estimate_beam_fraction(
     sw_down: np.ndarray,
     cos_zen: np.ndarray,
 ) -> np.ndarray:
-    """Estimate direct-beam fraction from clearness index (Weiss & Norman 1985).
+    """Estimate direct-beam fraction from clearness index (Erbs et al. 1982).
 
     Clearness index  kt = SW_down / (S0 * cos_zen)  where S0 = 1361 W/m².
-    Empirical relationship (Erbs et al. 1982, updated):
-      kt ≤ 0.22 → f_dir ≈ 0.00 (overcast)
-      kt ≥ 0.80 → f_dir ≈ 0.90 (clear sky)
-      otherwise  → piecewise linear interpolation
+    Erbs et al. (1982, Solar Energy 28:293-302) give the *diffuse* fraction Id/I:
 
-    Returns f_dir ∈ [0, 0.95] per column.
+        kt ≤ 0.22:  Id/I = 1 - 0.09*kt
+        0.22 < kt ≤ 0.80:
+            Id/I = 0.9511 - 0.1604*kt + 4.388*kt² - 16.638*kt³ + 12.336*kt⁴
+        kt > 0.80:  Id/I = 0.165
+
+    Direct fraction: f_dir = 1 - Id/I, clamped to [0, 1].
+    Returns f_dir per column.
     """
     S0 = 1361.0  # solar constant [W/m²]
     cos_zen_clamped = np.maximum(cos_zen, 0.01)
     sw_toa = S0 * cos_zen_clamped
     kt = np.where(sw_down > 1.0, np.minimum(sw_down / sw_toa, 1.0), 0.0)
-    # Piecewise beam fraction from clearness index
-    f_dir = np.where(
-        kt <= 0.22, 0.0,
-        np.where(
-            kt >= 0.80, 0.90,
-            # linear ramp 0→0.90 over kt 0.22→0.80
-            0.90 * (kt - 0.22) / (0.80 - 0.22),
-        ),
-    )
+
+    # Erbs et al. 1982 diffuse fraction polynomial
+    id_over_i_low = 1.0 - 0.09 * kt
+    id_over_i_mid = (0.9511 - 0.1604 * kt + 4.388 * kt**2
+                     - 16.638 * kt**3 + 12.336 * kt**4)
+    id_over_i_high = np.full_like(kt, 0.165)
+    id_over_i = np.where(kt <= 0.22, id_over_i_low,
+                np.where(kt <= 0.80, id_over_i_mid, id_over_i_high))
+    f_dir = np.clip(1.0 - id_over_i, 0.0, 1.0)
+
     # At night (sw_down < 1 W/m²) force beam fraction to zero
-    f_dir = np.where(sw_down < 1.0, 0.0, f_dir)
-    return f_dir.astype(np.float64)
+    return np.where(sw_down < 1.0, 0.0, f_dir).astype(np.float64)
 
 
 def _sw_partition(
@@ -368,6 +379,8 @@ def _build_stubs(
     dz_soil: np.ndarray,
     soil_hydraulics: Any | None,
     cos_zen: np.ndarray | None = None,
+    T_soil_all: jnp.ndarray | None = None,
+    t_a10_prior: jnp.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build minimal CLM input stub objects from legoESM state.
 
@@ -445,10 +458,18 @@ def _build_stubs(
     albgri_col = jnp.zeros((np_, numrad + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
-        albgrd_col = albgrd_col.at[c, ivis].set(float(alb_arr[i]) * 0.9)  # VIS slightly less
-        albgrd_col = albgrd_col.at[c, inir].set(float(alb_arr[i]) * 1.1)  # NIR slightly more
-        albgri_col = albgri_col.at[c, ivis].set(float(alb_arr[i]) * 0.9)
-        albgri_col = albgri_col.at[c, inir].set(float(alb_arr[i]) * 1.1)
+        # Vegetation canopies: NIR reflectance is ~3-5× VIS (broadleaf typical:
+        # VIS≈0.10, NIR≈0.45).  Split broadband albedo accordingly rather than
+        # the previous ±10% that was nearly spectrally flat and biased SW absorption.
+        # Using ratio 1:3 (VIS:NIR) means alb_vis = 0.5*alb_broadband,
+        # alb_nir = 1.5*alb_broadband — conservative but physical.
+        alb_broadband = float(alb_arr[i])
+        alb_vis = alb_broadband * 0.5
+        alb_nir = alb_broadband * 1.5
+        albgrd_col = albgrd_col.at[c, ivis].set(alb_vis)
+        albgrd_col = albgrd_col.at[c, inir].set(alb_nir)
+        albgri_col = albgri_col.at[c, ivis].set(alb_vis)
+        albgri_col = albgri_col.at[c, inir].set(alb_nir)
 
     # ---- Soil state ----
     n_layers = len(dz_soil)
@@ -493,11 +514,27 @@ def _build_stubs(
     soilresis_col = jnp.full(np_, 100.0, dtype=jnp.float64)
 
     # ---- Temperature ----
-    t_a10_patch = _pad1(forcing.T_lowest)   # 10-day mean ≈ current T (fallback)
+    # t_a10_patch is the 10-day running mean canopy air temperature [K].
+    # On first call (canopy_state=None) we have no prior state, so we fall back
+    # to instantaneous T_lowest.  The caller must extract t_a10 from canopy_state
+    # and pass it here on subsequent steps via the t_a10_prior argument.
+    t_a10_patch = _pad1(t_a10_prior if t_a10_prior is not None else forcing.T_lowest)
+    # Fill all nlevsoi soil temperature layers.  Previously only layer 1 was set;
+    # layers 2–10 = 0 K corrupted thermal gradient and soil heat flux.
     t_soisno_col = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
-        t_soisno_col = t_soisno_col.at[c, 1].set(float(T_soil_top[i]))
+        if T_soil_all is not None and T_soil_all.shape[1] >= 1:
+            n_fill = min(T_soil_all.shape[1], nlevsoi)
+            for j in range(1, n_fill + 1):
+                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, j - 1]))
+            # If legoESM has fewer layers than CLM, repeat the deepest value
+            for j in range(n_fill + 1, nlevsoi + 1):
+                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, n_fill - 1]))
+        else:
+            # Fallback: fill all layers with surface soil temperature
+            for j in range(1, nlevsoi + 1):
+                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_top[i]))
 
     # ---- canopystate ----
     htop_patch = jnp.zeros(np_, dtype=jnp.float64)
@@ -666,13 +703,14 @@ def _extract_surface_fluxes(
     lhflx = jnp.stack([mlcanopy.lhflx_canopy[i + 1] for i in range(ncol)])
     G_soil = jnp.stack([mlcanopy.gsoi_soil[i + 1] for i in range(ncol)])
     lw_up = jnp.stack([mlcanopy.lwup_canopy[i + 1] for i in range(ncol)])
-    # GPP: µmol CO2/m²/s → gC/m²/s (1 µmol CO2 = 12e-6 gC)
+    # GPP: µmol CO2/m²/s → gC/m²/s  (standard atomic weight of C = 12.011 g/mol)
+    _M_C_g_per_mol = 12.011
     gpp_umol = jnp.stack([mlcanopy.gppveg_canopy[i + 1] for i in range(ncol)])
-    gpp = gpp_umol * 12.0e-6  # µmol/m²/s → gC/m²/s
+    gpp = gpp_umol * (_M_C_g_per_mol * 1.0e-6)  # µmol/m²/s → gC/m²/s
 
     # Friction velocity → momentum flux components
     ustar = jnp.stack([mlcanopy.ustar_canopy[i + 1] for i in range(ncol)])
-    rho_a = forcing.p_surface / (287.058 * forcing.T_lowest)  # kg/m³
+    rho_a = forcing.p_surface / (constants.R_d * forcing.T_lowest)  # kg/m³
     tau_total = rho_a * ustar ** 2  # [N/m²]
     # Split tau between x and y proportional to wind components
     u = forcing.u_lowest
@@ -839,12 +877,26 @@ def compute_clm_ml_canopy_fluxes(
     # doy → correct calday inside CLM (fixes wrong solar zenith bug)
     _setup_clm_time(dt, doy, _CLM_STEP_COUNTER)
 
+    # ---- Extract t_a10 from prior canopy state (10-day running mean T) ----
+    # t_a10_patch must be carried forward from one call to the next so CLM's
+    # Vcmax temperature acclimation uses a smoothed temperature, not just the
+    # instantaneous forcing.  On first call (canopy_state=None), fall back to T_lowest.
+    t_a10_prior = None
+    if canopy_state is not None and canopy_state.mlcanopy is not None:
+        prior = canopy_state.mlcanopy
+        if hasattr(prior, "t_a10_patch"):
+            t_a10_prior = jnp.stack(
+                [prior.t_a10_patch[i + 1] for i in range(ncol)]
+            )
+
     # ---- Build stub CLM instances ----
     soil_hyd = getattr(land_config, "hydraulics", None)
     stubs = _build_stubs(
         ncol, forcing, canopy_config, land_config, land_params,
         T_soil_top, psi_soil, theta_soil, dz_soil, soil_hyd,
         cos_zen=cos_zen,
+        T_soil_all=T_soil,
+        t_a10_prior=t_a10_prior,
     )
 
     # ---- Allocate / retrieve mlcanopy_type ----

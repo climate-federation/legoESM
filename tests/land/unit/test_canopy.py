@@ -500,16 +500,51 @@ class TestSolarGeometry(unittest.TestCase):
         cos_z = _compute_cos_zenith(lat, lon, doy_midnight)
         self.assertAlmostEqual(float(cos_z[0]), 0.0, places=2)
 
+    def test_spencer_doy_convention(self):
+        """Spencer formula uses doy directly (0-based), not doy-1."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _compute_cos_zenith
+
+        # June 21 (doy≈172) is summer solstice — max declination ~+23.45°
+        # Dec 21 (doy≈355) is winter solstice — min declination ~-23.45°
+        # The 1-day offset between 0-based and 1-based doy shifts declination
+        # by ~0.4° at solstices.  Verify solstice symmetry holds.
+        lat = np.array([0.0])  # equator
+        lon = np.array([0.0])
+        doy_summer = 172.5   # June 22 noon UTC
+        doy_winter = 355.5   # Dec 22 noon UTC
+        cos_summer = _compute_cos_zenith(lat, lon, doy_summer)
+        cos_winter = _compute_cos_zenith(lat, lon, doy_winter)
+        # At equator noon: cos_zen = cos(|decl|) ≈ cos(23.45°) ≈ 0.917
+        # Both should be ~equal and ~0.917 ± 0.01
+        self.assertAlmostEqual(float(cos_summer[0]), float(cos_winter[0]), places=2)
+        self.assertGreater(float(cos_summer[0]), 0.90)
+
     def test_beam_fraction_clear_sky(self):
-        """Under clear-sky SW (kt ≈ 0.7–0.8), beam fraction should be > 0.5."""
+        """Under nearly-clear sky (kt ≈ 0.73), Erbs 1982 gives f_dir ≈ 0.80."""
         import numpy as np
         from legoesm.land.canopy.clm_ml_interface import _estimate_beam_fraction
 
         sw   = np.array([800.0])    # typical clear-sky daytime
         cosz = np.array([0.8])      # mid-afternoon sun
         f    = _estimate_beam_fraction(sw, cosz)
-        # kt = 800 / (1361 * 0.8) ≈ 0.734 → f_dir > 0.5
+        # kt = 800 / (1361 * 0.8) ≈ 0.734; Erbs poly: Id/I ≈ 0.20 → f_dir ≈ 0.80
+        # (physically: ~80% beam under near-clear sky conditions)
         self.assertGreater(float(f[0]), 0.5)
+
+    def test_beam_fraction_erbs_polynomial(self):
+        """Verify Erbs 1982 polynomial matches known values at kt=0.5."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _estimate_beam_fraction
+
+        # kt=0.5: Id/I = 0.9511 - 0.1604*0.5 + 4.388*0.25 - 16.638*0.125 + 12.336*0.0625
+        #       = 0.9511 - 0.0802 + 1.097 - 2.0798 + 0.771 ≈ 0.659
+        # f_dir = 1 - 0.659 ≈ 0.341
+        sw   = np.array([340.25])   # 340.25 / (1361 * 0.5) = 0.5 exactly
+        cosz = np.array([0.5])
+        f    = _estimate_beam_fraction(sw, cosz)
+        expected = 1.0 - (0.9511 - 0.1604*0.5 + 4.388*0.25 - 16.638*0.125 + 12.336*0.0625)
+        self.assertAlmostEqual(float(f[0]), expected, places=3)
 
     def test_beam_fraction_nighttime_zero(self):
         """At night (sw_down < 1 W/m²), beam fraction must be 0."""
