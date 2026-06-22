@@ -220,7 +220,20 @@ hypothesis be A/B-tested in minutes. All numbers below are real runs vs the real
 vector-invariant WENO momentum (the 1D WENO kernel is coefficient-faithful; the gap is in
 the C-grid vorticity-flux APPLICATION / the VelocityStencil smoothness realization).
 
-**Next (research-level):** match Oceananigans' `VelocityStencil` vorticity-flux dissipation
-in legoESM's vector-invariant momentum (the `_weno_zeta_at_u` beta-average path) — the one
-remaining un-closed node. CASE 3 (§5) bar (stay finite while oracle stable AND within 2×)
-remains UNMET: the faithful order-9 config stays finite only to day ~12 here.
+**Next (research-level) — the residual NARROWED (vorticity-flux source comparison, 2026-06-22):**
+The obvious lever is already faithful: at HEAD (`fe79af117` on-branch) the weno9 vorticity flux
+uses `beta_average=True` (single biased reconstruction on AVERAGED betas = Oceananigans'
+`beta_sum`+`bias`, weno.py `weno_reconstruct_split2`) and `convert_to_cellavg=False` (no low-pass
+pre-filter = Oceananigans direct nodal FV reconstruction). The legacy
+`0.5·(recon(βᵥ)+recon(βᵤ))` average-of-results path (under-dissipative, dilutes the WENO-Z weight
+nonlinearity) is NOT the active path. Further eliminated ON THIS CASE: **PV-flux q=ζ/h vs direct-ζ**
+is negligible (flat bottom H=1km uniform, small η ⇒ q=ζ/h≈ζ/const horizontally); **Neumann wall fill**
+is unlikely (the GPU §5 wall-budget diagnostic put the 2Δx mode in the JET CENTER, not the walls).
+So legoESM under-dissipates even with the FULLY-faithful WENO vorticity flux on a flat bottom. The
+residual is the **C-grid collocation of the vorticity flux** — the bias-velocity v̂ interpolation
+(`ℑxᶠᵃᵃ(ℑyᵃᶜᵃ(Δx·v))·Δx⁻¹` in Oceananigans vs legoESM's `v_at_u`) and the vertex relative-vorticity
+`curl_vertex_cgrid` vs Oceananigans' `ζ₃ᶠᶠᶜ` — i.e. the discrete curl/upwind-velocity collocation,
+NOT the 1D WENO kernel (coefficient-faithful) nor the smoothness family (now decoupled + faithful).
+CASE 3 (§5) bar (stay finite while oracle stable AND within 2×) remains UNMET: the faithful order-9
+config NaNs ~day 18 here while the oracle saturates at 2.05. This is the one un-closed node; it
+overlaps the standing `fix/silvestri-turbulent-dissipation` effort (multi-session research).
