@@ -78,7 +78,7 @@ def compute_gpp(
     APAR = fAPAR * PAR_MJ
 
     T_C = T - constants.T_freeze
-    f_T = jnp.exp(-0.5 * ((T_C - config.T_opt) / config.T_width) ** 2)
+    f_T = jnp.exp(-0.5 * ((T_C - config.T_opt_C) / config.T_width_C) ** 2)
 
     # CO2 fertilization — Michaelis-Menten.  Use ``jnp.full`` (single
     # ``Broadcast`` HLO op) instead of
