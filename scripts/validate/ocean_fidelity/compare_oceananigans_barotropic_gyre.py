@@ -57,6 +57,7 @@ PHI0 = 15.0
 LPHI = LAT_N - LAT_S              # 60 deg
 A_H = 5.0e3 * (60.0 / NX) ** 2   # nu_h0
 MU_DRAG = 1.0 / (60.0 * 86400.0)  # linear bottom drag [1/s]
+RHO0 = 1000.0                     # reference density [kg/m^3] (cfg.rho_0)
 
 
 def build_gyre():
@@ -91,15 +92,25 @@ def build_gyre():
 
 
 def build_wind(grid):
-    """cos wind stress tau_x(phi) = TAU0 cos(2pi (phi-PHI0)/LPHI). legoESM treats
-    OceanSurfaceForcing.tau_x as the ATMOSPHERIC stress (flips it internally), so
-    pass -ocean_stress (the MITgcm-gyre-recipe convention)."""
+    """cos wind stress tau_x(phi) = TAU0 cos(2pi (phi-PHI0)/LPHI).
+
+    UNIT CONVENTION (the bridge's job): Oceananigans applies the wind as a
+    ``FluxBoundaryCondition`` on the velocity field u, so its TAU0=1e-2 is a
+    KINEMATIC stress [m^2/s^2] = tau_dynamic / rho_0 (the velocity equation is
+    per-unit-mass; there is no rho in it).  legoESM's ``OceanSurfaceForcing.tau_x``
+    is a DYNAMIC stress [N/m^2] that the model divides by rho_0 internally.  To
+    deliver the IDENTICAL top-cell acceleration tau/(rho_0*H) we must pass the
+    dynamic stress rho_0 * tau_kinematic.  Omitting this factor under-forces the
+    gyre by exactly rho_0 (=1000x) -> a laminar ~3e-4 m/s flow instead of the
+    oracle's O(1 m/s) western boundary current.
+
+    Sign convention VALIDATED against the oracle: passing +ocean_stress (NOT the
+    MITgcm-recipe negation) makes legoESM spin up the SAME gyre pattern as
+    Oceananigans.  WIND_SIGN env overrides for re-checking the convention.
+    """
     lat_deg = np.degrees(np.asarray(grid.lat))           # (n_lat+2,) incl wall rows
-    ocean_tau = TAU0 * np.cos(2 * np.pi * (lat_deg - PHI0) / LPHI)
-    # Sign convention VALIDATED against the oracle: passing +ocean_tau (NOT the
-    # MITgcm-recipe negation) makes legoESM spin up the SAME gyre pattern as
-    # Oceananigans (day-10 surface-u pattern_corr +0.68; the negation gives
-    # -0.68). WIND_SIGN env overrides for re-checking the convention.
+    tau_kin = TAU0 * np.cos(2 * np.pi * (lat_deg - PHI0) / LPHI)   # kinematic [m^2/s^2]
+    ocean_tau = RHO0 * tau_kin                                     # -> dynamic [N/m^2]
     sign = float(os.environ.get("WIND_SIGN", "-1"))
     tau_x = jnp.asarray(np.broadcast_to(
         -sign * ocean_tau[:, None], lat_deg.shape + (NX + 2,)))
