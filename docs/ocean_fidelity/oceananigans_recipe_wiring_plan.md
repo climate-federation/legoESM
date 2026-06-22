@@ -206,19 +206,30 @@ the SAME 0.0357) → 0.0357 IS the converged solution of `A·η=eta_old`, so the
 operator `A = I − coeff·∇·(H∇)` **amplifies the smooth bump ~2.8×** (equivalently
 the inverse over-SMOOTHS η). SCALE-SELECTIVE: σ=30°(~5cell)→×0.36,
 60°(~11cell)→×0.63, 120°(~21cell)→×0.85 — a diffusion that hammers high
-wavenumbers. The effective `coeff·∇²` for the 5-cell mode is ~1.8, but
-`coeff=g·dt²=1e-4` and CFL²~0.01 predict ~0.01 → **the operator is ~50–100× too
-strong**, a METRIC SCALING BUG in `_helmholtz_apply` / `_helmholtz_coupling_pieces`
-(the dy_u/dx/area combination on the lat-lon C-grid; the ~100× ≈ a missing/extra
-metric factor, possibly deg-vs-rad or an area mis-weight). Bickley masks it because
-there η develops FROM the flow each step (flow→η); the geostrophic adjustment is
-the η→flow case the over-damping kills.
+wavenumbers. **CORRECTION — NOT an operator metric bug.** Direct measurement of the actual
+C-grid operators: `div(H·grad(η))/η = 7.2` for the bump, so
+`coeff·div/η = g·dt²·7.2 = 7e-4 ≪ 1` → the Helmholtz operator `A = I − coeff·∇·(H∇)`
+is `≈ I` (it PRESERVES η). The grad/div metrics are correct (grad_x ~0.12 ≈ the
+analytic 0.19). Yet the solve still returns η_new = 0.36·eta_old. **This is a
+genuine contradiction**: a benign operator (A≈I) + rhs=eta_old should give
+η_new≈eta_old, but the solve over-damps. And θ=1.0 — which makes the RHS cancel to
+EXACTLY eta_old — damps the MOST (×0.36/step → 3e-9 by step 40), while θ=0.5
+(non-exact cancellation) damps LEAST. So the mechanism is NOT the Helmholtz
+operator; it is deeper in `solve_helmholtz_freesurface` (its internally-REBUILT
+operator / preconditioner / the custom-VJP forward solve) OR the predictor-
+corrector U_pred↔η interaction (the predictor already applies −g·dt·∂η_old, and the
+corrector's Δη-gradient may then remove the flow even though the η field itself is
+what collapses). The η-collapse is REAL and reproduced 1-step; the analytic story
+doesn't close → needs `solve_helmholtz_freesurface` instrumentation (compare its
+internal A·η to `_make_helmholtz`'s; check the H/coeff it actually uses).
 
-NEXT: trace the exact metric factor in `_helmholtz_apply`/`_helmholtz_coupling_pieces`
-(barotropic_implicit_latlon_cgrid.py:216,243) against the geostrophic-adjustment
-1-step test (eta_new should ≈ eta_old for a smooth bump); FIX it; re-check
-gyre/bickley/§5. This is now a SPECIFIC, CPU-testable operator bug — not a chaotic
-research problem.
+NEXT: instrument `solve_helmholtz_freesurface` (barotropic_implicit_latlon_cgrid.py
++ the helmholtz solver module) — verify its rebuilt operator == `_make_helmholtz`
+and the coeff/H it receives; find why a solve with A≈I and rhs=eta_old returns
+0.36·eta_old. Validate against the geostrophic-adjustment 1-step test. Caveat: this
+is on the unit-sphere bickley grid (R=1,g=1); confirm it transfers to §5's physical
+units before claiming it IS the §5 residual (it is the free-surface COUPLING gap
+regardless; the §5 link is a strong but unconfirmed hypothesis).
 
 ## 5. Phased plan
 
