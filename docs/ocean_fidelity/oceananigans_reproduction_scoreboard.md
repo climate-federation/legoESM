@@ -89,10 +89,30 @@ faithful cure, the §5-style gating + F_slow is another (it needs the setup's
 F_slow state fields, so it is not a drop-in config override on the bickley
 rest-state).
 
-**Next (research-level):** a barotropic scheme that fully damps the rotational
-2Δx mode while staying strongly dissipative and conservative, matching
-`ImplicitFreeSurface`, AND the separate §5 eddy-scale instability. Tracked by the
-standing §5 effort on `fix/silvestri-turbulent-dissipation`.
+**§5 free-surface-solver finding (2026-06-22):** the actual §5 oracle deck
+(`/tmp/ocn_silvestri/silvestri_jet.jl`) uses a UNIFORM `RectilinearGrid` with no
+explicit `free_surface` → Oceananigans default = **`ImplicitFreeSurface`**
+(backward-Euler), NOT split-explicit. The legoESM §5 setup
+(`silvestri_baroclinic_jet.py`) uses `explicit_substep` +
+`barotropic_slow_forcing_ab2` + `explicit_ab2`-gating, built to match a
+split-explicit oracle that does not exist — and to cure a barotropic-substep 2Δx
+Coriolis mode the oracle (no substep) cannot have. The faithful §5 barotropic
+stack should be `implicit_cn` (ImplicitFreeSurface analog). **Tested head-to-head
+at α=0 (160×128×50, GPU): implicit_cn + matsuno_split blew DAY 52 vs the
+explicit_substep baseline's DAY 82 — WORSE.** Confounded: `implicit_cn` needs a
+Coriolis scheme, and `matsuno_split` (vertex-f) re-introduces the in-substep
+barotropic Coriolis 2Δx mode that §5's `explicit_ab2`+gating+F_slow cures. A
+clean ImplicitFreeSurface match (implicit FS + Coriolis purely in the 3D
+momentum, NO in-substep barotropic term) is not reachable via config flags.
+
+**Next (research-level):** a faithful no-in-substep-barotropic-Coriolis implicit
+free-surface solver matching `ImplicitFreeSurface`, OR a barotropic scheme that
+damps the residual 2Δx / eddy-scale instability at α=0 under the existing
+split-explicit stack. Tracked by the standing §5 effort on
+`fix/silvestri-turbulent-dissipation`. The verified finding stands: the §5 oracle
+uses ImplicitFreeSurface, so legoESM's split-explicit §5 stack is unfaithful at
+the solver level even though it survives longer than the (confounded) implicit_cn
+attempt.
 
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
