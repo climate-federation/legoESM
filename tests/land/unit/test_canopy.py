@@ -455,6 +455,115 @@ class TestConfig(unittest.TestCase):
         state = CanopyState(mlcanopy=None)
         self.assertIsNone(state.mlcanopy)
 
+    def test_clm_ml_config_new_fields(self):
+        """New config fields (pft_clm, f_vis, f_dir, soil defaults) have physical defaults."""
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+        cfg = CLMMLCanopyConfig()
+        # pft_clm=7 (broadleaf deciduous temperate tree) — not 13 (C3 grass)
+        self.assertEqual(cfg.pft_clm, 7)
+        # f_vis=0.46 — observation-based, not 0.5
+        self.assertAlmostEqual(cfg.f_vis, 0.46)
+        # f_dir=-1 → auto-estimated from zenith
+        self.assertLess(cfg.f_dir, 0.0)
+        # smp_default_mm: near field capacity, not near saturation
+        self.assertLess(cfg.smp_default_mm, -1000.0)
+        # hk_default_mm_s: silty clay loam range, not 10× too high
+        self.assertLess(cfg.hk_default_mm_s, 1.0e-4)
+
+
+class TestSolarGeometry(unittest.TestCase):
+    """Unit tests for solar zenith and SW beam-fraction helpers."""
+
+    def test_cos_zenith_noon_pdt(self):
+        """At CHATS7 (38.47°N, -121.84°W) near solar noon in May, cos_zen ≈ 0.85-0.95."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _compute_cos_zenith
+
+        lat = np.array([38.47])
+        lon = np.array([-121.84])
+        # May 1 solar noon ≈ 20:00 UTC (noon PDT = UTC-8h + ~8 min longitude correction)
+        doy_solar_noon = 120.0 + 19.87 / 24.0
+        cos_z = _compute_cos_zenith(lat, lon, doy_solar_noon)
+        self.assertGreater(float(cos_z[0]), 0.80, "cos_zen at solar noon should be > 0.80")
+        self.assertLessEqual(float(cos_z[0]), 1.0, "cos_zen must be <= 1")
+
+    def test_cos_zenith_midnight_is_zero(self):
+        """At solar midnight, cos_zen must be 0 (clamped)."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _compute_cos_zenith
+
+        lat = np.array([38.47])
+        lon = np.array([-121.84])
+        # Midnight PDT = 07:00 UTC (lon=-121.84 → UTC offset ≈ -8.1h)
+        doy_midnight = 120.0 + 7.12 / 24.0
+        cos_z = _compute_cos_zenith(lat, lon, doy_midnight)
+        self.assertAlmostEqual(float(cos_z[0]), 0.0, places=2)
+
+    def test_beam_fraction_clear_sky(self):
+        """Under clear-sky SW (kt ≈ 0.7–0.8), beam fraction should be > 0.5."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _estimate_beam_fraction
+
+        sw   = np.array([800.0])    # typical clear-sky daytime
+        cosz = np.array([0.8])      # mid-afternoon sun
+        f    = _estimate_beam_fraction(sw, cosz)
+        # kt = 800 / (1361 * 0.8) ≈ 0.734 → f_dir > 0.5
+        self.assertGreater(float(f[0]), 0.5)
+
+    def test_beam_fraction_nighttime_zero(self):
+        """At night (sw_down < 1 W/m²), beam fraction must be 0."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _estimate_beam_fraction
+
+        sw   = np.array([0.0, 0.5])
+        cosz = np.array([0.0, 0.0])
+        f    = _estimate_beam_fraction(sw, cosz)
+        self.assertAlmostEqual(float(f[0]), 0.0)
+        self.assertAlmostEqual(float(f[1]), 0.0)
+
+    def test_interface_with_lon_and_doy(self):
+        """compute_clm_ml_canopy_fluxes accepts lon and doy, produces finite output."""
+        import numpy as np
+
+        if not (jax_available and clm_ml_available):
+            self.skipTest("clm-ml-jax not installed")
+
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        from legoesm.land.config import MultiLayerLandConfig
+
+        ncol = 1
+        config = CLMMLCanopyConfig(pft_clm=7)
+        land_config = MultiLayerLandConfig(surface_scheme=config)
+        forcing = _make_forcing(ncol)
+        T_soil, psi_soil, theta_soil = _make_soil_arrays(ncol)
+
+        surface_out, _ = compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_soil[:, 0],
+            forcing=forcing,
+            canopy_config=config,
+            land_config=land_config,
+            land_params=None,
+            w_frac_rz=jnp.full(ncol, 0.6),
+            wind_speed=jnp.full(ncol, 4.5),
+            canopy_state=None,
+            dt=1800.0,
+            T_soil=T_soil,
+            psi_soil=psi_soil,
+            theta_soil=theta_soil,
+            lat=jnp.array([38.47]),
+            lon=jnp.array([-121.84]),
+            doy=120.833,  # May 1 ~noon PDT
+        )
+        for name in surface_out._fields:
+            val = getattr(surface_out, name)
+            if val is not None:
+                self.assertTrue(
+                    bool(jnp.all(jnp.isfinite(jnp.asarray(val)))),
+                    f"{name} is non-finite with lon+doy set",
+                )
+
     def test_multilayer_config_accepts_clm_ml(self):
         """MultiLayerLandConfig accepts CLMMLCanopyConfig as surface_scheme."""
         from legoesm.land.canopy.config import CLMMLCanopyConfig

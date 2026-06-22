@@ -29,13 +29,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.coupler.coupling_fields import AtmToSurface
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.state import CanopyState
 from legoesm.land.surface_scheme import SurfaceFluxOutput
 from legoesm.thermo import saturation_mixing_ratio
 
 if TYPE_CHECKING:
+    from legoesm.coupler.coupling_fields import AtmToSurface
     from legoesm.land.config import MultiLayerLandConfig
 
 # ---------------------------------------------------------------------------
@@ -89,9 +89,11 @@ def _ensure_clm_initialized() -> None:
 def _setup_clm_topology(
     ncol: int,
     lat_deg: np.ndarray,
+    lon_deg: np.ndarray,
     dz_soil: np.ndarray,
     z_soil: np.ndarray,
     z_ref: float,
+    pft_clm: int = 7,
 ) -> None:
     """Set up CLM module-level topology singletons for ``ncol`` columns.
 
@@ -104,13 +106,18 @@ def _setup_clm_topology(
         Number of legoESM columns.
     lat_deg : np.ndarray
         Latitude of each column [degrees], shape ``(ncol,)``.
+    lon_deg : np.ndarray
+        Longitude of each column [degrees, -180..180 or 0..360],
+        shape ``(ncol,)``.  Used by the internal solar zenith calculation.
     dz_soil : np.ndarray
-        Soil layer thicknesses [m], shape ``(n_layers,)``.  Used to
-        populate ``col.dz``, ``col.z``, ``col.zi``.
+        Soil layer thicknesses [m], shape ``(n_layers,)``.
     z_soil : np.ndarray
         Soil layer mid-point depths from surface [m], shape ``(n_layers,)``.
     z_ref : float
-        Atmospheric reference height [m] (e.g. ``land_config.z_ref``).
+        Atmospheric reference height [m].
+    pft_clm : int
+        CLM PFT index (1-based) applied to all columns.  Controls Vcmax25
+        and plant hydraulic parameters via the MLpftcon lookup table.
     """
     from clm_src_main import ColumnType as _col_mod
     from clm_src_main import GridcellType as _grc_mod
@@ -128,9 +135,9 @@ def _setup_clm_topology(
     itype_arr = np.full(ncol + 1, ispval, dtype=np.int32)
     for i in range(ncol):
         p = i + 1  # 1-based patch index
-        col_arr[p] = p  # column = patch (1:1)
-        gc_arr[p] = p   # gridcell = patch (1:1)
-        itype_arr[p] = 13  # C3 non-arctic grass (PFT 13)
+        col_arr[p] = p       # column = patch (1:1)
+        gc_arr[p] = p        # gridcell = patch (1:1)
+        itype_arr[p] = pft_clm  # CLM PFT from config (was hardcoded to 13)
 
     patch.column = jnp.array(col_arr, dtype=jnp.int32)
     patch.gridcell = jnp.array(gc_arr, dtype=jnp.int32)
@@ -184,6 +191,7 @@ def _setup_clm_topology(
     for i in range(ncol):
         g = i + 1
         latdeg_np[g] = float(lat_deg[i]) if i < len(lat_deg) else 0.0
+        londeg_np[g] = float(lon_deg[i]) if i < len(lon_deg) else 0.0
     _grc_mod.grc = gridcell_type(
         latdeg=jnp.array(latdeg_np, dtype=jnp.float64),
         londeg=jnp.array(londeg_np, dtype=jnp.float64),
@@ -191,25 +199,114 @@ def _setup_clm_topology(
 
 
 def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
-    """Configure the CLM time manager for the current legoESM timestep."""
+    """Configure the CLM time manager so that ``get_curr_calday(0) ≈ doy + 1``.
+
+    CLM calday convention: calday 1.000 = 0Z on Jan 1.  So if legoESM
+    provides ``doy`` as a 0-based float (0.0 = Jan 1, 120.0 = May 1 in a
+    non-leap year), the correct CLM calday is ``doy + 1``.
+
+    We encode this by pinning ``start_date_ymd = 20000101`` (calday=1) and
+    choosing ``itim`` such that::
+
+        get_curr_calday(0) = 1 + itim * dt / 86400 ≈ doy + 1
+        → itim = round(doy * 86400 / dt)
+
+    This fixes the previous bug where ``itim = step_count`` (1, 2, 3 …)
+    caused the internal calday to always be near January 1 regardless of the
+    actual simulation date, producing wrong solar zenith angles and hence
+    wrong sun/shade fractions and per-layer radiation profiles.
+    """
     import clm_src_utils.clm_time_manager as _tm
 
     _tm.dtstep = int(dt)
-    _tm.itim = max(1, step_count)
-    # Use year 2000, day-1 as reference; itim * dtstep gives elapsed seconds.
-    # get_curr_calday(offset=0) = start_calday + elapsed_days
-    # Start on Jan 1 → calday 1. doy=0 → calday 1.
+    # Encode actual day-of-year into itim so that get_curr_calday returns
+    # the correct calendar day for solar zenith computation.
+    _tm.itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
     _tm.start_date_ymd = 20000101
     _tm.start_date_tod = 0
-    # curr_date_ymd is updated by get_curr_date(); pre-set as fallback.
     _tm.curr_date_ymd = 20000101
-    _tm.curr_date_tod = int((step_count * dt) % 86400)
+    _tm.curr_date_tod = int((doy * 86400.0) % 86400)
+
+
+def _compute_cos_zenith(
+    lat_deg: np.ndarray,
+    lon_deg: np.ndarray,
+    doy: float,
+) -> np.ndarray:
+    """Compute cosine of solar zenith angle per column.
+
+    Uses a simple declination + hour-angle formula.  Accuracy is ±0.01 in
+    cos_zen, sufficient for the Weiss–Norman clearness-index partition.
+
+    Parameters
+    ----------
+    lat_deg : np.ndarray  shape (ncol,), latitude in degrees
+    lon_deg : np.ndarray  shape (ncol,), longitude in degrees (-180..180 or 0..360)
+    doy     : float, 0-based day of year (0.0 = Jan 1 00:00 UTC)
+
+    Returns
+    -------
+    cos_zen : np.ndarray  shape (ncol,), clamped to [0, 1]
+    """
+    lat_r = np.deg2rad(lat_deg)
+    # Solar declination (Spencer 1971)
+    B = 2.0 * np.pi * (doy - 1.0) / 365.0
+    decl = (0.006918
+            - 0.399912 * np.cos(B)
+            + 0.070257 * np.sin(B)
+            - 0.006758 * np.cos(2 * B)
+            + 0.000907 * np.sin(2 * B)
+            - 0.002697 * np.cos(3 * B)
+            + 0.00148  * np.sin(3 * B))
+    # Fractional time of day (UTC hours from doy fractional part)
+    frac = doy % 1.0           # 0.0 = midnight, 0.5 = noon UTC
+    utc_hour = frac * 24.0
+    # Local solar time hour angle (degrees, 0=noon)
+    lon_norm = np.where(lon_deg > 180.0, lon_deg - 360.0, lon_deg)
+    ha_deg = (utc_hour - 12.0) * 15.0 + lon_norm
+    ha_r = np.deg2rad(ha_deg)
+    cos_zen = (np.sin(lat_r) * np.sin(decl)
+               + np.cos(lat_r) * np.cos(decl) * np.cos(ha_r))
+    return np.maximum(cos_zen, 0.0)
+
+
+def _estimate_beam_fraction(
+    sw_down: np.ndarray,
+    cos_zen: np.ndarray,
+) -> np.ndarray:
+    """Estimate direct-beam fraction from clearness index (Weiss & Norman 1985).
+
+    Clearness index  kt = SW_down / (S0 * cos_zen)  where S0 = 1361 W/m².
+    Empirical relationship (Erbs et al. 1982, updated):
+      kt ≤ 0.22 → f_dir ≈ 0.00 (overcast)
+      kt ≥ 0.80 → f_dir ≈ 0.90 (clear sky)
+      otherwise  → piecewise linear interpolation
+
+    Returns f_dir ∈ [0, 0.95] per column.
+    """
+    S0 = 1361.0  # solar constant [W/m²]
+    cos_zen_clamped = np.maximum(cos_zen, 0.01)
+    sw_toa = S0 * cos_zen_clamped
+    kt = np.where(sw_down > 1.0, np.minimum(sw_down / sw_toa, 1.0), 0.0)
+    # Piecewise beam fraction from clearness index
+    f_dir = np.where(
+        kt <= 0.22, 0.0,
+        np.where(
+            kt >= 0.80, 0.90,
+            # linear ramp 0→0.90 over kt 0.22→0.80
+            0.90 * (kt - 0.22) / (0.80 - 0.22),
+        ),
+    )
+    # At night (sw_down < 1 W/m²) force beam fraction to zero
+    f_dir = np.where(sw_down < 1.0, 0.0, f_dir)
+    return f_dir.astype(np.float64)
 
 
 def _sw_partition(
     sw_down: jnp.ndarray,
-    f_vis: float = 0.5,
-    f_dir: float = 0.5,
+    f_vis: float = 0.46,
+    f_dir: float = -1.0,
+    cos_zen: np.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Partition total downwelling SW into direct/diffuse × VIS/NIR bands.
 
@@ -218,11 +315,17 @@ def _sw_partition(
     sw_down : jnp.ndarray
         Total downwelling shortwave [W/m²], shape ``(ncol,)``.
     f_vis : float
-        Fraction of total SW in the visible band (0.4–0.7 µm).
-        Default 0.5 (climatological mean).
+        Fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
+        Observation-based climatological value is 0.46 (not 0.50).
     f_dir : float
-        Fraction of total SW that is direct beam.
-        Default 0.5 (approximate global mean; reduce for overcast).
+        Direct-beam fraction of total SW.
+        -1.0  → auto-estimated from ``cos_zen`` via clearness index
+                 (Weiss & Norman 1985; Erbs et al. 1982).  This is the
+                 physically correct default for ESM applications.
+        0–1   → fixed override (use only for idealised runs).
+    cos_zen : np.ndarray | None
+        Cosine of solar zenith angle per column, shape ``(ncol,)``.
+        Required when ``f_dir < 0``.  Ignored otherwise.
 
     Returns
     -------
@@ -231,12 +334,25 @@ def _sw_partition(
     swskyd_vis, swskyd_nir : jnp.ndarray
         Diffuse SW in VIS and NIR bands [W/m²].
     """
-    vis = f_vis * sw_down
-    nir = (1.0 - f_vis) * sw_down
-    swskyb_vis = f_dir * vis
-    swskyb_nir = f_dir * nir
-    swskyd_vis = (1.0 - f_dir) * vis
-    swskyd_nir = (1.0 - f_dir) * nir
+    sw_np = np.asarray(sw_down, dtype=np.float64)
+
+    if f_dir < 0.0:
+        # Physics-based estimate using clearness index
+        if cos_zen is None:
+            # Fallback: assume overcast (conservative, no zenith info)
+            f_dir_arr = np.full_like(sw_np, 0.30)
+        else:
+            f_dir_arr = _estimate_beam_fraction(sw_np, np.asarray(cos_zen, dtype=np.float64))
+    else:
+        f_dir_arr = np.full_like(sw_np, float(f_dir))
+
+    vis = jnp.array(f_vis * sw_np)
+    nir = jnp.array((1.0 - f_vis) * sw_np)
+    f_dir_jax = jnp.array(f_dir_arr)
+    swskyb_vis = f_dir_jax * vis
+    swskyb_nir = f_dir_jax * nir
+    swskyd_vis = (1.0 - f_dir_jax) * vis
+    swskyd_nir = (1.0 - f_dir_jax) * nir
     return swskyb_vis, swskyb_nir, swskyd_vis, swskyd_nir
 
 
@@ -251,6 +367,7 @@ def _build_stubs(
     theta_soil: jnp.ndarray | None,
     dz_soil: np.ndarray,
     soil_hydraulics: Any | None,
+    cos_zen: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build minimal CLM input stub objects from legoESM state.
 
@@ -271,7 +388,11 @@ def _build_stubs(
 
     # ---- SW partitioning ----
     swskyb_vis, swskyb_nir, swskyd_vis, swskyd_nir = _sw_partition(
-        forcing.sw_down)
+        forcing.sw_down,
+        f_vis=float(canopy_config.f_vis),
+        f_dir=float(canopy_config.f_dir),
+        cos_zen=cos_zen,
+    )
 
     # shape (np_, numrad+1) = (np_, 3); CLM uses ivis=1, inir=2
     numrad = 2
@@ -352,14 +473,18 @@ def _build_stubs(
                 # psi [m] → smp_l [mm]; preserve sign (negative for unsaturated)
                 smp_l_col = smp_l_col.at[p, j].set(psi_soil[i, jl] * 1000.0)
             else:
-                smp_l_col = smp_l_col.at[p, j].set(-1000.0)  # ~10 kPa suction default
+                # Use config default (-3000 mm ≈ -0.029 MPa, ~50% field capacity).
+                # Previous default was -1000 mm (near-saturation) which masked drought stress.
+                smp_l_col = smp_l_col.at[p, j].set(float(canopy_config.smp_default_mm))
 
             if soil_hydraulics is not None and psi_soil is not None and theta_soil is not None:
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
                 K = hydraulic_conductivity(psi_soil[i, jl], theta_soil[i, jl], soil_hydraulics)
                 hk_l_col = hk_l_col.at[p, j].set(float(K) * 1000.0)  # m/s → mm/s
             else:
-                hk_l_col = hk_l_col.at[p, j].set(1.0e-4)  # 0.1 mm/s default
+                # Use config default (1e-5 mm/s ≈ silty clay loam at moderate dryness).
+                # Previous default (1e-4) was 10× too high.
+                hk_l_col = hk_l_col.at[p, j].set(float(canopy_config.hk_default_mm_s))
 
             rootfr_patch = rootfr_patch.at[p, j].set(float(root_frac_np[jl]))
 
@@ -626,6 +751,7 @@ def compute_clm_ml_canopy_fluxes(
     psi_soil: jnp.ndarray | None = None,
     theta_soil: jnp.ndarray | None = None,
     lat: jnp.ndarray | None = None,
+    lon: jnp.ndarray | None = None,
     doy: float = 0.0,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
@@ -660,8 +786,12 @@ def compute_clm_ml_canopy_fluxes(
         Volumetric water content [m³/m³], shape ``(ncol, n_layers)``.
     lat:
         Latitude [degrees], shape ``(ncol,)`` or ``None``.
+    lon:
+        Longitude [degrees], shape ``(ncol,)`` or ``None``.
+        Used for solar zenith angle and SW partitioning.  Pass ``None``
+        to default to 0° (Greenwich); this is incorrect for most sites.
     doy:
-        Day of year (0-based float).
+        Day of year (0-based float, e.g. 120.0 = May 1 in a non-leap year).
 
     Returns
     -------
@@ -689,15 +819,24 @@ def compute_clm_ml_canopy_fluxes(
     z_soil = np.array(grid.z_node, dtype=np.float64)   # (n_layers,)
     n_layers = len(dz_soil)
 
-    # ---- Latitude array ----
+    # ---- Latitude / longitude arrays ----
     if lat is not None:
         lat_deg = np.array(lat, dtype=np.float64)
     else:
         lat_deg = np.zeros(ncol, dtype=np.float64)
+    if lon is not None:
+        lon_deg = np.array(lon, dtype=np.float64)
+    else:
+        lon_deg = np.zeros(ncol, dtype=np.float64)
+
+    # ---- Solar zenith for SW partitioning ----
+    cos_zen = _compute_cos_zenith(lat_deg, lon_deg, doy)
 
     # ---- CLM global state setup ----
-    _setup_clm_topology(ncol, lat_deg, dz_soil, z_soil,
-                        float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0)
+    z_ref = float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0
+    _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
+                        pft_clm=int(canopy_config.pft_clm))
+    # doy → correct calday inside CLM (fixes wrong solar zenith bug)
     _setup_clm_time(dt, doy, _CLM_STEP_COUNTER)
 
     # ---- Build stub CLM instances ----
@@ -705,6 +844,7 @@ def compute_clm_ml_canopy_fluxes(
     stubs = _build_stubs(
         ncol, forcing, canopy_config, land_config, land_params,
         T_soil_top, psi_soil, theta_soil, dz_soil, soil_hyd,
+        cos_zen=cos_zen,
     )
 
     # ---- Allocate / retrieve mlcanopy_type ----

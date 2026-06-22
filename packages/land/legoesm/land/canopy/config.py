@@ -286,3 +286,33 @@ class CLMMLCanopyConfig(NamedTuple):
     #   0 → no interpolation (single forcing value per CLM step)
     #   3 → 3-point centred interpolation (bef / cur / next)
     met_type: int = 0
+
+    # CLM PFT index (1-based, 0=bare).  Controls Vcmax25, plant hydraulic
+    # parameters, beta-distribution PAD shape, and canopy height defaults
+    # from the MLpftcon lookup table.
+    #   7  = broadleaf deciduous temperate tree (DBT) — default for forests
+    #   13 = C3 non-arctic grass — CLM default grass PFT
+    # When in doubt, choose the PFT whose Vcmax25 and htop match the site.
+    pft_clm: int = 7
+
+    # SW band partitioning.
+    # f_vis: fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
+    #   Observation-based climatological mean is ~0.46 (not 0.5).
+    # f_dir: direct-beam fraction of total SW.
+    #   -1.0 → estimate from solar zenith angle and clearness index (default).
+    #   0.0–1.0 → fixed override (use only when the coupler guarantees a
+    #              constant sky condition, e.g. idealised aquaplanet runs).
+    f_vis: float = 0.46
+    f_dir: float = -1.0         # -1 → auto-estimated from zenith + clearness
+
+    # Default soil matric potential [mm] when psi_soil is not provided.
+    # -3000 mm ≈ -0.029 MPa corresponds to ~50% field capacity for a
+    # medium-texture soil — a physically defensible "unknown soil" state.
+    # The Fortran standalone uses -10 000 to -40 000 mm (0.1–0.4 MPa
+    # suction) for a California walnut orchard in May.
+    smp_default_mm: float = -3000.0
+
+    # Default unsaturated hydraulic conductivity [mm/s].
+    # 1e-5 mm/s ≈ 0.86 mm/day, representative of silty clay loam at
+    # moderate dryness.  The prior default (1e-4) was 10× too high.
+    hk_default_mm_s: float = 1.0e-5
