@@ -124,10 +124,18 @@ staggering, collocation) on legoESM's **latlon C-grid** vs the oracle's
 **Cartesian RectilinearGrid beta-plane**. CASE 2's bickley enstrophy excess and
 CASE 3's §5 wall blow-up are the SAME residual (2Δx grid-scale under-dissipation).
 
-**Next (research-level):** the vector-invariant momentum's C-grid metric /
-collocation at the 2Δx scale (NOT the 1D WENO kernel, which is bit-faithful) —
-why the discrete curl/KE-gradient on a latlon C-grid under-dissipates the 2Δx-in-
-lon mode vs a Cartesian FV grid. Tracked by the standing §5 effort on
+**Quantified grid-level faithfulness gap:** legoESM §5 runs on a TRUE latlon grid
+(lat −60→−40) with cos(lat) dx varying **~47%** across the channel; the oracle's
+uniform Cartesian RectilinearGrid beta-plane has ZERO metric variation. This is
+the concrete grid-level unfaithfulness plausibly driving the 2Δx-mode
+under-dissipation in the vector-invariant momentum metrics.
+
+**Next (research-level):** reproduce §5 on a uniform-metric (Cartesian
+beta-plane) ocean C-grid matching the oracle's RectilinearGrid (needs Cartesian-
+C-grid ocean infra — `LatLonCGridOceanModel` is latlon-tied), OR fix the latlon
+C-grid vector-invariant momentum metric operators so the 2Δx-in-lon dissipation
+is metric-invariant. The 1D WENO kernel is DONE (coefficient-faithful); the
+grid/metric application is the open work. Tracked by the standing §5 effort on
 `fix/silvestri-turbulent-dissipation`. (The verified §5-oracle-uses-
 ImplicitFreeSurface finding stands and corrects the setup comment — not the
 blow-up lever.)
