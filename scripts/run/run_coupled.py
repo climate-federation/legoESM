@@ -255,6 +255,16 @@ def main():
                              "DARK over snow-covered high-latitude land (should "
                              "be bright snow).  Recommended ON for realistic "
                              "land/cryosphere surface albedo.")
+    parser.add_argument("--warm-start-soil", dest="warm_start_soil",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Warm-start the land soil at the atmosphere's "
+                             "lat-structured near-surface air temperature (t=0) "
+                             "instead of the uniform 280 K default.  The uniform "
+                             "default starts tropical land soil ~18 K too cold, "
+                             "and the slow multilayer soil takes months to spin "
+                             "up — dragging global near-surface air T down. "
+                             "Default off (byte-identical); recommended ON for a "
+                             "faster, more realistic land spin-up.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -579,6 +589,12 @@ def main():
                 snow_albedo_feedback=True))
         logger.info("  Land albedo: snow-albedo feedback + lat-varying "
                     "vegetation albedo ENABLED")
+
+    # Soil warm-start (opt-in): init soil at the atmosphere's lat-structured
+    # near-surface air T (t=0) instead of a uniform 280 K cold start.
+    if getattr(args, "warm_start_soil", False) and coupled_cfg.land_mode != "none":
+        coupled_cfg = coupled_cfg._replace(warm_start_soil=True)
+        logger.info("  Soil warm-start ENABLED (atm near-surface air T at t=0)")
 
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
