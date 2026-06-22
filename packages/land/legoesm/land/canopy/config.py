@@ -332,3 +332,13 @@ class CLMMLCanopyConfig(NamedTuple):
     # Literature range for temperate deciduous trees: 150–500 g/m²
     # (Jackson et al. 1997 Global Ecol. Biogeogr.); using 300 g/m² as default.
     root_biomass_default_g_m2: float = 300.0
+
+    # Sub-canopy soil (ground) spectral albedo for the CLM-ML two-stream RT.
+    # These are the SOIL bottom-boundary albedos used by MLSolarRadiationMod,
+    # NOT the vegetation broadband albedo.  CLM4.5 loam soil lookup values:
+    #   VIS (0.4–0.7 µm):  ~0.10  (moist loam; dry loam ~0.17)
+    #   NIR (0.7–5.0 µm):  ~0.20  (moist loam; dry loam ~0.34)
+    # These are lower than the vegetation albedo (0.15–0.20 broadband) and
+    # must NOT be derived from albedo_veg.
+    albgrd_vis_default: float = 0.10
+    albgrd_nir_default: float = 0.20

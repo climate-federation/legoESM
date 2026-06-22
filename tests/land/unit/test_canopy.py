@@ -475,6 +475,11 @@ class TestConfig(unittest.TestCase):
         # root_biomass_default_g_m2: not spval (1e36), must be in literature range
         self.assertGreater(cfg.root_biomass_default_g_m2, 50.0)
         self.assertLess(cfg.root_biomass_default_g_m2, 2000.0)
+        # albgrd_vis/nir: soil spectral albedo (NOT vegetation broadband)
+        # loam soil: VIS ≈ 0.10, NIR ≈ 0.20; must satisfy NIR > VIS
+        self.assertGreater(cfg.albgrd_nir_default, cfg.albgrd_vis_default)
+        self.assertLess(cfg.albgrd_vis_default, 0.20)   # VIS < 0.20 for mineral soil
+        self.assertLess(cfg.albgrd_nir_default, 0.40)   # NIR < 0.40 for moist soil
 
 
 class TestSolarGeometry(unittest.TestCase):

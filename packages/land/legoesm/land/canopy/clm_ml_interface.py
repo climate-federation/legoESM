@@ -224,10 +224,11 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     _tm.start_date_ymd = 20000101
     _tm.start_date_tod = 0
     # Derive curr_date_ymd from doy so CLM phenology sees the correct calendar
-    # date (not hardcoded Jan 1).  doy 0-based in a non-leap year → add 1 for
-    # CLM's 1-based day.  day_of_year 1..365 → YYYYMMDD in year 2000.
+    # date (not hardcoded Jan 1).  Use year 2001 (non-leap, 365 days) so that
+    # timedelta(doy) maps doy=0→Jan1, doy=59→Mar1 with no leap-year offset.
+    # Year 2000 (leap) shifted all dates after Feb 28 by 1 day.
     import datetime as _dt
-    _jan1 = _dt.date(2000, 1, 1)
+    _jan1 = _dt.date(2001, 1, 1)
     _curr = _jan1 + _dt.timedelta(days=int(doy))
     _tm.curr_date_ymd = int(_curr.strftime("%Y%m%d"))
     _tm.curr_date_tod = int((doy * 86400.0) % 86400)
@@ -448,35 +449,35 @@ def _build_stubs(
 
     # ---- Ground albedo ----
     # Use land_params or config fallback
-    if land_params is not None and hasattr(land_params, "albedo_veg") and land_params.albedo_veg is not None:
-        alb_arr = land_params.albedo_veg
-    else:
-        alb_arr = jnp.full(ncol, float(land_config.albedo_land))
-
+    # albgrd_col / albgri_col are the SUB-CANOPY SOIL (ground) spectral albedos,
+    # used as the bottom boundary in the CLM-ML two-stream RT solver.
+    # These must NOT be set from land_params.albedo_veg (vegetation broadband
+    # albedo) — doing so was a prior bug.  Use configurable soil albedo defaults:
+    # CLM4.5 lookup for loam soil: VIS ≈ 0.10, NIR ≈ 0.20.
+    albgrd_vis = float(canopy_config.albgrd_vis_default)
+    albgrd_nir = float(canopy_config.albgrd_nir_default)
     albgrd_col = jnp.zeros((np_, numrad + 1), dtype=jnp.float64)
     albgri_col = jnp.zeros((np_, numrad + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
-        # Vegetation canopies: NIR reflectance is ~3-5× VIS (broadleaf typical:
-        # VIS≈0.10, NIR≈0.45).  Split broadband albedo accordingly rather than
-        # the previous ±10% that was nearly spectrally flat and biased SW absorption.
-        # Using ratio 1:3 (VIS:NIR) means alb_vis = 0.5*alb_broadband,
-        # alb_nir = 1.5*alb_broadband — conservative but physical.
-        alb_broadband = float(alb_arr[i])
-        alb_vis = alb_broadband * 0.5
-        alb_nir = alb_broadband * 1.5
-        albgrd_col = albgrd_col.at[c, ivis].set(alb_vis)
-        albgrd_col = albgrd_col.at[c, inir].set(alb_nir)
-        albgri_col = albgri_col.at[c, ivis].set(alb_vis)
-        albgri_col = albgri_col.at[c, inir].set(alb_nir)
+        albgrd_col = albgrd_col.at[c, ivis].set(albgrd_vis)
+        albgrd_col = albgrd_col.at[c, inir].set(albgrd_nir)
+        albgri_col = albgri_col.at[c, ivis].set(albgrd_vis)
+        albgri_col = albgri_col.at[c, inir].set(albgrd_nir)
 
     # ---- Soil state ----
+    # Use nlevgrnd (total ground layers = 15 in CLM4.5) as the allocation size,
+    # not nlevsoi (10 soil layers only).  MLSoilTemperatureMod writes to
+    # thk[c, j] for j=1..nlevgrnd and would OOB on a nlevsoi+1-sized array.
+    # Similarly t_soisno_col is declared with shape nlevsno+nlevgrnd in the type.
+    # Both arrays are filled only for j=1..nlevsoi; deeper layers keep default.
     n_layers = len(dz_soil)
-    smp_l_col = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)  # [mm]
-    hk_l_col = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)   # [mm/s]
-    rootfr_patch = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)
-    h2osoi_ice = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)  # no ice
-    thk_col = jnp.full((np_, nlevsoi + 1), 0.5, dtype=jnp.float64)  # ~0.5 W/m/K
+    smp_l_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)   # [mm]
+    hk_l_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)    # [mm/s]
+    rootfr_patch = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)
+    h2osoi_ice = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)   # no ice
+    # ~0.5 W/m/K for moist mineral soil (physical range 0.2–2.0 W/m/K)
+    thk_col = jnp.full((np_, nlevgrnd + 1), 0.5, dtype=jnp.float64)
 
     root_depth = float(land_config.root_depth) if hasattr(land_config, "root_depth") else 1.0
     z_centers = np.array([float(z) for z in dz_soil], dtype=np.float64).cumsum() - dz_soil / 2
@@ -527,19 +528,21 @@ def _build_stubs(
     t_a10_patch = _pad1(t_a10_prior if t_a10_prior is not None else forcing.T_lowest)
     # Fill all nlevsoi soil temperature layers.  Previously only layer 1 was set;
     # layers 2–10 = 0 K corrupted thermal gradient and soil heat flux.
-    t_soisno_col = jnp.zeros((np_, nlevsoi + 1), dtype=jnp.float64)
+    # t_soisno_col shape must be (np_, nlevgrnd+1) to match CLM-ML type declaration.
+    t_soisno_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)
     for i in range(ncol):
         c = i + 1
         if T_soil_all is not None and T_soil_all.shape[1] >= 1:
             n_fill = min(T_soil_all.shape[1], nlevsoi)
             for j in range(1, n_fill + 1):
                 t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, j - 1]))
-            # If legoESM has fewer layers than CLM, repeat the deepest value
-            for j in range(n_fill + 1, nlevsoi + 1):
-                t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_all[i, n_fill - 1]))
+            # Layers n_fill+1..nlevsoi: repeat deepest legoESM layer
+            deepest_T = float(T_soil_all[i, n_fill - 1])
+            for j in range(n_fill + 1, nlevgrnd + 1):
+                t_soisno_col = t_soisno_col.at[c, j].set(deepest_T)
         else:
             # Fallback: fill all layers with surface soil temperature
-            for j in range(1, nlevsoi + 1):
+            for j in range(1, nlevgrnd + 1):
                 t_soisno_col = t_soisno_col.at[c, j].set(float(T_soil_top[i]))
 
     # ---- canopystate ----
