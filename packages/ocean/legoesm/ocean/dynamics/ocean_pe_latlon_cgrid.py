@@ -67,6 +67,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     polar_cap_boost_factor,
     laplacian_scaling_factor,
     divergence_cgrid,
+    vface_zonal_cos_lat,
     gradient_x_cgrid,
     gradient_y_cgrid,
     bilaplacian_cgrid,
@@ -903,6 +904,27 @@ def _flux_form_vertical_momentum_advection_weno(
 # WENO D-term (divergence flux) and K-term (KE) helpers — Phase 4b
 # =============================================================================
 
+def flux_form_vface_zonal_length(grid) -> jnp.ndarray:
+    """Canonical v-face zonal length ``dx_v = R·cos(lat_v)·dlon`` (#516).
+
+    Single source for the meridional volume-transport face length used
+    by the flux-form momentum advection, the velocity-divergence split
+    and the conservative cell divergence on a regular/Mercator lat-lon
+    grid.  Routes through :func:`vface_zonal_cos_lat` so it bit-matches
+    the canonical ``divergence_cgrid`` metric — guaranteeing that the
+    ``v·dx_v`` transport summed by the momentum advection equals the
+    transport continuity uses (no mass leak between continuity and
+    momentum advection on a non-uniform-dlat grid).
+
+    Returns
+    -------
+    dx_v : (n_lat+1,)
+        Zonal length of each v-face; interior cos-of-interface, the two
+        polar walls exactly ``0`` (no flux through the pole).
+    """
+    return grid.radius * vface_zonal_cos_lat(grid) * grid.dlon
+
+
 def _split_velocity_divergence(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -939,16 +961,11 @@ def _split_velocity_divergence(
     else:
         # Regular or Mercator: variable-dy safe.
         _is_2d_dy = False
-        R = grid.radius
-        dlon = grid.dlon
-        lat = grid.lat
         face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-        lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-        cos_lat_v = jnp.cos(lat_v)
-        face_dx = R * cos_lat_v * dlon                  # (n_lat+1,)
+        # #516: single-source v-face zonal length so the meridional
+        # ``v·dx_v`` transport the w-/horizontal divergence splits is
+        # bit-identical to the continuity / flux-form-advection metric.
+        face_dx = flux_form_vface_zonal_length(grid)    # (n_lat+1,)
         fd = face_dx[:, jnp.newaxis, jnp.newaxis]
 
     # Zonal flux divergence at cells.
@@ -3016,9 +3033,10 @@ def _bc_horizontal_momentum_advection_flux_form(
 
     # --- FV metrics (mirror divergence_cgrid) ---
     dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
-    lat = grid.lat
-    cos_lat_v = jnp.pad(jnp.cos(0.5 * (lat[:-1] + lat[1:])), (1, 1))
-    face_dx_v = (grid.radius * cos_lat_v * grid.dlon)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
+    # #516: single-source v-face zonal length — bit-identical to the
+    # continuity / divergence metric so the ``v·dx_v`` transport this
+    # advection sums equals the transport continuity uses (no mass leak).
+    face_dx_v = flux_form_vface_zonal_length(grid)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
     area = grid.area[..., jnp.newaxis]                            # (n_lat,n_lon,1)
 
     # Volume transports through faces [m^3/s] (h-weighted velocity x face length).
