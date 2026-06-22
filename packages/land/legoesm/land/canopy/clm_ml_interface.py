@@ -292,43 +292,57 @@ def _compute_cos_zenith(
 def _compute_virtual_lon_deg(
     cos_zen_forcing: np.ndarray,
     lat_deg: np.ndarray,
-    doy: float,
+    caldaym1: float,
 ) -> np.ndarray:
     """Invert shr_orb_cosz to find a longitude that reproduces cos_zen_forcing.
 
-    The CLM formula: cosz = sin(lat)*sin(decl) - cos(lat)*cos(decl)*cos(jday*2π+lon)
-    Inverted:        lon  = arccos((sin(lat)*sin(decl) - cosz)/(cos(lat)*cos(decl)))
-                            - jday * 2π
+    Uses CLM's own Kepler orbital mechanics (``shr_orb_decl``) and the same
+    ``caldaym1`` that ``MLCanopyFluxesMod._MLCanopyForcing`` will use, so the
+    inversion is exact rather than approximated by Spencer (1971).
 
-    Both arccos branches produce the same cosz when substituted back, so we take
-    the principal branch (arccos → [0,π]) without ambiguity.  For nighttime columns
-    (cos_zen ≤ 0.01) no solution exists; we return 0° (harmless — sw_down ≈ 0).
+    Must be called after ``_ensure_clm_initialized()`` (sets ``clm_varorb``
+    orbital parameters used by ``shr_orb_decl``).
+
+    The CLM formula (``shr_orb_cosz``):
+        cosz = sin(lat)*sin(decl) - cos(lat)*cos(decl)*cos(jday_frac*2π + lon)
+    Inversion:
+        lon  = arccos((sin(lat)*sin(decl) − cosz) / (cos(lat)*cos(decl)))
+               − jday_frac * 2π
+
+    Both arccos branches produce the same cosz when substituted back, so the
+    principal branch (arccos → [0, π]) is unambiguous.  The arccos result is
+    well-defined even at night (``cos_arg`` is clipped to [−1, 1]) so no
+    nighttime guard is needed.
 
     Parameters
     ----------
-    cos_zen_forcing : np.ndarray  shape (ncol,)
-        Forcing cosine solar zenith angle (already clamped ≥ 0 by coupler).
-    lat_deg : np.ndarray  shape (ncol,)  Latitude [°].
-    doy     : float  0-based fractional day of year.
+    cos_zen_forcing : np.ndarray  shape (ncol,), ≥ 0 (clamp before calling)
+    lat_deg : np.ndarray  shape (ncol,), latitude [°]
+    caldaym1 : float
+        CLM calendar day at the *beginning* of the current timestep.
+        Equals ``get_curr_calday(offset=-dt)`` after ``_setup_clm_time``.
+        Computed as ``1 + (itim - 1) * dt / 86400`` where
+        ``itim = max(1, round(doy * 86400 / dt))``.
 
     Returns
     -------
-    lon_deg : np.ndarray  shape (ncol,)  Virtual longitude [°, –180..180].
+    lon_deg : np.ndarray  shape (ncol,), virtual longitude [°, −180..180]
     """
-    lat_r = np.deg2rad(lat_deg)
-    B = 2.0 * np.pi * doy / 365.0
-    decl = (0.006918
-            - 0.399912 * np.cos(B)
-            + 0.070257 * np.sin(B)
-            - 0.006758 * np.cos(2 * B)
-            + 0.000907 * np.sin(2 * B)
-            - 0.002697 * np.cos(3 * B)
-            + 0.00148  * np.sin(3 * B))
+    from clm_share.shr_orb_mod import shr_orb_decl
+    import clm_src_utils.clm_varorb as _varorb
 
-    jday_frac = doy % 1.0  # fractional day [0, 1)
+    lat_r = np.deg2rad(lat_deg)
+
+    # CLM Kepler orbital mechanics — exact match with _MLCanopyForcing
+    declinm1, _ = shr_orb_decl(caldaym1, _varorb.eccen, _varorb.mvelpp,
+                                _varorb.lambm0, _varorb.obliqr)
+    decl = float(declinm1)
+
+    jday_frac = caldaym1 % 1.0  # fractional part of caldaym1 → [0, 1)
 
     sin_lat, cos_lat = np.sin(lat_r), np.cos(lat_r)
-    sin_decl, cos_decl = np.sin(decl), np.cos(decl)
+    sin_decl = np.full_like(lat_r, np.sin(decl))
+    cos_decl = np.full_like(lat_r, np.cos(decl))
 
     denom = cos_lat * cos_decl
     denom_safe = np.where(np.abs(denom) > 1e-6, denom,
@@ -337,9 +351,7 @@ def _compute_virtual_lon_deg(
 
     lon_rad = np.arccos(cos_arg) - jday_frac * 2.0 * np.pi
     lon_rad = ((lon_rad + np.pi) % (2.0 * np.pi)) - np.pi  # → [−π, π]
-    lon_deg = np.degrees(lon_rad)
-
-    return np.where(cos_zen_forcing > 0.01, lon_deg, 0.0)
+    return np.degrees(lon_rad)
 
 
 def _estimate_beam_fraction(
@@ -999,25 +1011,34 @@ def compute_clm_ml_canopy_fluxes(
         lat_deg = np.array(lat, dtype=np.float64)
     else:
         lat_deg = np.zeros(ncol, dtype=np.float64)
+
+    # ---- CLM global state setup ----
+    # _setup_clm_time must precede _compute_virtual_lon_deg because the latter
+    # calls shr_orb_decl with orbital params set by _ensure_clm_initialized and
+    # needs caldaym1 derived from the itim we are about to write.
+    z_ref = float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0
+    _setup_clm_time(dt, doy, 0)
+    # caldaym1 matches what _MLCanopyForcing computes internally:
+    #   get_curr_calday(offset=-int(dtime_clm)) = 1 + (itim-1) * dt / 86400
+    # This is distinct from doy%1 by exactly one CLM step (dt/86400 days).
+    _itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
+    _caldaym1 = 1.0 + (_itim - 1) * dt / 86400.0
+
     if lon is not None:
         lon_deg = np.array(lon, dtype=np.float64)
         cos_zen = _compute_cos_zenith(lat_deg, lon_deg, doy)
     else:
         # Use coupler-provided cos_zenith directly — avoids 100× error in beam
         # extinction (kb=0.5/coszen) that occurs when lon defaults to 0° (Greenwich).
-        # Then invert the CLM shr_orb_cosz formula to recover the equivalent
-        # virtual longitude so that CLM's internal solar_zen_forcing[p] matches
-        # the forcing.  Both arccos branches reproduce the same cosz, so the
-        # virtual lon is not geographically meaningful but is numerically correct.
-        cos_zen = np.array(forcing.cos_zenith, dtype=np.float64)
-        lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, doy)
+        # Then invert the CLM shr_orb_cosz formula (using CLM's own Kepler declination
+        # and caldaym1) so that CLM's internal solar_zen_forcing[p] reproduces the
+        # forcing.  Both arccos branches give the same cosz, so the virtual longitude
+        # is numerically correct even if not geographically meaningful.
+        cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
+        lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
 
-    # ---- CLM global state setup ----
-    z_ref = float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0
     _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
                         pft_clm=int(canopy_config.pft_clm))
-    # doy → correct calday inside CLM (fixes wrong solar zenith bug)
-    _setup_clm_time(dt, doy, 0)
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
     # MLCanopyFluxes copies t_a10_patch into tacclim_forcing on output — reading

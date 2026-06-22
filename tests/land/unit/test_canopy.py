@@ -672,41 +672,73 @@ class TestSolarGeometry(unittest.TestCase):
         self.assertIsInstance(config.surface_scheme, CCC)
 
     def test_virtual_lon_round_trips_cos_zen(self):
-        """_compute_virtual_lon_deg produces lon that recovers input cos_zen via _compute_cos_zenith."""
+        """_compute_virtual_lon_deg produces lon that recovers input cos_zen via shr_orb_cosz.
+
+        Since _compute_virtual_lon_deg now uses CLM's own shr_orb_decl and caldaym1,
+        the round-trip must close through shr_orb_cosz — not through the Spencer-based
+        _compute_cos_zenith (which would show small residuals from Kepler vs Spencer).
+        """
         import numpy as np
         from legoesm.land.canopy.clm_ml_interface import (
             _compute_virtual_lon_deg,
-            _compute_cos_zenith,
+            _ensure_clm_initialized,
         )
+        from clm_share.shr_orb_mod import shr_orb_cosz, shr_orb_decl
+        import clm_src_utils.clm_varorb as _varorb
+        from math import pi
+
+        _ensure_clm_initialized()  # sets _varorb.*
 
         lat = np.array([38.47, 51.5, -33.9])   # CHATS7 CA, London, Sydney
         cos_zen_in = np.array([0.85, 0.45, 0.62])
         doy = 120.833  # May 1 near noon PDT for column 0
+        dt = 1800.0
 
-        lon_virtual = _compute_virtual_lon_deg(cos_zen_in, lat, doy)
-        cos_zen_out = _compute_cos_zenith(lat, lon_virtual, doy)
+        # caldaym1 used by _MLCanopyForcing when itim=round(doy*86400/dt)
+        itim = max(1, round(doy * 86400.0 / dt))
+        caldaym1 = 1.0 + (itim - 1) * dt / 86400.0
 
+        lon_virtual = _compute_virtual_lon_deg(cos_zen_in, lat, caldaym1)
+
+        # Verify round-trip through CLM's own shr_orb_cosz
+        declinm1, _ = shr_orb_decl(caldaym1, _varorb.eccen, _varorb.mvelpp,
+                                    _varorb.lambm0, _varorb.obliqr)
         for i in range(len(lat)):
+            lat_r = float(lat[i]) * pi / 180.0
+            lon_r = float(lon_virtual[i]) * pi / 180.0
+            cos_zen_out = shr_orb_cosz(caldaym1, lat_r, lon_r, float(declinm1))
             self.assertAlmostEqual(
-                float(cos_zen_in[i]), float(cos_zen_out[i]), delta=0.01,
-                msg=(f"col {i}: cos_zen round-trip error: "
-                     f"{cos_zen_in[i]:.4f} → lon={lon_virtual[i]:.1f}° "
-                     f"→ {cos_zen_out[i]:.4f}"),
+                float(cos_zen_in[i]), float(cos_zen_out), delta=1e-6,
+                msg=(f"col {i}: CLM round-trip error: "
+                     f"{cos_zen_in[i]:.6f} → lon={lon_virtual[i]:.2f}° "
+                     f"→ {cos_zen_out:.6f}"),
             )
 
-    def test_virtual_lon_nighttime_returns_zero(self):
-        """_compute_virtual_lon_deg returns 0° for nighttime columns (cos_zen ≤ 0.01)."""
+    def test_virtual_lon_finite_for_all_cos_zen(self):
+        """_compute_virtual_lon_deg returns finite [-180,180] for all cos_zen values including nighttime."""
         import numpy as np
-        from legoesm.land.canopy.clm_ml_interface import _compute_virtual_lon_deg
+        from legoesm.land.canopy.clm_ml_interface import (
+            _compute_virtual_lon_deg,
+            _ensure_clm_initialized,
+        )
 
-        lat = np.array([38.47, 38.47, 38.47])
-        cos_zen_night = np.array([0.0, 0.005, -0.1])  # all nighttime/twilight
+        _ensure_clm_initialized()
+
+        lat = np.array([38.47, 38.47, 38.47, 38.47])
+        cos_zen_test = np.array([0.85, 0.2, 0.0, 0.005])  # daytime, low sun, terminator
         doy = 120.0
+        dt = 1800.0
+        itim = max(1, round(doy * 86400.0 / dt))
+        caldaym1 = 1.0 + (itim - 1) * dt / 86400.0
 
-        lon_out = _compute_virtual_lon_deg(cos_zen_night, lat, doy)
-        for i in range(3):
-            self.assertAlmostEqual(float(lon_out[i]), 0.0, places=6,
-                                   msg=f"Nighttime col {i}: expected 0°, got {lon_out[i]}")
+        lon_out = _compute_virtual_lon_deg(cos_zen_test, lat, caldaym1)
+        for i in range(len(lat)):
+            self.assertTrue(
+                np.isfinite(lon_out[i]),
+                f"col {i} (cos_zen={cos_zen_test[i]}): expected finite lon, got {lon_out[i]}",
+            )
+            self.assertGreaterEqual(float(lon_out[i]), -180.0)
+            self.assertLessEqual(float(lon_out[i]), 180.0)
 
 
 if __name__ == "__main__":
