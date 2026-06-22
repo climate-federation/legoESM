@@ -71,9 +71,10 @@ def build_gyre():
         # spin-up than implicit_cn); alpha=0 = no SSH-diffusion backstop.
         extra["barotropic_diffusion_alpha"] = float(
             os.environ.get("BARO_ALPHA", "0.0"))
+    g_use = float(os.environ.get("G_OVERRIDE", str(G_REDUCED)))
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
-        g=G_REDUCED, rho_0=1000.0,
+        g=g_use, rho_0=1000.0,
         A_h=A_H, K_h=0.0,
         momentum_advection=mom,
         barotropic_solver=baro,
@@ -126,8 +127,10 @@ def main():
             state = step(state)
         jax.block_until_ready(state.u.data)
         umax = float(jnp.max(jnp.abs(state.u.data)))
+        etamax = float(jnp.max(jnp.abs(state.eta.data)))
         finite = bool(jnp.all(jnp.isfinite(state.u.data)))
-        print(f"  day {day:3d}  max|u|={umax:.4e}  finite={finite}", flush=True)
+        print(f"  day {day:3d}  max|u|={umax:.4e}  max|eta|={etamax:.4e}  "
+              f"finite={finite}", flush=True)
         if not finite:
             print(f"  >>> legoESM blew at day {day}", flush=True)
             break
