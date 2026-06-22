@@ -766,7 +766,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         """Explicitly set the anchored mass target (iter-19)."""
         self._target_mass = target_mass
 
-    def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
+    def compute_mass(self, state: CGridLatLonHydrostaticState, grid=None) -> jax.Array:
         """Compute total mass (for conservation fixer target).
 
         Iter-12: use the fp64 budget accumulator unconditionally.
@@ -776,7 +776,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         iter-2's anchor wiring.
         """
         acc = conservation_accumulator()
-        return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
+        _grid = self.grid if grid is None else grid
+        return jnp.sum(state.p_s.astype(acc) * _grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
         return cgrid_latlon_hydrostatic_tendencies(
@@ -827,24 +828,63 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
         phys_state=None,
     ) -> tuple:
-        """Internal: advance one step on C-grid state (raw arrays).
+        """Internal (JITTED): advance one step on C-grid state (raw arrays).
+
+        Thin wrapper over :meth:`_step_cgrid_impl` with the model's own grid /
+        sigma_coord / polar masks. The lat-band SPMD body calls
+        ``_step_cgrid_impl`` directly with the BAND geometry (un-jitted, so the
+        band grid stays a concrete value rather than a tracer).
+        """
+        return self._step_cgrid_impl(
+            state, dt, target_mass, physics_fn, phys_state,
+        )
+
+    def _step_cgrid_impl(
+        self,
+        state: CGridLatLonHydrostaticState,
+        dt: float,
+        target_mass: jax.Array | None = None,
+        physics_fn=None,
+        phys_state=None,
+        *,
+        grid=None,
+        sigma_coord=None,
+        polar_mask=None,
+        polar_mask_v=None,
+        pole_v_bc_masks=None,
+    ) -> tuple:
+        """Advance one step on C-grid state (raw arrays). UN-jitted.
 
         Physics is evaluated inside each RK stage (matching the CDGrid
         PE contract), not as a post-step Euler update.  Every stage
         receives the STEP-INPUT ``phys_state``; the carry-out comes
         from one extra physics evaluation on the post-step state (see
         :meth:`step`).  Returns ``(state_new, phys_state_out)``.
+
+        ``grid`` / ``sigma_coord`` / ``polar_mask`` / ``polar_mask_v`` default
+        to ``self.*`` (serial / single-rank).  The lat-band SPMD wrapper passes
+        the BAND geometry + band polar masks so the whole step runs on the band;
+        un-jitted because a nested ``jax.jit`` would trace ``grid`` as a tracer
+        and crash the operators' trace-time static ``if`` / pole constructions.
         """
+        if grid is None:
+            grid = self.grid
+        if sigma_coord is None:
+            sigma_coord = self.sigma_coord
+        if polar_mask is None:
+            polar_mask = self._polar_mask
+        if polar_mask_v is None:
+            polar_mask_v = self._polar_mask_v
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
             du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
-                s, self.grid, self.sigma_coord, self.config,
+                s, grid, sigma_coord, self.config,
             )
 
             # --- Physics coupling (inside RK stage) ---
             if physics_fn is not None:
-                hs = cgrid_to_hydrostatic(s, self.grid)
+                hs = cgrid_to_hydrostatic(s, grid)
                 phys_tend = self._call_physics(physics_fn, hs, phys_state)
 
                 dT = dT + phys_tend.dT_dt.data
@@ -886,14 +926,14 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # equatorial-CFL dt (which only the filtered fields can
             # tolerate) would crash on the unfiltered transport.
             # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
-            if self._polar_mask is not None:
-                dT = fourier_filter_3d(dT, self.grid, self._polar_mask)
-                dps = fourier_filter(dps, self.grid, self._polar_mask)
+            if polar_mask is not None:
+                dT = fourier_filter_3d(dT, grid, polar_mask)
+                dps = fourier_filter(dps, grid, polar_mask)
 
                 # u: lon-interface, shape (n_lat, n_lon+1, nlev).  Drop
                 # the duplicated last lon column, filter, then restore
                 # the periodicity column from the filtered first column.
-                du_int = fourier_filter_3d(du[:, :-1, :], self.grid, self._polar_mask)
+                du_int = fourier_filter_3d(du[:, :-1, :], grid, polar_mask)
                 du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
 
                 # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Use
@@ -905,7 +945,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # with the northern neighbour) so re-appending it
                 # unfiltered would leak an unfiltered perturbation
                 # into v at each step.
-                dv = fourier_filter_3d(dv, self.grid, self._polar_mask_v)
+                dv = fourier_filter_3d(dv, grid, polar_mask_v)
 
                 # Tracers: each transported tracer has the same
                 # (n_lat, n_lon, nlev) shape as dT, so the same mask
@@ -914,7 +954,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # polar tracer advection past its CFL.
                 if dq:
                     dq = {
-                        name: fourier_filter_3d(dq_field, self.grid, self._polar_mask)
+                        name: fourier_filter_3d(dq_field, grid, polar_mask)
                         for name, dq_field in dq.items()
                     }
 
@@ -932,16 +972,39 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # tendency-side rewrite above).  Serial config has
         # ``pole_v_bc=(True, True)`` so this preserves bit-exact
         # behaviour with the pre-refactor single-Pad implementation.
-        v_new = _zero_v_at_pole(
-            state_new.v,
-            south=self.config.pole_v_bc[0],
-            north=self.config.pole_v_bc[1],
-            offset=self.config.pole_v_bc_offset,
-        )
+        if pole_v_bc_masks is not None:
+            # Lat-band SPMD: zero v at the PHYSICAL pole faces only (the south
+            # band's bottom / north band's top), selected DATA-dependently per
+            # band — an interior cut's end v-face is a shared interior face and
+            # must NOT be walled.  ``_zero_v_at_pole``'s static ``if south`` /
+            # fast-path cannot take traced masks, so apply the wall via
+            # ``jnp.where`` over the same offset rows.
+            _south_m, _north_m = pole_v_bc_masks
+            _off = self.config.pole_v_bc_offset
+            v_new = state_new.v
+            _n = v_new.shape[0]
+            v_new = jnp.where(
+                _south_m, v_new.at[_off].set(jnp.zeros_like(v_new[_off])), v_new)
+            v_new = jnp.where(
+                _north_m,
+                v_new.at[_n - 1 - _off].set(jnp.zeros_like(v_new[_n - 1 - _off])),
+                v_new)
+        else:
+            # Enforce v = 0 at poles via the rank-aware helper.  Serial config
+            # has ``pole_v_bc=(True, True)`` so this preserves bit-exact
+            # behaviour with the pre-refactor single-Pad implementation.
+            v_new = _zero_v_at_pole(
+                state_new.v,
+                south=self.config.pole_v_bc[0],
+                north=self.config.pole_v_bc[1],
+                offset=self.config.pole_v_bc_offset,
+            )
         state_new = state_new._replace(v=v_new)
 
-        # Safety rails: T floor, p_s floor, mass fixer
-        state_new = self._apply_safety_rails(state_new, target_mass, state)
+        # Safety rails: T floor, p_s floor, mass fixer (band grid + global
+        # area denominator under SPMD).
+        state_new = self._apply_safety_rails(
+            state_new, target_mass, state, grid=grid, sigma_coord=sigma_coord)
 
         state_out = cast_pytree(state_new, None, "storage")
 
@@ -955,7 +1018,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         phys_state_out = phys_state
         if physics_fn is not None and phys_state is not None:
             _pr = self._call_physics_raw(
-                physics_fn, cgrid_to_hydrostatic(state_out, self.grid),
+                physics_fn, cgrid_to_hydrostatic(state_out, grid),
                 phys_state,
             )
             if type(_pr) is tuple and len(_pr) > 1:
@@ -972,12 +1035,25 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state: CGridLatLonHydrostaticState,
         target_mass: jax.Array | None = None,
         pre_state: CGridLatLonHydrostaticState | None = None,
+        *,
+        grid=None,
+        sigma_coord=None,
     ) -> CGridLatLonHydrostaticState:
         """Apply T_min floor, p_floor clamp, and mass fixer.
 
         Called after dynamics and again after physics to ensure safety
         invariants hold regardless of what physics tendencies produce.
+
+        ``grid`` / ``sigma_coord`` default to ``self.*`` (serial / single-rank).
+        The lat-band SPMD body passes the BAND grid (with a GLOBAL
+        ``grid_total_area`` denominator kept global by the band slicer + the
+        ``batch_global_area_sums`` "lat"-psum) so the mass fixer's numerator
+        AND denominator stay global across bands.
         """
+        if grid is None:
+            grid = self.grid
+        if sigma_coord is None:
+            sigma_coord = self.sigma_coord
         # Temperature floor
         T_new = jnp.maximum(state.T, self.config.T_min)
         state = state._replace(T=T_new)
@@ -994,24 +1070,25 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
             # latlon SPMD sharding).
-            total_area = self.grid.grid_total_area.astype(acc)
+            total_area = grid.grid_total_area.astype(acc)
             if target_mass is not None:
                 # Closure-constant target → only ``mass_new`` is reduced.
-                area = self.grid.area.astype(acc)
+                area = grid.area.astype(acc)
                 mass_target = target_mass
                 mass_new = jnp.sum(state.p_s.astype(acc) * area)
             elif pre_state is not None:
                 # Iter-57: batch the two area-weighted sums into a
                 # single MPI allreduce / cross-shard reduction (the
                 # cubed-sphere ``fix_mass_hydrostatic`` already does
-                # this via ``batch_global_area_sums``).
+                # this via ``batch_global_area_sums``).  Under lat-band SPMD
+                # this psum's across the "lat" axis (the global numerator).
                 mass_target, mass_new = batch_global_area_sums(
-                    [pre_state.p_s, state.p_s], self.grid,
+                    [pre_state.p_s, state.p_s], grid,
                 )
             else:
                 # Degenerate case: mass_target == mass_new → correction=0.
                 # Skip the redundant second reduction.
-                area = self.grid.area.astype(acc)
+                area = grid.area.astype(acc)
                 mass_new = jnp.sum(state.p_s.astype(acc) * area)
                 mass_target = mass_new
             correction = (mass_target - mass_new) / total_area
@@ -1036,12 +1113,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             )
             if state.tracers:
                 _hybrid = isinstance(
-                    self.sigma_coord, HybridSigmaPressureCoordinate)
+                    sigma_coord, HybridSigmaPressureCoordinate)
                 if _hybrid:
-                    dp_pre = dp_from_hybrid(self.sigma_coord, p_s_pre)
-                    dp_post = dp_from_hybrid(self.sigma_coord, p_s_post)
+                    dp_pre = dp_from_hybrid(sigma_coord, p_s_pre)
+                    dp_post = dp_from_hybrid(sigma_coord, p_s_post)
                 else:
-                    dsigma = self.sigma_coord.dsigma
+                    dsigma = sigma_coord.dsigma
                     dp_pre = p_s_pre[..., jnp.newaxis] * dsigma
                     dp_post = p_s_post[..., jnp.newaxis] * dsigma
                 ratio = dp_pre / (dp_post + 1e-10)  # (n_lat, n_lon, nlev)
