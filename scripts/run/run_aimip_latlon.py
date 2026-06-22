@@ -303,22 +303,40 @@ def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_ROLLOUT_HOURS
         acc[name]["rmse"].append(rmse)
         acc[name]["bias"].append(bias)
 
+    diag = {}  # non-RMSE model diagnostics (no ERA5 target)
+
+    def _diag_precip(pred):
+        # precip_accum [kg/m^2] over the rollout -> mm/day (1 kg/m^2 = 1 mm).
+        pa = getattr(pred, "precip_accum", None)
+        if pa is None:
+            return
+        rate = jnp.asarray(pa) / max(float(hours), 1e-9) * 24.0
+        diag.setdefault("precip_mm_day", {"mean": [], "max": []})
+        diag["precip_mm_day"]["mean"].append(_area_weighted(rate, cos_lat))
+        diag["precip_mm_day"]["max"].append(float(np.max(np.asarray(rate))))
+
     for ic, tgt, forcing in zip(ics, targets, forcings):
         pred = single_day_rollout(ic, forcing, run_seg_raw, dt=dt, hours=hours)
         _accum("T", pred.T, tgt.T)
         _accum("u", pred.u, tgt.u)
         _accum("v", pred.v, tgt.v)
-        _accum("q", pred.q_v, tgt.q_v)
+        _accum("q", pred.q_v, tgt.q_v)       # specific humidity [kg/kg]
         _accum("ps", pred.p_s, tgt.p_s)
         # Radiation fluxes (only meaningful when targets carry ERA5 fluxes).
         _accum("olr", pred.held_lw_up_toa, tgt.held_lw_up_toa)
         _accum("rsut", pred.held_sw_up_toa, tgt.held_sw_up_toa)
         _accum("sfc_net_sw", pred.held_sw_net_sfc, tgt.held_sw_net_sfc)
         _accum("sfc_net_lw", pred.held_lw_net_sfc, tgt.held_lw_net_sfc)
+        # Precipitation has no ERA5 target here -> report model rate as a
+        # physical sanity diagnostic (global-mean ~3 mm/day expected).
+        _diag_precip(pred)
 
-    return {k: {"rmse": float(np.mean(v["rmse"])),
-                "bias": float(np.mean(v["bias"]))}
-            for k, v in acc.items()}
+    out = {k: {"rmse": float(np.mean(v["rmse"])),
+               "bias": float(np.mean(v["bias"]))}
+           for k, v in acc.items()}
+    for k, v in diag.items():
+        out[k] = {"mean": float(np.mean(v["mean"])), "max": float(np.max(v["max"]))}
+    return out
 
 
 # ---------------------------------------------------------------------------
