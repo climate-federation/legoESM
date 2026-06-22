@@ -1,0 +1,115 @@
+#!/bin/bash -l
+#PBS -N legoesm_cpu_mpi_scaling
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=premium
+#PBS -l select=1:ncpus=128:mpiprocs=128
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# AMIP-like CPU weak+strong MPI scaling on NCAR Derecho (128-core EPYC nodes).
+#
+# Runs scripts/bench/run_cpu_mpi_scaling.py over MPI ranks. The genuinely
+# domain-decomposed grids are latlon (latitude bands / 2-D pencils) and
+# icosahedral (MPAS); cubed-sphere and spectral are rank-1 only (replicated)
+# and the sweep correctly restricts them. The job enumerates cases with
+# --sweep, then runs each case under `mpiexec -n N_RANKS ... --case '<json>'`,
+# sweeping rank counts 1,2,4,...,MAX_RANKS on a single node (<=128 ranks).
+# Each result is written as JSON (with backend, n_cores, fix_mass) into OUTDIR.
+#
+# ---------------------------------------------------------------------------
+# PREREQS:
+#   * A conda env with JAX (CPU) AND mpi4py + mpi4jax built against Derecho's
+#     Cray MPICH. Set its name via LEGOESM_CONDA_ENV (default: legoesm-mpi).
+#     Without a working mpi4jax the multi-rank halo exchange will not run.
+#   * One rank per core (the default) => clean scaling: the harness pins each
+#     rank to a single thread (forces single-threaded Eigen) when there is no
+#     SLURM_CPUS_PER_TASK, which is the case under PBS.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs
+#
+# OVERRIDE at submit time (no file edits):
+#   # AMIP-representative moist physics, latlon, up to 128 ranks:
+#   qsub -v PHYSICS=moist,GRID=latlon,MAX_RANKS=128 \
+#        scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs
+#   # icosahedral (MPAS) genuine MPI decomposition:
+#   qsub -v GRID=icosahedral scripts/cluster/scaling_derecho/cpu_mpi_scaling.pbs
+#
+# NOTE: MAX_RANKS>128 needs multiple nodes -- bump the `select=` line to
+#       select=NODES:ncpus=128:mpiprocs=128 and `mpiexec -n N` will span them.
+# ===========================================================================
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# CPU/MPI env: force the CPU backend and pick the mpi-enabled conda env BEFORE
+# sourcing _env.sh (which respects pre-set values). The harness also sets
+# JAX_PLATFORMS=cpu internally; this keeps the rest of _env.sh consistent.
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-mpi}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# --- Benchmark configuration (overridable via `qsub -v NAME=value`) ----------
+GRID="${GRID:-latlon}"              # latlon | icosahedral (genuine MPI); cs/spectral = rank-1 only
+PHYSICS="${PHYSICS:-held_suarez}"   # held_suarez (dry, robust) | moist (AMIP-like: moisture + Kessler)
+MODE="${MODE:-both}"                # weak | strong | both
+PRECISION="${PRECISION:-float64}"   # float64 (default) | float32
+MAX_RANKS="${MAX_RANKS:-64}"        # powers of 2 swept: 1,2,4,...,MAX_RANKS (<=128 for one node)
+NLEV="${NLEV:-26}"
+N_WARMUP="${N_WARMUP:-5}"
+N_TIMING="${N_TIMING:-50}"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/cpu_mpi_${STAMP}}"
+mkdir -p "$OUTDIR"
+CASE_FILE="$OUTDIR/cases.jsonl"
+
+echo "=== HOST ==="
+hostname; date
+echo "ncores(node)=$(nproc 2>/dev/null || echo '?')"
+echo "=== CONFIG ==="
+echo "grid=$GRID physics=$PHYSICS mode=$MODE precision=$PRECISION max_ranks=$MAX_RANKS nlev=$NLEV"
+echo "python=$PY"
+echo "outdir=$OUTDIR"
+
+# --- 1) Enumerate cases (single process, no MPI) -----------------------------
+"$PY" scripts/bench/run_cpu_mpi_scaling.py --sweep \
+    --grid "$GRID" \
+    --mode "$MODE" \
+    --physics "$PHYSICS" \
+    --precision "$PRECISION" \
+    --n-levels "$NLEV" \
+    --max-ranks "$MAX_RANKS" > "$CASE_FILE"
+
+N_CASES=$(grep -c . "$CASE_FILE" || true)
+echo "=== SWEEP: $N_CASES cases ==="
+cat "$CASE_FILE"
+
+# --- 2) Run each case under mpiexec with its matched rank count ---------------
+rc_all=0
+i=0
+while IFS= read -r CASE; do
+    [ -z "$CASE" ] && continue
+    N_RANKS=$("$PY" -c 'import sys,json; print(json.loads(sys.argv[1])["n_ranks"])' "$CASE")
+    echo "--- case $i: n_ranks=$N_RANKS ---"
+    echo "$CASE"
+    mpiexec -n "$N_RANKS" "$PY" scripts/bench/run_cpu_mpi_scaling.py \
+        --case "$CASE" \
+        --n-warmup "$N_WARMUP" \
+        --n-timing "$N_TIMING" \
+        --output-dir "$OUTDIR"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "case $i FAILED rc=$rc"
+        rc_all=$rc
+    fi
+    i=$((i + 1))
+done < "$CASE_FILE"
+
+echo "=== DONE rc=$rc_all ==="
+echo "results under: $OUTDIR"
+exit $rc_all
