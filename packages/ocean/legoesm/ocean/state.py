@@ -943,6 +943,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     #              (Eq 44). The paper notes the divergence choice "has a large
     #              impact on the solution" (W9D is markedly more dissipative).
     weno_smoothness: str = "split"
+    # DECOUPLED divergence-flux (D-term) smoothness, independent of the vorticity
+    # smoothness above. Oceananigans' WENOVectorInvariant uses TWO independent
+    # choices: ``vorticity_stencil`` (VelocityStencil, Eq 43 = our "split" vorticity)
+    # AND ``upwinding`` (OnlySelfUpwinding, Eq 44 = "standard"/self divergence) — a
+    # mix the single ``weno_smoothness`` flag cannot express ("split" forces the
+    # divergence to the more-aggressive Eq-45 full-divergence smoothness; "standard"
+    # forces the vorticity to self-smoothness). At marginal (eddy-permitting)
+    # resolution the Eq-45 divergence under-dissipates the 2dx grid mode and a
+    # baroclinic-eddy field runs away, while Oceananigans (Eq-44 self-divergence)
+    # saturates. ``None`` (default) = follow ``weno_smoothness`` for BOTH (bit-
+    # identical to the historical behaviour); set ``"standard"`` to get the faithful
+    # Oceananigans OnlySelfUpwinding divergence while keeping ``weno_smoothness=
+    # "split"`` VelocityStencil vorticity.
+    weno_divergence_smoothness: str | None = None
     # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
     # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
     # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant

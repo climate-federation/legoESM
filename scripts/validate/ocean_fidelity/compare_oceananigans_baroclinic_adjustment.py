@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from netCDF4 import Dataset
 
 from legoesm import constants
-from legoesm.grids.latlon import create_regional_latlon_grid
+from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.eos import LinearEOSConfig
 from legoesm.ocean.fidelity.oceananigans_recipe import oceananigans_canonical_ocean_config
@@ -51,6 +51,12 @@ ALPHA_T = 2.0e-4
 T_REF_C = 10.0
 G = constants.g
 RHO0 = 1000.0
+# BetaPlane(latitude=-45): f(y) = f0 + beta*y, exactly as Oceananigans builds it
+# from the Cartesian RectilinearGrid + BetaPlane (NOT a spherical sin(lat) grid).
+F0 = 2.0 * constants.Omega * np.sin(np.radians(LATC))
+BETA = 2.0 * constants.Omega * np.cos(np.radians(LATC)) / constants.R_earth
+DX_M = LX / NX                                         # square cells, 1000km/48
+Y_ORIGIN = -LY / 2.0                                   # front centred at domain mid (y=0)
 
 
 def _ramp(y, dy):
@@ -58,22 +64,35 @@ def _ramp(y, dy):
 
 
 def build_setup():
-    # lat/lon spans giving ~LX x LY at LATC.
-    R = constants.R_earth
-    dlat_deg = np.degrees(LY / R)
-    dlon_deg = np.degrees(LX / (R * np.cos(np.radians(LATC))))
-    grid, wall = create_regional_latlon_grid(
-        NY, NX, LATC - dlat_deg / 2, LATC + dlat_deg / 2,
-        lon_west=-dlon_deg / 2, lon_east=dlon_deg / 2, periodic_x=True)
+    # FAITHFUL grid: Oceananigans baroclinic_adjustment uses a Cartesian
+    # RectilinearGrid (x,y in metres) + BetaPlane(-45) -- NOT a lat-lon spherical
+    # grid. The beta-plane C-grid matches it exactly: uniform Cartesian metric
+    # (cos_lat==1, no spherical convergence) and f=f0+beta*y at each stagger point.
+    # Topology (Periodic, Bounded, Bounded): zonally re-entrant (no E/W walls) +
+    # N/S v-faces auto-walled by the barotropic solver. This removes the spherical
+    # metric terms that feed the 2dx grid-scale Coriolis runaway on the latlon grid.
+    grid = create_beta_plane_cgrid_geometry(
+        NY, NX, dx_m=DX_M, dy_m=DX_M, f0=F0, beta=BETA,
+        y_origin_m=Y_ORIGIN, x_origin_m=0.0, cartesian_pseudo_lat=True)
     z = create_ocean_z_star(n_levels=NZ, H_max=LZ)
+    wall = jnp.ones((NY, NX), dtype=jnp.asarray(grid.cos_lat).dtype)   # all ocean
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=ALPHA_T, beta_S=0.0),
         g=G, rho_0=RHO0, A_h=0.0, K_h=0.0,
-        momentum_advection=os.environ.get("MOM_ADV", "weno5"),
+        # weno9 momentum + weno7 tracer = W9V, matching the regenerated oracle
+        # (WENOVectorInvariant(vorticity_order=9) + WENO(order=7)).
+        momentum_advection=os.environ.get("MOM_ADV", "weno9"),
         barotropic_solver=os.environ.get("BARO_SOLVER", "implicit_cn"),
-        bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
-    cfg = cfg._replace(barotropic_implicit_theta_eta=1.0,
-                       barotropic_implicit_theta_pgf=1.0)
+        # FAITHFUL defaults to Oceananigans WENOVectorInvariant + BetaPlane +
+        # ImplicitFreeSurface: matsuno_split = HydrostaticSphericalCoriolis
+        # EnstrophyConserving (f & ζ co-located at the FF vertex); split vorticity
+        # = VelocityStencil; standard divergence = OnlySelfUpwinding.
+        coriolis_scheme=os.environ.get("CORIOLIS_SCHEME", "matsuno_split"),
+        bottom_drag_r=0.0, tracer_advection="weno7",
+        weno_smoothness=os.environ.get("WENO_SMOOTH", "split"))
+    cfg = cfg._replace(
+        barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0,
+        weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH", "standard") or None)
     state = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=wall, H_max=LZ,
                                           T_water_init_C=T_REF_C, T_deep=T_REF_C)
     model = LatLonCGridOceanModel(grid, z, cfg)
@@ -81,14 +100,18 @@ def build_setup():
 
 
 def set_ic(grid, z, state):
-    """IC: b = N^2 z + db*ramp(y) (+noise) -> T = T_ref + b/(g a); thermal-wind u."""
-    R = constants.R_earth
-    lat = np.asarray(grid.lat)                         # (n_lat,)
-    y = R * (lat - np.radians(LATC))                   # metres from the front centre
+    """IC matching Oceananigans `set!(model, b=bᵢ)` EXACTLY: b = N^2 z + db*ramp(y)
+    (+noise) -> T = T_ref + b/(g a), and START FROM REST (u=v=0). The jet spins up
+    by geostrophic adjustment during the run, like the oracle -- imposing the
+    thermal-wind jet at t=0 instead would start legoESM with MORE energy than the
+    oracle ever has (0.97 m/s vs the oracle's 0.72 m/s day-6 jet) and inflate the
+    over-energization measurement. On the Cartesian beta-plane grid `lat` is pinned
+    to 0, so y is recovered from the cell index: y_c = y_origin + (j+1/2) dy."""
     z_full = np.asarray(z.z_full_ref)                  # (nlev,) <=0
     mask = np.asarray(state.land_mask.data)            # (n_lat, n_lon)
     n_lat, n_lon = mask.shape
     nlev = len(z_full)
+    y = Y_ORIGIN + (np.arange(n_lat) + 0.5) * DX_M     # metres from front centre (y=0)
     rng = np.random.default_rng(8675309)
     T = np.empty((n_lat, n_lon, nlev))
     ramp = _ramp(y, DY)                                # (n_lat,)
@@ -96,19 +119,8 @@ def set_ic(grid, z, state):
         b_col = N2 * z_full[k] + DB * ramp             # (n_lat,)
         T[:, :, k] = T_REF_C + b_col[:, None] / (G * ALPHA_T)
     T = (T + EPS_B / (G * ALPHA_T) * rng.standard_normal(T.shape)) * mask[:, :, None]
-    # Thermal wind: f du/dz = -db/dy ; u(z=-H)=0. db/dy = DB*d(ramp)/dy.
-    dbdy = DB * np.gradient(ramp, y)                   # (n_lat,)
-    f_lat = 2.0 * constants.Omega * np.sin(lat)
-    f_safe = np.where(np.abs(f_lat) < 1e-12, 1e-12, f_lat)
-    u = np.zeros((n_lat, n_lon + 1, nlev))
-    for k in range(nlev):
-        u[:, :, k] = (-(1.0 / f_safe) * dbdy * (z_full[k] + LZ))[:, None]
-    uface = np.minimum(mask, np.roll(mask, 1, axis=1))
-    uface = np.concatenate([uface, uface[:, :1]], axis=1)
-    u = u * uface[:, :, None]
-    return state._replace(
-        T=state.T.replace(data=jnp.asarray(T)),
-        u=state.u.replace(data=jnp.asarray(u)))
+    # Rest start (u=v=0) -- the oracle sets ONLY b; the jet adjusts up in the run.
+    return state._replace(T=state.T.replace(data=jnp.asarray(T)))
 
 
 def main():

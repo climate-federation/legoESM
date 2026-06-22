@@ -1027,6 +1027,16 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_WENO_SMOOTHNESS)}, "
                 f"got {config.weno_smoothness!r}",
             )
+        # Decoupled divergence-flux smoothness: None (follow weno_smoothness) or a
+        # valid family. Lets the Oceananigans recipe mix VelocityStencil vorticity
+        # ("split") with OnlySelfUpwinding divergence ("standard").
+        if (config.weno_divergence_smoothness is not None
+                and config.weno_divergence_smoothness not in VALID_WENO_SMOOTHNESS):
+            raise ValueError(
+                f"weno_divergence_smoothness must be None or one of "
+                f"{sorted(VALID_WENO_SMOOTHNESS)}, "
+                f"got {config.weno_divergence_smoothness!r}",
+            )
         if config.lateral_friction_scheme not in VALID_LATERAL_FRICTION_SCHEME:
             raise ValueError(
                 f"lateral_friction_scheme must be one of "

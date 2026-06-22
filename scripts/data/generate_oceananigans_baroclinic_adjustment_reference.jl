@@ -19,22 +19,32 @@ using Printf
 using Random
 Random.seed!(8675309)
 
-out_dir   = length(ARGS) >= 1 ? ARGS[1] : "."
+ref_root  = length(ARGS) >= 1 ? ARGS[1] : "."
 stop_days = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 30.0
 dump_days = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 6.0
+# The Python driver reads <REF>/baroclinic_adjustment/baroclinic_adjustment.nc, so
+# write into the case subdir of the reference root (ARGS[1] = $LEGOESM_OCEAN_FIDELITY_OCEANANIGANS_REF).
+out_dir = joinpath(ref_root, "baroclinic_adjustment")
 mkpath(out_dir)
 
 Lx = Ly = 1000kilometers
 Lz = 1kilometers
 grid = RectilinearGrid(size = (48, 48, 8),
+                       halo = (6, 6, 4),   # WENOVectorInvariant(order=9) needs >= (6,6,4)
                        x = (0, Lx), y = (-Ly/2, Ly/2), z = (-Lz, 0),
                        topology = (Periodic, Bounded, Bounded))
 
+# Momentum MUST be WENOVectorInvariant (NOT a plain `WENO()`): on a RectilinearGrid
+# a plain `WENO()` dispatches to FLUX-FORM `div_𝐯u` momentum advection (Advection/
+# vector_invariant_advection.jl:417), NOT the vector-invariant form legoESM uses and
+# the Silvestri §5 jet uses. WENOVectorInvariant(vorticity_order=9) matches the §5
+# oracle deck exactly (= W9V) so this is a faithful §5 precursor + an apples-to-apples
+# test of legoESM's vector-invariant WENO momentum (legoesm momentum_advection="weno9").
 model = HydrostaticFreeSurfaceModel(grid;
                                     coriolis = BetaPlane(latitude = -45),
                                     buoyancy = BuoyancyTracer(), tracers = :b,
-                                    momentum_advection = WENO(),
-                                    tracer_advection = WENO())
+                                    momentum_advection = WENOVectorInvariant(vorticity_order = 9),
+                                    tracer_advection = WENO(order = 7))
 
 ramp(y, Δy) = min(max(0, y/Δy + 1/2), 1)
 N² = 1e-5; M² = 1e-7; Δy = 100kilometers

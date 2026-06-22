@@ -145,3 +145,82 @@ not the blow-up lever.)
 Oracle source consulted:
 `/tmp/ocn_j11_depot/packages/Oceananigans/NCFoc/src/Advection/{vector_invariant_advection,weno_interpolants}.jl`
 and `.../HydrostaticFreeSurfaceModels/implicit_free_surface.jl`.
+
+## §5 residual — decisively isolated on a fast CPU precursor (2026-06-22)
+
+The §5 blow-up was reproduced on a CLEAN, FAST CPU test bed — **baroclinic_adjustment**
+(48×48×8, minutes per 30-day run): a stratified buoyancy front on a beta-plane goes
+baroclinically unstable, the canonical Oceananigans example. Driver
+`scripts/validate/ocean_fidelity/compare_oceananigans_baroclinic_adjustment.py`,
+reference `scripts/data/generate_oceananigans_baroclinic_adjustment_reference.jl`.
+This replaced 20 iterations of chasing the chaotic 160×128×50 GPU §5 and let each
+hypothesis be A/B-tested in minutes. All numbers below are real runs vs the real oracle.
+
+**Five faithful fixes / findings (in order):**
+
+1. **IC from rest (faithful).** The oracle does `set!(model, b=bᵢ)` — starts from REST,
+   the jet spins up by geostrophic adjustment. The driver had imposed the full
+   thermal-wind jet (0.97 m/s) at t=0 — more energy than the oracle ever has. Fixed
+   to start from rest; sharpened the early-time match (day-6 ratio 2.0×→1.25×).
+
+2. **Runaway is SPATIAL, not a timestep artifact.** Halving dt (600→150 s) makes the
+   blow-up WORSE (day-18 max|u| 8.0→11.1), the unambiguous signature of a grid-scale
+   spatial instability, not CFL. (The oracle's `TimeStepWizard` actually runs at
+   dt≈1200 s — coarser than legoESM — and stays bounded.)
+
+3. **Cartesian beta-plane grid (faithful) — but the spherical metric terms are NOT the
+   dominant source.** The oracle uses a Cartesian `RectilinearGrid` + `BetaPlane(-45)`,
+   NOT a spherical lat-lon grid. The driver was rebuilt on
+   `create_beta_plane_cgrid_geometry` (f=f0+βy at each stagger point, cos_lat≡1,
+   Periodic-x + N/S walls = Oceananigans `(Periodic, Bounded, Bounded)`). This is
+   strictly more faithful, but the runaway PERSISTS on the Cartesian grid — so the
+   latlon spherical metrics are not the 2Δx source (correcting the earlier hypothesis).
+
+4. **Decoupled D-term smoothness (faithful model fix).** Oceananigans'
+   `WENOVectorInvariant` default mixes TWO independent smoothness choices —
+   `vorticity_stencil=VelocityStencil()` (velocity smoothness, Eq 43 = legoESM "split"
+   vorticity) AND `upwinding=OnlySelfUpwinding` (self-smoothness, Eq 44 = "standard"
+   divergence). legoESM's single `weno_smoothness` flag forced BOTH to the same family,
+   so neither setting matched the oracle ("split" → under-dissipative Eq-45 divergence;
+   "standard" → over-constrained Eq-37 vorticity). New optional config field
+   `weno_divergence_smoothness` (default None = follow `weno_smoothness`, bit-identical)
+   lets the divergence flux pick its family independently. The faithful Oceananigans mix
+   = split vorticity + self divergence. This materially helps (the case stays FINITE to
+   30 days instead of NaN) but does not fully close the gap at order 9.
+
+5. **THE RESIDUAL, apples-to-apples (the key correction).** The Oceananigans
+   `baroclinic_adjustment` example (and any `momentum_advection = WENO()` deck on a
+   `RectilinearGrid`) advects momentum in **FLUX FORM** `∇·(u⊗u)`, NOT vector-invariant:
+   `U_dot_∇u(…, ::AbstractAdvectionScheme, U) = div_𝐯u(…)` (vector_invariant_advection.jl:417);
+   only a `VectorInvariant`/`WENOVectorInvariant` object dispatches to the vector-invariant
+   form (line 292). The §5 jet deck DOES use `WENOVectorInvariant(vorticity_order=9)` (=W9V).
+   The precursor reference was therefore regenerated with `WENOVectorInvariant(order=9)` +
+   `WENO(order=7)` tracer to be a TRUE apples-to-apples vector-invariant comparison
+   (legoESM `momentum_advection="weno9"`). Result, BOTH vector-invariant order-9:
+
+   | day | legoESM weno9 (faithful: split-vort+self-div+matsuno, Cartesian) | oracle W9V |
+   |-----|------------------------------------------------------------------|------------|
+   | 6   | 1.07 | 0.72 |
+   | 12  | 3.39 | 1.47 |
+   | 18  | **NaN** | 1.56 |
+   | 30  | —    | **2.05 (saturates)** |
+
+   legoESM's vector-invariant WENO **blows up where Oceananigans' `WENOVectorInvariant`
+   saturates**, and higher order is WORSE in legoESM (weno9 NaN day-18 vs weno5 finite to
+   day-30). This DEFINITIVELY isolates the §5 residual to legoESM's **vector-invariant WENO
+   momentum under-dissipating grid-scale enstrophy vs Oceananigans' `WENOVectorInvariant`** —
+   specifically the **VelocityStencil vorticity flux** (the self-divergence D-term, now
+   decoupled, helps but does not close it). NOT the grid, NOT the timestep, NOT the WENO
+   order, NOT the free-surface solver, NOT the Coriolis scheme alone.
+
+**Ruled out as the dominant lever:** ❌ timestep (finer = worse), ❌ spherical metric terms
+(Cartesian grid still blows), ❌ momentum WENO order (weno9 worse than weno5),
+❌ free-surface solver, ❌ Coriolis scheme (matsuno_split delays but doesn't cure).
+**Localised to:** legoESM's VelocityStencil vorticity-flux reconstruction in the
+vector-invariant WENO momentum (the 1D WENO kernel is coefficient-faithful; the gap is in
+the C-grid vorticity-flux APPLICATION / the VelocityStencil smoothness realization).
+
+**Next (research-level):** match Oceananigans' `VelocityStencil` vorticity-flux dissipation
+in legoESM's vector-invariant momentum (the `_weno_zeta_at_u` beta-average path) — the one
+remaining un-closed node. CASE 3 (§5) bar (stay finite while oracle stable AND within 2×)
+remains UNMET: the faithful order-9 config stays finite only to day ~12 here.

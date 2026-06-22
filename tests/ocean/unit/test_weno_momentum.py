@@ -434,6 +434,99 @@ class TestWENOSmoothnessSplitVsStandard:
         finally:
             set_policy(prev)
 
+    @pytest.mark.parametrize("sm", [None, "split", "standard"])
+    def test_config_accepts_divergence_smoothness(self, sm):
+        """The DECOUPLED divergence-flux smoothness accepts None (follow
+        weno_smoothness) or a valid family."""
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = LatLonCGridOceanConfig(momentum_advection="weno9",
+                                     weno_divergence_smoothness=sm)
+        assert cfg.weno_divergence_smoothness == sm
+
+    def test_invalid_divergence_smoothness_rejected(self):
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            r = build_eady_uniform_setup(n_lat=12, n_lon=12, momentum_advection="weno9")
+            bad = r.model_config._replace(weno_divergence_smoothness="bogus")
+            with pytest.raises(ValueError, match="weno_divergence_smoothness"):
+                LatLonCGridOceanModel(r.grid, r.z_coord, bad)
+        finally:
+            set_policy(prev)
+
+    def test_divergence_smoothness_decouples_dterm(self):
+        """The Oceananigans WENOVectorInvariant default MIXES VelocityStencil
+        vorticity (Eq 43, "split") with OnlySelfUpwinding divergence (Eq 44,
+        "standard") — a combination the single ``weno_smoothness`` flag cannot
+        express. ``weno_divergence_smoothness`` selects the divergence family
+        INDEPENDENTLY of the vorticity family. This test pins three invariants on a
+        full step with a sharp ζ/divergence feature:
+
+        1. ``weno_divergence_smoothness=None`` is BIT-IDENTICAL to leaving it unset
+           (None → follow ``weno_smoothness`` for the D-term) — backward compat.
+        2. With ``weno_smoothness="split"`` fixed, switching the D-term to
+           "standard" (self/OnlySelfUpwinding) actually CHANGES the solution — so
+           the decoupling is wired through, not a no-op.
+        3. The faithful Oceananigans mix (split vorticity + standard divergence)
+           differs from BOTH pure split/split and pure standard/standard.
+        """
+        from legoesm.core.field import Field
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            def _run(weno_sm, div_sm):
+                r = build_eady_uniform_setup(n_lat=16, n_lon=16,
+                                             momentum_advection="weno9")
+                cfg = r.model_config._replace(weno_smoothness=weno_sm,
+                                              weno_divergence_smoothness=div_sm,
+                                              weno_d_term=True)
+                model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
+                s = r.initial_state
+                # Sharp u AND v features so BOTH divergence components δU and δV are
+                # grid-scale nonzero — required to separate the full-divergence
+                # smoothness {δU; D=δU+δV} ("split") from the self-smoothness
+                # {δU; δU} ("standard"): with δV≈0 the two coincide.
+                u2 = s.u.data.at[8, 8, :].add(0.3).at[8, 9, :].add(-0.3)
+                v2 = s.v.data.at[8, 8, :].add(0.3).at[9, 8, :].add(-0.3)
+                s = s._replace(u=s.u.replace(data=u2), v=s.v.replace(data=v2))
+
+                def _z(d):
+                    return Field(data=jnp.zeros_like(d.data),
+                                 name=d.name + "_incr_prev", dims=d.dims, units=d.units)
+                s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                               u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+                return model.step(s, 300.0).u.data
+
+            split_none = _run("split", None)        # default path (D-term follows split)
+            split_split = _run("split", "split")    # explicit; must equal split_none
+            split_self = _run("split", "standard")  # faithful Oceananigans mix
+            std_std = _run("standard", "standard")  # pure W9D
+
+            # 1. None == explicit "split" (backward compat, bit-identical).
+            assert jnp.allclose(split_none, split_split, atol=1e-14), \
+                "weno_divergence_smoothness=None must follow weno_smoothness exactly"
+            # 2. Decoupling is wired: self-divergence changes the solution.
+            d_div = float(jnp.max(jnp.abs(split_self - split_split)))
+            assert d_div > 1e-10, \
+                f"self-divergence must change the D-term; max|Δu|={d_div}"
+            # 3. The faithful mix is distinct from pure W9D too.
+            d_mix = float(jnp.max(jnp.abs(split_self - std_std)))
+            assert d_mix > 1e-10, \
+                f"split-vort+self-div must differ from standard/standard; max|Δu|={d_mix}"
+            assert bool(jnp.all(jnp.isfinite(split_self)))
+        finally:
+            set_policy(prev)
+
 
 # =====================================================================
 # WENO vertical momentum advection

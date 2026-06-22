@@ -1896,10 +1896,17 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
         # Smoothness measure for the matching-direction WENO reconstruction:
         #   "split"    (W*V) → {δU; D}: smoothness from the FULL divergence
-        #              D = δU + δV (Silvestri Eq 45). The paper notes this
-        #              "has a large impact on the solution".
-        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44).
-        if config.weno_smoothness == "split":
+        #              D = δU + δV (Silvestri Eq 45, Oceananigans
+        #              CrossAndSelfUpwinding). The paper notes this "has a large
+        #              impact on the solution".
+        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44, Oceananigans
+        #              OnlySelfUpwinding — the WENOVectorInvariant DEFAULT).
+        # DECOUPLED from the vorticity smoothness: Oceananigans' default mixes
+        # VelocityStencil vorticity (Eq 43, "split") with OnlySelfUpwinding
+        # divergence (Eq 44, "standard"); ``weno_divergence_smoothness`` selects the
+        # divergence family independently (None → follow ``weno_smoothness``).
+        _div_smooth = config.weno_divergence_smoothness or config.weno_smoothness
+        if _div_smooth == "split":
             D_full_filled = neumann_fill_cgrid(
                 dU_di_cell + dV_dj_cell, mask, grid=grid)
             psi_u, psi_v = D_full_filled, D_full_filled

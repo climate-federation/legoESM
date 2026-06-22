@@ -49,5 +49,6 @@ def test_setup_builds_3d_stratified(ba):
     # bottom (k=0) since b = N^2 z increases toward z=0 and T = T_ref + b/(g a).
     ci, cj = T.shape[0] // 2, T.shape[1] // 2
     assert float(T[ci, cj, 0]) > float(T[ci, cj, -1])  # k=0 surface warmer
-    # Thermal-wind jet was set (nonzero u).
-    assert float(np.abs(np.asarray(state.u.data)).max()) > 0.1
+    # Rest start (matches Oceananigans `set!(model, b=bᵢ)`): u=v=0, the jet spins
+    # up by geostrophic adjustment in the run, NOT imposed at t=0.
+    assert float(np.abs(np.asarray(state.u.data)).max()) == pytest.approx(0.0)
