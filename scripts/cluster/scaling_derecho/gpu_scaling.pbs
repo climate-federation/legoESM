@@ -3,8 +3,7 @@
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=premium
-#PBS -l select=1:ncpus=64:ngpus=4:mem=480GB
-#PBS -l gpu_type=a100
+#PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
 #PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -k eod
@@ -24,11 +23,13 @@
 # RESOURCES -- VERIFY before submit:
 #   * Derecho GPU nodes are 1 socket / 64 cores + 4x A100-40GB. The request
 #     above takes a full node (ngpus=4) for the multi-GPU sweep.
-#   * `gpu_type=a100` and `job_priority` follow NCAR Derecho GPU conventions;
-#     if a job will not schedule, confirm these tokens with `qstat -Qf main`
-#     / NCAR docs and adjust. `--n-gpus 0` below auto-detects whatever PBS
-#     gives you, so editing ONLY the `select=` line keeps the Python in sync.
-#   * For a quick single-GPU baseline: set `select=1:ncpus=16:ngpus=1:mem=120GB`.
+#   * `gpu_type=a100` is a per-chunk resource INSIDE select (current Derecho
+#     PBS syntax), and `job_priority` follows NCAR conventions; if a job will
+#     not schedule, confirm these with `qstat -Qf main` / NCAR docs. `--n-gpus 0`
+#     below auto-detects whatever PBS gives you, so editing ONLY the `select=`
+#     line keeps the Python in sync.
+#   * For a quick single-GPU baseline: set
+#     `select=1:ncpus=16:mpiprocs=1:ngpus=1:gpu_type=a100:mem=100GB`.
 #
 # SUBMIT:
 #   qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs

@@ -51,7 +51,7 @@ Build it in an interactive GPU session so the CUDA build sees a real A100:
 
 ```bash
 qsub -I -A P08010000 -q main -l job_priority=premium \
-     -l select=1:ncpus=64:ngpus=4:mem=480GB -l gpu_type=a100 -l walltime=00:40:00
+     -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB -l walltime=00:40:00
 # on the deg* node:
 module load conda cuda
 conda create -n legoesm-gpu python=3.11 -y && conda activate legoesm-gpu
