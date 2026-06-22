@@ -196,11 +196,29 @@ the bump at t=0.1, physically correct for the slow gravity-wave radiation of a
 0.5-rad bump at c=1).
 
 This is high-impact node #1 AND the suspected §5/bickley eddy-residual home,
-reproduced in a clean deterministic test. NEXT: debug the implicit_cn Helmholtz
-η update (why the bump collapses — likely the RHS assembly / H-weighting / the
-eta-averaging θ_eta blend), OR adopt explicit_substep at a CFL-stable dt as the
-faithful-physics match. Validate against this geostrophic-adjustment test, then
-re-check §5/bickley (the eddy η field should stop being over-damped).
+reproduced in a clean deterministic test.
+
+**ROOT-CAUSE PINNED (1-step debug, BARO_SOLVER=implicit_cn):** the implicit
+Helmholtz SOLVE collapses η in ONE step: RHS = eta_old (0.0997, confirming the
+predictor/RHS algebra cancels to eta_old) but `solve_helmholtz_freesurface`
+returns η_new = 0.0357. NOT under-convergence (400 PCG iters, resid 2.4e-3, gives
+the SAME 0.0357) → 0.0357 IS the converged solution of `A·η=eta_old`, so the
+operator `A = I − coeff·∇·(H∇)` **amplifies the smooth bump ~2.8×** (equivalently
+the inverse over-SMOOTHS η). SCALE-SELECTIVE: σ=30°(~5cell)→×0.36,
+60°(~11cell)→×0.63, 120°(~21cell)→×0.85 — a diffusion that hammers high
+wavenumbers. The effective `coeff·∇²` for the 5-cell mode is ~1.8, but
+`coeff=g·dt²=1e-4` and CFL²~0.01 predict ~0.01 → **the operator is ~50–100× too
+strong**, a METRIC SCALING BUG in `_helmholtz_apply` / `_helmholtz_coupling_pieces`
+(the dy_u/dx/area combination on the lat-lon C-grid; the ~100× ≈ a missing/extra
+metric factor, possibly deg-vs-rad or an area mis-weight). Bickley masks it because
+there η develops FROM the flow each step (flow→η); the geostrophic adjustment is
+the η→flow case the over-damping kills.
+
+NEXT: trace the exact metric factor in `_helmholtz_apply`/`_helmholtz_coupling_pieces`
+(barotropic_implicit_latlon_cgrid.py:216,243) against the geostrophic-adjustment
+1-step test (eta_new should ≈ eta_old for a smooth bump); FIX it; re-check
+gyre/bickley/§5. This is now a SPECIFIC, CPU-testable operator bug — not a chaotic
+research problem.
 
 ## 5. Phased plan
 
