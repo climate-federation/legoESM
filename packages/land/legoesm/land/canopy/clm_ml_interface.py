@@ -509,9 +509,16 @@ def _build_stubs(
 
             rootfr_patch = rootfr_patch.at[p, j].set(float(root_frac_np[jl]))
 
-    # ---- Soil resistance (bare-ground aerodynamic, rough estimate) ----
-    # beta_soil → soil evaporative resistance ~ 100 / beta s/m
-    soilresis_col = jnp.full(np_, 100.0, dtype=jnp.float64)
+    # ---- Soil evaporative resistance (Sellers-Lockwood formula) ----
+    # The CLM-ML SurfaceResistanceMod uses rs = exp(8.206 - 4.255*Se) [s/m]
+    # where Se = effective saturation.  For a silty clay loam with porosity 0.464
+    # and the default smp = -50000 mm = -0.49 MPa, Se ≈ 0.15, so
+    # rs ≈ exp(8.206 - 4.255*0.15) ≈ exp(7.568) ≈ 1927 s/m.
+    # For saturated soil (smp ≈ 0): rs ≈ exp(8.206 - 4.255) ≈ 52 s/m.
+    # We use 2000 s/m as the default to match the moderate-stress config default,
+    # replacing the previous 100 s/m (matched to saturated soil only).
+    _rs_base = float(canopy_config.soilresis_default_s_m)
+    soilresis_col = jnp.full(np_, _rs_base, dtype=jnp.float64)
 
     # ---- Temperature ----
     # t_a10_patch is the 10-day running mean canopy air temperature [K].
@@ -665,11 +672,26 @@ def _init_mlcanopy(ncol: int, stubs: dict, canopy_config: CLMMLCanopyConfig) -> 
         ztop = ztop.at[p].set(htop_v)
         zbot = zbot.at[p].set(hbot_v)
 
+    # Initialize root_biomass_canopy to a physical value.
+    # create_mlcanopy initializes it to spval=1e36, which causes SoilResistance
+    # to compute rld ≈ 1e37 m/m³ and a soil-root conductance of ~1e33 — the
+    # plant resistance then dominates correctly but layer-wise soil ET is wrong.
+    # Default: 300 g/m² (temperate deciduous tree, Jackson et al. 1997).
+    root_biomass = jnp.full_like(mlcanopy.root_biomass_canopy,
+                                  float(canopy_config.root_biomass_default_g_m2))
+    # root_biomass_canopy is initialized to spval for p=0; keep that convention
+    # and only fill 1-based patch indices.
+    for i in range(ncol):
+        root_biomass = root_biomass.at[i + 1].set(
+            float(canopy_config.root_biomass_default_g_m2)
+        )
+
     mlcanopy = mlcanopy._replace(
         ztop_canopy=ztop,
         zbot_canopy=zbot,
         pbeta_lai_canopy=pbeta_lai,
         pbeta_sai_canopy=pbeta_sai,
+        root_biomass_canopy=root_biomass,
     )
 
     # Call init_cold to set initial leaf water potential and intercepted water.
@@ -877,17 +899,28 @@ def compute_clm_ml_canopy_fluxes(
     # doy → correct calday inside CLM (fixes wrong solar zenith bug)
     _setup_clm_time(dt, doy, _CLM_STEP_COUNTER)
 
-    # ---- Extract t_a10 from prior canopy state (10-day running mean T) ----
-    # t_a10_patch must be carried forward from one call to the next so CLM's
-    # Vcmax temperature acclimation uses a smoothed temperature, not just the
-    # instantaneous forcing.  On first call (canopy_state=None), fall back to T_lowest.
-    t_a10_prior = None
+    # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
+    # MLCanopyFluxes stores the acclimation temperature in tacclim_forcing, not
+    # t_a10_patch (which is an input, not output).  We implement the running mean
+    # update ourselves here using an exponential filter with 10-day e-folding:
+    #   T_a10_new = alpha * T_now + (1 - alpha) * T_a10_old
+    #   alpha = dt / (10 * 86400)
+    # On first call (canopy_state=None), initialize to T_lowest (cold start).
+    T_lowest_np = np.array(forcing.T_lowest, dtype=np.float64)
     if canopy_state is not None and canopy_state.mlcanopy is not None:
         prior = canopy_state.mlcanopy
-        if hasattr(prior, "t_a10_patch"):
-            t_a10_prior = jnp.stack(
-                [prior.t_a10_patch[i + 1] for i in range(ncol)]
+        # tacclim_forcing holds the previous acclimation temperature per patch
+        if hasattr(prior, "tacclim_forcing"):
+            t_a10_prev = np.array(
+                [float(prior.tacclim_forcing[i + 1]) for i in range(ncol)]
             )
+        else:
+            t_a10_prev = T_lowest_np
+        alpha = min(dt / (10.0 * 86400.0), 1.0)
+        t_a10_now = (alpha * T_lowest_np + (1.0 - alpha) * t_a10_prev).astype(np.float64)
+    else:
+        t_a10_now = T_lowest_np
+    t_a10_prior = jnp.array(t_a10_now)
 
     # ---- Build stub CLM instances ----
     soil_hyd = getattr(land_config, "hydraulics", None)

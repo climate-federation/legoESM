@@ -317,3 +317,18 @@ class CLMMLCanopyConfig(NamedTuple):
     # 1e-5 mm/s ≈ 0.86 mm/day, representative of silty clay loam at
     # moderate dryness.  The prior default (1e-4) was 10× too high.
     hk_default_mm_s: float = 1.0e-5
+
+    # Default soil evaporative resistance [s/m] when soil texture is not known.
+    # Sellers-Lockwood formula with silty clay loam parameters and Se≈0.15
+    # (corresponding to smp_default_mm = -50000 mm) gives rs ≈ 1927 s/m.
+    # Using 2000 s/m as a round number.  Previous default (100 s/m) matched
+    # saturated conditions only and was ~20× too low for the new dry default.
+    soilresis_default_s_m: float = 2000.0
+
+    # Default fine root biomass per unit ground area [g/m²].
+    # Used by CLM-ML SoilResistance to compute root length density and soil
+    # hydraulic conductance.  The default mlcanopy_type initializes this to
+    # spval=1e36, which produces anomalous root conductance.
+    # Literature range for temperate deciduous trees: 150–500 g/m²
+    # (Jackson et al. 1997 Global Ecol. Biogeogr.); using 300 g/m² as default.
+    root_biomass_default_g_m2: float = 300.0

@@ -466,10 +466,15 @@ class TestConfig(unittest.TestCase):
         self.assertAlmostEqual(cfg.f_vis, 0.46)
         # f_dir=-1 → auto-estimated from zenith
         self.assertLess(cfg.f_dir, 0.0)
-        # smp_default_mm: near field capacity, not near saturation
+        # smp_default_mm: moderate stress (-0.49 MPa), not near saturation
         self.assertLess(cfg.smp_default_mm, -1000.0)
         # hk_default_mm_s: silty clay loam range, not 10× too high
         self.assertLess(cfg.hk_default_mm_s, 1.0e-4)
+        # soilresis_default_s_m: must be physically consistent with dry soil (~2000 s/m)
+        self.assertGreater(cfg.soilresis_default_s_m, 500.0)
+        # root_biomass_default_g_m2: not spval (1e36), must be in literature range
+        self.assertGreater(cfg.root_biomass_default_g_m2, 50.0)
+        self.assertLess(cfg.root_biomass_default_g_m2, 2000.0)
 
 
 class TestSolarGeometry(unittest.TestCase):
