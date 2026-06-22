@@ -212,6 +212,8 @@ def compute_most_fluxes(
     n_iter=5,
     charnock=0.011,
     L_latent=None,
+    gustiness_w_zi=0.0,
+    gustiness_beta=1.25,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -314,6 +316,21 @@ def compute_most_fluxes(
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
 
+        # COARE 3.0 convective gustiness (opt-in; gustiness_w_zi=0 => off =>
+        # byte-identical, so the OMIP/forward-default paths are unchanged).  Over
+        # a calm but convectively-unstable warm ocean the mean wind alone gives
+        # an anemic flux (the tropical hfls ~45 vs ~120 W/m² bias); the
+        # free-convection velocity scale w* = (g·z_i·<w'θv'>/θv)^(1/3) adds a
+        # sub-grid gust U_eff = sqrt(|U|² + (β·w*)²) (Fairall et al. 2003,
+        # β~1.25, z_i = BL depth ~600 m).  <w'θv'> = u*·θv* (kinematic, upward
+        # +; unstable only).
+        if gustiness_w_zi > 0.0:
+            wpthvp = jnp.maximum(u_star_safe * theta_v_star, 0.0)
+            wstar = jnp.cbrt(G * gustiness_w_zi * wpthvp / T_v)
+            U_eff = jnp.sqrt(wind_speed ** 2 + (gustiness_beta * wstar) ** 2)
+        else:
+            U_eff = wind_speed
+
         # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
         #
         # The stability parameter ζ = z/L is the *only* way L enters this
@@ -404,7 +421,7 @@ def compute_most_fluxes(
             )
 
             # 5) Update scaling parameters directly from coefficients
-            u_star_new = rd * wind_speed
+            u_star_new = rd * U_eff
             theta_star_new = rh * dT
             q_star_new = re * dq
 
@@ -432,7 +449,7 @@ def compute_most_fluxes(
         denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, 0.5)
         denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, 0.5)
 
-        u_star_new = KAPPA * wind_speed / denom_m
+        u_star_new = KAPPA * U_eff / denom_m
         theta_star_new = KAPPA * dT / denom_h
         q_star_new = KAPPA * dq / denom_q
 
