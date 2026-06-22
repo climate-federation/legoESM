@@ -179,13 +179,24 @@ Findings:
 - `explicit_substep` DOES drive flow (max|u| 3e-3 at step 10) but is gravity-wave
   CFL-unstable at dt=0.01 (NaN by step 20).
 
-⇒ **The free-surface COUPLING is the concrete legoESM↔Oceananigans difference**
-(Oceananigans applies `u −= gΔt ∂η` in its corrector, directly driving flow from
-the η gradient; legoESM's barotropic solver under-couples η→flow). This is the
-high-impact node #1 AND the suspected §5 interior-residual home — now reproduced
-in a clean, deterministic, non-chaotic test. NEXT: investigate the implicit_cn
-barotropic velocity update (why η→U_bar is ~100× weak) + match Oceananigans'
-predictor-corrector `u −= gΔt ∂η`.
+⇒ **The free-surface COUPLING is the concrete legoESM↔Oceananigans difference.**
+ROOT CAUSE (η-evolution diagnostic, dt=0.01): legoESM's `implicit_cn` **collapses
+the η bump 88% in the first 10 steps** (0.0997→0.0123) then plateaus; the oracle
+decays gradually (0.099→0.052 over 40 steps). So the implicit_cn free-surface
+SOLVE is **catastrophically over-damping the η field**, killing the pressure
+gradient before the geostrophic flow can develop. θ-INDEPENDENT (even θ=0.5 gives
+max|u| 1.8e-4 vs oracle 3.4e-2 — ~200× weak). The Crank-Nicolson PG itself is
+correct (net `−g·dt·[(1−θ)∂η_old+θ∂η_new]`, not cancelled); the bug is the η
+over-damping in the implicit Helmholtz update (with `1/(gΔt²)=1e4` the solve
+SHOULD give η_new≈η_old, but legoESM loses 88%). `explicit_substep` preserves the
+coupling (drives 3e-3) but is gravity-wave CFL-unstable at dt=0.01.
+
+This is high-impact node #1 AND the suspected §5/bickley eddy-residual home,
+reproduced in a clean deterministic test. NEXT: debug the implicit_cn Helmholtz
+η update (why the bump collapses — likely the RHS assembly / H-weighting / the
+eta-averaging θ_eta blend), OR adopt explicit_substep at a CFL-stable dt as the
+faithful-physics match. Validate against this geostrophic-adjustment test, then
+re-check §5/bickley (the eddy η field should stop being over-damped).
 
 ## 5. Phased plan
 
