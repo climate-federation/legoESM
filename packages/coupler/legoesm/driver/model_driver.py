@@ -1012,14 +1012,76 @@ class ModelDriver:
             from legoesm.core.precision import get_policy
             _sd = get_policy().storage
             self.physics.f_land = self._f_land.astype(_sd)
-            self.physics.albedo_land = (
-                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
-            )
+            # Latitude-only land albedo is the default and the ocean/uncovered
+            # fallback; surfdata (when configured) overrides it on land cells.
+            lat_albedo = land_vegetation_albedo(self.grid.grid_lat)
+            surfdata_path = getattr(self.config, "surfdata_path", "")
+            if surfdata_path:
+                albedo_land = self._surfdata_land_albedo(surfdata_path, lat_albedo)
+            else:
+                albedo_land = lat_albedo
+            self.physics.albedo_land = albedo_land.astype(_sd)
             self.physics.rad_update_steps = self.config.rad_update_steps
             logger.info(
                 f"  Land tile: ACTIVE (slab land, C_land="
                 f"{self.physics.C_land:.1e} J/m2/K)"
             )
+
+    def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
+        """Static land albedo field from harmonized surface data.
+
+        Loads + regrids the surfdata to ``self.grid`` (once, host-side), adapts it
+        to a slab SimpleSEB land config, fills mask-land gaps with bare soil, and
+        maps the per-column ``albedo_veg`` (soil-colour + PFT-vegetation blend with
+        a glacier override) onto the model grid.  Cells the driver considers ocean
+        (``f_land == 0``) keep ``lat_albedo`` — physically irrelevant there (the
+        radiation step blends land albedo by ``f_land``) but keeps the field finite
+        and smooth everywhere.
+
+        Static snapshot at ``config.start_day`` day-of-year.  Seasonal-LAI /
+        soil-wetness evolution of the albedo is a follow-up (it would thread
+        per-step ``land_params`` through the integration scan).
+        """
+        from legoesm.land.config import LandConfig
+        from legoesm.land.boundary_data import (
+            init_land_surface_data, fill_land_param_gaps,
+        )
+
+        # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
+        land_cfg = LandConfig()
+        _, land_params, gsd = init_land_surface_data(
+            surfdata_path, self.grid, land_cfg, float(self.config.start_day),
+        )
+        # Reconcile to the driver's AUTHORITATIVE land mask (not surfdata's own
+        # cover): surfdata properties are kept only where _f_land > 0, so the
+        # land params never disagree with the ocean tile (weighted by 1-f_land)
+        # or preexisting AMIP runs.  Ravel matches the loader's column order
+        # since grid_shape_2d == grid_lat.shape (verified for latlon/gaussian/
+        # cubed-sphere).
+        land_params = fill_land_param_gaps(
+            land_params, gsd, f_land=jnp.asarray(self._f_land).reshape(-1),
+        )
+
+        albedo_col = jnp.asarray(land_params.albedo_veg)          # (ncol,)
+        grid_shape = tuple(int(s) for s in jnp.asarray(self.grid.grid_lat).shape)
+        n_grid = int(np.prod(grid_shape))
+        if albedo_col.shape[0] != n_grid:
+            raise ValueError(
+                f"surfdata albedo has {albedo_col.shape[0]} columns but grid "
+                f"{type(self.grid).__name__} has {n_grid} (shape {grid_shape}); "
+                "column/grid layout mismatch."
+            )
+        # Loader flattens grid.grid_lat in C-order (_target_latlon_flat -> ravel),
+        # so reshape aligns cell-for-cell with grid_lat / physics.albedo_land.
+        surf_albedo = albedo_col.reshape(grid_shape)
+        is_land = jnp.asarray(self._f_land) > 0.0
+        on_land = jnp.where(is_land, surf_albedo, jnp.nan)
+        logger.info(
+            f"  Land albedo: SURFDATA ({surfdata_path}); "
+            f"{int(jnp.sum(is_land))} land cells, on-land albedo range "
+            f"[{float(jnp.nanmin(on_land)):.3f}, {float(jnp.nanmax(on_land)):.3f}]"
+        )
+        return jnp.where(is_land, surf_albedo, lat_albedo)
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
