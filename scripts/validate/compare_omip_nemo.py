@@ -319,6 +319,17 @@ def main() -> int:
         if bs is not None:
             print(f"   {bn:22s} rmse={bs['rmse']:.2f} bias={bs['bias']:+.2f} "
                   f"corr={bs['corr']:.3f}")
+    # Per-band SSS too (only when the freshwater closure is applied, --sss-faithful):
+    # localises WHERE a global SSS bias comes from -- the river-mouth / Arctic /
+    # basin breakdown that pinned the MPAS runoff over-concentration (PR #560).
+    sss_bands = (_band_breakdown(sssL, sssN, area, tgt_lat)
+                 if args.sss_faithful else None)
+    if sss_bands is not None:
+        print("[SSS bands]")
+        for bn, bs in sss_bands.items():
+            if bs is not None:
+                print(f"   {bn:22s} rmse={bs['rmse']:.2f} bias={bs['bias']:+.2f} "
+                      f"corr={bs['corr']:.3f}")
 
     def _verdict(rmse, exc, good):
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
@@ -386,8 +397,8 @@ def main() -> int:
         "SST_bands": sst_bands,
         # SSS is a real scored metric when the run applied the freshwater closure
         # (--sss-faithful); otherwise the legacy informational-only gated key.
-        **({"SSS": sss, "SSS_verdict": sss_v} if args.sss_faithful
-           else {"SSS_gated_runoff0": sss}),
+        **({"SSS": sss, "SSS_verdict": sss_v, "SSS_bands": sss_bands}
+           if args.sss_faithful else {"SSS_gated_runoff0": sss}),
         "MLD_dsigma0p01": mld_report,
         "tolerances": _TOL,
     }
