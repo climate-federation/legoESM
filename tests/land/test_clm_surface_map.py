@@ -91,5 +91,36 @@ def test_glacier_raises_albedo(tmp_path):
     assert np.all(alb[fg < 0.01] < _GLACIER_ALBEDO)                 # non-glacier darker
 
 
+def test_tuned_variant_selection(tmp_path):
+    """variant='multilayer' bakes its own per-PFT albedo + glacier ice base; an
+    unknown variant raises (dispatch hardening)."""
+    from legoesm.land.clm_surface_map import (
+        load_clm_surface, CLMSurfaceParamProvider, _VARIANT_TUNED,
+        TUNED_GLACIER_ALBEDO, TUNED_GLACIER_ALBEDO_MULTILAYER)
+    f = str(tmp_path / "v.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(85, -85, 8); lon = np.linspace(0, 315, 8)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    args = (m["pft_fractions"], m["theta_wp"], m["theta_fc"], m["glacier_frac"])
+    slab = CLMSurfaceParamProvider(*args, variant="slab")()
+    mult = CLMSurfaceParamProvider(*args, variant="multilayer")()
+    # the two calibrations differ on the vegetated albedo
+    nonglac = np.asarray(m["glacier_frac"]) < 0.01
+    assert not np.allclose(np.asarray(slab.albedo_veg)[nonglac],
+                           np.asarray(mult.albedo_veg)[nonglac])
+    # multilayer stays physical
+    assert float(jnp.min(mult.albedo_veg)) >= 0.05
+    assert np.all(np.asarray(mult.albedo_veg)[nonglac] <= 0.45)
+    # glacier base albedo follows the variant
+    full_ice = np.asarray(m["glacier_frac"]) > 0.99
+    assert np.allclose(np.asarray(slab.albedo_veg)[full_ice], TUNED_GLACIER_ALBEDO, atol=1e-6)
+    assert np.allclose(np.asarray(mult.albedo_veg)[full_ice],
+                       TUNED_GLACIER_ALBEDO_MULTILAYER, atol=1e-6)
+    assert set(_VARIANT_TUNED) == {"slab", "multilayer"}
+    with pytest.raises(ValueError, match="unknown tuned variant"):
+        CLMSurfaceParamProvider(*args, variant="bogus")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
