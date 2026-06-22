@@ -32,6 +32,20 @@ def test_resolve_turbulence_propagates_surface_bulk_scheme(scheme: str) -> None:
     assert turb_config.surface.bulk_scheme == scheme
 
 
+def test_resolve_turbulence_threads_gustiness_zi() -> None:
+    # surface_gustiness_zi must reach the turbulence scheme's SurfaceLayerConfig.
+    cfg = ExperimentConfig(
+        turbulence="holtslag_boville", surface_bulk_scheme="coare3",
+        surface_gustiness_zi=600.0,
+    )
+    _fn, turb_config = _resolve_turbulence(cfg)
+    assert turb_config.surface.gustiness_w_zi == 600.0
+    # default None => unchanged (0.0)
+    cfg0 = ExperimentConfig(turbulence="holtslag_boville")
+    _fn0, tc0 = _resolve_turbulence(cfg0)
+    assert tc0.surface.gustiness_w_zi == 0.0
+
+
 def test_resolve_turbulence_default_constant_unchanged() -> None:
     # Default surface_bulk_scheme="constant" => resolved config untouched.
     cfg = ExperimentConfig(turbulence="holtslag_boville")
@@ -118,6 +132,25 @@ def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
     for arr in (tau_x, tau_y, sh, lh, ust):
         assert jnp.all(jnp.isfinite(arr))
     assert float(lh.mean()) > 0.0  # evaporation upward over a warm ocean
+
+
+def test_convective_gustiness_raises_calm_unstable_flux() -> None:
+    """COARE convective gustiness (opt-in) must boost the latent flux over a calm
+    but convectively-unstable warm ocean, and the default (off) must be
+    byte-identical (OMIP/forward paths unchanged)."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+
+    f = lambda v: jnp.full((8,), v)  # noqa: E731
+    args = dict(u_rel=f(0.5), v_rel=f(0.0), T_atm=f(290.0), q_atm=f(0.010),
+                T_sfc=f(302.0), q_sfc=f(0.026), rho=f(1.1), scheme="coare3")
+    _tx, _ty, _sh0, lh_off, _u0 = compute_most_fluxes(**args, gustiness_w_zi=0.0)
+    _tx, _ty, _sh1, lh_on, _u1 = compute_most_fluxes(**args, gustiness_w_zi=600.0)
+    assert jnp.all(jnp.isfinite(lh_on))
+    assert float(lh_on.mean()) > float(lh_off.mean())   # gustiness => more evap
+    # default param == off (byte-identical)
+    _tx, _ty, _shd, lh_def, _ud = compute_most_fluxes(**args)
+    assert jnp.allclose(lh_def, lh_off)
 
 
 def test_ocean_unknown_bulk_scheme_raises() -> None:

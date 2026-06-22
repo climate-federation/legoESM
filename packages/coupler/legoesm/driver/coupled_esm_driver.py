@@ -583,9 +583,16 @@ class CoupledESMDriver:
             land_param_provider=land_param_provider,
         )
 
-        # Initialize surface state
+        # Initialize surface state.  Optionally warm-start the soil at the
+        # atmosphere's lat-structured near-surface air temperature (t=0) — the
+        # same spatial source the slab SST uses — so tropical land does not
+        # cold-spin from a uniform 280 K (default off => byte-identical).
+        soil_kwargs = {}
+        if getattr(cfg, "warm_start_soil", False):
+            soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
+            logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg,
+            shape_2d, land_config=land_cfg, **soil_kwargs,
         )
 
         # Tile fractions

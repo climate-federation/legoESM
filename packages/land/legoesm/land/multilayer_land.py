@@ -580,8 +580,12 @@ def init_multilayer_land_state(
         Number of columns.
     config : MultiLayerLandConfig
         Land model configuration.
-    T_init : float
-        Initial uniform soil temperature [K].
+    T_init : float or array
+        Initial soil temperature [K].  A scalar gives a uniform column
+        (legacy default).  A per-column array of shape ``(ncol,)`` gives a
+        spatially-structured warm start (e.g. the lat-varying near-surface air
+        temperature), broadcast vertically across all soil layers — removes the
+        artificial tropical cold-soil spin-up of the uniform 280 K default.
     theta_init : float or None
         Initial uniform volumetric water content [m3/m3].
         If None, uses 0.5 * theta_sat.
@@ -596,7 +600,12 @@ def init_multilayer_land_state(
     if theta_init is None:
         theta_init = 0.5 * config.hydraulics.theta_sat
 
-    T_soil = jnp.full((ncol, nlayers), T_init)
+    _T = jnp.asarray(T_init)
+    if _T.ndim == 0:
+        T_soil = jnp.full((ncol, nlayers), T_init)
+    else:
+        # per-column (ncol,) -> broadcast across the vertical soil layers
+        T_soil = jnp.broadcast_to(_T.reshape(ncol, 1), (ncol, nlayers))
     # broadcast_to (not full) so a PER-COLUMN theta_init (ncol,1) from a spatial
     # theta_sat works; scalar theta_init broadcasts identically.
     theta_soil = jnp.broadcast_to(jnp.asarray(theta_init), (ncol, nlayers))

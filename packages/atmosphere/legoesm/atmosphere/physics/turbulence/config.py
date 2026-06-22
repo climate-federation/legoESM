@@ -145,6 +145,7 @@ __param_spec__ = {
     "SurfaceLayerConfig": {
         "scheme_key": "atm.turb.SurfaceLayerConfig",
         "excluded": {
+            "gustiness_w_zi": "COARE convective-gustiness BL-depth z_i [m]; 0=off. A scheme-enable / BL-depth convention, not a trainable closure (trainable z_i is ill-posed and couples to the BL scheme).",
         },
         "params": {
             "Cd_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral drag coefficient (Large & Yeager 2004 range)", "shape": None},
@@ -243,6 +244,10 @@ class SurfaceLayerConfig(NamedTuple):
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
     bulk_n_iter: int = 5
+    # COARE 3.0 convective-gustiness BL depth z_i [m] (compute_most_fluxes);
+    # 0 = off (byte-identical), ~600 = enable the w* free-convection gust over a
+    # calm warm ocean.  Only effective with bulk_scheme coare3/large_yeager.
+    gustiness_w_zi: float = 0.0
 
 
 class SmagorinskyConfig(NamedTuple):
