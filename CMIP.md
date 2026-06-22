@@ -256,10 +256,14 @@ MISSING the COARE free-convection velocity scale w*) → implemented `w* =
 Earth-like, the tas–tos gap halved, R_TOA toward balance, the cold column warmed
 +7 K (257→265 K col-T). But **zi=600 OVERSHOOTS**: over-evaporates → over-cools
 the slab (−7.2, the old gustiness regime re-appears now that fluxes are strong)
-+ over-moistens (CWV 32) → over-clouds (albedo 35.7). The sweet spot is between
-0 and 600 → **zi=300 running (job 8538045)** to balance hfls/gap gains vs
-slab-drift/albedo. Likely pair with `--q-c-diagnostic` (thinner cloud) to hold
-albedo ~30 as before. The lever + wiring are shipped; only the z_i value tunes.
++ over-moistens (CWV 32) → over-clouds (albedo 35.7). zi=300 (job 8538045) ≈ zi=600 (hfls 74.7, gap +6.6, albedo 35.4, drift −6.7):
+**z_i has weak leverage** (w*∝z_i^⅓), so the albedo/CWV overshoot rides WITH the
+gustiness, not tunable via z_i. The air-sea fix is locked in; the albedo (35) is
+offset by the proven `q_c` knob → **final balanced config = gustiness zi=300 +
+`--q-c-diagnostic 3e-4` (thinner cloud), job 8538901**. The slab drift −6.7 is
+largely a transient ocean→atmosphere heat redistribution (atmosphere warmed
++5 K; R_TOA +13 net-in refills the slab over a long run). Lever + wiring shipped;
+only z_i + q_c tune.
 
 ## Equilibration confirmed (180d, best config) + status
 **Merged to main (PR #563).** A 180-day run of the best config
