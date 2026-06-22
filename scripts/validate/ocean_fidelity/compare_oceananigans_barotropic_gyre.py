@@ -71,6 +71,8 @@ def build_gyre():
         # spin-up than implicit_cn); alpha=0 = no SSH-diffusion backstop.
         extra["barotropic_diffusion_alpha"] = float(
             os.environ.get("BARO_ALPHA", "0.0"))
+        extra["barotropic_time_filter"] = os.environ.get("BARO_FILTER", "cosine")
+        extra["n_barotropic_substeps"] = int(os.environ.get("BARO_SUBSTEPS", "30"))
     g_use = float(os.environ.get("G_OVERRIDE", str(G_REDUCED)))
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
