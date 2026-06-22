@@ -171,6 +171,7 @@ Override knobs without editing files (`qsub -v NAME=value,...`):
 | `PRECISION` | `float32` | `float64` | |
 | `MAX_RANKS` | — | `64` | CPU only; powers of 2, ≤128 per node. >128 ⇒ multi-node `select=`. |
 | `N_GPUS` | `0` (auto) | — | GPU only; 0 = use all PBS-allocated GPUs. |
+| `STRONG_RES` | `48,96,192,384` | — | GPU only; cubed-sphere strong-scaling resolutions (cN/face-edge). Drop `48` for a cleaner curve. |
 
 Examples:
 ```bash

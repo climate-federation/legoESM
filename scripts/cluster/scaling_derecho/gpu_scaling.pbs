@@ -63,6 +63,11 @@ N_GPUS="${N_GPUS:-0}"               # 0 = auto-detect all GPUs PBS allocated
 NLEV="${NLEV:-26}"
 N_WARMUP="${N_WARMUP:-3}"           # JIT warmup steps (excluded from timing)
 N_TIMING="${N_TIMING:-100}"         # timed steps
+# Cubed-sphere strong-scaling resolutions = cells per cube-face edge ("cN").
+# C96~1deg, C192~0.5deg, C384~0.25deg (realistic high-res climate). C48 kept as
+# the small/comms-bound contrast point; drop it (96,192,384) for a cleaner
+# strong curve. Weak scaling sweeps resolution on its own (unaffected).
+STRONG_RES="${STRONG_RES:-48,96,192,384}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/amip_gpu_${STAMP}}"
 mkdir -p "$OUTDIR"
@@ -71,7 +76,7 @@ echo "=== HOST ==="
 hostname; date
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -8 || true
 echo "=== CONFIG ==="
-echo "grid=$GRID physics=$PHYSICS mode=$MODE precision=$PRECISION n_gpus=$N_GPUS nlev=$NLEV"
+echo "grid=$GRID physics=$PHYSICS mode=$MODE precision=$PRECISION n_gpus=$N_GPUS nlev=$NLEV strong_res=$STRONG_RES"
 echo "python=$PY"
 echo "outdir=$OUTDIR"
 
@@ -84,6 +89,7 @@ echo "outdir=$OUTDIR"
     --n-levels "$NLEV" \
     --n-warmup "$N_WARMUP" \
     --n-timing "$N_TIMING" \
+    --strong-resolutions "$STRONG_RES" \
     --output-dir "$OUTDIR"
 rc=$?
 
