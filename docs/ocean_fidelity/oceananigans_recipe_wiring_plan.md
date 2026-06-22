@@ -161,6 +161,32 @@ Implications:
   Oceananigans) makes §5 LESS dissipative, so the §5 fix is NOT the D-term; the
   D-term is just a faithfulness mismatch to expose as a recipe option.
 
+### 3e. Phase-2 free-surface COUPLING result (2026-06-22) — the §5-residual node, localized
+
+Harness: `scripts/data/generate_oceananigans_geostrophic_adjustment_reference.jl`
+(unbalanced η Gaussian bump, u=v=0, ImplicitFreeSurface, deterministic adjustment)
++ `scripts/validate/ocean_fidelity/compare_oceananigans_geostrophic_adjustment.py`.
+
+Findings:
+- IC η aligns (corr 0.997). Oceananigans adjusts: the bump drives a geostrophic
+  flow max|u| 0.011→0.034 over 40 steps.
+- **legoESM (implicit_cn) drives ~NO flow** (max|u| ~2e-5, decaying) — ~100×
+  too weak; η pattern decorrelates.
+- ROOT: at the η-bump IC legoESM's `KE_PGF_u = 0`, `du_dt = 0`, `deta_dt = 0`
+  → **the free-surface η pressure gradient is ABSENT from the 3D momentum
+  tendency**; the η→flow coupling is handled ENTIRELY in the barotropic solver,
+  which (implicit_cn) does not drive the geostrophic flow from an η bump.
+- `explicit_substep` DOES drive flow (max|u| 3e-3 at step 10) but is gravity-wave
+  CFL-unstable at dt=0.01 (NaN by step 20).
+
+⇒ **The free-surface COUPLING is the concrete legoESM↔Oceananigans difference**
+(Oceananigans applies `u −= gΔt ∂η` in its corrector, directly driving flow from
+the η gradient; legoESM's barotropic solver under-couples η→flow). This is the
+high-impact node #1 AND the suspected §5 interior-residual home — now reproduced
+in a clean, deterministic, non-chaotic test. NEXT: investigate the implicit_cn
+barotropic velocity update (why η→U_bar is ~100× weak) + match Oceananigans'
+predictor-corrector `u −= gΔt ∂η`.
+
 ## 5. Phased plan
 
 - **Phase 0 — wiring diagrams + diff** (in progress): finish 3b, complete 3c, rank
