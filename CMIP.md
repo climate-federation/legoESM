@@ -11,14 +11,17 @@ Run env (Ginsburg, GPU partition `glab1`, `--account=glab`):
 --clouds sundqvist …` (always via `sbatch`/`srun`, never the login node).
 
 ## Status at a glance
-| Quantity | Earth | original | NOW (fixes on) |
-|---|---|---|---|
-| Planetary albedo | ~30% | 13–14% | **28–30%** |
-| OLR (rlut) | ~240 | 388 | ~221–232 |
-| CWV | ~25 | 84→14 | **20.7** |
-| `<R_TOA>` (area-wtd) | ~0 | −36 (artifact) | **−1.2 … +15** |
-| SST drift | ~0 | −9 K/yr | **−7.2 K/yr** (spin-up) |
-| LW_net_sfc | ~−55 (CAM) | −110 | −75 … −91 |
+Recommended config: combined preset (slab_richards + --snow-albedo-feedback +
+--convective-cloud) + **--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4**.
+| Quantity | Earth | original | combined (constant) | **BEST (coare3+thin-cloud)** |
+|---|---|---|---|---|
+| Planetary albedo | ~30% | 13–14% | 28.6% | **31.3%** |
+| OLR (rlut) | ~240 | 388 | ~221 | ~221 |
+| CWV | ~25 | 84→14 | 20.7 | **22.0** |
+| `<R_TOA>` (area-wtd) | ~0 | −36 (artifact) | +15 | +19 (warming) |
+| **SST drift** | ~0 | −9 K/yr | −7.2 | **−2.2 K/yr** |
+| hfls | ~80 | — | 41 | **51** |
+| tropics tas–tos gap | ~1 | — | +12.9 | **+11.2** |
 
 ## Fixes SHIPPED (committed + pushed)
 1. **IC fix** — root cause of low precip / high CWV / OLR=388 was the uniform
