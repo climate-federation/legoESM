@@ -203,6 +203,38 @@ albedo.** R_TOA +19 (net-in) is the cost of the thinner cloud — it keeps the
 system warming toward equilibrium. RECOMMENDED coupled config:
 `--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4` (+ the combined preset).
 
+## 180d equilibrated result (job 8535790, COMPLETE) + remaining-bias diagnosis
+Best config (coare3 + `--q-c-diagnostic 5e-4` + combined preset), 180 days:
+| metric | Day-30 | **Day-180 (equilibrated)** | Earth |
+|---|---|---|---|
+| planetary albedo | 31.3% | **30.1%** | ~30 ✓ |
+| SST drift | −2.2 | **−1.4 K/yr** | ~0 (improving ✓) |
+| column-T | 258.7 K | ~256.7 K (quasi-stable ~257) | — |
+| `<R_TOA>` | +19 | **+20 W/m²** | ~0 ✗ persists |
+| hfls | 51 | **45.6 W/m²** | ~80–120 ✗ |
+| CWV / precip | 22.0 / 1.90 | 19.7 / 1.60 | 25 / 2.7 |
+| tropics tas–tos gap | +11.2 | **+13.8** (tos 29.8, tas 16.0) | ~1 ✗ |
+
+**Equilibration: PASS** — bottoms ~Day 90–100 then quasi-stabilizes at ~257 K
+column-T; SST drift down to −1.4 K/yr; albedo Earth-like. NOT the constant
+scheme's runaway. The fast-physics realism goal is met + merged (PR #563).
+
+**Remaining bias = persistent air-sea decoupling, TWO parts:**
+1. **Diagnostic artifact (~4 K of the gap):** `tas` is the LOWEST MODEL LEVEL T
+   (diagnostics.py:693, "proxy for 2 m"), ~100 m up at nlev=20. A neutral
+   log-law 2 m interpolation (T_sfc + ~0.72·(T_low−T_sfc)) gives ~20°C 2 m air
+   vs the 16°C lowest level. → **add a proper MOST 2 m `tas` diagnostic** (needs
+   surface skin-T + ustar/θ*/L threaded to the collector). Correct CMIP output.
+2. **Real flux deficiency (~10 K + R_TOA +20):** even at 2 m the air is ~10 K
+   below a 29.8°C ocean, with hfls 45 ≪ Earth ~120. The ocean absorbs R_TOA +20
+   and warms (tos 28.8→29.8) but the weak surface turbulent flux can't shed it to
+   the cold atmosphere → gap widens, R_TOA stays imbalanced. coare3 helped but
+   the effective surface wind is still ~0.85 m/s (calm tropics; w* under-boosts).
+   NEXT lever: stronger air-sea exchange — NOTE the slab is now energy-GAINING
+   (R_TOA +20), the OPPOSITE of the old gustiness dead-end regime, so a higher
+   gustiness/effective-wind floor should now shed the ocean's excess to the
+   atmosphere (closes BOTH R_TOA and the gap) — but validate vs SST drift.
+
 ## Equilibration confirmed (180d, best config) + status
 **Merged to main (PR #563).** A 180-day run of the best config
 (coare3 + `--q-c-diagnostic 5e-4` + combined preset) bottoms out near Day
