@@ -1907,10 +1907,18 @@ def _resolve_turbulence(config):
     # add the convective-gustiness w* term absent from the constant neutral
     # coefficients — the fix for anemic evaporation over a calm warm ocean.
     sbs = getattr(config, "surface_bulk_scheme", "constant")
-    if (sbs != "constant" and turb_config is not None
-            and getattr(turb_config, "surface", None) is not None):
-        turb_config = turb_config._replace(
-            surface=turb_config.surface._replace(bulk_scheme=sbs))
+    gzi = getattr(config, "surface_gustiness_zi", None)
+    if (turb_config is not None
+            and getattr(turb_config, "surface", None) is not None
+            and (sbs != "constant" or gzi is not None)):
+        surf = turb_config.surface
+        if sbs != "constant":
+            surf = surf._replace(bulk_scheme=sbs)
+        if gzi is not None:
+            # COARE convective-gustiness BL depth (only effective with a MOST
+            # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
+            surf = surf._replace(gustiness_w_zi=gzi)
+        turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 
 

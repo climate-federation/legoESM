@@ -63,6 +63,10 @@ class SimpleOceanConfig(NamedTuple):
     # wires --surface-bulk-scheme into both).  z_ref / n_iter use the
     # ``compute_most_fluxes`` defaults (10 m / 5), matching SurfaceLayerConfig.
     bulk_scheme: str = "constant"
+    # COARE convective-gustiness BL depth z_i [m] for the slab heat budget's
+    # coare3/large_yeager fluxes (0 = off; ~600 = enable w*).  Kept consistent
+    # with the atmosphere SurfaceLayerConfig.gustiness_w_zi by run_coupled.
+    gustiness_w_zi: float = 0.0
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
@@ -166,6 +170,7 @@ def _ocean_turbulent_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
             scheme=config.bulk_scheme,
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
         )
         return shflx, lhflx
     raise ValueError(
