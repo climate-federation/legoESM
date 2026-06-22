@@ -84,6 +84,9 @@ N_TIMING="${N_TIMING:-50}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/cpu_mpi_${STAMP}}"
 mkdir -p "$OUTDIR"
+# Mirror all console output into the results dir, so a log always lands next to
+# the data on scratch regardless of how PBS routes the job's .o file.
+exec > >(tee -a "$OUTDIR/run.log") 2>&1
 CASE_FILE="$OUTDIR/cases.jsonl"
 
 echo "=== HOST ==="

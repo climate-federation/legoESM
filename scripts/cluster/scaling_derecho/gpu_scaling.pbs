@@ -83,6 +83,9 @@ STRONG_RES="${STRONG_RES:-48,96,192,384}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/amip_gpu_${STAMP}}"
 mkdir -p "$OUTDIR"
+# Mirror all console output into the results dir, so a log always lands next to
+# the data on scratch regardless of how PBS routes the job's .o file.
+exec > >(tee -a "$OUTDIR/run.log") 2>&1
 
 echo "=== HOST ==="
 hostname; date
