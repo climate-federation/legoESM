@@ -289,6 +289,59 @@ def _compute_cos_zenith(
     return np.maximum(cos_zen, 0.0)
 
 
+def _compute_virtual_lon_deg(
+    cos_zen_forcing: np.ndarray,
+    lat_deg: np.ndarray,
+    doy: float,
+) -> np.ndarray:
+    """Invert shr_orb_cosz to find a longitude that reproduces cos_zen_forcing.
+
+    The CLM formula: cosz = sin(lat)*sin(decl) - cos(lat)*cos(decl)*cos(jday*2π+lon)
+    Inverted:        lon  = arccos((sin(lat)*sin(decl) - cosz)/(cos(lat)*cos(decl)))
+                            - jday * 2π
+
+    Both arccos branches produce the same cosz when substituted back, so we take
+    the principal branch (arccos → [0,π]) without ambiguity.  For nighttime columns
+    (cos_zen ≤ 0.01) no solution exists; we return 0° (harmless — sw_down ≈ 0).
+
+    Parameters
+    ----------
+    cos_zen_forcing : np.ndarray  shape (ncol,)
+        Forcing cosine solar zenith angle (already clamped ≥ 0 by coupler).
+    lat_deg : np.ndarray  shape (ncol,)  Latitude [°].
+    doy     : float  0-based fractional day of year.
+
+    Returns
+    -------
+    lon_deg : np.ndarray  shape (ncol,)  Virtual longitude [°, –180..180].
+    """
+    lat_r = np.deg2rad(lat_deg)
+    B = 2.0 * np.pi * doy / 365.0
+    decl = (0.006918
+            - 0.399912 * np.cos(B)
+            + 0.070257 * np.sin(B)
+            - 0.006758 * np.cos(2 * B)
+            + 0.000907 * np.sin(2 * B)
+            - 0.002697 * np.cos(3 * B)
+            + 0.00148  * np.sin(3 * B))
+
+    jday_frac = doy % 1.0  # fractional day [0, 1)
+
+    sin_lat, cos_lat = np.sin(lat_r), np.cos(lat_r)
+    sin_decl, cos_decl = np.sin(decl), np.cos(decl)
+
+    denom = cos_lat * cos_decl
+    denom_safe = np.where(np.abs(denom) > 1e-6, denom,
+                          np.where(denom >= 0, 1e-6, -1e-6))
+    cos_arg = np.clip((sin_lat * sin_decl - cos_zen_forcing) / denom_safe, -1.0, 1.0)
+
+    lon_rad = np.arccos(cos_arg) - jday_frac * 2.0 * np.pi
+    lon_rad = ((lon_rad + np.pi) % (2.0 * np.pi)) - np.pi  # → [−π, π]
+    lon_deg = np.degrees(lon_rad)
+
+    return np.where(cos_zen_forcing > 0.01, lon_deg, 0.0)
+
+
 def _estimate_beam_fraction(
     sw_down: np.ndarray,
     cos_zen: np.ndarray,
@@ -948,11 +1001,16 @@ def compute_clm_ml_canopy_fluxes(
         lat_deg = np.zeros(ncol, dtype=np.float64)
     if lon is not None:
         lon_deg = np.array(lon, dtype=np.float64)
+        cos_zen = _compute_cos_zenith(lat_deg, lon_deg, doy)
     else:
-        lon_deg = np.zeros(ncol, dtype=np.float64)
-
-    # ---- Solar zenith for SW partitioning ----
-    cos_zen = _compute_cos_zenith(lat_deg, lon_deg, doy)
+        # Use coupler-provided cos_zenith directly — avoids 100× error in beam
+        # extinction (kb=0.5/coszen) that occurs when lon defaults to 0° (Greenwich).
+        # Then invert the CLM shr_orb_cosz formula to recover the equivalent
+        # virtual longitude so that CLM's internal solar_zen_forcing[p] matches
+        # the forcing.  Both arccos branches reproduce the same cosz, so the
+        # virtual lon is not geographically meaningful but is numerically correct.
+        cos_zen = np.array(forcing.cos_zenith, dtype=np.float64)
+        lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, doy)
 
     # ---- CLM global state setup ----
     z_ref = float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0

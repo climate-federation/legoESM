@@ -671,6 +671,43 @@ class TestSolarGeometry(unittest.TestCase):
         from legoesm.land.canopy.config import CLMMLCanopyConfig as CCC
         self.assertIsInstance(config.surface_scheme, CCC)
 
+    def test_virtual_lon_round_trips_cos_zen(self):
+        """_compute_virtual_lon_deg produces lon that recovers input cos_zen via _compute_cos_zenith."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import (
+            _compute_virtual_lon_deg,
+            _compute_cos_zenith,
+        )
+
+        lat = np.array([38.47, 51.5, -33.9])   # CHATS7 CA, London, Sydney
+        cos_zen_in = np.array([0.85, 0.45, 0.62])
+        doy = 120.833  # May 1 near noon PDT for column 0
+
+        lon_virtual = _compute_virtual_lon_deg(cos_zen_in, lat, doy)
+        cos_zen_out = _compute_cos_zenith(lat, lon_virtual, doy)
+
+        for i in range(len(lat)):
+            self.assertAlmostEqual(
+                float(cos_zen_in[i]), float(cos_zen_out[i]), delta=0.01,
+                msg=(f"col {i}: cos_zen round-trip error: "
+                     f"{cos_zen_in[i]:.4f} → lon={lon_virtual[i]:.1f}° "
+                     f"→ {cos_zen_out[i]:.4f}"),
+            )
+
+    def test_virtual_lon_nighttime_returns_zero(self):
+        """_compute_virtual_lon_deg returns 0° for nighttime columns (cos_zen ≤ 0.01)."""
+        import numpy as np
+        from legoesm.land.canopy.clm_ml_interface import _compute_virtual_lon_deg
+
+        lat = np.array([38.47, 38.47, 38.47])
+        cos_zen_night = np.array([0.0, 0.005, -0.1])  # all nighttime/twilight
+        doy = 120.0
+
+        lon_out = _compute_virtual_lon_deg(cos_zen_night, lat, doy)
+        for i in range(3):
+            self.assertAlmostEqual(float(lon_out[i]), 0.0, places=6,
+                                   msg=f"Nighttime col {i}: expected 0°, got {lon_out[i]}")
+
 
 if __name__ == "__main__":
     unittest.main()
