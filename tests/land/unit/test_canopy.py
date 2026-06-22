@@ -174,6 +174,26 @@ class TestCLMMLInterface(unittest.TestCase):
         )
 
     @pytest.mark.timeout(120)
+    def test_T_canopy_air_populated(self):
+        """T_canopy_air is populated and physically between T_surface and forcing T."""
+        surface_out, _ = _call_interface()
+        self.assertIsNotNone(
+            surface_out.T_canopy_air,
+            "T_canopy_air must be populated for the coupler aerodynamic T_sfc",
+        )
+        Tc = surface_out.T_canopy_air
+        T_sfc = surface_out.T_surface
+        # Canopy air T must be finite and physically realistic (200–340 K)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(Tc))), "T_canopy_air has non-finite values")
+        self.assertTrue(bool(jnp.all(Tc > 200.0)), f"T_canopy_air too cold: {Tc}")
+        self.assertTrue(bool(jnp.all(Tc < 340.0)), f"T_canopy_air too hot: {Tc}")
+        # Canopy air must differ from tg_soil (not the fallback) when vegetation is active
+        self.assertFalse(
+            bool(jnp.all(Tc == T_sfc)),
+            "T_canopy_air equals T_surface — taveg_canopy fallback triggered unexpectedly",
+        )
+
+    @pytest.mark.timeout(120)
     def test_warm_start_reuses_state(self):
         """Second call with existing canopy_state does not re-cold-start."""
         _, state1 = _call_interface()

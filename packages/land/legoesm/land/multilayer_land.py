@@ -482,14 +482,15 @@ def _step_multilayer_land_impl(
     # for SimpleSEB it is the top-soil surface temperature ``T_surface_new``.
     # Static dispatch on the (compile-time) surface-scheme type — feature gating,
     # not data-dependent selection.
-    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
-        response_T_sfc = surface_out.T_canopy_air   # aerodynamic (canopy air-space temp)
-        # Upward LW MUST be the canopy's conservative top-of-canopy LW_out (the
-        # flux consistent with T_rad / eps_col), NOT a recomputation from the
-        # post-step top-SOIL temperature — otherwise the tile blend, the gray
-        # brightness temperature (sigma*T_bb^4 = lw_up), and lw_net all carry a
-        # soil-based flux that discards the canopy radiative state.  (The slab
-        # canopy path likewise reports surface_out.lw_up.)
+    if isinstance(config.surface_scheme, (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
+        # For both canopy schemes the coupler must receive the canopy-consistent
+        # LW_up (computed inside the canopy RT, not recomputed from post-step soil T)
+        # and the aerodynamic canopy-air temperature (not the soil skin T).
+        # CLMMLCanopyConfig populates T_canopy_air in _extract_surface_fluxes;
+        # fall back to T_surface if absent (should not happen post-Iter 9).
+        response_T_sfc = (surface_out.T_canopy_air
+                          if surface_out.T_canopy_air is not None
+                          else surface_out.T_surface)
         response_lw_up = surface_out.lw_up          # canopy LW_out
     else:
         response_T_sfc = T_surface_new              # SimpleSEB: top-soil surface temp

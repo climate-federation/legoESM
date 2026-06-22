@@ -821,6 +821,20 @@ def _extract_surface_fluxes(
     else:
         stflx_veg = None
 
+    # T_canopy_air: aerodynamic exchange temperature for SH coupling to atmosphere.
+    # taveg_canopy is the PAI-weighted mean within-canopy air temperature — the
+    # best available proxy for the canopy exchange node Tc in H = rho*cp*(Tc-Ta)/Ra.
+    # (tair_profile is not written back to the output NamedTuple by MLCanopyFluxes.)
+    if hasattr(mlcanopy, "taveg_canopy"):
+        T_canopy_air = jnp.stack([mlcanopy.taveg_canopy[i + 1] for i in range(ncol)])
+        # Guard against cold-start spval=1e36 (no PAI → taveg=0, or uninitialized)
+        T_canopy_air = jnp.where(
+            (T_canopy_air > 1e30) | (T_canopy_air < 100.0),
+            T_surface, T_canopy_air,
+        )
+    else:
+        T_canopy_air = T_surface  # fallback: tg_soil
+
     return SurfaceFluxOutput(
         shflx=shflx,
         lhflx=lhflx,
@@ -836,6 +850,7 @@ def _extract_surface_fluxes(
         emissivity=emissivity,
         z0=z0,
         gpp=gpp,
+        T_canopy_air=T_canopy_air,
         stomatal_ratio=jnp.ones(ncol),
         stflx_air=stflx_air,
         stflx_veg=stflx_veg,
