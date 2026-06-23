@@ -1543,9 +1543,11 @@ def _bc_ke_and_pressure_gradients(
     # Adcroft & Campin (2004) shift each cell's pressure to a common
     # face-reference depth (the shallower of the two centroids) before
     # differencing.  Implemented here as an additive correction to
-    # dp_dx, dp_dy.  For pure z\\* coord (legacy), all centroids align
+    # dp_dx, dp_dy.  For pure z\\* coord (legacy adcroft), all centroids align
     # within a column so the correction is identically zero — bit-exact
-    # backwards-compat preserved.
+    # backwards-compat preserved; ``pgf_scheme="smc03"`` instead applies the
+    # density-Jacobian PGF (the elif branch below).  ``pgf_scheme`` is validated
+    # against {"adcroft","smc03"} at model construction (_validate_config).
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
@@ -1581,6 +1583,33 @@ def _bc_ke_and_pressure_gradients(
             dp_dy = dp_dy + partial_cell_pgf_correction_y(
                 centroid_depth, rho_prime, grid, g_val,
             )
+    elif isinstance(z_coord, OceanZStarCoordinate):
+        # Pure z-star (terrain-following) PGF.  The legacy path applies NO
+        # correction: the raw ``gradient_*_cgrid(p')`` differences cells at the
+        # SAME reference level k but DIFFERENT physical depth wherever the
+        # coordinate compresses over sloping bathymetry (H_bathy < H_max), the
+        # classic terrain-following PGF error (≈1.8 m/s spurious flow from rest
+        # over a ridge in the seamount-at-rest check).  ``pgf_scheme="smc03"``
+        # generalizes the density-Jacobian PGF (proven exact at rest on partial
+        # cells) to z-star: reconstruct ρ(z_physical) per column from the η=0
+        # physical thickness ``dz_ref·H_bathy/H_max`` (= ``compute_layer_thickness``
+        # at η=0, matching the η=0 reference the rest of the baroclinic path
+        # uses) and difference at a common physical depth — which vanishes at
+        # rest for a horizontally-uniform-in-z stratification.  All z-star cells
+        # are active (no below-seafloor cells).  Opt-in: the default
+        # ``pgf_scheme="adcroft"`` keeps the raw gradient → BIT-IDENTICAL
+        # (this branch is not entered).
+        if getattr(config, "pgf_scheme", "adcroft") == "smc03":
+            h_zstar = compute_layer_thickness(
+                jnp.zeros_like(eta_safe), H_bathy, z_coord,
+            )
+            is_active_zstar = jnp.ones(rho_prime.shape, dtype=bool)
+            dp_dx = density_jacobian_pgf_smc03_x(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+            ).astype(dp_dx.dtype)
+            dp_dy = density_jacobian_pgf_smc03_y(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+            ).astype(dp_dy.dtype)
 
     return dKE_dx, dp_dx, dKE_dy, dp_dy
 
