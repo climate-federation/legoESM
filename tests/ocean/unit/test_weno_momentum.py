@@ -434,6 +434,37 @@ class TestWENOSmoothnessSplitVsStandard:
         finally:
             set_policy(prev)
 
+    def test_weno_vertadv_full_vs_perturbation_differ(self):
+        """The full-velocity vs perturbation WENO vertical momentum advection differ by
+        exactly the −∂(w·U_bar)/∂z redistribution that the perturbation form omits — the
+        §5/baroclinic interior-eddy closure lever. A barotropic offset (U_bar≠0) with a
+        vertically-structured w MUST change the WENO vertical-advection tendency; a
+        DEPTH-UNIFORM w (∂w/∂z=0) must NOT (the redistribution is then zero)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _flux_form_vertical_momentum_advection_weno,
+        )
+        nlev = 8
+        u_prime = jnp.linspace(-0.2, 0.2, nlev)          # baroclinic shear (zero-mean)
+        u_full = u_prime + 1.3                            # + barotropic U_bar = 1.3
+        h = jnp.full(nlev, 100.0)
+        # Vertically-STRUCTURED w (∂w/∂z ≠ 0): the redistribution term is nonzero.
+        w_struct = jnp.concatenate([jnp.zeros(1), jnp.sin(jnp.linspace(0, 3.0, nlev - 1)),
+                                    jnp.zeros(1)])
+        gp = _flux_form_vertical_momentum_advection_weno(u_prime, w_struct, h, order=5)
+        gf = _flux_form_vertical_momentum_advection_weno(u_full, w_struct, h, order=5)
+        d = float(jnp.max(jnp.abs(gf - gp)))
+        assert d > 1e-6, f"full vs perturbation must differ with U_bar≠0, ∂w/∂z≠0; Δ={d}"
+        assert bool(jnp.all(jnp.isfinite(gf)))
+        # DEPTH-UNIFORM w (∂w/∂z = 0 in the interior): −∂(w·U_bar)/∂z = 0, so the
+        # barotropic offset's flux is a constant across interior faces and cancels in the
+        # divergence — full and perturbation agree in the INTERIOR (the boundary cells see
+        # the top/bottom flux BC and may differ; that is the physical w=0 boundary, not
+        # the redistribution under test).
+        w_unif = jnp.full(nlev + 1, 0.5)
+        gp2 = _flux_form_vertical_momentum_advection_weno(u_prime, w_unif, h, order=5)
+        gf2 = _flux_form_vertical_momentum_advection_weno(u_full, w_unif, h, order=5)
+        assert jnp.allclose(gf2[1:-1], gp2[1:-1], atol=1e-12)
+
     @pytest.mark.parametrize("sm", [None, "split", "standard"])
     def test_config_accepts_divergence_smoothness(self, sm):
         """The DECOUPLED divergence-flux smoothness accepts None (follow

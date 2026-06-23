@@ -94,7 +94,8 @@ def build_setup():
         barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0,
         weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH", "standard") or None,
         vortcor_reconstruct_zeta=os.environ.get("VORTCOR_ZETA", "0") == "1",
-        vortcor_enstrophy_metric=os.environ.get("VORTCOR_METRIC", "0") == "1")
+        vortcor_enstrophy_metric=os.environ.get("VORTCOR_METRIC", "0") == "1",
+        weno_vertadv_full_velocity=os.environ.get("VERTADV_FULL", "1") == "1")
     state = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=wall, H_max=LZ,
                                           T_water_init_C=T_REF_C, T_deep=T_REF_C)
     model = LatLonCGridOceanModel(grid, z, cfg)

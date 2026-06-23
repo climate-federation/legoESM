@@ -2117,10 +2117,19 @@ def _bc_vertical_momentum_advection(
             # W9V ("order has minimal impact"), and the vertical tracer kernel
             # is only defined for orders 5 and 7.
             _vert_order = _weno_order if _weno_order <= 7 else 5
+            # config.weno_vertadv_full_velocity: advect the FULL velocity (Oceananigans-
+            # faithful) vs the default baroclinic perturbation u' (omits −∂(w·U_bar)/∂z).
+            _vfull = getattr(config, "weno_vertadv_full_velocity", False)
+            if _vfull and (u_full is None or v_full is None):
+                raise ValueError(
+                    "weno_vertadv_full_velocity=True requires u_full and v_full to be "
+                    "passed to _bc_vertical_momentum_advection (match centered_full).")
+            _u_va = u_full if _vfull else u_prime
+            _v_va = v_full if _vfull else v_prime
             diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-                u_prime, w_u, h_u_old, order=_vert_order)
+                _u_va, w_u, h_u_old, order=_vert_order)
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-                v_prime, w_v, h_v_old, order=_vert_order)
+                _v_va, w_v, h_v_old, order=_vert_order)
         else:
             # Non-WENO explicit vertical momentum advection.  Pass u/v
             # face-activity masks so the vertical momentum flux is exactly

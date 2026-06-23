@@ -141,6 +141,14 @@ def oceananigans_canonical_ocean_config(
         differentiable_barotropic=True,
         use_conservation_fixer=False,
         enable_runtime_checks=False,
+        # Oceananigans advects the FULL horizontal momentum vertically (w·∂u/∂z over the
+        # full u); legoESM's production default advects only the baroclinic perturbation
+        # u' (omitting −∂(w·U_bar)/∂z). The perturbation form makes a 3D baroclinic-eddy
+        # front go UNSTABLE at the interior (the §5/baroclinic_adjustment runaway: NaN
+        # day 18) while the full-velocity form saturates like the oracle (within 2× to
+        # 30 d). No effect on single-layer cases (gyre/bickley). This is the faithful
+        # Oceananigans choice — the §5/CASE-3 interior-eddy closure.
+        weno_vertadv_full_velocity=True,
         **vmix,
         **overrides,
     )

@@ -978,6 +978,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # cases): the q-form is retained by default because it conserves potential enstrophy
     # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
     vortcor_reconstruct_zeta: bool = False
+    # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
+    # advects the full horizontal momentum vertically) instead of legoESM's default
+    # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
+    # −∂(w·U_bar)/∂z = U_bar·∇·u_h (depth-integral zero; U_bar is depth-independent so
+    # there is NO extra WENO dissipation, only this redistribution term legoESM omits).
+    # Candidate for the INTERIOR finite-amplitude baroclinic-eddy runaway (the §5 residual
+    # is at the front, NOT the walls). False (default) = perturbation (bit-identical).
+    weno_vertadv_full_velocity: bool = False
     # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
     # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
     # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant

@@ -71,6 +71,19 @@ concrete, untested candidate for the interior finite-amplitude runaway. ALSO tes
 hydrostatic PGF at finite amplitude. NEXT ITERATION: build a vertical-momentum A/B (full-u vs
 perturbation) and test on the baroclinic blow-up (the STRONG, now-correctly-targeted gate).
 
+## ITERATION 3 — BREAKTHROUGH: full-velocity vertical momentum advection ARRESTS the blow-up
+The 3D vertical momentum advection WAS the lever. legoESM's WENO path advected only the
+baroclinic perturbation u'=u−U_bar (omitting −∂(w·U_bar)/∂z); Oceananigans advects the FULL u.
+New gated option `weno_vertadv_full_velocity` (state.py + ocean_pe_latlon_cgrid.py:2119, default
+OFF/bit-identical) advects u_full in the WENO vertical path. baroclinic_adjustment:
+- baseline (perturbation): day12 3.39, **NaN day 18**.
+- full velocity: day6 1.02, day12 **2.22**, day18 **1.96 (FINITE, 1.25× oracle)** — survives.
+Confirms the interior-blow-up reframe: bickley (single-layer, NO vertical advection) is benign;
+baroclinic (3D) blew up because the vertical advection omitted the U_bar redistribution. FAITHFUL
+(Oceananigans advects full horizontal momentum vertically). 30-day verification running. NEXT:
+confirm 30d saturation + within 2×, run the gate suite (bickley unaffected = single-layer; no
+regression), set the Oceananigans recipe to advect full velocity, model review, commit.
+
 ## Next candidates (untested)
 1. KE-gradient (bernoulli head) upwinding: is legoESM's WENO KE-grad matching Oceananigans'
    OnlySelfUpwinding `kinetic_energy_gradient_scheme`? (test on the STRONG baroclinic gate —
