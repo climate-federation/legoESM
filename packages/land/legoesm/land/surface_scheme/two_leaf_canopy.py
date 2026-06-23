@@ -159,6 +159,7 @@ def compute_two_leaf_canopy_fluxes(
     dt: float,
     TgC_override: jnp.ndarray | None = None,
     LAI_override: jnp.ndarray | None = None,
+    w_frac_soil_evap: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -250,9 +251,17 @@ def compute_two_leaf_canopy_fluxes(
     else:
         TgC = _get(lp, "TgC", forcing.T_lowest - 273.15)
 
-    # ---- Soil moisture stress (canopy reuses the shared root-zone beta) ----
-    fStress_soil  = w_frac_rz         # soil evaporation stress
-    fStress_vcmax = w_frac_rz         # Vcmax down-regulation
+    # ---- Soil moisture stress ----
+    # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.
+    # Bare-soil evaporation is governed by the fast-drying SURFACE layer, not the
+    # root zone: when ``w_frac_soil_evap`` (a top-layer availability) is supplied
+    # by the caller, use it for ``fStress_soil``; otherwise fall back to the
+    # root-zone beta (legacy behaviour).  Using the root-zone beta for soil evap
+    # over-estimated forest-floor evaporation (it stays wet while the surface
+    # dries), inflating LE and starving H.
+    fStress_vcmax = w_frac_rz         # Vcmax / transpiration down-regulation
+    fStress_soil  = (w_frac_rz if w_frac_soil_evap is None
+                     else w_frac_soil_evap)   # soil evaporation stress
 
     Vc3_leaf_stressed = Vc3_leaf * fStress_vcmax
     Vc4_leaf_stressed = Vc4_leaf * fStress_vcmax
@@ -326,7 +335,7 @@ def compute_two_leaf_canopy_fluxes(
 
     def _fwd_one_col(xf, bun):
         return _canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
-                               cc.use_ta_for_photosynthesis)
+                               cc.le_cap_mode, cc.use_ta_for_photosynthesis)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal ----
     # See canopy_land.py module notes for the stability analysis.  The

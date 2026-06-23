@@ -36,6 +36,16 @@ _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor 0.446; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 
+# Minimum cuticular (residual) stomatal conductance [mol m-2 s-1].  Stomata
+# never fully close — the leaf cuticle always leaks a little — so the conductance
+# has a small floor.  Numerically this is essential: under full water stress the
+# stress factor scales the Ball-Berry slope AND intercept to zero (m = b0 = 0 ⇒
+# gs = 0), which makes the leaf gs/Ci/An subsystem degenerate and the canopy
+# Newton Jacobian singular → NaN fluxes (seen at dry FLUXNET sites, e.g. US-Ton
+# savanna at SWC near wilting point).  Value matches the DifferBESS ``g0`` default
+# (CarbonWaterFluxes.py).  Binds only at near-complete stomatal closure.
+_GS_MIN_MOL = 1.0e-4
+
 # Saturation vapour pressure and its first/second temperature derivatives come
 # from the shared ``legoesm.thermo`` Alduchov-Eskridge (1996) AERK water + AERKi
 # ice blend (``*_aerk``), matching the DifferBESS two-big-leaf canopy oracle.
@@ -43,6 +53,63 @@ _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
 # with e_s (a mismatched parameterisation makes the PM closure humidity-dependently
 # wrong) and gives a proper over-ice branch below freezing (the over-water Magnus
 # over-estimates e_s by ~10-60 % at -10..-50 degC).
+
+
+# ---------------------------------------------------------------------------
+# Energy-balance latent-heat (LE) cap
+# ---------------------------------------------------------------------------
+# Bound LE to the available energy so the leaf-temperature Newton solve stays
+# well-posed under hot/dry/high-VPD forcing.  Without a cap, the large dq_sat/dT
+# makes the leaf energy-balance Jacobian stiff; the Newton update
+# ``Tf_new = Tc + Rb (Rn - LE) / (rho Cp)`` then overshoots, ``q_sat(Tf)``
+# overflows, and the leaf temperature goes NaN (observed at sparse/dry FLUXNET
+# sites — US-Ton savanna here, US-Wkg grassland in DifferBESS).
+#
+# ``soft`` is a smooth (softplus) UPPER bound ``LE <= max(Rn,0) + slack(Rn)`` with
+# a radiation-gated slack (wide by day, tight at night).  It preserves exactly the
+# physics the hard clamp ``LE in [0,max(Rn,0)]`` was removed to keep — negative LE
+# (dew/condensation) passes through unchanged (it is bounded by the humidity
+# gradient and cannot run away, so it needs no floor) and a moderate daytime LE>Rn
+# is allowed — while stopping the positive runaway.  No lower bound is applied: one
+# would map a zero raw flux to a small POSITIVE LE (spurious evaporation from
+# bone-dry soil / closed stomata).  ``max(Rn,0)`` is softplus-smoothed so the
+# bound has no Jacobian kink at Rn=0 (Rn depends on the Newton state via longwave).
+# Slack coefficients are the DifferBESS ``CanopyEnergyBalance`` soft-cap settings.
+_LE_CAP_DAY_SLACK_WM2     = 80.0    # extra LE budget above Rn when Rn is large
+_LE_CAP_NIGHT_SLACK_WM2   = 30.0    # LE upper-bound slack at night (Rn <= 0)
+_LE_CAP_RN_TRANSITION_WM2 = 100.0   # Rn over which the day/night slack saturates
+_LE_CAP_SOFTNESS_PER_WM2  = 0.1     # softplus softness scale (~10 W m-2)
+_LE_CAP_MODES = ("soft", "hard", "off")
+
+
+def apply_le_cap(LE: jax.Array, Rn: jax.Array,
+                 le_cap_mode: str = "soft") -> jax.Array:
+    """Bound the latent-heat flux to the available energy (see module notes).
+
+    ``le_cap_mode`` is a static Python string resolved at trace time:
+
+    * ``"soft"`` — smooth softplus UPPER bound ``LE <= max(Rn,0)+slack(Rn)`` with a
+      radiation-gated slack (wide by day, tight at night).  Default; stops the
+      positive-LE runaway that diverges the leaf-T Newton solve.  Negative LE
+      (dew) passes through unchanged; a zero raw flux stays ~0 (no lower bound).
+    * ``"hard"`` — legacy ``clip(LE, 0, max(Rn,0))`` (non-smooth; forces H>=0).
+    * ``"off"`` — no cap (pre-regression behaviour; can diverge at dry sites).
+    """
+    if le_cap_mode == "off":
+        return LE
+    if le_cap_mode == "hard":
+        return jnp.clip(LE, 0.0, jnp.maximum(Rn, 0.0))
+    if le_cap_mode == "soft":
+        k = _LE_CAP_SOFTNESS_PER_WM2
+        rn_pos = jax.nn.softplus(Rn * k) / k          # smooth max(Rn, 0): no kink
+        gate = jnp.minimum(rn_pos / _LE_CAP_RN_TRANSITION_WM2, 1.0)
+        slack = _LE_CAP_NIGHT_SLACK_WM2 + (
+            _LE_CAP_DAY_SLACK_WM2 - _LE_CAP_NIGHT_SLACK_WM2) * gate
+        cap_hi = rn_pos + slack
+        # Upper bound only — see module notes (no lower/dew bound).
+        return cap_hi - jax.nn.softplus((cap_hi - LE) * k) / k
+    raise ValueError(
+        f"unknown le_cap_mode {le_cap_mode!r}; expected one of {_LE_CAP_MODES}")
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +220,11 @@ def _compute_gs_and_ci(
     else:
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
 
+    # Minimum cuticular conductance: keep gs > 0 even at full water stress
+    # (m = b0 = 0), otherwise the leaf gs/Ci/An subsystem degenerates and the
+    # canopy Newton Jacobian goes singular → NaN.  See ``_GS_MIN_MOL``.
+    gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
+
     Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
@@ -172,7 +244,7 @@ def _compute_gs_and_ci(
 # Leaf energy balance — BT (Bulk Transfer)
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("stomatal_model",))
+@functools.partial(jax.jit, static_argnames=("stomatal_model", "le_cap_mode"))
 def leaf_energy_balance_bt(
     An: jax.Array,
     ASW: jax.Array,
@@ -192,6 +264,7 @@ def leaf_energy_balance_bt(
     m: jax.Array,
     b0: jax.Array,
     stomatal_model: str = "ball_berry",
+    le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
@@ -239,19 +312,19 @@ def leaf_energy_balance_bt(
     g_lh = gs / (gs * Rb + 1.0)
     LE = lam * rhoa * (q_f - q_c) * g_lh
 
-    # LE sign is not constrained here: negative LE = dew formation on the
-    # leaf, positive LE = transpiration + evaporation.  The DifferBESS
-    # daytime-only clamp ``LE ∈ [0, max(Rn, 0)]`` has been removed so the
-    # model can represent nocturnal dew and non-stationary transitions.
+    # Bound LE to the available energy (default soft cap).  This is what keeps
+    # ``Tf_new`` from running away: the smooth ``soft`` mode still admits
+    # nocturnal dew (LE < 0) and modest daytime LE > Rn, so it preserves the
+    # behaviour the old hard clamp ``LE ∈ [0, max(Rn,0)]`` was removed to keep,
+    # while preventing the q_sat(Tf) overflow that diverged the Newton solve at
+    # hot/dry sites.  See ``apply_le_cap``.
+    LE = apply_le_cap(LE, Rn, le_cap_mode)
 
     H  = Rn - LE
     # ``Tf_new`` is the leaf temperature satisfying sensible-flux closure
-    # ``H = ρ Cp (Tf − Tc)/Rb``.  The earlier hard ``clip(dT, ±30)`` was
-    # non-differentiable at the clamp boundary and silently degraded the
-    # Newton Jacobian.  Leave ``Tf_new`` unclipped here — the Newton
-    # driver ``solve_canopy_closure`` already damps ``Δx`` globally
-    # (``clamp = 10 → 0.1`` across iterations), so step sizes remain
-    # bounded without a local non-smooth clip.
+    # ``H = ρ Cp (Tf − Tc)/Rb``.  Left unclipped (a hard ``clip(dT, ±30)`` is
+    # non-differentiable and degrades the Newton Jacobian); the LE cap above
+    # plus the solver's Newton step clamp keep ``Tf_new`` bounded.
     Tf_new = Tc + Rb * H / (rhoa * Cp)
 
     return Rn, LE, H, Tf_new, gs, Ci
@@ -261,7 +334,7 @@ def leaf_energy_balance_bt(
 # Leaf energy balance — PM (Penman-Monteith, second-order Paw & Gao 1988)
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("stomatal_model",))
+@functools.partial(jax.jit, static_argnames=("stomatal_model", "le_cap_mode"))
 def leaf_energy_balance_pm(
     An: jax.Array,
     ASW: jax.Array,
@@ -281,6 +354,7 @@ def leaf_energy_balance_pm(
     m: jax.Array,
     b0: jax.Array,
     stomatal_model: str = "ball_berry",
+    le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
 
@@ -312,10 +386,11 @@ def leaf_energy_balance_pm(
     disc = jnp.maximum(b**2 - 4.0 * a * c, 0.0)
     LE   = (-b + jnp.sign(b) * jnp.sqrt(disc)) / (2.0 * a)
 
-    # No LE clamp — see notes in leaf_energy_balance_bt for rationale.
+    # Bound LE to the available energy — see leaf_energy_balance_bt / apply_le_cap.
+    LE = apply_le_cap(LE, Rn, le_cap_mode)
 
     H  = Rn - LE
-    # Unclipped Tf update; see leaf_energy_balance_bt for rationale.
+    # Unclipped Tf update; the LE cap + solver Newton clamp bound it.
     Tf_new = Tc + Rb * H / (rhoa * Cp)
 
     return Rn, LE, H, Tf_new, gs, Ci
@@ -325,7 +400,7 @@ def leaf_energy_balance_pm(
 # Soil energy balance — BT
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("le_cap_mode",))
 def soil_energy_balance_bt(
     Ts: jax.Array,
     Tc: jax.Array,
@@ -339,8 +414,16 @@ def soil_energy_balance_bt(
     fStress: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
+    le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Soil energy balance with prescribed skin temperature (BT).
+
+    The soil LE is also energy-capped (default soft).  With ``Ts`` PRESCRIBED the
+    humidity-gradient soil evaporation is not energy-constrained — a hot prescribed
+    skin gives a large ``q_sat(Ts)`` and LE can vastly exceed the available soil
+    net radiation (``G`` then absorbs the imbalance), which is unphysical and badly
+    biases offline LE.  The cap keeps ``LE_soil`` near ``[-SOFT_LOW, Rn_soil+slack]``.
+    Pass ``le_cap_mode="off"`` to recover the raw conductance form.
 
     The soil skin ``Ts`` is supplied by the caller from the top layer of the
     multilayer soil thermal state (``T_soil[:, 0]``).  Turbulent fluxes are
@@ -362,16 +445,21 @@ def soil_energy_balance_bt(
     Rn = ASW_soil + ALW_soil
     # Direct bulk-transfer turbulent fluxes — Ts is prescribed so no
     # root-finding for soil T is needed.
-    # Soil latent-heat conductance written as the soil-evaporation efficiency
-    # ``fStress`` times the below-canopy aerodynamic conductance:
-    #   g_soil = fStress / raw_soil   (algebraically 1/(raw_soil + Rsoil) with
-    #   the dryness resistance Rsoil = raw_soil*(1/fStress - 1)).  Expressing
-    #   fStress as a multiplier — rather than forming Rsoil ~ 1/fStress — keeps
-    #   the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0 with
-    #   d LE / d fStress = num/raw_soil), instead of the quotient form's
-    #   Inf/Inf at fStress = 0 (DifferBESS Apr-13 conductance refactor).
+    # Soil evaporation — BETA form: ``fStress`` (soil-evaporation efficiency)
+    # times the below-canopy aerodynamic conductance, g_soil = fStress/raw_soil.
+    # Expressing fStress as a multiplier (not a 1/fStress dryness resistance)
+    # keeps the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0).
+    # NOTE on the stress variable: the caller supplies ``fStress`` = the soil
+    # pore RELATIVE HUMIDITY h_r = exp(psi_top g / (R_v T)) (Kelvin eq.) from the
+    # PROGNOSTIC top-layer matric potential — so soil evaporation is governed by
+    # the fast-drying SURFACE, not the root zone.  The beta form (vs the alpha
+    # sub-saturated-surface q_surf=h_r*q_s) is used deliberately: with legoESM's
+    # PROGNOSTIC skin T the alpha form drives excessive condensation (LE<0) onto a
+    # dry surface and destabilises the surface energy balance; beta bounds LE->0
+    # as h_r->0 (DifferBESS can use alpha because it PRESCRIBES Ts).
     g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
     LE = lam * rhoa * (q_s - q_c) * g_soil
+    LE = apply_le_cap(LE, Rn, le_cap_mode)
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     # G closes the surface energy budget as a residual — positive into soil.
     G  = Rn - LE - H
@@ -382,7 +470,7 @@ def soil_energy_balance_bt(
 # Soil energy balance — PM
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("le_cap_mode",))
 def soil_energy_balance_pm(
     Ts: jax.Array,
     Tc: jax.Array,
@@ -396,6 +484,7 @@ def soil_energy_balance_pm(
     fStress: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
+    le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Soil energy balance with prescribed skin temperature (PM).
 
@@ -411,16 +500,21 @@ def soil_energy_balance_pm(
     Rn_soil, LE_soil, H_soil, G
     """
     Rn = ASW_soil + ALW_soil
-    # Soil latent-heat conductance written as the soil-evaporation efficiency
-    # ``fStress`` times the below-canopy aerodynamic conductance:
-    #   g_soil = fStress / raw_soil   (algebraically 1/(raw_soil + Rsoil) with
-    #   the dryness resistance Rsoil = raw_soil*(1/fStress - 1)).  Expressing
-    #   fStress as a multiplier — rather than forming Rsoil ~ 1/fStress — keeps
-    #   the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0 with
-    #   d LE / d fStress = num/raw_soil), instead of the quotient form's
-    #   Inf/Inf at fStress = 0 (DifferBESS Apr-13 conductance refactor).
+    # Soil evaporation — BETA form: ``fStress`` (soil-evaporation efficiency)
+    # times the below-canopy aerodynamic conductance, g_soil = fStress/raw_soil.
+    # Expressing fStress as a multiplier (not a 1/fStress dryness resistance)
+    # keeps the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0).
+    # NOTE on the stress variable: the caller supplies ``fStress`` = the soil
+    # pore RELATIVE HUMIDITY h_r = exp(psi_top g / (R_v T)) (Kelvin eq.) from the
+    # PROGNOSTIC top-layer matric potential — so soil evaporation is governed by
+    # the fast-drying SURFACE, not the root zone.  The beta form (vs the alpha
+    # sub-saturated-surface q_surf=h_r*q_s) is used deliberately: with legoESM's
+    # PROGNOSTIC skin T the alpha form drives excessive condensation (LE<0) onto a
+    # dry surface and destabilises the surface energy balance; beta bounds LE->0
+    # as h_r->0 (DifferBESS can use alpha because it PRESCRIBES Ts).
     g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
     LE = lam * rhoa * (q_s - q_c) * g_soil
+    LE = apply_le_cap(LE, Rn, le_cap_mode)
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     G  = Rn - LE - H
     return Rn, LE, H, G
@@ -471,6 +565,9 @@ def canopy_air_update(
     # finite as the soil dries.  See the leaf/soil energy-balance notes.
     cw_sun = gs_Sun / (gs_Sun * Rb_Sun + 1.0)
     cw_sh  = gs_Sh  / (gs_Sh  * Rb_Sh  + 1.0)
+    # Soil water conductance = fStress / raw_below (beta form; fStress = soil pore
+    # RH h_r).  Beta (not alpha sub-saturation) for consistency with the soil
+    # energy balance under a PROGNOSTIC skin T — see soil_energy_balance_bt.
     cw_g   = fStress / jnp.maximum(raw_below, 1e-9)
 
     q_f_Sun = saturation_specific_humidity(Tf_Sun, Ps)

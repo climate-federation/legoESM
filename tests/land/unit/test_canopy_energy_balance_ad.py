@@ -53,7 +53,11 @@ def test_leaf_conductance_identity():
 
 
 def test_leaf_le_matches_conductance_form():
-    Rn, LE, H, Tf_new, gs, Ci = leaf_energy_balance_bt(An=jnp.array(12.0), **_LEAF)
+    # ``le_cap_mode="off"`` checks the raw conductance-form algebra; the default
+    # soft cap deliberately perturbs LE via the softplus bound (tested separately
+    # in test_canopy_le_cap.py), so it would break this exact-form identity.
+    Rn, LE, H, Tf_new, gs, Ci = leaf_energy_balance_bt(
+        An=jnp.array(12.0), le_cap_mode="off", **_LEAF)
     num = _LEAF["lam"] * _LEAF["rhoa"] * (_LEAF["q_f"] - _LEAF["q_c"])
     assert jnp.allclose(LE, num * gs / (gs * _LEAF["Rb"] + 1.0), rtol=1e-6)
     assert jnp.allclose(LE, num / (_LEAF["Rb"] + 1.0 / gs), rtol=1e-6)
@@ -72,8 +76,11 @@ def test_leaf_le_grad_finite_dark_and_light():
 
 def test_soil_le_zero_and_grad_finite_at_zero_fstress():
     """LE_soil -> 0 as fStress -> 0, with a finite derivative num/raw_soil."""
+    # ``le_cap_mode="off"`` checks the raw conductance-form limit; the default
+    # soft cap perturbs LE near 0 via the softplus (tested in test_canopy_le_cap).
     def le_of_fstress(fStress):
-        _, LE, _, _ = soil_energy_balance_bt(fStress=fStress, **_SOIL)
+        _, LE, _, _ = soil_energy_balance_bt(
+            fStress=fStress, le_cap_mode="off", **_SOIL)
         return LE
 
     LE0 = le_of_fstress(jnp.array(0.0))
@@ -89,7 +96,9 @@ def test_soil_le_zero_and_grad_finite_at_zero_fstress():
 def test_soil_le_matches_old_quotient_in_wet_regime():
     """For fStress in (0,1], num*fStress/raw_soil == num/(raw_soil + Rsoil)."""
     fStress = jnp.array(0.4)
-    _, LE, _, _ = soil_energy_balance_bt(fStress=fStress, **_SOIL)
+    # Raw conductance form (le_cap_mode="off"); the soft cap is tested separately.
+    _, LE, _, _ = soil_energy_balance_bt(
+        fStress=fStress, le_cap_mode="off", **_SOIL)
     num = _SOIL["lam"] * _SOIL["rhoa"] * (_SOIL["q_s"] - _SOIL["q_c"])
     Rsoil = _SOIL["raw_soil"] * (1.0 / fStress - 1.0)  # old dryness resistance
     assert jnp.allclose(LE, num / (_SOIL["raw_soil"] + Rsoil), rtol=1e-6)

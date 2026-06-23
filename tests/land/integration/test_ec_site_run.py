@@ -1,0 +1,150 @@
+"""Smoke test for the offline EC-site diagnostic driver (scripts/run/run_ec_site.py).
+
+Builds a small synthetic DifferBESS-style v2 driver NetCDF (one diurnal cycle),
+runs ``run_site`` end to end (read -> vmap canopy -> obs comparison -> NetCDF),
+and asserts the pipeline produces finite fluxes, sensible skill metrics, daytime
+GPP > 0, and a well-formed output file.  The variable-mapping correctness of the
+reader itself is covered by tests/land/boundary_data/test_ec_site.py.
+"""
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+
+import numpy as np
+import xarray as xr
+import pytest
+
+_REPO = pathlib.Path(__file__).resolve().parents[3]
+_DRIVER_PY = _REPO / "scripts" / "run" / "run_ec_site.py"
+
+
+def _load_driver_module():
+    spec = importlib.util.spec_from_file_location("run_ec_site", _DRIVER_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_driver(path: str, n: int = 96) -> None:
+    """A minimal valid v2 driver: n half-hourly steps over a diurnal cycle."""
+    rng = np.arange(n)
+    hour = (rng * 0.5) % 24.0
+    day = np.clip(np.sin(np.pi * (hour - 6.0) / 12.0), 0.0, None)   # 0 at night
+    sw = 850.0 * day                                               # W/m2
+    sza = 90.0 - 65.0 * day                                        # deg (<90 day)
+    ones = np.ones(n)
+
+    def var(values):
+        return ("time", np.asarray(values, dtype="f8"))
+
+    ds = xr.Dataset(
+        {
+            "SW_IN": var(sw), "LW_IN": var(330.0 * ones), "TA": var(20.0 + 8.0 * day),
+            "VPD": var(8.0 + 10.0 * day), "PA": var(99.0 * ones), "WS": var(2.5 * ones),
+            "P": var(0.0 * ones), "CO2": var(410.0 * ones), "SZA": var(sza),
+            "SWC": var(28.0 * ones), "TS": var(19.0 + 6.0 * day),
+            "LAI": var(2.4 * ones), "CI": var(0.7 * ones), "T_GROWTH": var(21.0 * ones),
+            "EMISSIVITY": var(0.97 * ones), "Vcmax25_C3Leaf": var(45.0 * ones),
+            "BESS_PAR_DIFF_PAR_RATIO": var(0.3 + 0.4 * (1.0 - day)),
+            "Albedo_BSA_vis": var(0.08 * ones), "Albedo_WSA_vis": var(0.09 * ones),
+            "Albedo_BSA_nir": var(0.30 * ones), "Albedo_WSA_nir": var(0.32 * ones),
+            "IGBP": var(3.0 * ones),       # DBF
+            "CLIMATE": var(2.0 * ones), "C4": var(0.0 * ones),
+            "CANOPY_HEIGHT": var(20.0 * ones), "LAT": var(39.0 * ones),
+            "LONG": var(-86.0 * ones), "ELEVATION": var(275.0 * ones),
+            # observed fluxes (only daytime "measured" for GPP/H; ET in mm/day)
+            "GPP_DT": var(np.where(day > 0.1, 12.0 * day, 0.0)),
+            "NEE": var(-8.0 * day + 2.0), "ET": var(2.0 * day), "H": var(60.0 * day),
+        },
+        coords={"time": (np.datetime64("2015-06-01T00:00")
+                         + np.arange(n) * np.timedelta64(30, "m"))},
+        attrs={"site": "SYN-Test"},
+    )
+    ds.to_netcdf(path)
+
+
+def test_run_ec_site_diagnostic_smoke(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+
+    out_dir = str(tmp_path / "out")
+    metrics = mod.run_site(driver_nc, "diagnostic", out_dir, chunk=96)
+
+    # metrics for all three fluxes, with a finite RMSE on the valid steps
+    assert set(metrics) == {"GPP", "LE", "H"}
+    for flux in ("GPP", "LE", "H"):
+        assert metrics[flux]["n"] > 0
+        assert np.isfinite(metrics[flux]["rmse"])
+
+    # output NetCDF is well-formed and the modelled fluxes are finite + physical
+    out_nc = pathlib.Path(out_dir) / "SYN-Test_ec_diagnostic.nc"
+    assert out_nc.exists()
+    ds = xr.open_dataset(out_nc)
+    v = ds.valid.values.astype(bool)
+    assert v.any()
+    gpp = ds.gpp_mod.values
+    le = ds.le_mod.values
+    assert np.all(np.isfinite(gpp[v]))
+    assert np.all(np.isfinite(le[v]))
+    # daytime photosynthesis is positive somewhere
+    assert np.nanmax(gpp[v]) > 0.0
+    # latent heat stays physical (no runaway): below ~ peak SW + slack
+    assert np.nanmax(le[v]) < 1000.0
+
+
+def test_run_ec_site_prognostic_smoke(tmp_path):
+    """Prognostic mode integrates the multilayer soil forward (lax.scan) and
+    reports the NaN-revert count; on clean synthetic forcing nothing reverts."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+
+    out_dir = str(tmp_path / "out_prog")
+    metrics = mod.run_site(driver_nc, "prognostic", out_dir, chunk=96)
+
+    assert set(metrics) == {"GPP", "LE", "H"}
+    for flux in ("GPP", "LE", "H"):
+        assert metrics[flux]["n"] > 0
+        assert np.isfinite(metrics[flux]["rmse"])
+        # the NaN guard must keep every modelled-on-valid step finite
+        assert metrics[flux]["model_nan"] == 0
+
+    out_nc = pathlib.Path(out_dir) / "SYN-Test_ec_prognostic.nc"
+    assert out_nc.exists()
+    ds = xr.open_dataset(out_nc)
+    assert ds.attrs["mode"] == "prognostic"
+    v = ds.valid.values.astype(bool)
+    assert np.all(np.isfinite(ds.gpp_mod.values[v]))
+    assert np.all(np.isfinite(ds.le_mod.values[v]))
+    assert np.all(np.isfinite(ds.h_mod.values[v]))
+    # the exact scoring mask is persisted so metric counts are reproducible
+    assert "score_valid" in ds and "reverted" in ds
+    sv = ds.score_valid.values.astype(bool)
+    n_recomputed = int((sv & np.isfinite(ds.gpp_mod.values)
+                        & np.isfinite(ds.gpp_obs.values)).sum())
+    assert n_recomputed == metrics["GPP"]["n"]
+
+
+def test_reader_exposes_volumetric_theta_for_prognostic_ic(tmp_path):
+    """The prognostic IC must initialise soil moisture from the observed
+    volumetric water content (SWC/100), not by inverting w_frac_rz with
+    mismatched thresholds.  Lock the reader contract that backs that fix."""
+    from legoesm.land.boundary_data.ec_site import read_ec_site_driver
+
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)                      # SWC = 28.0 % everywhere
+    d = read_ec_site_driver(driver_nc)
+
+    theta = np.asarray(d.theta_soil).ravel()
+    assert np.all(np.isfinite(theta))
+    assert np.allclose(theta, 0.28, atol=1e-9)   # 28 % -> 0.28 m3/m3
+
+
+def test_run_ec_site_rejects_unknown_mode(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError, match="mode"):
+        mod.run_site(driver_nc, "bogus-mode", str(tmp_path / "o"), chunk=8)

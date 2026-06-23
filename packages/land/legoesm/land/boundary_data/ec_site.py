@@ -101,6 +101,19 @@ _RANGE: dict[str, tuple[float, float]] = {
 # below -20 is masked NaN (DifferBESS util/io.py).
 _SW_NOISE_FLOOR = -20.0
 
+
+def is_observed(name: str, values) -> np.ndarray:
+    """Boolean mask of GENUINELY-OBSERVED samples of a driver field: finite AND
+    within the same physical range the reader uses to mask fills/sentinels.
+
+    Public so producers (e.g. ``scripts/data/build_ec_gapfree_driver.py``) define
+    fill provenance the SAME way the reader decides validity — a finite but
+    out-of-range value (sentinel / rejected extreme) is NOT an observation.
+    """
+    a = np.asarray(values, dtype=np.float64)
+    lo, hi = _RANGE.get(name, (-np.inf, np.inf))
+    return np.isfinite(a) & (a >= lo) & (a <= hi)
+
 # Observed tower-flux physical ranges (FLUXNET -9999 / fill sentinels -> NaN, so
 # the comparison ignores them).  Generous bounds that reject sentinels only.
 _OBS_RANGE: dict[str, tuple[float, float]] = {
@@ -141,6 +154,8 @@ class ECSiteDriver(NamedTuple):
     canopy_params: CanopyLandParams  # each field (n_time, 1) — finite
     T_soil_top: jnp.ndarray        # (n_time, 1) prescribed soil skin T [K] (diagnostic)
     w_frac_rz: jnp.ndarray         # (n_time, 1) root-zone moisture stress beta [0, 1]
+    theta_soil: jnp.ndarray        # (n_time, 1) observed volumetric soil moisture [m3/m3]
+                                   #   (SWC/100; for PROGNOSTIC soil initialisation)
     wind_speed: jnp.ndarray        # (n_time, 1) [m/s]
     valid: np.ndarray              # (n_time,) bool — all required inputs observed
     obs: dict                      # {'gpp_umol','le_wm2','h_wm2','nee_umol'} (n_time,) w/ NaN
@@ -152,6 +167,14 @@ class ECSiteDriver(NamedTuple):
     climate: str
     pft: str
     site_id: str
+    # (n_time,) 1 where any ATMOSPHERIC forcing field (TA/VPD/SW_IN/LW_IN/PA) was
+    # gap-filled by the gap-free producer (build_ec_gapfree_driver.py); None for a
+    # standard driver_v2 whose met is already measured-only.  Per-step forcing in
+    # both modes -> lets the consumer score skill on genuinely-observed forcing.
+    met_filled: np.ndarray | None = None
+    # (n_time,) 1 where a SOIL field (TS/SWC) was gap-filled.  Prescribed per-step
+    # in diagnostic mode; only the initial state in prognostic mode.
+    soil_filled: np.ndarray | None = None
 
 
 def _masked(ds: xr.Dataset, name: str) -> np.ndarray:
@@ -398,9 +421,21 @@ def read_ec_site_driver(
         "nee_umol": _obs_masked(ds, "NEE", n),
     }
 
+    # Gap-free producer provenance (absent on a standard driver_v2).  Prefer the
+    # atmospheric-only flag; fall back to the aggregate for older gap-free files.
+    def _flag(name):
+        return (np.asarray(ds[name].values).ravel().astype(np.int8)
+                if name in ds.data_vars else None)
+    met_filled = _flag("met_atm_filled")
+    if met_filled is None:
+        met_filled = _flag("met_any_filled")
+    soil_filled = _flag("soil_filled")
+
     return ECSiteDriver(
         forcing=forcing, canopy_params=canopy_params, T_soil_top=T_soil_top,
-        w_frac_rz=w_frac_rz, wind_speed=col(fil["WS"]), valid=valid, obs=obs_flux,
+        w_frac_rz=w_frac_rz, theta_soil=col(theta),
+        wind_speed=col(fil["WS"]), valid=valid, obs=obs_flux,
         lat_rad=lat_rad, lon_deg=lon_out,
         doy=doy, dt_s=dt_s, igbp=igbp, climate=climate, pft=pft, site_id=site_id,
+        met_filled=met_filled, soil_filled=soil_filled,
     )

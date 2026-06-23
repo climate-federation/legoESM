@@ -241,6 +241,17 @@ def _step_multilayer_land_impl(
             dt=dt,
             TgC_override=TgC_override,
             LAI_override=LAI_override,
+            # Bare-soil evaporation efficiency = soil pore RELATIVE HUMIDITY from
+            # the PROGNOSTIC top-layer matric potential (Kelvin equation):
+            # h_r = exp(psi_top * g / (R_v * T)), clamped to (0, 1].  Applied as a
+            # beta conductance efficiency in the canopy soil energy balance.  This
+            # ties soil evaporation to the fast-drying SURFACE (self-mulching)
+            # rather than the root-zone average; the latter kept the forest floor
+            # evaporating at the energy limit, which the EC + DifferBESS
+            # comparison showed over-predicts soil evaporation several-fold.
+            w_frac_soil_evap=jnp.exp(jnp.minimum(
+                psi[:, 0] * constants.g
+                / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)),
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].

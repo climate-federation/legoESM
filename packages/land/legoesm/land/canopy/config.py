@@ -158,6 +158,13 @@ class CanopyConfig(NamedTuple):
     # Python string via functools.partial — never traced.
     stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
+    # Energy-balance latent-heat cap that keeps the leaf-temperature Newton
+    # solve from diverging (NaN leaf T -> NaN fluxes) under hot/dry/high-VPD
+    # forcing.  "soft" (default) is a smooth softplus bound that still admits
+    # dew and a modest LE>Rn excess; "off" reproduces the pre-cap behaviour;
+    # "hard" is the legacy clip(LE, 0, max(Rn,0)).  Resolved at trace time
+    # (static, like LE_module/stomatal_model).  See energy_balance.apply_le_cap.
+    le_cap_mode: str = "soft"               # "soft" (default) | "hard" | "off"
     # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True and the
     # carbon cycle is active with ``scheme="differland"``, the canopy's
     # LAI is recomputed each step from ``C_fol / LCMA``, bypassing any

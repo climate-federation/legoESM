@@ -137,6 +137,7 @@ def _canopy_residual(
     bundle: CanopyForcingBundle,
     LE_module: str,
     stomatal_model: str,
+    le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
@@ -165,9 +166,9 @@ def _canopy_residual(
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
 
-    # Soil evaporation uses the efficiency b.fStress_soil directly as a
-    # conductance multiplier (no 1/fStress dryness-resistance intermediate) —
-    # see soil_energy_balance_bt / canopy_air_update.
+    # Soil evaporation uses the beta efficiency b.fStress_soil (= soil pore RH
+    # h_r from the prognostic top-layer matric potential) as a conductance
+    # multiplier — see soil_energy_balance_bt / canopy_air_update.
 
     # ---- Longwave radiation ----
     lw_out  = canopy_longwave_rt(
@@ -196,23 +197,23 @@ def _canopy_residual(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -221,13 +222,13 @@ def _canopy_residual(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
             rah_below, raw_below, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil)
+            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
     else:
         _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
             rah_below, raw_below, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil)
+            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
@@ -278,6 +279,7 @@ def _canopy_forward(
     bundle: CanopyForcingBundle,
     LE_module: str,
     stomatal_model: str,
+    le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
@@ -330,23 +332,23 @@ def _canopy_forward(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model)
+            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
@@ -354,13 +356,13 @@ def _canopy_forward(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
             rah_below, raw_below, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil)
+            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
     else:
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
             rah_below, raw_below, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil)
+            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
@@ -406,6 +408,7 @@ def solve_canopy_closure(
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
+        le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         max_iters=config.max_iters,
         tol=config.tol,
@@ -420,6 +423,7 @@ def solve_canopy_closure(
 def _make_implicit_newton_solver(
     LE_module: str,
     stomatal_model: str,
+    le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
     max_iters: int,
     tol: float,
@@ -460,6 +464,7 @@ def _make_implicit_newton_solver(
             x, bundle,
             LE_module=LE_module,
             stomatal_model=stomatal_model,
+            le_cap_mode=le_cap_mode,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
         )
 

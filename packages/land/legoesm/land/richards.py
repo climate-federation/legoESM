@@ -129,9 +129,18 @@ def solve_richards(
     # layer so the result stays ``(ncol,)`` — without it, a ``(ncol, 1)``
     # theta_sat would broadcast against ``theta[:, 0]`` (shape ``(ncol,)``) to
     # ``(ncol, ncol)`` and silently corrupt the infiltration capacity.
-    K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], slice_layer(hydro_config, 0))
+    # The rate coefficient is the WETTED-surface conductivity (~K_sat), NOT the
+    # dry-state K(theta_top): a dry soil has near-zero K(theta) but enormous
+    # suction and absorbs water readily (Green-Ampt — the wetting-front
+    # transmission zone conducts at ~K_sat).  Using K(theta_top) collapsed the
+    # capacity to ~0 once the surface dried to residual, so ALL precip was
+    # rejected as surface runoff and the column could never re-wet (root zone
+    # pinned at wilting -> spurious permanent water stress -> GPP/LE collapse).
+    # The suction term (1 - head_grad) still makes a dry surface draw water in
+    # and a ponded/saturated surface (psi>=0) shed it as saturation-excess runoff.
+    K_surf = slice_layer(hydro_config, 0).K_sat
     head_grad = psi[:, 0] / (0.5 * dz[0])
-    infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
+    infil_capacity = jnp.maximum(K_surf * (1.0 - head_grad), 0.0)
 
     # Surface runoff: excess over Darcy infiltration capacity.
     # Do NOT additionally cap by top-layer saturation — the implicit Picard
