@@ -32,7 +32,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ocean.eos import LinearEOSConfig
 from legoesm.ocean.fidelity.oceananigans_recipe import oceananigans_canonical_ocean_config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.vertical import create_ocean_z_star
+from legoesm.ocean.vertical import create_ocean_z_star, create_partial_cell_coordinate
 
 LX = 2.0e6                  # x ∈ (-L, L), L=1000 km → 2000 km total
 H = 2.0e3                   # depth [m]
@@ -64,10 +64,18 @@ def build_setup():
     grid = create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DX_M, f0=F0, beta=0.0,    # beta=0 → f-plane
         y_origin_m=-NY * DX_M / 2, x_origin_m=-LX / 2, cartesian_pseudo_lat=True)
-    z = create_ocean_z_star(n_levels=NZ, H_max=H)
+    z_star = create_ocean_z_star(n_levels=NZ, H_max=H)
     # Bump bathymetry: depth = H − hill(x), y-uniform.
     xc = -LX / 2 + (np.arange(NX) + 0.5) * DX_M
     Hb = (H - _hill(xc))[None, :] * np.ones((NY, 1))      # (NY, NX)
+    # PARTIAL CELLS (default) — bottom-concentrated topography matching Oceananigans'
+    # PartialCellBottom (z-LEVEL upper cells + a partial bottom cell); the flow over the
+    # ridge displaces isopycnals → internal tide. Pure z-STAR (PARTIAL_CELL=0) is
+    # terrain-following (levels follow H_bathy → uniform compression → NO tide).
+    if os.environ.get("PARTIAL_CELL", "1") == "1":
+        z = create_partial_cell_coordinate(z_star, jnp.asarray(Hb))
+    else:
+        z = z_star
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=ALPHA_T, beta_S=0.0),
         g=G, rho_0=RHO0, A_h=0.0, K_h=0.0,
@@ -75,6 +83,9 @@ def build_setup():
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
     cfg = cfg._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0)
+    _pgf = os.environ.get("PGF_SCHEME")            # "adcroft" (default) | "smc03"
+    if _pgf:
+        cfg = cfg._replace(pgf_scheme=_pgf)
     wall = jnp.ones((NY, NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     state = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=wall,
                                           H_bathy_override=jnp.asarray(Hb),
@@ -117,7 +128,8 @@ def main():
           f"A2={A2:.4e} T2={T2/3600:.2f}h", flush=True)
 
     ds = Dataset(os.path.join(os.environ["LEGOESM_OCEAN_FIDELITY_OCEANANIGANS_REF"],
-                              "internal_tide", "internal_tide.nc"))
+                              "internal_tide",
+                              os.environ.get("IT_REF", "internal_tide_zlevel.nc")))
     o_t = np.asarray(ds.variables["times_s"][:])
     # Julia writes (t,x,z) column-major → netCDF4 reads it reversed as (z,x,t).
     # Compare the BUOYANCY ANOMALY b'=b−N²z (isopycnal displacement = the internal-tide
@@ -142,7 +154,12 @@ def main():
 
     o_days = o_t / 86400.0
     nsteps = int(round(stop_days * 86400.0 / dt))
-    print("\n  day | lego max|b'| | b' pattern_corr | finite", flush=True)
+    Hb = np.asarray(state.H_bathy.data)[jrow]           # (n_lon,) local depth
+    # WET-cell mask: cells whose reference depth is above the local seafloor (partial
+    # cells / z-level: z_ref IS the physical depth). Masks the dry/below-ridge cells whose
+    # b' is a static artifact in BOTH codes — leaving the radiated internal-tide signal.
+    wet = (z_full[None, :] > -Hb[:, None])              # (n_lon, nlev)
+    print("\n  day | lego max|b'|(wet) | b' pattern_corr(wet) | finite", flush=True)
     t = 0.0
     for it in range(1, nsteps + 1):
         state = step_and_force(state, t)
@@ -151,19 +168,15 @@ def main():
         if any(abs(td - od) < dt / 86400.0 / 2 for od in o_days):
             oi = int(np.argmin([abs(td - od) for od in o_days]))
             T = np.asarray(state.T.data)[jrow]          # (n_lon, nlev)
-            eta = np.asarray(state.eta.data)[jrow]      # (n_lon,)
-            Hb = np.asarray(state.H_bathy.data)[jrow]   # (n_lon,) local depth
-            # z-star PHYSICAL depth: z = η + z_ref·(H_bathy+η)/H_max (compresses over the
-            # ridge). b' = b − N²·z_phys — the internal-tide isopycnal-displacement signal.
-            # Using z_ref instead would cancel the compression-induced response (the tide).
-            z_phys = eta[:, None] + z_full[None, :] * (Hb[:, None] + eta[:, None]) / H
-            bp = G * ALPHA_T * (T - T_REF_C) - N2 * z_phys
-            fin = bool(np.all(np.isfinite(bp)))
+            bp = G * ALPHA_T * (T - T_REF_C) - N2 * z_full[None, :]   # b' = b − N²z_ref
+            fin = bool(np.all(np.isfinite(bp[wet])))
             o_bp_oi = o_bp[:, :, oi].T                   # (z,x) → (x, z)
             nxc = min(bp.shape[0], o_bp_oi.shape[0])
             o_bi = np.array([np.interp(-z_full, -zc, o_bp_oi[ix, :]) for ix in range(nxc)])
-            corr = amp2dx(bp[:nxc], o_bi) if fin else float("nan")
-            print(f"  {td:4.1f} | {np.abs(bp).max():.3e}  | {corr:+.4f}        | {fin}", flush=True)
+            m = wet[:nxc]
+            corr = amp2dx(bp[:nxc][m], o_bi[m]) if fin else float("nan")
+            print(f"  {td:4.1f} | {np.abs(bp[wet]).max():.3e}      | {corr:+.4f}             | {fin}",
+                  flush=True)
             if not fin:
                 print("  >>> legoESM blew", flush=True); break
 
