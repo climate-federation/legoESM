@@ -92,6 +92,44 @@ def gather_state_atm_latlon(
     )
 
 
+# ==============================================================================
+# Stage 7 — cell-centered HydrostaticState <-> sharded C-grid state BRIDGE
+# ==============================================================================
+# The SPMD step (``make_sharded_atm_latlon_step``) consumes/produces a
+# ``CGridLatLonHydrostaticState`` (raw face-staggered arrays, laid out as
+# ``v_lower``).  The rest of the system — IC builders, the driver, output,
+# restart I/O — speaks the cell-centered, Field-wrapped ``HydrostaticState``.
+# These two thin host-boundary adapters reconcile the two by composing the
+# EXISTING serial converters (``hydrostatic_to_cgrid`` / ``cgrid_to_hydrostatic``,
+# the same ones the serial ``model.step(HydrostaticState)`` uses) with the
+# shard/gather above.  The conversion runs on the FULL (un-sharded on entry,
+# gathered on exit) arrays — it never executes inside a ``shard_map``, so it adds
+# ZERO new SPMD-correctness surface; all sharded numerics stay in the validated
+# C-grid step.
+
+
+def shard_hydrostatic_to_atm_latlon(hs, grid, mesh):
+    """Bridge a cell-centered ``HydrostaticState`` to a lat-band-SHARDED C-grid
+    state: convert (cell winds -> C-grid faces) THEN shard. ``mesh=None`` returns
+    the un-sharded C-grid state (single-device fallback). Inverse of
+    :func:`gather_atm_latlon_to_hydrostatic`."""
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        hydrostatic_to_cgrid)
+    c_state = hydrostatic_to_cgrid(hs, grid)
+    return c_state if mesh is None else shard_state_atm_latlon(c_state, mesh)
+
+
+def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
+    """Inverse of :func:`shard_hydrostatic_to_atm_latlon`: gather the sharded
+    C-grid state THEN convert (C-grid faces -> cell winds) to the cell-centered,
+    Field-wrapped ``HydrostaticState`` the driver/output/restart contract
+    expects. ``mesh=None`` converts the already-full C-grid state directly."""
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        cgrid_to_hydrostatic)
+    full = c_state if mesh is None else gather_state_atm_latlon(c_state, mesh)
+    return cgrid_to_hydrostatic(full, grid)
+
+
 # LatLonGrid scalar fields that stay STATIC per band (uniform bands -> one
 # shard_map program); every OTHER LatLonGrid field is a jax.Array and is
 # stacked over the band axis + indexed by axis_index in the body.
@@ -251,3 +289,43 @@ def make_sharded_atm_latlon_step(model, mesh):
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_step
+
+
+def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps):
+    """Run ``n_steps`` of the lat-band-SPMD C-grid hydrostatic step from a
+    cell-centered ``HydrostaticState``, returning a ``HydrostaticState``.
+
+    The Stage-7 driver seam: it bridges the cell-centered driver/output/restart
+    contract to the sharded C-grid step. Convert+shard ONCE on entry, run the
+    whole ``n_steps`` purely in the sharded C-grid layout, gather+convert ONCE on
+    exit. This MATCHES the serial ``for _ in range(n): hs = model.step(hs, dt)``
+    loop, which — via the model's ``id()``-keyed ``_cgrid_cache`` — likewise
+    stays in the C-grid layout across the loop and only converts cell<->face at
+    the segment boundaries. So the (lossy) cell->face->cell round-trip happens
+    ONCE on both paths, not per step, and the two trajectories reduce to the
+    Stage-5 C-grid equivalence (tendency bit-exact; the limited-FV-PPM cut
+    truncation bounded).
+
+    DYNAMICS ONLY: ``make_sharded_atm_latlon_step`` does not yet thread
+    ``physics_fn`` (a follow-up — column-local physics is shard-safe, but global
+    reductions must be psum-routed). ``mesh=None`` runs the single-device step.
+
+    Parameters
+    ----------
+    model : CGridLatLonPrimitiveEquationModel
+    mesh : jax.sharding.Mesh | None   1-D ``"lat"`` mesh (n_lat % n_dev == 0).
+    hs_init : HydrostaticState        cell-centered, Field-wrapped.
+    dt : float
+    n_steps : int
+
+    Returns
+    -------
+    HydrostaticState                  cell-centered, Field-wrapped.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    step = make_sharded_atm_latlon_step(model, mesh)
+    c_state = shard_hydrostatic_to_atm_latlon(hs_init, model.grid, mesh)
+    for _ in range(n_steps):
+        c_state = step(c_state, dt)
+    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)

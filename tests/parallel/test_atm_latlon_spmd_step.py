@@ -53,9 +53,13 @@ from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
     make_sharded_atm_latlon_step,
     shard_state_atm_latlon,
     gather_state_atm_latlon,
+    run_atm_latlon_spmd_segment,
     _build_band_grids_atm,
     _atm_grid_array_field_names,
     _lat_spec,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    cgrid_to_hydrostatic,
 )
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
@@ -279,3 +283,99 @@ def test_make_sharded_atm_step_rejects_anchor_mass():
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
     with pytest.raises(NotImplementedError, match="anchor_mass_to_initial"):
         make_sharded_atm_latlon_step(model, mesh)
+
+
+# ==============================================================================
+# Stage 7 — the cell-centered HydrostaticState <-> sharded C-grid DRIVER bridge.
+# run_atm_latlon_spmd_segment converts+shards a HydrostaticState ONCE, runs N
+# sharded C-grid steps, gathers+converts back ONCE. It must match the serial
+# model.step(HydrostaticState) loop, which stays C-grid across the loop via its
+# _cgrid_cache — so the lossy cell<->face conversion happens once on BOTH paths.
+# ==============================================================================
+
+def _hs_from_cgrid_state(model, c_state):
+    """Build a cell-centered HydrostaticState IC from the C-grid test state."""
+    return cgrid_to_hydrostatic(c_state, model.grid)
+
+
+def test_run_atm_latlon_spmd_segment_single_device_bit_exact():
+    """mesh=None: the segment driver reduces to the serial cgrid step with the
+    SAME boundary conversions, so it is BIT-EXACT to the serial model.step loop.
+    Needs no extra devices -> runs anywhere."""
+    model, c_state = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, c_state)
+    dt, n_steps = 100.0, 3
+
+    serial = _model_and_state(use_polar_filter=False)[0]  # fresh model, no cache
+    hs_s = _hs_from_cgrid_state(serial, c_state)
+    for _ in range(n_steps):
+        hs_s = serial.step(hs_s, dt)
+
+    hs_b = run_atm_latlon_spmd_segment(model, None, hs0, dt, n_steps)
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(hs_b, field).data),
+            np.asarray(getattr(hs_s, field).data),
+            rtol=1e-12, atol=1e-13,
+            err_msg=f"mesh=None segment diverged from serial in '{field}'.")
+
+
+def test_run_atm_latlon_spmd_segment_rejects_bad_nsteps():
+    """Dispatch-hardening: n_steps < 1 must raise, never silently no-op."""
+    model, _ = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, _model_and_state(False)[1])
+    with pytest.raises(ValueError, match="n_steps"):
+        run_atm_latlon_spmd_segment(model, None, hs0, 100.0, 0)
+
+
+@pytest.mark.parametrize("use_polar_filter", [False, True])
+def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
+    """The Stage-7 end-to-end gate: the N-band SPMD segment driven from a
+    cell-centered HydrostaticState matches the serial model.step loop at the
+    Stage-5 integrated bound (the bridge composes the validated step + the lossy
+    boundary conversions identically on both paths)."""
+    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        shard_hydrostatic_to_atm_latlon)
+    mesh = _mesh()
+    # Two independent model instances so serial-loop cache mutation cannot leak
+    # into the SPMD path (SPMD uses _step_cgrid_impl, cache-free, but be explicit).
+    serial, c_state = _model_and_state(use_polar_filter)
+    spmd_model, _ = _model_and_state(use_polar_filter)
+    hs0 = _hs_from_cgrid_state(serial, c_state)
+    dt, n_steps = 100.0, 3
+
+    # Non-vacuity guard A — the bridge ACTUALLY shards across the mesh (else the
+    # segment trivially == serial and the comparison below proves nothing).
+    sharded_c = shard_hydrostatic_to_atm_latlon(hs0, spmd_model.grid, mesh)
+    assert sharded_c.T.sharding.num_devices == N_DEV, (
+        f"bridge did not shard across the mesh: "
+        f"{sharded_c.T.sharding.num_devices} devices != {N_DEV}")
+
+    hs_s = hs0
+    for _ in range(n_steps):
+        hs_s = serial.step(hs_s, dt)
+
+    hs_b = run_atm_latlon_spmd_segment(spmd_model, mesh, hs0, dt, n_steps)
+
+    for field in ("u", "v", "T", "p_s"):
+        a = np.asarray(getattr(hs_b, field).data)
+        b = np.asarray(getattr(hs_s, field).data)
+        assert a.shape == b.shape, f"{field} shape {a.shape} vs {b.shape}"
+        np.testing.assert_allclose(
+            a, b, rtol=1e-6, atol=1e-9,
+            err_msg=(
+                f"Stage-7 SPMD segment (HydrostaticState, polar_filter="
+                f"{use_polar_filter}) diverged from the serial model.step loop "
+                f"in '{field}' beyond the FV-PPM cut-truncation bound."))
+
+    # Non-vacuity guard B — the band decomposition is GENUINELY exercised: the
+    # limited-FV-PPM scalar advection truncates at cut rows (~8e-11 in u after 3
+    # steps, Stage 5), so the SPMD trajectory must differ from serial by MORE
+    # than the fp64 roundoff floor. A zero diff would mean sharding silently
+    # collapsed to single-device (the one way this gate could pass vacuously).
+    u_diff = float(np.max(np.abs(
+        np.asarray(hs_b.u.data) - np.asarray(hs_s.u.data))))
+    assert u_diff > 1e-13, (
+        f"SPMD u is bit-identical to serial ({u_diff:.2e}) — the FV-PPM cut "
+        f"truncation is absent, so the band decomposition did not actually run "
+        f"(sharding collapsed to single-device); this gate would be vacuous.")
