@@ -9,9 +9,11 @@ integration loop has a single source of truth.
 """
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 import jax
+from jax.ad_checkpoint import checkpoint_policies as _cp
 
 State = TypeVar("State")
 
@@ -22,6 +24,7 @@ def integrate_scan_generic(
     n_steps: int,
     checkpoint_interval: int = 0,
     return_trajectory: bool = True,
+    storage: str = "recompute",
 ) -> tuple[State, State | None]:
     """Run ``n_steps`` of ``step`` forward via ``jax.lax.scan``.
 
@@ -40,6 +43,10 @@ def integrate_scan_generic(
     return_trajectory : bool
         If True (default), stack every intermediate state (leading
         ``n_steps`` axis); else return ``(final_state, None)``.
+    storage : {"recompute", "host"}
+        Only consulted when ``checkpoint_interval > 0``.  ``"host"`` offloads
+        the matmul residuals to pinned host (CPU) DRAM instead of recomputing
+        them — trades PCIe bandwidth for device (GPU/TPU) HBM.
 
     Returns
     -------
@@ -57,7 +64,24 @@ def integrate_scan_generic(
             new_state = step(s)
             return new_state, None
 
+    if storage not in ("recompute", "host"):
+        raise ValueError(
+            f"unknown storage {storage!r}; expected 'recompute' or 'host'"
+        )
+    # Host offload modifies an active checkpoint; without one (checkpoint_interval
+    # <= 0) there is nothing to offload, so reject the contradiction rather than
+    # silently ignoring the requested storage.
+    if checkpoint_interval <= 0 and storage != "recompute":
+        raise ValueError(
+            f"storage {storage!r} requires checkpoint_interval > 0; "
+            "without checkpointing there is nothing to offload."
+        )
+
     if checkpoint_interval > 0:
-        scan_fn = jax.checkpoint(scan_fn)
+        if storage == "host":
+            policy = _cp.offload_dot_with_no_batch_dims("device", "pinned_host")
+            scan_fn = jax.checkpoint(scan_fn, policy=policy)
+        else:  # recompute
+            scan_fn = jax.checkpoint(scan_fn)
 
     return jax.lax.scan(scan_fn, state, xs=None, length=n_steps)
