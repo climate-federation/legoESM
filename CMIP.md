@@ -203,6 +203,17 @@ albedo.** R_TOA +19 (net-in) is the cost of the thinner cloud — it keeps the
 system warming toward equilibrium. RECOMMENDED coupled config:
 `--surface-bulk-scheme coare3 --q-c-diagnostic 5e-4` (+ the combined preset).
 
+## 2 m tas diagnostic — correct CMIP near-surface T (job 8544950, 30d)
+CMOR `tas` was the lowest model level (~80 m at nlev=20), reading colder than
+2 m over a warm ocean. New `DiagnosticCollector._tas_2m` interpolates to 2 m via
+the MOST similarity profile (`compute_most_fluxes(return_2m=True)`). DIAGNOSTIC-
+ONLY (no dynamics change): vs the same balanced run, tropics tas **21.7 → 22.9 °C**
+(gap +6.6 → **+5.4**), midlat tas 16.6 → 16.9 (gap +3.3); R_TOA/hfls/albedo/drift
+identical. A real, modest correction toward Earth-like (the lowest level is only
+~80 m up, so the profile correction is ~1–2 K). Opt-in core (`return_2m`, default
+5-tuple byte-identical → OMIP/AD untouched); collector falls back to the lowest
+level when SST/sigma absent.
+
 ## ✅ 180d balanced equilibration — DEFINITIVE PROOF (job 8539793)
 The recommended config (`coare3 --gustiness-zi 300 --q-c-diagnostic 3e-4` +
 combined preset) run 180 days reaches a **stable, energy-balanced, Earth-like
