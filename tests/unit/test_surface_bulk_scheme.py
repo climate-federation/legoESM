@@ -153,6 +153,26 @@ def test_convective_gustiness_raises_calm_unstable_flux() -> None:
     assert jnp.allclose(lh_def, lh_off)
 
 
+def test_compute_most_fluxes_2m_diagnostic() -> None:
+    """The opt-in 2m air-temperature diagnostic must sit between the lowest model
+    level and the (warmer) surface, and the default (off) must keep the legacy
+    5-tuple return (byte-identical for all existing callers)."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+
+    f = lambda v: jnp.full((8,), v)  # noqa: E731
+    args = dict(u_rel=f(4.0), v_rel=f(0.0), T_atm=f(289.0), q_atm=f(0.010),
+                T_sfc=f(301.0), q_sfc=f(0.025), rho=f(1.15), scheme="coare3")
+    out5 = compute_most_fluxes(**args)
+    assert len(out5) == 5                       # default return unchanged
+    out6 = compute_most_fluxes(**args, return_2m=True)
+    assert len(out6) == 6
+    T2 = out6[5]
+    # 2 m air over a warm ocean: between the lowest level (289) and SST (301),
+    # and WARMER than the lowest level (the diagnostic the raw "tas" proxy misses)
+    assert jnp.all(T2 > 289.0) and jnp.all(T2 < 301.0)
+
+
 def test_ocean_unknown_bulk_scheme_raises() -> None:
     # Dispatch hardening (CLAUDE.md): an unknown scheme must raise, not silently
     # fall through to a default.

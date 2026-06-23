@@ -214,6 +214,8 @@ def compute_most_fluxes(
     L_latent=None,
     gustiness_w_zi=0.0,
     gustiness_beta=1.25,
+    return_2m=False,
+    z_diag=2.0,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -470,6 +472,26 @@ def compute_most_fluxes(
     tau_y = -rho * u_star ** 2 * v_rel / wind_speed
     shflx = rho * constants.c_pd * u_star * theta_star
     lhflx = rho * _L * u_star * q_star_val
+
+    if return_2m:
+        # Air temperature at the diagnostic height (default 2 m) from the
+        # converged MOST similarity profile: T(z) = T_sfc − (θ*/κ)·[ln(z/z0t) −
+        # ψ_h(z/L)], which reduces to T_atm at z=z_t.  Over a warm ocean the
+        # lowest model level (~100 m at nlev=20) reads colder than 2 m, so the
+        # raw lowest-level "tas" exaggerates the cold/air-sea-gap bias — this
+        # gives the physically correct CMIP 2 m value.  Recompute 1/L from the
+        # converged scales (the iteration carries scales, not L).
+        u_star_safe = jnp.maximum(u_star, 1e-6)
+        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
+        inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
+        zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(zeta_d)
+        T_2m = T_sfc - (theta_star / KAPPA) * denom_d
+        # Guard against profile extrapolation outside [T_atm, T_sfc].
+        lo = jnp.minimum(T_atm, T_sfc)
+        hi = jnp.maximum(T_atm, T_sfc)
+        T_2m = jnp.clip(T_2m, lo, hi)
+        return tau_x, tau_y, shflx, lhflx, u_star, T_2m
 
     return tau_x, tau_y, shflx, lhflx, u_star
 
