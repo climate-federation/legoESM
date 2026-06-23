@@ -1260,11 +1260,26 @@ def _bc_geometry_and_density(
     # accounting for the partial bottom cell.  Cells below the
     # seafloor have h_partial=0 and contribute zero pressure increment.
     # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
-    _h_actual_pprime = (
-        z_coord.h_partial
-        if isinstance(z_coord, OceanPartialCellCoordinate)
-        else None
-    )
+    #
+    # z-star + smc03: integrate the hydrostatic pressure on the PHYSICAL
+    # compressed thickness (η=0: dz_ref·H_bathy/H_max) so a pressure-dependent
+    # EOS (Wright) sees the correct in-situ pressure — CONSISTENT with the
+    # physical depths the smc03 density-Jacobian reconstructs against.  With
+    # h_actual=None (dz_ref) the pressure is reference-coordinate; for a curved
+    # ρ(p) that mismatch with smc03's compressed geometry produces a spurious
+    # rest-state PGF that blows up a tall-seamount z-star column (the tier-1
+    # Wright seamount).  Linear EOS is pressure-independent ⇒ this is a no-op
+    # there.  The legacy adcroft z-star path keeps None (dz_ref) → BIT-IDENTICAL,
+    # and its raw same-level gradient is consistent with the dz_ref pressure.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        _h_actual_pprime = z_coord.h_partial
+    elif (isinstance(z_coord, OceanZStarCoordinate)
+          and getattr(config, "pgf_scheme", "adcroft") == "smc03"):
+        _h_actual_pprime = compute_layer_thickness(
+            jnp.zeros_like(eta_safe), H_bathy, z_coord,
+        )
+    else:
+        _h_actual_pprime = None
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
@@ -1611,11 +1626,23 @@ def _bc_ke_and_pressure_gradients(
                 jnp.zeros_like(eta_safe), H_bathy, z_coord,
             )
             is_active_zstar = jnp.ones(rho_prime.shape, dtype=bool)
+            # ``bottom_slope_2nd_order=True``: z-star divides the column into N
+            # compressed cells, so over a tall seamount the bottom cells become
+            # very thin and the ONE-SIDED bottom harmonic slope's O(Δz) curvature
+            # bias — under a pressure-dependent EOS where ρ(z) is curved even for
+            # uniform T,S — is amplified into a spurious rest-state PGF that blows
+            # up (the tier-1 z-star Wright-EOS seamount). The 3-point backward
+            # slope evaluates dρ/dz AT the bottom centroid (exact for linear AND
+            # quadratic ρ), removing the bias. Partial cells keep the default
+            # (False) — full-thickness column above the partial bottom, proven
+            # path bit-identical.
             dp_dx = density_jacobian_pgf_smc03_x(
                 rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
             ).astype(dp_dx.dtype)
             dp_dy = density_jacobian_pgf_smc03_y(
                 rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
             ).astype(dp_dy.dtype)
 
     return dKE_dx, dp_dx, dKE_dy, dp_dy

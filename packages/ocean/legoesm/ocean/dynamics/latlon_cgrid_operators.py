@@ -3169,6 +3169,7 @@ def density_jacobian_pgf_smc03_x(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at u-faces (S&M03 §4) — zonal direction.
 
@@ -3212,7 +3213,10 @@ def density_jacobian_pgf_smc03_x(
     """
     # Per-column geometry and slopes.
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # West-neighbour rolls (column j-1 at u-face j).
     rho_W = jnp.roll(rho_per_cell, 1, axis=1)
@@ -3262,6 +3266,7 @@ def density_jacobian_pgf_smc03_y(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at v-faces (S&M03 §4) — meridional direction.
 
@@ -3274,7 +3279,10 @@ def density_jacobian_pgf_smc03_y(
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # Cell-pad-first (PR357 Bug-2 pattern; see ``interp_to_v_points``): pad
     # the CELL columns so the v-face PGF at a partition cut is built from the
