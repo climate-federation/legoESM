@@ -122,5 +122,32 @@ def test_tuned_variant_selection(tmp_path):
         CLMSurfaceParamProvider(*args, variant="bogus")
 
 
+def test_multilayer_extended_bake(tmp_path):
+    """The multilayer variant overrides theta_wp/fc with the per-PFT PLANT btran
+    thresholds (slab keeps the soil map), and the per-cell Ch + thermal helpers are
+    PFT-weighted from the calibrated tables."""
+    from legoesm.land.clm_surface_map import (
+        load_clm_surface, CLMSurfaceParamProvider, clm_multilayer_ch,
+        clm_multilayer_thermal_config, _TUNED_PFT_CH_MULTILAYER)
+    f = str(tmp_path / "e.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(80, -80, 5); lon = np.linspace(10, 300, 6)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    args = (m["pft_fractions"], m["theta_wp"], m["theta_fc"], m["glacier_frac"])
+    slab = CLMSurfaceParamProvider(*args, variant="slab")()
+    mult = CLMSurfaceParamProvider(*args, variant="multilayer")()
+    # slab theta_wp == soil map; multilayer == PFT-weighted plant thresholds (differ)
+    assert np.allclose(np.asarray(slab.theta_wp), np.asarray(m["theta_wp"]))
+    assert not np.allclose(np.asarray(mult.theta_wp), np.asarray(m["theta_wp"]))
+    assert np.all(np.asarray(mult.theta_fc) > np.asarray(mult.theta_wp))   # range valid
+    # per-cell Ch + thermal: PFT-weighted, physical
+    ch = np.asarray(clm_multilayer_ch(m))
+    assert ch.shape == (30,) and np.all((ch >= 2e-3 - 1e-9) & (ch <= 6e-3 + 1e-9))
+    th = clm_multilayer_thermal_config(m)
+    assert np.asarray(th.C_soil).shape == (30, 1)
+    assert np.all(np.asarray(th.C_soil) > 0) and np.all(np.asarray(th.k_solid) > 0)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
