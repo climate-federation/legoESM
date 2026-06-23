@@ -97,13 +97,23 @@ def build_setup():
     _pgf = os.environ.get("PGF_SCHEME")            # "adcroft" (default) | "smc03"
     if _pgf:
         cfg = cfg._replace(pgf_scheme=_pgf)
-    # Vector-invariant PV-flux step-vertex handling toggles (partial-cell dynamics
-    # probe): the spurious internal-tide growth localizes to the vector-invariant
-    # vorticity flux at partial-cell steps.
-    if os.environ.get("RECON_ZETA") == "1":
+    # FAITHFUL vector-invariant form. The oracle is Oceananigans WENOVectorInvariant,
+    # which reconstructs the RELATIVE VORTICITY ζ and multiplies by the transport
+    # velocity (flux = v̂·ζᴿ); legoESM's DEFAULT is the potential-vorticity form
+    # (reconstruct q=ζ/h ×h·v). reconstruct_zeta=True matches the oracle AND damps
+    # the spurious internal-tide growth ~2.4× (1.1e-3→4.6e-4) and localizes it onto
+    # the bump's partial-cell staircase flanks. Default ON (faithful); RECON_ZETA=0
+    # reverts to the PV form for the probe. The RESIDUAL (rms still ~14× oracle,
+    # pattern_corr~0) = spurious vorticity at the partial-cell STAIRCASE STEPS on the
+    # bump flanks (curl_vertex_cgrid + 2D vertex mask blind to per-level steps);
+    # full fidelity needs Oceananigans' immersed-boundary vorticity over the staircase.
+    if os.environ.get("RECON_ZETA", "1") == "1":
         cfg = cfg._replace(vortcor_reconstruct_zeta=True)
     if os.environ.get("ENSTROPHY_METRIC") == "1":
         cfg = cfg._replace(vortcor_enstrophy_metric=True)
+    _divs = os.environ.get("DIV_SMOOTH")           # "standard" (Oceananigans) | "split"
+    if _divs:
+        cfg = cfg._replace(weno_divergence_smoothness=_divs)
     wall = jnp.ones((NY, NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     state = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=wall,
                                           H_bathy_override=jnp.asarray(Hb),
