@@ -20,13 +20,19 @@ ref_root   = length(ARGS) >= 1 ? ARGS[1] : "."
 stop_days  = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 4.0
 dump_hours = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 3.0
 Nz_arg     = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 64
+vmode      = length(ARGS) >= 5 ? ARGS[5] : "zlevel"   # "zlevel" or "zstar"
 out_dir = joinpath(ref_root, "internal_tide"); mkpath(out_dir)
 
 Nx, Nz = 256, Nz_arg
 H, L = 2kilometers, 1000kilometers
+# z-LEVEL (fixed faces) vs z-STAR (MutableVerticalDiscretization → time-evolving
+# ZStarCoordinate, the terrain/surface-following coordinate legoESM uses). Same setup
+# otherwise — this isolates whether the vertical COORDINATE under-generates the tide.
+zspec = vmode == "zstar" ? MutableVerticalDiscretization((-H, 0)) : (-H, 0)
 underlying_grid = RectilinearGrid(size = (Nx, Nz), halo = (4, 4),
-                                  x = (-L, L), z = (-H, 0),
+                                  x = (-L, L), z = zspec,
                                   topology = (Periodic, Flat, Bounded))
+@info "internal_tide vertical mode = $vmode"
 h₀ = 250meters; width = 20kilometers
 hill(x) = h₀ * exp(-x^2 / 2width^2)
 bottom(x) = -H + hill(x)
@@ -65,9 +71,11 @@ end
 simulation.callbacks[:snap] = Callback(_ -> snap!(), TimeInterval(dump_hours * hours))
 snap!(); run!(simulation)
 
-@printf("internal_tide: stop=%.1fd, %d snaps, T₂=%.3fh, U₂=%.4e, max|w_final|=%.3e\n",
-        stop_days, length(times), T₂/3600, U₂, maximum(abs, ws[length(times)]))
-nc = joinpath(out_dir, "internal_tide.nc")
+bprime_amp = [maximum(abs, bp[i]) for i in 1:length(times)]
+@printf("internal_tide[%s]: stop=%.1fd, %d snaps, max|w_final|=%.3e, max|b'| over time: %.3e..%.3e (var %.3e)\n",
+        vmode, stop_days, length(times), maximum(abs, ws[length(times)]),
+        minimum(bprime_amp), maximum(bprime_amp), maximum(bprime_amp) - minimum(bprime_amp))
+nc = joinpath(out_dir, "internal_tide_" * vmode * ".nc")
 NCDataset(nc, "c") do ds
     nt = length(times); defDim(ds, "t", nt); defDim(ds, "x", Nx); defDim(ds, "z", Nz)
     ds.attrib["T2_s"] = T₂; ds.attrib["U2"] = U₂; ds.attrib["N2"] = Nᵢ²; ds.attrib["H"] = H
