@@ -101,7 +101,32 @@ PROMISE RECONCILIATION (the gates as written need correcting, evidenced by iter 
   unfaithful A_h=1000+Smag `stabilize` backstop in silvestri_baroclinic_jet.py can be removed).
 - Do NOT emit the promise until the actual §5 GPU case confirms survival.
 
-## Next candidates (untested)
+## ITERATION 4-5 — §5 confirmed NOT closed by faithful momentum levers (research-level residual)
+- §5 W9V GPU (no backstop): baseline blows day 82; full-velocity vertadv day 89; vertadv +
+  velform_ec (Oceananigans velocity-form vorticity flux) **BYTE-IDENTICAL to vertadv-alone,
+  blows day 89** (velform_ec has ZERO effect at §5 amplitude). ⇒ the §5 residual is NOT in the
+  vorticity-flux form, and the full-velocity vertadv fix only DELAYS §5 (82→89), not closes it.
+- The fix dips (1.25→0.997 at day 85) then sudden NaN at 89 = a FAST grid-scale instability at
+  the ~1 m/s transient peak (not CFL — finer dt is worse, spatial). Driven by §5's sustained
+  τ=50d restoring forcing, which the precursor (no restoring) lacks → precursor fully closes,
+  §5 does not.
+
+## LOOP CONCLUSION (honest exit per the task)
+DELIVERED + committed (faithful, real): the full-velocity vertical momentum advection fix
+(weno_vertadv_full_velocity, recipe default True) that CLOSES the baroclinic_adjustment
+precursor (NaN18→saturate30 within 2% of the WENOVectorInvariant oracle) — the 3D
+interior-eddy mechanism the bickley-focused effort could never see. Plus 3 faithful gated
+options ruled out (metric transport, direct-ζ, decoupled D-term smoothness) + the per-node and
+2Δx-decay gates. 396+ tests pass, reviews clean.
+NOT achieved: the actual §5 W9V case (CASE 3) does NOT survive — blows ~day 89 with every
+faithful momentum lever. The §5 residual = a SUSTAINED-FORCING grid-scale eddy instability at
+the transient peak, research-level (the §5 setup's own docstring calls it "a separate effort"),
+beyond the faithful operator space exhaustively searched here (6 levers this loop) + the prior
+multi-week effort (~15 levers). The promise SILVESTRI_S5_DISSIPATION_MATCHED is NOT TRUE and is
+NOT emitted. The remaining §5 work needs research-level effort (a faithful vertical/eddy closure
+or the sustained-forcing-amplitude grid-scale treatment), not a selectable operator option.
+
+## Next candidates (research-level, untested — beyond faithful operator options)
 1. KE-gradient (bernoulli head) upwinding: is legoESM's WENO KE-grad matching Oceananigans'
    OnlySelfUpwinding `kinetic_energy_gradient_scheme`? (test on the STRONG baroclinic gate —
    it IS sensitive: reconstruct_zeta moved day-12 3.39→3.26.)
