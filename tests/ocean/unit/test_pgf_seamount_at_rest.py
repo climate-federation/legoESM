@@ -54,14 +54,21 @@ F0 = 2.0 * constants.Omega * np.sin(np.radians(LATC))
 DT = 150.0
 
 
-def _build(partial: bool, pgf_scheme: str):
+def _build(partial: bool, pgf_scheme: str, orient: str = "x"):
     grid = create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DX_M, f0=F0, beta=0.0,
         y_origin_m=-NY * DX_M / 2, x_origin_m=-LX / 2, cartesian_pseudo_lat=True)
     z_star = create_ocean_z_star(n_levels=NZ, H_max=H)
-    xc = -LX / 2 + (np.arange(NX) + 0.5) * DX_M
-    hill = H0 * np.exp(-xc ** 2 / (2.0 * WIDTH ** 2))
-    Hb = (H - hill)[None, :] * np.ones((NY, 1))
+    if orient == "y":
+        # Meridional (y) bathymetry slope — exercises density_jacobian_pgf_smc03_y
+        # well-balancedness independently of the x-operator. A monotone linear
+        # ramp across the (few) rows is a clean slope at this coarse NY.
+        ramp = np.linspace(0.0, H0, NY)
+        Hb = (H - ramp)[:, None] * np.ones((1, NX))
+    else:
+        xc = -LX / 2 + (np.arange(NX) + 0.5) * DX_M
+        hill = H0 * np.exp(-xc ** 2 / (2.0 * WIDTH ** 2))
+        Hb = (H - hill)[None, :] * np.ones((NY, 1))
     z = create_partial_cell_coordinate(z_star, jnp.asarray(Hb)) if partial else z_star
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=ALPHA_T, beta_S=0.0),
@@ -86,8 +93,8 @@ def _build(partial: bool, pgf_scheme: str):
     return state, model
 
 
-def _rest_step_max_du(partial: bool, pgf_scheme: str) -> float:
-    state, model = _build(partial, pgf_scheme)
+def _rest_step_max_du(partial: bool, pgf_scheme: str, orient: str = "x") -> float:
+    state, model = _build(partial, pgf_scheme, orient=orient)
     s1 = model.step(state, DT, surface_forcing=None)
     du = np.abs(np.asarray(s1.u.data) - np.asarray(state.u.data))
     dv = np.abs(np.asarray(s1.v.data) - np.asarray(state.v.data))
@@ -100,8 +107,20 @@ def test_smc03_partial_cell_rest_balance():
 
 
 def test_smc03_zstar_rest_balance():
-    """smc03 generalized to z-star: well-balanced (~1e-5), not the raw error."""
-    assert _rest_step_max_du(False, "smc03") < 1e-3
+    """smc03 generalized to z-star: well-balanced (~1e-7 measured), not the raw
+    terrain-following error (~2e-2). Gate at 1e-5 — 2+ orders above the measured
+    residual (EOS-curvature / dz_ref-vs-compressed rho' detail) but 3 orders
+    below the uncorrected error, so a real regression still trips it."""
+    assert _rest_step_max_du(False, "smc03") < 1e-5
+
+
+def test_smc03_zstar_meridional_slope_balance():
+    """Independently pin density_jacobian_pgf_smc03_y on z-star: a meridional
+    (y) bathymetry slope at rest must not generate flow either (the x-ridge
+    test above only exercises smc03_x well-balancedness)."""
+    assert _rest_step_max_du(False, "smc03", orient="y") < 1e-5
+    # non-vacuous: uncorrected z-star over the same y-slope IS large.
+    assert _rest_step_max_du(False, "adcroft", orient="y") > 1e-2
 
 
 def test_zstar_uncorrected_pgf_is_large_selftest():

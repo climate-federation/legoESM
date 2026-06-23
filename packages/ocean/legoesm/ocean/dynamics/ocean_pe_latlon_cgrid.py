@@ -1600,6 +1600,13 @@ def _bc_ke_and_pressure_gradients(
         # ``pgf_scheme="adcroft"`` keeps the raw gradient → BIT-IDENTICAL
         # (this branch is not entered).
         if getattr(config, "pgf_scheme", "adcroft") == "smc03":
+            # ``min_water_column_m`` intentionally omitted (mirrors the partial-
+            # cell smc03 branch, which uses the unfloored static ``h_partial``):
+            # smc03 re-integrates pressure from THIS ``h_zstar`` and discards the
+            # upstream dz_ref-based ``p'``, so the centroid + pressure stay self-
+            # consistent (the well-balancedness requirement).  The floor only
+            # matters at sub-floor wet/dry-margin columns, which are masked out
+            # downstream by ``u_mask_3d``.
             h_zstar = compute_layer_thickness(
                 jnp.zeros_like(eta_safe), H_bathy, z_coord,
             )
