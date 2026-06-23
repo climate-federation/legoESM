@@ -39,7 +39,7 @@ H = 2.0e3                   # depth [m]
 NX = 256
 NY = 8                      # thin y (the flow is x-z, y-uniform)
 NZ = 64
-H0 = 250.0                  # ridge height [m]
+H0 = float(os.environ.get("IT_H0", "250.0"))   # ridge height [m] (0 → flat bottom)
 WIDTH = 2.0e4               # ridge width [m]
 N2 = 1e-4                   # stratification
 LATC = -45.0               # f-plane latitude
@@ -76,9 +76,20 @@ def build_setup():
         z = create_partial_cell_coordinate(z_star, jnp.asarray(Hb))
     else:
         z = z_star
+    # Match the oracle's NO-closure setup: Oceananigans internal_tide uses
+    # WENO advection and NO explicit diffusivity. The canonical config defaults
+    # to K_v=1e-4 / A_v=1e-3 background mixing, which (with zero-flux BCs) slowly
+    # relaxes the stratification toward uniform — over topography that relaxation
+    # is horizontally uneven and spins up a spurious flow from rest. Setting
+    # K_v=A_v=0 matches the oracle and is the physically correct rest state.
+    # NOTE: K_v=0 currently NaNs the implicit tracer solve (a zero-diffusivity
+    # degeneracy, tracked separately); default to the canonical background until
+    # that is fixed, so the case is at least stable. The oracle truly has none.
+    _kv = float(os.environ.get("IT_K_V", "1e-4"))
+    _av = float(os.environ.get("IT_A_V", "1e-3"))
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=ALPHA_T, beta_S=0.0),
-        g=G, rho_0=RHO0, A_h=0.0, K_h=0.0,
+        g=G, rho_0=RHO0, A_h=0.0, K_h=0.0, A_v=_av, K_v=_kv,
         momentum_advection=os.environ.get("MOM_ADV", "weno5"),
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
