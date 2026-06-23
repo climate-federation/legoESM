@@ -90,7 +90,13 @@ def build_setup():
     cfg = oceananigans_canonical_ocean_config(
         eos_linear=LinearEOSConfig(alpha_T=ALPHA_T, beta_S=0.0),
         g=G, rho_0=RHO0, A_h=0.0, K_h=0.0, A_v=_av, K_v=_kv,
-        momentum_advection=os.environ.get("MOM_ADV", "weno5"),
+        # FAITHFUL scheme = flux_form: the oracle's `momentum_advection = WENO()`
+        # on a RectilinearGrid is FLUX-FORM (div_𝐯u), NOT WENOVectorInvariant.
+        # (Earlier weno5/vector-invariant runs were the WRONG scheme — they spun
+        # up a spurious y-velocity, max|v| 2.7 vs 0.70 for flux_form.) flux_form
+        # is stable and ~7× closer in rms; the RESIDUAL is grid-scale (2Δx) noise
+        # at the partial-cell staircase, not the momentum scheme.
+        momentum_advection=os.environ.get("MOM_ADV", "flux_form"),
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
     cfg = cfg._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0)
