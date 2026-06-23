@@ -560,13 +560,24 @@ class CoupledESMDriver:
                 and getattr(cfg, "land_param_source", "analytical") == "clm"
                 and self._atm._grid_lat is not None):
             from legoesm.land.clm_surface_map import (
-                download_clm_surfdata, load_clm_surface, clm_hydraulics_config)
+                download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
+                clm_multilayer_thermal_config, clm_multilayer_ch)
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
             smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
-            land_cfg = land_cfg._replace(hydraulics=clm_hydraulics_config(smap))
-            logger.info("  Soil: CLM reference van-Genuchten map (per-column)")
+            # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
+            # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
+            # storage dtype so the (float64) PFT-table matmuls do not silently down-
+            # cast into the (possibly float32) land state on every scatter update.
+            _c = lambda x: x.astype(_sd) if isinstance(x, jnp.ndarray) else x
+            cast = lambda t: jax.tree.map(_c, t)   # cast only the array fields
+            ch_cell = clm_multilayer_ch(smap).astype(_sd)
+            land_cfg = land_cfg._replace(
+                hydraulics=cast(clm_hydraulics_config(smap)),
+                thermal=cast(clm_multilayer_thermal_config(smap)),
+                Ch_land=ch_cell, Cd_land=ch_cell)
+            logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
 
         self._land_cfg = land_cfg  # store for diagnostics
 
