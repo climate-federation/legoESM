@@ -45,8 +45,10 @@ DY = 1.0e5             # 100 km front width
 DB = DY * M2          # 1e-2
 EPS_B = 1e-2 * DB
 LATC = -45.0          # BetaPlane latitude
-NX = NY = 48
-NZ = 8
+# Resolution env-overridable so the precursor can be pushed to eddy-RESOLVING (to
+# reproduce the §5 over-energization, which needs better-resolved eddies than 48x48x8).
+NX = NY = int(os.environ.get("BARO_N", "48"))
+NZ = int(os.environ.get("BARO_NZ", "8"))
 ALPHA_T = 2.0e-4
 T_REF_C = 10.0
 G = constants.g
