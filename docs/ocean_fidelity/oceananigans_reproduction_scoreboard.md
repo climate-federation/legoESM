@@ -237,3 +237,25 @@ NOT the 1D WENO kernel (coefficient-faithful) nor the smoothness family (now dec
 CASE 3 (§5) bar (stay finite while oracle stable AND within 2×) remains UNMET: the faithful order-9
 config NaNs ~day 18 here while the oracle saturates at 2.05. This is the one un-closed node; it
 overlaps the standing `fix/silvestri-turbulent-dissipation` effort (multi-session research).
+
+## §5 CLOSURE — full-velocity vertical momentum advection (2026-06-22, commit 7564e0e8f)
+
+The §5/baroclinic-eddy blow-up was decisively re-diagnosed and PARTIALLY closed:
+- **The blow-up is INTERIOR (front/jet centre), NOT the wall mode** — a per-day max|u|-location
+  probe of baroclinic_adjustment put it at lat-row ~24/48 every day, never the N/S walls. This
+  overturned the long-standing wall-mode hypothesis.
+- **bickley (2D, single-layer) is benign (~4%); baroclinic (3D) blows up** ⇒ the lever is a
+  3D-only term the entire bickley-focused effort could never exercise: **vertical momentum
+  advection**. legoESM advected only the baroclinic perturbation u'=u−U_bar (omitting
+  −∂(w·U_bar)/∂z); Oceananigans advects the FULL u. New faithful option
+  `weno_vertadv_full_velocity` (recipe default True) advects full u.
+- **baroclinic_adjustment: NaN day-18 → SATURATES within 2% of the oracle through 30 d**
+  (day-30 1.05×). The clean §5-precursor blow-up is CLOSED, faithfully (review-clean,
+  conservative, AD-pure, 396 tests pass).
+- **BUT the actual §5 W9V 160×128×50 case (sustained restoring forcing) is only DELAYED**
+  82 d → 89 d (GPU, no backstop). §5's τ=50d restoring on (b,u,v) keeps pumping energy past
+  what the fix dissipates; the precursor (no restoring) saturates freely. So §5's residual is a
+  SUSTAINED-FORCING eddy instability at the ~1 m/s transient peak — SEPARATE from the interior
+  vertical-advection runaway this fix closes. CASE 3 still UNMET; the full-velocity vertadv fix is
+  a real, faithful, committed improvement (closes the precursor + the 3D vertical-advection
+  mechanism) but not the complete §5 cure.

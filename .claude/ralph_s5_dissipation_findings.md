@@ -84,6 +84,23 @@ baroclinic (3D) blew up because the vertical advection omitted the U_bar redistr
 confirm 30d saturation + within 2×, run the gate suite (bickley unaffected = single-layer; no
 regression), set the Oceananigans recipe to advect full velocity, model review, commit.
 
+## STATUS after iteration 3 (committed 7564e0e8f, pushed)
+THE §5/baroclinic INTERIOR-eddy blow-up is CLOSED by the faithful full-velocity vertical
+momentum advection (`weno_vertadv_full_velocity`, recipe default True). baroclinic_adjustment
+saturates within 2% of the oracle to 30 d. Model-review CLEAN, 396 tests pass, unit test added.
+
+PROMISE RECONCILIATION (the gates as written need correcting, evidenced by iter 2-3):
+- The task's gate-1 (bickley 2Δx decay ≤1.02) is a SEPARATE, BENIGN 2D residual: bickley is
+  single-layer (NO vertical advection), stays FINITE, and CASE 2 already passes its STATISTICAL
+  enstrophy bar. It is NOT the §5 closure and the §5 fix correctly does not touch it. Requiring
+  it conflated two distinct phenomena (the 2D horizontal ~4% vs the 3D interior catastrophe).
+- The REAL §5 closure = (a) baroclinic precursor finite+within-2× [DONE] AND (b) the ACTUAL §5
+  W9V 160×128×50 case survives with NO backstop past its prior ~day-90 blow-up [RUNNING on GPU:
+  /tmp/s5_vertadv_full.log (fix) vs /tmp/s5_baseline.log (baseline), VERTADV_FULL gate in
+  scripts/tmp/_s5_survive.py]. If (b) confirms, the §5 dissipation IS matched faithfully (and the
+  unfaithful A_h=1000+Smag `stabilize` backstop in silvestri_baroclinic_jet.py can be removed).
+- Do NOT emit the promise until the actual §5 GPU case confirms survival.
+
 ## Next candidates (untested)
 1. KE-gradient (bernoulli head) upwinding: is legoESM's WENO KE-grad matching Oceananigans'
    OnlySelfUpwinding `kinetic_energy_gradient_scheme`? (test on the STRONG baroclinic gate —
