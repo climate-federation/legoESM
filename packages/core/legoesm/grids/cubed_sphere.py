@@ -195,8 +195,29 @@ class CubedSphereGrid(NamedTuple):
         ``self.duogrid is None``; iter-865b exposes the proper
         bounded-domain abstraction so future regional/nested support
         gates the same way.
+
+        **Cubed-sphere MPI face-scatter:** a rank that owns a SINGLE global
+        cube face (``--cs-mpi-scatter`` with 6 ranks) also has
+        ``lat.shape[0] == 1``, but it is NOT a regional/nested panel — its
+        cross-face seams are filled by MPI halo exchange (the ``pad_halo``
+        wall-BC branch is itself skipped when ``_halo_backend == 'mpi'``), so
+        ``bounded_domain`` must be False there or operators would wrongly skip
+        global-cube edge/corner handling.  Detect this the same way ``pad_halo``
+        does: the MPI backend is active and the active topology is the
+        face-only cube topology (carries ``local_face_ids``).
         """
-        return (self.duogrid is not None) or (self.lat.shape[0] == 1)
+        if self.duogrid is not None:
+            return True
+        if self.lat.shape[0] == 1:
+            from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+            if get_halo_backend() == "mpi":
+                topo = get_mpi_topology()
+                if topo is not None and hasattr(topo, "local_face_ids"):
+                    # Rank-local scattered global-cube face, not a regional panel.
+                    return False
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # GridProtocol properties

@@ -258,9 +258,38 @@ def _total_area(grid) -> jax.Array:
     ~10^-13 drift on the cube hydro PE even with the anchored
     fixer + fp64 ``mass_target``.  Cast to the conservation
     accumulator here so every fixer division sees an fp64 denominator.
+
+    **Cubed-sphere face-scatter (MPI):** when each rank owns only a
+    SUBSET of the 6 faces (``grid`` sliced to owned faces, leading dim
+    ``< 6``), ``grid.grid_total_area`` is the rank-LOCAL owned-face area,
+    not the global total.  The mass-fixer numerator
+    (``global_area_sum``) already allreduces owned partials to the global
+    mass, so an un-reduced local denominator would scale the correction
+    by ``global_area / owned_area`` (~``n_ranks``) and break conservation
+    + replicated-vs-scattered equivalence.  Detect the scattered case
+    (leading dim equals this rank's owned-face count AND ``< 6``) and
+    ``allreduce(SUM)`` the local area to the global total.  Replicated
+    dynamics (full ``(6, ...)`` on every rank) and single-rank runs
+    already hold the global area, so they are left byte-identical.
     """
     acc = conservation_accumulator()
-    return grid.grid_total_area.astype(acc)
+    local = grid.grid_total_area.astype(acc)
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+    if get_halo_backend() == "mpi":
+        topo = get_mpi_topology()
+        area = getattr(grid, "area", None)
+        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
+        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
+        # accessor (no ``local_face_ids``), so guard with hasattr to avoid an
+        # AttributeError on non-cube MPI backends.
+        if topo is not None and area is not None and hasattr(topo, "local_face_ids"):
+            n_local = len(topo.local_face_ids)
+            if area.shape[0] == n_local and n_local < 6:
+                from legoesm.parallel.reductions import global_sum_mpi
+
+                local = global_sum_mpi(local)
+    return local
 
 
 def fix_mass_shallow_water(
