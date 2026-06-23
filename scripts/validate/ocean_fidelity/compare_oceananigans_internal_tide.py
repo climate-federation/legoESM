@@ -142,7 +142,6 @@ def main():
 
     o_days = o_t / 86400.0
     nsteps = int(round(stop_days * 86400.0 / dt))
-    bN2z = N2 * z_full                                  # the N²z mean profile (nlev,)
     print("\n  day | lego max|b'| | b' pattern_corr | finite", flush=True)
     t = 0.0
     for it in range(1, nsteps + 1):
@@ -152,7 +151,13 @@ def main():
         if any(abs(td - od) < dt / 86400.0 / 2 for od in o_days):
             oi = int(np.argmin([abs(td - od) for od in o_days]))
             T = np.asarray(state.T.data)[jrow]          # (n_lon, nlev)
-            bp = G * ALPHA_T * (T - T_REF_C) - bN2z[None, :]   # b' = b − N²z
+            eta = np.asarray(state.eta.data)[jrow]      # (n_lon,)
+            Hb = np.asarray(state.H_bathy.data)[jrow]   # (n_lon,) local depth
+            # z-star PHYSICAL depth: z = η + z_ref·(H_bathy+η)/H_max (compresses over the
+            # ridge). b' = b − N²·z_phys — the internal-tide isopycnal-displacement signal.
+            # Using z_ref instead would cancel the compression-induced response (the tide).
+            z_phys = eta[:, None] + z_full[None, :] * (Hb[:, None] + eta[:, None]) / H
+            bp = G * ALPHA_T * (T - T_REF_C) - N2 * z_phys
             fin = bool(np.all(np.isfinite(bp)))
             o_bp_oi = o_bp[:, :, oi].T                   # (z,x) → (x, z)
             nxc = min(bp.shape[0], o_bp_oi.shape[0])
