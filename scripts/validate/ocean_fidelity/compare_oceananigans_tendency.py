@@ -67,6 +67,11 @@ def main():
     o_v = np.asarray(ds.variables["v"][:])
     o_Gu = np.asarray(ds.variables["Gu"][:])
     o_Gv = np.asarray(ds.variables["Gv"][:])
+    # Isolated vorticity-flux node (-v̂·ζᴿ); the advection contributes -hadv to G,
+    # so the oracle's vorticity-flux CONTRIBUTION to du/dt is -hadv_u (matches the
+    # sign of legoESM's diag.vortcor_u = q̄·Fv added to du_dt).
+    o_vort_u = -np.asarray(ds.variables["hadv_u"][:]) if "hadv_u" in ds.variables else None
+    o_vort_v = -np.asarray(ds.variables["hadv_v"][:]) if "hadv_v" in ds.variables else None
     print(f"[oracle] Gu shape {o_Gu.shape} max|Gu|={np.abs(o_Gu).max():.4e} "
           f"max|Gv|={np.abs(o_Gv).max():.4e}")
 
@@ -124,6 +129,46 @@ def main():
           "Gv~0.9998) once (a) legoESM's planetary Coriolis is added (it is applied "
           "outside du_dt) and (b) the additive D-term is dropped (Oceananigans folds "
           "divergence into the OnlySelfUpwinding; no separate additive term).")
+
+    # ---- ISOLATED VORTICITY-FLUX NODE (the §5 residual target, the loop gate) ----
+    # legoESM diag.vortcor_u (= q̄·Fv contribution to du/dt) vs oracle -hadv_u
+    # (= -horizontal_advection_U = +v̂·ζᴿ contribution to Gu). Same colocation +
+    # alignment as Gu/Gv. The DISSIPATION signature is the grid-scale (2Δx) content
+    # of this term: legoESM UNDER-dissipates ⇒ MORE 2Δx power than the oracle.
+    if o_vort_u is None:
+        print("\n  [vorticity-flux node] reference lacks hadv_u/hadv_v — regenerate "
+              "the tendency deck (it now dumps the isolated vorticity flux).")
+        return
+
+    def hp2dx(f):
+        """2Δx high-pass: f minus its 1-2-1 smooth in BOTH axes (lon periodic, lat
+        replicate). The residual is the grid-scale (Nyquist) content."""
+        f = np.asarray(f, dtype=float)
+        sm_lon = 0.25 * (np.roll(f, 1, 1) + 2 * f + np.roll(f, -1, 1))
+        g = sm_lon
+        sm = np.empty_like(g)
+        sm[1:-1] = 0.25 * (g[:-2] + 2 * g[1:-1] + g[2:])
+        sm[0], sm[-1] = g[0], g[-1]
+        return f - sm
+
+    print("\n=== ISOLATED VORTICITY-FLUX NODE (legoESM diag.vortcor vs oracle -hadv) ===")
+    for comp, l_field, o_field, la0, roll in (
+        ("u", np.asarray(diag.vortcor_u.data)[:, :, 0], o_vort_u, la0u, ru),
+        ("v", np.asarray(diag.vortcor_v.data)[:, :, 0], o_vort_v, la0v, rv),
+    ):
+        lf = apply(l_field, la0, roll, o_field.shape)
+        m = compare_field(lf, o_field)
+        # Grid-scale (2Δx) RMS ratio: >1 ⇒ legoESM has MORE grid-scale vorticity-flux
+        # content than the oracle = UNDER-dissipation (the residual signature).
+        hp_l = float(np.sqrt(np.mean(hp2dx(lf) ** 2)))
+        hp_o = float(np.sqrt(np.mean(hp2dx(o_field) ** 2)))
+        ratio = hp_l / hp_o if hp_o > 1e-30 else float("nan")
+        print(f"  vort_{comp}: corr {m.pattern_corr:+.4f}  nrmse {m.nrmse:.4f}  "
+              f"max(lego {np.abs(lf).max():.3e} / oracle {np.abs(o_field).max():.3e})  "
+              f"2Δx-RMS lego/oracle = {ratio:.3f} (>1 ⇒ under-dissipated)")
+    print("  GATE: drive corr→1, nrmse→0, AND 2Δx-RMS ratio→1 by matching the C-grid "
+          "collocation (bias-velocity v̂ interp + vertex curl). This is the fast, "
+          "non-chaotic per-node signal for the §5 vorticity-flux residual.")
 
 
 if __name__ == "__main__":

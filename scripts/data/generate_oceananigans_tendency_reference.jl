@@ -62,8 +62,27 @@ Gv = interior(model.timestepper.Gⁿ.v)[:, :, 1]
 compute!(ζf)
 ζ = interior(ζf)[:, :, 1]
 
-@printf("tendency ref: Nh=%d  max|u|=%.4f max|Gu|=%.4e max|Gv|=%.4e\n",
-        Nh, maximum(abs, u), maximum(abs, Gu), maximum(abs, Gv))
+# ISOLATED vorticity-flux node (the §5 residual target): Oceananigans'
+# `horizontal_advection_U/V` = -v̂·ζᴿ (the vorticity-flux contribution to U_dot_∇u),
+# evaluated DIRECTLY via KernelFunctionOperation on the materialized scheme. This is
+# the single-step, non-chaotic per-node oracle for the C-grid vorticity-flux
+# collocation (bias-velocity interp + vertex curl) — compared pointwise to legoESM's
+# `diag_vortcor_u/v`. The advection contributes `-horizontal_advection_*` to G* (the
+# tendency is minus the advection), so the legoESM comparison is to -hadv_*.
+sch = model.advection.momentum
+hadvU = Field(KernelFunctionOperation{Face, Center, Center}(
+    Oceananigans.Advection.horizontal_advection_U, grid, sch,
+    model.velocities.u, model.velocities.v))
+hadvV = Field(KernelFunctionOperation{Center, Face, Center}(
+    Oceananigans.Advection.horizontal_advection_V, grid, sch,
+    model.velocities.u, model.velocities.v))
+compute!(hadvU); compute!(hadvV)
+hadv_u = interior(hadvU)[:, :, 1]   # at (Face,Center) = u-point, colocates with Gu
+hadv_v = interior(hadvV)[:, :, 1]   # at (Center,Face) = v-point, colocates with Gv
+
+@printf("tendency ref: Nh=%d  max|u|=%.4f max|Gu|=%.4e max|Gv|=%.4e max|hadvU|=%.4e max|hadvV|=%.4e\n",
+        Nh, maximum(abs, u), maximum(abs, Gu), maximum(abs, Gv),
+        maximum(abs, hadv_u), maximum(abs, hadv_v))
 
 nc = joinpath(out_dir, "tendency.nc")
 # u is (Face,Center); v is (Center,Face); Gu colocates with u, Gv with v;
@@ -77,5 +96,8 @@ NCDataset(nc, "c") do ds
     defVar(ds, "Gu", Gu, ("xu","yu"))
     defVar(ds, "Gv", Gv, ("xv","yv"))
     defVar(ds, "zeta", ζ, ("xz","yz"))
+    # Isolated vorticity-flux node (colocated with u/v respectively).
+    defVar(ds, "hadv_u", hadv_u, ("xu","yu"))
+    defVar(ds, "hadv_v", hadv_v, ("xv","yv"))
 end
 @info "DONE: wrote $nc"
