@@ -97,6 +97,13 @@ def build_setup():
     _pgf = os.environ.get("PGF_SCHEME")            # "adcroft" (default) | "smc03"
     if _pgf:
         cfg = cfg._replace(pgf_scheme=_pgf)
+    # Vector-invariant PV-flux step-vertex handling toggles (partial-cell dynamics
+    # probe): the spurious internal-tide growth localizes to the vector-invariant
+    # vorticity flux at partial-cell steps.
+    if os.environ.get("RECON_ZETA") == "1":
+        cfg = cfg._replace(vortcor_reconstruct_zeta=True)
+    if os.environ.get("ENSTROPHY_METRIC") == "1":
+        cfg = cfg._replace(vortcor_enstrophy_metric=True)
     wall = jnp.ones((NY, NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     state = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=wall,
                                           H_bathy_override=jnp.asarray(Hb),
