@@ -3485,7 +3485,22 @@ class LatLonCGridOceanModel:
         J_cell = compute_ocean_jacobian(
             state.eta.data, state.H_bathy.data, self.z_coord,
         )
-        dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
+        # Diffuse on the ACTUAL per-cell thickness.  The backward-Euler solve
+        # with zero-flux BCs conserves Σ(dz_cell·T) per column; for PHYSICAL heat
+        # conservation that weight must be the partial-cell thickness h_partial·J,
+        # not dz_ref·J — the thin bottom partial cell is NOT a full reference
+        # cell, and weighting it by dz_ref leaks heat at the topography (a
+        # sum(h_partial·T) drift; gated by test_partial_cells_phase7
+        # ::test_partial_cells_implicit_mixing_conserves_heat).  h_partial·J ==
+        # compute_layer_thickness for partial cells; below-seafloor cells get
+        # h_partial=0 → dz_cell=0, which the solver clips (inv_dz via
+        # maximum(dz,_EPS)) and the _wet_if_vmix / face-activity guards zero every
+        # flux that would couple them, so they stay inert.  Pure z-star keeps
+        # dz_ref·J → BIT-IDENTICAL (else branch == the original line).
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            dz_cell = self.z_coord.h_partial * J_cell[..., jnp.newaxis]
+        else:
+            dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
         # Gradient (center-to-center) divisor of the implicit solve.  Default is
         # the midpoint reconstruction 0.5(dz_k+dz_{k+1}); the Veros-faithful slot
         # (config.implicit_vmix_dzw_slot, #428) uses the coordinate's
