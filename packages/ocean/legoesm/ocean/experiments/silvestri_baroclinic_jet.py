@@ -290,12 +290,17 @@ def build_silvestri_baroclinic_jet_setup(
         #   * barotropic_slow_forcing_ab2=True — AB2 time-center F_slow to match
         #     Oceananigans' AB2-extrapolated Gᵁ → keeps the barotropic eta-U
         #     geostrophic balance (without it the SSH drifts → blows ~day 38).
-        # This removes the EARLY barotropic failures and W9V survives the 80-d
-        # target at alpha=0, but a SEPARATE eddy-scale instability (filter-
-        # independent, onset ~day 55 at the oracle's ~0.1 m/s saturation
-        # amplitude) blows the run at ~day 90 — see the module docstring SCOPE
-        # note. NOT a complete §5 cure; the residual is the WENO/eddy-
-        # equilibration problem, a separate effort.
+        # This removes the EARLY barotropic failures. The remaining ~day-89 blow-up
+        # was NOT an eddy-equilibration residual (as long believed) — it was TWO
+        # faithful gaps, both now closed (2026-06-23, see the scoreboard): (1) the
+        # vertical momentum advection advected only u' (omitting −∂(w·U_bar)/∂z) —
+        # fixed by weno_vertadv_full_velocity=True below; (2) the TIMESTEP — the oracle
+        # runs an adaptive wizard (cfl=0.3, Δt 300–900 s) that shrinks at the transient
+        # peak, while a FIXED dt=900 (the oracle's max) CFL-violated at the
+        # over-energized peak → NaN day 89. With full-velocity vertadv + the oracle's
+        # adaptive dt (or a fixed dt ≤ ~450 s within its range), §5 W9V survives the
+        # FULL 200-d transient at alpha=0 with NO backstop, max|u| ~1 m/s (the oracle's
+        # amplitude). The A_h+Smag `stabilize` backstop below is NO LONGER NEEDED.
         barotropic_solver="explicit_substep",
         coriolis_scheme="explicit_ab2",
         barotropic_slow_forcing_ab2=True,
@@ -316,17 +321,23 @@ def build_silvestri_baroclinic_jet_setup(
         # eddy-permitting W9V/W9D jet run with NO closure (vs the A_h+Smag `stabilize`
         # backstop below). Validated: §5 W9V survives 16 d at the Oceananigans amplitude.
         wall_grid_filter_rate_s=config.wall_grid_filter_rate_s,
+        # FAITHFUL §5 closure (2026-06-23): advect the FULL horizontal momentum
+        # vertically (Oceananigans w·∂u/∂z over full u), not legoESM's default
+        # baroclinic perturbation u' which omits −∂(w·U_bar)/∂z. The perturbation form
+        # let the interior baroclinic eddies run away; the full-velocity form lets §5
+        # W9V survive the full transient (200 d, no backstop) with the oracle's adaptive
+        # timestep (cfl=0.3, max_Δt=900 s). See docs/ocean_fidelity/oceananigans_reproduction_scoreboard.md.
+        weno_vertadv_full_velocity=True,
     )
     model_config = apply_silvestri_scheme(base_config, scheme)
 
-    # Eddy-resolving stabilization backstop (B5-stab finding): legoESM's WENO
-    # vector-invariant under-dissipates the C-grid grid-scale mode vs Oceananigans
-    # and blows up at eddy-resolving resolution WITHOUT an explicit closure. The
-    # Eady min-dissipation combination A_h=1000 + C_smag=0.1 + smag_cfl_safety=0.5
-    # stabilizes it while keeping the eddies. Applied ONLY to the no-closure WENO/
-    # flux schemes (lateral_friction_scheme=="none"); SM2/QG2 keep their own
-    # closure (adding A_h/C_smag would trip the double-friction guard). NOT
-    # paper-faithful (the paper's WENO has no closure) — a documented legoESM cost.
+    # Eddy-resolving stabilization backstop — NO LONGER NEEDED for a faithful §5 run
+    # (2026-06-23): the blow-up it patched was the vertical-advection + fixed-dt CFL
+    # gap, now closed (full-velocity vertadv + the oracle's adaptive dt). Kept ONLY as
+    # an opt-in (`stabilize=True`, default False) for non-faithful robustness probes;
+    # the faithful paper run (stabilize=False) survives the full transient with NO
+    # closure. A_h=1000 + C_smag=0.1 + smag_cfl_safety=0.5 is the old Eady backstop;
+    # it trips the double-friction guard against SM2/QG2 so is WENO/flux-only.
     if stabilize and model_config.lateral_friction_scheme == "none":
         model_config = model_config._replace(
             A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5)

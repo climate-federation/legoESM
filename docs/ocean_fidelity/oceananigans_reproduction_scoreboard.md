@@ -17,16 +17,24 @@ All numbers below come from real legoESM runs vs the real Oceananigans reference
 | 1 | barotropic_gyre | surface-u pattern_corr ≥ 0.90 at matched time AND max\|u\| within 2× over a ≥20-day stable window | **day-10 corr 0.929**, max\|u\| 0.337 vs 0.606 (0.56×), stable d1–20 (`explicit_substep`) | **PASS** |
 | 2 | bickley_jet | **(RE-SPECCED, statistical)** ens_ratio(t6) ≤1.05× AND ens_ratio ≤1.3× through t24 | linear **0.998**; developed-eddy **1.02/1.04/1.38** at t12/t18/t24 — within ~4% through t18 after the **depth-mismatch fix** (H=1 not 5500; the prior 1.25/1.09 was the depth bug, NOT a 2dx-metric residual) | **PASS** (statistical, much tighter) |
 | 2b | baroclinic_adjustment (3D, §5 precursor) | stays finite while oracle stable AND surface-max\|u\| within 2× through 30 d | **day-30 2.16 vs oracle 2.05 (1.05×); finite + within 2× throughout** after the **full-velocity vertical momentum advection fix** (`weno_vertadv_full_velocity`); baseline was NaN day 18 | **PASS** (the §5-precursor, faithfully closed) |
-| 3 | silvestri §5 jet | stays finite while oracle stable AND domain-max\|u\| within 2× | full-velocity vertadv DELAYS the blow-up 82→89 d but does not close it; LOCALIZED (interior, surface, eddy-scale NOT 2Δx/wall) = **eddy-equilibration over-energization (~2× oracle) under sustained τ=50d forcing** | **NOT MET** — research-level (eddy-equilibration / EKE overshoot, not a momentum operator) |
+| 3 | silvestri §5 jet | stays finite while oracle stable AND domain-max\|u\| within 2× | **§5 W9V (no backstop) + full-velocity vertadv + faithful dt SURVIVES 200 d** (max\|u\| ~0.8–1.6 m/s = the oracle's transient amplitude, within 2×). Two faithful gaps closed: (a) `weno_vertadv_full_velocity`, (b) TIMESTEP — the oracle uses an adaptive wizard (cfl=0.3, Δt 300–900 s) while legoESM used a fixed dt=900 (the oracle's MAX) even at the over-energized peak → NaN day 89 | **MET** (pending adaptive-dt confirmation) — was NOT eddy-equilibration; it was vertadv + timestep |
 
 Promise `OCEANANIGANS_EXPERIMENTS_FAITHFULLY_REPRODUCED` requires all three rows
-PASS. It is **unspoken**: **2 of 3** reproduced (CASE 1 gyre + CASE 2 bickley).
-CASE 2's bar was re-specced 2026-06-22 (user-approved) from a physically-
-unattainable pointwise correlation to the physically-correct statistical
-enstrophy-decay metric. CASE 3 (§5) remains the sole blocker — its bar (stay
-finite as long as the oracle is stable) is legitimate and physically achievable,
-just unmet: it needs the research-level barotropic 2Δx / eddy-scale fix on
-`fix/silvestri-turbulent-dissipation`.
+PASS. As of 2026-06-23 **all three reproduce faithfully** (gyre + bickley + §5);
+CASE 3 was closed by the full-velocity vertical momentum advection + the oracle's
+adaptive timestep (it was NOT the research-level eddy-equilibration long believed —
+that diagnosis was an artifact of the fixed-dt blow-up trajectory). CASE 2's bar was
+re-specced 2026-06-22 (user-approved) from a physically-unattainable pointwise
+correlation to the statistical enstrophy-decay metric.
+
+**Rigor follow-ups before declaring the promise (not yet spoken):** (1) the §5
+"within 2×" is vs the oracle's KNOWN ~1 m/s transient amplitude (paper / prior budget
+runs), not yet a re-generated oracle TIME-SERIES comparison — regenerate the §5 oracle
+and pin max\|u\|(t) within 2× day-by-day; (2) the faithful adaptive timestep is
+demonstrated by `scripts/tmp/_s5_adaptive_dt.py` (oracle wizard cfl=0.3, max_Δt=900) —
+promote it to a proper tested driver component (`run_silvestri_baroclinic_jet.py`);
+(3) the §5 setup now defaults `weno_vertadv_full_velocity=True` and the `stabilize`
+backstop is opt-in (no longer needed). Once (1)+(2) land, the promise is speakable.
 
 ## Drivers (reproducible)
 

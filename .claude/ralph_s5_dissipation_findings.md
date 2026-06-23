@@ -143,6 +143,25 @@ NOT a numerical grid/wall mode. Research target: why legoESM's forced surface ed
 ~2× too energetic vs Oceananigans (eddy KE sink / GM-like restratification / surface BC), NOT a
 selectable momentum operator.
 
+## 🟢 CASE-3 BREAKTHROUGH (post-loop) — §5 SURVIVES with vertadv + faithful dt
+The §5 day-89 blow-up was TWO faithful gaps, not one:
+1. **vertical momentum advection** (perturbation u' vs full u) — the `weno_vertadv_full_velocity`
+   fix (committed). Closes the precursor; delays §5 82→89.
+2. **TIMESTEP**: the §5 ORACLE deck (`/tmp/ocn_silvestri/silvestri_jet.jl:46-47`) uses an
+   ADAPTIVE wizard `conjure_time_step_wizard!(cfl=0.3, max_Δt=15min)`, Δt start 5min — so the
+   oracle's dt ranges 300–900s, shrinking toward 300s at the transient peak. legoESM used a FIXED
+   dt=900 (= the oracle's MAX) ALWAYS, including the peak where the oracle adapts DOWN → CFL
+   violation at the over-energized peak → NaN day 89. UNFAITHFUL.
+RESULT: §5 W9V (no backstop) + vertadv_full + **DT=450** (within the oracle's adaptive range):
+SURVIVES to day 110+ (day100 1.61, day105 1.99, day110 1.01, all finite), max|u| oscillating
+~1-2 m/s = the oracle's transient eddy amplitude, WITHIN 2×. Baseline dt=900 blew day 82;
+vertadv+dt900 blew day 89; vertadv+dt450 SURVIVES. ⇒ CASE 3's "stays finite while oracle stable
+AND within 2×" is being MET with TWO FAITHFUL changes (full-u vertadv + oracle-range dt). The
+earlier "2× over-energization" was largely the BLOW-UP trajectory at dt=900, not the true
+equilibration (dt=450 equilibrates ~1.4×). Long run to day 200 confirming; then implement proper
+ADAPTIVE dt (cfl=0.3, max=900 — the wizard) as the clean faithful timestep. This REOPENS CASE 3
+as closeable (NOT research-level eddy-equilibration after all — it was vertadv + timestep).
+
 ## Next candidates (research-level, untested — beyond faithful operator options)
 1. KE-gradient (bernoulli head) upwinding: is legoESM's WENO KE-grad matching Oceananigans'
    OnlySelfUpwinding `kinetic_energy_gradient_scheme`? (test on the STRONG baroclinic gate —
