@@ -126,6 +126,23 @@ multi-week effort (~15 levers). The promise SILVESTRI_S5_DISSIPATION_MATCHED is 
 NOT emitted. The remaining §5 work needs research-level effort (a faithful vertical/eddy closure
 or the sustained-forcing-amplitude grid-scale treatment), not a selectable operator option.
 
+## ITERATION 6 — §5 BLOW-UP LOCALIZED: interior, surface, EDDY-scale (NOT 2Δx, NOT wall)
+`scripts/tmp/_s5_blowup_locate.py` (§5 W9V + vertadv_full, day 78→NaN):
+- INTERIOR (max|u| at lat 83-98 of 160 = mid-channel jet, NEVER walls).
+- SURFACE-intensified (lev 0-2 of 50).
+- EDDY-scale, NOT 2Δx grid-scale: Nyquist fractions tiny (2Δx-lon 0.005-0.015, 2Δx-lat
+  0.001-0.003). The energy is in the LARGE eddies, not a grid mode.
+- Physical OVER-ENERGIZATION: max|u| 0.93→2.06 m/s (day 78→88) ≈ 2× the oracle's ~1 m/s
+  saturation, then a fast sub-daily instability NaNs day 89.
+⇒ OVERTURNS both the "2Δx wall-mode" AND "2Δx grid-mode" §5 hypotheses. The §5 residual is the
+SURFACE-INTENSIFIED INTERIOR EDDY OVER-ENERGIZATION under sustained τ=50d restoring forcing —
+the SAME baroclinic-eddy mechanism the vertadv fix closed in the UNFORCED precursor, but §5's
+forcing drives the eddies to ~2× the oracle's saturation amplitude where they blow. This is the
+EDDY-EQUILIBRATION problem (legoESM's known EKE overshoot, cf. project_eke_overshoot / Phase-G),
+NOT a numerical grid/wall mode. Research target: why legoESM's forced surface eddies equilibrate
+~2× too energetic vs Oceananigans (eddy KE sink / GM-like restratification / surface BC), NOT a
+selectable momentum operator.
+
 ## Next candidates (research-level, untested — beyond faithful operator options)
 1. KE-gradient (bernoulli head) upwinding: is legoESM's WENO KE-grad matching Oceananigans'
    OnlySelfUpwinding `kinetic_energy_gradient_scheme`? (test on the STRONG baroclinic gate —
