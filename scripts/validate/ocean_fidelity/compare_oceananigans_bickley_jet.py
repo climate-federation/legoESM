@@ -101,7 +101,10 @@ def build_bickley():
     )
     # ImplicitFreeSurface is fully implicit (backward Euler) -> theta=1.0.
     cfg = cfg._replace(barotropic_implicit_theta_eta=1.0,
-                       barotropic_implicit_theta_pgf=1.0)
+                       barotropic_implicit_theta_pgf=1.0,
+                       vortcor_enstrophy_metric=os.environ.get("VORTCOR_METRIC", "0") == "1",
+                       vortcor_reconstruct_zeta=os.environ.get("VORTCOR_ZETA", "0") == "1",
+                       weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH") or None)
     # CRITICAL: match the Oceananigans z=(0,1) domain depth (H=1). The rest-state
     # bathymetry defaults to H_max=5500 m; leaving it would give a barotropic depth
     # H~5500 (gravity-wave speed sqrt(gH)~74 instead of 1) -> the free surface is

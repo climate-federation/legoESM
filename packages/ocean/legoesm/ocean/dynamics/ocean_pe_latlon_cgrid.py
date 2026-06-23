@@ -1665,6 +1665,8 @@ def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
     weno_smoothness="split",
     vertex_mask=None,
+    enstrophy_metric=False,
+    reconstruct_zeta=False,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1761,10 +1763,22 @@ def _bc_pv_flux(
 
     # (Fv / Fu computed above, before the fused pad.)
 
-    # Average Fv to u-points (4-point, periodic in lon)
+    # Average Fv to u-points (4-point, periodic in lon).  enstrophy_metric selects the
+    # Sadourny Δx-WEIGHTED transport v̂ = 0.25·Σ(Δx_v·Fv)/Δx_u matching Oceananigans'
+    # WENOVectorInvariant (ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹), which conserves enstrophy at
+    # FINITE amplitude.  The plain average (default) is identical on uniform-metric
+    # grids (Δx_v ≡ Δx_u) — the cos-lat weighting is the finite-amplitude lever.
     Fv_west = jnp.roll(Fv, 1, axis=1)
-    Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
-                            + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]                       # (n_lat+1, n_lon, 1)
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :Fv.shape[1], None]          # (n_lat, n_lon, 1)
+        Fv_at_u_core = (0.25 * (_dxv[:-1] * Fv[:-1] + _dxv[1:] * Fv[1:]
+                                + _dxv_w[:-1] * Fv_west[:-1]
+                                + _dxv_w[1:] * Fv_west[1:])) / _dxu_u
+    else:
+        Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
+                                + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
     Fv_at_u = jnp.concatenate(
         [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1788,10 +1802,20 @@ def _bc_pv_flux(
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Total velocity at u/v faces (for WENO upwinding direction)
+    # Total velocity at u faces (sets the WENO upwinding DIRECTION).  Same Sadourny
+    # Δx-weighting as Fv_at_u under enstrophy_metric, so the upwind side is chosen by
+    # the metric-consistent transport v̂ (matches Oceananigans bias(v̂)).
     v_west_total = jnp.roll(v, 1, axis=1)
-    v_at_u_core = 0.25 * (v[:-1] + v[1:]
-                           + v_west_total[:-1] + v_west_total[1:])
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :v.shape[1], None]
+        v_at_u_core = (0.25 * (_dxv[:-1] * v[:-1] + _dxv[1:] * v[1:]
+                               + _dxv_w[:-1] * v_west_total[:-1]
+                               + _dxv_w[1:] * v_west_total[1:])) / _dxu_u
+    else:
+        v_at_u_core = 0.25 * (v[:-1] + v[1:]
+                               + v_west_total[:-1] + v_west_total[1:])
     v_at_u = jnp.concatenate(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1831,23 +1855,32 @@ def _bc_pv_flux(
         # Neumann extrapolation instead of masked-zero discontinuities.
         vtx_mask = (vertex_mask if vertex_mask is not None
                     else compute_vertex_mask(mask, grid=grid))
-        q_filled = _neumann_fill_vertex(q, vtx_mask)
-        # Faithful Oceananigans FV-WENO (see the KE-gradient note): reconstruct
-        # the vertex PV grid values directly (convert_to_cellavg=False), and use
-        # the VelocityStencil beta-average form (beta_average=True) — average the
-        # smoothness betas of ⟨u⟩ and ⟨v⟩ per sub-stencil and reconstruct ONCE,
-        # rather than averaging two independent reconstructions (which is
-        # nonlinearly under-dissipative).  Matches weno_interpolants.jl::beta_sum.
-        q_at_u = _weno_zeta_at_u(
-            q_filled, v, v_at_u, order=_weno_order, u_smooth=u,
+        # reconstruct_zeta: Oceananigans WENOVectorInvariant form — reconstruct the
+        # RELATIVE VORTICITY ζ directly and multiply by the transport velocity v̂
+        # (flux = v̂·ζᴿ; h NOT in the vorticity flux). Default: the POTENTIAL-vorticity
+        # form (reconstruct q=ζ/h, ×mass flux h·v), which conserves potential enstrophy
+        # on partial-cell topography. Identical when h is uniform (η≈0); they diverge
+        # at finite amplitude (the nonlinear WENO over the h-varying stencil).
+        _recon = zeta if reconstruct_zeta else q
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): reconstruct the
+        # vertex grid values directly (convert_to_cellavg=False) with the VelocityStencil
+        # beta-average form (beta_average=True) — average the smoothness betas of ⟨u⟩ and
+        # ⟨v⟩ per sub-stencil and reconstruct ONCE (matches weno_interpolants.jl::beta_sum).
+        _filled = _neumann_fill_vertex(_recon, vtx_mask)
+        rec_at_u = _weno_zeta_at_u(
+            _filled, v, v_at_u, order=_weno_order, u_smooth=u,
             smoothness=weno_smoothness, convert_to_cellavg=False,
             beta_average=True)
-        q_at_v = _weno_zeta_at_v(
-            q_filled, u, u_at_v, order=_weno_order, v_smooth=v,
+        rec_at_v = _weno_zeta_at_v(
+            _filled, u, u_at_v, order=_weno_order, v_smooth=v,
             smoothness=weno_smoothness, convert_to_cellavg=False,
             beta_average=True)
-        diag_vortcor_u = q_at_u * Fv_at_u
-        diag_vortcor_v = -(q_at_v * Fu_at_v)
+        if reconstruct_zeta:
+            diag_vortcor_u = rec_at_u * v_at_u            # ζᴿ·v̂ (Oceananigans form)
+            diag_vortcor_v = -(rec_at_v * u_at_v)
+        else:
+            diag_vortcor_u = rec_at_u * Fv_at_u           # qᴿ·(h·v) PV flux
+            diag_vortcor_v = -(rec_at_v * Fu_at_v)
     else:
         vtx_mask_va = (vertex_mask if vertex_mask is not None
                        else compute_vertex_mask(mask, grid=grid))
@@ -3375,6 +3408,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
             config.weno_smoothness,
             vertex_mask=vertex_mask,
+            enstrophy_metric=config.vortcor_enstrophy_metric,
+            reconstruct_zeta=config.vortcor_reconstruct_zeta,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

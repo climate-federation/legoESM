@@ -957,6 +957,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Oceananigans OnlySelfUpwinding divergence while keeping ``weno_smoothness=
     # "split"`` VelocityStencil vorticity.
     weno_divergence_smoothness: str | None = None
+    # Sadourny ENSTROPHY-CONSERVING metric weighting of the vorticity-flux transport
+    # velocity. Oceananigans' WENOVectorInvariant builds the transport at the u-point as
+    # v̂ = 0.25·Σ(Δx_v·v)/Δx_u (vector_invariant_advection.jl: ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹),
+    # a Δx (cos-lat) WEIGHTED average — the Sadourny form that conserves enstrophy at
+    # FINITE amplitude on a non-uniform metric. legoESM's default forms v_at_u / Fv_at_u
+    # as PLAIN 4-point averages (Δx-weighting dropped), which under-dissipates the
+    # finite-amplitude 2Δx grid mode (the §5 residual). True selects the faithful
+    # metric-weighted transport (and the matching Δy weighting on û for the v-equation);
+    # False (default) keeps the plain average (bit-identical to historical behaviour; a
+    # no-op on uniform-metric Cartesian grids where Δx_v ≡ Δx_u).
+    vortcor_enstrophy_metric: bool = False
+    # Reconstruct the RELATIVE VORTICITY ζ directly in the WENO vorticity flux (the
+    # Oceananigans WENOVectorInvariant form: flux = v̂·ζᴿ with ζᴿ = WENO(ζ₃ᶠᶠᶜ)), instead
+    # of legoESM's default POTENTIAL-vorticity form (reconstruct q=ζ/h, ×mass-flux h·v).
+    # The two are identical when h is uniform (η≈0, linear), but at FINITE amplitude η
+    # makes h vary and WENO(ζ/h)·(h·v) ≠ WENO(ζ)·v (the WENO is nonlinear over the
+    # h-varying stencil) — a candidate for the §5 finite-amplitude under-dissipation.
+    # Faithful ONLY on flat-bottom / no-partial-cell setups (the Oceananigans idealized
+    # cases): the q-form is retained by default because it conserves potential enstrophy
+    # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
+    vortcor_reconstruct_zeta: bool = False
     # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
     # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
     # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant
