@@ -1,36 +1,39 @@
-"""The barotropic (depth-mean) inertial oscillation must actually ROTATE.
+"""Closed-basin barotropic geostrophic adjustment vs the oracle's Flat-y inertial
+oscillation — the topology root cause of the internal_tide fidelity gap (#576).
 
-Root cause of the Oceananigans ``internal_tide`` fidelity failure (issue #576,
-scoreboard row 2d): legoESM's BAROCLINIC Coriolis is correct (a vertically
-sheared, zero-depth-mean velocity traces a clean inertial circle — verified in
-``test_baroclinic_inertial_rotates`` below), but the BAROTROPIC (depth-mean)
-Coriolis for the **x-uniform k=0 mode** is FROZEN: an initial uniform u = U0,
-v = 0 on an f-plane stays u = U0, v = 0 forever instead of rotating
-u → 0, v → −U0/f-sign over a quarter inertial period.
+⚠️ THIS SUPERSEDES an earlier (wrong) framing in this file that called the
+non-rotating depth-mean a "frozen Coriolis bug". It is NOT a bug. Verified
+(JAX_ENABLE_X64, quarter→full inertial period sweep):
 
-Physics (flat bottom, x- and y-uniform, free surface, no forcing):
-    du/dt = +f v,  dv/dt = −f u,  η ≡ 0  (since ∂_x u = 0 ⇒ ∂_t η = 0)
-  ⇒ a pure inertial oscillation  u = U0 cos(ft), v = −U0 sin(ft).
+  legoESM's lat-lon beta-plane C-grid is **meridionally CLOSED** — the barotropic
+  solvers wall the north/south v-faces (`_zero_polar_lat_ends`; see
+  `create_beta_plane_cgrid_geometry`'s "A domain periodic in y is NOT supported").
+  An initial UNIFORM barotropic u = U0 (v=0) therefore does **geostrophic
+  adjustment**, not a free inertial oscillation: the depth-mean u stays ≈ U0 while
+  a meridional free-surface tilt builds to balance it, ∂η/∂y → −f·U0/g (measured
+  ratio → ~1.08 after one inertial period; <v> → 0). The barotropic Rossby radius
+  √(gH)/f ≈ 1358 km dwarfs the basin (256 km), so the WHOLE domain adjusts — there
+  is no wall-free interior (verified: still adjusts at NY=128).
 
-Why it matters for ``internal_tide``: the case sets u = U₂ and a barotropic M2
-tide. With the k=0 inertial mode frozen, the prescribed U₂ never rotates away —
-it lingers as a spurious DC mean current (~+0.4 m/s, measured) that advects a
-steady lee wake over the ridge instead of letting the OSCILLATING tide radiate.
-The single-step PGF / w / tracer-advection tendencies all match the oracle
-(issue #576 iter 10–11); the 2-day divergence is THIS frozen depth-mean mode.
+  The Oceananigans internal_tide oracle uses `topology = (Periodic, Flat, Bounded)`
+  — TRUE 2-D x–z, meridionally UNBOUNDED (no v-walls, ∂η/∂y ≡ 0) — so its barotropic
+  mode does the free inertial/tidal oscillation (u rotates into v, no DC retention).
 
-The barotropic Coriolis is routed (``coriolis_scheme``) either through the
-in-substep solver term (``matsuno_split``) or through the AB2 slow forcing
-F_slow (``explicit_ab2``); the k=0 depth-mean rotation is lost in BOTH, and
-across both free-surface solvers (``implicit_cn``, ``explicit_substep``) — see
-``test_barotropic_inertial_frozen_all_configs``. Fixing it is a barotropic-solver
-change (the depth-mean Coriolis must rotate the k=0 mode without re-admitting the
-2Δx C-grid rotational null mode that ``test_barotropic_coriolis_null_mode`` pins).
+CONSEQUENCE for internal_tide (#576): in legoESM's closed basin the prescribed
+barotropic U₂ and the tidal flow are retained as a geostrophically-balanced DC
+mean current (measured ~+0.4 m/s) instead of the oracle's purely-oscillating tide
+→ a steady lee wake over the ridge instead of a radiating tide → the b' pattern
+decorrelates. The single-step PGF / w / tracer-advection tendencies all match the
+oracle (#576 iters 10–11); the 2-day divergence is THIS topology mismatch, not a
+tracer/PGF/partial-cell or Coriolis-operator defect. The faithful cure is a
+meridionally-unbounded / y-periodic (re-entrant channel) configuration matching
+the oracle's Flat-y — currently unsupported by the beta-plane grid — NOT a change
+to the Coriolis or barotropic operators (which are doing correct closed-basin
+physics here).
 
-These tests are the mechanical tripwire for that fix: ``xfail(strict=True)`` on the
-barotropic rotation (it currently does NOT rotate) so the fix flips it to xpass
-LOUDLY, and a passing baroclinic-rotation test so a regression that breaks the
-*working* Coriolis also trips.
+These tests pin the verified behavior so a future Flat-y/periodic-y option (or a
+regression in the closed-basin geostrophic adjustment, or the *working* baroclinic
+Coriolis) trips loudly.
 """
 
 from __future__ import annotations
@@ -57,14 +60,15 @@ from legoesm.ocean.fidelity.oceananigans_recipe import (
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.vertical import create_ocean_z_star
 
-# Small flat-bottom f-plane box (x-periodic, thin y). f<0 (southern mid-lat).
-_NY, _NX, _NZ = 8, 16, 8
+# Flat-bottom f-plane box (x-periodic, meridionally CLOSED). f<0 (southern mid-lat).
+_NY, _NX, _NZ = 64, 8, 4
 _H = 2.0e3
 _DX = 4.0e3
 _LAT = -45.0
 _F0 = 2.0 * constants.Omega * np.sin(np.radians(_LAT))
 _U0 = 0.2
 _T_INERTIAL = 2.0 * np.pi / abs(_F0)
+_DT = 300.0
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +81,7 @@ def _fp64():
     set_policy(prev)
 
 
-def _build(barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2"):
+def _build():
     grid = create_beta_plane_cgrid_geometry(
         _NY, _NX, dx_m=_DX, dy_m=_DX, f0=_F0, beta=0.0,
         y_origin_m=-_NY * _DX / 2, x_origin_m=-_NX * _DX / 2,
@@ -87,10 +91,8 @@ def _build(barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2"):
         eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
         g=constants.g, rho_0=1000.0, A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
         momentum_advection="flux_form",
-        barotropic_solver=barotropic_solver, coriolis_scheme=coriolis_scheme,
+        barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
-    if coriolis_scheme != "explicit_ab2":
-        cfg = cfg._replace(outer_integrator="forward_euler")
     wall = jnp.ones((_NY, _NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     Hb = jnp.full((_NY, _NX), _H, dtype=wall.dtype)
     state = rest_state_latlon_cgrid_ocean(
@@ -100,46 +102,50 @@ def _build(barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2"):
     return grid, z, state, model
 
 
-def _set_uniform_u(state, u0):
-    u = np.full((_NY, _NX + 1, _NZ), u0)
-    return state._replace(u=state.u.replace(data=jnp.asarray(u)))
+def _quarter_steps():
+    return int(round(_T_INERTIAL / 4.0 / _DT))
 
 
-def _depth_mean_uv(state):
-    u = np.asarray(state.u.data)[_NY // 2]
-    v = np.asarray(state.v.data)[_NY // 2]
-    ubar = float(u[u[:, 0] != 0, :].mean()) if np.any(u[:, 0] != 0) else 0.0
-    vbar = float(v[1:-1].mean())
-    return ubar, vbar
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN BUG (issue #576): the barotropic x-uniform k=0 inertial mode is "
-    "frozen — depth-mean u stays at U0 instead of rotating to ~0 over a quarter "
-    "inertial period. Flips to xpass when the barotropic-Coriolis fix lands."))
-def test_barotropic_inertial_rotates():
-    """A uniform barotropic u must rotate into v over a quarter inertial period."""
+def test_closed_basin_geostrophic_adjustment():
+    """A uniform barotropic u in the meridionally-CLOSED basin geostrophically
+    adjusts: u stays ≈ U0 and a meridional η tilt builds to ∂η/∂y → −f·U0/g (the
+    barotropic Rossby radius spans the basin → no free inertial oscillation). This
+    is the CORRECT closed-basin response (NOT a Coriolis bug); it differs from the
+    oracle's Flat-y free oscillation purely by meridional TOPOLOGY."""
     grid, z, state, model = _build()
-    state = _set_uniform_u(state, _U0)
+    u = np.full((_NY, _NX + 1, _NZ), _U0)
+    state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
 
     @jax.jit
     def step(s):
-        return model.step(s, 300.0, surface_forcing=None)
+        return model.step(s, _DT, surface_forcing=None)
 
-    nq = int(round(_T_INERTIAL / 4.0 / 300.0))
-    for _ in range(nq):
+    for _ in range(4 * _quarter_steps()):  # one full inertial period
         state = step(state)
-    ubar, vbar = _depth_mean_uv(state)
-    # After a quarter inertial period: u→0, |v|→U0 (sign from f<0).
-    assert abs(ubar) < 0.25 * _U0, f"depth-mean u did not rotate away: {ubar:+.4f}"
-    assert abs(vbar) > 0.5 * _U0, f"depth-mean v did not spin up: {vbar:+.4f}"
+
+    u_out = np.asarray(state.u.data)[_NY // 4:3 * _NY // 4]
+    v_out = np.asarray(state.v.data)[_NY // 4:3 * _NY // 4]
+    ubar = float(u_out[u_out[:, :, 0] != 0].mean())
+    vbar = float(v_out.mean())
+    # depth-mean u is retained (geostrophically balanced), not rotated away
+    assert abs(ubar - _U0) < 0.1 * _U0, f"u not retained ({ubar:+.4f})"
+    assert abs(vbar) < 0.1 * _U0, f"v should stay ~0 (got {vbar:+.4f})"
+
+    eta = np.asarray(state.eta.data)[:, _NX // 2]
+    deta_dy = np.gradient(eta, _DX)[_NY // 4:3 * _NY // 4].mean()
+    geo_pred = -_F0 * _U0 / constants.g
+    # η tilt has reached geostrophic balance with f·u (within ~25%)
+    assert abs(deta_dy / geo_pred - 1.0) < 0.25, (
+        f"∂η/∂y={deta_dy:.3e} not geostrophically balanced with -f·U0/g="
+        f"{geo_pred:.3e} (ratio {deta_dy/geo_pred:.2f})")
 
 
 def test_baroclinic_inertial_rotates():
-    """CONTROL: the baroclinic (zero-depth-mean, vertically sheared) Coriolis
-    DOES rotate — proves the Coriolis machinery is correct and isolates the bug
-    to the barotropic depth-mean mode. A regression that breaks the working
-    baroclinic Coriolis trips this (it passes today)."""
+    """CONTROL: the baroclinic (zero-depth-mean, vertically sheared) Coriolis DOES
+    rotate u into v — its (small) Rossby radius fits inside the basin, so it is NOT
+    geostrophically locked. Proves the Coriolis machinery is correct and that the
+    closed-basin retention above is a barotropic/topology effect, not a broken
+    Coriolis operator. A regression in the working Coriolis trips this."""
     grid, z, state, model = _build()
     zf = np.asarray(z.z_full_ref)
     shear = (zf - zf.mean()) / (zf.max() - zf.min())  # mean 0, range ~[-0.5,0.5]
@@ -148,40 +154,12 @@ def test_baroclinic_inertial_rotates():
 
     @jax.jit
     def step(s):
-        return model.step(s, 300.0, surface_forcing=None)
+        return model.step(s, _DT, surface_forcing=None)
 
-    v0_amp = 0.0
-    nq = int(round(_T_INERTIAL / 4.0 / 300.0))
-    for _ in range(nq):
+    v_amp = 0.0
+    for _ in range(_quarter_steps()):
         state = step(state)
-        v0_amp = max(v0_amp, float(np.abs(np.asarray(state.v.data)).max()))
-    # The sheared u must spin up a comparable sheared v (inertial rotation).
-    assert v0_amp > 0.3 * _U0, (
-        f"baroclinic Coriolis did not rotate u into v (max|v|={v0_amp:.4f}); "
+        v_amp = max(v_amp, float(np.abs(np.asarray(state.v.data)).max()))
+    assert v_amp > 0.3 * _U0, (
+        f"baroclinic Coriolis did not rotate u into v (max|v|={v_amp:.4f}); "
         "the Coriolis machinery itself is broken")
-
-
-@pytest.mark.parametrize("bsolver", ["implicit_cn", "explicit_substep"])
-@pytest.mark.parametrize("cscheme", ["explicit_ab2", "matsuno_split"])
-def test_barotropic_inertial_frozen_all_configs(bsolver, cscheme):
-    """Document that the frozen k=0 mode is NOT solver/scheme specific: the
-    depth-mean u stays pinned at its initial value across both free-surface
-    solvers and both Coriolis routings. (Asserts the CURRENT buggy behavior so a
-    fix that rotates ANY config trips this and forces this test to be updated
-    together with the xfail above.)"""
-    grid, z, state, model = _build(barotropic_solver=bsolver,
-                                   coriolis_scheme=cscheme)
-    state = _set_uniform_u(state, _U0)
-
-    @jax.jit
-    def step(s):
-        return model.step(s, 300.0, surface_forcing=None)
-
-    nq = int(round(_T_INERTIAL / 4.0 / 300.0))
-    for _ in range(nq):
-        state = step(state)
-    ubar, _ = _depth_mean_uv(state)
-    assert abs(ubar - _U0) < 0.1 * _U0, (
-        f"{bsolver}/{cscheme}: depth-mean u={ubar:+.4f} is no longer frozen at "
-        f"{_U0} — the barotropic-Coriolis fix may have landed; update this test "
-        "and flip test_barotropic_inertial_rotates to a real (non-xfail) assert.")
