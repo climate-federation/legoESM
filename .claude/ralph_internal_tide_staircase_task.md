@@ -38,6 +38,8 @@ is ~2e-5 in b', so any spurious grid-scale noise swamps it.
 
 - **iter 7: CORRECTION — residual is SCHEME-INDEPENDENT geometric/coordinate consistency, NOT reconstruction.** Narrow stencils give the same ~5x (weno5 5.2x, centered 5.0x, upwind 5.4x) -> iter-6 boundary-aware-reconstruction is WRONG; b_face is irrelevant. For linear b=N2z, residual = N2*[div(mass_flux*z_face)+vert_div(w*z_face)] = telescoping error of the z_face-WEIGHTED fluxes at the partial-cell staircase. It's a GEOMETRIC partial-cell vertical-coordinate-consistency issue (z_half face depths x min-rule mass flux x diagnosed w don't combine consistently for depth-varying b), the tracer analog of the partial-cell PGF consistency. Fix target = the partial-cell z_half handling in the tracer flux divergence.
 
+- **iter 8: advective form 2x better than flux-form; max-ratio confounded; stable metric = pattern_corr 0.76.** Advective -(u*db/dx+w*N2) gives 2.5x vs flux-form 5.2x (same corr 0.76) => the FLUX-FORM partial-cell discretization adds ~2x error (coordinate-consistency gap). The 4-5x max-ratios were confounded (max|Gb| and max|w*N2| at different cells; staircase outliers). STABLE conclusion: structure matches at corr ~0.76 with localized staircase outliers; flux-form is ~2x worse than advective. Fix = coordinate-consistent/remapping conservative flux-form tracer advection matching the advective form's accuracy at partial-cell steps.
+
 ## The blocker (precisely located)
 With `MOM_ADV=flux_form`: STABLE, max|v| over bump 0.70 m/s (vs 2.7 vector-invariant),
 b' rms 2.5e-4 (vs oracle 2e-5, ~12×), pattern_corr ~0. The b' shows a grid-scale
