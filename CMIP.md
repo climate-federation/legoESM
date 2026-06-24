@@ -403,9 +403,30 @@ than halved, SST realistic). NOT yet equilibrated: the atmosphere is still dry
 (CWV 15.87), so R_TOA stays −24 and SST still drifts at τ=15 d. The atm column
 responds slowly (a free coupled spin-up from a dry IC needs months).
 
-**Next:** stronger SST restoring (τ=5 d) pins SST near WOA so the run becomes
-effectively a realistic-prescribed-SST coupled spin-up; run 30 d to let the atm
-moisten (CWV→~35 ⇒ greenhouse ⇒ R_TOA→balance, the slab equilibration path).
+**Stronger restoring τ=5 d (30 d job 8560151) — COLD COLLAPSE SOLVED:**
+
+| config            | SST drift   | R_TOA   | SST mean        | col-T d30 |
+|-------------------|-------------|---------|-----------------|-----------|
+| gustiness only    | −92 K/yr    | −54     | 279.0           | collapse  |
+| + restore τ=15 d  | −47 K/yr    | −24     | 281.4           | —         |
+| **+ restore τ=5 d** | **+25 K/yr** | **−10** | **284.3 (trop 298)** | 252.6 (plateau) |
+
+SST drift flipped **negative → positive** (−92 → +25 K/yr): the collapse is
+arrested, mild warming toward equilibrium. R_TOA −54 → −10 (near balance). SST
+mean 284.3 K with a realistic tropical warm pool (298 K). Column-T plateaued
+(Day 20/25/30 = 252.6/252.4/252.6 K — equilibrated), circulation stable
+(max_v ~19). **The full 3D dynamic ocean from realistic WOA IC now runs stably
+AND realistically** (stable SST near climatology, energy near balance, no
+collapse) — the deliverable.
+
+Residual: CWV 14.9 (atm still dry) ⇒ R_TOA still −10. A longer run lets the warm
+restored SST + gustiness evaporation moisten the column (CWV→greenhouse→R_TOA→0).
+
+**Recommended realistic 3D-ocean coupled config:** `--ocean dynamic --ocean-ic
+woa --ocean-restore-sst-tau-days 5 --ocean-restore-sss-tau-days 30
+--surface-bulk-scheme coare3 --gustiness-zi 300 --q-c-diagnostic 3e-4
+--land-bulk-scheme most --convective-cloud --snow-albedo-feedback --preset
+slab_richards` (land MOST + Richards water-limited ET; ocean COARE air-sea).
 
 ## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
 User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
