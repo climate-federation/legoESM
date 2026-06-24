@@ -69,6 +69,25 @@ class Test12c_LandAlbedoBlend:
         alpha = compute_land_albedo(lat, snow_depth, jnp.array([0.0]), LCFG)
         assert float(alpha[0]) > float(land_vegetation_albedo(lat, LCFG)[0])
 
+    def test_base_albedo_override_snowfree(self):
+        # snow-free: a per-cell base albedo (e.g. CLM PFT map) is used verbatim,
+        # NOT the latitude-band default.
+        lat = jnp.array([0.4, 0.4])
+        base = jnp.array([0.30, 0.13])  # bright desert vs dark forest
+        alpha = compute_land_albedo(lat, jnp.zeros(2), jnp.zeros(2), LCFG,
+                                    base_albedo=base)
+        assert jnp.allclose(alpha, base)
+        assert not jnp.allclose(alpha, land_vegetation_albedo(lat, LCFG))
+
+    def test_base_albedo_blends_with_snow(self):
+        # snow albedo still blends ON TOP of the per-cell base (deserts AND ice
+        # sheets both realistic): full snow -> brighter than the base everywhere.
+        lat = jnp.array([0.4, 0.4])
+        base = jnp.array([0.30, 0.13])
+        snowy = compute_land_albedo(lat, jnp.full(2, 100.0), jnp.zeros(2), LCFG,
+                                    base_albedo=base)
+        assert bool(jnp.all(snowy > base))
+
 
 class Test12d_IceAlbedo:
     def test_cold_high(self):

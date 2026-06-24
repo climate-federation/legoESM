@@ -29,13 +29,14 @@ import jax.numpy as jnp
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    thermal_expansion_coeff,
-    haline_contraction_coeff,
 )
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate, compute_ocean_jacobian,
 )
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    surface_buoyancy_flux,
+)
 
 
 def compute_vertical_K_profiles(
@@ -232,32 +233,17 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config):
     q_net = getattr(sf, "q_net", None) if sf else None
     fw = getattr(sf, "freshwater", None) if sf else None
     salt = getattr(sf, "salt_flux", None) if sf else None
-    T_sfc = state.T.data[..., 0]
-    S_sfc = state.S.data[..., 0]
-    p_sfc = jnp.zeros_like(T_sfc)
-
-    Q_sfc_T = None
-    B_f = None
-    if q_net is not None:
-        Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
-        alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-        B_f = -constants_config.g * alpha * Q_sfc_T
-
-    Q_sfc_S = None
-    if fw is not None or salt is not None:
-        beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-        # Kinematic surface salt flux [PSU·m/s]: freshwater dilution
-        # (-S*fw/rho, fw>0 in -> stabilizing) PLUS a REAL salt-mass flux
-        # (+salt*1e3/rho, salt>0 in -> destabilizing brine rejection).
-        Q_sfc_S = jnp.zeros_like(S_sfc)
-        if fw is not None:
-            Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
-        if salt is not None:
-            Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
-        B_salt = constants_config.g * beta * Q_sfc_S
-        B_f = B_salt if B_f is None else (B_f + B_salt)
-
-    return B_f, Q_sfc_T, Q_sfc_S
+    # Grid-agnostic kernel (#518 item 1).  Lat-lon convention: the real
+    # salt-mass flux feeds BOTH the surface buoyancy and the non-local
+    # Q_sfc_S (``real_salt_in_qs=True``).
+    return surface_buoyancy_flux(
+        q_net, fw, salt,
+        state.T.data[..., 0], state.S.data[..., 0],
+        g=constants_config.g,
+        rho_0=constants_config.rho_0,
+        c_sw=constants_config.c_sw,
+        real_salt_in_qs=True,
+    )
 
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,

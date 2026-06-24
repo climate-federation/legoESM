@@ -22,7 +22,7 @@ Other phases live in this module: bathymetry (Phase 2B), surface
 forcing (Phase 2C), initial conditions (Phase 2D), vertical grid
 (Phase 2E), and dispatch wiring (Phase 2F).
 
-See ``docs/ocean_experiments/dino_replication_plan.md`` for the full
+See ``docs/ocean/experiments/dino_replication_plan.md`` for the full
 plan, decisions log, and audit findings.
 """
 
@@ -52,7 +52,7 @@ class DINOConfig:
     All numeric defaults reflect the paper (Tables 1-2, Appendices A-D)
     and were cross-checked against the upstream NEMO namelist
     (vopikamm/DINO@v0.2.0, EXPREF/namelist_cfg, fetched 2026-05-14).
-    See ``docs/ocean_experiments/dino_replication_plan.md`` for the
+    See ``docs/ocean/experiments/dino_replication_plan.md`` for the
     decisions log.
     """
 

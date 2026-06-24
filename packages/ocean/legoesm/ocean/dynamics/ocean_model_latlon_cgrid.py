@@ -74,6 +74,11 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
 from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
     barotropic_implicit_latlon_cgrid,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    ab2_blend,
+    depth_average_to_faces,
+    depth_mean,
+)
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
@@ -588,15 +593,11 @@ def _forward_backward_coriolis_3d(
     h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
-    # Per-face thickness + barotropic-mean column reductions share the
-    # h_u/h_v weight on the level axis — fuse into one stack each.
-    _u_pair = jnp.sum(jnp.stack([h_u, u * h_u], axis=-1), axis=-2)
-    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
-    U_bar = _u_pair[..., 1] / H_u * u_mask
-
-    _v_pair = jnp.sum(jnp.stack([h_v, v * h_v], axis=-1), axis=-2)
-    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
-    V_bar = _v_pair[..., 1] / H_v * v_mask
+    # Thickness-weighted depth average masked by the face mask (#517
+    # item 1: shared depth_average_to_faces; floor = min_water_col,
+    # passed verbatim → bit-identical).
+    U_bar = depth_average_to_faces(u, h_u, u_mask, min_water_col)
+    V_bar = depth_average_to_faces(v, h_v, v_mask, min_water_col)
 
     # --- Perturbation velocity ---
     u_prime = (u - U_bar[..., jnp.newaxis]) * u_mask_3d
@@ -2603,8 +2604,10 @@ class LatLonCGridOceanModel:
                                       else state.S_flux_div_prev)
                         if prev_field is not None:
                             fd_prev = prev_field.data
-                            effective_fd = ((1.5 + eps) * total_flux_div
-                                            - (0.5 + eps) * fd_prev)
+                            # (#517 item 8: shared ab2_blend; eps verbatim
+                            # → bit-identical.)
+                            effective_fd = ab2_blend(total_flux_div, fd_prev,
+                                                     eps)
                         else:
                             # First step: fall back to Euler
                             effective_fd = total_flux_div
@@ -3016,8 +3019,8 @@ class LatLonCGridOceanModel:
         dtke_prev = (state.dtke.data.astype(dtype)
                      if state.dtke is not None else jnp.zeros_like(dtke_now))
         eps = self.config.ab2_epsilon
-        tke_out = tke_new + dt * ((1.5 + eps) * dtke_now
-                                  - (0.5 + eps) * dtke_prev)
+        # (#517 item 8: shared ab2_blend; eps verbatim → bit-identical.)
+        tke_out = tke_new + dt * ab2_blend(dtke_now, dtke_prev, eps)
         dtke_field = Field(data=dtke_now, name="dtke",
                            dims=("lat", "lon", "level"), units="m^2/s^3")
         return tke_out, dtke_field
@@ -3903,7 +3906,7 @@ class LatLonCGridOceanModel:
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
             # elliptic eta solve + uniform surface-pressure correction. Removes the
             # split's grid-scale PGF/continuity adjointness violation that drives the
-            # spurious 2dx baroclinic instability (docs/ocean_fidelity/
+            # spurious 2dx baroclinic instability (docs/ocean/fidelity/
             # mitgcm_unsplit_freesurface_fix.md). Requires the ab2 outer integrator.
             if _oi != "ab2":
                 raise ValueError(
@@ -4286,6 +4289,12 @@ class LatLonCGridOceanModel:
             dT_diss_incr, dS_diss_incr, du_diss_incr, dv_diss_incr = diss_incr
         else:
             dT_diss_incr = dS_diss_incr = du_diss_incr = dv_diss_incr = 0.0
+        # NB (#517 item 8): NOT routed through ab2_blend.  The original adds
+        # the blend INTO ``state.X.data`` as ``((base + a_n·new) - a_p·old)``;
+        # ``base + ab2_blend(...)`` re-associates to ``base + (a_n·new −
+        # a_p·old)`` and FP addition is non-associative → ~1e-16 byte drift
+        # (codex).  Kept inline.  ab2_blend is used only where the blend is a
+        # STANDALONE subexpression (rigid-lid ψ, the flux-div / TKE AB2 above).
         T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p + dT_diss_incr) * mask3
         S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p + dS_diss_incr) * mask3
 
@@ -4298,8 +4307,11 @@ class LatLonCGridOceanModel:
         h_v = min_cell_to_vface(h_k, _grid)
 
         def _split(field, h_face):
-            bt = (jnp.sum(field * h_face, axis=-1, keepdims=True)
-                  / jnp.maximum(jnp.sum(h_face, axis=-1, keepdims=True), 1.0e-10))
+            # (#517 item 5: shared depth_mean; floor 1.0e-10 + keepdims
+            # passed verbatim → bit-identical.)  Was open-coded as TWO
+            # separate sums → fused=False (byte-identity reduction topology).
+            bt = depth_mean(field, h_face, 1.0e-10, keepdims=True,
+                            fused=False)
             return field - bt, bt          # (baroclinic deviation, barotropic mean)
 
         # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
@@ -4478,7 +4490,7 @@ class LatLonCGridOceanModel:
         Replaces the split-explicit barotropic/baroclinic stepping (which breaks
         the discrete PGF/continuity adjointness at the grid scale, driving the
         spurious 2dx baroclinic instability) with MITgcm's unsplit
-        ``implicitFreeSurface`` algorithm (docs/ocean_fidelity/
+        ``implicitFreeSurface`` algorithm (docs/ocean/fidelity/
         mitgcm_unsplit_freesurface_fix.md):
 
           1. u* = u^n + AB2(Δt·du_dt)   — the FULL explicit baroclinic tendency
@@ -4569,6 +4581,9 @@ class LatLonCGridOceanModel:
         dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None  # noqa: N806
                 else jnp.zeros_like(dS_n))
         # 2. AB2 predictor on the FULL 3-D velocity + tracers.
+        # NB (#517 item 8): kept inline (NOT ab2_blend) — adding the blend into
+        # ``state.X.data`` re-associates the FP add (~1e-16 drift); see the
+        # split-predictor note above.
         u_star = (state.u.data + a_n * du_n - a_p * du_p) * u_mask3
         v_star = (state.v.data + a_n * dv_n - a_p * dv_p) * v_mask3
         T_star = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3   # noqa: N806

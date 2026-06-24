@@ -125,7 +125,7 @@ mixing, bottom drag) are fused into one monolithic function, you cannot isolate,
 equivariance-test, or swap a single stage — a **structural** modularity failure even when
 whole-component swaps pass. This dimension is a STATIC audit (Glob/Grep/Read only; no runtime
 execution). Verification-aligned: it directly supports the oracle-recipe strategy
-(`docs/ocean_fidelity/oracle_recipe_strategy.md`), where stage-level equivariance and
+(`docs/ocean/fidelity/oracle_recipe_strategy.md`), where stage-level equivariance and
 block-granularity tests require addressable stages.
 
 Audit and report:
@@ -158,7 +158,7 @@ synonyms that try to spread (`test_concept_registry.py`, which ratchets the alia
 `src/legoesm/ocean/fidelity/concept_registry.py`). What no text/AST-pattern scan can reach is
 **semantic** equivalence — the same computation under a different name, or two helpers that
 differ only in parameters and should be one. That is this dimension (doctrine rule I in
-`docs/ocean_fidelity/oracle_recipe_strategy.md` §9; STATIC, Read/Grep/Glob only).
+`docs/ocean/fidelity/oracle_recipe_strategy.md` §9; STATIC, Read/Grep/Glob only).
 
 Read the concept registry first, then audit `src/legoesm/ocean/{dynamics,physics}/**` and the
 oracle-side names in `src/legoesm/ocean/fidelity/**`. Detect and report:

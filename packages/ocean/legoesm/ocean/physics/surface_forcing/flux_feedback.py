@@ -87,11 +87,15 @@ from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
     shortwave_penetration_tendency,
 )
+from legoesm.ocean.physics.surface_forcing._shared import (
+    linear_relaxation,
+    surface_tendency_factors,
+)
 from legoesm.ocean.physics.surface_forcing.config import FluxFeedbackConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py and
-# docs/ai_guardrails/domain_architect_vs_syntax_engine.md).
+# docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md).
 __physics_contract__ = {
     "summary": (
         "Veros-style surface tracer forcing: prescribed heat flux plus a linear "
@@ -313,10 +317,12 @@ def flux_feedback_surface_forcing(
     q_total = q_total * mask
 
     # --- W/m² → K/s: the ONE conversion (Veros: /cp_0/rho_0 in the setup
-    #     kernel, /dzt[-1] in the tracer core). ---
-    inv_rho_csw_dz = jnp.where(
-        is_ocean, 1.0 / (cfg.rho_0 * cfg.c_sw * dz_safe), 0.0
-    ).astype(dtype)
+    #     kernel, /dzt[-1] in the tracer core).  #518: shared helper, with the
+    #     Veros-faithful config-pinned cfg.rho_0/cfg.c_sw (deliberately NOT the
+    #     eos module constants the other schemes use). ---
+    _, inv_rho_csw_dz = surface_tendency_factors(
+        is_ocean, dz_0, cfg.rho_0, cfg.c_sw)
+    inv_rho_csw_dz = inv_rho_csw_dz.astype(dtype)
     dT_top = q_total * inv_rho_csw_dz
 
     # --- Penetrative solar column [K/s] (Veros qsol·divpen·maskT/cp_0/rho_0):
@@ -353,7 +359,9 @@ def flux_feedback_surface_forcing(
             dS_top = (jnp.asarray(S_p, dtype)
                       * (jnp.asarray(S_t, dtype) - S_surf) * inv_dz)
         else:
-            dS_top = (jnp.asarray(S_t, dtype) - S_surf) / cfg.tau_restore_s * mask
+            # Scalar SSS restoring (shared kernel, #518 item 9).
+            dS_top = linear_relaxation(
+                S_surf, jnp.asarray(S_t, dtype), cfg.tau_restore_s) * mask
     else:
         dS_top = zT
 

@@ -4,7 +4,7 @@ A faithful, differentiable re-implementation of Veros's rigid-lid barotropic
 mode (``veros/core/external/solve_stream.py``) as a selectable
 ``barotropic_solver = "rigid_lid"`` option, for apples-to-apples fidelity with
 the Veros oracle (the ACC transport's response to bottom drag differs between a
-free surface and a rigid lid; see docs/ocean_fidelity/oracle_recipe_strategy.md).
+free surface and a rigid lid; see docs/ocean/fidelity/oracle_recipe_strategy.md).
 
 Formulation
 -----------
@@ -72,6 +72,11 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     coriolis_cgrid,
     min_cell_to_uface,
     min_cell_to_vface,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    ab2_blend,
+    column_depth,
+    depth_average_to_faces,
 )
 
 # Numerical floor for reciprocal depths / empty cells.
@@ -449,10 +454,11 @@ def rigid_lid_step(psi, dpsi, dpsi_prev, dpsin, dpsin_prev,
     dpsin_new = _solve_island_constants(line_forc, rl_data)
 
     # 5. AB2 integrate ψ (interior + island contributions).
-    ab2_int = (1.5 + eps) * dpsi_new - (0.5 + eps) * dpsi
+    # (#517 item 8: shared ab2_blend; eps passed verbatim → bit-identical.)
+    ab2_int = ab2_blend(dpsi_new, dpsi, eps)
     psi_new = psi + dt * ab2_int
     if rl_data.nisle > 1:
-        ab2_isle = (1.5 + eps) * dpsin_new - (0.5 + eps) * dpsin       # (nisle,)
+        ab2_isle = ab2_blend(dpsin_new, dpsin, eps)                    # (nisle,)
         # Σ_k ab2_isle[k] · psin[...,k]
         psi_new = psi_new + dt * jnp.tensordot(rl_data.psin, ab2_isle, axes=([2], [0]))
 
@@ -514,12 +520,20 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
         min_water_column_m=config.min_water_column_m)
     h_u = min_cell_to_uface(h_k)                              # (n_lat, n_lon+1, nlev)
     h_v = min_cell_to_vface(h_k, grid)                        # (n_lat+1, n_lon, nlev)
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), _DEPTH_FLOOR)    # (n_lat, n_lon+1)
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), _DEPTH_FLOOR)    # (n_lat+1, n_lon)
+    # Floored face-column depths (#517 item 5: shared column_depth; floor
+    # = _DEPTH_FLOOR → bit-identical).  H_u / H_v are reused below to
+    # rebuild the depth-integrated transport, so keep them named.
+    H_u = column_depth(h_u, _DEPTH_FLOOR)                     # (n_lat, n_lon+1)
+    H_v = column_depth(h_v, _DEPTH_FLOOR)                     # (n_lat+1, n_lon)
 
     # Old barotropic (depth-mean) of the predicted velocity -> baroclinic dev.
-    U_old = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
-    V_old = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
+    # (#517 items 1/5: shared depth_average_to_faces; floor = _DEPTH_FLOOR
+    # passed verbatim → bit-identical.)  U_old/V_old were open-coded as TWO
+    # separate sums → fused=False (byte-identity reduction topology).
+    U_old = depth_average_to_faces(u_3d, h_u, u_mask, _DEPTH_FLOOR,
+                                   fused=False)  # (n_lat, n_lon+1)
+    V_old = depth_average_to_faces(v_3d, h_v, v_mask, _DEPTH_FLOOR,
+                                   fused=False)  # (n_lat+1, n_lon)
     u_prime = u_3d - U_old[..., jnp.newaxis]
     v_prime = v_3d - V_old[..., jnp.newaxis]
 

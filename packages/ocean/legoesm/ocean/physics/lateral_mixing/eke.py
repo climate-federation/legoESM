@@ -35,7 +35,7 @@ The mixing length ``L`` is selectable (``EKEConfig.mixing_length_scheme``):
 l_min)`` — legoESM's pre-``eke_len`` behaviour; ``"rhines"`` reproduces Veros's
 Rhines-limited ``eke_len = max(l_min, min(eke_cross·L_rossby, eke_crhin·L_rhines))``
 from the deformation radius (``eke_deformation_radius``) and the eddy-energy Rhines
-scale (``eke_rhines_length``). See ``docs/ocean_fidelity/eke_len_build_spec.md``.
+scale (``eke_rhines_length``). See ``docs/ocean/fidelity/eke_len_build_spec.md``.
 
 Defaults match Veros ACC (``eke_c_k=0.4``, ``eke_c_eps=0.5``, ``eke_lmin=100``).
 """

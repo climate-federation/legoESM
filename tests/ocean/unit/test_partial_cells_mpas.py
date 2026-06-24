@@ -1,5 +1,5 @@
 """Partial-cell coordinate on MPAS Voronoi mesh (P1.5 of the MPAS
-realistic-geometry plan; ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``).
+realistic-geometry plan; ``docs/ocean/experiments/realistic_geometry_mpas_plan.md``).
 
 The grid-agnostic ``create_partial_cell_coordinate`` already supports
 arbitrary leading-axis shapes via ``H.ndim``-based broadcasting.

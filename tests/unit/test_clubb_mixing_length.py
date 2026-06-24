@@ -4,7 +4,7 @@ Idealized-profile checks: a neutral column mixes over a far larger length scale
 than a strongly stable column; shapes, positivity, the Lscale_max cap, and
 AD/JIT cleanliness.
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

@@ -14,6 +14,8 @@ from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
     EnergyBudgetTracker,
     MoistureBudgetTracker,
+    area_weighted_mean,
+    area_weighted_profile,
 )
 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
 from legoesm.forcing.surface_utils import blend_surface_temperature
@@ -175,6 +177,13 @@ class DiagnosticCollector:
         self.dsigma = dsigma
         self.clear_sky_diag = clear_sky_diag
 
+        # Per-cell horizontal area weights for global-mean diagnostics.
+        # ``None`` => unweighted ``jnp.mean`` (legacy behaviour); the driver
+        # calls ``set_area_weights(grid.grid_area)`` so lat-lon polar rows do
+        # not over-weight every <R_TOA>/<SST>/<CWV> global mean (see
+        # ``area_weighted_mean``).
+        self._area_w = None
+
         # Time-series storage
         self.times: list[float] = []
         self.sst: list[float] = []
@@ -270,6 +279,22 @@ class DiagnosticCollector:
         if n_days not in self.snapshot_days:
             self.snapshot_days.add(n_days)
         self.snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def set_area_weights(self, area) -> None:
+        """Register per-cell horizontal areas for area-weighted global means.
+
+        Parameters
+        ----------
+        area : array or None
+            Per-cell area on the native horizontal grid (``grid.grid_area``:
+            lat-lon ``(n_lat, n_lon)``, cube ``(6, n, n)``).  Passing ``None``
+            (or a grid that lacks ``grid_area``) keeps the legacy unweighted
+            ``jnp.mean``.  Without this the polar rows of a lat-lon grid count
+            equally with the equatorial rows despite spanning ``~cos(lat)``
+            less area, biasing <R_TOA>, <SST>, <CWV> and friends toward the
+            cold high latitudes.
+        """
+        self._area_w = None if area is None else jnp.asarray(area)
 
     def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1):
         """Configure CMIP output grid and regridding weights.
@@ -472,6 +497,34 @@ class DiagnosticCollector:
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
         return f_lo + alpha * (f_hi - f_lo)
 
+    def _tas_2m(self, state, q_v, sst, sic, T_ice):
+        """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
+        similarity profile (interpolate the lowest model level down to 2 m).
+        Returns the lowest-level T when the surface inputs (SST / sigma) are
+        unavailable — e.g. a prescribed-SST run that does not pass SST here."""
+        T_low = state.T.data[..., -1]
+        if sst is None or self.sigma_full is None:
+            return T_low
+        import jax.numpy as jnp
+        from legoesm import constants
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.core.bulk_flux import compute_most_fluxes
+        u_low = state.u.data[..., -1]
+        v_low = state.v.data[..., -1]
+        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        p_s = state.p_s.data
+        p_low = p_s * jnp.asarray(self.sigma_full)[-1]
+        rho_low = p_low / (constants.R_d * T_low)
+        T_sfc = blend_surface_temperature(sst, sic, T_ice)
+        q_sfc = saturation_mixing_ratio(T_sfc, p_s)
+        # coare3 similarity profile (the recommended config's scheme); the 2 m
+        # value is set by stability, so gustiness is irrelevant here.
+        *_, T_2m = compute_most_fluxes(
+            u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+            scheme="coare3", return_2m=True,
+        )
+        return T_2m
+
     def collect(
         self,
         elapsed_day: float,
@@ -528,19 +581,20 @@ class DiagnosticCollector:
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        _aw = self._area_w
         _stats = jnp.stack([
-            jnp.mean(sst),
-            jnp.mean(sic),
-            jnp.mean(state.T.data),
-            jnp.mean(state.T.data[..., -1]),
+            area_weighted_mean(sst, _aw),
+            area_weighted_mean(sic, _aw),
+            area_weighted_mean(state.T.data, _aw),
+            area_weighted_mean(state.T.data[..., -1], _aw),
             wind_term,
-            jnp.mean(precip_total),
-            jnp.mean(cwv),
-            jnp.mean(sw_up_toa),
-            jnp.mean(lw_up_toa),
-            jnp.mean(state.p_s.data),
-            jnp.mean(sw_net_sfc),
-            jnp.mean(lw_net_sfc),
+            area_weighted_mean(precip_total, _aw),
+            area_weighted_mean(cwv, _aw),
+            area_weighted_mean(sw_up_toa, _aw),
+            area_weighted_mean(lw_up_toa, _aw),
+            area_weighted_mean(state.p_s.data, _aw),
+            area_weighted_mean(sw_net_sfc, _aw),
+            area_weighted_mean(lw_net_sfc, _aw),
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -575,10 +629,9 @@ class DiagnosticCollector:
         # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
         # Stacked into one ``np.asarray`` host transfer (same dtype as
         # T) so the two profile means share a single device→host sync.
-        spatial_axes = tuple(range(state.T.data.ndim - 1))
         _profiles_host = np.asarray(jnp.stack([
-            jnp.mean(state.T.data, axis=spatial_axes),
-            jnp.mean(q_v, axis=spatial_axes).astype(state.T.data.dtype),
+            area_weighted_profile(state.T.data, self._area_w),
+            area_weighted_profile(q_v, self._area_w).astype(state.T.data.dtype),
         ]))
         self.profiles_T.append(_profiles_host[0])
         self.profiles_qv.append(_profiles_host[1] * 1000.0)
@@ -611,12 +664,14 @@ class DiagnosticCollector:
             self.dsigma, self.sigma_full,
             sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
             elapsed_seconds=elapsed_s,
+            area_weights=self._area_w,
         )
 
         # Moisture budget
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total, elapsed_seconds=elapsed_s,
+            area_weights=self._area_w,
         )
 
         # Monthly means
@@ -661,10 +716,14 @@ class DiagnosticCollector:
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {}
-            r = self._regrid_to_latlon_2d(state.T.data[..., -1])
+            # tas: 2 m air temperature.  The lowest model level (~100 m at
+            # nlev=20) reads colder than 2 m over a warm surface, so use the
+            # MOST surface-layer similarity profile to interpolate the lowest
+            # level down to 2 m (CMIP tas convention).  Falls back to the
+            # lowest level if the surface-layer inputs are unavailable.
+            tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+            r = self._regrid_to_latlon_2d(tas_field)
             if r is not None:
-                # tas: lowest model level T as proxy for 2 m air temperature.
-                # True 2 m diagnostic requires a surface-layer scheme.
                 fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:
@@ -827,10 +886,12 @@ class DiagnosticCollector:
         """Collect only scalar reduction diagnostics (no host materialization).
 
         This is the performance-mode alternative to :meth:`collect`.
-        It computes global means and max-wind via ``jnp.mean``/``jnp.max``
-        which work correctly on SPMD-sharded arrays (JAX handles
-        cross-device reductions internally).  No ``np.asarray()`` calls,
-        no snapshot capture, no profile extraction, no monthly means.
+        It computes global means via ``area_weighted_mean`` (cell-area
+        weighted when ``set_area_weights`` was called, else a plain
+        ``jnp.mean``) and max-wind via ``jnp.max``; both work correctly on
+        SPMD-sharded arrays (JAX handles cross-device reductions
+        internally).  No ``np.asarray()`` calls, no snapshot capture, no
+        profile extraction, no monthly means.
 
         Use this for scaling benchmarks where diagnostic overhead must
         not dominate wall-clock time.
@@ -847,19 +908,20 @@ class DiagnosticCollector:
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        _aw = self._area_w
         _stats = jnp.stack([
-            jnp.mean(sst),
-            jnp.mean(sic),
-            jnp.mean(state.T.data),
-            jnp.mean(state.T.data[..., -1]),
+            area_weighted_mean(sst, _aw),
+            area_weighted_mean(sic, _aw),
+            area_weighted_mean(state.T.data, _aw),
+            area_weighted_mean(state.T.data[..., -1], _aw),
             wind_term,
-            jnp.mean(precip_total),
-            jnp.mean(cwv),
-            jnp.mean(sw_up_toa),
-            jnp.mean(lw_up_toa),
-            jnp.mean(state.p_s.data),
-            jnp.mean(sw_net_sfc),
-            jnp.mean(lw_net_sfc),
+            area_weighted_mean(precip_total, _aw),
+            area_weighted_mean(cwv, _aw),
+            area_weighted_mean(sw_up_toa, _aw),
+            area_weighted_mean(lw_up_toa, _aw),
+            area_weighted_mean(state.p_s.data, _aw),
+            area_weighted_mean(sw_net_sfc, _aw),
+            area_weighted_mean(lw_net_sfc, _aw),
         ])
         _h = np.asarray(_stats)
         mean_sst = float(_h[0])

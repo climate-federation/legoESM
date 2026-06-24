@@ -40,8 +40,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.precision import PrecisionPolicy, set_policy
-set_policy(PrecisionPolicy.fp64())
+# Precision policy is applied from --precision in main() via
+# legoesm.runtime.precision.apply_precision (default fp64 == prior behavior:
+# OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
+# fp64/mixed accumulate+control roles stay exact regardless of mode;
+# apply_precision installs the per-module mixed overrides when requested.
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
     VerticalMixingConfig,
@@ -75,7 +78,7 @@ GRID_DEFAULTS: dict[str, dict] = {
 
 ALL_RESULTS: list[dict] = []
 
-_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "richardson", "constant", "none")
+_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
 
 
@@ -86,6 +89,7 @@ class OMIPRunConfig(NamedTuple):
     restart_buffer_seconds: float
     seed: int
     vertical_mixing: VerticalMixingConfig
+    precision: str = "fp64"
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -100,6 +104,11 @@ def build_vertical_mixing_config_from_args(
 ) -> VerticalMixingConfig:
     """Resolve the OMIP vertical-mixing CLI flags into the physics config."""
     scheme = args.vertical_mixing_scheme or default_scheme
+    if scheme == "catke":
+        # CATKE (Wagner 2025) uses its own VerticalMixingConfig.catke defaults
+        # (calibrated); the kpp-tuning CLI flags don't apply.  Implicit-only.
+        from legoesm.ocean.physics.vertical_mixing.config import CATKEConfig
+        return VerticalMixingConfig(scheme="catke", catke=CATKEConfig())
     return VerticalMixingConfig(
         scheme=scheme,
         kpp=KPPConfig(
@@ -119,7 +128,22 @@ def build_config_from_args(args) -> OMIPRunConfig:
         restart_buffer_seconds=args.restart_buffer_seconds,
         seed=args.seed,
         vertical_mixing=build_vertical_mixing_config_from_args(args),
+        precision=args.precision,
     )
+
+
+def apply_run_precision(args) -> None:
+    """Apply the ``--precision`` policy globally (idempotent).
+
+    Called from BOTH ``main()`` and ``run_omip_single()`` so that a direct
+    in-process ``run_omip_single()`` caller cannot silently run at the wrong
+    (default) precision: the unconditional module-import ``set_policy(fp64)``
+    was removed, so the policy is now applied at every model-building entry
+    point. The canonical bridge sets the global policy + x64 and installs the
+    mixed-mode per-module overrides; unknown modes raise (dispatch-hardening).
+    """
+    from legoesm.runtime.precision import apply_precision
+    apply_precision(args.precision)
 
 
 # ===========================================================================
@@ -150,6 +174,16 @@ def parse_args(argv: list[str] | None = None):
                    help="Wallclock buffer [s] reserved for restart writes")
     p.add_argument("--seed", type=int, default=0,
                    help="Master RNG seed for reproducibility metadata")
+    p.add_argument("--precision", type=str, default="fp64",
+                   choices=["fp32", "fp64", "mixed"],
+                   help=(
+                       "Precision policy (default fp64 = prior OMIP behavior): "
+                       "fp32 (storage+compute float32), fp64 (all float64), or "
+                       "mixed (fp32 storage/compute, fp64 accumulate/control + "
+                       "fp64 overrides on the precision-sensitive ocean kernels "
+                       "barotropic_solver/pressure_gradient/equation_of_state/"
+                       "coriolis). NOTE: mixed is NOT yet validated for "
+                       "century-scale OMIP drift — see scripts/validate/."))
     p.add_argument("--woa-t", type=str, default=None,
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
@@ -548,7 +582,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # who explicitly opt into ``--grid cubed_sphere`` get the
         # warning printed at startup.  The structural fix (SMC03-style
         # density-Jacobian PGF + duogrid halo on T, S) is tracked in
-        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
+        # docs/ocean/experiments/cubed_sphere_pgf_stability.md.
         A_h_cs = max(A_h, 5.0e5)
         K_h_cs = max(K_h, 5.0e6)
         if A_h_cs > A_h:
@@ -578,7 +612,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # cd-grid A-L corner stencil's face-edge halo amplification under
         # horizontal density gradients is the documented cube cold-start gate;
         # the structural fix (partial cells + SMC03 density-Jacobian PGF on the
-        # C-D grid) is tracked in docs/md_files/ocean_faithfulness_nemo.md.
+        # C-D grid) is tracked in docs/dev-notes/ocean_faithfulness_nemo.md.
         model = OceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "cube"
 
@@ -767,6 +801,15 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # ``omip_nemo_match_mpas_v1`` by tests/ocean/unit/test_recipes.py), then
         # overlay only the run-dependent SETUP physics above.
         config = nemo_match_mpas_model_config(physics=physics)
+        # Enforce global surface-freshwater balance, exactly as the lat-lon/tripole
+        # config does (LatLonCGridOceanConfig(normalize_freshwater=True) above).
+        # The CORE-II P-E+R integral is a net ~+0.65 Sv freshwater input (a true
+        # forcing imbalance, identical on every grid); without this the MPAS ocean
+        # accumulates it as a ~-0.5 PSU global-mean fresh drift in 90 days, while
+        # the tripole/lat-lon path (which sets the flag) stays balanced.  The MPAS
+        # step already reads config.normalize_freshwater (ocean_pe_mpas) — the only
+        # gap was the flag defaulting False on MPASOceanConfig.
+        config = config._replace(normalize_freshwater=True)
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
 
@@ -2925,6 +2968,11 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
+    # Apply precision BEFORE any model state is built. Idempotent + safe for
+    # both main() (which also calls it) and direct in-process callers that
+    # invoke run_omip_single() without going through main() — the module no
+    # longer force-applies fp64 at import (codex 2026-06-21).
+    apply_run_precision(args)
     run_config = build_config_from_args(args)
     # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
     # ``--resolution 16`` was applied verbatim to every grid
@@ -3575,7 +3623,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                 return str(obj)
         return obj
 
-    run_config = {
+    run_config_json = {
         "grid_type": grid_type,
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
@@ -3590,7 +3638,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     config_path = config_dir / "run_config.json"
     try:
         with open(config_path, "w") as f:
-            json.dump(run_config, f, indent=2, default=str)
+            json.dump(run_config_json, f, indent=2, default=str)
         print(f"  Config saved: {config_path}")
     except Exception as e:
         print(f"  Warning: could not save config: {e}")
@@ -3692,6 +3740,27 @@ def run_omip_single(grid_type: str, args) -> dict:
         blowup_info=blowup_info,
     )
 
+    # Final MLD-diagnostic snapshot (de Boyer Montegut / Treguier 2023): the
+    # shared writer emits the T/S + geometry contract that
+    # scripts/validate/compare_mld_dbm.py and compare_omip_nemo.py consume so
+    # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
+    # additive output; a diagnostic must never abort the run.
+    try:
+        from legoesm.ocean.restart import (
+            save_mld_snapshot, grid_lat2d_lon2d_deg,
+        )
+        # Grid coords are radians; the scorers consume degrees -> convert via
+        # the shared per-grid extractor (handles latlon/tripole/cube/mpas).
+        lat2d, lon2d = grid_lat2d_lon2d_deg(grid, grid_type)
+        snap = save_mld_snapshot(
+            state, output_dir / "snapshot_final.npz", z_coord=z_coord,
+            lat2d=lat2d, lon2d=lon2d,
+            time_s=float(args.days) * 86400.0, step=int(n_steps),
+        )
+        print(f"  MLD snapshot: {snap}")
+    except Exception as e:  # diagnostic snapshot must never crash the run
+        print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
+
     ALL_RESULTS.append(results)
     return results
 
@@ -3739,6 +3808,11 @@ def print_summary():
 def main():
     args = parse_args()
 
+    # Apply the precision policy before any model state is built. Default
+    # fp64 reproduces the prior unconditional behavior exactly. run_omip_single
+    # re-applies it idempotently so direct callers are also covered.
+    apply_run_precision(args)
+
     # ``--grid all`` runs every grid.  cubed_sphere is now stable on
     # the FC-Gram spectral baroclinic backend (see _create_setup) so
     # it is included in the default matrix.
@@ -3748,6 +3822,7 @@ def main():
     print(f"  Grids: {', '.join(grids)}")
     print(f"  Days: {'30 (quick)' if args.quick else args.days}")
     print(f"  Physics: {args.physics}")
+    print(f"  Precision: {args.precision}")
 
     for grid_type in grids:
         try:

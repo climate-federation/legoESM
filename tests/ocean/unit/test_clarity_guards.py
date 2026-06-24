@@ -2,7 +2,7 @@
 
 Mechanizable structural-clarity checks that run every PR — the enforceable
 counterpart to the ``lego-modularity-tester`` dimension 9 (structural /
-decomposition modularity). See ``docs/ocean_fidelity/oracle_recipe_strategy.md``.
+decomposition modularity). See ``docs/ocean/fidelity/oracle_recipe_strategy.md``.
 
 Currently enforces a **function-LOC ceiling**: no new monolithic functions. The
 allow-list is seeded with today's known offenders so the suite is green now; it

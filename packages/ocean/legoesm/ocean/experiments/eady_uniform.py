@@ -29,8 +29,12 @@ from dataclasses import dataclass
 from typing import Dict, NamedTuple, Tuple
 
 from legoesm import constants
-from legoesm.constants import g, Omega
+from legoesm.constants import g
 from legoesm.core.field import Field
+from legoesm.ocean.experiments.idealized_ic import (
+    coriolis_f,
+    gaussian_lat_envelope,
+)
 
 
 @dataclass
@@ -109,12 +113,11 @@ class EadyUniformConfig:
     @property
     def dTdy(self) -> float:
         """Thermal wind: f ∂u/∂z = -g α_T ∂T/∂y  →  ∂T/∂y = -f₀Λ/(gα_T) < 0."""
-        f0 = 2.0 * Omega * np.sin(np.radians(self.lat_center))
-        return -f0 * self.Lambda / (g * self.alpha_T)
+        return -self.f0 * self.Lambda / (g * self.alpha_T)
 
     @property
     def f0(self) -> float:
-        return 2.0 * Omega * np.sin(np.radians(self.lat_center))
+        return coriolis_f(np.radians(self.lat_center))
 
     @property
     def Ld_km(self) -> float:
@@ -225,7 +228,7 @@ def _rest_state_mpas(mesh, z_coord, config):
 
 def _jet_envelope(lat_deg, config):
     """Gaussian envelope centered on the jet: 1 at center, ~0 far away."""
-    return np.exp(-((lat_deg - config.lat_center) / config.jet_width_deg) ** 2)
+    return gaussian_lat_envelope(lat_deg, config.lat_center, config.jet_width_deg)
 
 
 def _set_uniform_stratification(state, z_coord, config, grid):
@@ -407,7 +410,7 @@ def _add_perturbation_latlon(state, grid, config):
     lat_rad = np.asarray(grid.lat)
     lat_center_rad = np.radians(config.lat_center)
     lat_width_rad = np.radians(config.jet_width_deg)
-    envelope = np.exp(-((lat_rad - lat_center_rad) / lat_width_rad) ** 2)
+    envelope = gaussian_lat_envelope(lat_rad, lat_center_rad, lat_width_rad)
 
     k = config.perturbation_wavenumber
     # Fit k complete wavelengths in the periodic domain
@@ -432,7 +435,7 @@ def _add_perturbation_mpas(state, mesh, config):
     lon_cell = np.asarray(mesh.lonCell)
     lat_center_rad = np.radians(config.lat_center)
     lat_width_rad = np.radians(config.jet_width_deg)
-    envelope = np.exp(-((lat_cell - lat_center_rad) / lat_width_rad) ** 2)
+    envelope = gaussian_lat_envelope(lat_cell, lat_center_rad, lat_width_rad)
 
     k = config.perturbation_wavenumber
     mask = np.asarray(state.land_mask.data)
@@ -644,7 +647,7 @@ def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
         # (enstrophy-cascade-aware); both grid-aware so they scale across a
         # resolution sweep. c_smag_lap/b_h available for extra grid-scale control.
         # VALIDATED EDDY-RESOLVING MINIMUM-DISSIPATION RECIPE (≥120×120, weak U=0.2,
-        # dt=600; ralph-loop search, docs/planning/eady_eddy_resolving_ralph.md):
+        # dt=600; ralph-loop search, docs/dev-notes/planning/eady_eddy_resolving_ralph.md):
         # the COMBINATION a_h≈1000 + c_smag≈0.1 + smag_cfl_safety=0.5 is stable,
         # spectrally clean, and keeps strong eddies (pure A_h over-damps; pure
         # biharmonic Smagorinsky blows up at 120 — the ~4–5Δx mode is too close to

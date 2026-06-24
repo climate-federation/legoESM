@@ -64,7 +64,7 @@ class CoupledConfig(NamedTuple):
     #     fields below; the coupled cold-start uses the OMIP-validated stable
     #     stack (rk3 momentum + implicit_cn barotropic + implicit vmix + smc03
     #     PGF), forced in CoupledESMDriver._init_ocean.  See
-    #     docs/coupled_3d_ocean_plan.md.
+    #     docs/ocean/coupled_3d_ocean_plan.md.
     ocean_mode: str = "slab"
     ocean_config: SimpleOceanConfig | LatLonCGridOceanConfig = SimpleOceanConfig(
         mode="slab")
@@ -97,6 +97,9 @@ class CoupledConfig(NamedTuple):
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()
     use_pft: bool = False
+    # Source of the spatial land parameters when use_pft: "analytical" (latitude
+    # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
+    land_param_source: str = "analytical"
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
@@ -121,6 +124,15 @@ class CoupledConfig(NamedTuple):
     # OceanAlbedoConfig.method='zenith', LandConfig.snow_albedo_feedback), whose
     # effect on radiation is otherwise silently dropped.
     couple_surface_radiation: bool = False
+
+    # Warm-start the land soil at the atmosphere's lat-structured near-surface
+    # air temperature (t=0) instead of the uniform 280 K default.  The uniform
+    # default makes tropical land soil start ~18 K too cold, and the (slow)
+    # multilayer soil takes months to spin up — dragging the global near-surface
+    # air temperature down through the long transient.  Default False keeps
+    # existing coupled runs byte-identical; recommended ON for a faster, more
+    # realistic land spin-up.
+    warm_start_soil: bool = False
 
 
 # ============================================================================

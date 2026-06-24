@@ -7,7 +7,7 @@ A single machine-readable map from each physical concept the ocean code uses to:
   - units + status.
 
 Why this exists (per the gap->block / dedup doctrine in
-``docs/ocean_fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
+``docs/ocean/fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
 
 1. **Recognition across oracles.** Different production models name the same
    quantity differently (Veros ``kappaM`` = legoESM ``A_v``; Veros ``r_bot`` =

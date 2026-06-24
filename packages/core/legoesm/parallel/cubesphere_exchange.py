@@ -2242,8 +2242,29 @@ def packed_pad_halo_4d(
 _spmd_mesh = None
 
 
+def _mesh_supports_face_exchange(mesh) -> bool:
+    """True iff ``mesh`` can run the SPMD cube halo exchange.
+
+    The face-axis ppermute/all_gather kernels block-partition the
+    length-6 face axis over the ``"face"`` mesh axis, so the device
+    count must divide 6 (1, 2, 3 or 6) — OR the mesh must be a
+    ``(6, kt, kt)`` sub-face *tiled* mesh.  Any other device count
+    (4, 5, 7, 8, …) cannot face-sub-shard and must run the halo
+    REPLICATED (see ``activate_spmd_halo_backend(..., allow_replicated
+    _fallback=True)``).  Static (reads only ``mesh.devices`` shape) —
+    safe to call outside a trace.
+    """
+    n_devices = len(mesh.devices.flat)
+    sh = tuple(mesh.devices.shape)
+    is_tiled = (
+        len(sh) == 3 and sh[0] == 6 and sh[1] == sh[2] and sh[1] >= 2
+    )
+    return is_tiled or (n_devices >= 1 and 6 % n_devices == 0)
+
+
 def activate_spmd_halo_backend(
     mesh, n: int = 0, nlev: int = 1, *, force_allgather: bool | None = None,
+    allow_replicated_fallback: bool = False,
 ) -> None:
     """Switch the global halo backend to explicit SPMD exchange.
 
@@ -2257,7 +2278,9 @@ def activate_spmd_halo_backend(
     Parameters
     ----------
     mesh : jax.sharding.Mesh
-        Face-axis mesh; the device count must divide 6.
+        Face-axis mesh; the device count must divide 6 (1, 2, 3, 6) or
+        be a ``(6, kt, kt)`` tiled mesh.  A non-divisor count (e.g. an
+        8-chip TPU slice) is rejected unless ``allow_replicated_fallback``.
     n : int
         Per-face resolution.  Retained for call-site compatibility and
         logging; no longer drives backend choice (the retired volume
@@ -2268,14 +2291,59 @@ def activate_spmd_halo_backend(
         ``True`` selects the all_gather diagnostic kernels.  ``None``
         (default) defers to the ``LEGOESM_SPMD_FORCE_ALLGATHER=1``
         environment override, otherwise ppermute.
+    allow_replicated_fallback : bool
+        When the mesh cannot face-sub-shard (device count does not
+        divide 6 and not a ``(6, kt, kt)`` tile), ``False`` (default)
+        RAISES — a non-divisor face mesh is a configuration error, not
+        silently degraded (dispatch-hardening).  ``True`` instead leaves
+        the LOCAL halo backend active (each device holds all 6 faces;
+        the halo is filled by the serial ``pad_halo_local_*`` body, so
+        the result is bit-identical to single-device), logging the
+        replication loudly.  Use for an 8-chip TPU slice / any
+        non-divisor count where a correct replicated cube halo is wanted
+        over a crash.  Numerics are unchanged; only the cross-device
+        face exchange is skipped (each device recomputes it locally).
     """
     global _spmd_mesh, _use_ppermute
     from legoesm.grids import halo
+    n_devices = len(mesh.devices.flat)
+    _mshape = tuple(mesh.devices.shape)
+    _is_tiled = (
+        len(_mshape) == 3 and _mshape[0] == 6
+        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
+    )
+    # A mesh that cannot face-sub-shard (count does not divide 6 and is not a
+    # (6,kt,kt) tile) either runs the cube halo REPLICATED on the serial local
+    # body (opt-in, bit-identical to single-device) or is REFUSED — never a
+    # silent half-activation. Checked FIRST, BEFORE the corner-fill restriction
+    # and any global mutation: a refusal leaves state untouched, and the
+    # replicated fallback is deliberately NOT subject to the SPMD-kernel
+    # corner_fill='avg' rule below (the local pad body honors every corner mode).
+    if not _mesh_supports_face_exchange(mesh):
+        if allow_replicated_fallback:
+            logger.warning(
+                "SPMD cube halo: %d devices (shape %s) cannot face-sub-shard "
+                "6; running the cube halo REPLICATED (local pad body, each "
+                "device holds all 6 faces — bit-identical to single-device, no "
+                "cross-device face exchange).",
+                n_devices, _mshape,
+            )
+            _spmd_mesh = None
+            halo._halo_backend = "local"
+            halo._spmd_mesh = None
+            return
+        raise ValueError(
+            f"SPMD halo backend requires a face-axis mesh whose device "
+            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
+            f"mesh, got {n_devices} devices, shape {_mshape}. Pass "
+            f"allow_replicated_fallback=True to run the cube halo REPLICATED "
+            f"on this device count instead."
+        )
     # The SPMD exchange kernels hard-code AVERAGE corner fill at the 4 cube
     # corners (3-face junctions); they do NOT honor the non-default
     # ``_corner_fill_mode`` the serial/mpi4jax paths apply. Reject non-avg modes
     # so SPMD never silently produces wrong corner cells (codex review). Checked
-    # FIRST, before any global mutation, so a raise leaves state untouched.
+    # before any global mutation, so a raise leaves state untouched.
     cfm = halo.get_corner_fill_mode()
     if cfm != "avg":
         raise NotImplementedError(
@@ -2283,18 +2351,6 @@ def activate_spmd_halo_backend(
             f"'{cfm}': the 4 cube-corner cells would silently mismatch the "
             f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
             f"backend for non-avg corner fills.")
-    n_devices = len(mesh.devices.flat)
-    _mshape = tuple(mesh.devices.shape)
-    _is_tiled = (
-        len(_mshape) == 3 and _mshape[0] == 6
-        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
-    )
-    if not _is_tiled and (n_devices < 1 or 6 % n_devices != 0):
-        raise ValueError(
-            f"SPMD halo backend requires a face-axis mesh whose device "
-            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
-            f"mesh, got {n_devices} devices, shape {_mshape}."
-        )
     if _is_tiled and (force_allgather
                       or os.environ.get(_FORCE_ALLGATHER_ENV) == "1"):
         # Checked BEFORE any global mutation: tiled meshes have no

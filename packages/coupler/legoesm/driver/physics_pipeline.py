@@ -179,6 +179,16 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Opt-in convective cumulus cloud-fraction source (set by
+        # build_physics_pipeline from ExperimentConfig.convective_cloud).
+        # When True, compute_radiation_core feeds the lagged convective precip
+        # to the cloud diagnosis so the convecting tropics get radiative cloud.
+        self._cloud_convective = False
+        # Optional cloud-tuning overrides (None => CloudConfig default =>
+        # byte-identical); set by build_physics_pipeline from ExperimentConfig.
+        self._cloud_rh_crit = None
+        self._cloud_q_c_diagnostic = None
+        self._cloud_conv_cloud_max = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -955,7 +965,8 @@ class PhysicsPipeline:
                                cloud_scheme="none",
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
-                               sfc_T_override=None):
+                               sfc_T_override=None,
+                               conv_precip=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1062,7 +1073,38 @@ class PhysicsPipeline:
                 compute_cloud_properties,
             )
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            cloud_config = CloudConfig(scheme=cloud_scheme)
+            # ``convective_cloud`` (opt-in) adds a bounded cumulus cloud cover
+            # from the lagged convective precip so the convecting tropics get
+            # radiative cloud the RH-based stratiform scheme misses.  Default
+            # False => CloudConfig defaults (no convective term, no guard).
+            # Activate the convective cloud term only where the convective
+            # precip is actually plumbed (the compiled segment threads it via
+            # the lagged carry).  Auxiliary callers that don't pass conv_precip
+            # — the single warm-up step, any non-compiled per-step path —
+            # degrade to no convective cloud rather than tripping the loud
+            # compute_cloud_properties guard.  The guard still fires for a
+            # direct convective_cloud=True + conv_precip=None misconfiguration.
+            # Optional cloud-tuning overrides (None => CloudConfig default =>
+            # byte-identical).  The SW/LW knob for e.g. the coare3 moisture-
+            # driven albedo overshoot (raise rh_crit / lower q_c_diagnostic).
+            _cc_over = {}
+            if getattr(self, "_cloud_rh_crit", None) is not None:
+                _cc_over["rh_crit"] = self._cloud_rh_crit
+            if getattr(self, "_cloud_q_c_diagnostic", None) is not None:
+                _cc_over["q_c_diagnostic"] = self._cloud_q_c_diagnostic
+            if getattr(self, "_cloud_conv_cloud_max", None) is not None:
+                _cc_over["conv_cloud_max"] = self._cloud_conv_cloud_max
+            cloud_config = CloudConfig(
+                scheme=cloud_scheme,
+                convective_cloud=(getattr(self, "_cloud_convective", False)
+                                  and conv_precip is not None),
+                **_cc_over,
+            )
+            # Column convective precip [kg/m²/s] for the convective cloud cover;
+            # flattened to the (ncol,) column layout like the other inputs.
+            conv_precip_col = (
+                None if conv_precip is None else ad.flatten_2d(conv_precip)
+            )
             # When no microphysics is wired (``self.micro_fn is None``)
             # the prognostic ``q_c`` is a zero tracer and feeding it to
             # ``compute_cloud_properties`` short-circuits the diagnostic
@@ -1113,6 +1155,7 @@ class PhysicsPipeline:
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
                 n_cloud=n_cloud_col, n_ice=n_ice_col,
+                conv_precip=conv_precip_col,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -1242,7 +1285,8 @@ class PhysicsPipeline:
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
                          sfc_T_override=None,
-                         tke=None, qke=None, gwd_spectrum=None):
+                         tke=None, qke=None, gwd_spectrum=None,
+                         conv_precip=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1255,7 +1299,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum) = args
+                 tke, qke, gwd_spectrum, conv_precip) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -1272,6 +1316,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
+                        conv_precip=conv_precip,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1317,7 +1362,8 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum) = args
+                 tke, qke, gwd_spectrum, conv_precip) = args
+                del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -1358,7 +1404,7 @@ class PhysicsPipeline:
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
-                    tke, qke, gwd_spectrum)
+                    tke, qke, gwd_spectrum, conv_precip)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -1821,6 +1867,24 @@ def _resolve_turbulence(config):
 
     tc = TurbulenceConfig(scheme=scheme)
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
+    # Propagate the experiment-level surface bulk-flux algorithm into the
+    # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
+    # identical).  The stability-dependent MOST schemes (coare3/large_yeager)
+    # add the convective-gustiness w* term absent from the constant neutral
+    # coefficients — the fix for anemic evaporation over a calm warm ocean.
+    sbs = getattr(config, "surface_bulk_scheme", "constant")
+    gzi = getattr(config, "surface_gustiness_zi", None)
+    if (turb_config is not None
+            and getattr(turb_config, "surface", None) is not None
+            and (sbs != "constant" or gzi is not None)):
+        surf = turb_config.surface
+        if sbs != "constant":
+            surf = surf._replace(bulk_scheme=sbs)
+        if gzi is not None:
+            # COARE convective-gustiness BL depth (only effective with a MOST
+            # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
+            surf = surf._replace(gustiness_w_zi=gzi)
+        turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 
 
@@ -2053,6 +2117,10 @@ def build_physics_pipeline(grid, sigma, config):
         column_mesh=column_mesh,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
+    pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
+    pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
+    pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma

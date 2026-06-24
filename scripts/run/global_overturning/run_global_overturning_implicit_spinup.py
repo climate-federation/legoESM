@@ -7,7 +7,7 @@ integrates for 10 sim-years using ``barotropic_solver = 'implicit_cn'``
 from step 1 — so the resulting state has no chequerboard inherited
 from the old explicit-substep solver.  This restart is then the clean
 IC for the 1-yr verification run that decides whether Crit 1.2/1.3 of
-``docs/issues/barotropic_mode_noise.md`` pass.
+``docs/dev-notes/issues/barotropic_mode_noise.md`` pass.
 
 Inner stepping uses the same lax.scan + JIT pattern as
 ``_drake_momentum_budget_runner.py`` (Follow-up D), without the

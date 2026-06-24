@@ -260,3 +260,16 @@ class TestDifferentiability:
         g = grad_fn(state.h.data)
         assert jnp.all(jnp.isfinite(g)), "Gradient contains NaN/Inf"
         assert float(jnp.max(jnp.abs(g))) > 0, "Gradient is all zeros"
+
+
+class TestPVSchemeDispatch:
+    """Dispatch hardening for the MPAS shallow-water PV flux selector."""
+
+    def test_unknown_pv_scheme_raises(self, mesh):
+        """A typo in ``pv_scheme`` must raise, not silently select the
+        energy-conserving PV flux."""
+        config = MPASShallowWaterConfig(pv_scheme="bogus")
+        model = MPASShallowWaterModel(mesh, config)
+        state = williamson_test2_mpas(mesh)
+        with pytest.raises(ValueError, match="Unknown pv_scheme"):
+            model.step(state, 300.0)

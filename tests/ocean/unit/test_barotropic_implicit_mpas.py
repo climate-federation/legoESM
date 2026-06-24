@@ -305,7 +305,7 @@ def test_implicit_solver_cleaner_than_explicit_substep(state, mesh, z_coord):
 
 def test_implicit_solver_strong_depth_contrast(state, mesh, z_coord):
     """P0 of the MPAS topography plan
-    (``docs/ocean_experiments/realistic_geometry_mpas_plan.md``):
+    (``docs/ocean/experiments/realistic_geometry_mpas_plan.md``):
     confirm the implicit-CN Helmholtz operator handles realistic
     bathymetry depth contrast (~600x, 10m shelves to 6000m abyss
     on ETOPO ico4) without losing PCG convergence or mass

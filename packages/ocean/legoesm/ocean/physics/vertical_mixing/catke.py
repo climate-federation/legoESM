@@ -40,18 +40,28 @@ from legoesm.ocean.physics.vertical_mixing._shared import (
 )
 
 __physics_contract__ = {
-    "units": {
+    "summary": (
+        "Prognostic CATKE vertical mixing (Wagner et al. 2025): turbulent "
+        "diffusivities K_u/K_c/K_e and the TKE dissipation rate from the "
+        "prognostic turbulent kinetic energy e, stratification N2, shear S2, "
+        "and surface buoyancy flux Jb via a mixing-length closure with "
+        "convective (Deardorff length) enhancement."
+    ),
+    "inputs": {
         "e": "m^2/s^2", "N2": "1/s^2", "S2": "1/s^2", "Jb": "m^2/s^3",
+    },
+    "outputs": {
         "K_u": "m^2/s", "K_c": "m^2/s", "K_e": "m^2/s",
         "dissipation_rate": "1/s", "surface_tke_flux": "m^3/s^3",
     },
-    "signs": (
+    "sign_convention": (
         "diffusivities K_X >= 0; convective columns (Jb>0 & N2<0) enhance K via "
         "the Deardorff length; dissipation_rate >= 0; surface_tke_flux <= 0 "
         "(a downward TKE flux INTO the column)."
     ),
-    "conserves": "none (computes diffusivities/dissipation; the TKE budget is "
-                 "closed by the prognostic solve in the dispatch layer)",
+    # Computes diffusivities/dissipation only; the TKE budget is closed by the
+    # prognostic solve in the dispatch layer, so nothing is conserved here.
+    "conserves": ["none"],
     "differentiable": True,
     "reference": "Wagner et al. (2025), JAMES, doi:10.1029/2024MS004522; "
                  "Oceananigans CATKEVerticalDiffusivity",

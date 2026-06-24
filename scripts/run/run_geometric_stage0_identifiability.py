@@ -4,7 +4,7 @@ Quantifies WHICH observables constrain WHICH GEOMETRIC parameters, and exposes
 the sloppy/degenerate directions that the ETKI twin recovery hit (the c_eps drift,
 the α/c_eps trade-off). This is the Stage-0 deliverable that EXPLAINS the recovery
 plateau and tells us whether an observation vector / joint-IC scheme can break the
-degeneracy (``docs/planning/geometric_calibration_campaign.md`` §4, Stage 0 gates).
+degeneracy (``docs/dev-notes/planning/geometric_calibration_campaign.md`` §4, Stage 0 gates).
 
 Method: the differentiable ocean (2026-06-11 audit; GM/Redi
 ``adjoint_stabilization="stop_gradient_slopes"`` gate, commit dc41c0a33) gives the

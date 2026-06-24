@@ -169,6 +169,40 @@ def global_area_sum(
     return local_sum
 
 
+def _spmd_lat_psum_or_none(local_sums: list[jax.Array]) -> list[jax.Array] | None:
+    """If a lat-band SPMD halo backend is armed, sum ``local_sums`` across the
+    ``"lat"`` device axis and return the result; otherwise ``None`` (the caller
+    falls through to the MPI / serial logic).
+
+    This is the single-controller (``shard_map``) cross-band reduction for the
+    lat-lon band SPMD steps, where ``is_distributed()`` is False (one process)
+    yet each band holds only a PARTIAL sum that must be combined across the
+    ``"lat"`` axis. It mirrors, byte-for-byte in dispatch, the ocean barotropic
+    PCG's ``barotropic_common._global_dot_batch`` (which already shipped this
+    exact logic): route to ``jax.lax.psum`` (self-transposing => AD-safe) ONLY
+    when the armed mesh is the lat-band one, keyed on the ``"lat"`` axis BY
+    NAME so a coupled-run cube ``("face", ...)`` SPMD mesh falls through to the
+    MPI/local path (cube fields are never lat-band-sharded). Inert for the
+    serial and MPI backends (``get_halo_backend() != "spmd"``).
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None:
+        # Armed "spmd" with no mesh: an invalid state reachable only via a bare
+        # set_halo_backend("spmd"). FAIL FAST rather than silently return
+        # unreduced band-local partials inside a sharded step (matches the
+        # ocean _global_dot_batch guard).
+        raise RuntimeError(
+            "_spmd_lat_psum_or_none: halo backend is 'spmd' but no SPMD mesh "
+            "is set; arm it via activate_latlon_spmd_halo(mesh).")
+    if "lat" in tuple(mesh.axis_names):
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local_sums, "lat")
+    return None
+
+
 def batch_global_area_sums(
     arrays: list[jax.Array],
     grid,
@@ -200,6 +234,14 @@ def batch_global_area_sums(
     )
     local_sums = [summed[..., i] for i in range(len(arrays))]
 
+    # Lat-band SPMD (single-process shard_map): combine the band-local partials
+    # across the "lat" axis. Checked BEFORE is_distributed() because under SPMD
+    # there is one process (is_distributed() is False) yet each band holds only
+    # a partial sum. Inert for serial/MPI/cube (returns None).
+    spmd_sums = _spmd_lat_psum_or_none(local_sums)
+    if spmd_sums is not None:
+        return spmd_sums
+
     if is_distributed():
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
@@ -216,9 +258,38 @@ def _total_area(grid) -> jax.Array:
     ~10^-13 drift on the cube hydro PE even with the anchored
     fixer + fp64 ``mass_target``.  Cast to the conservation
     accumulator here so every fixer division sees an fp64 denominator.
+
+    **Cubed-sphere face-scatter (MPI):** when each rank owns only a
+    SUBSET of the 6 faces (``grid`` sliced to owned faces, leading dim
+    ``< 6``), ``grid.grid_total_area`` is the rank-LOCAL owned-face area,
+    not the global total.  The mass-fixer numerator
+    (``global_area_sum``) already allreduces owned partials to the global
+    mass, so an un-reduced local denominator would scale the correction
+    by ``global_area / owned_area`` (~``n_ranks``) and break conservation
+    + replicated-vs-scattered equivalence.  Detect the scattered case
+    (leading dim equals this rank's owned-face count AND ``< 6``) and
+    ``allreduce(SUM)`` the local area to the global total.  Replicated
+    dynamics (full ``(6, ...)`` on every rank) and single-rank runs
+    already hold the global area, so they are left byte-identical.
     """
     acc = conservation_accumulator()
-    return grid.grid_total_area.astype(acc)
+    local = grid.grid_total_area.astype(acc)
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+    if get_halo_backend() == "mpi":
+        topo = get_mpi_topology()
+        area = getattr(grid, "area", None)
+        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
+        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
+        # accessor (no ``local_face_ids``), so guard with hasattr to avoid an
+        # AttributeError on non-cube MPI backends.
+        if topo is not None and area is not None and hasattr(topo, "local_face_ids"):
+            n_local = len(topo.local_face_ids)
+            if area.shape[0] == n_local and n_local < 6:
+                from legoesm.parallel.reductions import global_sum_mpi
+
+                local = global_sum_mpi(local)
+    return local
 
 
 def fix_mass_shallow_water(

@@ -5,7 +5,7 @@ selects the canonical legoESM blocks that reproduce MITgcm's hydrostatic z-coord
 ocean numerics.  It contains NO MITgcm-specific solver, grid, bridge, forcing reader,
 or state translation — those mimicry-only pieces live in the fidelity harness
 (``mitgcm_io``/``mitgcm_runner``/``mitgcm_state_bridge``), never in the model
-(oracle-recipe doctrine, docs/ocean_fidelity/oracle_recipe_strategy.md).
+(oracle-recipe doctrine, docs/ocean/fidelity/oracle_recipe_strategy.md).
 
 The mapping below was established by TERM-BY-TERM validation against MITgcm's own
 momentum diagnostics at a bit-imported state (``scripts/tmp/_bgyre_operator_match.py``)
@@ -14,7 +14,7 @@ plus a direct read/audit of the MITgcm Fortran:
   - the free surface: MITgcm ``implicitFreeSurface`` is UNSPLIT (audited: no barotropic
     sub-cycle, one CG2D solve for eta, no barotropic-velocity prognostic, uniform
     surface-pressure correction) -> ``barotropic_solver="implicit_unsplit"``
-    (docs/ocean_fidelity/mitgcm_unsplit_freesurface_fix.md).
+    (docs/ocean/fidelity/mitgcm_unsplit_freesurface_fix.md).
 
 ALL 5 tutorial recipes (``mitgcm_{barotropic_gyre,baroclinic_gyre,front_relax,
 advection_gyre,reentrant_channel}_recipe.py``) select this card's block choices: they

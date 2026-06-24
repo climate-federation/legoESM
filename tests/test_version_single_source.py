@@ -14,7 +14,7 @@ If any of these drift, a release ships inconsistent provenance, so they fail
 fast here (a clear ``AssertionError``, not a confusing downstream mismatch).
 
 **Deliberately out of scope:** *illustrative* version strings inside
-documentation (e.g. an example ``pyproject`` snippet in ``docs/specs/`` or the
+documentation (e.g. an example ``pyproject`` snippet in ``docs/science/specs/`` or the
 generated ``docs/*.html``) and throwaway agent-review notes.  Those are
 human-readable examples, not machine-read provenance; forcing them through this
 guard would require allowlisting essentially every file that contains an example

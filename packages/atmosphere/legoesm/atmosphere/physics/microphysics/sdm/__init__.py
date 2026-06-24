@@ -3,7 +3,7 @@
 Faithful JAX port of the Super-Droplet Method (Shima et al. 2009,
 QJRMS 135:1307-1320), using ERF ``Source/Microphysics/SuperDropletsMoist`` +
 ``Source/Particles/ERF_SuperDropletPC*`` as the algorithmic oracle. See
-``docs/specs/superdroplet_sdm.md`` for the full oracle digest and port plan.
+``docs/science/specs/superdroplet_sdm.md`` for the full oracle digest and port plan.
 
 SDM represents the droplet population by a small number of *super-droplets*,
 each a computational particle carrying a multiplicity ``ξ`` (the number of

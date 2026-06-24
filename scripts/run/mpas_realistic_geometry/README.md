@@ -1,6 +1,6 @@
 # MPAS realistic-bathymetry validation scripts
 
-P6 of `docs/ocean_experiments/realistic_geometry_mpas_plan.md`.
+P6 of `docs/ocean/experiments/realistic_geometry_mpas_plan.md`.
 Standalone scripts that exercise the MPAS partial-cell stack
 (ETOPO ingestion, Adcroft PGF, hybrid vertex thickness, donor-cell
 continuity, min-rule edge thickness, bottom drag at

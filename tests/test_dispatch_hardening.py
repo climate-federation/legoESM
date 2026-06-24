@@ -140,6 +140,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py", "plane_compressible_euler_slow_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py", "validate_plane_config"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py", "plane_compressible_euler_slow_tendencies_halo"),
+        # MPAS atm dycore pv_scheme guards (hardened 2026-06-22; previously a
+        # bare ``else`` silently fell back to the energy-conserving PV flux).
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py", "dca_convection"),
@@ -153,6 +158,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
+        # thompson snow_scheme guard (hardened 2026-06-22; previously a bare
+        # ``else`` silently used the bulk power-law fall speed on a typo).
+        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py", "thompson_microphysics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "_get_radiation_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "make_radiation_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
@@ -171,7 +179,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/parallel/halo_exchange_voronoi.py", "exchange_local_simulated"),
         ("packages/core/legoesm/parallel/runtime.py", "halo_exchange"),
         ("packages/core/legoesm/parallel/voronoi_mpi.py", "gather_voronoi_field"),
+        ("packages/core/legoesm/parallel/voronoi_mpi.py", "initialize_voronoi_mpi"),
         ("packages/core/legoesm/parallel/voronoi_partition.py", "partition_voronoi_mesh"),
+        ("packages/core/legoesm/parallel/voronoi_partition.py", "reorder_voronoi_for_sharding"),
         ("packages/core/legoesm/timestepping/dispatch.py", "dispatch_integrator"),
         ("packages/core/legoesm/timestepping/split_explicit.py", "split_explicit_step"),
         ("packages/coupler/legoesm/coupler/coupler.py", "ocean_tile_response"),

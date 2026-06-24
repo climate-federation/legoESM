@@ -131,6 +131,32 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
     return float(ce) / (_RC_F_LENGTH_SCALE_M * f0)
 
 
+def mle_streamfunction_magnitude(
+    rc_f: float,
+    H_face: jnp.ndarray,
+    face_width: jnp.ndarray,
+    dbm_face: jnp.ndarray,
+    cap: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO nn_mle=1 face streamfunction MAGNITUDE [m^3/s] (#518 item 9).
+
+    ``psim = rc_f · H_face² · face_width · dbm_face · cap``
+
+    The single grid-agnostic product shared by the lat-lon ``psim_u`` / ``psim_v``
+    and the MPAS ``psim_e``.  Each grid passes its OWN face operands:
+
+    * lat-lon u-face: ``face_width = e2u``, ``dbm_face = (bm_E-bm_W)/e1u``,
+      ``cap = min(max_grid_scale_m, e1u)`` (and the v-face analogue).
+    * MPAS edge:     ``face_width = dvEdge``, ``dbm_face = (bm[c2]-bm[c1])/dcEdge``,
+      ``cap = min(max_grid_scale_m, dcEdge)``.
+
+    The multiply is the same left-to-right ``rc_f * H * H * width * dbm * cap``
+    order as every original site, so the result is byte-identical.  ``H_face`` is
+    the face mixed-layer depth [m]; the square keeps the FK scaling.
+    """
+    return rc_f * H_face * H_face * face_width * dbm_face * cap
+
+
 def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
     """FK vertical structure mu(z) on w-interfaces (NEMO tramle.F90).
 

@@ -1,5 +1,5 @@
 # DKRZ Levante GPU partition (A100). SLURM-scheduled multi-GPU runs.
-# See docs/REAL_HARDWARE_SCALING.md.
+# See docs/performance/REAL_HARDWARE_SCALING.md.
 machine:
   name: levante-gpu
   hostnames: ["*.levante.dkrz.de", "levante*"]

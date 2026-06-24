@@ -23,6 +23,7 @@ from legoesm import constants
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
+from legoesm.diagnostics.energy_budget import area_weighted_mean
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
@@ -116,6 +117,11 @@ class CoupledESMDriver:
         self._ocean_grid = self._ocean_grid_arg or self._atm.grid
         self._grid_remapper = make_grid_remapper(self._atm.grid, self._ocean_grid)
         shape_2d = self._ocean_grid.grid_shape_2d
+        # Per-cell ocean area weights for the global-mean SST / drift metric.
+        # ``jnp.mean`` over a lat-lon ocean grid over-weights the cold polar
+        # rows, so an unweighted SST mean read a much larger cold drift than the
+        # area-weighted ocean actually experiences (see ``area_weighted_mean``).
+        self._ocean_area_w = getattr(self._ocean_grid, "grid_area", None)
 
         # Initial SST from the atmosphere's SST source (day 0), remapped onto
         # the ocean grid (identity => unchanged).
@@ -147,7 +153,7 @@ class CoupledESMDriver:
         elif cfg.ocean_mode == "dynamic":
             # Prognostic 3D ocean (LatLonCGridOceanModel) stepped by the coupler
             # on a SHARED lat-lon grid (no cross-grid remap).  Phase 1 of
-            # docs/coupled_3d_ocean_plan.md.
+            # docs/ocean/coupled_3d_ocean_plan.md.
             self._init_dynamic_ocean(T_sfc_mean)
         else:
             raise ValueError(
@@ -157,7 +163,7 @@ class CoupledESMDriver:
     def _init_dynamic_ocean(self, T_sfc_mean: float):
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
-        cold-start stack.  See docs/coupled_3d_ocean_plan.md (Phase 1)."""
+        cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.state import LatLonCGridOceanConfig
         from legoesm.ocean.vertical import create_ocean_z_star
@@ -532,6 +538,47 @@ class CoupledESMDriver:
             carbon_cfg = CarbonConfig(scheme="differland")
             land_cfg = land_cfg._replace(carbon=carbon_cfg)
 
+        # Calibrated config-level land parameters on the CLM default path (the
+        # per-cell PFT params come from the provider; these are the global snow/ice
+        # + bulk-transfer values tuned vs ERA5 under physical bounds).
+        if (cfg.land_mode != "none"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"):
+            import legoesm.land.clm_surface_map as _csm
+            if cfg.land_mode == "multilayer":
+                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+            else:
+                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
+            land_cfg = land_cfg._replace(
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
+                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+            logger.info(f"  Land: ERA5-calibrated Ch/snow params "
+                        f"({cfg.land_mode} CLM default path)")
+
+        # Spatial soil hydraulics from the CLM reference map (per-column van-
+        # Genuchten retention) for the Richards multilayer land.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"
+                and self._atm._grid_lat is not None):
+            from legoesm.land.clm_surface_map import (
+                download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
+                clm_multilayer_thermal_config, clm_multilayer_ch)
+            lat = self._atm._grid_lat; lon = self._atm._grid_lon
+            lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
+            # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
+            # storage dtype so the (float64) PFT-table matmuls do not silently down-
+            # cast into the (possibly float32) land state on every scatter update.
+            _c = lambda x: x.astype(_sd) if isinstance(x, jnp.ndarray) else x
+            cast = lambda t: jax.tree.map(_c, t)   # cast only the array fields
+            ch_cell = clm_multilayer_ch(smap).astype(_sd)
+            land_cfg = land_cfg._replace(
+                hydraulics=cast(clm_hydraulics_config(smap)),
+                thermal=cast(clm_multilayer_thermal_config(smap)),
+                Ch_land=ch_cell, Cd_land=ch_cell)
+            logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
+
         self._land_cfg = land_cfg  # store for diagnostics
 
         # PFT parameter provider (if requested and land is active)
@@ -547,9 +594,16 @@ class CoupledESMDriver:
             land_param_provider=land_param_provider,
         )
 
-        # Initialize surface state
+        # Initialize surface state.  Optionally warm-start the soil at the
+        # atmosphere's lat-structured near-surface air temperature (t=0) — the
+        # same spatial source the slab SST uses — so tropical land does not
+        # cold-spin from a uniform 280 K (default off => byte-identical).
+        soil_kwargs = {}
+        if getattr(cfg, "warm_start_soil", False):
+            soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
+            logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg,
+            shape_2d, land_config=land_cfg, **soil_kwargs,
         )
 
         # Tile fractions
@@ -635,7 +689,10 @@ class CoupledESMDriver:
                     f"f_land_mean={land_frac:.2f}")
 
     def _build_pft_provider(self, shape_2d):
-        """Create a PFTParamProvider with analytical PFT fractions."""
+        """Create the spatial land-parameter provider.
+
+        ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
+        reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
         from legoesm.land.param_providers import PFTParamProvider
 
@@ -644,6 +701,24 @@ class CoupledESMDriver:
             logger.warning("  PFT requested but no latitude available; "
                            "falling back to scalar params")
             return None
+
+        source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        if source == "clm":
+            from legoesm.land.clm_surface_map import clm_surface_provider
+            lon = self._atm._grid_lon
+            lat_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            # Use the calibration matched to the active land scheme (each tuned its
+            # surface-energy params against a different soil forward).
+            variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
+                       else "slab")
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
+            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
+                        f"reference soil, {variant} tuning), {lat_deg.size} columns")
+            return provider
+        if source != "analytical":
+            raise ValueError(
+                f"land_param_source must be 'analytical' or 'clm', got {source!r}.")
 
         # Flatten to (ncol,)
         lat_flat = jnp.ravel(lat) if lat.ndim > 1 else lat
@@ -1117,7 +1192,12 @@ class CoupledESMDriver:
         has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
         has_T_sfc = self._last_sfc_response is not None
 
-        terms = [jnp.mean(sst), jnp.min(sst), jnp.max(sst)]
+        terms = [area_weighted_mean(sst, self._ocean_area_w),
+                 jnp.min(sst), jnp.max(sst)]
+        # co2/T_sfc kept as unweighted means deliberately: the co2 global mean
+        # mirrors the radiation-override mean (line ~1100), so area-weighting it
+        # here would diverge from the value that actually forces the radiation —
+        # that change is NOT diagnostics-only and needs separate validation.
         if has_co2:
             terms.append(jnp.mean(self._co2_field))
         if has_T_sfc:
@@ -1211,7 +1291,7 @@ class CoupledESMDriver:
         # NOTE: the prognostic 3D ocean (ocean_mode='dynamic') is NOT yet
         # checkpointed — its full LatLonCGridOceanState pytree (T,S,u,v,eta +
         # AB2 history) needs the checkpoint-v2 flatten path (deferred, see
-        # docs/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
+        # docs/ocean/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
         # for dynamic so a short Phase-1 run does not crash on the missing
         # T_sfc field; a dynamic run must currently restart from the IC.
         if self._ocean_state is not None and not getattr(
@@ -1271,7 +1351,7 @@ class CoupledESMDriver:
             raise ValueError(
                 "Coupled checkpoint restart is not supported for "
                 "ocean_mode='dynamic' (the 3D ocean state is not checkpointed; "
-                "ckpt v2 is deferred — see docs/coupled_3d_ocean_plan.md). "
+                "ckpt v2 is deferred — see docs/ocean/coupled_3d_ocean_plan.md). "
                 "Restart from the initial condition instead.")
 
         # Validate provenance BEFORE restoring — a checkpoint from a different

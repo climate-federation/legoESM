@@ -2,7 +2,7 @@
 ``__physics_contract__``.
 
 This is the "Domain Architect dictates logic" half of the harness (see
-``docs/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
+``docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
 a physics parameterization is written, the domain expert pins its *contract* —
 the units of every input/output, the sign convention, what it conserves, whether
 it is differentiable, the literature reference, and an idealized acceptance
@@ -151,6 +151,7 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/output.py",
         "packages/ocean/legoesm/ocean/physics/mpas_physics.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/__init__.py",
+        "packages/ocean/legoesm/ocean/physics/surface_forcing/_shared.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/config.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/output.py",
@@ -220,7 +221,6 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vreman.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py",
-        "packages/ocean/legoesm/ocean/physics/bottom_drag/quadratic.py",
         "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py",
         "packages/ocean/legoesm/ocean/physics/convection/plume.py",
         "packages/ocean/legoesm/ocean/physics/ice_shelf.py",

@@ -27,7 +27,10 @@ Parallelism strategies
 
 7. **Voronoi mesh decomposition**:
    ``partition_voronoi_mesh()`` partitions unstructured MPAS/Voronoi
-   meshes via geometric bisection or METIS, with halo exchange via
+   meshes via a capability-aware ``method="auto"`` default (METIS graph
+   partition when ``pymetis`` is present — the ``[mesh]`` extra — else
+   geometric RCB), or an explicit ``"sfc"`` Hilbert space-filling-curve
+   partitioner; local arrays use owned-first indexing. Halo exchange via
    ``VoronoiHaloExchange``.
 
 8. **Ensemble parallelism**:
@@ -54,13 +57,88 @@ Parallelism strategies
     and ``mixed_precision_policy()`` returns optimal dtype policies.
 """
 
-from legoesm.parallel.runtime import (
-    ParallelRuntime,
-    HaloBackend,
-    ReductionBackend,
-    validate_device_count,
+from legoesm.parallel.async_halo import (
+    InteriorBoundaryMasks,
+    OverlapContext,
+    async_halo_step,
+    async_halo_step_multi,
+    async_halo_step_vector,
+    boundary_slices,
+    create_interior_boundary_masks,
+    create_overlap_context,
+    extract_interior_padded,
+    finish_halo_exchange,
+    interior_slice,
+    merge_interior_boundary,
+    overlapped_compute_with_context,
+    overlapped_halo_compute,
+    overlapped_halo_compute_vector,
+    split_interior_boundary,
+    start_halo_exchange,
 )
-
+from legoesm.parallel.device_config import (
+    HardwareConfig,
+    MixedPrecisionPolicy,
+    cast_for_device,
+    configure_jax_for_device,
+    get_optimal_dtype,
+    get_optimal_mesh,
+    mixed_precision_policy,
+)
+from legoesm.parallel.device_config import (
+    detect_devices as detect_hardware,
+)
+from legoesm.parallel.ensemble import (
+    create_ensemble_mesh,
+    ensemble_integrate,
+    ensemble_integrate_with_forcing,
+    ensemble_mean,
+    ensemble_percentile,
+    ensemble_spread,
+    ensemble_std,
+    gather_ensemble,
+    make_ensemble_step,
+    make_ensemble_step_jit,
+    perturb_initial_conditions,
+    perturb_parameters,
+    shard_ensemble,
+    stack_states,
+    unstack_states,
+)
+from legoesm.parallel.halo_exchange_voronoi import (
+    VoronoiHaloExchange,
+    exchange_local_simulated,
+)
+from legoesm.parallel.layout import (
+    DistributedLayout,
+    FaceOwnership,
+    SingleRankLayout,
+    make_layout,
+)
+from legoesm.parallel.layout import (
+    gather as layout_gather,
+)
+from legoesm.parallel.layout import (
+    gather_pytree as layout_gather_pytree,
+)
+from legoesm.parallel.layout import (
+    global_reduce as layout_global_reduce,
+)
+from legoesm.parallel.layout import (
+    local_max as layout_local_max,
+)
+from legoesm.parallel.layout import (
+    local_min as layout_local_min,
+)
+from legoesm.parallel.layout import (
+    local_sum as layout_local_sum,
+)
+from legoesm.parallel.layout import (
+    scatter as layout_scatter,
+)
+from legoesm.parallel.layout import (
+    scatter_pytree as layout_scatter_pytree,
+)
 from legoesm.parallel.mesh import (
     DeviceConfig,
     create_device_mesh,
@@ -69,115 +147,59 @@ from legoesm.parallel.mesh import (
     create_voronoi_device_mesh,
     get_active_config,
     replicate_pytree,
-    shard_pytree,
     shard_latlon,
     shard_levels,
+    shard_pytree,
 )
-
-from legoesm.parallel.voronoi_partition import (
-    HaloCommSchedule,
-    VoronoiPartition,
-    partition_cells_geometric,
-    partition_voronoi_mesh,
-    build_local_mesh,
-    scatter_to_local,
-    reorder_voronoi_for_sharding,
+from legoesm.parallel.profiling import (
+    get_stats as get_mpi_profile_stats,
 )
-
-from legoesm.parallel.halo_exchange_voronoi import (
-    VoronoiHaloExchange,
-    exchange_local_simulated,
-)
-
-from legoesm.parallel.async_halo import (
-    InteriorBoundaryMasks,
-    OverlapContext,
-    create_interior_boundary_masks,
-    split_interior_boundary,
-    merge_interior_boundary,
-    boundary_slices,
-    interior_slice,
-    extract_interior_padded,
-    overlapped_halo_compute,
-    overlapped_halo_compute_vector,
-    create_overlap_context,
-    overlapped_compute_with_context,
-    start_halo_exchange,
-    finish_halo_exchange,
-    async_halo_step,
-    async_halo_step_multi,
-    async_halo_step_vector,
-)
-
-from legoesm.parallel.device_config import (
-    HardwareConfig,
-    detect_devices as detect_hardware,
-    configure_jax_for_device,
-    get_optimal_dtype,
-    get_optimal_mesh,
-    MixedPrecisionPolicy,
-    mixed_precision_policy,
-    cast_for_device,
-)
-
-from legoesm.parallel.sharded_dynamics import (
-    StepCacheKey,
-    CompiledShardedStep,
-    make_sharded_step,
-    make_voronoi_sharded_step,
-    shard_state as shard_state_to_devices,
-    gather_state as gather_state_from_devices,
-    create_output_shardings,
-    sharded_step_with_halo,
-    make_face_halo_exchange,
-    sharded_integrate,
-    sharded_integrate_scan,
-    check_sharding,
-)
-
-from legoesm.parallel.reductions import (
-    batch_allreduce_mpi,
-)
-
 from legoesm.parallel.profiling import (
     is_profiling_enabled,
     mpi_timer,
-    get_stats as get_mpi_profile_stats,
-    reset_stats as reset_mpi_profile_stats,
     print_mpi_profile,
 )
-
-from legoesm.parallel.layout import (
-    DistributedLayout,
-    SingleRankLayout,
-    FaceOwnership,
-    make_layout,
-    scatter as layout_scatter,
-    scatter_pytree as layout_scatter_pytree,
-    gather as layout_gather,
-    gather_pytree as layout_gather_pytree,
-    local_sum as layout_local_sum,
-    local_max as layout_local_max,
-    local_min as layout_local_min,
-    global_reduce as layout_global_reduce,
+from legoesm.parallel.profiling import (
+    reset_stats as reset_mpi_profile_stats,
 )
-
-from legoesm.parallel.ensemble import (
-    stack_states,
-    unstack_states,
-    perturb_initial_conditions,
-    perturb_parameters,
-    make_ensemble_step,
-    make_ensemble_step_jit,
-    ensemble_integrate,
-    ensemble_integrate_with_forcing,
-    ensemble_mean,
-    ensemble_std,
-    ensemble_percentile,
-    ensemble_spread,
-    create_ensemble_mesh,
-    shard_ensemble,
-    gather_ensemble,
+from legoesm.parallel.reductions import (
+    batch_allreduce_mpi,
+)
+from legoesm.parallel.runtime import (
+    HaloBackend,
+    ParallelRuntime,
+    ReductionBackend,
+    validate_device_count,
+)
+from legoesm.parallel.sharded_dynamics import (
+    CompiledShardedStep,
+    StepCacheKey,
+    check_sharding,
+    create_output_shardings,
+    make_face_halo_exchange,
+    make_sharded_step,
+    make_voronoi_sharded_step,
+    sharded_integrate,
+    sharded_integrate_scan,
+    sharded_step_with_halo,
+)
+from legoesm.parallel.sharded_dynamics import (
+    gather_state as gather_state_from_devices,
+)
+from legoesm.parallel.sharded_dynamics import (
+    shard_state as shard_state_to_devices,
+)
+from legoesm.parallel.voronoi_partition import (
+    HaloCommSchedule,
+    VoronoiPartition,
+    build_local_mesh,
+    hilbert_cell_keys,
+    partition_cells_geometric,
+    partition_cells_sfc,
+    partition_voronoi_mesh,
+    reorder_voronoi_for_sharding,
+    resolve_partition_method,
+    scatter_to_local,
 )
 
 __all__ = [
@@ -201,10 +223,13 @@ __all__ = [
     "HaloCommSchedule",
     "VoronoiPartition",
     "partition_cells_geometric",
+    "partition_cells_sfc",
+    "hilbert_cell_keys",
     "partition_voronoi_mesh",
     "build_local_mesh",
     "scatter_to_local",
     "reorder_voronoi_for_sharding",
+    "resolve_partition_method",
     "VoronoiHaloExchange",
     "exchange_local_simulated",
     # Ensemble parallelism

@@ -113,10 +113,15 @@ def mpas_shallow_water_tendencies(
         q = apvm_correction(q, u, mesh, config.apvm_scale * dt)
 
     # --- PV flux ---
-    if config.pv_scheme == "enstrophy":
+    if config.pv_scheme == "energy":
+        F_pv = pv_flux_energy_conserving(u, h, q, mesh)
+    elif config.pv_scheme == "enstrophy":
         F_pv = pv_flux_enstrophy_conserving(u, h, q, mesh)
     else:
-        F_pv = pv_flux_energy_conserving(u, h, q, mesh)
+        raise ValueError(
+            f"Unknown pv_scheme {config.pv_scheme!r}; "
+            "expected one of: 'energy', 'enstrophy'."
+        )
 
     # --- Velocity tendency ---
     du_dt_data = -grad_B + F_pv

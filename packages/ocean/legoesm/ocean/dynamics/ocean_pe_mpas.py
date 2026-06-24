@@ -244,6 +244,15 @@ def mpas_ocean_baroclinic_tendencies(
         h_e_continuity = h_e_3d
     # Both ``H_e`` and ``u_bar`` numerator share the ``h_e_3d`` weight
     # on the level axis — fuse into one stacked column reduction.
+    # NOTE (#517 item 1/5): NOT routed through the shared
+    # depth_average_to_faces / column_depth helpers.  Splitting this
+    # fused ``jnp.stack``+single-``jnp.sum`` into two separate reductions
+    # changes XLA's fusion in the full MPAS step and drifts the seamount
+    # centered-scheme transport at ~1e-10 (caught by
+    # test_seamount_centered_stable_over_steps), so the fused form is
+    # kept verbatim to stay byte-identical.  H_e additionally is reused
+    # by F_slow_u below; u_bar floors the divisor at a bare 1e-10 ON TOP
+    # of H_e's min_water_column_m floor (a divergent second floor).
     _u_pair = jnp.sum(jnp.stack([h_e_3d, u_3d * h_e_3d], axis=-1), axis=1)
     H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
     u_bar = _u_pair[..., 1] / jnp.maximum(H_e, 1e-10)
@@ -406,7 +415,7 @@ def mpas_ocean_baroclinic_tendencies(
     #                thin spike at partial-cell interfaces that drives
     #                a 2Δz vertical mode on ETOPO; SMC03's per-column
     #                ρ(z) reconstruction is smooth in z).  See
-    #                ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.
+    #                ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``.
     #   "centered" : no correction; ``grad_B`` already contains the
     #                bare ``∇(KE + p'/rho_0)``.
     if pgf_scheme == "adcroft" and isinstance(z_coord, OceanPartialCellCoordinate):
@@ -665,7 +674,7 @@ def mpas_ocean_baroclinic_tendencies(
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Legacy single-cell drag at maxLevelEdgeBot.
             # WARNING: CFL-violates at thin partial cells (see
-            # docs/ocean_experiments/density_jacobian_pgf_mpas.md §8a).
+            # docs/ocean/experiments/density_jacobian_pgf_mpas.md §8a).
             # Prefer ``bottom_drag_bbl_thickness > 0`` on real bathymetry.
             bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
             # Edges with at least one dry neighbor have bot_e < 0 (since

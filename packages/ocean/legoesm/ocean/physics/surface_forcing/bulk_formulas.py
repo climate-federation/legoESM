@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -107,11 +108,9 @@ def bulk_formula_surface_forcing(
     # ``external.py`` (codex review, finding #5).
     dz_0 = z_coord.dz_ref[0] * jacobian
     is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
-    dz_safe = jnp.maximum(dz_0, 1e-10)
-    inv_rho_dz = jnp.where(is_ocean, 1.0 / (rho_0_ref * dz_safe), 0.0)
-    inv_rho_csw_dz = jnp.where(
-        is_ocean, 1.0 / (rho_0_ref * c_sw * dz_safe), 0.0,
-    )
+    # Wet-cell flux→tendency reciprocals (#518: shared helper; eos rho_0/c_sw).
+    inv_rho_dz, inv_rho_csw_dz = surface_tendency_factors(
+        is_ocean, dz_0, rho_0_ref, c_sw)
 
     # Pad with zero on trailing axis instead of alloc-zeros +
     # scatter — single Pad HLO op per field.  Same pattern as the

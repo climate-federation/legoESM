@@ -186,15 +186,20 @@ def mpas_compressible_euler_slow_tendencies(
     f_v = mesh.fVertex if config.use_coriolis else jnp.zeros_like(mesh.fVertex)
     q_v_3d = potential_vorticity_vertex_3d(u_3d, h_proxy_3d, f_v, mesh)
 
-    if config.pv_scheme == "enstrophy":
+    if config.pv_scheme == "energy":
+        pv_flux_3d = pv_flux_energy_conserving_3d(
+            u_3d, h_proxy_3d, q_v_3d, mesh,
+            h_edge_3d=h_proxy_edge_3d,
+        )
+    elif config.pv_scheme == "enstrophy":
         pv_flux_3d = pv_flux_enstrophy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh,
             h_edge_3d=h_proxy_edge_3d,
         )
     else:
-        pv_flux_3d = pv_flux_energy_conserving_3d(
-            u_3d, h_proxy_3d, q_v_3d, mesh,
-            h_edge_3d=h_proxy_edge_3d,
+        raise ValueError(
+            f"Unknown pv_scheme {config.pv_scheme!r}; "
+            "expected one of: 'energy', 'enstrophy'."
         )
 
     # Momentum tendency

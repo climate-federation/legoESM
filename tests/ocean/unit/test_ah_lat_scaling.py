@@ -2,7 +2,7 @@
 (`LatLonCGridOceanConfig.A_h_lat_scaling`).
 
 The scaling addresses the high-latitude viscous-Coriolis runaway documented
-in `docs/ocean_experiments/realistic_geometry_phase4_results.md` (D1):
+in `docs/ocean/experiments/realistic_geometry_phase4_results.md` (D1):
 on real ETOPO at A_h=2e5, the model blows up at a single Arctic
 partial-cell at lat 82.5° in ~15 sim-days because the viscous decay time
 shrinks with cos²(lat) and becomes faster than the Coriolis period at the

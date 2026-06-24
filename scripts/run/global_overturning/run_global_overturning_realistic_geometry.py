@@ -15,7 +15,7 @@ Builds on the existing ``run_global_overturning_implicit_spinup.py``
   bit-equivalent to the previous SMC03 default on lat-lon 5° ETOPO
   to 4 sig figs at 30 days, and stable for 1-yr (max|u| converging
   to ~1.4 m/s, max|eta| ~0.27 m, no NaN).  See
-  ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` §8d.
+  ``docs/ocean/experiments/density_jacobian_pgf_mpas.md`` §8d.
 - ``momentum_advection="vector_invariant"`` which now uses the
   Arakawa-Lamb 1981 12-point triad PV flux (NEMO ``dyn_vor_een``,
   via ``pv_flux_al81_partial_cell``) — required for stability on

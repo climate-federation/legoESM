@@ -4,7 +4,7 @@
 Identical to ``run_drake_momentum_budget.py`` (the baseline run that
 produced the chequerboard smoking gun) but with
 ``barotropic_div_damp = 0.1`` (was 0).  Tests the hypothesis from
-``docs/issues/barotropic_mode_noise.md`` Stage 0.
+``docs/dev-notes/issues/barotropic_mode_noise.md`` Stage 0.
 
 Output: ``results/ocean/momentum_budget_online_divdamp/``
 """

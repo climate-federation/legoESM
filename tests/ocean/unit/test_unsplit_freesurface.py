@@ -1,7 +1,7 @@
 """Tests for the MITgcm-faithful UNSPLIT implicit free surface
 (``barotropic_solver="implicit_unsplit"``) — the fix for the spurious 2dx
 baroclinic instability the split free surface produces (the long-run
-baroclinic-gyre checkerboard). See docs/ocean_fidelity/
+baroclinic-gyre checkerboard). See docs/ocean/fidelity/
 mitgcm_unsplit_freesurface_fix.md.
 """
 

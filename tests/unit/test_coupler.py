@@ -866,6 +866,49 @@ def test_full_coupler_step():
     assert new_state.accumulator.total_dt > 0.0
 
 
+def test_full_coupler_step_multilayer_richards():
+    """End-to-end coupler step with the MULTILAYER soil-thermal + RICHARDS land
+    tile (columnar (ncol, nlayers) state), proving the coupler dispatch wires the
+    multilayer land into AMIP/CMIP the same way as the slab tile.
+
+    The coupler flattens (6,n,n) forcing to (ncol,), steps ``step_multilayer_land``,
+    and unflattens the TileResponse back to spatial shape for blending."""
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    ncol = 6 * 4 * 4
+    nlayers = 6
+    land_cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=nlayers, total_depth=2.0))
+    lat = jnp.full(SHAPE, 0.5)  # radians (required to flatten for the columnar tile)
+    step_fn = make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(), LakeConfig(),
+                           lat=lat)
+
+    sfc_state = init_surface_state(SHAPE, land_config=land_cfg)
+    # the land sub-state is the columnar multilayer state, not the slab Field state
+    assert sfc_state.land.T_soil.shape == (ncol, nlayers)
+    assert sfc_state.land.theta_soil.shape == (ncol, nlayers)
+
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(f_land=jnp.full(SHAPE, 0.5), f_lake=jnp.zeros(SHAPE))
+    sst = jnp.full(SHAPE, 300.0); zu = jnp.zeros(SHAPE)
+
+    for _ in range(3):
+        sfc_state, blended = step_fn(sfc_state, forcing, tile_cfg, sst, zu, zu, DT)
+
+    # blended response is unflattened back to spatial shape and finite
+    assert blended.T_sfc.shape == SHAPE
+    assert jnp.all(jnp.isfinite(blended.T_sfc))
+    assert jnp.all(jnp.isfinite(blended.lhflx))
+    assert jnp.all(jnp.isfinite(blended.shflx))
+    # multilayer land state advanced, finite, Richards moisture stays physical
+    assert jnp.all(jnp.isfinite(sfc_state.land.T_soil))
+    assert jnp.all(jnp.isfinite(sfc_state.land.theta_soil))
+    assert jnp.all(sfc_state.land.theta_soil >= 0.0)
+    assert jnp.all(sfc_state.land.theta_soil <= 1.0)
+    assert float(sfc_state.accumulator.total_dt) == pytest.approx(3 * DT, abs=1e-6)
+
+
 def test_coupler_multiple_steps():
     """Multiple coupler steps stay finite and accumulator grows."""
     coupler_cfg = CouplerConfig()

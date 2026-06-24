@@ -11,7 +11,7 @@ shared flux-form FD transport (:mod:`plane_fd_advection`, WENO5/van-Leer/upwind 
 public ``core.weno``/``core.flux_limiters`` kernels). Time stepping is SSP-RK3 with the
 projection applied per stage.
 
-Why this core (vs the two existing plane dycores) — see ``docs/pseudo_incompressible_les.md``.
+Why this core (vs the two existing plane dycores) — see ``docs/physics-notes/pseudo_incompressible_les.md``.
 The spectral core is exact but FFT ⇒ all-to-all (poor mesh scaling, periodic-only); the
 compressible core scales (FD + halo) but acoustic CFL + hyperdiff cap the effective Re.
 This core has no acoustic mode and only nearest-neighbour elliptic comms.

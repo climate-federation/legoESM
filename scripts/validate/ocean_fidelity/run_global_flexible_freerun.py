@@ -76,10 +76,23 @@ DAYS_PER_YEAR = 360.0               # Veros forcing year
 SECONDS_PER_DAY = 86400.0
 
 
+def _shared_freerun():
+    """Import the shared global-freerun helpers, whether this file is run as
+    a script or imported as ``validate.ocean_fidelity.run_global_flexible_freerun``."""
+    try:
+        from validate.ocean_fidelity import veros_global_freerun as m
+    except ImportError:
+        import sys
+        scripts_dir = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from validate.ocean_fidelity import veros_global_freerun as m
+    return m
+
+
 def _read_nc(path, var):
-    import h5netcdf
-    with h5netcdf.File(path, "r") as f:
-        return np.array(f.variables[var], dtype="float").T   # Veros _get_data
+    return _shared_freerun().read_nc(path, var)
 
 
 def load_and_prepare(verify_against: str | None = None):
@@ -234,58 +247,11 @@ def compute_metrics(state, recipe) -> dict:
         veros_area_t_flexible,
     )
 
-    ia = np.asarray(recipe.z_coord.is_active)[1:-1, :, :]   # interior
     lat = np.degrees(np.asarray(recipe.grid.lat))[1:-1]
     dyt_deg = global_flexible_dyt_deg()
     area = veros_area_t_flexible(lat, dyt_deg)[:, None]      # (NY, 1)
     dz = global_flexible_dzt_veros()[::-1]                   # full-cell (snap)
-    vol = area[:, :, None] * dz[None, None, :] * ia
-
-    u = np.asarray(state.u.data)
-    v = np.asarray(state.v.data)
-    T = np.asarray(state.T.data)[1:-1]
-    S = np.asarray(state.S.data)[1:-1]
-
-    # u/v at the T-cell's east/north face — Veros's u[i,j,k]/v[i,j,k].
-    u_cell = u[1:-1, 1:, :]
-    v_cell = v[2:-1, :, :]
-
-    ia_e = np.minimum(ia, np.roll(ia, -1, axis=1))           # maskU (min rule)
-    rho0 = float(recipe.model_config.rho_0)
-
-    def wmean(x, w):
-        sw = w.sum()
-        return float((x * w).sum() / max(sw, 1e-30))
-
-    speed2 = u_cell ** 2 + v_cell ** 2
-
-    psi = np.asarray(state.psi) if state.psi is not None else np.zeros((1,))
-    psi_min, psi_max = float(psi.min() / 1e6), float(psi.max() / 1e6)
-
-    out_we = {}
-    for name in ("tke", "eke"):
-        fld = getattr(state, name)
-        if fld is None:
-            out_we[f"mean_{name}"] = float("nan")
-            continue
-        e = np.asarray(fld.data)[1:-1, :, :]                 # (NY, NX, NZ-1)
-        w_if = vol[:, :, 1:]                                  # cell below
-        out_we[f"mean_{name}"] = wmean(e, w_if)
-
-    return dict(
-        psi_min_sv=psi_min,
-        psi_max_sv=psi_max,
-        psi_range_sv=psi_max - psi_min,
-        total_ke_j=0.5 * rho0 * float((speed2 * vol).sum()),
-        vol_mean_T=wmean(T, vol),
-        vol_mean_S=wmean(S, vol),
-        max_abs_u=float(np.max(np.abs(u_cell * ia_e))),
-        sfc_T_mean=wmean(T[..., :1], vol[..., :1]),
-        mean_tke=out_we["mean_tke"],
-        mean_eke=out_we["mean_eke"],
-        finite=bool(np.isfinite(u).all() and np.isfinite(T).all()
-                    and np.isfinite(S).all()),
-    )
+    return _shared_freerun().compute_metrics(state, recipe, area, dz)
 
 
 # ---------------------------------------------------------------------------
@@ -447,24 +413,7 @@ def run(years: float, out_path: str | None, compare_path: str | None,
 
 
 def _print_comparison(yearly, compare_path):
-    with open(compare_path) as f:
-        ref = json.load(f)["yearly"]
-    keys = ("total_ke_j", "psi_min_sv", "psi_max_sv", "psi_range_sv",
-            "vol_mean_T", "vol_mean_S", "max_abs_u", "mean_eke")
-    print("\n== per-year ratios (legoESM / Veros oracle) ==")
-    print("year " + " ".join(f"{k:>13s}" for k in keys))
-    for m in yearly:
-        yr = m.get("year")
-        if yr is None or float(yr) != int(float(yr)):
-            continue
-        rv = next((r for r in ref if r.get("year") == int(float(yr))), None)
-        if rv is None:
-            continue
-        cells = []
-        for k in keys:
-            denom = rv[k]
-            cells.append(f"{m[k] / denom:13.3f}" if denom else f"{'n/a':>13s}")
-        print(f"{int(float(yr)):4d} " + " ".join(cells))
+    _shared_freerun().print_comparison(yearly, compare_path)
 
 
 def main() -> int:

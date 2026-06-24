@@ -124,7 +124,10 @@ def solve_richards(
     # producing artificially-enhanced infiltration.  Using ``abs(psi)``
     # would always increase the capacity, which is wrong for ponded
     # cells (Codex GPT-5 review caught the sign).
-    K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], hydro_config)
+    # Keep the column axis (``[:, :1]`` not ``[:, 0]``) so a PER-COLUMN
+    # ``hydro_config`` (van-Genuchten fields shaped ``(ncol, 1)`` for spatial soil)
+    # broadcasts; squeeze back to ``(ncol,)``.  Bit-identical for a scalar config.
+    K_top = hydraulic_conductivity(psi[:, :1], theta[:, :1], hydro_config)[:, 0]
     head_grad = psi[:, 0] / (0.5 * dz[0])
     infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
 
@@ -244,9 +247,12 @@ def solve_richards(
     # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
-    # Subsurface runoff: gravitational drainage at bottom
+    # Subsurface runoff: gravitational drainage at bottom.  Keep the column axis
+    # (``[:, -1:]`` then squeeze) so a PER-COLUMN hydro_config (ncol,1) broadcasts —
+    # same fix as the K_top boundary call; bit-identical for a scalar config.
     if richards_config.bottom_bc == "free_drainage":
-        K_bot = hydraulic_conductivity(psi_final[:, -1], theta_final[:, -1], hydro_config)
+        K_bot = hydraulic_conductivity(psi_final[:, -1:], theta_final[:, -1:],
+                                       hydro_config)[:, 0]
         runoff_subsurface = K_bot  # [m/s]
     else:
         runoff_subsurface = jnp.zeros(ncol)

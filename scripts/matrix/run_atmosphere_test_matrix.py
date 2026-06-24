@@ -181,7 +181,7 @@ class TestCase:
 #       prerequisites and the DCMIP 2025 NH cases (which are partial
 #       coverage of the canonical DCMIP 2012 set, see catalog).
 #
-# See ``docs/dycore_validation_catalog.md`` for the canonical inventory.
+# See ``docs/validation/dycore_validation_catalog.md`` for the canonical inventory.
 _CASE_FAMILIES: dict[str, frozenset[str]] = {
     # Williamson SW (W1=cosine_bell, W2, W5 wired pre-M1; W6 added M1.a)
     "williamson2":        frozenset({"sw", "hughes"}),
@@ -272,7 +272,7 @@ def _build_test_matrix() -> list[TestCase]:
         # analytic edge-/face-midpoint wind init at non-trivial lon/lat
         # offsets (W6 winds depend on both lon and lat, unlike W2/W5),
         # so they are deferred to M1.b.  See
-        # ``docs/dycore_validation_catalog.md``.
+        # ``docs/validation/dycore_validation_catalog.md``.
         # new_test_dycores iter-24: extend W6 to cube (cubed_sphere)
         # via the edge-midpoint analytic init wired in run_shallow_water.
         # new_test_dycores iter-25: also extend W6 to lat-lon (C-grid)

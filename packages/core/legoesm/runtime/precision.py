@@ -99,6 +99,13 @@ def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     # Activate globally.
     set_policy(policy)
 
+    # Clear any per-module overrides left by a PRIOR apply_precision so a
+    # mode switch is clean: without this, ``apply_precision("mixed")`` then
+    # ``apply_precision("fp32")`` would leave barotropic_solver / EOS / PGF /
+    # coriolis pinned fp64, i.e. fp32 mode would not actually be fp32 in a
+    # long-lived process (codex 2026-06-21).
+    clear_module_overrides()
+
     # Apply recommended per-module overrides when in mixed mode.
     if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
         set_recommended_overrides("mixed")

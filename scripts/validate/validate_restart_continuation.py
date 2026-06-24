@@ -1,7 +1,7 @@
 """Production-setup validation: bit-exact restart chains with stateful physics.
 
 Ported from fix/persist-physics onto main's #413 carry architecture
-(FIX_RESTART_TIME, docs/FIX_RESTART_TIME.md).
+(FIX_RESTART_TIME, docs/dev-notes/FIX_RESTART_TIME.md).
 
 Runs the SAME
 experiment twice — once straight through, once as a checkpoint/restart

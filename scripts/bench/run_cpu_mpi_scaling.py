@@ -529,11 +529,12 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
         create_cubed_sphere_cdgrid,
     )
 
-    if physics_level != "none":
+    _moist = physics_level == "moist"
+    if physics_level not in ("none", "moist"):
         raise ValueError(
-            "--cs-spmd currently benchmarks the dry dycore only "
-            f"(physics={physics_level!r}); physics column scatter under "
-            "the SPMD path is the next wiring step."
+            f"--cs-spmd supports physics 'none' or 'moist' (got "
+            f"{physics_level!r}); other column physics is not wired under "
+            "the SPMD path."
         )
     gdev = jax.devices()
     n_global = len(gdev)
@@ -553,7 +554,7 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     grid = create_cubed_sphere(resolution)
     sigma = create_sigma_coordinate(nlev)
     state = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True),
+        baroclinic_wave_init(grid, sigma, perturbed=True, moist=_moist),
         create_cubed_sphere_cdgrid(grid))
     state = jax.tree.map(cast_fn, state)
     # IDENTICAL config to the serial cubed-sphere baseline above —
@@ -571,7 +572,19 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     )
     model = CDGridPrimitiveEquationModel(grid, sigma, config)
 
-    step_fn = make_sharded_step(model, cfg_mesh, n=resolution, nlev=nlev)
+    sharded_step = make_sharded_step(model, cfg_mesh, n=resolution, nlev=nlev)
+    if _moist:
+        # Kessler warm-rain bound to this step's dt; column-local, so it adds
+        # NO horizontal halo coupling beyond the dycore's q_v/q_c/q_r tracer
+        # exchange (which rides the SAME multiface-ppermute halo as T under the
+        # SPMD path).  Threaded via the sharded step's call-time physics_fn,
+        # which dispatches to model.step_with_physics inside the jitted, sharded
+        # program — so the column physics runs SPMD-local on each shard.
+        from legoesm.atmosphere.kessler_forcing import make_kessler_forcing_cube
+        _phys = make_kessler_forcing_cube(dt)
+        step_fn = lambda s, d: sharded_step(s, d, physics_fn=_phys)
+    else:
+        step_fn = sharded_step
     state = shard_pytree(state, cfg_mesh)
 
     total_cells = 6 * resolution * resolution * nlev

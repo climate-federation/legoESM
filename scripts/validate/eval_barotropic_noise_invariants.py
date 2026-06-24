@@ -3,7 +3,7 @@
 
 Loads a tendency_3d_means.npz produced by ``run_drake_momentum_budget*.py``
 and computes the three invariants from
-``docs/issues/barotropic_mode_noise.md``:
+``docs/dev-notes/issues/barotropic_mode_noise.md``:
 
   1. var(div(U_baro)) / var(U_baro) on the time-mean field
   2. max |<V_baro>| outside polar caps
@@ -12,7 +12,7 @@ and computes the three invariants from
 V_baro is computed as the depth-mean of state_v_mean using dz_ref
 weights (z-star-correct using the time-mean h_v would also work but
 adds a Reynolds correction which is shown in
-docs/research/zstar_vbaro_residual_investigation.md to be small at
+docs/dev-notes/research/zstar_vbaro_residual_investigation.md to be small at
 this resolution).  Same for U_baro.
 
 Usage:

@@ -80,6 +80,14 @@ def thompson_microphysics(
     MicrophysicsOutput
     """
     ncol, nlev = T.shape
+    # Validate the snow scheme on the static config value at fn entry so a
+    # typo cannot silently select the bulk power-law fall speed (site below)
+    # while leaving Thompson-2008 snow deposition disabled — a physics change.
+    if config.snow_scheme not in ("thompson2008", "bulk_qpower"):
+        raise ValueError(
+            f"Unknown snow_scheme {config.snow_scheme!r}; "
+            "expected one of: 'thompson2008', 'bulk_qpower'."
+        )
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
     q_i = hydrometeors.q_i

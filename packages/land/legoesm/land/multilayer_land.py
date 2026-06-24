@@ -247,8 +247,10 @@ def step_multilayer_land(
         snow,
     )
     if config.snow_albedo_feedback and lat is not None:
+        # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied.
+        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc.shape)
         alpha = compute_land_albedo(
-            lat, snow_effective, snow_age, config.land_albedo,
+            lat, snow_effective, snow_age, config.land_albedo, base_albedo=_base,
         )
     else:
         alpha = jnp.full(T_sfc.shape, albedo_land, dtype=T_sfc.dtype)
@@ -458,8 +460,9 @@ def step_multilayer_land(
 
     # Post-step albedo: reflects updated snow for the next atmosphere step
     if config.snow_albedo_feedback and lat is not None:
+        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc_new.shape)
         alpha_new = compute_land_albedo(
-            lat, snow_new, snow_age_new, config.land_albedo,
+            lat, snow_new, snow_age_new, config.land_albedo, base_albedo=_base,
         )
     else:
         alpha_new = alpha
@@ -577,8 +580,12 @@ def init_multilayer_land_state(
         Number of columns.
     config : MultiLayerLandConfig
         Land model configuration.
-    T_init : float
-        Initial uniform soil temperature [K].
+    T_init : float or array
+        Initial soil temperature [K].  A scalar gives a uniform column
+        (legacy default).  A per-column array of shape ``(ncol,)`` gives a
+        spatially-structured warm start (e.g. the lat-varying near-surface air
+        temperature), broadcast vertically across all soil layers — removes the
+        artificial tropical cold-soil spin-up of the uniform 280 K default.
     theta_init : float or None
         Initial uniform volumetric water content [m3/m3].
         If None, uses 0.5 * theta_sat.
@@ -593,8 +600,15 @@ def init_multilayer_land_state(
     if theta_init is None:
         theta_init = 0.5 * config.hydraulics.theta_sat
 
-    T_soil = jnp.full((ncol, nlayers), T_init)
-    theta_soil = jnp.full((ncol, nlayers), theta_init)
+    _T = jnp.asarray(T_init)
+    if _T.ndim == 0:
+        T_soil = jnp.full((ncol, nlayers), T_init)
+    else:
+        # per-column (ncol,) -> broadcast across the vertical soil layers
+        T_soil = jnp.broadcast_to(_T.reshape(ncol, 1), (ncol, nlayers))
+    # broadcast_to (not full) so a PER-COLUMN theta_init (ncol,1) from a spatial
+    # theta_sat works; scalar theta_init broadcasts identically.
+    theta_soil = jnp.broadcast_to(jnp.asarray(theta_init), (ncol, nlayers))
     psi_soil = psi_from_theta(theta_soil, config.hydraulics)
 
     return MultiLayerLandState(
