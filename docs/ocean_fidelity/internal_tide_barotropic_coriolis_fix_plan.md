@@ -57,6 +57,24 @@ sub-step + barotropic-solver FB term → wrong rotation u=0.137 vs analytic 0.00
 the clean "Coriolis resolved/coupled WITH gravity, counted ONCE" that the stable
 standalone does.
 
+## ⚠️⚠️ FURTHER CORRECTION (implementation attempt) — the growing mode is dominantly BAROCLINIC
+
+Implementation probing (z-structure of the model's growing 2Δy mode at t/Tin=0.4):
+`max|v_baroclinic_dev|=2.14` vs `max|v_barotropic|=0.79`; v z-profile
+`[-2.44, -0.49, 0.28, 0.37]` (strongly z-varying). The mode lives DOMINANTLY in the
+3-D baroclinic `u_prime` (= `u_star − U_old`), which `u_new_3d = u_prime + U_new`
+carries straight past the barotropic solver — explaining why NO barotropic-solver
+knob touches it (`barotropic_implicit_theta_eta/pgf` 0.5–1.0: zero effect; same for
+every solver/scheme/ab2_epsilon). The standalone BAROTROPIC SWE (`_baro_swe_*.py`)
+therefore can NOT reproduce it (it has no baroclinic d.o.f.; its own f=0 blow-up is
+a different, missing-consistency-term artifact). The real instability is the **3-D
+Coriolis 2Δy null mode in the BAROCLINIC momentum** (the `coriolis_cgrid` 4-pt
+average in `du_dt` / `_forward_backward_coriolis_3d`), exposed by periodic-y and
+coupled through the free surface. So the fix IS a spatial enstrophy-conserving
+(Arakawa–Lamb) Coriolis — but applied to the **full 3-D momentum**, not just the
+barotropic solver. This is genuine multi-day dycore work; the standalone testbed
+route is a dead end (needs the full 3-D + free-surface model to reproduce).
+
 ## The fix (exact, minimal locus)
 
 **REVISED:** make the barotropic Coriolis–gravity coupling STABLE at large dt —
