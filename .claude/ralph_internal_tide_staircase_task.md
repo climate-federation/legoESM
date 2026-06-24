@@ -36,6 +36,8 @@ is ~2e-5 in b', so any spurious grid-scale noise swamps it.
 
 - **iter 6: FAITHFUL FIX FOUND = boundary-aware reconstruction (not Neumann fill).** Oceananigans (`immersed_advective_fluxes.jl`: "Don't reconstruct with immersed cells!", `inside_immersed_boundary`) REDUCES the WENO stencil order near immersed nodes (one-sided, doesn't reach into dead cells). legoESM NEUMANN-FILLS dead cells (`tracer_wall_neumann_fill`) + reconstructs with the full stencil. The fill-induced b_face error is amplified by the near-cancellation -> the 5x residual. FIX = boundary-aware (stencil-reducing) tracer reconstruction matching Oceananigans, gated (default = current fill, bit-identical). Acceptance: `_it_inst_tend.py` net db/dt -> oracle 7.8e-8. Real dycore reconstruction change; implement+test+review deliberately.
 
+- **iter 7: CORRECTION — residual is SCHEME-INDEPENDENT geometric/coordinate consistency, NOT reconstruction.** Narrow stencils give the same ~5x (weno5 5.2x, centered 5.0x, upwind 5.4x) -> iter-6 boundary-aware-reconstruction is WRONG; b_face is irrelevant. For linear b=N2z, residual = N2*[div(mass_flux*z_face)+vert_div(w*z_face)] = telescoping error of the z_face-WEIGHTED fluxes at the partial-cell staircase. It's a GEOMETRIC partial-cell vertical-coordinate-consistency issue (z_half face depths x min-rule mass flux x diagnosed w don't combine consistently for depth-varying b), the tracer analog of the partial-cell PGF consistency. Fix target = the partial-cell z_half handling in the tracer flux divergence.
+
 ## The blocker (precisely located)
 With `MOM_ADV=flux_form`: STABLE, max|v| over bump 0.70 m/s (vs 2.7 vector-invariant),
 b' rms 2.5e-4 (vs oracle 2e-5, ~12×), pattern_corr ~0. The b' shows a grid-scale
