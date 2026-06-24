@@ -181,7 +181,7 @@ def _build_band_grids_atm(grid, n_devices: int):
     ]
 
 
-def make_sharded_atm_latlon_step(model, mesh):
+def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     """Return ``step(c_state, dt) -> c_state`` running the C-grid hydrostatic atm
     step lat-band-SPMD over the 1-D ``"lat"`` mesh.
 
@@ -194,14 +194,43 @@ def make_sharded_atm_latlon_step(model, mesh):
     halo via the swapped backend, ``spmd_pole_end_masks``, the band slicer);
     atm-NEW is only the 6-field state/geometry walk. ``check_vma=False`` (the
     band halo reads neighbour-rank data). Mirrors ``make_sharded_ocean_step``.
+
+    ``physics_fn`` (optional): a STATELESS, COLUMN-LOCAL physics closure
+    (``physics_fn(hs, grid, sigma_coord) -> HydrostaticTendencies``, e.g.
+    Held-Suarez or any per-column parameterization). It is evaluated inside each
+    RK stage on the BAND geometry (``_step_cgrid_impl`` routes the band grid into
+    ``_call_physics`` so a lat-dependent forcing sees the band's latitudes), and
+    its wind tendencies couple cell->face through the SPMD-aware
+    ``interp_cell_to_vface_halo`` — so column-local physics is decomposition-
+    invariant with NO collectives. The only global reductions in the step
+    (``zero_mean_tendency``, the mass fixer) are already "lat"-psum-routed.
+    STATEFUL physics (a ``PhysicsState`` carry) is NOT yet SPMD-routed — the
+    carry is the flattened ``(ncol=n_lat*n_lon, ...)`` layout (needs a lat-major
+    reshape-aware shard) and stochastic schemes need a global-column-indexed PRNG
+    split; ``run_atm_latlon_spmd_segment`` rejects a non-None ``phys_state``.
     """
     from legoesm.parallel.latlon_spmd import (
         latlon_band_perms, reconstruct_vface_lower, to_vface_lower,
         spmd_pole_end_masks, activate_latlon_spmd_halo)
     from legoesm.parallel.shard_map_compat import shard_map
 
+    # Dispatch-hardening: the SPMD body calls _step_cgrid_impl / _step_cgrid
+    # DIRECTLY, bypassing model.step()'s refuse_unthreaded_stateful_physics
+    # guard. A STATEFUL (tagged) physics_fn handed here with no carry would
+    # silently reseed its PhysicsState every step (issue #405/#413). Since the
+    # SPMD path does not yet thread the carry, reject a tagged stateful physics_fn
+    # LOUDLY (covers both the mesh=None and the sharded paths below).
+    if physics_fn is not None:
+        from legoesm.timestepping.integration import (
+            refuse_unthreaded_stateful_physics)
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None,
+            where="atm lat-band SPMD step (stateful PhysicsState carry not yet "
+                  "SPMD-routed)")
+
     if mesh is None:                       # single-device: plain C-grid step
-        return lambda c_state, dt: model._step_cgrid(c_state, dt)[0]
+        return lambda c_state, dt: model._step_cgrid(
+            c_state, dt, physics_fn=physics_fn)[0]
 
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
@@ -259,6 +288,7 @@ def make_sharded_atm_latlon_step(model, mesh):
         state_band = state_local._replace(v=v_full)
         out, _ = model._step_cgrid_impl(
             state_band, dt_closure[0],
+            physics_fn=physics_fn, phys_state=None,
             grid=band_geom, sigma_coord=model.sigma_coord,
             polar_mask=pmask, polar_mask_v=pmaskv,
             pole_v_bc_masks=spmd_pole_end_masks(),
@@ -291,24 +321,30 @@ def make_sharded_atm_latlon_step(model, mesh):
     return sharded_step
 
 
-def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps):
+def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
+                                physics_fn=None, phys_state=None):
     """Run ``n_steps`` of the lat-band-SPMD C-grid hydrostatic step from a
     cell-centered ``HydrostaticState``, returning a ``HydrostaticState``.
 
     The Stage-7 driver seam: it bridges the cell-centered driver/output/restart
     contract to the sharded C-grid step. Convert+shard ONCE on entry, run the
     whole ``n_steps`` purely in the sharded C-grid layout, gather+convert ONCE on
-    exit. This MATCHES the serial ``for _ in range(n): hs = model.step(hs, dt)``
-    loop, which — via the model's ``id()``-keyed ``_cgrid_cache`` — likewise
-    stays in the C-grid layout across the loop and only converts cell<->face at
-    the segment boundaries. So the (lossy) cell->face->cell round-trip happens
-    ONCE on both paths, not per step, and the two trajectories reduce to the
-    Stage-5 C-grid equivalence (tendency bit-exact; the limited-FV-PPM cut
-    truncation bounded).
+    exit. This MATCHES the serial ``for _ in range(n): hs = model.step(hs, dt,
+    physics_fn=physics_fn)`` loop, which — via the model's ``id()``-keyed
+    ``_cgrid_cache`` — likewise stays in the C-grid layout across the loop and
+    only converts cell<->face at the segment boundaries. So the (lossy)
+    cell->face->cell round-trip happens ONCE on both paths, not per step, and the
+    two trajectories reduce to the Stage-5 C-grid equivalence (tendency bit-exact
+    for dynamics + column-local physics; the limited-FV-PPM cut truncation
+    bounded).
 
-    DYNAMICS ONLY: ``make_sharded_atm_latlon_step`` does not yet thread
-    ``physics_fn`` (a follow-up — column-local physics is shard-safe, but global
-    reductions must be psum-routed). ``mesh=None`` runs the single-device step.
+    ``physics_fn`` (optional): a STATELESS, COLUMN-LOCAL physics closure (e.g.
+    Held-Suarez / any per-column parameterization). Evaluated per RK stage on the
+    band geometry; decomposition-invariant with no collectives. ``mesh=None``
+    runs the single-device step. STATEFUL physics (a ``PhysicsState`` carry) is
+    not yet SPMD-routed (see :func:`make_sharded_atm_latlon_step`) -> a non-None
+    ``phys_state`` raises ``NotImplementedError`` rather than silently
+    mis-sharding the flattened ``(ncol,)`` carry.
 
     Parameters
     ----------
@@ -317,6 +353,8 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps):
     hs_init : HydrostaticState        cell-centered, Field-wrapped.
     dt : float
     n_steps : int
+    physics_fn : callable | None      stateless column-local physics.
+    phys_state : None                 stateful carry is not yet SPMD-routed.
 
     Returns
     -------
@@ -324,8 +362,92 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps):
     """
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
-    step = make_sharded_atm_latlon_step(model, mesh)
+    if phys_state is not None:
+        raise NotImplementedError(
+            "atm lat-band SPMD: a stateful physics carry (PhysicsState) is not "
+            "yet SPMD-routed — its flattened (ncol=n_lat*n_lon,) layout needs a "
+            "lat-major reshape-aware shard and stochastic schemes need a "
+            "global-column-indexed PRNG split. Pass a stateless physics_fn "
+            "(phys_state=None), or run dynamics-only.")
+    step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
     c_state = shard_hydrostatic_to_atm_latlon(hs_init, model.grid, mesh)
     for _ in range(n_steps):
         c_state = step(c_state, dt)
     return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+
+
+def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
+                        segment_steps=None, physics_fn=None, on_segment=None):
+    """Production lat-band-SPMD run driver: integrate ``n_steps`` of the C-grid
+    hydrostatic atm in SEGMENTS, returning ``(hs_final, status)``.
+
+    Each segment runs ``run_atm_latlon_spmd_segment`` (shard once -> sharded
+    steps -> gather once), so a cell-centered ``HydrostaticState`` is available
+    at every segment boundary for output / coupling (the ``on_segment(hs,
+    step_done)`` callback) WITHOUT gathering every step. A NaN/Inf in the
+    gathered surface pressure or temperature ends the run as
+    ``"BLOWUP at step N"`` (the host-side equivalent of the compiled driver's
+    finite-check), so a diverging run stops cleanly instead of integrating
+    garbage. ``segment_steps=None`` uses one segment of ``n_steps``.
+
+    DYNAMICS ONLY or STATELESS ``physics_fn`` (Held-Suarez / per-column
+    parameterizations); a stateful ``PhysicsState`` carry is not yet SPMD-routed
+    (see :func:`run_atm_latlon_spmd_segment`). ``mesh=None`` runs single-device.
+
+    This is the run-loop the production driver dispatches to for a single-process
+    multi-device lat-lon grid; it composes only the Stage-5/7-validated step +
+    bridge, so it adds no new SPMD-correctness surface.
+
+    The integration STAYS in the sharded C-grid layout for the WHOLE run
+    (convert+shard ONCE on entry, convert+gather ONCE on exit). The per-segment
+    gather is an OUTPUT-ONLY copy that is NOT fed back into the next segment — so
+    the (lossy) cell<->face re-projection happens only at the run boundaries, NOT
+    at every segment, and the trajectory is segmentation-invariant + matches the
+    serial ``model.step`` loop (whose ``_cgrid_cache`` likewise stays C-grid).
+
+    Parameters
+    ----------
+    model : CGridLatLonPrimitiveEquationModel
+    mesh : jax.sharding.Mesh | None
+    hs_init : HydrostaticState
+    dt : float
+    n_steps : int                     total steps to integrate.
+    segment_steps : int | None        steps per gathered segment (output cadence).
+    physics_fn : callable | None      stateless column-local physics.
+    on_segment : callable | None      ``on_segment(hs_global, step_done)`` at each
+                                      segment boundary (post-gather, for I/O); the
+                                      gathered state is a COPY, not fed back.
+
+    Returns
+    -------
+    (HydrostaticState, str)           final state + ``"COMPLETED"`` / ``"BLOWUP
+                                      at step N"``.
+    """
+    import jax.numpy as jnp
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    seg = n_steps if segment_steps is None else int(segment_steps)
+    if seg < 1:
+        raise ValueError(f"segment_steps must be >= 1, got {segment_steps}")
+
+    step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
+    # Convert + shard ONCE; the run stays in the sharded C-grid layout.
+    c_state = shard_hydrostatic_to_atm_latlon(hs_init, model.grid, mesh)
+    done = 0
+    status = "COMPLETED"
+    while done < n_steps:
+        this = min(seg, n_steps - done)
+        for _ in range(this):
+            c_state = step(c_state, dt)
+        done += this
+        # Gather a cell-centered COPY for output / blowup-check ONLY — the
+        # integration continues from c_state (sharded C-grid), so the lossy
+        # cell<->face round-trip is NOT fed back into the dynamics.
+        hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+        finite = bool(jnp.isfinite(hs_out.p_s.data).all()
+                      & jnp.isfinite(hs_out.T.data).all())
+        if not finite:
+            return hs_out, f"BLOWUP at step {done}"
+        if on_segment is not None:
+            on_segment(hs_out, done)
+    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh), status

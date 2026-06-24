@@ -379,3 +379,160 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
         f"SPMD u is bit-identical to serial ({u_diff:.2e}) — the FV-PPM cut "
         f"truncation is absent, so the band decomposition did not actually run "
         f"(sharding collapsed to single-device); this gate would be vacuous.")
+
+
+# ==============================================================================
+# physics_fn threading — a STATELESS, COLUMN-LOCAL physics (Held-Suarez) must
+# thread through the SPMD step and match the serial model.step(physics_fn) loop.
+# The band grid is routed into _call_physics so the lat-dependent forcing sees
+# each band's latitudes; column-local physics adds no cross-band coupling.
+# ==============================================================================
+
+def test_run_atm_latlon_spmd_segment_rejects_stateful_physics():
+    """Dispatch-hardening: a non-None phys_state (stateful PhysicsState carry) is
+    not yet SPMD-routed (flattened (ncol,) layout + stochastic PRNG split) ->
+    must raise, never silently mis-shard."""
+    model, c_state = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, c_state)
+    with pytest.raises(NotImplementedError, match="stateful physics carry"):
+        run_atm_latlon_spmd_segment(
+            model, None, hs0, 100.0, 1, phys_state=object())
+
+
+def test_run_atm_latlon_spmd_segment_rejects_tagged_stateful_physics_fn():
+    """Dispatch-hardening (codex): a STATEFUL (``_requires_phys_state``-tagged)
+    physics_fn with NO carry must raise — the SPMD body calls _step_cgrid(_impl)
+    directly, bypassing model.step()'s refuse_unthreaded_stateful_physics guard,
+    so without this it would silently reseed the carry every step (#405/#413).
+    Covers the mesh=None path; make_sharded_atm_latlon_step guards both."""
+    model, c_state = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, c_state)
+
+    def _fake_stateful_physics(hs, grid, sigma):  # never actually called
+        raise AssertionError("guard should fire before evaluation")
+    _fake_stateful_physics._requires_phys_state = True
+
+    with pytest.raises(NotImplementedError, match="stateful physics_fn"):
+        run_atm_latlon_spmd_segment(
+            model, None, hs0, 100.0, 1, physics_fn=_fake_stateful_physics)
+
+
+def test_run_atm_latlon_spmd_segment_physics_matches_serial():
+    """physics_fn gate: Held-Suarez (stateless, column-local) threads through the
+    SPMD segment and matches the serial model.step(hs, physics_fn=...) loop at
+    the Stage-5 integrated bound. Non-vacuity: physics must actually change the
+    trajectory vs dynamics-only."""
+    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    mesh = _mesh()
+    serial, c_state = _model_and_state(use_polar_filter=False)
+    spmd_model, _ = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(serial, c_state)
+    dt, n_steps = 100.0, 3
+    phys = held_suarez_forcing_latlon
+
+    hs_s = hs0
+    for _ in range(n_steps):
+        hs_s = serial.step(hs_s, dt, physics_fn=phys)
+
+    hs_b = run_atm_latlon_spmd_segment(
+        spmd_model, mesh, hs0, dt, n_steps, physics_fn=phys)
+
+    # Non-vacuity: the physics genuinely altered the trajectory (vs dynamics-only)
+    # — guards against physics_fn being silently dropped under shard_map.
+    hs_dyn = run_atm_latlon_spmd_segment(spmd_model, mesh, hs0, dt, n_steps)
+    phys_effect = float(np.max(np.abs(
+        np.asarray(hs_b.T.data) - np.asarray(hs_dyn.T.data))))
+    assert phys_effect > 1e-6, (
+        f"Held-Suarez physics did not change the SPMD trajectory "
+        f"({phys_effect:.2e}) — physics_fn was not applied under shard_map.")
+
+    for field in ("u", "v", "T", "p_s"):
+        a = np.asarray(getattr(hs_b, field).data)
+        b = np.asarray(getattr(hs_s, field).data)
+        np.testing.assert_allclose(
+            a, b, rtol=1e-6, atol=1e-9,
+            err_msg=(
+                f"SPMD Held-Suarez segment diverged from the serial "
+                f"model.step(physics_fn) loop in '{field}' beyond the FV-PPM "
+                f"cut-truncation bound — band physics coupling bug."))
+
+
+# ==============================================================================
+# run_atm_latlon_spmd — the production multi-segment run driver. Stays in the
+# sharded C-grid layout for the whole run (gather is an output-only side copy),
+# so it is segmentation-invariant and matches the serial model.step loop.
+# ==============================================================================
+
+def test_run_atm_latlon_spmd_rejects_bad_segment_steps():
+    """Dispatch-hardening: segment_steps < 1 must raise, never silently no-op."""
+    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        run_atm_latlon_spmd)
+    model, c_state = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, c_state)
+    with pytest.raises(ValueError, match="segment_steps"):
+        run_atm_latlon_spmd(model, None, hs0, 100.0, 4, segment_steps=0)
+
+
+def test_run_atm_latlon_spmd_blowup_detection():
+    """A NaN-injecting (stateless) physics_fn must end the run as 'BLOWUP at
+    step N', not integrate garbage. mesh=None keeps it cheap."""
+    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        run_atm_latlon_spmd)
+    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    model, c_state = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(model, c_state)
+
+    def _nan_physics(hs, grid, sigma):
+        phys = held_suarez_forcing_latlon(hs, grid, sigma)
+        nan = jnp.full_like(phys.dT_dt.data, jnp.nan)
+        return phys._replace(dT_dt=phys.dT_dt.replace(data=nan))
+
+    hs_out, status = run_atm_latlon_spmd(
+        model, None, hs0, 100.0, 3, segment_steps=1, physics_fn=_nan_physics)
+    assert status.startswith("BLOWUP at step"), f"expected blowup, got {status!r}"
+
+
+def test_run_atm_latlon_spmd_segmentation_invariant_and_matches_serial():
+    """The production runner stays C-grid across the whole run, so segment_steps
+    is OUTPUT cadence only: a 2-step-segment run is BIT-IDENTICAL to a 4-step
+    single segment, and both match the serial model.step loop at the Stage-5
+    bound. The on_segment callback fires once per segment with the GLOBAL state."""
+    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        run_atm_latlon_spmd)
+    mesh = _mesh()
+    serial, c_state = _model_and_state(use_polar_filter=False)
+    spmd_model, _ = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(serial, c_state)
+    dt, n_steps = 100.0, 4
+
+    seg_calls = []
+    hs_seg2, st2 = run_atm_latlon_spmd(
+        spmd_model, mesh, hs0, dt, n_steps, segment_steps=2,
+        on_segment=lambda hs, k: seg_calls.append((k, np.asarray(hs.T.data).shape)))
+    hs_seg4, st4 = run_atm_latlon_spmd(
+        spmd_model, mesh, hs0, dt, n_steps, segment_steps=4)
+    assert st2 == "COMPLETED" and st4 == "COMPLETED"
+
+    # Callback fired once per 2-step segment (steps 2 and 4) with GLOBAL shape.
+    assert [k for k, _ in seg_calls] == [2, 4], f"callback steps {seg_calls}"
+    assert all(shape == (N_LAT, N_LON, NLEV) for _, shape in seg_calls)
+
+    # Segmentation-invariant: gather is output-only, not fed back -> bit-identical.
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(hs_seg2, field).data),
+            np.asarray(getattr(hs_seg4, field).data),
+            rtol=1e-12, atol=1e-13,
+            err_msg=f"segment_steps changed the '{field}' trajectory — the "
+                    f"output gather is being fed back into the dynamics.")
+
+    # Matches the serial model.step loop at the Stage-5 integrated bound.
+    hs_s = hs0
+    for _ in range(n_steps):
+        hs_s = serial.step(hs_s, dt)
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(hs_seg4, field).data),
+            np.asarray(getattr(hs_s, field).data),
+            rtol=1e-6, atol=1e-9,
+            err_msg=f"production runner diverged from serial in '{field}'.")

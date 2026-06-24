@@ -804,7 +804,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
     # Internal C-grid stepping (raw-array CGridLatLonHydrostaticState)
     # ------------------------------------------------------------------
 
-    def _call_physics(self, physics_fn, hs, phys_state=None):
+    def _call_physics(self, physics_fn, hs, phys_state=None, *,
+                      grid=None, sigma_coord=None):
         """Call physics_fn with the correct contract and unwrap tuples.
 
         Supports both calling conventions used in the repo:
@@ -816,23 +817,35 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         (issue #413); a 3-arg-only physics_fn then fails loudly rather
         than silently dropping the carry.
 
+        ``grid`` / ``sigma_coord`` default to ``self.*`` (serial). The lat-band
+        SPMD body passes the BAND geometry so a lat-dependent physics (e.g.
+        Held-Suarez ``T_eq``/``k_T``) sees the band's latitudes, not the global
+        ones (a shape/value mismatch otherwise). Column-local physics is
+        otherwise decomposition-invariant.
+
         Also unwraps ``(tendencies, aux)`` tuple returns from
         PhysicsModuleProtocol-style callables.
         """
-        result = self._call_physics_raw(physics_fn, hs, phys_state)
+        result = self._call_physics_raw(
+            physics_fn, hs, phys_state, grid=grid, sigma_coord=sigma_coord)
         if type(result) is tuple:
             return result[0]
         return result
 
-    def _call_physics_raw(self, physics_fn, hs, phys_state=None):
+    def _call_physics_raw(self, physics_fn, hs, phys_state=None, *,
+                          grid=None, sigma_coord=None):
         """As :meth:`_call_physics` but WITHOUT unwrapping the result —
-        the carry-out evaluation needs ``result[1]``."""
+        the carry-out evaluation needs ``result[1]``. ``grid`` / ``sigma_coord``
+        default to ``self.*`` (serial / single-rank); the SPMD body passes the
+        BAND grid so per-band physics is correct."""
+        _grid = self.grid if grid is None else grid
+        _sigma = self.sigma_coord if sigma_coord is None else sigma_coord
         if phys_state is not None:
-            return physics_fn(hs, self.grid, self.sigma_coord, phys_state)
+            return physics_fn(hs, _grid, _sigma, phys_state)
         sig = inspect.signature(physics_fn)
         n_params = len(sig.parameters)
         if n_params >= 3:
-            return physics_fn(hs, self.grid, self.sigma_coord)
+            return physics_fn(hs, _grid, _sigma)
         return physics_fn(hs)
 
     @partial(jax.jit, static_argnums=(0, 4))
@@ -901,7 +914,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # --- Physics coupling (inside RK stage) ---
             if physics_fn is not None:
                 hs = cgrid_to_hydrostatic(s, grid)
-                phys_tend = self._call_physics(physics_fn, hs, phys_state)
+                phys_tend = self._call_physics(
+                    physics_fn, hs, phys_state,
+                    grid=grid, sigma_coord=sigma_coord)
 
                 dT = dT + phys_tend.dT_dt.data
                 dps = dps + phys_tend.dp_s_dt.data
@@ -1035,7 +1050,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         if physics_fn is not None and phys_state is not None:
             _pr = self._call_physics_raw(
                 physics_fn, cgrid_to_hydrostatic(state_out, grid),
-                phys_state,
+                phys_state, grid=grid, sigma_coord=sigma_coord,
             )
             if type(_pr) is tuple and len(_pr) > 1:
                 phys_state_out = _pr[1]
