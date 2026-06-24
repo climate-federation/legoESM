@@ -2611,7 +2611,16 @@ def main() -> int:
     # per rank (replicated dynamics, not real scaling), lat-lon raises
     # NotImplementedError, spectral has no MPI path.  This catches all
     # three with one branch and one consistent error message.
-    if world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS:
+    #
+    # EXCEPTION: ``--cs-mpi-scatter`` on cubed-sphere IS genuine face
+    # decomposition (each rank owns a subset of the 6 faces; cross-face
+    # halos exchange via mpi4jax), so it is allowed through here exactly
+    # like the inner guard's ``_cube_scatter_ok`` carve-out.  Without
+    # this the early guard aborts the run before the scatter path ever
+    # executes — the two guards were inconsistent.
+    _cube_scatter_ok = grid_type == "cubed-sphere" and args.cs_mpi_scatter
+    if (world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS
+            and not _cube_scatter_ok):
         if is_rank0:
             print(
                 f"ERROR: {grid_type} MPI multi-rank scaling is not "
