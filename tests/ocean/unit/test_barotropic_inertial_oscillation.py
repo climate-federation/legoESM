@@ -81,7 +81,11 @@ def _fp64():
     set_policy(prev)
 
 
-def _build():
+def _build(flat=False):
+    # FLAT-y masks are built at rest-state construction (before the model), so set
+    # the global here too; the config field then keeps the stepping operators flat.
+    from legoesm.grids.halo_latlon import set_meridionally_flat
+    set_meridionally_flat(flat)
     grid = create_beta_plane_cgrid_geometry(
         _NY, _NX, dx_m=_DX, dy_m=_DX, f0=_F0, beta=0.0,
         y_origin_m=-_NY * _DX / 2, x_origin_m=-_NX * _DX / 2,
@@ -92,7 +96,8 @@ def _build():
         g=constants.g, rho_0=1000.0, A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
         momentum_advection="flux_form",
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
-        bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
+        bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split",
+        meridionally_flat=flat)
     wall = jnp.ones((_NY, _NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     Hb = jnp.full((_NY, _NX), _H, dtype=wall.dtype)
     state = rest_state_latlon_cgrid_ocean(
@@ -116,9 +121,8 @@ def test_meridionally_flat_inertial_oscillation():
     full inertial period. Default-OFF bit-identity is held by the geostrophic test."""
     from legoesm.grids.halo_latlon import set_meridionally_flat
 
-    set_meridionally_flat(True)
     try:
-        grid, z, state, model = _build()
+        grid, z, state, model = _build(flat=True)  # config-driven Flat-y
         u = np.full((_NY, _NX + 1, _NZ), _U0)
         state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
         step = jax.jit(lambda s: model.step(s, _DT, surface_forcing=None))

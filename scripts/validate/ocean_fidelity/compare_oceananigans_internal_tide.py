@@ -106,7 +106,10 @@ def build_setup():
         # at the partial-cell staircase, not the momentum scheme.
         momentum_advection=os.environ.get("MOM_ADV", "flux_form"),
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
-        bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split")
+        bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split",
+        # Oceananigans `Flat`-y topology (record on the config; the global was set
+        # above before the rest state so the face masks are flat-aware too).
+        meridionally_flat=os.environ.get("FLAT_Y", "1") == "1")
     cfg = cfg._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0)
     _pgf = os.environ.get("PGF_SCHEME")            # "adcroft" (default) | "smc03"
     if _pgf:

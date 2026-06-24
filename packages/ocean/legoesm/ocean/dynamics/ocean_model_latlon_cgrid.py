@@ -707,6 +707,16 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
+        # operators backend global (same pattern as the halo backend).  Set
+        # UNCONDITIONALLY from config so building a non-flat model resets the
+        # global (no cross-model leak); default False ⇒ bit-identical.  NOTE: the
+        # face masks are built at STATE construction (before the model), so an
+        # experiment that wants flat-y masks must ALSO set
+        # ``halo_latlon.set_meridionally_flat(True)`` before building the rest
+        # state; this push guarantees the stepping operators honour the config.
+        from legoesm.grids.halo_latlon import set_meridionally_flat
+        set_meridionally_flat(bool(getattr(self.config, "meridionally_flat", False)))
         # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.

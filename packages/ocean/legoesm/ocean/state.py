@@ -1547,3 +1547,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
     implicit_vmix_dzw_slot: bool = False
+    # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
+    # When True, every meridional DIFFERENCE operator returns 0 — the faithful
+    # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension
+    # (`δyᵃᶜᵃ(grid::Flat)=zero`).  v stays prognostic (so the Coriolis f×u→v
+    # rotation works) but no ∂/∂y ever exists, so (a) there is NO meridional
+    # pressure gradient → no closed-basin geostrophic locking of the barotropic
+    # mode, and (b) NO 2Δy mode can form.  This is the faithful 2-D x–z setting the
+    # Oceananigans internal_tide oracle uses; required to reproduce it (#576).
+    # ``LatLonCGridOceanModel`` pushes this to the process-global
+    # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
+    # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
+    meridionally_flat: bool = False
