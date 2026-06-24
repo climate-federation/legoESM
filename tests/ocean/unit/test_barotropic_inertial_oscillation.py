@@ -143,6 +143,33 @@ def test_meridionally_flat_inertial_oscillation():
     assert u_final_max < 2.0 * _U0, f"flat-y run not bounded (max|u|={u_final_max:.3f})"
 
 
+def test_meridionally_flat_rejects_ungated_meridional_operators():
+    """`meridionally_flat=True` is wired only into the flat-aware meridional
+    operators (PGF/KE-grad/tracer-advection/Laplacian/vector-Laplacian +
+    flux-form momentum advection). Operators that own their own meridional
+    stencil (flux-divergence viscosity, GM/Redi, lateral friction) are NOT
+    flat-aware, so combining them must be REJECTED at construction (else the
+    model is silently Flat for some terms, 3-D for others)."""
+    from legoesm.grids.halo_latlon import set_meridionally_flat
+    set_meridionally_flat(False)
+    try:
+        # flux-divergence viscosity with A_h>0 + flat → reject
+        with __import__("pytest").raises(ValueError, match="meridionally_flat"):
+            grid = create_beta_plane_cgrid_geometry(
+                _NY, _NX, dx_m=_DX, dy_m=_DX, f0=_F0, beta=0.0,
+                y_origin_m=-_NY * _DX / 2, x_origin_m=-_NX * _DX / 2,
+                cartesian_pseudo_lat=True)
+            z = create_ocean_z_star(n_levels=_NZ, H_max=_H)
+            cfg = oceananigans_canonical_ocean_config(
+                eos_linear=LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0),
+                g=constants.g, rho_0=1000.0, A_h=100.0, K_h=0.0,
+                momentum_advection="flux_form", barotropic_solver="implicit_cn",
+                coriolis_scheme="explicit_ab2", meridionally_flat=True)
+            LatLonCGridOceanModel(grid, z, cfg)
+    finally:
+        set_meridionally_flat(False)
+
+
 def test_closed_basin_geostrophic_adjustment():
     """A uniform barotropic u in the meridionally-CLOSED basin geostrophically
     adjusts: u stays ≈ U0 and a meridional η tilt builds to ∂η/∂y → −f·U0/g (the

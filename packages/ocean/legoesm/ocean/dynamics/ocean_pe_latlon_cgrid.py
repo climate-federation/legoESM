@@ -3250,6 +3250,10 @@ def _bc_horizontal_momentum_advection_flux_form(
     u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
     Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
     net_merid_u = Fy_vu[1:, :, :] - Fy_vu[:-1, :, :]            # (n_lat,n_lon+1,nlev)
+    # Oceananigans `Flat`-y: δy(meridional u-momentum flux) ≡ 0.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid_u = jnp.zeros_like(net_merid_u)
 
     # u-cell area at u-faces (avg of adjacent cell areas, periodic).
     a_uc = 0.5 * (area[:, :, 0] + jnp.roll(area[:, :, 0], 1, axis=1))   # (n_lat,n_lon)
@@ -3270,6 +3274,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
     zero_lon = jnp.zeros_like(v[:1, :, :])
     net_merid_v = jnp.concatenate([zero_lon, net_merid_v_int, zero_lon], axis=0)
+    # Oceananigans `Flat`-y: δy(meridional v-momentum flux) ≡ 0.
+    if get_meridionally_flat():
+        net_merid_v = jnp.zeros_like(net_merid_v)
 
     # x-flux at vertices (lon-faces). Use roll-based periodicity in lon (drop
     # the u wrap column) so the divergence telescopes EXACTLY regardless of

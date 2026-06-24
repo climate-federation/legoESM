@@ -708,13 +708,19 @@ class LatLonCGridOceanModel:
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
-        # operators backend global (same pattern as the halo backend).  Set
-        # UNCONDITIONALLY from config so building a non-flat model resets the
-        # global (no cross-model leak); default False ⇒ bit-identical.  NOTE: the
-        # face masks are built at STATE construction (before the model), so an
-        # experiment that wants flat-y masks must ALSO set
-        # ``halo_latlon.set_meridionally_flat(True)`` before building the rest
-        # state; this push guarantees the stepping operators honour the config.
+        # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
+        # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
+        # per process — constructing a second model with a different
+        # ``meridionally_flat`` flips the global for BOTH (the operators read it at
+        # trace time, so a model that recompiles after the flip silently bakes in
+        # the other model's setting).  The unconditional set keeps the global in
+        # sync with the MOST-RECENTLY-CONSTRUCTED model; for the normal single-model
+        # run this is correct, and default False ⇒ bit-identical.  NOTE: the face
+        # masks are built at STATE construction (before the model), so an experiment
+        # that wants flat-y masks must ALSO call ``set_meridionally_flat(True)``
+        # before building the rest state (partial-cell steps rebuild masks from
+        # ``z_coord.is_active`` and so honour the flag regardless; non-partial-cell
+        # paths consume the stored mask and need the pre-set).
         from legoesm.grids.halo_latlon import set_meridionally_flat
         set_meridionally_flat(bool(getattr(self.config, "meridionally_flat", False)))
         # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
@@ -917,6 +923,34 @@ class LatLonCGridOceanModel:
                 "via the top-level config.gm_redi; keep "
                 "physics.lateral_mixing.scheme='none'."
             )
+
+        # Meridionally-FLAT (Oceananigans `Flat`-y, ∂/∂y≡0) is wired ONLY into the
+        # operators built via gradient_y_cgrid / divergence_cgrid (PGF, KE-gradient,
+        # tracer advection, the scalar Laplacian, the vector-Laplacian viscosity)
+        # PLUS the flux-form momentum advection's meridional flux.  Operators that
+        # own their OWN meridional stencil are NOT flat-aware: the flux-divergence
+        # lateral viscosity, biharmonic, GM/Redi, and the lateral-friction schemes.
+        # Reject those combinations LOUDLY so a config is never silently Flat for
+        # some terms and 3-D for others (the 2-D x–z oracle has none of them).
+        if getattr(config, "meridionally_flat", False):
+            _ungated = []
+            if (config.A_h > 0.0 or config.B_h > 0.0) and \
+                    config.lateral_viscosity_operator == "flux_divergence":
+                _ungated.append(
+                    'A_h/B_h>0 with lateral_viscosity_operator="flux_divergence" '
+                    '(use "vector_laplacian", which IS flat-aware)')
+            if config.gm_redi is not None:
+                _ungated.append("gm_redi is not None")
+            if getattr(config, "lateral_friction_scheme", "none") != "none":
+                _ungated.append(
+                    f"lateral_friction_scheme={config.lateral_friction_scheme!r}")
+            if _ungated:
+                raise ValueError(
+                    "meridionally_flat=True (Oceananigans Flat-y, ∂/∂y≡0) is "
+                    "incompatible with meridional operators that are not flat-aware: "
+                    + "; ".join(_ungated) + ". These keep live ∂/∂y terms, making "
+                    "the model neither the 2-D x–z oracle nor a consistent 3-D run. "
+                    "Disable them or use a flat-aware alternative.")
 
         if config.n_barotropic_substeps < 1:
             raise ValueError(
