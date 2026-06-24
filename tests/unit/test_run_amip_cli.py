@@ -46,6 +46,20 @@ def test_build_config_includes_joint_physics_parameterization_flags():
     assert cfg.physics_parameterization_seed == 7
 
 
+def test_enable_latlon_spmd_flag_flows_to_config():
+    """--enable-latlon-spmd round-trips into ExperimentConfig (default off)."""
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--time-var", "month",
+            "--lat-var", "ylat", "--lon-var", "xlon"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_off.enable_latlon_spmd is False
+
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--enable-latlon-spmd"]), parser))
+    assert cfg_on.enable_latlon_spmd is True
+
+
 def test_joint_parameterization_requires_mass_flux_and_louis():
     parser = build_arg_parser()
     args = parser.parse_args([

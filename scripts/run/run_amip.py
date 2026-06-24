@@ -476,6 +476,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Distributed / MPI
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
+    parser.add_argument(
+        "--enable-latlon-spmd", action="store_true", default=False,
+        help=("Single-process multi-device lat-BAND SPMD for the lat-lon C-grid "
+              "dycore (A1). Requires --grid-type latlon, n_lat %% n_devices == 0, "
+              "and dynamics-only or --held-suarez physics (stateful physics not "
+              "yet SPMD-routed). Distinct from --distributed (MPI)."))
     parser.add_argument("--ensemble-size", type=int, default=1)
     # Issue #273 follow-up: opt-in horizontal-column sharding for the
     # per-column radiation kernel.  Decouples per-column physics
@@ -623,6 +629,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         held_suarez_forcing=args.held_suarez_forcing,
+        enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,
         physics_parameterization_checkpoint=args.physics_parameterization_checkpoint,
         physics_parameterization_stats=args.physics_parameterization_stats,
