@@ -125,6 +125,15 @@ class CoupledConfig(NamedTuple):
     # effect on radiation is otherwise silently dropped.
     couple_surface_radiation: bool = False
 
+    # Warm-start the land soil at the atmosphere's lat-structured near-surface
+    # air temperature (t=0) instead of the uniform 280 K default.  The uniform
+    # default makes tropical land soil start ~18 K too cold, and the (slow)
+    # multilayer soil takes months to spin up — dragging the global near-surface
+    # air temperature down through the long transient.  Default False keeps
+    # existing coupled runs byte-identical; recommended ON for a faster, more
+    # realistic land spin-up.
+    warm_start_soil: bool = False
+
 
 # ============================================================================
 # Preset factories

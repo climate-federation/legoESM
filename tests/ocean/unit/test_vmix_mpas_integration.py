@@ -1,0 +1,195 @@
+"""Direct unit tests for the MPAS Voronoi-mesh vertical-mixing adapters.
+
+``ocean/physics/vertical_mixing/mpas_integration.py`` bridges KPP onto the MPAS
+C-grid (T/S at cells, edge-normal u at edges).  These tests exercise its public
+factories and the two private kernels directly on a small ``subdivision_level=1``
+Voronoi mesh (42 cells / 120 edges) plus tiny synthetic arrays:
+
+  * ``make_kpp_physics_mpas`` — returns ``(du_dt_edge, dT_dt_cell, dS_dt_cell)``
+    with the right shapes, all finite, land/sub-seafloor-masked.
+  * ``make_kpp_profiles_mpas`` — returns ``(A_v_cells, K_v_cells)`` at half
+    levels, both non-negative and finite (the implicit-solver inputs).
+  * ``_vertical_diffusion_edge_partial`` — second-order vertical-diffusion
+    stencil with per-edge thicknesses: zero on a uniform field, volume-
+    conserving on a sheared field, zero on a single level.
+  * ``_mpas_surface_buoyancy_flux`` — the MPAS surface-forcing convention
+    (real salt feeds buoyancy only); ``None`` when no forcing channel is present.
+
+The KPP boundary-layer numerics themselves are validated by the KPP suite; here
+we pin the MPAS *adapter* contract (shapes, masking, finiteness, sign).
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import pytest
+
+from legoesm.grids.voronoi import create_voronoi_mesh
+from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+from legoesm.ocean.physics.vertical_mixing.config import KPPConfig, VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+    _mpas_surface_buoyancy_flux,
+    _vertical_diffusion_edge_partial,
+    make_kpp_physics_mpas,
+    make_kpp_profiles_mpas,
+)
+from legoesm.ocean.vertical import create_ocean_z_star
+
+
+@pytest.fixture(autouse=True)
+def _x64():
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
+@pytest.fixture(scope="module")
+def mesh():
+    return create_voronoi_mesh(subdivision_level=1)
+
+
+@pytest.fixture(scope="module")
+def z_coord():
+    return create_ocean_z_star(n_levels=6, H_max=4000.0)
+
+
+@pytest.fixture(scope="module")
+def state(mesh, z_coord):
+    return rest_state_mpas_ocean(
+        mesh, z_coord,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0, land_lat_threshold=85.0,
+    )
+
+
+@pytest.fixture
+def kpp_cfg():
+    return VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
+
+
+class TestKPPPhysicsMPAS:
+    def test_shapes_and_finite(self, mesh, z_coord, state, kpp_cfg):
+        fn = make_kpp_physics_mpas(kpp_cfg)
+        du_dt_edge, dT_dt, dS_dt = fn(state, mesh, z_coord, None)
+        nCells, nlev = state.T.data.shape
+        nEdges = state.u.data.shape[0]
+        assert du_dt_edge.shape == (nEdges, nlev)
+        assert dT_dt.shape == (nCells, nlev)
+        assert dS_dt.shape == (nCells, nlev)
+        assert bool(jnp.all(jnp.isfinite(du_dt_edge)))
+        assert bool(jnp.all(jnp.isfinite(dT_dt)))
+        assert bool(jnp.all(jnp.isfinite(dS_dt)))
+
+    def test_land_cells_zero_tracer_tendency(self, mesh, z_coord, state, kpp_cfg):
+        """KPP tracer tendencies must be exactly zero on land cells."""
+        fn = make_kpp_physics_mpas(kpp_cfg)
+        _, dT_dt, dS_dt = fn(state, mesh, z_coord, None)
+        land = state.land_mask.data < 0.5
+        if bool(jnp.any(land)):
+            assert jnp.allclose(dT_dt[land], 0.0)
+            assert jnp.allclose(dS_dt[land], 0.0)
+
+    def test_callable_factory(self, kpp_cfg):
+        assert callable(make_kpp_physics_mpas(kpp_cfg))
+
+
+class TestKPPProfilesMPAS:
+    def test_shapes_nonneg_finite(self, mesh, z_coord, state, kpp_cfg):
+        pf = make_kpp_profiles_mpas(kpp_cfg)
+        A_v, K_v = pf(state, mesh, z_coord, None)
+        nCells, nlev = state.T.data.shape
+        assert A_v.shape == (nCells, nlev - 1)   # half levels
+        assert K_v.shape == (nCells, nlev - 1)
+        # Diffusivity / viscosity inputs to the implicit solve are >= 0, finite.
+        assert bool(jnp.all(K_v >= 0.0))
+        assert bool(jnp.all(A_v >= 0.0))
+        assert bool(jnp.all(jnp.isfinite(K_v)))
+        assert bool(jnp.all(jnp.isfinite(A_v)))
+
+    def test_land_cells_zeroed(self, mesh, z_coord, state, kpp_cfg):
+        pf = make_kpp_profiles_mpas(kpp_cfg)
+        A_v, K_v = pf(state, mesh, z_coord, None)
+        land = state.land_mask.data < 0.5
+        if bool(jnp.any(land)):
+            assert jnp.allclose(A_v[land], 0.0)
+            assert jnp.allclose(K_v[land], 0.0)
+
+
+class TestEdgePartialDiffusion:
+    def test_uniform_field_zero_tendency(self):
+        nE, nlev = 4, 5
+        h_e = jnp.full((nE, nlev), 100.0)
+        K = jnp.full((nE, nlev - 1), 1e-3)
+        field = jnp.full((nE, nlev), 0.5)
+        tend = _vertical_diffusion_edge_partial(field, h_e, K)
+        assert tend.shape == (nE, nlev)
+        assert jnp.allclose(tend, 0.0)
+
+    def test_sheared_field_conserves_column_momentum(self):
+        nE, nlev = 4, 5
+        h_e = jnp.full((nE, nlev), 100.0)
+        K = jnp.full((nE, nlev - 1), 1e-3)
+        sheared = jnp.broadcast_to(jnp.linspace(1.0, -1.0, nlev), (nE, nlev))
+        tend = _vertical_diffusion_edge_partial(sheared, h_e, K)
+        # Zero-flux BC => volume-integrated tendency is ~0.
+        col = jnp.sum(tend * h_e, axis=-1)
+        assert jnp.allclose(col, 0.0, atol=1e-12)
+        assert float(jnp.max(jnp.abs(tend))) > 0.0
+        # Diffusion damps the shear: top (largest u) gets a negative tendency.
+        assert float(tend[0, 0]) < 0.0
+
+    def test_single_level_returns_zeros(self):
+        h_e = jnp.full((3, 1), 100.0)
+        K = jnp.zeros((3, 0))
+        field = jnp.full((3, 1), 0.7)
+        tend = _vertical_diffusion_edge_partial(field, h_e, K)
+        assert tend.shape == (3, 1)
+        assert jnp.allclose(tend, 0.0)
+
+    def test_finite_with_zero_thickness_subseafloor(self):
+        """Sub-seafloor levels (h_e = 0) must stay finite (1 m floor)."""
+        nE, nlev = 3, 4
+        h_e = jnp.array([[100.0, 100.0, 0.0, 0.0]] * nE)
+        K = jnp.zeros((nE, nlev - 1)).at[:, 0].set(1e-3)
+        field = jnp.broadcast_to(jnp.linspace(1.0, 0.0, nlev), (nE, nlev))
+        tend = _vertical_diffusion_edge_partial(field, h_e, K)
+        assert bool(jnp.all(jnp.isfinite(tend)))
+
+
+class TestMPASSurfaceBuoyancyFlux:
+    def test_returns_none_when_no_forcing(self):
+        T3 = jnp.full((6, 4, 1), 20.0)
+        S3 = jnp.full((6, 4, 1), 35.0)
+        B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(None, None, None, T3, S3)
+        assert B_f is None
+        assert Q_sfc_T is None
+        assert Q_sfc_S is None
+
+    def test_heat_flux_drives_buoyancy(self):
+        """Surface cooling (q_net < 0) is destabilising -> B_f > 0."""
+        T3 = jnp.full((6, 4, 1), 20.0)
+        S3 = jnp.full((6, 4, 1), 35.0)
+        q_net = jnp.full((6, 4), -100.0)   # ocean losing heat
+        B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(q_net, None, None, T3, S3)
+        assert B_f is not None and B_f.shape == (6, 4)
+        assert bool(jnp.all(jnp.isfinite(B_f)))
+        assert float(jnp.min(B_f)) > 0.0       # cooling destabilises
+        assert Q_sfc_T is not None
+        # MPAS convention: real salt feeds buoyancy only, so a heat-only
+        # forcing leaves the non-local salinity flux absent.
+        assert Q_sfc_S is None
+
+    def test_real_salt_buoyancy_only_no_nonlocal_salt(self):
+        """Real salt_flux feeds B_f but NOT Q_sfc_S (real_salt_in_qs=False)."""
+        T3 = jnp.full((6, 4, 1), 20.0)
+        S3 = jnp.full((6, 4, 1), 35.0)
+        salt = jnp.full((6, 4), 1e-4)
+        B_f, _, Q_sfc_S = _mpas_surface_buoyancy_flux(None, None, salt, T3, S3)
+        assert B_f is not None and bool(jnp.all(jnp.isfinite(B_f)))
+        # Real salt is buoyancy-only: the non-local salinity flux is an
+        # explicit ZERO (not the freshwater term) so it injects no second
+        # real-salt contribution (no-double-count contract).
+        assert Q_sfc_S is not None
+        assert jnp.allclose(Q_sfc_S, 0.0)

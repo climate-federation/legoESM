@@ -3154,6 +3154,15 @@ def compute_face_masks_3d(
     # v-face i is between cell i-1 (south) and cell i (north).
     # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
+    # Meridionally-periodic (y-re-entrant) mode: boundary v-faces wrap (wet iff
+    # the wrap-adjacent cells are wet at that level), not walls. Default OFF =
+    # bit-identical. See compute_face_masks.
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
+        wrap = a[-1:] * a[0:1]
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
@@ -3343,6 +3352,7 @@ def density_jacobian_pgf_smc03_x(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at u-faces (S&M03 §4) — zonal direction.
 
@@ -3386,7 +3396,10 @@ def density_jacobian_pgf_smc03_x(
     """
     # Per-column geometry and slopes.
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # West-neighbour rolls (column j-1 at u-face j).
     rho_W = jnp.roll(rho_per_cell, 1, axis=1)
@@ -3436,6 +3449,7 @@ def density_jacobian_pgf_smc03_y(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at v-faces (S&M03 §4) — meridional direction.
 
@@ -3448,7 +3462,10 @@ def density_jacobian_pgf_smc03_y(
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # Cell-pad-first (PR357 Bug-2 pattern; see ``interp_to_v_points``): pad
     # the CELL columns so the v-face PGF at a partition cut is built from the
@@ -3912,6 +3929,16 @@ def compute_face_masks(
 
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
+    # Meridionally-periodic (y-re-entrant channel) mode: the south boundary
+    # v-face (between cell N-1 and cell 0, wrapping) and the identical north
+    # boundary v-face are WET when both wrap-adjacent cells are wet -- NOT walls.
+    # Default OFF -> the historical hard-walled N/S v-faces (bit-identical).
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
+        wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
     # The fold face is kept as a wall (zero) until a proper halo
     # exchange architecture (Option B) is implemented.  Opening the

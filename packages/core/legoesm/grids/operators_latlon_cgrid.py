@@ -572,10 +572,16 @@ def gradient_y_cgrid(
     # ends (== the historical south=0 / pole pad), and the fold overwrite
     # reproduces the old tripolar north row.
     from legoesm.grids.halo_latlon import (
+        get_meridionally_flat,
         pad_halo_latlon,
         pad_halo_latlon_3d,
         zero_polar_lat_ends,
     )
+    # Oceananigans `Flat`-y topology: δy ≡ 0 (no meridional gradient ever).
+    if get_meridionally_flat():
+        n_lat = f.shape[0]
+        out_shape = (n_lat + 1,) + f.shape[1:]
+        return jnp.zeros(out_shape, dtype=f.dtype)
     if f.ndim == 2:
         f_padded = pad_halo_latlon(f, halo=1)
         # Strip the lon halo — gradient_y only needs the lat halo.
@@ -752,6 +758,12 @@ def divergence_cgrid(
         else:
             net_merid = (v_north * fd[1:, :, jnp.newaxis]
                          - v_south * fd[:-1, :, jnp.newaxis])
+
+    # Oceananigans `Flat`-y topology: the meridional flux divergence is 0
+    # (δy(Ay·v) ≡ 0), so η responds only to the zonal transport divergence.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid = jnp.zeros_like(net_zonal)
 
     # Cell area
     area = grid.area  # (n_lat, n_lon)

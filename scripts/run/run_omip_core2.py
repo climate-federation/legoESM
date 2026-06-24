@@ -2284,7 +2284,8 @@ def main() -> int:
                    help="HORIZONTAL coastal-spread passes for the regridded "
                         "runoff (ocean-masked neighbour-average; Voronoi-topology "
                         "on MPAS, structured laplacian elsewhere). Default None = "
-                        "4 on MPAS (big rivers over-concentrate in ~4 IDW cells), "
+                        "8 on MPAS (big rivers over-concentrate in ~4 IDW cells; "
+                        "spread-passes sensitivity-tuned), "
                         "2 on lat-lon/cube. The area-conservative renorm keeps the "
                         "global total exact. Distinct from --runoff-depth-spread-m "
                         "(VERTICAL spread).")
@@ -2961,19 +2962,24 @@ def main() -> int:
     if args.runoff:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--runoff: not wired for the cube (parked grid).")
-        # Coastal-spread passes: MPAS now uses the Voronoi-topology smoother in
+        # Coastal-spread passes: MPAS uses the Voronoi-topology smoother in
         # load_runoff_monthly (cellsOnCell neighbour-average), so it gets the SAME
         # spreading the structured grids always had.  MPAS needs MORE passes than
         # lat-lon: the IDW k=4 regrid concentrates each river into ~4 Voronoi cells,
         # so un-spread the Amazon/Arctic over-freshen their mouths by -2 to -3 PSU
-        # (regional SSS-band diagnostic); a wider coastal band fixes it.  The
-        # area-conservative renorm keeps the global total exact regardless.
+        # (regional SSS-band diagnostic).  A spread-passes SENSITIVITY (ico6 day-90,
+        # SSS bias vs NEMO) is MONOTONE with no downside to the open Pacific/Southern
+        # Ocean: Amazon basin -1.04 (sp2) -> -0.70 (sp4) -> -0.335 (sp8); global SSS
+        # rmse 1.046 -> 1.01 -> 0.990.  8 still leaves the basin NEGATIVE (the real
+        # plume is preserved, not washed out); beyond ~8 the gain plateaus and risks
+        # over-diffusing the plume, so 8 is the default.  The area-conservative
+        # renorm keeps the global total exact regardless.
         if args.runoff_spread_passes is not None and int(args.runoff_spread_passes) < 0:
             raise SystemExit(
                 "--runoff-spread-passes must be >= 0 "
                 f"(got {args.runoff_spread_passes})")
         _spread = int(args.runoff_spread_passes) if args.runoff_spread_passes is not None \
-            else (4 if app_grid_type == "mpas" else 2)
+            else (8 if app_grid_type == "mpas" else 2)
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)

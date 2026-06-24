@@ -314,6 +314,46 @@ class TestTracerMassConservation:
         assert rel_drift_T < 1e-12, f"T mass drift = {rel_drift_T:.2e}"
         assert rel_drift_S < 1e-12, f"S mass drift = {rel_drift_S:.2e}"
 
+    def _mixing_cfg(self):
+        """K_v>0 + implicit vertical mixing — exercises the implicit tracer
+        solve. Its per-cell layer-thickness weighting must conserve the PHYSICAL
+        column heat sum(h_partial*T*area), not the dz_ref-weighted sum. All
+        other tendencies disabled + conservation fixer off, so the only thing
+        that can break sum(h*T) is the mixing's own thickness weighting."""
+        return LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn",
+            K_h=0.0, K_bih=0.0, A_h=0.0, B_h=0.0, C_smag=0.0,
+            bottom_drag_r=0.0,
+            K_v=1.0e-3, A_v=0.0,
+            implicit_vertical_mixing=True,
+            use_conservation_fixer=False,
+            physics=None,
+        )
+
+    def test_partial_cells_implicit_mixing_conserves_heat(self, grid, z_coord):
+        """Implicit vertical diffusion (K_v>0) over partial cells must conserve
+        the physical column heat sum(h_partial*T*area). The backward-Euler solve
+        with zero-flux BCs conserves sum(dz_cell*T); if dz_cell is the reference
+        thickness dz_ref instead of the partial-cell h_partial at the thin bottom
+        cell, it conserves the WRONG integral and leaks heat at the topography.
+        At rest (u=0) the flux-form advection is conservative, so any sum(h*T)
+        drift is the implicit mixing's thickness-weighting error."""
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = _stratified_state_partial(grid, z_coord, H_bathy, partial_coord)
+        cfg = self._mixing_cfg()
+        model = LatLonCGridOceanModel(grid, partial_coord, cfg)
+
+        m_T_0, _ = _column_integrated_tracer_mass(state, partial_coord, cfg, grid)
+        s = model.step(state, 600.0)
+        m_T_1, _ = _column_integrated_tracer_mass(s, partial_coord, cfg, grid)
+
+        rel_drift_T = float(abs(m_T_1 - m_T_0) / max(abs(m_T_0), 1.0))
+        assert rel_drift_T < 1e-12, (
+            f"implicit-mixing heat drift = {rel_drift_T:.2e} "
+            f"(partial-cell vertical mixing must weight by h_partial, not dz_ref)"
+        )
+
     def test_zstar_step_bathymetry(self, grid, z_coord):
         """Same conservation property on legacy z* — the Phase 7
         face-thickness change should not regress this."""

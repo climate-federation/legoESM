@@ -21,6 +21,7 @@ from legoesm.core.weno import (
     weno7_z,
     weno9_z,
     weno_reconstruct_split,
+    weno_reconstruct_split2,
     weno_upwind,
 )
 
@@ -276,6 +277,43 @@ class TestSplitSmoothnessVariant:
         fp_split, fm_split = weno_reconstruct_split(stencil, stencil, order=5)
         np.testing.assert_allclose(fp_split, fp_std, atol=1e-14)
         np.testing.assert_allclose(fm_split, fm_std, atol=1e-14)
+
+    @pytest.mark.parametrize("order", [5, 7, 9])
+    def test_split2_reduces_to_split_when_psi1_eq_psi2(self, order):
+        """beta-averaged dual-smoothness reduces to split when psi1==psi2.
+
+        Since the per-sub-stencil beta average is (β+β)/2 = β, the
+        Oceananigans ``VelocityStencil`` form (``weno_reconstruct_split2``)
+        must reproduce ``weno_reconstruct_split`` exactly when both
+        smoothness fields are identical.
+        """
+        rng = np.random.RandomState(11)
+        k = (order + 1) // 2
+        n = 2 * k
+        phi = [jnp.asarray(v) for v in rng.randn(n)]
+        psi = [jnp.asarray(v) for v in rng.randn(n)]
+        fp1, fm1 = weno_reconstruct_split(phi, psi, order=order)
+        fp2, fm2 = weno_reconstruct_split2(phi, psi, psi, order=order)
+        np.testing.assert_allclose(fp2, fp1, atol=1e-14)
+        np.testing.assert_allclose(fm2, fm1, atol=1e-14)
+
+    @pytest.mark.parametrize("order", [5, 7, 9])
+    def test_split2_distinct_psi_is_finite_and_between(self, order):
+        """With distinct smoothness fields the beta-average is finite and
+        is NOT identical to either single-field reconstruction (so it is a
+        genuine combined-smoothness, not a no-op)."""
+        rng = np.random.RandomState(13)
+        k = (order + 1) // 2
+        n = 2 * k
+        phi = [jnp.asarray(v) for v in rng.randn(n)]
+        psi1 = [jnp.asarray(v) for v in rng.randn(n)]
+        psi2 = [jnp.asarray(v) for v in rng.randn(n)]
+        fp_avg, _ = weno_reconstruct_split2(phi, psi1, psi2, order=order)
+        fp_1, _ = weno_reconstruct_split(phi, psi1, order=order)
+        fp_2, _ = weno_reconstruct_split(phi, psi2, order=order)
+        assert bool(jnp.all(jnp.isfinite(fp_avg)))
+        assert abs(float(fp_avg - fp_1)) > 1e-12
+        assert abs(float(fp_avg - fp_2)) > 1e-12
 
     @pytest.mark.parametrize("order", [5, 7, 9])
     def test_split_convergence(self, order):

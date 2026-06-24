@@ -435,6 +435,11 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # Previous-step barotropic slow forcing (depth-mean tendency) for the
+    # AB2 time-centering of F_slow (matches Oceananigans' AB2-extrapolated Gᵁ).
+    # Only used when barotropic_slow_forcing_ab2=True; None otherwise (default).
+    F_slow_u_prev: object = None
+    F_slow_v_prev: object = None
     # Rigid-lid barotropic streamfunction state (config.barotropic_solver ==
     # "rigid_lid").  ``psi`` is the vertex-point streamfunction [m^3/s], shape
     # (n_lat+1, n_lon+1).  ``dpsi``/``dpsi_prev`` are the interior streamfunction
@@ -856,7 +861,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box" or "cosine" (shaped filter for time-averaging)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
     max_abs_eta_m: float = 1.0e4
@@ -938,6 +943,49 @@ class LatLonCGridOceanConfig(NamedTuple):
     #              (Eq 44). The paper notes the divergence choice "has a large
     #              impact on the solution" (W9D is markedly more dissipative).
     weno_smoothness: str = "split"
+    # DECOUPLED divergence-flux (D-term) smoothness, independent of the vorticity
+    # smoothness above. Oceananigans' WENOVectorInvariant uses TWO independent
+    # choices: ``vorticity_stencil`` (VelocityStencil, Eq 43 = our "split" vorticity)
+    # AND ``upwinding`` (OnlySelfUpwinding, Eq 44 = "standard"/self divergence) — a
+    # mix the single ``weno_smoothness`` flag cannot express ("split" forces the
+    # divergence to the more-aggressive Eq-45 full-divergence smoothness; "standard"
+    # forces the vorticity to self-smoothness). At marginal (eddy-permitting)
+    # resolution the Eq-45 divergence under-dissipates the 2dx grid mode and a
+    # baroclinic-eddy field runs away, while Oceananigans (Eq-44 self-divergence)
+    # saturates. ``None`` (default) = follow ``weno_smoothness`` for BOTH (bit-
+    # identical to the historical behaviour); set ``"standard"`` to get the faithful
+    # Oceananigans OnlySelfUpwinding divergence while keeping ``weno_smoothness=
+    # "split"`` VelocityStencil vorticity.
+    weno_divergence_smoothness: str | None = None
+    # Sadourny ENSTROPHY-CONSERVING metric weighting of the vorticity-flux transport
+    # velocity. Oceananigans' WENOVectorInvariant builds the transport at the u-point as
+    # v̂ = 0.25·Σ(Δx_v·v)/Δx_u (vector_invariant_advection.jl: ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹),
+    # a Δx (cos-lat) WEIGHTED average — the Sadourny form that conserves enstrophy at
+    # FINITE amplitude on a non-uniform metric. legoESM's default forms v_at_u / Fv_at_u
+    # as PLAIN 4-point averages (Δx-weighting dropped), which under-dissipates the
+    # finite-amplitude 2Δx grid mode (the §5 residual). True selects the faithful
+    # metric-weighted transport (and the matching Δy weighting on û for the v-equation);
+    # False (default) keeps the plain average (bit-identical to historical behaviour; a
+    # no-op on uniform-metric Cartesian grids where Δx_v ≡ Δx_u).
+    vortcor_enstrophy_metric: bool = False
+    # Reconstruct the RELATIVE VORTICITY ζ directly in the WENO vorticity flux (the
+    # Oceananigans WENOVectorInvariant form: flux = v̂·ζᴿ with ζᴿ = WENO(ζ₃ᶠᶠᶜ)), instead
+    # of legoESM's default POTENTIAL-vorticity form (reconstruct q=ζ/h, ×mass-flux h·v).
+    # The two are identical when h is uniform (η≈0, linear), but at FINITE amplitude η
+    # makes h vary and WENO(ζ/h)·(h·v) ≠ WENO(ζ)·v (the WENO is nonlinear over the
+    # h-varying stencil) — a candidate for the §5 finite-amplitude under-dissipation.
+    # Faithful ONLY on flat-bottom / no-partial-cell setups (the Oceananigans idealized
+    # cases): the q-form is retained by default because it conserves potential enstrophy
+    # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
+    vortcor_reconstruct_zeta: bool = False
+    # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
+    # advects the full horizontal momentum vertically) instead of legoESM's default
+    # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
+    # −∂(w·U_bar)/∂z = U_bar·∇·u_h (depth-integral zero; U_bar is depth-independent so
+    # there is NO extra WENO dissipation, only this redistribution term legoESM omits).
+    # Candidate for the INTERIOR finite-amplitude baroclinic-eddy runaway (the §5 residual
+    # is at the front, NOT the walls). False (default) = perturbation (bit-identical).
+    weno_vertadv_full_velocity: bool = False
     # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
     # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
     # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant
@@ -957,6 +1005,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # strict no-op where there is no land (periodic/global aquaplanet).  Default
     # ON: the masked cold-cell contamination is a bug for any masked-land run.
     tracer_wall_neumann_fill: bool = True
+    # AB2 time-centering of the barotropic slow forcing F_slow (matches the
+    # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
+    # tendency, vs legoESM's default current-time depth-mean).  Investigated for
+    # the §5 no-in-substep-Coriolis path's barotropic geostrophic balance
+    # (docs/dev-notes/issues/barotropic_mode_noise.md). Default False = bit-identical.
+    barotropic_slow_forcing_ab2: bool = False
     # Barotropic solver selection (see docs/dev-notes/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.
@@ -1493,3 +1547,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
     implicit_vmix_dzw_slot: bool = False
+    # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
+    # When True, every meridional DIFFERENCE operator returns 0 — the faithful
+    # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension
+    # (`δyᵃᶜᵃ(grid::Flat)=zero`).  v stays prognostic (so the Coriolis f×u→v
+    # rotation works) but no ∂/∂y ever exists, so (a) there is NO meridional
+    # pressure gradient → no closed-basin geostrophic locking of the barotropic
+    # mode, and (b) NO 2Δy mode can form.  This is the faithful 2-D x–z setting the
+    # Oceananigans internal_tide oracle uses; required to reproduce it (#576).
+    # ``LatLonCGridOceanModel`` pushes this to the process-global
+    # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
+    # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
+    meridionally_flat: bool = False

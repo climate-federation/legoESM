@@ -32,6 +32,20 @@ def test_resolve_turbulence_propagates_surface_bulk_scheme(scheme: str) -> None:
     assert turb_config.surface.bulk_scheme == scheme
 
 
+def test_resolve_turbulence_threads_gustiness_zi() -> None:
+    # surface_gustiness_zi must reach the turbulence scheme's SurfaceLayerConfig.
+    cfg = ExperimentConfig(
+        turbulence="holtslag_boville", surface_bulk_scheme="coare3",
+        surface_gustiness_zi=600.0,
+    )
+    _fn, turb_config = _resolve_turbulence(cfg)
+    assert turb_config.surface.gustiness_w_zi == 600.0
+    # default None => unchanged (0.0)
+    cfg0 = ExperimentConfig(turbulence="holtslag_boville")
+    _fn0, tc0 = _resolve_turbulence(cfg0)
+    assert tc0.surface.gustiness_w_zi == 0.0
+
+
 def test_resolve_turbulence_default_constant_unchanged() -> None:
     # Default surface_bulk_scheme="constant" => resolved config untouched.
     cfg = ExperimentConfig(turbulence="holtslag_boville")
@@ -118,6 +132,45 @@ def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
     for arr in (tau_x, tau_y, sh, lh, ust):
         assert jnp.all(jnp.isfinite(arr))
     assert float(lh.mean()) > 0.0  # evaporation upward over a warm ocean
+
+
+def test_convective_gustiness_raises_calm_unstable_flux() -> None:
+    """COARE convective gustiness (opt-in) must boost the latent flux over a calm
+    but convectively-unstable warm ocean, and the default (off) must be
+    byte-identical (OMIP/forward paths unchanged)."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+
+    f = lambda v: jnp.full((8,), v)  # noqa: E731
+    args = dict(u_rel=f(0.5), v_rel=f(0.0), T_atm=f(290.0), q_atm=f(0.010),
+                T_sfc=f(302.0), q_sfc=f(0.026), rho=f(1.1), scheme="coare3")
+    _tx, _ty, _sh0, lh_off, _u0 = compute_most_fluxes(**args, gustiness_w_zi=0.0)
+    _tx, _ty, _sh1, lh_on, _u1 = compute_most_fluxes(**args, gustiness_w_zi=600.0)
+    assert jnp.all(jnp.isfinite(lh_on))
+    assert float(lh_on.mean()) > float(lh_off.mean())   # gustiness => more evap
+    # default param == off (byte-identical)
+    _tx, _ty, _shd, lh_def, _ud = compute_most_fluxes(**args)
+    assert jnp.allclose(lh_def, lh_off)
+
+
+def test_compute_most_fluxes_2m_diagnostic() -> None:
+    """The opt-in 2m air-temperature diagnostic must sit between the lowest model
+    level and the (warmer) surface, and the default (off) must keep the legacy
+    5-tuple return (byte-identical for all existing callers)."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+
+    f = lambda v: jnp.full((8,), v)  # noqa: E731
+    args = dict(u_rel=f(4.0), v_rel=f(0.0), T_atm=f(289.0), q_atm=f(0.010),
+                T_sfc=f(301.0), q_sfc=f(0.025), rho=f(1.15), scheme="coare3")
+    out5 = compute_most_fluxes(**args)
+    assert len(out5) == 5                       # default return unchanged
+    out6 = compute_most_fluxes(**args, return_2m=True)
+    assert len(out6) == 6
+    T2 = out6[5]
+    # 2 m air over a warm ocean: between the lowest level (289) and SST (301),
+    # and WARMER than the lowest level (the diagnostic the raw "tas" proxy misses)
+    assert jnp.all(T2 > 289.0) and jnp.all(T2 < 301.0)
 
 
 def test_ocean_unknown_bulk_scheme_raises() -> None:
