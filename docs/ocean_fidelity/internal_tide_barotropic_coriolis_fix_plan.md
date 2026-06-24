@@ -40,7 +40,33 @@ x-uniform) that **grows unbounded** and NaNs the run by ~day 0.2.
 - NOT the boundary wiring: **f=0 periodic is perfectly stable** (max|u|=0.200) — the
   4-site periodic wiring is correct; the instability appears only with f≠0.
 
+## ⚠️ CORRECTED MECHANISM (standalone SWE proof) — it is NOT a pure spatial null mode
+
+A minimal standalone C-grid barotropic SWE solver (`scripts/tmp/_baro_swe_coriolis.py`)
+shows the **naive** 4-pt-average Coriolis is PERFECTLY STABLE + tracks the analytic
+inertial oscillation for 2 periods when the gravity wave is time-resolved (dt=20s,
+CFL≈0.7) — even with a seeded 2Δy mode. So the earlier "purely spatial null mode"
+conclusion (iters 16–20; `ab2_epsilon` had no effect because it's the OUTER AB2,
+not the barotropic split) is WRONG. The real instability is the **implicit-free-
+surface (dt=300s ≫ gravity CFL) + explicit/split-timescale Coriolis** coupling for
+the wildly time-under-resolved 2Δ gravity mode (ω_2Δ·dt ≈ 33). legoESM's solvers all
+mishandle this: `implicit_cn`+`explicit_ab2` routes Coriolis through F_slow (split
+timescale, gated off in the solve); `matsuno_split` DOUBLE-COUNTS (3-D Matsuno
+sub-step + barotropic-solver FB term → wrong rotation u=0.137 vs analytic 0.001);
+`explicit_substep`+`explicit_ab2` gates the in-substep Coriolis off (split). NONE do
+the clean "Coriolis resolved/coupled WITH gravity, counted ONCE" that the stable
+standalone does.
+
 ## The fix (exact, minimal locus)
+
+**REVISED:** make the barotropic Coriolis–gravity coupling STABLE at large dt —
+either (a) a clean forward-backward in-substep Coriolis counted once (the
+Oceananigans/ROMS split-explicit way: Coriolis applied IN the barotropic substeps
+with gravity, NO F_slow Coriolis, NO 3-D Matsuno double-count), or (b) a semi-
+implicit (CN/FB) Coriolis coupled with the implicit free surface in `implicit_cn`
+(`_cori_fac=1` in the predictor, with Coriolis REMOVED from F_slow so it is counted
+once). The standalone forward-backward Coriolis+gravity reference (stable, correct)
+is the target. NOT an Arakawa–Lamb spatial redesign (the spatial scheme is fine).
 
 Replace the barotropic-solver Coriolis with an **Arakawa–Lamb energy/enstrophy-
 conserving** discretization for the 2-D barotropic (U, V, η) system, so the 2Δ mode
