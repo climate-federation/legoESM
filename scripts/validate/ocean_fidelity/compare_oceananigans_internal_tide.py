@@ -61,6 +61,14 @@ def _hill(x):
 
 
 def build_setup():
+    # FLAT_Y (default ON): Oceananigans uses topology=(Periodic, Flat, Bounded) —
+    # a TRUE 2-D x–z domain with NO meridional dimension. legoESM's `Flat`-y analog
+    # (set_meridionally_flat) zeros every meridional difference (∂/∂y≡0), matching
+    # the oracle exactly: it removes the closed-basin geostrophic adjustment (the
+    # walled grid otherwise locks the barotropic tide) AND forbids the spurious 2Δy
+    # mode. Required for fidelity; FLAT_Y=0 reverts to the walled (closed-basin) grid.
+    from legoesm.grids.halo_latlon import set_meridionally_flat
+    set_meridionally_flat(os.environ.get("FLAT_Y", "1") == "1")
     grid = create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DX_M, f0=F0, beta=0.0,    # beta=0 → f-plane
         y_origin_m=-NY * DX_M / 2, x_origin_m=-LX / 2, cartesian_pseudo_lat=True)
@@ -189,11 +197,22 @@ def main():
     o_days = o_t / 86400.0
     nsteps = int(round(stop_days * 86400.0 / dt))
     Hb = np.asarray(state.H_bathy.data)[jrow]           # (n_lon,) local depth
-    # WET-cell mask: cells whose reference depth is above the local seafloor (partial
-    # cells / z-level: z_ref IS the physical depth). Masks the dry/below-ridge cells whose
-    # b' is a static artifact in BOTH codes — leaving the radiated internal-tide signal.
-    wet = (z_full[None, :] > -Hb[:, None])              # (n_lon, nlev)
-    print("\n  day | lego max|b'|(wet) | b' pattern_corr(wet) | finite", flush=True)
+    o_x = np.asarray(ds.variables["x"][:])              # oracle x-centres
+    o_bp0 = o_bp[:, :, 0].T                             # (x, z) oracle REST b'
+
+    def _bp_lego(st):
+        T = np.asarray(st.T.data)[jrow]
+        return G * ALPHA_T * (T - T_REF_C) - N2 * z_full[None, :]
+
+    # The internal tide = the TIME-VARYING anomaly b'(t)−b'(0): subtracting the rest
+    # field removes the STATIC partial-cell coordinate offset (which dominates the raw
+    # b' and is NOT the tide). Compare on the ORACLE's native z-grid (interpolate
+    # legoESM ONTO it) so the oracle's deep near-bump signal is preserved (interpolating
+    # the oracle DOWN onto the coarse legoESM levels destroys it), restricted to the
+    # bump region |x|<200 km where the radiated tide lives.
+    bp0_lego = _bp_lego(state)
+    print("\n  day | lego max|Δb'| | oracle max|Δb'| | Δb' pattern_corr(bump) | finite",
+          flush=True)
     t = 0.0
     for it in range(1, nsteps + 1):
         state = step_and_force(state, t)
@@ -201,15 +220,18 @@ def main():
         td = t / 86400.0
         if any(abs(td - od) < dt / 86400.0 / 2 for od in o_days):
             oi = int(np.argmin([abs(td - od) for od in o_days]))
-            T = np.asarray(state.T.data)[jrow]          # (n_lon, nlev)
-            bp = G * ALPHA_T * (T - T_REF_C) - N2 * z_full[None, :]   # b' = b − N²z_ref
-            fin = bool(np.all(np.isfinite(bp[wet])))
-            o_bp_oi = o_bp[:, :, oi].T                   # (z,x) → (x, z)
-            nxc = min(bp.shape[0], o_bp_oi.shape[0])
-            o_bi = np.array([np.interp(-z_full, -zc, o_bp_oi[ix, :]) for ix in range(nxc)])
-            m = wet[:nxc]
-            corr = amp2dx(bp[:nxc][m], o_bi[m]) if fin else float("nan")
-            print(f"  {td:4.1f} | {np.abs(bp[wet]).max():.3e}      | {corr:+.4f}             | {fin}",
+            dl = _bp_lego(state) - bp0_lego              # (n_lon, nlev) lego tidal anomaly
+            do = o_bp[:, :, oi].T - o_bp0                # (x, zc) oracle tidal anomaly
+            nxc = min(dl.shape[0], do.shape[0])
+            fin = bool(np.all(np.isfinite(dl)))
+            # interpolate legoESM onto the oracle z-grid (preserve the oracle signal)
+            lego_on = np.array([np.interp(zc, z_full[::-1], dl[ix][::-1])
+                                for ix in range(nxc)])
+            bump = np.abs(o_x[:nxc]) < 2.0e5
+            wetb = (zc[None, :] > -Hb[:nxc, None]) & bump[:, None]
+            corr = amp2dx(lego_on[wetb], do[:nxc][wetb]) if fin else float("nan")
+            print(f"  {td:4.1f} | {np.abs(lego_on[wetb]).max() if fin else -1:.3e}    | "
+                  f"{np.abs(do[:nxc][wetb]).max():.3e}     | {corr:+.4f}            | {fin}",
                   flush=True)
             if not fin:
                 print("  >>> legoESM blew", flush=True); break
