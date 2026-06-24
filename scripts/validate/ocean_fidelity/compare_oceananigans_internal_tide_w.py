@@ -14,6 +14,7 @@ os.environ.setdefault("MOM_ADV", "flux_form")
 import numpy as np
 import jax.numpy as jnp
 from netCDF4 import Dataset
+from legoesm.ocean.vertical import compute_centroid_depth
 sys.path.insert(0, os.path.dirname(__file__))
 import compare_oceananigans_internal_tide as C
 
@@ -26,7 +27,12 @@ def set_prescribed(grid, z, state):
     n_lat, n_lon = mask.shape
     nlev = len(z_full)
     xc = -C.LX / 2 + (np.arange(n_lon) + 0.5) * C.DX_M
-    T = (C.T_REF_C + (C.N2 * z_full[None, None, :]) / (C.G * C.ALPHA_T)) * mask[:, :, None]
+    # b = N^2 * z at the PHYSICAL cell-center depth (matches Oceananigans, which
+    # sets b=N^2 z at its partial-cell centers) — NOT z_full_ref, which would put
+    # an inconsistent b at the partial bottom cells and fake a ∂b/∂x at the steps.
+    H_bathy = jnp.asarray(np.asarray(state.H_bathy.data))
+    z_phys = -np.asarray(compute_centroid_depth(jnp.zeros_like(H_bathy), H_bathy, z))
+    T = (C.T_REF_C + (C.N2 * z_phys) / (C.G * C.ALPHA_T)) * mask[:, :, None]
     uface = np.minimum(mask, np.roll(mask, 1, axis=1))
     uface = np.concatenate([uface, uface[:, :1]], axis=1)
     u = np.full((n_lat, n_lon + 1, nlev), C.U2) * uface[:, :, None]
