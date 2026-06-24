@@ -79,6 +79,15 @@ def main():
     print(f"  2dx-roughness(bump): lego max={rl:.3e} (max|w|={ml:.3e})  "
           f"oracle max={ro:.3e} (max|w|={mo:.3e})", flush=True)
     print(f"  -> lego rough/|w| = {rl/ml:.3f}   oracle rough/|w| = {ro/mo:.3f}", flush=True)
+    # direct w PATTERN match (oracle face-w averaged to cell centers vs lego state.w)
+    o_w_cc = 0.5 * (o_w[:nx, :-1] + o_w[:nx, 1:])         # (nx, Nz) cell-centers
+    wl = w_lego[:nx]
+    nzc = min(o_w_cc.shape[1], wl.shape[1])
+    wetw = (z_full[None, :nzc] > -Hb[:nx, None])
+    a = wl[:, :nzc][wetw]; b_ = o_w_cc[:, :nzc][wetw]
+    ca = a - a.mean(); cb = b_ - b_.mean()
+    wc = float(np.sum(ca * cb) / (np.sqrt(np.sum(ca**2)*np.sum(cb**2)) + 1e-30))
+    print(f"  w pattern_corr(wet, cell-center) = {wc:+.4f}", flush=True)
 
     # --- buoyancy-tendency (tracer advection) comparison ---
     o_Gb = np.asarray(ds.variables["Gb"][:]).T            # (x, z) col-major reversal
