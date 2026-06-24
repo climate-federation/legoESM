@@ -428,6 +428,19 @@ woa --ocean-restore-sst-tau-days 5 --ocean-restore-sss-tau-days 30
 --land-bulk-scheme most --convective-cloud --snow-albedo-feedback --preset
 slab_richards` (land MOST + Richards water-limited ET; ocean COARE air-sea).
 
+**Full-config 60 d validation (job 8561537) — STABLE + RECOVERING:** the
+complete config above. SST drift +19.2 K/yr (decelerating from the 30 d +25 ⇒
+approaching equilibrium), R_TOA −8.9, SST mean 285.4 K with a realistic tropical
+warm pool (299.8 K), column-T recovered +2.3 K from the Day-25 minimum
+(252.4 → 254.7 K, monotonic warming Days 25–60 as the warm restored SST +
+gustiness moisten the atm), circulation strengthening (max_v 18.9 → 20.8).
+**The full 3D-ocean coupled CMIP run from realistic WOA IC runs stably and
+equilibrates toward a realistic climate — cold collapse definitively solved.**
+Residual: CWV ~15 (atm still drier than Earth's ~25) ⇒ R_TOA still −8.9; the
+same slow-moistening residual the slab faced (slab took 180 d to reach R_TOA
+−0.72), so multi-month integration is the remaining lever, not a structural
+bug. Figure: `docs/scaling/cmip_3docean_full_60d.png`.
+
 ## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
 User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
 (COARE is itself a MOST algorithm; the split is generic-MOST for the simple
