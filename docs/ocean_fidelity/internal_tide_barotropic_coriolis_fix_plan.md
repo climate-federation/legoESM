@@ -1,4 +1,19 @@
-# internal_tide (#576) — barotropic Coriolis null-mode fix: design & plan
+# internal_tide (#576) — RESOLVED (Flat-y + ImplicitFreeSurface). Design & history.
+
+## STATUS: REPRODUCED 2026-06-24
+M2 b' pattern_corr **+0.99 (day 0.1) → +0.94 (0.5) → +0.81 (1.0) → +0.67 (1.2)**,
+amplitudes within ~1.5× (from corr≈0 + blow-up). Fix = `meridionally_flat` config
+field (Oceananigans `Flat`-y: ∂/∂y≡0) on the `implicit_cn`/`ImplicitFreeSurface`
+stack. Productionized: `LatLonCGridOceanConfig.meridionally_flat` (default-off,
+bit-identical), wired through the comparison + canonical config; tests
+`test_meridionally_flat_inertial_oscillation` + the comparator. Residual: late-time
+corr decay (0.94→0.51 over days 1.4→2.0) = advection/dispersion vs oracle WENO7
+(refinement). The long "Arakawa–Lamb / spatial null mode" thread below is SUPERSEDED
+(it was an `implicit_cn` split-coupling instability, not a spatial scheme defect).
+
+---
+
+# internal_tide (#576) — barotropic Coriolis null-mode fix: design & plan (history)
 
 Actionable handoff from the 20-iteration diagnostic (ralph log
 `.claude/ralph_internal_tide_staircase_task.md`; memory `project_internal_tide_pgf`).
