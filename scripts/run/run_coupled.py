@@ -272,6 +272,17 @@ def main():
     parser.add_argument("--woa-s-path",
                         default="data/woa18/woa18_decav_s00_01.nc",
                         help="WOA18 salinity file (--ocean-ic woa)")
+    parser.add_argument("--ocean-restore-sst-tau-days", type=float, default=0.0,
+                        help="3D ocean (--ocean dynamic --ocean-ic woa): Newtonian "
+                             "relaxation timescale [days] for the surface "
+                             "temperature toward the WOA initial state. 0 = off. "
+                             "Anchors the surface against the cold-start drift "
+                             "during the coupled spin-up (the gustiness fix alone "
+                             "is insufficient; ~30 d is a moderate start).")
+    parser.add_argument("--ocean-restore-sss-tau-days", type=float, default=0.0,
+                        help="3D ocean (--ocean dynamic --ocean-ic woa): Newtonian "
+                             "relaxation timescale [days] for the surface salinity "
+                             "toward the WOA initial state. 0 = off.")
     parser.add_argument("--tripole-mesh", default=None,
                         help="NEMO eORCA mesh_mask file (e.g. "
                              "data/grids/eORCA1.2_mesh_mask.nc).  When set with "
@@ -492,6 +503,18 @@ def main():
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
         overrides["ocean_ic"] = args.ocean_ic
+        # WOA surface restoring (coupled spin-up anchor); 0 => off => unchanged.
+        overrides["ocean_restore_sst_tau_days"] = args.ocean_restore_sst_tau_days
+        overrides["ocean_restore_sss_tau_days"] = args.ocean_restore_sss_tau_days
+        if (args.ocean_restore_sst_tau_days > 0.0
+                or args.ocean_restore_sss_tau_days > 0.0):
+            if args.ocean_ic != "woa":
+                raise SystemExit(
+                    "--ocean-restore-*-tau-days requires --ocean-ic woa "
+                    "(the restoring target is the WOA climatology).")
+            logger.info("  3D-ocean WOA restoring: SST tau=%.1f d, SSS tau=%.1f d",
+                        args.ocean_restore_sst_tau_days,
+                        args.ocean_restore_sss_tau_days)
         if args.tripole_mesh:
             # Build the tripole geometry from the NEMO mesh and pass it as a
             # DISTINCT ocean grid (make_grid_remapper builds the atm<->tripole

@@ -131,6 +131,22 @@ class CoupledConfig(NamedTuple):
     # realistic land spin-up.
     warm_start_soil: bool = False
 
+    # 3D-ocean WOA restoring (Newtonian / Haney) timescales [days].  Consumed
+    # ONLY when ocean_mode=="dynamic" + ocean_ic=="woa": the surface-layer T/S
+    # are relaxed toward the WOA-climatology initial state with these timescales
+    # after each coupling step.  A short coupled spin-up from realistic IC will
+    # NOT reach equilibrium (the dry cold-start atmosphere radiates away the
+    # warm WOA ocean's heat -> a cold collapse a free 3D ocean cannot buffer
+    # like a slab); restoring anchors the surface near observed climatology
+    # while the atmosphere equilibrates (the standard coupled spin-up protocol).
+    # The restoring flux represents the missing ocean heat transport / flux
+    # correction during spin-up.  0.0 => OFF (no relaxation) => byte-identical,
+    # so every existing dynamic-ocean run is unchanged.  The convective-gustiness
+    # air-sea fix (CouplerConfig.gustiness_w_zi) is necessary but NOT sufficient
+    # alone (measured: 15d still drifts -92 K/yr); restoring is the complement.
+    ocean_restore_sst_tau_days: float = 0.0   # surface T relaxation [days]
+    ocean_restore_sss_tau_days: float = 0.0   # surface S relaxation [days]
+
 
 # ============================================================================
 # Preset factories

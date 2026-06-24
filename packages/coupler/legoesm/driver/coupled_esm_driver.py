@@ -27,6 +27,9 @@ from legoesm.diagnostics.energy_budget import area_weighted_mean
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
+# Exact time-unit conversion for the day-valued restoring timescales.
+_SECONDS_PER_DAY = 86400.0
+
 
 class CoupledESMDriver:
     """Coupled atmosphere + ocean + land + carbon driver.
@@ -66,6 +69,10 @@ class CoupledESMDriver:
         self._sfc_state = None
         self._ocean_state = None
         self._ocean_step = None
+        # WOA surface T/S restoring targets (set by the dynamic-ocean WOA init;
+        # None => no target => relaxation skipped).
+        self._ocean_T_target = None
+        self._ocean_S_target = None
         self._last_sfc_response = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
@@ -234,6 +241,10 @@ class CoupledESMDriver:
         from legoesm.core.precision import get_policy
         _sd = get_policy().storage
         z_star = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # WOA surface T/S restoring targets (set in the ocean_ic=="woa" branches;
+        # None => no restoring target available => relaxation skipped).
+        self._ocean_T_target = None
+        self._ocean_S_target = None
 
         if cfg.ocean_ic == "woa":
             # REALISTIC cold start: WOA18 reanalysis T/S + WOA-derived continents
@@ -300,6 +311,11 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
+            # WOA surface restoring targets (top model level [degC]/[PSU]) — the
+            # climatology the optional Newtonian relaxation anchors the surface
+            # toward during the coupled spin-up (CoupledConfig.ocean_restore_*).
+            self._ocean_T_target = jnp.asarray(T_woa[..., 0], dtype=_sd)
+            self._ocean_S_target = jnp.asarray(S_woa[..., 0], dtype=_sd)
             # Balanced cold start (MANDATORY for WOA): the rest-velocity state
             # leaves WOA's baroclinic PGF UNBALANCED -> a violent geostrophic
             # adjustment that goes nonlinear (the standalone ocean blows from
@@ -477,6 +493,10 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
+            # WOA surface restoring targets (top level [degC]/[PSU]) — see the
+            # co-located path; anchors the surface during the coupled spin-up.
+            self._ocean_T_target = jnp.asarray(T_woa[..., 0], dtype=_sd)
+            self._ocean_S_target = jnp.asarray(S_woa[..., 0], dtype=_sd)
             self._ocean_state = apply_balanced_init(
                 self._ocean_state, self._ocean_grid, model_z_coord, ocfg,
             )
@@ -964,6 +984,41 @@ class CoupledESMDriver:
             self._ocean_state = self._ocean_step(
                 self._ocean_state, odt, freshwater=fw, surface_forcing=sf,
             )
+        # Optional WOA surface T/S restoring (coupled spin-up anchor) — applied
+        # once per coupling step over the full dt; no-op when the restoring
+        # timescales are 0 or no WOA target was loaded (byte-identical).
+        self._apply_ocean_restoring(dt)
+
+    def _apply_ocean_restoring(self, dt):
+        """Relax the 3D-ocean surface T/S toward the WOA-climatology IC.
+
+        The standard coupled spin-up anchor: a free 3D ocean started from
+        realistic WOA T/S cold-collapses when the dry cold-start atmosphere
+        radiates away the warm ocean's heat faster than it can re-equilibrate
+        (measured -92 K/yr at 15 d even with the air-sea gustiness fix).
+        Newtonian relaxation of the surface layer toward the WOA initial state
+        keeps the surface near observed climatology while the atmosphere spins
+        up.  No-op unless ocean_mode=='dynamic' + ocean_ic=='woa' AND a positive
+        restoring timescale is configured (CoupledConfig.ocean_restore_*).
+        """
+        cfg = self.coupled_cfg
+        tau_T_days = getattr(cfg, "ocean_restore_sst_tau_days", 0.0)
+        tau_S_days = getattr(cfg, "ocean_restore_sss_tau_days", 0.0)
+        if tau_T_days <= 0.0 and tau_S_days <= 0.0:
+            return
+        if self._ocean_T_target is None or self._ocean_S_target is None:
+            return
+        from legoesm.ocean.forcing.surface_relaxation import (
+            apply_surface_relaxation_step,
+        )
+        self._ocean_state = apply_surface_relaxation_step(
+            self._ocean_state,
+            T_target=self._ocean_T_target,
+            S_target=self._ocean_S_target,
+            dt=dt,
+            tau_T_s=tau_T_days * _SECONDS_PER_DAY,
+            tau_S_s=tau_S_days * _SECONDS_PER_DAY,
+        )
 
     def _ocean_surface_KuvC(self):
         """Ocean surface (SST [K], u_sfc, v_sfc [m/s]) at cell centres on the
