@@ -32,6 +32,8 @@ is ~2e-5 in b', so any spurious grid-scale noise swamps it.
 
 - **iter 4: genuine residual ~2× (confounds stripped).** Instantaneous flux-div probe (`scripts/tmp/_it_inst_tend.py`): model.step(AB2,corrected)=3.4×, direct(no-AB2,simple)=5.2×, both corr 0.76. Barotropic correction reduces it (5.2→3.4); AB2 adds ~1.5×. => genuine ~2× tracer-advection over-strength at the staircase. The fix = partial-cell-aware tracer advection (flux-form horizontal+vertical telescoping for vertically-varying b) matching Oceananigans' immersed tracer flux — a real dycore change, NOT a quick toggle. Measurements are confound-heavy; diagnostic iterations now incremental.
 
+- **iter 5: residual = near-cancellation of HUGE flux-form terms (fundamental).** Component split: horizontal |div_hut/h|=7.0e-6, vertical |vert/h|=6.8e-6 (each ~35x the physical w*N2=1.9e-7), nearly cancelling to net 4.1e-7. A ~6% imperfection in the cancellation gives the 5x too-large net. This is a FUNDAMENTAL partial-cell flux-form tracer-advection consistency problem (near-cancellation sensitivity), not a tweak — the fix is a tracer-advection scheme matching Oceananigans' immersed tracer flux. Diagnostic loop at its floor.
+
 ## The blocker (precisely located)
 With `MOM_ADV=flux_form`: STABLE, max|v| over bump 0.70 m/s (vs 2.7 vector-invariant),
 b' rms 2.5e-4 (vs oracle 2e-5, ~12×), pattern_corr ~0. The b' shows a grid-scale
