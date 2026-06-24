@@ -106,6 +106,39 @@ def _quarter_steps():
     return int(round(_T_INERTIAL / 4.0 / _DT))
 
 
+def test_meridionally_flat_inertial_oscillation():
+    """Oceananigans `Flat`-y mode (`set_meridionally_flat`): every meridional
+    difference → 0, so a uniform barotropic u does the FREE inertial oscillation
+    (u → 0 over a quarter period, |v| spins up) — matching the oracle's
+    `topology=(Periodic, Flat, Bounded)` — instead of the closed-basin geostrophic
+    lock. This is the fix that reproduced Oceananigans internal_tide (#576): no
+    meridional d.o.f. → no closed-basin adjustment AND no 2Δy mode. Bounded for a
+    full inertial period. Default-OFF bit-identity is held by the geostrophic test."""
+    from legoesm.grids.halo_latlon import set_meridionally_flat
+
+    set_meridionally_flat(True)
+    try:
+        grid, z, state, model = _build()
+        u = np.full((_NY, _NX + 1, _NZ), _U0)
+        state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
+        step = jax.jit(lambda s: model.step(s, _DT, surface_forcing=None))
+        uq = vmax = None
+        for i in range(4 * _quarter_steps()):  # one full inertial period
+            state = step(state)
+            if i == _quarter_steps() - 1:
+                uu = np.asarray(state.u.data)[_NY // 2]
+                uq = float(uu[uu[:, 0] != 0, 0].mean())
+            vmax = max(vmax or 0.0, float(np.abs(np.asarray(state.v.data)).max()))
+        u_final_max = float(np.abs(np.asarray(state.u.data)).max())
+    finally:
+        set_meridionally_flat(False)
+    # quarter period: u rotated away from U0 toward 0 (the free inertial oscillation)
+    assert abs(uq) < 0.25 * _U0, f"flat-y u did not rotate away ({uq:+.4f})"
+    # v spun up (Coriolis rotation), and the run stayed BOUNDED (no 2Δy blow-up)
+    assert vmax > 0.5 * _U0, f"flat-y v did not spin up ({vmax:.4f})"
+    assert u_final_max < 2.0 * _U0, f"flat-y run not bounded (max|u|={u_final_max:.3f})"
+
+
 def test_closed_basin_geostrophic_adjustment():
     """A uniform barotropic u in the meridionally-CLOSED basin geostrophically
     adjusts: u stays ≈ U0 and a meridional η tilt builds to ∂η/∂y → −f·U0/g (the
