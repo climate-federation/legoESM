@@ -6,9 +6,15 @@ amplitudes within ~1.5× (from corr≈0 + blow-up). Fix = `meridionally_flat` co
 field (Oceananigans `Flat`-y: ∂/∂y≡0) on the `implicit_cn`/`ImplicitFreeSurface`
 stack. Productionized: `LatLonCGridOceanConfig.meridionally_flat` (default-off,
 bit-identical), wired through the comparison + canonical config; tests
-`test_meridionally_flat_inertial_oscillation` + the comparator. Residual: late-time
-corr decay = an internal-tide DISPERSION difference (diagnosed 2026-06-24, NOT a
-quick fix). Chased and RULED OUT: (a) momentum dissipation — `weno5`/vector-invariant
+`test_meridionally_flat_inertial_oscillation` + the comparator. Late-time corr decay = an internal-tide DISPERSION difference — **CLEARED 2026-06-24
+via `momentum_flux_scheme="upwind3"`**: the default was 1st-order `upwind`, whose
+huge dispersion error (vs the oracle's WENO5 momentum) dephased the beam. upwind3
+(3rd-order, the closest STABLE legoESM match) keeps corr ≥0.6 through ~day 1.8 at
+dt=300, and ≥0.6 the FULL 2 days at dt=150 (full-domain +0.69). Now the recipe
+default. Ruled out en route: biharmonic momentum viscosity, weno7 tracer, smc03 PGF
+(blows up), implicit_unsplit (corr~0), vector-invariant weno5 momentum (blows up).
+dt halving = ~20% of the decay (time-stepping), upwind3 = the bulk (spatial). OLD
+note (superseded): Chased and RULED OUT: (a) momentum dissipation — `weno5`/vector-invariant
 momentum is more accurate early (+0.98 vs +0.94 day 0.5) but BLOWS UP day 0.6; a
 biharmonic momentum viscosity (`B_h` ≤1e10, flat-aware `vector_laplacian`) barely
 helps (day-2 +0.44→+0.48); (b) tracer order — `weno7` ≡ `weno5` (no change); (c)
