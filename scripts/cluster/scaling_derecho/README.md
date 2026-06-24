@@ -5,10 +5,22 @@ GPU (`deg*` nodes: 4× A100-40GB) and CPU-MPI (`main` queue: 128-core EPYC nodes
 
 ```
 scaling_derecho/
-├── _env.sh         # shared env, sourced by both jobs (edit 2 values, see below)
-├── gpu_scaling.pbs # GPU weak+strong (queue main, gpu nodes; single-process multi-GPU)
-└── cpu_scaling.pbs # CPU weak+strong over MPI ranks (queue main; latlon/icosahedral)
+├── _env.sh              # shared env, sourced by all jobs (edit 2 values, see below)
+├── gpu_scaling.pbs      # GPU weak+strong (gpu nodes; single-process multi-GPU sharding; cubed-sphere AMIP physics)
+├── gpu_moist_scaling.pbs # GPU weak+strong, route-A mpi4jax (1 GPU/rank; latlon/icosahedral + --physics moist Kessler)
+└── cpu_scaling.pbs      # CPU weak+strong over MPI ranks (queue main; latlon/icosahedral)
 ```
+
+`gpu_moist_scaling.pbs` is the GPU twin of `cpu_scaling.pbs` (same
+`run_cpu_mpi_scaling.py --physics moist` Kessler path), not of `gpu_scaling.pbs`.
+It runs the new all-grids moist baroclinic wave on the two genuinely
+GPU-decomposed grids — `latlon` and `icosahedral` — with one MPI rank per A100
+over the mpi4jax halo. It needs the **`legoesm-gpu`** env to also carry a
+CUDA-aware mpi4jax (the route-A overlay), and it pins `CUDA_VISIBLE_DEVICES` per
+rank from the Cray-PALS local rank id (Derecho's `mpiexec` does not export the
+OpenMPI/SLURM vars the auto-pin looks for). Cubed-sphere/spectral are rejected
+up front (cube moist on GPU is covered by `gpu_scaling.pbs`; spectral has no MPI
+path).
 
 The two jobs need **two different conda envs** — GPU JAX and CPU+MPI JAX are
 incompatible builds. Build both once (Steps 1–2), edit `_env.sh` (Step 0), then
@@ -157,8 +169,9 @@ mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \
 ## Step 4 — Submit the full sweeps
 
 ```bash
-qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs    # GPU weak+strong (1->2->4 A100)
-qsub scripts/cluster/scaling_derecho/cpu_scaling.pbs     # CPU weak+strong (ranks 1,2,4,...)
+qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs        # GPU weak+strong (1->2->4 A100; cubed-sphere AMIP)
+qsub scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs   # GPU weak+strong moist (latlon/icosahedral; 1 GPU/rank)
+qsub scripts/cluster/scaling_derecho/cpu_scaling.pbs         # CPU weak+strong (ranks 1,2,4,...)
 ```
 
 Override knobs without editing files (`qsub -v NAME=value,...`):
@@ -176,6 +189,7 @@ Override knobs without editing files (`qsub -v NAME=value,...`):
 Examples:
 ```bash
 qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both scripts/cluster/scaling_derecho/gpu_scaling.pbs
+qsub -v GRID=icosahedral,PRECISION=float64 scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs
 qsub -v PHYSICS=moist,MAX_RANKS=128 scripts/cluster/scaling_derecho/cpu_scaling.pbs
 qsub -v GRID=icosahedral scripts/cluster/scaling_derecho/cpu_scaling.pbs
 ```
