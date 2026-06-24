@@ -497,6 +497,34 @@ class DiagnosticCollector:
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
         return f_lo + alpha * (f_hi - f_lo)
 
+    def _tas_2m(self, state, q_v, sst, sic, T_ice):
+        """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
+        similarity profile (interpolate the lowest model level down to 2 m).
+        Returns the lowest-level T when the surface inputs (SST / sigma) are
+        unavailable — e.g. a prescribed-SST run that does not pass SST here."""
+        T_low = state.T.data[..., -1]
+        if sst is None or self.sigma_full is None:
+            return T_low
+        import jax.numpy as jnp
+        from legoesm import constants
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.core.bulk_flux import compute_most_fluxes
+        u_low = state.u.data[..., -1]
+        v_low = state.v.data[..., -1]
+        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        p_s = state.p_s.data
+        p_low = p_s * jnp.asarray(self.sigma_full)[-1]
+        rho_low = p_low / (constants.R_d * T_low)
+        T_sfc = blend_surface_temperature(sst, sic, T_ice)
+        q_sfc = saturation_mixing_ratio(T_sfc, p_s)
+        # coare3 similarity profile (the recommended config's scheme); the 2 m
+        # value is set by stability, so gustiness is irrelevant here.
+        *_, T_2m = compute_most_fluxes(
+            u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+            scheme="coare3", return_2m=True,
+        )
+        return T_2m
+
     def collect(
         self,
         elapsed_day: float,
@@ -688,10 +716,14 @@ class DiagnosticCollector:
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {}
-            r = self._regrid_to_latlon_2d(state.T.data[..., -1])
+            # tas: 2 m air temperature.  The lowest model level (~100 m at
+            # nlev=20) reads colder than 2 m over a warm surface, so use the
+            # MOST surface-layer similarity profile to interpolate the lowest
+            # level down to 2 m (CMIP tas convention).  Falls back to the
+            # lowest level if the surface-layer inputs are unavailable.
+            tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+            r = self._regrid_to_latlon_2d(tas_field)
             if r is not None:
-                # tas: lowest model level T as proxy for 2 m air temperature.
-                # True 2 m diagnostic requires a surface-layer scheme.
                 fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:

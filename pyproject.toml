@@ -164,6 +164,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # CLUBB validation/characterization scripts use the same physical symbol names
 # (T for temperature) and set jax_enable_x64 before importing (E402).
 "scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# Cubed-sphere MPI face-scatter tests set jax_enable_x64 before importing the
+# dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
+"tests/parallel/test_cube_face_scatter.py" = ["E402"]
+"tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"

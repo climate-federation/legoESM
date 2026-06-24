@@ -22,6 +22,7 @@ REFERENCE_KINDS: tuple[str, ...] = (
     "analytical",
     "literature_scalar",
     "veros",
+    "oceananigans",
     "observation",
 )
 SCHEMA_VERSION: int = 1

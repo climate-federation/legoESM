@@ -708,6 +708,22 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
+        # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
+        # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
+        # per process — constructing a second model with a different
+        # ``meridionally_flat`` flips the global for BOTH (the operators read it at
+        # trace time, so a model that recompiles after the flip silently bakes in
+        # the other model's setting).  The unconditional set keeps the global in
+        # sync with the MOST-RECENTLY-CONSTRUCTED model; for the normal single-model
+        # run this is correct, and default False ⇒ bit-identical.  NOTE: the face
+        # masks are built at STATE construction (before the model), so an experiment
+        # that wants flat-y masks must ALSO call ``set_meridionally_flat(True)``
+        # before building the rest state (partial-cell steps rebuild masks from
+        # ``z_coord.is_active`` and so honour the flag regardless; non-partial-cell
+        # paths consume the stored mask and need the pre-set).
+        from legoesm.grids.halo_latlon import set_meridionally_flat
+        set_meridionally_flat(bool(getattr(self.config, "meridionally_flat", False)))
         # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.
@@ -909,6 +925,35 @@ class LatLonCGridOceanModel:
                 "physics.lateral_mixing.scheme='none'."
             )
 
+        # Meridionally-FLAT (Oceananigans `Flat`-y, ∂/∂y≡0) is wired ONLY into the
+        # operators built via gradient_y_cgrid / divergence_cgrid (PGF, KE-gradient,
+        # tracer advection, the scalar Laplacian, the vector-Laplacian viscosity)
+        # PLUS the flux-form momentum advection's meridional flux.  Operators that
+        # own their OWN meridional stencil are NOT flat-aware: the flux-divergence
+        # lateral viscosity, biharmonic, GM/Redi, and the lateral-friction schemes.
+        # Reject those combinations LOUDLY so a config is never silently Flat for
+        # some terms and 3-D for others (the 2-D x–z oracle has none of them).
+        if getattr(config, "meridionally_flat", False):
+            _ungated = []
+            _visc_on = (config.A_h > 0.0 or config.B_h > 0.0
+                        or getattr(config, "C_smag", 0.0) > 0.0)
+            if _visc_on and config.lateral_viscosity_operator == "flux_divergence":
+                _ungated.append(
+                    'A_h/B_h/C_smag>0 with lateral_viscosity_operator='
+                    '"flux_divergence" (use "vector_laplacian", which IS flat-aware)')
+            if config.gm_redi is not None:
+                _ungated.append("gm_redi is not None")
+            if getattr(config, "lateral_friction_scheme", "none") != "none":
+                _ungated.append(
+                    f"lateral_friction_scheme={config.lateral_friction_scheme!r}")
+            if _ungated:
+                raise ValueError(
+                    "meridionally_flat=True (Oceananigans Flat-y, ∂/∂y≡0) is "
+                    "incompatible with meridional operators that are not flat-aware: "
+                    + "; ".join(_ungated) + ". These keep live ∂/∂y terms, making "
+                    "the model neither the 2-D x–z oracle nor a consistent 3-D run. "
+                    "Disable them or use a flat-aware alternative.")
+
         if config.n_barotropic_substeps < 1:
             raise ValueError(
                 f"n_barotropic_substeps must be >= 1, got "
@@ -1027,6 +1072,16 @@ class LatLonCGridOceanModel:
                 f"weno_smoothness must be one of "
                 f"{sorted(VALID_WENO_SMOOTHNESS)}, "
                 f"got {config.weno_smoothness!r}",
+            )
+        # Decoupled divergence-flux smoothness: None (follow weno_smoothness) or a
+        # valid family. Lets the Oceananigans recipe mix VelocityStencil vorticity
+        # ("split") with OnlySelfUpwinding divergence ("standard").
+        if (config.weno_divergence_smoothness is not None
+                and config.weno_divergence_smoothness not in VALID_WENO_SMOOTHNESS):
+            raise ValueError(
+                f"weno_divergence_smoothness must be None or one of "
+                f"{sorted(VALID_WENO_SMOOTHNESS)}, "
+                f"got {config.weno_divergence_smoothness!r}",
             )
         if config.lateral_friction_scheme not in VALID_LATERAL_FRICTION_SCHEME:
             raise ValueError(
@@ -1148,7 +1203,7 @@ class LatLonCGridOceanModel:
                     "tendencies + implicit FS + implicit vertical mixing; these "
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
-        _valid_time_filters = {"box", "cosine"}
+        _valid_time_filters = {"box", "cosine", "power_law"}
         if config.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
@@ -1328,21 +1383,25 @@ class LatLonCGridOceanModel:
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
             if config.barotropic_solver not in (
-                    "rigid_lid", "implicit_cn", "implicit_unsplit"):
+                    "rigid_lid", "implicit_cn", "implicit_unsplit",
+                    "explicit_substep"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'barotropic_solver in ("rigid_lid","implicit_cn","implicit_unsplit"): '
+                    'barotropic_solver in ("rigid_lid","implicit_cn",'
+                    '"implicit_unsplit","explicit_substep"): '
                     'the explicit Coriolis '
                     "tendency reaches the barotropic mode through its depth-mean "
                     "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
                     "vloc, the depth-integral of du including Coriolis), and the "
                     "solver's own f×U_bt addition is gated off to avoid "
-                    "double-counting (rigid_lid: add_barotropic_coriolis=False; "
+                    "double-counting (rigid_lid / explicit_substep: "
+                    "add_barotropic_coriolis=False; "
                     "implicit_cn: _cori_fac=0 in the FB predictor). The "
-                    "explicit-substep (split-explicit) solver instead sub-steps "
-                    "the barotropic Coriolis on the gravity-wave clock (different "
-                    "physics, not covered). Got barotropic_solver="
-                    f"{config.barotropic_solver!r}.")
+                    "explicit_substep solver now gates its in-substep Coriolis "
+                    "off too (Oceananigans split-explicit convention: ∂_tU = "
+                    "−gH∇η + G^U, no in-substep Coriolis), which removes the "
+                    "C-grid 4-point Coriolis rotational null mode. Got "
+                    f"barotropic_solver={config.barotropic_solver!r}.")
             if getattr(config, "coriolis_energy_conserving", False):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" is incompatible with '
@@ -1358,6 +1417,35 @@ class LatLonCGridOceanModel:
                     "explicit_ab2 (the MITgcm-faithful face-f form), or switch to "
                     "the Matsuno split scheme for the vertex-f energy-conserving "
                     "Coriolis.")
+
+        # barotropic_slow_forcing_ab2 (AB2 time-centering of the depth-mean
+        # barotropic forcing F_slow) is only well-posed alongside the
+        # explicit_ab2 Coriolis routing, and only with ab2_scope="total".
+        # Validate on the static config at construction (dispatch-hardening):
+        # reject the silent-misconfiguration combinations rather than producing
+        # a Coriolis-free or time-inconsistent barotropic forcing.
+        if getattr(config, "barotropic_slow_forcing_ab2", False):
+            if _cor_scheme != "explicit_ab2":
+                raise ValueError(
+                    'barotropic_slow_forcing_ab2=True requires '
+                    'coriolis_scheme="explicit_ab2": the AB2 time-centering of '
+                    "the barotropic slow forcing only carries the planetary "
+                    "Coriolis to the barotropic mode when f×u enters du_dt "
+                    "(explicit_ab2, whose depth-mean lands in F_slow). Under "
+                    "matsuno_split the in-substep f·V_at_u 4-point average (the "
+                    "2Δx rotational null mode) is still active AND F_slow has no "
+                    "Coriolis, so the flag would AB2-extrapolate a Coriolis-free "
+                    "forcing while the null mode persists — a silent no-op cure. "
+                    f"Got coriolis_scheme={_cor_scheme!r}.")
+            if getattr(config, "ab2_scope", "total") == "advective":
+                raise ValueError(
+                    'barotropic_slow_forcing_ab2=True is not supported with '
+                    'ab2_scope="advective": the stored AB2 prev is F_slow BEFORE '
+                    "the du_diss depth-mean is folded in, so under advective "
+                    "scope the dissipative depth-mean would be applied "
+                    "un-time-centered while the prev omits it (an inconsistent "
+                    'AB2). Use ab2_scope="total" (dissipative terms then enter '
+                    "du_dt and AB2-extrapolate with everything; §5 uses total).")
 
         # AB2 extrapolation scope (Veros-faithful dissipative placement). The
         # "advective" scope withholds the dissipative tendencies from the AB2
@@ -1761,6 +1849,42 @@ class LatLonCGridOceanModel:
             F_slow_u = F_slow_u * state.u_mask.data
             F_slow_v = F_slow_v * state.v_mask.data
 
+        # AB2 time-centering of the barotropic slow forcing (matches the
+        # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral).
+        # F_slow_eff = (3/2+ε)·F_slow^n − (1/2+ε)·F_slow^{n-1}, applied to the
+        # barotropic forcing ONLY (du_dt_pert above keeps the current-time
+        # baroclinic perturbation).  The ε = ab2_epsilon robustification is the
+        # SAME χ-stabilised AB2 the outer baroclinic integrator uses (a_n/a_p at
+        # ~L4093) and that Oceananigans applies to Gᵁ — bare (3/2,1/2) AB2 is the
+        # marginally-unstable form, so robustifying matters on this barotropic
+        # mode.  Cold start (prev=zeros) gives (3/2+ε)·F_slow ≈ 1.6× on step 1 —
+        # the SAME first-step convention as the outer AB2 (not forward-Euler).
+        # ``_F_slow_*_cur`` (current values) are stored as next-step prev below.
+        # Default off ⇒ bit-identical (the branch is not traced).
+        _F_slow_u_cur = F_slow_u
+        _F_slow_v_cur = F_slow_v
+        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+            _fpu = state.F_slow_u_prev
+            _fpv = state.F_slow_v_prev
+            if _fpu is None or _fpv is None:
+                # `None` is a static pytree-structure value (not traced), so this
+                # raises cleanly at trace time with an actionable message instead
+                # of a cryptic lax.scan "carry structure changed" error: the
+                # storage block below ALWAYS writes a Field, so an unseeded
+                # first step (prev=None) would flip None→Field between scan
+                # iterations.  The driver MUST seed zeros Fields (see
+                # build_silvestri_baroclinic_jet_setup).
+                raise ValueError(
+                    "barotropic_slow_forcing_ab2=True requires the state's "
+                    "F_slow_u_prev/F_slow_v_prev to be seeded (zeros Field) "
+                    "before stepping: the AB2 needs a stable pytree carry under "
+                    "lax.scan (a None→Field transition breaks the scan). Seed "
+                    "them as in build_silvestri_baroclinic_jet_setup.")
+            _eps = self.config.ab2_epsilon
+            _an, _ap = 1.5 + _eps, 0.5 + _eps
+            F_slow_u = (_an * F_slow_u - _ap * _fpu.data) * state.u_mask.data
+            F_slow_v = (_an * F_slow_v - _ap * _fpv.data) * state.v_mask.data
+
         # Outer baroclinic momentum integrator (NEMO-mirror, #RK3).  The
         # cold-start amplifiers (pressure gradient + KE gradient + relative
         # vorticity flux) live in ``du_dt`` and are integrated explicitly
@@ -1918,12 +2042,22 @@ class LatLonCGridOceanModel:
             )
         else:
             dt_s = dt_mom / self.config.n_barotropic_substeps
+            # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
+            # reaches the barotropic mode via F_slow (its depth-mean came through
+            # du_dt), so the substep must NOT add its own f×U_bt — this is the
+            # Oceananigans split-explicit convention and removes the C-grid
+            # 4-point Coriolis rotational null mode (the 2Δx barotropic mode that
+            # otherwise blows the eddy-resolving jet).
+            _add_bt_cor = (
+                getattr(self.config, "coriolis_scheme", "matsuno_split")
+                != "explicit_ab2")
             state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
                 state_mid, dt_s, self.config.n_barotropic_substeps,
                 _grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
+                add_barotropic_coriolis=_add_bt_cor,
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after
@@ -2509,6 +2643,25 @@ class LatLonCGridOceanModel:
                         data=_S_flux_div_cur, name="S_flux_div_prev",
                         dims=_dims_fd, units="m/s"),
                 )
+
+        # Store the current barotropic slow forcing as next-step prev for the
+        # AB2 time-centering.  Pytree-stable: the apply block above REQUIRES the
+        # prev to be a seeded Field when the flag is on (it raises on None), so
+        # this storage is always Field→Field across scan iterations.  ``_F_slow_
+        # *_cur`` is the CURRENT (non-extrapolated) value, captured BEFORE the
+        # du_diss depth-mean fold (ab2_scope="advective" is rejected upstream, so
+        # under the supported ab2_scope="total" path du_diss is None and there is
+        # nothing extra to fold).
+        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+            from legoesm.core.field import Field as _Field_fs
+            state_new = state_new._replace(
+                F_slow_u_prev=_Field_fs(
+                    data=_F_slow_u_cur, name="F_slow_u_prev",
+                    dims=("lat", "lon_u"), units="m/s^2"),
+                F_slow_v_prev=_Field_fs(
+                    data=_F_slow_v_cur, name="F_slow_v_prev",
+                    dims=("lat_v", "lon"), units="m/s^2"),
+            )
 
         # Include vertical velocity diagnostic in state
         # w_baro has shape (..., nlev+1) on half levels, interpolate to full levels (..., nlev)
@@ -3380,7 +3533,22 @@ class LatLonCGridOceanModel:
         J_cell = compute_ocean_jacobian(
             state.eta.data, state.H_bathy.data, self.z_coord,
         )
-        dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
+        # Diffuse on the ACTUAL per-cell thickness.  The backward-Euler solve
+        # with zero-flux BCs conserves Σ(dz_cell·T) per column; for PHYSICAL heat
+        # conservation that weight must be the partial-cell thickness h_partial·J,
+        # not dz_ref·J — the thin bottom partial cell is NOT a full reference
+        # cell, and weighting it by dz_ref leaks heat at the topography (a
+        # sum(h_partial·T) drift; gated by test_partial_cells_phase7
+        # ::test_partial_cells_implicit_mixing_conserves_heat).  h_partial·J ==
+        # compute_layer_thickness for partial cells; below-seafloor cells get
+        # h_partial=0 → dz_cell=0, which the solver clips (inv_dz via
+        # maximum(dz,_EPS)) and the _wet_if_vmix / face-activity guards zero every
+        # flux that would couple them, so they stay inert.  Pure z-star keeps
+        # dz_ref·J → BIT-IDENTICAL (else branch == the original line).
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            dz_cell = self.z_coord.h_partial * J_cell[..., jnp.newaxis]
+        else:
+            dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
         # Gradient (center-to-center) divisor of the implicit solve.  Default is
         # the midpoint reconstruction 0.5(dz_k+dz_{k+1}); the Veros-faithful slot
         # (config.implicit_vmix_dzw_slot, #428) uses the coordinate's

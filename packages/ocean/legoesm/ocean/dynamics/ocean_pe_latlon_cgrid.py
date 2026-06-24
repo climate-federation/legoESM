@@ -680,6 +680,8 @@ def _weno_zeta_at_u(
     order: int = 5,
     u_smooth: jnp.ndarray | None = None,
     smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
@@ -714,9 +716,18 @@ def _weno_zeta_at_u(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
     # Convert point values to cell averages along the meridional
-    # reconstruction axis before WENO.
-    from legoesm.core.weno import point_to_cellavg_bounded
+    # reconstruction axis before WENO.  Faithful Oceananigans path
+    # (convert_to_cellavg=False): feed the vertex grid values DIRECTLY to the
+    # finite-volume WENO reconstruction (Oceananigans, a FV code, reconstructs
+    # nodal grid values directly with no point->cellavg pre-filter; that
+    # pre-filter is a mild grid-scale low-pass that suppresses the WENO's
+    # nonlinear ENO dissipation — see _weno_cell_to_uface).
     conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+    else:
+        def point_to_cellavg_bounded(a, axis=0, order=0):
+            return a
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
 
@@ -742,12 +753,10 @@ def _weno_zeta_at_u(
     psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
-    phi_plus_v, phi_minus_v = weno_reconstruct_split(
-        phi_stencil, psi_v_stencil, order=order)
-    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
-
     if u_smooth is None:
-        return result_v
+        phi_plus_v, phi_minus_v = weno_reconstruct_split(
+            phi_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
 
     # ⟨u⟩_j: u averaged in latitude to vertex positions.
     n_lon_u = u_smooth.shape[1]  # n_lon+1
@@ -762,6 +771,18 @@ def _weno_zeta_at_u(
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil: average the smoothness betas
+        # of ⟨v⟩ and ⟨u⟩ per sub-stencil, then ONE reconstruction (NOT an
+        # average of two independent reconstructions, which under-dissipates).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_v_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
+    phi_plus_v, phi_minus_v = weno_reconstruct_split(
+        phi_stencil, psi_v_stencil, order=order)
+    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
         phi_stencil, psi_u_stencil, order=order)
     result_u = weno_upwind(phi_plus_u, phi_minus_u, v_at_u)
@@ -776,6 +797,8 @@ def _weno_zeta_at_v(
     order: int = 5,
     v_smooth: jnp.ndarray | None = None,
     smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
@@ -811,8 +834,13 @@ def _weno_zeta_at_v(
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
     # Convert point values to cell averages along zonal axis (periodic).
-    from legoesm.core.weno import point_to_cellavg_periodic
+    # Faithful Oceananigans path (convert_to_cellavg=False): see _weno_zeta_at_u.
     conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+    else:
+        def point_to_cellavg_periodic(a, axis=1, order=0):
+            return a
 
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
@@ -833,12 +861,10 @@ def _weno_zeta_at_v(
     psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
-    phi_plus_u, phi_minus_u = weno_reconstruct_split(
-        phi_stencil, psi_u_stencil, order=order)
-    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
-
     if v_smooth is None:
-        return result_u
+        phi_plus_u, phi_minus_u = weno_reconstruct_split(
+            phi_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
 
     # ⟨v⟩_i: v averaged in longitude to vertex positions.
     v_w = jnp.roll(v_smooth, 1, axis=1)
@@ -851,6 +877,16 @@ def _weno_zeta_at_v(
     psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil (see _weno_zeta_at_u).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_u_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
+    phi_plus_u, phi_minus_u = weno_reconstruct_split(
+        phi_stencil, psi_u_stencil, order=order)
+    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
         phi_stencil, psi_v_stencil, order=order)
     result_v = weno_upwind(phi_plus_v, phi_minus_v, u_at_v)
@@ -1005,6 +1041,7 @@ def _weno_cell_to_uface(
     psi: jnp.ndarray,
     u_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to u-faces (zonal, periodic).
 
@@ -1028,10 +1065,24 @@ def _weno_cell_to_uface(
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8, 9: 8}[order]
-    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
-    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+        psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    else:
+        # Faithful Oceananigans path: the grid values are fed DIRECTLY to the
+        # finite-volume WENO reconstruction.  Oceananigans is a finite-volume
+        # code and reconstructs the nodal grid values directly with the same
+        # Balsara-Shu cell-avg->face coefficients; it has NO point->cellavg
+        # pre-filter.  legoESM's point_to_cellavg is a mild grid-scale low-pass
+        # (measured Nyquist gain ~0.79) that pre-smooths the field the WENO
+        # smoothness indicators see -> weights stay nearer optimal -> the
+        # nonlinear ENO dissipation is SUPPRESSED at the grid scale.  Removing
+        # it restores the standard FV-WENO operator (verified more dissipative
+        # on the 2Δx mode), matching the oracle.
+        phi_avg = phi
+        psi_avg = psi
 
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
@@ -1059,6 +1110,7 @@ def _weno_cell_to_vface(
     psi: jnp.ndarray,
     v_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to v-faces (meridional, wall BC).
 
@@ -1085,10 +1137,15 @@ def _weno_cell_to_vface(
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8, 9: 8}[order]
-    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
-    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+        psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    else:
+        # Faithful Oceananigans path (see _weno_cell_to_uface).
+        phi_avg = phi
+        psi_avg = psi
 
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
@@ -1220,11 +1277,26 @@ def _bc_geometry_and_density(
     # accounting for the partial bottom cell.  Cells below the
     # seafloor have h_partial=0 and contribute zero pressure increment.
     # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
-    _h_actual_pprime = (
-        z_coord.h_partial
-        if isinstance(z_coord, OceanPartialCellCoordinate)
-        else None
-    )
+    #
+    # z-star + smc03: integrate the hydrostatic pressure on the PHYSICAL
+    # compressed thickness (η=0: dz_ref·H_bathy/H_max) so a pressure-dependent
+    # EOS (Wright) sees the correct in-situ pressure — CONSISTENT with the
+    # physical depths the smc03 density-Jacobian reconstructs against.  With
+    # h_actual=None (dz_ref) the pressure is reference-coordinate; for a curved
+    # ρ(p) that mismatch with smc03's compressed geometry produces a spurious
+    # rest-state PGF that blows up a tall-seamount z-star column (the tier-1
+    # Wright seamount).  Linear EOS is pressure-independent ⇒ this is a no-op
+    # there.  The legacy adcroft z-star path keeps None (dz_ref) → BIT-IDENTICAL,
+    # and its raw same-level gradient is consistent with the dz_ref pressure.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        _h_actual_pprime = z_coord.h_partial
+    elif (isinstance(z_coord, OceanZStarCoordinate)
+          and getattr(config, "pgf_scheme", "adcroft") == "smc03"):
+        _h_actual_pprime = compute_layer_thickness(
+            jnp.zeros_like(eta_safe), H_bathy, z_coord,
+        )
+    else:
+        _h_actual_pprime = None
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
@@ -1367,12 +1439,24 @@ def _bc_ke_and_pressure_gradients(
         delta_v_sq_cell = neumann_fill_cgrid(delta_v_sq_cell, mask, grid=grid)
         v_avg_cell = neumann_fill_cgrid(v_avg_cell, mask, grid=grid)
 
+        # Faithful Oceananigans FV-WENO: feed the cell-centred δu²/δv² grid
+        # values DIRECTLY to the finite-volume WENO reconstruction
+        # (convert_to_cellavg=False).  Oceananigans (a finite-volume code)
+        # reconstructs the grid values directly with the same Balsara-Shu FV
+        # coefficients and has NO point->cellavg pre-filter.  legoESM's
+        # point_to_cellavg is a mild grid-scale low-pass (Nyquist gain ~0.79)
+        # that pre-smooths the field, so the WENO smoothness indicators see a
+        # smoother field and keep near-optimal weights — suppressing the
+        # nonlinear ENO dissipation at the grid scale.  Removing it restores the
+        # standard, more-dissipative FV-WENO operator (verified on the 2Δx mode).
         # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
         delta_u_sq_at_uface = _weno_cell_to_uface(
-            delta_u_sq_cell, u_avg_cell, u, order=5)        # (n_lat, n_lon+1, nlev)
+            delta_u_sq_cell, u_avg_cell, u, order=5,
+            convert_to_cellavg=False)                       # (n_lat, n_lon+1, nlev)
         # WENO upwind of δ_j v² to v-faces.
         delta_v_sq_at_vface = _weno_cell_to_vface(
-            delta_v_sq_cell, v_avg_cell, v, order=5)        # (n_lat+1, n_lon, nlev)
+            delta_v_sq_cell, v_avg_cell, v, order=5,
+            convert_to_cellavg=False)                       # (n_lat+1, n_lon, nlev)
 
         # Convert "δ across one cell" → "gradient at face" by dividing
         # by dx_u (cell width at u-face latitude) and dy_v (distance
@@ -1500,9 +1584,11 @@ def _bc_ke_and_pressure_gradients(
     # Adcroft & Campin (2004) shift each cell's pressure to a common
     # face-reference depth (the shallower of the two centroids) before
     # differencing.  Implemented here as an additive correction to
-    # dp_dx, dp_dy.  For pure z\\* coord (legacy), all centroids align
+    # dp_dx, dp_dy.  For pure z\\* coord (legacy adcroft), all centroids align
     # within a column so the correction is identically zero — bit-exact
-    # backwards-compat preserved.
+    # backwards-compat preserved; ``pgf_scheme="smc03"`` instead applies the
+    # density-Jacobian PGF (the elif branch below).  ``pgf_scheme`` is validated
+    # against {"adcroft","smc03"} at model construction (_validate_config).
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
@@ -1538,6 +1624,52 @@ def _bc_ke_and_pressure_gradients(
             dp_dy = dp_dy + partial_cell_pgf_correction_y(
                 centroid_depth, rho_prime, grid, g_val,
             )
+    elif isinstance(z_coord, OceanZStarCoordinate):
+        # Pure z-star (terrain-following) PGF.  The legacy path applies NO
+        # correction: the raw ``gradient_*_cgrid(p')`` differences cells at the
+        # SAME reference level k but DIFFERENT physical depth wherever the
+        # coordinate compresses over sloping bathymetry (H_bathy < H_max), the
+        # classic terrain-following PGF error (≈1.8 m/s spurious flow from rest
+        # over a ridge in the seamount-at-rest check).  ``pgf_scheme="smc03"``
+        # generalizes the density-Jacobian PGF (proven exact at rest on partial
+        # cells) to z-star: reconstruct ρ(z_physical) per column from the η=0
+        # physical thickness ``dz_ref·H_bathy/H_max`` (= ``compute_layer_thickness``
+        # at η=0, matching the η=0 reference the rest of the baroclinic path
+        # uses) and difference at a common physical depth — which vanishes at
+        # rest for a horizontally-uniform-in-z stratification.  All z-star cells
+        # are active (no below-seafloor cells).  Opt-in: the default
+        # ``pgf_scheme="adcroft"`` keeps the raw gradient → BIT-IDENTICAL
+        # (this branch is not entered).
+        if getattr(config, "pgf_scheme", "adcroft") == "smc03":
+            # ``min_water_column_m`` intentionally omitted (mirrors the partial-
+            # cell smc03 branch, which uses the unfloored static ``h_partial``):
+            # smc03 re-integrates pressure from THIS ``h_zstar`` and discards the
+            # upstream dz_ref-based ``p'``, so the centroid + pressure stay self-
+            # consistent (the well-balancedness requirement).  The floor only
+            # matters at sub-floor wet/dry-margin columns, which are masked out
+            # downstream by ``u_mask_3d``.
+            h_zstar = compute_layer_thickness(
+                jnp.zeros_like(eta_safe), H_bathy, z_coord,
+            )
+            is_active_zstar = jnp.ones(rho_prime.shape, dtype=bool)
+            # ``bottom_slope_2nd_order=True``: z-star divides the column into N
+            # compressed cells, so over a tall seamount the bottom cells become
+            # very thin and the ONE-SIDED bottom harmonic slope's O(Δz) curvature
+            # bias — under a pressure-dependent EOS where ρ(z) is curved even for
+            # uniform T,S — is amplified into a spurious rest-state PGF that blows
+            # up (the tier-1 z-star Wright-EOS seamount). The 3-point backward
+            # slope evaluates dρ/dz AT the bottom centroid (exact for linear AND
+            # quadratic ρ), removing the bias. Partial cells keep the default
+            # (False) — full-thickness column above the partial bottom, proven
+            # path bit-identical.
+            dp_dx = density_jacobian_pgf_smc03_x(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
+            ).astype(dp_dx.dtype)
+            dp_dy = density_jacobian_pgf_smc03_y(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
+            ).astype(dp_dy.dtype)
 
     return dKE_dx, dp_dx, dKE_dy, dp_dy
 
@@ -1622,6 +1754,8 @@ def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
     weno_smoothness="split",
     vertex_mask=None,
+    enstrophy_metric=False,
+    reconstruct_zeta=False,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1718,10 +1852,22 @@ def _bc_pv_flux(
 
     # (Fv / Fu computed above, before the fused pad.)
 
-    # Average Fv to u-points (4-point, periodic in lon)
+    # Average Fv to u-points (4-point, periodic in lon).  enstrophy_metric selects the
+    # Sadourny Δx-WEIGHTED transport v̂ = 0.25·Σ(Δx_v·Fv)/Δx_u matching Oceananigans'
+    # WENOVectorInvariant (ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹), which conserves enstrophy at
+    # FINITE amplitude.  The plain average (default) is identical on uniform-metric
+    # grids (Δx_v ≡ Δx_u) — the cos-lat weighting is the finite-amplitude lever.
     Fv_west = jnp.roll(Fv, 1, axis=1)
-    Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
-                            + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]                       # (n_lat+1, n_lon, 1)
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :Fv.shape[1], None]          # (n_lat, n_lon, 1)
+        Fv_at_u_core = (0.25 * (_dxv[:-1] * Fv[:-1] + _dxv[1:] * Fv[1:]
+                                + _dxv_w[:-1] * Fv_west[:-1]
+                                + _dxv_w[1:] * Fv_west[1:])) / _dxu_u
+    else:
+        Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
+                                + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
     Fv_at_u = jnp.concatenate(
         [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1745,10 +1891,20 @@ def _bc_pv_flux(
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Total velocity at u/v faces (for WENO upwinding direction)
+    # Total velocity at u faces (sets the WENO upwinding DIRECTION).  Same Sadourny
+    # Δx-weighting as Fv_at_u under enstrophy_metric, so the upwind side is chosen by
+    # the metric-consistent transport v̂ (matches Oceananigans bias(v̂)).
     v_west_total = jnp.roll(v, 1, axis=1)
-    v_at_u_core = 0.25 * (v[:-1] + v[1:]
-                           + v_west_total[:-1] + v_west_total[1:])
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :v.shape[1], None]
+        v_at_u_core = (0.25 * (_dxv[:-1] * v[:-1] + _dxv[1:] * v[1:]
+                               + _dxv_w[:-1] * v_west_total[:-1]
+                               + _dxv_w[1:] * v_west_total[1:])) / _dxu_u
+    else:
+        v_at_u_core = 0.25 * (v[:-1] + v[1:]
+                               + v_west_total[:-1] + v_west_total[1:])
     v_at_u = jnp.concatenate(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1788,15 +1944,32 @@ def _bc_pv_flux(
         # Neumann extrapolation instead of masked-zero discontinuities.
         vtx_mask = (vertex_mask if vertex_mask is not None
                     else compute_vertex_mask(mask, grid=grid))
-        q_filled = _neumann_fill_vertex(q, vtx_mask)
-        q_at_u = _weno_zeta_at_u(
-            q_filled, v, v_at_u, order=_weno_order, u_smooth=u,
-            smoothness=weno_smoothness)
-        q_at_v = _weno_zeta_at_v(
-            q_filled, u, u_at_v, order=_weno_order, v_smooth=v,
-            smoothness=weno_smoothness)
-        diag_vortcor_u = q_at_u * Fv_at_u
-        diag_vortcor_v = -(q_at_v * Fu_at_v)
+        # reconstruct_zeta: Oceananigans WENOVectorInvariant form — reconstruct the
+        # RELATIVE VORTICITY ζ directly and multiply by the transport velocity v̂
+        # (flux = v̂·ζᴿ; h NOT in the vorticity flux). Default: the POTENTIAL-vorticity
+        # form (reconstruct q=ζ/h, ×mass flux h·v), which conserves potential enstrophy
+        # on partial-cell topography. Identical when h is uniform (η≈0); they diverge
+        # at finite amplitude (the nonlinear WENO over the h-varying stencil).
+        _recon = zeta if reconstruct_zeta else q
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): reconstruct the
+        # vertex grid values directly (convert_to_cellavg=False) with the VelocityStencil
+        # beta-average form (beta_average=True) — average the smoothness betas of ⟨u⟩ and
+        # ⟨v⟩ per sub-stencil and reconstruct ONCE (matches weno_interpolants.jl::beta_sum).
+        _filled = _neumann_fill_vertex(_recon, vtx_mask)
+        rec_at_u = _weno_zeta_at_u(
+            _filled, v, v_at_u, order=_weno_order, u_smooth=u,
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
+        rec_at_v = _weno_zeta_at_v(
+            _filled, u, u_at_v, order=_weno_order, v_smooth=v,
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
+        if reconstruct_zeta:
+            diag_vortcor_u = rec_at_u * v_at_u            # ζᴿ·v̂ (Oceananigans form)
+            diag_vortcor_v = -(rec_at_v * u_at_v)
+        else:
+            diag_vortcor_u = rec_at_u * Fv_at_u           # qᴿ·(h·v) PV flux
+            diag_vortcor_v = -(rec_at_v * Fu_at_v)
     else:
         vtx_mask_va = (vertex_mask if vertex_mask is not None
                        else compute_vertex_mask(mask, grid=grid))
@@ -1845,10 +2018,17 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
         # Smoothness measure for the matching-direction WENO reconstruction:
         #   "split"    (W*V) → {δU; D}: smoothness from the FULL divergence
-        #              D = δU + δV (Silvestri Eq 45). The paper notes this
-        #              "has a large impact on the solution".
-        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44).
-        if config.weno_smoothness == "split":
+        #              D = δU + δV (Silvestri Eq 45, Oceananigans
+        #              CrossAndSelfUpwinding). The paper notes this "has a large
+        #              impact on the solution".
+        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44, Oceananigans
+        #              OnlySelfUpwinding — the WENOVectorInvariant DEFAULT).
+        # DECOUPLED from the vorticity smoothness: Oceananigans' default mixes
+        # VelocityStencil vorticity (Eq 43, "split") with OnlySelfUpwinding
+        # divergence (Eq 44, "standard"); ``weno_divergence_smoothness`` selects the
+        # divergence family independently (None → follow ``weno_smoothness``).
+        _div_smooth = config.weno_divergence_smoothness or config.weno_smoothness
+        if _div_smooth == "split":
             D_full_filled = neumann_fill_cgrid(
                 dU_di_cell + dV_dj_cell, mask, grid=grid)
             psi_u, psi_v = D_full_filled, D_full_filled
@@ -1857,10 +2037,15 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         # Matching direction (WENO upwind), cross direction (centered).
         # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
         # W9V has D=WENO9, paired with the order-9 vorticity flux).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order)
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): the
+        # divergence-flux grid values are reconstructed directly
+        # (convert_to_cellavg=False), no point->cellavg deconvolution.
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order,
+                                      convert_to_cellavg=False)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order))
+                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order,
+                                        convert_to_cellavg=False))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
@@ -2021,10 +2206,19 @@ def _bc_vertical_momentum_advection(
             # W9V ("order has minimal impact"), and the vertical tracer kernel
             # is only defined for orders 5 and 7.
             _vert_order = _weno_order if _weno_order <= 7 else 5
+            # config.weno_vertadv_full_velocity: advect the FULL velocity (Oceananigans-
+            # faithful) vs the default baroclinic perturbation u' (omits −∂(w·U_bar)/∂z).
+            _vfull = getattr(config, "weno_vertadv_full_velocity", False)
+            if _vfull and (u_full is None or v_full is None):
+                raise ValueError(
+                    "weno_vertadv_full_velocity=True requires u_full and v_full to be "
+                    "passed to _bc_vertical_momentum_advection (match centered_full).")
+            _u_va = u_full if _vfull else u_prime
+            _v_va = v_full if _vfull else v_prime
             diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-                u_prime, w_u, h_u_old, order=_vert_order)
+                _u_va, w_u, h_u_old, order=_vert_order)
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-                v_prime, w_v, h_v_old, order=_vert_order)
+                _v_va, w_v, h_v_old, order=_vert_order)
         else:
             # Non-WENO explicit vertical momentum advection.  Pass u/v
             # face-activity masks so the vertical momentum flux is exactly
@@ -3083,6 +3277,10 @@ def _bc_horizontal_momentum_advection_flux_form(
     u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
     Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
     net_merid_u = Fy_vu[1:, :, :] - Fy_vu[:-1, :, :]            # (n_lat,n_lon+1,nlev)
+    # Oceananigans `Flat`-y: δy(meridional u-momentum flux) ≡ 0.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid_u = jnp.zeros_like(net_merid_u)
 
     # u-cell area at u-faces (avg of adjacent cell areas, periodic).
     a_uc = 0.5 * (area[:, :, 0] + jnp.roll(area[:, :, 0], 1, axis=1))   # (n_lat,n_lon)
@@ -3103,6 +3301,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
     zero_lon = jnp.zeros_like(v[:1, :, :])
     net_merid_v = jnp.concatenate([zero_lon, net_merid_v_int, zero_lon], axis=0)
+    # Oceananigans `Flat`-y: δy(meridional v-momentum flux) ≡ 0.
+    if get_meridionally_flat():
+        net_merid_v = jnp.zeros_like(net_merid_v)
 
     # x-flux at vertices (lon-faces). Use roll-based periodicity in lon (drop
     # the u wrap column) so the divergence telescopes EXACTLY regardless of
@@ -3313,6 +3514,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
             config.weno_smoothness,
             vertex_mask=vertex_mask,
+            enstrophy_metric=config.vortcor_enstrophy_metric,
+            reconstruct_zeta=config.vortcor_reconstruct_zeta,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

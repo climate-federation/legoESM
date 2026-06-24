@@ -62,6 +62,60 @@ TUNED_GLACIER_ALBEDO = 0.7192     # snow-free ice-sheet base albedo
 TUNED_SNOW_ALBEDO_MAX = 0.7844    # LandAlbedoConfig.alpha_snow_max
 TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 
+# --- MULTILAYER (8-layer Richards) default per-PFT + snow/ice parameters ----------
+# A SEPARATE calibration from the slab set above: the deep-soil forward freezes the
+# annual-mean soil moisture and trains the EXTENDED per-PFT set against 24-hour ERA5
+# forcing (scripts/run/train_multilayer_land_era5.py) -- besides albedo/emissivity/
+# root it tunes the bulk exchange Ch, the soil thermal inertia (C_soil + k_solid ->
+# seasonal-cycle amplitude/phase) and the PLANT btran water-stress thresholds
+# theta_wp/theta_fc (distinct from the reference-soil van-Genuchten retention).
+# Full-grid validation: bias +0.81 K, RMSE 3.28, seasonal-amplitude bias -0.49 K.
+# Selected via CLMSurfaceParamProvider(variant="multilayer"); the slab set stays the
+# default so slab runs do not regress.  CLM5 PFT order (17).
+_TUNED_PFT_ALBEDO_MULTILAYER = (0.3809, 0.1359, 0.1382, 0.1564, 0.1577, 0.1591, 0.1682,
+                                0.1700, 0.1700, 0.1218, 0.2143, 0.2173, 0.2361, 0.2186,
+                                0.2425, 0.2139, 0.1800)
+_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9877, 0.9867, 0.9839, 0.9840, 0.9873, 0.9876,
+                                    0.9855, 0.9867, 0.9855, 0.9882, 0.9875, 0.9864,
+                                    0.9872, 0.9853, 0.9875, 0.9862, 0.9600)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.06, 0.94, 0.92, 0.94, 1.10, 1.14, 1.03, 0.89, 0.71,
+                                    1.87, 0.67, 0.44, 0.32, 0.37, 0.35, 0.34, 0.50)
+# per-PFT bulk heat/moisture exchange coefficient [-]
+_TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.005629,
+                            0.005195, 0.005527, 0.004722, 0.002040, 0.005474, 0.004351,
+                            0.005020, 0.004351, 0.005545, 0.004121, 0.003000)
+# per-PFT soil thermal inertia: mineral heat capacity [J/m3/K] + solid conductivity [W/m/K]
+_TUNED_PFT_CSOIL_MULTILAYER = (753233., 801667., 2748512., 865693., 899206., 828903.,
+                               1079340., 788562., 1040769., 717987., 777039., 711600.,
+                               857871., 954084., 1021996., 1061035., 2000000.)
+_TUNED_PFT_KSOLID_MULTILAYER = (1.268, 1.088, 1.317, 1.119, 1.124, 1.098, 1.297, 1.091,
+                                1.330, 1.041, 1.103, 1.049, 1.163, 1.199, 1.171, 1.286, 2.000)
+# per-PFT PLANT btran water-stress thresholds (wilting / field capacity) [m3/m3]
+_TUNED_PFT_WP_MULTILAYER = (0.1148, 0.0726, 0.0627, 0.0693, 0.1008, 0.0792, 0.0852, 0.0709,
+                            0.0666, 0.2904, 0.0598, 0.0571, 0.0568, 0.0854, 0.0992, 0.1095, 0.1000)
+_TUNED_PFT_FC_MULTILAYER = (0.1967, 0.1987, 0.1440, 0.1499, 0.2097, 0.1878, 0.1849, 0.1518,
+                            0.1579, 0.5827, 0.1086, 0.1069, 0.1186, 0.1936, 0.2522, 0.2795, 0.2500)
+TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7308
+TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.8384
+# scalar fallback Ch (PFT mean) for the rare no-grid path where the per-cell map
+# (clm_multilayer_ch) cannot be built; the per-cell value is used when a grid exists.
+TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
+# btran needs theta_fc > theta_wp per PFT; PFT-weighting (a convex combination) then
+# preserves the ordering for every mixed cell, so the stress range never inverts.
+assert all(fc > wp for wp, fc in zip(_TUNED_PFT_WP_MULTILAYER, _TUNED_PFT_FC_MULTILAYER)), \
+    "multilayer plant theta_fc must exceed theta_wp for every PFT"
+
+# Per-variant lookup: snow-free per-PFT (albedo, emissivity, root_depth) columns +
+# glacier ice base albedo.  The slab W_max is reused for both (W_max is the bucket
+# store of the 1-layer slab; the Richards multilayer ignores it -> it gets no
+# gradient in the multilayer calibration, so there is nothing distinct to bake).
+_VARIANT_TUNED = {
+    "slab": (_TUNED_PFT_ALBEDO, _TUNED_PFT_EMISSIVITY, _TUNED_PFT_ROOT_DEPTH,
+             TUNED_GLACIER_ALBEDO),
+    "multilayer": (_TUNED_PFT_ALBEDO_MULTILAYER, _TUNED_PFT_EMISSIVITY_MULTILAYER,
+                   _TUNED_PFT_ROOT_DEPTH_MULTILAYER, TUNED_GLACIER_ALBEDO_MULTILAYER),
+}
+
 # Snow-free albedo of glacier / ice-sheet ice used as the snow-free BASE over
 # glacier cells so ice sheets stay bright when summer snow melts (snow feedback
 # layers on top) instead of exposing dark bare soil — the "Greenland problem".
@@ -152,33 +206,53 @@ class CLMSurfaceParamProvider(eqx.Module):
     soil_theta_fc: jax.Array          # (ncol,)
     glacier_frac: jax.Array           # (ncol,) ice-sheet fraction [0,1]
     raw_table: jax.Array              # (17, 12) per-PFT parameter table (tuned or CLM5)
+    _glacier_albedo: float = eqx.field(static=True)   # snow-free ice base albedo
+    plant_theta_wp: jax.Array = None  # (ncol,) PFT-weighted PLANT btran wilting (or None)
+    plant_theta_fc: jax.Array = None  # (ncol,) PFT-weighted PLANT btran field cap (or None)
 
     def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac,
-                 tuned: bool = True):
+                 tuned: bool = True, variant: str = "slab"):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
         self.glacier_frac = glacier_frac
+        self._glacier_albedo = TUNED_GLACIER_ALBEDO
+        self.plant_theta_wp = None
+        self.plant_theta_fc = None
         table = np.asarray(clm5_pft_table())
         if tuned:   # overwrite the calibrated per-PFT columns (physical bounds)
+            if variant not in _VARIANT_TUNED:
+                raise ValueError(
+                    f"unknown tuned variant {variant!r}; expected one of "
+                    f"{sorted(_VARIANT_TUNED)}")
+            alb, emis, root, glac_alb = _VARIANT_TUNED[variant]
             table = table.copy()
-            table[:, PARAM_NAMES.index("albedo_veg")] = _TUNED_PFT_ALBEDO
-            table[:, PARAM_NAMES.index("emissivity")] = _TUNED_PFT_EMISSIVITY
-            table[:, PARAM_NAMES.index("root_depth")] = _TUNED_PFT_ROOT_DEPTH
+            table[:, PARAM_NAMES.index("albedo_veg")] = alb
+            table[:, PARAM_NAMES.index("emissivity")] = emis
+            table[:, PARAM_NAMES.index("root_depth")] = root
             table[:, PARAM_NAMES.index("W_max")] = _TUNED_PFT_WMAX
+            self._glacier_albedo = glac_alb
+            if variant == "multilayer":  # PLANT btran thresholds override the soil map
+                self.plant_theta_wp = pft_fractions @ jnp.asarray(_TUNED_PFT_WP_MULTILAYER)
+                self.plant_theta_fc = pft_fractions @ jnp.asarray(_TUNED_PFT_FC_MULTILAYER)
         self.raw_table = jnp.asarray(table)
 
     def __call__(self) -> LandSurfaceParams:
         vals = self.pft_fractions @ self.raw_table          # (ncol, 12) PFT-weighted
         params = {name: vals[:, i] for i, name in enumerate(PARAM_NAMES)}
-        # soil (not vegetation) properties come from the reference soil map
-        params["theta_wp"] = self.soil_theta_wp
-        params["theta_fc"] = self.soil_theta_fc
+        # theta_wp/theta_fc: the PLANT btran thresholds (multilayer variant) when
+        # calibrated, else the reference-soil van-Genuchten wilting/field capacity.
+        if self.plant_theta_wp is not None:
+            params["theta_wp"] = self.plant_theta_wp
+            params["theta_fc"] = self.plant_theta_fc
+        else:
+            params["theta_wp"] = self.soil_theta_wp
+            params["theta_fc"] = self.soil_theta_fc
         # Glacier / ice-sheet cells: blend the snow-free base albedo toward ice so
         # ice sheets stay bright when summer snow melts (the snow feedback layers on
         # top of this base) instead of exposing dark bare soil — the Greenland fix.
         fg = self.glacier_frac
-        params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * _GLACIER_ALBEDO
+        params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * self._glacier_albedo
         return LandSurfaceParams(**params)
 
 
@@ -197,11 +271,32 @@ def clm_hydraulics_config(surface_map: dict):
         alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
 
 
-def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None
-                         ) -> CLMSurfaceParamProvider:
+def clm_multilayer_thermal_config(surface_map: dict):
+    """Per-column :class:`SoilThermalConfig` with the PFT-weighted, ERA5-calibrated
+    soil thermal inertia (mineral heat capacity + solid conductivity), shaped
+    ``(ncol, 1)`` so it broadcasts over the soil layers — the multilayer-variant
+    seasonal-cycle calibration.  Drop into ``MultiLayerLandConfig(thermal=...)``."""
+    from legoesm.land.soil_thermal import SoilThermalConfig
+    pft = jnp.asarray(surface_map["pft_fractions"])              # (ncol, 17)
+    pw1 = lambda t: (pft @ jnp.asarray(t)).reshape(-1, 1)
+    return SoilThermalConfig(C_soil=pw1(_TUNED_PFT_CSOIL_MULTILAYER),
+                             k_solid=pw1(_TUNED_PFT_KSOLID_MULTILAYER))
+
+
+def clm_multilayer_ch(surface_map: dict):
+    """PFT-weighted, ERA5-calibrated per-cell bulk heat/moisture exchange coefficient
+    (ncol,) for the multilayer CLM default path (``LandConfig.Ch_land``/``Cd_land``)."""
+    return jnp.asarray(surface_map["pft_fractions"]) @ jnp.asarray(_TUNED_PFT_CH_MULTILAYER)
+
+
+def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = None,
+                         variant: str = "slab") -> CLMSurfaceParamProvider:
     """Build the default CLM PFT + reference-soil parameter provider for the given
-    target columns (downloads the surfdata file if ``surfdata_path`` is None)."""
+    target columns (downloads the surfdata file if ``surfdata_path`` is None).
+
+    ``variant`` selects the baked tuned set: ``"slab"`` (default, 1-layer slab land)
+    or ``"multilayer"`` (8-layer Richards land)."""
     path = surfdata_path or download_clm_surfdata()
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
-                                   m["glacier_frac"])
+                                   m["glacier_frac"], variant=variant)

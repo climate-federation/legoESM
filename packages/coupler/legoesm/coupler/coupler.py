@@ -131,15 +131,23 @@ def init_surface_state(
     dims_2d = ("face", "x", "y")
     _sd = get_policy().storage
 
+    # ``T_soil_init`` may be a scalar (uniform; legacy default) OR a spatial
+    # array of shape ``shape`` (a warm start, e.g. the lat-varying near-surface
+    # air temperature) — removes the artificial tropical cold-soil spin-up of
+    # the uniform 280 K default.
+    _Tsi = jnp.asarray(T_soil_init)
     if isinstance(land_config, MultiLayerLandConfig):
         # For multi-layer land, ncol = product of spatial dims
         ncol = math.prod(shape)
+        T_init_col = T_soil_init if _Tsi.ndim == 0 else _Tsi.reshape(ncol)
         land = init_multilayer_land_state(
-            ncol, land_config, T_init=T_soil_init,
+            ncol, land_config, T_init=T_init_col,
         )
     else:
+        T_soil_data = (jnp.full(shape, T_soil_init, dtype=_sd) if _Tsi.ndim == 0
+                       else jnp.broadcast_to(_Tsi.astype(_sd), shape))
         land = LandState(
-            T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
+            T_soil=Field(data=T_soil_data,
                          name="T_soil", dims=dims_2d, units="K"),
             W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
                            name="W_bucket", dims=dims_2d, units="kg/m2"),
