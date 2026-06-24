@@ -41,7 +41,8 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 
-def main():
+def build_parser():
+    """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -121,20 +122,36 @@ def main():
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
-                        help="Air-sea surface bulk-flux algorithm. Applied "
-                             "CONSISTENTLY to the atmosphere surface layer, the "
-                             "slab/two-layer ocean heat budget, and the coupler "
-                             "ocean tile (so the turbulent heat leaving the ocean "
-                             "matches the heat entering the atmosphere). "
-                             "NOTE: the land / lake / sea-ice tiles keep their "
-                             "own bulk_scheme. 'constant' (default, byte-"
-                             "identical) = neutral coefficients, no gustiness. "
-                             "'coare3'/'large_yeager' = stability-dependent MOST "
-                             "with convective-gustiness w* — fixes anemic "
-                             "evaporation over a calm, convectively-unstable warm "
-                             "ocean (cold/dry surface-air bias). Requires a "
-                             "turbulence scheme (not --turbulence none).")
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="AIR-SEA surface bulk-flux algorithm for the "
+                             "atmosphere surface layer + the coupler OCEAN tile "
+                             "(the 3D-ocean air-sea flux). 'coare3' is the "
+                             "ocean-appropriate choice (Charnock roughness + "
+                             "convective-gustiness w*). The LAND and SLAB-ocean "
+                             "tiles use their OWN scheme (--land-bulk-scheme / "
+                             "--slab-bulk-scheme, default 'most'). 'constant' "
+                             "(default, byte-identical) = neutral coefficients; "
+                             "'most' = generic iterative MOST (fixed roughness); "
+                             "'coare3'/'large_yeager' = ocean stability-dependent "
+                             "MOST. Requires a turbulence scheme (not "
+                             "--turbulence none).")
+    parser.add_argument("--land-bulk-scheme", default="most",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface bulk-flux scheme for the LAND tile "
+                             "(slab/multilayer land). Default 'most' = "
+                             "Monin-Obukhov similarity with a land roughness "
+                             "(no ocean Charnock); 'constant' = neutral "
+                             "coefficients (legacy). Land already carries dynamic "
+                             "water pools + dryness-limited ET (bucket / Richards "
+                             "soil moisture), so MOST + soil-moisture stress gives "
+                             "a physical land-atmosphere flux.")
+    parser.add_argument("--slab-bulk-scheme", default="most",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface bulk-flux scheme for the SLAB / two-layer "
+                             "ocean heat budget (--ocean slab|two_layer). Default "
+                             "'most' (generic MOST). The prognostic 3D ocean "
+                             "(--ocean dynamic) instead uses --surface-bulk-scheme "
+                             "on the coupler ocean tile (coare3 for air-sea).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi",
                         type=float, default=None,
                         help="COARE 3.0 convective-gustiness boundary-layer depth "
@@ -349,7 +366,11 @@ def main():
     parser.add_argument("--output", "-o", default="results/coupled",
                         help="Output directory")
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     # --minimal-physics: collapse the full-physics defaults to a cheap
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
@@ -548,16 +569,16 @@ def main():
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
-            # Match the slab heat-budget turbulent fluxes to the atmosphere
-            # surface layer (interface energy consistency); see SimpleOceanConfig.
-            bulk_scheme=args.surface_bulk_scheme,
+            # The SLAB/two-layer ocean uses its own bulk scheme (default MOST);
+            # the prognostic 3D ocean is what gets COARE on the coupler tile.
+            bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
-            bulk_scheme=args.surface_bulk_scheme,
+            bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
         )
         # ocean_mode log label (fixed/slab -> "slab").
@@ -580,6 +601,23 @@ def main():
                 snow_albedo_feedback=True))
         logger.info("  Land albedo: snow-albedo feedback + lat-varying "
                     "vegetation albedo ENABLED")
+
+    # Land surface bulk-flux scheme (default MOST): wire --land-bulk-scheme onto
+    # the LandConfig / MultiLayerLandConfig so the land tile computes its
+    # turbulent fluxes with Monin-Obukhov similarity (land roughness, no ocean
+    # Charnock) instead of the legacy constant coefficients.  The land model
+    # already carries dynamic water pools + dryness-limited ET (bucket / Richards
+    # soil moisture), so MOST + the soil-moisture stress gives a physical
+    # land-atmosphere flux.  The config-level default stays "constant" (other
+    # callers / tests byte-identical); only run_coupled opts into MOST.
+    if (coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None
+            and hasattr(coupled_cfg.land_config, "bulk_scheme")):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                bulk_scheme=args.land_bulk_scheme))
+        logger.info("  Land surface flux scheme: %s (land tile; dynamic water "
+                    "pools + dryness-limited ET active)", args.land_bulk_scheme)
 
     # Soil warm-start (opt-in): init soil at the atmosphere's lat-structured
     # near-surface air T (t=0) instead of a uniform 280 K cold start.
