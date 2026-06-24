@@ -7,8 +7,18 @@ field (Oceananigans `Flat`-y: ∂/∂y≡0) on the `implicit_cn`/`ImplicitFreeSu
 stack. Productionized: `LatLonCGridOceanConfig.meridionally_flat` (default-off,
 bit-identical), wired through the comparison + canonical config; tests
 `test_meridionally_flat_inertial_oscillation` + the comparator. Residual: late-time
-corr decay (0.94→0.51 over days 1.4→2.0) = advection/dispersion vs oracle WENO7
-(refinement). The long "Arakawa–Lamb / spatial null mode" thread below is SUPERSEDED
+corr decay = an internal-tide DISPERSION difference (diagnosed 2026-06-24, NOT a
+quick fix). Chased and RULED OUT: (a) momentum dissipation — `weno5`/vector-invariant
+momentum is more accurate early (+0.98 vs +0.94 day 0.5) but BLOWS UP day 0.6; a
+biharmonic momentum viscosity (`B_h` ≤1e10, flat-aware `vector_laplacian`) barely
+helps (day-2 +0.44→+0.48); (b) tracer order — `weno7` ≡ `weno5` (no change); (c)
+part of the apparent decay is the BUMP-ONLY comparison window — the radiated beam
+leaves it; full-domain corr is better (0.95→0.83→0.63→**0.55**, ≥0.6 through ~day
+1.5). So the residual is genuine discrete-dispersion (legoESM baroclinic-mode
+propagation vs Oceananigans WENO5 flux-form); the amplitude stays matched (corr
+decays, |b'| doesn't), confirming phase/dispersion not damping. A clean full-2-day
+pass would need matching the exact discrete dispersion relation (deep). The long
+"Arakawa–Lamb / spatial null mode" thread below is SUPERSEDED
 (it was an `implicit_cn` split-coupling instability, not a spatial scheme defect).
 
 ---
