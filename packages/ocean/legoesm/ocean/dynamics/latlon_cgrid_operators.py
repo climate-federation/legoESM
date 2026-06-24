@@ -2980,6 +2980,14 @@ def compute_face_masks_3d(
     # v-face i is between cell i-1 (south) and cell i (north).
     # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
+    # Meridionally-periodic (y-re-entrant) mode: boundary v-faces wrap (wet iff
+    # the wrap-adjacent cells are wet at that level), not walls. Default OFF =
+    # bit-identical. See compute_face_masks.
+    from legoesm.grids.halo_latlon import get_meridionally_periodic
+    if get_meridionally_periodic():
+        wrap = a[-1:] * a[0:1]
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
