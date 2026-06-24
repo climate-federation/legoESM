@@ -272,9 +272,8 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
             axis=0), rep)
 
     perm_north, _perm_south = latlon_band_perms(n_dev)
-    dt_closure = [None]
 
-    def _body(state_local, stacks_local):
+    def _body(state_local, stacks_local, dt):
         r = jax.lax.axis_index(axis)
         band_geom = template._replace(
             **{name: stacks_local[name][r] for name in array_field_names})
@@ -287,7 +286,7 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         v_full = reconstruct_vface_lower(state_local.v, axis, perm_north)
         state_band = state_local._replace(v=v_full)
         out, _ = model._step_cgrid_impl(
-            state_band, dt_closure[0],
+            state_band, dt,
             physics_fn=physics_fn, phys_state=None,
             grid=band_geom, sigma_coord=model.sigma_coord,
             polar_mask=pmask, polar_mask_v=pmaskv,
@@ -295,16 +294,33 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         )
         return out._replace(v=to_vface_lower(out.v))
 
+    # Build the JITTED shard_map ONCE and cache it. ``jax.jit`` is LOAD-BEARING:
+    # a bare shard_map is NOT compilation-cached, so calling it re-traces +
+    # recompiles the (large, un-jitted) band step EVERY call — a 32x64x10 nd=2
+    # step took ~142 s/step (bench 8560671), and the whole equivalence gate ran
+    # ~65 min. Wrapping in jit caches the compile: probe 8561202 measured
+    # [3079, 1.4, 1.2, 1.1, 1.1] ms — first call compiles, the rest hit the
+    # cache. ``dt`` is a TRACED operand (not a closure constant) so a changing dt
+    # does not retrigger compilation. The grid-tracer concern that kept
+    # _step_cgrid_impl un-jitted does NOT bite here: band_geom's STATIC scalar
+    # fields stay concrete (template._replace only swaps the array fields), and
+    # the SPMD operator retrofits removed the trace-time static-bool checks on
+    # the cut/pole branches.
+    _cache = {}
+
     def sharded_step(c_state, dt):
-        dt_closure[0] = dt
-        in_spec = jax.tree.map(_lat_spec, c_state)
-        stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
-        fn = shard_map(
-            _body, mesh=mesh, in_specs=(in_spec, stacks_spec),
-            out_specs=in_spec, check_vma=False)
+        fn = _cache.get("fn")
+        if fn is None:
+            in_spec = jax.tree.map(_lat_spec, c_state)
+            stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
+            fn = jax.jit(shard_map(
+                _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
+                out_specs=in_spec, check_vma=False))
+            _cache["fn"] = fn
         # Arm the SPMD band halo around the call ONLY; save+restore the FULL
         # backend state (a later serial/full-domain call must not take SPMD-only
-        # branches outside a shard_map). Per-call re-trace bakes the band halo.
+        # branches outside a shard_map). The first call traces (baking the band
+        # halo from the armed backend); later calls reuse the cached compile.
         from legoesm.grids.halo import (
             get_halo_backend, get_mpi_topology, get_spmd_mesh,
             set_halo_backend, set_spmd_mesh)
@@ -313,7 +329,7 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(c_state, stacks)
+            return fn(c_state, stacks, jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
