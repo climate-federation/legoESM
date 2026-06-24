@@ -29,11 +29,26 @@ bounded and tracks the analytic solution for 2 full periods (u: 0.20→0.00→�
 with the explicit/FB Coriolis — NOT a spatial null mode and NOT needing Arakawa–Lamb.
 (All the earlier "spatial null mode / AL redesign" conclusions are SUPERSEDED.)
 
-**Remaining (narrow):** with `implicit_unsplit`, the BUMP (partial-cell topography
-+ stratification) still blows up (day 0.08; flat bottom is fine). Next: the
-partial-cell interaction with the unsplit implicit free surface (the oracle uses
-`PartialCellBottom`). This is a much smaller, well-localized problem than the
-imagined dycore redesign.
+**Remaining (narrow, well-defined): complete the y-periodic wiring for the bump
+path.** Isolation with `implicit_unsplit`: bump is STABLE walled (day 0.5,
+max|u|=0.495) but blows up PERIODIC even homogeneous (day 0.08). So it is NOT a
+partial-cell-numerics or stratification problem — it is the y-periodic boundary
+wiring, which was only validated FLAT-bottom (the 4 sites: zero_polar_lat_ends,
+pad_with_pole_bc_lat, compute_face_masks, compute_face_masks_3d). The bump path
+exercises more meridional-boundary operators that are not yet periodic-wired. And
+the match genuinely NEEDS periodic-y: walled `implicit_unsplit` internal_tide runs
+stably 2 days but corr≈0 / under-generates (the geostrophic-adjustment topology
+mismatch). So the ONLY remaining work is the coherent y-periodic operator sweep
+(Step 1 of the Plan), now with the stepper question SETTLED (`implicit_unsplit`).
+
+### Updated plan (stepper settled)
+1. Set `barotropic_solver="implicit_unsplit"` for the Oceananigans internal_tide
+   recipe (faithful to `ImplicitFreeSurface`; fixes the core instability).
+2. Complete the coherent y-periodic meridional-boundary conversion for the bump /
+   partial-cell path (find the not-yet-wrapped operators that the bump exercises:
+   the partial-cell PGF, the unsplit-solve N/S boundary, the topographic continuity).
+3. Run the comparator (periodic-y + implicit_unsplit): target M2 b' corr ≥ 0.6.
+NO Arakawa–Lamb / novel-Coriolis work is needed — that whole line is superseded.
 
 ## Verified root cause (historical — see RESOLUTION PATH above for the actual fix)
 
