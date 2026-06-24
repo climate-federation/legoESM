@@ -378,14 +378,34 @@ Fix (opt-in, byte-identical when off):
 Validation: 15d A/B job 8558650 (vs prior 10d 8554291: R_TOA −27, CWV 17.6,
 drift −133) — expect higher CWV, less-negative R_TOA, arrested drift.
 
-**Next lever IF gustiness alone is insufficient** (a short coupled spin-up from
-WOA IC will not reach equilibrium): WOA T/S restoring. The canonical SSS
-restoring exists (`ocean/forcing/sss_restoring.py::compute_sss_restoring_flux`
-+ `ocean/coupler/sss_apply.py`); a TEMPERATURE (Haney SST) restoring helper does
-NOT yet exist in the package (only run_omip's private `_apply_restoring`) — the
-proper fix is to promote a canonical Haney SST restoring into the ocean package
-and wire an opt-in coupled flag, NOT to copy the numerics. HOLD until the
-gustiness validation decides whether it is needed (verify-first).
+**Gustiness alone CONFIRMED insufficient** (15d job 8558910): R_TOA −54,
+SST drift −92 K/yr, column-T 256.8→250.9 K monotonic, circulation dying. The
+standard complement — WOA surface T/S restoring — was implemented (commit
+b071ba359): canonical Haney kernel `ocean/forcing/surface_relaxation.py`
+(run_omip's `_apply_restoring` refactored onto it; no duplicate numerics),
+`CoupledConfig.ocean_restore_{sst,sss}_tau_days`, `_apply_ocean_restoring` in
+`_step_ocean` (opt-in, byte-identical off), `run_coupled
+--ocean-restore-{sst,sss}-tau-days`.
+
+**Restoring WORKS — measured win** (15d job 8559528, SST τ=15 d / SSS τ=60 d
+vs gustiness-only 8558910):
+
+| metric        | gustiness only | + restoring τ=15d |
+|---------------|----------------|-------------------|
+| SST drift     | −92 K/yr       | **−47 K/yr** (½)  |
+| R_TOA         | −54 W/m²       | **−24 W/m²** (2.3×)|
+| SST mean      | 279.0 K        | **281.4 K** (trop 290.6 ~WOA) |
+| column-T d15  | 250.9 K        | 252.1 K (+1.2)    |
+| CWV           | 15.87          | 15.87 (atm dry)   |
+
+Restoring directly anchors the ocean (drift halved, R_TOA energy-loss more
+than halved, SST realistic). NOT yet equilibrated: the atmosphere is still dry
+(CWV 15.87), so R_TOA stays −24 and SST still drifts at τ=15 d. The atm column
+responds slowly (a free coupled spin-up from a dry IC needs months).
+
+**Next:** stronger SST restoring (τ=5 d) pins SST near WOA so the run becomes
+effectively a realistic-prescribed-SST coupled spin-up; run 30 d to let the atm
+moisten (CWV→~35 ⇒ greenhouse ⇒ R_TOA→balance, the slab equilibration path).
 
 ## Key files
 - `packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py`
