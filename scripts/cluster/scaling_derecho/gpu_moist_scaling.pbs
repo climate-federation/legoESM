@@ -82,9 +82,22 @@ source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
 # Runtime MPI stack: load the SAME GNU cray-mpich that mpi4py/mpi4jax were BUILT
-# against (README Step 2), so `mpiexec` and libmpi match the build ABI -- the
+# against (README Step 1b), so `mpiexec` and libmpi match the build ABI -- the
 # route-A halo exchange needs the right MPI at runtime, on GPU as on CPU.
-module load gcc cray-mpich 2>/dev/null || true
+# craype-accel-nvidia80 links the CUDA GTL (GPU transport layer); cuda gives the
+# CUDA runtime the cuda jaxlib + mpi4jax GPU extension load against.
+module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
+
+# GPU-aware MPI: cray-mpich only sends device buffers directly (the whole point
+# of route-A) when this is set; without it, mpi4jax handing a device pointer to
+# MPI errors at the first halo exchange.
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+# The rebuilt Cray-MPICH mpi4py needs Cray's libmpi on the loader path. The
+# module exports CRAY_LD_LIBRARY_PATH but NOT LD_LIBRARY_PATH, so the dynamic
+# linker can't find libmpi.so.12 without this bridge -> "ImportError:
+# libmpi.so.12: cannot open shared object file" on every rank (README Step 1b).
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 
 # --- Benchmark configuration (overridable via `qsub -v NAME=value`) ----------
 GRID="${GRID:-latlon}"              # latlon | icosahedral  (route-A, 1 GPU/rank)

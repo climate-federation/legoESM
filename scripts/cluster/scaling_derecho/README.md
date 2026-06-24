@@ -78,10 +78,80 @@ python -c "import jax; print(jax.devices()[0].device_kind)"   # -> 'NVIDIA A100-
 ```
 
 > **Why JAX 0.9.2?** Keeps both envs in the tested `jax 0.8–0.9` envelope and
-> aligned with the MPI env (see the mpi4jax constraint below). The GPU path does
-> NOT use mpi4jax — it shards a single process across the node's GPUs via JAX's
-> device mesh — so the GPU scaling result is clean and independent of the MPI
-> caveat.
+> aligned with the MPI env (see the mpi4jax constraint below).
+
+> **Two different GPU jobs, two different requirements.** `gpu_scaling.pbs`
+> (cubed-sphere AMIP physics) shards a *single process* across the node's GPUs
+> via JAX's device mesh — it does **not** use mpi4jax, so the steps above are
+> enough for it. `gpu_moist_scaling.pbs` (latlon/icosahedral moist) is
+> **multi-process, one rank per GPU over mpi4jax** (route-A) and needs the
+> overlay below. Skip Step 1b if you only run `gpu_scaling.pbs`.
+
+### Step 1b — route-A overlay (only for `gpu_moist_scaling.pbs`)
+
+The route-A GPU path launches `mpiexec -n N` (one rank per A100) and exchanges
+halos over mpi4jax — so `legoesm-gpu` ALSO needs a Cray-MPICH-built `mpi4py`
+plus a **CUDA-built** `mpi4jax`, exactly like the CPU env in Step 2. The
+`jax[cuda12]` wheel does NOT bring these. If a generic/conda `mpi4py` is present
+it ignores Derecho's Cray PALS launcher, so `mpiexec -n 2` silently runs **two
+independent size-1 jobs** (each prints `Ranks: 1`, both overwrite the same
+`_n1_` result) — you get rank-1 points only, never a scaling curve. Build the
+overlay INTO the GPU env. The order below is battle-tested; the footguns
+(annotated) are real and each cost a debugging round.
+
+```bash
+conda activate legoesm-gpu
+module load gcc cray-mpich cuda    # cuda is REQUIRED so mpi4jax finds nvcc & builds its GPU ext
+cc --version                       # ncarcompilers wrapper around gcc 14.x (NOT Intel icx) -- correct on Derecho
+
+# (1) PURGE any generic/conda mpi4py first. A conda-forge mpi4py ships dual
+#     'MPI.mpich.*' + 'MPI.openmpi.*' .so files that want a stock libmpi.so.12 /
+#     libmpi.so.40 (absent on Derecho); with it present, `pip --no-binary` sees
+#     "already satisfied" and NEVER rebuilds -> import fails "libmpi.so.12: cannot
+#     open shared object file". Remove from BOTH managers:
+pip uninstall -y mpi4py mpi4jax
+conda remove -y --force mpi4py mpich openmpi 2>/dev/null || true
+
+# (2) source-build mpi4py against Cray MPICH -> ONE 'MPI.cpython-311-*.so'
+MPICC=cc pip install --no-cache-dir --no-binary mpi4py "mpi4py>=4.1,<5"
+
+# (3) build mpi4jax WITH CUDA and --no-deps. --no-deps is CRITICAL: without it
+#     pip pulls jax 0.10.x, which (a) orphans the jax_cuda12_plugin 0.9.2 -> GPU
+#     silently DISABLED, and (b) breaks mpi4jax 0.8.x ("cannot import get_aval").
+MPICC=cc CUDA_ROOT="${CUDA_HOME:-$(dirname "$(dirname "$(which nvcc)")")}" \
+    pip install --no-deps --no-cache-dir --no-binary mpi4jax "mpi4jax==0.8.1.post2"
+
+# (4) PIN jax back into the tested envelope (matches legoesm-mpi: jax/jaxlib
+#     0.9.2). This realigns jaxlib + jax_cuda12_plugin to 0.9.2 (re-enables the
+#     GPU) and keeps mpi4jax importable (get_aval exists in 0.9.2, gone in 0.10).
+pip install --force-reinstall "jax[cuda12]==0.9.2"
+
+# (5) loader path: the Cray module exports CRAY_LD_LIBRARY_PATH, NOT
+#     LD_LIBRARY_PATH, so mpi4py can't find Cray's libmpi without this bridge.
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}"
+
+# (6) verify import (single .so, resolves, CRAY MPICH, gpu backend, mpi4jax OK):
+ls $CONDA_PREFIX/lib/python3.11/site-packages/mpi4py/MPI*.so      # exactly ONE, no .mpich/.openmpi
+python -c "from mpi4py import MPI; print(MPI.Get_library_version())"   # -> CRAY MPICH ...
+python -c "import jax; print(jax.default_backend(), jax.__version__)"  # -> gpu 0.9.2
+python -c "import mpi4jax; print('mpi4jax OK')"                        # no get_aval error
+```
+
+Final check — federation AND GPU together, **inside a PBS allocation** (a
+login-node `mpiexec` errors with "No host list provided"):
+
+```bash
+module load craype-accel-nvidia80          # CUDA GTL for GPU-aware sends
+export MPICH_GPU_SUPPORT_ENABLED=1
+mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
+    print('rank', MPI.COMM_WORLD.Get_rank(), 'of', MPI.COMM_WORLD.Get_size(), jax.default_backend())"
+#   want: two lines, size 2, backend gpu  ==  route-A overlay fully working
+```
+
+`gpu_moist_scaling.pbs` sets `MPICH_GPU_SUPPORT_ENABLED=1`, the
+`craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge itself at
+runtime, so once the env is built the submitted job carries the right
+environment without any of the manual exports above.
 
 ---
 
