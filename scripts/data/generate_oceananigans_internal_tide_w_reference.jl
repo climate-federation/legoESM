@@ -48,16 +48,17 @@ xc = xnodes(grid, Center()); zc = znodes(grid, Center())
 zf = znodes(grid, Face())
 Hb = Float64[-(-H + hill(x)) for x in xc]
 
-dt_ref = 150.0
 w = interior(model.velocities.w)[:, 1, :]    # (Nx, Nz+1) at prescribed state
 u = interior(model.velocities.u)[:, 1, :]
 v = interior(model.velocities.v)[:, 1, :]
 b0 = Array(interior(model.tracers.b)[:, 1, :])
-# One real timestep → Δb/dt = the actual single-step buoyancy tendency (advection,
-# NO closure) — the per-node oracle for legoESM's one-step Δb/dt at the staircase.
-time_step!(model, dt_ref)
+# The FIRST time_step! is an Euler step, so Δb/dt = the INSTANTANEOUS RHS tracer
+# tendency (= -advection of b, NO closure). This is the clean per-node oracle to
+# compare against legoESM's directly-computed (un-AB2-weighted) advection flux
+# divergence (`scripts/tmp/_it_inst_tend.py`).
+time_step!(model, 150.0)
 b = interior(model.tracers.b)[:, 1, :]
-Gb = (b .- b0) ./ dt_ref
+Gb = (b .- b0) ./ 150.0
 
 @printf("it-w ref: Nx=%d Nz=%d U2=%.4e V0=%.3f  max|w|=%.4e max|Gb|=%.4e\n",
         Nx, Nz, U₂, V0, maximum(abs, w), maximum(abs, Gb))
