@@ -40,11 +40,15 @@ def set_prescribed(grid, z, state):
 
 
 def main():
+    dt = 150.0
     grid, wall, z, state, model = C.build_setup()
     state = set_prescribed(grid, z, state)
-    s1 = model.step(state, 150.0, surface_forcing=None)   # populates state.w from the diagnosis
+    T0 = np.asarray(state.T.data)
+    s1 = model.step(state, dt, surface_forcing=None)      # populates state.w + advances T
     jrow = C.NY // 2
     w_lego = np.asarray(s1.w.data)[jrow]                  # (n_lon, nlev_w)
+    # buoyancy tendency db/dt = G*alpha*(T_after - T_before)/dt (advection; K_v small)
+    dbdt_lego = C.G * C.ALPHA_T * (np.asarray(s1.T.data) - T0)[jrow] / dt   # (n_lon, nlev)
     z_full = np.asarray(z.z_full_ref)
     Hb = np.asarray(state.H_bathy.data)[jrow]
 
@@ -69,6 +73,29 @@ def main():
     print(f"  2dx-roughness(bump): lego max={rl:.3e} (max|w|={ml:.3e})  "
           f"oracle max={ro:.3e} (max|w|={mo:.3e})", flush=True)
     print(f"  -> lego rough/|w| = {rl/ml:.3f}   oracle rough/|w| = {ro/mo:.3f}", flush=True)
+
+    # --- buoyancy-tendency (tracer advection) comparison ---
+    o_Gb = np.asarray(ds.variables["Gb"][:]).T            # (x, z) col-major reversal
+    o_zc = np.asarray(ds.variables["z"][:])
+    # interp oracle Gb onto legoESM z_full per column
+    o_Gb_on = np.array([np.interp(-z_full, -o_zc, o_Gb[ix, :]) for ix in range(nx)])
+    lego_Gb = dbdt_lego[:nx, :]
+    wet = (z_full[None, :] > -Hb[:nx, None])
+    m = wet
+    print(f"\n  db/dt (tracer advection): max|lego|={np.abs(lego_Gb[m]).max():.3e}  "
+          f"max|oracle|={np.abs(o_Gb_on[m]).max():.3e}", flush=True)
+    ca = lego_Gb[m] - lego_Gb[m].mean(); cb = o_Gb_on[m] - o_Gb_on[m].mean()
+    corr = float(np.sum(ca * cb) / (np.sqrt(np.sum(ca ** 2) * np.sum(cb ** 2)) + 1e-30))
+    print(f"  db/dt pattern_corr(wet) = {corr:+.4f}", flush=True)
+    d = np.where(wet, np.abs(lego_Gb - o_Gb_on), 0.0)
+    xi, ki = np.unravel_index(np.argmax(d), d.shape)
+    print(f"  worst db/dt diff at x={o_x[xi]/1e3:.0f}km z={z_full[ki]:.0f}m "
+          f"(lego={lego_Gb[xi,ki]:.3e} oracle={o_Gb_on[xi,ki]:.3e}) Hb={Hb[xi]:.0f}m", flush=True)
+    # 2dx roughness of db/dt over the bump
+    def rough2(f2):
+        fb = f2[bump]; d2 = np.abs(fb[2:] - 2 * fb[1:-1] + fb[:-2]); return d2.max(), np.abs(fb).max()
+    rgl, mgl = rough2(lego_Gb); rgo, mgo = rough2(o_Gb_on)
+    print(f"  db/dt 2dx-rough/|.|: lego={rgl/ (mgl+1e-30):.3f}  oracle={rgo/(mgo+1e-30):.3f}", flush=True)
 
 
 if __name__ == "__main__":

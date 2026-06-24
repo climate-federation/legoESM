@@ -12,7 +12,7 @@
 
 using Oceananigans
 using Oceananigans.Units
-using Oceananigans.TimeSteppers: update_state!
+using Oceananigans.TimeSteppers: update_state!, time_step!
 using NCDatasets
 using Printf
 
@@ -48,12 +48,19 @@ xc = xnodes(grid, Center()); zc = znodes(grid, Center())
 zf = znodes(grid, Face())
 Hb = Float64[-(-H + hill(x)) for x in xc]
 
-w = interior(model.velocities.w)[:, 1, :]    # (Nx, Nz+1) at (Center, -, Face)
+dt_ref = 150.0
+w = interior(model.velocities.w)[:, 1, :]    # (Nx, Nz+1) at prescribed state
 u = interior(model.velocities.u)[:, 1, :]
 v = interior(model.velocities.v)[:, 1, :]
+b0 = Array(interior(model.tracers.b)[:, 1, :])
+# One real timestep → Δb/dt = the actual single-step buoyancy tendency (advection,
+# NO closure) — the per-node oracle for legoESM's one-step Δb/dt at the staircase.
+time_step!(model, dt_ref)
+b = interior(model.tracers.b)[:, 1, :]
+Gb = (b .- b0) ./ dt_ref
 
-@printf("it-w ref: Nx=%d Nz=%d U2=%.4e V0=%.3f  max|w|=%.4e\n",
-        Nx, Nz, U₂, V0, maximum(abs, w))
+@printf("it-w ref: Nx=%d Nz=%d U2=%.4e V0=%.3f  max|w|=%.4e max|Gb|=%.4e\n",
+        Nx, Nz, U₂, V0, maximum(abs, w), maximum(abs, Gb))
 
 nc = joinpath(out_dir, "internal_tide_w.nc")
 NCDataset(nc, "c") do ds
@@ -64,5 +71,6 @@ NCDataset(nc, "c") do ds
     defVar(ds, "H_bathy", Hb, ("x",))
     defVar(ds, "w", w, ("x","zf"))
     defVar(ds, "u", u, ("x","z")); defVar(ds, "v", v, ("x","z"))
+    defVar(ds, "b", b, ("x","z")); defVar(ds, "Gb", Gb, ("x","z"))
 end
 @info "DONE: wrote $nc"
