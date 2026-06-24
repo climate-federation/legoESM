@@ -70,7 +70,26 @@ Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig4b_turb2d_convergen
 (effective-resolution convergence), `fig5_turb2d_spectra.png` (isotropic spectra @ t=3.6),
 `fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
 
-## §5 — baroclinic jet — STABILIZED for WENO schemes (backstop); matrix GPU-gated
+## §5 — baroclinic jet — FAITHFUL (no backstop) via vertadv + oracle-range dt
+
+**✅ CASE-3 BREAKTHROUGH (supersedes the "needs a dissipation backstop" framing below).** §5 W9V
+eddy-resolving at 1/8° (160×128×50) SURVIVES with **NO dissipation backstop** once TWO *faithful*
+gaps are closed — it was NEVER an under-dissipation / eddy-equilibration problem:
+1. **`weno_vertadv_full_velocity=True`** — full-velocity vertical momentum advection (vs the
+   perturbation-only default). Now the recipe default (`silvestri_baroclinic_jet.py`).
+2. **TIMESTEP** — the §5 oracle deck uses an ADAPTIVE wizard (`cfl=0.3`, Δt 300–900 s, shrinking
+   toward 300 s at the transient peak); legoESM ran a FIXED dt=900 (= the oracle's MAX) even at the
+   over-energized peak → CFL violation → NaN ~day 89. Running within the oracle's range (dt=450)
+   removes it. Baseline dt=900 blew day 82; vertadv+dt900 day 89; **vertadv+dt450 SURVIVES** to
+   day 110+ (max|u| ~1–2 m/s = the oracle's transient eddy amplitude, within 2×; equilibrates
+   ~1.4×). The earlier "2× over-energization / under-dissipation" was largely the BLOW-UP
+   trajectory at dt=900, NOT the equilibrated field. CONFIRMS scoreboard row 3.
+**STATUS (2026-06-24): a day-200 no-backstop confirmation run is in flight** (W9V 160×128×50,
+dt=450, `logs/s5_case3_confirm.log`). REMAINING: (a) confirm day-200 survival + within-2×, then
+(b) productionize the proper ADAPTIVE-dt wizard (cfl=0.3, max=900) as the clean faithful timestep
+(a fixed dt=450 stands in). The `--stabilize` backstop below is now a LEGACY fallback, not the path.
+
+### Legacy — "needs a dissipation backstop" analysis (superseded by CASE-3 above)
 
 **UPDATE — root cause diagnosed + fixed for the WENO schemes.** A heavily-damped config integrates
 the jet stably (48×32×50, 55 d) where un-damped weno9 blows (day 39) → **the SETUP is sound; the
@@ -93,12 +112,13 @@ baroclinic_adjustment gate (48×48×8, dt=600, weno9, vs the Oceananigans oracle
 **within ~3% of each other and both over-energize ~1.3× vs the oracle** (day-18 surface max|u|:
 oracle 1.56; `implicit_cn` 1.96 = 1.26×; `explicit_substep` 2.03 = 1.30×), neither blows up.
 ⇒ **the free-surface/barotropic coupling is NOT the §5 residual lever** — switching to the
-oracle-faithful `ImplicitFreeSurface` (`implicit_cn`) does NOT reduce the over-energization. This
-INDEPENDENTLY CONFIRMS "the blowup is INSUFFICIENT DISSIPATION" (above): both solvers leak the same
-~1.3× excess energy, so the lever is grid-scale momentum dissipation (the wall representation +
-the anti-dissipative WENO pre-filter), exactly what **PR #559** (remove the `point_to_cellavg`
-anti-dissipative pre-filter) targets. internal_tide's `Flat`-y cure does NOT transfer (§5 is a full
-y-walled eddy field, not a y-uniform 2-D case). Reproduce:
+oracle-faithful `ImplicitFreeSurface` (`implicit_cn`) does NOT reduce the ~1.3× over-energization.
+**CORRECTION (in light of the CASE-3 breakthrough above):** the ~1.3× is the ACCEPTABLE
+EQUILIBRATED state (within 2×), NOT an "insufficient dissipation" failure — the §5 *blow-up* was
+vertadv (perturbation-vs-full-u) + the fixed-dt CFL violation, not under-dissipation. So this check
+correctly RULES OUT the free surface, but does not implicate dissipation; both solvers simply
+equilibrate at the same faithful ~1.3×. internal_tide's `Flat`-y cure does NOT transfer (§5 is a
+full y-walled eddy field, not a y-uniform 2-D case). Reproduce:
 `BARO_SOLVER=implicit_cn|explicit_substep .venv/bin/python
 scripts/validate/ocean_fidelity/compare_oceananigans_baroclinic_adjustment.py 18`.
 
