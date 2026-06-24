@@ -40,6 +40,8 @@ is ~2e-5 in b', so any spurious grid-scale noise swamps it.
 
 - **iter 8: advective form 2x better than flux-form; max-ratio confounded; stable metric = pattern_corr 0.76.** Advective -(u*db/dx+w*N2) gives 2.5x vs flux-form 5.2x (same corr 0.76) => the FLUX-FORM partial-cell discretization adds ~2x error (coordinate-consistency gap). The 4-5x max-ratios were confounded (max|Gb| and max|w*N2| at different cells; staircase outliers). STABLE conclusion: structure matches at corr ~0.76 with localized staircase outliers; flux-form is ~2x worse than advective. Fix = coordinate-consistent/remapping conservative flux-form tracer advection matching the advective form's accuracy at partial-cell steps.
 
+- **iter 9: probe metrics are confound-limited; STABLE finding = pattern_corr 0.76.** Flux-vs-advective localization showed distributed error (13% bottom-3) BUT my advective-form reference uses a crude centered db/dx + cell-center w, so (flux-advective) isn't the true flux-form error — localization unreliable. Across 9 iters the ONE stable, confound-free metric is pattern_corr ~0.76 for the partial-cell tracer advection. The probes cannot reliably pin the magnitude further (max-vs-rms, AB2, barotropic, crude advective estimate). Converged conclusion: partial-cell flux-form tracer-advection coordinate-consistency gap (corr 0.76 single-step -> 12x b' over 2d); fix = a clean coordinate-consistent conservative tracer advection, implemented + validated fresh (not via confounded probes or a rushed change to a core conservation operator).
+
 ## The blocker (precisely located)
 With `MOM_ADV=flux_form`: STABLE, max|v| over bump 0.70 m/s (vs 2.7 vector-invariant),
 b' rms 2.5e-4 (vs oracle 2e-5, ~12×), pattern_corr ~0. The b' shows a grid-scale
