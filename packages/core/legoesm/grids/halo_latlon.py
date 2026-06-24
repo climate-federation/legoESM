@@ -59,6 +59,30 @@ def get_meridionally_periodic() -> bool:
     return _MERIDIONALLY_PERIODIC
 
 
+# --- Meridionally-FLAT (Oceananigans `Flat`-y topology) mode ------------------
+# Default OFF.  When ON, every meridional DIFFERENCE operator returns 0 — exactly
+# matching Oceananigans' `Flat` topology (`δyᵃᶜᵃ(grid::Flat, v) = zero`): v stays
+# prognostic (so the Coriolis f×u → v rotation works) but no ∂/∂y ever exists, so
+# (a) no meridional pressure gradient → no closed-basin geostrophic adjustment, and
+# (b) no 2Δy mode can ever develop. This is the faithful 2-D x–z analog the oracle
+# uses (`topology=(Periodic, Flat, Bounded)`), strictly cleaner than the periodic-y
+# thin channel (which ADDS meridional d.o.f. the oracle does not have). Gates
+# `gradient_y_cgrid` (→0) and `divergence_cgrid`'s meridional flux (→0); pairs with
+# the wrap v_mask so v is unwalled. Default OFF = bit-identical.
+_MERIDIONALLY_FLAT = False
+
+
+def set_meridionally_flat(enabled: bool) -> None:
+    """Enable/disable the meridionally-flat (Oceananigans `Flat`-y) mode."""
+    global _MERIDIONALLY_FLAT
+    _MERIDIONALLY_FLAT = bool(enabled)
+
+
+def get_meridionally_flat() -> bool:
+    """Return whether the meridionally-flat (`Flat`-y) mode is active."""
+    return _MERIDIONALLY_FLAT
+
+
 def fold_pole_rows(
     data: jnp.ndarray,
     halo: int,

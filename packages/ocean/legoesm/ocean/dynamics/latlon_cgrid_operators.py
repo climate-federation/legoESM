@@ -2983,8 +2983,9 @@ def compute_face_masks_3d(
     # Meridionally-periodic (y-re-entrant) mode: boundary v-faces wrap (wet iff
     # the wrap-adjacent cells are wet at that level), not walls. Default OFF =
     # bit-identical. See compute_face_masks.
-    from legoesm.grids.halo_latlon import get_meridionally_periodic
-    if get_meridionally_periodic():
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
         wrap = a[-1:] * a[0:1]
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
@@ -3758,8 +3759,9 @@ def compute_face_masks(
     # v-face (between cell N-1 and cell 0, wrapping) and the identical north
     # boundary v-face are WET when both wrap-adjacent cells are wet -- NOT walls.
     # Default OFF -> the historical hard-walled N/S v-faces (bit-identical).
-    from legoesm.grids.halo_latlon import get_meridionally_periodic
-    if get_meridionally_periodic():
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
         wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
