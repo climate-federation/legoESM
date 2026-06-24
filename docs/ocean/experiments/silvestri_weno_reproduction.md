@@ -84,10 +84,14 @@ gaps are closed — it was NEVER an under-dissipation / eddy-equilibration probl
    day 110+ (max|u| ~1–2 m/s = the oracle's transient eddy amplitude, within 2×; equilibrates
    ~1.4×). The earlier "2× over-energization / under-dissipation" was largely the BLOW-UP
    trajectory at dt=900, NOT the equilibrated field. CONFIRMS scoreboard row 3.
-**STATUS (2026-06-24): a day-200 no-backstop confirmation run is in flight** (W9V 160×128×50,
-dt=450, `logs/s5_case3_confirm.log`). REMAINING: (a) confirm day-200 survival + within-2×, then
-(b) productionize the proper ADAPTIVE-dt wizard (cfl=0.3, max=900) as the clean faithful timestep
-(a fixed dt=450 stands in). The `--stabilize` backstop below is now a LEGACY fallback, not the path.
+**✅ STATUS (2026-06-24): day-200 no-backstop confirmation COMPLETE.** W9V 160×128×50, dt=450,
+friction=none — **survived the full 200 days** (`stable=True`, `blew=False`), day-200 max|u|=1.34
+m/s (within the oracle's ~1–2 m/s eddy amplitude), L_d=6.13 km, **gridscale_frac=0.023** (low — the
+eddies are RESOLVED, not grid noise). EKE spins up and saturates ~4×10¹³; the surface-vorticity
+field shows a clean mesoscale eddy field (Rossby ζ/f up to ~0.75). Figures:
+`results/silvestri_jet/s5_eddies_{hero,day200}.png`. REMAINING (productionization only): replace
+the fixed dt=450 with the proper ADAPTIVE-dt wizard (cfl=0.3, max=900) as the clean faithful
+timestep. The `--stabilize` backstop below is a LEGACY fallback, not the path.
 
 ### Legacy — "needs a dissipation backstop" analysis (superseded by CASE-3 above)
 
