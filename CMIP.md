@@ -407,6 +407,28 @@ responds slowly (a free coupled spin-up from a dry IC needs months).
 effectively a realistic-prescribed-SST coupled spin-up; run 30 d to let the atm
 moisten (CWV→~35 ⇒ greenhouse ⇒ R_TOA→balance, the slab equilibration path).
 
+## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
+User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
+(COARE is itself a MOST algorithm; the split is generic-MOST for the simple
+surfaces vs ocean-specific Charnock+gustiness COARE for the air-sea flux).
+
+- **Ocean air-sea → COARE**: `--surface-bulk-scheme coare3` drives the atm
+  surface layer + the coupler ocean tile (`ocean_tile_response` →
+  `compute_most_fluxes(scheme="coare3")`, with the gustiness w* fix). Already
+  wired; audit confirmed.
+- **Land → MOST**: NEW `--land-bulk-scheme` (default `most`) wired onto
+  Land/MultiLayerLandConfig.bulk_scheme. Both land models already dispatch
+  `most` with `z0_init=config.z0_land` (land roughness, no ocean Charnock).
+- **Slab ocean → MOST**: added `most` to `SimpleOcean._ocean_turbulent_fluxes`
+  dispatch; NEW `--slab-bulk-scheme` (default `most`), decoupled from
+  `--surface-bulk-scheme`.
+- **Land dynamic water pools + dryness → ALREADY PRESENT** (audit, no code
+  change): slab bucket (β_soil, water-capped evap) + Richards multilayer
+  (θ_soil, β_root, extractable-water limit). `--preset slab_richards` uses the
+  Richards multilayer soil ⇒ water-limited ET (dry soil → reduced LH → sensible
+  warming). The recommended 3D-ocean coupled config uses `slab_richards`.
+- Config-level defaults stay `constant` (non-run_coupled callers byte-identical).
+
 ## Key files
 - `packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py`
   (`convective_cloud_fraction`, thin-cirrus condensate split) + `config.py`.
