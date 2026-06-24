@@ -344,6 +344,49 @@ and a low hfls (51 vs ~80).
    self-correct; check the ice-albedo feedback isn't latching.
 4. Multi-year / restart-chained run for full slab+soil equilibrium.
 
+## Full 3D dynamic ocean from realistic WOA IC (2026-06-24, in progress)
+Goal: run the coupled model with the prognostic 3D ocean
+(`--ocean dynamic --ocean-ic woa`, `LatLonCGridOceanModel` on the atm lat-lon
+grid, WOA18 T/S + WOA continents/bathy) instead of the slab/two_layer used for
+all the work above.
+
+**RUNS STABLY = the deliverable** (10d job 8554291): the OMIP cold-start recipe
+(`barotropic=implicit_cn`, `momentum=rk3`, `pgf=smc03`, partial cells +
+balanced init) is AUTO-applied; no blowup (max current 27→20 m/s settling),
+realistic SST [272–290 K].
+
+**But cold-COLLAPSED** (90d 8557907, KILLED): SST −0.5 K/day, R_TOA −27,
+CWV 17.6 (dry), drift −133 K/yr — a runaway, NOT a self-settling spin-up
+transient like the slab.
+
+**Root cause (fix shipped, commit a232a32ff): air-sea interface energy
+inconsistency.** The 3D-ocean `q_net` is built from `ocean_tile_response`
+(coupler), which called `compute_most_fluxes` WITHOUT the convective-gustiness
+`w*` that the atmosphere surface layer and the slab ocean already use. So the
+atmosphere evaporated with gustiness but the ocean-tile flux driving the
+3D-ocean heat budget did not → a calm warm WOA ocean barely evaporates
+(hfls ~45 vs ~120 W/m²) → dry atmosphere → the warm SST radiates LW the dry
+column can't trap → R_TOA −27 → cold collapse. Same mechanism the slab
+air-sea-decoupling fix solved; the 3D-ocean tile was simply missed.
+
+Fix (opt-in, byte-identical when off):
+- `CouplerConfig.gustiness_w_zi` (BL depth z_i for w*) + ocean_tile_response
+  passes it to `compute_most_fluxes`;
+- `run_coupled` threads `--gustiness-zi` onto the coupler tile (same value the
+  atm surface layer gets) → interface flux is energy-CONSISTENT.
+
+Validation: 15d A/B job 8558650 (vs prior 10d 8554291: R_TOA −27, CWV 17.6,
+drift −133) — expect higher CWV, less-negative R_TOA, arrested drift.
+
+**Next lever IF gustiness alone is insufficient** (a short coupled spin-up from
+WOA IC will not reach equilibrium): WOA T/S restoring. The canonical SSS
+restoring exists (`ocean/forcing/sss_restoring.py::compute_sss_restoring_flux`
++ `ocean/coupler/sss_apply.py`); a TEMPERATURE (Haney SST) restoring helper does
+NOT yet exist in the package (only run_omip's private `_apply_restoring`) — the
+proper fix is to promote a canonical Haney SST restoring into the ocean package
+and wire an opt-in coupled flag, NOT to copy the numerics. HOLD until the
+gustiness validation decides whether it is needed (verify-first).
+
 ## Key files
 - `packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py`
   (`convective_cloud_fraction`, thin-cirrus condensate split) + `config.py`.
