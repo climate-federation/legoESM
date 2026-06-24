@@ -3746,6 +3746,15 @@ def compute_face_masks(
 
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
+    # Meridionally-periodic (y-re-entrant channel) mode: the south boundary
+    # v-face (between cell N-1 and cell 0, wrapping) and the identical north
+    # boundary v-face are WET when both wrap-adjacent cells are wet -- NOT walls.
+    # Default OFF -> the historical hard-walled N/S v-faces (bit-identical).
+    from legoesm.grids.halo_latlon import get_meridionally_periodic
+    if get_meridionally_periodic():
+        wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
     # The fold face is kept as a wall (zero) until a proper halo
     # exchange architecture (Option B) is implemented.  Opening the

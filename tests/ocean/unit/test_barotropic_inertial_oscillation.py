@@ -140,6 +140,41 @@ def test_closed_basin_geostrophic_adjustment():
         f"{geo_pred:.3e} (ratio {deta_dy/geo_pred:.2f})")
 
 
+def test_meridionally_periodic_poc_oscillates():
+    """PoC (#576): with the meridionally-PERIODIC (y-re-entrant) mode ON, the SAME
+    uniform barotropic u does the FREE inertial oscillation (u rotates away from
+    U0 toward 0 over a quarter inertial period) — matching the oracle's Flat-y —
+    instead of the closed-basin geostrophic lock. Confirms the topology fix
+    direction. NOTE: only 3 of ~90 boundary sites are wired so far, so the run is
+    physical only within the first quarter period (stable regime); the full sweep
+    is the production feature. Default-OFF is asserted bit-identical by
+    test_closed_basin_geostrophic_adjustment."""
+    from legoesm.grids.halo_latlon import set_meridionally_periodic
+
+    def quarter_period_u(periodic):
+        set_meridionally_periodic(periodic)
+        try:
+            grid, z, state, model = _build()
+            u = np.full((_NY, _NX + 1, _NZ), _U0)
+            state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
+            step = jax.jit(lambda s: model.step(s, _DT, surface_forcing=None))
+            for _ in range(_quarter_steps()):
+                state = step(state)
+            uu = np.asarray(state.u.data)[_NY // 2]
+            return float(uu[uu[:, 0] != 0, 0].mean())
+        finally:
+            set_meridionally_periodic(False)
+
+    u_walled = quarter_period_u(False)
+    u_periodic = quarter_period_u(True)
+    # Walled: geostrophically locked near U0. Periodic: rotated away to ~0
+    # (analytic inertial u at a quarter period = U0·cos(π/2) ≈ 0).
+    assert abs(u_walled - _U0) < 0.1 * _U0, f"walled u not locked ({u_walled:+.4f})"
+    assert abs(u_periodic) < 0.25 * _U0, (
+        f"periodic u did not rotate away ({u_periodic:+.4f}); the y-periodic mode "
+        "should make the barotropic mode oscillate freely like the Flat-y oracle")
+
+
 def test_baroclinic_inertial_rotates():
     """CONTROL: the baroclinic (zero-depth-mean, vertically sheared) Coriolis DOES
     rotate u into v — its (small) Rossby radius fits inside the basin, so it is NOT

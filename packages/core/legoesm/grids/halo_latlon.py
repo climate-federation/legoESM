@@ -29,6 +29,35 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+# --- Meridionally-periodic (y-re-entrant channel) mode -----------------------
+# Default OFF → the historical meridionally-CLOSED (walled N/S v-faces) BC,
+# bit-identical.  When ON (single-rank/local backend only for now), the lat-axis
+# boundary helpers WRAP instead of walling: ``pad_with_pole_bc_lat`` pads with the
+# periodic (rolled) rows and ``zero_polar_lat_ends`` is a no-op (the wrapped halo
+# already carries the correct boundary v-faces).  This matches an Oceananigans
+# ``Flat``/``Periodic`` meridional topology — required to reproduce idealized 2-D
+# x–z cases (internal_tide #576) whose barotropic Rossby radius spans the basin,
+# so a closed basin geostrophically adjusts instead of oscillating freely.
+# Mirrors the ``_halo_backend`` global-state pattern (accessor, never import the
+# global directly).
+_MERIDIONALLY_PERIODIC = False
+
+
+def set_meridionally_periodic(enabled: bool) -> None:
+    """Enable/disable the meridionally-periodic (y-re-entrant) boundary mode.
+
+    Local (single-rank) backend only; the MPI/SPMD lat-band paths still wall
+    (a periodic-y band exchange is a follow-up).  Default OFF = bit-identical
+    closed-basin BC.
+    """
+    global _MERIDIONALLY_PERIODIC
+    _MERIDIONALLY_PERIODIC = bool(enabled)
+
+
+def get_meridionally_periodic() -> bool:
+    """Return whether the meridionally-periodic boundary mode is active."""
+    return _MERIDIONALLY_PERIODIC
+
 
 def fold_pole_rows(
     data: jnp.ndarray,
@@ -442,6 +471,13 @@ def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
     -------
     jax.Array : same shape as ``field``.
     """
+    # Meridionally-periodic (y-re-entrant) mode: the lat-axis WRAPS, so the
+    # boundary v-faces are genuine periodic interfaces, not walls — do NOT zero
+    # them.  Local backend only (the MPI/SPMD band paths below still wall).
+    if _MERIDIONALLY_PERIODIC:
+        from legoesm.grids.halo import get_halo_backend
+        if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
+            return field
     # SPMD lat-band backend (single-controller multi-GPU): zero index 0 only on
     # the south band, index -1 only on the north band; interior band cuts keep
     # their cross-band gradient (the analogue of the MPI pole-touch test).
@@ -545,6 +581,18 @@ def pad_with_pole_bc_lat(
     # works for arbitrary trailing dimensions (1D sin_lat, 2D u-face,
     # 3D u-face-with-levels, etc.).
     pad_widths = ((halo, halo),) + ((0, 0),) * (interior.ndim - 1)
+
+    # Meridionally-periodic (y-re-entrant) mode: WRAP-pad the lat axis instead of
+    # padding with the south/north wall constants.  ``mode="wrap"`` fills the
+    # south halo with ``interior[-halo:]`` and the north halo with
+    # ``interior[:halo]`` — the periodic-channel BC.  Local backend only (the
+    # MPI/SPMD band paths below keep the wall constant; periodic-y band exchange
+    # is a follow-up).  No vector sign flip: a y-periodic f-plane channel has no
+    # pole fold.
+    if _MERIDIONALLY_PERIODIC:
+        from legoesm.grids.halo import get_halo_backend
+        if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
+            return jnp.pad(interior, pad_widths, mode="wrap")
 
     # SPMD lat-band backend (single-controller multi-GPU): interior band cuts
     # must read the NEIGHBOUR band's edge row (ppermute), not a constant wall;
