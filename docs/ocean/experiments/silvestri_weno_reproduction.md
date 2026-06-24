@@ -84,6 +84,24 @@ closures are still insufficient at 1/8° (matrix: blow d24/d15) — follow-up (s
 guard-relaxed backstop, or the finer 1/16°). Matrix launch (GPU): `run_silvestri_baroclinic_jet.py
 --scheme {W9V,W9D,UP3} --resolution 160x128 --days 1000 --stabilize`. (Original blowup analysis below.)
 
+### 2026-06-24 — free-surface solver RULED OUT (end-to-end, baroclinic_adjustment gate)
+Triggered by the internal_tide #576 resolution, which showed the Oceananigans oracle uses
+`free_surface = ImplicitFreeSurface()` while legoESM's §5 recipe uses
+`barotropic_solver="explicit_substep"` (split-explicit) — a genuine free-surface fidelity gap, and
+the same CLASS of mismatch that was decisive for internal_tide. Tested end-to-end on the WALLED
+baroclinic_adjustment gate (48×48×8, dt=600, weno9, vs the Oceananigans oracle), the two solvers are
+**within ~3% of each other and both over-energize ~1.3× vs the oracle** (day-18 surface max|u|:
+oracle 1.56; `implicit_cn` 1.96 = 1.26×; `explicit_substep` 2.03 = 1.30×), neither blows up.
+⇒ **the free-surface/barotropic coupling is NOT the §5 residual lever** — switching to the
+oracle-faithful `ImplicitFreeSurface` (`implicit_cn`) does NOT reduce the over-energization. This
+INDEPENDENTLY CONFIRMS "the blowup is INSUFFICIENT DISSIPATION" (above): both solvers leak the same
+~1.3× excess energy, so the lever is grid-scale momentum dissipation (the wall representation +
+the anti-dissipative WENO pre-filter), exactly what **PR #559** (remove the `point_to_cellavg`
+anti-dissipative pre-filter) targets. internal_tide's `Flat`-y cure does NOT transfer (§5 is a full
+y-walled eddy field, not a y-uniform 2-D case). Reproduce:
+`BARO_SOLVER=implicit_cn|explicit_substep .venv/bin/python
+scripts/validate/ocean_fidelity/compare_oceananigans_baroclinic_adjustment.py 18`.
+
 ### Original blowup analysis
 The §5 recipe (front Eqs 52-53 + thermal wind + τ=50d zonal-mean restoring, uniform 20m/50lev,
 L_d≈5.7km), the per-scheme driver (1000-day scan + Fig-7/8/9/10 metrics), and the plotter are
