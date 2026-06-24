@@ -15,6 +15,7 @@ __param_spec__ = {
             "U_min": "numerics: minimum wind-speed floor for bulk fluxes [m/s]",
             "co2_ppmv_default": "forcing: default atmospheric CO2 [ppmv]",
             "coupling_dt": "numerics: coupling timestep [s]",
+            "gustiness_w_zi": "convention: boundary-layer depth z_i [m] setting the COARE convective-gustiness w* scale (0 => off); a BL-depth convention, not a trainable closure",
             "z_q_atm": "convention: humidity measurement reference height [m]",
             "z_ref": "convention: reference height [m]",
             "z_t_atm": "convention: temperature measurement reference height [m]",
@@ -78,6 +79,19 @@ class CouplerConfig(NamedTuple):
     # (Wing 2018) is correct only for PRESCRIBED-SST (SCM/AMIP).  See the CAM
     # surface-energy audit.
     gustiness: float = 1.0
+    # COARE 3.0 free-convection gustiness on the air-sea tile flux: the
+    # boundary-layer depth z_i [m] that sets the convective velocity scale
+    # w* = (g·z_i·<w'θv'>/θv)^(1/3) -> U_eff = sqrt(|U|^2 + (β·w*)^2).  0.0
+    # => OFF => byte-identical to the constant-floor path (the OMIP / default
+    # coupled run is unchanged).  This is the SAME convective-gustiness fix the
+    # atmosphere surface layer (SurfaceLayerConfig.gustiness_w_zi) and the slab
+    # ocean (SimpleOceanConfig.gustiness_w_zi) use; wiring it on the coupler
+    # ocean tile keeps the air-sea interface flux energy-CONSISTENT (the heat
+    # the ocean loses == the latent heat the atmosphere gains).  See the
+    # cmip_air_sea_decoupling fix: a calm warm tropical ocean barely evaporates
+    # without w* (hfls ~45 vs ~120 W/m²), drying the atmosphere -> weak
+    # greenhouse -> the warm SST radiates to space -> 3D-ocean cold collapse.
+    gustiness_w_zi: float = 0.0       # Convective-gustiness BL depth z_i [m]
     ocean_albedo: float = 0.06        # Fallback constant ocean albedo
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]

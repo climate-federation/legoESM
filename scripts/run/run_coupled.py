@@ -575,9 +575,20 @@ def main():
     coupler_config = None
     if args.surface_bulk_scheme != "constant":
         from legoesm.coupler.config import CouplerConfig
-        coupler_config = CouplerConfig(bulk_scheme=args.surface_bulk_scheme)
+        # Thread the SAME convective-gustiness BL depth onto the coupler ocean
+        # tile that the atmosphere surface layer uses (--gustiness-zi), so the
+        # air-sea interface flux is energy-consistent: the latent heat the
+        # ocean loses == the moisture flux the atmosphere gains.  Without this
+        # the 3D-ocean q_net used the non-gusty tile flux -> weak evaporation
+        # -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
+        coupler_config = CouplerConfig(
+            bulk_scheme=args.surface_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+        )
         logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
-                    "ocean tile)", args.surface_bulk_scheme)
+                    "ocean tile); convective gustiness z_i=%.0f m",
+                    args.surface_bulk_scheme,
+                    (args.surface_gustiness_zi or 0.0))
 
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,

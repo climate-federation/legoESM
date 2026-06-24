@@ -112,6 +112,28 @@ def test_ocean_coare3_enhances_unstable_latent_flux() -> None:
     assert float(lh_coare.mean()) > float(lh_const.mean())
 
 
+def test_coupler_ocean_tile_gustiness_raises_latent_flux() -> None:
+    """The coupler ocean tile (``ocean_tile_response``) drives the 3D-ocean
+    q_net.  Over a calm warm ocean under unstable air, enabling the convective
+    gustiness BL depth (``CouplerConfig.gustiness_w_zi``) must raise the tile
+    latent heat flux vs gustiness_w_zi=0 — keeping the air-sea interface
+    energy-consistent with the atmosphere surface layer (the 3D-ocean
+    cold-collapse fix; cmip_air_sea_decoupling)."""
+    import jax.numpy as jnp
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.coupler import ocean_tile_response
+
+    fc = _ocean_forcing(T_lowest=288.0, q_lowest=8e-3, u=2.0)  # const-ok: test air temp [K]
+    sst = jnp.full((6, 4, 4), 300.0)                  # warm calm ocean
+    u_o = v_o = jnp.zeros((6, 4, 4))
+    base = CouplerConfig(bulk_scheme="coare3", gustiness_w_zi=0.0)
+    gust = CouplerConfig(bulk_scheme="coare3", gustiness_w_zi=600.0)
+    r_off = ocean_tile_response(fc, sst, u_o, v_o, base)
+    r_on = ocean_tile_response(fc, sst, u_o, v_o, gust)
+    assert jnp.all(jnp.isfinite(r_on.lhflx))
+    assert float(r_on.lhflx.mean()) > float(r_off.lhflx.mean())
+
+
 @pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
 def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
     """Regression: MOST under float32 inputs (the atmosphere coupled path) must
