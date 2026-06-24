@@ -441,6 +441,23 @@ same slow-moistening residual the slab faced (slab took 180 d to reach R_TOA
 −0.72), so multi-month integration is the remaining lever, not a structural
 bug. Figure: `docs/scaling/cmip_3docean_full_60d.png`.
 
+**120 d continuation (job 8565679) — SST converges but R_TOA worsens (the
+restoring tradeoff):** SST drift +14.2 K/yr (decelerating 25→19→14 ⇒
+converging), SST mean 286.1 K (tropical warm pool 300.8 K), CWV 16.8 (rising
+from 15.1 — atm slowly moistening), column-T 257.6 K (+5.2 K from the Day-25
+min, still rising). BUT R_TOA −18.4 (WORSE than 60 d's −8.9).
+**Read = restoring-strength vs energy-balance tradeoff.** The τ=5 d SST
+restoring forces the surface warm; the column warms ⇒ OLR rises, but the dry
+atm (CWV 16.8 ≪ Earth's ~25) can't trap it ⇒ the planet leaks energy and the
+restoring flux does net work to hold the warm SST. Strong restoring buys
+SST-realism + stability; it PAYS an energy imbalance. NEXT LEVERS (the open
+question): (1) weaker restoring τ=15–30 d — lets SST cool slightly toward an
+energetically self-consistent state (cost: SST a bit below WOA); (2) attack the
+root **dry-atm bias** (CWV caps ≪ Earth across BOTH slab + 3D-ocean runs — the
+fundamental residual) via the moisture budget (evap vs precip efficiency).
+The deliverable (stable, realistic-SST, non-collapsing 3D-ocean coupled run from
+WOA IC) STANDS; full energy closure is the refinement.
+
 ## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
 User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
 (COARE is itself a MOST algorithm; the split is generic-MOST for the simple
