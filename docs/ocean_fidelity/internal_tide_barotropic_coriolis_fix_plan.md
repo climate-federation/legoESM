@@ -5,7 +5,37 @@ Actionable handoff from the 20-iteration diagnostic (ralph log
 This is the *one* remaining piece of work that closes Oceananigans `internal_tide`
 fidelity — and, because it is the same root, the Silvestri §5 turbulent blow-up.
 
-## Verified root cause
+## ⚠️⚠️⚠️ RESOLUTION PATH (from the Oceananigans SOURCE, not a search)
+
+Looked up the oracle's actual time stepper in the Oceananigans source
+(`Models/HydrostaticFreeSurfaceModels/hydrostatic_free_surface_model.jl`,
+`barotropic_pressure_correction.jl`):
+- **Timestepper = `:QuasiAdamsBashforth2`** (AB2 of the full momentum RHS, Coriolis
+  INCLUDED).
+- **Free surface = `ImplicitFreeSurface`** (the `XYRegularStaticRG` default; the
+  internal_tide grid is x-regular / y-Flat, so it is NOT split-explicit).
+- Scheme: AB2 momentum → solve η implicitly → `correct_barotropic_mode!` subtracts
+  the barotropic pressure gradient UNIFORMLY at every level (`u -= g·Δt·∂ₓη`). No
+  forward-backward Coriolis in the η solve, no `_cori_fac` gating, no `F_slow`
+  Coriolis routing — i.e. far SIMPLER than legoESM's `implicit_cn` predictor-corrector.
+
+**Result:** legoESM's `barotropic_solver="implicit_unsplit"` (MITgcm-faithful: full
+velocity solved implicitly with a uniform surface-pressure correction) is the
+faithful match to Oceananigans' `ImplicitFreeSurface`, and it is **STABLE** where
+`implicit_cn` blows up: the periodic-y flat-bottom inertial oscillation stays
+bounded and tracks the analytic solution for 2 full periods (u: 0.20→0.00→−0.21→
+0.00→+0.20, max|u|≈0.20); flat-bottom + tidal forcing also stable (day 1, max|u|
+0.77). So the instability was the `implicit_cn` split-coupling of the implicit FS
+with the explicit/FB Coriolis — NOT a spatial null mode and NOT needing Arakawa–Lamb.
+(All the earlier "spatial null mode / AL redesign" conclusions are SUPERSEDED.)
+
+**Remaining (narrow):** with `implicit_unsplit`, the BUMP (partial-cell topography
++ stratification) still blows up (day 0.08; flat bottom is fine). Next: the
+partial-cell interaction with the unsplit implicit free surface (the oracle uses
+`PartialCellBottom`). This is a much smaller, well-localized problem than the
+imagined dycore redesign.
+
+## Verified root cause (historical — see RESOLUTION PATH above for the actual fix)
 
 The Oceananigans `internal_tide` oracle is `topology=(Periodic, Flat, Bounded)` —
 meridionally **unbounded** (true 2-D x–z). legoESM's lat-lon beta-plane C-grid is
