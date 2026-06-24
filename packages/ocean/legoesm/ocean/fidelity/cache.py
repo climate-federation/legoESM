@@ -27,7 +27,7 @@ _FALLBACK_ENV = "LEGOESM_CACHE_DIR"
 _DEFAULT_REL = Path(".cache") / "legoesm" / "ocean_fidelity"
 
 ALLOWED_SUBDIRS: tuple[str, ...] = (
-    "veros", "mitgcm", "obs", "regrid_weights", "forcing",
+    "veros", "mitgcm", "oceananigans", "obs", "regrid_weights", "forcing",
 )
 
 

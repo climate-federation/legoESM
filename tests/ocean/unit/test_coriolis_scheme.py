@@ -460,10 +460,23 @@ def test_explicit_ab2_requires_ab2_outer():
         _construct("explicit_ab2", outer_integrator="forward_euler")
 
 
-def test_explicit_ab2_requires_rigid_lid():
-    with pytest.raises(ValueError, match='requires barotropic_solver="rigid_lid"'):
+def test_explicit_ab2_accepts_implicit_solvers():
+    """explicit_ab2 routes the planetary Coriolis to the barotropic mode via the
+    AB2-extrapolated slow forcing F_slow, with the solver's own f×U_bt gated off —
+    so it is valid with the rigid lid AND with the implicit / split-explicit free
+    surfaces (the Oceananigans-fidelity internal_tide recipe uses implicit_cn).
+    (Relaxed from the original rigid-lid-only requirement; an OUT-OF-SET solver
+    still raises, exercised by test_explicit_ab2_rejects_unknown_solver.)"""
+    for bsolver in ("rigid_lid", "implicit_cn", "implicit_unsplit",
+                    "explicit_substep"):
         _construct("explicit_ab2", outer_integrator="ab2",
-                   barotropic_solver="implicit_cn")
+                   barotropic_solver=bsolver)
+
+
+def test_explicit_ab2_rejects_unknown_solver():
+    with pytest.raises(ValueError, match="barotropic_solver"):
+        _construct("explicit_ab2", outer_integrator="ab2",
+                   barotropic_solver="not_a_real_solver")
 
 
 def test_default_accepts_any_solver():
