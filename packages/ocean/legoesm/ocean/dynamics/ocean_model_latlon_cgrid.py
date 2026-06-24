@@ -934,11 +934,12 @@ class LatLonCGridOceanModel:
         # some terms and 3-D for others (the 2-D x–z oracle has none of them).
         if getattr(config, "meridionally_flat", False):
             _ungated = []
-            if (config.A_h > 0.0 or config.B_h > 0.0) and \
-                    config.lateral_viscosity_operator == "flux_divergence":
+            _visc_on = (config.A_h > 0.0 or config.B_h > 0.0
+                        or getattr(config, "C_smag", 0.0) > 0.0)
+            if _visc_on and config.lateral_viscosity_operator == "flux_divergence":
                 _ungated.append(
-                    'A_h/B_h>0 with lateral_viscosity_operator="flux_divergence" '
-                    '(use "vector_laplacian", which IS flat-aware)')
+                    'A_h/B_h/C_smag>0 with lateral_viscosity_operator='
+                    '"flux_divergence" (use "vector_laplacian", which IS flat-aware)')
             if config.gm_redi is not None:
                 _ungated.append("gm_redi is not None")
             if getattr(config, "lateral_friction_scheme", "none") != "none":
