@@ -105,6 +105,12 @@ def build_setup():
         # is stable and ~7× closer in rms; the RESIDUAL is grid-scale (2Δx) noise
         # at the partial-cell staircase, not the momentum scheme.
         momentum_advection=os.environ.get("MOM_ADV", "flux_form"),
+        # 3rd-order upwind momentum flux (vs the 1st-order "upwind" default): the
+        # oracle uses WENO5 momentum, whose LOW DISPERSION the 1st-order scheme
+        # badly misses → the internal-tide beam dephases (day-2 b' corr 0.44→0.54
+        # at dt=300, →0.61 with dt=150). upwind3 is the closest STABLE legoESM
+        # match (vector-invariant weno5 momentum blows up here).
+        momentum_flux_scheme=os.environ.get("MOM_FLUX", "upwind3"),
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split",
         # Oceananigans `Flat`-y topology (record on the config; the global was set
