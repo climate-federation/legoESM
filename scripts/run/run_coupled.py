@@ -198,6 +198,9 @@ def main():
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
+                        choices=["none", "kessler", "sundqvist",
+                                 "seifert_beheng", "morrison", "thompson",
+                                 "p3", "sdm", "fast_sbm"],
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
                              "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
