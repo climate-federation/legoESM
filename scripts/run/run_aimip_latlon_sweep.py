@@ -8,13 +8,12 @@ radiation-flux loss on.  Mirrors the spectral
 ``run_aimip_classical_sweep_stage1.py`` protocol but on the faster
 lat-lon C-grid carry stack.
 
-Axes swept: convection, turbulence, gravity-wave drag — the
-differentiable levers with >1 option.  Microphysics is now threaded
-through the training segment (baseline uses the orchestrator default,
-``kessler``), but is not an OAT axis here (one warm-rain scheme is enough
-to "have microphysics"; add an axis if scheme choice needs comparing).
-Radiation is the orchestrator default ``rrtmgp`` (band model — required
-for AMIP-like flux generalization; gray is debug-only).
+Axes swept (all 5 physics CATEGORIES): convection, turbulence,
+gravity-wave drag, microphysics, and cloud cover.  Each combo also
+gradient-TRAINS its tunable params (the classical variant), so the sweep
+finds the best scheme COMBINATION on top of per-combo training.  Radiation
+is fixed to the orchestrator default ``rrtmgp`` (band model — required for
+AMIP-like flux generalization; gray is debug-only) and is not a swept axis.
 
 Usage:
     python run_aimip_latlon_sweep.py --list           # n combos
@@ -42,6 +41,8 @@ BASELINE = {
     "convection": "mass_flux",
     "turbulence": "louis",
     "gravity_wave_drag": "hines",
+    "microphysics": "kessler",
+    "clouds": "xu_randall",
 }
 
 # OAT alternatives per axis (baseline value excluded — it is the
@@ -71,10 +72,24 @@ SWEEP_SPACE = {
     "gravity_wave_drag": [
         "none", "mcfarlane", "lindzen", "rayleigh",
     ],
+    # kessler is the baseline warm-rain micro.  "none" probes no-microphysics
+    # (sat-adjust only, no surface precip); "sundqvist" is the alternative
+    # single-moment scheme.  Double-moment schemes (morrison/p3/thompson/
+    # seifert_beheng) need extra prognostic tracer slots not wired into the
+    # training carry + blow the rrtmgp+micro compile budget -> excluded.
+    "microphysics": [
+        "none", "sundqvist",
+    ],
+    # xu_randall is the baseline cloud-fraction scheme (feeds rrtmgp cloud
+    # optics).  "none" = clear-sky control; "sundqvist" = diagnostic-RH clouds.
+    "clouds": [
+        "none", "sundqvist",
+    ],
 }
 
 _AXIS_TAG = {"convection": "conv", "turbulence": "turb",
-             "gravity_wave_drag": "gwd"}
+             "gravity_wave_drag": "gwd", "microphysics": "micro",
+             "clouds": "cloud"}
 
 
 def build_combos():
@@ -114,6 +129,8 @@ def run_combo(index, output_root, extra_argv):
         "--convection", combo["convection"],
         "--turbulence", combo["turbulence"],
         "--gravity-wave-drag", combo["gravity_wave_drag"],
+        "--microphysics", combo["microphysics"],
+        "--clouds", combo["clouds"],
         "--output-dir", str(Path(output_root) / combo["name"]),
         *extra_argv,
     ]
@@ -132,9 +149,10 @@ def main(argv=None):
     if args.list or args.index is None:
         print(f"{len(combos)} combos:")
         for i, c in enumerate(combos):
-            print(f"  {i:2d}  {c['name']:32s} "
+            print(f"  {i:2d}  {c['name']:34s} "
                   f"conv={c['convection']} turb={c['turbulence']} "
-                  f"gwd={c['gravity_wave_drag']}")
+                  f"gwd={c['gravity_wave_drag']} micro={c['microphysics']} "
+                  f"cloud={c['clouds']}")
         return 0
     return run_combo(args.index, args.output_root, extra)
 

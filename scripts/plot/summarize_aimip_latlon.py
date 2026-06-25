@@ -188,6 +188,7 @@ def summarize_sweep(sweep_root: Path) -> str:
                       f"turbulence=`{sch.get('turbulence','?')}`, "
                       f"gwd=`{sch.get('gravity_wave_drag','?')}`, "
                       f"microphysics=`{sch.get('microphysics','?')}`, "
+                      f"clouds=`{sch.get('clouds','?')}`, "
                       f"radiation=`{sch.get('radiation','?')}`")
         tail.append(f"\n**Best combination: `{best}`** — {combo_desc} "
                     f"(composite {scores[best]:.3f}).")

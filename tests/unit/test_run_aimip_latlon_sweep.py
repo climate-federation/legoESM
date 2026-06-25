@@ -15,12 +15,13 @@ _spec.loader.exec_module(mod)
 
 def test_combo_count_and_structure():
     combos = mod.build_combos()
-    # baseline + 4 conv (profile-prognostic excluded) + 4 turb + 4 gwd
-    assert len(combos) == 1 + 4 + 4 + 4 == 13
+    # baseline + 4 conv + 4 turb + 4 gwd + 2 micro + 2 cloud (all 5 categories)
+    assert len(combos) == 1 + 4 + 4 + 4 + 2 + 2 == 17
     assert combos[0]["name"] == "combo_baseline"
     assert combos[0]["convection"] == mod.BASELINE["convection"]
     for c in combos:
-        assert {"name", "convection", "turbulence", "gravity_wave_drag"} <= set(c)
+        assert {"name", "convection", "turbulence", "gravity_wave_drag",
+                "microphysics", "clouds"} <= set(c)
 
 
 def test_sweep_schemes_are_run_amip_choices():
@@ -35,7 +36,8 @@ def test_sweep_schemes_are_run_amip_choices():
     rspec.loader.exec_module(ra)
     parser = ra.build_arg_parser()
     flag = {"convection": "--convection", "turbulence": "--turbulence",
-            "gravity_wave_drag": "--gravity-wave-drag"}
+            "gravity_wave_drag": "--gravity-wave-drag",
+            "microphysics": "--microphysics", "clouds": "--clouds"}
     choices = {}
     for action in parser._actions:
         for axis, f in flag.items():
@@ -50,7 +52,8 @@ def test_sweep_schemes_are_run_amip_choices():
 def test_oat_changes_exactly_one_axis():
     base = mod.BASELINE
     for c in mod.build_combos()[1:]:
-        diffs = [k for k in ("convection", "turbulence", "gravity_wave_drag")
+        diffs = [k for k in ("convection", "turbulence", "gravity_wave_drag",
+                             "microphysics", "clouds")
                  if c[k] != base[k]]
         assert len(diffs) == 1, f"{c['name']} changes {diffs}, expected exactly 1"
 
