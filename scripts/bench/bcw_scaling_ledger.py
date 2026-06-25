@@ -228,7 +228,7 @@ def main() -> int:
                    help="UTC timestamp string (caller-supplied; no clock here).")
     pl = sub.add_parser("plot")
     pl.add_argument("--ledger", default="results/bcw_scaling/scaling_ledger.csv")
-    pl.add_argument("--out", default="docs/scaling/bcw_scaling_vs_iteration.png")
+    pl.add_argument("--out", default="docs/performance/scaling/bcw_scaling_vs_iteration.png")
     pl.add_argument("--grid", default="icosahedral")
     args = p.parse_args()
 

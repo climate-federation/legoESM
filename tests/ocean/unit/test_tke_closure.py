@@ -4,7 +4,7 @@ Tests target the closure module
 :mod:`legoesm.ocean.physics.vertical_mixing.tke` directly. The
 integration into ``_apply_implicit_vertical_mixing`` (with prognostic
 TKE state on ``LatLonCGridOceanState.tke``) is deferred to a follow-up
-commit; see ``docs/ocean_fidelity/phase_g_veros_recipe_audit.md`` G.1a.
+commit; see ``docs/ocean/fidelity/phase_g_veros_recipe_audit.md`` G.1a.
 
 Test surface:
 

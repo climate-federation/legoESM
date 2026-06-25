@@ -278,7 +278,7 @@ def _meta_path(checkpoint_path: Path) -> Path:
 #
 # Bit-identical replay holds per platform/precision/backend; the caveats (GPU
 # reduction order, JIT cache, fp32 vs x64) are catalogued in
-# docs/portability_gpu_mpi_precision.md ("Nondeterminism sources").
+# docs/architecture/portability_gpu_mpi_precision.md ("Nondeterminism sources").
 
 # Version policy: bump ONLY on a breaking shape change (removed/renamed field,
 # changed meaning). validate_run_manifest requires the EXACT version, so a bump

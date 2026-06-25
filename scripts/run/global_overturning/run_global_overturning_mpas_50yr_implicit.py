@@ -17,7 +17,7 @@ constraints, NOT knobs):
     3D CFL.  Smoke-test the largest stable dt before the long run.
   - GM/Redi slope_scheme = "centered" (lat-lon 50yr used default
     "triads"; MPAS triads is Phase 5 of the GM/Redi MPAS plan, not yet
-    implemented).  Eady validation (docs/ocean_experiments/gm_redi_mpas_plan.md)
+    implemented).  Eady validation (docs/ocean/experiments/gm_redi_mpas_plan.md)
     found centered acceptable on weak-forcing physics, but expect more
     spurious diapycnal mixing in the deep ocean over 50 yr.
 

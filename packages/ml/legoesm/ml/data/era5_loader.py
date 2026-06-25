@@ -141,19 +141,36 @@ def _normalize_dims(ds):
 
 
 def _resolve_variables(ds, variables: tuple[str, ...]) -> list[str]:
-    """Resolve variable names, trying aliases for missing variables."""
+    """Resolve variable names, trying aliases for missing variables.
+
+    Raises ``ValueError`` listing any requested variable that cannot be
+    resolved — silently dropping it (the previous behaviour) yields a packed
+    array with fewer channels than the model was built for, surfacing as a
+    confusing shape mismatch far from the cause.
+    """
     resolved = []
+    unresolved = []
     for var in variables:
         if var in ds:
             resolved.append(var)
         elif var in _WB2_VAR_ALIASES and _WB2_VAR_ALIASES[var] in ds:
             resolved.append(_WB2_VAR_ALIASES[var])
         else:
-            # Try reverse lookup (long name → short alias)
-            for short, long in _WB2_VAR_ALIASES.items():
-                if var == long and short in ds:
-                    resolved.append(short)
-                    break
+            # Reverse lookup (long name → short alias).
+            match = next(
+                (short for short, long in _WB2_VAR_ALIASES.items()
+                 if var == long and short in ds),
+                None,
+            )
+            if match is not None:
+                resolved.append(match)
+            else:
+                unresolved.append(var)
+    if unresolved:
+        raise ValueError(
+            f"ERA5 variable(s) not found in dataset (after alias resolution): "
+            f"{unresolved}. Available data_vars: {sorted(ds.data_vars)}."
+        )
     return resolved
 
 

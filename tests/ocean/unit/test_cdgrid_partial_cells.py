@@ -481,3 +481,18 @@ def test_bottom_drag_differentiable():
 
     g = jax.grad(loss)(st.u.data)
     assert jnp.all(jnp.isfinite(g)), "gradient through bottom-drag path non-finite"
+
+
+def test_unknown_pgf_scheme_raises_on_zstar():
+    """PR A (ocean): the ``pgf_scheme`` membership guard was gated inside
+    ``if is_partial:``, so a pure z* run (is_partial=False) skipped it and a
+    typo silently ran adcroft. The guard is now hoisted to fn entry and must
+    fail loudly on every vertical coordinate."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = jnp.full((6, N, N), HMAX, dtype=jnp.float64)
+    st = _state(grid, zc, H)
+    cfg = _cfg()._replace(pgf_scheme="bogus_scheme")
+    with pytest.raises(ValueError, match="(?i)pgf_scheme"):
+        ocean_baroclinic_tendencies_cdgrid(st, grid, zc, cdgrid, cfg)

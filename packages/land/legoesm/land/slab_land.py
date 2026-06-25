@@ -97,8 +97,11 @@ def step_land(
 
     # --- Surface albedo (from current snow state + surviving fresh snow) ---
     if config.snow_albedo_feedback and lat is not None:
+        # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied,
+        # else the latitude-band default; snow albedo blends on top either way.
+        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_soil.shape)
         alpha = compute_land_albedo(
-            lat, snow_for_albedo, snow_age, config.land_albedo,
+            lat, snow_for_albedo, snow_age, config.land_albedo, base_albedo=_base,
         )
     else:
         alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
@@ -253,8 +256,17 @@ def step_land(
 
     # Post-step albedo: reflects updated snow state for the next atmosphere step
     if config.snow_albedo_feedback and lat is not None:
+        # Mirror the pre-step block: snow-free base = per-cell map albedo (CLM
+        # PFT) when land_params supplied, else the latitude-band default. Without
+        # base_albedo the post-step value silently reverts to the vegetation
+        # default over snow-free cells, creating a pre/post discontinuity in the
+        # albedo reported to the atmosphere (corrupts the coupled SW balance).
+        _base_new = None if lp is None else jnp.broadcast_to(
+            albedo_land, T_soil_new.shape
+        )
         alpha_new = compute_land_albedo(
             lat, snow_new, snow_age_new, config.land_albedo,
+            base_albedo=_base_new,
         )
     else:
         alpha_new = alpha

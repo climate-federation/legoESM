@@ -26,7 +26,7 @@ DATA = {
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--out", default="docs/scaling/voronoi_batched_ab.png")
+    p.add_argument("--out", default="docs/performance/scaling/voronoi_batched_ab.png")
     args = p.parse_args()
 
     labels = list(DATA)

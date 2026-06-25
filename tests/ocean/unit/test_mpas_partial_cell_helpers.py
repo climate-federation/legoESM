@@ -1,6 +1,6 @@
 """Unit tests for MPAS partial-cell helpers (P2 of the MPAS
 realistic-geometry plan; see
-``docs/ocean_experiments/realistic_geometry_mpas_plan.md``).
+``docs/ocean/experiments/realistic_geometry_mpas_plan.md``).
 
 Covers ``compute_edge_mask``, ``compute_vertex_mask``,
 ``compute_max_level_edge_bot/top``, ``min_cell_to_edge``,

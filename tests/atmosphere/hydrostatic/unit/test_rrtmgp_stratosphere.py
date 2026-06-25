@@ -31,7 +31,7 @@ A separate ``TestColumnShardedRadiation::test_rrtmgp_*`` pair in
 invariance for both the default and ``use_optimal_angle=True``
 paths.
 
-Full chronology in ``docs/specs/rrtmgp.md``.
+Full chronology in ``docs/science/specs/rrtmgp.md``.
 """
 
 from __future__ import annotations

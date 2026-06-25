@@ -254,7 +254,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # wet/rock mask (face active iff BOTH adjacent A-cells active, with a
         # cross-seam ``is_active`` halo) is the next conservation upgrade and
         # closes coastline + seafloor faces together; tracked in
-        # docs/md_files/ocean_faithfulness_nemo.md.
+        # docs/dev-notes/ocean_faithfulness_nemo.md.
 
     # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
     # Reference Jacobian (J=1, eta=0): the barotropic solver handles
@@ -305,7 +305,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # carry a spurious flux across the seafloor step.  Mask each C-face to
         # wet iff BOTH adjacent A-cells are wet (land_mask AND above seafloor),
         # halo-correctly across cube seams.  This is the conservation upgrade
-        # tracked in docs/md_files/ocean_faithfulness_nemo.md and closes the
+        # tracked in docs/dev-notes/ocean_faithfulness_nemo.md and closes the
         # coastline + seafloor faces together.  z* path (is_partial False)
         # stays bit-exact (no masking).
         wet_cc_3d = mask_3d * active_3d
@@ -397,14 +397,17 @@ def ocean_baroclinic_tendencies_cdgrid(
     #              spurious bottom PGF above) → not faithful on the cube.
     #   "smc03"  : full Shchepetkin & McWilliams 2003 density-Jacobian PGF
     #              REPLACING dp — see below.  Matches the proven latlon/tripole.
+    pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+    if pgf_scheme not in ("adcroft", "smc03", "zero"):
+        # Static config value -> validate at fn entry UNCONDITIONALLY. A pure
+        # z* run has is_partial=False, so gating this guard inside `if
+        # is_partial` let a typo (e.g. 'smc3') silently fall back to adcroft and
+        # disable the faithful scheme on z*; a typo must fail loudly on every
+        # vertical coordinate (matches the latlon/mpas siblings).
+        raise ValueError(
+            f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
+            "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
     if is_partial:
-        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
-        if pgf_scheme not in ("adcroft", "smc03", "zero"):
-            # Static config value -> validate at fn entry (a typo must fail loudly,
-            # not silently fall back to adcroft and disable the faithful scheme).
-            raise ValueError(
-                f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
-                "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
         cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
         if pgf_scheme == "smc03":
             # S&M03 density-Jacobian PGF on the AL corners.  Per-cell geometry
@@ -519,7 +522,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # residual is the SOLE cause (vs any barotropic / advective / metric term).
     # Works for both partial and z* (zeroes the base AL gradient + any
     # correction).  Diagnostic only — never a faithful run.
-    if getattr(config, "pgf_scheme", "adcroft") == "zero":
+    if pgf_scheme == "zero":
         dp_dx = jnp.zeros_like(dp_dx)
         dp_dy_perp = jnp.zeros_like(dp_dy_perp)
 

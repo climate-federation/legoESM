@@ -4,7 +4,7 @@ Wraps the existing :mod:`legoesm.atmosphere.held_suarez` forcing with a
 DCMIP-§2-0-0-style ridged cosine-bell mountain.  The relaxation /
 friction kernels are unchanged — only the surface geopotential and
 surface pressure differ from the flat-Earth baseline.  This is the
-``HS-Topo`` entry in :doc:`/docs/dycore_validation_catalog`.
+``HS-Topo`` entry in :doc:`/docs/validation/dycore_validation_catalog`.
 
 The forcing functions are aliased directly from
 :mod:`legoesm.atmosphere.held_suarez` (no behavioural change):

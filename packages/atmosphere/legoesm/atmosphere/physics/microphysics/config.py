@@ -845,7 +845,7 @@ class MicrophysicsConfig(NamedTuple):
         Fast spectral-bin microphysics (WRF FSBM-2 port). The column path
         reconstructs the 33-bin liquid spectrum from bulk (q_c, q_r, N_r)
         and runs oracle condensation + Bott coalescence per step (see
-        ``docs/specs/bin_microphysics.md``).
+        ``docs/science/specs/bin_microphysics.md``).
     ml_emulator : MicrophysicsMLEmulatorConfig
     """
     scheme: str = "none"

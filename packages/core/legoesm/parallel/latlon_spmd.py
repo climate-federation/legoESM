@@ -52,6 +52,45 @@ def latlon_band_perms(n_dev: int):
     return perm_north, perm_south
 
 
+def reconstruct_vface_lower(v_lower, axis: str, perm_north):
+    """Rebuild the ``n_lat+1`` staggered v-faces from the ``n_lat``-row
+    ``v_lower`` representation, INSIDE a ``shard_map`` over ``axis``.
+
+    The staggered meridional velocity ``v`` has a leading dim ``n_lat+1`` (faces
+    at latitude interfaces), coprime with ``n_lat`` for ``N>1`` so it cannot be
+    sharded directly; it is carried as ``v_lower = v[:n_lat]`` (``n_lat`` rows,
+    divisible by ``N``). Each band's NORTH boundary face is the next band's
+    ``v_lower[0]`` (= the shared global interface row), lifted down via
+    ``ppermute(..., perm_north)``; the north-most band has no neighbour there and
+    receives the pole-wall zero (the ppermute non-target). Pure array core (no
+    Field/state coupling) shared by the ocean and atmosphere lat-band SPMD steps
+    so the v-stagger numerics are written ONCE (factored from the ocean step's
+    ``_reconstruct_v`` closure). AD-safe: ``ppermute`` is self-transposing.
+
+    Parameters
+    ----------
+    v_lower : array ``(n_lat_band, n_lon[, nlev])``
+    axis : the ``shard_map`` mesh axis name (``"lat"``).
+    perm_north : the ``(src, dst)`` pairs from :func:`latlon_band_perms`.
+
+    Returns
+    -------
+    array ``(n_lat_band + 1, n_lon[, nlev])`` — the band's full v-faces.
+    """
+    boundary = jax.lax.ppermute(v_lower[0:1], axis, perm_north)
+    return jnp.concatenate([v_lower, boundary], axis=0)
+
+
+def to_vface_lower(v_full):
+    """Inverse of :func:`reconstruct_vface_lower`: drop the north boundary face
+    (owned by the next band) to return to the ``n_lat``-row ``v_lower``.
+
+    Round-trip identity ``to_vface_lower(reconstruct_vface_lower(v_lower)) ==
+    v_lower`` holds whenever the top boundary face is the pole-wall zero (true
+    after any step that zeroes v at the pole)."""
+    return v_full[:-1]
+
+
 def _pole_fold(rows, negate: bool):
     """Serial pole fold of ``rows`` (lat-mirror + 180 deg lon roll [+ sign]).
 
@@ -219,6 +258,28 @@ def spmd_pole_end_masks():
     return (b == 0), (b == n_dev - 1)
 
 
+def apply_pole_end_masks(field, masks, offset: int = 0):
+    """Zero ``field`` at the south / north PHYSICAL pole rows of the active band,
+    selecting the clamp DATA-dependently from ``masks = (south_mask, north_mask)``
+    (the :func:`spmd_pole_end_masks` traced scalar booleans).
+
+    Interior band cuts — whose ``masks`` are both ``False`` — pass through
+    untouched, so their cut row keeps the cross-band meridional gradient.  This is
+    the SPMD twin of the static ``_zero_v_at_pole`` (atmosphere PE) /
+    ``zero_polar_lat_ends`` (halo) pole-wall clamp; ``offset`` mirrors their
+    halo-row offset (``0`` under SPMD — bands are not pre-padded).  Both ends are
+    applied via ``jnp.where`` so the same compiled body is bit-correct on every
+    band (south pole, north pole, or interior cut).
+    """
+    south_mask, north_mask = masks
+    n = field.shape[0]
+    z_south = field.at[offset].set(jnp.zeros_like(field[offset]))
+    out = jnp.where(south_mask, z_south, field)
+    z_north = out.at[n - 1 - offset].set(jnp.zeros_like(out[n - 1 - offset]))
+    out = jnp.where(north_mask, z_north, out)
+    return out
+
+
 def zero_polar_lat_ends_band_spmd(field, mesh):
     """SPMD analogue of the MPI branch of
     :func:`legoesm.grids.halo_latlon.zero_polar_lat_ends` — zero axis-0 index 0
@@ -228,16 +289,13 @@ def zero_polar_lat_ends_band_spmd(field, mesh):
 
     Must be called INSIDE a shard_map over the same ``"lat"`` axis.  Mirrors the
     MPI ``south_rank is None`` / ``north_rank is None`` pole-touch test with
-    ``jax.lax.axis_index`` (data-dependent ⇒ ``jnp.where``, both ends traced).
+    ``jax.lax.axis_index`` (data-dependent ⇒ ``jnp.where``, both ends traced) and
+    delegates the field-zeroing to the shared :func:`apply_pole_end_masks` core.
     """
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
     b = jax.lax.axis_index(axis)
-    zero0 = field.at[0].set(jnp.zeros_like(field[0]))
-    out = jnp.where(b == 0, zero0, field)
-    zerom1 = out.at[-1].set(jnp.zeros_like(out[-1]))
-    out = jnp.where(b == n_dev - 1, zerom1, out)
-    return out
+    return apply_pole_end_masks(field, ((b == 0), (b == n_dev - 1)), offset=0)
 
 
 def pad_halo_latlon_band_spmd(mesh, halo: int = 1, negate: bool = False):

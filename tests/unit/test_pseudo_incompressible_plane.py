@@ -5,7 +5,7 @@ at rest; a dry warm bubble rises with a physically reasonable, x-symmetric updra
 whose peak vertical velocity is in the LEX oracle ballpark; the step is JIT/grad-safe.
 
 The dry warm-bubble oracle (LEX, solver_opt=1, turb off) gives w_max ≈ 8.5 m/s after
-600 s on a 200 m grid (see docs/pseudo_incompressible_les.md). We do NOT expect a
+600 s on a 200 m grid (see docs/physics-notes/pseudo_incompressible_les.md). We do NOT expect a
 bit-level match (collocated-horizontal vs LEX C-grid; different advection details), so
 the oracle assertion is a physically-meaningful bracket (a few m/s ≤ w_max ≤ ~15 m/s)
 plus x-symmetry, which would catch a wrong sign, dead dynamics, or a blow-up.

@@ -232,7 +232,7 @@ class MPASOceanConfig(NamedTuple):
     # the existing forward-backward substep loop with cosine filter.
     # ``"implicit_cn"`` uses a single-step Crank-Nicolson free surface
     # with PCG Helmholtz solve, mirroring the lat-lon implementation
-    # (docs/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
+    # (docs/dev-notes/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
     # rotational null branch (Thuburn 2008; Ringler+ 2010 §6) by
     # construction; no substepping or time filter needed.
     barotropic_solver: str = "explicit_substep"
@@ -277,10 +277,10 @@ class MPASOceanConfig(NamedTuple):
     gm_redi: object = None  # GMRediConfig — None disables GM/Redi.  Only the
                             # 'centered' slope_scheme is implemented on MPAS;
                             # 'triads' raises NotImplementedError (Phase 5
-                            # of docs/ocean_experiments/gm_redi_mpas_plan.md).
+                            # of docs/ocean/experiments/gm_redi_mpas_plan.md).
     mle: object = None     # MLEConfig — None disables Fox-Kemper mixed-layer-eddy
                            # restratification.  Voronoi bolus port of NEMO nn_mle=1
-                           # (docs/ocean_experiments/mle_mpas_port_plan.md).
+                           # (docs/ocean/experiments/mle_mpas_port_plan.md).
     implicit_vertical_mixing: bool = True  # When True, vertical viscosity
                                            # (A_v on velocity) and vertical
                                            # diffusivity (K_v on tracers) are
@@ -311,7 +311,7 @@ class MPASOceanConfig(NamedTuple):
     C_leith: float = 0.0
     C_leith_modified: bool = False
     # Pressure-gradient scheme (P3 of MPAS realistic-geometry plan;
-    # see ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``).
+    # see ``docs/ocean/experiments/realistic_geometry_mpas_plan.md``).
     # ``"centered"`` (default) is the legacy bare-gradient
     # ``gradient_edge(p'/rho_0)`` — correct for flat-bottom z-star but
     # produces O(1 cm/s) spurious shelf-break currents on partial cells.
@@ -324,7 +324,7 @@ class MPASOceanConfig(NamedTuple):
     # density-Jacobian PGF (per-column harmonic-slope ρ(z)
     # reconstruction evaluated at a face-reference depth) — required
     # for stability on real bathymetry; see
-    # ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.  Only
+    # ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``.  Only
     # meaningful with ``OceanPartialCellCoordinate``; falls back to
     # centered on z-star.
     # ``"ahh08"`` enables the Adcroft, Hallberg & Hill (2008) analytic

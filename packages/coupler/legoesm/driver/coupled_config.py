@@ -64,7 +64,7 @@ class CoupledConfig(NamedTuple):
     #     fields below; the coupled cold-start uses the OMIP-validated stable
     #     stack (rk3 momentum + implicit_cn barotropic + implicit vmix + smc03
     #     PGF), forced in CoupledESMDriver._init_ocean.  See
-    #     docs/coupled_3d_ocean_plan.md.
+    #     docs/ocean/coupled_3d_ocean_plan.md.
     ocean_mode: str = "slab"
     ocean_config: SimpleOceanConfig | LatLonCGridOceanConfig = SimpleOceanConfig(
         mode="slab")
@@ -97,6 +97,14 @@ class CoupledConfig(NamedTuple):
     land_mode: str = "slab"
     land_config: LandConfig | MultiLayerLandConfig = LandConfig()
     use_pft: bool = False
+    # Source of the spatial land parameters when use_pft: "analytical" (latitude
+    # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
+    land_param_source: str = "analytical"
+    # Coupled DIURNAL surface model for multilayer land (default ON): use the
+    # physical Monin-Obukhov surface exchange + Farquhar photosynthesis-stomata
+    # coupling (vs a constant bulk coefficient + soil-only beta).  Well-posed in the
+    # coupled model because the atmosphere supplies a resolved diurnal cycle.
+    land_diurnal_surface: bool = True
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"

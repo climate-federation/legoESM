@@ -78,7 +78,7 @@ GRID_DEFAULTS: dict[str, dict] = {
 
 ALL_RESULTS: list[dict] = []
 
-_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "richardson", "constant", "none")
+_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
 
 
@@ -104,6 +104,11 @@ def build_vertical_mixing_config_from_args(
 ) -> VerticalMixingConfig:
     """Resolve the OMIP vertical-mixing CLI flags into the physics config."""
     scheme = args.vertical_mixing_scheme or default_scheme
+    if scheme == "catke":
+        # CATKE (Wagner 2025) uses its own VerticalMixingConfig.catke defaults
+        # (calibrated); the kpp-tuning CLI flags don't apply.  Implicit-only.
+        from legoesm.ocean.physics.vertical_mixing.config import CATKEConfig
+        return VerticalMixingConfig(scheme="catke", catke=CATKEConfig())
     return VerticalMixingConfig(
         scheme=scheme,
         kpp=KPPConfig(
@@ -580,7 +585,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # who explicitly opt into ``--grid cubed_sphere`` get the
         # warning printed at startup.  The structural fix (SMC03-style
         # density-Jacobian PGF + duogrid halo on T, S) is tracked in
-        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
+        # docs/ocean/experiments/cubed_sphere_pgf_stability.md.
         A_h_cs = max(A_h, 5.0e5)
         K_h_cs = max(K_h, 5.0e6)
         if A_h_cs > A_h:
@@ -610,7 +615,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # cd-grid A-L corner stencil's face-edge halo amplification under
         # horizontal density gradients is the documented cube cold-start gate;
         # the structural fix (partial cells + SMC03 density-Jacobian PGF on the
-        # C-D grid) is tracked in docs/md_files/ocean_faithfulness_nemo.md.
+        # C-D grid) is tracked in docs/dev-notes/ocean_faithfulness_nemo.md.
         model = OceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "cube"
 
@@ -3623,7 +3628,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                 return str(obj)
         return obj
 
-    run_config = {
+    run_config_json = {
         "grid_type": grid_type,
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
@@ -3638,7 +3643,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     config_path = config_dir / "run_config.json"
     try:
         with open(config_path, "w") as f:
-            json.dump(run_config, f, indent=2, default=str)
+            json.dump(run_config_json, f, indent=2, default=str)
         print(f"  Config saved: {config_path}")
     except Exception as e:
         print(f"  Warning: could not save config: {e}")
@@ -3739,6 +3744,27 @@ def run_omip_single(grid_type: str, args) -> dict:
         output_dir, diag, args, grid_type, wall_time, ok,
         blowup_info=blowup_info,
     )
+
+    # Final MLD-diagnostic snapshot (de Boyer Montegut / Treguier 2023): the
+    # shared writer emits the T/S + geometry contract that
+    # scripts/validate/compare_mld_dbm.py and compare_omip_nemo.py consume so
+    # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
+    # additive output; a diagnostic must never abort the run.
+    try:
+        from legoesm.ocean.restart import (
+            save_mld_snapshot, grid_lat2d_lon2d_deg,
+        )
+        # Grid coords are radians; the scorers consume degrees -> convert via
+        # the shared per-grid extractor (handles latlon/tripole/cube/mpas).
+        lat2d, lon2d = grid_lat2d_lon2d_deg(grid, grid_type)
+        snap = save_mld_snapshot(
+            state, output_dir / "snapshot_final.npz", z_coord=z_coord,
+            lat2d=lat2d, lon2d=lon2d,
+            time_s=float(args.days) * 86400.0, step=int(n_steps),
+        )
+        print(f"  MLD snapshot: {snap}")
+    except Exception as e:  # diagnostic snapshot must never crash the run
+        print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
 
     ALL_RESULTS.append(results)
     return results

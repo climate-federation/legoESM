@@ -3,7 +3,7 @@
 Exercises the W6 (Rossby-Haurwitz wave-4) initial condition on every
 grid type for which it is wired in M1.a (latlon, MPAS, spectral).
 Cubed-sphere W6 is deferred to M1.b — see
-``docs/dycore_validation_catalog.md``.
+``docs/validation/dycore_validation_catalog.md``.
 """
 
 from __future__ import annotations

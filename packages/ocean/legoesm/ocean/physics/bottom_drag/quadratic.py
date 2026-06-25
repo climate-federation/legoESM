@@ -8,6 +8,37 @@ from legoesm.ocean.physics.bottom_drag.config import QuadraticDragConfig
 from legoesm.ocean.physics.bottom_drag.output import bottom_level_drag_output
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Quadratic (drag-law) bottom drag: a momentum sink applied at the "
+        "deepest wet level, (du/dt, dv/dt) = -C_d |u| (u, v) / dz_bottom."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s",
+        "jacobian": "1 (z-star dimensionless)",
+        "z_coord.dz_ref": "m",
+        "cfg.C_d": "1 (dimensionless drag coefficient)",
+    },
+    "outputs": {"du_dt": "m/s^2", "dv_dt": "m/s^2"},
+    "sign_convention": (
+        "Drag opposes near-bottom velocity: du_dt = -C_d |u| u / dz_bottom, "
+        "anti-parallel to (u, v); for each component its drag has the opposite "
+        "sign to that component. Non-zero only at the bottom level (zeros above)."
+    ),
+    # Momentum sink into the solid bottom — not conserved within the fluid.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "MITgcm bottomDragQuadratic; bottom stress tau = rho_0 C_d |u| u, "
+        "C_d ~ 1e-3 (dimensionless)."
+    ),
+    "idealized_test": (
+        "u=0 -> zero drag; a constant near-bottom speed spins down as the "
+        "quadratic ODE du/dt = -(C_d/dz_bottom) |u| u (algebraic 1/(1+t/tau) "
+        "decay, NOT exponential), monotonically toward zero."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 

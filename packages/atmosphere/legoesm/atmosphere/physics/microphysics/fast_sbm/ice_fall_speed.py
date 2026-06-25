@@ -2,7 +2,7 @@
 
 The oracle reads bin fall-speed tables (``VR1..VR5``) from data files not in
 the WRF repo, so — consistent with the kernel strategy (see
-``docs/specs/bin_microphysics.md``) — ice fall speeds are computed from
+``docs/science/specs/bin_microphysics.md``) — ice fall speeds are computed from
 published power laws instead. Each ice category falls at
 
     V(m) = a · D^b · (ρ₀/ρ_air)^½          D = (6 m / (π ρ_cat))^{1/3}

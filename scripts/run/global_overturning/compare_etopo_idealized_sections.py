@@ -121,7 +121,12 @@ def _load_tripole(rundir, target_day):
     u = np.asarray(npz["u"])
     H = np.asarray(npz["H_bathy"])
     lm = np.asarray(npz["land_mask"]) > 0.5
-    geom = create_tripole_grid(str(REPO / "data/grids/eORCA1.2_mesh_mask.nc"))
+    # eORCA1.2 is a halo-inclusive mesh -> explicit "n_lon-1-i" fold origin
+    # (its curved fold row resolves under auto too, but state the intent).
+    geom = create_tripole_grid(
+        str(REPO / "data/grids/eORCA1.2_mesh_mask.nc"),
+        fold_convention="n_lon-1-i",
+    )
     lat = np.degrees(np.asarray(geom.lat_T))
     lon = np.degrees(np.asarray(geom.lon_T))
     lon = np.where(lon > 180.0, lon - 360.0, lon)

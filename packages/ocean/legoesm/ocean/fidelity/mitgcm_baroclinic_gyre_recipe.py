@@ -168,7 +168,7 @@ def build_baroclinic_gyre_config(grid: LatLonGrid) -> LatLonCGridOceanConfig:
     The card pins the algorithm common to every MITgcm tutorial (flux-form
     centered momentum, centered tracer, explicit_ab2 Coriolis, AB2(total) +
     unsplit free surface, implicit vertical mixing); see ``mitgcm_recipe.py``
-    and docs/ocean_fidelity/mitgcm_unsplit_freesurface_fix.md.
+    and docs/ocean/fidelity/mitgcm_unsplit_freesurface_fix.md.
     """
     return mitgcm_canonical_ocean_config(
         g=GRAVITY,

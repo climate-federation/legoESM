@@ -15,7 +15,7 @@ from legoesm.ocean.physics.bottom_drag.output import bottom_level_drag_output
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py and
-# docs/ai_guardrails/domain_architect_vs_syntax_engine.md).
+# docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md).
 __physics_contract__ = {
     "summary": (
         "Linear bottom drag: a momentum sink applied at the deepest wet level, "

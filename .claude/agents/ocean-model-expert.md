@@ -475,8 +475,8 @@ The major subdirectories are:
 - `biogeochemistry/` — NPZD, carbon cycle, carbonate, gas exchange
 - Top-level files — state containers, vertical coordinate (z-star), EOS, conservation, bathymetry, initialization
 
-Tests live in `tests/ocean/`. The ocean test matrix is at `scripts/matrix/run_ocean_test_matrix.py`. Experiment documentation is at `docs/ocean_experiments_reference.md`.
+Tests live in `tests/ocean/`. The ocean test matrix is at `scripts/matrix/run_ocean_test_matrix.py`. Experiment documentation is at `docs/dev-notes/ocean_experiments_reference.md`.
 
-**IMPORTANT**: Before implementing or diagnosing ocean issues, read `docs/ocean_experiments_reference.md` for experiment details and check open GitHub issues (`gh issue list --label ocean` or browse the issue tracker) for known limitations and in-progress work.
+**IMPORTANT**: Before implementing or diagnosing ocean issues, read `docs/dev-notes/ocean_experiments_reference.md` for experiment details and check open GitHub issues (`gh issue list --label ocean` or browse the issue tracker) for known limitations and in-progress work.
 
 Python environment: `.venv/bin/python3.14`, always run tests with `JAX_ENABLE_X64=1`.

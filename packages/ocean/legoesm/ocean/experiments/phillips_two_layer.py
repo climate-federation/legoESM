@@ -57,6 +57,7 @@ from typing import Any, Dict, Tuple
 
 from legoesm.constants import g, R_earth
 from legoesm.core.field import Field
+from legoesm.ocean.experiments.idealized_ic import gaussian_lat_envelope
 
 
 _A_EARTH = R_earth
@@ -216,8 +217,8 @@ def _add_phillips_perturbation_spectral(state, grid, z_coord, config):
     cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
 
     # Upper layer: eastward jet
-    u_upper = (config.jet_speed_upper *
-               np.exp(-((lat_2d - config.jet_center_lat) / config.jet_width) ** 2))
+    u_upper = config.jet_speed_upper * gaussian_lat_envelope(
+        lat_2d, config.jet_center_lat, config.jet_width)
     u_grid = np.zeros(T_grid.shape, dtype=np.float64)
     u_grid[..., 0] = u_upper * mask
 
@@ -299,10 +300,8 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         lat_e_deg = np.asarray(grid.latEdge, dtype=np.float64) * 180 / np.pi
         angle = np.asarray(grid.angleEdge, dtype=np.float64)
-        u_upper_edge = (
-            config.jet_speed_upper *
-            np.exp(-((lat_e_deg - config.jet_center_lat) /
-                     config.jet_width) ** 2))
+        u_upper_edge = config.jet_speed_upper * gaussian_lat_envelope(
+            lat_e_deg, config.jet_center_lat, config.jet_width)
         u_edge_up = u_upper_edge * np.cos(angle)
         u_data[..., 0] = u_edge_up
         if nlev > 1:
@@ -324,9 +323,8 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
             lat_u_2d = np.broadcast_to(lat_u_1d[:, None], (n_lat, n_u_lon))
             lat_v_2d = np.broadcast_to(
                 lat_v_1d[:, None], (n_v_lat, v_data.shape[1]))
-            u_upper = (config.jet_speed_upper *
-                       np.exp(-((lat_u_2d - config.jet_center_lat) /
-                                config.jet_width) ** 2))
+            u_upper = config.jet_speed_upper * gaussian_lat_envelope(
+                lat_u_2d, config.jet_center_lat, config.jet_width)
             u_data[..., 0] = u_upper
             v_data[..., 0] = 0.0
             if nlev > 1:
@@ -335,9 +333,8 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
             # v_2d not strictly needed (jet is zonal) but kept for clarity.
             _ = lat_v_2d
         else:
-            u_upper = (config.jet_speed_upper *
-                       np.exp(-((lat_2d - config.jet_center_lat) /
-                                config.jet_width) ** 2))
+            u_upper = config.jet_speed_upper * gaussian_lat_envelope(
+                lat_2d, config.jet_center_lat, config.jet_width)
             u_data[..., 0] = u_upper
             v_data[..., 0] = 0.0
             if nlev > 1:

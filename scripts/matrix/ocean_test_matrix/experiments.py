@@ -1991,12 +1991,12 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
             f"eady_gm_redi only for channel grids, not {tc.grid_type}")
     # MPAS only implements the centred slope scheme (Phase 5 triads
     # are still NotImplementedError — see
-    # docs/ocean_experiments/gm_redi_mpas_plan.md).
+    # docs/ocean/experiments/gm_redi_mpas_plan.md).
     slope_scheme_cli = tc.run_kwargs.get("slope_scheme", "centered")
     if tc.grid_type == "mpas_channel" and slope_scheme_cli == "triads":
         raise NotImplementedError(
             "GM/Redi triad scheme not yet implemented on MPAS — see "
-            "docs/ocean_experiments/gm_redi_mpas_plan.md Phase 5"
+            "docs/ocean/experiments/gm_redi_mpas_plan.md Phase 5"
         )
 
     from legoesm.ocean.experiments.eady_uniform import (

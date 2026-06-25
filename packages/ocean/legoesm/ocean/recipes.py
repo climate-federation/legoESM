@@ -142,7 +142,7 @@ LATLON_RECIPES = {
     # Proven OMIP tripole eORCA025 (¼°) NEMO-CLIMATE-match dycore — the tripole
     # branch of run_omip.py::_create_setup (nemo_match_tripole_model_config).
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 1.15, corr 0.99
-    # (docs/md_files/ocean_faithfulness_nemo.md) — a climate-match stack
+    # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
     # like nemo_v1. ke_gradient/outer/tracer integrators are config defaults the
     # tripole branch intentionally leaves unset (the Hollingsworth KE stencil is
@@ -188,7 +188,7 @@ MPAS_RECIPES = {
     # Proven OMIP MPAS ico6 (~115 km ≈ ORCA1) NEMO-CLIMATE-match dycore — the
     # mpas branch of run_omip.py::_create_setup (nemo_match_mpas_model_config).
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 0.84 (the best grid)
-    # (docs/md_files/ocean_faithfulness_nemo.md) — a climate-match stack
+    # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
     # like nemo_v1. eos/pv_scheme are the config defaults the mpas branch leaves
     # unset; tracer_advection/pgf/barotropic/implicit are set explicitly.

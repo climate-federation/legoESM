@@ -33,17 +33,12 @@ from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+from legoesm.ocean.physics.vertical_mixing._shared import richardson_number
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
-
-
-# Monin-Obukhov similarity (Businger-Dyer) + surface u* constants (fixed).
-_USTAR_SPEED_RATIO = 0.01
-_BUSINGER_UNSTABLE_COEFF = 16.0
-_BUSINGER_STABLE_COEFF = 5.0
 
 
 def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
@@ -82,7 +77,7 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
     abs_zeta = jnp.abs(zeta)
     Bf_pos = jnp.maximum(B_f_e, 0.0)
     is_unstable = B_f_e > 0.0
-    base16 = jnp.maximum(1.0 + _BUSINGER_UNSTABLE_COEFF * abs_zeta, 1.0)
+    base16 = jnp.maximum(1.0 + cfg.businger_unstable_coeff * abs_zeta, 1.0)
     w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
     w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
     # Convective scales (kappa OUTSIDE the cube root); floored base keeps the
@@ -100,7 +95,7 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
     # Shared stable suppression: zeta < 0 for stable forcing under this sign
     # convention, so max(-zeta, 0) drives the suppression.
     w_stable = (kappa * ustar_e
-                / jnp.maximum(1.0 + _BUSINGER_STABLE_COEFF * jnp.maximum(-zeta, 0.0), 1.0))
+                / jnp.maximum(1.0 + cfg.businger_stable_coeff * jnp.maximum(-zeta, 0.0), 1.0))
     w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
     w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
     return w_m, w_s
@@ -277,9 +272,9 @@ def kpp_vertical_mixing(
         tau_mag = jnp.sqrt(tau_x**2 + tau_y**2 + eps)
         u_star = jnp.sqrt(tau_mag / rho_0_ref)
     else:
-        # Simplified proxy: u_star ~ 0.01 * |U_surface|
+        # Simplified proxy: u_star ~ ustar_speed_ratio * |U_surface|
         speed_sfc = jnp.sqrt(u[..., 0]**2 + v[..., 0]**2 + eps)
-        u_star = jnp.maximum(speed_sfc * _USTAR_SPEED_RATIO, 1e-4)  # coeff-ok: u_star floor [m/s]
+        u_star = jnp.maximum(speed_sfc * cfg.ustar_speed_ratio, 1e-4)  # coeff-ok: u_star floor [m/s]
 
     # --- Surface buoyancy flux ---
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
@@ -327,11 +322,11 @@ def kpp_vertical_mixing(
 
     # --- Interior mixing: Richardson-number dependent ---
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # Interface spacing — also reused by the surface T/S gradient terms below.
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
-    du = u[..., :-1] - u[..., 1:]
-    dv = v[..., :-1] - v[..., 1:]
-    S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
-    Ri_int = N2 / jnp.maximum(S2, eps)
+    # Interior Ri = N^2 / S^2 (#518: shared helper; no clip here — KPP clamps
+    # downstream via Ri / Ri_0).
+    Ri_int = richardson_number(N2, u, v, dz_actual, eps=eps, clip_negative=False)
     # LMD94 interior shear instability: K = K_0 * (1 - (Ri/Ri_0)^2)^3
     # for Ri < Ri_0, zero above.
     Ri_ratio = jnp.clip(Ri_int / cfg.Ri_0, 0.0, 1.0)

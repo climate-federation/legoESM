@@ -1,0 +1,205 @@
+#!/bin/bash -l
+#PBS -N legoesm_gpu_moist_scaling
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# MOIST baroclinic-wave multi-GPU scaling on NCAR Derecho GPU nodes
+# (deg*: 1x 64-core EPYC Milan + 4x NVIDIA A100-40GB, queue `main`).
+#
+# This is the GPU twin of cpu_scaling.pbs, NOT of gpu_scaling.pbs.  It runs
+# scripts/bench/run_cpu_mpi_scaling.py with --device gpu --physics moist, i.e.
+# the NEW all-grids Kessler warm-rain moist case (q_v/q_c/q_r + warm-rain
+# condensation, NO radiation), on the two grids that are GENUINELY
+# domain-decomposed across GPUs via the route-A mpi4jax halo path:
+#
+#   latlon        -- C-grid FV PE dycore, latitude-band MPI (1 GPU per rank)
+#   icosahedral   -- MPAS Voronoi TRiSK PE dycore, cell-partition MPI
+#
+# One MPI rank per GPU; the mpi4jax sendrecv halo runs on the cuda devices
+# over the node's NVLink/PCIe fabric (the SAME make_latlon_mpi_step /
+# make_voronoi_mpi_step machinery as the CPU path, just on cuda).
+#
+# Why a separate script (NOT gpu_scaling.pbs):
+#   * gpu_scaling.pbs runs run_levante_gpu_scaling.py, which is SINGLE-PROCESS
+#     multi-GPU sharding and only supports cubed-sphere with the full-AMIP
+#     gray_sbm/rrtmg_full physics (icosahedral/spectral are dry there).  It
+#     never got the new --physics moist (Kessler) all-grids work.
+#   * cubed-sphere moist on GPU is therefore ALREADY served:
+#       - by gpu_scaling.pbs (gray_sbm/rrtmg_full single-process sharding), or
+#       - for the Kessler-moist label specifically, by the --cs-spmd
+#         jax.distributed path (which needs a coordinator/auto-detect that is
+#         not wired for Cray PALS here -- a follow-up, intentionally OUT of
+#         scope for this wrapper).  Do NOT pass GRID=cubed-sphere here.
+#   * spectral has no MPI path (single device) -- not a scaling case.
+#
+# ---------------------------------------------------------------------------
+# PREREQS (read scripts/cluster/scaling_derecho/README.md):
+#   * The route-A GPU path DOES use mpi4jax (unlike gpu_scaling.pbs).  The
+#     conda env (LEGOESM_CONDA_ENV, default legoesm-gpu) MUST have a CUDA
+#     jaxlib AND a CUDA-aware mpi4jax built against Derecho's Cray MPICH.
+#     A CPU-only jaxlib here will trip the GPU-backend assertion in
+#     run_cpu_mpi_scaling.py (--device gpu refuses to record CPU-fallback
+#     numbers) -- which is the desired loud failure, not a silent CPU run.
+#   * Single node only: one rank per GPU, <= NGPUS ranks.  Cross-node GPU
+#     mpi4jax (CUDA-aware over the Slingshot fabric) is not validated here.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs
+#
+# OVERRIDE at submit time (no file edits):
+#   qsub -v GRID=icosahedral,MODE=strong,PRECISION=float64 \
+#        scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs
+# ===========================================================================
+
+set -uo pipefail
+
+# PBS copies this script to a spool dir before running it, so $0 / BASH_SOURCE
+# do NOT point at the repo. Locate _env.sh from the submit dir ($PBS_O_WORKDIR)
+# instead -- works whether you qsub from the repo root or this job's own dir.
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    echo "       qsub from the repo root or from scripts/cluster/scaling_derecho/." >&2
+    exit 1
+fi
+
+# Force the CUDA backend + GPU conda env BEFORE sourcing _env.sh so a stale
+# JAX_PLATFORMS=cpu (inherited from the submit shell via PBS env export) can
+# never silently run this GPU benchmark on the CPU. Symmetric with gpu_scaling.pbs.
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# Runtime MPI stack: load the SAME GNU cray-mpich that mpi4py/mpi4jax were BUILT
+# against (README Step 1b), so `mpiexec` and libmpi match the build ABI -- the
+# route-A halo exchange needs the right MPI at runtime, on GPU as on CPU.
+# craype-accel-nvidia80 links the CUDA GTL (GPU transport layer); cuda gives the
+# CUDA runtime the cuda jaxlib + mpi4jax GPU extension load against.
+module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
+
+# GPU-aware MPI: cray-mpich only sends device buffers directly (the whole point
+# of route-A) when this is set; without it, mpi4jax handing a device pointer to
+# MPI errors at the first halo exchange.
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+# The rebuilt Cray-MPICH mpi4py needs Cray's libmpi on the loader path. The
+# module exports CRAY_LD_LIBRARY_PATH but NOT LD_LIBRARY_PATH, so the dynamic
+# linker can't find libmpi.so.12 without this bridge -> "ImportError:
+# libmpi.so.12: cannot open shared object file" on every rank (README Step 1b).
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+
+# --- Benchmark configuration (overridable via `qsub -v NAME=value`) ----------
+GRID="${GRID:-latlon}"              # latlon | icosahedral  (route-A, 1 GPU/rank)
+PHYSICS="${PHYSICS:-moist}"         # moist (Kessler warm-rain) | held_suarez | none
+MODE="${MODE:-both}"                # weak | strong | both
+PRECISION="${PRECISION:-float32}"   # float32 (A100-fast, FV-safe) | float64
+NLEV="${NLEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-100}"
+
+# One rank per GPU; cap the sweep's rank ladder at the GPUs PBS gave us.
+NGPUS_DETECT="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+NGPUS="${NGPUS:-${NGPUS_DETECT}}"
+if ! [ "$NGPUS" -ge 1 ] 2>/dev/null; then NGPUS=4; fi   # defensive default
+MAX_RANKS="${MAX_RANKS:-$NGPUS}"
+
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_moist_${STAMP}}"
+mkdir -p "$OUTDIR"
+# Mirror all console output into the results dir, so a log always lands next to
+# the data on scratch regardless of how PBS routes the job's .o file.
+exec > >(tee -a "$OUTDIR/run.log") 2>&1
+CASE_FILE="$OUTDIR/cases.jsonl"
+
+# --- Reject the out-of-scope grids up front (clear message, not a crash) -----
+case "$GRID" in
+    latlon|icosahedral) : ;;
+    cubed-sphere)
+        echo "ERROR: cubed-sphere is out of scope for gpu_moist_scaling.pbs." >&2
+        echo "       Cube moist on GPU is served by gpu_scaling.pbs (gray_sbm/" >&2
+        echo "       rrtmg_full single-process sharding); the Kessler-moist cube" >&2
+        echo "       path (--cs-spmd) needs PALS coordinator wiring (follow-up)." >&2
+        exit 2 ;;
+    spectral)
+        echo "ERROR: spectral has no MPI path (single device) -- not a scaling case." >&2
+        exit 2 ;;
+    *)
+        echo "ERROR: unknown GRID=$GRID (use latlon | icosahedral)." >&2
+        exit 2 ;;
+esac
+
+echo "=== HOST ==="
+hostname; date
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -8 || true
+echo "=== CONFIG ==="
+echo "grid=$GRID physics=$PHYSICS mode=$MODE precision=$PRECISION ngpus=$NGPUS max_ranks=$MAX_RANKS nlev=$NLEV"
+echo "python=$PY"
+echo "outdir=$OUTDIR"
+
+# --- 1) Enumerate cases (single process, no MPI) -----------------------------
+"$PY" scripts/bench/run_cpu_mpi_scaling.py --sweep \
+    --grid "$GRID" \
+    --mode "$MODE" \
+    --physics "$PHYSICS" \
+    --precision "$PRECISION" \
+    --n-levels "$NLEV" \
+    --max-ranks "$MAX_RANKS" > "$CASE_FILE"
+
+N_CASES=$(grep -c . "$CASE_FILE" || true)
+echo "=== SWEEP: $N_CASES cases (rank ladder capped at NGPUS=$NGPUS) ==="
+cat "$CASE_FILE"
+
+# --- 2) Run each case under mpiexec, ONE GPU PER RANK ------------------------
+# GPU pinning: _configure_jax_gpu in run_cpu_mpi_scaling.py auto-detects the
+# local rank from OpenMPI/MVAPICH/SLURM env vars ONLY -- NOT from Cray PALS
+# (Derecho's mpiexec).  Without a per-rank pin every rank would grab GPU 0
+# (all ranks on one device == the documented eff-collapse bug).  So we set
+# CUDA_VISIBLE_DEVICES per rank from the PALS local rank id in a tiny bash -c
+# shim; the script RESPECTS an explicit CVD (it only auto-pins when CVD is
+# unset), so this binds rank k -> GPU k cleanly.  Fallbacks cover a non-PALS
+# launcher (OpenMPI) so the shim is portable.
+#
+# Read the case list on FD 9 (not stdin): mpiexec consumes stdin, which would
+# otherwise swallow the rest of the file and end the loop after case 0.
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-${OMPI_COMM_WORLD_LOCAL_RANK:-${MV2_COMM_WORLD_LOCAL_RANK:-0}}}; exec "$@"'
+rc_all=0
+i=0
+while IFS= read -r -u 9 CASE; do
+    [ -z "$CASE" ] && continue
+    N_RANKS=$("$PY" -c 'import sys,json; print(json.loads(sys.argv[1])["n_ranks"])' "$CASE")
+    if [ "$N_RANKS" -gt "$NGPUS" ]; then
+        echo "--- case $i: n_ranks=$N_RANKS > NGPUS=$NGPUS -- SKIP (single node) ---"
+        i=$((i + 1))
+        continue
+    fi
+    echo "--- case $i: n_ranks=$N_RANKS (1 GPU/rank) ---"
+    echo "$CASE"
+    mpiexec -n "$N_RANKS" bash -c "$PIN" _ \
+        "$PY" scripts/bench/run_cpu_mpi_scaling.py \
+        --case "$CASE" \
+        --device gpu \
+        --n-warmup "$N_WARMUP" \
+        --n-timing "$N_TIMING" \
+        --output-dir "$OUTDIR" < /dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "case $i FAILED rc=$rc"
+        rc_all=$rc
+    fi
+    i=$((i + 1))
+done 9< "$CASE_FILE"
+
+echo "=== DONE rc=$rc_all ==="
+echo "results under: $OUTDIR"
+exit $rc_all

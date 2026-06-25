@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import virtual_temperature, mixing_length
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -248,11 +248,9 @@ def ysu_turbulence(
         constants.kappa_vk * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
     )
 
-    # Local Ri-based Km above PBL
-    z_abs = jnp.clip(jnp.abs(z_half_inner), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )
+    # Local Ri-based Km above PBL: shared Blackadar mixing-length helper
+    # (same expression as Louis/TKE/CLUBB-lite/EDMF/Smagorinsky).
+    l_mix = mixing_length(z_half_inner, config.l_mix_max)
     # Louis (1982) stability constants come from config; the previous
     # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
     # constant-discipline rule (CLAUDE.md).  Note that Louis (1982)

@@ -111,6 +111,30 @@ def _restore_pytree_from_npz(state, data, prefix: str, ckpt_name: str,
     )
 
 
+def enable_diurnal_surface_land(land_cfg):
+    """Switch a ``MultiLayerLandConfig`` to the coupled DIURNAL surface model:
+    Monin-Obukhov (MOST) surface exchange + Farquhar photosynthesis-stomata coupling.
+
+    Farquhar (the coupled stomatal-conductance path) only fires when the carbon scheme
+    is ``differland`` (it reads the prognostic LAI = C_fol/LCMA); under any other scheme
+    ``compute_effective_beta`` silently falls back to the Jarvis model, which ignores
+    Vc_max25.  So any non-``differland`` scheme is upgraded to ``differland`` here to
+    guarantee the photosynthesis params are actually used (the coupler initialises +
+    threads the carbon state from this config).  Pure -> unit-testable; the driver
+    gates it on ``CoupledConfig.land_diurnal_surface``.
+
+    NOTE: MOST references fluxes to ``land_cfg.z_ref`` (default 10 m).  When the
+    atmosphere's lowest model level sits at a different height this is a (bounded) bias
+    the coupled feedback absorbs; threading the true lowest-level height is a follow-up.
+    Setting ``land_diurnal_surface=False`` reverts to the constant-Ch + soil-beta land."""
+    from legoesm.land.carbon.config import CarbonConfig
+    cfg = land_cfg._replace(
+        bulk_scheme="most", stomata=land_cfg.stomata._replace(enabled=True))
+    if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
+        cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
+    return cfg
+
+
 class CoupledESMDriver:
     """Coupled atmosphere + ocean + land + carbon driver.
 
@@ -240,7 +264,7 @@ class CoupledESMDriver:
         elif cfg.ocean_mode == "dynamic":
             # Prognostic 3D ocean (LatLonCGridOceanModel) stepped by the coupler
             # on a SHARED lat-lon grid (no cross-grid remap).  Phase 1 of
-            # docs/coupled_3d_ocean_plan.md.
+            # docs/ocean/coupled_3d_ocean_plan.md.
             self._init_dynamic_ocean(T_sfc_mean)
         else:
             raise ValueError(
@@ -250,7 +274,7 @@ class CoupledESMDriver:
     def _init_dynamic_ocean(self, T_sfc_mean: float):
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
-        cold-start stack.  See docs/coupled_3d_ocean_plan.md (Phase 1)."""
+        cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.state import LatLonCGridOceanConfig
         from legoesm.ocean.vertical import create_ocean_z_star
@@ -629,14 +653,74 @@ class CoupledESMDriver:
                 land_cfg = cfg.land_config
             else:
                 land_cfg = MultiLayerLandConfig()
-        else:
+        elif cfg.land_mode == "slab":
             land_cfg = cfg.land_config if isinstance(cfg.land_config, LandConfig) else LandConfig()
+        else:
+            raise ValueError(
+                f"Unknown land_mode {cfg.land_mode!r}; "
+                "expected 'none', 'slab', or 'multilayer'."
+            )
 
         # Enable carbon in land config if carbon_active + differland
         if cfg.carbon_active and cfg.carbon_land == "differland":
             from legoesm.land.carbon.config import CarbonConfig
             carbon_cfg = CarbonConfig(scheme="differland")
             land_cfg = land_cfg._replace(carbon=carbon_cfg)
+
+        # Calibrated config-level land parameters on the CLM default path (the
+        # per-cell PFT params come from the provider; these are the global snow/ice
+        # + bulk-transfer values tuned vs ERA5 under physical bounds).
+        if (cfg.land_mode != "none"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"):
+            import legoesm.land.clm_surface_map as _csm
+            if cfg.land_mode == "multilayer":
+                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+            else:
+                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
+            land_cfg = land_cfg._replace(
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
+                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+            logger.info(f"  Land: ERA5-calibrated Ch/snow params "
+                        f"({cfg.land_mode} CLM default path)")
+
+        # Spatial soil hydraulics from the CLM reference map (per-column van-
+        # Genuchten retention) for the Richards multilayer land.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_param_source", "analytical") == "clm"
+                and self._atm._grid_lat is not None):
+            from legoesm.land.clm_surface_map import (
+                download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
+                clm_multilayer_thermal_config, clm_multilayer_ch)
+            lat = self._atm._grid_lat; lon = self._atm._grid_lon
+            lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
+            # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
+            # storage dtype so the (float64) PFT-table matmuls do not silently down-
+            # cast into the (possibly float32) land state on every scatter update.
+            _c = lambda x: x.astype(_sd) if isinstance(x, jnp.ndarray) else x
+            cast = lambda t: jax.tree.map(_c, t)   # cast only the array fields
+            ch_cell = clm_multilayer_ch(smap).astype(_sd)
+            land_cfg = land_cfg._replace(
+                hydraulics=cast(clm_hydraulics_config(smap)),
+                thermal=cast(clm_multilayer_thermal_config(smap)),
+                Ch_land=ch_cell, Cd_land=ch_cell)
+            logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
+
+        # Coupled DIURNAL surface model (default ON for the multilayer land): the
+        # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,
+        # consistent lowest-model-level height, so the surface exchange can be the
+        # physical Monin-Obukhov (MOST) scheme (roughness-driven, stability-dependent)
+        # and transpiration the Farquhar photosynthesis-stomata coupling — both of
+        # which are ill-posed against the crude offline single-column forcing but
+        # well-posed here.  Carbon must run (differland) so Farquhar has a prognostic
+        # LAI; the coupler already initialises + threads the carbon state.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_diurnal_surface", True)):
+            land_cfg = enable_diurnal_surface_land(land_cfg)
+            logger.info("  Land surface: MOST exchange + Farquhar stomata "
+                        "(coupled diurnal model)")
 
         self._land_cfg = land_cfg  # store for diagnostics
 
@@ -748,7 +832,10 @@ class CoupledESMDriver:
                     f"f_land_mean={land_frac:.2f}")
 
     def _build_pft_provider(self, shape_2d):
-        """Create a PFTParamProvider with analytical PFT fractions."""
+        """Create the spatial land-parameter provider.
+
+        ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
+        reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
         from legoesm.land.param_providers import PFTParamProvider
 
@@ -757,6 +844,24 @@ class CoupledESMDriver:
             logger.warning("  PFT requested but no latitude available; "
                            "falling back to scalar params")
             return None
+
+        source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        if source == "clm":
+            from legoesm.land.clm_surface_map import clm_surface_provider
+            lon = self._atm._grid_lon
+            lat_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
+            lon_deg = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
+            # Use the calibration matched to the active land scheme (each tuned its
+            # surface-energy params against a different soil forward).
+            variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
+                       else "slab")
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
+            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
+                        f"reference soil, {variant} tuning), {lat_deg.size} columns")
+            return provider
+        if source != "analytical":
+            raise ValueError(
+                f"land_param_source must be 'analytical' or 'clm', got {source!r}.")
 
         # Flatten to (ncol,)
         lat_flat = jnp.ravel(lat) if lat.ndim > 1 else lat
@@ -879,8 +984,7 @@ class CoupledESMDriver:
             sst, sic = self._atm.get_sst_sic(day)
             acfg = self.atm_config
             alb = blend_surface_property(
-                sic, getattr(acfg, "albedo_ice", 0.65),
-                getattr(acfg, "albedo_ocean", 0.06),
+                sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
             return alb, T
@@ -946,34 +1050,28 @@ class CoupledESMDriver:
             T_sfc = _resp.T_sfc
         else:
             albedo_eff = blend_surface_property(
-                sic,
-                getattr(acfg, 'albedo_ice', 0.6),
-                getattr(acfg, 'albedo_ocean', 0.06),
+                sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity comes from the coupler config (per-tile
-        # ocean/ice/land emissivity is blended via tile fractions
-        # downstream).  The 0.96 broad-spectrum default lives in the
-        # ``CoupledDriverConfig.surface_emissivity`` field, falling
-        # back to the canonical ocean emissivity from
-        # ``constants.emissivity_ocean`` if not set.
-        eps_sfc = getattr(
-            self.coupled_cfg, "surface_emissivity",
-            constants.emissivity_ocean,
+        # Surface emissivity: blend canonical ocean/ice emissivity by sea-ice
+        # fraction (same blend as albedo, matching earth_system_driver). The
+        # old ``getattr(coupled_cfg, "surface_emissivity", ...)`` referenced a
+        # field ``CoupledDriverConfig`` never defines, so it silently pinned
+        # emissivity to the ocean value and ignored the ice fraction.
+        eps_sfc = blend_surface_property(
+            sic, constants.emissivity_ice, constants.emissivity_ocean,
         )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
         precip_total = jnp.maximum(seg_precip, 0.0)
-        # Smooth snow fraction (Wigmosta 1994 / Dai 2008): ramp from 0
-        # at T_low = T_freeze + 2 K to 1 at T_low = T_freeze - 2 K.
-        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
-        # gradients (training/DA paths) and miscounted mixed-phase
-        # precipitation in the 0–4 °C band.
-        snow_frac = jnp.clip(
-            (constants.T_freeze + 2.0 - T_low) / 4.0, 0.0, 1.0,
-        )
+        # Smooth snow fraction (Wigmosta 1994 / Dai 2008) via shared helper —
+        # single source of truth with the earth-system driver. Replaces the
+        # prior hard step, which killed d(snow)/d(T_low) and miscounted
+        # mixed-phase precip in the 0–4 °C band.
+        from legoesm.forcing.surface_utils import snow_fraction
+        snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith

@@ -164,6 +164,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # CLUBB validation/characterization scripts use the same physical symbol names
 # (T for temperature) and set jax_enable_x64 before importing (E402).
 "scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# Cubed-sphere MPI face-scatter tests set jax_enable_x64 before importing the
+# dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
+"tests/parallel/test_cube_face_scatter.py" = ["E402"]
+"tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -176,7 +180,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    # Complexity-tier ladder (docs/TESTING.md). Opt-in selectors: run a rung
+    # Complexity-tier ladder (docs/validation/TESTING.md). Opt-in selectors: run a rung
     # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
     # (does NOT tier-gate) so untagged tests still run until the suite is tagged.
     "tier0: unit/operator tests — kernels, no model integration (numerical invariants)",

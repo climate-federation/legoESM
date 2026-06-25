@@ -8707,7 +8707,7 @@ exec
    131	    # the existing forward-backward substep loop with cosine filter.
    132	    # ``"implicit_cn"`` uses a single-step Crank-Nicolson free surface
    133	    # with PCG Helmholtz solve, mirroring the lat-lon implementation
-   134	    # (docs/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
+   134	    # (docs/dev-notes/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
    135	    # rotational null branch (Thuburn 2008; Ringler+ 2010 §6) by
    136	    # construction; no substepping or time filter needed.
    137	    barotropic_solver: str = "explicit_substep"
@@ -8728,7 +8728,7 @@ exec
    152	    gm_redi: object = None  # GMRediConfig — None disables GM/Redi.  Only the
    153	                            # 'centered' slope_scheme is implemented on MPAS;
    154	                            # 'triads' raises NotImplementedError (Phase 5
-   155	                            # of docs/ocean_experiments/gm_redi_mpas_plan.md).
+   155	                            # of docs/ocean/experiments/gm_redi_mpas_plan.md).
    156	    tracer_advection: str = "upwind"
    157	    # Runtime bounds checks (matching cubed-sphere ocean)
    158	    enable_runtime_checks: bool = False

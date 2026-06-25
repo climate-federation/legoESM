@@ -26,7 +26,7 @@ This first stage tiles the SWEEP axis only (i-sweep ``xtp_u`` on a
 ``(6, kt)`` ``(face, tile_i)`` mesh, full cross axis) — np = 6*kt.  The 2-D
 ``(6, kt, kt)`` staggered-cross-axis tiling + the ``ytp_v`` j-sweep + the
 real Courant / B-grid corner sync are follow-ups (design:
-``docs/scaling/cube_transport_tiling_design.md`` §U3).
+``docs/performance/scaling/cube_transport_tiling_design.md`` §U3).
 """
 from __future__ import annotations
 

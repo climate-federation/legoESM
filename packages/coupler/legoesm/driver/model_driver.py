@@ -3386,6 +3386,13 @@ class ModelDriver:
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
                 status = self._run_spectral(start_step, start_day)
+            elif (getattr(self.config, "enable_latlon_spmd", False)
+                    and self.config.grid.grid_type == "latlon"):
+                # Single-process multi-device lat-band SPMD (A1): a dedicated
+                # segment loop over the validated run_atm_latlon_spmd, distinct
+                # from the jitted compiled_segments scan (zero surgical risk to
+                # the shared hot loop).
+                status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
             else:
@@ -4797,6 +4804,130 @@ class ModelDriver:
     # ==================================================================
     # Shared run helpers (used by both compiled and per-step paths)
     # ==================================================================
+
+    def _latlon_spmd_mesh(self):
+        """Build the 1-D ``("lat",)`` device mesh for the single-process
+        multi-device lat-band SPMD run from ``config.n_devices`` (``"auto"`` =
+        all visible devices). Returns ``None`` for a single device (the
+        run_atm_latlon_spmd mesh=None single-device fallback)."""
+        import numpy as _np
+        nd_cfg = self.config.n_devices
+        devs = jax.devices()
+        nd = len(devs) if nd_cfg == "auto" else int(nd_cfg)
+        nd = max(1, min(nd, len(devs)))
+        if nd <= 1:
+            return None
+        n_lat = int(self.grid.n_lat)
+        if n_lat % nd != 0:
+            raise ValueError(
+                f"enable_latlon_spmd: n_lat ({n_lat}) not divisible by "
+                f"n_devices ({nd}) — pick n_devices among the divisors of "
+                f"{n_lat} so every lat band is uniform.")
+        return jax.sharding.Mesh(_np.array(devs[:nd]), axis_names=("lat",))
+
+    def _latlon_spmd_physics_fn(self):
+        """Select the STATELESS physics closure for the lat-band SPMD run, or
+        raise if the configured physics is the stateful unified pipeline (not
+        yet SPMD-routed). Supports Held-Suarez forcing and dynamics-only."""
+        cfg = self.config
+        if cfg.held_suarez_forcing:
+            from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+            return held_suarez_forcing_latlon
+        active = {
+            name: val for name, val in (
+                ("radiation", cfg.radiation),
+                ("convection", cfg.convection),
+                ("turbulence", cfg.turbulence),
+                ("microphysics", cfg.microphysics),
+                ("gravity_wave_drag", cfg.gravity_wave_drag),
+                ("cloud_scheme", cfg.cloud_scheme),
+            ) if val not in (None, "none")
+        }
+        if not active:
+            return None                     # dynamics-only (dry)
+        raise NotImplementedError(
+            "enable_latlon_spmd supports dynamics-only (all parameterizations "
+            f"'none') or held_suarez_forcing=True; the stateful unified physics "
+            f"{active} is not yet SPMD-routed — its PhysicsState carry needs the "
+            "lat-major reshape-aware shard (see run_atm_latlon_spmd_segment). "
+            "Set those schemes to 'none' or use held_suarez_forcing=True.")
+
+    def _run_compiled_latlon_spmd(self, start_step: int = 0,
+                                  start_day: float | None = None) -> str:
+        """Single-process multi-device lat-band SPMD run for the lat-lon C-grid
+        hydrostatic atm (``config.enable_latlon_spmd``).
+
+        Integrates via ``run_atm_latlon_spmd`` — the Stage-5/7-validated lat-band
+        step + the HydrostaticState<->C-grid bridge — in segments, gathering a
+        cell-centered ``HydrostaticState`` per segment for the coupler callback +
+        a host-side NaN-blowup guard. A dedicated path, NOT the jitted
+        ``compiled_segments`` scan (zero surgical risk to the shared hot loop).
+
+        Supports DYNAMICS-ONLY or stateless Held-Suarez. Stateful physics and the
+        diagnostics/checkpoint writers are follow-ups (rejected loudly); a coupled
+        driver consumes the per-segment state via ``segment_callback``.
+        """
+        import time
+        from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+            run_atm_latlon_spmd)
+
+        cfg = self.config
+        physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
+        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
+            raise NotImplementedError(
+                "enable_latlon_spmd does not yet support the diagnostics / "
+                "checkpoint writers (set diag_days=0, checkpoint_days=0); the "
+                "gathered root-only writers are a follow-up — use the "
+                "segment_callback hook for I/O.")
+        mesh = self._latlon_spmd_mesh()
+        DT = cfg.dycore.dt
+        n_steps_total = int(cfg.days * 86400.0 / DT)
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (mirrors _run_spectral / _prepare_run_context):
+        # these loops index time as START_DAY + ABSOLUTE_step * DT/86400, so
+        # START_DAY must be the EPOCH day.  Normalize ONLY when the caller passes
+        # back EXACTLY what this driver's load_checkpoint returned (the recorded
+        # hint), so a caller that already passes an epoch start_day is unchanged.
+        if (start_day is not None and start_step > 0
+                and getattr(self, "_loaded_checkpoint_step_day", None)
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
+        # One-day output/coupling cadence (no diagnostics writer here yet).
+        seg_len = max(1, int(86400.0 / DT))
+        n_run = n_steps_total - start_step
+        if n_run < 1:
+            return "COMPLETED"
+
+        logger.info(
+            "lat-lon SPMD run: %d steps, %s, physics=%s, mesh=%s",
+            n_run, f"{seg_len}-step segments",
+            ("held_suarez" if cfg.held_suarez_forcing
+             else ("dynamics-only" if physics_fn is None else "custom")),
+            (None if mesh is None else mesh.devices.size))
+
+        # ``step_done`` is the cumulative step count WITHIN this run (1-based from
+        # the run start); ``_prev`` tracks the previous boundary so the coupler
+        # gets the ACTUAL (possibly short final) segment length, and the day uses
+        # the ABSOLUTE step index ``start_step + step_done``.
+        _prev = [0]
+
+        def _on_segment(hs_global, step_done):
+            self.state = hs_global
+            seg_n = step_done - _prev[0]
+            _prev[0] = step_done
+            day = START_DAY + (start_step + step_done) * DT / 86400.0
+            self._current_day = day
+            if self._segment_callback is not None:
+                self._segment_callback(self, day, DT * seg_n)
+
+        t0 = time.time()
+        hs_final, status = run_atm_latlon_spmd(
+            self.model, mesh, self.state, DT, n_run,
+            segment_steps=seg_len, physics_fn=physics_fn,
+            on_segment=_on_segment)
+        self.state = hs_final
+        logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
+        return status
 
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):
         """Prepare shared state for a run loop.

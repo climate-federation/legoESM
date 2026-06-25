@@ -3,7 +3,7 @@
 Adds W6 (Rossby-Haurwitz wave-4) for cubed-sphere, lat-lon, MPAS, and
 spectral grids. W3 (steady-state with compact support) and W4 (forced
 flow with translating low) are deferred to M1.b — registered as TODO in
-``docs/dycore_validation_catalog.md``.
+``docs/validation/dycore_validation_catalog.md``.
 
 References
 ----------

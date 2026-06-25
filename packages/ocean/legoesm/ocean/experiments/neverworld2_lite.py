@@ -7,7 +7,7 @@ hierarchy to investigate ocean mesoscale eddies", Geosci. Model
 Dev. 15, 6567-6579.
 
 Bachman, S. (2025) DINO + NeverWorld2 successor referenced in
-``docs/ocean_fidelity/...``; uses similar geometry to DINO but with
+``docs/ocean/fidelity/...``; uses similar geometry to DINO but with
 * doubly-periodic ACC channel band in the south (45-65 S)
 * global-scale subtropical / subpolar gyres in both hemispheres
 * idealised flat-with-ridge bathymetry in the channel

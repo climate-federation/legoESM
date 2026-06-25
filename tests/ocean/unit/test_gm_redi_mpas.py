@@ -8,7 +8,7 @@ they are guarded by the dispatch test that asserts they raise with a
 plan-doc pointer.  As each phase lands, replace the corresponding
 parametrize entry with a real numerical test.
 
-See docs/ocean_experiments/gm_redi_mpas_plan.md for the phased plan.
+See docs/ocean/experiments/gm_redi_mpas_plan.md for the phased plan.
 """
 
 from __future__ import annotations

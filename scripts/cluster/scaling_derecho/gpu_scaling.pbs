@@ -1,0 +1,113 @@
+#!/bin/bash -l
+#PBS -N legoesm_gpu_scaling
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# AMIP-representative GPU weak+strong scaling on NCAR Derecho GPU nodes
+# (deg*: 1x 64-core EPYC Milan + 4x NVIDIA A100-40GB, queue `main`).
+#
+# Runs scripts/bench/run_levante_gpu_scaling.py on the cubed-sphere dycore with
+# moist GCM physics -- the one grid that supports BOTH single-process
+# multi-GPU sharding AND AMIP-style moist physics (latlon is 1-GPU only;
+# spectral/icosahedral are dry-dynamics only). The harness internally sweeps
+# GPU subsets (1, 2, 4, ...) from the devices PBS allocates and reports
+# weak-scaling time/step and strong-scaling SYPD + parallel efficiency, with
+# JSON results and PNG plots.
+#
+# ---------------------------------------------------------------------------
+# RESOURCES -- VERIFY before submit:
+#   * Derecho GPU nodes are 1 socket / 64 cores + 4x A100-40GB. The request
+#     above takes a full node (ngpus=4) for the multi-GPU sweep.
+#   * `gpu_type=a100` is a per-chunk resource INSIDE select (current Derecho
+#     PBS syntax), and `job_priority` follows NCAR conventions; if a job will
+#     not schedule, confirm these with `qstat -Qf main` / NCAR docs. `--n-gpus 0`
+#     below auto-detects whatever PBS gives you, so editing ONLY the `select=`
+#     line keeps the Python in sync.
+#   * For a quick single-GPU baseline: set
+#     `select=1:ncpus=16:mpiprocs=1:ngpus=1:gpu_type=a100:mem=100GB`.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs
+#
+# OVERRIDE knobs at submit time (no need to edit the file):
+#   qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both \
+#        scripts/cluster/scaling_derecho/gpu_scaling.pbs
+# ===========================================================================
+
+set -uo pipefail
+
+# PBS copies this script to a spool dir before running it, so $0 / BASH_SOURCE
+# do NOT point at the repo. Locate _env.sh from the submit dir ($PBS_O_WORKDIR)
+# instead -- works whether you qsub from the repo root or this job's own dir.
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    echo "       qsub from the repo root or from scripts/cluster/scaling_derecho/." >&2
+    exit 1
+fi
+
+# Force the CUDA backend BEFORE sourcing _env.sh so a stale JAX_PLATFORMS=cpu
+# (inherited from the submit shell via PBS env export, or a reused interactive
+# shell) can NEVER silently run this GPU benchmark on the CPU. Unconditional on
+# purpose -- a GPU job must always use cuda. Symmetric with the cpu pin in
+# cpu_scaling.pbs.
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# --- Benchmark configuration (all overridable via `qsub -v NAME=value`) ------
+GRID="${GRID:-cubed-sphere}"        # only cubed-sphere does multi-GPU + moist physics
+PHYSICS="${PHYSICS:-gray_sbm}"      # gray_sbm (self-contained) | rrtmg_full (needs RRTMGP data)
+MODE="${MODE:-both}"                # weak | strong | both
+PRECISION="${PRECISION:-float32}"   # float32 (A100-fast, FV-safe) | float64 | both
+N_GPUS="${N_GPUS:-0}"               # 0 = auto-detect all GPUs PBS allocated
+NLEV="${NLEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"           # JIT warmup steps (excluded from timing)
+N_TIMING="${N_TIMING:-100}"         # timed steps
+# Cubed-sphere strong-scaling resolutions = cells per cube-face edge ("cN").
+# C96~1deg, C192~0.5deg, C384~0.25deg (realistic high-res climate). C48 kept as
+# the small/comms-bound contrast point; drop it (96,192,384) for a cleaner
+# strong curve. Weak scaling sweeps resolution on its own (unaffected).
+STRONG_RES="${STRONG_RES:-48,96,192,384}"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/amip_gpu_${STAMP}}"
+mkdir -p "$OUTDIR"
+# Mirror all console output into the results dir, so a log always lands next to
+# the data on scratch regardless of how PBS routes the job's .o file.
+exec > >(tee -a "$OUTDIR/run.log") 2>&1
+
+echo "=== HOST ==="
+hostname; date
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -8 || true
+echo "=== CONFIG ==="
+echo "grid=$GRID physics=$PHYSICS mode=$MODE precision=$PRECISION n_gpus=$N_GPUS nlev=$NLEV strong_res=$STRONG_RES"
+echo "python=$PY"
+echo "outdir=$OUTDIR"
+
+"$PY" scripts/bench/run_levante_gpu_scaling.py \
+    --grid "$GRID" \
+    --physics "$PHYSICS" \
+    --mode "$MODE" \
+    --precision "$PRECISION" \
+    --n-gpus "$N_GPUS" \
+    --n-levels "$NLEV" \
+    --n-warmup "$N_WARMUP" \
+    --n-timing "$N_TIMING" \
+    --strong-resolutions "$STRONG_RES" \
+    --output-dir "$OUTDIR"
+rc=$?
+
+echo "=== DONE rc=$rc ==="
+echo "results + plots under: $OUTDIR"
+exit $rc

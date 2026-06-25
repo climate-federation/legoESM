@@ -79,10 +79,14 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     is_tripolar,
     pad_ns_zero,
+    vface_zonal_cos_lat,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    depth_average_to_faces,
 )
 
 
@@ -115,8 +119,11 @@ def _depth_average_to_faces(
     # active-vs-inactive partial-cell faces (one side has h=0).
     h_u_inner = jnp.minimum(jnp.roll(h_k, 1, axis=1), h_k)
     h_u = jnp.concatenate([h_u_inner, h_u_inner[:, 0:1, :]], axis=1)
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
+    # Barotropic-mean face velocity (#517 item 1: shared
+    # depth_average_to_faces; floor = min_water_col → bit-identical).
+    # U_bar was open-coded as TWO separate sums → fused=False (byte-identity).
+    U_bar = depth_average_to_faces(u_3d, h_u, u_mask, min_water_col,
+                                   fused=False)
 
     # Cell-pad-first (PR357 Bug-2 pattern): pad the cell thickness so the
     # v-face min at a partition cut uses the neighbour rank's adjacent
@@ -129,9 +136,7 @@ def _depth_average_to_faces(
     if fold_is_local(grid):
         north_row = jnp.minimum(h_k[-1:], fold_vface_row(h_k, grid))
         h_v = jnp.concatenate([h_v[:-1], north_row], axis=0)
-    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
-    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
-    V_bar = _v_pair[..., 1] / H_v * v_mask
+    V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
 
     return U_bar, V_bar
 
@@ -402,14 +407,13 @@ def _helmholtz_inv_diag(
         dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
         dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
 
-        lat = grid.lat
-        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
-        lat_v = jnp.concatenate([
-            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-            lat_v_int,
-            jnp.array([jnp.pi / 2], dtype=lat.dtype),
-        ])
-        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        # #516: single-source v-face zonal cos(lat_v) — interior
+        # cos(0.5·(lat[j]+lat[j+1])), poles exactly 0.  Routes through the
+        # shared helper (backend-aware pad_with_pole_bc_lat + zero_polar_lat_ends)
+        # so an MPI band cut keeps the neighbour-rank metric instead of the
+        # old synthetic ±π/2 endpoints (which dropped the meridional diagonal
+        # at interior cuts — #515).  Bit-identical on serial.
+        cos_lat_v = vface_zonal_cos_lat(grid)            # (n_lat+1,)
         dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
         diag_zonal = (
@@ -607,7 +611,7 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
 # ---------------------------------------------------------------------------
 # Geometric multigrid preconditioner (anisotropic: zonal-line smoother)
 # ---------------------------------------------------------------------------
-# POC 8487762 (docs/scaling/scaling_levers_audit_2026-06-14.md): a geometric
+# POC 8487762 (docs/performance/scaling/scaling_levers_audit_2026-06-14.md): a geometric
 # V-cycle with a ZONAL-LINE smoother cuts the barotropic-PCG outer iteration
 # count M60 -> M2-4 on the polar-anisotropic lat-lon Helmholtz (textbook
 # O(log n)), where the pointwise-Jacobi smoother gives only ~3x.  The line
@@ -1321,16 +1325,9 @@ def barotropic_implicit_latlon_cgrid(
         h_k_old, min_water_col, mask, grid,
     )
 
-    # ----- Step 3: Coriolis face values ---------------------------------
-    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
-        f_u = grid.f_u.astype(eta_dtype)
-        f_v = grid.f_v.astype(eta_dtype)
-    else:
-        f_cell = grid.f.astype(eta_dtype)
-        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
-        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    # ----- Step 3: Coriolis face values (#517: shared fold-safe helper) --
+    from legoesm.ocean.dynamics.barotropic_common import coriolis_at_faces
+    f_u, f_v = coriolis_at_faces(grid, eta_dtype)
 
     # ----- Step 4: predictor (FB Coriolis, OLD eta gradient) -----------
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)

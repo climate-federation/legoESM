@@ -28,6 +28,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 from legoesm import constants
@@ -151,16 +152,40 @@ def _is_ocean_schema(d: dict) -> bool:
     return False
 
 
-def _rows_from_nested(d: dict, source: Path) -> list[dict]:
-    """Ocean-campaign schema: ``{backend, results:[TimingResult,...]}``.
+def _is_atm_nested_schema(d: dict) -> bool:
+    """True only for the atmosphere GPU harness nested report
+    (run_levante_gpu_scaling.py): a non-ocean mode plus per-result atmosphere
+    markers (``grid_type`` / ``physics_level``).  POSITIVE match so an
+    unrecognized/typoed nested schema is SKIPPED rather than silently mislabeled
+    'atm' (codex review — the prior ``else: 'atm'`` default mislabeled anything
+    that was not ocean)."""
+    if str(d.get("mode", "")).startswith("ocean"):
+        return False
+    res = d.get("results")
+    if not (isinstance(res, list) and res and isinstance(res[0], dict)):
+        return False
+    r0 = res[0]
+    if str(r0.get("mode", "")).startswith("ocean"):
+        return False
+    return ("grid_type" in r0) or ("physics_level" in r0)
 
-    Flattens each inner result into a component='ocean' tidy row so the
-    atmosphere (flat per-case JSON) and ocean (nested) campaigns land in one
-    unified table.
+
+def _rows_from_nested(d: dict, source: Path, component: str = "ocean") -> list[dict]:
+    """Nested ``{backend, results:[TimingResult,...]}`` report → tidy rows.
+
+    Serves BOTH campaigns that emit a nested report:
+      * ``component='ocean'`` — the ocean GPU/CPU campaign (mode 'ocean_*'),
+        case label 'ocean', grid defaulting to 'latlon'.
+      * ``component='atm'`` — the atmosphere GPU harness
+        (run_levante_gpu_scaling.py), grid taken from the per-result
+        ``grid_type`` field, case derived from physics_level like the flat
+        atm path.  Without this branch a nested atm report has no flat
+        top-level ``sypd``/``grid_type`` and is silently dropped.
     """
     backend = str(d.get("backend", "")).upper() or backend_from_path(source)
     if backend not in ("CPU", "GPU", "TPU"):
         backend = backend_from_path(source)
+    is_ocean = component == "ocean"
     out = []
     for r in d.get("results") or []:
         if not isinstance(r, dict) or r.get("sypd") is None:
@@ -168,15 +193,17 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
         n_dev = r.get("n_ranks", r.get("n_gpus"))
         if n_dev is None:
             continue
-        grid = r.get("grid_type", "latlon")
+        phys = r.get("physics_level", "none")
+        grid = r.get("grid_type", "latlon" if is_ocean else "")
+        case = "ocean" if is_ocean else _CASE.get(phys, phys)
         res = r.get("resolution")
         cpt = int(r.get("cpus_per_task") or 1)
         n_cores = int(r.get("n_cores") or (int(n_dev) * cpt))
         out.append({
-            "component": "ocean",
+            "component": component,
             "backend": backend,
             "grid": grid,
-            "case": "ocean",
+            "case": case,
             "precision": r.get("precision", ""),
             "mode": str(r.get("mode", "strong")).replace("ocean_", "") or "strong",
             "n_devices": int(n_dev),
@@ -193,7 +220,7 @@ def _rows_from_nested(d: dict, source: Path) -> list[dict]:
             "mcells_per_s": r.get("mcells_per_s"),
             "scaling_efficiency": r.get("scaling_efficiency"),
             "dt_seconds": r.get("dt_seconds"),
-            "physics_level": r.get("physics_level", ""),
+            "physics_level": phys,
             "compile_time_s": r.get("compile_time_s"),
             "source": str(source),
         })
@@ -249,10 +276,20 @@ def collect(roots) -> tuple[list[dict], int]:
             except (json.JSONDecodeError, OSError):
                 continue
             if isinstance(d, dict) and isinstance(d.get("results"), list):
-                # Nested ONLY ingested for the ocean schema; a nested atm
-                # (levante) report is skipped, not faked as ocean.
+                # Nested report: ocean campaign OR the atmosphere GPU harness
+                # (run_levante_gpu_scaling.py).  Route by POSITIVE schema match;
+                # an unrecognized nested schema is SKIPPED with a warning, never
+                # silently mislabeled 'atm' (codex review).
                 if _is_ocean_schema(d):
-                    for row in _rows_from_nested(d, jf):
+                    component = "ocean"
+                elif _is_atm_nested_schema(d):
+                    component = "atm"
+                else:
+                    print(f"WARNING: unrecognized nested report schema, skipping "
+                          f"{jf}", file=sys.stderr)
+                    component = None
+                if component is not None:
+                    for row in _rows_from_nested(d, jf, component=component):
                         _add(row)
             else:
                 _add(_row_from_json(d, jf))

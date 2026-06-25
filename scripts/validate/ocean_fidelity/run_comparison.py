@@ -18,7 +18,7 @@ Usage::
 
     JAX_PLATFORMS=cpu .venv/bin/python scripts/validate/ocean_fidelity/run_comparison.py \\
         --legoesm-root results/ocean \\
-        --output docs/ocean_fidelity/initial_comparison_<sha>.md
+        --output docs/ocean/fidelity/initial_comparison_<sha>.md
 
 The script does NOT trigger runs — it only reads what is already on disk.
 Run ``scripts/matrix/run_ocean_test_matrix.py`` and the Veros runner separately
@@ -375,9 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--output", type=Path,
-        default=Path(f"docs/ocean_fidelity/initial_comparison_{_git_sha()}.md"),
+        default=Path(f"docs/ocean/fidelity/initial_comparison_{_git_sha()}.md"),
         help="markdown report path (default: hash-suffixed under "
-             "docs/ocean_fidelity/)",
+             "docs/ocean/fidelity/)",
     )
     return p
 

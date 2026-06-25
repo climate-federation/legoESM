@@ -50,7 +50,7 @@ All notable changes to legoESM. Format roughly follows
 - **Mass-conservation projection** in implicit barotropic solvers
   (lat-lon and MPAS).
 - **Veros peer-comparison harness** (`ocean/fidelity/`): DINO and
-  Eady adapters, regridder, and reports under `docs/ocean_fidelity/`.
+  Eady adapters, regridder, and reports under `docs/ocean/fidelity/`.
 - **Cross-grid metric consistency**: ocean matrix 57/57 PASS
   across lat-lon, tripolar, cubed-sphere, MPAS Voronoi.
 - **Ocean dissipation suite**: biharmonic Smagorinsky (#189),
@@ -130,14 +130,14 @@ All notable changes to legoESM. Format roughly follows
 
 ### Documentation
 
-- New: [docs/getting_started.md](docs/getting_started.md) —
+- New: [docs/user-guide/getting_started.md](docs/user-guide/getting_started.md) —
   beginner onboarding.
-- New: [docs/scm.md](docs/scm.md) — single-column model.
+- New: [docs/user-guide/scm.md](docs/user-guide/scm.md) — single-column model.
 - New: this CHANGELOG.
 - Updated: [README.md](README.md),
-  [docs/cmip_readiness.md](docs/cmip_readiness.md),
-  [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md),
-  [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md).
+  [docs/validation/cmip_readiness.md](docs/validation/cmip_readiness.md),
+  [docs/dev-notes/ocean_experiments_reference.md](docs/dev-notes/ocean_experiments_reference.md),
+  [docs/performance/REAL_HARDWARE_SCALING.md](docs/performance/REAL_HARDWARE_SCALING.md).
 
 ---
 

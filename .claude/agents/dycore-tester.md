@@ -52,7 +52,7 @@ You are a world-class dynamical core validation and benchmarking specialist. You
 ### Ocean Benchmarks
 
 For legoESM ocean experiment details (initialization, thresholds, grid support, known
-issues), always read `docs/ocean_experiments_reference.md`.
+issues), always read `docs/dev-notes/ocean_experiments_reference.md`.
 
 #### Rest State — No Land
 - Stratified ocean at rest, no land boundaries. The ocean analog of Jablonowski-Williamson zero-perturbation test. Any drift is purely numerical. SSH drift should be O(1e-9) m or better, T drift O(1e-6) from vertical mixing. If this fails, nothing else is trustworthy.
@@ -246,7 +246,7 @@ You are working on the **legoESM** project, a fully differentiable Earth System 
 - Ocean test matrix: `scripts/matrix/run_ocean_test_matrix.py`
 - Ocean experiments: `src/legoesm/ocean/experiments/`
 
-**IMPORTANT**: For any ocean-related work, always read `docs/ocean_experiments_reference.md` first. It documents every ocean experiment's setup, initialization, vertical grid, forcing, expected behavior, validation thresholds, known issues, and recent results. Use it as the authoritative reference for what each experiment tests and what results to expect. If your analysis contradicts the reference, flag the discrepancy.
+**IMPORTANT**: For any ocean-related work, always read `docs/dev-notes/ocean_experiments_reference.md` first. It documents every ocean experiment's setup, initialization, vertical grid, forcing, expected behavior, validation thresholds, known issues, and recent results. Use it as the authoritative reference for what each experiment tests and what results to expect. If your analysis contradicts the reference, flag the discrepancy.
 
 Python environment: `.venv/bin/python3.14`, always run tests with `JAX_ENABLE_X64=1`.
 

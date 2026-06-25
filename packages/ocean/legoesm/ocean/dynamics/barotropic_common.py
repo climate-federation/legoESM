@@ -29,6 +29,62 @@ import jax
 import jax.numpy as jnp
 
 
+def compute_power_law_filter_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    *,
+    p: int = 2,
+    q: int = 4,
+    r: float = 0.18927,
+):
+    """Shchepetkin & McWilliams (2005) power-law barotropic averaging filter.
+
+    This is the averaging kernel used by ROMS, MOM6 and Oceananigans'
+    ``SplitExplicitFreeSurface`` (``averaging_shape_function``).  Unlike the
+    cosine (Hanning) filter — which is only first-order accurate and is
+    *documented* to excite the 2Δx barotropic checkerboard (the C-grid Coriolis
+    rotational null mode; see docs/issues/barotropic_mode_noise.md §B) — the
+    power-law filter spans an EXTENDED window τ∈(0, 2] (i.e. the barotropic
+    substeps run for ~1.5× the baroclinic step) with the shape
+
+        w(τ) = (τ/τ₀)^p · (1 − (τ/τ₀)^q) − r·(τ/τ₀),
+        τ₀ = (p+2)(p+q+2) / [(p+1)(p+q+1)],
+
+    whose centroid sits at the baroclinic step (τ=1) and which strongly damps
+    the grid mode.  The window is trimmed at the last positive weight ``M★``
+    and the averaging weights are normalised to sum to 1.  ``transport_weights``
+    (the SM2005 secondary weights) keep the time-averaged barotropic transport
+    consistent with the SSH evolution for volume conservation.
+
+    Returns
+    -------
+    (w_avg, w_total, w_transport, n_loop) : the per-substep averaging weights
+        (length ``n_loop`` = M★), their sum (== 1), the transport weights, and
+        the (static) number of substeps to run.  ``n_loop`` > ``n_substeps``
+        because the window extends past the baroclinic step.
+    """
+    import numpy as _np
+    tau0 = (p + 2) * (p + q + 2) / ((p + 1) * (p + q + 1))
+    # τ resolved at the same Δτ = dt/n_substeps as the cosine path, spanning
+    # (0, 2]; this is 2·n_substeps candidate substeps before trimming.
+    tau = _np.arange(1, 2 * n_substeps + 1, dtype=_np.float64) / n_substeps
+    w = (tau / tau0) ** p * (1.0 - (tau / tau0) ** q) - r * (tau / tau0)
+    m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last positive weight
+    w = w[:m_star]
+    w = w / w.sum()
+    # SM2005 transport weights: transport_w[i] = sum(w[i:]) / n_substeps so the
+    # cumulative averaged transport closes the depth-integrated continuity.
+    w_transport = _np.array(
+        [w[i:].sum() for i in range(m_star)], dtype=_np.float64
+    ) / n_substeps
+    return (
+        jnp.asarray(w, dtype=dtype),
+        jnp.asarray(w.sum(), dtype=dtype),
+        jnp.asarray(w_transport, dtype=dtype),
+        m_star,
+    )
+
+
 def compute_filter_weights(
     n_substeps: int,
     dtype: jnp.dtype,
@@ -105,6 +161,58 @@ def maxvel_clip(field: jnp.ndarray, maxvel: float | jnp.ndarray) -> jnp.ndarray:
     would otherwise crash the solver before the substep finishes.
     """
     return jnp.clip(field, -maxvel, maxvel)
+
+
+def coriolis_at_faces(grid, dtype) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Coriolis parameter at C-grid u-/v-faces ``(f_u, f_v)``.
+
+    Single source of truth for the semi-implicit Coriolis face values that
+    the lat-lon C-grid barotropic solvers (explicit + implicit) and the
+    full PE step each reconstructed with a byte-identical inline block
+    (#517).  Behaviour, in preference order:
+
+    1. **Stored metrics (the shipping path).** If the geometry carries
+       pre-computed ``grid.f_u`` (shape ``(n_lat, n_lon+1)``) and
+       ``grid.f_v`` (``(n_lat+1, n_lon)``) — every ``LatLonCGridGeometry``,
+       including tripolar — return those cast to ``dtype``.  Bit-identical
+       to the previous inline ``hasattr(grid, "f_u")`` branch.
+    2. **Reconstruct from cell-centre ``grid.f``** (lean ``LatLonGrid``,
+       which lacks face metrics): average adjacent cells onto the faces.
+       Bit-identical to the previous inline ``else`` branch.
+
+    Fold safety (the latent bug this dedup closes): the reconstruction in
+    (2) is NOT tripolar-fold-aware — it averages cell-centre ``f`` without
+    the fold's ``vector_sign_v`` flip on the north v-row, so on a folded
+    grid it would yield wrong vorticity at the seam.  Real folded grids
+    always take path (1) (they store ``f_u/f_v``).  Should a folded grid
+    ever reach (2) without stored face metrics, RAISE rather than silently
+    mis-reconstruct (dispatch-hardening: a latent silent-wrong-answer
+    becomes a loud error; no shipping path changes).
+
+    Operator-package-free: the fold check reads ``grid.fold.is_active``
+    directly (mirrors ``operators_latlon_cgrid.is_tripolar``) so this
+    module keeps its no-operator-import contract.
+    """
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        return grid.f_u.astype(dtype), grid.f_v.astype(dtype)
+
+    fold = getattr(grid, "fold", None)
+    if fold is not None and bool(getattr(fold, "is_active", False)):
+        raise ValueError(
+            "coriolis_at_faces: tripolar/folded grid is missing stored "
+            "f_u/f_v. The reconstruct-from-grid.f fallback is not "
+            "fold-aware (no vector_sign_v flip on the north v-row) and "
+            "would produce wrong vorticity at the fold seam. Populate "
+            "grid.f_u/grid.f_v (LatLonCGridGeometry does this) instead of "
+            "passing a bare fold-less grid."
+        )
+
+    f_cell = grid.f.astype(dtype)
+    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+    f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    return f_u, f_v
 
 
 # ---------------------------------------------------------------------

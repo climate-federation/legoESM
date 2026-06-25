@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clouds", type=str, default="sundqvist")
     # Morrison double-moment (M2005/MG) is the production default: the
     # most faithful + best-validated microphysics in the repo (SAM-oracle
-    # validation in docs/md_files/CRM_faithful_SAM.md; RCEMIP-viable per
+    # validation in docs/dev-notes/CRM_faithful_SAM.md; RCEMIP-viable per
     # the microphysics-RCE campaign) with number-aware r_eff and the
     # aerosol-CCN coupling.  Sundqvist (the previous default) remains
     # the fast diagnostic fallback (--microphysics sundqvist).  Kessler

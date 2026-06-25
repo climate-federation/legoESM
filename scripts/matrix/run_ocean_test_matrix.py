@@ -406,7 +406,7 @@ def _build_test_matrix() -> list[TestCase]:
     # (cubed_sphere excluded — wind-driven Munk boundary current
     # interacts with face corners producing NaN at ~step 200 even
     # with FC-Gram + raised diffusion; tracked in
-    # docs/ocean_experiments/cubed_sphere_pgf_stability.md as a
+    # docs/ocean/experiments/cubed_sphere_pgf_stability.md as a
     # documented cube ocean dycore limitation.)
     for g in ["latlon", "mpas"]:
         matrix.append(TestCase(
@@ -5196,7 +5196,7 @@ def _run_experiment_via_registry(
     # so the matrix tests the SAME recipe the production driver runs. Without
     # this the field-by-field scrape above silently drops K_v / bottom_drag /
     # eos / gm_redi on the lat-lon path (see the divergence note in
-    # docs/planning/ocean_recipe_consolidation_audit.md, #488). This is the
+    # docs/dev-notes/planning/ocean_recipe_consolidation_audit.md, #488). This is the
     # generalisation of what DINO already does by hand (run_dino calls
     # dino_*_model_config directly, bypassing this registry helper). Only the
     # latlon/mpas grids are wired; other grids fall back to the scrape.

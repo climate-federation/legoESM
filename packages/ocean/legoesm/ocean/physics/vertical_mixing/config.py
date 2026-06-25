@@ -33,16 +33,22 @@ __param_spec__ = {
     "TKEConfig": {
         "scheme_key": "ocean.vm.tke",
         "excluded": {
+            "bg_diff_amp": "Bryan-Lewis 1979 fixed published arctan offset",
+            "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
+            "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
+            "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
         },
         "params": {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
         },
@@ -97,6 +103,8 @@ __param_spec__ = {
             "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
+            "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
+            "businger_unstable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
@@ -114,6 +122,7 @@ __param_spec__ = {
             "K_max": {"units": "m^2/s", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "ustar_speed_ratio": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP u* surface-speed proxy (Large et al. 1994)", "shape": None},
         },
     },
 }
@@ -180,6 +189,13 @@ class TKEConfig(NamedTuple):
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
     enable_kappaH_profile: bool = True
+    # --- Galperin Pr-Ri + Bryan-Lewis (1979) bg-diffusivity profile (#518 §10) ---
+    prandtl_ri_coeff: float = 6.6        # Galperin/Veros fixed Pr = max(1, min(10, 6.6*Ri)) slope
+    bg_diff_amp: float = 0.8             # Bryan-Lewis arctan offset (published fit)
+    bg_diff_arctan_coeff: float = 1.05   # Bryan-Lewis arctan amplitude (published fit)
+    bg_diff_depth_m: float = 2500.0      # Bryan-Lewis transition depth [m] (published fit)
+    bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
+    bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
@@ -432,6 +448,16 @@ class KPPConfig(NamedTuple):
     # value smaller than the real dt over-damps; larger risks instability.
     # Default 300.0 preserves the historical hard-coded estimate.
     cfl_cap_dt_s: float = 300.0
+    # --- Monin-Obukhov similarity (Businger-Dyer) + u* proxy (#518 item 10) ---
+    # Businger-Dyer MOST stability-function constants (Businger et al. 1971,
+    # used by LMD94): the unstable (1 + 16|zeta|) and stable (1 + 5*zeta)
+    # coefficients in the weakly-(un)stable velocity scales.  Fixed published
+    # constants (like a_m/c_m above) — excluded from training.
+    businger_unstable_coeff: float = 16.0   # (1 + 16|zeta|)^{1/4,1/2} weakly-unstable scale
+    businger_stable_coeff: float = 5.0      # 1/(1 + 5*zeta) stable suppression
+    # u_star proxy ratio when wind stress is absent: u* ~ ratio*|U_surface|
+    # (~sqrt(C_d) drag-like closure knob).
+    ustar_speed_ratio: float = 0.01
 
 
 class CATKEConfig(NamedTuple):

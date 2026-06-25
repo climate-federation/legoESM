@@ -1,6 +1,6 @@
 """Discrete energy + enstrophy budget test for the AL81 PV-flux operator.
 
-Driven by the AL81 audit (`docs/ocean_experiments/al81_corner_triad_audit.md`)
+Driven by the AL81 audit (`docs/ocean/experiments/al81_corner_triad_audit.md`)
 flagged six potential defects in `pv_flux_al81_partial_cell` whose
 combined effect on the residual 2Δy zonal-jet mode is bounded at ≤20%
 by the WENO5-vs-AL81 comparison (D2 in the realistic-geometry session
@@ -35,7 +35,7 @@ References:
 - Arakawa & Lamb 1981, MWR 109, 18-36
 - Le Sommer, Penduff, Theetten, Madec, Barnier 2009, OM 29, 1-14
 - Stewart & Dellar 2016, JCP 313, 99-120 (Appendix A)
-- `docs/ocean_experiments/al81_corner_triad_audit.md`
+- `docs/ocean/experiments/al81_corner_triad_audit.md`
 """
 
 from __future__ import annotations

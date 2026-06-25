@@ -7,7 +7,7 @@ A single machine-readable map from each physical concept the ocean code uses to:
   - units + status.
 
 Why this exists (per the gap->block / dedup doctrine in
-``docs/ocean_fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
+``docs/ocean/fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
 
 1. **Recognition across oracles.** Different production models name the same
    quantity differently (Veros ``kappaM`` = legoESM ``A_v``; Veros ``r_bot`` =
@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 # Oracle keys used in ``oracle_aliases``. Keep this closed so the consistency
 # test can validate every mapping references a known oracle.
-KNOWN_ORACLES = frozenset({"veros", "mom6", "mitgcm", "nemo"})
+KNOWN_ORACLES = frozenset({"veros", "mom6", "mitgcm", "nemo", "oceananigans"})
 
 # Status vocabulary:
 #   "canonical"        — settled canonical name; aliases are clear debt.
@@ -201,7 +201,8 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         canonical="u",
         units="m/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "u"), ("mitgcm", "U"), ("mitgcm", "uVel")),
+        oracle_aliases=(("veros", "u"), ("mitgcm", "U"), ("mitgcm", "uVel"),
+                        ("oceananigans", "u")),
         note="LatLonCGridOceanState.u. Veros 'u' sits at the EAST T-cell face; "
              "MITgcm 'U' (UVEL) sits at the WEST face — the bridge owns that "
              "half-cell convention, verified by equivariance tests.",
@@ -211,7 +212,8 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         canonical="v",
         units="m/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "v"), ("mitgcm", "V"), ("mitgcm", "vVel")),
+        oracle_aliases=(("veros", "v"), ("mitgcm", "V"), ("mitgcm", "vVel"),
+                        ("oceananigans", "v")),
         note="LatLonCGridOceanState.v. MITgcm 'V' (VVEL) sits at the SOUTH face.",
     ),
     ConceptDef(
@@ -219,7 +221,8 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         canonical="w",
         units="m/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "w"), ("mitgcm", "W"), ("mitgcm", "wVel")),
+        oracle_aliases=(("veros", "w"), ("mitgcm", "W"), ("mitgcm", "wVel"),
+                        ("oceananigans", "w")),
         note="LatLonCGridOceanState.w (diagnostic on most configs).",
     ),
     ConceptDef(
@@ -244,7 +247,8 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         canonical="eta",
         units="m",
         status="fidelity-scoped",
-        oracle_aliases=(("mitgcm", "Eta"), ("mitgcm", "ETAN")),
+        oracle_aliases=(("mitgcm", "Eta"), ("mitgcm", "ETAN"),
+                        ("oceananigans", "eta"), ("oceananigans", "η")),
         note="LatLonCGridOceanState.eta. MITgcm implicit free surface 'Eta'/"
              "'ETAN'. Veros has no direct eta (barotropic psi); left unmapped.",
     ),

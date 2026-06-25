@@ -13,6 +13,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ocean.eos import (
+    thermal_expansion_coeff,
+    haline_contraction_coeff,
+)
 
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -38,6 +42,57 @@ def vertical_shear_squared(
     du = (u_cell[..., 1:] - u_cell[..., :-1]) / dz_safe
     dv = (v_cell[..., 1:] - v_cell[..., :-1]) / dz_safe
     return du * du + dv * dv
+
+
+def richardson_number(
+    N2: jnp.ndarray,
+    u_cell: jnp.ndarray,
+    v_cell: jnp.ndarray,
+    dz_actual: jnp.ndarray,
+    *,
+    eps: float,
+    clip_negative: bool = False,
+) -> jnp.ndarray:
+    """Gradient Richardson number ``Ri = N^2 / S^2`` at interfaces.
+
+    Single source for the Richardson-scheme (``richardson.py``) and KPP
+    interior-shear (``kpp.py``) blocks, which computed this from byte-identical
+    inline code (#518 item 5).  ``N2`` is supplied by the caller (both already
+    call ``eos.compute_buoyancy_frequency``; KPP also reuses ``N2`` for its
+    static-instability term).
+
+    The squared shear uses the floor-on-the-SQUARED-denominator form
+    ``S^2 = (du^2 + dv^2) / max(dz_half^2, eps)`` with ``du = u[k] - u[k+1]``
+    — preserved bit-for-bit from both call sites.  NOTE: this floor placement
+    differs from :func:`vertical_shear_squared` (which floors the LINEAR
+    ``dz_half`` before dividing); the two are equal away from vanishing
+    ``dz_half`` but diverge in sub-eps-thin layers, so they are intentionally
+    NOT merged here — reconciling the floor convention is a numerics-affecting
+    change for a separate PR.
+
+    Parameters
+    ----------
+    N2 : (..., nlev-1) — buoyancy frequency squared at interfaces.
+    u_cell, v_cell : (..., nlev) — cell-centre velocities.
+    dz_actual : (..., nlev) — actual layer thickness (z* Jacobian applied).
+    eps : float — denominator floor (caller's scheme eps; applied to both
+        ``dz_half**2`` and ``S2``).
+    clip_negative : bool — when True, clip ``Ri`` to ``>= 0`` (the Richardson
+        scheme's "unstable -> max mixing" convention); KPP passes False and
+        clamps downstream via ``Ri / Ri_0``.
+
+    Returns
+    -------
+    Ri : (..., nlev-1)
+    """
+    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    du = u_cell[..., :-1] - u_cell[..., 1:]
+    dv = v_cell[..., :-1] - v_cell[..., 1:]
+    S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
+    Ri = N2 / jnp.maximum(S2, eps)
+    if clip_negative:
+        Ri = jnp.maximum(Ri, 0.0)
+    return Ri
 
 
 def compute_N2(
@@ -98,6 +153,102 @@ def compute_N2(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed' "
         f"or 'adiabatic'."
     )
+
+
+def surface_buoyancy_flux(
+    q_net,
+    fw,
+    salt,
+    T_sfc: jnp.ndarray,
+    S_sfc: jnp.ndarray,
+    *,
+    g: float,
+    rho_0: float,
+    c_sw: float,
+    real_salt_in_qs: bool,
+):
+    """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the kinematic
+    surface heat / salt fluxes for the KPP / CATKE boundary-layer closures.
+
+    Single grid-agnostic source for the surface-forcing buoyancy block
+    (#518 item 1).  Previously three byte-identical-in-logic copies existed:
+    the lat-lon ``integration.py`` inline, ``k_profiles._surface_buoyancy_flux``,
+    and ``mpas_integration._mpas_surface_buoyancy_flux``.
+
+    Sign convention (KPP / CATKE: ``B_f > 0`` = unstable = convection):
+    ``B_f = -g*alpha*Q_T + g*beta*Q_S`` where ``Q_T = q_net/(rho_0*c_sw)`` and
+    ``Q_S`` is the kinematic salt flux.  ``alpha``/``beta`` are the EOS
+    thermal-expansion / haline-contraction coefficients at the surface
+    (``p = 0``).
+
+    ``real_salt_in_qs`` (the ONE deliberate grid difference):
+
+    * ``True`` (lat-lon): the real brine salt-mass flux feeds BOTH the surface
+      buoyancy AND the returned non-local salt flux ``Q_sfc_S`` — they are
+      accumulated into a single ``Q_sfc_S`` and ``B_salt = g*beta*Q_sfc_S``.
+    * ``False`` (MPAS): the real salt feeds the surface BUOYANCY ONLY; the
+      returned ``Q_sfc_S`` carries the freshwater (virtual-salt) term ONLY,
+      starting from an explicit ``0`` baseline (NOT ``None``) so the KPP caller
+      does not gradient-diagnose the non-local salt flux.  The real-salt
+      injection is instead the mass-exact floored-h_k source in
+      ``mpas_ocean_baroclinic_tendencies`` (adding it to the non-local term too
+      would double-count and break partial-cell mass conservation).
+
+    The float-operation ORDER per branch is preserved bit-for-bit from each
+    original site.
+
+    Parameters
+    ----------
+    q_net : surface net heat flux [W/m^2] (>0 into ocean) or ``None``.
+    fw : surface freshwater flux [kg/m^2/s] (>0 P-E into ocean) or ``None``.
+    salt : real surface salt-mass flux [kg/m^2/s] (>0 brine into ocean) or
+        ``None``.
+    T_sfc, S_sfc : (...,) — top-layer temperature [degC] and salinity [PSU].
+    g, rho_0, c_sw : gravity [m/s^2], Boussinesq reference density [kg/m^3],
+        seawater specific heat [J/(kg K)] — passed by the caller from its own
+        constant source (``constants_config`` for lat-lon, module constants for
+        MPAS; both equal the canonical values by default).
+    real_salt_in_qs : see above.
+
+    Returns
+    -------
+    (B_f, Q_sfc_T, Q_sfc_S) : each ``None`` when its forcing channel is absent
+    (``B_f`` is ``None`` only when BOTH heat and freshwater/salt are absent).
+    """
+    p_sfc = jnp.zeros_like(T_sfc)
+
+    Q_sfc_T = None
+    B_f = None
+    if q_net is not None:
+        Q_sfc_T = q_net / (rho_0 * c_sw)
+        alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
+        B_f = -g * alpha * Q_sfc_T
+
+    Q_sfc_S = None
+    if fw is not None or salt is not None:
+        beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
+        Q_sfc_S = jnp.zeros_like(S_sfc)
+        if real_salt_in_qs:
+            # Lat-lon: freshwater dilution PLUS real salt both accumulate into
+            # one Q_sfc_S; the buoyancy uses that single combined flux.
+            if fw is not None:
+                Q_sfc_S = Q_sfc_S - S_sfc * fw / rho_0
+            if salt is not None:
+                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / rho_0
+            B_salt = g * beta * Q_sfc_S
+        else:
+            # MPAS: Q_sfc_S carries the freshwater term only; the real salt
+            # adds to the surface buoyancy alone (separate B_salt term).
+            B_salt = jnp.zeros_like(S_sfc)
+            if fw is not None:
+                Q_sfc_S = -S_sfc * jnp.asarray(fw, S_sfc.dtype) / rho_0
+                B_salt = B_salt + g * beta * Q_sfc_S
+            if salt is not None:
+                B_salt = B_salt + g * beta * (
+                    jnp.asarray(salt, S_sfc.dtype) * 1.0e3 / rho_0)
+        B_f = B_salt if B_f is None else (B_f + B_salt)
+
+    return B_f, Q_sfc_T, Q_sfc_S
 
 
 def tridiag_thomas(a, b, c, d):

@@ -176,6 +176,16 @@ class OutputConfig(NamedTuple):
     restart_buffer_seconds: float = 600.0
 
 
+# Single source of truth for the valid microphysics scheme literals — consumed
+# by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
+# CLI allowlist cannot drift from the config validation (e.g. omitting an
+# advertised scheme like ``ml_emulator``).
+VALID_MICROPHYSICS = (
+    "none", "kessler", "sundqvist", "seifert_beheng",
+    "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+)
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -446,6 +456,17 @@ class ExperimentConfig(NamedTuple):
     # face-compatible count.  Pair with ``shard_radiation_columns``
     # for the full 4-GPU unblock.  Default off.
     allow_level_fallback: bool = False
+    # A1 (lat-lon SPMD): opt-in single-process multi-device lat-BAND
+    # decomposition for the lat-lon C-grid hydrostatic dycore (the atm twin
+    # of the ocean lat-band SPMD step).  Routes ModelDriver.run() to the
+    # dedicated ``_run_compiled_latlon_spmd`` segment loop
+    # (``run_atm_latlon_spmd``).  DISTINCT from ``distributed_mode='spmd'``
+    # (that is the multi-controller cubed-sphere path); this is the
+    # single-process ``n_devices>1`` path and never arms mpi4jax.  Requires
+    # grid.grid_type='latlon', n_lat % n_devices == 0, and DYNAMICS-ONLY or a
+    # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
+    # carry is not yet SPMD-routed.  Default off preserves all existing paths.
+    enable_latlon_spmd: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -529,6 +550,24 @@ class ExperimentConfig(NamedTuple):
                     f"{self.output.diag_days}); set diag_days=0 — "
                     "gathered root-only diagnostics are a follow-up"
                 )
+        if self.enable_latlon_spmd:
+            # Single-process multi-device lat-band path (NOT distributed_mode).
+            if g.grid_type != "latlon":
+                errors.append(
+                    "enable_latlon_spmd=True requires grid.grid_type='latlon' "
+                    f"(got {g.grid_type!r}): the lat-band decomposition is the "
+                    "lat-lon C-grid twin of the ocean SPMD step"
+                )
+            if self.distributed:
+                errors.append(
+                    "enable_latlon_spmd=True is the SINGLE-PROCESS multi-device "
+                    "path and is mutually exclusive with distributed=True "
+                    "(MPI / multi-controller); use one or the other"
+                )
+            # The n_lat % n_devices divisibility constraint is checked at
+            # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
+            # LatLonGrid (GridConfig carries only ``resolution``, not the
+            # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
@@ -572,13 +611,9 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
-        _valid_microphysics = (
-            "none", "kessler", "sundqvist", "seifert_beheng",
-            "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
-        )
-        if self.microphysics not in _valid_microphysics:
+        if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
-                f"microphysics must be one of {_valid_microphysics}, "
+                f"microphysics must be one of {VALID_MICROPHYSICS}, "
                 f"got {self.microphysics!r}"
             )
         # Physics-scheme membership (mirror the integration.py factory sets so

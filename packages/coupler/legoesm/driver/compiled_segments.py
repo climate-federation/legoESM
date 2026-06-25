@@ -49,6 +49,26 @@ from legoesm.thermo import saturation_mixing_ratio
 logger = logging.getLogger(__name__)
 
 
+# Auto-enable jax.checkpoint (rematerialization) for segments longer than this
+# many steps when ``gradient_checkpoint`` is left at its default ``None``.
+_CKPT_AUTO_STEPS = 50
+
+
+def _resolve_checkpoint(gradient_checkpoint: bool | None, n_steps: int) -> bool:
+    """Resolve the gradient-checkpoint policy for a segment of ``n_steps``.
+
+    An explicit ``True``/``False`` always wins; ``None`` (the default) auto-
+    enables rematerialization for segments longer than ``_CKPT_AUTO_STEPS`` —
+    the documented contract that was previously absent, so ``None`` silently
+    disabled checkpointing and a long reverse-mode-AD segment could OOM exactly
+    where the docstring promised protection. ``n_steps`` is the static scan
+    length, so this is a compile-time decision.
+    """
+    if gradient_checkpoint is None:
+        return n_steps > _CKPT_AUTO_STEPS
+    return gradient_checkpoint
+
+
 # ======================================================================
 # Segment carry — all mutable arrays for the hot loop
 # ======================================================================
@@ -1144,7 +1164,7 @@ def build_segment_fn(
         """
         body_rad = _make_single_step(forcing, step_fn=step_unified)
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
-        if gradient_checkpoint:
+        if _resolve_checkpoint(gradient_checkpoint, n_steps):
             body_rad = jax.checkpoint(body_rad, prevent_cse=False)
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
 
@@ -1170,7 +1190,7 @@ def build_segment_fn(
         ``n_steps`` does not divide evenly by ``rad_update_steps``.
         """
         _step_fn = _make_single_step(forcing)
-        if gradient_checkpoint:
+        if _resolve_checkpoint(gradient_checkpoint, n_steps):
             _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
@@ -1205,7 +1225,10 @@ def build_segment_fn(
         scan).
         """
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
-        if gradient_checkpoint:
+        # This unfused no-rad scan has length rad_update_steps (called once per
+        # radiation cycle); resolve the checkpoint policy against THAT length so
+        # a long rad_update_steps still auto-checkpoints under default None.
+        if _resolve_checkpoint(gradient_checkpoint, rad_update_steps):
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
         final_carry, _ = jax.lax.scan(
             body_no_rad, carry, None, length=rad_update_steps,

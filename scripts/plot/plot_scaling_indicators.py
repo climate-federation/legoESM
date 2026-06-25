@@ -1,7 +1,7 @@
 """Plot the EVOLUTION of the main scaling indicators across campaign
 iterations (atm + ocean × MPI/GPU × weak/strong).
 
-Reads the append-only tracked ledger ``docs/scaling/scaling_indicators.csv``
+Reads the append-only tracked ledger ``docs/performance/scaling/scaling_indicators.csv``
 (date,commit,tag,grid,backend,mode,metric,value,unit,job,note) and plots
 each indicator's value vs iteration order, so progress over time is
 visible at a glance.  Regenerated EVERY campaign iteration (per the
@@ -22,7 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-LEDGER = Path("docs/scaling/scaling_indicators.csv")
+LEDGER = Path("docs/performance/scaling/scaling_indicators.csv")
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
     "results/scaling_ginsburg/scaling_indicators_evolution.png")
 

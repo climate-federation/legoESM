@@ -367,23 +367,41 @@ def interp_cell_to_vface_halo(
     f_v : (n_lat_local + 1, n_lon, ...) at v-faces.
     """
     band = get_band_mpi_cut_layout()
-    if band is not None:
+    # Single-program SPMD twin (the lat-band shard_map backend, for which
+    # ``get_band_mpi_cut_layout()`` is None): the cross-cut interior faces need
+    # the same neighbour-row average, but the pole edge-copy must be restored
+    # only at the PHYSICAL pole bands, selected DATA-dependently per band.
+    # ``None`` for serial/MPI/cube (those keep their static branch — additive).
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    spmd_pm = spmd_pole_end_masks()
+    if band is not None or spmd_pm is not None:
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-        # Interior cuts: neighbour row via AD-safe sendrecv.  A
-        # pole-touching end gets a constant-0 ghost row here that
-        # is immediately overridden by the legacy edge copy below,
-        # so the constant never reaches the output.  ``f_pad`` may be
-        # supplied pre-padded by a caller that fused this exchange
-        # with others (must be exactly this pad call's output).
+        # Interior cuts: neighbour row via the backend-aware pad (AD-safe MPI
+        # sendrecv / SPMD lat-band ppermute).  A pole-touching end gets a
+        # constant-0 ghost row here that is immediately overridden by the
+        # legacy edge copy below, so the constant never reaches the output.
+        # ``f_pad`` may be supplied pre-padded by a caller that fused this
+        # exchange with others (must be exactly this pad call's output).
         if f_pad is None:
             f_pad = pad_with_pole_bc_lat(
                 f, halo=1, south_value=0.0, north_value=0.0,
             )
         f_v = 0.5 * (f_pad[:-1] + f_pad[1:])  # (n_lat_local+1, ...)
-        if band.south_rank is None:
-            f_v = jnp.concatenate([f[0:1], f_v[1:]], axis=0)
-        if band.north_rank is None:
-            f_v = jnp.concatenate([f_v[:-1], f[-1:]], axis=0)
+        if spmd_pm is not None:
+            # SPMD: restore the legacy pole edge-copy at the south / north pole
+            # bands only (interior cuts keep the cross-cut average). south then
+            # north, sequenced so a single band reproduces serial at both ends.
+            south_m, north_m = spmd_pm
+            f_v = jnp.where(
+                south_m, jnp.concatenate([f[0:1], f_v[1:]], axis=0), f_v)
+            f_v = jnp.where(
+                north_m, jnp.concatenate([f_v[:-1], f[-1:]], axis=0), f_v)
+        else:
+            # MPI: static per-rank pole answer (None ⟺ this rank owns the pole).
+            if band.south_rank is None:
+                f_v = jnp.concatenate([f[0:1], f_v[1:]], axis=0)
+            if band.north_rank is None:
+                f_v = jnp.concatenate([f_v[:-1], f[-1:]], axis=0)
         return f_v
     return interp_cell_to_vface(f)
 
@@ -554,10 +572,16 @@ def gradient_y_cgrid(
     # ends (== the historical south=0 / pole pad), and the fold overwrite
     # reproduces the old tripolar north row.
     from legoesm.grids.halo_latlon import (
+        get_meridionally_flat,
         pad_halo_latlon,
         pad_halo_latlon_3d,
         zero_polar_lat_ends,
     )
+    # Oceananigans `Flat`-y topology: δy ≡ 0 (no meridional gradient ever).
+    if get_meridionally_flat():
+        n_lat = f.shape[0]
+        out_shape = (n_lat + 1,) + f.shape[1:]
+        return jnp.zeros(out_shape, dtype=f.dtype)
     if f.ndim == 2:
         f_padded = pad_halo_latlon(f, halo=1)
         # Strip the lon halo — gradient_y only needs the lat halo.
@@ -734,6 +758,12 @@ def divergence_cgrid(
         else:
             net_merid = (v_north * fd[1:, :, jnp.newaxis]
                          - v_south * fd[:-1, :, jnp.newaxis])
+
+    # Oceananigans `Flat`-y topology: the meridional flux divergence is 0
+    # (δy(Ay·v) ≡ 0), so η responds only to the zonal transport divergence.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid = jnp.zeros_like(net_zonal)
 
     # Cell area
     area = grid.area  # (n_lat, n_lon)

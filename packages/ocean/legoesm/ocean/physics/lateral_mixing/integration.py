@@ -80,7 +80,7 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
     ``gm_redi_latlon_cgrid.gm_redi_tracer_tendency_latlon`` directly
     from ``ocean_model_latlon_cgrid.py``.  Unifying the factory to
     support both grids is tracked as a known gap (see
-    ``docs/ocean_experiments/gm_redi_latlon_cgrid_plan.md``).
+    ``docs/ocean/experiments/gm_redi_latlon_cgrid_plan.md``).
     """
     cfg = config.gm_redi
 

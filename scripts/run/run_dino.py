@@ -22,7 +22,7 @@ no test-matrix integration. The output directory is self-contained
 (NPZ snapshots + a JSON config dump) so it can be moved to a GPU
 machine for production runs.
 
-See ``docs/md_files/ocean_experiments_reference.md`` for a 1-minute
+See ``docs/dev-notes/ocean_experiments_reference.md`` for a 1-minute
 orientation and the full scientific configuration, decisions log, and
 stability investigation.
 """

@@ -165,7 +165,13 @@ def weighted_mae(
     """
     abs_err = jnp.abs(pred - target)
     w = weights[:, None, None]
-    return jnp.mean(abs_err * w)
+    # Same resolution-independence correction as ``area_weighted_mse`` /
+    # ``per_variable_mse``: ``jnp.mean(abs·w)`` divides by the full array size
+    # (B·n_lat·n_lon·n_ch); multiplying by ``n_lat/Σw`` recovers the proper
+    # area-weighted mean Σ(abs·w)/(B·Σw·n_lon·n_ch). Without it the MAE was off
+    # by ~n_lat/Σw and lived on a different scale from the corrected MSE.
+    n_lat = weights.shape[0]
+    return jnp.mean(abs_err * w) * n_lat / jnp.sum(weights)
 
 
 def almost_fair_crps(

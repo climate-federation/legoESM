@@ -14,7 +14,7 @@ smooth everywhere INCLUDING across the fold; any sharp line along the top rows
 
 Usage (compute node / sbatch, NOT the login node):
     python scripts/plot/plot_tripole_remap_seam.py \
-        --mesh data/grids/eORCA1.2_mesh_mask.nc --out docs/scaling/tripole_remap_seam.png
+        --mesh data/grids/eORCA1.2_mesh_mask.nc --out docs/performance/scaling/tripole_remap_seam.png
 """
 
 from __future__ import annotations
@@ -33,8 +33,12 @@ if _ROOT not in sys.path:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mesh", default="data/grids/eORCA1.2_mesh_mask.nc")
-    ap.add_argument("--out", default="docs/scaling/tripole_remap_seam.png")
+    ap.add_argument("--out", default="docs/performance/scaling/tripole_remap_seam.png")
     ap.add_argument("--atm-nlat", type=int, default=72)  # 2.5deg atm
+    ap.add_argument("--fold-convention", default="auto",
+                    choices=["auto", "n_lon-1-i", "(n_lon-i)%n_lon"],
+                    help="Tripole T-fold seam origin (default auto; auto raises "
+                         "on a genuinely ambiguous near-constant fold row).")
     args = ap.parse_args()
 
     import jax
@@ -50,7 +54,7 @@ def main():
     from legoesm.grids.conservative_regrid import apply_conservative_regrid
 
     atm = create_latlon_grid(args.atm_nlat)
-    trip = create_tripole_grid(args.mesh)
+    trip = create_tripole_grid(args.mesh, fold_convention=args.fold_convention)
     print(f"atm {atm.n_lat}x{atm.n_lon}  tripole {trip.n_lat}x{trip.n_lon} "
           f"(fold cap_j={trip.fold.cap_j})")
 

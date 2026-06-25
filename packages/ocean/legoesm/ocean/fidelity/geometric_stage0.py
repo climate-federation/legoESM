@@ -4,7 +4,7 @@ Both the truth generator (``scripts/run/run_geometric_stage0.py``) and the ETKI
 recovery loop (``scripts/run/run_geometric_stage0_etki.py``) build the same 2°
 Veros-ACC + GEOMETRIC-closure free run, seed the same AB2 + rigid-lid carries,
 step it the same way, and reduce the same observable maps — so that machinery
-lives here once (``docs/planning/geometric_calibration_campaign.md`` §3-4).
+lives here once (``docs/dev-notes/planning/geometric_calibration_campaign.md`` §3-4).
 
 Observation vector (§3.2): equal-weighted, per-field-normalized spatial maps of
 the time-MEAN and temporal-STD of T, S, ψ and the depth-integrated EKE. ψ (not η)

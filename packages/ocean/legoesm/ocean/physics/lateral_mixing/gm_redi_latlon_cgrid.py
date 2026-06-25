@@ -47,6 +47,7 @@ from legoesm.ocean.eos import (
 )
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
+    EPS_DIV as _EPS_DIV,
     compute_eke_kappa_gm,
     compute_visbeck_kappa_gm,
     dm95_taper,
@@ -58,9 +59,9 @@ from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 
-# Division-guard epsilon — larger than float32 machine eps to prevent
-# intermediate blow-up in the backward pass (see plan §7, AD safety).
-_EPS_DIV = 1e-10
+# Division-guard epsilon (shared _gm_redi_common.EPS_DIV = 1e-10, #518 item 11):
+# larger than float32 machine eps to prevent intermediate blow-up in the
+# backward pass (see plan §7, AD safety).
 # Salinity floor [PSU] applied ONLY to the inputs of EOS *differentiation*
 # (jax.grad): a sqrt(S)-bearing EOS (TEOS-10 gsw) has an unbounded ∂ρ/∂S at
 # exactly S=0, so jax.grad returns NaN there — and NaN survives the

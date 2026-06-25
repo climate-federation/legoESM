@@ -791,10 +791,14 @@ def _spectral_state_loss_components(
     a recomputation.  Each family already includes the user-supplied
     ``w_*`` weights and the per-variable scale normalisation:
 
-    - ``mse``      : Σ_v w_v · <(pred - target)² · lev_w> / scale²
+    - ``mse``      : Σ_v w_v · <(pred - target)²>_area / scale²
     - ``bias``     : Σ_v w_bias_v · (area-weighted mean error)² / scale²
-    - ``crps``     : Σ_v w_crps_v · <|pred - target| · lev_w> / scale
+    - ``crps``     : Σ_v w_crps_v · <|pred - target|>_area / scale
                      (grid-space M=1 fair-CRPS = MAE)
+
+    ``<·>_area`` is the Gaussian-latitude + level weighted mean (the same
+    weighting as the bias term); a plain ``jnp.mean`` would over-weight the
+    poles.
     - ``spec_crps``: Σ_v w_spec_crps_v · <|SH(pred - target)|> / scale
                      (spectral M=1 fair-CRPS, requires JAX_ENABLE_X64=True)
 
@@ -831,10 +835,12 @@ def _spectral_state_loss_components(
     else:
         T_norm = wind_norm = q_norm = ps_norm = 1.0
 
-    # Latitude-weighted mean over the Gaussian grid for the bias-
-    # penalty term.  ``grid.weights`` are Gaussian-quadrature
-    # latitude weights; combined with uniform longitude weighting
-    # this gives an area-weighted global mean.
+    # Latitude-weighted mean over the Gaussian grid, used by the bias
+    # penalty AND the MSE / CRPS terms below.  ``grid.weights`` are
+    # Gaussian-quadrature latitude weights; combined with uniform
+    # longitude weighting this gives an area-weighted global mean. Using a
+    # plain ``jnp.mean`` for the MSE/CRPS over-weights the poles (the
+    # Gaussian rows shrink toward the pole) and contradicts the bias term.
     lat_w = grid.weights.astype(jnp.float32)
     lat_w_sum = jnp.sum(lat_w)
 
@@ -861,7 +867,7 @@ def _spectral_state_loss_components(
 
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
-    mse_loss = mse_loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
+    mse_loss = mse_loss + config.w_T * _area_weighted_mean_3d(dT ** 2) / T_norm
     if config.w_bias_T > 0.0:
         bias_T = _area_weighted_mean_3d(dT)
         bias_loss = bias_loss + config.w_bias_T * bias_T ** 2 / T_norm
@@ -869,8 +875,8 @@ def _spectral_state_loss_components(
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
     dv = fields['v'].astype(jnp.float32) - target_carry.v
-    mse_loss = mse_loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
-    mse_loss = mse_loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
+    mse_loss = mse_loss + config.w_u * _area_weighted_mean_3d(du ** 2) / wind_norm
+    mse_loss = mse_loss + config.w_v * _area_weighted_mean_3d(dv ** 2) / wind_norm
     if config.w_bias_u > 0.0:
         bias_u = _area_weighted_mean_3d(du)
         bias_loss = bias_loss + config.w_bias_u * bias_u ** 2 / wind_norm
@@ -891,11 +897,11 @@ def _spectral_state_loss_components(
     wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
     ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
     if config.w_crps_T > 0.0:
-        crps_loss = crps_loss + config.w_crps_T * jnp.mean(jnp.abs(dT) * lev_w) / T_scale
+        crps_loss = crps_loss + config.w_crps_T * _area_weighted_mean_3d(jnp.abs(dT)) / T_scale
     if config.w_crps_u > 0.0:
-        crps_loss = crps_loss + config.w_crps_u * jnp.mean(jnp.abs(du) * lev_w) / wind_scale
+        crps_loss = crps_loss + config.w_crps_u * _area_weighted_mean_3d(jnp.abs(du)) / wind_scale
     if config.w_crps_v > 0.0:
-        crps_loss = crps_loss + config.w_crps_v * jnp.mean(jnp.abs(dv) * lev_w) / wind_scale
+        crps_loss = crps_loss + config.w_crps_v * _area_weighted_mean_3d(jnp.abs(dv)) / wind_scale
 
     # Spectral-space CRPS (M=1 = MAE of coefficient differences).  Same
     # normalisation convention as the grid CRPS: scale (not scale²).
@@ -918,9 +924,9 @@ def _spectral_state_loss_components(
 
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
-    mse_loss = mse_loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
+    mse_loss = mse_loss + config.w_ps * _area_weighted_mean_2d(dp ** 2) / ps_norm
     if config.w_crps_ps > 0.0:
-        crps_loss = crps_loss + config.w_crps_ps * jnp.mean(jnp.abs(dp)) / ps_scale
+        crps_loss = crps_loss + config.w_crps_ps * _area_weighted_mean_2d(jnp.abs(dp)) / ps_scale
     if config.w_bias_ps > 0.0:
         bias_ps = _area_weighted_mean_2d(dp)
         bias_loss = bias_loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
@@ -939,7 +945,7 @@ def _spectral_state_loss_components(
             _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
         ).astype(jnp.float32)
         dq = qv_grid - target_carry.q_v
-        mse_loss = mse_loss + config.w_q * jnp.mean(dq ** 2 * lev_w) / q_norm
+        mse_loss = mse_loss + config.w_q * _area_weighted_mean_3d(dq ** 2) / q_norm
         # CRPS / MAE term for q (M=1 fair-CRPS limit).  The tails of
         # the q error distribution are wider than for T or wind --
         # convective + microphysical noise concentrates errors in
@@ -949,7 +955,7 @@ def _spectral_state_loss_components(
         # contributions live in commensurate units.
         q_scale = config.q_scale if config.normalize_by_scale else 1.0
         if getattr(config, "w_crps_q", 0.0) > 0.0:
-            crps_loss = crps_loss + config.w_crps_q * jnp.mean(jnp.abs(dq) * lev_w) / q_scale
+            crps_loss = crps_loss + config.w_crps_q * _area_weighted_mean_3d(jnp.abs(dq)) / q_scale
         # Spectral CRPS for q.  Penalises errors in the spectral
         # pattern of humidity that grid-MAE underweights when the
         # error is concentrated at small scales (convective noise).

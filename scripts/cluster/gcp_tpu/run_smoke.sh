@@ -2,7 +2,7 @@
 # Cheap cubed-sphere smoke test ON a small (4-chip) Cloud TPU VM.
 #
 # Generation-agnostic: run it on whatever 4-chip slice you created
-# (v6e-4 default per docs/scaling/scaling_tpu.md, or v5litepod-4).
+# (v6e-4 default per docs/performance/scaling/scaling_tpu.md, or v5litepod-4).
 #
 # Purpose: a fast, low-cost "does it run on real TPU hardware at all" check
 # before committing to a full 8-chip scaling sweep.  This is NOT a meaningful
@@ -10,7 +10,7 @@
 #
 # On a 4-chip VM the valid cubed-sphere device counts are 1 and 2 only:
 # face sharding needs a divisor of the 6-face layout, and neither 4 nor 8
-# divides 6 (see docs/scaling/scaling_tpu.md).  So this sweeps 1 -> 2 chips
+# divides 6 (see docs/performance/scaling/scaling_tpu.md).  So this sweeps 1 -> 2 chips
 # (2 of the 4 chips idle) at C24/L10 with float32.
 #
 # Run from the repo root on the TPU VM (after setup_env.sh):

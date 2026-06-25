@@ -225,7 +225,7 @@ def _run_veros_bridged(years, template_state):
 
 _KNOWN_DIFFERENCES = """\
 Known model-formulation differences (the deltas below should be read in this
-context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
+context; see docs/ocean/fidelity/oracle_recipe_strategy.md §8):
   0. Bottom drag: now FAITHFULLY mapped (dissipation audit, 2026-05-29). Veros applies
      r_bot=1e-5 as a RATE on the bottom cell (no /dz); legoESM uses -r*u/h_bot, so the
      recipe now sets bottom_drag_r=r_bot*h_bot~2.76e-3 (the prior r=1e-5 was ~276x too

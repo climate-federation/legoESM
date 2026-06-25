@@ -55,7 +55,7 @@ def test_pseudo_lat_is_zero_for_metric_self_consistency():
     ``y_c/radius`` pseudo-lat would leave a ``1-cos(y_c/radius)`` (~1.8% at
     ``|y_c|/radius=0.19``) grad<->div metric mismatch that makes the implicit
     free surface non-conservative and flips the marginally-resolved gyre
-    turbulent (docs/ocean_fidelity/mitgcm_gyre_energy_conservation.md, the
+    turbulent (docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md, the
     iteration-7 resolution)."""
     # A tall box (y up to ~1e6 m) is exactly where the old y_c/radius pseudo-lat
     # reached |lat|~0.19 rad and the cos(lat) error bit.

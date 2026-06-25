@@ -40,6 +40,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_coupled")
 
+_LAND_SCHEMES = ("slab", "multilayer")
+
+
+def land_scheme_overrides(land_scheme: str) -> dict:
+    """CoupledConfig overrides selecting the land surface model.
+
+    The coupler dispatches on the land-config TYPE, so the (land_mode,
+    land_config) pair must agree: ``MultiLayerLandConfig`` -> 8-layer soil
+    thermal + Richards soil-moisture column tile; ``LandConfig`` -> 1-layer slab.
+    Raises on an unknown scheme (dispatch hardening)."""
+    from legoesm.land.config import LandConfig, MultiLayerLandConfig
+    if land_scheme == "multilayer":
+        return {"land_mode": "multilayer", "land_config": MultiLayerLandConfig()}
+    if land_scheme == "slab":
+        return {"land_mode": "slab", "land_config": LandConfig()}
+    raise ValueError(
+        f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
+
 
 #: Max atm-ocean coupling interval [days] for the dynamic 3D ocean.  diag_days
 #: sets the integration segment length and the coupler fires once per segment,
@@ -81,6 +99,10 @@ def _find_latest_checkpoint(output_dir):
 
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
+    # Central microphysics literal set — keep the CLI allowlist in sync with
+    # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
+    from legoesm.driver.config import VALID_MICROPHYSICS
+
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -235,6 +257,7 @@ def build_parser():
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
+                        choices=list(VALID_MICROPHYSICS),
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
                              "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
@@ -277,6 +300,28 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    parser.add_argument("--land-scheme", choices=_LAND_SCHEMES,
+                        default=None,
+                        help="Override the preset's land surface model. 'slab' = "
+                             "1-layer bucket; 'multilayer' = 8-layer soil thermal + "
+                             "Richards soil moisture (column land). Both route through "
+                             "the coupler land tile. Default (unset): keep the preset's "
+                             "land (e.g. full_coupled=multilayer). --ocean-ic woa "
+                             "defaults to slab when unset.")
+    parser.add_argument("--land-params", choices=("analytical", "clm"),
+                        default="clm",
+                        help="Spatial land parameters when land is active. 'clm' "
+                             "(default) = CLM reference surfdata: real global PFT "
+                             "classification + reference soil map (downloaded + "
+                             "cached on first use). 'analytical' = latitude-band "
+                             "PFT fractions, no soil map.")
+    parser.add_argument("--land-diurnal-surface", dest="land_diurnal_surface",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Coupled diurnal surface model for multilayer land (ON "
+                             "by default): physical Monin-Obukhov (MOST) surface "
+                             "exchange + Farquhar photosynthesis-stomata coupling.  "
+                             "--no-land-diurnal-surface reverts to a constant bulk "
+                             "coefficient + soil-only beta.")
     parser.add_argument("--snow-albedo-feedback", dest="snow_albedo_feedback",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Enable the land snow-albedo feedback + latitude-"
@@ -362,6 +407,13 @@ def build_parser():
                              "coupled via the Phase-2 cross-grid conservative "
                              "remap, using the OMIP-validated cold-start recipe. "
                              "The land mask + bathymetry come from this file.")
+    parser.add_argument(
+        "--fold-convention", default="auto",
+        choices=["auto", "n_lon-1-i", "(n_lon-i)%n_lon"],
+        help="Tripole T-fold seam origin (default auto). 'auto' raises on a "
+             "genuinely ambiguous (near-constant) fold row; pass the convention "
+             "explicitly for such a mesh ('n_lon-1-i' halo-inclusive eORCA1.2, "
+             "'(n_lon-i)%%n_lon' de-haloed eORCA025).")
 
     # Atmosphere initial condition.  CRITICAL for realism: the bare
     # ExperimentConfig default ic="default" is a UNIFORM T_init (~isothermal
@@ -640,22 +692,24 @@ def main():
             # cross-grid remap; _init_tripole_dynamic_ocean clones the OMIP
             # cold-start recipe and reads mask+bathy from this same mesh).
             from legoesm.grids.tripole import create_tripole_grid
-            ocean_grid_obj = create_tripole_grid(args.tripole_mesh)
+            ocean_grid_obj = create_tripole_grid(
+                args.tripole_mesh, fold_convention=args.fold_convention)
             overrides["tripole_mesh_path"] = args.tripole_mesh
             logger.info(f"  Ocean grid: TRIPOLE from {args.tripole_mesh} "
                         f"({ocean_grid_obj.n_lat}x{ocean_grid_obj.n_lon}); "
                         f"atm lat-lon -> tripole cross-grid remap")
         if args.ocean_ic == "woa":
             # Realistic WOA cold start: observed T/S + WOA-derived continents.
-            from legoesm.land.config import LandConfig
             overrides["woa_t_path"] = args.woa_t_path
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
-            # and enable a slab land tile over the continents (f_land>0 with
+            # and enable a land tile over the continents (f_land>0 with
             # land_mode='none' would try to run an unused land model).
             overrides["f_land_mode"] = "from_ocean"
-            overrides["land_mode"] = "slab"
-            overrides["land_config"] = LandConfig()
+            # Select the land surface model (coupler dispatches on the config
+            # type: MultiLayerLandConfig -> Richards column tile, else slab).
+            # woa defaults to slab when --land-scheme is unset.
+            overrides.update(land_scheme_overrides(args.land_scheme or "slab"))
             # With real continents the atmospheric radiative surface boundary
             # SHOULD be the tile-blended (land+ocean) skin T / albedo, not the
             # ocean SST everywhere (else land cells radiate at the dynamic-ocean
@@ -683,6 +737,18 @@ def main():
         overrides["ocean_mode"] = "slab"
     if args.co2_init != 415.0:
         overrides["co2_ppmv_init"] = args.co2_init
+
+    # Spatial land parameters: CLM reference map (real PFT + soil) by default.
+    overrides["land_param_source"] = args.land_params
+    if args.land_params == "clm":
+        overrides["use_pft"] = True
+    overrides["land_diurnal_surface"] = args.land_diurnal_surface
+
+    # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
+    # (the woa branch already applied its own default above; re-applying the same
+    # explicit value is idempotent). Unset -> keep the preset's land choice.
+    if args.land_scheme is not None:
+        overrides.update(land_scheme_overrides(args.land_scheme))
 
     coupled_cfg = PRESETS[args.preset](**overrides)
 

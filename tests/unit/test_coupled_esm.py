@@ -355,5 +355,31 @@ class TestPresetConfigs(unittest.TestCase):
             self.assertTrue(cfg.co2_tracer, f"{name} should have co2_tracer")
 
 
+class TestLandModeDispatch(unittest.TestCase):
+    """PR A: the coupled driver's land_mode dispatch (``_init_coupler``) used a
+    bare ``else`` that silently selected slab for any unknown mode. It now raises
+    on an unknown mode — defense-in-depth behind ``land_scheme_overrides`` (which
+    already guards the CLI path)."""
+
+    def test_unknown_land_mode_raises(self):
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        )
+        from legoesm.driver.coupled_config import preset_aquaplanet
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+        atm_config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            output=OutputConfig(diag_days=1),
+            radiation="gray",
+            days=1,
+        )
+        coupled_cfg = preset_aquaplanet(land_mode="bogus_mode")
+        driver = CoupledESMDriver(atm_config, coupled_cfg)
+        with self.assertRaisesRegex(ValueError, "(?i)unknown land_mode"):
+            driver.setup()
+
+
 if __name__ == "__main__":
     unittest.main()

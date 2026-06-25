@@ -68,3 +68,14 @@ class ConvectionOutput(NamedTuple):
     convective_mask: jax.Array
     du_dt_conv: jax.Array | None = None
     dv_dt_conv: jax.Array | None = None
+    dq_r_conv_dt: jax.Array | None = None
+    """Optional convective source for RAIN mixing ratio [kg/kg/s], shape
+    (ncol, nlev).  ``None`` (default) for schemes that detrain all
+    condensate as cloud water.  Tiedtke's in-updraft precipitation (the
+    1989 ``c0`` conversion) splits the plume condensate: the precipitated
+    fraction is emitted here as rain -- a *precipitating* species that
+    sediments out via microphysics and is invisible to radiation (which
+    sees only ``q_c``/``q_i``) -- while the anvil remainder stays in
+    ``dq_c_conv_dt``.  Without this split, 100% of convective condensate
+    loads the grid-scale cloud and the radiation, which microphysics
+    cannot drain fast enough (source-buffered)."""

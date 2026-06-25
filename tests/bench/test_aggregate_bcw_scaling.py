@@ -100,6 +100,29 @@ def test_ingests_nested_ocean_schema(tmp_path):
     assert r["backend"] == "CPU" and r["n_devices"] == 16 and r["mode"] == "strong"
 
 
+def test_ingests_nested_atm_report(tmp_path):
+    # run_levante_gpu_scaling.py writes a nested report with mode 'strong'
+    # (NOT 'ocean_*'); each result carries grid_type + n_gpus. It must be
+    # flattened as component='atm' with the right grid, not dropped.
+    d = tmp_path / "scaling" / "20260624T2252Z"
+    payload = {
+        "backend": "GPU", "mode": "strong", "precisions": ["float32"],
+        "results": [{
+            "n_gpus": 2, "resolution": 96, "n_levels": 26, "precision": "float32",
+            "mode": "strong", "physics_level": "none", "grid_type": "cubed-sphere",
+            "sypd": 12.5, "mcells_per_s": 240.0, "total_cells": 1492992,
+            "time_per_step_ms": 6.8,
+        }],
+    }
+    _write(d, "strong_scaling.json", payload)
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["component"] == "atm" and r["grid"] == "cubed-sphere"
+    assert r["backend"] == "GPU" and r["n_devices"] == 2 and r["n_resource"] == 2
+    assert r["case"] == "dry" and r["mode"] == "strong" and r["sypd"] == 12.5
+
+
 def test_multi_root_collect(tmp_path):
     a = tmp_path / "bcw_scaling" / "dry_icosahedral_cpu_np16_1"
     o = tmp_path / "scaling_cpu_ocean"
@@ -131,3 +154,19 @@ def test_skips_non_case_json(tmp_path):
     _write(d, "case.json", _case("icosahedral", "none", "strong", 5, 16, "float64", 29.4))
     rows, _ = agg.collect(tmp_path)
     assert len(rows) == 1
+
+
+def test_unknown_nested_schema_is_skipped_not_atm(tmp_path):
+    # A nested {results:[...]} report that is NEITHER ocean (mode 'ocean_*') NOR
+    # the atm harness (no grid_type / physics_level markers) must be SKIPPED, not
+    # silently mislabeled component='atm' (codex review of the else->atm default).
+    d = tmp_path / "scaling" / "mystery"
+    payload = {
+        "backend": "GPU", "mode": "strong",
+        "results": [{"n_gpus": 2, "resolution": 96, "precision": "float32",
+                     "mode": "strong", "sypd": 9.0, "mcells_per_s": 100.0,
+                     "total_cells": 1000}],   # NO grid_type, NO physics_level
+    }
+    _write(d, "strong_scaling.json", payload)
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []                          # skipped, not flattened as atm

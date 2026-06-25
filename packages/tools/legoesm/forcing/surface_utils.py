@@ -61,6 +61,45 @@ def blend_surface_property(
     return sic * value_ice + (1.0 - sic) * value_ocean
 
 
+def snow_fraction(
+    T_low: jnp.ndarray,
+    T_freeze: float,
+    transition_center_offset_K: float = 2.0,
+    transition_width_K: float = 4.0,
+) -> jnp.ndarray:
+    """Smooth rain/snow partition fraction (Wigmosta 1994 / Dai 2008).
+
+    Linear ramp from 0 (all rain) at
+    ``T_low = T_freeze + transition_center_offset_K`` down to 1 (all snow)
+    at ``T_low = T_freeze + transition_center_offset_K - transition_width_K``.
+    Replaces the hard step ``where(T_low < T_freeze, 1, 0)``, which zeroes
+    ``d(snow)/d(T_low)`` on training/DA paths and miscounts mixed-phase
+    precipitation in the 0–4 °C band. Single source of truth shared by the
+    coupled and earth-system drivers so the two cannot silently diverge.
+
+    Parameters
+    ----------
+    T_low : array
+        Lowest-model-level air temperature [K].
+    T_freeze : float
+        Freezing point [K] (pass ``constants.T_freeze``).
+    transition_center_offset_K : float
+        Upper edge of the mixed-phase band above freezing [K] (default 2.0).
+    transition_width_K : float
+        Total width of the linear ramp [K] (default 4.0).
+
+    Returns
+    -------
+    snow_frac : array
+        Snow fraction in [0, 1].
+    """
+    return jnp.clip(
+        (T_freeze + transition_center_offset_K - T_low) / transition_width_K,
+        0.0,
+        1.0,
+    )
+
+
 def distribute_column_aod_to_layers(
     aod_col: jnp.ndarray,
     p_half_col: jnp.ndarray,

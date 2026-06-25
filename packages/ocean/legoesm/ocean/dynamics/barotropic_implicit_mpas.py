@@ -729,7 +729,7 @@ def barotropic_implicit_mpas(
     # rotational u_bar null mode that grows e-folding ~5 days
     # (project_mpas_etopo_instability.md).  Mirrors the explicit-substep
     # path (barotropic_mpas.py:272) and the lat-lon Follow-up C
-    # recommendation (docs/issues/barotropic_mode_noise.md §"Residual").
+    # recommendation (docs/dev-notes/issues/barotropic_mode_noise.md §"Residual").
     A_baro_visc = jnp.asarray(
         getattr(config, "barotropic_u_viscosity", 0.0), dtype=eta_dtype,
     )
