@@ -662,3 +662,18 @@ def test_triads_leaf_raises_with_plan_pointer():
     msg = str(exc_info.value)
     assert "gm_redi_tracer_tendency_triads_mpas" in msg
     assert "gm_redi_mpas_plan.md" in msg
+
+
+def test_validate_mpas_gm_redi_config_rejects_unsupported_fields():
+    """PR C #10: the MPAS GM/Redi path must REJECT (not silently no-op) a
+    lat-lon-C-grid-only GMRediConfig field, mirroring the cubed-sphere
+    validator. Setting e.g. implicit_K33 used to run the plain centered tensor
+    and ignore the requested physics."""
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+        validate_mpas_gm_redi_config,
+    )
+    # Default config touches only supported fields -> no raise.
+    validate_mpas_gm_redi_config(GMRediConfig())
+    # An advanced triad/skew option the MPAS path does not honor -> raise.
+    with pytest.raises(ValueError, match="(?i)does not support|unsupported"):
+        validate_mpas_gm_redi_config(GMRediConfig(implicit_K33=True))

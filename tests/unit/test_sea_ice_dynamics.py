@@ -2985,3 +2985,27 @@ class TestMulticatFullPipelineTracers:
         salt_mass = float(jnp.sum(state.S_ice.data * state.h_ice.data
                                   * state.concentration.data))
         assert jnp.isfinite(salt_mass) and salt_mass >= 0.0
+
+
+class TestEvpSolverInputGuards:
+    """PR C: evp_solver gained the fail-early input guards its mevp_solver
+    sibling already had — N_evp<1 / non-finite T_evp/e_yield/Delta_min raise
+    instead of silently no-op'ing or poisoning every gradient."""
+
+    def _args(self):
+        grid = _make_grid(4)
+        z = jnp.zeros((6, 4, 4))
+        # u,v,s11,s22,s12,h,conc,wu,wv,ou,ov, grid, dt
+        return (z, z, z, z, z, z, z, z, z, z, z, grid, 3600.0)
+
+    def test_n_evp_below_one_raises(self):
+        with pytest.raises(ValueError, match="N_evp"):
+            evp_solver(*self._args(), N_evp=0)
+
+    def test_non_finite_t_evp_raises(self):
+        with pytest.raises(ValueError, match="T_evp"):
+            evp_solver(*self._args(), N_evp=10, T_evp=float("nan"))
+
+    def test_non_finite_yield_raises(self):
+        with pytest.raises(ValueError, match="(?i)e_yield|Delta_min|finite"):
+            evp_solver(*self._args(), N_evp=10, e_yield=float("inf"))

@@ -95,7 +95,8 @@ class TestDatasetToArray:
         arr = _dataset_to_array(ds, cfg)
         assert arr.shape == (8, 16, 1)
 
-    def test_missing_variable_skipped(self):
+    def test_missing_variable_raises(self):
+        import pytest
         from legoesm.ml.data.era5_loader import _dataset_to_array, ERA5Config
 
         ds = self._make_mock_ds()
@@ -103,9 +104,11 @@ class TestDatasetToArray:
             variables=("geopotential", "nonexistent_variable"),
             levels=(1000, 500, 250),
         )
-        arr = _dataset_to_array(ds, cfg)
-        # Only geopotential (3 levels)
-        assert arr.shape == (8, 16, 3)
+        # An unresolvable variable now fails loud (was silently skipped, which
+        # yielded a short-channel array surfacing as a shape error far from the
+        # cause — PR C era5 fix).
+        with pytest.raises(ValueError, match="(?i)not found"):
+            _dataset_to_array(ds, cfg)
 
 
 class TestVariableResolution:
@@ -308,8 +311,10 @@ class TestLossFunctions:
         target = jnp.ones((4, 8, 2)) * 1.0
         weights = jnp.ones(4) / 4.0
         result = weighted_mae(pred, target, weights)
-        # mean(abs_err * w) = mean(2.0 * 0.25) = 0.5
-        assert float(result) == pytest.approx(0.5, abs=1e-6)
+        # PR C: weighted_mae now applies the n_lat/Σw resolution correction, so
+        # the area-weighted MAE of a CONSTANT error 2.0 is 2.0 (the constant)
+        # regardless of the weights — was an uncorrected 0.5 = mean(2·0.25).
+        assert float(result) == pytest.approx(2.0, abs=1e-6)
 
     def test_spectral_loss_zero(self):
         from legoesm.ml.loss import spectral_loss

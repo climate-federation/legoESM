@@ -46,8 +46,36 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     compute_visbeck_kappa_gm,
     dm95_taper_scalar,
     validate_adjoint_stabilization,
+    validate_gm_redi_supported_fields,
     vertical_flux_divergence,
 )
+
+# Fields the MPAS GM/Redi path actually honors (the centered small-slope tensor
+# with DM95 taper + Visbeck kappa, same as the cubed-sphere path; ``slope_scheme``
+# is honored for "centered" and raises NotImplementedError for "triads" below).
+# Anything else (slope_density, implicit_K33, K_iso_steep, double_redi_diagonal,
+# veros_triad_weights, surface_complement[_depth], eke) is lat-lon-C-grid-only and
+# would be a SILENT no-op here, so ``validate_mpas_gm_redi_config`` rejects it.
+_MPAS_SUPPORTED_FIELDS = frozenset({
+    "kappa_GM",
+    "kappa_Redi",
+    "S_max",
+    "taper_width_frac",
+    "visbeck",
+    "adjoint_stabilization",
+    "slope_scheme",
+})
+
+
+def validate_mpas_gm_redi_config(cfg: "GMRediConfig") -> None:
+    """Fail fast on a GMRediConfig field the MPAS GM/Redi path does not honor.
+
+    Mirror of ``validate_cubed_sphere_gm_redi_config`` (gm_redi.py) for the
+    Voronoi mesh, via the shared ``validate_gm_redi_supported_fields`` helper —
+    so setting a triad / surface-complement / EKE option is a loud ValueError
+    instead of a silent no-op running the plain centered tensor.
+    """
+    validate_gm_redi_supported_fields(cfg, _MPAS_SUPPORTED_FIELDS, "MPAS")
 from legoesm.ocean.vertical import compute_ocean_jacobian
 
 if TYPE_CHECKING:
@@ -548,6 +576,11 @@ def gm_redi_tracer_tendency_mpas(
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
+    # Fail loud on any GMRediConfig field the MPAS path does not honor (triad /
+    # surface-complement / EKE options) — was a silent no-op running the plain
+    # centered tensor. Static config check, JIT/grad-safe.
+    validate_mpas_gm_redi_config(cfg)
+
     if mask is None:
         mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
     if edge_mask is None:

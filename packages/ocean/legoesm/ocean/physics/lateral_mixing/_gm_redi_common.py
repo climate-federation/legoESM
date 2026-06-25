@@ -91,6 +91,31 @@ def validate_adjoint_stabilization(mode: str) -> None:
         )
 
 
+def validate_gm_redi_supported_fields(cfg, supported_fields, path_name: str) -> None:
+    """Fail fast on a ``GMRediConfig`` field a given grid path does not honor.
+
+    Shared by the cubed-sphere and MPAS GM/Redi validators: both implement only
+    the centered small-slope tensor (+ DM95 taper + Visbeck-adaptive kappa), so
+    a Veros-faithful triad / surface-complement / prognostic-EKE field set on
+    those paths would be a SILENT no-op. This raises ``ValueError`` for any
+    field NOT in ``supported_fields`` whose value differs from its config
+    default. Static-Python check on the config (no traced ops; JIT/grad-safe).
+    """
+    defaults = type(cfg)()
+    offending = sorted(
+        name for name in cfg._fields
+        if name not in supported_fields
+        and getattr(cfg, name) != getattr(defaults, name)
+    )
+    if offending:
+        raise ValueError(
+            f"The {path_name} GM/Redi path does not support these GMRediConfig "
+            f"field(s): {', '.join(offending)} (unsupported on this grid). They "
+            "are only honored by the lat-lon C-grid path (gm_redi_latlon_cgrid); "
+            "use that path or leave these fields at their GMRediConfig defaults."
+        )
+
+
 def dm95_taper(
     S_x: jnp.ndarray,
     S_y: jnp.ndarray,
