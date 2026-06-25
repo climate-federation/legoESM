@@ -362,3 +362,33 @@ class TestGradientYZeroPolarMetric:
         grad = jax.grad(
             lambda x: jnp.sum(gradient_y_cgrid(x, g0) ** 2))(f)
         assert bool(jnp.all(jnp.isfinite(grad))), "AD grad not finite"
+
+
+class TestCreateTripoleGridFoldDefault:
+    """PR B #4 (codex round-2): the public loader's default ``fold_convention=
+    'auto'`` must NOT hard-fail on an ambiguous (constant) fold row. The
+    synthetic mesh below has a constant fold row (gphit[-1] is uniform), so
+    ``_detect_fold('auto')`` would raise — the loader must instead warn and fall
+    back to the legacy ``n_lon-1-i`` origin so existing meshes keep loading."""
+
+    def test_default_auto_warns_and_loads_on_ambiguous_fold(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with pytest.warns(RuntimeWarning, match="(?i)ambiguous|falling back"):
+                geom = create_tripole_grid(path)
+        assert geom is not None  # loaded, no startup failure
+
+    def test_explicit_convention_silences_warning(self):
+        import warnings as _warnings
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("error")  # any warning becomes an error
+                geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
+        assert geom is not None

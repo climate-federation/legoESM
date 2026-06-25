@@ -344,12 +344,13 @@ def create_tripole_grid(
         Pass 0.0 to disable.
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
-        symmetry-detects it but tie-breaks silently to ``n_lon-1-i`` on a
-        near-constant fold-row latitude. Pass it EXPLICITLY for a de-haloed
-        mesh whose fold row is too flat to disambiguate
-        (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed meshes,
-        ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the choice
-        is still verified against the symmetry tolerance.
+        symmetry-detects it; on a genuinely ambiguous (near-constant) fold row
+        where both conventions fit equally it WARNS and falls back to the legacy
+        ``"n_lon-1-i"`` origin (backward-compatible) instead of failing. Pass it
+        EXPLICITLY for a de-haloed mesh whose fold row is too flat to
+        disambiguate (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed meshes,
+        ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes) to silence the
+        warning; the choice is still verified against the symmetry tolerance.
 
     Returns
     -------
@@ -426,9 +427,30 @@ def create_tripole_grid(
     f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
     f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
 
-    # Fold descriptor
-    fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
-                        fold_convention=fold_convention)
+    # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
+    # (near-constant) fold row under "auto" so internal callers cannot silently
+    # get the wrong seam origin. The PUBLIC loader stays backward-compatible: on
+    # that ambiguity it WARNS loudly and falls back to the legacy "n_lon-1-i"
+    # origin (the historical auto tie-break) rather than failing at startup.
+    # Real ORCA meshes have a curved (non-constant) fold row and never hit this;
+    # pass fold_convention explicitly to silence the warning and pick the
+    # correct origin for a de-haloed mesh. Non-ambiguity errors still propagate.
+    try:
+        fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                            fold_convention=fold_convention)
+    except ValueError as exc:
+        if fold_convention != "auto" or "Ambiguous fold_convention" not in str(exc):
+            raise
+        import warnings
+        warnings.warn(
+            f"{exc} Falling back to the legacy 'n_lon-1-i' fold origin; pass "
+            "fold_convention explicitly to choose the correct origin for a "
+            "de-haloed mesh and silence this warning.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                            fold_convention="n_lon-1-i")
 
     # Rotation angles
     glamu = raw.get("glamu", glamt)
