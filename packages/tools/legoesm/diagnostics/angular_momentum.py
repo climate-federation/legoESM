@@ -224,28 +224,13 @@ def aam_drift_nh(state_old, state_new, grid, hc) -> float:
 # =============================================================================
 
 
-def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 604: AAM from a FV3HydrostaticState.
+def _aam_column_pe(state, grid, coord) -> jax.Array:
+    """Per-column PE absolute angular momentum [kg·m²/s] as a traced JAX array
+    — the un-reduced core of :func:`aam_from_pe_state`.
 
-    PE mirror of iter-587's ``aam_from_nh_state``.  Differences:
-    - Winds u_d, v_d on D-grid corners (shape (face, n+1, n+1, nlev));
-      averaged to cell-center via 4-point average.
-    - Column mass from hybrid coord: ``delp = A·p_ref + B·p_s``,
-      ``dm = delp · area / g`` (kg per cell).
-    - Face-local (u, v) at cell-center → rotated to u_east via
-      ``u_east = cos(angle)·u - sin(angle)·v``.
-
-    Faithful to FV3 compute_aam hydrostatic branch.
-
-    Parameters
-    ----------
-    state : FV3HydrostaticState
-    grid : CubedSphereGrid
-    coord : HybridSigmaPressureCoordinate
-
-    Returns
-    -------
-    aam_column, aam_total
+    Kept separate so the differentiable ``apply_aam_correction_pe`` can sum it
+    under trace, without the host ``float()`` the public diagnostic applies to
+    its scalar total.
     """
     # iter-46: promote to fp64 budget accumulator (see NH twin).
     from legoesm.core.conservation import conservation_accumulator
@@ -283,10 +268,37 @@ def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, jax.Array]:
     aam_cell = (r2[..., None] * omega_acc
                 + r1[..., None] * u_east) * dm
     aam_column = jnp.sum(aam_cell, axis=-1)            # (6, n, n)
-    # Total as a TRACED 0-d array (no host ``float()``) so the AAM correction's
-    # Newton sweep stays jit/grad-safe; callers wanting a host scalar float() it.
-    aam_total = jnp.sum(aam_column)
-    return aam_column, aam_total
+    return aam_column
+
+
+def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
+    """FV3_3D iter 604: AAM from a FV3HydrostaticState.
+
+    PE mirror of iter-587's ``aam_from_nh_state``.  Differences:
+    - Winds u_d, v_d on D-grid corners (shape (face, n+1, n+1, nlev));
+      averaged to cell-center via 4-point average.
+    - Column mass from hybrid coord: ``delp = A·p_ref + B·p_s``,
+      ``dm = delp · area / g`` (kg per cell).
+    - Face-local (u, v) at cell-center → rotated to u_east via
+      ``u_east = cos(angle)·u - sin(angle)·v``.
+
+    Faithful to FV3 compute_aam hydrostatic branch.
+
+    Parameters
+    ----------
+    state : FV3HydrostaticState
+    grid : CubedSphereGrid
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    aam_column : jax.Array, shape (6, n, n)
+        Per-column absolute angular momentum [kg·m²/s].
+    aam_total : float
+        Globally-integrated AAM [J·s] (host scalar).
+    """
+    aam_column = _aam_column_pe(state, grid, coord)
+    return aam_column, float(jnp.sum(aam_column))
 
 
 def aam_drift_pe(state_old, state_new, grid, coord) -> float:
@@ -301,7 +313,7 @@ def aam_drift_pe(state_old, state_new, grid, coord) -> float:
     """
     _, aam_old = aam_from_pe_state(state_old, grid, coord)
     _, aam_new = aam_from_pe_state(state_new, grid, coord)
-    return float(aam_new - aam_old)
+    return aam_new - aam_old
 
 
 # Fixed Newton sweeps for the PE AAM correction (a COUNT, never config): the
@@ -333,7 +345,7 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     state_corrected : FV3HydrostaticState
         State with u_d, v_d adjusted; other fields unchanged.
     """
-    _, aam_target = aam_from_pe_state(state_old, grid, coord)  # traced scalar
+    aam_target = jnp.sum(_aam_column_pe(state_old, grid, coord))  # traced scalar
 
     # iter-46: promote to fp64 budget accumulator for M_fac integral.
     from legoesm.core.conservation import conservation_accumulator
@@ -366,7 +378,7 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     # ``float()``) so the whole correction is jit/grad-safe. M_fac_total is the
     # physical R²·cos²·mass integral (strictly > 0), so the divide is safe.
     def _newton_step(_, state_curr):
-        _, aam_curr = aam_from_pe_state(state_curr, grid, coord)
+        aam_curr = jnp.sum(_aam_column_pe(state_curr, grid, coord))
         amdt = aam_curr - aam_target
         u0 = -grid.radius * amdt / M_fac_total
         delta_u_face_2d = cos_a_c * u0 * cos_lat

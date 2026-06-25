@@ -27,28 +27,13 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
-def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, jax.Array]:
-    """Compute per-column and total PE hydrostatic total energy.
+def _te_column_pe(state, grid, coord) -> jax.Array:
+    """Per-column PE hydrostatic total energy × area [J/cell] as a traced JAX
+    array — the un-reduced core of :func:`compute_total_energy_pe`.
 
-    Faithful to FV3 fv_mapz.F90:1127-1152 (hydrostatic branch) using
-    legoESM PE state conventions:
-    - T from state.T.data (cell-centered, mid-level)
-    - p_s from state.p_s.data (cell-centered, surface pressure)
-    - phis = state.phis.data (surface geopotential)
-    - u_d, v_d from D-grid corners → averaged to cell-center for KE
-
-    Parameters
-    ----------
-    state : FV3HydrostaticState
-    grid : CubedSphereGrid (needs area)
-    coord : HybridSigmaPressureCoordinate (A_half, B_half, dA, dB)
-
-    Returns
-    -------
-    te_column : jax.Array, shape (6, n, n)
-        Per-column total energy times area [J/cell].
-    te_total : float
-        Globally-integrated total energy [J].
+    Kept separate so the differentiable ``apply_te_correction_pe`` can sum it
+    under trace, without the host ``float()`` the public diagnostic applies to
+    its scalar total.
     """
     n_face, n, _ = state.p_s.data.shape
     nlev = state.T.data.shape[-1]
@@ -119,11 +104,34 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, jax.Array]:
     # Multiply by area for J per column (delp already kg·m/s²/m² → J/m² when
     # times specific energy).  FV3's te_2d before area mult is in J/m².
     te_column = te * grid.area.astype(acc)
-    # Return the total as a TRACED 0-d array (no host ``float()``), so the
-    # energy-correction Newton solve below stays jit/grad-safe. Callers wanting
-    # a host scalar do ``float(te_total)`` (e.g. ``te_drift_pe``).
-    te_total = jnp.sum(te_column)
-    return te_column, te_total
+    return te_column
+
+
+def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
+    """Compute per-column and total PE hydrostatic total energy.
+
+    Faithful to FV3 fv_mapz.F90:1127-1152 (hydrostatic branch) using
+    legoESM PE state conventions:
+    - T from state.T.data (cell-centered, mid-level)
+    - p_s from state.p_s.data (cell-centered, surface pressure)
+    - phis = state.phis.data (surface geopotential)
+    - u_d, v_d from D-grid corners → averaged to cell-center for KE
+
+    Parameters
+    ----------
+    state : FV3HydrostaticState
+    grid : CubedSphereGrid (needs area)
+    coord : HybridSigmaPressureCoordinate (A_half, B_half, dA, dB)
+
+    Returns
+    -------
+    te_column : jax.Array, shape (6, n, n)
+        Per-column total energy times area [J/cell].
+    te_total : float
+        Globally-integrated total energy [J] (host scalar).
+    """
+    te_column = _te_column_pe(state, grid, coord)
+    return te_column, float(jnp.sum(te_column))
 
 
 def te_drift_pe(state_old, state_new, grid, coord) -> float:
@@ -142,7 +150,7 @@ def te_drift_pe(state_old, state_new, grid, coord) -> float:
     """
     _, te_old = compute_total_energy_pe(state_old, grid, coord)
     _, te_new = compute_total_energy_pe(state_new, grid, coord)
-    return float(te_new - te_old)
+    return te_new - te_old
 
 
 # Fixed Newton sweeps for the PE total-energy correction. A COUNT (never
@@ -182,7 +190,7 @@ def apply_te_correction_pe(state_old, state_new, grid, coord):
     Bit-for-bit identical to state_new when te_dt = 0.
     Differentiable end-to-end.
     """
-    _, te_target = compute_total_energy_pe(state_old, grid, coord)  # traced scalar
+    te_target = jnp.sum(_te_column_pe(state_old, grid, coord))  # traced scalar
 
     # PE TE includes a hydrostatic boundary-work term that depends on T (via phi
     # from hydrostatic integration), so the effective heat capacity is NOT
@@ -192,12 +200,12 @@ def apply_te_correction_pe(state_old, state_new, grid, coord):
     dT_probe = 1.0e-3
 
     def _newton_step(_, state_curr):
-        _, te_curr = compute_total_energy_pe(state_curr, grid, coord)
+        te_curr = jnp.sum(_te_column_pe(state_curr, grid, coord))
         residual = te_curr - te_target
         state_probe = state_curr._replace(
             T=state_curr.T.replace(data=state_curr.T.data + dT_probe),
         )
-        _, te_probe = compute_total_energy_pe(state_probe, grid, coord)
+        te_probe = jnp.sum(_te_column_pe(state_probe, grid, coord))
         dTE_dT = (te_probe - te_curr) / dT_probe
         # Guard a (near-)singular Jacobian with a where-select, NOT a break.
         dT_step = jnp.where(jnp.abs(dTE_dT) < 1e-30, 0.0, -residual / dTE_dT)
