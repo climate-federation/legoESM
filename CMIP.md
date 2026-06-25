@@ -458,6 +458,27 @@ fundamental residual) via the moisture budget (evap vs precip efficiency).
 The deliverable (stable, realistic-SST, non-collapsing 3D-ocean coupled run from
 WOA IC) STANDS; full energy closure is the refinement.
 
+**Restoring-strength study CONCLUDED (τ=5d vs τ=15d, both 120d):**
+
+| metric        | τ=5 d (8565679) | τ=15 d (8566931) |
+|---------------|-----------------|------------------|
+| R_TOA         | −18.4           | **−13.6** (better) |
+| SST drift     | **14.2** K/yr   | 18.8 K/yr (more)  |
+| CWV           | **16.8→19.5**   | 11.3 (drier)      |
+| column-T d120 | **257.6**       | 253.0 (colder)    |
+| SST mean      | **286.1 (trop 300.8)** | 284.4 (trop 297.9) |
+| max_v         | **22.1**        | 17.6 (weaker)     |
+
+**τ=5 d is the recommended config.** Weaker restoring (τ=15 d) buys ~5 W/m²
+better R_TOA but pays a colder, drier, weaker-circulation climate that drifts
+MORE from WOA (18.8 vs 14.2 K/yr) — less realistic on every climate metric. The
+R_TOA −18 at τ=5 d is the accepted flux-correction cost of holding realistic
+SST. **The root residual shared by BOTH (and by the slab runs) is the DRY
+ATMOSPHERE** (CWV ≪ Earth's ~25) ⇒ weak greenhouse ⇒ R_TOA<0. That moisture
+deficit — not the restoring strength — is the fundamental next lever (moisture
+budget: evap/precip efficiency; or multi-month integration as the atm moistens,
+CWV already re-rising 16.7→19.5 over Days 60–120 at τ=5 d).
+
 ## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
 User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
 (COARE is itself a MOST algorithm; the split is generic-MOST for the simple
