@@ -280,21 +280,17 @@ def train_physics_params(
         )
 
     params = TrainablePhysicsParams.from_defaults()
-    # Radiation sub-cycling in the DIFFERENTIATED rollout.  build_segment_fn
-    # only engages its nested outer-rad x inner-no-rad scan (rrtmgp OUT of the
-    # hot inner body, so its reverse-mode runs ~n_steps/rad_update_steps times
-    # instead of EVERY step) when given BOTH a fresh-rad step and a no-rad
-    # step.  Without step_unified_no_rad the sub-cycle is silently inert and
-    # rrtmgp is back-propped every step — the cost the old spectral training
-    # path avoided (rrtmgp gated ~once per rad interval), i.e. the main reason
-    # the new lat-lon path is slow.  static_need_rad makes each step's
-    # radiation branch a compile-time constant (no per-step lax.cond).
+    # NB radiation sub-cycling: the ``.raw`` AD path (used here) always routes
+    # to build_segment_fn's ``_run_single`` (the subcycle dispatch reads
+    # int(step_index), not traceable under grad), which ALREADY cond-gates
+    # rrtmgp to ~1/rad_update_steps at runtime — bit-equivalent to the nested
+    # subcycle, only XLA compile-time differs (and the once-jit + persistent
+    # cache amortize that).  So passing step_unified_no_rad / static_need_rad
+    # here does NOT cut training runtime; the rrtmgp adjoint cost is inherent.
+    # The real runtime lever is --radiation-as-forcing (drop the rrtmgp adjoint
+    # entirely), threaded via rad_stop_gradient.
     step_unified = physics_pipeline.build_step_unified(
-        static_need_rad=True, rad_stop_gradient=rad_stop_gradient)
-    step_unified_no_rad = (
-        physics_pipeline.build_step_unified(
-            static_need_rad=False, rad_stop_gradient=rad_stop_gradient)
-        if rad_update_steps > 1 else None)
+        rad_stop_gradient=rad_stop_gradient)
     sigma_full = jnp.asarray(sigma.sigma_full)
 
     def make_loss_fn(_params, ic, target, forcing):
@@ -303,7 +299,6 @@ def train_physics_params(
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
                 microphysics=microphysics, rad_update_steps=rad_update_steps,
-                step_unified_no_rad=step_unified_no_rad,
                 **seg_kw,
             )
             pred = single_day_rollout(

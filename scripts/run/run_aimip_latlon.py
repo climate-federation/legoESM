@@ -360,19 +360,12 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             rad_stop_gradient=args.radiation_as_forcing,
             loss_config=loss_config, log_every=1,
         )
-        # Same rad sub-cycle wiring as train_physics_params so the eval rollout
-        # also keeps rrtmgp out of the inner hot body (fresh-rad + no-rad steps).
         step_unified = physics_pipeline.build_step_unified(
-            static_need_rad=True, rad_stop_gradient=args.radiation_as_forcing)
-        step_unified_no_rad = (
-            physics_pipeline.build_step_unified(
-                static_need_rad=False, rad_stop_gradient=args.radiation_as_forcing)
-            if args.rad_update_steps > 1 else None)
+            rad_stop_gradient=args.radiation_as_forcing)
         seg = build_training_segment(
             model, step_unified, grid, sigma, args.dt,
             microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,
-            step_unified_no_rad=step_unified_no_rad,
             **trained.to_segment_kwargs(),
         )
     elif variant == "column_nn":
