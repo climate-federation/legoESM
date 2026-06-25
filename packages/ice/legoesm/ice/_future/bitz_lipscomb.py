@@ -63,7 +63,11 @@ __all__ = (
 # capacity) so those terms stay finite and differentiable as T → 0⁻.
 _T_FLOOR_C = 1.0e-2          # [°C]
 _K_MIN = 0.1                 # conductivity floor [W/m/K]
-_DISC_FLOOR = 1.0            # quadratic-discriminant floor [(J/kg)²-scale]
+# Quadratic-discriminant floor. 0.0 is the exact degenerate double-root limit
+# (sqrt(0)=0, root -> vertex -B/2c0) and absorbs any roundoff-negative
+# discriminant; a POSITIVE floor (was 1.0) perturbs a valid near-degenerate root
+# by forcing sqrt(disc) >= 1, so it is wrong — keep the floor at 0.
+_DISC_FLOOR = 0.0
 
 
 def _neg_temp_c(T_K):

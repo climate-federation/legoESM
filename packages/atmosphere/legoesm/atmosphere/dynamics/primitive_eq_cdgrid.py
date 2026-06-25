@@ -111,6 +111,7 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Simplified semi-implicit damping. ps *= exp(-alpha*dt*lap(ps)). Typical 0.5*c_grav²*dt/dx².
     T_min: float = 50.0            # Temperature floor [K]
     p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic 1/p
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     sponge_sigma: float = 0.15     # Rayleigh sponge above this sigma
     sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
     use_conservation_fixer: bool = True
@@ -305,7 +306,7 @@ def fv3_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. D-grid to C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)

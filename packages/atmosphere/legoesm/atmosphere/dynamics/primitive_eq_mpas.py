@@ -81,6 +81,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     K_h: float = 0.0              # scalar diffusion [m²/s]
     T_min: float = 50.0           # temperature floor [K]
     p_floor: float = 100.0        # pressure floor [Pa] for adiabatic heating (limits 1/p)
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
@@ -158,7 +159,7 @@ def mpas_hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
     T_3d.shape[-1]
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. Pressure at full levels ---
     if _hybrid:

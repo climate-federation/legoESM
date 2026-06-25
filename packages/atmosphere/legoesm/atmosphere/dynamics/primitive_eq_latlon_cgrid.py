@@ -146,6 +146,7 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     anchor_mass_to_initial: bool = False  # Mirror cubed-sphere: anchor fixer to initial mass
     T_min: float = 50.0           # Temperature floor [K]
     p_floor: float = 100.0        # Pressure floor [Pa] for surface pressure positivity
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     zero_mean_ps_tendency: bool = True
     use_ppm_transport: bool = True  # PPM scalar transport (vs cell-centered gradient)
     use_polar_filter: bool = False
@@ -323,7 +324,7 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. Pressure at full levels ---
     if _hybrid:

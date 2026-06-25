@@ -18,6 +18,7 @@ Reference Fortran: Zenodo 8327578 (atmos_cubed_sphere-symmetryclean).
 
 from __future__ import annotations
 
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -902,6 +903,16 @@ def fill_corner_region(
         mitigates the overshoot downstream in a way that our A-L+RK3
         path does not).  Enable for DUOGRID mass-transport stability.
     """
+    if monotone_clip:
+        warnings.warn(
+            "fill_corner_region(monotone_clip=True) clips cube-corner halo "
+            "cells to the neighbour min/max — a NON-CONSERVATIVE limiter: it "
+            "perturbs the Lagrange-interpolated values, so the corner fill no "
+            "longer preserves the global tracer/mass integral. Enable only for "
+            "duogrid mass-transport stability; leave it False (the default) for "
+            "conservation-critical runs.",
+            stacklevel=2,
+        )
     n = duogrid.n
     ng = duogrid.ng
     h = halo
