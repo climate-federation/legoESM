@@ -56,8 +56,8 @@ def test_flux_scheme_rejects_unknown(bad_flag):
 
 
 def test_stomata_flag():
-    """--stomata enables stomatal conductance (default off, byte-identical)."""
-    assert mod.build_parser().parse_args([]).stomata is False
+    """Stomatal conductance is DEFAULT ON for coupled runs; --no-stomata opts out."""
+    assert mod.build_parser().parse_args([]).stomata is True
     assert mod.build_parser().parse_args(["--stomata"]).stomata is True
     assert mod.build_parser().parse_args(["--no-stomata"]).stomata is False
 

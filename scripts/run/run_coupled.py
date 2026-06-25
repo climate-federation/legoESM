@@ -279,12 +279,13 @@ def build_parser():
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
     parser.add_argument("--stomata", dest="stomata",
-                        action=argparse.BooleanOptionalAction, default=False,
-                        help="Enable STOMATAL CONDUCTANCE control of land "
-                             "evapotranspiration (StomataConfig.enabled).  Off "
-                             "(default) => land ET is limited only by the bucket/"
-                             "Richards soil-moisture beta (no physiological "
-                             "control).  ON => the effective beta is further "
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="STOMATAL CONDUCTANCE control of land "
+                             "evapotranspiration (StomataConfig.enabled).  DEFAULT "
+                             "ON for realistic land ET; --no-stomata => land ET is "
+                             "limited only by the bucket/Richards soil-moisture "
+                             "beta (no physiological control).  ON => the "
+                             "effective beta is further "
                              "limited by stomatal conductance: with the DifferLand "
                              "carbon scheme (--preset slab_carbon) it is the "
                              "CO2-COUPLED Farquhar + Ball-Berry/Medlyn solver "
