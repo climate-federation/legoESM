@@ -439,19 +439,18 @@ def evp_solver(
     sigma_11_new, sigma_22_new, sigma_12_new : arrays (6, n, n)
         Updated stress tensor [N/m].
     """
-    # Fail-early input validation (mirrors mevp_solver): these are STATIC Python
-    # scalars, so the guard is doctrine-permitted control flow. N_evp<1 makes the
-    # subcycle a silent no-op (or /0); a non-finite T_evp/e_yield/Delta_min
-    # silently poisons every stress update and gradient.
+    # Fail-early validation of the ITERATION parameters only (mirrors
+    # mevp_solver, which guards N_mevp/alpha/beta — not the physics scalars).
+    # N_evp is a loop count and T_evp is iteration-coupled, so both are always
+    # STATIC Python values → boolean control flow is doctrine-permitted here.
+    # ``e_yield`` / ``Delta_min`` are TUNABLE physics params that can arrive as
+    # JAX tracers via the trainable-override path under jit/grad, so they MUST
+    # NOT enter a Python ``np.isfinite`` check (it would fail at trace time).
     if N_evp < 1:
         raise ValueError(f"evp_solver: N_evp must be >= 1, got {N_evp}.")
     if not np.isfinite(T_evp) or T_evp <= 0.0:
         raise ValueError(
             f"evp_solver: T_evp must be a finite scalar > 0; got {T_evp}.")
-    if not (np.isfinite(e_yield) and np.isfinite(Delta_min)):
-        raise ValueError(
-            f"evp_solver: e_yield ({e_yield}) and Delta_min ({Delta_min}) "
-            "must be finite.")
 
     dt_s = dt / N_evp  # subcycle timestep
 
