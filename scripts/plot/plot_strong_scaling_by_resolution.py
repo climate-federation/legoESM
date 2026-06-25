@@ -99,7 +99,19 @@ def compute_speedup(by_res: dict):
 
 
 def make_figure(rows, grid: str, out_dir: Path, metric: str = "sypd") -> Path:
+    # Fail LOUD on a typoed --grid/--metric instead of silently writing a blank
+    # PNG (codex review): a missing metric column or a grid with no strong-mode
+    # rows is a user error, not an empty result.
+    if rows and metric not in rows[0]:
+        raise SystemExit(
+            f"metric {metric!r} is not a column in the CSV "
+            f"(columns: {sorted(rows[0])})")
     series = group_series(rows, grid, metric)
+    if not series:
+        raise SystemExit(
+            f"no strong-mode rows for grid={grid!r} metric={metric!r} — check "
+            f"--grid/--metric (canonical grids: cubed-sphere, latlon, "
+            f"icosahedral, spectral)")
     precisions = sorted(series) or [""]
     ncol = len(precisions)
     fig, axes = plt.subplots(2, ncol, figsize=(6 * ncol, 9), squeeze=False)
