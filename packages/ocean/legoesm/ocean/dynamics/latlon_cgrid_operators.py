@@ -674,12 +674,7 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
         return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-    sin_lat = jnp.sin(lat)
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_lat = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])   # (n_lat+1,)
+    A_lat = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)  # (n_lat+1,)
     # Interior rows carry area; pole rows (wall BC) zero — consistent with
     # curl_vertex_cgrid computing vorticity only on interior rows.
     A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
@@ -1265,6 +1260,23 @@ def flux_divergence_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def _vertex_dual_area_interior(lat, radius, dlon):
+    """Raw vertex dual-cell area ``R**2 * dlon * |Δsin(lat)|`` of shape
+    ``(n_lat+1,)`` (#515 consolidation).
+
+    The single source for the interior of the regular (non-tripolar) lat-lon
+    vertex/q-cell area, previously recomputed verbatim in ``vertex_area_cgrid``,
+    ``strain_rate_cgrid`` and the Smagorinsky ``A_vertex`` floor.  Callers keep
+    their OWN pole handling (zero pole rows vs a ``1e-30`` floor) and pass an
+    appropriately-typed ``lat`` (stored dtype, or ``result_type(float)`` for the
+    #516 working-precision path), so each extraction is byte-identical to the
+    former inline recompute.
+    """
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+    return radius**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+
+
 def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
     """Canonical ``cos(lat_v)`` at the ``n_lat+1`` v-face latitudes (#516).
 
@@ -1797,10 +1809,8 @@ def strain_rate_cgrid(
         _fdtype = jnp.result_type(float)
         lat_f = jnp.asarray(lat, dtype=_fdtype)
         cos_lat_f = jnp.asarray(cos_lat, dtype=_fdtype)
-        sin_lat = jnp.sin(lat_f)
-        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-        A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
-        A_vertex = jnp.maximum(A_vertex, 1e-30)
+        A_vertex = jnp.maximum(
+            _vertex_dual_area_interior(lat_f, R, dlon), 1e-30)
 
         dx_cell = R * cos_lat_f * dlon
         dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
@@ -2221,14 +2231,7 @@ def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
         Area of each vertex dual cell.  Pole rows are set to a small
         positive floor (1e-30) to avoid division by zero.
     """
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-    sin_lat = jnp.sin(lat)
-    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
-    # singletons + concatenate-of-three.
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_v = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+    A_v = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)
     return jnp.maximum(A_v, 1e-30)
 
 

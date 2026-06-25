@@ -8,6 +8,7 @@ jax.grad through the inner loop cost function.
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -94,18 +95,37 @@ def incremental_4dvar(
     inner_iterations = []
     innovation_rms_list = []
 
-    for outer in range(config.n_outer):
-        # Build cost function around current iterate
-        template = control_to_state(x_k, control_spec, background_state)
-
+    # Build the cost-and-grad ONCE with the re-linearization template as a
+    # TRACED argument.  Each outer iteration rebinds the template VALUE (same
+    # shape), so the compiled function is REUSED instead of re-JITed every outer
+    # loop — ``build_cost_fn`` runs inside the trace and compiles once.
+    # (Previously the cost closure was rebuilt and ``jax.jit``-wrapped INSIDE the
+    # loop, recompiling the full windowed model + adjoint on every outer
+    # iteration.)  Mirrors the SegmentForcing doctrine: per-iteration changing
+    # values are traced args, not compile-time closure captures.
+    @jax.jit
+    def _cost_and_grad(x, template_state):
         cost_fn = build_cost_fn(
             model, x_b, observations, B, control_spec,
-            template, dt, n_steps, config.checkpoint,
+            template_state, dt, n_steps, config.checkpoint,
         )
-        cost_and_grad = jax.value_and_grad(cost_fn)
+        return jax.value_and_grad(cost_fn)(x)
 
-        # Compute current cost and gradient
-        J_k, g_k = cost_and_grad(x_k)
+    @jax.jit
+    def _precond_and_grad(v, template_state):
+        cost_fn = build_cost_fn(
+            model, x_b, observations, B, control_spec,
+            template_state, dt, n_steps, config.checkpoint,
+        )
+        J_tilde = preconditioned_cost_fn(cost_fn, B, x_b)
+        return jax.value_and_grad(J_tilde)(v)
+
+    for outer in range(config.n_outer):
+        # Re-linearize around the current iterate (changing VALUE, fixed shape).
+        template = control_to_state(x_k, control_spec, background_state)
+
+        # Current cost and gradient (compiled once; no per-outer recompile).
+        J_k, g_k = _cost_and_grad(x_k, template)
         g_norm = float(jnp.linalg.norm(g_k))
         cost_history.append(float(J_k))
         grad_norm_history.append(g_norm)
@@ -119,35 +139,37 @@ def incremental_4dvar(
             innovation_rms_list.append(0.0)
             continue
 
-        # Inner loop minimization
+        # Inner loop minimization.  ``partial`` binds the current template by
+        # VALUE (no late-binding / B023), giving the minimizer a single-arg
+        # ``f(x) -> (J, grad)`` backed by the once-compiled wrapper above.
         if config.use_preconditioning:
-            J_tilde = preconditioned_cost_fn(cost_fn, B, x_b)
-            J_tilde_and_grad = jax.value_and_grad(J_tilde)
             # Initial v from current x: x_k = x_b + B^{1/2} v
             v0 = jnp.zeros_like(x_k)
+            inner_fn = partial(_precond_and_grad, template_state=template)
 
             if config.inner_method == "cg":
                 result = minimize_cg(
-                    jax.jit(J_tilde_and_grad), v0,
+                    inner_fn, v0,
                     max_iter=config.n_inner, gtol=config.inner_gtol,
                 )
             else:
                 result = minimize_lbfgs(
-                    jax.jit(J_tilde_and_grad), v0,
+                    inner_fn, v0,
                     max_iter=config.n_inner, gtol=config.inner_gtol,
                 )
 
             # Recover x from v
             x_k = x_b + B.sqrt_multiply(result.x)
         else:
+            inner_fn = partial(_cost_and_grad, template_state=template)
             if config.inner_method == "cg":
                 result = minimize_cg(
-                    jax.jit(cost_and_grad), x_k,
+                    inner_fn, x_k,
                     max_iter=config.n_inner, gtol=config.inner_gtol,
                 )
             else:
                 result = minimize_lbfgs(
-                    jax.jit(cost_and_grad), x_k,
+                    inner_fn, x_k,
                     max_iter=config.n_inner, gtol=config.inner_gtol,
                 )
             x_k = result.x

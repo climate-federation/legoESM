@@ -245,6 +245,7 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         #
         # Default ``False`` keeps the legacy explicit-diffusion
         # path bit-exact.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Appended last to preserve positional ABI.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -305,7 +306,7 @@ def fv3_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. D-grid to C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)

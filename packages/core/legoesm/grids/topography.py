@@ -18,6 +18,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
+from legoesm.grids.halo import pad_halo_local
 
 
 def _grid_lat_lon_2d(grid):
@@ -526,34 +527,42 @@ def _load_land_fraction_file(
 
 
 def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarray:
-    """Simple Laplacian smoothing on a cubed-sphere field (6, n, n).
+    """Laplacian smoothing on a cubed-sphere field (6, n, n).
 
-    Replaces each interior cell with (1-w)*self + w*avg_neighbors where
-    w = 0.5. Boundary cells are handled by wrapping via halo padding.
+    Each cell becomes ``0.5*original + 0.5*smoothed`` where ``smoothed`` is the
+    5-point mean ``(self + 4 neighbours)/5``.  The neighbours at face boundaries
+    come from the cross-face HALO (``pad_halo_local``, which handles the axis
+    swaps and reversals), so the smoothing is CONTINUOUS across cube edges.
+
+    The previous implementation used one-sided boundary CLAMPING (edge cells
+    averaged only their in-face neighbours), which smoothed each face in
+    isolation and left a per-face discontinuity at the shared edges — the
+    "cube imprint" artifact.  Using the real cross-face halo removes it at the
+    source (the downstream ``blend_scalar_cube_edges_2d`` step is then a light
+    final touch, not a band-aid for a seam this function created).
+
+    NOTE: cube-imprint artifacts are confirmed VISUALLY (CLAUDE.md visual-verify
+    rule); the unit test asserts the necessary cross-face-leakage property, but
+    the nightly cube-SW visual-regression gate is the authoritative check.
     """
     if passes <= 0:
         return arr
-    result = arr.copy()
+    field = jnp.asarray(arr)
+    orig = field
     for _ in range(passes):
-        smoothed = result.copy()
-        for face in range(6):
-            n = result.shape[1]
-            # Interior 4-point average
-            for i in range(n):
-                for j in range(n):
-                    # Use available neighbors with boundary clamping
-                    vals = [result[face, i, j]]
-                    if i > 0:
-                        vals.append(result[face, i - 1, j])
-                    if i < n - 1:
-                        vals.append(result[face, i + 1, j])
-                    if j > 0:
-                        vals.append(result[face, i, j - 1])
-                    if j < n - 1:
-                        vals.append(result[face, i, j + 1])
-                    smoothed[face, i, j] = np.mean(vals)
-        result = 0.5 * arr + 0.5 * smoothed  # blend toward smoothed
-    return result
+        # (6, n+2, n+2) with REAL neighbour data from adjacent faces in the halo.
+        # Use the LOCAL halo=1 fill directly (not the backend-dispatching
+        # ``pad_halo``): this is host-side topography preprocessing on the FULL
+        # global field, so it must stay deterministic and never enter the
+        # MPI/SPMD exchange path even if a distributed halo backend is active.
+        p = pad_halo_local(field, None)
+        neighbour_sum = (
+            p[:, :-2, 1:-1] + p[:, 2:, 1:-1]    # i-1, i+1
+            + p[:, 1:-1, :-2] + p[:, 1:-1, 2:]  # j-1, j+1
+        )
+        smoothed = (field + neighbour_sum) / 5.0   # self + 4 cross-face neighbours
+        field = 0.5 * orig + 0.5 * smoothed
+    return np.asarray(field)
 
 
 def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
