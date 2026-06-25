@@ -28,6 +28,30 @@ from legoesm.diagnostics.energy_budget import area_weighted_mean
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
 
+def enable_diurnal_surface_land(land_cfg):
+    """Switch a ``MultiLayerLandConfig`` to the coupled DIURNAL surface model:
+    Monin-Obukhov (MOST) surface exchange + Farquhar photosynthesis-stomata coupling.
+
+    Farquhar (the coupled stomatal-conductance path) only fires when the carbon scheme
+    is ``differland`` (it reads the prognostic LAI = C_fol/LCMA); under any other scheme
+    ``compute_effective_beta`` silently falls back to the Jarvis model, which ignores
+    Vc_max25.  So any non-``differland`` scheme is upgraded to ``differland`` here to
+    guarantee the photosynthesis params are actually used (the coupler initialises +
+    threads the carbon state from this config).  Pure -> unit-testable; the driver
+    gates it on ``CoupledConfig.land_diurnal_surface``.
+
+    NOTE: MOST references fluxes to ``land_cfg.z_ref`` (default 10 m).  When the
+    atmosphere's lowest model level sits at a different height this is a (bounded) bias
+    the coupled feedback absorbs; threading the true lowest-level height is a follow-up.
+    Setting ``land_diurnal_surface=False`` reverts to the constant-Ch + soil-beta land."""
+    from legoesm.land.carbon.config import CarbonConfig
+    cfg = land_cfg._replace(
+        bulk_scheme="most", stomata=land_cfg.stomata._replace(enabled=True))
+    if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
+        cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
+    return cfg
+
+
 class CoupledESMDriver:
     """Coupled atmosphere + ocean + land + carbon driver.
 
@@ -578,6 +602,20 @@ class CoupledESMDriver:
                 thermal=cast(clm_multilayer_thermal_config(smap)),
                 Ch_land=ch_cell, Cd_land=ch_cell)
             logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
+
+        # Coupled DIURNAL surface model (default ON for the multilayer land): the
+        # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,
+        # consistent lowest-model-level height, so the surface exchange can be the
+        # physical Monin-Obukhov (MOST) scheme (roughness-driven, stability-dependent)
+        # and transpiration the Farquhar photosynthesis-stomata coupling — both of
+        # which are ill-posed against the crude offline single-column forcing but
+        # well-posed here.  Carbon must run (differland) so Farquhar has a prognostic
+        # LAI; the coupler already initialises + threads the carbon state.
+        if (cfg.land_mode == "multilayer"
+                and getattr(cfg, "land_diurnal_surface", True)):
+            land_cfg = enable_diurnal_surface_land(land_cfg)
+            logger.info("  Land surface: MOST exchange + Farquhar stomata "
+                        "(coupled diurnal model)")
 
         self._land_cfg = land_cfg  # store for diagnostics
 

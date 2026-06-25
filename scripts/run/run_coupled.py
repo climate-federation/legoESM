@@ -255,6 +255,13 @@ def main():
                              "classification + reference soil map (downloaded + "
                              "cached on first use). 'analytical' = latitude-band "
                              "PFT fractions, no soil map.")
+    parser.add_argument("--land-diurnal-surface", dest="land_diurnal_surface",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Coupled diurnal surface model for multilayer land (ON "
+                             "by default): physical Monin-Obukhov (MOST) surface "
+                             "exchange + Farquhar photosynthesis-stomata coupling.  "
+                             "--no-land-diurnal-surface reverts to a constant bulk "
+                             "coefficient + soil-only beta.")
     parser.add_argument("--snow-albedo-feedback", dest="snow_albedo_feedback",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Enable the land snow-albedo feedback + latitude-"
@@ -580,6 +587,7 @@ def main():
     overrides["land_param_source"] = args.land_params
     if args.land_params == "clm":
         overrides["use_pft"] = True
+    overrides["land_diurnal_surface"] = args.land_diurnal_surface
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same
