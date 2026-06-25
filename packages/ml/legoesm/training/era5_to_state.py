@@ -18,6 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -43,9 +44,30 @@ def resolve_var(ds, name):
     return None
 
 
-from legoesm.training.vertical_interp import interp_pressure_to_sigma
+from legoesm.training.vertical_interp import (
+    interp_pressure_to_sigma,
+    interp_pressure_to_hybrid,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _hybrid_p_s_floor(sigma, dp_floor: float = 100.0) -> float:
+    """Minimum surface pressure for all hybrid layer thicknesses >= dp_floor.
+
+    The L40 hybrid coordinate develops near-zero or negative layer thicknesses
+    (dp = dA*p_ref + dB*p_s < dp_floor) when p_s << p_ref.  This returns the
+    smallest p_s that keeps every level's dp above dp_floor Pa.
+    """
+    import numpy as _np
+    dA = _np.asarray(sigma.dA)
+    dB = _np.asarray(sigma.dB)
+    p_ref = float(sigma.p_ref)
+    # dp(k) = dA[k]*p_ref + dB[k]*p_s >= dp_floor
+    # → p_s >= (dp_floor - dA[k]*p_ref) / dB[k]  when dB[k] > 0
+    p_s_per_level = _np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+    return float(_np.max(p_s_per_level))
+
 
 # Module-level cache for regridding weights (expensive to recompute)
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
@@ -288,6 +310,8 @@ def era5_to_spectral_carry(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
 
     # ERA5 is on 1440x721 lat-lon; regrid to Gaussian grid via simple
@@ -296,14 +320,26 @@ def era5_to_spectral_carry(
         era5, grid,
     )
 
-    # Vertical interpolation: pressure levels → sigma levels
+    # Vertical interpolation: pressure levels → model levels.
+    # Use TRUE hybrid pressure p(k) = A(k)*p_ref + B(k)*p_s to avoid
+    # the sigma approximation error over steep terrain (see cubed-sphere
+    # path comment for details).
     p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+        def _vinterp(f):
+            return interp_pressure_to_hybrid(jnp.asarray(f), plev, p_s_jax, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+        def _vinterp(f):
+            return interp_pressure_to_sigma(jnp.asarray(f), plev, p_s_jax, sigma_f)
 
-    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
-    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
-    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
+    T_model = _vinterp(T_ll)
+    u_model = _vinterp(u_ll)
+    v_model = _vinterp(v_ll)
     # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air).  The
     # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
     # / mass dry air) — saturation_mixing_ratio in thermo.py returns
@@ -312,10 +348,7 @@ def era5_to_spectral_carry(
     # boundary: r = q / (1 − q).  In the tropical PBL (q ≈ 0.025) the
     # bias from skipping this conversion is ~3% of q.  Clip to avoid
     # division blow-up at q = 1.
-    q_specific = jnp.maximum(
-        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
-        0.0,
-    )
+    q_specific = jnp.maximum(_vinterp(q_ll), 0.0)
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
 
@@ -379,6 +412,8 @@ def era5_to_cubedsphere_carry(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
     n_lon_era5 = era5.T.shape[1]
     weights = _get_cs_weights(n_lon_era5, grid)
@@ -391,28 +426,114 @@ def era5_to_cubedsphere_carry(
         return regrid_scalar(jnp.asarray(flat), weights)
 
     T_cs = _regrid_3d(era5.T)
-    u_cs = _regrid_3d(era5.u)
-    v_cs = _regrid_3d(era5.v)
     q_cs = _regrid_3d(era5.q)
+
+    # Regrid winds then rotate from geographic (east, north) to local panel
+    # (x, y) coordinates.  ERA5 u/v are in geographic frame; the cubed-sphere
+    # dycore expects winds in the local panel frame.  On equatorial faces the
+    # angle is ~0 so the rotation is a no-op; on polar faces it can be ±90°,
+    # which is exactly where the ~100 m/s polar-vortex jet would otherwise be
+    # placed in the wrong direction, triggering immediate numerical blowup.
+    u_cs_geo = _regrid_3d(era5.u)  # (6, n, n, n_plev) in geographic frame
+    v_cs_geo = _regrid_3d(era5.v)
+    _angle = jnp.asarray(grid.angle)[..., None]  # (6, n, n, 1) → broadcasts
+    _cos_a = jnp.cos(_angle)
+    _sin_a = jnp.sin(_angle)
+    u_cs = _cos_a * u_cs_geo + _sin_a * v_cs_geo
+    v_cs = -_sin_a * u_cs_geo + _cos_a * v_cs_geo
 
     # Regrid 2D fields
     p_s_cs = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)
-    phis_cs = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
+    phis_cs_raw = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
 
-    # Vertical interpolation
+    # Apply topography smoothing to match load_real_topography defaults
+    # (topo_smoothing=4, topo_edge_blend=0.3).  Without this, raw ERA5 phis
+    # has steep gradients near cubed-sphere face boundaries: the northern
+    # Tibet slope (~37°N) sits only 3-4 cells from face 1's polar edge, and
+    # the Arakawa-Lamb gradient scheme amplifies face-boundary gradient errors
+    # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
+    # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
+    # even from rest.
+    from legoesm.grids.topography import smooth_phis_cubed_sphere
+    phis_cs = smooth_phis_cubed_sphere(phis_cs_raw)
+
+    # Barometric p_s correction for hydrostatic consistency with smoothed phis.
+    # Smoothing phis lowers terrain gradients (dB_dx ↓), but without this
+    # adjustment ln_ps is unchanged, so the split-PGF correction term
+    # pg_corr_x = R_d × T × B × p_s/p × dln_ps/dx stays the same while
+    # dB_dx decreases — WORSENING the cancellation residual over Tibet.
+    # Barometric formula: p_s_new = p_s × exp[(phis_raw − phis_smooth) / (R_d × T_sfc)]
+    # Derivation: hydrostatic dln_p = −dΦ / (R_d × T) → Δln_p = −ΔΦ / (R_d × T)
+    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = 1000 hPa).
+    _T_sfc_cs = T_cs[..., -1]  # (6, n, n) — 1000 hPa, nearest to surface
+    _delta_phis = phis_cs_raw - phis_cs  # > 0 where terrain was lowered by smoothing
+    p_s_corrected = p_s_cs * jnp.exp(_delta_phis / (constants.R_d * _T_sfc_cs))
+
+    # Enforce a minimum surface pressure to prevent degenerate hybrid levels.
+    # The L40 hybrid coordinate has p(k) = A(k)*p_ref + B(k)*p_s.  Near the
+    # surface the A coefficients decrease toward 0 while B → 1; when p_s << p_ref
+    # the A*p_ref term dominates and adjacent levels can have |dp| < 1 Pa or
+    # even dp < 0 (inverted).  At p_s = 56703 Pa (Tibet, 4751 m), 19 of 40
+    # levels are underground and the arch-peak at level 28–29 has dp = −1 Pa,
+    # causing catastrophic vertical-velocity amplification in the continuity eq.
+    # Fix: raise p_s to p_s_floor wherever needed; simultaneously lower phis
+    # by the barometric-formula equivalent so the split-PGF cancellation is
+    # maintained (phis consistent with raised p_s).
+    if _is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
+        phis_cs = phis_cs - constants.R_d * _T_sfc_cs * _ln_ratio
+        p_s_cs = jnp.maximum(p_s_corrected, p_s_floor)
+    else:
+        p_s_cs = p_s_corrected
+
+    # Vertical interpolation.
+    # CRITICAL: for hybrid sigma-pressure coordinates, use the TRUE level
+    # pressure p(k) = A(k)*p_ref + B(k)*p_s — NOT the sigma approximation
+    # (A+B)*p_s.  Over steep terrain (Tibet, Andes) where p_s << p_ref, the
+    # sigma approximation misplaces upper levels by 100-180 hPa, introducing
+    # ~20 K temperature errors and ~70 m/s wind imbalances that cause
+    # immediate numerical blowup.
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
-    T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f)
-    u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f)
-    v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+        def _vinterp(field_cs):
+            return interp_pressure_to_hybrid(field_cs, plev, p_s_cs, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+        def _vinterp(field_cs):
+            return interp_pressure_to_sigma(field_cs, plev, p_s_cs, sigma_f)
+
+    T_model = _vinterp(T_cs)
+    u_model = _vinterp(u_cs)
+    v_model = _vinterp(v_cs)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
     # RATIO (see comment at the lat-lon path above).  Convert
     # r = q / (1 − q) at the boundary.
-    q_specific = jnp.maximum(
-        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f), 0.0,
-    )
+    q_specific = jnp.maximum(_vinterp(q_cs), 0.0)
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
+
+    if logger.isEnabledFor(logging.INFO):
+        import jax as _jax
+        _hT = _jax.device_get(T_model)
+        _hu = _jax.device_get(u_model)
+        _hv = _jax.device_get(v_model)
+        _hps = _jax.device_get(p_s_cs)
+        _hphis = _jax.device_get(phis_cs)
+        _hphis_raw = _jax.device_get(phis_cs_raw)
+        _p_s_floor_val = _hybrid_p_s_floor(sigma, dp_floor=100.0) if _is_hybrid else 0.0
+        logger.info(
+            f"  ERA5→CS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
+            f"u=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
+            f"v=[{float(_hv.min()):.0f},{float(_hv.max()):.0f}]m/s "
+            f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
+            f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2 "
+            f"(raw phis peak={float(_hphis_raw.max()):.0f}, "
+            f"p_s_floor={_p_s_floor_val:.0f}Pa)"
+        )
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -527,6 +648,159 @@ def era5_to_latlon_carry(
         held_lw_up_toa=jnp.zeros(shape_2d),
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+    )
+
+
+class MPASCarry(NamedTuple):
+    """ERA5 initial condition on an MPAS/Voronoi mesh.
+
+    Unlike the cube/lat-lon ``SegmentCarry`` (which stores cell-centred
+    ``u``/``v``), the MPAS hydrostatic state carries the horizontal wind as
+    the **edge-normal** component on mesh edges, and has no separate ``v``.
+    """
+    u: jnp.ndarray      # (nEdges, nlev) edge-normal velocity [m/s]
+    T: jnp.ndarray      # (nCells, nlev) temperature [K]
+    p_s: jnp.ndarray    # (nCells,) surface pressure [Pa]
+    phis: jnp.ndarray   # (nCells,) surface geopotential [m^2/s^2]
+    q_v: jnp.ndarray    # (nCells, nlev) water vapour mixing ratio [kg/kg]
+
+
+def era5_to_mpas_carry(
+    era5: ERA5Slice,
+    mesh,
+    sigma,
+):
+    """Convert an ERA5 slice to an initial condition on an MPAS/Voronoi mesh.
+
+    The MPAS hydrostatic dycore stores the prognostic horizontal velocity as
+    the **edge-normal** component ``u`` on mesh edges (no cell-centred ``v``),
+    with scalars (``T``/``p_s``/``phis``/tracers) at cell centres.  This
+    builds that state from ERA5:
+
+    1. Horizontal regrid (KD-tree inverse-distance) of the regular ERA5
+       lat-lon fields onto the mesh — scalars to cell centres
+       (``latCell``/``lonCell``), winds to edge midpoints
+       (``latEdge``/``lonEdge``).
+    2. Edge-normal projection of the geographic ERA5 (east, north) winds
+       via ``angleEdge`` (eastward = 0):
+       ``u_n = u_east·cos(angleEdge) + v_north·sin(angleEdge)`` — the inverse
+       of the ``reconstruct_cell_velocity`` the physics uses.
+    3. Vertical interpolation from ERA5 pressure levels to the model
+       sigma/hybrid levels (true level pressure ``A·p_ref + B·p_s`` for
+       hybrid), with a hybrid ``p_s`` floor over high terrain.
+    4. Specific humidity → mixing ratio (``r = q/(1−q)``), matching the
+       cube/lat-lon convention.
+
+    Parameters
+    ----------
+    era5 : ERA5Slice
+    mesh : VoronoiMesh
+        Exposes ``latCell``/``lonCell``/``latEdge``/``lonEdge``/``angleEdge``
+        (radians) and ``nCells``/``nEdges``.
+    sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    MPASCarry
+    """
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar,
+    )
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    sigma_full = np.asarray(sigma.sigma_full)
+
+    era5_lat = np.asarray(era5.lat)  # radians
+    era5_lon = np.asarray(era5.lon)  # radians
+
+    # Horizontal regrid weights: ERA5 lat-lon -> cell centres / edge midpoints.
+    cell_w = compute_latlon_to_voronoi_weights(
+        era5_lat, era5_lon,
+        np.asarray(mesh.latCell), np.asarray(mesh.lonCell),
+    )
+    edge_w = compute_latlon_to_voronoi_weights(
+        era5_lat, era5_lon,
+        np.asarray(mesh.latEdge), np.asarray(mesh.lonEdge),
+    )
+
+    # Scalars at cells (nCells, n_plev) / (nCells,).
+    T_cell = regrid_scalar(jnp.asarray(era5.T), cell_w)
+    q_cell = regrid_scalar(jnp.asarray(era5.q), cell_w)
+    p_s_cell = regrid_scalar(jnp.asarray(era5.p_s), cell_w)
+    phis_cell = regrid_scalar(jnp.asarray(era5.phis), cell_w)
+
+    # Winds at edge midpoints (geographic east/north), then project to the
+    # edge normal.  ERA5 u/v are in the geographic frame; angleEdge gives the
+    # edge-normal direction relative to local east.
+    u_east_edge = regrid_scalar(jnp.asarray(era5.u), edge_w)   # (nEdges, n_plev)
+    v_north_edge = regrid_scalar(jnp.asarray(era5.v), edge_w)
+    angle = jnp.asarray(mesh.angleEdge)[:, None]               # (nEdges, 1)
+    u_n_edge = u_east_edge * jnp.cos(angle) + v_north_edge * jnp.sin(angle)
+
+    # Surface pressure at edges (for placing the wind levels over terrain).
+    p_s_edge = regrid_scalar(jnp.asarray(era5.p_s), edge_w)
+
+    # Hybrid p_s floor over high terrain: raise p_s where the hybrid layers
+    # would become degenerate (dp < dp_floor), and lower phis by the
+    # barometric equivalent so the split-PGF cancellation is preserved.
+    # No phis smoothing is applied (the coarse mesh is already smooth and
+    # there is no mesh-native cube-edge artefact to blend), so unlike the
+    # cubed-sphere path there is no smoothing-driven p_s correction.
+    if _is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+        _T_sfc = T_cell[..., -1]  # 1000 hPa (plev ascending -> last index)
+        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_cell))
+        phis_cell = phis_cell - constants.R_d * _T_sfc * _ln_ratio
+        p_s_cell = jnp.maximum(p_s_cell, p_s_floor)
+        p_s_edge = jnp.maximum(p_s_edge, p_s_floor)
+
+    # Vertical interpolation to model levels.
+    plev = jnp.asarray(era5.plev_Pa)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+
+        def _vinterp_cell(field):
+            return interp_pressure_to_hybrid(field, plev, p_s_cell, _A, _B, _p_ref)
+
+        def _vinterp_edge(field):
+            return interp_pressure_to_hybrid(field, plev, p_s_edge, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+
+        def _vinterp_cell(field):
+            return interp_pressure_to_sigma(field, plev, p_s_cell, sigma_f)
+
+        def _vinterp_edge(field):
+            return interp_pressure_to_sigma(field, plev, p_s_edge, sigma_f)
+
+    T_model = _vinterp_cell(T_cell)
+    u_model = _vinterp_edge(u_n_edge)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO.
+    q_specific = jnp.clip(jnp.maximum(_vinterp_cell(q_cell), 0.0), 0.0, 0.99)
+    q_model = q_specific / (1.0 - q_specific)
+
+    if logger.isEnabledFor(logging.INFO):
+        import jax as _jax
+        _hT = _jax.device_get(T_model)
+        _hu = _jax.device_get(u_model)
+        _hps = _jax.device_get(p_s_cell)
+        _hphis = _jax.device_get(phis_cell)
+        logger.info(
+            f"  ERA5->MPAS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
+            f"u_n=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
+            f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
+            f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2"
+        )
+
+    return MPASCarry(
+        u=u_model,
+        T=T_model,
+        p_s=p_s_cell,
+        phis=phis_cell,
+        q_v=q_model,
     )
 
 

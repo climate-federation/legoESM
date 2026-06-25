@@ -976,6 +976,7 @@ class ModelDriver:
                 era5_to_cubedsphere_carry,
                 era5_to_spectral_carry,
                 era5_to_latlon_carry,
+                era5_to_mpas_carry,
             )
             logger.info(
                 f"  IC: loading ERA5 from {cfg.ic_path} "
@@ -995,38 +996,102 @@ class ModelDriver:
                 carry = era5_to_latlon_carry(
                     era5_slice, self.grid, self.sigma
                 )
+            elif cfg.grid.grid_type == "mpas":
+                # MPAS carries the wind as the edge-normal component on mesh
+                # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
+                # to cells/edges and projects the winds via angleEdge.
+                carry = era5_to_mpas_carry(
+                    era5_slice, self.grid, self.sigma
+                )
             else:
-                # MPAS Voronoi needs an edge-normal wind projection (ERA5
-                # cell-centred u/v -> mesh edge velocities) not yet
-                # implemented + validated; fail loudly rather than
-                # silently mis-initialise.  Use --ic default there until
-                # era5_to_mpas_carry lands.
                 raise NotImplementedError(
                     f"ERA5 IC not yet supported for "
                     f"grid_type={cfg.grid.grid_type!r} / "
                     f"discretization={cfg.dycore.discretization!r}. "
-                    "Supported: cubed_sphere, latlon, gaussian/spectral. "
-                    "For voronoi/mpas use --ic default (era5_to_mpas_carry "
-                    "is a tracked follow-up)."
+                    "Supported: cubed_sphere, latlon, mpas, gaussian/spectral."
                 )
 
-            self.state = self.state._replace(
-                u=self.state.u.replace(data=carry.u),
-                v=self.state.v.replace(data=carry.v),
-                T=self.state.T.replace(data=carry.T),
-                p_s=self.state.p_s.replace(data=carry.p_s),
-                phis=self.state.phis.replace(data=carry.phis),
-            )
-            self.tracers["q_v"] = jnp.asarray(carry.q_v)
+            if cfg.dycore.discretization == "spectral":
+                # The spectral state holds prognostics as SH coefficients,
+                # not grid-point Fields.  Forward-transform the grid-space
+                # ERA5 carry: (u, v) -> (vor_hat, div_hat) via the validated
+                # ``vordiv_from_uv_3d`` (inverse of the dycore's
+                # ``uv_from_vordiv_3d``); T/ln(p_s)/phis via ``sh_analysis``.
+                from legoesm.grids.gaussian import (
+                    vordiv_from_uv_3d, sh_analysis_3d, sh_analysis,
+                )
+                vor_hat, div_hat = vordiv_from_uv_3d(
+                    self.grid, carry.u, carry.v
+                )
+                T_hat = sh_analysis_3d(self.grid, carry.T)
+                lnps_hat = sh_analysis(self.grid, jnp.log(carry.p_s))
+                phis_hat = sh_analysis(self.grid, carry.phis)
+                self.state = self.state._replace(
+                    vor_hat=self.state.vor_hat.replace(data=vor_hat),
+                    div_hat=self.state.div_hat.replace(data=div_hat),
+                    T_hat=self.state.T_hat.replace(data=T_hat),
+                    lnps_hat=self.state.lnps_hat.replace(data=lnps_hat),
+                    phis_hat=self.state.phis_hat.replace(data=phis_hat),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
+                # Re-attach the ERA5 q_v into the dycore-advected tracer
+                # state (the spectral moist-init block above seeded a
+                # rest-state q_v; override with ERA5).
+                if (self.state.tracers is not None
+                        and "q_v" in self.state.tracers):
+                    self.state = self.state._replace(tracers={
+                        **self.state.tracers,
+                        "q_v": self.state.tracers["q_v"].replace(
+                            data=jnp.asarray(carry.q_v)),
+                    })
+                # Stats from the grid-space reconstruction.
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    spectral_pe_to_grid,
+                )
+                _fg = spectral_pe_to_grid(self.state, self.grid, self.sigma)
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], _fg['p_s'], self.sigma.dsigma,
+                    )),
+                    jnp.mean(_fg['T']),
+                ])
+            elif cfg.grid.grid_type == "mpas":
+                # MPAS state: edge-normal u (nEdges, nlev), no v; scalars at
+                # cells.  q_v lives in the dycore-advected tracer dict.
+                self.state = self.state._replace(
+                    u=self.state.u.replace(data=carry.u),
+                    T=self.state.T.replace(data=carry.T),
+                    p_s=self.state.p_s.replace(data=carry.p_s),
+                    phis=self.state.phis.replace(data=carry.phis),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], self.state.p_s.data,
+                        self.sigma.dsigma,
+                    )),
+                    jnp.mean(self.state.T.data),
+                ])
+            else:
+                self.state = self.state._replace(
+                    u=self.state.u.replace(data=carry.u),
+                    v=self.state.v.replace(data=carry.v),
+                    T=self.state.T.replace(data=carry.T),
+                    p_s=self.state.p_s.replace(data=carry.p_s),
+                    phis=self.state.phis.replace(data=carry.phis),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
 
-            _stats_era5 = jnp.stack([
-                jnp.mean(self.tracers["q_v"]),
-                jnp.mean(column_water_vapor(
-                    self.tracers["q_v"], self.state.p_s.data,
-                    self.sigma.dsigma,
-                )),
-                jnp.mean(self.state.T.data),
-            ])
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], self.state.p_s.data,
+                        self.sigma.dsigma,
+                    )),
+                    jnp.mean(self.state.T.data),
+                ])
             _h2 = np.asarray(_stats_era5)
             logger.info(
                 f"  State init (ERA5 {cfg.start_year}): "
@@ -1083,9 +1148,26 @@ class ModelDriver:
             from legoesm.core.precision import get_policy
             _sd = get_policy().storage
             self.physics.f_land = self._f_land.astype(_sd)
-            self.physics.albedo_land = (
-                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
-            )
+            # Land albedo: a static NetCDF (e.g. ICON-extpar ALB) when
+            # ``albedo_land_path`` is set, else the latitude-vegetation
+            # default.  ``albedo_land_month`` (1-12) picks a month from a
+            # monthly climatology; 0 -> annual mean.
+            _alb_path = getattr(self.config, "albedo_land_path", "")
+            if _alb_path:
+                from legoesm.grids.topography import load_land_albedo
+                _alb_month = getattr(self.config, "albedo_land_month", 0) or None
+                self.physics.albedo_land = load_land_albedo(
+                    self.grid, _alb_path, month=_alb_month
+                ).astype(_sd)
+                logger.info(
+                    f"  Land albedo: {_alb_path} "
+                    f"(month={_alb_month or 'annual mean'}, "
+                    f"mean={float(jnp.mean(self.physics.albedo_land)):.3f})"
+                )
+            else:
+                self.physics.albedo_land = (
+                    land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+                )
             self.physics.rad_update_steps = self.config.rad_update_steps
             logger.info(
                 f"  Land tile: ACTIVE (slab land, C_land="
@@ -1483,8 +1565,8 @@ class ModelDriver:
                     ps_g = _g(state.p_s.data)
                     phis_g = _g(state.phis.data)
                     for _tname in (
-                        'q_v', 'q_c', 'q_r', 'q_i', 'sst', 'sic',
-                        'precip_total',
+                        'q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g',
+                        'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
                     ):
@@ -1522,7 +1604,7 @@ class ModelDriver:
                         fields_global[name] = gather(arr, self._layout, root_only=True)
 
                     # Gather tracers (all ranks participate)
-                    for tname in ('q_v', 'q_c', 'q_r', 'q_i'):
+                    for tname in ('q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -3505,7 +3587,9 @@ class ModelDriver:
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, apply_microphysics_experiment_flags,
+        )
         from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
         from legoesm.atmosphere.physics.radiation.config import (
             RRTMGPConfig, OzoneProfileConfig,
@@ -3564,6 +3648,27 @@ class ModelDriver:
         # an "AMIP" MPAS run radiated CLEAR-SKY regardless of --clouds.
         _cloud_scheme = (cfg.cloud_scheme
                          if _rad_scheme == "rrtmgp" else "none")
+        # Aerosol-CCN specified-Nc coupling (Andreae 2009 AOD->CCN) + sub-grid
+        # in-cloud autoconversion: thread both ExperimentConfig switches onto
+        # the selected microphysics sub-config through the SAME shared helper
+        # the coupled-path ``_resolve_microphysics`` uses, so the combined-
+        # physics microphysics + radiation factories diagnose N_c from the
+        # prescribed ``forcing["aerosol_od"]`` and the warm-rain closures match
+        # the cube/lat-lon path exactly.  The helper fails loudly on a scheme
+        # that lacks a requested switch (only Morrison implements them).  The
+        # external-aerosol-forcing requirement is enforced upstream by run_amip
+        # and by the factories' fail-fast (no aerosol_od => raise).
+        _micro_cfg = MicrophysicsConfig(scheme=cfg.microphysics)
+        _msub = getattr(_micro_cfg, cfg.microphysics, None)
+        if _msub is not None:
+            _micro_cfg = _micro_cfg._replace(**{
+                cfg.microphysics: apply_microphysics_experiment_flags(
+                    _msub, cfg.microphysics,
+                    nc_from_aerosol=getattr(cfg, "nc_from_aerosol", False),
+                    subgrid_autoconversion=getattr(
+                        cfg, "subgrid_autoconversion", False),
+                )
+            })
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -3588,7 +3693,7 @@ class ModelDriver:
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
             turbulence=TurbulenceConfig(scheme=cfg.turbulence),
-            microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
+            microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
         # Phase D perf: shard the per-column RRTMGP workload across all local
@@ -3635,6 +3740,35 @@ class ModelDriver:
             )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh)
+
+        # ---- Radiation sub-cycle (issue #316, MPAS port) ----
+        # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
+        # full RRTMGP solve EVERY timestep (e.g. 60×/hour at dt=60), which is
+        # the dominant cost and made the merged-dycore MPAS path unusably slow
+        # (L4 ~0.44 steps/s).  Build a SECOND variant (``need_rad=False``) that
+        # skips the RRTMGP/gray solve and re-uses the cached heating tendency
+        # (``PhysicsState.rad_heating``, written by the full variant); the step
+        # loop alternates the two by ``step % RAD_UPDATE_STEPS``.  At dt=60 /
+        # RAD_UPDATE_STEPS=60 that is a 1-hour radiation cadence — the
+        # CESM/E3SM standard the cubed-sphere path already validates — i.e.
+        # ~RAD_UPDATE_STEPS× fewer RRTMGP solves with no new physics knob.
+        # Only built when subcycling is active AND radiation is configured;
+        # the held variant compiles a separate (RRTMGP-free, much cheaper)
+        # ``model.step`` the first time it is used.
+        RAD_UPDATE_STEPS = max(1, int(getattr(cfg, "rad_update_steps", 1)))
+        _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
+        physics_fn_norad = (
+            make_physics(phys_cfg, model_type="mpas", dt=DT,
+                         column_mesh=_column_mesh, need_rad=False)
+            if _subcycle_rad else None
+        )
+        if _subcycle_rad:
+            logger.info(
+                "  Radiation sub-cycle: RRTMGP solved every "
+                f"{RAD_UPDATE_STEPS} steps (cadence "
+                f"{DT * RAD_UPDATE_STEPS / 3600.0:.2f} h); held heating reused "
+                "in between"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
@@ -3701,56 +3835,64 @@ class ModelDriver:
                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
             )
 
-        # Wrap with Held-Suarez forcing when enabled
+        # Wrap with Held-Suarez forcing when enabled.  Factored into a helper
+        # so the SAME wrap applies to BOTH radiation sub-cycle variants (the
+        # full ``physics_fn`` and the held ``physics_fn_norad``).
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
-            _rrtmgp_fn = physics_fn
-
-            def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-                rrtmgp_result = _rrtmgp_fn(
-                    state, mesh, sigma_coord, phys_state=phys_state, forcing=forcing)
-                rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
-                phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
-                hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
-                from legoesm.core.state import HydrostaticTendencies
-                summed = HydrostaticTendencies(
-                    du_dt=rrtmgp_tend.du_dt.replace(
-                        data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
-                    dT_dt=rrtmgp_tend.dT_dt.replace(
-                        data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
-                    dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
-                        data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
-                    dphis_dt=rrtmgp_tend.dphis_dt.replace(
-                        data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
-                    tracer_tendencies=rrtmgp_tend.tracer_tendencies,
-                )
-                return summed, phys_state_out
-
-            if hasattr(_rrtmgp_fn, 'set_time'):
-                physics_fn.set_time = _rrtmgp_fn.set_time
-            if hasattr(_rrtmgp_fn, 'reset_state'):
-                physics_fn.reset_state = _rrtmgp_fn.reset_state
-            # Forward the surface-T override too (symmetry with set_time /
-            # reset_state).  The SST anchor is already baked into _rrtmgp_fn's
-            # closure before wrapping, but forwarding keeps the hook reachable
-            # on the wrapped fn so a later set_T_sfc_override call still lands.
-            if hasattr(_rrtmgp_fn, 'set_T_sfc_override'):
-                physics_fn.set_T_sfc_override = _rrtmgp_fn.set_T_sfc_override
-            # Carry the forcing-aware marker so the dispatcher/step still
-            # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
-            if getattr(_rrtmgp_fn, '_wants_forcing', False):
-                physics_fn._wants_forcing = True
-            # Propagate the stateful-carry tag (#413): this combine wrapper
-            # is a plain closure, so refuse_unthreaded_stateful_physics
-            # cannot unwrap it.  Forward the marker from the config (the
-            # source of truth) so the carry contract and the sharded /
-            # spectral refusals still see a stateful physics THROUGH this
-            # wrapper, not a deceptively diagnostic-looking callable.
+            from legoesm.core.state import HydrostaticTendencies
             from legoesm.atmosphere.physics.combined import (
                 physics_config_requires_phys_state,
             )
-            if physics_config_requires_phys_state(phys_cfg):
-                physics_fn._requires_phys_state = True
+
+            def _wrap_hs(_rrtmgp_fn):
+                def _hs_physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
+                    rrtmgp_result = _rrtmgp_fn(
+                        state, mesh, sigma_coord, phys_state=phys_state, forcing=forcing)
+                    rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+                    phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+                    hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
+                    summed = HydrostaticTendencies(
+                        du_dt=rrtmgp_tend.du_dt.replace(
+                            data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
+                        dT_dt=rrtmgp_tend.dT_dt.replace(
+                            data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
+                        dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
+                            data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
+                        dphis_dt=rrtmgp_tend.dphis_dt.replace(
+                            data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
+                        tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+                    )
+                    return summed, phys_state_out
+
+                if hasattr(_rrtmgp_fn, 'set_time'):
+                    _hs_physics_fn.set_time = _rrtmgp_fn.set_time
+                if hasattr(_rrtmgp_fn, 'reset_state'):
+                    _hs_physics_fn.reset_state = _rrtmgp_fn.reset_state
+                # Forward the surface-T override too (symmetry with set_time /
+                # reset_state).  The SST anchor is already baked into
+                # _rrtmgp_fn's closure before wrapping, but forwarding keeps
+                # the hook reachable on the wrapped fn so a later
+                # set_T_sfc_override call still lands.
+                if hasattr(_rrtmgp_fn, 'set_T_sfc_override'):
+                    _hs_physics_fn.set_T_sfc_override = _rrtmgp_fn.set_T_sfc_override
+                # Carry the forcing-aware marker so the dispatcher/step still
+                # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
+                if getattr(_rrtmgp_fn, '_wants_forcing', False):
+                    _hs_physics_fn._wants_forcing = True
+                # Propagate the stateful-carry tag (#413): this combine wrapper
+                # is a plain closure, so refuse_unthreaded_stateful_physics
+                # cannot unwrap it.  Forward the marker from the config (the
+                # source of truth) so the carry contract and the sharded /
+                # spectral refusals still see a stateful physics THROUGH this
+                # wrapper, not a deceptively diagnostic-looking callable.
+                if physics_config_requires_phys_state(phys_cfg):
+                    _hs_physics_fn._requires_phys_state = True
+                return _hs_physics_fn
+
+            physics_fn = _wrap_hs(physics_fn)
+            if physics_fn_norad is not None:
+                physics_fn_norad = _wrap_hs(physics_fn_norad)
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total} steps, {N_DAYS} days "
@@ -3800,6 +3942,15 @@ class ModelDriver:
             and (self._ozone_ext_active or self._aerosol_active
                  or self._ghg_active or bool(self._experiment))
         )
+        # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
+        # MICROPHYSICS step regardless of the radiation scheme (the second
+        # indirect / KK2000 ``Nc^-1.79`` effect is independent of how
+        # radiation is solved).  Without this an --aerosol-ccn run on gray
+        # radiation would never thread aerosol_od and the microphysics fill
+        # would raise its (then-misleading) fail-fast.  Requires a real
+        # aerosol source.
+        if getattr(cfg, "nc_from_aerosol", False) and self._aerosol_active:
+            _ext_forcing = True
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
         # feed it back next step.  SEEDED here (issue #405): starting from
@@ -3943,6 +4094,7 @@ class ModelDriver:
         # ``physics_fn`` and the traced ``forcing`` / ``phys_state`` carry are
         # threaded through unchanged.  Built once outside the loop.
         _mpi_step = None
+        _mpi_step_norad = None
         if self._voronoi_layout is not None:
             from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
             _mpi_step = make_voronoi_mpi_step(
@@ -3950,6 +4102,14 @@ class ModelDriver:
                 config=self.model.config, physics_fn=physics_fn,
                 return_phys_state=True,
             )
+            # Radiation sub-cycle: a matching held-radiation MPI step so the
+            # cell-partition path also skips RRTMGP on the held steps.
+            if physics_fn_norad is not None:
+                _mpi_step_norad = make_voronoi_mpi_step(
+                    self.model, self._voronoi_layout, self.model.sigma_coord,
+                    config=self.model.config, physics_fn=physics_fn_norad,
+                    return_phys_state=True,
+                )
             logger.info(
                 "  MPAS MPI step active (rank %d/%d)",
                 self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
@@ -4014,12 +4174,21 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+            # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
+            # always) and every RAD_UPDATE_STEPS-th step; reuse the held
+            # heating (PhysicsState.rad_heating) in between.  ``step`` is
+            # job-local, so the first step of every job/restart link re-solves
+            # radiation and repopulates the cache before any held step reads
+            # it.  When subcycling is off, every step is a full step.
+            _use_rad = (not _subcycle_rad) or (step % RAD_UPDATE_STEPS == 0)
             if _mpi_step is not None:
-                self.state, _phys_state = _mpi_step(
+                _mstep = _mpi_step if _use_rad else _mpi_step_norad
+                self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
             else:
+                _pfn = physics_fn if _use_rad else physics_fn_norad
                 self.state = self.model.step(
-                    self.state, DT, physics_fn=physics_fn, forcing=_forcing,
+                    self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
             # Keep the persisted-carry handle fresh for save_checkpoint
@@ -5781,6 +5950,8 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
+                    q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )
 
                 # CFL computed host-side from final segment state (not in hot loop)
@@ -6298,6 +6469,8 @@ class ModelDriver:
                     sw_down_toa=phys_out.sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
+                    q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
+                    q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )
 
                 logger.info(f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "

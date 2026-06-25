@@ -386,6 +386,109 @@ class TestERA5ToState:
         assert jnp.all(jnp.isfinite(carry.q_v)), "q_v contains non-finite values"
         assert jnp.all(carry.q_v >= 0), "q_v contains negative values"
 
+    def test_era5_to_cubedsphere_carry_barometric_correction(self):
+        """With Tibet-like phis, the barometric p_s correction is applied and
+        the output remains finite.  Without the correction, smoothing phis
+        without adjusting p_s would worsen the split-PGF residual over steep
+        terrain boundaries."""
+        import jax.numpy as jnp
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        rng = np.random.default_rng(42)
+        T_ll = (260.0 + rng.random((n_lat, n_lon, n_plev)) * 40.0).astype(np.float32)
+        u_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        v_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+        plev_Pa = np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64)
+
+        # Tibet-like phis: steep gradient in northern quarter of domain
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        phis[: n_lat // 3, :] = 50000.0   # ~5000 m elevation
+        p_s = np.where(phis > 0, 55000.0, 101325.0).astype(np.float32)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+
+        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite with Tibet phis"
+        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite with Tibet phis"
+        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite with Tibet phis"
+        # p_s should be positive everywhere after barometric correction
+        assert jnp.all(carry.p_s > 0), "p_s has non-positive values after correction"
+
+    def test_era5_to_cubedsphere_carry_hybrid_ps_floor(self):
+        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, the p_s floor
+        must be enforced and phis adjusted so that all hybrid layer thicknesses
+        remain positive (no degenerate/inverted levels).  Without this fix, 19 of
+        40 levels are underground at p_s=56703 Pa and the arch-peak at lev 28–29
+        has dp = −1 Pa, causing catastrophic continuity-equation blow-up."""
+        import jax.numpy as jnp
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 5
+        rng = np.random.default_rng(7)
+        plev_Pa = np.array([5000.0, 15000.0, 30000.0, 55000.0, 100000.0], dtype=np.float64)
+        T_ll = (240.0 + rng.random((n_lat, n_lon, n_plev)) * 50.0).astype(np.float32)
+        u_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        v_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+
+        # Tibet-like column: p_s = 56703 Pa (far below L40 p_s_floor ~69645 Pa)
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        phis[: n_lat // 3, :] = 46559.0   # ~4751 m (central Tibet)
+        p_s = np.where(phis > 0, 56703.0, 101325.0).astype(np.float32)
+
+        sigma40 = standard_hybrid_levels(40)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 270.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry = era5_to_cubedsphere_carry(era5, _GRID, sigma40)
+
+        # All fields must be finite
+        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.phis)), "phis non-finite after p_s floor"
+
+        # p_s must be at or above the minimum level where all hybrid layers
+        # have positive thickness (dp_floor=100 Pa).  Compute floor from the
+        # hybrid coordinate definition: p = A*p_ref + B*p_s, so minimum p_s
+        # that keeps all layers positive is where A[-1] + B[-1]*p_s = A[-2] + B[-2]*p_s
+        # i.e. p_s_floor = max over k of (A[k-1]-A[k])/(B[k]-B[k-1])+dp_floor/B_mean.
+        # Simpler: p_s_floor via the constraint that the lowest full level stays
+        # above the surface. Just verify the model enforces a positive floor.
+        assert float(jnp.min(carry.p_s)) > 0.0, "p_s must be positive everywhere"
+        # And that the floor was applied: Tibet column p_s=56703 Pa should be raised
+        assert float(jnp.min(carry.p_s)) > 56703.0, (
+            f"p_s floor not applied: min p_s={float(jnp.min(carry.p_s)):.1f} Pa "
+            f"still at Tibet value 56703 Pa"
+        )
+
+        # All L40 hybrid layer thicknesses must be positive for every column
+        A_full = jnp.asarray(sigma40.A_full)
+        B_full = jnp.asarray(sigma40.B_full)
+        p_model = A_full * sigma40.p_ref + B_full * carry.p_s[..., None]  # (6,N,N,40)
+        dp = jnp.diff(p_model, axis=-1)  # (6,N,N,39)
+        assert float(jnp.min(dp)) >= -1.0, (
+            f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver

@@ -617,6 +617,13 @@ def _target_grid_degrees(grid):
 
     Returns ``(target_lat_2d, target_lon_2d, is_gaussian, grid_spacing)``
     where the lat/lon arrays are in degrees and longitude is in [0, 360).
+
+    Unstructured Voronoi/MPAS meshes expose ``grid_lat``/``grid_lon`` as
+    rank-1 ``(nCells,)`` cell centres (``latCell``/``lonCell``); they have
+    no structured ``n``/``n_lat``, so the cell-count is used to estimate a
+    mean angular cell spacing.  ``is_gaussian`` is False for them (they are
+    not a regular lat-lon mesh); callers that smooth must additionally guard
+    on the rank-1 target shape (no structured/cube smoother applies).
     """
     grid_lat = np.asarray(grid.grid_lat)
     grid_lon = np.asarray(grid.grid_lon)
@@ -640,7 +647,18 @@ def _target_grid_degrees(grid):
     else:
         target_lat_2d = grid_lat * 180.0 / np.pi
         target_lon_2d = (grid_lon * 180.0 / np.pi) % 360.0
-        grid_spacing = 90.0 / grid.n
+        if hasattr(grid, "n"):
+            grid_spacing = 90.0 / grid.n
+        else:
+            # Unstructured Voronoi/MPAS: no structured ``n``.  Estimate the
+            # mean angular cell size from the cell count — the whole sphere
+            # (4π sr) split over nCells cells gives a linear angular extent
+            # ~sqrt(4π/nCells) rad per cell (used only as the sub-grid
+            # land-fraction sampling box width).
+            ncols = int(np.asarray(grid_lat).size)
+            grid_spacing = float(
+                np.sqrt(4.0 * np.pi / max(ncols, 1)) * 180.0 / np.pi
+            )
 
     return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
 
@@ -677,6 +695,222 @@ def load_land_fraction(
         path, var_name, target_lat_2d, target_lon_2d
     )
     return jnp.asarray(f_land)
+
+
+def load_land_albedo(
+    grid,
+    path: str,
+    var_name: str = "",
+    month: int | None = None,
+) -> jnp.ndarray:
+    """Load a land surface albedo field, regridded to the model grid.
+
+    Accepts a regular lat-lon NetCDF albedo (e.g. the ICON-extpar ALB
+    broadband albedo remapped to 0.25 deg lat-lon at
+    ``/work/bd1083/b309178/diffESM/land_data/
+    extpar_albedo_latlon_0p25deg.nc``).  When the field carries a time
+    axis (monthly climatology), ``month`` (1-12) selects a single month;
+    otherwise the annual mean is used.
+
+    Auto-detects percent vs. fraction (max > 1.5 → divide by 100).
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid or GaussianGrid
+        Target model grid.
+    path : str
+        NetCDF file containing land albedo.
+    var_name : str, optional
+        Albedo variable name; empty → auto-detect (ALB, al, alb, albedo,
+        surface_albedo, fal).
+    month : int, optional
+        1-12 to pick a single month from a monthly file; None → annual
+        mean (or the only field if the file is already time-collapsed).
+
+    Returns
+    -------
+    jax.Array
+        Land albedo (fraction in [0, 1]), shape ``(6, n, n)`` for
+        cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(path)
+    try:
+        all_names = set(ds.data_vars) | set(ds.coords)
+        if var_name:
+            alb_var = var_name
+        else:
+            alb_var = None
+            for c in ("ALB", "al", "alb", "albedo", "surface_albedo",
+                      "fal", "Albedo"):
+                if c in all_names:
+                    alb_var = c
+                    break
+            if alb_var is None:
+                data_vars = [
+                    v for v in ds.data_vars
+                    if ds[v].ndim >= 2
+                    and not str(v).endswith(("_bnds", "_bounds"))
+                ]
+                if not data_vars:
+                    raise KeyError(
+                        f"No data variables in albedo file {path}"
+                    )
+                alb_var = data_vars[0]
+
+        lat_var = None
+        for c in ("lat", "latitude", "y", "Y"):
+            if c in all_names:
+                lat_var = c
+                break
+        lon_var = None
+        for c in ("lon", "longitude", "x", "X"):
+            if c in all_names:
+                lon_var = c
+                break
+        if lat_var is None or lon_var is None:
+            raise KeyError(
+                f"Cannot detect lat/lon in albedo file {path}; "
+                f"available: {sorted(all_names)}"
+            )
+
+        lat_src = ds[lat_var].values.astype(np.float64)
+        lon_src = ds[lon_var].values.astype(np.float64)
+        alb_data = ds[alb_var].values.astype(np.float64)
+    finally:
+        ds.close()
+
+    # Reduce time / level dims to 2-D
+    if alb_data.ndim >= 3 and month is not None:
+        if not 1 <= month <= alb_data.shape[0]:
+            raise ValueError(
+                f"month={month} out of range [1, {alb_data.shape[0]}]"
+            )
+        alb_data = alb_data[month - 1]
+    while alb_data.ndim > 2:
+        # Time-mean over leading axis; squeeze any singleton level.
+        if alb_data.shape[0] == 1:
+            alb_data = alb_data[0]
+        else:
+            alb_data = np.nanmean(alb_data, axis=0)
+
+    # Longitude in [0, 360), ascending
+    lon_src = lon_src % 360.0
+    lon_order = np.argsort(lon_src)
+    lon_src = lon_src[lon_order]
+    alb_data = alb_data[:, lon_order]
+
+    # Latitude ascending
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        alb_data = alb_data[::-1, :]
+
+    alb_data = np.where(np.isnan(alb_data), 0.0, alb_data)
+
+    # Percent → fraction (extpar ALB is 0-100; ERA5 fal is 0-1)
+    if np.nanmax(alb_data) > 1.5:
+        alb_data = alb_data / 100.0
+
+    target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
+    alb_grid = _regrid_to_target(
+        lat_src, lon_src, alb_data, target_lat_2d, target_lon_2d
+    )
+    alb_grid = np.clip(alb_grid, 0.0, 1.0)
+    return jnp.asarray(alb_grid)
+
+
+def load_subgrid_orography(
+    grid,
+    path: str,
+    var_name: str = "SSO_STDH",
+) -> jnp.ndarray:
+    """Load the subgrid orographic standard deviation, regridded to the grid.
+
+    The orographic gravity-wave-drag schemes (Lindzen, McFarlane) launch a
+    stress ``tau_0 ∝ h_topo²`` where ``h_topo`` is the standard deviation of
+    the unresolved (subgrid) orography in each model cell.  Without a real
+    per-column field the schemes fall back to a single global
+    ``config.h_topo = 500 m`` everywhere — i.e. a 500 m mountain over the open
+    ocean too — which is unphysical.  This loader reads a real subgrid
+    orographic stddev (ICON-extpar ``SSO_STDH`` remapped to a regular lat-lon
+    grid, e.g. ``extpar_sso_latlon_0p25deg.nc``) so the drag is localized to
+    real mountains and is ~0 over flat ocean.
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid or GaussianGrid
+        Target model grid.
+    path : str
+        NetCDF file containing the subgrid orographic stddev [m].
+    var_name : str, optional
+        Variable name (default ``SSO_STDH``; ICON-extpar convention).
+
+    Returns
+    -------
+    jax.Array
+        Subgrid orographic stddev [m], clipped to >= 0, shape ``(6, n, n)``
+        for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(path)
+    try:
+        all_names = set(ds.data_vars) | set(ds.coords)
+        sso_var = var_name if var_name in all_names else None
+        if sso_var is None:
+            for c in ("SSO_STDH", "sso_stdh", "stddev_orography", "sgh"):
+                if c in all_names:
+                    sso_var = c
+                    break
+        if sso_var is None:
+            raise KeyError(
+                f"Cannot find subgrid orography variable in {path}; "
+                f"available: {sorted(ds.data_vars)}"
+            )
+
+        lat_var = None
+        for c in ("lat", "latitude", "y", "Y"):
+            if c in all_names:
+                lat_var = c
+                break
+        lon_var = None
+        for c in ("lon", "longitude", "x", "X"):
+            if c in all_names:
+                lon_var = c
+                break
+        if lat_var is None or lon_var is None:
+            raise KeyError(
+                f"Cannot detect lat/lon in SSO file {path}; "
+                f"available: {sorted(all_names)}"
+            )
+
+        lat_src = ds[lat_var].values.astype(np.float64)
+        lon_src = ds[lon_var].values.astype(np.float64)
+        sso_data = ds[sso_var].values.astype(np.float64)
+    finally:
+        ds.close()
+
+    while sso_data.ndim > 2:
+        sso_data = sso_data[0]
+
+    lon_src = lon_src % 360.0
+    lon_order = np.argsort(lon_src)
+    lon_src = lon_src[lon_order]
+    sso_data = sso_data[:, lon_order]
+
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        sso_data = sso_data[::-1, :]
+
+    sso_data = np.where(np.isnan(sso_data), 0.0, sso_data)
+
+    target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
+    sso_grid = _regrid_to_target(
+        lat_src, lon_src, sso_data, target_lat_2d, target_lon_2d
+    )
+    sso_grid = np.maximum(sso_grid, 0.0)
+    return jnp.asarray(sso_grid)
 
 
 def load_real_topography(
@@ -787,14 +1021,20 @@ def load_real_topography(
     if config.clip_negative:
         z_s = np.maximum(z_s, 0.0)
 
-    # Smoothing
-    if is_gaussian:
+    # Smoothing.  Unstructured Voronoi/MPAS fields are rank-1 ``(nCells,)``
+    # with no structured neighbour stencil, so neither the gaussian (2-D)
+    # nor the cubed-sphere (6, n, n) smoother applies — the point-sampled
+    # field is used as-is (a mesh-native Laplacian smoother is a follow-up).
+    is_unstructured = np.asarray(z_s).ndim == 1
+    if is_unstructured:
+        pass
+    elif is_gaussian:
         z_s = _laplacian_smooth_gaussian(z_s, passes=config.smoothing_passes)
     else:
         z_s = _laplacian_smooth_cubed_sphere(z_s, passes=config.smoothing_passes)
 
     # Edge blending for cubed-sphere
-    if not is_gaussian and config.edge_blend_strength > 0:
+    if not is_gaussian and not is_unstructured and config.edge_blend_strength > 0:
         z_s_jax = jnp.array(z_s)
         z_s_jax = blend_scalar_cube_edges_2d(
             z_s_jax,
