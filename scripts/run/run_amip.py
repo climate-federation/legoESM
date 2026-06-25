@@ -841,6 +841,12 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
 
 
 def main(argv: list[str] | None = None):
+    # Persistent cross-process XLA compile cache (RRTMGP cold-compile ~2600 s,
+    # otherwise re-paid every launch).  Idempotent; before any jit.  run_amip
+    # does not go through bootstrap()/configure_backend(), so wire it directly.
+    from legoesm.runtime.backend import enable_persistent_compile_cache
+    enable_persistent_compile_cache()
+
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
