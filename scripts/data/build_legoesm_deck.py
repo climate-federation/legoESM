@@ -389,7 +389,7 @@ def slide_title():
         [Para([Run("Columbia University  ·  2026",
                    size=12, italic=True, color=PALE_INK)])]))
     b.add(sp_textbox(idg, SLIDE_W_IN - 4.5 - M, SLIDE_H_IN - 0.85, 4.5, 0.5,
-        [Para([Run("github.com/legoESM", size=12, color=PALE_INK)], align="r")]))
+        [Para([Run("github.com/climate-federation/legoESM", size=12, color=PALE_INK)], align="r")]))
     return b
 
 
@@ -1597,7 +1597,7 @@ def slide_roadmap():
 
     by = 6.55
     b.add(sp_rect_with_text(idg, M, by, SLIDE_W_IN - 2 * M, 0.55, TEAL_DARK,
-        [Para([Run("Thank you  ·  Questions?   github.com/legoESM   ·   pg2328@columbia.edu",
+        [Para([Run("Thank you  ·  Questions?   github.com/climate-federation/legoESM   ·   pg2328@columbia.edu",
                    size=16, bold=True, color=PAPER, font=HEADER_FONT)], align="ctr")],
         anchor="ctr", margin=0))
     return b
