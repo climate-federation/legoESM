@@ -278,6 +278,11 @@ class TimingResult:
     total_cells: int
     cells_per_gpu: int
     mcells_per_s: float
+    # Grid family this row was measured on (cubed-sphere / latlon / icosahedral
+    # / spectral).  Serialized into strong_scaling.json so the tidy aggregator
+    # (aggregate_bcw_scaling.py) can tag each GPU row with its grid — without
+    # it the nested atm report has no grid and the rows are silently dropped.
+    grid_type: str = "cubed-sphere"
     scaling_efficiency: float = 1.0
     # Collective-permute op census of the compiled TIMED executable
     # (comm-minimisation step 1: measurement infrastructure for the
@@ -1313,6 +1318,7 @@ def _run_segment_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        grid_type=grid_type,
         **_hlo_census_fields(_hlo_counts),
     )
 
@@ -1870,6 +1876,7 @@ def run_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        grid_type=grid_type,
         **_hlo_census_fields(_hlo_counts),
     )
 
@@ -2611,7 +2618,16 @@ def main() -> int:
     # per rank (replicated dynamics, not real scaling), lat-lon raises
     # NotImplementedError, spectral has no MPI path.  This catches all
     # three with one branch and one consistent error message.
-    if world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS:
+    #
+    # EXCEPTION: ``--cs-mpi-scatter`` on cubed-sphere IS genuine face
+    # decomposition (each rank owns a subset of the 6 faces; cross-face
+    # halos exchange via mpi4jax), so it is allowed through here exactly
+    # like the inner guard's ``_cube_scatter_ok`` carve-out.  Without
+    # this the early guard aborts the run before the scatter path ever
+    # executes — the two guards were inconsistent.
+    _cube_scatter_ok = grid_type == "cubed-sphere" and args.cs_mpi_scatter
+    if (world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS
+            and not _cube_scatter_ok):
         if is_rank0:
             print(
                 f"ERROR: {grid_type} MPI multi-rank scaling is not "
