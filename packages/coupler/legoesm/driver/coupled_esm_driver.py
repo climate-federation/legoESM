@@ -529,8 +529,13 @@ class CoupledESMDriver:
                 land_cfg = cfg.land_config
             else:
                 land_cfg = MultiLayerLandConfig()
-        else:
+        elif cfg.land_mode == "slab":
             land_cfg = cfg.land_config if isinstance(cfg.land_config, LandConfig) else LandConfig()
+        else:
+            raise ValueError(
+                f"Unknown land_mode {cfg.land_mode!r}; "
+                "expected 'none', 'slab', or 'multilayer'."
+            )
 
         # Enable carbon in land config if carbon_active + differland
         if cfg.carbon_active and cfg.carbon_land == "differland":
@@ -841,8 +846,7 @@ class CoupledESMDriver:
             sst, sic = self._atm.get_sst_sic(day)
             acfg = self.atm_config
             alb = blend_surface_property(
-                sic, getattr(acfg, "albedo_ice", 0.65),
-                getattr(acfg, "albedo_ocean", 0.06),
+                sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
             return alb, T
@@ -908,34 +912,28 @@ class CoupledESMDriver:
             T_sfc = _resp.T_sfc
         else:
             albedo_eff = blend_surface_property(
-                sic,
-                getattr(acfg, 'albedo_ice', 0.6),
-                getattr(acfg, 'albedo_ocean', 0.06),
+                sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity comes from the coupler config (per-tile
-        # ocean/ice/land emissivity is blended via tile fractions
-        # downstream).  The 0.96 broad-spectrum default lives in the
-        # ``CoupledDriverConfig.surface_emissivity`` field, falling
-        # back to the canonical ocean emissivity from
-        # ``constants.emissivity_ocean`` if not set.
-        eps_sfc = getattr(
-            self.coupled_cfg, "surface_emissivity",
-            constants.emissivity_ocean,
+        # Surface emissivity: blend canonical ocean/ice emissivity by sea-ice
+        # fraction (same blend as albedo, matching earth_system_driver). The
+        # old ``getattr(coupled_cfg, "surface_emissivity", ...)`` referenced a
+        # field ``CoupledDriverConfig`` never defines, so it silently pinned
+        # emissivity to the ocean value and ignored the ice fraction.
+        eps_sfc = blend_surface_property(
+            sic, constants.emissivity_ice, constants.emissivity_ocean,
         )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
         precip_total = jnp.maximum(seg_precip, 0.0)
-        # Smooth snow fraction (Wigmosta 1994 / Dai 2008): ramp from 0
-        # at T_low = T_freeze + 2 K to 1 at T_low = T_freeze - 2 K.
-        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
-        # gradients (training/DA paths) and miscounted mixed-phase
-        # precipitation in the 0–4 °C band.
-        snow_frac = jnp.clip(
-            (constants.T_freeze + 2.0 - T_low) / 4.0, 0.0, 1.0,
-        )
+        # Smooth snow fraction (Wigmosta 1994 / Dai 2008) via shared helper —
+        # single source of truth with the earth-system driver. Replaces the
+        # prior hard step, which killed d(snow)/d(T_low) and miscounted
+        # mixed-phase precip in the 0–4 °C band.
+        from legoesm.forcing.surface_utils import snow_fraction
+        snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith

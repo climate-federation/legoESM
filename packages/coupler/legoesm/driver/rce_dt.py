@@ -74,13 +74,25 @@ def empirical_dt_dx2(dx_min: float) -> float:
     return _DT_DX2_K * dx_min ** 2
 
 
+# Voronoi-family unstructured grids all use the voronoi-safe dt: MPAS uses an
+# SCVT Voronoi mesh, and the icosahedral grid shares the conservative 300 s
+# default pending its own 30-day measurement. The structured resolution ladder
+# in ``auto_dt_rce`` is only validated for the quasi-uniform ladder grids below.
+_VORONOI_LIKE_GRIDS = ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
+_LADDER_GRIDS = ("cubed_sphere", "gaussian", "latlon")
+
+
 def auto_dt_rce(grid_type: str, resolution: int) -> float:
     """Return the empirically-measured stable outer dt [s] for the
     cross-grid RCE driver.
 
     Parameters
     ----------
-    grid_type : {"cubed_sphere", "gaussian", "latlon", "voronoi"}
+    grid_type : str
+        One of the ladder grids ``{"cubed_sphere", "gaussian", "latlon"}`` or
+        a voronoi-family grid ``{"voronoi", "mpas", "mpas_voronoi",
+        "icosahedral"}`` (all map to the voronoi-safe dt). Any other value
+        raises ``ValueError`` rather than silently using the ladder.
     resolution : int
         N for cubed_sphere (CXX), N_max for spectral (TXX), n_lat for
         lat-lon (LLXX), level for voronoi/MPAS (VXX).
@@ -95,16 +107,23 @@ def auto_dt_rce(grid_type: str, resolution: int) -> float:
     Raises
     ------
     ValueError
-        For ``cubed_sphere`` / ``gaussian`` / ``latlon`` at
-        ``resolution > 96``. The iter-13 / iter-20 measurements
-        showed that extrapolating the ladder past the last measured
-        boundary is unsafe (C96 BLOWUP at the iter-13-extrapolated
-        dt=75). High-resolution runs must pass an explicit ``--dt``
-        and update both this function + the regression test once a
-        30-day measurement lands.
+        For an unknown ``grid_type`` (not a ladder or voronoi-family grid), or
+        for a ladder grid (``cubed_sphere`` / ``gaussian`` / ``latlon``) at
+        ``resolution > 96``. The iter-13 / iter-20 measurements showed that
+        extrapolating the ladder past the last measured boundary is unsafe
+        (C96 BLOWUP at the iter-13-extrapolated dt=75). High-resolution runs
+        must pass an explicit ``--dt`` and update both this function + the
+        regression test once a 30-day measurement lands.
     """
-    if grid_type == "voronoi":
+    if grid_type in _VORONOI_LIKE_GRIDS:
         return 300.0
+    if grid_type not in _LADDER_GRIDS:
+        raise ValueError(
+            f"auto_dt_rce: unknown grid_type {grid_type!r}; expected one of "
+            f"{_LADDER_GRIDS + _VORONOI_LIKE_GRIDS}. The structured resolution "
+            "ladder is only validated for the quasi-uniform ladder grids; "
+            "unstructured grids must map to the voronoi-safe branch."
+        )
     if resolution <= 24:
         return 600.0
     if resolution <= 48:

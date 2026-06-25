@@ -2131,7 +2131,7 @@ def plane_compressible_euler_slow_tendencies(
                 u, v, w, grid, height_coord, c_s_arg,
                 n2_sgs=n2_sgs, prandtl=config.smagorinsky_prandtl,
                 wall_damping=getattr(config, "smagorinsky_wall_damping", True),
-                delta_max=getattr(config, "smagorinsky_delta_max", 1.0e30),
+                delta_max=config.smagorinsky_delta_max,
                 stability_length=getattr(
                     config, "smagorinsky_stability_length", False),
             )

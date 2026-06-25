@@ -397,14 +397,17 @@ def ocean_baroclinic_tendencies_cdgrid(
     #              spurious bottom PGF above) → not faithful on the cube.
     #   "smc03"  : full Shchepetkin & McWilliams 2003 density-Jacobian PGF
     #              REPLACING dp — see below.  Matches the proven latlon/tripole.
+    pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+    if pgf_scheme not in ("adcroft", "smc03", "zero"):
+        # Static config value -> validate at fn entry UNCONDITIONALLY. A pure
+        # z* run has is_partial=False, so gating this guard inside `if
+        # is_partial` let a typo (e.g. 'smc3') silently fall back to adcroft and
+        # disable the faithful scheme on z*; a typo must fail loudly on every
+        # vertical coordinate (matches the latlon/mpas siblings).
+        raise ValueError(
+            f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
+            "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
     if is_partial:
-        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
-        if pgf_scheme not in ("adcroft", "smc03", "zero"):
-            # Static config value -> validate at fn entry (a typo must fail loudly,
-            # not silently fall back to adcroft and disable the faithful scheme).
-            raise ValueError(
-                f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
-                "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
         cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
         if pgf_scheme == "smc03":
             # S&M03 density-Jacobian PGF on the AL corners.  Per-cell geometry
@@ -519,7 +522,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # residual is the SOLE cause (vs any barotropic / advective / metric term).
     # Works for both partial and z* (zeroes the base AL gradient + any
     # correction).  Diagnostic only — never a faithful run.
-    if getattr(config, "pgf_scheme", "adcroft") == "zero":
+    if pgf_scheme == "zero":
         dp_dx = jnp.zeros_like(dp_dx)
         dp_dy_perp = jnp.zeros_like(dp_dy_perp)
 
