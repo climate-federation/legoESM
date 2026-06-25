@@ -111,7 +111,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Simplified semi-implicit damping. ps *= exp(-alpha*dt*lap(ps)). Typical 0.5*c_grav²*dt/dx².
     T_min: float = 50.0            # Temperature floor [K]
     p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic 1/p
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     sponge_sigma: float = 0.15     # Rayleigh sponge above this sigma
     sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
     use_conservation_fixer: bool = True
@@ -246,6 +245,7 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         #
         # Default ``False`` keeps the legacy explicit-diffusion
         # path bit-exact.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Appended last to preserve positional ABI.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:

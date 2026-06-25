@@ -32,6 +32,13 @@ def test_pe_configs_expose_p_ceil_default():
     ):
         assert cfg_cls().p_ceil == 2.0e6              # default == former literal
         assert cfg_cls(p_ceil=1.5e6).p_ceil == 1.5e6  # tunable
+        # Positional-ABI guard (codex PR F): p_ceil was APPENDED, so it must be
+        # the LAST field — otherwise inserting it would shift the positional
+        # binding of every later field for existing positional callers.
+        assert cfg_cls._fields[-1] == "p_ceil", (
+            f"{cfg_cls.__name__}: p_ceil must remain the LAST NamedTuple field "
+            "to preserve the positional constructor ABI"
+        )
 
 
 def test_duogrid_monotone_clip_warns_non_conservative():

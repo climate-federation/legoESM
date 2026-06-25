@@ -81,7 +81,6 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     K_h: float = 0.0              # scalar diffusion [m²/s]
     T_min: float = 50.0           # temperature floor [K]
     p_floor: float = 100.0        # pressure floor [Pa] for adiabatic heating (limits 1/p)
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
@@ -119,6 +118,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # that blowup at no stability cost.  Use ``ssp_rk54`` for a bit-exact
     # reference run.  See ``timestepping/ssp_rk54.py``.
     time_integrator: str = "ssp_rk54_scan"
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
 
 
 # ============================================================================

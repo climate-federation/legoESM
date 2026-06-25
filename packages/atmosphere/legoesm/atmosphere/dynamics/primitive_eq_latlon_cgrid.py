@@ -146,7 +146,6 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     anchor_mass_to_initial: bool = False  # Mirror cubed-sphere: anchor fixer to initial mass
     T_min: float = 50.0           # Temperature floor [K]
     p_floor: float = 100.0        # Pressure floor [Pa] for surface pressure positivity
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p)
     zero_mean_ps_tendency: bool = True
     use_ppm_transport: bool = True  # PPM scalar transport (vs cell-centered gradient)
     use_polar_filter: bool = False
@@ -168,6 +167,7 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     by ``tests/parallel/test_latlon_mpi_step_serial.py`` on Stage-2
     smoke).
     """
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
