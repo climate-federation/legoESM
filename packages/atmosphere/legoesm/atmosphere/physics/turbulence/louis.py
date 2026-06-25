@@ -51,6 +51,8 @@ def louis_turbulence(
     rho: jax.Array,
     dt: float,
     config: LouisConfig,
+    surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+    | None = None,
 ) -> TurbulenceOutput:
     """Compute turbulence tendencies using Louis (1979) stability functions.
 
@@ -79,6 +81,16 @@ def louis_turbulence(
     dt : float
         Time step [s].
     config : LouisConfig
+    surface_flux : tuple of jax.Array, optional
+        Pre-computed surface fluxes ``(tau_x, tau_y, shflx, lhflx, ustar)``,
+        each shape ``(ncol,)``, used as the BL bottom boundary condition in
+        place of the single-surface ``compute_surface_fluxes`` call.  This
+        is how the driver injects the AREA-WEIGHTED tiled (mosaic) surface
+        flux — COARE3 on the ocean tile, the land Monin-Obukhov scheme on
+        the land tile — instead of running one bulk scheme on the blended
+        surface temperature (which runs the ocean scheme over land).  When
+        ``None`` (default) the legacy single-surface flux is computed from
+        ``T_sfc``/``q_sfc``/``config.surface`` (byte-identical behaviour).
 
     Returns
     -------
@@ -173,11 +185,15 @@ def louis_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    # Surface fluxes
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
-        u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+    # Surface fluxes — either the driver-supplied tiled (mosaic) flux or
+    # the legacy single-surface bulk flux from the blended T_sfc.
+    if surface_flux is not None:
+        tau_x, tau_y, shflx, lhflx, ustar = surface_flux
+    else:
+        tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+            u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
+            T_sfc, q_sfc, rho[:, -1], config.surface,
+        )
 
     sflx_u = tau_x
     sflx_v = tau_y
