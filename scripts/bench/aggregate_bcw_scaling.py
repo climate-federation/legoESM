@@ -28,6 +28,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 from legoesm import constants
@@ -151,6 +152,24 @@ def _is_ocean_schema(d: dict) -> bool:
     return False
 
 
+def _is_atm_nested_schema(d: dict) -> bool:
+    """True only for the atmosphere GPU harness nested report
+    (run_levante_gpu_scaling.py): a non-ocean mode plus per-result atmosphere
+    markers (``grid_type`` / ``physics_level``).  POSITIVE match so an
+    unrecognized/typoed nested schema is SKIPPED rather than silently mislabeled
+    'atm' (codex review — the prior ``else: 'atm'`` default mislabeled anything
+    that was not ocean)."""
+    if str(d.get("mode", "")).startswith("ocean"):
+        return False
+    res = d.get("results")
+    if not (isinstance(res, list) and res and isinstance(res[0], dict)):
+        return False
+    r0 = res[0]
+    if str(r0.get("mode", "")).startswith("ocean"):
+        return False
+    return ("grid_type" in r0) or ("physics_level" in r0)
+
+
 def _rows_from_nested(d: dict, source: Path, component: str = "ocean") -> list[dict]:
     """Nested ``{backend, results:[TimingResult,...]}`` report → tidy rows.
 
@@ -258,12 +277,20 @@ def collect(roots) -> tuple[list[dict], int]:
                 continue
             if isinstance(d, dict) and isinstance(d.get("results"), list):
                 # Nested report: ocean campaign OR the atmosphere GPU harness
-                # (run_levante_gpu_scaling.py).  Route by schema so an atm
-                # report is flattened as component='atm' (grid from its
-                # per-result grid_type) instead of being dropped.
-                component = "ocean" if _is_ocean_schema(d) else "atm"
-                for row in _rows_from_nested(d, jf, component=component):
-                    _add(row)
+                # (run_levante_gpu_scaling.py).  Route by POSITIVE schema match;
+                # an unrecognized nested schema is SKIPPED with a warning, never
+                # silently mislabeled 'atm' (codex review).
+                if _is_ocean_schema(d):
+                    component = "ocean"
+                elif _is_atm_nested_schema(d):
+                    component = "atm"
+                else:
+                    print(f"WARNING: unrecognized nested report schema, skipping "
+                          f"{jf}", file=sys.stderr)
+                    component = None
+                if component is not None:
+                    for row in _rows_from_nested(d, jf, component=component):
+                        _add(row)
             else:
                 _add(_row_from_json(d, jf))
     rows = sorted(
