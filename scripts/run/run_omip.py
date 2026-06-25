@@ -419,6 +419,9 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
         meshes = {
             "eorca1": ("data/grids/eORCA1.2_mesh_mask.nc", "n_lon-1-i"),
             "eorca025": ("data/grids/eORCA025_mesh_mask.nc", "(n_lon-i)%n_lon"),
+            # eORCA05 (1/2 deg) is 2x-decimated from eORCA025 (de-haloed -> same
+            # (n_lon-i)%n_lon fold convention, fold-verified at build time).
+            "eorca05": ("data/grids/eORCA05_mesh_mask.nc", "(n_lon-i)%n_lon"),
         }
         key = resolution.lower()
         if key not in meshes:

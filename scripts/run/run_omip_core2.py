@@ -352,7 +352,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # default eORCA1 (1 deg). create_tripole_grid reads the grid (glamt/e1t.../
     # tmask + fold) from this SAME file, so the grid and the land_mask/bathy
     # (read below) provably come from one mesh -- assert it to kill any drift.
-    resolution = "eorca025" if "025" in Path(mesh_path).name else "eorca1"
+    _mname = Path(mesh_path).name
+    resolution = ("eorca025" if "025" in _mname
+                  else "eorca05" if "05" in _mname else "eorca1")
     _grid_mesh = run_omip._parse_resolution("tripole", resolution)["mesh_path"]
     if Path(_grid_mesh).resolve() != Path(mesh_path).resolve():
         raise ValueError(
