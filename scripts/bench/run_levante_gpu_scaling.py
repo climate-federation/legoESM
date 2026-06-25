@@ -278,6 +278,11 @@ class TimingResult:
     total_cells: int
     cells_per_gpu: int
     mcells_per_s: float
+    # Grid family this row was measured on (cubed-sphere / latlon / icosahedral
+    # / spectral).  Serialized into strong_scaling.json so the tidy aggregator
+    # (aggregate_bcw_scaling.py) can tag each GPU row with its grid — without
+    # it the nested atm report has no grid and the rows are silently dropped.
+    grid_type: str = "cubed-sphere"
     scaling_efficiency: float = 1.0
     # Collective-permute op census of the compiled TIMED executable
     # (comm-minimisation step 1: measurement infrastructure for the
@@ -1313,6 +1318,7 @@ def _run_segment_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        grid_type=grid_type,
         **_hlo_census_fields(_hlo_counts),
     )
 
@@ -1870,6 +1876,7 @@ def run_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        grid_type=grid_type,
         **_hlo_census_fields(_hlo_counts),
     )
 
