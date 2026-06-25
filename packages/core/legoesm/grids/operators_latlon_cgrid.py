@@ -70,6 +70,27 @@ def pad_ns_zero_multi(*fields: jnp.ndarray) -> tuple:
     return pad_with_pole_bc_lat_multi(fields, halo=1)
 
 
+def _vface_cos_lat_core(grid) -> jnp.ndarray:
+    """Raw ``cos(lat_v)`` at the ``n_lat+1`` v-face midpoints (#515 consolidation).
+
+    The single source for the regular-branch v-face zonal-metric cosine shared by
+    ``divergence_cgrid`` and ``gradient_curl_to_v``: pad ``grid.lat`` with the
+    halo-aware pole/cut BC (``pad_with_pole_bc_lat`` — at an interior MPI band cut
+    the ghost row is the neighbour rank's true edge latitude via the AD-safe
+    sendrecv), take the v-face midpoint latitude, return its cosine.  Callers apply
+    their OWN pole step (``zero_polar_lat_ends`` vs a ``1e-30`` floor) and the
+    ``R*dlon`` scaling.  Kept on the STORED ``grid.lat`` dtype (NOT
+    ``result_type``-cast — unlike the ocean ``vface_zonal_cos_lat``) so the core
+    path stays byte-identical to the former inline recompute.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    lat_pad = pad_with_pole_bc_lat(
+        grid.lat, halo=1, south_value=0.0, north_value=0.0,
+    )
+    lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
+    return jnp.cos(lat_v)
+
+
 def is_tripolar(grid) -> bool:
     """Return True if ``grid`` carries an active tripolar fold descriptor.
 
@@ -728,15 +749,8 @@ def divergence_cgrid(
         # exactly 0 (no flux through the pole), which also discards the
         # pole-side constant ghost; bit-identical to the historical
         # jnp.pad(cos_interior, (1, 1)) on the local backend.
-        from legoesm.grids.halo_latlon import (
-            pad_with_pole_bc_lat,
-            zero_polar_lat_ends,
-        )
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
+        from legoesm.grids.halo_latlon import zero_polar_lat_ends
+        cos_lat_v = zero_polar_lat_ends(_vface_cos_lat_core(grid))
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -1147,14 +1161,9 @@ def gradient_curl_to_v(
         # divergence_cgrid): at an interior MPI band cut the ghost row
         # is the neighbour's true edge cell latitude via the AD-safe
         # sendrecv, so the end faces divide by the exact serial metric.
-        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         R = grid.radius
         dlon = grid.dlon
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = jnp.cos(lat_v)
+        cos_lat_v = _vface_cos_lat_core(grid)
         # Floor only guards the ghost-derived pole entries (overwritten
         # below); interior/cut faces are O(1e5 m) — bit-identical.
         dx_v = jnp.maximum(R * cos_lat_v * dlon, 1e-30)  # (n_lat+1,)
