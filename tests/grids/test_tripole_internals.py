@@ -31,10 +31,14 @@ class TestDetectFold:
         glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
 
         gphit = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
-        # Force the fold row to be perfectly symmetric (constant in lon)
+        # Force the fold row to be perfectly symmetric (constant in lon).
         gphit = gphit.at[-1].set(60.0)
 
-        fold = _detect_fold(glamt, gphit, n_lat, n_lon)
+        # A constant fold row is self-symmetric under BOTH index conventions, so
+        # ``auto`` cannot disambiguate (see test_constant_fold_row_is_ambiguous);
+        # pass the convention explicitly to exercise the n_lon-1-i descriptor.
+        fold = _detect_fold(glamt, gphit, n_lat, n_lon,
+                            fold_convention="n_lon-1-i")
 
         assert fold.is_active is True
         assert fold.fold_j == n_lat - 1
@@ -43,6 +47,26 @@ class TestDetectFold:
         assert jnp.all(fold.perm_v == fold.perm_T)
         assert fold.vector_sign_u == -1.0
         assert fold.vector_sign_v == -1.0
+
+    def test_constant_fold_row_is_ambiguous_under_auto(self):
+        """PR B #4: a constant (perfectly symmetric) fold row fits BOTH index
+        conventions, so ``fold_convention='auto'`` must raise rather than
+        silently guess n_lon-1-i (the wrong origin for a de-haloed mesh)."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 16, 32
+        lon = jnp.linspace(0.0, 360.0, n_lon, endpoint=False)
+        lat = jnp.linspace(-80.0, 60.0, n_lat)
+        glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
+        gphit = jnp.broadcast_to(lat[:, None], (n_lat, n_lon)).at[-1].set(60.0)
+
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)  # auto
+
+        # Both explicit conventions resolve it (no ambiguity once chosen).
+        for conv in ("n_lon-1-i", "(n_lon-i)%n_lon"):
+            fold = _detect_fold(glamt, gphit, n_lat, n_lon, fold_convention=conv)
+            assert fold.is_active is True
 
     def test_asymmetric_fold_raises(self):
         from legoesm.grids.tripole import _detect_fold
@@ -105,16 +129,21 @@ class TestDetectFold:
         expected = (n_lon - jnp.arange(n_lon)) % n_lon
         assert jnp.all(fold.perm_T == expected)
         assert jnp.all(fold.perm_v == fold.perm_T)
-        # And the eORCA1.2-style convention is still detected as n_lon-1-i.
-        gphit2 = gphit.at[-1].set(60.0)  # constant row -> ties break to n_lon-1-i
-        fold2 = _detect_fold(glamt, gphit2, n_lat, n_lon)
+        # A constant fold row is a genuine tie (symmetric under BOTH origins):
+        # auto now RAISES instead of silently guessing n_lon-1-i (PR B #4); the
+        # eORCA1.2 origin is recovered only by naming it explicitly.
+        gphit2 = gphit.at[-1].set(60.0)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit2, n_lat, n_lon)
+        fold2 = _detect_fold(glamt, gphit2, n_lat, n_lon,
+                             fold_convention="n_lon-1-i")
         assert jnp.all(fold2.perm_T == jnp.arange(n_lon - 1, -1, -1))
 
     def test_explicit_fold_convention_overrides_ambiguous_tie(self):
-        """A constant fold-row latitude is a silent tie that auto-detect breaks
-        to n_lon-1-i. An explicit ``fold_convention`` bypasses the tie (still
-        verified against the tolerance), giving a de-haloed mesh its correct
-        pure-periodic origin."""
+        """A constant fold-row latitude is a genuine tie: ``auto`` raises (PR B
+        #4) rather than silently guessing. An explicit ``fold_convention``
+        resolves it (still verified against the tolerance), giving a de-haloed
+        mesh its correct pure-periodic origin."""
         from legoesm.grids.tripole import _detect_fold
 
         n_lat, n_lon = 12, 24
@@ -123,10 +152,9 @@ class TestDetectFold:
         gphit = jnp.broadcast_to(
             jnp.linspace(-80.0, 60.0, n_lat)[:, None], (n_lat, n_lon))
         gphit = gphit.at[-1].set(60.0)   # constant fold row -> auto ties
-        # auto -> n_lon-1-i (documented tie-break)
-        assert jnp.all(
-            _detect_fold(glamt, gphit, n_lat, n_lon).perm_T
-            == jnp.arange(n_lon - 1, -1, -1))
+        # auto -> raises (ambiguous, neither origin distinguishable)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)
         # explicit pure-periodic -> the OTHER origin, verified (asym 0 <= tol)
         f = _detect_fold(glamt, gphit, n_lat, n_lon,
                          fold_convention="(n_lon-i)%n_lon")

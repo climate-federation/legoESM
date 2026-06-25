@@ -124,7 +124,9 @@ def test_compute_total_energy_pe_returns_fp64():
     assert te_column.dtype == jnp.float64, (
         f"PE total-energy column dropped fp64: {te_column.dtype}"
     )
-    # te_total is Python float; assert finite + non-zero.
+    # te_total is now a TRACED fp64 0-d array (the host float() was removed so
+    # the energy correction stays jit/grad-safe); assert fp64 + finite + positive.
+    assert te_total.dtype == jnp.float64
     assert te_total > 0
 
 

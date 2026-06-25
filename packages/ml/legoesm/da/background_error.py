@@ -130,18 +130,26 @@ class DiffusionB:
         return self.sigma * smoothed
 
     def inv_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply approximate B^{-1} to control vector x. Differentiable.
+        """Apply the EXACT inverse of ``B = sqrt_multiply ∘ sqrt_multiplyᵀ``.
 
-        B^{-1} = Sigma^{-1} @ C^{-1} @ Sigma^{-1}.
-        C^{-1} is approximated by reversing the diffusion smoothing
-        (subtracting rather than adding the relaxation). This is a
-        first-order approximation that is accurate for small kappa but
-        degrades for large length scales or many iterations.  The
-        approximation is sufficient for preconditioning but should not
-        be relied upon for exact inverse operations.
+        ``sqrt_multiply`` is ``B^{1/2} = Σ·Sᵐ`` with ``m = n_iter//2 + 1`` and
+        ``S`` the area-mean Jacobi smoother, so
+
+            B = Σ Sᵐ (Sᵀ)ᵐ Σ   ⇒   B^{-1} = Σ^{-1} (Sᵀ)^{-m} S^{-m} Σ^{-1}.
+
+        Each smoother step ``S = (1-α)I + α·1·aᵀ`` (``a`` = area weights,
+        ``aᵀ1 = 1``) is a rank-1 update of ``(1-α)I``, so its inverse is the
+        closed-form Sherman-Morrison step ``S^{-1}z = (z - α·aᵀz)/(1-α)`` (and
+        the transpose ``(Sᵀ)^{-1}y = (y - α·a·1ᵀy)/(1-α)``) — NOT the previous
+        first-order ``I - αΔ`` approximation, which also used the wrong step
+        count (``n_iter`` instead of ``m``) and so was not the inverse of
+        ``sqrt_multiply`` (‖B^{-1}B − I‖ was O(1)). With these exact steps and
+        matching count, ``inv_multiply(B v) == v`` to machine precision, so the
+        change-of-variable ``x = x_b + B^{1/2} v`` and ``J_b = ½ dxᵀ B^{-1} dx``
+        are mutually consistent.
         """
-        # First divide by sigma
-        x_scaled = x / self.sigma
+        m = self.n_iter // 2 + 1
+        x_scaled = x / self.sigma          # Σ^{-1}
 
         ncol = self.grid.grid_n_columns
         if x_scaled.ndim == 1 and x_scaled.size > ncol:
@@ -155,19 +163,23 @@ class DiffusionB:
         area = self.grid.to_columns(self.grid.grid_area)
         area_norm = area / jnp.sum(area)
         alpha = self.kappa
+        inv_damp = 1.0 / (1.0 - alpha)     # α ≤ 0.5 ⇒ inv_damp ∈ [1, 2]
 
-        # C^{-1} ≈ reverse diffusion
-        def inv_step(x, _):
-            mean_x = jnp.sum(x * area_norm[:, None], axis=0, keepdims=True)
-            x_new = x - alpha * (mean_x - x)
-            return x_new, None
+        # S^{-1}: z -> (z - α·(area-weighted mean of z)) / (1-α)
+        def inv_step(z, _):
+            mean_z = jnp.sum(z * area_norm[:, None], axis=0, keepdims=True)
+            return inv_damp * (z - alpha * mean_z), None
 
-        result, _ = jax.lax.scan(inv_step, field_2d, None, length=self.n_iter)
+        # (Sᵀ)^{-1}: y -> (y - α·area_norm·(column sum of y)) / (1-α)
+        def invT_step(y, _):
+            col_sum = jnp.sum(y, axis=0, keepdims=True)
+            return inv_damp * (y - alpha * area_norm[:, None] * col_sum), None
 
-        if x_scaled.ndim == 1:
-            result = result.ravel()
+        field_2d, _ = jax.lax.scan(inv_step, field_2d, None, length=m)   # S^{-m}
+        field_2d, _ = jax.lax.scan(invT_step, field_2d, None, length=m)  # (Sᵀ)^{-m}
 
-        return result / self.sigma
+        result = field_2d.ravel() if x_scaled.ndim == 1 else field_2d
+        return result / self.sigma         # Σ^{-1}
 
 
 # ---------------------------------------------------------------------------

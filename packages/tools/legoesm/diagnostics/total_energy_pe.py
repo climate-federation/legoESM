@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
-def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
+def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, jax.Array]:
     """Compute per-column and total PE hydrostatic total energy.
 
     Faithful to FV3 fv_mapz.F90:1127-1152 (hydrostatic branch) using
@@ -119,7 +119,10 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     # Multiply by area for J per column (delp already kg·m/s²/m² → J/m² when
     # times specific energy).  FV3's te_2d before area mult is in J/m².
     te_column = te * grid.area.astype(acc)
-    te_total = float(jnp.sum(te_column))
+    # Return the total as a TRACED 0-d array (no host ``float()``), so the
+    # energy-correction Newton solve below stays jit/grad-safe. Callers wanting
+    # a host scalar do ``float(te_total)`` (e.g. ``te_drift_pe``).
+    te_total = jnp.sum(te_column)
     return te_column, te_total
 
 
@@ -139,7 +142,14 @@ def te_drift_pe(state_old, state_new, grid, coord) -> float:
     """
     _, te_old = compute_total_energy_pe(state_old, grid, coord)
     _, te_new = compute_total_energy_pe(state_new, grid, coord)
-    return te_new - te_old
+    return float(te_new - te_old)
+
+
+# Fixed Newton sweeps for the PE total-energy correction. A COUNT (never
+# config/trainable); the energy is ~linear in a uniform ΔT so this converges in
+# 1-2 iters and the rest are ~no-ops — a fixed loop keeps the correction
+# jit/grad-safe (no data-dependent early-out).
+_TE_NEWTON_ITERS = 5
 
 
 def apply_te_correction_pe(state_old, state_new, grid, coord):
@@ -172,31 +182,31 @@ def apply_te_correction_pe(state_old, state_new, grid, coord):
     Bit-for-bit identical to state_new when te_dt = 0.
     Differentiable end-to-end.
     """
-    _, te_old = compute_total_energy_pe(state_old, grid, coord)
-    _, te_new = compute_total_energy_pe(state_new, grid, coord)
-    te_target = te_old
+    _, te_target = compute_total_energy_pe(state_old, grid, coord)  # traced scalar
 
-    # PE TE includes a hydrostatic boundary-work term that depends
-    # on T (via phi from hydrostatic integration), so the effective
-    # heat capacity is NOT simply cp · total_mass.  Use Newton
-    # iteration with a numerical-Jacobian estimate of dTE/dT.
-    state_curr = state_new
+    # PE TE includes a hydrostatic boundary-work term that depends on T (via phi
+    # from hydrostatic integration), so the effective heat capacity is NOT
+    # simply cp · total_mass. Use a FIXED-count Newton sweep with a
+    # numerical-Jacobian estimate of dTE/dT — no data-dependent ``break`` and no
+    # host ``float()``, so the whole correction is jit/grad-safe.
     dT_probe = 1.0e-3
-    for _ in range(5):
+
+    def _newton_step(_, state_curr):
         _, te_curr = compute_total_energy_pe(state_curr, grid, coord)
         residual = te_curr - te_target
-        if abs(residual) < 1e-2:
-            break
-        # Probe Jacobian at current state
         state_probe = state_curr._replace(
             T=state_curr.T.replace(data=state_curr.T.data + dT_probe),
         )
         _, te_probe = compute_total_energy_pe(state_probe, grid, coord)
         dTE_dT = (te_probe - te_curr) / dT_probe
-        if abs(dTE_dT) < 1e-30:
-            break
-        dT_step = -residual / dTE_dT
-        state_curr = state_curr._replace(
-            T=state_curr.T.replace(data=state_curr.T.data + dT_step),
+        # Guard a (near-)singular Jacobian with a where-select, NOT a break.
+        dT_step = jnp.where(jnp.abs(dTE_dT) < 1e-30, 0.0, -residual / dTE_dT)
+        # Cast the (fp64-budget) increment to the state dtype so the fori_loop
+        # carry keeps a stable dtype (input == output).
+        return state_curr._replace(
+            T=state_curr.T.replace(
+                data=state_curr.T.data + dT_step.astype(state_curr.T.data.dtype),
+            ),
         )
-    return state_curr
+
+    return jax.lax.fori_loop(0, _TE_NEWTON_ITERS, _newton_step, state_new)
