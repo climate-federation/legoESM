@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import jax
-jax.config.update("jax_enable_x64", True)
-
 import jax.numpy as jnp
 import numpy as np
+
+jax.config.update("jax_enable_x64", True)
 
 
 def test_resolve_checkpoint_auto_enable_policy():
@@ -13,7 +13,8 @@ def test_resolve_checkpoint_auto_enable_policy():
     longer than the threshold (the documented contract that was missing — None
     silently disabled it, risking OOM on long reverse-mode-AD segments)."""
     from legoesm.driver.compiled_segments import (
-        _resolve_checkpoint, _CKPT_AUTO_STEPS,
+        _CKPT_AUTO_STEPS,
+        _resolve_checkpoint,
     )
     assert _resolve_checkpoint(True, 1) is True            # explicit wins
     assert _resolve_checkpoint(False, 10_000) is False     # explicit wins
@@ -27,9 +28,9 @@ def test_held_suarez_init_mpas_threads_storage_dtype():
     state's dtypes disagreeing (the float64-config-through-float32-state
     scan-carry mismatch)."""
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.core.precision import get_policy
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
 
     mesh = create_voronoi_mesh(subdivision_level=2)
     sigma = create_sigma_coordinate(8)
