@@ -944,7 +944,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
                      runoff_depth_spread_m=None, mle=None,
-                     vertical_mixing=None):
+                     vertical_mixing=None, ew_cyclic_overlap=False):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1007,6 +1007,17 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     # faithful geometry tripole/latlon/cube use).
     import xarray as xr
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    # ORCA 2-pt cyclic-overlap fill of the eORCA source mask/bathy BEFORE the
+    # Voronoi regrid + NN land/sea lookup.  The eORCA mask halo columns are
+    # INCONSISTENT with their interior partners (verified: |col0 - col[nx-2]| = 1.0
+    # wet/dry mismatch at lon 72.5/73.5E), so the IDW/NN near 72.5E blends a
+    # wet-vs-land mismatch -> a spurious ~73E SST/SSS stripe on the MPAS maps
+    # (Voronoi has no intrinsic seam; it is IMPORTED from this inconsistent source).
+    # Reuses the same _ew_overlap_fill the tripole path applies; gated by
+    # --ew-cyclic-overlap (matches tripole's opt-in; default off = byte-identical).
+    if ew_cyclic_overlap:
+        e_mask = _ew_overlap_fill(np.asarray(e_mask))
+        e_H = _ew_overlap_fill(np.asarray(e_H))
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
     src_lon = _squeeze2d(ds["glamt"].values)
@@ -2693,11 +2704,13 @@ def main() -> int:
 
     print(f"[setup] building {args.grid} (nlev={args.nlev}, "
           f"woa_init={args.woa_init}) ...")
-    if args.ew_cyclic_overlap and args.grid != "tripole":
+    if args.ew_cyclic_overlap and args.grid not in ("tripole", "mpas"):
         raise ValueError(
             "--ew-cyclic-overlap is ORCA-cyclic-overlap-specific (the eORCA1 "
-            "tripole); it is WRONG on a regular period-nx lat-lon grid. "
-            f"Got --grid {args.grid!r}.")
+            "source mesh): tripole applies it to the C-grid prognostic seam, "
+            "mpas applies it to the eORCA source mask/bathy BEFORE the Voronoi "
+            "regrid (removes the imported ~73E seam). It is WRONG on a regular "
+            f"period-nx lat-lon / cube grid. Got --grid {args.grid!r}.")
     if args.river_mouth_restoring_gate and not args.runoff:
         raise ValueError(
             "--river-mouth-restoring-gate requires --runoff (the gate masks "
@@ -2807,6 +2820,7 @@ def main() -> int:
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
+            ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
         app_grid_type = "mpas"
     else:
