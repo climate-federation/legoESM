@@ -120,6 +120,13 @@ def _training_loop(
     params : updated parameters
     loss_history : list[float]
     """
+    # Persistent cross-process XLA compile cache: the RRTMGP radiation graph
+    # cold-compiles in ~2600 s; without the cache every training launch re-pays
+    # it.  Idempotent + must precede the first ``filter_jit`` compile below.
+    # Function-scope import keeps the ml->runtime dependency off module init.
+    from legoesm.runtime.backend import enable_persistent_compile_cache
+    enable_persistent_compile_cache()
+
     # Optimize INEXACT (float/complex) arrays only — exactly what
     # eqx.filter_value_and_grad differentiates.  is_array would also pull in
     # any INT arrays (e.g. an SFNO's non-static Gaussian grid index arrays
@@ -273,8 +280,21 @@ def train_physics_params(
         )
 
     params = TrainablePhysicsParams.from_defaults()
+    # Radiation sub-cycling in the DIFFERENTIATED rollout.  build_segment_fn
+    # only engages its nested outer-rad x inner-no-rad scan (rrtmgp OUT of the
+    # hot inner body, so its reverse-mode runs ~n_steps/rad_update_steps times
+    # instead of EVERY step) when given BOTH a fresh-rad step and a no-rad
+    # step.  Without step_unified_no_rad the sub-cycle is silently inert and
+    # rrtmgp is back-propped every step — the cost the old spectral training
+    # path avoided (rrtmgp gated ~once per rad interval), i.e. the main reason
+    # the new lat-lon path is slow.  static_need_rad makes each step's
+    # radiation branch a compile-time constant (no per-step lax.cond).
     step_unified = physics_pipeline.build_step_unified(
-        rad_stop_gradient=rad_stop_gradient)
+        static_need_rad=True, rad_stop_gradient=rad_stop_gradient)
+    step_unified_no_rad = (
+        physics_pipeline.build_step_unified(
+            static_need_rad=False, rad_stop_gradient=rad_stop_gradient)
+        if rad_update_steps > 1 else None)
     sigma_full = jnp.asarray(sigma.sigma_full)
 
     def make_loss_fn(_params, ic, target, forcing):
@@ -283,6 +303,7 @@ def train_physics_params(
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
                 microphysics=microphysics, rad_update_steps=rad_update_steps,
+                step_unified_no_rad=step_unified_no_rad,
                 **seg_kw,
             )
             pred = single_day_rollout(
