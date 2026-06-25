@@ -696,6 +696,41 @@ def main():
         if "co2_ppmv_mean" in df:
             logger.info(f"  CO2: {df['co2_ppmv_mean']:.1f} ppmv")
 
+    # Ocean-circulation snapshot (dynamic 3D ocean only): the prognostic
+    # currents are not in the atmosphere DiagnosticCollector, so dump the final
+    # ocean state's C-grid velocities (centred to cell centres), the
+    # depth-integrated transport (barotropic-streamfunction proxy), SST, and the
+    # wet mask + grid to ocean_circulation.npz for the circulation figure.
+    # Defensive: a diagnostic dump must never fail the run.
+    if args.ocean == "dynamic" and getattr(driver, "ocean_state", None) is not None:
+        try:
+            os_ = driver.ocean_state
+            u = _np.asarray(os_.u.data)          # (nlat, nlon+1, nlev) [m/s]
+            v = _np.asarray(os_.v.data)          # (nlat+1, nlon, nlev) [m/s]
+            uc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # -> cell centres
+            vc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+            T = _np.asarray(os_.T.data)          # (nlat, nlon, nlev) [degC]
+            z = driver._ocean_z_coord
+            dz = _np.asarray(getattr(z, "dz_ref", _np.ones(u.shape[-1])))
+            dz = dz.reshape(1, 1, -1) if dz.ndim == 1 else dz
+            Utr = _np.sum(uc * dz, axis=-1)      # depth-integrated zonal transport
+            Vtr = _np.sum(vc * dz, axis=-1)
+            g = driver._ocean_grid
+            lat = _np.degrees(_np.asarray(getattr(g, "lat")))
+            lon = _np.degrees(_np.asarray(getattr(g, "lon")))
+            _np.savez(
+                Path(args.output) / "ocean_circulation.npz",
+                u_sfc=uc[..., 0], v_sfc=vc[..., 0],
+                speed_sfc=_np.hypot(uc[..., 0], vc[..., 0]),
+                U_transport=Utr, V_transport=Vtr,
+                T_sfc=T[..., 0], land_mask=_np.asarray(driver._ocean_land_mask),
+                lat=lat, lon=lon,
+            )
+            logger.info("  Ocean circulation saved: ocean_circulation.npz "
+                        f"(max sfc current {float(_np.nanmax(_np.hypot(uc[...,0], vc[...,0]))):.2f} m/s)")
+        except Exception as _e:   # pragma: no cover - diagnostic only
+            logger.warning(f"  Ocean-circulation dump skipped: {_e}")
+
     logger.info("=" * 60)
 
 
