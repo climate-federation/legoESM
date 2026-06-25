@@ -16,6 +16,7 @@ References
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -54,6 +55,27 @@ from legoesm.atmosphere.physics.microphysics.output import (
     MicrophysicsOutput,
     sedimentation_tendency,
 )
+
+
+class WarmRainRateScales(NamedTuple):
+    """Per-level multipliers on Morrison's warm-rain process-rate primitives.
+
+    Returned by an optional, LES-trained ``MorrisonConfig.warm_rain_scale_fn``.
+    Each field broadcasts against ``(ncol, nlev)`` and multiplies the *rate
+    primitive* (before the donor clamps) so that the process's matching source,
+    sink, latent-heat, and number tendencies all scale by the SAME factor —
+    mass/energy/number conservation is preserved (the clamps still enforce
+    non-negativity on the scaled rates). Defaults of 1.0 ⇒ identity.
+
+    autoconv   scales ``dq_c_au`` AND its number companion ``dN_r_au`` together
+               (and hence ``dN_c_dt ∝ dq_c_au``).
+    accretion  scales ``dq_c_ac``.
+    rain_evap  scales ``evaporation`` (and hence ``dN_r_evap`` and the latent
+               cooling ``-L_v·evaporation/c_pd``, both derived from it).
+    """
+    autoconv: jax.Array | float = 1.0
+    accretion: jax.Array | float = 1.0
+    rain_evap: jax.Array | float = 1.0
 
 
 # --- fixed M2005 PSD / fall-speed / nucleation / transport constants ---
@@ -230,6 +252,35 @@ def morrison_microphysics(
             f"Unknown rain_evap_scheme: {config.rain_evap_scheme!r}. "
             f"Expected 'm2005' (SAM PRE, default) or 'bulk' (legacy)."
         )
+
+    # === OPTIONAL LES-trained warm-rain rate scaling ===
+    # Multiply the warm-rain rate PRIMITIVES (before the donor clamps below) by
+    # per-level, state-conditioned factors. Because every downstream budget reads
+    # these same variables — autoconv mass/number (dq_c_au, dN_r_au, dN_c_dt),
+    # accretion (dq_c_ac), and evaporation (vapour source, latent cooling, NSUBR
+    # rain-number loss, all ∝ ``evaporation``) — scaling the primitive scales the
+    # matched source/sink/heat/number TOGETHER, so mass/energy/number stay
+    # conserved and the donor clamps still enforce non-negativity on the scaled
+    # rates. ``warm_rain_scale_fn is None`` (production default) is a Python
+    # structural branch (feature-gating doctrine, NOT traced) → bit-identical
+    # baseline. ``x_c`` (mean drop mass) is NOT scaled — it is a size, not a rate.
+    if config.warm_rain_scale_fn is not None:
+        scales = config.warm_rain_scale_fn(T, q_v, q_c, q_r, rho)
+        # Non-negativity guard (codex iter-1, finding C): the public hook accepts
+        # any callable, but a NEGATIVE multiplier would INVERT a sign convention
+        # — e.g. ``dq_c_au`` would become a q_c *source* / rain *sink* the donor
+        # clamps below do not budget. Clamp at 0 so the scale can only attenuate
+        # or amplify a rate, never flip it. The bundled net is already strictly
+        # positive (``exp(log_bound·tanh)``), so this is a no-op for it; the floor
+        # exists to make the API contract (dimensionless, sign-preserving) safe
+        # for any hand-written scale fn. ``maximum`` subgradient is AD-safe.
+        au_scale = jnp.maximum(scales.autoconv, 0.0)
+        ac_scale = jnp.maximum(scales.accretion, 0.0)
+        evap_scale = jnp.maximum(scales.rain_evap, 0.0)
+        dq_c_au = dq_c_au * au_scale
+        dN_r_au = dN_r_au * au_scale
+        dq_c_ac = dq_c_ac * ac_scale
+        evaporation = evaporation * evap_scale
 
     # === ICE PHASE ===
     T_freeze = constants.T_freeze

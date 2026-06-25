@@ -24,6 +24,7 @@ References
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 from legoesm import constants
@@ -674,6 +675,16 @@ class MorrisonConfig(NamedTuple):
     # Gated on q_s≥0.1 g/kg AND q_c≥0.5 g/kg. Snow number sink NSCNG via MG0.
     do_snow_to_graupel: bool = True
     graupel_embryo_mass: float = 1.6e-10    # SAM MG0 graupel embryo mass [kg]
+    # OPTIONAL state-conditioned warm-rain rate scaling (LES-trained closure).
+    # A callable ``(T, q_v, q_c, q_r, rho) -> WarmRainRateScales`` (per-level
+    # multipliers on autoconversion / accretion / rain-evaporation). ``None``
+    # (default, production) is a NO-OP → bit-identical baseline Morrison; the
+    # field is constant-folded out. During training it holds an Equinox module
+    # (a pytree) whose array leaves are traced (config-pytree injection, the
+    # SegmentForcing/apply_param_overrides doctrine). NOT a scalar param, so it
+    # is invisible to ``__param_spec__``/param_collector by design. See
+    # ``WarmRainRateScales`` in ``morrison.py``.
+    warm_rain_scale_fn: Callable | None = None
 
 
 class ThompsonConfig(NamedTuple):

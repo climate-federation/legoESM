@@ -169,6 +169,14 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Cubed-sphere MPI face-scatter tests set jax_enable_x64 before importing the
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
+# Morrison warm-rain scale-net + SCM trainer use physical symbol names (T, q_v,
+# q_c, q_r) matching the microphysics modules; the trainer/tests set sys.path /
+# jax_enable_x64 before importing (E402), the standard JAX/script idiom.
+"packages/ml/legoesm/training/morrison_scale_net.py" = ["N803", "N806"]
+"scripts/run/train_scm_morrison_scale.py" = ["E402", "N803", "N806", "N815"]
+"tests/unit/test_morrison_scale_net.py" = ["N806"]
+"tests/unit/test_train_scm_morrison_scale.py" = ["E402", "N806"]
+"tests/unit/test_morrison_warm_rain_scaling.py" = ["N803", "N806"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
 
 [tool.mypy]

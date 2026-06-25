@@ -47,7 +47,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
-from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+from legoesm.atmosphere.physics.microphysics.morrison import (
+    morrison_microphysics,
+    WarmRainRateScales,
+)
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
