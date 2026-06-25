@@ -320,6 +320,13 @@ def main():
                              "coupled via the Phase-2 cross-grid conservative "
                              "remap, using the OMIP-validated cold-start recipe. "
                              "The land mask + bathymetry come from this file.")
+    parser.add_argument(
+        "--fold-convention", default="auto",
+        choices=["auto", "n_lon-1-i", "(n_lon-i)%n_lon"],
+        help="Tripole T-fold seam origin (default auto). 'auto' raises on a "
+             "genuinely ambiguous (near-constant) fold row; pass the convention "
+             "explicitly for such a mesh ('n_lon-1-i' halo-inclusive eORCA1.2, "
+             "'(n_lon-i)%%n_lon' de-haloed eORCA025).")
 
     # Atmosphere initial condition.  CRITICAL for realism: the bare
     # ExperimentConfig default ic="default" is a UNIFORM T_init (~isothermal
@@ -538,7 +545,8 @@ def main():
             # cross-grid remap; _init_tripole_dynamic_ocean clones the OMIP
             # cold-start recipe and reads mask+bathy from this same mesh).
             from legoesm.grids.tripole import create_tripole_grid
-            ocean_grid_obj = create_tripole_grid(args.tripole_mesh)
+            ocean_grid_obj = create_tripole_grid(
+                args.tripole_mesh, fold_convention=args.fold_convention)
             overrides["tripole_mesh_path"] = args.tripole_mesh
             logger.info(f"  Ocean grid: TRIPOLE from {args.tripole_mesh} "
                         f"({ocean_grid_obj.n_lat}x{ocean_grid_obj.n_lon}); "
