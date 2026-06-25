@@ -210,11 +210,12 @@ Implemented the FV3 case-8 "soliton twin-vortex" / JAMES Colliding-Modons test
 - Non-rotating handled as experiment glue: `cdgrid._replace(f_corner=0)` (the SW
   core's only Coriolis use is `f_corner + rarea_c·vort`), mirroring `f0=fC=0`.
 
-`tests/test_cases/modons.py` (`colliding_modons_cubesphere`) +
-`tests/test_cases/test_modons.py` (IC faithfulness + short non-rotating
-prognostic run: stable, mass-conserving, modons evolve, h>0). Driver
-`scripts/validate/run_colliding_modons.py` (collision/conservation/symmetry
-diagnostics).
+`tests/test_cases/colliding_modons.py` (`colliding_modons_cdgrid`, the FV3
+edge-midpoint assembler; all-grid IC kernels live in the same module) +
+`tests/atmosphere/shallow_water/unit/test_colliding_modons_run.py` (IC
+faithfulness + short non-rotating prognostic run: stable, mass-conserving,
+modons evolve, h>0). Driver `scripts/validate/run_colliding_modons.py`
+(collision/conservation/symmetry diagnostics).
 
 **Status — works, stable, faithful IC; long-run damping calibration is open.**
 C48 60-day non-rotating run (`--dt 150 --div-damp 10 --damp-v 0.04

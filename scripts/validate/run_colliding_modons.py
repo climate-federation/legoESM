@@ -46,7 +46,7 @@ def main():
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
         FV3EdgeShallowWaterModel, iter1009_dual_target_config)
-    from tests.test_cases.modons import colliding_modons_cubesphere
+    from tests.test_cases.colliding_modons import colliding_modons_cdgrid
 
     n = args.n
     grid = create_cubed_sphere(n)
@@ -59,7 +59,7 @@ def main():
         n, div_damp_factor=args.div_damp, damp_v=args.damp_v,
         hyperdiff_coeff=hyperdiff)
     model = FV3EdgeShallowWaterModel(grid, cfg)
-    state, cd_nr = colliding_modons_cubesphere(grid, model.cdgrid)
+    state, cd_nr = colliding_modons_cdgrid(grid, model.cdgrid)
     model.cdgrid = cd_nr
     model.set_initial_mass(state)
     state = model.step(state, args.dt)         # settle storage dtype (1 step)
