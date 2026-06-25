@@ -43,7 +43,7 @@ command depends on whether you have `uv` (see the README "Installing" section fo
 the full why):
 
 ```bash
-git clone https://github.com/gentine/legoESM.git
+git clone https://github.com/climate-federation/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate

@@ -25,7 +25,7 @@ via `mpi4jax`. Apple Silicon users who want the spectral solver must set
 Install from a clone (development install — the supported path today):
 
 ```bash
-git clone https://github.com/gentine/legoESM.git
+git clone https://github.com/climate-federation/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate
