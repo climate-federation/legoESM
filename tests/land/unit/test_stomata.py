@@ -672,7 +672,7 @@ class TestDifferentiability(unittest.TestCase):
 
     def test_coupled_solver_differentiable(self):
         """Coupled Farquhar-stomata solver is differentiable w.r.t. T."""
-        cfg = StomataConfig(enabled=True)  # n_iter_ags is a module constant now
+        cfg = StomataConfig(enabled=True, n_iter_ags=3)
 
         def f(T):
             gs, gpp = coupled_farquhar_stomata(

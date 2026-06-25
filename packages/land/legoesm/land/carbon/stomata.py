@@ -158,6 +158,12 @@ class StomataConfig(NamedTuple):
     T_range_jarvis_C: float = 20.0 # Temperature range [deg C]
     a_vpd: float = 0.05          # VPD sensitivity [1/hPa]
 
+    # --- Solver ---
+    # A-gs fixed-point iteration count. An int field, so it is never spec-
+    # eligible / trainable (the loop-count-never-trainable guarantee holds
+    # structurally); the default references the module constant. Kept as a
+    # config field for backward compatibility + per-call convergence tuning.
+    n_iter_ags: int = _N_AGS_ITER_DEFAULT
 
     # --- Other ---
     O2_conc: float = 209000.0    # Atmospheric O2 [umol/mol]
@@ -418,7 +424,7 @@ def coupled_farquhar_stomata(
     Ci = _CI_CA_INIT_RATIO * Ca
 
     # Fixed-point iteration (unrolled for JIT compatibility)
-    for _ in range(_N_AGS_ITER_DEFAULT):
+    for _ in range(config.n_iter_ags):
         A_net, _ = farquhar_photosynthesis(
             Ci, APAR_umol, T_leaf, config, beta_soil)
 
