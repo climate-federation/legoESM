@@ -36,7 +36,7 @@ Optional extras:
 
 ```bash
 pip install -e ".[ml,mesh,viz,data]"               # neural cores, MPAS meshes, plotting, data IO
-pip install "mpi4py>=4.1,<5" "mpi4jax>=0.8,<0.9"   # multi-node MPI runs
+pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"   # multi-node MPI runs
 pip install -e ".[docs]"                           # build this documentation site
 ```
 

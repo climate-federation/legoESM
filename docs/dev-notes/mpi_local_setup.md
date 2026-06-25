@@ -9,7 +9,7 @@ host `mpi4jax` (JAX 0.10 removed the `custom_call` API mpi4jax uses; see
 ```bash
 bash scripts/experiment/setup_mpi_local.sh
 ```
-This builds `.venv-mpi` (JAX 0.9.2 + jaxlib 0.9.2 + `mpi4py` + `mpi4jax==0.8.1.post2`
+This builds `.venv-mpi` (JAX 0.9.2 + jaxlib 0.9.2 + `mpi4py` + `mpi4jax==0.9.0`
 compiled against MPICH + legoESM editable + pytest), then smoke-tests
 `mpi4jax.sendrecv` and the bootstrap/halo distributed tests.
 
