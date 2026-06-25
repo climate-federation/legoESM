@@ -1933,7 +1933,7 @@ requires-python = ">=3.11"
 [project.optional-dependencies]
 data = ["gcsfs", "fsspec"]
 metal = ["jax-metal"]
-mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.9"]
+mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.10"]
 dev = ["pytest>=8.0", "ruff", "mypy"]
 
 [project.scripts]
