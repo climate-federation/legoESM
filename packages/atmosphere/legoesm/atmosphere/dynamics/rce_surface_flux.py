@@ -37,6 +37,13 @@ from legoesm import constants
 from legoesm.core.bulk_flux import simple_bulk_fluxes, apply_gustiness
 
 
+# --- RCEMIP1 surface-flux closure constants (Wing et al. 2018, RCEMIP) ---
+# Empirical closure coefficients shared by the RCE surface-flux composers below;
+# named here (not inline signature literals) so a tuning change is one edit.
+_RCEMIP1_C_H = 1.5e-3               # bulk heat/moisture exchange coefficient [-]
+_RCEMIP1_GUSTINESS_FLOOR_MS = 5.0  # minimum surface wind speed (gustiness) [m/s]
+
+
 def _validate_nh_state_shape(state, height_coord) -> None:
     """Cross-layout shape contract (Codex iter-2 strengthened).
 
@@ -88,8 +95,8 @@ def _validate_qv_slot(qv_slot: int, n_tracers: int) -> None:
 def compose_rce_surface_scalar_tendencies(
     state, height_coord,
     T_sfc, q_sfc, wind_speed,
-    C_h: float = 1.5e-3,
-    gustiness_floor: float = 5.0,
+    C_h: float = _RCEMIP1_C_H,
+    gustiness_floor: float = _RCEMIP1_GUSTINESS_FLOOR_MS,
     qv_slot: int = 0,
 ):
     """Scalar (heat + moisture) surface flux tendencies at the lowest
@@ -184,8 +191,8 @@ def compose_rce_surface_scalar_tendencies(
 def apply_rce_surface_fluxes(
     state, height_coord, dt,
     T_sfc, q_sfc, wind_speed,
-    C_h: float = 1.5e-3,
-    gustiness_floor: float = 5.0,
+    C_h: float = _RCEMIP1_C_H,
+    gustiness_floor: float = _RCEMIP1_GUSTINESS_FLOOR_MS,
     qv_slot: int = 0,
 ):
     """Forward-Euler step of the scalar RCE surface flux tendencies.

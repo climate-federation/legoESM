@@ -277,9 +277,19 @@ class HybridB:
     beta_static : float
         Weight for static component.
     localization_length : float
-        Gaspari-Cohn localization half-width [m].
+        Gaspari-Cohn localization half-width [m]. RESERVED — see the note.
     grid : GridProtocol, optional
-        Grid for localization distance computation.
+        Grid for localization distance computation. RESERVED — see the note.
+
+    Notes
+    -----
+    Gaspari-Cohn localization is NOT yet applied: ``sqrt_multiply`` uses the RAW
+    (un-localized) ensemble covariance, and ``localization_length`` / ``grid``
+    are accepted but unused (reserved for a future localized implementation;
+    ``_gaspari_cohn`` exists and is unit-tested but is not yet wired in here).
+    ``inv_multiply`` is an explicit static-only approximation (see its
+    docstring). Use ``HybridB`` as an inner-loop preconditioner only — do not
+    rely on it for a spatially-localized hybrid B or an exact inverse.
     """
 
     def __init__(self, static_B, ensemble_perts: jax.Array,
@@ -295,7 +305,12 @@ class HybridB:
         self.n_members = ensemble_perts.shape[0]
 
     def sqrt_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply B^{1/2} x ≈ sqrt(beta_s) * B_static^{1/2} x + sqrt(beta_e) * ensemble component."""
+        """Apply B^{1/2} x ≈ sqrt(beta_s)·B_static^{1/2} x + sqrt(beta_e)·ensemble.
+
+        NOTE: the ensemble term uses the RAW (un-localized) ensemble covariance —
+        no Gaspari-Cohn localization is applied (see the class Notes). For a
+        small/preconditioning ensemble weight this is acceptable.
+        """
         static_part = jnp.sqrt(self.beta_s) * self.static_B.sqrt_multiply(x)
         # Ensemble part: project x onto ensemble directions
         # B_e^{1/2} x ≈ (1/sqrt(n-1)) * X_pert @ (X_pert^T @ x) / (n-1)

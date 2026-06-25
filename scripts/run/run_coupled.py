@@ -60,6 +60,10 @@ def land_scheme_overrides(land_scheme: str) -> dict:
 
 
 def main():
+    # Central microphysics literal set — keep the CLI allowlist in sync with
+    # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
+    from legoesm.driver.config import VALID_MICROPHYSICS
+
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -198,6 +202,7 @@ def main():
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
+                        choices=list(VALID_MICROPHYSICS),
                         help="Microphysics scheme (default: morrison — the "
                              "ice-capable double-moment scheme; warm-rain-only "
                              "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
