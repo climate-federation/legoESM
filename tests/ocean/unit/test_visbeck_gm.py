@@ -420,3 +420,33 @@ class TestGMRediWithVisbeck:
             f"Visbeck kappa gradient contains Inf — likely sqrt(0) "
             f"backward.  Gradient: {g}"
         )
+
+
+class TestSurfaceComplementInherent:
+    """The cubed-sphere GM/Redi honors the Ferrari (2008) surface complement BY
+    CONSTRUCTION: its Redi diagonal kappa_Redi*nabla^2(q) is never tapered, so
+    boundary-layer horizontal mixing is always kappa_Redi (no separate
+    depth-masked complement term, unlike the lat-lon tapered tensor)."""
+
+    def test_fully_tapered_slopes_reduce_to_untapered_diagonal(self):
+        """With S=0 (the mixed-layer / fully-tapered limit), the tracer tendency
+        equals the UNTAPERED diagonal kappa_Redi*nabla^2(q) — i.e. the BL still
+        gets kappa_Redi horizontal mixing. This is what the lat-lon path needs an
+        explicit surface complement for; on the cube it is inherent."""
+        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+
+        grid, z_coord, jacobian, shape = _make_setup(n=4, nlev=10)
+        q = jax.random.normal(jax.random.PRNGKey(0), shape)  # horizontal gradient
+        S_zero = jnp.zeros((6, 4, 4, shape[-1] - 1))         # fully tapered
+        kappa_Redi = 1000.0
+
+        tend = _tracer_tendency_gm_redi(
+            q, S_zero, S_zero, z_coord, jacobian, grid, kappa_Redi, kappa_Redi,
+        )
+        expected = laplacian_viscosity_3d(q, grid, kappa_Redi)
+
+        np.testing.assert_allclose(
+            np.asarray(tend), np.asarray(expected), rtol=1e-10, atol=1e-12,
+        )
+        # Non-trivial: BL horizontal mixing actually happens (not a degenerate 0).
+        assert float(jnp.max(jnp.abs(tend))) > 0.0

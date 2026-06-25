@@ -372,6 +372,11 @@ def gm_redi_tracer_tendency_centered_mpas(
     else:
         kappa_GM_edge_b = kappa_GM_edge
 
+    # The diagonal term ``kappa_Redi * dq_dn_half`` is UNTAPERED (the DM95 taper
+    # enters only through the tapered slope ``S_n`` in the off-diagonal term), so
+    # — as on the cubed-sphere path — the mixed-layer horizontal diffusivity is
+    # always kappa_Redi: the Ferrari (2008) surface complement is inherent here,
+    # not a separate term (see gm_redi.validate_cubed_sphere_gm_redi_config).
     F_n_half = (
         kappa_Redi * dq_dn_half
         + (kappa_Redi - kappa_GM_edge_b) * S_n * dq_dz_edge
