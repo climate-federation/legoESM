@@ -100,6 +100,11 @@ class CoupledConfig(NamedTuple):
     # Source of the spatial land parameters when use_pft: "analytical" (latitude
     # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
     land_param_source: str = "analytical"
+    # Coupled DIURNAL surface model for multilayer land (default ON): use the
+    # physical Monin-Obukhov surface exchange + Farquhar photosynthesis-stomata
+    # coupling (vs a constant bulk coefficient + soil-only beta).  Well-posed in the
+    # coupled model because the atmosphere supplies a resolved diurnal cycle.
+    land_diurnal_surface: bool = True
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
