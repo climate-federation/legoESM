@@ -142,6 +142,52 @@ def test_ic_era5_without_ic_path_fails():
         _postprocess_args(args, parser)
 
 
+# ---------------------------------------------------------------------------
+# --aerosol-ccn grid gating: MPAS is now wired (Phase C); spectral standalone
+# is still blocked.
+# ---------------------------------------------------------------------------
+
+_AEROSOL_CCN_BASE = [
+    "--dataset", "analytical",
+    "--aerosol-ccn",
+    "--aerosol-forcing", "external",
+    "--microphysics", "morrison",
+]
+
+
+def test_aerosol_ccn_allowed_on_mpas():
+    parser = build_arg_parser()
+    args = parser.parse_args(_AEROSOL_CCN_BASE + [
+        "--grid-type", "voronoi",
+        "--discretization", "mpas",
+    ])
+    # Must NOT raise now that the MPAS combined-physics path fills the
+    # specified-Nc field.
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.nc_from_aerosol is True
+
+
+def test_aerosol_ccn_still_blocked_on_spectral():
+    parser = build_arg_parser()
+    args = parser.parse_args(_AEROSOL_CCN_BASE + [
+        "--discretization", "spectral",
+    ])
+    with pytest.raises(SystemExit):
+        _postprocess_args(args, parser)
+
+
+def test_aerosol_ccn_requires_external_forcing():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--aerosol-ccn",
+        "--microphysics", "morrison", "--grid-type", "voronoi",
+        "--discretization", "mpas",
+    ])
+    with pytest.raises(SystemExit):
+        _postprocess_args(args, parser)
+
+
 def test_issue484_new_amip_flags_flow_to_config():
     parser = build_arg_parser()
     args = parser.parse_args([
