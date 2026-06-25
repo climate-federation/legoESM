@@ -262,8 +262,16 @@ class TestComputeRotationAngles:
 netcdf4 = pytest.importorskip("netCDF4")
 
 
-def _write_synthetic_mesh_mask(path: str, n_lat: int = 8, n_lon: int = 16) -> None:
-    """Write a minimal NEMO-style mesh_mask.nc file."""
+def _write_synthetic_mesh_mask(
+    path: str, n_lat: int = 8, n_lon: int = 16, curved_fold: bool = False,
+) -> None:
+    """Write a minimal NEMO-style mesh_mask.nc file.
+
+    The default fold row (gphit[-1]) is constant — a deliberately AMBIGUOUS
+    fold. ``curved_fold=True`` instead writes a realistic non-constant fold row
+    that is self-symmetric under exactly ONE convention (like a real ORCA
+    bipolar cap), so ``fold_convention='auto'`` resolves it WITHOUT raising.
+    """
     ds = netcdf4.Dataset(path, "w")
     ds.createDimension("y", n_lat)
     ds.createDimension("x", n_lon)
@@ -272,9 +280,18 @@ def _write_synthetic_mesh_mask(path: str, n_lat: int = 8, n_lon: int = 16) -> No
         np.linspace(0.0, 360.0, n_lon, endpoint=False)[None, :],
         (n_lat, n_lon),
     ).astype(np.float64)
-    gphit = np.broadcast_to(
-        np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon),
-    ).astype(np.float64)
+    gphit = np.array(
+        np.broadcast_to(
+            np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon),
+        ),
+        dtype=np.float64,
+    )
+    if curved_fold:
+        # cos(2*pi*i/n_lon) is even under i -> (n_lon - i) % n_lon but NOT under
+        # i -> n_lon-1-i, so this fold row fits exactly one convention -> auto
+        # disambiguates it (no tie), mirroring a real (non-flat) ORCA fold.
+        i = np.arange(n_lon)
+        gphit[-1, :] = 80.0 + 5.0 * np.cos(2.0 * np.pi * i / n_lon)
     ones = np.ones((n_lat, n_lon), dtype=np.float64)
 
     for name, arr in (
@@ -371,6 +388,23 @@ class TestCreateTripoleGridFoldDefault:
     halo. The synthetic mesh has a constant fold row (gphit[-1] is uniform). The
     legacy n_lon-1-i fallback is available only as an EXPLICIT opt-in."""
 
+    def test_default_auto_loads_realistic_curved_fold(self):
+        """A REALISTIC mesh has a curved (non-constant) fold row — like a real
+        ORCA bipolar cap — so the default ``fold_convention='auto'`` resolves it
+        WITHOUT raising. This is the production path (eORCA1.2 etc.): the
+        fail-loud default only trips on a degenerate constant fold row, so it is
+        not an operational break for real meshes."""
+        import warnings as _warnings
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=12, n_lon=24, curved_fold=True)
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("error")  # no warning on a resolvable fold
+                geom = create_tripole_grid(path)  # default auto, no convention
+        assert geom is not None
+
     def test_default_auto_raises_on_ambiguous_fold(self):
         from legoesm.grids.tripole import create_tripole_grid
 
@@ -378,7 +412,7 @@ class TestCreateTripoleGridFoldDefault:
             path = os.path.join(tmp, "mesh.nc")
             _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
             with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
-                create_tripole_grid(path)  # default: fail loud
+                create_tripole_grid(path)  # default: fail loud on a flat fold
 
     def test_legacy_fold_fallback_is_explicit_opt_in(self):
         from legoesm.grids.tripole import create_tripole_grid
