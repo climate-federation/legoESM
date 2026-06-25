@@ -154,3 +154,19 @@ def test_skips_non_case_json(tmp_path):
     _write(d, "case.json", _case("icosahedral", "none", "strong", 5, 16, "float64", 29.4))
     rows, _ = agg.collect(tmp_path)
     assert len(rows) == 1
+
+
+def test_unknown_nested_schema_is_skipped_not_atm(tmp_path):
+    # A nested {results:[...]} report that is NEITHER ocean (mode 'ocean_*') NOR
+    # the atm harness (no grid_type / physics_level markers) must be SKIPPED, not
+    # silently mislabeled component='atm' (codex review of the else->atm default).
+    d = tmp_path / "scaling" / "mystery"
+    payload = {
+        "backend": "GPU", "mode": "strong",
+        "results": [{"n_gpus": 2, "resolution": 96, "precision": "float32",
+                     "mode": "strong", "sypd": 9.0, "mcells_per_s": 100.0,
+                     "total_cells": 1000}],   # NO grid_type, NO physics_level
+    }
+    _write(d, "strong_scaling.json", payload)
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []                          # skipped, not flattened as atm

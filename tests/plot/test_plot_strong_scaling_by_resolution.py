@@ -6,6 +6,8 @@ import csv
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _PLT = (Path(__file__).resolve().parents[2] / "scripts" / "plot"
         / "plot_strong_scaling_by_resolution.py")
 _spec = importlib.util.spec_from_file_location("plot_strong_by_resolution", _PLT)
@@ -77,3 +79,21 @@ def test_compute_speedup_normalises_to_min_resource():
     speed = plot.compute_speedup(by_res)
     # baseline N0=1, v0=10 -> speedups 1.0, 1.8, 2.4
     assert speed["48"] == [(1, 1.0), (2, 1.8), (3, 2.4)]
+
+
+def test_make_figure_raises_on_unknown_grid(tmp_path):
+    # typoed --grid -> no matching rows -> fail loud, not a blank PNG (codex).
+    csvp = tmp_path / "tidy.csv"
+    _write_csv(csvp, _sample_rows())
+    rows = plot._read(csvp)
+    with pytest.raises(SystemExit):
+        plot.make_figure(rows, "no-such-grid", tmp_path)
+
+
+def test_make_figure_raises_on_unknown_metric(tmp_path):
+    # typoed --metric (not a CSV column) -> fail loud, not a blank PNG (codex).
+    csvp = tmp_path / "tidy.csv"
+    _write_csv(csvp, _sample_rows())
+    rows = plot._read(csvp)
+    with pytest.raises(SystemExit):
+        plot.make_figure(rows, "cubed-sphere", tmp_path, metric="not_a_column")
