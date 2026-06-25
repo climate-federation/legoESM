@@ -375,11 +375,11 @@ def evp_solver(
     grid,
     dt: float,
     N_evp: int = _N_EVP_DEFAULT,
-    e_yield: float = 2.0,
+    e_yield: float = _DYN_DEFAULTS.e_yield,
     P_star: float = _DYN_DEFAULTS.P_star,
     C_strength: float = _DYN_DEFAULTS.C_strength,
     T_evp: float = _DYN_DEFAULTS.T_evp,
-    Delta_min: float = 2.0e-9,
+    Delta_min: float = _DYN_DEFAULTS.Delta_min,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
@@ -439,6 +439,19 @@ def evp_solver(
     sigma_11_new, sigma_22_new, sigma_12_new : arrays (6, n, n)
         Updated stress tensor [N/m].
     """
+    # Fail-early validation of the ITERATION parameters only (mirrors
+    # mevp_solver, which guards N_mevp/alpha/beta — not the physics scalars).
+    # N_evp is a loop count and T_evp is iteration-coupled, so both are always
+    # STATIC Python values → boolean control flow is doctrine-permitted here.
+    # ``e_yield`` / ``Delta_min`` are TUNABLE physics params that can arrive as
+    # JAX tracers via the trainable-override path under jit/grad, so they MUST
+    # NOT enter a Python ``np.isfinite`` check (it would fail at trace time).
+    if N_evp < 1:
+        raise ValueError(f"evp_solver: N_evp must be >= 1, got {N_evp}.")
+    if not np.isfinite(T_evp) or T_evp <= 0.0:
+        raise ValueError(
+            f"evp_solver: T_evp must be a finite scalar > 0; got {T_evp}.")
+
     dt_s = dt / N_evp  # subcycle timestep
 
     # Ice mass per unit ice-covered area: rho_ice · h.  In the CICE
@@ -549,12 +562,12 @@ def mevp_solver(
     grid,
     dt: float,
     N_mevp: int = _N_EVP_DEFAULT,
-    e_yield: float = 2.0,
+    e_yield: float = _DYN_DEFAULTS.e_yield,
     P_star: float = _DYN_DEFAULTS.P_star,
     C_strength: float = _DYN_DEFAULTS.C_strength,
     alpha_mevp: float = _MEVP_ALPHA_DEFAULT,
     beta_mevp: float = _MEVP_BETA_DEFAULT,
-    Delta_min: float = 2.0e-9,
+    Delta_min: float = _DYN_DEFAULTS.Delta_min,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
