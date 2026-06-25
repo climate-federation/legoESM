@@ -28,6 +28,20 @@ AIMIP_VARIANTS: tuple[str, ...] = (
 )
 
 
+# Canonical convection-scheme set.  Single source of truth — imported by
+# ``scripts/run/run_amip.py`` for its ``--convection`` CLI ``choices`` and
+# used by the ``validate_strict`` membership check below.  Mirrors the
+# ``integration.py`` / ``physics_pipeline`` convection factory sets, so a
+# scheme added to the pipeline must be added here (and the CLI picks it up
+# automatically — no second list to drift, which is exactly the bug this
+# constant prevents: ``--convection tiedtke`` was rejected by a stale CLI
+# ``choices`` while ``validate_strict`` accepted it).
+VALID_CONVECTION_SCHEMES: tuple[str, ...] = (
+    "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+)
+
+
 class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration.
 
@@ -331,6 +345,34 @@ class ExperimentConfig(NamedTuple):
     # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
     # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
     surface_gustiness_zi: float | None = None
+    # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
+    # turbulent flux is computed SEPARATELY per surface tile and area-weighted
+    # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
+    # fixed-roughness land Monin-Obukhov scheme ("most", roughness
+    # ``surface_z0_land``) runs on the LAND tile, and sea ice uses constant
+    # coefficients — instead of applying one scheme to the blended surface
+    # temperature (which runs the ocean air-sea scheme over land: the bm_v3
+    # land-tile energy blowup).  Requires an active land tile + the louis
+    # turbulence scheme (the only kernel that accepts the injected tiled flux).
+    surface_tiled: bool = False
+    surface_z0_land: float = 0.1       # land roughness length [m] for the tiled land MOST scheme
+    # Prognostic soil-water bucket (Manabe 1969) for the slab-land tile: the
+    # land evaporation efficiency beta = beta_min + (1-beta_min)*W/W_max
+    # limits land latent heat by soil wetness (no longer a saturated swamp
+    # everywhere).  Requires an active land tile.  ``w_land`` (soil water,
+    # restart-persisted) advances from precip (source) and beta-limited land
+    # evaporation (sink) with overflow runoff.  Same beta ramp as
+    # legoesm.land.slab_land.  Off → byte-identical saturated-surface path.
+    land_soil_bucket: bool = False
+    land_bucket_w_max: float = 150.0      # soil-water bucket capacity [kg/m^2]
+    land_beta_min: float = 0.1            # min moisture availability (dry soil)
+    land_bucket_w_init_frac: float = 0.5  # initial soil water as fraction of W_max
+    # Route the soil-water availability through the SHARED land Jarvis (1976)
+    # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
+    # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
+    # stomata in low light / high VPD.  Requires land_soil_bucket (which
+    # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
+    land_stomatal_beta: bool = False
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
@@ -349,6 +391,11 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # Activate the slab-land SEB tile without loading a separate LSM file.
+    # Useful when --topography already provides a good f_land (ETOPO) and
+    # no separate mask file is available.  Ignored when land_mask_path is set
+    # (the file path already implies activation).
+    slab_land_active: bool = False
 
     # Surface
     T_init: float = 300.0
@@ -380,6 +427,12 @@ class ExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
+    # Bechtold deep-convection CAPE trigger threshold [J/kg].  Deep convection
+    # fires only above this CAPE; lowering it lets convection trigger more
+    # readily at coarse resolution (where CAPE is under-resolved), which is
+    # the lever for the AMIP convective-precipitation deficit.  Default matches
+    # BechtoldConfig.cape_threshold (byte-identical when unset).
+    bechtold_cape_threshold: float = 70.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -581,6 +634,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
             )
+        if self.bechtold_cape_threshold < 0:
+            errors.append(
+                f"bechtold_cape_threshold must be >= 0, got "
+                f"{self.bechtold_cape_threshold}"
+            )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
                 "physics_parameterization must be 'none' or 'ml', "
@@ -618,10 +676,7 @@ class ExperimentConfig(NamedTuple):
             )
         # Physics-scheme membership (mirror the integration.py factory sets so
         # a typo fails here, not only at JIT-compile inside integration.py).
-        _valid_convection = (
-            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
-            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
-        )
+        _valid_convection = VALID_CONVECTION_SCHEMES
         if self.convection not in _valid_convection:
             errors.append(
                 f"convection must be one of {_valid_convection}, "
@@ -654,6 +709,58 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence scheme (turbulence != 'none') so the atmosphere "
                 f"surface layer uses the same bulk-flux algorithm as the ocean "
                 f"tile; got turbulence='none'."
+            )
+        # Tiled (mosaic) surface fluxes inject a per-tile flux as the louis BL
+        # bottom boundary condition; only the louis kernel accepts it, so reject
+        # the combination loudly rather than silently ignoring the request
+        # (dispatch hardening).
+        if self.surface_tiled and self.turbulence != "louis":
+            errors.append(
+                f"surface_tiled=True is currently supported only with "
+                f"turbulence='louis' (the kernel that consumes the injected "
+                f"tiled surface flux); got turbulence={self.turbulence!r}."
+            )
+        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+            errors.append(
+                "surface_tiled=True requires an active land tile "
+                "(--slab-land-active or a land-mask file); otherwise there is no "
+                "land tile to give its own surface scheme."
+            )
+        if not (self.surface_z0_land > 0.0):
+            errors.append(
+                f"surface_z0_land must be a positive roughness length [m]; "
+                f"got {self.surface_z0_land!r}."
+            )
+        # Prognostic soil-water bucket: needs an active land tile to step,
+        # and physically-bounded parameters.
+        if self.land_soil_bucket and not (
+                self.slab_land_active or self.land_mask_path):
+            errors.append(
+                "land_soil_bucket=True requires an active land tile "
+                "(--slab-land-active or a land-mask file); there is no land "
+                "surface to carry soil water otherwise."
+            )
+        if not (self.land_bucket_w_max > 0.0):
+            errors.append(
+                f"land_bucket_w_max must be a positive bucket capacity "
+                f"[kg/m^2]; got {self.land_bucket_w_max!r}."
+            )
+        if not (0.0 < self.land_beta_min <= 1.0):
+            errors.append(
+                f"land_beta_min (min soil-moisture availability) must be in "
+                f"(0, 1]; got {self.land_beta_min!r}."
+            )
+        if not (0.0 <= self.land_bucket_w_init_frac <= 1.0):
+            errors.append(
+                f"land_bucket_w_init_frac (initial fill fraction) must be in "
+                f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
+            )
+        # Stomatal soil-water limitation needs the bucket to supply beta_soil.
+        if self.land_stomatal_beta and not self.land_soil_bucket:
+            errors.append(
+                "land_stomatal_beta=True requires land_soil_bucket=True "
+                "(the bucket supplies the soil availability beta_soil that the "
+                "Jarvis stomatal model down-regulates)."
             )
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
@@ -943,6 +1050,8 @@ class ExperimentConfig(NamedTuple):
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
+            bechtold_cape_threshold=getattr(
+                amip_cfg, 'bechtold_cape_threshold', 70.0),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -1047,6 +1156,7 @@ class ExperimentConfig(NamedTuple):
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
+            bechtold_cape_threshold=self.bechtold_cape_threshold,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

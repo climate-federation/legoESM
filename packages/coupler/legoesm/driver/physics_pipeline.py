@@ -156,6 +156,46 @@ class PhysicsPipeline:
         self.f_land = None
         self.albedo_land = None
         self.rad_update_steps = 1
+        # When True, T_land is stepped each radiation call (full slab-land
+        # tile, --land-mask-file path).  When False, T_land is carried but
+        # NOT updated — the land albedo/T_sfc blend still applies (passive
+        # mode, --topography path with no explicit land IC).
+        self.slab_land_active = False
+        # Tiled (mosaic) surface fluxes: when True, the turbulent surface
+        # fluxes are computed SEPARATELY per surface tile (ocean / sea-ice /
+        # land) — the ocean bulk scheme (e.g. COARE3) on the ocean tile and
+        # the fixed-roughness land Monin-Obukhov scheme ("most") on the land
+        # tile — then area-weighted, instead of applying one scheme to the
+        # blended surface temperature (which runs the ocean scheme over
+        # land, the bm_v3 blowup).  Set post-construction by the driver from
+        # ExperimentConfig.surface_tiled.  ``surface_z0_land`` is the land
+        # roughness length [m] used by the land tile's MOST scheme.
+        self.surface_tiled = False
+        self.surface_z0_land = 0.1
+        # Prognostic soil-water bucket (Manabe 1969) for the slab-land tile.
+        # When True, the land evaporation efficiency beta = beta_min +
+        # (1-beta_min)*clip(W/W_max, 0, 1) (the SAME formula as
+        # legoesm.land.slab_land) limits land latent heat by soil wetness,
+        # instead of evaporating at the saturated (swamp) rate everywhere.
+        # ``w_land`` (soil water [kg/m^2]) is a prognostic carry threaded like
+        # ``T_land``.  Set post-construction by the driver from
+        # ExperimentConfig.  All no-ops (beta=1, byte-identical to the
+        # wet-surface path) when ``land_soil_bucket`` is False.
+        self.land_soil_bucket = False
+        self.land_bucket_w_max = 150.0     # bucket capacity [kg/m^2]
+        self.land_beta_min = 0.1           # min moisture availability (dry soil)
+        self.land_bucket_w_init_frac = 0.5  # initial fill fraction of W_max
+        # ``land_stomatal_beta``: route the soil-water availability through the
+        # SHARED land stomatal model (Jarvis 1976) instead of the bare bucket
+        # ramp — the soil beta becomes ``min(beta_soil, beta_canopy)`` where
+        # the canopy term closes stomata in low light / high VPD (Pierre's
+        # steer: use the existing stomatal soil-water limitation, not a
+        # parallel bucket).  ``stomata_config`` (a land ``StomataConfig``) is
+        # set by the driver when enabled.  Off → soil-only beta (the prior
+        # bucket path, byte-identical).  Requires ``land_soil_bucket`` (the
+        # bucket supplies ``beta_soil``).
+        self.land_stomatal_beta = False
+        self.stomata_config = None
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         # ``dynamic_albedo``: zenith-angle-dependent ocean albedo
@@ -215,8 +255,85 @@ class PhysicsPipeline:
         """
         return self.f_land * land_field + (1.0 - self.f_land) * ocean_field
 
+    def _land_surface_bulk(self, T_low, u_low, v_low, p_s):
+        """Lowest-level air density [kg/m^3] and wind speed [m/s] for the
+        land surface bulk fluxes.
+
+        Shared by the slab-land SEB step and the soil-water bucket so the
+        two use ONE consistent transfer estimate (no re-derived bulk
+        formula).  ``1.0`` is the [m^2/s^2] wind-speed floor.
+        """
+        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_low)
+        wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
+        return rho_low, wind_speed
+
+    def _land_beta(self, w_land, T_land=None, sw_down_sfc=None,
+                   q_air=None, p_s=None):
+        """Soil-moisture evaporation efficiency ``beta`` in ``[beta_min, 1]``.
+
+        ``beta_soil = beta_min + (1-beta_min)*clip(W/W_max, 0, 1)`` — the SAME
+        Manabe bucket availability ramp as ``legoesm.land.slab_land`` (no
+        re-derived hydrology).  Returns ``None`` (the caller treats it as
+        ``beta = 1``, a wet/swamp surface) when the bucket is inactive or
+        ``w_land`` is ``None``, so the slab-land path is byte-identical to
+        the pre-bucket behaviour.
+
+        When ``land_stomatal_beta`` is set AND the stomatal forcing
+        (``T_land``, ``sw_down_sfc``, ``q_air``, ``p_s``) is supplied, the
+        soil availability is routed through the SHARED land Jarvis (1976)
+        stomatal model: ``beta = compute_stomatal_beta(jarvis_gs(...),
+        beta_soil)`` = ``min(beta_soil, clip(gs/gs_ref))`` — REUSING
+        ``legoesm.land.carbon.stomata`` (no re-derived conductance numerics,
+        the same fallback path ``compute_effective_beta`` takes when the
+        carbon state is unavailable).  ``gs`` closes the canopy term in low
+        light (so ``beta -> 0`` at night) and high VPD.  Without the forcing
+        (or when disabled) the soil-only ramp is returned unchanged.
+        """
+        if not self.land_soil_bucket or w_land is None:
+            return None
+        w_frac = jnp.clip(w_land / self.land_bucket_w_max, 0.0, 1.0)
+        beta_soil = self.land_beta_min + (1.0 - self.land_beta_min) * w_frac
+        if (not self.land_stomatal_beta or self.stomata_config is None
+                or T_land is None or sw_down_sfc is None
+                or q_air is None or p_s is None):
+            return beta_soil
+        # Shared Jarvis stomatal limitation (carbon state unavailable on the
+        # AMIP slab path -> LAI=None -> min(beta_soil, beta_canopy)).
+        from legoesm.land.carbon.stomata import (
+            compute_stomatal_beta,
+            jarvis_gs,
+        )
+        gs = jarvis_gs(T_land, sw_down_sfc, q_air, p_s, beta_soil,
+                       self.stomata_config)
+        return compute_stomatal_beta(gs, None, beta_soil, self.stomata_config)
+
+    def _bucket_update(self, w_land, precip_total, beta_land,
+                       T_land, T_low, q_air, u_low, v_low, p_s, dt):
+        """Advance the Manabe (1969) soil-water bucket one physics step.
+
+            dW/dt = P - E,   W clipped to [0, W_max]   (overflow -> runoff).
+
+        ``P`` (``precip_total``) is total surface precip over land
+        [kg/m^2/s]; ``E`` is the ``beta``-limited land evaporation
+        [kg/m^2/s] = the SAME ``beta``-scaled bulk latent flux (/L_v) that
+        cools ``T_land`` in :meth:`_step_slab_land`.  Capacity ``W_max`` and
+        the clip-to-``[0, W_max]`` (overflow = surface runoff, leaves the
+        column) mirror ``legoesm.land.slab_land``.  Returns ``w_land``
+        unchanged when the bucket is inactive.
+        """
+        if not self.land_soil_bucket or w_land is None:
+            return w_land
+        beta = 1.0 if beta_land is None else beta_land
+        rho_low, wind_speed = self._land_surface_bulk(T_low, u_low, v_low, p_s)
+        q_sat_land = saturation_specific_humidity(T_land, p_s)
+        # beta-limited land evaporation mass flux [kg/m^2/s] (negative = dew
+        # onto soil, a source); consistent with the SEB latent flux.
+        evap = beta * rho_low * self.C_E * wind_speed * (q_sat_land - q_air)
+        w_unclamped = w_land + dt * (precip_total - evap)
+        return jnp.clip(w_unclamped, 0.0, self.land_bucket_w_max)
+
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
-                        T, p_s, q_v, u, v, dt):
+                        T, p_s, q_v, u, v, dt, beta_land=None):
         """Advance the slab-land skin temperature by one radiation step.
 
         Semi-implicit surface energy balance::
@@ -226,15 +343,22 @@ class PhysicsPipeline:
         linearized about the current ``T_land``.  Every flux term damps
         (``dF/dT < 0``), so the denominator ``C_land - dt*dF/dT`` is
         always larger than ``C_land`` and the update is unconditionally
-        stable for any radiation cadence.  Land evaporation uses the
-        saturated (wet-surface) bulk flux — no soil-moisture limit.
+        stable for any radiation cadence.
+
+        ``beta_land`` is the soil-moisture evaporation efficiency
+        (:meth:`_land_beta`): it scales the land latent heat flux (and its
+        temperature derivative) so a dry bucket evaporates less and warms
+        (the desert-heating effect).  ``None`` ⇒ ``beta = 1`` (the legacy
+        saturated wet-surface flux, byte-identical to the pre-bucket path).
         """
         T_air = T[..., -1]
         q_air = q_v[..., -1]
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_air)
-        wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
+        rho_low, wind_speed = self._land_surface_bulk(
+            T_air, u[..., -1], v[..., -1], p_s,
+        )
         sh_coef = rho_low * constants.c_pd * self.C_H * wind_speed
         lh_coef = rho_low * constants.L_v * self.C_E * wind_speed
+        beta = 1.0 if beta_land is None else beta_land
         eps = self.emissivity_land
         sb = constants.sigma_sb
 
@@ -242,16 +366,92 @@ class PhysicsPipeline:
         sw_net = sw_down_sfc * (1.0 - self.albedo_land)
         lw_net = eps * lw_down_sfc - eps * sb * T_land ** 4
         shflx = sh_coef * (T_land - T_air)
-        lhflx = lh_coef * (q_sat_land - q_air)
+        lhflx = beta * lh_coef * (q_sat_land - q_air)
         flux = sw_net + lw_net - shflx - lhflx
 
-        # Clausius-Clapeyron derivative of saturation specific humidity.
+        # Clausius-Clapeyron derivative of saturation specific humidity
+        # (the latent term carries the same beta factor as ``lhflx``).
         dqsat_dT = q_sat_land * constants.L_v / (constants.R_v * T_land ** 2)
         dflux_dT = (-4.0 * eps * sb * T_land ** 3
-                    - sh_coef - lh_coef * dqsat_dT)
+                    - sh_coef - beta * lh_coef * dqsat_dT)
 
         dt_rad = dt * self.rad_update_steps
         return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
+
+    def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
+                           sst, sic, T_land, p_s, beta_land=None):
+        """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
+
+        Used when ``self.surface_tiled`` is True (the active land tile).  The
+        ocean tile uses the experiment's ocean bulk scheme (e.g. COARE3 +
+        convective gustiness, from ``turbulence_config.surface``); the land
+        tile uses the FIXED-ROUGHNESS land Monin-Obukhov scheme (``"most"``,
+        roughness ``surface_z0_land``, no Charnock/gustiness); sea ice uses
+        constant neutral coefficients.  This keeps the ocean air-sea scheme
+        off the land columns — the bm_v3 blowup was COARE3 run over land.
+
+        Ocean/ice surface humidities are wet-surface (saturated).  The LAND
+        tile uses the soil-moisture-limited effective humidity
+        ``q_eff = q_air + beta*(q_sat(T_land) - q_air)`` so the land latent
+        flux is ``beta`` times its potential (wet-surface) value — the same
+        ``beta`` (:meth:`_land_beta`) that limits the SEB in
+        :meth:`_step_slab_land`.  ``beta_land=None`` ⇒ ``beta = 1`` (the
+        legacy saturated land surface, byte-identical to the pre-bucket
+        path).  Returns ``(tau_x, tau_y, shflx, lhflx, ustar)`` in column
+        format.
+        """
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            SurfaceTileSpec,
+            compute_tiled_surface_fluxes,
+        )
+
+        ad = self.adapter
+        f_land = ad.flatten_2d(self.f_land)
+        sic_col = ad.flatten_2d(sic)
+        frac_land = f_land
+        frac_ice = (1.0 - f_land) * sic_col
+        frac_ocean = (1.0 - f_land) * (1.0 - sic_col)
+
+        T_ocean = ad.flatten_2d(sst)
+        T_ice_grid = jnp.broadcast_to(
+            jnp.asarray(self.T_ice, dtype=sst.dtype), sst.shape,
+        )
+
+        # Land tile: soil-moisture-limited effective surface humidity.
+        # q_eff = q_air + beta*(q_sat(T_land) - q_air) makes the land latent
+        # flux beta times its wet-surface potential.  beta=1 (beta_land None)
+        # recovers the saturated land surface exactly.
+        q_sat_land_col = ad.flatten_2d(saturation_specific_humidity(T_land, p_s))
+        if beta_land is None:
+            q_sfc_land_col = q_sat_land_col
+        else:
+            beta_col = ad.flatten_2d(beta_land)
+            q_sfc_land_col = q_low + beta_col * (q_sat_land_col - q_low)
+
+        tiles = SurfaceTileSpec(
+            frac_ocean=frac_ocean,
+            frac_ice=frac_ice,
+            frac_land=frac_land,
+            T_ocean=T_ocean,
+            T_ice=ad.flatten_2d(T_ice_grid),
+            T_land=ad.flatten_2d(T_land),
+            q_sfc_ocean=ad.flatten_2d(saturation_specific_humidity(sst, p_s)),
+            q_sfc_ice=ad.flatten_2d(
+                saturation_specific_humidity(T_ice_grid, p_s)
+            ),
+            q_sfc_land=q_sfc_land_col,
+        )
+
+        ocean_cfg = self.turbulence_config.surface
+        land_cfg = ocean_cfg._replace(
+            bulk_scheme="most", z0=self.surface_z0_land, gustiness_w_zi=0.0,
+        )
+        ice_cfg = ocean_cfg._replace(bulk_scheme="constant")
+
+        return compute_tiled_surface_fluxes(
+            u_low, v_low, T_low, q_low, rho_low,
+            tiles, ocean_cfg, ice_cfg, land_cfg,
+        )
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -261,7 +461,8 @@ class PhysicsPipeline:
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
                             T_land=None, aerosol_od=None,
-                            tke=None, qke=None, gwd_spectrum=None):
+                            tke=None, qke=None, gwd_spectrum=None,
+                            w_land=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -299,6 +500,18 @@ class PhysicsPipeline:
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
         if self.f_land is not None and T_land is not None:
             T_sfc = self._blend_land(T_sfc, T_land)
+
+        # Soil-moisture evaporation efficiency for the land tile + bucket
+        # (None ⇒ beta=1, wet surface; byte-identical to the pre-bucket path).
+        # Recover the surface downwelling SW from the held net SW for the
+        # Jarvis PAR term (sw_net = sw_down*(1-albedo); over a land tile the
+        # blend albedo ≈ albedo_land, so this is accurate where stomata
+        # apply).  Unused (dead-code-eliminated) unless land_stomatal_beta.
+        _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - self.albedo_land, 1e-3)
+        beta_land = self._land_beta(
+            w_land, T_land=T_land, sw_down_sfc=_sw_down_sfc,
+            q_air=q_v[..., -1], p_s=p_s,
+        )
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -801,6 +1014,20 @@ class PhysicsPipeline:
                 T_sfc=T_sfc_col, q_sfc=q_sat_sfc_col,
                 rho=rho_col_phys, dt=dt, config=self.turbulence_config,
             )
+            # Tiled (mosaic) surface flux: compute the surface turbulent flux
+            # PER TILE (ocean bulk scheme on ocean, land Monin-Obukhov on
+            # land) and inject it as the BL bottom boundary condition, rather
+            # than running one scheme on the blended surface temperature.
+            # Gated to the louis scheme by ExperimentConfig.validate_strict.
+            # ``beta_land`` (None unless the soil-water bucket is active)
+            # soil-moisture-limits the land tile's latent flux.
+            if (self.surface_tiled and self.f_land is not None
+                    and T_land is not None):
+                _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
+                    u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                    rho_col_phys[:, -1], sst, sic, T_land, p_s,
+                    beta_land=beta_land,
+                )
             if self._turb_energy_field is not None:
                 # Stateful scheme (issue #413): kernel takes the
                 # prognostic energy under its trait-named keyword
@@ -918,6 +1145,15 @@ class PhysicsPipeline:
             dq_c_dt = dq_c_dt - _cond_lost            # do not form the cloud
             dT_dt = dT_dt - constants.L_v * _cond_lost / constants.c_pd
 
+        # Advance the prognostic soil-water bucket (no-op / w_land unchanged
+        # when the bucket is inactive).  Total surface precip is the source;
+        # the beta-limited land evaporation is the sink.
+        w_land_new = self._bucket_update(
+            w_land, precip + precip_micro, beta_land,
+            T_land, T[..., -1], q_v[..., -1],
+            u[..., -1], v[..., -1], p_s, dt,
+        )
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -950,6 +1186,7 @@ class PhysicsPipeline:
             tke=_pin_carry_dtype(tke_out, tke),
             qke=_pin_carry_dtype(qke_out, qke),
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
+            w_land=_pin_carry_dtype(w_land_new, w_land),
         )
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
@@ -966,7 +1203,7 @@ class PhysicsPipeline:
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
                                sfc_T_override=None,
-                               conv_precip=None):
+                               conv_precip=None, w_land=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1222,10 +1459,18 @@ class PhysicsPipeline:
         sw_down_toa = ad.unflatten_2d(rad_out.sw_flux_down[:, 0])
 
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
-        if _land_active:
+        # ``beta_land`` (None unless the soil-water bucket is active)
+        # soil-moisture-limits the land latent flux, so a dry bucket warms
+        # the land skin (desert-heating).  w_land itself is advanced in
+        # physics_step_no_rad (where total precip is available).
+        if _land_active and self.slab_land_active:
             lw_down_sfc = ad.unflatten_2d(rad_out.lw_flux_down[:, -1])
             T_land_new = self._step_slab_land(
                 T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
+                beta_land=self._land_beta(
+                    w_land, T_land=T_land, sw_down_sfc=sw_down_sfc,
+                    q_air=q_v[..., -1], p_s=p_s,
+                ),
             )
         else:
             T_land_new = T_land
@@ -1286,7 +1531,7 @@ class PhysicsPipeline:
                          sfc_albedo_override=None,
                          sfc_T_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
-                         conv_precip=None):
+                         conv_precip=None, w_land=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1299,7 +1544,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum, conv_precip) = args
+                 tke, qke, gwd_spectrum, conv_precip, w_land) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -1316,7 +1561,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
-                        conv_precip=conv_precip,
+                        conv_precip=conv_precip, w_land=w_land,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1328,6 +1573,7 @@ class PhysicsPipeline:
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
+                    w_land=w_land,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -1343,11 +1589,11 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum)
+                            physics_out.gwd_spectrum, physics_out.w_land)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
-                    gwd_spectrum=_carries[2],
+                    gwd_spectrum=_carries[2], w_land=_carries[3],
                 )
                 return physics_out, new_held, _cast(T_land_new)
 
@@ -1362,7 +1608,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
-                 tke, qke, gwd_spectrum, conv_precip) = args
+                 tke, qke, gwd_spectrum, conv_precip, w_land) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1374,6 +1620,7 @@ class PhysicsPipeline:
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
+                    w_land=w_land,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -1386,11 +1633,11 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum)
+                            physics_out.gwd_spectrum, physics_out.w_land)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
-                    gwd_spectrum=_carries[2],
+                    gwd_spectrum=_carries[2], w_land=_carries[3],
                 )
                 return physics_out, new_held, _cast(T_land)
 
@@ -1404,7 +1651,7 @@ class PhysicsPipeline:
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
-                    tke, qke, gwd_spectrum, conv_precip)
+                    tke, qke, gwd_spectrum, conv_precip, w_land)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -1698,6 +1945,14 @@ def _resolve_convection(config):
             tau_c=config.sbm_tau_c,
             rh_ref=config.sbm_RH_ref,
             cape_threshold=getattr(config, 'sbm_cape_threshold', 70.0),
+        )
+    elif scheme == "bechtold":
+        # Expose the Bechtold CAPE trigger threshold so it is tunable for the
+        # coarse-resolution convective-precip deficit (default matches
+        # BechtoldConfig.cape_threshold ⇒ byte-identical when unset).
+        from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+        conv_config = BechtoldConfig(
+            cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)
