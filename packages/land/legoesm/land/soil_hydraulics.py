@@ -557,12 +557,14 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
         C = pdi_C(psi, config)
     elif curve == "lu":
         C = lu_C(psi, config)
-    else:
+    elif curve == "brooks_corey":
         # Brooks-Corey: use finite difference approximation
         eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
         theta_p = theta_from_psi(psi + eps, config)
         theta_m = theta_from_psi(psi - eps, config)
         C = (theta_p - theta_m) / (2.0 * eps)
+    else:
+        raise ValueError(f"Unknown retention curve: {curve}")
 
     # Add elastic storage near saturation
     C = C + config.S_s * config.theta_sat

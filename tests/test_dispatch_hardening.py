@@ -186,6 +186,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/timestepping/split_explicit.py", "split_explicit_step"),
         ("packages/coupler/legoesm/coupler/coupler.py", "ocean_tile_response"),
         ("packages/coupler/legoesm/coupler/lake/two_layer_lake.py", "step_lake"),
+        # auto_dt_rce grid_type guard (hardened 2026-06-25; previously only
+        # 'voronoi' was special-cased and mpas/icosahedral fell through to the
+        # cubed_sphere ladder returning an unsafe dt, and an unknown grid_type
+        # silently used the ladder).
+        ("packages/coupler/legoesm/driver/rce_dt.py", "auto_dt_rce"),
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
