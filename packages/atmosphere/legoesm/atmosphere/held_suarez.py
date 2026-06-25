@@ -607,17 +607,23 @@ def held_suarez_init_mpas(
     nEdges = mesh.nEdges
     nlev = sigma_coord.n_levels
 
-    # Surface geopotential
+    # Surface geopotential. Thread the precision-policy storage dtype through
+    # EVERY field (matching held_suarez_init / _latlon) so a mixed-precision
+    # policy does not leave the MPAS HS state's dtypes disagreeing with the
+    # policy storage (which reproduces the float64-config-through-float32-state
+    # scan-carry mismatch).
     if phis is None:
-        phis_data = jnp.zeros((nCells,))
+        phis_data = jnp.zeros((nCells,), dtype=_dtype)
     else:
-        phis_data = phis
+        phis_data = jnp.asarray(phis, dtype=_dtype)
 
     # Surface pressure (hydrostatic adjustment for topography)
-    p_s_data = p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+    p_s_data = (
+        p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+    ).astype(_dtype)
 
     # Temperature: uniform with small perturbation at lowest level
-    T_data = jnp.full((nCells, nlev), T_init)
+    T_data = jnp.full((nCells, nlev), T_init, dtype=_dtype)
     key = jax.random.PRNGKey(seed)
     perturbation = jax.random.normal(key, (nCells,), dtype=_dtype) * jnp.asarray(
         perturbation_amplitude, dtype=_dtype
@@ -625,7 +631,7 @@ def held_suarez_init_mpas(
     T_data = T_data.at[:, -1].add(perturbation)
 
     # Velocity: at rest
-    u_data = jnp.zeros((nEdges, nlev))
+    u_data = jnp.zeros((nEdges, nlev), dtype=_dtype)
 
     return MPASHydrostaticState(
         u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
