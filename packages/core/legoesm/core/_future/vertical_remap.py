@@ -234,18 +234,27 @@ def vertical_remap_ppm(
             b = frac_consumed + p_take / jnp.maximum(dp_k, 1e-30)
             accum = _ppm_integral(a, b, q_L_col[k], q_R_col[k], d6_col[k], dp_k)
 
-            # Update remaining and advance old-cell pointer if exhausted
+            # Update remaining and advance old-cell pointer if exhausted.
+            # When the LAST old cell is exhausted we must NOT reset frac to 0
+            # (that would re-consume the deepest source layer on the next new
+            # cell, fabricating mass for a Σdp_new > Σdp_old column); keep
+            # frac=1 so no further source is drawn and the excess target space
+            # stays empty (still conservative: all source is distributed once).
             remaining = dp_needed - p_take
             exhausted = (dp_k * (1.0 - b)) < 1e-20
-            k = jnp.where(exhausted, jnp.minimum(k + 1, jnp.int32(nlev_old - 1)), k)
-            frac_consumed = jnp.where(exhausted, 0.0, b)
+            at_last = k >= jnp.int32(nlev_old - 1)
+            advance = exhausted & jnp.logical_not(at_last)
+            k = jnp.where(advance, k + 1, k)
+            frac_consumed = jnp.where(advance, 0.0, jnp.where(exhausted, 1.0, b))
 
-            # Continue consuming additional old cells while remaining > 0.
-            # Use a lax.while_loop to handle the (rare) case where a new
-            # cell spans multiple old cells.
+            # Continue consuming additional old cells while mass remains AND the
+            # source is not exhausted (the deepest old cell fully consumed) —
+            # the source-availability guard prevents non-termination / re-draw
+            # when a new cell needs more thickness than the old grid provides.
             def _while_cond(state):
-                _, _, _, rem, _ = state
-                return rem > 1e-20
+                _, kk, fc, rem, _ = state
+                source_left = (fc < 1.0) | (kk < jnp.int32(nlev_old - 1))
+                return (rem > 1e-20) & source_left
 
             def _while_body(state):
                 acc, kk, fc, rem, _ = state
@@ -259,8 +268,10 @@ def vertical_remap_ppm(
                 )
                 rem = rem - p_take2
                 ex = (dp_kk * (1.0 - b2)) < 1e-20
-                kk = jnp.where(ex, jnp.minimum(kk + 1, jnp.int32(nlev_old - 1)), kk)
-                fc = jnp.where(ex, 0.0, b2)
+                at_last2 = kk >= jnp.int32(nlev_old - 1)
+                advance2 = ex & jnp.logical_not(at_last2)
+                kk = jnp.where(advance2, kk + 1, kk)
+                fc = jnp.where(advance2, 0.0, jnp.where(ex, 1.0, b2))
                 return (acc, kk, fc, rem, True)
 
             accum, k, frac_consumed, _, _ = jax.lax.while_loop(

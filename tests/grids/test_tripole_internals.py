@@ -98,13 +98,42 @@ class TestDetectFold:
         gphit = gphit.at[-1].set(60.0)
         gphit = gphit.at[-1, 1].set(60.5)
 
-        with pytest.raises(ValueError):
+        # Default 0.1 tolerance rejects the 0.5 deg asymmetry outright.
+        with pytest.raises(ValueError, match="Fold symmetry check failed"):
             _detect_fold(glamt, gphit, n_lat, n_lon)
-        # Loosening the threshold lets it through.
+        # Loosening max_fold_asym_deg to 1.0 passes the symmetry check. But a
+        # col-1 bump is asymmetric by the SAME amount under both conventions
+        # (a tie), so 'auto' now correctly raises as ambiguous (PR B #4) —
+        # naming the convention explicitly confirms the loosened threshold let
+        # the 0.5 deg bump through.
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon, max_fold_asym_deg=1.0)
         fold = _detect_fold(
             glamt, gphit, n_lat, n_lon, max_fold_asym_deg=1.0,
+            fold_convention="n_lon-1-i",
         )
         assert fold.is_active is True
+
+    def test_near_constant_fold_row_nonzero_tie_raises(self):
+        """PR B #4 (codex): the tie test is on the DIFFERENCE of the two
+        asymmetries, not their magnitude. A near-constant fold row whose two
+        candidate asymmetries are both small-but-nonzero AND essentially equal
+        is still ambiguous and must raise — the earlier 'both <= tol' form
+        wrongly let such a row through."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 8, 16
+        glamt = jnp.zeros((n_lat, n_lon))
+        gphit = jnp.broadcast_to(
+            jnp.linspace(-70.0, 60.0, n_lat)[:, None], (n_lat, n_lon),
+        )
+        # Tiny col-1 bump (1e-4 deg): both conventions see asym 1e-4 (>> the
+        # 1e-6 default tie tol in magnitude) but their DIFFERENCE is ~0, so the
+        # row is genuinely ambiguous.
+        gphit = gphit.at[-1].set(60.0)
+        gphit = gphit.at[-1, 1].set(60.0 + 1e-4)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)
 
     def test_pure_periodic_fold_convention(self):
         """De-haloed NEMO meshes (e.g. eORCA025) self-permute the fold row

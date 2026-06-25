@@ -180,13 +180,17 @@ def _detect_fold(
         # Silently taking min(...) would pick the dict-first key and could
         # corrupt every ORCA-seam fold halo / vector-sign flip — require an
         # explicit convention instead.
-        # A tie = BOTH conventions fit the fold row to within the tolerance
-        # (e.g. a constant fold-row latitude is self-symmetric under either
-        # origin), so neither is distinguishable. A real mesh leaves the wrong
-        # origin with an O(deg) asymmetry, so only the genuinely-ambiguous case
-        # trips this. (A mesh where exactly one convention fits — the normal
-        # case — has max asymmetry >> tol and falls through to the min below.)
-        if max(asym_by_perm.values()) <= fold_tie_tol_deg:
+        # A tie = BOTH conventions are valid fits (each asymmetry <=
+        # max_fold_asym_deg) AND they are indistinguishable (their asymmetries
+        # differ by <= fold_tie_tol_deg) — e.g. a near-constant fold-row
+        # latitude is self-symmetric under either origin. Symmetry then cannot
+        # disambiguate the E-W wrap origin, so silently taking min(...) could
+        # pick the wrong ORCA seam. A real mesh leaves the WRONG origin with an
+        # O(deg) asymmetry (>> the right one), so the normal case — exactly one
+        # convention fitting — falls through to the min() below.
+        _asyms = list(asym_by_perm.values())
+        if (max(_asyms) <= max_fold_asym_deg
+                and abs(_asyms[0] - _asyms[1]) <= fold_tie_tol_deg):
             raise ValueError(
                 f"Ambiguous fold_convention='auto' at j={fold_j}: both index "
                 f"conventions fit the fold-row latitude equally well "
