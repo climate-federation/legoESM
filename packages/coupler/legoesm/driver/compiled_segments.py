@@ -1217,7 +1217,10 @@ def build_segment_fn(
         scan).
         """
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
-        if gradient_checkpoint:
+        # This unfused no-rad scan has length rad_update_steps (called once per
+        # radiation cycle); resolve the checkpoint policy against THAT length so
+        # a long rad_update_steps still auto-checkpoints under default None.
+        if _resolve_checkpoint(gradient_checkpoint, rad_update_steps):
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
         final_carry, _ = jax.lax.scan(
             body_no_rad, carry, None, length=rad_update_steps,
