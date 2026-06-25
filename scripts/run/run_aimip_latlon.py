@@ -489,7 +489,14 @@ def build_parser():
     # cannot generalize to a different climate — the whole point of flux
     # supervision.  Gray stays selectable for cheap debug only.
     p.add_argument("--radiation", default="rrtmgp")
-    p.add_argument("--convection", default="sbm")
+    # Convection default = mass_flux (DETRAINING).  With microphysics=kessler,
+    # an ADJUSTMENT convection scheme (sbm/dca/kuo) precipitates the column
+    # drying DIRECTLY *and* kessler rains the same vapour -> precip
+    # double-counted (measured ~26 mm/day vs ~3 expected).  A detraining scheme
+    # (mass_flux/edmf/...) routes convective condensate to the q_c cloud bucket
+    # so kessler is the SOLE surface-precip owner — physically correct + no
+    # double-count.  sbm stays selectable (pair it with microphysics=none).
+    p.add_argument("--convection", default="mass_flux")
     p.add_argument("--turbulence", default="louis")
     # Full AMIP physics stack: warm-rain microphysics (kessler — cheap,
     # differentiable, fast-compiling; morrison/p3 + rrtmgp blow the compile

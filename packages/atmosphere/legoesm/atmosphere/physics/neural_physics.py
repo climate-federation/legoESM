@@ -47,6 +47,14 @@ _DEFAULT_RESIDUAL_SCALE = 0.01
 # head outputs use a separate physical scale: raw network output (O(1)) x
 # this maps to W/m^2.  Untrained -> ~0 (stable); training drives toward ERA5.
 _DEFAULT_FLUX_OUTPUT_SCALE = 100.0
+# Tendency-head SATURATION cap (in raw-output units).  The tendency head is a
+# raw linear map x residual_scale; left unbounded, training grows its weights
+# until a single step's tendency tips the multi-step moist rollout past CFL
+# (saturation latent-heat feedback) into inf/nan — the NN-variant training
+# blow-up.  tanh(raw/cap)*cap keeps the head ~linear and ~0 at init (untrained
+# rollout = pure dynamics) but caps |tendency| at residual_scale*cap, removing
+# the blow-up at its source while staying smoothly differentiable.
+_DEFAULT_TENDENCY_CAP = 5.0
 
 
 
@@ -157,6 +165,7 @@ class NeuralPhysics(eqx.Module):
     n_output: int = eqx.field(static=True)
     residual_scale: float = eqx.field(static=True)
     flux_output_scale: float = eqx.field(static=True)
+    tendency_cap: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -167,12 +176,14 @@ class NeuralPhysics(eqx.Module):
         key: jax.Array,
         residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
         flux_output_scale: float = _DEFAULT_FLUX_OUTPUT_SCALE,
+        tendency_cap: float = _DEFAULT_TENDENCY_CAP,
     ):
         self.nlev = nlev
         self.n_input = nlev * 4 + 2   # T, u, v, q_v per level + p_s + solar
         self.n_output = nlev * 4 + 6   # tendencies per level + 6 surface fluxes
         self.residual_scale = residual_scale
         self.flux_output_scale = flux_output_scale
+        self.tendency_cap = tendency_cap
 
         keys = jax.random.split(key, n_layers + 1)
         dims = [self.n_input] + [hidden_dim] * n_layers + [self.n_output]
@@ -197,15 +208,16 @@ class NeuralPhysics(eqx.Module):
         for layer in self.layers[:-1]:
             x = jax.nn.gelu(layer(x))
         raw = self.layers[-1](x)
-        # Tendencies (4*nlev) + precip are per-second rates -> residual_scale;
-        # the 5 radiation fluxes (sw_net_sfc, lw_net_sfc, sw_up_toa,
-        # lw_up_toa, sw_down_toa) are O(100 W/m^2) -> flux_output_scale, so
-        # the flux head can actually reach observed magnitudes.
+        # Tendencies (4*nlev) + precip are per-second rates -> residual_scale,
+        # tanh-BOUNDED so a trained weight blow-up can never push a single
+        # step's tendency past CFL into an inf/nan moist rollout (the NN-variant
+        # training crash). The 5 radiation fluxes (sw_net_sfc, lw_net_sfc,
+        # sw_up_toa, lw_up_toa, sw_down_toa) are O(100 W/m^2) ->
+        # flux_output_scale (they do not drive the state, so left unbounded).
         n_rate = self.nlev * 4 + 1  # tendencies + precip
-        return jnp.concatenate([
-            raw[:n_rate] * self.residual_scale,
-            raw[n_rate:] * self.flux_output_scale,
-        ])
+        cap = self.tendency_cap
+        rate = self.residual_scale * cap * jnp.tanh(raw[:n_rate] / cap)
+        return jnp.concatenate([rate, raw[n_rate:] * self.flux_output_scale])
 
 
 # ======================================================================

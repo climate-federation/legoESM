@@ -33,8 +33,13 @@ REPO = Path(__file__).resolve().parents[2]
 # Baseline classical stack (one known-good point in the space).  Full AMIP
 # physics: convection + turbulence + active (non-orographic) GWD; microphysics
 # (kessler) and radiation (rrtmgp) come from the orchestrator defaults.
+# convection=mass_flux is DETRAINING: with kessler microphysics, an adjustment
+# scheme (sbm/dca/kuo) double-counts precip (its column drying rains AND kessler
+# rains the same vapour).  NB the dca/kuo sweep alternatives are adjustment
+# schemes -> they will over-precipitate against this baseline; mass_flux/edmf
+# are the clean (detraining) convection options for the kessler stack.
 BASELINE = {
-    "convection": "sbm",
+    "convection": "mass_flux",
     "turbulence": "louis",
     "gravity_wave_drag": "hines",
 }
@@ -47,8 +52,11 @@ SWEEP_SPACE = {
     # bechtold, tiedtke) need a seeded conv_prog carry (issue #413) + a CLI
     # wiring the orchestrator/run_amip don't have yet -> deferred (they would
     # fail argparse, wasting a sweep task).
+    # mass_flux is the baseline (detraining). Alternatives: edmf (also
+    # detraining) + sbm/dca/kuo (ADJUSTMENT -> double-count precip with kessler;
+    # included to MEASURE that effect, not as recommended pairings).
     "convection": [
-        "dca", "kuo", "mass_flux", "edmf",
+        "sbm", "dca", "kuo", "edmf",
     ],
     # Stateful-TKE schemes (tke, mynn25) need a seeded prognostic carry
     # (issue #413) the orchestrator doesn't thread yet -> excluded; the

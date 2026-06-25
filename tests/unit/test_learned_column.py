@@ -48,6 +48,23 @@ def test_make_column_physics_fn_returns_callable():
     assert callable(fn)
 
 
+def test_neural_tendency_output_is_bounded():
+    """The tendency head must SATURATE (tanh-bounded) so a trained weight
+    blow-up can't drive the moist rollout to inf/nan. A huge input -> tendency
+    capped at residual_scale*tendency_cap, NOT unbounded."""
+    from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+
+    nn = NeuralPhysics(nlev=4, hidden_dim=8, n_layers=2,
+                       key=jax.random.PRNGKey(7),
+                       residual_scale=1e-5, tendency_cap=5.0)
+    y = nn(jnp.full((nn.n_input,), 1.0e6))   # extreme input
+    n_rate = nn.nlev * 4 + 1
+    tend = y[:n_rate]
+    ceil = nn.residual_scale * nn.tendency_cap
+    assert float(jnp.abs(tend).max()) <= ceil * 1.0001   # saturated, finite
+    assert jnp.all(jnp.isfinite(y))
+
+
 def test_neural_flux_head_writes_predicted_fluxes_into_held():
     """The bridge must write the NN's predicted TOA/surface fluxes into
     held_* (so the flux loss supervises them), NOT pass the (zeroed) input

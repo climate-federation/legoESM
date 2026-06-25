@@ -21,6 +21,10 @@ import equinox as eqx
 # scaled by this so it can reach observed magnitudes (mirrors the column
 # NN's flux_output_scale).  Untrained -> ~0 (stable).
 _SFNO_FLUX_OUTPUT_SCALE = 100.0
+# Tendency SATURATION cap (raw-output units): tanh-bound the SFNO tendency so a
+# trained blow-up can't push a step past CFL into an inf/nan moist rollout
+# (mirrors NeuralPhysics._DEFAULT_TENDENCY_CAP).  ~linear + ~0 at init.
+_SFNO_TENDENCY_CAP = 5.0
 
 if TYPE_CHECKING:
     from legoesm.grids.gaussian import GaussianGrid
@@ -191,12 +195,18 @@ def make_sfno_step_unified_latlon(
         zeros_3d = jnp.zeros(T.shape, dtype=T.dtype)
         zeros_2d = jnp.zeros(p_s.shape, dtype=p_s.dtype)
         # Scale the raw SFNO output (O(1)) to physical per-second tendency
-        # magnitudes — without this dT/dt ~ 1 K/s blows the multi-step
-        # forward at init (same fix as the column NN's residual_scale).
+        # magnitudes, tanh-BOUNDED so a trained weight blow-up can't push a
+        # single step past CFL into an inf/nan moist rollout (the NN-variant
+        # training crash; same fix as NeuralPhysics' tendency_cap).
+        _cap = _SFNO_TENDENCY_CAP
+
+        def _bound(t):
+            return tendency_scale * _cap * jnp.tanh(t / _cap)
+
         out_ll = PhysicsOutput(
             **_physics_output_kwargs(
-                dT_dt=tendency_scale * _to_latlon(sfno_out.dT_dt, T.shape),
-                dq_v_dt=tendency_scale * _to_latlon(sfno_out.dq_v_dt, T.shape),
+                dT_dt=_bound(_to_latlon(sfno_out.dT_dt, T.shape)),
+                dq_v_dt=_bound(_to_latlon(sfno_out.dq_v_dt, T.shape)),
                 dq_c_dt=zeros_3d, dq_r_dt=zeros_3d, precip=zeros_2d,
                 sw_net_sfc=zeros_2d, lw_net_sfc=zeros_2d,
                 sw_up_toa=zeros_2d, lw_up_toa=zeros_2d, sw_down_toa=zeros_2d,
