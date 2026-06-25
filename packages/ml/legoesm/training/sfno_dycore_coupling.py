@@ -197,16 +197,20 @@ def make_sfno_step_unified_latlon(
         # Scale the raw SFNO output (O(1)) to physical per-second tendency
         # magnitudes, tanh-BOUNDED so a trained weight blow-up can't push a
         # single step past CFL into an inf/nan moist rollout (the NN-variant
-        # training crash; same fix as NeuralPhysics' tendency_cap).
+        # training crash; same fix as NeuralPhysics' tendency_cap).  Bound on
+        # the GAUSSIAN grid BEFORE regridding: an inf SFNO output would make the
+        # regrid weighted sum inf-inf -> nan (codex) before a post-regrid tanh
+        # could clamp it; regrid of a tanh-bounded field stays bounded.
         _cap = _SFNO_TENDENCY_CAP
 
-        def _bound(t):
-            return tendency_scale * _cap * jnp.tanh(t / _cap)
+        def _bound_to_latlon(t_gauss):
+            return tendency_scale * _to_latlon(
+                _cap * jnp.tanh(t_gauss / _cap), T.shape)
 
         out_ll = PhysicsOutput(
             **_physics_output_kwargs(
-                dT_dt=_bound(_to_latlon(sfno_out.dT_dt, T.shape)),
-                dq_v_dt=_bound(_to_latlon(sfno_out.dq_v_dt, T.shape)),
+                dT_dt=_bound_to_latlon(sfno_out.dT_dt),
+                dq_v_dt=_bound_to_latlon(sfno_out.dq_v_dt),
                 dq_c_dt=zeros_3d, dq_r_dt=zeros_3d, precip=zeros_2d,
                 sw_net_sfc=zeros_2d, lw_net_sfc=zeros_2d,
                 sw_up_toa=zeros_2d, lw_up_toa=zeros_2d, sw_down_toa=zeros_2d,
