@@ -952,6 +952,37 @@ class PhysicsPipeline:
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
         )
 
+    def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
+        """Prescribed TOA incident shortwave [W/m^2] — the incoming solar the
+        radiation solver is GIVEN, used for the ``rsdt`` diagnostic.
+
+        ``rsdt`` previously read ``sw_flux_down`` at the top halo, whose value
+        comes from the quadratic top-boundary extrapolation in
+        ``rte/two_stream._replace_top_flux``.  For downwelling SW the true TOA
+        value exceeds every interior level (the column only attenuates
+        downward), so the extrapolation's range-limit (kept deliberately to
+        bound the BUG-B drifted-state overshoot, ``sw_down`` 1121 W/m^2) caps
+        the diagnostic ~15 % below ``S_0 cos(SZA)`` (≈330 vs ≈340 W/m^2,
+        C48).  The physical TOA incident flux is not an extrapolation at all —
+        it is the prescribed insolation boundary condition.  This returns that
+        insolation with the EXACT convention the solver uses (the column
+        ``insol`` in the radiation builders): instantaneous ``S_0 cos(SZA)``
+        under a diurnal cycle, else the daily-mean insolation.  Computed on the
+        native grid (``lat``/``lon``) so it is ``sw_down_toa`` directly, and
+        consistent with ``rsut`` (same ``S_0``/zenith), keeping the TOA budget
+        ``R = rsdt - rsut - rlut`` correct.  Heating rates are unaffected (the
+        halo is stripped before use); the BUG-B clamp on the halo is untouched.
+        """
+        from legoesm.atmosphere.physics.radiation.solar import (
+            cos_zenith_angle,
+            daily_mean_insolation,
+        )
+        if self.diurnal_cycle:
+            hour = seconds_of_day / 3600.0
+            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour)
+            return s_0 * jnp.maximum(cos_sza, 0.0)
+        return daily_mean_insolation(lat, day_of_year, s_0)
+
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
@@ -1219,7 +1250,11 @@ class PhysicsPipeline:
         )
         sw_up_toa = ad.unflatten_2d(rad_out.sw_flux_up[:, 0])
         lw_up_toa = ad.unflatten_2d(rad_out.lw_flux_up[:, 0])
-        sw_down_toa = ad.unflatten_2d(rad_out.sw_flux_down[:, 0])
+        # rsdt = the prescribed TOA insolation (S_0 cos(SZA) / daily-mean), NOT
+        # the quadratically-extrapolated top-halo downwelling flux (which the
+        # _replace_top_flux range-limit caps ~15% low).  See _toa_insolation.
+        sw_down_toa = self._toa_insolation(
+            lat, lon, day_of_year, seconds_of_day, s_0)
 
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         if _land_active:
