@@ -319,6 +319,7 @@ def create_tripole_grid(
     dtype=None,
     min_dx_m: float = 1000.0,
     fold_convention: str = "auto",
+    allow_ambiguous_legacy_fold: bool = False,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -345,12 +346,17 @@ def create_tripole_grid(
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
         symmetry-detects it; on a genuinely ambiguous (near-constant) fold row
-        where both conventions fit equally it WARNS and falls back to the legacy
-        ``"n_lon-1-i"`` origin (backward-compatible) instead of failing. Pass it
-        EXPLICITLY for a de-haloed mesh whose fold row is too flat to
-        disambiguate (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed meshes,
-        ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes) to silence the
-        warning; the choice is still verified against the symmetry tolerance.
+        where both conventions fit equally it RAISES (fail loud) rather than
+        guess a seam origin that could silently corrupt the northern-halo
+        exchange. Pass it EXPLICITLY for a de-haloed mesh whose fold row is too
+        flat to disambiguate (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed
+        meshes, ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the
+        choice is still verified against the symmetry tolerance.
+    allow_ambiguous_legacy_fold : bool, default False
+        Explicit opt-in: when ``True`` and ``fold_convention="auto"`` hits an
+        ambiguous fold row, fall back to the historical ``"n_lon-1-i"`` origin
+        (with a warning) instead of raising. For callers who knowingly accept
+        the legacy tie-break; prefer an explicit ``fold_convention``.
 
     Returns
     -------
@@ -428,24 +434,30 @@ def create_tripole_grid(
     f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
-    # (near-constant) fold row under "auto" so internal callers cannot silently
-    # get the wrong seam origin. The PUBLIC loader stays backward-compatible: on
-    # that ambiguity it WARNS loudly and falls back to the legacy "n_lon-1-i"
-    # origin (the historical auto tie-break) rather than failing at startup.
-    # Real ORCA meshes have a curved (non-constant) fold row and never hit this;
-    # pass fold_convention explicitly to silence the warning and pick the
-    # correct origin for a de-haloed mesh. Non-ambiguity errors still propagate.
+    # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
+    # silent guess would corrupt the northern-boundary halo exchange / vector
+    # sign-flip for the whole run (not just at startup). The default here is to
+    # let that error propagate — fail loud and require an explicit
+    # ``fold_convention``. Real ORCA meshes have a curved (non-constant) fold
+    # row and never hit this. ``allow_ambiguous_legacy_fold=True`` is an
+    # explicit opt-in that restores the historical "n_lon-1-i" tie-break (with a
+    # warning) for callers who knowingly accept the legacy behaviour. Non-
+    # ambiguity errors always propagate.
     try:
         fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
                             fold_convention=fold_convention)
     except ValueError as exc:
-        if fold_convention != "auto" or "Ambiguous fold_convention" not in str(exc):
+        is_ambiguity = (
+            fold_convention == "auto"
+            and "Ambiguous fold_convention" in str(exc)
+        )
+        if not (is_ambiguity and allow_ambiguous_legacy_fold):
             raise
         import warnings
         warnings.warn(
-            f"{exc} Falling back to the legacy 'n_lon-1-i' fold origin; pass "
-            "fold_convention explicitly to choose the correct origin for a "
-            "de-haloed mesh and silence this warning.",
+            f"{exc} allow_ambiguous_legacy_fold=True → using the legacy "
+            "'n_lon-1-i' fold origin, which may be WRONG for a de-haloed mesh; "
+            "pass fold_convention explicitly for a guaranteed-correct origin.",
             RuntimeWarning,
             stacklevel=2,
         )

@@ -365,21 +365,30 @@ class TestGradientYZeroPolarMetric:
 
 
 class TestCreateTripoleGridFoldDefault:
-    """PR B #4 (codex round-2): the public loader's default ``fold_convention=
-    'auto'`` must NOT hard-fail on an ambiguous (constant) fold row. The
-    synthetic mesh below has a constant fold row (gphit[-1] is uniform), so
-    ``_detect_fold('auto')`` would raise — the loader must instead warn and fall
-    back to the legacy ``n_lon-1-i`` origin so existing meshes keep loading."""
+    """PR B #4 (codex rounds 2-3): the public loader on an ambiguous (constant)
+    fold row must fail LOUD by default — a runtime warning is insufficient for
+    batch/long runs where a wrong seam origin silently corrupts the northern
+    halo. The synthetic mesh has a constant fold row (gphit[-1] is uniform). The
+    legacy n_lon-1-i fallback is available only as an EXPLICIT opt-in."""
 
-    def test_default_auto_warns_and_loads_on_ambiguous_fold(self):
+    def test_default_auto_raises_on_ambiguous_fold(self):
         from legoesm.grids.tripole import create_tripole_grid
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "mesh.nc")
             _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
-            with pytest.warns(RuntimeWarning, match="(?i)ambiguous|falling back"):
-                geom = create_tripole_grid(path)
-        assert geom is not None  # loaded, no startup failure
+            with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+                create_tripole_grid(path)  # default: fail loud
+
+    def test_legacy_fold_fallback_is_explicit_opt_in(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with pytest.warns(RuntimeWarning, match="(?i)legacy"):
+                geom = create_tripole_grid(path, allow_ambiguous_legacy_fold=True)
+        assert geom is not None  # opt-in loads with the legacy origin
 
     def test_explicit_convention_silences_warning(self):
         import warnings as _warnings
