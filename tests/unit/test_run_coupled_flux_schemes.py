@@ -55,6 +55,20 @@ def test_flux_scheme_rejects_unknown(bad_flag):
         mod.build_parser().parse_args([bad_flag, "garbage_scheme"])
 
 
+def test_coupling_diag_days_clamp():
+    """diag_days is the atm-ocean coupling interval for the dynamic ocean; it is
+    clamped to <=10 (the stale-SST overheating-instability guard), and left
+    untouched for slab/two_layer or when already tight."""
+    f = mod.clamp_coupling_diag_days
+    assert f("dynamic", 20) == 10          # loose -> clamped
+    assert f("dynamic", 30) == 10
+    assert f("dynamic", 10) == 10          # at the cap -> unchanged
+    assert f("dynamic", 5) == 5            # tight -> unchanged
+    assert f("slab", 20) == 20             # slab ocean unaffected
+    assert f("two_layer", 60) == 60
+    assert f("fixed", 30) == 30
+
+
 def test_slab_ocean_most_dispatch_finite():
     """SimpleOcean._ocean_turbulent_fluxes accepts scheme='most' and returns
     finite SH/LH (the slab=MOST path)."""

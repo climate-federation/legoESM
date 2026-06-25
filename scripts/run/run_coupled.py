@@ -41,6 +41,25 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 
+#: Max atm-ocean coupling interval [days] for the dynamic 3D ocean.  diag_days
+#: sets the integration segment length and the coupler fires once per segment,
+#: so diag_days IS the coupling interval; looser than this overheats the atm on
+#: stale SST and goes unstable (see clamp_coupling_diag_days).
+_MAX_COUPLED_DIAG_DAYS = 10
+
+
+def clamp_coupling_diag_days(ocean: str, diag_days: int) -> int:
+    """Clamp diag_days to a tight coupling cadence for the dynamic 3D ocean.
+
+    Returns ``min(diag_days, _MAX_COUPLED_DIAG_DAYS)`` when ``ocean == "dynamic"``
+    (diag_days is the atm-ocean coupling interval there), else ``diag_days``
+    unchanged.  Pure + side-effect-free so it is unit-testable.
+    """
+    if ocean == "dynamic" and diag_days > _MAX_COUPLED_DIAG_DAYS:
+        return _MAX_COUPLED_DIAG_DAYS
+    return diag_days
+
+
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
     parser = argparse.ArgumentParser(
@@ -396,6 +415,25 @@ def main():
     if args.ic is None:
         args.ic = ("standard" if args.grid in ("latlon", "cubed_sphere")
                    else "default")
+
+    # Coupling-interval guard (dynamic 3D ocean): diag_days sets the integration
+    # SEGMENT length, and the atm<->ocean coupler (_segment_hook) — which steps
+    # the ocean and refreshes the SST the atmosphere sees — fires ONCE PER
+    # SEGMENT.  So diag_days IS the coupling interval.  A large diag_days lets
+    # the atmosphere integrate many days on a FIXED (stale) SST, which overheats
+    # the column and goes unstable (measured: --diag-days 20 -> column-T 258.9K,
+    # max_v 28.6, NaN by ~day 40; --diag-days 10 stays at 252.7K, stable).  Clamp
+    # to a tight coupling cadence for the dynamic ocean so infrequent-output runs
+    # don't silently loosen the coupling.  (Proper fix: a coupling interval
+    # independent of the output interval in model_driver's segment-length calc.)
+    _clamped = clamp_coupling_diag_days(args.ocean, args.diag_days)
+    if _clamped != args.diag_days:
+        logger.warning(
+            "--diag-days %d is too loose for --ocean dynamic (diag_days sets the "
+            "atm-ocean coupling interval); clamping to %d to keep the coupling "
+            "tight and avoid the stale-SST overheating instability.",
+            args.diag_days, _clamped)
+        args.diag_days = _clamped
 
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather
