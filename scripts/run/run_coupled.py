@@ -278,6 +278,21 @@ def build_parser():
                              "up — dragging global near-surface air T down. "
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
+    parser.add_argument("--stomata", dest="stomata",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable STOMATAL CONDUCTANCE control of land "
+                             "evapotranspiration (StomataConfig.enabled).  Off "
+                             "(default) => land ET is limited only by the bucket/"
+                             "Richards soil-moisture beta (no physiological "
+                             "control).  ON => the effective beta is further "
+                             "limited by stomatal conductance: with the DifferLand "
+                             "carbon scheme (--preset slab_carbon) it is the "
+                             "CO2-COUPLED Farquhar + Ball-Berry/Medlyn solver "
+                             "(transpiration responds to atmospheric CO2 via "
+                             "forcing.co2_ppmv); without carbon it is the Jarvis "
+                             "multiplicative model (no CO2).  Soil moisture still "
+                             "depletes dynamically (bucket dW/dt=P-E / Richards "
+                             "theta).  Recommended ON for realistic land ET.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -656,6 +671,32 @@ def main():
                 bulk_scheme=args.land_bulk_scheme))
         logger.info("  Land surface flux scheme: %s (land tile; dynamic water "
                     "pools + dryness-limited ET active)", args.land_bulk_scheme)
+
+    # Stomatal conductance (opt-in): enable physiological control of land ET so
+    # transpiration is NOT just soil-moisture-limited.  compute_effective_beta
+    # then routes through the CO2-coupled Farquhar+Ball-Berry/Medlyn solver when
+    # the DifferLand carbon scheme is active (CO2 via forcing.co2_ppmv), else the
+    # Jarvis model.  Default config keeps stomata.enabled=False (byte-identical).
+    if (getattr(args, "stomata", False)
+            and coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None
+            and hasattr(coupled_cfg.land_config, "stomata")):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                stomata=coupled_cfg.land_config.stomata._replace(enabled=True)))
+        _co2_coupled = (coupled_cfg.carbon_active
+                        and coupled_cfg.carbon_land == "differland")
+        logger.info("  Stomatal conductance ENABLED (%s); land ET physiologically "
+                    "limited, soil moisture depletes dynamically",
+                    "CO2-coupled Farquhar/Ball-Berry" if _co2_coupled
+                    else "Jarvis (no CO2 — use --preset slab_carbon for "
+                         "CO2-coupling)")
+        if not _co2_coupled:
+            logger.warning(
+                "  --stomata WITHOUT the DifferLand carbon scheme: stomata use "
+                "the Jarvis model (no CO2 response).  For CO2-coupled stomatal "
+                "conductance use --preset slab_carbon (carbon_active + differland "
+                "+ co2_tracer).")
 
     # Soil warm-start (opt-in): init soil at the atmosphere's lat-structured
     # near-surface air T (t=0) instead of a uniform 280 K cold start.

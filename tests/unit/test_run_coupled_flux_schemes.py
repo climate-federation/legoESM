@@ -55,6 +55,13 @@ def test_flux_scheme_rejects_unknown(bad_flag):
         mod.build_parser().parse_args([bad_flag, "garbage_scheme"])
 
 
+def test_stomata_flag():
+    """--stomata enables stomatal conductance (default off, byte-identical)."""
+    assert mod.build_parser().parse_args([]).stomata is False
+    assert mod.build_parser().parse_args(["--stomata"]).stomata is True
+    assert mod.build_parser().parse_args(["--no-stomata"]).stomata is False
+
+
 def test_coupling_diag_days_clamp():
     """diag_days is the atm-ocean coupling interval for the dynamic ocean; it is
     clamped to <=10 (the stale-SST overheating-instability guard), and left
