@@ -56,6 +56,10 @@ SWEEP_SPACE = {
     # mass_flux is the baseline (detraining). Alternatives: edmf (also
     # detraining) + sbm/dca/kuo (ADJUSTMENT -> double-count precip with kessler;
     # included to MEASURE that effect, not as recommended pairings).
+    # NO "none" in any axis: every combo keeps ALL five categories ACTIVE (the
+    # sweep compares real schemes, never omits a parameterization). The
+    # cloud=none / micro=none clear-sky runs already proved omitting a category
+    # wrecks radiation (OLR rmse 34->80), so they are not useful comparisons.
     "convection": [
         "sbm", "dca", "kuo", "edmf",
     ],
@@ -63,27 +67,26 @@ SWEEP_SPACE = {
     # (issue #413) the orchestrator doesn't thread yet -> excluded; the
     # diagnostic closures are swept.
     "turbulence": [
-        "smagorinsky", "holtslag_boville", "ysu", "none",
+        "smagorinsky", "holtslag_boville", "ysu",
     ],
-    # hines is the baseline; "none" probes the no-GWD effect.  mcfarlane and
-    # lindzen are orographic — with no per-column subgrid-orography input they
-    # fall back to the scalar config.h_topo (~500 m), so they ARE active
-    # uniform-orographic drag (not an inert control), a legitimate alternative.
+    # hines is the baseline. mcfarlane and lindzen are orographic — with no
+    # per-column subgrid-orography input they fall back to the scalar
+    # config.h_topo (~500 m), so they ARE active uniform-orographic drag;
+    # rayleigh is a simple linear drag. All keep GWD ON.
     "gravity_wave_drag": [
-        "none", "mcfarlane", "lindzen", "rayleigh",
+        "mcfarlane", "lindzen", "rayleigh",
     ],
-    # kessler is the baseline warm-rain micro.  "none" probes no-microphysics
-    # (sat-adjust only, no surface precip); "sundqvist" is the alternative
-    # single-moment scheme.  Double-moment schemes (morrison/p3/thompson/
+    # kessler is the baseline warm-rain micro; sundqvist is the alternative
+    # single-moment scheme. Double-moment schemes (morrison/p3/thompson/
     # seifert_beheng) need extra prognostic tracer slots not wired into the
     # training carry + blow the rrtmgp+micro compile budget -> excluded.
     "microphysics": [
-        "none", "sundqvist",
+        "sundqvist",
     ],
     # xu_randall is the baseline cloud-fraction scheme (feeds rrtmgp cloud
-    # optics).  "none" = clear-sky control; "sundqvist" = diagnostic-RH clouds.
+    # optics); sundqvist is the diagnostic-RH alternative.
     "clouds": [
-        "none", "sundqvist",
+        "sundqvist",
     ],
 }
 

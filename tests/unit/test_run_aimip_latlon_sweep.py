@@ -15,13 +15,24 @@ _spec.loader.exec_module(mod)
 
 def test_combo_count_and_structure():
     combos = mod.build_combos()
-    # baseline + 4 conv + 4 turb + 4 gwd + 2 micro + 2 cloud (all 5 categories)
-    assert len(combos) == 1 + 4 + 4 + 4 + 2 + 2 == 17
+    # baseline + 4 conv + 3 turb + 3 gwd + 1 micro + 1 cloud (all 5 categories,
+    # NO 'none' anywhere -> every combo keeps all 5 parameterizations active)
+    assert len(combos) == 1 + 4 + 3 + 3 + 1 + 1 == 13
     assert combos[0]["name"] == "combo_baseline"
     assert combos[0]["convection"] == mod.BASELINE["convection"]
     for c in combos:
         assert {"name", "convection", "turbulence", "gravity_wave_drag",
                 "microphysics", "clouds"} <= set(c)
+
+
+def test_no_combo_omits_a_category():
+    """User constraint: ALWAYS have all parameterization categories active —
+    no combo (incl. baseline) may set any category to 'none'."""
+    cats = ("convection", "turbulence", "gravity_wave_drag",
+            "microphysics", "clouds")
+    for c in mod.build_combos():
+        off = [k for k in cats if c[k] == "none"]
+        assert not off, f"{c['name']} omits {off} (set to 'none')"
 
 
 def test_sweep_schemes_are_run_amip_choices():
