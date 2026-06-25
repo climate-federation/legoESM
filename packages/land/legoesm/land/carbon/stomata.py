@@ -59,6 +59,11 @@ _PAR_FRAC = 0.48   # Fraction of shortwave that is PAR
 _PAR_CONV = 4.6    # umol photons per J of PAR
 _MC = 12.0e-6      # g C per umol CO2
 
+# A-gs coupling fixed-point iteration COUNT. A loop count is never a config /
+# trainable leaf (loop-counts-never-trainable doctrine) — it stays a module
+# constant so it can never reach the trainable collector.
+_N_AGS_ITER_DEFAULT = 5
+
 
 # =====================================================================
 # Configuration
@@ -153,8 +158,6 @@ class StomataConfig(NamedTuple):
     T_range_jarvis_C: float = 20.0 # Temperature range [deg C]
     a_vpd: float = 0.05          # VPD sensitivity [1/hPa]
 
-    # --- Solver ---
-    n_iter_ags: int = 5          # A-gs coupling iterations
 
     # --- Other ---
     O2_conc: float = 209000.0    # Atmospheric O2 [umol/mol]
@@ -415,7 +418,7 @@ def coupled_farquhar_stomata(
     Ci = _CI_CA_INIT_RATIO * Ca
 
     # Fixed-point iteration (unrolled for JIT compatibility)
-    for _ in range(config.n_iter_ags):
+    for _ in range(_N_AGS_ITER_DEFAULT):
         A_net, _ = farquhar_photosynthesis(
             Ci, APAR_umol, T_leaf, config, beta_soil)
 

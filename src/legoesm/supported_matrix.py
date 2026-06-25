@@ -92,6 +92,13 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.compressible_euler_mpas",
     ),
 
+    # -- U-cast (unstructured-cast hydrostatic primitive equations) --
+    SolverEntry(
+        "atmosphere", "hydrostatic", "u_cast",
+        "ucast_primitive_equations", "UCastPrimitiveEquationModel",
+        "legoesm.atmosphere.dynamics.ucast_pe",
+    ),
+
     # -- Lat-lon C-grid (FV) --
     SolverEntry(
         "atmosphere", "shallow_water", "latlon_cgrid",

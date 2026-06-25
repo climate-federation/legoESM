@@ -101,3 +101,19 @@ def test_component_members_are_the_independent_earth_system_components() -> None
     # each component member bundles exactly one subpackage (so they carve apart)
     for m in COMPONENT_MEMBERS:
         assert len(FEDERATION_MEMBERS[m]) == 1
+
+
+def test_supported_matrix_lists_every_resolvable_atmosphere_solver() -> None:
+    """PR D: ``supported_matrix`` is the documented single source of truth for
+    distinct atmosphere dycore+discretization+grid implementations, so it must
+    list every solver resolvable via ``dynamics._SOLVER_TO_CLASS``.
+    ``ucast_primitive_equations`` was a live solver missing from the matrix;
+    this pins the two together so the matrix can never silently drop a
+    resolvable solver again."""
+    from legoesm.supported_matrix import canonical_solver_names
+    from legoesm.atmosphere.dynamics import _SOLVER_TO_CLASS
+
+    assert set(canonical_solver_names("atmosphere")) == set(_SOLVER_TO_CLASS), (
+        "supported_matrix ATMOSPHERE_MATRIX is out of sync with the resolvable "
+        "solvers in dynamics._SOLVER_TO_CLASS — add/remove the SolverEntry."
+    )
