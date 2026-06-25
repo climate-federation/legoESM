@@ -18,7 +18,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
-from legoesm.grids.halo import pad_halo
+from legoesm.grids.halo import pad_halo_local
 
 
 def _grid_lat_lon_2d(grid):
@@ -531,8 +531,8 @@ def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarr
 
     Each cell becomes ``0.5*original + 0.5*smoothed`` where ``smoothed`` is the
     5-point mean ``(self + 4 neighbours)/5``.  The neighbours at face boundaries
-    come from the cross-face HALO (``pad_halo``, which handles the axis swaps and
-    reversals), so the smoothing is CONTINUOUS across cube edges.
+    come from the cross-face HALO (``pad_halo_local``, which handles the axis
+    swaps and reversals), so the smoothing is CONTINUOUS across cube edges.
 
     The previous implementation used one-sided boundary CLAMPING (edge cells
     averaged only their in-face neighbours), which smoothed each face in
@@ -551,7 +551,11 @@ def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarr
     orig = field
     for _ in range(passes):
         # (6, n+2, n+2) with REAL neighbour data from adjacent faces in the halo.
-        p = pad_halo(field, halo=1)
+        # Use the LOCAL halo=1 fill directly (not the backend-dispatching
+        # ``pad_halo``): this is host-side topography preprocessing on the FULL
+        # global field, so it must stay deterministic and never enter the
+        # MPI/SPMD exchange path even if a distributed halo backend is active.
+        p = pad_halo_local(field, None)
         neighbour_sum = (
             p[:, :-2, 1:-1] + p[:, 2:, 1:-1]    # i-1, i+1
             + p[:, 1:-1, :-2] + p[:, 1:-1, 2:]  # j-1, j+1

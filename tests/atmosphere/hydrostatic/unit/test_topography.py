@@ -574,6 +574,26 @@ class TestLaplacianSmoothCrossFace(unittest.TestCase):
         out = _laplacian_smooth_cubed_sphere(arr, passes=3)
         npt.assert_allclose(out, 3.0, atol=1e-10)
 
+    def test_smoothing_independent_of_halo_backend(self):
+        """Host-side topography smoothing must NOT dispatch through the global
+        MPI/SPMD halo backend (codex PR F): it uses the local cross-face pad
+        directly, so the result is identical regardless of the active backend —
+        a full global field must never enter the distributed exchange path."""
+        from legoesm.grids.halo import get_halo_backend, set_halo_backend
+        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+
+        arr = np.zeros((6, 6, 6))
+        arr[0] = 1.0
+        out_local = _laplacian_smooth_cubed_sphere(arr, passes=2)
+
+        prev = get_halo_backend()
+        try:
+            set_halo_backend("spmd")  # non-local backend active during smoothing
+            out_other = _laplacian_smooth_cubed_sphere(arr, passes=2)
+        finally:
+            set_halo_backend(prev)
+        npt.assert_allclose(out_other, out_local, atol=1e-12)
+
 
 if __name__ == "__main__":
     unittest.main()
