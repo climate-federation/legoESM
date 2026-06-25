@@ -255,10 +255,16 @@ def regrid_scalar(
         extra_dims = flat.shape[1:]
 
     indices = regrid_weights.src_indices    # (n_target, k)
-    # Weights are stored fp64; downcast to the field dtype here so an fp64 field
-    # keeps full-precision gradients through the IDW sum while an fp32 field
-    # still multiplies in fp32 (no fp64 footprint at run time).
-    weights = regrid_weights.weights.astype(field.dtype)    # (n_target, k)
+    # Weights are stored fp64. For a FLOATING field, downcast to the field dtype
+    # so an fp64 field keeps full-precision gradients through the IDW sum while
+    # an fp32 field stays fp32 (no fp64 footprint at run time). For a NON-floating
+    # field (int/bool mask, categorical), keep the float weights so the fractional
+    # IDW weights are not truncated to 0/1 — the product then promotes the result
+    # to float, exactly as before this change.
+    if jnp.issubdtype(field.dtype, jnp.floating):
+        weights = regrid_weights.weights.astype(field.dtype)    # (n_target, k)
+    else:
+        weights = regrid_weights.weights                        # (n_target, k)
 
     if len(extra_dims) == 0:
         # Simple scalar: (n_target,)
