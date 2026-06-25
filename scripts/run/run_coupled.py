@@ -60,6 +60,25 @@ def clamp_coupling_diag_days(ocean: str, diag_days: int) -> int:
     return diag_days
 
 
+def _find_latest_checkpoint(output_dir):
+    """Return ``(atm_checkpoint_path, day_token)`` for the highest-day
+    ``checkpoint_day_NNNN.npz`` in ``output_dir``, or ``(None, None)`` if none
+    exists.  Used by ``--resume`` to chain multi-segment equilibration jobs.
+    Pure + side-effect-free so it is unit-testable."""
+    import glob
+    import os
+    import re
+    best, best_day = None, None
+    for p in glob.glob(os.path.join(str(output_dir), "checkpoint_day_*.npz")):
+        m = re.search(r"checkpoint_day_(\d+)\.npz$", os.path.basename(p))
+        if m is None:
+            continue
+        d = int(m.group(1))
+        if best_day is None or d > best_day:
+            best, best_day = p, d
+    return best, best_day
+
+
 def build_parser():
     """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
     parser = argparse.ArgumentParser(
@@ -400,6 +419,24 @@ def build_parser():
     # Output
     parser.add_argument("--output", "-o", default="results/coupled",
                         help="Output directory")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from the latest checkpoint in --output "
+                             "(atm checkpoint_day_NNNN.npz + coupled "
+                             "coupled_day_NNNN.npz), continuing the integration "
+                             "from that day instead of the initial condition. "
+                             "Enables job-chained multi-month equilibration of "
+                             "the dynamic 3D ocean (ckpt v2). No checkpoint "
+                             "present => starts fresh.")
+    parser.add_argument("--checkpoint-days", type=int, default=0,
+                        help="Write a full coupled checkpoint every N sim-days "
+                             "(0=off). Needed for --resume job-chaining; a "
+                             "small N bounds the work lost to an abrupt cancel.")
+    parser.add_argument("--max-wallclock-hours", type=float, default=0.0,
+                        help="Wallclock budget (hours): checkpoint and exit "
+                             "cleanly before this elapsed time so SLURM does "
+                             "not kill the job mid-step (0=off). Set it just "
+                             "under the SLURM --time so the next --resume link "
+                             "picks up the exact end state.")
 
     return parser
 
@@ -524,6 +561,13 @@ def main():
             diag_days=args.diag_days,
             cmip_output=args.cmip_output,
             cmip_resolution_deg=args.cmip_resolution_deg,
+            # Periodic checkpoint cadence (days) + a wallclock budget that
+            # triggers a clean checkpoint+exit before SLURM kills the job — both
+            # needed so a long dynamic-3D-ocean equilibration survives an abrupt
+            # cancel / walltime and resumes via --resume (ckpt v2).
+            checkpoint_days=args.checkpoint_days,
+            max_wallclock_seconds=(args.max_wallclock_hours * 3600.0
+                                   if args.max_wallclock_hours else 0.0),
         ),
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
@@ -741,8 +785,29 @@ def main():
     t_setup = time.time() - t0
     logger.info(f"Setup completed in {t_setup:.1f}s")
 
+    # --resume: continue the integration from the latest checkpoint in --output
+    # (atm + coupled written together, same day token).  setup() has already
+    # rebuilt the IC + ocean geometry + WOA restoring targets deterministically;
+    # the load overwrites the prognostic state with the saved day-N values.
+    start_step, start_day = 0, None
+    if getattr(args, "resume", False):
+        import os
+        ckpt, _tok = _find_latest_checkpoint(args.output)
+        if ckpt is None:
+            logger.info("  --resume: no checkpoint in %s; starting fresh",
+                        args.output)
+        else:
+            step, day = driver._atm.load_checkpoint(ckpt)
+            elapsed = day - getattr(atm_config, "start_day", 0.0)
+            driver.load_coupled_checkpoint(float(elapsed),
+                                           checkpoint_dir=args.output)
+            start_step, start_day = step, day
+            logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
+                        "integrating to day %d", os.path.basename(ckpt),
+                        step, day, elapsed, args.days)
+
     t0 = time.time()
-    status = driver.run()
+    status = driver.run(start_step=start_step, start_day=start_day)
     t_run = time.time() - t0
 
     # Summary
