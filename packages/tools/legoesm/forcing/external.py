@@ -1966,11 +1966,20 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
     distort the per-band ratio after a downstream sum-to-1
     normalization (Codex iter-5 review).
 
-    Fix: divide each band's fraction by the number of g-points in
-    that band when expanding.  After this transformation, the sum
-    over g-points equals the sum over bands, so a sum-to-1 normalize
-    preserves the per-band proportions.  Each g-point inside band b
-    receives ``f_b / n_gpt_b`` so that ``Σ_{g ∈ band b} f_g = f_b``.
+    Fix: distribute each band's fraction over its g-points PROPORTIONAL
+    to the table's own per-g-point solar source (``solar_source_quiet``),
+    rescaled to the band total ``f_b``.  RRTMGP g-points within a band
+    carry very unequal solar weight — the source concentrates flux in the
+    window (weakly-absorbing) g-points and assigns almost none to the
+    strongly-absorbing ones.  The earlier UNIFORM split (``f_b / n_gpt_b``)
+    smeared each band's flux evenly across its g-points, dumping solar
+    energy into the strong-absorption g-points and ~doubling clear-sky
+    atmospheric SW absorption (24.5% → 48% in a single-column test) — a
+    within-band variant of the band-order bug #322 (the band rotation was
+    correct; the within-band shape was not).  Using the source shape gives
+    ``Σ_{g ∈ band b} f_g = f_b`` AND the physically correct spectral
+    distribution.  Falls back to the uniform split for any band whose
+    source sums to zero, or if the table lacks ``solar_source_quiet``.
 
     Parameters
     ----------
@@ -1980,7 +1989,7 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
         supported and broadcast over the leading axis.)
     rrtmg_sw_path : str
         Path to the RRTMG-SW lookup table NetCDF/Zarr (for
-        ``bnd_limits_gpt``).
+        ``bnd_limits_gpt`` and ``solar_source_quiet``).
 
     Returns
     -------
@@ -1992,24 +2001,37 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
         else xr.open_zarr(rrtmg_sw_path)
     # bnd_limits_gpt: (n_bands, 2) with 1-based [start, end] gpt indices
     bnd_lims = ds["bnd_limits_gpt"].values.astype(int)  # 1-indexed
+    # Per-g-point solar source = the physical within-band spectral shape.
+    if "solar_source_quiet" in ds:
+        solar_src = np.asarray(ds["solar_source_quiet"].values, dtype=np.float64)
+    else:
+        solar_src = None
     ds.close()
     n_gpt = int(bnd_lims[:, 1].max())
     spec_bands = np.asarray(spec_bands, dtype=np.float64)
+
+    # Per-band within-band weights summing to 1 (source shape, or uniform).
+    band_weights = []  # list of (lo0, hi, w[g]) with 0-based lo0
+    for (lo, hi) in bnd_lims:
+        lo0, n_in = lo - 1, int(hi - lo + 1)
+        if solar_src is not None:
+            w = solar_src[lo0:hi]
+            s = w.sum()
+            w = w / s if s > 0 else np.full(n_in, 1.0 / n_in)
+        else:
+            w = np.full(n_in, 1.0 / n_in)
+        band_weights.append((lo0, hi, w))
+
     if spec_bands.ndim == 1:
         out = np.zeros(n_gpt, dtype=np.float64)
-        for i, (lo, hi) in enumerate(bnd_lims):
-            n_gpt_in_band = int(hi - lo + 1)
-            # Divide so that ``Σ_{g ∈ band b} f_g == spec_bands[b]``.
-            out[lo - 1 : hi] = spec_bands[i] / n_gpt_in_band
+        for i, (lo0, hi, w) in enumerate(band_weights):
+            out[lo0:hi] = spec_bands[i] * w
         return out
     # Trailing-axis case: (..., n_bands) → (..., n_gpt).
     leading_shape = spec_bands.shape[:-1]
     out = np.zeros(leading_shape + (n_gpt,), dtype=np.float64)
-    for i, (lo, hi) in enumerate(bnd_lims):
-        n_gpt_in_band = int(hi - lo + 1)
-        out[..., lo - 1 : hi] = (
-            spec_bands[..., i:i + 1] / n_gpt_in_band
-        )
+    for i, (lo0, hi, w) in enumerate(band_weights):
+        out[..., lo0:hi] = spec_bands[..., i:i + 1] * w
     return out
 
 

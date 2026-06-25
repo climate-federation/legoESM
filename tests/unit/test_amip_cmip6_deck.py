@@ -661,6 +661,69 @@ class TestSolarBandExpansion:
         # Total sum must equal sum-of-band-fractions == 1.0
         assert np.isclose(np.sum(out), 1.0)
 
+    def _make_fake_rrtmg_lookup_with_source(
+        self, path: Path, *, bnd_limits: list[tuple[int, int]],
+        solar_source: list[float],
+    ) -> None:
+        """Synthetic RRTMG-SW table carrying ``solar_source_quiet`` (the
+        per-g-point solar source) in addition to ``bnd_limits_gpt``."""
+        from netCDF4 import Dataset
+        n_bands = len(bnd_limits)
+        n_gpt = max(hi for _, hi in bnd_limits)
+        with Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("band", n_bands)
+            ds.createDimension("two", 2)
+            ds.createDimension("gpt", n_gpt)
+            v = ds.createVariable("bnd_limits_gpt", "i4", ("band", "two"))
+            for i, (lo, hi) in enumerate(bnd_limits):
+                v[i, 0] = lo
+                v[i, 1] = hi
+            s = ds.createVariable("solar_source_quiet", "f8", ("gpt",))
+            s[:] = np.asarray(solar_source, dtype=float)
+
+    def test_within_band_split_follows_solar_source(self, tmp_path):
+        """With ``solar_source_quiet`` present, a band's fraction is
+        distributed over its g-points PROPORTIONAL to the per-g-point solar
+        source (not split equally) — while the band integral is preserved.
+
+        Pins the within-band source-shape fix: RRTMGP g-points within a band
+        carry very unequal solar weight, so a uniform split dumps flux into
+        strongly-absorbing g-points and ~doubles clear-sky SW absorption.
+        """
+        from legoesm.forcing.external import _expand_bands_to_gpoints
+        # One 4-g-point band; source weights 0.4/0.3/0.2/0.1.
+        bnd_limits = [(1, 4)]
+        solar_source = [4.0, 3.0, 2.0, 1.0]
+        path = tmp_path / "rrtmg_source.nc"
+        self._make_fake_rrtmg_lookup_with_source(
+            path, bnd_limits=bnd_limits, solar_source=solar_source)
+
+        spec = np.array([0.8])  # single-band fraction
+        out = _expand_bands_to_gpoints(spec, str(path))
+        assert out.shape == (4,)
+        # Within-band split ∝ source shape (NOT uniform 0.2 each).
+        expected = 0.8 * np.array([0.4, 0.3, 0.2, 0.1])
+        assert np.allclose(out, expected, rtol=1e-12), (
+            f"Within-band split not source-shaped: got {out}, "
+            f"expected {expected}")
+        assert not np.allclose(out, np.full(4, 0.8 / 4)), (
+            "Split is uniform — source shape ignored")
+        # Band integral preserved.
+        assert np.isclose(np.sum(out), 0.8)
+
+    def test_zero_source_band_falls_back_to_uniform(self, tmp_path):
+        """A band whose solar source sums to zero falls back to the uniform
+        split (no divide-by-zero), still preserving the band integral."""
+        from legoesm.forcing.external import _expand_bands_to_gpoints
+        bnd_limits = [(1, 4)]
+        path = tmp_path / "rrtmg_zerosrc.nc"
+        self._make_fake_rrtmg_lookup_with_source(
+            path, bnd_limits=bnd_limits, solar_source=[0.0, 0.0, 0.0, 0.0])
+        spec = np.array([0.5])
+        out = _expand_bands_to_gpoints(spec, str(path))
+        assert np.allclose(out, np.full(4, 0.5 / 4), rtol=1e-12)
+        assert np.isclose(np.sum(out), 0.5)
+
 
 class TestCMIPBandOrderRemap:
     """Issue #322: the MPI-M CMIP6 14-band ``SSI_frac`` file is in
