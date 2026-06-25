@@ -33,3 +33,29 @@ def test_rce_surface_flux_defaults_reference_named_constants():
         sig = inspect.signature(fn)
         assert sig.parameters["C_h"].default == m._RCEMIP1_C_H
         assert sig.parameters["gustiness_floor"].default == m._RCEMIP1_GUSTINESS_FLOOR_MS
+
+
+def test_cli_microphysics_choices_match_validate_strict():
+    """The run_coupled --microphysics choices derive from VALID_MICROPHYSICS, the
+    SAME set ExperimentConfig.validate_strict enforces, so the CLI cannot drop an
+    advertised scheme (codex caught ml_emulator missing) or drift from the config.
+    """
+    from legoesm.driver.config import VALID_MICROPHYSICS, ExperimentConfig
+
+    # The scheme codex caught the hardcoded list dropping:
+    assert "ml_emulator" in VALID_MICROPHYSICS
+
+    # validate_strict accepts every scheme in the set (it raises a single
+    # ValueError listing all problems; assert microphysics is never among them).
+    for scheme in VALID_MICROPHYSICS:
+        try:
+            ExperimentConfig(microphysics=scheme).validate_strict()
+        except ValueError as e:
+            assert "microphysics must be one of" not in str(e), (
+                f"{scheme!r} is in VALID_MICROPHYSICS but validate_strict "
+                f"rejects it: {e}"
+            )
+
+    # ... and an unknown scheme is rejected by validate_strict.
+    with pytest.raises(ValueError, match="microphysics must be one of"):
+        ExperimentConfig(microphysics="bogus_micro").validate_strict()

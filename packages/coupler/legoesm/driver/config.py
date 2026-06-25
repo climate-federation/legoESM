@@ -176,6 +176,16 @@ class OutputConfig(NamedTuple):
     restart_buffer_seconds: float = 600.0
 
 
+# Single source of truth for the valid microphysics scheme literals — consumed
+# by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
+# CLI allowlist cannot drift from the config validation (e.g. omitting an
+# advertised scheme like ``ml_emulator``).
+VALID_MICROPHYSICS = (
+    "none", "kessler", "sundqvist", "seifert_beheng",
+    "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+)
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -601,13 +611,9 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
-        _valid_microphysics = (
-            "none", "kessler", "sundqvist", "seifert_beheng",
-            "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
-        )
-        if self.microphysics not in _valid_microphysics:
+        if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
-                f"microphysics must be one of {_valid_microphysics}, "
+                f"microphysics must be one of {VALID_MICROPHYSICS}, "
                 f"got {self.microphysics!r}"
             )
         # Physics-scheme membership (mirror the integration.py factory sets so
