@@ -69,6 +69,11 @@ def test_apply_gustiness_ad_safe_at_calm_wind():
 
 
 def test_simple_ocean_config_uses_gustiness():
-    """The slab/two-layer ocean exposes a gustiness field (Wing default 5.0)."""
+    """The slab/two-layer ocean exposes a gustiness field. Its default is 1.0
+    m/s for the COUPLED slab: gustiness=5 cold-drifts the slab SST (~-20 K/yr;
+    see the field comment), so the Wing 2018 5.0 m/s is kept only for the
+    prescribed-SST paths (SCM rce_surface_flux / AMIP). This test was stale —
+    it asserted the pre-revert 5.0 default (config commit 3f376730e reverted the
+    default to 1.0 but did not update the test)."""
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
-    assert SimpleOceanConfig().gustiness == pytest.approx(5.0)
+    assert SimpleOceanConfig().gustiness == pytest.approx(1.0)
