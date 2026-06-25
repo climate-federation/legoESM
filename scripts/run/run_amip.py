@@ -30,6 +30,7 @@ maybe_init_jax_distributed()
 
 from legoesm import constants
 from legoesm.driver.config import (
+    VALID_CONVECTION_SCHEMES,
     DycoreConfig,
     ExperimentConfig,
     GridConfig,
@@ -39,6 +40,92 @@ from legoesm.driver.config import (
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
 _EXPERIMENT_DEFAULTS = ExperimentConfig()
+
+
+def _print_forcing_activity(args) -> None:
+    """Print a forcing-channel activity summary (call on rank-0 only).
+
+    Mirrors the table in ``run_amip_cmip6_deck.py`` for the direct AMIP
+    path.  GHG/ozone/aerosol/volcanic are gated on rrtmg/rrtmgp radiation;
+    SST/SIC is always active; solar file threading is active when
+    ``--solar-source`` is file-based.
+    """
+    rad_active = getattr(args, "radiation", "gray") in ("rrtmg", "rrtmgp")
+    aerosol_active = getattr(args, "aerosol_forcing", "off") == "external"
+    volcanic_active = (
+        aerosol_active
+        and bool(getattr(args, "volcanic_aerosol_file", ""))
+        and getattr(args, "volcanic_aerosol_scale", 0.0) > 0.0
+    )
+    solar_file_active = getattr(args, "solar_source", "constant") in (
+        "file", "spectral_file"
+    )
+
+    def _flag(active: bool) -> str:
+        return "ACTIVE" if active else "inert  (gray radiation)"
+
+    print("[run_amip] Forcing-channel activity for this run:")
+    print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
+    if solar_file_active:
+        print(f"  Solar TSI                            ACTIVE        (time-varying from file)")
+    else:
+        print(f"  Solar TSI                            constant S_0  (--solar-source constant)")
+    print(f"  Greenhouse gases (transient annual)  "
+          f"{_flag(rad_active and getattr(args, 'ghg_forcing', 'constant') == 'external')}")
+    print(f"  Ozone (cyclic clim or interannual)   "
+          f"{_flag(rad_active and getattr(args, 'ozone_forcing', 'inline') == 'external')}")
+    if aerosol_active:
+        print(f"  Tropospheric aerosol (Kinne)         {_flag(rad_active)}")
+    if volcanic_active:
+        print(f"  Volcanic stratospheric AOD           {_flag(rad_active)}")
+    if not rad_active:
+        print(
+            "[run_amip] NOTE: --radiation gray disables GHG/ozone/aerosol/"
+            "volcanic. Use --radiation rrtmg for production AMIP."
+        )
+
+
+def _print_forcing_activity(args) -> None:
+    """Print a forcing-channel activity summary (call on rank-0 only).
+
+    Mirrors the table in ``run_amip_cmip6_deck.py`` for the direct AMIP
+    path.  GHG/ozone/aerosol/volcanic are gated on rrtmg/rrtmgp radiation;
+    SST/SIC is always active; solar file threading is active when
+    ``--solar-source`` is file-based.
+    """
+    rad_active = getattr(args, "radiation", "gray") in ("rrtmg", "rrtmgp")
+    aerosol_active = getattr(args, "aerosol_forcing", "off") == "external"
+    volcanic_active = (
+        aerosol_active
+        and bool(getattr(args, "volcanic_aerosol_file", ""))
+        and getattr(args, "volcanic_aerosol_scale", 0.0) > 0.0
+    )
+    solar_file_active = getattr(args, "solar_source", "constant") in (
+        "file", "spectral_file"
+    )
+
+    def _flag(active: bool) -> str:
+        return "ACTIVE" if active else "inert  (gray radiation)"
+
+    print("[run_amip] Forcing-channel activity for this run:")
+    print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
+    if solar_file_active:
+        print(f"  Solar TSI                            ACTIVE        (time-varying from file)")
+    else:
+        print(f"  Solar TSI                            constant S_0  (--solar-source constant)")
+    print(f"  Greenhouse gases (transient annual)  "
+          f"{_flag(rad_active and getattr(args, 'ghg_forcing', 'constant') == 'external')}")
+    print(f"  Ozone (cyclic clim or interannual)   "
+          f"{_flag(rad_active and getattr(args, 'ozone_forcing', 'inline') == 'external')}")
+    if aerosol_active:
+        print(f"  Tropospheric aerosol (Kinne)         {_flag(rad_active)}")
+    if volcanic_active:
+        print(f"  Volcanic stratospheric AOD           {_flag(rad_active)}")
+    if not rad_active:
+        print(
+            "[run_amip] NOTE: --radiation gray disables GHG/ozone/aerosol/"
+            "volcanic. Use --radiation rrtmg for production AMIP."
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -419,6 +506,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
     parser.add_argument("--sbm-cape-threshold", type=float, default=70.0)
+    parser.add_argument("--bechtold-cape-threshold", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_cape_threshold,
+                        dest="bechtold_cape_threshold",
+                        help="Bechtold deep-convection CAPE trigger threshold "
+                             "[J/kg]; lower it to trigger convection more readily "
+                             "at coarse resolution (the AMIP precip-deficit lever). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -500,6 +594,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--albedo-land-month", type=int, default=0,
                         help="Month (1-12) to pick from a monthly land-albedo "
                              "climatology; 0 = annual mean (default).")
+    parser.add_argument("--slab-land-active", action="store_true", default=False,
+                        help="Activate the slab-land SEB tile using the "
+                             "topography-derived land fraction (requires "
+                             "--topography). No separate LSM file needed.")
+    parser.add_argument("--surface-tiled", action="store_true", default=False,
+                        help="Tiled (mosaic) surface fluxes: run --surface-bulk-scheme "
+                             "(e.g. coare3) on the OCEAN tile and the fixed-roughness "
+                             "land Monin-Obukhov scheme on the LAND tile, then "
+                             "area-weight — instead of one scheme on the blended "
+                             "surface (which runs the ocean scheme over land). "
+                             "Requires --slab-land-active and --turbulence louis.")
+    parser.add_argument("--surface-z0-land", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_z0_land,
+                        dest="surface_z0_land",
+                        help="Land roughness length z0 [m] for the tiled land MOST "
+                             "scheme (only used with --surface-tiled). Default "
+                             f"{_EXPERIMENT_DEFAULTS.surface_z0_land}.")
+    parser.add_argument("--land-soil-bucket", action="store_true", default=False,
+                        dest="land_soil_bucket",
+                        help="Prognostic soil-water bucket (Manabe) on the slab-land "
+                             "tile: soil-moisture-limited land evaporation "
+                             "(beta=beta_min+(1-beta_min)*W/W_max) instead of a "
+                             "saturated wet surface everywhere. Requires "
+                             "--slab-land-active.")
+    parser.add_argument("--land-bucket-w-max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_bucket_w_max,
+                        dest="land_bucket_w_max",
+                        help="Soil-water bucket capacity [kg/m^2] (only with "
+                             "--land-soil-bucket). Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_bucket_w_max}.")
+    parser.add_argument("--land-beta-min", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_beta_min,
+                        dest="land_beta_min",
+                        help="Minimum soil-moisture availability (dry-soil floor on "
+                             "land evaporation efficiency; only with "
+                             "--land-soil-bucket). Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_beta_min}.")
+    parser.add_argument("--land-bucket-w-init-frac", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_bucket_w_init_frac,
+                        dest="land_bucket_w_init_frac",
+                        help="Initial soil water as a fraction of W_max (only with "
+                             "--land-soil-bucket). Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_bucket_w_init_frac}.")
+    parser.add_argument("--land-stomatal-beta", action="store_true", default=False,
+                        dest="land_stomatal_beta",
+                        help="Route the soil-water availability through the shared "
+                             "land Jarvis (1976) stomatal model "
+                             "(legoesm.land.carbon.stomata) instead of the bare "
+                             "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
+                             "stomata in low light / high VPD. Requires "
+                             "--land-soil-bucket.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -638,11 +783,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         output_dir=args.output or "",
         diag_days=args.diag_days,
         checkpoint_days=args.checkpoint_days,
+        max_wallclock_seconds=args.max_wallclock_seconds,
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
         checkpoint_format=args.checkpoint_format,
-        max_wallclock_seconds=args.max_wallclock_seconds,
         restart_buffer_seconds=args.restart_buffer_seconds,
     )
 
@@ -717,6 +862,14 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
+        slab_land_active=args.slab_land_active,
+        surface_tiled=args.surface_tiled,
+        surface_z0_land=args.surface_z0_land,
+        land_soil_bucket=args.land_soil_bucket,
+        land_bucket_w_max=args.land_bucket_w_max,
+        land_beta_min=args.land_beta_min,
+        land_bucket_w_init_frac=args.land_bucket_w_init_frac,
+        land_stomatal_beta=args.land_stomatal_beta,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
         albedo_ice=args.albedo_ice,
@@ -732,6 +885,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_tau_c=args.sbm_tau_c,
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
+        bechtold_cape_threshold=args.bechtold_cape_threshold,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,
@@ -754,12 +908,14 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
 
 
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
-    # Auto-detect MPI environment
-    if not args.distributed and any(
-        key in os.environ for key in (
-            "OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
-            "SLURM_NTASKS", "MPI_LOCALNRANKS",
-        )
+    # Auto-detect MPI environment.
+    # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
+    # only treat it as an MPI signal when > 1 actual tasks are allocated.
+    _slurm_ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
+    _mpi_env_vars = {"OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MPI_LOCALNRANKS"}
+    if not args.distributed and (
+        any(key in os.environ for key in _mpi_env_vars)
+        or _slurm_ntasks > 1
     ):
         args.distributed = True
 
@@ -1010,6 +1166,9 @@ def main(argv: list[str] | None = None):
     driver.setup()
 
     _is_root = (driver._mpi_rank is None or driver._mpi_rank == 0)
+
+    if _is_root:
+        _print_forcing_activity(args)
 
     start_step = 0
     start_day = None
