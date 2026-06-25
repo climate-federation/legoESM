@@ -90,6 +90,8 @@ __param_spec__ = {
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
+            "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
@@ -380,6 +382,21 @@ class MorrisonConfig(NamedTuple):
     # microphysics link (Twomey r_eff + KK2000 Nc^-1.79 lifetime
     # effects).  Ignored when predict_Nc=True.
     nc_from_aerosol: bool = False
+    # Sub-grid in-cloud autoconversion/accretion (Morrison & Gettelman 2008;
+    # Boutle et al. 2014).  Warm-rain rates are strongly non-linear in cloud
+    # water (KK2000 PRC ∝ q_c^2.47), so evaluating them on the GRID-MEAN q_c
+    # systematically UNDER-produces drizzle in partly-filled boxes.  When True,
+    # autoconversion + accretion are evaluated on the IN-CLOUD water q_c/cf and
+    # the resulting tendency is scaled back by the cloud fraction cf — i.e. the
+    # standard "all warm rain happens in the cloudy fraction" closure, giving an
+    # enhancement cf^(1−2.47)=cf^−1.47 (autoconv) / cf^−1.30 (accretion).  cf is
+    # the Sundqvist √-form from the local RH (subgrid_rh_crit, mirroring the
+    # cloud scheme), floored at subgrid_cf_min for AD/numeric safety.  This is a
+    # physics-fidelity correction (no tunable knob), default False to preserve
+    # bit-reproducibility of existing runs.
+    subgrid_autoconversion: bool = False
+    subgrid_rh_crit: float = 0.7     # critical RH for the in-cloud cf (Sundqvist)
+    subgrid_cf_min: float = 0.1      # cf floor (caps enhancement at cf_min^-1.47)
     # Warm rain (Seifert-Beheng knobs; consumed only when
     # warm_rain_scheme="seifert_beheng")
     k_au: float = 6e2
