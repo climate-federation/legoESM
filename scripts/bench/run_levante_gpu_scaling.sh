@@ -32,12 +32,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # -------------------------------------------------------------------------
 # Default configuration
 # -------------------------------------------------------------------------
-ACCOUNT="${SLURM_ACCOUNT:-bm1183}"
+ACCOUNT="${SLURM_ACCOUNT:-bd1083_gpu}"
 PARTITION="gpu"
 GPUS_PER_NODE=4
 TIME_LIMIT="02:00:00"
@@ -169,7 +169,7 @@ for N_GPUS in "${GPU_LIST[@]}"; do
     # Build the Python command.  Iter 18 fix: pass ``--grid`` (the
     # wrapper previously omitted it, so multi-rank jobs silently
     # ran the default ``spectral`` grid which has no MPI dispatch).
-    PYTHON_CMD=".venv/bin/python scripts/bench/run_levante_gpu_scaling.py"
+    PYTHON_CMD="/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python scripts/bench/run_levante_gpu_scaling.py"
     PYTHON_CMD="${PYTHON_CMD} --grid ${GRID}"
     PYTHON_CMD="${PYTHON_CMD} --mode ${MODE}"
     PYTHON_CMD="${PYTHON_CMD} --precision ${PRECISION}"
@@ -214,12 +214,9 @@ echo "========================================"
 # --- Environment setup ---
 cd ${PROJECT_DIR}
 
-# Load required modules
-module purge
-module load python3 cuda/12
-
-# Activate the project venv
-source .venv/bin/activate
+# Levante uses a mambaforge conda env (no system cuda/python3 module needed)
+export PATH=/work/bd1083/b309178/mambaforge/envs/diffesm/bin:\${PATH}
+export PYTHONPATH="${PROJECT_DIR}:${PROJECT_DIR}/src:${PROJECT_DIR}/packages/core:${PROJECT_DIR}/packages/atmosphere:${PROJECT_DIR}/packages/coupler:${PROJECT_DIR}/packages/tools:${PROJECT_DIR}/packages/ml:${PROJECT_DIR}/packages/ocean:${PROJECT_DIR}/packages/land:${PROJECT_DIR}/packages/ice"
 
 # --- JAX / XLA configuration ---
 # Iter 22/26: ``JAX_PLATFORMS="gpu,cpu"`` is the legacy alias and is
@@ -254,8 +251,8 @@ echo "--- nvidia-smi ---"
 nvidia-smi || true
 echo ""
 echo "--- Python / JAX versions ---"
-python -c "import sys; print(f'Python {sys.version}')"
-python -c "import jax; print(f'JAX {jax.__version__}, devices: {jax.devices()}')" || true
+/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python -c "import sys; print(f'Python {sys.version}')"
+/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python -c "import jax; print(f'JAX {jax.__version__}, devices: {jax.devices()}')" || true
 echo ""
 
 # --- Launch benchmark ---
