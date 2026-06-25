@@ -78,18 +78,25 @@ def _configure_mpi_gpu_affinity() -> None:
         or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
     )
     if local_rank is None:
-        # SLURM_LOCALID is exported even in a plain sbatch batch step
-        # (ntasks=1, no srun).  Pinning on it there hid all but GPU 0
-        # from single-process multi-GPU runs: every "2-GPU" case ran on
-        # one device with efficiency silently pinned at exactly 0.5
-        # (Ginsburg jobs 8454397/8454737, 2026-06-10).  Only honor it
-        # for genuine multi-task launches.
+        # SLURM_LOCALID + SLURM_NTASKS are exported even in the batch step
+        # (where a single Python process runs and all GPUs must be visible).
+        # Pinning on SLURM_LOCALID=0 there hid all but GPU 0 from
+        # single-process multi-GPU runs (Ginsburg 8454397/8454737, 2026-06-10;
+        # Levante 25842907, 2026-06-23).
+        # Only honor SLURM_LOCALID when inside an actual srun step:
+        # SLURM_STEP_NODELIST is set by srun for every task, but is absent
+        # (or set to the batch magic) in the top-level batch step.
         slurm_localid = os.environ.get("SLURM_LOCALID")
-        slurm_ntasks = os.environ.get("SLURM_NTASKS", "1")
-        if slurm_localid is not None and slurm_ntasks.isdigit() \
-                and int(slurm_ntasks) > 1:
+        slurm_step_nodelist = os.environ.get("SLURM_STEP_NODELIST", "")
+        if slurm_localid is not None and slurm_step_nodelist:
             local_rank = slurm_localid
-    if local_rank is not None:
+    # Only set CUDA_VISIBLE_DEVICES when SLURM hasn't already restricted it.
+    # With --gpus-per-node + srun, SLURM binds one GPU per task automatically
+    # (CUDA_VISIBLE_DEVICES="0" for each task).  Overwriting with local_rank
+    # (0,1,2,3 ...) then conflicts with SLURM's assignment and produces
+    # "CUDA_ERROR_INVALID_DEVICE" on every task beyond the first
+    # (Levante 25842908, 2026-06-23).
+    if local_rank is not None and "CUDA_VISIBLE_DEVICES" not in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
 
 
@@ -185,11 +192,18 @@ def _maybe_init_distributed(
             pass
 
     # Check for SLURM-launched multi-process jobs.  A plain sbatch allocation
-    # may set SLURM_NTASKS>1 even when this script is executed once for a
-    # single-process, multi-device run, so require a per-task rank variable.
+    # sets SLURM_NTASKS>1 even when this script is executed as a single process
+    # with multiple local GPUs (single-node case).  Only enter distributed init
+    # when actually running on multiple nodes (SLURM_NNODES>1) under srun, where
+    # SLURM_STEP_NODELIST is set and JAX can resolve the coordinator address.
     slurm_ntasks = os.environ.get("SLURM_NTASKS")
     slurm_procid = os.environ.get("SLURM_PROCID")
-    if slurm_ntasks and slurm_procid is not None and int(slurm_ntasks) > 1:
+    slurm_nnodes = int(os.environ.get("SLURM_NNODES", "1"))
+    slurm_step_nodelist = os.environ.get("SLURM_STEP_NODELIST", "")
+    if (slurm_ntasks and slurm_procid is not None
+            and int(slurm_ntasks) > 1
+            and slurm_nnodes > 1
+            and slurm_step_nodelist):
         import jax
         jax.distributed.initialize()
         return jax.process_index(), jax.process_count()
