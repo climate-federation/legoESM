@@ -124,19 +124,28 @@ def test_mpas_factory_builds_valid_model_and_one_step_is_finite():
     assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
-def test_tripole_factory_builds_valid_latlon_model():
+def test_tripole_factory_builds_valid_model_and_one_step_is_finite():
     """The tripole factory config constructs a valid lat-lon C-grid model on a
-    small synthetic grid (no eORCA mesh file needed for the dycore validators)."""
+    small synthetic grid (no eORCA mesh file needed for the dycore validators)
+    AND a step stays finite — the tripole card was previously only constructed,
+    never stepped (issue #501).  The eORCA north-fold is not exercised on this
+    synthetic grid; this gates the dycore scheme stack the card selects."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.vertical import create_ocean_z_star
 
     grid = create_latlon_grid(8, 16)
     z_coord = create_ocean_z_star(n_levels=3, H_max=4000.0)
     config = nemo_match_tripole_model_config()
-    LatLonCGridOceanModel(grid, z_coord, config)
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+    state = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    new_state = model.step(state, dt=60.0)
+    assert bool(jnp.all(jnp.isfinite(new_state.T.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.u.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
 def test_block_mapping_is_explicit():
