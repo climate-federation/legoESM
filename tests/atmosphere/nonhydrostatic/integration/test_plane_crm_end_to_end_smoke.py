@@ -332,65 +332,63 @@ def _run_driver_no_mass_fixer(output_dir):
     )
 
 
-def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
+def test_plane_crm_no_mass_fixer_retains_more_cwv_than_fixer(tmp_path):
     """iter-95k: pin the behavioural half of iter-95b's Bug 2 fix.
 
-    With ``--no-mass-fixer`` set, fix_moist_mass_plane is NOT called
-    after surface flux deposits q_v in the lowest model level. CWV
-    must therefore GROW from the IC (49.78 mm at 12x12@nlev=20).
-    The matching default-config test pins the inverse: with the
-    fixer ON, CWV stays pinned within 0.1 mm.
+    The ``--no-mass-fixer`` gate must measurably change behaviour. With the
+    fixer ON, ``fix_moist_mass_plane`` rescales the column back toward its IC
+    every step; with ``--no-mass-fixer`` it does NOT, so the moisture that
+    surface flux deposits in the lowest model level is retained and the column
+    holds MORE water vapour than the fixer-on run over the smoke window.
+
+    Contract is the RELATIVE one (off retains more than on), not absolute CWV
+    growth.  The earlier "CWV must grow from the IC" premise relied on the
+    pre-``e1944f023`` Kessler OVER-condensing the IC supersaturation (~4x too
+    much), which it no longer does (psychrometric latent-warming correction) —
+    so both runs now drift slightly DOWN from the IC and the off-vs-on gap is
+    the robust signal.  Measured 2026-06-26 (12x12 / nlev=20 / dt=5 s / 86
+    steps, deterministic — bubble + qv noise both 0):
+        fixer OFF final CWV = 49.890 mm,  fixer ON final = 49.871 mm,
+        gap = +0.019 mm.  The 0.005 mm gate keeps a ~3.8x cushion.
 
     Failure modes this catches:
-    * Someone removes the gate ``if not args.no_mass_fixer:`` (CWV
-      would pin again and this test fails).
-    * Someone flips the argparse default to True (the default
-      test would start failing because CWV would grow there too).
-    * Surface flux scheme stops actually depositing moisture
-      (CWV would not grow with the flag set).
+    * ``if not args.no_mass_fixer:`` gate removed -> fixer runs in BOTH ->
+      gap ~0 -> fails.
+    * Surface-flux scheme stops depositing moisture -> nothing for the fixer to
+      rescale away -> gap ~0 -> fails.
     """
-    out_dir = tmp_path / "rce_plane_smoke_no_mass_fixer"
-    result = _run_driver_no_mass_fixer(out_dir)
-    if result.returncode != 0:
-        pytest.fail(
-            f"run_rce_mpi_long.py --no-mass-fixer exited "
-            f"{result.returncode}\n"
-            f"stdout tail:\n{result.stdout[-1000:]}\n"
-            f"stderr tail:\n{result.stderr[-500:]}"
-        )
-    rows = _read_log(out_dir)
-    assert rows, "log.txt produced no diagnostic rows with --no-mass-fixer"
-    cwv_first = float(rows[0]["CWV_mean"])
-    cwv_final = float(rows[-1]["CWV_mean"])
-    # IC anchor (same as the default-config smoke): iter-95 12x12 re-measured
+    out_off = tmp_path / "rce_plane_no_mass_fixer"
+    out_on = tmp_path / "rce_plane_fixer_on"
+    r_off = _run_driver_no_mass_fixer(out_off)
+    r_on = _run_driver(out_on)
+    for tag, r in (("--no-mass-fixer", r_off), ("default (fixer on)", r_on)):
+        if r.returncode != 0:
+            pytest.fail(
+                f"run_rce_mpi_long.py {tag} exited {r.returncode}\n"
+                f"stdout tail:\n{r.stdout[-1000:]}\n"
+                f"stderr tail:\n{r.stderr[-500:]}"
+            )
+    rows_off = _read_log(out_off)
+    rows_on = _read_log(out_on)
+    assert rows_off and rows_on, "log.txt produced no diagnostic rows"
+    # IC anchor (identical IC for both runs): iter-95 12x12 re-measured
     # 2026-06-26 to 49.930 mm (see test_plane_crm_short_smoke_clean_ic for the
-    # provenance — the prior 49.78 sentinel was stale; Wing IC numerics are
-    # byte-unchanged since it was pinned). NOTE: the cwv_growth assertion below
-    # still fails as of 2026-06-26 (CWV shrinks ~0.04 mm instead of the
-    # documented +0.026 mm growth) — a real behavioural change in the
-    # --no-mass-fixer surface-flux path, tracked separately (NOT a stale
-    # anchor); this anchor fix only stops the IC sentinel from masking it.
+    # provenance; the prior 49.78 sentinel was stale, Wing IC byte-unchanged).
+    cwv_first = float(rows_off[0]["CWV_mean"])
     assert abs(cwv_first - 49.930) < 0.01, (
         f"plane CRM --no-mass-fixer smoke: IC CWV={cwv_first:.4f} mm "
         f"!= 49.930 ± 0.01. Either the Wing IC drifted or the "
         f"iter-95 hydrostatic-BC fix regressed."
     )
-    # Behavioural check: CWV must grow. The default-config test
-    # asserts drift < 0.1 mm; here we assert drift > 0.01 mm (a
-    # solid margin above the noise floor in 86 outer steps and
-    # above the default-config drift limit at <1e-4). Measured
-    # growth in this 86-step / dt=5s / 12x12 window is ~0.026 mm;
-    # the 0.01 mm gate has a 2.5x cushion. On the iter-95 v3 run
-    # at 32x32 / dt=10s CWV grew ~0.4 mm in the first 7 minutes —
-    # consistent with this measurement.
-    cwv_growth = cwv_final - cwv_first
-    assert cwv_growth > 0.01, (
-        f"plane CRM --no-mass-fixer smoke: CWV grew only "
-        f"{cwv_growth:.4f} mm (IC={cwv_first:.4f}, "
-        f"final={cwv_final:.4f}). Expected > 0.01 mm growth — "
-        f"either --no-mass-fixer regressed (fixer still rescaling "
-        f"back to IC), surface flux scheme stopped depositing "
-        f"moisture, or both."
+    cwv_off = float(rows_off[-1]["CWV_mean"])
+    cwv_on = float(rows_on[-1]["CWV_mean"])
+    gap = cwv_off - cwv_on
+    assert gap > 0.005, (
+        f"plane CRM: --no-mass-fixer did NOT retain more column moisture than "
+        f"the fixer-on run (off={cwv_off:.4f}, on={cwv_on:.4f}, "
+        f"gap={gap:.4f} mm; expected > 0.005). Either the "
+        f"`if not args.no_mass_fixer:` gate was removed (fixer runs in both) or "
+        f"the surface-flux scheme stopped depositing moisture."
     )
 
 
