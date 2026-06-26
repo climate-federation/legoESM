@@ -151,8 +151,8 @@ class EarthSystemDriver:
         else:
             albedo_eff = blend_surface_property(
                 sic,
-                getattr(cfg, 'albedo_ice', 0.6),
-                getattr(cfg, 'albedo_ocean', 0.06),
+                cfg.albedo_ice,
+                cfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
@@ -179,7 +179,7 @@ class EarthSystemDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(cfg, 'S_0', constants.S_0)
+            S_0 = cfg.S_0
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:

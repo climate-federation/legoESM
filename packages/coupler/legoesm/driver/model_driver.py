@@ -1217,7 +1217,7 @@ class ModelDriver:
         # a volcanic file present.  Default OFF ⇒ no LW aerosol path.
         self._aerosol_lw_active = (
             cfg.radiation in ("rrtmg", "rrtmgp")
-            and bool(getattr(cfg, "volcanic_aerosol_lw", False))
+            and bool(cfg.volcanic_aerosol_lw)
             and bool(cfg.volcanic_aerosol_file)
         )
         self._aerosol_lw_od = None
@@ -1233,8 +1233,7 @@ class ModelDriver:
             # the LW switch is set AND a volcanic file is present.  Default
             # OFF ⇒ ``get_aerosol_lw_at_time`` returns None ⇒ zeros LW od
             # ⇒ byte-identical (RRTMGP no-op).
-            volcanic_lw_enabled=(bool(getattr(cfg, "volcanic_aerosol_lw",
-                                              False))
+            volcanic_lw_enabled=(bool(cfg.volcanic_aerosol_lw)
                                  and bool(cfg.volcanic_aerosol_file)),
             # Calendar anchor for the non-cyclic dispatch in
             # ``get_aerosol_at_time``.  Multi-year volcanic time-series
@@ -1491,9 +1490,7 @@ class ModelDriver:
 
         # CMIP output requires full collect() for spatial/monthly
         # accumulation — perf mode skips those, producing zero files.
-        cmip_on = getattr(
-            getattr(self.config, 'output', None), 'cmip_output', False,
-        )
+        cmip_on = self.config.output.cmip_output
         if cmip_on and perf_mode:
             perf_mode = False
 
@@ -3468,7 +3465,7 @@ class ModelDriver:
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
                 status = self._run_spectral(start_step, start_day)
-            elif (getattr(self.config, "enable_latlon_spmd", False)
+            elif (self.config.enable_latlon_spmd
                     and self.config.grid.grid_type == "latlon"):
                 # Single-process multi-device lat-band SPMD (A1): a dedicated
                 # segment loop over the validated run_atm_latlon_spmd, distinct
@@ -3664,9 +3661,8 @@ class ModelDriver:
             _micro_cfg = _micro_cfg._replace(**{
                 cfg.microphysics: apply_microphysics_experiment_flags(
                     _msub, cfg.microphysics,
-                    nc_from_aerosol=getattr(cfg, "nc_from_aerosol", False),
-                    subgrid_autoconversion=getattr(
-                        cfg, "subgrid_autoconversion", False),
+                    nc_from_aerosol=cfg.nc_from_aerosol,
+                    subgrid_autoconversion=cfg.subgrid_autoconversion,
                 )
             })
         phys_cfg = PhysicsConfig(
@@ -3755,7 +3751,7 @@ class ModelDriver:
         # Only built when subcycling is active AND radiation is configured;
         # the held variant compiles a separate (RRTMGP-free, much cheaper)
         # ``model.step`` the first time it is used.
-        RAD_UPDATE_STEPS = max(1, int(getattr(cfg, "rad_update_steps", 1)))
+        RAD_UPDATE_STEPS = max(1, int(cfg.rad_update_steps))
         _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
         physics_fn_norad = (
             make_physics(phys_cfg, model_type="mpas", dt=DT,
@@ -3949,7 +3945,7 @@ class ModelDriver:
         # radiation would never thread aerosol_od and the microphysics fill
         # would raise its (then-misleading) fail-fast.  Requires a real
         # aerosol source.
-        if getattr(cfg, "nc_from_aerosol", False) and self._aerosol_active:
+        if cfg.nc_from_aerosol and self._aerosol_active:
             _ext_forcing = True
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
@@ -5469,7 +5465,7 @@ class ModelDriver:
         # re-sampled ONLY at segment boundaries, so this knob is the
         # forcing cadence for cadence-less runs — warn when the dataset
         # is time-varying so the throttle is an explicit choice.
-        _fb_days = getattr(cfg, "forcing_update_days", 1.0)
+        _fb_days = cfg.forcing_update_days
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
             fallback_interval=int(_fb_days * 86400 / DT),
@@ -5739,7 +5735,7 @@ class ModelDriver:
             # Execute compiled segment (vmap over ensemble if needed)
             if self._ensemble_size > 1:
                 carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
-            elif (getattr(cfg, "unfused_radiation", False)
+            elif (cfg.unfused_radiation
                     and RAD_UPDATE_STEPS > 1
                     and seg_steps % RAD_UPDATE_STEPS == 0
                     and self._ensemble_size == 1
@@ -6010,7 +6006,7 @@ class ModelDriver:
                     segment_length = compute_segment_length(
                         diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
                         fallback_interval=int(
-                            getattr(cfg, "forcing_update_days", 1.0)
+                            cfg.forcing_update_days
                             * 86400 / DT),
                     )
                     run_segment = build_segment_fn(
