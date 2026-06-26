@@ -239,10 +239,24 @@ def solve_richards(
     theta_m_init = theta_from_psi(psi_m, hydro_config)
     theta_m_init = jnp.clip(theta_m_init, hydro_config.theta_r, hydro_config.theta_sat)
 
+    # The Picard body upcasts ``psi_m + dpsi`` to the working precision implied
+    # by EVERY float that feeds the Thomas solve (the grid spacings, the
+    # infiltration/sink forcing, and the van-Genuchten hydraulics via
+    # ``theta_m_init``), so the fori_loop OUTPUT carry is that dtype.  If the
+    # soil state arrives as float32 in an x64 run (a downcast somewhere upstream
+    # between coupled segments), the INPUT carry would be float32 while the
+    # output is float64 -> "scan body carry input and output must have equal
+    # types" at compile.  Promote the initial carry to the result type of all
+    # those contributors so input == output for ANY input precision — narrowing
+    # this to ``(psi_m, dz)`` alone would still mismatch a mixed-dtype config
+    # whose hydraulics are wider than ``dz`` (codex).  Byte-identical for a
+    # uniform float64 / true float32 run.
+    _work_dtype = jnp.result_type(
+        psi_m, theta_n, theta_m_init, dz, dz_if, flux_infiltrated, sink)
     psi_final, theta_final = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (psi_m, theta_m_init),
+        (psi_m.astype(_work_dtype), theta_m_init.astype(_work_dtype)),
     )
     # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
