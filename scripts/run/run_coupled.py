@@ -59,7 +59,56 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
 
-def main():
+def _load_yaml_config(path, parser) -> dict:
+    """Load a run_coupled YAML config file into a dict of argument defaults.
+
+    Used by ``--config`` to make a canonical coupled run (e.g. the tuned
+    ``config/cmip/cmip_ocean_{slab,3D}.yaml``) reproducible from one file.  Every
+    key MUST be a known run_coupled argument dest; an unknown key raises (no
+    silent typo'd / dropped override — dispatch-hardening).
+
+    Each scalar is coerced through that argument's ``type=`` callable, because
+    ``parser.set_defaults`` (how the caller applies this) BYPASSES argparse's own
+    type conversion: a value written as a quoted string (e.g. ``dt: "300"``)
+    would otherwise reach the run as a str.  Returns the mapping so the caller
+    can feed it to ``parser.set_defaults`` (an explicit CLI flag still wins).
+    """
+    import yaml
+    doc = yaml.safe_load(Path(path).read_text())
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise SystemExit(
+            f"--config {path}: expected a YAML mapping of "
+            f"argument=value, got {type(doc).__name__}.")
+    actions = {a.dest: a for a in parser._actions}
+    unknown = sorted(set(doc) - set(actions))
+    if unknown:
+        raise SystemExit(
+            f"--config {path}: unknown key(s) {unknown}. Keys must be "
+            f"run_coupled argument dests (e.g. 'surface_bulk_scheme', 'ocean', "
+            f"'surface_gustiness_zi', 'cloud_q_c_diagnostic', "
+            f"'ocean_restore_sst_tau_days').")
+    out = {}
+    for key, value in doc.items():
+        argtype = getattr(actions[key], "type", None)
+        # Coerce only string scalars through the arg's type (a YAML native
+        # float/int/bool is already the right Python type; type=None args are
+        # str/bool flags that need no conversion).
+        if argtype is not None and isinstance(value, str):
+            try:
+                value = argtype(value)
+            except (ValueError, TypeError) as exc:
+                raise SystemExit(
+                    f"--config {path}: key '{key}' value {value!r} is not a "
+                    f"valid {getattr(argtype, '__name__', argtype)}: {exc}")
+        out[key] = value
+    return out
+
+
+def build_parser():
+    """Build the run_coupled argument parser (exposed for CLI round-trip tests +
+    the --config loader)."""
     # Central microphysics literal set — keep the CLI allowlist in sync with
     # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
     from legoesm.driver.config import VALID_MICROPHYSICS
@@ -400,6 +449,24 @@ def main():
     # Output
     parser.add_argument("--output", "-o", default="results/coupled",
                         help="Output directory")
+    parser.add_argument("--config", default=None,
+                        help="YAML run-config file (e.g. config/cmip/"
+                             "cmip_ocean_slab.yaml): its keys set argument "
+                             "DEFAULTS, so any explicit CLI flag still overrides "
+                             "it. Keys are run_coupled argument dests; an unknown "
+                             "key is a hard error (no silent typo'd override).")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    pre, _ = parser.parse_known_args()
+    if pre.config is not None:
+        parser.set_defaults(**_load_yaml_config(pre.config, parser))
 
     args = parser.parse_args()
 
