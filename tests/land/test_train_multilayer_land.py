@@ -30,6 +30,8 @@ def _synthetic_data(ncol=12):
     c = lambda v: jnp.full((ncol,), v)
     data = dict(forc=f, lat=jnp.asarray(lat), pft=jnp.asarray(pft),
                 fg=jnp.asarray(rng.random(ncol) * 0.3), wp=c(0.12), fc=c(0.30),
+                pct_sand=jnp.asarray(rng.uniform(20, 80, ncol)),   # %sand for texture k/C
+                pct_clay=jnp.asarray(rng.uniform(5, 40, ncol)),
                 skt=jnp.broadcast_to(jnp.asarray(Tair), (12, ncol)),
                 alb=jnp.full((12, ncol), 0.2), t0=jnp.asarray(Tair),
                 dom_onehot=jnp.asarray(oh), w=jnp.cos(jnp.asarray(lat)))
@@ -65,7 +67,7 @@ def test_loss_is_differentiable():
     # the MOST roughness z0.  theta_wp is data-dependent (test_water_stress_response);
     # Ch is inert under MOST and the Farquhar params (Vc_max25/g1/LCMA) are inert
     # unless --stomata (test_bulk_stomata_toggle_params).
-    for k in ("pft_alb", "pft_csoil", "pft_ksolid", "pft_z0"):
+    for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
 
 
