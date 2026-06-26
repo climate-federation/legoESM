@@ -13,10 +13,10 @@
 #
 # Runs scripts/bench/run_levante_gpu_scaling.py with TRUE face decomposition
 # (--cs-mpi-scatter: each rank owns 6/nranks faces, cross-face halos over
-# mpi4jax) at a ladder of rank counts, then aggregates + plots per-resolution
-# strong-scaling curves.  Used by submit_fullnode.sh with RANKS=1 as the cube
-# 1-A100 baseline; cube_fullnode_cpu.sh runs the IDENTICAL driver and flags on
-# the CPU backend (only JAX_PLATFORMS + the conda env differ).
+# mpi4jax) over 1->2->3 A100 (4 doesn't divide 6, 6 needs 2 nodes) -> the cube
+# GPU strong-scaling curve.  cube_fullnode_cpu.sh is the CPU twin (identical
+# driver/flags; only JAX_PLATFORMS + the conda env + thread layout differ).
+# Multi-GPU here uses route-A mpi4jax, so it needs the README Step 1b overlay.
 #
 # SUBMIT as a batch job (qsub from the repo root so $PBS_O_WORKDIR finds it):
 #   cd /glade/work/$USER/legoESM
@@ -51,11 +51,19 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
+# Route-A runtime stack (README Step 1b): multi-GPU mpi4jax face halos need the
+# GNU cray-mpich the bindings were built against, the CUDA GTL, GPU-aware MPI,
+# and the Cray libmpi loader bridge.  (Inert/harmless at RANKS=1.)
+module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
+export MPICH_GPU_SUPPORT_ENABLED=1
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+
 # --- Sweep configuration (all overridable via the environment) ---------------
 RANKS="${RANKS:-1 2 3}"            # cube face-scatter: must DIVIDE 6; 1 node=4 GPUs
 PHYSICS="${PHYSICS:-none}"         # 'none' = dycore-only (aggregate case 'dry')
 PRECISION="${PRECISION:-float32}"  # float32 | float64 | both
-STRONG_RES="${STRONG_RES:-48,96,192}"   # cube face-edge cells (C48/C96/C192)
+STRONG_RES="${STRONG_RES:-48 96 192}"   # cube face-edge cells (space or comma)
+RES_CSV="$(echo "$STRONG_RES" | tr ' ' ',')"   # run_levante wants comma-separated
 STAMP="$(date +%Y%m%d_%H%M%S)"
 CAMP="${CAMP:-$SCRATCH/legoesm_scaling/cube_gpu_strong_${STAMP}}"
 mkdir -p "$CAMP"
@@ -76,22 +84,18 @@ echo "    outdir=$CAMP"
 rc_all=0
 for N in $RANKS; do
   echo "=== $N GPU(s) ==="
+  # Per-N output subdir so run_levante's fixed strong_scaling.json never collides.
   mpiexec -n "$N" bash -c "$PIN" _ \
       "$PY" scripts/bench/run_levante_gpu_scaling.py \
       --grid cubed-sphere --cs-mpi-scatter --mode strong \
       --physics "$PHYSICS" --precision "$PRECISION" \
-      --strong-resolutions "$STRONG_RES" \
+      --strong-resolutions "$RES_CSV" \
       --output-dir "$CAMP/n$N" --no-timestamp < /dev/null \
     || { echo "  n$N FAILED rc=$?"; rc_all=1; }
 done
 
-# --- Aggregate + plot --------------------------------------------------------
 "$PY" scripts/bench/aggregate_bcw_scaling.py \
-    --root "$CAMP" --out "$CAMP/cube_gpu_strong_tidy.csv"
-"$PY" scripts/plot/plot_strong_scaling_by_resolution.py \
-    --csv "$CAMP/cube_gpu_strong_tidy.csv" --grid cubed-sphere --out "$CAMP/plots"
+    --root "$CAMP" --out "$CAMP/cube_gpu_tidy.csv"
 
-echo "=== DONE rc=$rc_all ==="
-echo "CSV:   $CAMP/cube_gpu_strong_tidy.csv"
-echo "Plots: $CAMP/plots"
+echo "=== DONE rc=$rc_all ===   CSV: $CAMP/cube_gpu_tidy.csv"
 exit $rc_all

@@ -1,8 +1,9 @@
-# Derecho scaling: full CPU node vs 1 A100
+# Derecho scaling: CPU node vs A100, strong scaling
 
-**The single supported way to test legoESM scaling on NCAR Derecho.** It
-measures throughput (SYPD) per resolution for **one full CPU node (128-core
-EPYC, `main` queue)** against **one A100 GPU (`deg*` node)**, one grid at a time.
+**The single supported way to test legoESM scaling on NCAR Derecho.** It runs a
+strong-scaling sweep on BOTH backends — CPU MPI ranks 1→128 (128-core EPYC,
+`main` queue) and GPU 1→4 A100 (`deg*` node) — at each resolution, one grid at a
+time, then compares the curves (headline = the full-node point on each side).
 
 `submit_fullnode.sh` is the only entry point — it fans each resolution out into
 its own CPU job + GPU job and dispatches to the right backend scripts; you never
@@ -12,20 +13,20 @@ call the building blocks directly.
 scaling_derecho/
 ├── _env.sh              # shared env, sourced by every job (edit 2 values, Step 0)
 ├── submit_fullnode.sh   # ►ENTRY POINT◄  submit_fullnode.sh <outdir> <grid> [res...]
-├── fullnode_cpu.sh      # full-node CPU (latlon/ico = 128-way MPI; spectral = threads)
-├── fullnode_gpu.sh      # 1-A100 baseline (latlon/ico/spectral)
-├── cube_fullnode_cpu.sh # full-node CPU for cubed-sphere (6-rank x ~21-thread hybrid)
-├── cube_strong_gpu.sh   # 1-A100 baseline for cubed-sphere (RANKS=1; mpi4jax scatter)
+├── fullnode_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
+├── fullnode_gpu.sh      # GPU scaling sweep (latlon/ico = 1->2->4 A100, route-A; spectral = 1)
+├── cube_fullnode_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
+├── cube_strong_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
 └── finalize_fullnode.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```
 
 **Why cubed-sphere has its own pair.** Cube has only 6 faces, so MPI caps at 6
-ranks — its full-node CPU run is a 6-rank × ~21-thread hybrid via the mpi4jax
-face-scatter path (`run_levante_gpu_scaling.py --cs-mpi-scatter`), and its A100
-baseline must use the same driver. latlon and icosahedral are genuinely
-domain-decomposed, so they run pure 128-way MPI via `run_cpu_mpi_scaling.py`;
-spectral has no MPI path and fills the node with XLA threads. `submit_fullnode.sh`
-hides all of this.
+ranks — it sweeps the face decomposition (GPU 1→2→3 A100; CPU faces 1,2,3,6 with
+each rank multithreaded to fill the node) via the mpi4jax face-scatter path
+(`run_levante_gpu_scaling.py --cs-mpi-scatter`). latlon and icosahedral are
+genuinely domain-decomposed, so they sweep the full rank/GPU ladder via
+`run_cpu_mpi_scaling.py` (`--device cpu`/`--device gpu`); spectral has no MPI
+path (single device). `submit_fullnode.sh` hides all of this.
 
 The CPU and GPU sides need **two different conda envs** — GPU JAX and CPU+MPI JAX
 are incompatible builds. Build both once (Steps 1–2), edit `_env.sh` (Step 0),
@@ -85,13 +86,13 @@ python -c "import jax; print(jax.devices()[0].device_kind)"   # -> 'NVIDIA A100-
 > **Why JAX 0.9.2?** Keeps both envs in the tested `jax 0.8–0.9` envelope and
 > aligned with the MPI env (see the mpi4jax constraint below).
 
-> **The full-node comparison does NOT need Step 1b.** Every GPU job here is a
-> single A100 (1 rank, no mpi4jax halo), so the basic `legoesm-gpu` env above is
-> enough. Step 1b (the route-A mpi4jax-on-GPU overlay) is OPTIONAL — only build
-> it if you separately run `cube_strong_gpu.sh` standalone with `RANKS>1` for a
-> multi-GPU cube curve.
+> **The GPU sweeps need Step 1b.** `fullnode_gpu.sh` (1→2→4 A100) and
+> `cube_strong_gpu.sh` (1→2→3 A100) exchange halos over mpi4jax across GPUs, so
+> the `legoesm-gpu` env MUST carry the route-A overlay (a CUDA-built mpi4jax).
+> Build it before submitting any GPU job. (A 1-rank run would not need it, but
+> the sweeps always go past 1 GPU.)
 
-### Step 1b — route-A overlay (OPTIONAL — only for multi-GPU `cube_strong_gpu.sh RANKS>1`)
+### Step 1b — route-A overlay (REQUIRED for the GPU scaling sweeps)
 
 The route-A GPU path launches `mpiexec -n N` (one rank per A100) and exchanges
 halos over mpi4jax — so `legoesm-gpu` ALSO needs a Cray-MPICH-built `mpi4py`
@@ -152,8 +153,10 @@ mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
 #   want: two lines, size 2, backend gpu  ==  route-A overlay fully working
 ```
 
-(Only relevant to a standalone multi-GPU `cube_strong_gpu.sh RANKS>1` run; the
-full-node comparison's GPU jobs are single-rank and skip this entirely.)
+`fullnode_gpu.sh` and `cube_strong_gpu.sh` set `MPICH_GPU_SUPPORT_ENABLED=1`,
+the `craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge themselves
+at runtime, so once the overlay env is built the jobs carry the right
+environment without the manual exports above.
 
 ---
 
@@ -257,8 +260,9 @@ scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
 ```
 
-For each resolution it submits **one full-node CPU job + one 1-A100 GPU job**
-(so a slow high-res case gets its own walltime and runs in parallel).
+For each resolution it submits **one CPU-sweep job + one GPU-sweep job** (each
+sweeps its device ladder internally), so a slow high-res case gets its own
+walltime and runs in parallel.
 
 Knobs (environment, passed through to the jobs):
 
@@ -292,10 +296,10 @@ scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT   # aggregate + plot
 
 This runs `aggregate_bcw_scaling.py` over the whole `<outdir>` into
 `$OUT/all_tidy.csv`, then `plot_fullnode_cpu_vs_gpu.py` to render, **for each
-grid**, SYPD and throughput (Mcells/s) vs resolution with one line for the
-full-node CPU and one for the 1 A100 — `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png`
-— and prints a GPU/CPU speedup table. Any conda env with legoESM installed works
-(no GPU/MPI env needed for this step).
+grid**, the CPU and GPU strong-scaling curves (SYPD and Mcells/s vs device
+count) one panel per resolution — `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png` —
+and prints a peak (full-node) GPU/CPU speedup table. Any conda env with legoESM
+installed works (no GPU/MPI env needed for this step).
 
 ---
 

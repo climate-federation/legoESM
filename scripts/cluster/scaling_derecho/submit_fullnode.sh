@@ -93,7 +93,7 @@ for R in "${RES[@]}"; do
     case "$GRID" in
         cubed-sphere)
             CPU_SCRIPT="$SD/cube_fullnode_cpu.sh"; CPU_VARS="STRONG_RES=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
-            GPU_SCRIPT="$SD/cube_strong_gpu.sh";   GPU_VARS="RANKS=1,STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
+            GPU_SCRIPT="$SD/cube_strong_gpu.sh";   GPU_VARS="STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
             ;;
         *)  # latlon | icosahedral | spectral (validated above)
             CPU_SCRIPT="$SD/fullnode_cpu.sh"; CPU_VARS="GRID=${GRID},RESOLUTIONS=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
@@ -101,10 +101,10 @@ for R in "${RES[@]}"; do
             ;;
     esac
     if [ "${GPU_ONLY:-0}" != "1" ]; then
-        submit "cpu ${GRID} res=${R} (full node)" -v "$CPU_VARS" "$CPU_SCRIPT"
+        submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$CPU_SCRIPT"
     fi
     if [ "${CPU_ONLY:-0}" != "1" ]; then
-        submit "gpu ${GRID} res=${R} (1 A100)" -v "$GPU_VARS" "$GPU_SCRIPT"
+        submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$GPU_SCRIPT"
     fi
 done
 
