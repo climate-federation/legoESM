@@ -65,6 +65,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Cubed-sphere/curvilinear: assume edge+metric errors first.
 - Physics coupling: column closure + consistent flux signs.
 - DA/diff: preserve smoothness. No gratuitous nondiff.
+- **Sign-convention check MANDATORY on every equation/flux/tendency edit.** Before declaring done on any code touching a PDE term, flux, source/sink, BC, or budget update: (1) state the coordinate convention in scope (z up/down, flux positive-up/down/into-body) as a comment at the term; (2) walk EACH term and confirm its sign matches that convention — gravity vs capillary/diffusion divergence, top vs bottom BC, source vs sink, the `±` in `state = state ± dt·tend`; (3) confirm the budget closes (`in − out − Δstorage = 0`) and exchanged fluxes carry the SAME sign at both ends of a coupling (land runoff `+into ocean` must arrive `+into ocean`). A comment label and the code must agree — a flux commented "upward" computed as downward is a defect, fix the label or the math. Mechanical gate where feasible: a sign/conservation unit test (analytic column, manufactured solution, or `assert` budget residual ≈ 0) — passing norms alone never certify a sign is right (a flipped flux can still be small). Common flips: z-axis direction, evap positive-up vs moistening, brine/salt vs freshwater dilution, stress atmospheric vs ocean convention (`-tau`), free-drainage vs gravity double-count.
 
 ## Parallel/HPC
 - Correctness across serial/multi-device/MPI/hybrid.
