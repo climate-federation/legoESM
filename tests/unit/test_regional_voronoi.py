@@ -385,6 +385,33 @@ class TestSub360Periodic:
             f"Expected majority hex cells on a 360° mesh, got {frac_hex*100:.0f}%"
         )
 
+    def test_negative_lon_min_west_seam_builds(self):
+        """Regression: a sub-360° periodic band whose **west meridian is at a
+        negative longitude** must build without falsely rejecting its own
+        seam generators.
+
+        Even rows seed a generator exactly on ``lon = lon_min``. Round-tripping
+        that point through ``xyz → arctan2`` returns ``lon_min − ε`` (float
+        error), so ``np.mod(lon − lon_min, 2π)`` wraps it to ``u ≈ 2π`` instead
+        of ``0`` — which used to trip the "generators fall outside the periodic
+        zonal extent" guard in ``_periodic_unroll_delaunay`` and raise. This is
+        exactly the DINO MPAS basin (``lon_range=(-50, 0)``); a smaller band
+        with the same negative west meridian reproduces it cheaply.
+        """
+        import numpy as np
+        # lon_min = -50° (negative) — even-row seeds sit exactly on it.
+        m = create_regional_voronoi_mesh(
+            (-50.0, -40.0), (16.0, 34.0), resolution_km=100.0, periodic_x=True,
+        )
+        assert m.nCells > 100, f"mesh unexpectedly small: nCells={m.nCells}"
+        # Every cell centre must lie within the periodic zonal extent.
+        lon = np.degrees(np.arctan2(np.asarray(m.yCell), np.asarray(m.xCell)))
+        u = np.mod(lon - (-50.0), 360.0)  # into [0, 360); valid in [0, 10)
+        assert u.max() <= 10.0 + 1e-6, (
+            f"cell centre escaped the periodic extent: u_max={u.max():.6f}° "
+            "(should be < 10°) — west-seam fold regressed"
+        )
+
     def test_ocean_model_one_step(self, sub360_periodic_mesh):
         """An MPAS ocean model should be able to take one step on the
         sub-360° periodic mesh without producing NaN."""
