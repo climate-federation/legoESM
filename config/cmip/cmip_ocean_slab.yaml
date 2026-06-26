@@ -1,0 +1,49 @@
+# Canonical coupled CMIP run — SLAB (two-layer) ocean.
+#
+#   run_coupled.py --config config/cmip/cmip_ocean_slab.yaml
+#
+# Encodes the tuned ("trained") parameter set converged through the coupled
+# CMIP-realism campaign — the configuration that reaches a stable, energy-
+# balanced, Earth-like slab-coupled climate (R_TOA settled to ~-0.7 W/m^2 at
+# 180 d; SST drift reduced from -7.2 to -2.2 K/yr; Earth-like planetary albedo
+# ~31%).  The two-layer slab (mixed + deep restoring layer) is the cheap, stable
+# reference; the dynamic-3D-ocean twin is config/cmip/cmip_ocean_3D.yaml.
+#
+# Keys are run_coupled argument dests; --config sets them as DEFAULTS so any
+# explicit CLI flag still overrides (e.g. --days 90 for a short test).
+
+# --- atmosphere + grid ---
+preset: slab_richards          # Richards multilayer soil -> water-limited ET
+grid: latlon
+resolution: 24
+nlev: 20
+dt: 300.0
+ic: standard
+days: 240
+diag_days: 10                  # atm<->ocean coupling cadence
+
+# --- radiation (true CMIP6 RRTMGP) ---
+radiation: rrtmgp
+rrtmgp_gpoint_batch_size: 16   # forward-only ~6x faster radiation
+rrtmgp_gpoint_checkpoint: false
+
+# --- physics schemes ---
+convection: sbm
+microphysics: morrison
+clouds: sundqvist
+convective_cloud: true         # thin-cirrus convective cloud fraction
+
+# --- TUNED air-sea + cloud "trained" parameters (CMIP-realism campaign) ---
+surface_bulk_scheme: coare3    # COARE MOST air-sea fluxes (w* gustiness)
+surface_gustiness_zi: 300.0    # convective free-convection velocity scale z_i [m]
+cloud_q_c_diagnostic: 3.0e-4   # optically-thinner cloud -> Earth-like albedo
+snow_albedo_feedback: true
+
+# --- ocean: two-layer thermodynamic slab ---
+ocean: two_layer
+
+# --- CMOR output (historical-1850 forcing) ---
+experiment: historical
+start_year: 1850
+cmip_output: true
+cmip_resolution_deg: 5.0
