@@ -83,6 +83,14 @@ def _parse_args():
              "97 km is the closest working value to 9900-cell match.)",
     )
     p.add_argument(
+        "--mpas-eq-visc-boost", type=float, default=None,
+        help="MPAS-only equatorial A_h boost factor (DINOConfig."
+             "mpas_equatorial_visc_boost, default 8.0). Boosts lateral "
+             "viscosity near the equator (tight Gaussian, sigma=5deg) to "
+             "constrain the forced f->0 equatorial jet that otherwise runs "
+             "away on the implicit-CN MPAS path; ignored on lat-lon.",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -247,6 +255,9 @@ def main():
     cfg = DINOConfig()
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
+    if args.mpas_eq_visc_boost is not None:
+        cfg = dataclasses.replace(
+            cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
     dt = cfg.dt
     grid_kind = args.grid
 
