@@ -116,7 +116,7 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # Dissipation-audit knob: Veros applies -r_bot·u (a RATE, 1e-5/s) at the
         # bottom cell with NO /dz; legoESM applies -r·u/h_bot. To match Veros's
         # ~28h drag, r ≈ r_bot·h_bot ≈ 1e-5·276 ≈ 2.8e-3 (flat-bottom ACC).
-        cfg = cfg._replace(bottom_drag_r=bottom_drag_r)
+        cfg = cfg._replace(bottom_drag=cfg.bottom_drag._replace(bottom_drag_r=bottom_drag_r))
     if barotropic_solver is not None:
         # Rigid-lid fidelity: match Veros's barotropic FORMULATION (streamfunction
         # rather than the legoESM split-explicit free surface). The dissipation

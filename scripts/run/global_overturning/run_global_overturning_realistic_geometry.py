@@ -263,7 +263,7 @@ def main():
     print(f"  PGF scheme:       {ocean_config.pgf_scheme}")
     print(f"  Momentum adv:     {ocean_config.momentum_advection} (AL81)")
     print(f"  Barotropic solver: {ocean_config.barotropic_solver}")
-    print(f"  Bottom drag:      r = {ocean_config.bottom_drag_r:.1e} 1/s")
+    print(f"  Bottom drag:      r = {ocean_config.bottom_drag.bottom_drag_r:.1e} 1/s")
     print(f"  B_h biharmonic:   {ocean_config.B_h:.1e} m⁴/s")
     print(f"  GM/Redi:          K_GM = {gm_redi_cfg.kappa_GM:.0f} m²/s, "
           f"K_Redi = {gm_redi_cfg.kappa_Redi:.0f} m²/s")
@@ -396,7 +396,7 @@ def main():
         f.write(f"pgf_scheme = smc03\n")
         f.write(f"momentum_advection = vector_invariant (AL81)\n")
         f.write(f"barotropic_solver = implicit_cn\n")
-        f.write(f"bottom_drag_r = {ocean_config.bottom_drag_r}\n")
+        f.write(f"bottom_drag_r = {ocean_config.bottom_drag.bottom_drag_r}\n")
         f.write(f"B_h = {ocean_config.B_h}\n")
         f.write(f"K_GM = {gm_redi_cfg.kappa_GM}, K_Redi = {gm_redi_cfg.kappa_Redi}\n")
         f.write(f"total_years = {total_years}\n")

@@ -228,7 +228,7 @@ class TestTripoleRestState:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             A_h=1000.0,
             K_h=500.0,
@@ -267,7 +267,7 @@ class TestTripoleRestState:
         from legoesm.core.field import Field
 
         z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             A_h=1000.0, K_h=500.0, A_v=1e-3, K_v=1e-5,
             n_barotropic_substeps=10,
@@ -303,7 +303,7 @@ class TestTripoleRestState:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             A_h=1000.0, K_h=500.0, A_v=1e-3, K_v=1e-5,
             n_barotropic_substeps=10,

@@ -683,6 +683,23 @@ class OMp25Config(NamedTuple):
     #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
 
 
+class DynBottomDragConfig(NamedTuple):
+    """Dynamics-level bottom-drag parameters (#501 config grouping).
+
+    Distinct from the deprecated physics-pathway ``BottomDragConfig``.  Field
+    names retain the ``bottom_drag_`` prefix so the flat YAML / legacy-kwarg
+    interface maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+    """
+
+    bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
+                                           # drag is quadratic-with-floor:
+                                           # tau ∝ √(u²+v²+u_bg²) · u, with
+                                           # the linear-in-u limit set to
+                                           # bottom_drag_r at |u|→0.
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -718,11 +735,11 @@ class LatLonCGridOceanConfig(NamedTuple):
 
     Minimal run (everything else defaults to sane Earth values)::
 
-        cfg = LatLonCGridOceanConfig()       # constant A_v/K_v, no physics pipeline
+        cfg = LatLonCGridOceanConfig.from_flat()       # constant A_v/K_v, no physics pipeline
 
     Production-style::
 
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
             bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
             barotropic_solver="implicit", eos="wright",
@@ -818,15 +835,9 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # the sharp jet (the WBC cold-start blowup).
                                     # ~0.125 (1/8) is a safe 2-D Laplacian cap.
 
-    # --- Bottom drag (dynamics-level; the physics-pathway BottomDragConfig is
-    #     deprecated — set drag here) ---
-    bottom_drag_r: float = 0.0
-    bottom_drag_bbl_thickness: float = 0.0
-    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
-                                           # drag is quadratic-with-floor:
-                                           # tau ∝ √(u²+v²+u_bg²) · u, with
-                                           # the linear-in-u limit set to
-                                           # bottom_drag_r at |u|→0.
+    # --- Bottom drag (dynamics-level; #501 grouped into DynBottomDragConfig;
+    #     the physics-pathway BottomDragConfig is deprecated — set drag here) ---
+    bottom_drag: DynBottomDragConfig = DynBottomDragConfig()
 
     # --- Tracer diffusivity & vertical mixing (A_v/K_v are constant fallbacks
     #     unless a physics vertical-mixing scheme / implicit_vertical_mixing
@@ -1559,3 +1570,35 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
     # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
     meridionally_flat: bool = False
+
+    @classmethod
+    def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
+        """Construct from FLAT keyword args (the legacy / YAML field names),
+        distributing #501-grouped fields into their nested sub-configs.
+
+        The canonical nested constructor is the NamedTuple itself
+        (``LatLonCGridOceanConfig.from_flat(bottom_drag=DynBottomDragConfig(...), ...)``);
+        this is the back-compatible flat entry point that existing call sites and
+        the YAML loader use, so a caller can keep passing the flat
+        ``bottom_drag_r=...`` and it is routed into ``bottom_drag``.  An unknown
+        field raises (NamedTuple validates the residual kwargs) — typos stay
+        loud.  Passing a sub-config object directly (``bottom_drag=...``) is
+        also accepted (it falls through unchanged).
+        """
+        nested = {}
+        _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
+        if _bd:
+            nested["bottom_drag"] = DynBottomDragConfig(**_bd)
+        return cls(**nested, **flat)
+
+    @classmethod
+    def flat_fields(cls) -> frozenset:
+        """The accepted FLAT field names (#501): the top-level fields with each
+        grouped sub-config replaced by its member field names.  Drives both
+        :meth:`from_flat` distribution and the flat ``ocean.*`` YAML typo-check,
+        so the flat construction / YAML interface stays 1:1 with the pre-grouping
+        field set even though the storage is nested.  Extend per nested group.
+        """
+        names = set(cls._fields) - {"bottom_drag"}
+        names |= set(DynBottomDragConfig._fields)
+        return frozenset(names)

@@ -97,13 +97,13 @@ def test_HW_differs_from_centered_for_meridional_shear():
 
 def test_config_default_is_centered():
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     assert cfg.ke_gradient_scheme == "centered"
 
 
 def test_config_can_select_hollingsworth():
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig()._replace(ke_gradient_scheme="hollingsworth")
+    cfg = LatLonCGridOceanConfig.from_flat()._replace(ke_gradient_scheme="hollingsworth")
     assert cfg.ke_gradient_scheme == "hollingsworth"
 
 
@@ -131,7 +131,7 @@ def test_one_step_centered_KE(small_setup):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.state import LatLonCGridOceanConfig
     grid, z, state = small_setup
-    cfg = LatLonCGridOceanConfig(ke_gradient_scheme="centered")
+    cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="centered")
     model = LatLonCGridOceanModel(grid, z, cfg)
     new = model.step(state, dt=600.0)
     assert bool(jnp.all(jnp.isfinite(new.eta.data)))
@@ -141,7 +141,7 @@ def test_one_step_hollingsworth_KE(small_setup):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.state import LatLonCGridOceanConfig
     grid, z, state = small_setup
-    cfg = LatLonCGridOceanConfig(ke_gradient_scheme="hollingsworth")
+    cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="hollingsworth")
     model = LatLonCGridOceanModel(grid, z, cfg)
     new = model.step(state, dt=600.0)
     assert bool(jnp.all(jnp.isfinite(new.eta.data)))
@@ -160,7 +160,7 @@ def test_invalid_ke_scheme_raises():
     z = create_ocean_z_star(n_levels=5, H_max=2000.0,
                             dz_surface=10.0, dz_deep=500.0)
     state = rest_state_latlon_cgrid_ocean(grid, z, H_max=2000.0)
-    cfg = LatLonCGridOceanConfig(ke_gradient_scheme="bogus")
+    cfg = LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="bogus")
     model = LatLonCGridOceanModel(grid, z, cfg)
     with pytest.raises(ValueError, match="ke_gradient_scheme"):
         model.step(state, dt=600.0)

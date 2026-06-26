@@ -370,7 +370,7 @@ class TestWENOSmoothnessSplitVsStandard:
     @pytest.mark.parametrize("sm", ["split", "standard"])
     def test_config_accepts_smoothness(self, sm):
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = LatLonCGridOceanConfig(momentum_advection="weno9", weno_smoothness=sm)
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection="weno9", weno_smoothness=sm)
         assert cfg.weno_smoothness == sm
 
     def test_invalid_smoothness_rejected(self):
@@ -470,7 +470,7 @@ class TestWENOSmoothnessSplitVsStandard:
         """The DECOUPLED divergence-flux smoothness accepts None (follow
         weno_smoothness) or a valid family."""
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = LatLonCGridOceanConfig(momentum_advection="weno9",
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection="weno9",
                                      weno_divergence_smoothness=sm)
         assert cfg.weno_divergence_smoothness == sm
 
@@ -645,7 +645,7 @@ class TestMomentumAdvectionConfig:
     @pytest.mark.parametrize("mode", ["vector_invariant", "weno5", "weno7", "weno9"])
     def test_config_field_accepted(self, mode):
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = LatLonCGridOceanConfig(momentum_advection=mode)
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection=mode)
         assert cfg.momentum_advection == mode
 
     def test_weno9_full_step_finite(self):
@@ -1081,7 +1081,7 @@ class TestFullTendencyWENODK:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         state, grid, z_coord = self._make_state_and_deps()
-        config = LatLonCGridOceanConfig(momentum_advection="weno5")
+        config = LatLonCGridOceanConfig.from_flat(momentum_advection="weno5")
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, config)
         du = tend.du_dt.data
@@ -1097,9 +1097,9 @@ class TestFullTendencyWENODK:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         state, grid, z_coord = self._make_state_and_deps()
-        cfg_centered = LatLonCGridOceanConfig(
+        cfg_centered = LatLonCGridOceanConfig.from_flat(
             momentum_advection="vector_invariant")
-        cfg_weno = LatLonCGridOceanConfig(momentum_advection="weno5")
+        cfg_weno = LatLonCGridOceanConfig.from_flat(momentum_advection="weno5")
 
         tend_c = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg_centered)

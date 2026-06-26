@@ -112,7 +112,7 @@ def _model(grid, z_coord, state, **kw):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver="rigid_lid", **kw)
     m = LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -277,7 +277,7 @@ def test_requires_implicit_vertical_mixing():
     with pytest.raises(ValueError, match="sponge_forcing_implicit"):
         LatLonCGridOceanModel(
             grid, z_coord,
-            LatLonCGridOceanConfig(sponge_forcing_implicit=True,
+            LatLonCGridOceanConfig.from_flat(sponge_forcing_implicit=True,
                                    implicit_vertical_mixing=False,
                                    enable_runtime_checks=False))
 

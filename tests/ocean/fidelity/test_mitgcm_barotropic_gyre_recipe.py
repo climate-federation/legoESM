@@ -48,7 +48,7 @@ def test_geometry_uses_beta_plane_with_mitgcm_params():
 def test_config_is_barotropic_constant_density():
     c = gyre.build_gyre_config()
     assert c.A_h == gyre.VISC_AH
-    assert c.bottom_drag_r == 0.0
+    assert c.bottom_drag.bottom_drag_r == 0.0  # #501: nested DynBottomDragConfig
     assert c.gm_redi is None
     assert c.eos == "linear"
     assert c.eos_linear.alpha_T == 0.0 and c.eos_linear.beta_S == 0.0

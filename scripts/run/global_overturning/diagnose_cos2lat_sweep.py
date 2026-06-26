@@ -123,7 +123,7 @@ def _run_one_ah(A_h, grid, z_coord_base, H_bathy, ocean_mask,
     )
     state, z_coord = _build_initial_state(grid, z_coord_base, H_bathy, ocean_mask, config)
 
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30, physics=physics,
         A_h=A_h,
         A_h_lat_scaling=True,                   # <-- the new flag

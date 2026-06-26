@@ -706,7 +706,7 @@ class LatLonCGridOceanModel:
         # geometry carries fold descriptor and rotation angles.
         self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig()
+        self.config = config or LatLonCGridOceanConfig.from_flat()
         self._validate_config(self.config)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).

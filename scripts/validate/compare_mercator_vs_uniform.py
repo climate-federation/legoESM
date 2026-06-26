@@ -115,7 +115,7 @@ def _build_model(grid, *, A_h=None, bottom_drag_r=None, physics=None):
         kw["bottom_drag_r"] = bottom_drag_r
     if physics is not None:
         kw["physics"] = physics
-    config = LatLonCGridOceanConfig(**kw)
+    config = LatLonCGridOceanConfig.from_flat(**kw)
     return LatLonCGridOceanModel(grid, _z_coord(), config)
 
 

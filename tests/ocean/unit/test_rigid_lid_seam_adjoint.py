@@ -65,7 +65,7 @@ def _channel():
     v_int = (lm[:-1] * lm[1:]) > 0.5
     v_mask = np.concatenate([np.zeros((1, N_LON)), v_int, np.zeros((1, N_LON))],
                             axis=0).astype(float)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     rl = build_rigid_lid_data(Hb, lm, u_mask, v_mask, cfg, grid, periodic_x=True)
     return grid, lm, u_mask, v_mask, cfg, rl
 

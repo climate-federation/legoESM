@@ -206,7 +206,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                 kw["A_h"] = A_h
             if A_v is not None:
                 kw["A_v"] = A_v
-            cfg = LatLonCGridOceanConfig(**kw)
+            cfg = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -350,7 +350,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
-        cfg = LatLonCGridOceanConfig(**kw)
+        cfg = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -406,7 +406,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         if barotropic_solver is not None:
             kw["barotropic_solver"] = barotropic_solver
         cfg = model_config if model_config is not None \
-            else LatLonCGridOceanConfig(**kw)
+            else LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi

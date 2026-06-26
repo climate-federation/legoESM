@@ -226,7 +226,7 @@ def test_model_rollout_grads_finite_f32(scheme):
         v=state.v.replace(data=state.v.data + 0.03 * jax.random.normal(
             kv, state.v.data.shape)),
     )
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         A_h=1000.0, K_h=100.0, A_v=1e-3, K_v=1e-4, bottom_drag_r=1e-3,
         tracer_advection=scheme, n_barotropic_substeps=4,
         differentiable_barotropic=True, enable_runtime_checks=False)

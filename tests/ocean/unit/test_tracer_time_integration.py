@@ -56,16 +56,16 @@ class TestConfigValidation:
     def test_valid_integrators(self):
         """All three valid integrators should be accepted."""
         for tti in ("euler", "ab2", "rk3"):
-            cfg = LatLonCGridOceanConfig(tracer_time_integrator=tti)
+            cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator=tti)
             assert cfg.tracer_time_integrator == tti
 
     def test_invalid_integrator_rejected(self, grid, z_coord):
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator="leapfrog")
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator="leapfrog")
         with pytest.raises(ValueError, match="tracer_time_integrator"):
             LatLonCGridOceanModel(grid, z_coord, config=cfg)
 
     def test_negative_ab2_epsilon_rejected(self, grid, z_coord):
-        cfg = LatLonCGridOceanConfig(ab2_epsilon=-0.1)
+        cfg = LatLonCGridOceanConfig.from_flat(ab2_epsilon=-0.1)
         with pytest.raises(ValueError, match="ab2_epsilon"):
             LatLonCGridOceanModel(grid, z_coord, config=cfg)
 
@@ -80,7 +80,7 @@ class TestModelIntegration:
     @pytest.mark.parametrize("tti", ["euler", "ab2", "rk3"])
     def test_step_produces_finite_output(self, grid, z_coord, state, tti):
         """A single step should produce finite T, S, eta."""
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator=tti)
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator=tti)
         model = LatLonCGridOceanModel(grid, z_coord, config=cfg)
         state_new = model.step(state, dt=300.0)
 
@@ -90,7 +90,7 @@ class TestModelIntegration:
 
     def test_ab2_two_steps_uses_previous_tendency(self, grid, z_coord, state):
         """AB2 should store and use previous flux divergence on step 2."""
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator="ab2")
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator="ab2")
         model = LatLonCGridOceanModel(grid, z_coord, config=cfg)
 
         # Step 1: falls back to Euler (no previous tendency)
@@ -104,8 +104,8 @@ class TestModelIntegration:
 
     def test_euler_default_unchanged(self, grid, z_coord, state):
         """Default config (euler) should produce the same result as before."""
-        cfg_euler = LatLonCGridOceanConfig(tracer_time_integrator="euler")
-        cfg_default = LatLonCGridOceanConfig()
+        cfg_euler = LatLonCGridOceanConfig.from_flat(tracer_time_integrator="euler")
+        cfg_default = LatLonCGridOceanConfig.from_flat()
         model_euler = LatLonCGridOceanModel(grid, z_coord, config=cfg_euler)
         model_default = LatLonCGridOceanModel(grid, z_coord, config=cfg_default)
 
@@ -118,7 +118,7 @@ class TestModelIntegration:
     @pytest.mark.parametrize("tti", ["ab2", "rk3"])
     def test_multi_step_finite(self, grid, z_coord, state, tti):
         """Multiple steps with AB2/RK3 should remain finite."""
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator=tti)
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator=tti)
         model = LatLonCGridOceanModel(grid, z_coord, config=cfg)
 
         s = state
@@ -134,7 +134,7 @@ class TestModelIntegration:
         Regression test for the pytree None→Field transition that
         previously crashed scan on the second iteration.
         """
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator="ab2")
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator="ab2")
         model = LatLonCGridOceanModel(grid, z_coord, config=cfg)
         final, trajectory = model.integrate_scan(state, n_steps=3, dt=300.0)
         assert bool(jnp.all(jnp.isfinite(final.T.data)))
@@ -145,7 +145,7 @@ class TestModelIntegration:
         """Flux-form advection must conserve total tracer mass."""
         from legoesm.ocean.vertical import compute_layer_thickness
 
-        cfg = LatLonCGridOceanConfig(tracer_time_integrator=tti)
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_time_integrator=tti)
         model = LatLonCGridOceanModel(grid, z_coord, config=cfg)
 
         # Use a state with non-trivial T profile so advection is active
@@ -192,7 +192,7 @@ class TestModelIntegration:
     @pytest.mark.parametrize("tti", ["ab2", "rk3"])
     def test_weno5_smoke(self, grid, z_coord, state, tti):
         """WENO5 + AB2/RK3 should produce finite output (key use case)."""
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             tracer_advection="weno5",
             tracer_time_integrator=tti,
         )

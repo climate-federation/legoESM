@@ -495,7 +495,7 @@ def build_global_1deg_model_config() -> LatLonCGridOceanConfig:
     """global_1deg dynamics config — the matched-4deg faithful dycore stack
     (same Veros core ⇒ same options) with the setup's parameter deltas
     (A_h literal, GM/Redi block, STOCK synchronous dt)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,

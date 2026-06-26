@@ -796,7 +796,7 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
 
     ``with_surface_forcing`` (free-run) threads through to the physics config to
     activate T* restoring; default ``False`` is the frozen-state-probe config."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         # All physical constants pinned to Veros via config (G-C4): g/rho_0 are
         # read by the PE core, the ConstantsConfig by the de-mirrored physics,
         # and R_earth feeds acc_A_h — pinned purely through config.

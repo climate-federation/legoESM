@@ -84,7 +84,7 @@ def _build_model(n_lat=12, n_lon=24, n_lev=8, dt_mom_ratio=1.0):
     """A small lat-lon C-grid ocean model exercising the implicit vmix path."""
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=n_lev, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_v=1e-3, K_v=1e-4,
         implicit_vertical_mixing=True,
         physics=None,                 # bench-default fallback K path

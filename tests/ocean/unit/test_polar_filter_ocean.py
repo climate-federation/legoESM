@@ -48,7 +48,7 @@ def _model(use_polar_filter=True, n_lat=24, n_lon=48, cutoff=60.0,
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=4000.0, land_lat_threshold=land_lat_threshold)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, n_barotropic_substeps=8,
         enable_runtime_checks=False, use_polar_filter=use_polar_filter,
         polar_filter_cutoff_lat_deg=cutoff, **cfg_kw)
@@ -58,7 +58,7 @@ def _model(use_polar_filter=True, n_lat=24, n_lon=48, cutoff=60.0,
 def test_default_filter_off():
     """Off by default -> bit-exact for legacy/tripole configs."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     assert cfg.use_polar_filter is False
     assert cfg.polar_filter_cutoff_lat_deg == pytest.approx(60.0)
 

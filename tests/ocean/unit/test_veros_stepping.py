@@ -49,7 +49,7 @@ def test_probe_branch_is_legoesm_defaults():
 def test_probe_branch_matches_model_defaults():
     """The probe branch must equal the config's own defaults — that is what
     keeps the frozen-state probe bit-identical to a no-stepping-bundle build."""
-    default = LatLonCGridOceanConfig()
+    default = LatLonCGridOceanConfig.from_flat()
     probe = veros_faithful_stepping(with_surface_forcing=False, dt_mom_ratio=9.0)
     for f in _FIELDS:
         assert probe[f] == getattr(default, f), f
@@ -63,7 +63,7 @@ def test_dt_mom_ratio_passthrough():
 
 def test_splats_into_config_without_collision():
     """The bundle must be splattable into the real config constructor."""
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0,
         **veros_faithful_stepping(with_surface_forcing=True, dt_mom_ratio=9.0),
     )

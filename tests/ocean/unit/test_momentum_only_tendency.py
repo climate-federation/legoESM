@@ -42,7 +42,7 @@ def _model_and_state():
     z_coord = create_ocean_z_star(n_levels=_NZ, H_max=4000.0)
     # Non-trivial lateral + vertical diffusion so the skipped tracer stage is
     # genuinely non-zero (non-vacuity).
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         momentum_time_integrator="rk3",
         K_h=500.0,
     )

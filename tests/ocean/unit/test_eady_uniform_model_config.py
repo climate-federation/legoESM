@@ -30,7 +30,7 @@ class TestDefaults:
             S_ref=cfg.S_uniform,
         )
         actual = eady_uniform_model_config(cfg, physics=physics, eos_config=eos)
-        expected = LatLonCGridOceanConfig(
+        expected = LatLonCGridOceanConfig.from_flat(
             physics=physics,
             eos="linear",
             eos_linear=eos,

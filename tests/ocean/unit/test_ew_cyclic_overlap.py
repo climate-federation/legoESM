@@ -46,7 +46,7 @@ def _model(ew_cyclic_overlap=False, n_lat=8, n_lon=16, **cfg_kw):
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, n_barotropic_substeps=8,
         enable_runtime_checks=False, ew_cyclic_overlap=ew_cyclic_overlap,
         **cfg_kw)
@@ -189,4 +189,4 @@ def test_runner_flag_registered_and_defaults_off():
     assert "ew_cyclic_overlap" in inspect.signature(r.build_tripole).parameters
     # the config field exists and defaults off (bit-exact legacy)
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig().ew_cyclic_overlap is False
+    assert LatLonCGridOceanConfig.from_flat().ew_cyclic_overlap is False

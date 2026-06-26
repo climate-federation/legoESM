@@ -128,7 +128,7 @@ class TestBottomDragDiff:
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -191,7 +191,7 @@ class TestBottomDragDiff:
         grid, z_coord, state, config, tend_fn = latlon_cgrid_setup
 
         # Config with no bottom drag
-        config_no_drag = config._replace(bottom_drag_r=0.0)
+        config_no_drag = config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
@@ -229,7 +229,7 @@ class TestSpongeRelaxationDiff:
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -372,7 +372,7 @@ class TestBarotropicBottomDragDiff:
         )
 
         # Must use differentiable_barotropic=True to use lax.scan
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -438,7 +438,7 @@ class TestBarotropicBottomDragDiff:
         dt_baroclinic = 600.0
         dt_s = dt_baroclinic / config.n_barotropic_substeps
 
-        config_no_drag = config._replace(bottom_drag_r=0.0)
+        config_no_drag = config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
@@ -534,7 +534,7 @@ if __name__ == "__main__":
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=1e-3, A_v=0.0, K_v=0.0, K_h=0.0,
             enable_runtime_checks=False, n_barotropic_substeps=2,
         )
@@ -575,7 +575,7 @@ if __name__ == "__main__":
         sponge = SpongeForcing(gamma=gamma, T_ref=T_ref, S_ref=S_ref)
 
         # reuse grid/z_coord/state from test 2
-        cfg_sp = LatLonCGridOceanConfig(
+        cfg_sp = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=0.0, A_v=0.0, K_v=0.0, K_h=0.0,
             enable_runtime_checks=False, n_barotropic_substeps=2,
         )
@@ -626,7 +626,7 @@ if __name__ == "__main__":
             v=state.v.replace(data=state.v.data + v_pert),
             eta=state.eta.replace(data=state.eta.data + eta_pert),
         )
-        cfg_bt = LatLonCGridOceanConfig(
+        cfg_bt = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=1e-3, n_barotropic_substeps=5,
             differentiable_barotropic=True, barotropic_diffusion_alpha=0.01,
             enable_runtime_checks=False, A_v=0.0, K_v=0.0, K_h=0.0,

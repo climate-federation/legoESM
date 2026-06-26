@@ -131,7 +131,7 @@ def test_model_construction_and_step_with_catke():
     )
     grid = create_latlon_grid(n_lat=8, n_lon=16)
     z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4, implicit_vertical_mixing=True, physics=_catke_physics(),
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)

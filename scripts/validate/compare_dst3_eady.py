@@ -58,7 +58,7 @@ def run_eady(scheme: str, n_lat: int, n_lon: int, days: float, dt: float = 300.0
         tracer_advection=scheme,
         physics=physics,
     )
-    cfg = LatLonCGridOceanConfig(**kw)
+    cfg = LatLonCGridOceanConfig.from_flat(**kw)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     state = eu_ic("latlon_channel", grid, z_coord, eu_config)
 

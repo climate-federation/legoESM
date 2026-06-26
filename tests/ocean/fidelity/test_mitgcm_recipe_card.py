@@ -38,7 +38,7 @@ def test_block_mapping_references_real_config_fields():
     from legoesm.ocean.fidelity.mitgcm_recipe import MITGCM_BLOCK_MAPPING
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     # TOP-LEVEL config fields the wiring diagram references (surface_forcing/sponge
     # are physics sub-fields / step args, not top-level — excluded here).
     top_level = {

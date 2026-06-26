@@ -211,7 +211,7 @@ class TestHallbergAdcroftColumnSumIdentity:
         H_bathy = _step_bathy(grid)
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
         state = _stratified_state_partial(grid, z_coord, H_bathy, partial_coord)
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
 
         (h_u_old, h_v_old, u_corr, v_corr, u_mask_3d, v_mask_3d,
          Hu_avg, Hv_avg) = self._replicate_step_through_correction(
@@ -239,7 +239,7 @@ class TestHallbergAdcroftColumnSumIdentity:
             T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
 
         (h_u_old, h_v_old, u_corr, v_corr, u_mask_3d, v_mask_3d,
          Hu_avg, Hv_avg) = self._replicate_step_through_correction(
@@ -289,7 +289,7 @@ class TestTracerMassConservation:
         flux-form transport is the only thing that can change the
         column-integrated tracer mass.  Conservation should then hold
         to machine precision."""
-        return LatLonCGridOceanConfig(
+        return LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             K_h=0.0, K_bih=0.0, K_v=0.0,
             A_h=0.0, B_h=0.0, A_v=0.0,
@@ -320,7 +320,7 @@ class TestTracerMassConservation:
         column heat sum(h_partial*T*area), not the dz_ref-weighted sum. All
         other tendencies disabled + conservation fixer off, so the only thing
         that can break sum(h*T) is the mixing's own thickness weighting."""
-        return LatLonCGridOceanConfig(
+        return LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             K_h=0.0, K_bih=0.0, A_h=0.0, B_h=0.0, C_smag=0.0,
             bottom_drag_r=0.0,
@@ -395,7 +395,7 @@ class TestVerticalVelocityAtPartialSeafloor:
         H_bathy = _step_bathy(grid)
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
         state = _stratified_state_partial(grid, z_coord, H_bathy, partial_coord)
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
 
         # Re-use the column-sum identity helper to get u_corrected,
         # which is the mass-consistent velocity used internally by the

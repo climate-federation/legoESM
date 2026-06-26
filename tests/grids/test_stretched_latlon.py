@@ -627,7 +627,7 @@ def _stretched_channel(**cfg_kw):
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         enable_runtime_checks=False, **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)

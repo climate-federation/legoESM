@@ -361,7 +361,7 @@ def _build_global_problem(
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
     import os as _os
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         barotropic_solver=baro_solver,
         barotropic_implicit_force_pcg=force_pcg,
         barotropic_implicit_pcg_variant=pcg_variant,

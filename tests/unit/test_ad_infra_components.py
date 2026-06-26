@@ -78,7 +78,7 @@ def _make_ocean():
 
     grid = create_latlon_grid(n_lat=8, n_lon=16)
     z = create_ocean_z_star(3, H_max=500.0)
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         use_conservation_fixer=False, enable_runtime_checks=False,
         n_barotropic_substeps=2, differentiable_barotropic=True,
     )

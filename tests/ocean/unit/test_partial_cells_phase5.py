@@ -100,7 +100,7 @@ class TestVerticalVelocityAtSeafloor:
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         # Use the full model.step to exercise the w-diagnosis pipeline.
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         # Run one step and check w at seafloor in the new state.
@@ -150,7 +150,7 @@ class TestVerticalAdvectionAtRest:
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         # Full PE call exercises both vertical advection and PGF
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, partial_coord, cfg,
@@ -190,7 +190,7 @@ class TestFlatBottomWDiagnosisBitExact:
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
 
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         # Compare full PE outputs (which exercise w-diagnosis internally)
         tend_zstar = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,

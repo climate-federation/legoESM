@@ -28,7 +28,7 @@ def veros_faithful_stepping(*, with_surface_forcing: bool,
 
     Splat into the config constructor, e.g.::
 
-        LatLonCGridOceanConfig(
+        LatLonCGridOceanConfig.from_flat(
             ...,
             **veros_faithful_stepping(with_surface_forcing=wsf, dt_mom_ratio=9.0),
             ...,

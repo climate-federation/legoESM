@@ -279,7 +279,7 @@ def _step_setup(dtype):
         u=state.u.replace(data=state.u.data.astype(dtype)),
         v=state.v.replace(data=state.v.data.astype(dtype)),
     )
-    cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
     return grid, z_coord, cfg, state
 
 

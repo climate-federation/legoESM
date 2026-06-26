@@ -597,7 +597,7 @@ def run_tier(config: TierConfig):
     state, coord = build_initial_state(grid, z_coord, config)
 
     # Build model
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         pgf_scheme=config.pgf_scheme,
         barotropic_solver=config.barotropic_solver,
         momentum_advection=config.momentum_advection,

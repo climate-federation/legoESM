@@ -217,7 +217,7 @@ def main():
         T_per_cell = jnp.where(z_coord.is_active, T_per_cell, 2.0)
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         barotropic_solver="implicit_cn",
         physics=None,
         bottom_drag_r=args.bottom_drag_r,

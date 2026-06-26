@@ -105,7 +105,7 @@ def test_latlon_ocean_spmd_matches_single_device():
     n_lat, n_lon, nlev = 48, 96, 10
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     state0 = _perturbed_state(grid, z_coord)
     dt, n_steps = 600.0, 3

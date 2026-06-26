@@ -61,7 +61,7 @@ def _promote_state_to_f64(state):
 def run_latlon():
     grid = create_latlon_grid(36, 72)
     z = create_ocean_z_star(n_levels=NLEV, H_max=H_MAX)
-    cfg = LatLonCGridOceanConfig(n_barotropic_substeps=30)
+    cfg = LatLonCGridOceanConfig.from_flat(n_barotropic_substeps=30)
     model = LatLonCGridOceanModel(grid, z, cfg)
     state = ga_ic("latlon", grid, z)
     state = _promote_state_to_f64(state)
