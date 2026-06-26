@@ -400,10 +400,83 @@ def _era5_held_fluxes(era5: ERA5Slice, regrid_2d_fn, shape_2d):
     )
 
 
+def prognostic_carry_seeds(
+    microphysics: str,
+    turbulence: str,
+    shape_3d,
+):
+    """Extra ``pack_carry`` kwargs seeding the conditional prognostic carries.
+
+    The warm-rain carry (``q_v``/``q_c``/``q_r`` + diagnostic turbulence)
+    needs nothing beyond the three microphysics slots every ERA5 carry
+    already passes, so for ``kessler``/``sundqvist`` + a diagnostic
+    turbulence scheme this returns ``{}`` and the carry pytree is
+    BYTE-IDENTICAL to the legacy warm-rain carry (``q_i``…``N_i``/``tke``/
+    ``qke`` stay ``None`` ⇒ the ``lax.scan`` carry structure and the
+    ``_dm_upd(None tendency)`` path are unchanged).  Seeding non-``None``
+    extras would flip the carry structure, so the warm-rain branch must
+    return ``{}``.
+
+    Two conditions add seeds (mirroring the production driver's
+    ``ModelDriver`` IC seeding, model_driver.py): a double-moment /
+    bin microphysics scheme that writes more than the three warm-rain
+    tracer slots gets ``q_i``…``N_i`` seeded as ``jnp.zeros(shape_3d)``;
+    a STATEFUL turbulence scheme (``carries_energy`` — tke / mynn25 /
+    clubb* / edmf) gets its prognostic energy carry (``tke`` or ``qke``)
+    seeded as ``jnp.zeros(shape_3d)``.  All double-moment schemes guard
+    their mean-size / fall-speed divides with ``jnp.where(q>eps,…)`` /
+    ``safe_divide`` / number floors, so a zero seed is forward- and
+    gradient-safe (produces zero tendencies at ``t=0``).
+
+    Parameters
+    ----------
+    microphysics : str
+        Microphysics scheme name (``ExperimentConfig.microphysics``).
+    turbulence : str
+        Turbulence scheme name (``ExperimentConfig.turbulence``).
+    shape_3d : tuple
+        Model 3-D field shape ``(..., nlev)`` — the shape of ``q_v``.
+
+    Returns
+    -------
+    dict
+        Keyword arguments to splat into :func:`pack_carry`.
+    """
+    from legoesm.driver.physics_pipeline import (
+        required_microphysics_tracer_slots,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+
+    seeds: dict = {}
+
+    # Double-moment / bin microphysics: seed the hydrometeor + number
+    # carries the scheme writes beyond the warm-rain [q_v, q_c, q_r]
+    # slots.  Slot layout (see validate_microphysics_tracer_slots):
+    # [3]=q_i [4]=q_s [5]=q_g [6]=N_c [7]=N_r [8]=N_i.  ``>3`` is the
+    # warm-rain guard: kessler / sundqvist (3 slots) and SDM's default
+    # condensation-only path (2 slots) keep these ``None``.
+    if required_microphysics_tracer_slots(microphysics) > 3:
+        for _name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+            seeds[_name] = jnp.zeros(shape_3d)
+
+    # Stateful turbulence: seed the prognostic energy carry (tke or qke).
+    # Diagnostic schemes (louis / smagorinsky / ysu / holtslag_boville /
+    # vreman) report carries_energy=False ⇒ no seed, carry unchanged.
+    _traits = turbulence_scheme_traits(turbulence)
+    if _traits.carries_energy:
+        seeds[_traits.energy_field] = jnp.zeros(shape_3d)
+
+    return seeds
+
+
 def era5_to_spectral_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -492,6 +565,7 @@ def era5_to_spectral_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -499,6 +573,8 @@ def era5_to_cubedsphere_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -584,6 +660,7 @@ def era5_to_cubedsphere_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -591,6 +668,8 @@ def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -611,6 +690,17 @@ def era5_to_latlon_carry(
     era5 : ERA5Slice
     grid : LatLonGrid  (exposes ``.lat`` / ``.lon`` in radians)
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+    microphysics : str, default ``"none"``
+        Microphysics scheme name.  A double-moment / bin scheme
+        (``morrison``/``seifert_beheng``/``thompson``/``p3``/
+        ``fast_sbm``/``ml_emulator``) seeds the extra hydrometeor +
+        number carries; warm-rain (``kessler``/``sundqvist``) leaves
+        them ``None`` (carry byte-identical).  See
+        :func:`prognostic_carry_seeds`.
+    turbulence : str, default ``"none"``
+        Turbulence scheme name.  A stateful scheme (``tke``/``mynn25``/
+        ``clubb*``/``edmf``) seeds the ``tke``/``qke`` energy carry;
+        diagnostic schemes leave them ``None``.
 
     Returns
     -------
@@ -674,6 +764,7 @@ def era5_to_latlon_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 

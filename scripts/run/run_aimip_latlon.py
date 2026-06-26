@@ -153,7 +153,7 @@ def _parse_windows(spec: str):
 
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
-                      era5_zarr=None):
+                      era5_zarr=None, microphysics="none", turbulence="none"):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
@@ -214,7 +214,13 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for s in range(n_ics + stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
-            block[s] = (era5_to_latlon_carry(era5, grid, sigma), era5, tidx)
+            block[s] = (
+                era5_to_latlon_carry(
+                    era5, grid, sigma,
+                    microphysics=microphysics, turbulence=turbulence,
+                ),
+                era5, tidx,
+            )
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
             target_carry, _, _ = block[d + stride]
@@ -641,12 +647,14 @@ def main(argv=None):
         grid, sigma, train_windows,
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
+        microphysics=args.microphysics, turbulence=args.turbulence,
     )
     logger.info("Loading eval data ...")
     eval_data = load_window_pairs(
         grid, sigma, eval_windows,
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
+        microphysics=args.microphysics, turbulence=args.turbulence,
     )
 
     scorecard = {}

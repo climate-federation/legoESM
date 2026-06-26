@@ -60,14 +60,20 @@ SWEEP_SPACE = {
     # sweep compares real schemes, never omits a parameterization). The
     # cloud=none / micro=none clear-sky runs already proved omitting a category
     # wrecks radiation (OLR rmse 34->80), so they are not useful comparisons.
+    # ALL run_amip-selectable convection schemes (baseline mass_flux). The
+    # profile-prognostic schemes (zhang_mcfarlane/kain_fritsch/emanuel/
+    # bechtold/tiedtke) are NOT in run_amip's --convection choices + need a
+    # conv_prog carry not yet seeded in training -> follow-up to test those.
     "convection": [
         "sbm", "dca", "kuo", "edmf",
     ],
-    # Stateful-TKE schemes (tke, mynn25) need a seeded prognostic carry
-    # (issue #413) the orchestrator doesn't thread yet -> excluded; the
-    # diagnostic closures are swept.
+    # ALL run_amip turbulence schemes (baseline louis). tke is stateful — its
+    # tke/qke carry is now seeded in the training IC (prognostic_carry_seeds),
+    # so it trains. clubb may be prognostic (needs a clubb_moments carry, not
+    # seeded) -> may fail-isolate. mynn25 is not a run_amip --turbulence choice.
     "turbulence": [
-        "smagorinsky", "holtslag_boville", "ysu",
+        "smagorinsky", "holtslag_boville", "ysu", "clubb_lite", "clubb",
+        "edmf", "tke",
     ],
     # hines is the baseline. mcfarlane and lindzen are orographic — with no
     # per-column subgrid-orography input they fall back to the scalar
@@ -76,15 +82,15 @@ SWEEP_SPACE = {
     "gravity_wave_drag": [
         "mcfarlane", "lindzen", "rayleigh",
     ],
-    # kessler is the baseline warm-rain micro; sundqvist is the alternative
-    # single-moment scheme. Double-moment schemes (morrison/p3/thompson/
-    # seifert_beheng) need extra prognostic tracer slots not wired into the
-    # training carry + blow the rrtmgp+micro compile budget -> excluded.
+    # ALL bulk microphysics (baseline kessler). Double-moment schemes
+    # (seifert_beheng/morrison/thompson/p3) now train — their 9 hydrometeor +
+    # number tracer slots are seeded (zeros, guarded q/N>eps) in the training
+    # IC. sdm (super-droplet) / fast_sbm (spectral-bin) are non-standard for
+    # AMIP bulk training -> excluded.
     "microphysics": [
-        "sundqvist",
+        "sundqvist", "seifert_beheng", "morrison", "thompson", "p3",
     ],
-    # xu_randall is the baseline cloud-fraction scheme (feeds rrtmgp cloud
-    # optics); sundqvist is the diagnostic-RH alternative.
+    # ALL cloud-fraction schemes (baseline xu_randall; sundqvist alternative).
     "clouds": [
         "sundqvist",
     ],

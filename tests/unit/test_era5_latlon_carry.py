@@ -12,7 +12,11 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.grids.factory import create_grid
-from legoesm.training.era5_to_state import ERA5Slice, era5_to_latlon_carry
+from legoesm.training.era5_to_state import (
+    ERA5Slice,
+    era5_to_latlon_carry,
+    prognostic_carry_seeds,
+)
 
 
 def _synthetic_era5(n_lat=37, n_lon=72, n_plev=8):
@@ -96,3 +100,94 @@ def test_latlon_carry_analytic_temperature_value():
         f"equator-pole gradient lost: eq={T_eq_sfc:.1f} pole={T_pole_sfc:.1f}")
     # Equatorial surface T near the synthetic 300 K equator value.
     assert 285.0 < T_eq_sfc < 305.0
+
+
+# ---------------------------------------------------------------------------
+# Conditional prognostic-carry seeding (all-scheme AIMIP training support)
+# ---------------------------------------------------------------------------
+
+def _latlon_carry(microphysics, turbulence, n=12, nlev=20):
+    grid = create_grid("latlon", n)
+    from legoesm.grids.vertical import create_sigma_coordinate
+    sigma = create_sigma_coordinate(nlev)
+    return era5_to_latlon_carry(
+        _synthetic_era5(), grid, sigma,
+        microphysics=microphysics, turbulence=turbulence,
+    )
+
+
+def test_warm_rain_carry_leaves_extras_none():
+    """kessler + diagnostic turbulence ⇒ q_i…N_i / tke / qke stay None.
+
+    The warm-rain default path's carry pytree must be byte-identical to
+    the legacy carry — seeding non-None would flip the lax.scan carry
+    structure and the _dm_upd(None tendency) path.
+    """
+    carry = _latlon_carry("kessler", "louis")
+    for name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i", "tke", "qke"):
+        assert getattr(carry, name) is None, (
+            f"{name} should be None for warm-rain kessler/louis, "
+            f"got {type(getattr(carry, name))}")
+    # The three warm-rain microphysics slots are still real arrays.
+    assert carry.q_v is not None and carry.q_c is not None
+    assert carry.q_r is not None
+
+
+def test_double_moment_carry_seeds_zero_tracers():
+    """morrison ⇒ q_i…N_i seeded as zero arrays of the 3-D field shape."""
+    carry = _latlon_carry("morrison", "louis")
+    nlev = 20
+    grid = create_grid("latlon", 12)
+    expected = (grid.n_lat, grid.n_lon, nlev)
+    for name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+        arr = getattr(carry, name)
+        assert arr is not None, f"{name} should be seeded for morrison"
+        arr = np.asarray(arr)
+        assert arr.shape == expected, (
+            f"{name} shape {arr.shape} != {expected}")
+        assert np.all(arr == 0.0), f"{name} should seed to zero, got nonzero"
+    # Diagnostic turbulence ⇒ tke / qke still None.
+    assert carry.tke is None and carry.qke is None
+
+
+def test_stateful_turbulence_carry_seeds_tke():
+    """tke turbulence ⇒ tke seeded as a zero (…, nlev) array; qke None."""
+    carry = _latlon_carry("kessler", "tke")
+    nlev = 20
+    grid = create_grid("latlon", 12)
+    expected = (grid.n_lat, grid.n_lon, nlev)
+    assert carry.tke is not None, "tke should be seeded for the tke scheme"
+    tke = np.asarray(carry.tke)
+    assert tke.shape == expected, f"tke shape {tke.shape} != {expected}"
+    assert np.all(tke == 0.0), "tke should seed to zero"
+    # tke (not mynn25) ⇒ the qke slot stays None.
+    assert carry.qke is None
+    # Warm-rain microphysics still leaves the double-moment slots None.
+    assert carry.q_i is None and carry.N_c is None
+
+
+def test_mynn25_seeds_qke_not_tke():
+    """mynn25 ⇒ the qke slot is seeded, tke stays None (distinct moment)."""
+    carry = _latlon_carry("kessler", "mynn25")
+    assert carry.qke is not None, "mynn25 should seed qke"
+    assert np.all(np.asarray(carry.qke) == 0.0)
+    assert carry.tke is None, "mynn25 carries q²=qke, not tke"
+
+
+def test_prognostic_carry_seeds_helper_warm_rain_empty():
+    """The shared helper returns {} for warm-rain (no carry-structure flip)."""
+    seeds = prognostic_carry_seeds("kessler", "louis", (4, 4, 5))
+    assert seeds == {}
+    # sundqvist is also warm-rain (3 slots).
+    assert prognostic_carry_seeds("sundqvist", "smagorinsky", (4, 4, 5)) == {}
+    # SDM default (condensation-only, 2 slots) ⇒ no double-moment seed.
+    assert "q_i" not in prognostic_carry_seeds("sdm", "louis", (4, 4, 5))
+
+
+def test_prognostic_carry_seeds_helper_double_moment_and_stateful():
+    """The helper seeds the right keys for a double-moment + stateful combo."""
+    seeds = prognostic_carry_seeds("seifert_beheng", "tke", (3, 3, 6))
+    for name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i", "tke"):
+        assert name in seeds, f"{name} missing from seeds"
+        assert np.asarray(seeds[name]).shape == (3, 3, 6)
+    assert "qke" not in seeds  # tke scheme uses the tke slot

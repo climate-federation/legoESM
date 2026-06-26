@@ -15,9 +15,9 @@ _spec.loader.exec_module(mod)
 
 def test_combo_count_and_structure():
     combos = mod.build_combos()
-    # baseline + 4 conv + 3 turb + 3 gwd + 1 micro + 1 cloud (all 5 categories,
-    # NO 'none' anywhere -> every combo keeps all 5 parameterizations active)
-    assert len(combos) == 1 + 4 + 3 + 3 + 1 + 1 == 13
+    # baseline + 4 conv + 7 turb + 3 gwd + 5 micro + 1 cloud — every CLI-valid
+    # scheme per category, NO 'none' anywhere (all 5 categories always active).
+    assert len(combos) == 1 + 4 + 7 + 3 + 5 + 1 == 21
     assert combos[0]["name"] == "combo_baseline"
     assert combos[0]["convection"] == mod.BASELINE["convection"]
     for c in combos:
