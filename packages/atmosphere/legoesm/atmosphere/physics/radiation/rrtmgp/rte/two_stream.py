@@ -125,7 +125,7 @@ def _reindex_vmr_fields(
   return {gas_optics_lib.idx_gases[k]: v for k, v in vmr_fields.items()}
 
 
-def _replace_top_flux(f: Array, allow_overshoot: bool = False) -> Array:
+def _replace_top_flux(f: Array) -> Array:
   """Modify problematic value for the fluxes at the top boundary (top halo).
 
   Use quadratic polynomials to evaluate the flux at the top boundary making use
@@ -156,39 +156,16 @@ def _replace_top_flux(f: Array, allow_overshoot: bool = False) -> Array:
   this range-limit is nonlinear, so clipping ``flux_net`` independently would
   break the ``net = up - down`` identity that the raw linear quadratic kept.
 
-  For downwelling fluxes (``allow_overshoot=True``): the TRUE TOA value exceeds
-  all interior levels (SW downwelling decreases monotonically toward surface;
-  LW downwelling → 0 at TOA).  The full ``[lo, hi]`` clamp systematically caps
-  ``rsdt`` at the first interior level (~15 % below S₀ cos θ).  With
-  ``allow_overshoot=True`` only the lower floor ``lo >= 0`` is applied — the
-  quadratic is free to exceed the interior maximum, recovering the correct TOA
-  diagnostic.  The BUG-B upwelling overshoot that motivated the clamp cannot
-  occur for downwelling (upwelling BUG-B arises from a sharp near-TOA
-  reflectance gradient — a downwelling profile cannot overshoot upward through
-  the same mechanism).
-
-  ``allow_overshoot`` is a compile-time Python bool (resolved at trace time,
-  never a traced JAX value).
-
   Args:
     f: The array to fix the top boundary of.
-    allow_overshoot: If True, clip only to ``lo`` (non-negative floor), allowing
-      the quadratic to exceed the interior maximum.  Use for downwelling fluxes.
-      If False (default), apply the full ``[lo, hi]`` range-limit.  Use for
-      upwelling fluxes.
 
   Returns:
     The array with the top boundary value fixed.
   """
   quad = 3 * f[:, :, -2] - 3 * f[:, :, -3] + f[:, :, -4]
   lo = jnp.minimum(jnp.minimum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-  if allow_overshoot:
-    # Downwelling: clamp to lo only (non-negative floor); allow quad > hi so
-    # that the TOA halo can correctly exceed all attenuated interior levels.
-    top_bdy_f = jnp.maximum(quad, lo)
-  else:
-    hi = jnp.maximum(jnp.maximum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-    top_bdy_f = jnp.clip(quad, lo, hi)
+  hi = jnp.maximum(jnp.maximum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
+  top_bdy_f = jnp.clip(quad, lo, hi)
   f = f.at[:, :, -1].set(top_bdy_f)
   return f
 
@@ -544,7 +521,7 @@ def solve_lw(
   # the physical up/down components and RECOMPUTE flux_net = up - down at the
   # top face to keep the TOA energy budget consistent.
   fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-  fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'], allow_overshoot=True)
+  fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
   fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
       fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
 
@@ -772,7 +749,7 @@ def solve_sw(
     # the top face (the nonlinear range-limit would otherwise break the
     # flux_net = flux_up - flux_down identity the raw linear quadratic kept).
     fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-    fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'], allow_overshoot=True)
+    fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
     fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
         fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
 
