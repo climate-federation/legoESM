@@ -43,15 +43,16 @@ module load gcc cray-mpich 2>/dev/null || true   # match the mpi4py/mpi4jax buil
 GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
 PRECISION="${PRECISION:-float32}"
-# Max MPI ranks = the slots PBS granted (one line per rank in $PBS_NODEFILE).
-# NOT `nproc`: a login-node / partial cpuset reports too few (e.g. 1) and the
-# `N*THREADS > NCPUS` guard then silently SKIPs the entire rank ladder.
-if   [ -n "${NCPUS:-}" ];        then :
-elif [ -n "${PBS_NODEFILE:-}" ]; then NCPUS="$(( $(wc -l < "$PBS_NODEFILE") ))"
-else NCPUS=128; fi   # off-PBS fallback: a full Derecho node
-if [ "${NCPUS:-0}" -lt 2 ]; then
-    echo "WARNING: NCPUS=$NCPUS (<2) -- only the 1-rank case will run. On a login" >&2
-    echo "         node? Submit via submit_fullnode.sh (qsub), or set NCPUS." >&2
+# Rank cap = the MPI slots PBS granted (one line per slot in $PBS_NODEFILE).
+# Do NOT use $NCPUS: PBS EXPORTS its own $NCPUS = cores-PER-RANK (=1 for
+# mpiprocs=128), so reading it silently SKIPs the whole rank ladder.  Override
+# with $LEGOESM_NCPUS for an off-PBS / partial run.
+_CORES="$( { [ -n "${PBS_NODEFILE:-}" ] && wc -l < "$PBS_NODEFILE"; } 2>/dev/null | tr -d '[:space:]' )"
+_CORES="${LEGOESM_NCPUS:-${_CORES:-128}}"   # off-PBS fallback: a full Derecho node
+if [ "${_CORES:-0}" -lt 2 ] 2>/dev/null; then
+    echo "WARNING: core count=${_CORES:-?} (<2) -- only the 1-rank case will run." >&2
+    echo "         Submit via submit_fullnode.sh (qsub), or set LEGOESM_NCPUS." >&2
+    _CORES=128
 fi
 EXTRA=""
 THREADS=1                              # pure-MPI default: one thread per rank
@@ -68,7 +69,7 @@ case "$GRID" in
     RESOLUTIONS="${RESOLUTIONS:-6 7}" ;;
   spectral)
     RANKS="1"                                 # no MPI -> single point...
-    THREADS="${THREADS_SPECTRAL:-$NCPUS}"     # ...fill the node with XLA threads
+    THREADS="${THREADS_SPECTRAL:-$_CORES}"    # ...fill the node with XLA threads
     RESOLUTIONS="${RESOLUTIONS:-85 170}" ;;
   *)
     echo "ERROR: unknown GRID='$GRID' (latlon | icosahedral | spectral)" >&2
@@ -87,13 +88,13 @@ mkdir -p "$CAMP"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
 echo "=== $GRID CPU strong scaling: ranks=[$RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
-echo "    physics=$PHYSICS prec=$PRECISION ncpus=$NCPUS  outdir=$CAMP"
+echo "    physics=$PHYSICS prec=$PRECISION cores=$_CORES  outdir=$CAMP"
 
 rc_all=0
 for R in $RESOLUTIONS; do
   for N in $RANKS; do
-    if [ "$(( N * THREADS ))" -gt "$NCPUS" ]; then
-      echo "--- $GRID res=$R N=$N: needs $(( N * THREADS )) > $NCPUS cores -- SKIP ---"
+    if [ "$(( N * THREADS ))" -gt "$_CORES" ]; then
+      echo "--- $GRID res=$R N=$N: needs $(( N * THREADS )) > $_CORES cores -- SKIP ---"
       continue
     fi
     echo "--- $GRID res=$R ranks=$N ---"

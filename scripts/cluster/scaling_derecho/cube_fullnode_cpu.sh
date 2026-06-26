@@ -40,10 +40,12 @@ module load gcc cray-mpich 2>/dev/null || true
 
 # --- Sweep configuration -----------------------------------------------------
 CUBE_RANKS="${CUBE_RANKS:-1 2 3 6}"   # face decomposition (each must DIVIDE 6)
-# Total cores to spread as threads across the face ranks.  cube requests
-# mpiprocs=6 (not 128), so $PBS_NODEFILE counts ranks, NOT cores -- default to a
-# full Derecho node and let NCPUS override.  NOT `nproc` (login-cpuset trap).
-NCPUS="${NCPUS:-128}"                 # full Derecho node cores
+# Total cores to spread as threads across the face ranks.  Do NOT use $NCPUS:
+# PBS EXPORTS its own $NCPUS (cores-per-rank, e.g. ompthreads), which is NOT the
+# node core count we need.  cube requests mpiprocs=6 so $PBS_NODEFILE counts
+# ranks (6), not cores either -- default to a full Derecho node; override with
+# $LEGOESM_NCPUS.
+_CORES="${LEGOESM_NCPUS:-128}"        # full Derecho node cores
 PHYSICS="${PHYSICS:-none}"           # 'none' = dycore-only (aggregate case 'dry')
 PRECISION="${PRECISION:-float32}"
 STRONG_RES="${STRONG_RES:-48 96 192}"   # cube face-edge cells (space-separated)
@@ -55,12 +57,12 @@ mkdir -p "$CAMP"
 # run_levante sweeps resolutions internally, so loop N (face count) only and
 # pass all resolutions at once; comma-separate them for --strong-resolutions.
 RES_CSV="$(echo "$STRONG_RES" | tr ' ' ',')"
-echo "=== cube CPU strong scaling: faces=[$CUBE_RANKS] on ${NCPUS} cores  res=[$STRONG_RES] ==="
+echo "=== cube CPU strong scaling: faces=[$CUBE_RANKS] on ${_CORES} cores  res=[$STRONG_RES] ==="
 echo "    physics=$PHYSICS prec=$PRECISION  outdir=$CAMP"
 
 rc_all=0
 for N in $CUBE_RANKS; do
-  THREADS=$(( NCPUS / N ))             # fill the node at this face count
+  THREADS=$(( _CORES / N ))             # fill the node at this face count
   # Multi-threaded Eigen ON; bind each rank to its own THREADS-core block so the
   # per-rank pools never overlap (Cray PALS depth binding).  Per-N output subdir
   # so run_levante's fixed strong_scaling.json filename never collides.
