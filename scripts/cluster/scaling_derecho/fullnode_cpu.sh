@@ -43,7 +43,16 @@ module load gcc cray-mpich 2>/dev/null || true   # match the mpi4py/mpi4jax buil
 GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
 PRECISION="${PRECISION:-float32}"
-NCPUS="${NCPUS:-$(nproc)}"
+# Max MPI ranks = the slots PBS granted (one line per rank in $PBS_NODEFILE).
+# NOT `nproc`: a login-node / partial cpuset reports too few (e.g. 1) and the
+# `N*THREADS > NCPUS` guard then silently SKIPs the entire rank ladder.
+if   [ -n "${NCPUS:-}" ];        then :
+elif [ -n "${PBS_NODEFILE:-}" ]; then NCPUS="$(( $(wc -l < "$PBS_NODEFILE") ))"
+else NCPUS=128; fi   # off-PBS fallback: a full Derecho node
+if [ "${NCPUS:-0}" -lt 2 ]; then
+    echo "WARNING: NCPUS=$NCPUS (<2) -- only the 1-rank case will run. On a login" >&2
+    echo "         node? Submit via submit_fullnode.sh (qsub), or set NCPUS." >&2
+fi
 EXTRA=""
 THREADS=1                              # pure-MPI default: one thread per rank
 case "$GRID" in

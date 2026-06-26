@@ -40,7 +40,10 @@ module load gcc cray-mpich 2>/dev/null || true
 
 # --- Sweep configuration -----------------------------------------------------
 CUBE_RANKS="${CUBE_RANKS:-1 2 3 6}"   # face decomposition (each must DIVIDE 6)
-NCPUS="${NCPUS:-$(nproc)}"            # full node = 128
+# Total cores to spread as threads across the face ranks.  cube requests
+# mpiprocs=6 (not 128), so $PBS_NODEFILE counts ranks, NOT cores -- default to a
+# full Derecho node and let NCPUS override.  NOT `nproc` (login-cpuset trap).
+NCPUS="${NCPUS:-128}"                 # full Derecho node cores
 PHYSICS="${PHYSICS:-none}"           # 'none' = dycore-only (aggregate case 'dry')
 PRECISION="${PRECISION:-float32}"
 STRONG_RES="${STRONG_RES:-48 96 192}"   # cube face-edge cells (space-separated)
