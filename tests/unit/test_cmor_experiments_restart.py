@@ -702,7 +702,10 @@ class TestTuningParameters(unittest.TestCase):
         from legoesm.tuning import TUNING_PARAMETERS
 
         categories = {p.category for p in TUNING_PARAMETERS.values()}
-        expected = {"dynamics", "radiation", "convection", "diffusion", "surface"}
+        expected = {
+            "dynamics", "radiation", "convection", "diffusion", "surface",
+            "turbulence", "gwd", "clouds",
+        }
         self.assertEqual(expected, categories)
 
     def test_ranges_valid(self):
