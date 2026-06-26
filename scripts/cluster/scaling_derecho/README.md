@@ -1,30 +1,34 @@
-# Derecho weak/strong scaling jobs
+# Derecho scaling: full CPU node vs 1 A100
 
-AMIP-representative weak+strong scaling of legoESM on **NCAR Derecho**, for both
-GPU (`deg*` nodes: 4× A100-40GB) and CPU-MPI (`main` queue: 128-core EPYC nodes).
+**The single supported way to test legoESM scaling on NCAR Derecho.** It
+measures throughput (SYPD) per resolution for **one full CPU node (128-core
+EPYC, `main` queue)** against **one A100 GPU (`deg*` node)**, one grid at a time.
+
+`submit_fullnode.sh` is the only entry point — it fans each resolution out into
+its own CPU job + GPU job and dispatches to the right backend scripts; you never
+call the building blocks directly.
 
 ```
 scaling_derecho/
-├── _env.sh              # shared env, sourced by all jobs (edit 2 values, see below)
-├── gpu_scaling.pbs      # GPU weak+strong (gpu nodes; single-process multi-GPU sharding; cubed-sphere AMIP physics)
-├── gpu_moist_scaling.pbs # GPU weak+strong, route-A mpi4jax (1 GPU/rank; latlon/icosahedral + --physics moist Kessler)
-└── cpu_scaling.pbs      # CPU weak+strong over MPI ranks (queue main; latlon/icosahedral)
+├── _env.sh              # shared env, sourced by every job (edit 2 values, Step 0)
+├── submit_fullnode.sh   # ►ENTRY POINT◄  submit_fullnode.sh <outdir> <grid> [res...]
+├── fullnode_cpu.sh      # full-node CPU (latlon/ico = 128-way MPI; spectral = threads)
+├── fullnode_gpu.sh      # 1-A100 baseline (latlon/ico/spectral)
+├── cube_fullnode_cpu.sh # full-node CPU for cubed-sphere (6-rank x ~21-thread hybrid)
+└── cube_strong_gpu.sh   # 1-A100 baseline for cubed-sphere (RANKS=1; mpi4jax scatter)
 ```
 
-`gpu_moist_scaling.pbs` is the GPU twin of `cpu_scaling.pbs` (same
-`run_cpu_mpi_scaling.py --physics moist` Kessler path), not of `gpu_scaling.pbs`.
-It runs the new all-grids moist baroclinic wave on the two genuinely
-GPU-decomposed grids — `latlon` and `icosahedral` — with one MPI rank per A100
-over the mpi4jax halo. It needs the **`legoesm-gpu`** env to also carry a
-CUDA-aware mpi4jax (the route-A overlay), and it pins `CUDA_VISIBLE_DEVICES` per
-rank from the Cray-PALS local rank id (Derecho's `mpiexec` does not export the
-OpenMPI/SLURM vars the auto-pin looks for). Cubed-sphere/spectral are rejected
-up front (cube moist on GPU is covered by `gpu_scaling.pbs`; spectral has no MPI
-path).
+**Why cubed-sphere has its own pair.** Cube has only 6 faces, so MPI caps at 6
+ranks — its full-node CPU run is a 6-rank × ~21-thread hybrid via the mpi4jax
+face-scatter path (`run_levante_gpu_scaling.py --cs-mpi-scatter`), and its A100
+baseline must use the same driver. latlon and icosahedral are genuinely
+domain-decomposed, so they run pure 128-way MPI via `run_cpu_mpi_scaling.py`;
+spectral has no MPI path and fills the node with XLA threads. `submit_fullnode.sh`
+hides all of this.
 
-The two jobs need **two different conda envs** — GPU JAX and CPU+MPI JAX are
-incompatible builds. Build both once (Steps 1–2), edit `_env.sh` (Step 0), then
-submit (Step 4).
+The CPU and GPU sides need **two different conda envs** — GPU JAX and CPU+MPI JAX
+are incompatible builds. Build both once (Steps 1–2), edit `_env.sh` (Step 0),
+then submit (Step 4).
 
 ---
 
@@ -80,14 +84,13 @@ python -c "import jax; print(jax.devices()[0].device_kind)"   # -> 'NVIDIA A100-
 > **Why JAX 0.9.2?** Keeps both envs in the tested `jax 0.8–0.9` envelope and
 > aligned with the MPI env (see the mpi4jax constraint below).
 
-> **Two different GPU jobs, two different requirements.** `gpu_scaling.pbs`
-> (cubed-sphere AMIP physics) shards a *single process* across the node's GPUs
-> via JAX's device mesh — it does **not** use mpi4jax, so the steps above are
-> enough for it. `gpu_moist_scaling.pbs` (latlon/icosahedral moist) is
-> **multi-process, one rank per GPU over mpi4jax** (route-A) and needs the
-> overlay below. Skip Step 1b if you only run `gpu_scaling.pbs`.
+> **The full-node comparison does NOT need Step 1b.** Every GPU job here is a
+> single A100 (1 rank, no mpi4jax halo), so the basic `legoesm-gpu` env above is
+> enough. Step 1b (the route-A mpi4jax-on-GPU overlay) is OPTIONAL — only build
+> it if you separately run `cube_strong_gpu.sh` standalone with `RANKS>1` for a
+> multi-GPU cube curve.
 
-### Step 1b — route-A overlay (only for `gpu_moist_scaling.pbs`)
+### Step 1b — route-A overlay (OPTIONAL — only for multi-GPU `cube_strong_gpu.sh RANKS>1`)
 
 The route-A GPU path launches `mpiexec -n N` (one rank per A100) and exchanges
 halos over mpi4jax — so `legoesm-gpu` ALSO needs a Cray-MPICH-built `mpi4py`
@@ -148,10 +151,8 @@ mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
 #   want: two lines, size 2, backend gpu  ==  route-A overlay fully working
 ```
 
-`gpu_moist_scaling.pbs` sets `MPICH_GPU_SUPPORT_ENABLED=1`, the
-`craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge itself at
-runtime, so once the env is built the submitted job carries the right
-environment without any of the manual exports above.
+(Only relevant to a standalone multi-GPU `cube_strong_gpu.sh RANKS>1` run; the
+full-node comparison's GPU jobs are single-rank and skip this entirely.)
 
 ---
 
@@ -236,45 +237,59 @@ mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \
 
 ---
 
-## Step 4 — Submit the full sweeps
+## Step 4 — Submit (one grid at a time)
+
+`submit_fullnode.sh` is the only entry point. Run it from anywhere — it `cd`s to
+the repo root so each job's `PBS_O_WORKDIR` resolves. The **outdir is required**;
+each job writes a unique subdir under it.
 
 ```bash
-qsub scripts/cluster/scaling_derecho/gpu_scaling.pbs        # GPU weak+strong (1->2->4 A100; cubed-sphere AMIP)
-qsub scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs   # GPU weak+strong moist (latlon/icosahedral; 1 GPU/rank)
-qsub scripts/cluster/scaling_derecho/cpu_scaling.pbs         # CPU weak+strong (ranks 1,2,4,...)
+submit_fullnode.sh <outdir> <grid> [res ...]
+#   <outdir>  REQUIRED scratch dir for all results (created if missing)
+#   <grid>    cubed-sphere | latlon | icosahedral | spectral
+#   [res]     resolutions to cover (default per-grid list if omitted)
+
+OUT=$SCRATCH/legoesm_scaling/cmp01
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon            # default res (128 256)
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere 48 96 192
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
 ```
 
-Override knobs without editing files (`qsub -v NAME=value,...`):
+For each resolution it submits **one full-node CPU job + one 1-A100 GPU job**
+(so a slow high-res case gets its own walltime and runs in parallel).
 
-| Var | GPU job default | CPU job default | Notes |
-|-----|-----------------|-----------------|-------|
-| `GRID` | `cubed-sphere` | `latlon` | CPU also: `icosahedral`. cubed-sphere/spectral are rank-1 only on CPU. |
-| `PHYSICS` | `gray_sbm` | `held_suarez` | GPU: `rrtmg_full` (needs RRTMGP data). CPU: `moist` (AMIP-like; moisture+Kessler). |
-| `MODE` | `both` | `both` | `weak` \| `strong` \| `both` |
-| `PRECISION` | `float32` | `float64` | |
-| `MAX_RANKS` | — | `64` | CPU only; powers of 2, ≤128 per node. >128 ⇒ multi-node `select=`. |
-| `N_GPUS` | `0` (auto) | — | GPU only; 0 = use all PBS-allocated GPUs. |
-| `STRONG_RES` | `48,96,192,384` | — | GPU only; cubed-sphere strong-scaling resolutions (cN/face-edge). Drop `48` for a cleaner curve. |
+Knobs (environment, passed through to the jobs):
 
-Examples:
+| Var | Default | Notes |
+|-----|---------|-------|
+| `PHYSICS` | `none` | `none` (dycore-only) \| `held_suarez` \| `moist` (moisture+Kessler) |
+| `PRECISION` | `float32` | `float32` \| `float64` |
+| `DRYRUN` | `0` | `1` = print the `qsub` lines without submitting |
+| `CPU_ONLY` / `GPU_ONLY` | `0` | submit just one side |
+
 ```bash
-qsub -v PHYSICS=rrtmg_full,MODE=strong,PRECISION=both scripts/cluster/scaling_derecho/gpu_scaling.pbs
-qsub -v GRID=icosahedral,PRECISION=float64 scripts/cluster/scaling_derecho/gpu_moist_scaling.pbs
-qsub -v PHYSICS=moist,MAX_RANKS=128 scripts/cluster/scaling_derecho/cpu_scaling.pbs
-qsub -v GRID=icosahedral scripts/cluster/scaling_derecho/cpu_scaling.pbs
+DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon   # preview first
+PHYSICS=moist PRECISION=float64 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
 ```
+
+Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
+icosahedral `6 7`, spectral `85 170`. Override by listing resolutions as args.
 
 ---
 
 ## Results
 
-Each run writes a timestamped dir under `$SCRATCH/legoesm_scaling/` containing
-per-case JSON (with `backend`, `n_cores`, `sypd`, `time_per_step_ms`, …) plus
-the GPU job's weak/strong PNG plots.
+Each job writes its subdir under your chosen `<outdir>` (`<grid>_cpu_res<R>/`,
+`<grid>_a100_res<R>/`), each containing per-case JSON (with `backend`, `sypd`,
+`time_per_step_ms`, …) and an aggregated tidy CSV. The full-node CPU vs 1-A100
+comparison is the **`sypd`** column at matched resolution.
 
 ```bash
 qstat -u $USER
-ls $SCRATCH/legoesm_scaling/
+ls $OUT                                            # the per-job subdirs
+column -s, -t < $OUT/latlon_cpu_res128/*_tidy.csv  # full-node CPU SYPD
+column -s, -t < $OUT/latlon_a100_res128/*_tidy.csv # 1-A100 SYPD
 ```
 
 ---

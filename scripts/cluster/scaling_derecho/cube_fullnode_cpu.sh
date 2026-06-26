@@ -59,9 +59,9 @@ module load gcc cray-mpich 2>/dev/null || true
 NRANKS="${NRANKS:-6}"              # one MPI rank per cube face (must DIVIDE 6)
 NCPUS="${NCPUS:-$(nproc)}"         # cores visible to the job (128 on a full node)
 THREADS="${THREADS:-$(( NCPUS / NRANKS ))}"   # XLA/Eigen threads per rank (~21)
-# Multi-threaded Eigen ON (do NOT disable it -- that is the 1-core-per-rank mode
-# of cube_strong_cpu.sh).  Bound below by --cpu-bind so each rank's THREADS
-# threads stay inside its own core block and ranks never oversubscribe.
+# Multi-threaded Eigen ON (do NOT disable it -- disabling gives the 1-core-per-
+# rank mode, which would idle most of the node).  Bound below by --cpu-bind so
+# each rank's THREADS threads stay inside its own core block (no oversubscribe).
 export OMP_NUM_THREADS="$THREADS"
 export MKL_NUM_THREADS="$THREADS"
 export OPENBLAS_NUM_THREADS="$THREADS"

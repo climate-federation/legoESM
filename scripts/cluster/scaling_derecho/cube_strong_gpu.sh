@@ -14,9 +14,9 @@
 # Runs scripts/bench/run_levante_gpu_scaling.py with TRUE face decomposition
 # (--cs-mpi-scatter: each rank owns 6/nranks faces, cross-face halos over
 # mpi4jax) at a ladder of rank counts, then aggregates + plots per-resolution
-# strong-scaling curves.  This is the GPU half of an apples-to-apples
-# CPU-vs-GPU comparison: cube_strong_cpu.sh runs the IDENTICAL driver and flags
-# on the CPU backend (only JAX_PLATFORMS + the conda env differ).
+# strong-scaling curves.  Used by submit_fullnode.sh with RANKS=1 as the cube
+# 1-A100 baseline; cube_fullnode_cpu.sh runs the IDENTICAL driver and flags on
+# the CPU backend (only JAX_PLATFORMS + the conda env differ).
 #
 # SUBMIT as a batch job (qsub from the repo root so $PBS_O_WORKDIR finds it):
 #   cd /glade/work/$USER/legoESM
@@ -44,7 +44,7 @@ fi
 
 # Force CUDA + the GPU conda env BEFORE sourcing _env.sh so a stale
 # JAX_PLATFORMS=cpu from a reused interactive shell can never silently run this
-# GPU sweep on the CPU (symmetric with cube_strong_cpu.sh).
+# GPU sweep on the CPU (symmetric with cube_fullnode_cpu.sh).
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 # shellcheck source=_env.sh

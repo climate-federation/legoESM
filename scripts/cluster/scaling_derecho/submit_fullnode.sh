@@ -10,18 +10,23 @@
 #   cubed-sphere -> cube_fullnode_cpu.sh   + cube_strong_gpu.sh (RANKS=1)
 #   latlon/ico/spectral -> fullnode_cpu.sh + fullnode_gpu.sh
 #
+# THE single supported way to run scaling on Derecho.  Everything else in this
+# directory is a building block this script drives.
+#
 # Usage:
-#   scripts/cluster/scaling_derecho/submit_fullnode.sh <grid> [res ...]
-#     <grid> : cubed-sphere | latlon | icosahedral | spectral
-#     [res]  : resolutions to cover (default per-grid list if omitted)
+#   scripts/cluster/scaling_derecho/submit_fullnode.sh <outdir> <grid> [res ...]
+#     <outdir> : REQUIRED scratch dir for all results, e.g.
+#                $SCRATCH/legoesm_scaling/cmp01 (each job writes a unique subdir)
+#     <grid>   : cubed-sphere | latlon | icosahedral | spectral
+#     [res]    : resolutions to cover (default per-grid list if omitted)
 #
 #   # default resolutions for the grid:
-#   scripts/cluster/scaling_derecho/submit_fullnode.sh latlon
+#   submit_fullnode.sh $SCRATCH/legoesm_scaling/run1 latlon
 #   # explicit resolutions:
-#   scripts/cluster/scaling_derecho/submit_fullnode.sh cubed-sphere 48 96 192
+#   submit_fullnode.sh $SCRATCH/legoesm_scaling/run1 cubed-sphere 48 96 192
 #   # knobs (pass through to the jobs) + dry run / one tier:
-#   PHYSICS=moist PRECISION=float32 DRYRUN=1 ... submit_fullnode.sh icosahedral
-#   CPU_ONLY=1 ... submit_fullnode.sh spectral
+#   PHYSICS=moist PRECISION=float32 DRYRUN=1 submit_fullnode.sh $SCRATCH/x icosahedral
+#   CPU_ONLY=1 submit_fullnode.sh $SCRATCH/x spectral
 # ===========================================================================
 set -euo pipefail
 
@@ -33,13 +38,17 @@ cd "${REPO_ROOT}"
 SD="scripts/cluster/scaling_derecho"
 QSUB="${QSUB:-qsub}"
 
-GRID="${1:-}"
-if [ -z "$GRID" ]; then
-    echo "usage: $0 <cubed-sphere|latlon|icosahedral|spectral> [res ...]" >&2
+OUTDIR="${1:-}"
+GRID="${2:-}"
+if [ -z "$OUTDIR" ] || [ -z "$GRID" ]; then
+    echo "usage: $0 <outdir> <cubed-sphere|latlon|icosahedral|spectral> [res ...]" >&2
+    echo "  <outdir> is REQUIRED (scratch dir for all results)." >&2
     exit 2
 fi
-shift
+shift 2
 RES=("$@")
+# Create the results root now (skip on a dry run -- it must not touch the FS).
+[ "${DRYRUN:-0}" = "1" ] || mkdir -p "$OUTDIR"
 
 # Default per-grid resolutions (match the underlying scripts) + reject unknowns.
 if [ "${#RES[@]}" -eq 0 ]; then
@@ -76,16 +85,19 @@ submit() {  # submit "<label>" <qsub args...>
 
 echo "=== repo: ${REPO_ROOT} ==="
 echo "=== full-node CPU-vs-A100: grid=${GRID}  resolutions=[${RES[*]}] ==="
+echo "=== outdir: ${OUTDIR} ==="
 
 for R in "${RES[@]}"; do
+    CPU_CAMP="${OUTDIR}/${GRID}_cpu_res${R}"     # unique per (grid,backend,res)
+    GPU_CAMP="${OUTDIR}/${GRID}_a100_res${R}"
     case "$GRID" in
         cubed-sphere)
-            CPU_SCRIPT="$SD/cube_fullnode_cpu.sh"; CPU_VARS="STRONG_RES=${R}${EXTRA_VARS}"
-            GPU_SCRIPT="$SD/cube_strong_gpu.sh";   GPU_VARS="RANKS=1,STRONG_RES=${R}${EXTRA_VARS}"
+            CPU_SCRIPT="$SD/cube_fullnode_cpu.sh"; CPU_VARS="STRONG_RES=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
+            GPU_SCRIPT="$SD/cube_strong_gpu.sh";   GPU_VARS="RANKS=1,STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
             ;;
         *)  # latlon | icosahedral | spectral (validated above)
-            CPU_SCRIPT="$SD/fullnode_cpu.sh"; CPU_VARS="GRID=${GRID},RESOLUTIONS=${R}${EXTRA_VARS}"
-            GPU_SCRIPT="$SD/fullnode_gpu.sh"; GPU_VARS="GRID=${GRID},RESOLUTIONS=${R}${EXTRA_VARS}"
+            CPU_SCRIPT="$SD/fullnode_cpu.sh"; CPU_VARS="GRID=${GRID},RESOLUTIONS=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
+            GPU_SCRIPT="$SD/fullnode_gpu.sh"; GPU_VARS="GRID=${GRID},RESOLUTIONS=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
             ;;
     esac
     if [ "${GPU_ONLY:-0}" != "1" ]; then
