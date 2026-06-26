@@ -700,6 +700,7 @@ def make_radiation_physics(
     column_mesh=None,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
+    nc_from_aerosol: bool = False,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -773,7 +774,8 @@ def make_radiation_physics(
     if model_type == "hydrostatic":
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs,
-                                            column_mesh=column_mesh)
+                                            column_mesh=column_mesh,
+                                            nc_from_aerosol=nc_from_aerosol)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -793,7 +795,8 @@ def make_radiation_physics(
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
-                                     column_mesh=column_mesh)
+                                     column_mesh=column_mesh,
+                                     nc_from_aerosol=nc_from_aerosol)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -811,6 +814,7 @@ def _make_hydrostatic_radiation(
     rrtmgp_solver=None,
     ml_ozone_coefs=None,
     column_mesh=None,
+    nc_from_aerosol: bool = False,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -825,6 +829,16 @@ def _make_hydrostatic_radiation(
     ``'col'`` axis.  Caller is responsible for ensuring the flattened
     column count ``ncol = ∏ shape_2d`` divides the mesh's device
     count.
+
+    When ``nc_from_aerosol`` is True AND the scheme is ``rrtmgp`` the
+    cloud-optics droplet number is overridden with the per-column Andreae
+    (2009) AOD->CCN diagnostic (``forcing["aerosol_od"]``) so the radiation
+    effective radius responds to the prescribed aerosol — the Twomey first
+    indirect effect, kept consistent with the microphysics specified-Nc
+    fill.  Gray radiation ignores ``n_cloud`` entirely, so the override is
+    skipped there (the microphysics second-indirect fill still runs).
+    Default False is byte-identical (the double-moment N_c carry / constant
+    r_eff is used).
     """
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
@@ -908,6 +922,33 @@ def _make_hydrostatic_radiation(
         q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
             _extract_tracer_columns(state, ncol, nlev)
         )
+
+        # Aerosol-CCN droplet number for the cloud-optics PSD (Twomey first
+        # indirect effect): override the (dead-zeros / constant-r_eff) N_c
+        # with the per-column Andreae (2009) AOD->CCN diagnostic so the
+        # radiation effective radius is consistent with the microphysics
+        # specified-Nc fill.  Mirrors the coupled physics_pipeline radiation
+        # fill; fail fast if the coupling is configured but no aerosol field
+        # was threaded.  Done BEFORE the optional column-shard below so the
+        # overridden field shards with the rest.  Only ``rrtmgp`` consumes a
+        # droplet number (gray ignores ``n_cloud`` entirely), so the override
+        # is gated on the scheme — gray runs the microphysics fill (second
+        # indirect effect) but skips this radiation-only first-indirect path
+        # instead of computing a droplet field the gray optics would discard.
+        if nc_from_aerosol and radiation_config.scheme == "rrtmgp":
+            if _aer_ext is None:
+                raise ValueError(
+                    "nc_from_aerosol=True but no 'aerosol_od' was passed to "
+                    "the radiation physics_fn via forcing — enable external "
+                    "aerosol forcing (--aerosol-forcing external) or disable "
+                    "--aerosol-ccn."
+                )
+            from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
+                specified_nc_field,
+            )
+            n_cloud_col = specified_nc_field(
+                jnp.asarray(_aer_ext), (ncol, nlev),
+            )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
 

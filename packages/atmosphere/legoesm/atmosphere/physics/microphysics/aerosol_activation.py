@@ -133,3 +133,39 @@ def ccn_from_aod(
     n_cm3 = (aod_safe / config.aot_coeff) ** (1.0 / config.aot_exponent)
     n_cm3 = jnp.clip(n_cm3, config.n_ccn_min_cm3, config.n_ccn_max_cm3)
     return n_cm3 * 1.0e6  # cm⁻³ → m⁻³
+
+
+def specified_nc_field(
+    aerosol_od: jnp.ndarray,
+    target_shape,
+    config: CCNFromAODConfig = CCNFromAODConfig(),
+) -> jnp.ndarray:
+    """Per-column SPECIFIED cloud-droplet number [1/m³] from per-layer AOD.
+
+    Column AOD is the sum of the per-layer optical depths the forcing
+    pipeline distributed from the Kinne climatology, inverted to a CCN
+    number via :func:`ccn_from_aod` (Andreae 2009) and broadcast across all
+    levels of each column.  This is the glue used by BOTH the coupled
+    (cube / lat-lon) ``physics_pipeline`` AND the combined-physics
+    (MPAS / hydrostatic) microphysics + radiation factories so the
+    AOD → specified-Nc mapping is written once (no duplicated numerics).
+
+    Parameters
+    ----------
+    aerosol_od : jnp.ndarray
+        Per-layer aerosol optical depth, shape ``(ncol, nlev)`` (column AOD
+        is the ``axis=-1`` sum).
+    target_shape : tuple of int
+        Output shape — the per-column ``(ncol, nlev)`` cloud-droplet field
+        the microphysics / radiation kernel expects.  The diagnosed
+        per-column value is broadcast to it.
+    config : CCNFromAODConfig
+
+    Returns
+    -------
+    n_c : jnp.ndarray
+        Specified cloud-droplet number [1/m³] of shape ``target_shape``.
+    """
+    aod_col = jnp.sum(aerosol_od, axis=-1)
+    n_ccn = ccn_from_aod(aod_col, config)
+    return jnp.broadcast_to(n_ccn[..., None], target_shape)

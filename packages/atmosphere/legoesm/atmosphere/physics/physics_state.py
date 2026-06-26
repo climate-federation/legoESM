@@ -101,6 +101,17 @@ class PhysicsState(NamedTuple):
         (like :attr:`gwd_spectrum`).  Distinct from :attr:`tke` so the diagnostic
         phase-1 CLUBB (``tke``) and the prognostic CLUBB (``clubb_moments``)
         cannot cross-feed on a restart scheme switch.
+    rad_heating : jax.Array, shape (ncol, nlev)
+        Cached radiative heating tendency ``dT/dt`` [K/s] from the most
+        recent full radiation solve.  Used by the radiation sub-cycle: on
+        steps that do NOT re-solve RRTMGP/gray (cadence ``rad_update_steps``),
+        the combined physics adds this held tendency instead of recomputing
+        radiation (CESM/E3SM-standard radiation cadence).  Written on each
+        radiation step and carried unchanged on the intervening steps.
+        Zero-filled before the first radiation solve (which is always step 0
+        of the sub-cycle, so the cache is populated before any held step
+        reads it).  Carried through the #413 checkpoint so a restart that
+        lands mid-sub-cycle continues with the correct held tendency.
     """
     tke: jnp.ndarray
     conv_prog_profile: jnp.ndarray
@@ -110,6 +121,7 @@ class PhysicsState(NamedTuple):
     surface_T_sfc_override: jnp.ndarray
     qke: jnp.ndarray
     clubb_moments: jnp.ndarray
+    rad_heating: jnp.ndarray
 
 
 def init_physics_state(
@@ -234,6 +246,11 @@ def init_physics_state(
     # when ``SCMForcing.prescribe == "T_s"``.
     surface_T_sfc_override = jnp.full((ncol,), jnp.nan, dtype=dtype)
 
+    # --- Radiation sub-cycle cache (held heating tendency) ---
+    # Zero before the first solve; populated on sub-cycle step 0 (which is
+    # always a radiation step) before any held step reads it.
+    rad_heating = jnp.zeros((ncol, nlev), dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -243,6 +260,7 @@ def init_physics_state(
         surface_T_sfc_override=surface_T_sfc_override,
         qke=qke,
         clubb_moments=clubb_moments,
+        rad_heating=rad_heating,
     )
 
 
@@ -284,4 +302,5 @@ def update_physics_state(phys_state, updates):
         ),
         qke=updates.get("qke", phys_state.qke),
         clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
+        rad_heating=updates.get("rad_heating", phys_state.rad_heating),
     )

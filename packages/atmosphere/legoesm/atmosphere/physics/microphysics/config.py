@@ -875,3 +875,57 @@ class MicrophysicsConfig(NamedTuple):
     sdm: SDMConfig = SDMConfig()
     fast_sbm: FastSBMConfig = FastSBMConfig()
     ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()
+
+
+def apply_microphysics_experiment_flags(
+    scheme_config,
+    scheme: str,
+    *,
+    nc_from_aerosol: bool = False,
+    subgrid_autoconversion: bool = False,
+):
+    """Thread ExperimentConfig-level microphysics switches onto a per-scheme
+    sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
+
+    Both switches are warm-rain closures currently implemented only by
+    Morrison's ``effective_Nc`` (specified-Nc aerosol mode) and in-cloud
+    autoconversion.  This single helper is shared by the coupled
+    (``physics_pipeline._resolve_microphysics``) and the combined-physics /
+    MPAS (``model_driver._run_mpas``) paths so the gating + fail-loud
+    validation is written ONCE — a scheme that would silently ignore the
+    flag raises instead, on either path (no duplicated dispatch).
+
+    Parameters
+    ----------
+    scheme_config : NamedTuple
+        The active per-scheme sub-config (e.g. ``MorrisonConfig``).
+    scheme : str
+        Scheme name, used only in the error message.
+    nc_from_aerosol, subgrid_autoconversion : bool
+        ExperimentConfig switches; when True the matching field is set on
+        ``scheme_config`` (raising if the field is absent).
+
+    Returns
+    -------
+    NamedTuple
+        ``scheme_config`` with the requested flags applied (a new instance;
+        unchanged when both switches are False).
+    """
+    fields = getattr(scheme_config, "_fields", ())
+    if nc_from_aerosol:
+        if "nc_from_aerosol" not in fields:
+            raise ValueError(
+                f"nc_from_aerosol=True is not supported by the {scheme!r} "
+                "microphysics scheme (no specified-Nc aerosol mode); use "
+                "--microphysics morrison or drop --aerosol-ccn."
+            )
+        scheme_config = scheme_config._replace(nc_from_aerosol=True)
+    if subgrid_autoconversion:
+        if "subgrid_autoconversion" not in fields:
+            raise ValueError(
+                f"subgrid_autoconversion=True is not supported by the "
+                f"{scheme!r} microphysics scheme; use --microphysics morrison "
+                "or drop --subgrid-autoconversion."
+            )
+        scheme_config = scheme_config._replace(subgrid_autoconversion=True)
+    return scheme_config
