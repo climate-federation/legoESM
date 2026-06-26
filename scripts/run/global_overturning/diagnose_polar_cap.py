@@ -119,7 +119,7 @@ def main():
     T_per_cell = T_per_cell * state.land_mask.data[..., jnp.newaxis]
     state = state._replace(T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)))
 
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30, physics=physics,
         A_h=A_H_GLOBAL,
         A_h_lat_scaling=True,

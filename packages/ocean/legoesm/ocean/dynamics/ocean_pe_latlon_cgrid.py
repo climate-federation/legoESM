@@ -2769,11 +2769,11 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
     diag_botdrag_u, diag_botdrag_v)``."""
     diag_botdrag_u = jnp.zeros_like(du_dt)
     diag_botdrag_v = jnp.zeros_like(dv_dt)
-    if config.bottom_drag_r > 0:
+    if config.bottom_drag.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
-        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        H_BBL = getattr(config.bottom_drag, "bottom_drag_bbl_thickness", 0.0)
         # MOM6-style background-velocity floor (DRAG_BG_VEL).  When >0,
         # the linear-in-u drag is upgraded to quadratic-with-floor:
         #   r_eff = (bottom_drag_r / u_bg) · √(u² + u_bg²)
@@ -2782,14 +2782,14 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
         # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
         # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
         # u_bg=0 → exactly the legacy linear formula (bit-exact path).
-        u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        u_bg = float(getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0))
         if u_bg > 0.0:
-            Cd_eq = config.bottom_drag_r / u_bg
+            Cd_eq = config.bottom_drag.bottom_drag_r / u_bg
             r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
             r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
         else:
-            r_eff_u = config.bottom_drag_r
-            r_eff_v = config.bottom_drag_r
+            r_eff_u = config.bottom_drag.bottom_drag_r
+            r_eff_v = config.bottom_drag.bottom_drag_r
         if H_BBL > 0:
             # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
             # spread drag over a fixed Ekman thickness ``H_BBL`` near the
@@ -3337,7 +3337,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
-    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
+    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig.from_flat(),
     physics_fn=None,
     surface_forcing=None,
     sponge=None,

@@ -1078,7 +1078,7 @@ def dino_lat_lon_model_config(
             bottom_drag=BottomDragConfig(scheme="none"),  # use model-level
         )
 
-    model_cfg = LatLonCGridOceanConfig(
+    model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B

@@ -35,7 +35,7 @@ class TestBaseAssembly:
         gm_redi = create_gm_redi_config(cfg)
         actual = global_overturning_model_config(
             cfg, physics=physics, eos_config=eos, gm_redi_cfg=gm_redi)
-        expected = LatLonCGridOceanConfig(
+        expected = LatLonCGridOceanConfig.from_flat(
             physics=physics,
             eos="linear",
             eos_linear=eos,
@@ -76,7 +76,7 @@ class TestBaseAssembly:
         default (the structural SCHEME fields are pinned separately; see
         test_recipe_snapshots)."""
         mc = global_overturning_model_config(GlobalOverturningConfig())
-        default = LatLonCGridOceanConfig()
+        default = LatLonCGridOceanConfig.from_flat()
         for field in ("B_h", "C_smag", "C_smag_lap", "slope_foot_alpha",
                       "A_h_lat_scaling", "A_h_floor", "A_h_eq_boost",
                       "A_h_eq_sigma_deg", "A_h_merid", "n_barotropic_substeps",

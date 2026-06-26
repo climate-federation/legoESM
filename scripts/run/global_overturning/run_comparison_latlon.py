@@ -522,7 +522,7 @@ def main():
         )
 
     # --- Model config ---
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         A_h=args.a_h if args.a_h is not None else A_H,
         A_h_lat_scaling=args.a_h_lat_scaling,
         A_h_floor=args.a_h_floor if args.a_h_floor is not None else 0.0,
@@ -602,9 +602,9 @@ def main():
         "A_v": float(ocean_config.A_v),
         "K_v": float(ocean_config.K_v),
         "K_h": float(ocean_config.K_h),
-        "bottom_drag_r": float(ocean_config.bottom_drag_r),
-        "bottom_drag_bbl_thickness": float(ocean_config.bottom_drag_bbl_thickness),
-        "bottom_drag_bg_velocity": float(ocean_config.bottom_drag_bg_velocity),
+        "bottom_drag_r": float(ocean_config.bottom_drag.bottom_drag_r),
+        "bottom_drag_bbl_thickness": float(ocean_config.bottom_drag.bottom_drag_bbl_thickness),
+        "bottom_drag_bg_velocity": float(ocean_config.bottom_drag.bottom_drag_bg_velocity),
         "pgf_scheme": ocean_config.pgf_scheme,
         "barotropic_solver": ocean_config.barotropic_solver,
         "momentum_advection": ocean_config.momentum_advection,

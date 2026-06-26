@@ -127,7 +127,7 @@ def _build_model(solver: str, physics):
     return LatLonCGridOceanModel(
         create_latlon_grid(n_lat=18, n_lon=36),
         create_ocean_z_star(n_levels=5, H_max=4000.0),
-        LatLonCGridOceanConfig(
+        LatLonCGridOceanConfig.from_flat(
             A_h=1.0e4, K_h=0.0, A_v=1.0e-3, K_v=1.0e-5,
             bottom_drag_r=1.1e-3,
             n_barotropic_substeps=30,
@@ -248,7 +248,7 @@ def test_implicit_solver_conserves_mass():
     """
     grid = create_latlon_grid(n_lat=18, n_lon=36)
     z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4, A_v=1.0e-3, K_v=1.0e-5,
         bottom_drag_r=1.1e-3,
         physics=_make_physics(tau_max=0.05),
@@ -290,7 +290,7 @@ def test_implicit_solver_grad_smoke():
     """jax.grad through the implicit CN solver returns finite values."""
     grid = create_latlon_grid(n_lat=18, n_lon=36)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4, A_v=1.0e-3, K_v=1.0e-5,
         bottom_drag_r=1.1e-3,
         barotropic_solver="implicit_cn",
@@ -320,7 +320,7 @@ def test_implicit_solver_grad_smoke():
 def test_implicit_solver_default_is_explicit_substep():
     """Default config uses the legacy explicit substep so existing
     experiments are bit-stable."""
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     assert cfg.barotropic_solver == "explicit_substep"
 
 
@@ -328,6 +328,6 @@ def test_invalid_barotropic_solver_rejected():
     """Config validation rejects unknown solver names."""
     grid = create_latlon_grid(n_lat=8, n_lon=16)
     z_coord = create_ocean_z_star(n_levels=2, H_max=1000.0)
-    cfg = LatLonCGridOceanConfig(barotropic_solver="bogus")
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="bogus")
     with pytest.raises(ValueError, match="barotropic_solver"):
         LatLonCGridOceanModel(grid, z_coord, cfg)

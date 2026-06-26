@@ -111,7 +111,7 @@ def _build_case(eke_cfg=None):
     state = state._replace(
         eke=Field(data=E0, name="eke", dims=("lat", "lon"), units="m^2/s^2"))
     gm = GMRediConfig(kappa_GM=1.0e3, kappa_Redi=1.0e3, eke=eke_cfg)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=8, enable_runtime_checks=False, gm_redi=gm)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)

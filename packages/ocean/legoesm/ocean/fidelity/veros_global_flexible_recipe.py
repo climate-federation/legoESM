@@ -680,7 +680,7 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
     """global_flexible dynamics config — the matched-4deg faithful dycore
     stack (same Veros core ⇒ same options) with the setup's parameter
     deltas (A_h literal, GM/Redi block, the documented rescaled dt pair)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,

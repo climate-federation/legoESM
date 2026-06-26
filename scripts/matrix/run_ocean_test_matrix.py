@@ -2366,7 +2366,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_v"] = A_v
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
-        config = LatLonCGridOceanConfig(**kw)
+        config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -2435,7 +2435,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
-        config = LatLonCGridOceanConfig(**kw)
+        config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -5180,6 +5180,8 @@ def _run_experiment_via_registry(
         setup_kw["bottom_drag_r"] = cfg.bottom_drag_coeff
     elif hasattr(cfg, "bottom_drag_r"):
         setup_kw["bottom_drag_r"] = cfg.bottom_drag_r
+    elif hasattr(cfg, "bottom_drag"):  # #501: nested DynBottomDragConfig
+        setup_kw["bottom_drag_r"] = cfg.bottom_drag.bottom_drag_r
     for attr in ("tracer_advection", "barotropic_diffusion_alpha",
                  "barotropic_div_damp"):
         if hasattr(cfg, attr):

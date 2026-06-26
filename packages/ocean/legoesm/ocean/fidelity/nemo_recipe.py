@@ -243,7 +243,7 @@ def nemo_lat_lon_model_config(
             implicit_K33=True,
         )
 
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=NEMO_CONSTANTS_CONFIG.g,
         rho_0=NEMO_CONSTANTS_CONFIG.rho_0,
         constants=NEMO_CONSTANTS_CONFIG,

@@ -212,7 +212,7 @@ def _build_state_and_model(grid, z_coord, H_bathy, land_mask,
     )
 
     # Build model
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         pgf_scheme=pgf_scheme,
         barotropic_solver="implicit_cn",
         momentum_advection="vector_invariant",

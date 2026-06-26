@@ -347,7 +347,7 @@ def _basin(*, surface_forcing_implicit, scheme="flux_feedback",
             scheme=scheme,
             flux_feedback=_cfg_solar(penetrative_shortwave=penetrative)),
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, implicit_vertical_mixing=True,
         enable_runtime_checks=False, outer_integrator="ab2",
         surface_forcing_implicit=surface_forcing_implicit, physics=phys,

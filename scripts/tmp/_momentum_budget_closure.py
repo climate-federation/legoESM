@@ -595,7 +595,7 @@ def main():
         "no_Ah": (config._replace(A_h=0.0), physics_fn),
         "no_smag": (config._replace(C_smag=0.0), physics_fn),
         "no_kzeta": (config._replace(K_zeta_bih=0.0), physics_fn),
-        "no_drag": (config._replace(bottom_drag_r=0.0), physics_fn),
+        "no_drag": (config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0)), physics_fn),
     }
 
     decomp_tends = {}

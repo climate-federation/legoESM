@@ -649,7 +649,7 @@ def main():
                 "remap).  Cube-atm + tripole-ocean needs the deferred "
                 "cross-family remap.")
         overrides["ocean_mode"] = "dynamic"
-        overrides["ocean_config"] = LatLonCGridOceanConfig()
+        overrides["ocean_config"] = LatLonCGridOceanConfig.from_flat()
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max

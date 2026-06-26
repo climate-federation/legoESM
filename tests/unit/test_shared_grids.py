@@ -75,7 +75,7 @@ def test_latlon_grid_shared_by_atmosphere_and_ocean() -> None:
 
     atm = CGridLatLonShallowWaterModel(grid)
     ocn = LatLonCGridOceanModel(grid, create_ocean_z_star(n_levels=4),
-                                config=LatLonCGridOceanConfig())
+                                config=LatLonCGridOceanConfig.from_flat())
 
     assert hasattr(atm, "step") and hasattr(ocn, "step")
     # Atmosphere holds the base grid directly; the ocean derives its staggered

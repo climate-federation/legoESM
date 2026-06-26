@@ -28,7 +28,7 @@ def test_default_config_resolves_to_latlon_namedtuple():
     rt = cfg.to_ocean_config()
     assert isinstance(rt, LatLonCGridOceanConfig)
     # Empty ocean: {} means every runtime default is preserved.
-    assert rt == LatLonCGridOceanConfig()
+    assert rt == LatLonCGridOceanConfig.from_flat()
 
 
 def test_from_yaml_deep_merges_onto_defaults(tmp_path):
@@ -61,7 +61,9 @@ def test_dot_get_set_roundtrip():
     cfg = OceanExperimentConfig()
     cfg.set("ocean.bottom_drag_r", 2.5e-3)
     assert cfg.get("ocean.bottom_drag_r") == 2.5e-3
-    assert cfg.to_ocean_config().bottom_drag_r == 2.5e-3
+    # #501: stored nested (config.bottom_drag.bottom_drag_r); the flat YAML key
+    # ocean.bottom_drag_r still routes here via flat_fields + from_flat.
+    assert cfg.to_ocean_config().bottom_drag.bottom_drag_r == 2.5e-3
     assert cfg.get("nonexistent.key", "fallback") == "fallback"
 
 

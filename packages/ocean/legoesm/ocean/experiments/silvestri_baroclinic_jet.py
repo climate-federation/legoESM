@@ -276,7 +276,7 @@ def build_silvestri_baroclinic_jet_setup(
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max,
                                   dz_surface=_dz, dz_deep=_dz)
 
-    base_config = LatLonCGridOceanConfig(
+    base_config = LatLonCGridOceanConfig.from_flat(
         # FAITHFUL barotropic stack = the Oceananigans split-explicit oracle's,
         # with NO dissipation backstop (barotropic_diffusion_alpha=0). The
         # eddy-resolving turbulent blow-up was the C-grid barotropic Coriolis

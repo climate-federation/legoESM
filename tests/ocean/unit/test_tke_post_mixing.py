@@ -381,7 +381,7 @@ def _small_model(tke_cfg, outer="forward_euler", extra=None):
               outer_integrator=outer)
     if extra:
         kw.update(extra)
-    cfg = LatLonCGridOceanConfig(**kw)
+    cfg = LatLonCGridOceanConfig.from_flat(**kw)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     s = rest_state_latlon_cgrid_ocean(
         grid, z_coord, T_water_init_C=18.0, T_deep=2.0, S_uniform=35.0,
@@ -581,7 +581,7 @@ def test_orchestrator_consumes_post_mixing_n2():
         shortwave_penetration=None)
     grid = create_latlon_grid(n_lat=6, n_lon=8)
     zc = create_ocean_z_star(n_levels=6, H_max=2000.0)
-    cfg = LatLonCGridOceanConfig(A_h=1e4, implicit_vertical_mixing=True,
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1e4, implicit_vertical_mixing=True,
                                  physics=physics)
     model = LatLonCGridOceanModel(grid, zc, cfg)
     s = rest_state_latlon_cgrid_ocean(grid, zc, T_water_init_C=2.0,

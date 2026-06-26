@@ -415,12 +415,12 @@ def barotropic_substeps_latlon_cgrid(
             ) * v_mask
 
         # Bottom drag: -r * U_bar / H_total
-        if config.bottom_drag_r > 0:
+        if config.bottom_drag.bottom_drag_r > 0:
             U_bar_new = U_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag_r, H_u,
+                dt_s, config.bottom_drag.bottom_drag_r, H_u,
             )
             V_bar_new = V_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag_r, H_v,
+                dt_s, config.bottom_drag.bottom_drag_r, H_v,
             )
 
         # --- MAXVEL clipping: prevent runaway velocities ---

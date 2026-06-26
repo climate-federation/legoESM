@@ -85,7 +85,7 @@ def _build_latlon(n_lat: int, dtype_x64: bool,
     n_lon = 2 * n_lat
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z = create_ocean_z_star(n_levels=OCEAN_NLEV)
-    cfg = LatLonCGridOceanConfig(barotropic_solver=baro_solver)
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver=baro_solver)
     model = LatLonCGridOceanModel(grid, z, cfg)
     state = rest_state_latlon_cgrid_ocean(grid, z)
     n_cells = n_lat * n_lon

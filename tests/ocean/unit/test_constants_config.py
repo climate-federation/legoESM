@@ -31,7 +31,7 @@ def test_defaults_reference_legoesm_constants():
 def test_latlon_config_carries_default_constants():
     """LatLonCGridOceanConfig gains a `constants` field defaulting to the
     canonical values — so existing configs are numerically unchanged."""
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     assert isinstance(cfg.constants, ConstantsConfig)
     assert cfg.constants.g == constants.g
     assert cfg.constants.rho_0 == constants.rho_ocean
@@ -53,7 +53,7 @@ def test_veros_constants_config_values():
 def test_constants_field_is_overridable_via_public_api():
     """A recipe can pin constants through the public config API (the point of
     G-C1) without the override_constants monkey-patch."""
-    cfg = LatLonCGridOceanConfig(constants=VEROS_CONSTANTS_CONFIG)
+    cfg = LatLonCGridOceanConfig.from_flat(constants=VEROS_CONSTANTS_CONFIG)
     assert cfg.constants.rho_0 == 1024.0
     assert cfg.constants.g == 9.81
 

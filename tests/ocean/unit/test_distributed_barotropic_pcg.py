@@ -410,7 +410,7 @@ class TestLatLonSolverMassAndResidual:
         from legoesm.ocean.state import LatLonCGridOceanConfig
         grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
         z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             barotropic_solver=barotropic_solver,
             barotropic_implicit_pcg_fixed_iters=120,
         )
@@ -527,7 +527,7 @@ class TestForcePCGConfigPlumb:
     def test_default_off(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
-        assert LatLonCGridOceanConfig().barotropic_implicit_force_pcg is False
+        assert LatLonCGridOceanConfig.from_flat().barotropic_implicit_force_pcg is False
 
     def test_force_pcg_step_matches_stock_cg_step(self):
         """One implicit_cn model step with force_pcg=True equals the
@@ -560,7 +560,7 @@ class TestForcePCGConfigPlumb:
 
         etas = {}
         for force in (False, True):
-            cfg = LatLonCGridOceanConfig(
+            cfg = LatLonCGridOceanConfig.from_flat(
                 barotropic_solver="implicit_cn",
                 barotropic_implicit_force_pcg=force,
             )
@@ -765,5 +765,5 @@ class TestSingleReducePCG:
     def test_config_field_plumb(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
-        assert (LatLonCGridOceanConfig().barotropic_implicit_pcg_variant
+        assert (LatLonCGridOceanConfig.from_flat().barotropic_implicit_pcg_variant
                 == "standard")

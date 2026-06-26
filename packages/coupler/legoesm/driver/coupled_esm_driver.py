@@ -234,7 +234,7 @@ class CoupledESMDriver:
         # one if the caller passed a SimpleOceanConfig.
         _oc = cfg.ocean_config
         if not isinstance(_oc, LatLonCGridOceanConfig):
-            _oc = LatLonCGridOceanConfig()
+            _oc = LatLonCGridOceanConfig.from_flat()
         # Force the OMIP-validated cold-start stack (the defaults
         # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
         # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
@@ -422,7 +422,7 @@ class CoupledESMDriver:
             ),
             shortwave_penetration=None,
         )
-        return LatLonCGridOceanConfig(
+        return LatLonCGridOceanConfig.from_flat(
             A_h=1.0e5, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
             C_smag_lap=0.33,
             n_barotropic_substeps=30,

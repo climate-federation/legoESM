@@ -28,7 +28,7 @@ def test_config_holds_dynamic_ocean():
     # 3D-ocean knobs default but present
     assert slab.ocean_nlev == 20 and slab.ocean_dt_s == 300.0
     dyn = CoupledConfig(
-        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig.from_flat(),
         ocean_nlev=8, ocean_dt_s=300.0,
     )
     assert dyn.ocean_mode == "dynamic"
@@ -124,7 +124,7 @@ def test_dynamic_ocean_requires_latlon_grid():
     )
     drv = CoupledESMDriver(
         atm, CoupledConfig(ocean_mode="dynamic",
-                           ocean_config=LatLonCGridOceanConfig(), ocean_nlev=4),
+                           ocean_config=LatLonCGridOceanConfig.from_flat(), ocean_nlev=4),
     )
     drv._atm.setup()
     with pytest.raises(ValueError, match="requires a regular lat-lon ocean grid"):
@@ -162,7 +162,7 @@ def test_woa_ic_requires_paths():
     )
     drv = CoupledESMDriver(
         atm, CoupledConfig(ocean_mode="dynamic",
-                           ocean_config=LatLonCGridOceanConfig(),
+                           ocean_config=LatLonCGridOceanConfig.from_flat(),
                            ocean_nlev=4, ocean_ic="woa"),
     )
     drv._atm.setup()
@@ -182,7 +182,7 @@ def test_init_dynamic_ocean_rejects_unknown_ic():
     )
     drv = CoupledESMDriver(
         atm, CoupledConfig(ocean_mode="dynamic",
-                           ocean_config=LatLonCGridOceanConfig(),
+                           ocean_config=LatLonCGridOceanConfig.from_flat(),
                            ocean_nlev=4, ocean_ic="garbage_ic"),
     )
     drv._atm.setup()

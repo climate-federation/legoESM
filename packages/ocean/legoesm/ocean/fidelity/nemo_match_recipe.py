@@ -305,7 +305,7 @@ def nemo_match_tripole_model_config(
         cfg = NEMOMatchTripoleRecipeConfig()
     if physics is None:
         physics = _default_match_physics()
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=cfg.A_h,
         A_v=cfg.A_v,
         K_v=cfg.K_v,

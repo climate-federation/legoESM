@@ -350,7 +350,7 @@ def test_flag_on_reports_vertadv_but_excludes_it_from_du_dt():
     z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
     state = _diag_state(grid, z_coord)
 
-    cfg_off = LatLonCGridOceanConfig(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
+    cfg_off = LatLonCGridOceanConfig.from_flat(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
     cfg_on = cfg_off._replace(adaptive_implicit_vertadv=True)
 
     tend_off, diag_off = latlon_cgrid_ocean_baroclinic_tendencies(
@@ -403,7 +403,7 @@ def test_flag_off_pe_closure_bit_exact_after_refactor():
     grid = create_latlon_grid(n_lat=24, n_lon=48)
     z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
     state = _diag_state(grid, z_coord)
-    cfg = LatLonCGridOceanConfig(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
 
     _, diag = latlon_cgrid_ocean_baroclinic_tendencies(
         state, grid, z_coord, cfg, diagnose_momentum=True)

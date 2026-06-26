@@ -107,7 +107,7 @@ def _config():
     # implicit_cn => distributed fixed-iteration PCG under MPI.  Use a
     # large fixed-iter count so the solve is fully converged and the
     # parity to serial (also fully-converged stock CG) is tight.
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         tracer_advection="tvd",
         barotropic_solver="implicit_cn",
         barotropic_implicit_pcg_fixed_iters=150,

@@ -453,7 +453,7 @@ def test_default_is_vector_laplacian_bit_identical():
     value is BYTE-IDENTICAL to the historical (no-field) path through the full
     ``_bc_horizontal_viscosity`` dispatch — the mandatory default-off regression."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
     assert cfg.lateral_viscosity_operator == "vector_laplacian"
     t_default = _tend(cfg)
     t_explicit = _tend(cfg._replace(lateral_viscosity_operator="vector_laplacian"))
@@ -467,7 +467,7 @@ def test_flux_divergence_differs_and_finite_via_config():
     """Selecting flux_divergence through the config produces a DIFFERENT (the curvature
     coupling is dropped) but finite momentum tendency vs the vector Laplacian."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    base = LatLonCGridOceanConfig(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
+    base = LatLonCGridOceanConfig.from_flat(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
     t_vec = _tend(base)
     t_fd = _tend(base._replace(lateral_viscosity_operator="flux_divergence"))
     assert bool(jnp.all(jnp.isfinite(t_fd.du_dt.data)))
@@ -484,7 +484,7 @@ def test_unknown_operator_raises_via_model_validation():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     grid = create_latlon_grid(12, 24, dtype=jnp.float64)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(lateral_viscosity_operator="bogus")
+    cfg = LatLonCGridOceanConfig.from_flat(lateral_viscosity_operator="bogus")
     with pytest.raises(ValueError, match="lateral_viscosity_operator"):
         LatLonCGridOceanModel(grid, z_coord, cfg)
 
@@ -493,7 +493,7 @@ def test_flux_divergence_rejects_legoesm_boosts():
     """flux_divergence (Veros harmonic friction) rejects the legoESM-only A_h boosts
     (eq / cap / floor) it does not implement, rather than silently ignoring them."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1,
         lateral_viscosity_operator="flux_divergence", A_h_eq_boost=3.0)
     with pytest.raises(ValueError, match="flux_divergence"):

@@ -485,7 +485,7 @@ def test_latlon_model_rejects_physics_lateral_mixing():
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    bad = LatLonCGridOceanConfig(
+    bad = LatLonCGridOceanConfig.from_flat(
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(
                 scheme="gm_redi", gm_redi=ACC_GM_REDI_CONFIG,
@@ -639,7 +639,7 @@ def test_veros_block_mapping_fields_are_real_config_fields():
     are sub-config/documentation rows, skipped here."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     # documentation rows whose middle column names a sub-config / dotted path
     # rather than a bare top-level scheme field (skipped by the field check).
     doc_rows = {"ConstantsConfig"}
