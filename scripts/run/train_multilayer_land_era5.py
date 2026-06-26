@@ -114,6 +114,12 @@ _TBL = np.asarray(S._TABLE)              # (17,12) CLM5 init values per column
 # coupled model (land_diurnal_surface).  --stomata re-enables them for experiments.
 _BULK_SCHEME = "most"
 _STOMATA_ON = False
+# Loss weights (CLI-tunable).  lam_amp raised from 0.5 -> 1.5: the residual is
+# dominated by the seasonal-cycle AMPLITUDE (mid-lats under, Antarctica over), and the
+# per-PFT thermal inertia has head-room the low weight wasn't exploiting.
+_LAM_ALB = 300.0
+_LAM_PFT = 2.0
+_LAM_AMP = 1.5
 
 
 # --------------------------------------------------------------------------- #
@@ -139,7 +145,7 @@ BOUNDS_EXT = dict(
     pft_alb=(S._PFT_ALB_LO, S._PFT_ALB_HI), pft_emis=(0.94, 0.99),
     pft_root=(S._PFT_ROOT_LO, S._PFT_ROOT_HI),
     pft_ch=(2.0e-3, 6.0e-3),                           # per-PFT bulk exch (constant bulk)
-    pft_z0=(5e-3, 2.0),                                # roughness (only active under MOST)
+    pft_z0=(5e-3, 3.0),                                # roughness (MOST); forests saturated 2.0
     pft_vcmax=(0.0, 80.0), pft_lcma=(20.0, 90.0), pft_g1=(1.0, 12.0),
     pft_wp=(0.05, 0.30), pft_fcgap=(0.03, 0.30),       # theta_fc_plant = wp + gap
     pft_csoil=(6.6e5, 6.0e6), pft_ksolid=(1.0, 3.5),   # per-PFT soil thermal inertia
@@ -311,7 +317,12 @@ def forward_ml(cp, data):
     return Tsum / spm, Asum / spm
 
 
-def loss_ml(p, data, lam_alb=300.0, lam_pft=2.0, lam_amp=0.5):
+def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None):
+    # weights default to the module globals (CLI-tunable) so the jitted
+    # value_and_grad picks up an updated lam_amp without re-partialling.
+    lam_alb = _LAM_ALB if lam_alb is None else lam_alb
+    lam_pft = _LAM_PFT if lam_pft is None else lam_pft
+    lam_amp = _LAM_AMP if lam_amp is None else lam_amp
     cp = constrain_ext(p)
     T, A = forward_ml(cp, data)
     w = data["w"][None, :]
@@ -421,9 +432,12 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
 
 
 def main():
-    global _BULK_SCHEME, _STOMATA_ON
+    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lam-amp", type=float, default=_LAM_AMP,
+                    help="seasonal-amplitude loss weight (raise to tighten the "
+                         "seasonal cycle at some cost to the annual-mean fit)")
     ap.add_argument("--diurnal-npz", default="/tmp/era5_diurnal.npz",
                     help="ERA5 monthly-diurnal climatology (4-synoptic-hour "
                          "fetch_era5_diurnal.py, or 24-h fetch_era5_hourly_climatology.py)")
@@ -442,6 +456,7 @@ def main():
     ap.add_argument("--out", default="results/land_tuned_multilayer.json")
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
+    _LAM_AMP = args.lam_amp
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out)
