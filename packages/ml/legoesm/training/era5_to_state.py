@@ -464,9 +464,15 @@ def prognostic_carry_seeds(
     # Stateful turbulence: seed the prognostic energy carry (tke or qke).
     # Diagnostic schemes (louis / smagorinsky / ysu / holtslag_boville /
     # vreman) report carries_energy=False ⇒ no seed, carry unchanged.
+    # NB the tke/qke carry is stored FLATTENED per-column (ncol, nlev) — NOT
+    # the grid-shaped (n_lat, n_lon, nlev) layout the microphysics tracers
+    # use — so a grid-shaped seed fails the scheme's carry-shape check
+    # (issue #405/#413: "expected (ncol, nlev)").  ncol = product of the
+    # horizontal dims (n_lat*n_lon for lat-lon, 6*n*n for cubed-sphere).
     _traits = turbulence_scheme_traits(turbulence)
     if _traits.carries_energy:
-        seeds[_traits.energy_field] = jnp.zeros(shape_3d)
+        _ncol = int(np.prod(shape_3d[:-1]))
+        seeds[_traits.energy_field] = jnp.zeros((_ncol, shape_3d[-1]))
 
     return seeds
 

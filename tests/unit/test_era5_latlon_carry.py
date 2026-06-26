@@ -151,11 +151,15 @@ def test_double_moment_carry_seeds_zero_tracers():
 
 
 def test_stateful_turbulence_carry_seeds_tke():
-    """tke turbulence ⇒ tke seeded as a zero (…, nlev) array; qke None."""
+    """tke turbulence ⇒ tke seeded as a zero (ncol, nlev) array; qke None.
+
+    The tke/qke carry is FLATTENED per-column (ncol, nlev) — not the
+    grid-shaped (n_lat, n_lon, nlev) layout the microphysics tracers use —
+    because the turbulence scheme reads it per-column (#405/#413)."""
     carry = _latlon_carry("kessler", "tke")
     nlev = 20
     grid = create_grid("latlon", 12)
-    expected = (grid.n_lat, grid.n_lon, nlev)
+    expected = (grid.n_lat * grid.n_lon, nlev)
     assert carry.tke is not None, "tke should be seeded for the tke scheme"
     tke = np.asarray(carry.tke)
     assert tke.shape == expected, f"tke shape {tke.shape} != {expected}"
@@ -187,7 +191,11 @@ def test_prognostic_carry_seeds_helper_warm_rain_empty():
 def test_prognostic_carry_seeds_helper_double_moment_and_stateful():
     """The helper seeds the right keys for a double-moment + stateful combo."""
     seeds = prognostic_carry_seeds("seifert_beheng", "tke", (3, 3, 6))
-    for name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i", "tke"):
+    # microphysics tracers are grid-shaped (n_lat, n_lon, nlev)...
+    for name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
         assert name in seeds, f"{name} missing from seeds"
         assert np.asarray(seeds[name]).shape == (3, 3, 6)
+    # ...but the turbulence energy carry is FLATTENED (ncol, nlev) = (9, 6).
+    assert "tke" in seeds
+    assert np.asarray(seeds["tke"]).shape == (3 * 3, 6)
     assert "qke" not in seeds  # tke scheme uses the tke slot
