@@ -1,0 +1,89 @@
+# =============================================================================
+# legoESM AMIP — AUTHORITATIVE production configuration (single source of truth)
+# =============================================================================
+# Run with:
+#   run_amip.py --config config/amip/amip_production.yaml \
+#       <machine path flags> --days N --output DIR
+#
+# Keys are run_amip argument DESTS (set as defaults via --config); any explicit
+# CLI flag still overrides a key here. Machine-specific PATHS (ERA5 IC, SST/SIC,
+# solar/ozone/GHG/aerosol/volcanic, topography) are deliberately NOT pinned here
+# — they live in config/amip/amip_production.sh (env-overridable) so this
+# physics config stays machine-independent and reproducible across deployments.
+#
+# Provenance: derived from Pierre's tuned CMIP-realism config
+# config/cmip/cmip_ocean_slab.yaml (SBM + Morrison + Sundqvist + COARE3 +
+# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. VALIDATED at
+# C48/L40 (job 25918469, 10-day): planetary albedo 0.292 (target ~0.29), rsut
+# 99, precip 3.2 mm/d (target ~2.8), rlut 234, net TOA +6 — SBM fixes the
+# structural over-bright (~2x) and too-dry (~4x) biases that Bechtold did NOT
+# (Bechtold: albedo 0.57 / precip 0.81). Land kept as our tiled COARE3/MOST +
+# soil bucket + Jarvis stomatal (Pierre-directed for AMIP, 2026-06-24/25); Louis
+# turbulence (required by the tiled surface).
+# Tracking: GitHub issue #636.
+# =============================================================================
+
+# --- Grid + dycore: cubed-sphere C48 / L40 hybrid, cd-grid, dt 150 s ----------
+grid_type: cubed_sphere
+resolution: 48
+nlev: 40
+discretization: cdgrid
+dt: 150.0
+
+# --- Atmospheric physics (SBM convection = the structural-bias fix) -----------
+radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
+rad_update_steps: 12
+clouds: sundqvist
+microphysics: morrison
+convection: sbm             # confirmed fixes albedo+precip (job 25918469)
+turbulence: louis           # Louis required by the tiled surface
+gravity_wave_drag: hines
+diurnal_cycle: true
+
+# --- Cloud tuning -------------------------------------------------------------
+# rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)
+# — NOT pinned here.
+q_c_diagnostic: 3.0e-4      # Pierre's tuned "thinner cloud" value
+# convective_cloud (Slingo-1987 cumulus cloud fraction): ON, for parity with
+# Pierre's authoritative config/cmip/cmip_ocean_slab.yaml and per the 2026-06-26
+# decision — adds the convective cloud cover that addresses the residual tropical
+# cold bias. NOTE: the SBM structural fix was validated WITHOUT it (job 25918469,
+# albedo 0.292 / pr 3.2); this SBM + convective_cloud=true combination is pending
+# its own C48/L40 forward validation (the next pilot run).
+convective_cloud: true
+
+# --- Tiled surface + interactive land -----------------------------------------
+# COARE3 ocean / land-MOST surface fluxes + Manabe soil bucket + Jarvis stomatal.
+slab_land_active: true
+surface_bulk_scheme: coare3
+gustiness_zi: 300.0
+surface_tiled: true
+surface_z0_land: 0.1
+land_soil_bucket: true
+land_stomatal_beta: true
+land_bucket_w_max: 150.0    # bucket field capacity [kg/m^2]
+land_beta_min: 0.1          # minimum evaporative efficiency
+land_bucket_w_init_frac: 0.5
+
+# --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
+# File PATHS are supplied at runtime (see amip_production.sh); these are the
+# authoritative SELECTORS + variable names + scalings.
+ic: era5
+dataset: custom
+sst_var: tosbcs
+sst_offset: 0.0
+sic_var: siconcbcs
+sic_scale: 0.01
+solar_source: file
+solar_tsi_var: TSI
+ozone_forcing: external
+ghg_forcing: external
+aerosol_forcing: external
+start_year: 1979
+
+# --- Diagnostics / output (CMIP6-protocol CMOR) -------------------------------
+diag_days: 5
+checkpoint_days: 30
+monthly_means: true
+cmip_output: true
+clear_sky_diag: true

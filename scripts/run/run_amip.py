@@ -134,6 +134,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # Run config file (shared --config mechanism; keys set argument DEFAULTS so
+    # any explicit CLI flag still overrides the file). The authoritative AMIP
+    # production config lives at config/amip/amip_production.yaml.
+    parser.add_argument("--config", default=None,
+                        help="YAML run-config file (e.g. "
+                             "config/amip/amip_production.yaml): its keys set "
+                             "argument DEFAULTS, so any explicit CLI flag still "
+                             "overrides it. Keys are run_amip argument dests; an "
+                             "unknown key is a hard error (no silent typo'd "
+                             "override).")
+
     # Forcing
     parser.add_argument("--dataset", type=str, default="analytical",
                         choices=["cobe", "hadisst", "custom", "analytical"])
@@ -1125,6 +1136,18 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
 
 def main(argv: list[str] | None = None):
     parser = build_arg_parser()
+
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    # Shared loader (single source of truth) — same mechanism as run_coupled.
+    pre, _ = parser.parse_known_args(argv)
+    if pre.config is not None:
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        parser.set_defaults(**load_yaml_config(
+            pre.config, parser,
+            example_keys="'convection', 'microphysics', 'surface_bulk_scheme', "
+                         "'q_c_diagnostic', 'gustiness_zi', 'convective_cloud'"))
+
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
 

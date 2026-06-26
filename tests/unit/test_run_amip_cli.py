@@ -705,3 +705,72 @@ def test_convective_cloud_defaults_off():
     args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convective_cloud is False
+
+
+# --- --config YAML loader (authoritative AMIP production config) --------------
+
+def _repo_root():
+    from pathlib import Path
+    return Path(__file__).resolve().parents[2]
+
+
+# Machine-path flags the YAML deliberately omits (supplied at runtime); dummy
+# values are fine — config construction does not stat the paths.
+_AMIP_DUMMY_PATHS = [
+    "--ic-path", "/dummy/era5.zarr", "--forcing-path", "/dummy/sst.nc",
+    "--sic-path", "/dummy/sic.nc", "--solar-file", "/dummy/solar.nc",
+    "--ozone-file", "/dummy/o3.nc", "--ghg-file", "/dummy/ghg.nc",
+    "--aerosol-file", "/dummy/aero.nc", "--volcanic-aerosol-file", "/dummy/volc.nc",
+    "--topography", "/dummy/etopo.nc", "--days", "10", "--output", "/dummy/out",
+]
+
+
+def test_config_yaml_loads_all_keys_are_valid_dests():
+    """Every key in the authoritative AMIP config is a real run_amip dest — a
+    typo'd / dropped override is a hard error (dispatch-hardening)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
+    parser = build_arg_parser()
+    defaults = load_yaml_config(str(cfg_file), parser)  # raises on unknown key
+    assert defaults  # non-empty
+    valid_dests = {a.dest for a in parser._actions}
+    assert set(defaults).issubset(valid_dests)
+
+
+def test_config_yaml_round_trips_authoritative_values():
+    """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
+    validated SBM AMIP parametrization (job 25918469)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    # grid geometry (resolution/nlev/discretization are CLI dests baked into
+    # cfg.grid, so assert them at the args level the YAML controls)
+    assert args.resolution == 48
+    assert args.nlev == 40
+    assert args.discretization == "cdgrid"
+    assert args.grid_type == "cubed_sphere"
+    cfg = build_config_from_args(args)
+    assert cfg.convection == "sbm"
+    assert cfg.microphysics == "morrison"
+    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
+    assert cfg.turbulence == "louis"         # required by the tiled surface
+    assert cfg.surface_tiled is True
+    assert cfg.start_year == 1979
+    # rh_crit left at the calibrated default; convective_cloud ON (parity with
+    # Pierre's cmip_ocean_slab.yaml + the 2026-06-26 decision).
+    assert cfg.convective_cloud is True
+
+
+def test_config_yaml_explicit_cli_flag_overrides_file():
+    """Precedence: an explicit CLI flag wins over the --config file default."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.convection == "bechtold"

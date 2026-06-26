@@ -59,83 +59,14 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
 
-def _read_yaml_with_includes(path, _seen=None) -> dict:
-    """Read a run_coupled YAML config, recursively merging an optional
-    ``include:`` base FIRST so the tuned physics can live in one shared file
-    (``config/cmip/cmip_tuned_physics.yaml``) and be reused across run configs.
-
-    Precedence: the including file's keys override the base it includes
-    (base < file).  An ``include:`` path is resolved relative to the including
-    file.  Cycles and missing/non-mapping files raise.  Returns the merged raw
-    dict; ``_load_yaml_config`` then validates + type-coerces it.
-    """
-    import yaml
-    p = Path(path).resolve()
-    _seen = set() if _seen is None else _seen
-    if p in _seen:
-        raise SystemExit(f"--config: 'include' cycle detected at {p}.")
-    _seen.add(p)
-    if not p.exists():
-        raise SystemExit(f"--config: file not found: {p}.")
-    doc = yaml.safe_load(p.read_text())
-    if doc is None:
-        return {}
-    if not isinstance(doc, dict):
-        raise SystemExit(
-            f"--config {path}: expected a YAML mapping of argument=value, "
-            f"got {type(doc).__name__}.")
-    base_ref = doc.pop("include", None)
-    merged = {}
-    if base_ref is not None:
-        if not isinstance(base_ref, str):
-            raise SystemExit(
-                f"--config {path}: 'include' must be a single path string, "
-                f"got {type(base_ref).__name__}.")
-        merged.update(_read_yaml_with_includes(p.parent / base_ref, _seen))
-    merged.update(doc)  # the including file overrides its base
-    return merged
-
-
-def _load_yaml_config(path, parser) -> dict:
-    """Load a run_coupled YAML config file into a dict of argument defaults.
-
-    Used by ``--config`` to make a canonical coupled run (e.g. the tuned
-    ``config/cmip/cmip_ocean_{slab,3D}.yaml``) reproducible from one file.
-    Supports an optional ``include:`` base merged first (see
-    ``_read_yaml_with_includes``).  Every (merged) key MUST be a known
-    run_coupled argument dest; an unknown key raises (no silent typo'd / dropped
-    override — dispatch-hardening).
-
-    Each scalar is coerced through that argument's ``type=`` callable, because
-    ``parser.set_defaults`` (how the caller applies this) BYPASSES argparse's own
-    type conversion: a value written as a quoted string (e.g. ``dt: "300"``)
-    would otherwise reach the run as a str.  Returns the mapping so the caller
-    can feed it to ``parser.set_defaults`` (an explicit CLI flag still wins).
-    """
-    doc = _read_yaml_with_includes(path)
-    actions = {a.dest: a for a in parser._actions}
-    unknown = sorted(set(doc) - set(actions))
-    if unknown:
-        raise SystemExit(
-            f"--config {path}: unknown key(s) {unknown}. Keys must be "
-            f"run_coupled argument dests (e.g. 'surface_bulk_scheme', 'ocean', "
-            f"'surface_gustiness_zi', 'cloud_q_c_diagnostic', "
-            f"'ocean_restore_sst_tau_days').")
-    out = {}
-    for key, value in doc.items():
-        argtype = getattr(actions[key], "type", None)
-        # Coerce only string scalars through the arg's type (a YAML native
-        # float/int/bool is already the right Python type; type=None args are
-        # str/bool flags that need no conversion).
-        if argtype is not None and isinstance(value, str):
-            try:
-                value = argtype(value)
-            except (ValueError, TypeError) as exc:
-                raise SystemExit(
-                    f"--config {path}: key '{key}' value {value!r} is not a "
-                    f"valid {getattr(argtype, '__name__', argtype)}: {exc}")
-        out[key] = value
-    return out
+# The --config YAML loader is the shared single source of truth
+# (legoesm.driver.run_config_yaml) reused by run_amip.py — see main(), which
+# imports it deferred.  run_coupled-specific example dests for the unknown-key
+# error hint:
+_COUPLED_EXAMPLE_KEYS = (
+    "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
+    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+)
 
 
 def _find_latest_checkpoint(output_dir):
@@ -535,7 +466,9 @@ def main():
     # flags still override (precedence: CLI > config file > parser default).
     pre, _ = parser.parse_known_args()
     if pre.config is not None:
-        parser.set_defaults(**_load_yaml_config(pre.config, parser))
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        parser.set_defaults(**load_yaml_config(
+            pre.config, parser, example_keys=_COUPLED_EXAMPLE_KEYS))
 
     args = parser.parse_args()
 
