@@ -163,10 +163,30 @@ def mpas_ocean_baroclinic_tendencies(
         _is_active_3d = z_coord.is_active.astype(T_3d.dtype)
     else:
         _is_active_3d = None
-    # Use h_actual (partial-cell-aware) for the baroclinic pressure
-    # cumsum on partial cells — matches NEMO ``ln_hpg_zps`` and MITgcm
-    # conventions.  When unset, falls back to dz_ref (legacy z*).
-    _use_h_actual_pgf = getattr(config, "use_h_actual_pgf", False)
+    # Integrate the baroclinic pressure anomaly p' against the actual
+    # partial-cell thickness h_k (NEMO ``ln_hpg_zps`` / MITgcm) ONLY for
+    # the Adcroft scheme.  This is the matched partner of the
+    # ``pgf_scheme == "adcroft"`` Adcroft–Campin face-correction branch
+    # below and MUST fire under the same guard: the AC correction reads
+    # centroid depths from h_partial, so p' has to be on the h_partial
+    # grid too (commit 62913cbe6 fixed that mismatch by enabling
+    # ``use_h_actual_pgf`` for the adcroft comparison runs).
+    #
+    # The bare "centered" scheme carries NO such correction.  Integrating
+    # p' on h_partial places p'[k] at each cell's *actual* centroid
+    # depth, which differs across a bottom-level step; the centered
+    # ``gradient_edge(p')`` then differences pressures at mismatched
+    # depths, injecting an uncompensated spurious ∇p' that blows up the
+    # rest state on a seamount step (max|u| 5.5e-4 → 1.2e-1 over 1 h).
+    # Centered therefore always integrates p' on the dz_ref reference-
+    # depth grid (its stable, common-depth treatment) regardless of
+    # ``use_h_actual_pgf``.  smc03/ahh08/zero drop p' from the Bernoulli
+    # scalar entirely, so the choice is moot for them and they too keep
+    # the dz_ref default.  When unset, falls back to dz_ref (legacy z*).
+    _use_h_actual_pgf = (
+        getattr(config, "use_h_actual_pgf", False)
+        and getattr(config, "pgf_scheme", "centered") == "adcroft"
+    )
     if _use_h_actual_pgf and isinstance(z_coord, OceanPartialCellCoordinate):
         _h_for_pgf = h_k
     else:
