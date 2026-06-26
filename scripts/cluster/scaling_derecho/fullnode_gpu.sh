@@ -2,7 +2,8 @@
 #PBS -N fullnode_gpu
 #PBS -A P08010000
 #PBS -q main
-#PBS -l job_priority=regular
+# NB: the queue is overridden and charging set by submit_fullnode.sh -- -q main
+#     adds -l job_priority, -q develop omits it (develop takes no job_priority).
 #PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
 #PBS -l walltime=02:00:00
 #PBS -j oe

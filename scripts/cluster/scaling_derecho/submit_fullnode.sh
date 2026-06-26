@@ -27,6 +27,10 @@
 #   # knobs (pass through to the jobs) + dry run / one tier:
 #   PHYSICS=moist PRECISION=float32 DRYRUN=1 submit_fullnode.sh $SCRATCH/x icosahedral
 #   CPU_ONLY=1 submit_fullnode.sh $SCRATCH/x spectral
+#   # queue: QUEUE=develop targets the shared debug queue (6 h cap, no
+#   # job_priority, charged cores/GPUs x hours); QUEUE=main (default) adds
+#   # -l job_priority=${PRIORITY:-regular}.
+#   QUEUE=develop submit_fullnode.sh $SCRATCH/x latlon
 # ===========================================================================
 set -euo pipefail
 
@@ -72,6 +76,17 @@ EXTRA_VARS=""
 if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; fi
 if [ -n "${PRECISION:-}" ]; then EXTRA_VARS="${EXTRA_VARS},PRECISION=${PRECISION}"; fi
 
+# Queue + charging.  `main` is the exclusive-node production queue and takes
+# `job_priority` (economy/regular/premium); `develop` is a SHARED-node debug
+# queue (6 h cap, charged cores/GPUs x hours) that does NOT accept
+# `job_priority` -- so we add it only for main.  The job scripts carry no
+# `#PBS -l job_priority`, so `-q develop` is clean.
+QUEUE="${QUEUE:-main}"
+QARGS=( -q "$QUEUE" )
+if [ "$QUEUE" = "main" ]; then
+    QARGS+=( -l "job_priority=${PRIORITY:-regular}" )
+fi
+
 submit() {  # submit "<label>" <qsub args...>
     local label="$1"; shift
     if [ "${DRYRUN:-0}" = "1" ]; then
@@ -84,7 +99,7 @@ submit() {  # submit "<label>" <qsub args...>
 }
 
 echo "=== repo: ${REPO_ROOT} ==="
-echo "=== full-node CPU-vs-A100: grid=${GRID}  resolutions=[${RES[*]}] ==="
+echo "=== full-node CPU-vs-A100: grid=${GRID}  resolutions=[${RES[*]}]  queue=${QUEUE} ==="
 echo "=== outdir: ${OUTDIR} ==="
 
 for R in "${RES[@]}"; do
@@ -101,10 +116,10 @@ for R in "${RES[@]}"; do
             ;;
     esac
     if [ "${GPU_ONLY:-0}" != "1" ]; then
-        submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$CPU_SCRIPT"
+        submit "cpu ${GRID} res=${R} (rank sweep)" "${QARGS[@]}" -v "$CPU_VARS" "$CPU_SCRIPT"
     fi
     if [ "${CPU_ONLY:-0}" != "1" ]; then
-        submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$GPU_SCRIPT"
+        submit "gpu ${GRID} res=${R} (A100 sweep)" "${QARGS[@]}" -v "$GPU_VARS" "$GPU_SCRIPT"
     fi
 done
 

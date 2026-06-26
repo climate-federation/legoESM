@@ -327,11 +327,36 @@ GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral #
 |-----|---------|-------|
 | `PHYSICS` | `none` | `none` (dycore-only) \| `held_suarez` \| `moist` (moisture+Kessler) |
 | `PRECISION` | `float32` | `float32` \| `float64` |
+| `QUEUE` | `main` | `main` (exclusive, adds `-l job_priority`) \| `develop` (see below) |
+| `PRIORITY` | `regular` | `main` only: `economy` \| `regular` \| `premium` |
 | `DRYRUN` | `0` | `1` = print the `qsub` lines without submitting |
 | `CPU_ONLY` / `GPU_ONLY` | `0` | submit just one side |
 
 Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
 icosahedral `6 7`, spectral `85 170`.
+
+### Queue: `main` vs `develop`
+
+```bash
+QUEUE=develop scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+```
+
+`develop` is Derecho's **shared-node debug queue** — use it for quick
+turnaround while validating the pipeline. Key differences the submitter handles
+for you, plus the limits to respect:
+
+- **No `job_priority`.** `develop` rejects the `job_priority` attribute that
+  `main` uses, so the job scripts carry none and the submitter adds it ONLY for
+  `main`. (Putting `#PBS -l job_priority=...` in a `develop` job is the usual
+  "switched to `-q develop` and it errored" cause.)
+- **6-hour wall-clock cap** (the jobs request 2–3 h, within the limit).
+- **Charged cores/GPUs × hours on shared nodes** (vs `main`'s exclusive
+  whole-node charge), and you may run **multiple jobs concurrently only up to
+  the per-node limit** (≈256 cores / 8 GPUs). A multi-resolution campaign can
+  exceed that and will queue — fine for a few cases, but run a full sweep on
+  `main`.
+- Interactive `develop` sessions likewise drop `job_priority`:
+  `qsub -I -q develop -A $PROJECT -l select=1:ncpus=128:mpiprocs=128 -l walltime=01:00:00`.
 
 ## Step 5 — Monitor the jobs
 
