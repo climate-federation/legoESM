@@ -310,7 +310,12 @@ def test_tier2_mass_flux_schemes_net_dry(name):
     "name",
     # Schemes that claim exact column total-water conservation
     # (vapor removed reappears as cloud water in the column).
-    ["sbm", "dca_manabe", "dca_ahmed_neelin", "emanuel"],
+    # NB: emanuel is intentionally EXCLUDED here. With use_genuine_mixing=True
+    # (the default) it is a PRECIPITATING scheme — the net vapor removal is the
+    # reference EP*CLW precipitation sink (emanuel.py:464-498, 534-549), NOT
+    # reinserted as in-column cloud water — so it does not close column total
+    # water in-scheme. Its behavioral contract is gated in the tier1/tier2 lists.
+    ["sbm", "dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_total_water_conserved(name):
     """∫(dq_v + dq_c) dp/g ≈ 0: every kg of vapor removed reappears as
@@ -331,7 +336,10 @@ def test_tier3_total_water_conserved(name):
 @pytest.mark.parametrize(
     "name",
     # Schemes that advertise column MSE conservation of the adjustment.
-    ["dca_manabe", "dca_ahmed_neelin", "emanuel"],
+    # emanuel excluded — it precipitates by design (see the tier3 total-water
+    # note above); the condensate carries latent heat out of the vapor-only
+    # reservoir, so the vapor-MSE residual is nonzero for the genuine scheme.
+    ["dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_column_mse_conserved(name):
     """∫(c_p dT + L_v dq_v) dp/g ≈ 0: column moist static energy of the

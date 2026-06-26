@@ -43,7 +43,7 @@ def step_ponds(
     pond_to_ice_max_area: float,
     depth_to_area_ratio: float,
     snow_block_threshold: float = _POND_DEFAULTS.snow_block_threshold,
-    refreeze_width_K: float = 0.5,
+    refreeze_width_K: float = _POND_DEFAULTS.refreeze_width_K,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 

@@ -80,6 +80,10 @@ def _acc_model_with_eke(**eke_overrides):
 
 def _developed_state(recipe, model, n=8):
     state = recipe.initial_state
+    # Rigid-lid island decomposition must be built from the CONCRETE initial state
+    # before the first (jitted) model.step (the in-jit host flood-fill cannot run on
+    # a traced state) — see ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
     for _ in range(n):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     return state
@@ -103,6 +107,10 @@ def test_default_off_bit_identical_realized_signed_and_p_diss_iso():
         gm_source_mode="parameterized", source_p_diss_iso=False)
     s = recipe.initial_state
     s2 = recipe.initial_state
+    # Warm each model's rigid-lid concrete cache before its first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model_off._ensure_rigid_lid_data(s)
+    model_ref._ensure_rigid_lid_data(s2)
     for _ in range(5):
         s = model_off.step(s, DT_MOM_S, surface_forcing=recipe.wind_forcing)
         s2 = model_ref.step(s2, DT_MOM_S, surface_forcing=recipe.wind_forcing)
@@ -296,6 +304,9 @@ def test_full_signed_step_keeps_eke_nonneg():
     iso sink are locally negative)."""
     recipe, model = _acc_model_with_eke()  # recipe default = realized_signed + iso
     s = recipe.initial_state
+    # Warm the rigid-lid concrete cache before the first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model._ensure_rigid_lid_data(s)
     for _ in range(6):
         s = model.step(s, DT_MOM_S, surface_forcing=recipe.wind_forcing)
         assert float(jnp.min(s.eke.data)) >= 0.0
@@ -361,6 +372,10 @@ def test_signed_step_is_differentiable():
     the negative-part semi-implicit folding are all differentiable."""
     recipe, model = _acc_model_with_eke()
     state = recipe.initial_state
+    # Warm the rigid-lid concrete cache before grad traces the step (the in-jit
+    # host flood-fill cannot run on the traced state passed into jax.grad) — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
 
     def loss(T_data):
         st = state._replace(T=state.T.replace(data=T_data))

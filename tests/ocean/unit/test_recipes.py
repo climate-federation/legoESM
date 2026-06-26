@@ -42,8 +42,11 @@ class TestRegistry:
         # The proven OMIP NEMO-match recipes (#500) appear in the menu.
         assert "omip_nemo_match_mpas_v1" in all_recipes
         assert "omip_nemo_match_tripole_v1" in all_recipes
+        # The MPAS sibling of default_wright_v1, added with the MPAS catalog (#490).
+        assert "default_wright_mpas_v1" in all_recipes
         assert list_recipes("mpas") == [
-            "legoesm_linear_mpas_v1", "omip_nemo_match_mpas_v1"]
+            "default_wright_mpas_v1", "legoesm_linear_mpas_v1",
+            "omip_nemo_match_mpas_v1"]
         assert "omip_nemo_match_tripole_v1" in list_recipes("latlon")
 
     def test_get_recipe_returns_copy(self):

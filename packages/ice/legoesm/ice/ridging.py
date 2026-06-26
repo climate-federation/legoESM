@@ -257,7 +257,7 @@ def apply_ridging(
     e_star: float = _RIDGE_DEFAULTS.e_star,
     mu_rdg: float = _RIDGE_DEFAULTS.mu_rdg,
     H_star: float = _RIDGE_DEFAULTS.H_star,
-    snow_fraction_retained: float = 0.5,
+    snow_fraction_retained: float = _RIDGE_DEFAULTS.snow_fraction_retained,
 ) -> dict:
     """Apply Lipscomb 2007 mechanical ridging to a multi-category state.
 

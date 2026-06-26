@@ -392,7 +392,16 @@ def attach_static_rho_ref_z(
 
     if isinstance(z_coord, OceanPartialCellCoordinate):
         is_active_3d = z_coord.is_active.astype(T_3d.dtype)
-        if getattr(config, "use_h_actual_pgf", False):
+        # Mirror the runtime PGF guard (ocean_pe_mpas.py): h_actual
+        # integration of the hydrostatic pressure pairs with the Adcroft
+        # scheme only.  Building the static rho_ref(z) on the SAME grid
+        # the runtime p'/p_hydro uses keeps ρ' = ρ − ρ_ref(z) consistent
+        # between init and run for every scheme (centered stays on
+        # dz_ref, so its static profile does too).
+        if (
+            getattr(config, "use_h_actual_pgf", False)
+            and getattr(config, "pgf_scheme", "centered") == "adcroft"
+        ):
             h_actual = compute_layer_thickness(
                 eta_2d, H_bathy, z_coord,
                 min_water_column_m=config.min_water_column_m,

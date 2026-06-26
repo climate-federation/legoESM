@@ -311,7 +311,9 @@ def test_validate_strict_rejects_bad_barotropic_solver():
 
 def test_validate_strict_rejects_nonpositive_dt():
     cfg = OceanExperimentConfig.from_dict({"time": {"dt_seconds": 0}})
-    with pytest.raises(ValueError, match="time.dt_seconds must be > 0"):
+    # Routed through the shared setup_selector.require_positive_finite helper
+    # (#388), whose message is "<name> must be a finite number > 0, got <v>".
+    with pytest.raises(ValueError, match=r"time\.dt_seconds must be a finite number > 0"):
         cfg.validate_strict()
 
 

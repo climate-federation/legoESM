@@ -609,13 +609,20 @@ class TestSpectralPEConvectiveDrying:
     def test_convection_alters_q_v_via_dycore_path(
         self, grid, sigma_coord, rest_state,
     ):
-        """In a CAPE-positive moist column, Tiedtke's q_v tendency
+        """In a CAPE-positive moist column, convection's q_v tendency
         should propagate end-to-end (bridge → orchestrator → dycore
         RHS → SSP-RK).  We pin the signature: q_v evolves
         non-trivially relative to the case where convection is OFF.
-        Direction-of-change is not asserted because Tiedtke's
-        subsidence vs detrainment can locally raise or lower q_v
-        depending on the column-mass-flux profile."""
+        Direction-of-change is not asserted because the subsidence vs
+        detrainment balance can locally raise or lower q_v depending on
+        the column-mass-flux profile.
+
+        Uses the STATELESS ``sbm`` deep-convection scheme: spectral PE's
+        ``step()`` refuses a profile-prognostic scheme (tiedtke/ZM/KF/
+        emanuel/bechtold) because transform space has no per-column
+        PhysicsState carry slot, so a dropped carry would silently reseed
+        the scheme's memory every step (issue #405/#413).  ``sbm`` drives
+        the identical bridge→orchestrator→RHS path without a carry."""
         from legoesm.atmosphere.physics.combined import (
             PhysicsConfig, make_physics,
         )
@@ -630,7 +637,6 @@ class TestSpectralPEConvectiveDrying:
         from legoesm.atmosphere.physics.gravity_wave_drag.config import (
             GravityWaveDragConfig,
         )
-        from legoesm.atmosphere.physics.physics_state import init_physics_state
         from legoesm.thermo import saturation_mixing_ratio
 
         nlev = sigma_coord.n_levels
@@ -660,13 +666,11 @@ class TestSpectralPEConvectiveDrying:
 
         cfg = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(scheme="tiedtke"),
+            convection=ConvectionConfig(scheme="sbm"),
             turbulence=TurbulenceConfig(scheme="none"),
             microphysics=MicrophysicsConfig(scheme="none"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
         )
-        ncol = grid.n_lat * grid.n_lon
-        ps = init_physics_state(ncol, nlev, cfg)
         physics_fn = make_physics(cfg, model_type="spectral_pe", dt=300.0)
 
         config = SpectralPEConfig(

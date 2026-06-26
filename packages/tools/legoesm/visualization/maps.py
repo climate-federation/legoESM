@@ -75,8 +75,7 @@ def plot_global_field(
     # Convert to numpy
     lon_np = np.asarray(grid.lon) * 180.0 / np.pi  # Convert to degrees
     lat_np = np.asarray(grid.lat) * 180.0 / np.pi
-    #data_np = np.asarray(field.data)
-    field_new=field.data if hasattr(field, 'data') else field
+    field_new = field.data if hasattr(field, 'data') else field
     data_np = np.asarray(field_new)
 
     # Plot each face as a scatter plot
@@ -104,7 +103,7 @@ def plot_global_field(
     ax.gridlines(linewidth=0.3, color="gray", alpha=0.5)
 
     cbar = plt.colorbar(sc, ax=ax, shrink=0.7, pad=0.05)
-    cbar.set_label(colorbar_label or field.units)
+    cbar.set_label(colorbar_label or getattr(field, "units", ""))
 
     if title:
         ax.set_title(title, fontsize=14)
