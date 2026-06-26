@@ -1,4 +1,9 @@
 """Per-column (spatial) van-Genuchten hydraulics in the Richards solver."""
+import jax
+# Enable x64 BEFORE jax.numpy / the module-level GRID is built, else GRID.dz is
+# float32 and the float32-soil dtype regression below would pass vacuously (the
+# body never upcasts, so there is no carry mismatch to catch).
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -58,6 +63,29 @@ def test_uniform_array_matches_scalar():
     t_scalar = _run(scalar, ncol=2)
     t_arr = _run(arr, ncol=2)
     assert np.allclose(t_scalar, t_arr, atol=1e-9)
+
+
+def test_float32_soil_state_survives_scan_carry_under_x64():
+    """A float32 soil state (e.g. downcast between coupled segments) must not
+    trip the Picard ``fori_loop`` "scan carry input/output type mismatch" under
+    x64: the Thomas solve promotes ``psi + dpsi`` to dz's float64 working
+    precision, so a float32 input carry vs a float64 output carry would crash at
+    compile.  ``solve_richards`` now promotes the initial carry to that working
+    dtype.  Before the fix this call raised TypeError at trace time.  (No-op
+    when x64 is off: dz is then float32 and nothing is promoted.)"""
+    cfg = _per_col_config(["sand", "clay"])
+    ncol = 2
+    theta = jnp.full((ncol, GRID.n_layers), 0.30, dtype=jnp.float32)
+    psi = psi_from_theta(theta, cfg).astype(jnp.float32)
+    flux = jnp.full((ncol,), 5e-6, dtype=jnp.float32)
+    sink = jnp.zeros((ncol, GRID.n_layers), dtype=jnp.float32)
+
+    out = solve_richards(psi, theta, GRID, cfg, RCFG, flux, sink, 1800.0)  # no raise
+
+    work = jnp.result_type(psi, GRID.dz)
+    assert out.psi_new.dtype == work
+    assert out.theta_new.dtype == work
+    assert np.all(np.isfinite(np.asarray(out.theta_new)))
 
 
 if __name__ == "__main__":

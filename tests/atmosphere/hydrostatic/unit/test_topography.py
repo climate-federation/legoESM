@@ -539,5 +539,61 @@ class TestLatLonAnalyticTopography(unittest.TestCase):
         self.assertGreater(float(jnp.max(z)), 1000.0)
 
 
+class TestLaplacianSmoothCrossFace(unittest.TestCase):
+    """Cube-imprint guard: the topography Laplacian smoothing must use the
+    cross-face halo, NOT per-face boundary clamping (which smooths each face in
+    isolation and leaves a cube-edge seam — the cube imprint). The authoritative
+    check is the nightly cube-SW visual-regression gate; this asserts the
+    necessary cross-face-leakage property deterministically."""
+
+    def test_smoothing_leaks_across_face_boundaries(self):
+        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+
+        n = 6
+        arr = np.zeros((6, n, n))
+        arr[0] = 1.0  # face 0 hot, all other faces zero
+        out = _laplacian_smooth_cubed_sphere(arr, passes=1)
+
+        # With a real cross-face halo the faces bordering face 0 receive a
+        # positive contribution. One-sided boundary clamping (the cube-imprint
+        # bug) leaves every non-face-0 cell exactly 0.
+        self.assertTrue(
+            np.any(out[1:] > 1e-6),
+            "smoothing did not cross cube face boundaries — per-face clamping "
+            "would leave a cube-edge seam (cube imprint)",
+        )
+        # Face 0 mixes toward its (zero) neighbours, so its min drops below 1.
+        self.assertLess(float(out[0].min()), 1.0)
+
+    def test_constant_field_is_preserved(self):
+        """Smoothing a constant field must return it unchanged (no spurious
+        edge artifact from the halo stencil)."""
+        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+
+        arr = np.full((6, 6, 6), 3.0)
+        out = _laplacian_smooth_cubed_sphere(arr, passes=3)
+        npt.assert_allclose(out, 3.0, atol=1e-10)
+
+    def test_smoothing_independent_of_halo_backend(self):
+        """Host-side topography smoothing must NOT dispatch through the global
+        MPI/SPMD halo backend (codex PR F): it uses the local cross-face pad
+        directly, so the result is identical regardless of the active backend —
+        a full global field must never enter the distributed exchange path."""
+        from legoesm.grids.halo import get_halo_backend, set_halo_backend
+        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
+
+        arr = np.zeros((6, 6, 6))
+        arr[0] = 1.0
+        out_local = _laplacian_smooth_cubed_sphere(arr, passes=2)
+
+        prev = get_halo_backend()
+        try:
+            set_halo_backend("spmd")  # non-local backend active during smoothing
+            out_other = _laplacian_smooth_cubed_sphere(arr, passes=2)
+        finally:
+            set_halo_backend(prev)
+        npt.assert_allclose(out_other, out_local, atol=1e-12)
+
+
 if __name__ == "__main__":
     unittest.main()

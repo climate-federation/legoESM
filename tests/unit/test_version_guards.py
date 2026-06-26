@@ -81,7 +81,7 @@ class TestValidate:
     def test_mpi4jax_above_range_warns(self):
         """mpi4jax above tested range produces a RuntimeWarning."""
         with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
-            _validate_mpi_runtime_versions("0.8.0", "0.9.1")
+            _validate_mpi_runtime_versions("0.8.0", "0.10.0")
 
     def test_warning_contains_fix(self):
         """Warning message must point to remediation."""
@@ -117,8 +117,9 @@ class TestConstantsConsistency:
         )
 
     def test_mpi4jax_max_excl(self):
-        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 9, 0), (
-            "_TESTED_MPI4JAX_MAX_EXCL must match pyproject.toml mpi4jax<0.9"
+        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 10, 0), (
+            "_TESTED_MPI4JAX_MAX_EXCL must match pyproject.toml mpi4jax<0.10 "
+            "(mpi4jax 0.9.0 = the FFI rewrite, issue #567)"
         )
 
     def test_jax_tested_range(self):

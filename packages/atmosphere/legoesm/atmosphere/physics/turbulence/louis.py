@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import virtual_temperature, mixing_length
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
@@ -90,11 +90,9 @@ def louis_turbulence(
     # z_half_inner[k] = 0.5 * (z_full[k] + z_full[k+1])  (nlev-1 interfaces)
     z_half_inner = 0.5 * (z_full[:, :-1] + z_full[:, 1:])  # (ncol, nlev-1)
 
-    # Mixing length at half-levels: l = kappa * z / (1 + kappa * z / l_max)
-    z_abs = jnp.clip(jnp.abs(z_half_inner), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )  # (ncol, nlev-1)
+    # Mixing length at half-levels (Blackadar 1962): shared helper, also used
+    # by TKE/CLUBB-lite/EDMF/Smagorinsky (no re-inlined l_mix expression).
+    l_mix = mixing_length(z_half_inner, config.l_mix_max)  # (ncol, nlev-1)
 
     # Layer thickness for gradient computation
     dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)

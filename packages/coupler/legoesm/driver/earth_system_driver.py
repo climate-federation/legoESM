@@ -151,8 +151,8 @@ class EarthSystemDriver:
         else:
             albedo_eff = blend_surface_property(
                 sic,
-                getattr(cfg, 'albedo_ice', 0.6),
-                getattr(cfg, 'albedo_ocean', 0.06),
+                cfg.albedo_ice,
+                cfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
@@ -163,9 +163,14 @@ class EarthSystemDriver:
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
-        # Snow fraction: approximate from T_lowest < freezing
+        # Snow fraction: smooth Wigmosta 1994 / Dai 2008 ramp (shared helper).
+        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
+        # d(snow)/d(T_low) on training/DA paths and miscounted mixed-phase
+        # precip in the 0–4 °C band; the helper matches the coupled driver so
+        # the two cannot diverge.
+        from legoesm.forcing.surface_utils import snow_fraction
         precip_total = jnp.maximum(seg_precip, 0.0)
-        snow_frac = jnp.where(T_low < constants.T_freeze, 1.0, 0.0)
+        snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith: daily-mean approximation cos_zen = Q / S_0
@@ -174,7 +179,7 @@ class EarthSystemDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(cfg, 'S_0', constants.S_0)
+            S_0 = cfg.S_0
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:

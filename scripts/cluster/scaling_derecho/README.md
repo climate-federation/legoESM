@@ -124,7 +124,7 @@ MPICC=cc pip install --no-cache-dir --no-binary mpi4py "mpi4py>=4.1,<5"
 #     pip pulls jax 0.10.x, which (a) orphans the jax_cuda12_plugin 0.9.2 -> GPU
 #     silently DISABLED, and (b) breaks mpi4jax 0.8.x ("cannot import get_aval").
 MPICC=cc CUDA_ROOT="${CUDA_HOME:-$(dirname "$(dirname "$(which nvcc)")")}" \
-    pip install --no-deps --no-cache-dir --no-binary mpi4jax "mpi4jax==0.8.1.post2"
+    pip install --no-deps --no-cache-dir --no-binary mpi4jax "mpi4jax==0.9.0"
 
 # (4) PIN jax back into the tested envelope (matches legoesm-mpi: jax/jaxlib
 #     0.9.2). This realigns jaxlib + jax_cuda12_plugin to 0.9.2 (re-enables the
@@ -185,7 +185,7 @@ module list               # confirm: gcc + cray-mpich loaded
 # (if cc still says icx:  module unload intel-oneapi-compilers  then reload gcc cray-mpich)
 
 MPICC=cc pip install --no-cache-dir --force-reinstall --no-binary mpi4py  "mpi4py>=4.1,<5"
-MPICC=cc pip install --no-cache-dir                  --no-binary mpi4jax "mpi4jax==0.8.1.post2"
+MPICC=cc pip install --no-cache-dir                  --no-binary mpi4jax "mpi4jax==0.9.0"
 
 python -c "import mpi4py, mpi4jax; print('mpi4jax', mpi4jax.__version__)"
 ```

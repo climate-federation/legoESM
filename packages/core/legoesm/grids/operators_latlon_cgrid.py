@@ -70,6 +70,27 @@ def pad_ns_zero_multi(*fields: jnp.ndarray) -> tuple:
     return pad_with_pole_bc_lat_multi(fields, halo=1)
 
 
+def _vface_cos_lat_core(grid) -> jnp.ndarray:
+    """Raw ``cos(lat_v)`` at the ``n_lat+1`` v-face midpoints (#515 consolidation).
+
+    The single source for the regular-branch v-face zonal-metric cosine shared by
+    ``divergence_cgrid`` and ``gradient_curl_to_v``: pad ``grid.lat`` with the
+    halo-aware pole/cut BC (``pad_with_pole_bc_lat`` — at an interior MPI band cut
+    the ghost row is the neighbour rank's true edge latitude via the AD-safe
+    sendrecv), take the v-face midpoint latitude, return its cosine.  Callers apply
+    their OWN pole step (``zero_polar_lat_ends`` vs a ``1e-30`` floor) and the
+    ``R*dlon`` scaling.  Kept on the STORED ``grid.lat`` dtype (NOT
+    ``result_type``-cast — unlike the ocean ``vface_zonal_cos_lat``) so the core
+    path stays byte-identical to the former inline recompute.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    lat_pad = pad_with_pole_bc_lat(
+        grid.lat, halo=1, south_value=0.0, north_value=0.0,
+    )
+    lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
+    return jnp.cos(lat_v)
+
+
 def is_tripolar(grid) -> bool:
     """Return True if ``grid`` carries an active tripolar fold descriptor.
 
@@ -101,6 +122,45 @@ def fold_is_local(grid) -> bool:
     """
     fold = getattr(grid, "fold", None)
     return fold is not None and bool(fold.is_active) and fold.fold_j >= 0
+
+
+def _has_2d_vface_metric(grid) -> bool:
+    """True if ``grid`` carries an explicit 2D stored v-face zonal metric.
+
+    Rich ``LatLonCGridGeometry`` (tripolar, spherical/Mercator, beta-plane)
+    builds ``dx_v`` of shape ``(n_lat+1, n_lon)`` at construction; the lean
+    ``LatLonGrid`` lacks the field entirely.
+    """
+    dxv = getattr(grid, "dx_v", None)
+    return dxv is not None and getattr(dxv, "ndim", 0) == 2
+
+
+def reads_stored_vface_metric(grid) -> bool:
+    """True if the v-face zonal length metric must be READ from the grid's
+    stored ``dx_v`` rather than recomputed as ``R*cos(grid.lat_v)*dlon``.
+
+    Generalizes :func:`is_tripolar` (#514/#515): the recompute reconstructs the
+    metric from ``cos(grid.lat)``, which is WRONG on a Cartesian **beta-plane**
+    (whose stored metric is the uniform ``dx_m`` but whose pseudo-lat is a
+    nonzero ``y_c/radius``) and merely redundant on a spherical rich geometry
+    (whose stored ``dx_v`` is bit-identical to the recompute in the core).
+
+    Reads stored when the grid carries an explicit 2D ``dx_v`` (any rich
+    geometry) EXCEPT under a meridionally-periodic (y-reentrant) topology,
+    where the pole v-faces must be wrap-padded (recomputed via
+    ``pad_with_pole_bc_lat``), not the stored closed-domain pole-zeros.
+    Tripolar always reads stored (its fold metric is never recomputable).
+
+    Resolves statically: ``grid`` is a trace-time constant and
+    ``get_meridionally_periodic()`` is a concrete module bool, so the calling
+    ``if`` is a compile-time branch (the sanctioned feature-gating pattern),
+    never traced control flow.
+    """
+    if is_tripolar(grid):
+        return True
+    from legoesm.grids.halo_latlon import get_meridionally_periodic
+
+    return _has_2d_vface_metric(grid) and not get_meridionally_periodic()
 
 
 def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -710,11 +770,12 @@ def divergence_cgrid(
         net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
     # --- Meridional face length (zonal extent of v-face) ---
-    # On a regular lat-lon grid this is the 1D array
-    # R*cos(lat_v)*dlon; on a tripolar grid (dlat==0 sentinel) it
-    # is the 2D array grid.dx_v.
-    if is_tripolar(grid):
-        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D for tripolar
+    # On a lean lat-lon grid this is the 1D array R*cos(lat_v)*dlon; a rich
+    # geometry that carries an explicit 2D stored metric (tripolar, beta-plane,
+    # spherical) reads grid.dx_v directly (#514) — the recompute reconstructs
+    # cos(grid.lat_v), which is WRONG on a Cartesian beta-plane.
+    if reads_stored_vface_metric(grid):
+        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D stored metric
     else:
         # v-face latitudes at ALL n_lat+1 local faces, cell-pad-first:
         # pad the CELL-CENTRE latitudes by one row through the
@@ -728,15 +789,8 @@ def divergence_cgrid(
         # exactly 0 (no flux through the pole), which also discards the
         # pole-side constant ghost; bit-identical to the historical
         # jnp.pad(cos_interior, (1, 1)) on the local backend.
-        from legoesm.grids.halo_latlon import (
-            pad_with_pole_bc_lat,
-            zero_polar_lat_ends,
-        )
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
+        from legoesm.grids.halo_latlon import zero_polar_lat_ends
+        cos_lat_v = zero_polar_lat_ends(_vface_cos_lat_core(grid))
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -1131,7 +1185,7 @@ def gradient_curl_to_v(
     face row on the rank that owns the tripolar seam — bit-identical to
     the old ``pad_ns_scalar`` output on the local backend.
     """
-    if is_tripolar(grid):
+    if reads_stored_vface_metric(grid):
         # Full 2D dx_v at ALL n_lat+1 v-faces.  The band slice already
         # carries the exact global metric at partition-cut rows
         # ([s:e+1]).  Floor the denominator like gradient_y_cgrid
@@ -1147,14 +1201,9 @@ def gradient_curl_to_v(
         # divergence_cgrid): at an interior MPI band cut the ghost row
         # is the neighbour's true edge cell latitude via the AD-safe
         # sendrecv, so the end faces divide by the exact serial metric.
-        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         R = grid.radius
         dlon = grid.dlon
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = jnp.cos(lat_v)
+        cos_lat_v = _vface_cos_lat_core(grid)
         # Floor only guards the ghost-derived pole entries (overwritten
         # below); interior/cut faces are O(1e5 m) — bit-identical.
         dx_v = jnp.maximum(R * cos_lat_v * dlon, 1e-30)  # (n_lat+1,)

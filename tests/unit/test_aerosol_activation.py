@@ -13,6 +13,7 @@ import pytest
 from legoesm.atmosphere.physics.microphysics.aerosol_activation import (
     CCNFromAODConfig,
     ccn_from_aod,
+    specified_nc_field,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -63,3 +64,65 @@ def test_shape_preserved():
     aod = jnp.ones((6, 4, 4)) * 0.1
     n = ccn_from_aod(aod)
     assert n.shape == aod.shape
+
+
+# ---------------------------------------------------------------------------
+# specified_nc_field — the column-AOD -> per-column specified-Nc glue shared by
+# the coupled (cube/lat-lon) physics_pipeline and the combined-physics
+# (MPAS/hydrostatic) microphysics + radiation factories.
+# ---------------------------------------------------------------------------
+
+def test_specified_nc_field_column_sum_and_broadcast():
+    # Per-layer AOD summed over levels then inverted to CCN and broadcast.
+    ncol, nlev = 5, 8
+    aer_od = jnp.full((ncol, nlev), 0.075 / nlev)  # column AOD = 0.075
+    n_c = specified_nc_field(aer_od, (ncol, nlev))
+    assert n_c.shape == (ncol, nlev)
+    # Same value at every level of a column (broadcast).
+    assert jnp.allclose(n_c, n_c[:, :1])
+    # Matches ccn_from_aod of the column-summed AOD.
+    expect = ccn_from_aod(jnp.sum(aer_od, axis=-1))
+    assert jnp.allclose(n_c[:, 0], expect)
+    assert jnp.all(n_c > 0.0)
+
+
+def test_specified_nc_field_monotone_in_column_aod():
+    # Heavier column AOD -> more droplets (until the cap).
+    nlev = 4
+    low = jnp.full((1, nlev), 0.02 / nlev)
+    high = jnp.full((1, nlev), 0.40 / nlev)
+    assert float(specified_nc_field(high, (1, nlev))[0, 0]) > float(
+        specified_nc_field(low, (1, nlev))[0, 0]
+    )
+
+
+def test_specified_nc_field_differentiable():
+    nlev = 4
+
+    def _mean_nc(scale):
+        aer = jnp.full((2, nlev), 0.05 / nlev) * scale
+        return jnp.mean(specified_nc_field(aer, (2, nlev)))
+
+    g = jax.grad(_mean_nc)(1.0)
+    assert jnp.isfinite(g) and g > 0.0
+
+
+def test_specified_nc_field_units_are_per_cubic_metre():
+    # UNIT LOCK.  Both consumers expect a per-VOLUME droplet number [#/m³]:
+    #   * Morrison warm rain — ``effective_Nc`` / ``Nc_0`` (1e8 /m³, bounds
+    #     1e7–1e9 in MorrisonConfig.__param_spec__);
+    #   * RRTMGP cloud optics — ``n_cloud`` is per-VOLUME [#/m³] and only
+    #     consumed where ``> 8`` (radiation/integration._extract_tracer_columns).
+    # ``ccn_from_aod`` works in cm⁻³, so the helper MUST apply the cm⁻³→m⁻³
+    # ×1e6 conversion.  Dropping it (returning ~10²–10³ cm⁻³ raw) would put
+    # N_c six orders of magnitude low, below the >8 optics guard and outside
+    # the Nc_0 bounds — a silent unit bug pytest would otherwise miss.  A
+    # clean continental column (AOT ~0.075 → ~200 cm⁻³) must land at ~2e8 /m³.
+    nlev = 8
+    aer_od = jnp.full((3, nlev), 0.075 / nlev)  # column AOT = 0.075
+    n_c = specified_nc_field(aer_od, (3, nlev))
+    val = float(n_c[0, 0])
+    assert 1.0e7 <= val <= 1.0e9, val          # inside Nc_0 spec bounds
+    assert val > 8.0                            # above cloud-optics guard
+    # ~200 cm⁻³ continental anchor -> ~2e8 /m³ (1.1e8–2.9e8 covers the ±90).
+    assert 1.1e8 <= val <= 2.9e8, val

@@ -6,6 +6,8 @@ water vapour on the lat-lon finite-volume grid — in contrast to the
 uniform-300 K rest state, which gives ~6x too much.
 """
 
+import tempfile
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -235,7 +237,11 @@ class TestDriverStandardIC:
             dataset="analytical", radiation="gray", ic=ic,
             topography=topography,
         )
-        drv = ModelDriver(cfg)
+        # Per-call unique output dir: ModelDriver's default path is a
+        # wall-clock-timestamped results/amip/... folder, so two _build calls in
+        # the same second collide on the run-manifest provenance guard (and would
+        # pollute the shared results/ tree). Isolate each driver.
+        drv = ModelDriver(cfg, output_dir=tempfile.mkdtemp(prefix="std_ic_"))
         drv.setup()
         return drv
 
@@ -344,7 +350,9 @@ class TestDriverStandardIC:
                                 discretization="cdgrid", dt=300.0),
             dataset="analytical", radiation="gray", ic=ic,
         )
-        drv = ModelDriver(cfg)
+        # Unique output dir (see _build): avoid same-second run-manifest
+        # collisions and shared-results pollution under the full suite.
+        drv = ModelDriver(cfg, output_dir=tempfile.mkdtemp(prefix="std_ic_cube_"))
         drv.setup()
         return drv
 
@@ -414,9 +422,13 @@ class TestDriverStandardIC:
         )
         cfg.validate_strict()  # must not raise
 
-    def test_standard_rejected_for_cubed_sphere(self):
-        # Cubed-sphere u/v are cube-local components; the geographic jet would
-        # need a grid-angle rotation that is not yet wired, so reject up front.
+    def test_standard_accepted_for_cubed_sphere(self):
+        # ic='standard' on cubed_sphere is ACCEPTED: the grid-agnostic realistic
+        # T/p_s overlay is applied; the balanced jet is skipped because cube u/v
+        # are cube-local components (config.py validate_strict accepts both
+        # 'latlon' and 'cubed_sphere'). The former test_standard_rejected_for_
+        # cubed_sphere was removed when the cube path was wired — it asserted a
+        # contract that contradicts the shipped behaviour.
         from legoesm.driver.config import (
             ExperimentConfig, GridConfig, DycoreConfig,
         )
@@ -426,8 +438,7 @@ class TestDriverStandardIC:
                                 discretization="cdgrid", dt=300.0),
             ic="standard",
         )
-        with pytest.raises(ValueError, match="grid_type='latlon'"):
-            cfg.validate_strict()
+        cfg.validate_strict()  # must not raise
 
     def test_standard_rejects_unphysical_t_init(self):
         from legoesm.driver.config import (

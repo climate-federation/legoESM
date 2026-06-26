@@ -104,7 +104,7 @@ def compute_cs_to_gauss_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -154,7 +154,7 @@ def compute_gauss_to_cs_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -215,7 +215,7 @@ def compute_latlon_to_voronoi_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=(n_target,),
         src_flat_size=src_flat_size,
     )
@@ -242,7 +242,6 @@ def regrid_scalar(
     """
     # Flatten spatial dimensions
     spatial_size = regrid_weights.src_flat_size
-    field.shape[len(field.shape) - (field.size // spatial_size):]
 
     # Handle different source shapes
     if field.size == spatial_size:
@@ -256,7 +255,16 @@ def regrid_scalar(
         extra_dims = flat.shape[1:]
 
     indices = regrid_weights.src_indices    # (n_target, k)
-    weights = regrid_weights.weights        # (n_target, k)
+    # Weights are stored fp64. For a FLOATING field, downcast to the field dtype
+    # so an fp64 field keeps full-precision gradients through the IDW sum while
+    # an fp32 field stays fp32 (no fp64 footprint at run time). For a NON-floating
+    # field (int/bool mask, categorical), keep the float weights so the fractional
+    # IDW weights are not truncated to 0/1 — the product then promotes the result
+    # to float, exactly as before this change.
+    if jnp.issubdtype(field.dtype, jnp.floating):
+        weights = regrid_weights.weights.astype(field.dtype)    # (n_target, k)
+    else:
+        weights = regrid_weights.weights                        # (n_target, k)
 
     if len(extra_dims) == 0:
         # Simple scalar: (n_target,)

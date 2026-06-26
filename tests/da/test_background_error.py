@@ -79,6 +79,34 @@ class TestDiffusionB:
         # Smoothed field should have less variance than the original
         assert jnp.var(smoothed_raw) < jnp.var(x)
 
+    def test_inv_is_exact_inverse_of_B(self, grid):
+        """PR B #5: inv_multiply must be the EXACT inverse of
+        ``B = sqrt_multiply ∘ sqrt_multiplyᵀ`` (transpose-consistent), so
+        ``inv_multiply(B v) == v``. The old first-order inverse with the wrong
+        step count gave ‖B^{-1}B − I‖ = O(1), making J_b inconsistent with the
+        B^{1/2} change-of-variable."""
+        n = grid.grid_n_columns
+        sigma = jnp.ones(n) * 2.0
+        B = DiffusionB(grid, sigma, horizontal_length_scale=1500e3,
+                       n_diffusion_iter=6)
+        v = jax.random.normal(jax.random.PRNGKey(3), (n,))
+        # B v = sqrt_multiply(sqrt_multiplyᵀ(v)); sqrt_multiply is linear.
+        sqrtT = jax.linear_transpose(B.sqrt_multiply, v)
+        Bv = B.sqrt_multiply(sqrtT(v)[0])
+        v_rec = B.inv_multiply(Bv)
+        assert jnp.allclose(v_rec, v, rtol=1e-5, atol=1e-5), (
+            f"max|inv(B v) - v| = {float(jnp.max(jnp.abs(v_rec - v))):.3e}"
+        )
+
+    def test_inv_multiply_differentiable(self, grid):
+        n = grid.grid_n_columns
+        sigma = jnp.ones(n) * 2.0
+        B = DiffusionB(grid, sigma, horizontal_length_scale=1500e3,
+                       n_diffusion_iter=6)
+        x = jax.random.normal(jax.random.PRNGKey(5), (n,))
+        grad = jax.grad(lambda v: jnp.sum(B.inv_multiply(v) ** 2))(x)
+        assert jnp.all(jnp.isfinite(grad))
+
 
 class TestGaspariCohn:
     def test_at_zero(self):

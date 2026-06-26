@@ -58,18 +58,18 @@ def _get_mpi_info():
 
 # Serial-vs-MPI equivalence + mass conservation go through the GLOBAL ALLREDUCE
 # (mass fixer / global_sum_mpi), which drifts ~1e-9 vs serial under a jax/mpi4jax
-# stack outside legoESM's tested range — no mpi4jax release supports jax>=0.10.1
-# yet (the point-to-point halo tests below stay bit-correct).  xfail those two
-# on an incompatible stack so they are not spurious reds, while still REQUIRING a
-# pass once a tested stack (jax<0.10 + mpi4jax<0.9, or a future FFI mpi4jax) is
-# installed -- the condition flips off automatically then.
+# stack outside legoESM's tested range (the point-to-point halo tests below stay
+# bit-correct).  xfail those two on an incompatible stack so they are not spurious
+# reds, while still REQUIRING a pass once a tested stack (mpi4jax >= 0.9, the FFI
+# rewrite, on jax 0.9 or 0.10) is installed -- the condition flips off
+# automatically then.
 from legoesm.parallel.reductions import mpi_stack_outside_tested_range
 
 _xfail_mpi_stack = pytest.mark.xfail(
     mpi_stack_outside_tested_range(),
     reason="jax/mpi4jax outside legoESM's tested MPI range: the global-allreduce "
            "path drifts ~1e-9 vs serial under the incompatible custom-call ABI "
-           "(halo exchange stays bit-correct). Install jax<0.10 + mpi4jax<0.9.",
+           "(halo exchange stays bit-correct). Install mpi4jax >= 0.9 (the FFI rewrite).",
     strict=False,
     run=True,
 )

@@ -106,6 +106,43 @@ def colliding_modons(grid) -> ShallowWaterState:
 
 
 # ---------------------------------------------------------------------------
+# Cubed-sphere FV3 edge-midpoint C-D grid (FV3EdgeShallowWaterModel)
+# ---------------------------------------------------------------------------
+
+
+def colliding_modons_cdgrid(grid, cdgrid):
+    """Colliding-modons IC on the FV3 edge-midpoint C-D grid.
+
+    Builds the ``FV3EdgeShallowWaterState`` consumed by
+    ``FV3EdgeShallowWaterModel``: the shared zonal-Gaussian wind kernel
+    ``_modon_winds_geo`` is evaluated at the two D-grid edge-midpoint staggers
+    and projected onto the edge directions via the stored
+    ``cos/sin_angle_edge_*`` metric rotation (``v_north = 0``, so only the
+    eastward component survives — the same rotation the Williamson cube ICs
+    use; no geometry re-derivation).  Returns ``(state, cdgrid_nonrot)`` where
+    ``cdgrid_nonrot`` has the corner Coriolis field zeroed (FV3 case-8
+    ``f0 = fC = 0``); assign it to ``model.cdgrid`` before stepping so the run
+    is non-rotating.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterState,
+    )
+
+    R = grid.radius
+    h = _modon_height(grid.lon, grid.lat)
+    h_s = jnp.zeros_like(h)
+
+    u_e_x, _ = _modon_winds_geo(cdgrid.lon_edge_x, cdgrid.lat_edge_x, R)
+    u_d = cdgrid.cos_angle_edge_x * u_e_x
+    u_e_y, _ = _modon_winds_geo(cdgrid.lon_edge_y, cdgrid.lat_edge_y, R)
+    v_d = -cdgrid.sin_angle_edge_y * u_e_y
+
+    state = FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
+    cdgrid_nonrot = cdgrid._replace(f_corner=jnp.zeros_like(cdgrid.f_corner))
+    return state, cdgrid_nonrot
+
+
+# ---------------------------------------------------------------------------
 # Lat-lon
 # ---------------------------------------------------------------------------
 

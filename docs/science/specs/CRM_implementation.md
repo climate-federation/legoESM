@@ -129,7 +129,7 @@ mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS
 np=2 is **28× SLOWER** than np=1 — the mpi4jax/jax FFI-API
 mismatch dominates step cost. ``mpi4jax`` raises a runtime
 warning citing this exact incompatibility. The fix is environment
-(``pip install 'mpi4jax>=0.8,<0.9' jax<0.10`` per the warning, or
+(``pip install 'mpi4jax>=0.9,<0.10'`` per the warning, or
 wait for the FFI port). NOT a CRM-side change. iter-252 single-
 rank smoke is the test gate for the DD compose path; the >np=1
 sweep waits for F9 unblock.
@@ -427,7 +427,7 @@ pipelines), throughput tolerance 2%→10% (rounding-noise tolerant).
 iter-253 measured F9 (MPI scaling platform-blocked) with
 concrete numbers on M5 Pro: np=2 strong efficiency **1.8%** under
 jax 0.10 vs mpi4jax 0.9 FFI-API mismatch. Documented env-fix
-recipe (`pip install 'mpi4jax>=0.8,<0.9' 'jax<0.10'`) and the
+recipe (`pip install 'mpi4jax>=0.9,<0.10'`) and the
 mpi4jax FFI port as the structural fix.
 
 **iter-260 final regression sweep** (extended scope):

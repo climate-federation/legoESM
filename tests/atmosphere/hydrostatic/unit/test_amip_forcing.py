@@ -299,3 +299,22 @@ class TestFillNanNearest:
         result = _fill_nan_nearest(data, lat, lon)
         assert not np.any(np.isnan(result))
         assert result[0, 2, 5] == 1.0  # nearest neighbor should be 1.0
+
+
+def test_get_forcing_at_time_single_record():
+    """PR D: a single-record (ntime==1) forcing — e.g. a climatological mean or
+    a 2D file promoted to shape (1, ...) — must return the single SST/SIC field
+    for ANY day. The cyclic-wrap + searchsorted clip(0, ntime-2)=clip(0, -1)
+    path produced idx=-1, dt=0, a blown-up weight, and ~0 K SST for day !=
+    times[0]."""
+    from legoesm.forcing.amip import AMIPForcing
+
+    sst = jnp.full((1, 4, 8), 290.0)
+    sic = jnp.full((1, 4, 8), 0.3)
+    forcing = AMIPForcing(
+        times=jnp.array([0.0]), sst=sst, sic=sic, config=AMIPForcingConfig(),
+    )
+    for day in (0.0, 100.0, 365.0):
+        s, i = get_forcing_at_time(forcing, float(day))
+        np.testing.assert_allclose(np.asarray(s), 290.0, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(i), 0.3, rtol=1e-6)

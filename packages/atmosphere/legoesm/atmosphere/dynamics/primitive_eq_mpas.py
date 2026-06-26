@@ -118,6 +118,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # that blowup at no stability cost.  Use ``ssp_rk54`` for a bit-exact
     # reference run.  See ``timestepping/ssp_rk54.py``.
     time_integrator: str = "ssp_rk54_scan"
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
 
 
 # ============================================================================
@@ -158,7 +159,7 @@ def mpas_hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
     T_3d.shape[-1]
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. Pressure at full levels ---
     if _hybrid:

@@ -124,7 +124,7 @@ def test_compute_total_energy_pe_returns_fp64():
     assert te_column.dtype == jnp.float64, (
         f"PE total-energy column dropped fp64: {te_column.dtype}"
     )
-    # te_total is Python float; assert finite + non-zero.
+    # te_total is a Python float (host scalar); assert finite + non-zero.
     assert te_total > 0
 
 

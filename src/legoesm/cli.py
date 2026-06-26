@@ -339,9 +339,11 @@ def cmd_test(args):
         compute_error_norms,
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
+    from legoesm import constants
 
+    _earth_radius_km = constants.R_earth / 1000.0
     logger.info(f"legoESM v{__version__} | Williamson Test Case {args.case}")
-    logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
+    logger.info(f"  Resolution: C{args.resolution} (~{_earth_radius_km / args.resolution:.0f} km)")
     logger.info(f"  Duration: {args.days} days")
     logger.info(f"  Time step: {args.dt} s")
     logger.info(f"  Backend: {rc.backend}")

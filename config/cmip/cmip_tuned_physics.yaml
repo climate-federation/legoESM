@@ -1,0 +1,50 @@
+# Tuned ("trained") atmosphere + air-sea physics parameter set from the coupled
+# CMIP-realism campaign — the SINGLE SOURCE OF TRUTH for the converged values.
+#
+# Grid- and length-AGNOSTIC: it carries only the physics knobs, not orchestration
+# (grid / resolution / days / output / ocean choice).  Reuse it from any run
+# config with `include: cmip_tuned_physics.yaml` (run_coupled --config merges the
+# base first, then the including file, then explicit CLI flags — CLI > file >
+# base > parser default), or copy the values into your own setup.
+#
+# Each value records: what it tunes, units, the experiment that converged it, and
+# the metric it moved.  Where the knob is a formal scheme parameter, its
+# machine-readable spec (units / bounds / transform / reference) lives in that
+# scheme's `__param_spec__` (cited below) — that is the authoritative metadata.
+
+# --- radiation: true CMIP6 RRTMGP (gas + cloud radiative transfer) ---
+radiation: rrtmgp
+rrtmgp_gpoint_batch_size: 16    # forward-only ~6x faster g-point radiation
+rrtmgp_gpoint_checkpoint: false # plain scan over g-points (smaller compiled code)
+
+# --- physics scheme selection (the realistic coupled stack) ---
+convection: sbm                 # Betts-Miller adjustment (detrains-to-precip)
+microphysics: morrison          # 2-moment (ice) — needed with rrtmgp + sbm
+clouds: sundqvist
+convective_cloud: true          # convective (thin-cirrus) cloud-fraction source;
+                                # converged: removes the ~4.5 K tropical cold bias.
+
+# --- TUNED air-sea fluxes: COARE 3.0 MOST with convective gustiness ---------
+# Converged in the air-sea-decoupling fix: a calm warm ocean barely evaporates
+# under a neutral bulk scheme (no w*), so the near-surface air sat ~13 K below the
+# SST.  COARE's free-convection velocity scale w* (set by z_i) restores it.
+# Effect: hfls 45 -> 78 W/m2, tropical tas-tos gap +13.8 -> +5.8 K, SST drift
+# -7.2 -> -3.2 K/yr.
+surface_bulk_scheme: coare3
+surface_gustiness_zi: 300.0     # [m] BL depth z_i driving w*; 0 = off.
+                                # __param_spec__: turbulence/config.py EXCLUDED
+                                # (a BL-depth convention / scheme-enable, not a
+                                # trainable closure).
+
+# --- TUNED cloud optics: thinner diagnostic condensate -> Earth-like albedo ---
+# Converged with coare3: the extra moisture over-brightened low cloud (albedo
+# overshoot 35.4%).  A thinner in-cloud condensate recovers it.
+# Effect: planetary albedo 35.4 -> 31.3% (Earth-like), SST drift -3.2 -> -2.2 K/yr.
+cloud_q_c_diagnostic: 3.0e-4    # [kg/kg] in-cloud condensate fed to radiation.
+                                # __param_spec__: clouds.CloudConfig.q_c_diagnostic
+                                # (bounds 5.0e-5..1.0e-3, tier 1, sigmoid,
+                                # category 'condensate').
+
+# --- land surface albedo ---
+snow_albedo_feedback: true      # bright-snow land albedo (vs a dark const 0.2);
+                                # converged in the land-albedo check (snow too dark).

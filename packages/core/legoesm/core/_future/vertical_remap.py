@@ -145,14 +145,16 @@ def vertical_remap_ppm(
         Field values on the old (deformed) grid.
     dp_old : jax.Array, shape (..., nlev)
         Layer pressure thicknesses on the old grid [Pa].
-    dp_new : jax.Array, shape (..., nlev)
-        Layer pressure thicknesses on the new (target) grid [Pa].
+    dp_new : jax.Array, shape (..., nlev_new)
+        Layer pressure thicknesses on the new (target) grid [Pa]. ``nlev_new``
+        may differ from the old layer count; the mass-weighted integral ∫ q dp
+        is conserved as long as Σ dp_new == Σ dp_old per column.
     limiter : bool
         Apply Colella-Woodward monotonicity limiter.
 
     Returns
     -------
-    q_new : jax.Array, shape (..., nlev)
+    q_new : jax.Array, shape (..., nlev_new)
         Field values on the new grid, conserving ∫ q dp.
     """
     # PPM reconstruction of q within each old cell
@@ -173,6 +175,7 @@ def vertical_remap_ppm(
     # Multiply by dp_old[k] to get mass-weighted integral.
 
     nlev = q.shape[-1]
+    nlev_new = dp_new.shape[-1]  # target grid may have a different layer count
     batch_shape = q.shape[:-1]
 
     # Compute pressure interfaces on old and new grids
@@ -207,6 +210,11 @@ def vertical_remap_ppm(
         contributions to two adjacent new cells), giving O(nlev) total.
         """
         nlev_new = dp_new_col.shape[0]
+        nlev_old = dp_old_col.shape[0]  # OLD-grid length: the pointer k indexes
+        #                                 dp_old_col/q_L_col/... so it must clamp
+        #                                 to nlev_old-1, NOT nlev_new-1 (else a
+        #                                 grid with nlev_new != nlev_old loses
+        #                                 the deepest source layers / goes OOB).
 
         def _scan_fn(carry, j):
             # carry = (k, frac_consumed)
@@ -226,18 +234,27 @@ def vertical_remap_ppm(
             b = frac_consumed + p_take / jnp.maximum(dp_k, 1e-30)
             accum = _ppm_integral(a, b, q_L_col[k], q_R_col[k], d6_col[k], dp_k)
 
-            # Update remaining and advance old-cell pointer if exhausted
+            # Update remaining and advance old-cell pointer if exhausted.
+            # When the LAST old cell is exhausted we must NOT reset frac to 0
+            # (that would re-consume the deepest source layer on the next new
+            # cell, fabricating mass for a Σdp_new > Σdp_old column); keep
+            # frac=1 so no further source is drawn and the excess target space
+            # stays empty (still conservative: all source is distributed once).
             remaining = dp_needed - p_take
             exhausted = (dp_k * (1.0 - b)) < 1e-20
-            k = jnp.where(exhausted, jnp.minimum(k + 1, jnp.int32(nlev_new - 1)), k)
-            frac_consumed = jnp.where(exhausted, 0.0, b)
+            at_last = k >= jnp.int32(nlev_old - 1)
+            advance = exhausted & jnp.logical_not(at_last)
+            k = jnp.where(advance, k + 1, k)
+            frac_consumed = jnp.where(advance, 0.0, jnp.where(exhausted, 1.0, b))
 
-            # Continue consuming additional old cells while remaining > 0.
-            # Use a lax.while_loop to handle the (rare) case where a new
-            # cell spans multiple old cells.
+            # Continue consuming additional old cells while mass remains AND the
+            # source is not exhausted (the deepest old cell fully consumed) —
+            # the source-availability guard prevents non-termination / re-draw
+            # when a new cell needs more thickness than the old grid provides.
             def _while_cond(state):
-                _, _, _, rem, _ = state
-                return rem > 1e-20
+                _, kk, fc, rem, _ = state
+                source_left = (fc < 1.0) | (kk < jnp.int32(nlev_old - 1))
+                return (rem > 1e-20) & source_left
 
             def _while_body(state):
                 acc, kk, fc, rem, _ = state
@@ -251,8 +268,10 @@ def vertical_remap_ppm(
                 )
                 rem = rem - p_take2
                 ex = (dp_kk * (1.0 - b2)) < 1e-20
-                kk = jnp.where(ex, jnp.minimum(kk + 1, jnp.int32(nlev_new - 1)), kk)
-                fc = jnp.where(ex, 0.0, b2)
+                at_last2 = kk >= jnp.int32(nlev_old - 1)
+                advance2 = ex & jnp.logical_not(at_last2)
+                kk = jnp.where(advance2, kk + 1, kk)
+                fc = jnp.where(advance2, 0.0, jnp.where(ex, 1.0, b2))
                 return (acc, kk, fc, rem, True)
 
             accum, k, frac_consumed, _, _ = jax.lax.while_loop(
@@ -275,13 +294,13 @@ def vertical_remap_ppm(
     q_R_flat = q_R.reshape(flat_shape)
     d6_flat = d6.reshape(flat_shape)
     dp_old_flat = dp_old.reshape(flat_shape)
-    dp_new_flat = dp_new.reshape(flat_shape)
+    dp_new_flat = dp_new.reshape(-1, nlev_new)
     p_old_flat = p_old_iface.reshape(-1, nlev + 1)
-    p_new_flat = p_new_iface.reshape(-1, nlev + 1)
+    p_new_flat = p_new_iface.reshape(-1, nlev_new + 1)
 
     q_new_flat = jax.vmap(_remap_column)(
         q_L_flat, q_R_flat, d6_flat,
         dp_old_flat, p_old_flat, p_new_flat, dp_new_flat,
     )
 
-    return q_new_flat.reshape(q.shape)
+    return q_new_flat.reshape(*batch_shape, nlev_new)

@@ -64,7 +64,7 @@ python scripts/experiment/install_federation.py --all --extras dev
 Optional MPI extras (only if you want multi-node runs):
 
 ```bash
-pip install "mpi4py>=4.1,<5" "mpi4jax>=0.8,<0.9"
+pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"
 ```
 
 Requirements: **Python ≥ 3.11, JAX ≥ 0.4.35**. Apple Silicon users

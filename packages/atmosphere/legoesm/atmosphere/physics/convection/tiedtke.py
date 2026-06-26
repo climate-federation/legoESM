@@ -407,16 +407,34 @@ def tiedtke_convection(
         du_dt_conv = None
         dv_dt_conv = None
 
+    # -- In-updraft precipitation (convective precipitation efficiency) ---
+    # The plume detrains its FULL cloud water as suspended grid-scale cloud
+    # (dq_c_conv_dt), which loads the radiation and which microphysics cannot
+    # drain fast enough (source-buffered). Real convective updrafts convert a
+    # large fraction of their condensate to PRECIPITATION before detrainment.
+    # Divert that fraction (precip_efficiency) to RAIN (dq_r_conv_dt) — a
+    # precipitating species that sediments via microphysics and is invisible
+    # to radiation (which sees only q_c/q_i) — leaving (1-PE) as anvil cloud
+    # water. precip_efficiency=0 (default) ⇒ no split (legacy behaviour).
+    dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
+    if config.precip_efficiency > 0.0:
+        pe = jnp.clip(config.precip_efficiency, 0.0, 1.0)
+        dq_r_conv_dt = dq_c_pos * pe
+        dq_c_pos = dq_c_pos * (1.0 - pe)
+    else:
+        dq_r_conv_dt = None
+
     # -- Convective mask ---------------------------------------------------
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=jnp.maximum(dq_c_conv_dt, 0.0),
+        dq_c_conv_dt=dq_c_pos,
         cape=cape,
         convective_mask=convective_mask,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
     return out, M_u_new

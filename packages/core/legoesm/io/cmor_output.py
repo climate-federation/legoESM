@@ -221,6 +221,20 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean",
         "dimensions": ("time", "lat", "lon"),
     },
+    "clwvi": {
+        "standard_name": "atmosphere_mass_content_of_cloud_condensed_water",
+        "long_name": "Condensed Water Path",
+        "units": "kg m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "clivi": {
+        "standard_name": "atmosphere_mass_content_of_cloud_ice",
+        "long_name": "Ice Water Path",
+        "units": "kg m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
     # --- TOA radiation ---
     "rsdt": {
         "standard_name": "toa_incoming_shortwave_flux",
@@ -239,6 +253,20 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
     "rlut": {
         "standard_name": "toa_outgoing_longwave_flux",
         "long_name": "TOA Outgoing Longwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rsutcs": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Shortwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rlutcs": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Longwave Radiation",
         "units": "W m-2",
         "cell_methods": "time: mean",
         "dimensions": ("time", "lat", "lon"),

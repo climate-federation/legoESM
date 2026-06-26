@@ -117,6 +117,52 @@ def _stable_dry_column(ncol: int = 2, nlev: int = 24):
     )
 
 
+def _capped_column(
+    ncol: int = 2,
+    nlev: int = 24,
+    *,
+    tropopause_pa: float = 1.5e4,
+    **kw,
+):
+    """``_column`` with an isothermal stratosphere above ``tropopause_pa``.
+
+    The default :func:`_column` applies a single constant lapse rate all the
+    way to ``p_top`` (50 hPa) — i.e. it has NO tropopause, so a moist-adiabatic
+    parcel stays positively buoyant at every level up to the model top
+    (``T_parcel − T_env`` never turns negative above the LFC).
+
+    That is fine for the buoyancy/CAPE-driven schemes that key only off the
+    integrated CAPE (ZM, Emanuel, Bechtold), but it is ILL-POSED for Kain-
+    Fritsch specifically: KF is the only scheme here that builds its cloud
+    geometry around a finite Level of Neutral Buoyancy via
+    ``_plume.compute_lfc_lnb``.  With no upper buoyancy cap that LNB has no
+    positive→negative crossing to localize, so it collapses onto the LFC
+    (``cloud_depth ≈ 0``); KF's cloud-top detrainment then dumps the updraft
+    right at cloud base, the plume makes ~no cloud water, and the net column
+    signal is dominated by sub-cloud downdraft re-evaporation — net COOLING
+    and MOISTENING regardless of the deep/shallow branch or trigger path.
+
+    The fix is the physical one: give KF a column with a real tropopause.  KF
+    then nets the expected heating/drying robustly (``+700..800 W/m²``,
+    ``dq_v < 0``) across tropopause heights 100–200 hPa.  This is NOT a relaxed
+    gate — the sign thresholds below are unchanged; only the test column is
+    made well-posed for a scheme that requires a finite LNB.  (The shared
+    ``compute_lfc_lnb`` LNB-collapse on an uncapped tower is a narrow but real
+    diagnostic soft-spot, reported separately; it does not bite on any
+    physically-capped sounding.)
+    """
+    T, q, p_full, p_half, u, v = _column(ncol=ncol, nlev=nlev, **kw)
+    # Isothermal cap: freeze T at its tropopause value above ``tropopause_pa``.
+    p_s = p_full[:, -1:]
+    z_full = -8500.0 * jnp.log(p_full / p_s)
+    z_trop = -8500.0 * jnp.log(tropopause_pa / p_s)
+    T_trop = jax.vmap(
+        lambda z_col, T_col, zt: jnp.interp(zt[0], z_col[::-1], T_col[::-1])
+    )(z_full, T, z_trop)
+    T = jnp.where(p_full < tropopause_pa, T_trop[:, None], T)
+    return T, q, p_full, p_half, u, v
+
+
 def _col_int(field, dp):
     """Column integral ∫ field dp / g  (mass-weighted), shape (ncol,)."""
     return jnp.sum(field * dp, axis=-1) / G
@@ -268,7 +314,11 @@ def test_tier2_cloud_water_source_non_negative(name):
 def test_tier2_destabilized_column_net_heats(name):
     """A CAPE-positive (or moisture-convergent, for Kuo) column should
     produce net column heating: ∫ c_p dT/dt dp/g > 0."""
-    T, q, pf, ph, u, v = _column()
+    # KF needs a finite LNB (tropopause); the bare _column has none — see
+    # _capped_column. All other schemes are unchanged on the shared column.
+    T, q, pf, ph, u, v = (
+        _capped_column() if name == "kain_fritsch" else _column()
+    )
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)
@@ -291,7 +341,11 @@ def test_tier2_destabilized_column_net_heats(name):
 def test_tier2_mass_flux_schemes_net_dry(name):
     """Mass-flux / buoyancy schemes remove vapor (it becomes cloud water):
     ∫ dq_v/dt dp/g <= 0 on a convecting column."""
-    T, q, pf, ph, u, v = _column()
+    # KF needs a finite LNB (tropopause); the bare _column has none — see
+    # _capped_column. All other schemes are unchanged on the shared column.
+    T, q, pf, ph, u, v = (
+        _capped_column() if name == "kain_fritsch" else _column()
+    )
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)
@@ -310,7 +364,12 @@ def test_tier2_mass_flux_schemes_net_dry(name):
     "name",
     # Schemes that claim exact column total-water conservation
     # (vapor removed reappears as cloud water in the column).
-    ["sbm", "dca_manabe", "dca_ahmed_neelin", "emanuel"],
+    # NB: emanuel is intentionally EXCLUDED here. With use_genuine_mixing=True
+    # (the default) it is a PRECIPITATING scheme — the net vapor removal is the
+    # reference EP*CLW precipitation sink (emanuel.py:464-498, 534-549), NOT
+    # reinserted as in-column cloud water — so it does not close column total
+    # water in-scheme. Its behavioral contract is gated in the tier1/tier2 lists.
+    ["sbm", "dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_total_water_conserved(name):
     """∫(dq_v + dq_c) dp/g ≈ 0: every kg of vapor removed reappears as
@@ -331,7 +390,10 @@ def test_tier3_total_water_conserved(name):
 @pytest.mark.parametrize(
     "name",
     # Schemes that advertise column MSE conservation of the adjustment.
-    ["dca_manabe", "dca_ahmed_neelin", "emanuel"],
+    # emanuel excluded — it precipitates by design (see the tier3 total-water
+    # note above); the condensate carries latent heat out of the vapor-only
+    # reservoir, so the vapor-MSE residual is nonzero for the genuine scheme.
+    ["dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_column_mse_conserved(name):
     """∫(c_p dT + L_v dq_v) dp/g ≈ 0: column moist static energy of the

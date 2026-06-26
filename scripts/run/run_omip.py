@@ -1065,12 +1065,14 @@ def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s,
         # MPAS: mask shape (nCells,), target shape (nCells,)
         mask_sfc = mask
 
-    T_new = T.at[..., 0].set(
-        T[..., 0] - alpha * (T[..., 0] - T_target) * mask_sfc,
+    # Canonical Haney surface relaxation kernel (shared with the coupled
+    # 3D-ocean spin-up path; no duplicated relaxation math).
+    from legoesm.ocean.forcing.surface_relaxation import relax_surface_tracers
+    T_top_new, S_top_new = relax_surface_tracers(
+        T[..., 0], S[..., 0], T_target, S_target, alpha, alpha, mask_sfc,
     )
-    S_new = S.at[..., 0].set(
-        S[..., 0] - alpha * (S[..., 0] - S_target) * mask_sfc,
-    )
+    T_new = T.at[..., 0].set(T_top_new)
+    S_new = S.at[..., 0].set(S_top_new)
 
     return state._replace(
         T=state.T.replace(data=T_new),

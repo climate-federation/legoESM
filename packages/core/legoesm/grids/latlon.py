@@ -1572,11 +1572,17 @@ def create_beta_plane_cgrid_geometry(
         metrics — only seeds the legacy pseudo-``lat``/``lon`` and the
         ``dlon``/``dlat`` consistency sentinels (``radius * dlon = dx_m``).
     cartesian_pseudo_lat : bool
-        When ``True``, pin the pseudo-``lat`` to 0 so the operators that recompute
-        ``cos(grid.lat)`` for a metric agree with the uniform ``cos_lat=1`` metric
-        fields (required for an energy-conserving IMPLICIT free surface — see the
-        Boundary-scope note and the MITgcm gyre recipe).  Default ``False`` keeps
-        the legacy ``lat = y_c/radius``.
+        **OBSOLETE for the metric since #514** — the C-grid operators now READ the
+        stored uniform ``dx_v`` (== ``dx_m``) instead of recomputing
+        ``cos(grid.lat_v)``, so the pseudo-lat no longer enters any v-face metric
+        and ``True``/``False`` give identical dynamics.  Historically ``True``
+        pinned the pseudo-``lat`` to 0 so the (then-recomputing) operators agreed
+        with the ``cos_lat=1`` metric fields, which the energy-conserving IMPLICIT
+        free surface relied on (the MITgcm gyre recipe; see the Boundary-scope
+        note).  Retained only for the cosmetic ``grid.lat`` value and the
+        non-adjointness-critical secondary readers (adaptive-Smag CFL ceiling,
+        polar-filter labelling).  Default ``False`` keeps the natural
+        ``lat = y_c/radius``.
 
     Returns
     -------

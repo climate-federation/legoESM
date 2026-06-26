@@ -31,10 +31,14 @@ class TestDetectFold:
         glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
 
         gphit = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
-        # Force the fold row to be perfectly symmetric (constant in lon)
+        # Force the fold row to be perfectly symmetric (constant in lon).
         gphit = gphit.at[-1].set(60.0)
 
-        fold = _detect_fold(glamt, gphit, n_lat, n_lon)
+        # A constant fold row is self-symmetric under BOTH index conventions, so
+        # ``auto`` cannot disambiguate (see test_constant_fold_row_is_ambiguous);
+        # pass the convention explicitly to exercise the n_lon-1-i descriptor.
+        fold = _detect_fold(glamt, gphit, n_lat, n_lon,
+                            fold_convention="n_lon-1-i")
 
         assert fold.is_active is True
         assert fold.fold_j == n_lat - 1
@@ -43,6 +47,26 @@ class TestDetectFold:
         assert jnp.all(fold.perm_v == fold.perm_T)
         assert fold.vector_sign_u == -1.0
         assert fold.vector_sign_v == -1.0
+
+    def test_constant_fold_row_is_ambiguous_under_auto(self):
+        """PR B #4: a constant (perfectly symmetric) fold row fits BOTH index
+        conventions, so ``fold_convention='auto'`` must raise rather than
+        silently guess n_lon-1-i (the wrong origin for a de-haloed mesh)."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 16, 32
+        lon = jnp.linspace(0.0, 360.0, n_lon, endpoint=False)
+        lat = jnp.linspace(-80.0, 60.0, n_lat)
+        glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
+        gphit = jnp.broadcast_to(lat[:, None], (n_lat, n_lon)).at[-1].set(60.0)
+
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)  # auto
+
+        # Both explicit conventions resolve it (no ambiguity once chosen).
+        for conv in ("n_lon-1-i", "(n_lon-i)%n_lon"):
+            fold = _detect_fold(glamt, gphit, n_lat, n_lon, fold_convention=conv)
+            assert fold.is_active is True
 
     def test_asymmetric_fold_raises(self):
         from legoesm.grids.tripole import _detect_fold
@@ -74,13 +98,42 @@ class TestDetectFold:
         gphit = gphit.at[-1].set(60.0)
         gphit = gphit.at[-1, 1].set(60.5)
 
-        with pytest.raises(ValueError):
+        # Default 0.1 tolerance rejects the 0.5 deg asymmetry outright.
+        with pytest.raises(ValueError, match="Fold symmetry check failed"):
             _detect_fold(glamt, gphit, n_lat, n_lon)
-        # Loosening the threshold lets it through.
+        # Loosening max_fold_asym_deg to 1.0 passes the symmetry check. But a
+        # col-1 bump is asymmetric by the SAME amount under both conventions
+        # (a tie), so 'auto' now correctly raises as ambiguous (PR B #4) —
+        # naming the convention explicitly confirms the loosened threshold let
+        # the 0.5 deg bump through.
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon, max_fold_asym_deg=1.0)
         fold = _detect_fold(
             glamt, gphit, n_lat, n_lon, max_fold_asym_deg=1.0,
+            fold_convention="n_lon-1-i",
         )
         assert fold.is_active is True
+
+    def test_near_constant_fold_row_nonzero_tie_raises(self):
+        """PR B #4 (codex): the tie test is on the DIFFERENCE of the two
+        asymmetries, not their magnitude. A near-constant fold row whose two
+        candidate asymmetries are both small-but-nonzero AND essentially equal
+        is still ambiguous and must raise — the earlier 'both <= tol' form
+        wrongly let such a row through."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 8, 16
+        glamt = jnp.zeros((n_lat, n_lon))
+        gphit = jnp.broadcast_to(
+            jnp.linspace(-70.0, 60.0, n_lat)[:, None], (n_lat, n_lon),
+        )
+        # Tiny col-1 bump (1e-4 deg): both conventions see asym 1e-4 (>> the
+        # 1e-6 default tie tol in magnitude) but their DIFFERENCE is ~0, so the
+        # row is genuinely ambiguous.
+        gphit = gphit.at[-1].set(60.0)
+        gphit = gphit.at[-1, 1].set(60.0 + 1e-4)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)
 
     def test_pure_periodic_fold_convention(self):
         """De-haloed NEMO meshes (e.g. eORCA025) self-permute the fold row
@@ -105,16 +158,21 @@ class TestDetectFold:
         expected = (n_lon - jnp.arange(n_lon)) % n_lon
         assert jnp.all(fold.perm_T == expected)
         assert jnp.all(fold.perm_v == fold.perm_T)
-        # And the eORCA1.2-style convention is still detected as n_lon-1-i.
-        gphit2 = gphit.at[-1].set(60.0)  # constant row -> ties break to n_lon-1-i
-        fold2 = _detect_fold(glamt, gphit2, n_lat, n_lon)
+        # A constant fold row is a genuine tie (symmetric under BOTH origins):
+        # auto now RAISES instead of silently guessing n_lon-1-i (PR B #4); the
+        # eORCA1.2 origin is recovered only by naming it explicitly.
+        gphit2 = gphit.at[-1].set(60.0)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit2, n_lat, n_lon)
+        fold2 = _detect_fold(glamt, gphit2, n_lat, n_lon,
+                             fold_convention="n_lon-1-i")
         assert jnp.all(fold2.perm_T == jnp.arange(n_lon - 1, -1, -1))
 
     def test_explicit_fold_convention_overrides_ambiguous_tie(self):
-        """A constant fold-row latitude is a silent tie that auto-detect breaks
-        to n_lon-1-i. An explicit ``fold_convention`` bypasses the tie (still
-        verified against the tolerance), giving a de-haloed mesh its correct
-        pure-periodic origin."""
+        """A constant fold-row latitude is a genuine tie: ``auto`` raises (PR B
+        #4) rather than silently guessing. An explicit ``fold_convention``
+        resolves it (still verified against the tolerance), giving a de-haloed
+        mesh its correct pure-periodic origin."""
         from legoesm.grids.tripole import _detect_fold
 
         n_lat, n_lon = 12, 24
@@ -123,10 +181,9 @@ class TestDetectFold:
         gphit = jnp.broadcast_to(
             jnp.linspace(-80.0, 60.0, n_lat)[:, None], (n_lat, n_lon))
         gphit = gphit.at[-1].set(60.0)   # constant fold row -> auto ties
-        # auto -> n_lon-1-i (documented tie-break)
-        assert jnp.all(
-            _detect_fold(glamt, gphit, n_lat, n_lon).perm_T
-            == jnp.arange(n_lon - 1, -1, -1))
+        # auto -> raises (ambiguous, neither origin distinguishable)
+        with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+            _detect_fold(glamt, gphit, n_lat, n_lon)
         # explicit pure-periodic -> the OTHER origin, verified (asym 0 <= tol)
         f = _detect_fold(glamt, gphit, n_lat, n_lon,
                          fold_convention="(n_lon-i)%n_lon")
@@ -205,8 +262,16 @@ class TestComputeRotationAngles:
 netcdf4 = pytest.importorskip("netCDF4")
 
 
-def _write_synthetic_mesh_mask(path: str, n_lat: int = 8, n_lon: int = 16) -> None:
-    """Write a minimal NEMO-style mesh_mask.nc file."""
+def _write_synthetic_mesh_mask(
+    path: str, n_lat: int = 8, n_lon: int = 16, curved_fold: bool = False,
+) -> None:
+    """Write a minimal NEMO-style mesh_mask.nc file.
+
+    The default fold row (gphit[-1]) is constant — a deliberately AMBIGUOUS
+    fold. ``curved_fold=True`` instead writes a realistic non-constant fold row
+    that is self-symmetric under exactly ONE convention (like a real ORCA
+    bipolar cap), so ``fold_convention='auto'`` resolves it WITHOUT raising.
+    """
     ds = netcdf4.Dataset(path, "w")
     ds.createDimension("y", n_lat)
     ds.createDimension("x", n_lon)
@@ -215,9 +280,18 @@ def _write_synthetic_mesh_mask(path: str, n_lat: int = 8, n_lon: int = 16) -> No
         np.linspace(0.0, 360.0, n_lon, endpoint=False)[None, :],
         (n_lat, n_lon),
     ).astype(np.float64)
-    gphit = np.broadcast_to(
-        np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon),
-    ).astype(np.float64)
+    gphit = np.array(
+        np.broadcast_to(
+            np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon),
+        ),
+        dtype=np.float64,
+    )
+    if curved_fold:
+        # cos(2*pi*i/n_lon) is even under i -> (n_lon - i) % n_lon but NOT under
+        # i -> n_lon-1-i, so this fold row fits exactly one convention -> auto
+        # disambiguates it (no tie), mirroring a real (non-flat) ORCA fold.
+        i = np.arange(n_lon)
+        gphit[-1, :] = 80.0 + 5.0 * np.cos(2.0 * np.pi * i / n_lon)
     ones = np.ones((n_lat, n_lon), dtype=np.float64)
 
     for name, arr in (
@@ -305,3 +379,59 @@ class TestGradientYZeroPolarMetric:
         grad = jax.grad(
             lambda x: jnp.sum(gradient_y_cgrid(x, g0) ** 2))(f)
         assert bool(jnp.all(jnp.isfinite(grad))), "AD grad not finite"
+
+
+class TestCreateTripoleGridFoldDefault:
+    """PR B #4 (codex rounds 2-3): the public loader on an ambiguous (constant)
+    fold row must fail LOUD by default — a runtime warning is insufficient for
+    batch/long runs where a wrong seam origin silently corrupts the northern
+    halo. The synthetic mesh has a constant fold row (gphit[-1] is uniform). The
+    legacy n_lon-1-i fallback is available only as an EXPLICIT opt-in."""
+
+    def test_default_auto_loads_realistic_curved_fold(self):
+        """A REALISTIC mesh has a curved (non-constant) fold row — like a real
+        ORCA bipolar cap — so the default ``fold_convention='auto'`` resolves it
+        WITHOUT raising. This is the production path (eORCA1.2 etc.): the
+        fail-loud default only trips on a degenerate constant fold row, so it is
+        not an operational break for real meshes."""
+        import warnings as _warnings
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=12, n_lon=24, curved_fold=True)
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("error")  # no warning on a resolvable fold
+                geom = create_tripole_grid(path)  # default auto, no convention
+        assert geom is not None
+
+    def test_default_auto_raises_on_ambiguous_fold(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with pytest.raises(ValueError, match="(?i)ambiguous fold_convention"):
+                create_tripole_grid(path)  # default: fail loud on a flat fold
+
+    def test_legacy_fold_fallback_is_explicit_opt_in(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with pytest.warns(RuntimeWarning, match="(?i)legacy"):
+                geom = create_tripole_grid(path, allow_ambiguous_legacy_fold=True)
+        assert geom is not None  # opt-in loads with the legacy origin
+
+    def test_explicit_convention_silences_warning(self):
+        import warnings as _warnings
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            _write_synthetic_mesh_mask(path, n_lat=8, n_lon=16)
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("error")  # any warning becomes an error
+                geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
+        assert geom is not None

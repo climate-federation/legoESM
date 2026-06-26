@@ -35,6 +35,62 @@ def test_config_holds_dynamic_ocean():
     assert isinstance(dyn.ocean_config, LatLonCGridOceanConfig)
 
 
+def test_config_holds_woa_restoring_taus():
+    """CoupledConfig exposes the WOA-restoring timescales; default 0 = off."""
+    c = CoupledConfig()
+    assert c.ocean_restore_sst_tau_days == 0.0
+    assert c.ocean_restore_sss_tau_days == 0.0
+    r = CoupledConfig(ocean_restore_sst_tau_days=30.0,
+                      ocean_restore_sss_tau_days=60.0)
+    assert r.ocean_restore_sst_tau_days == 30.0
+    assert r.ocean_restore_sss_tau_days == 60.0
+
+
+def test_apply_ocean_restoring_noop_when_off_or_no_target():
+    """_apply_ocean_restoring is a no-op (returns same state) when both taus are
+    0 OR no WOA target was loaded; relaxes the surface when configured."""
+    from types import SimpleNamespace
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(n_lat=8, n_lon=16)
+    z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, T_water_init_C=10.0, T_deep=2.0, S_uniform=34.0)
+    T_tgt = jnp.full((grid.n_lat, grid.n_lon), 25.0)
+    S_tgt = jnp.full((grid.n_lat, grid.n_lon), 36.0)
+
+    # tau=0 => no-op
+    fake = SimpleNamespace(
+        coupled_cfg=CoupledConfig(ocean_mode="dynamic"),
+        _ocean_T_target=T_tgt, _ocean_S_target=S_tgt, _ocean_state=state)
+    CoupledESMDriver._apply_ocean_restoring(fake, 3600.0)
+    assert fake._ocean_state is state
+
+    # tau>0 but no target => no-op
+    fake2 = SimpleNamespace(
+        coupled_cfg=CoupledConfig(ocean_mode="dynamic",
+                                  ocean_restore_sst_tau_days=30.0),
+        _ocean_T_target=None, _ocean_S_target=None, _ocean_state=state)
+    CoupledESMDriver._apply_ocean_restoring(fake2, 3600.0)
+    assert fake2._ocean_state is state
+
+    # tau>0 + target => surface warms toward 25 C
+    T0 = np.asarray(state.T.data).copy()
+    fake3 = SimpleNamespace(
+        coupled_cfg=CoupledConfig(ocean_mode="dynamic",
+                                  ocean_restore_sst_tau_days=10.0),
+        _ocean_T_target=T_tgt, _ocean_S_target=S_tgt, _ocean_state=state)
+    CoupledESMDriver._apply_ocean_restoring(fake3, 3600.0)
+    Tn = np.asarray(fake3._ocean_state.T.data)
+    assert np.any(Tn[..., 0] > T0[..., 0])           # surface relaxed up
+    np.testing.assert_array_equal(Tn[..., 1:], T0[..., 1:])  # subsurface intact
+
+
 def test_init_ocean_rejects_unknown_mode():
     """_init_ocean dispatch raises on an unknown ocean_mode (no silent
     else->slab; CLAUDE.md dispatch-hardening)."""

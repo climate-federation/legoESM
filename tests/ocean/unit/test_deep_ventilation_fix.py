@@ -291,7 +291,10 @@ def test_prandtl_chain_drops_abyssal_KH():
 
 def test_bryan_lewis_floor_shape_and_range():
     z = jnp.array([-100.0, -1000.0, -2500.0, -4000.0])
-    floor = _bryan_lewis_kappaH_floor(z)
+    # The Bryan-Lewis fit coefficients moved to TKEConfig (#518 item 10,
+    # ee0ad0c38); the formula and defaults are unchanged so the default cfg
+    # reproduces the published profile (bg_diff_amp=0.8, bg_diff_scale=1e-4).
+    floor = _bryan_lewis_kappaH_floor(z, TKEConfig())
     # At ~2500 m the arctan argument is 0 -> 0.8e-4. Deep -> larger; shallow
     # -> smaller. All within a sensible O(1e-4) band.
     assert np.all(np.asarray(floor) > 0.0)
@@ -549,8 +552,14 @@ def test_acc_recipe_opts_in_deep_t_fixes():
     T = np.asarray(rec.initial_state.T.data)
     lm = np.asarray(rec.initial_state.land_mask.data)
     zc = np.asarray(rec.z_coord.z_full_ref)
-    zb = float(np.asarray(rec.z_coord.z_half_ref)[-1])
-    T_veros = (1.0 - zc / zb) * 15.0
+    # The recipe IC is the LITERAL Veros ACC profile temp = (1 - zt/zw[0])*15
+    # (acc.py:117), where Veros's bottom-first zw[0] is the TOP face of the
+    # BOTTOM cell — legoESM (surface-first) z_half_ref[-2], NOT the bottom
+    # interface -H_max (z_half_ref[-1]). Normalising by -H_max was the earlier
+    # "linear" transcription that started the abyss +2.15 K warm (fixed in
+    # 32e1dec41); the test must use zw0 = z_half_ref[-2] to match the model.
+    zw0 = float(np.asarray(rec.z_coord.z_half_ref)[-2])
+    T_veros = (1.0 - zc / zw0) * 15.0
     wet = np.argwhere(lm > 0.5)
     i, j = wet[len(wet) // 2]
     np.testing.assert_allclose(T[i, j, :], T_veros, rtol=1e-5, atol=1e-5)

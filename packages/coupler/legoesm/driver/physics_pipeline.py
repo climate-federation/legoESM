@@ -952,6 +952,37 @@ class PhysicsPipeline:
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
         )
 
+    def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
+        """Prescribed TOA incident shortwave [W/m^2] — the incoming solar the
+        radiation solver is GIVEN, used for the ``rsdt`` diagnostic.
+
+        ``rsdt`` previously read ``sw_flux_down`` at the top halo, whose value
+        comes from the quadratic top-boundary extrapolation in
+        ``rte/two_stream._replace_top_flux``.  For downwelling SW the true TOA
+        value exceeds every interior level (the column only attenuates
+        downward), so the extrapolation's range-limit (kept deliberately to
+        bound the BUG-B drifted-state overshoot, ``sw_down`` 1121 W/m^2) caps
+        the diagnostic ~15 % below ``S_0 cos(SZA)`` (≈330 vs ≈340 W/m^2,
+        C48).  The physical TOA incident flux is not an extrapolation at all —
+        it is the prescribed insolation boundary condition.  This returns that
+        insolation with the EXACT convention the solver uses (the column
+        ``insol`` in the radiation builders): instantaneous ``S_0 cos(SZA)``
+        under a diurnal cycle, else the daily-mean insolation.  Computed on the
+        native grid (``lat``/``lon``) so it is ``sw_down_toa`` directly, and
+        consistent with ``rsut`` (same ``S_0``/zenith), keeping the TOA budget
+        ``R = rsdt - rsut - rlut`` correct.  Heating rates are unaffected (the
+        halo is stripped before use); the BUG-B clamp on the halo is untouched.
+        """
+        from legoesm.atmosphere.physics.radiation.solar import (
+            cos_zenith_angle,
+            daily_mean_insolation,
+        )
+        if self.diurnal_cycle:
+            hour = seconds_of_day / 3600.0
+            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour)
+            return s_0 * jnp.maximum(cos_sza, 0.0)
+        return daily_mean_insolation(lat, day_of_year, s_0)
+
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
@@ -1219,7 +1250,14 @@ class PhysicsPipeline:
         )
         sw_up_toa = ad.unflatten_2d(rad_out.sw_flux_up[:, 0])
         lw_up_toa = ad.unflatten_2d(rad_out.lw_flux_up[:, 0])
-        sw_down_toa = ad.unflatten_2d(rad_out.sw_flux_down[:, 0])
+        # rsdt = prescribed TOA incident SW the solver was given (#620), not the
+        # quadratically clamped top-halo SW flux (rad_out.sw_flux_down[:, 0],
+        # ~15% low).  Halo fallback keeps a value for any path (e.g. the
+        # zero-radiation stub) that leaves toa_insolation=None.
+        sw_down_toa = ad.unflatten_2d(
+            rad_out.toa_insolation if rad_out.toa_insolation is not None
+            else rad_out.sw_flux_down[:, 0]
+        )
 
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         if _land_active:
@@ -1578,6 +1616,9 @@ def _build_rrtmgp_radiation_fn(config):
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
+            # Prescribed TOA incident SW = S_0·max(cosθ,0) for the rsdt
+            # diagnostic (#620); matches _compute_insolation's diurnal return.
+            insol = s_0 * cos_zenith
         else:
             # Daytime-effective cos(SZA): use daylight fraction so the solver
             # sees the correct optical path during sunlit hours.  SW fluxes
@@ -1630,6 +1671,10 @@ def _build_rrtmgp_radiation_fn(config):
                 sw_heating_rate=result.sw_heating_rate * s,
             )
 
+        # Carry the prescribed TOA insolation so the CMOR rsdt diagnostic
+        # reads true TOA incident SW, not the clamped top-halo flux (#620).
+        # AFTER the rescale rebuild (which drops the field) so it survives.
+        result = result._replace(toa_insolation=insol)
         return result
 
     return radiation_fn
