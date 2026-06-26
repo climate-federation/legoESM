@@ -15,7 +15,8 @@ scaling_derecho/
 ├── fullnode_cpu.sh      # full-node CPU (latlon/ico = 128-way MPI; spectral = threads)
 ├── fullnode_gpu.sh      # 1-A100 baseline (latlon/ico/spectral)
 ├── cube_fullnode_cpu.sh # full-node CPU for cubed-sphere (6-rank x ~21-thread hybrid)
-└── cube_strong_gpu.sh   # 1-A100 baseline for cubed-sphere (RANKS=1; mpi4jax scatter)
+├── cube_strong_gpu.sh   # 1-A100 baseline for cubed-sphere (RANKS=1; mpi4jax scatter)
+└── finalize_fullnode.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```
 
 **Why cubed-sphere has its own pair.** Cube has only 6 faces, so MPI caps at 6
@@ -278,19 +279,23 @@ icosahedral `6 7`, spectral `85 170`. Override by listing resolutions as args.
 
 ---
 
-## Results
+## Results — aggregate + plot
 
-Each job writes its subdir under your chosen `<outdir>` (`<grid>_cpu_res<R>/`,
-`<grid>_a100_res<R>/`), each containing per-case JSON (with `backend`, `sypd`,
-`time_per_step_ms`, …) and an aggregated tidy CSV. The full-node CPU vs 1-A100
-comparison is the **`sypd`** column at matched resolution.
+Each job writes its subdir under `<outdir>` (`<grid>_cpu_res<R>/`,
+`<grid>_a100_res<R>/`) with per-case JSON and its own tidy CSV. Once the queue
+is empty, finalize the whole campaign in one step:
 
 ```bash
-qstat -u $USER
-ls $OUT                                            # the per-job subdirs
-column -s, -t < $OUT/latlon_cpu_res128/*_tidy.csv  # full-node CPU SYPD
-column -s, -t < $OUT/latlon_a100_res128/*_tidy.csv # 1-A100 SYPD
+qstat -u $USER                                              # wait until empty
+scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT   # aggregate + plot
 ```
+
+This runs `aggregate_bcw_scaling.py` over the whole `<outdir>` into
+`$OUT/all_tidy.csv`, then `plot_fullnode_cpu_vs_gpu.py` to render, **for each
+grid**, SYPD and throughput (Mcells/s) vs resolution with one line for the
+full-node CPU and one for the 1 A100 — `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png`
+— and prints a GPU/CPU speedup table. Any conda env with legoESM installed works
+(no GPU/MPI env needed for this step).
 
 ---
 
