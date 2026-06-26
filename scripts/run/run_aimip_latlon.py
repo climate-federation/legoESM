@@ -283,8 +283,12 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     # We always load fluxes here; verify they actually arrived (catches an
     # all-zero ERA5 read / regrid failure) on concrete arrays before any JIT.
     # Unwrap a multi-step target tuple to one carry for the sanity checks
-    # (every lead carries the same ERA5 flux variables).
-    _t0 = (targets[0][0] if (ics and isinstance(targets[0], tuple))
+    # (every lead carries the same ERA5 flux variables).  NB a SegmentCarry
+    # IS a NamedTuple (== tuple subclass), so isinstance(targets[0], tuple)
+    # can NOT distinguish a single carry from a multi-step tuple-of-carries —
+    # key off is_multi (else targets[0][0] grabs the carry's first FIELD, an
+    # array, and .held_lw_up_toa blows up on the single-target eval load).
+    _t0 = (targets[0][0] if (ics and is_multi)
            else (targets[0] if ics else None))
     if ics:
         import numpy as _np
