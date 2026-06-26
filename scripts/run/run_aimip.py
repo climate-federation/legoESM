@@ -131,7 +131,11 @@ def _build_spectral_config(cfg: dict[str, Any]):
 
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
-        n_levels=int(cfg["nlev"]),
+        # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
+        # left this read as "nlev" while the AIMIP configs declare "n_levels",
+        # so the spectral suite KeyError'd at step 0 (the v10 T63 ~2K path was
+        # fully blocked). Accept either key.
+        n_levels=int(cfg["nlev"] if "nlev" in cfg else cfg["n_levels"]),
         dt=float(cfg["dt"]),
         pe_config=SpectralPEConfig(
             hyperdiff_coeff=2.5e15,
