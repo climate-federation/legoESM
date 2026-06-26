@@ -133,6 +133,11 @@ def make_loss_config(args):
         flux_scale=20.0,
         normalize_by_scale=True,
         level_weighting="pressure",
+        # GenCast-style multi-step autoregressive supervision (empty ->
+        # single 6 h horizon).  multi_step_rollout_loss reads these off
+        # loss_config, so no trainer-signature change is needed.
+        multi_step_hours=tuple(args.multi_step_hours),
+        multi_step_weights=tuple(args.multi_step_weights),
     )
 
 
@@ -153,14 +158,21 @@ def _parse_windows(spec: str):
 
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
-                      era5_zarr=None, microphysics="none", turbulence="none"):
+                      era5_zarr=None, microphysics="none", turbulence="none",
+                      multi_step_hours=()):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
     logic, but produces lat-lon carries (flux-aware) and an aligned
-    SegmentForcing per IC.  Targets are ``rollout_hours`` ahead (24 h for
-    the single-day rollout).  Pairs are formed inside each window only (no
+    SegmentForcing per IC.  Pairs are formed inside each window only (no
     cross-window leakage).
+
+    ``multi_step_hours`` empty -> one target ``rollout_hours`` ahead per IC
+    (each ``targets[i]`` is a single carry; the single-horizon path).
+    Non-empty -> GenCast-style multi-step: each ``targets[i]`` is a TUPLE
+    of carries, one per lead in ``sorted(multi_step_hours)``, consumed by
+    ``multi_step_rollout_loss``.  Use the single-target form for EVAL (the
+    eval rolls one 6 h forecast) and the multi-step form for TRAINING.
     """
     from legoesm.driver.compiled_segments import pack_forcing
     from legoesm.training.era5_to_state import (
@@ -177,12 +189,18 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     flux_ds = open_era5_zarr(era5_cfg.flux_zarr) if era5_cfg.flux_zarr else ds
 
     era5_dt_hours = era5_cfg.dt_hours
-    if rollout_hours % era5_dt_hours != 0:
-        raise ValueError(
-            f"rollout_hours={rollout_hours} must be a multiple of "
-            f"era5_dt_hours={era5_dt_hours}."
-        )
-    stride = rollout_hours // era5_dt_hours       # snapshot units IC->target
+    # Lead(s) in ERA5-snapshot units.  Single-horizon: [rollout_hours].
+    # Multi-step: the sorted multi_step_hours leads (each a target snapshot).
+    leads_h = sorted(int(h) for h in multi_step_hours) or [int(rollout_hours)]
+    for h in leads_h:
+        if h % era5_dt_hours != 0:
+            raise ValueError(
+                f"lead {h}h (rollout_hours/multi_step_hours) must be a "
+                f"multiple of era5_dt_hours={era5_dt_hours}."
+            )
+    strides = [h // era5_dt_hours for h in leads_h]   # snapshot units IC->target
+    max_stride = max(strides)
+    is_multi = bool(multi_step_hours)
     snaps_per_day = 24 // era5_dt_hours
 
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
@@ -209,9 +227,9 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             raise ValueError(f"window {(year, day_off, n_days)} has n_days<1")
         start = _year_to_idx(year) + day_off * snaps_per_day
         n_ics = n_days * snaps_per_day
-        # Load the contiguous snapshot block (ICs + the stride lookahead).
+        # Load the contiguous snapshot block (ICs + the max-lead lookahead).
         block = {}
-        for s in range(n_ics + stride):
+        for s in range(n_ics + max_stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
             block[s] = (
@@ -223,7 +241,12 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             )
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
-            target_carry, _, _ = block[d + stride]
+            # Single-horizon -> one target carry; multi-step -> a tuple of
+            # carries (one per lead) for multi_step_rollout_loss.
+            if is_multi:
+                target_carry = tuple(block[d + s][0] for s in strides)
+            else:
+                target_carry, _, _ = block[d + strides[0]]
             # The IC must NOT carry the observed ERA5 fluxes (they are
             # loaded for the TARGET only): otherwise the model's predicted
             # held_* can leak the IC's observed fluxes and fake a perfect
@@ -259,9 +282,13 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     # flux weights would silently train the model's radiation toward zero.
     # We always load fluxes here; verify they actually arrived (catches an
     # all-zero ERA5 read / regrid failure) on concrete arrays before any JIT.
+    # Unwrap a multi-step target tuple to one carry for the sanity checks
+    # (every lead carries the same ERA5 flux variables).
+    _t0 = (targets[0][0] if (ics and isinstance(targets[0], tuple))
+           else (targets[0] if ics else None))
     if ics:
         import numpy as _np
-        tgt_olr = _np.asarray(targets[0].held_lw_up_toa)
+        tgt_olr = _np.asarray(_t0.held_lw_up_toa)
         if not _np.isfinite(tgt_olr).all():
             raise RuntimeError(
                 "Target carry OLR has non-finite values "
@@ -277,10 +304,11 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                 "Flux-loss supervision would push the model toward zero "
                 "radiation.  Check the WB2 mean_*_radiation_flux variables."
             )
-    logger.info("Loaded %d (ic,target,forcing) pairs across %d window(s); "
+    logger.info("Loaded %d (ic,target,forcing) pairs across %d window(s)%s; "
                 "target OLR mean ~%.1f W/m^2",
                 len(ics), len(windows),
-                float(np.asarray(targets[0].held_lw_up_toa).mean()) if ics else 0.0)
+                f" (multi-step leads={leads_h}h)" if is_multi else "",
+                float(np.asarray(_t0.held_lw_up_toa).mean()) if ics else 0.0)
     return ics, targets, forcings
 
 
@@ -295,19 +323,37 @@ def _area_weighted(field, cos_lat):
 
 
 def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_ROLLOUT_HOURS):
-    """RMSE + bias per prognostic + radiation flux, averaged over windows."""
+    """RMSE + bias per prognostic + radiation flux, averaged over windows.
+
+    METRIC PARITY with the canonical AIMIP scorecard (``run_aimip.py``
+    ``_evaluate_variant``): the headline ``T``/``u``/``v`` RMSE is the
+    SINGLE mid-level (sigma ~0.5, ≈500 hPa) cross-section — the
+    WeatherBench T@500hPa convention — NOT the full 3-D column.  The
+    full-column number (kept as ``T_column``) is dominated by the
+    boundary-layer + near-vacuum stratosphere/sponge levels where the
+    free 6 h forecast has its largest errors, so it runs ~3x higher than
+    the 500 hPa number and is NOT comparable to the spectral scorecard.
+    ``T_sfc`` is the near-surface (last sigma) level, matching the
+    canonical ``T_sfc`` entry used in the AIMIP intercomparison plot.
+    """
     from legoesm.training.dycore_rollout import single_day_rollout
 
     cos_lat = jnp.asarray(grid.cos_lat)
     acc = {}
 
     def _accum(name, pred, tgt):
+        """2-D field RMSE/bias (or full 3-D column when arrays are 3-D)."""
         d = pred - tgt
         rmse = np.sqrt(_area_weighted(d ** 2, cos_lat))
         bias = _area_weighted(d, cos_lat)
         acc.setdefault(name, {"rmse": [], "bias": []})
         acc[name]["rmse"].append(rmse)
         acc[name]["bias"].append(bias)
+
+    def _accum_level(name, pred3d, tgt3d, level):
+        """Single-level (lat,lon) slice of a 3-D (lat,lon,nlev) field —
+        the canonical AIMIP metric (500 hPa mid-level / near-surface)."""
+        _accum(name, pred3d[..., level], tgt3d[..., level])
 
     diag = {}  # non-RMSE model diagnostics (no ERA5 target)
 
@@ -323,10 +369,18 @@ def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_ROLLOUT_HOURS
 
     for ic, tgt, forcing in zip(ics, targets, forcings):
         pred = single_day_rollout(ic, forcing, run_seg_raw, dt=dt, hours=hours)
-        _accum("T", pred.T, tgt.T)
-        _accum("u", pred.u, tgt.u)
-        _accum("v", pred.v, tgt.v)
-        _accum("q", pred.q_v, tgt.q_v)       # specific humidity [kg/kg]
+        nlev = pred.T.shape[-1]
+        mid = nlev // 2          # ~500 hPa (sigma ~0.5) — WeatherBench convention
+        surf = nlev - 1          # near-surface (last sigma level)
+        # Headline metrics: single mid-level slice = canonical AIMIP parity.
+        _accum_level("T", pred.T, tgt.T, mid)
+        _accum_level("u", pred.u, tgt.u, mid)
+        _accum_level("v", pred.v, tgt.v, mid)
+        _accum_level("T_sfc", pred.T, tgt.T, surf)     # near-surface T
+        _accum_level("q", pred.q_v, tgt.q_v, surf)     # humidity is surface-heavy
+        # Full-column diagnostic (NOT comparable to the spectral scorecard —
+        # inflated ~3x by boundary-layer + stratosphere/sponge levels).
+        _accum("T_column", pred.T, tgt.T)
         _accum("ps", pred.p_s, tgt.p_s)
         # Radiation fluxes (only meaningful when targets carry ERA5 fluxes).
         _accum("olr", pred.held_lw_up_toa, tgt.held_lw_up_toa)
@@ -528,6 +582,18 @@ def build_parser():
     # longer tune radiation params (albedo) — that needs the cheap 2-scalar
     # forward-mode path (follow-up).  Classical variant only.
     p.add_argument("--radiation-as-forcing", action="store_true", default=False)
+    # GenCast-style multi-step autoregressive supervision (the canonical
+    # AIMIP protocol; spectral got classical 6.8->4.05K with it).  On the
+    # lat-lon stack the per-segment gradient is TRUNCATED (stop_gradient
+    # between segments) because the full-rollout adjoint NaNs past ~6h —
+    # so use SHORT (6h) segments: --multi-step-hours 6 12 18 24.  Empty ->
+    # single 6h horizon (legacy).
+    p.add_argument("--multi-step-hours", type=int, nargs="*", default=[],
+                   help="autoregressive leads in hours (multiples of 6), "
+                        "e.g. 6 12 18 24; empty -> single 6h horizon.")
+    p.add_argument("--multi-step-weights", type=float, nargs="*", default=[],
+                   help="per-lead loss weights (match --multi-step-hours); "
+                        "empty -> uniform.")
     p.add_argument("--variants", default="classical,column_nn",
                    help="comma list: classical,column_nn")
     p.add_argument("--epochs", type=int, default=8)
@@ -643,11 +709,15 @@ def main(argv=None):
     eval_windows = _parse_windows(args.eval_windows)
 
     logger.info("Loading training data ...")
+    # Training uses multi-step targets (tuple per IC) when --multi-step-hours
+    # is set; eval ALWAYS uses single 6h targets (evaluate() rolls one 6h
+    # forecast and _accum expects a single target carry).
     ics, targets, forcings = load_window_pairs(
         grid, sigma, train_windows,
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        multi_step_hours=tuple(args.multi_step_hours),
     )
     logger.info("Loading eval data ...")
     eval_data = load_window_pairs(
