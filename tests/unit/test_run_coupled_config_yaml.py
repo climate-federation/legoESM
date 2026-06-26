@@ -1,10 +1,10 @@
 """run_coupled --config YAML loader + the canonical CMIP run configs
-(config/cmip/cmip_ocean_{slab,3D}.yaml).
+(config/cmip/cmip_tuned_physics.yaml shared base + cmip_ocean_{slab,3D}.yaml).
 
-Guards that (1) every key in the shipped configs is a real run_coupled argument
-dest (a typo would be a silent dropped override), (2) the configs carry the
-tuned ("trained") parameter values, and (3) --config sets defaults that an
-explicit CLI flag still overrides.  Pure parser/YAML (no JAX run)."""
+Guards that (1) every (include-merged) key in the shipped configs is a real
+run_coupled argument dest, (2) the configs carry the tuned ("trained") parameter
+values, (3) `include:` merges a base (base < including file), and (4) --config
+sets defaults that an explicit CLI flag still overrides.  Pure parser/YAML."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -21,47 +20,72 @@ _spec = importlib.util.spec_from_file_location(
 mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
-CMIP_CONFIGS = [
-    REPO / "config" / "cmip" / "cmip_ocean_slab.yaml",
-    REPO / "config" / "cmip" / "cmip_ocean_3D.yaml",
-]
+CMIP_DIR = REPO / "config" / "cmip"
+BASE = CMIP_DIR / "cmip_tuned_physics.yaml"
+CMIP_CONFIGS = [CMIP_DIR / "cmip_ocean_slab.yaml", CMIP_DIR / "cmip_ocean_3D.yaml"]
 
 
 def _dests():
     return {a.dest for a in mod.build_parser()._actions}
 
 
-@pytest.mark.parametrize("cfg", CMIP_CONFIGS, ids=lambda p: p.name)
-def test_cmip_config_exists_and_keys_valid(cfg):
-    """Each shipped CMIP config exists and every key is a real run_coupled
-    argument dest (no key references a flag run_coupled does not have)."""
+@pytest.mark.parametrize("cfg", [BASE, *CMIP_CONFIGS], ids=lambda p: p.name)
+def test_config_keys_valid_after_include(cfg):
+    """Every key (after merging any `include:` base) in the shared base and the
+    run configs is a real run_coupled argument dest — a typo would be a silent
+    dropped override.  Also exercises that the real `include:` resolves."""
     assert cfg.exists(), f"missing canonical config {cfg}"
-    doc = yaml.safe_load(cfg.read_text())
-    assert isinstance(doc, dict) and doc, f"{cfg.name} is not a non-empty mapping"
-    unknown = sorted(set(doc) - _dests())
-    assert not unknown, f"{cfg.name} has key(s) not in run_coupled: {unknown}"
+    merged = mod._read_yaml_with_includes(str(cfg))
+    assert isinstance(merged, dict) and merged, f"{cfg.name} empty/not a mapping"
+    assert "include" not in merged, "include meta-key must be stripped"
+    unknown = sorted(set(merged) - _dests())
+    assert not unknown, f"{cfg.name}: keys not in run_coupled: {unknown}"
 
 
 def test_configs_carry_the_tuned_parameters():
-    """The tuned air-sea / cloud / ocean parameter set is encoded as expected."""
+    """The tuned air-sea / cloud / ocean set is present after the include merge:
+    the run configs inherit the physics from the shared base."""
     parser = mod.build_parser()
     slab = mod._load_yaml_config(str(CMIP_CONFIGS[0]), parser)
     assert slab["radiation"] == "rrtmgp"
-    assert slab["surface_bulk_scheme"] == "coare3"
-    assert slab["surface_gustiness_zi"] == 300.0
-    assert slab["cloud_q_c_diagnostic"] == pytest.approx(3.0e-4)
+    assert slab["surface_bulk_scheme"] == "coare3"       # from the base
+    assert slab["surface_gustiness_zi"] == 300.0         # from the base
+    assert slab["cloud_q_c_diagnostic"] == pytest.approx(3.0e-4)  # from the base
     assert slab["convective_cloud"] is True
     assert slab["snow_albedo_feedback"] is True
-    assert slab["ocean"] == "two_layer"
+    assert slab["ocean"] == "two_layer"                  # slab's own
 
     d3 = mod._load_yaml_config(str(CMIP_CONFIGS[1]), parser)
-    # 3D twin: identical tuned atm, only the ocean differs.
-    assert d3["surface_bulk_scheme"] == "coare3"
+    assert d3["surface_bulk_scheme"] == "coare3"         # same base physics
     assert d3["surface_gustiness_zi"] == 300.0
-    assert d3["ocean"] == "dynamic"
+    assert d3["ocean"] == "dynamic"                      # 3D's own
     assert d3["ocean_ic"] == "woa"
     assert d3["ocean_restore_sst_tau_days"] == 5.0
     assert d3["ocean_restore_sss_tau_days"] == 30.0
+
+
+def test_include_merges_base_then_overrides(tmp_path):
+    """`include:` merges the base first; the including file overrides on conflict
+    (precedence base < file), and the meta-key is stripped."""
+    (tmp_path / "base.yaml").write_text(
+        "surface_bulk_scheme: coare3\nocean: two_layer\ndays: 10\n")
+    child = tmp_path / "child.yaml"
+    child.write_text("include: base.yaml\nocean: dynamic\ndays: 240\n")
+    merged = mod._read_yaml_with_includes(str(child))
+    assert merged["surface_bulk_scheme"] == "coare3"  # inherited from base
+    assert merged["ocean"] == "dynamic"               # child overrides base
+    assert merged["days"] == 240                      # child overrides base
+    assert "include" not in merged
+
+
+def test_include_cycle_and_missing_raise(tmp_path):
+    (tmp_path / "a.yaml").write_text("include: b.yaml\n")
+    (tmp_path / "b.yaml").write_text("include: a.yaml\n")
+    with pytest.raises(SystemExit, match="cycle"):
+        mod._read_yaml_with_includes(str(tmp_path / "a.yaml"))
+    (tmp_path / "c.yaml").write_text("include: nope.yaml\n")
+    with pytest.raises(SystemExit, match="not found"):
+        mod._read_yaml_with_includes(str(tmp_path / "c.yaml"))
 
 
 def test_load_yaml_config_rejects_unknown_key(tmp_path):
@@ -74,14 +98,12 @@ def test_load_yaml_config_rejects_unknown_key(tmp_path):
 
 def test_load_yaml_config_coerces_quoted_scalar(tmp_path):
     """A scalar written as a quoted string is coerced through the arg's type=
-    (set_defaults bypasses argparse type conversion); a non-numeric value for a
-    numeric arg is a hard error, not a silent str default."""
+    (set_defaults bypasses argparse conversion); a non-numeric value raises."""
     good = tmp_path / "quoted.yaml"
     good.write_text('dt: "300"\nresolution: "24"\n')
     out = mod._load_yaml_config(str(good), mod.build_parser())
     assert out["dt"] == 300.0 and isinstance(out["dt"], float)
     assert out["resolution"] == 24 and isinstance(out["resolution"], int)
-
     bad = tmp_path / "badnum.yaml"
     bad.write_text("dt: not_a_number\n")
     with pytest.raises(SystemExit, match="not a valid"):
@@ -90,10 +112,10 @@ def test_load_yaml_config_coerces_quoted_scalar(tmp_path):
 
 def test_config_sets_defaults_cli_overrides():
     """--config supplies defaults; an explicit CLI flag still wins (precedence
-    CLI > config > parser default)."""
+    CLI > config-file > included base > parser default)."""
     parser = mod.build_parser()
     parser.set_defaults(**mod._load_yaml_config(str(CMIP_CONFIGS[0]), parser))
     args = parser.parse_args(["--days", "90"])
-    assert args.surface_bulk_scheme == "coare3"   # from the config file
-    assert args.ocean == "two_layer"              # from the config file
+    assert args.surface_bulk_scheme == "coare3"   # from the base via include
+    assert args.ocean == "two_layer"              # from the run config
     assert args.days == 90                        # explicit CLI overrides config
