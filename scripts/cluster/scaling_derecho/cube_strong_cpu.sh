@@ -1,6 +1,15 @@
 #!/bin/bash -l
+#PBS -N cube_strong_cpu
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=128:mpiprocs=128
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -k eod
 # ===========================================================================
-# Interactive cubed-sphere CPU STRONG-scaling sweep on NCAR Derecho.
+# Cubed-sphere CPU STRONG-scaling sweep on NCAR Derecho.  Runs both as a BATCH
+# job and interactively.
 #
 # CPU half of the apples-to-apples CPU-vs-GPU comparison: runs the SAME driver
 # and SAME flags as cube_strong_gpu.sh (scripts/bench/run_levante_gpu_scaling.py
@@ -11,20 +20,25 @@
 # --cs-spmd here: its cube path is jax.distributed, which does not auto-detect
 # Derecho's Cray PALS launcher and would refuse to federate -- see the README.)
 #
-# RUN inside an interactive CPU job (NOT qsub'd as a batch script):
-#   qsub -I -A P08010000 -q main -l walltime=02:00:00 \
-#        -l select=1:ncpus=128:mpiprocs=128
+# SUBMIT as a batch job (qsub from the repo root so $PBS_O_WORKDIR finds it):
 #   cd /glade/work/$USER/legoESM
-#   ./scripts/cluster/scaling_derecho/cube_strong_cpu.sh
+#   qsub scripts/cluster/scaling_derecho/cube_strong_cpu.sh
+#   # override knobs at submit time (C192 on CPU is slow -- trim for speed):
+#   qsub -v PHYSICS=none,PRECISION=float32,STRONG_RES=48,96 \
+#        scripts/cluster/scaling_derecho/cube_strong_cpu.sh
 #
-# OVERRIDE knobs from the environment (no edits needed).  C192 on CPU is slow;
-# trim STRONG_RES for a quicker sweep:
-#   RANKS="1 2 3 6"  PHYSICS=none  PRECISION=float32  STRONG_RES=48,96 \
-#   CAMP=$SCRATCH/legoesm_scaling/my_run  ./.../cube_strong_cpu.sh
+# Or RUN interactively (qsub -I ... then ./cube_strong_cpu.sh).
 # ===========================================================================
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Locate _env.sh: under PBS the script runs from a spool copy, so resolve from
+# $PBS_O_WORKDIR (the submit dir); fall back to BASH_SOURCE for interactive use.
+if [ -n "${PBS_O_WORKDIR:-}" ] \
+        && [ -f "${PBS_O_WORKDIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${PBS_O_WORKDIR}/scripts/cluster/scaling_derecho"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # Force CPU + the mpi-enabled conda env BEFORE sourcing _env.sh so a stale
 # JAX_PLATFORMS=cuda from a reused interactive shell can never push this MPI
@@ -53,6 +67,9 @@ STRONG_RES="${STRONG_RES:-48,96,192}"   # cube face-edge cells (C48/C96/C192)
 STAMP="$(date +%Y%m%d_%H%M%S)"
 CAMP="${CAMP:-$SCRATCH/legoesm_scaling/cube_cpu_strong_${STAMP}}"
 mkdir -p "$CAMP"
+# Batch run: mirror console output into the results dir so a log lands next to
+# the data regardless of where PBS routes the job's .o file.
+[ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
 echo "=== cube CPU strong sweep: ranks=[$RANKS] physics=$PHYSICS prec=$PRECISION res=$STRONG_RES ==="
 echo "    outdir=$CAMP"
