@@ -5,7 +5,7 @@ strong-scaling sweep on BOTH backends — CPU MPI ranks 1→128 (128-core EPYC,
 `main` queue) and GPU 1→4 A100 (`deg*` node) — at each resolution, one grid at a
 time, then compares the curves (headline = the full-node point on each side).
 
-`submit_fullnode.sh` is the only entry point — it fans each resolution out into
+`submit_fullnode.sh` is the only entry point. It fans each resolution out into
 its own CPU job + GPU job and dispatches to the right backend scripts; you never
 call the building blocks directly.
 
@@ -28,11 +28,50 @@ genuinely domain-decomposed, so they sweep the full rank/GPU ladder via
 `run_cpu_mpi_scaling.py` (`--device cpu`/`--device gpu`); spectral has no MPI
 path (single device). `submit_fullnode.sh` hides all of this.
 
-The CPU and GPU sides need **two different conda envs** — GPU JAX and CPU+MPI JAX
-are incompatible builds. Build both once (Steps 1–2), edit `_env.sh` (Step 0),
-then submit (Step 4).
+---
+
+## Quick start
+
+Already built the two conda envs and edited `_env.sh`? Then a full latlon
+comparison is four commands:
+
+```bash
+cd /glade/work/$USER/legoESM                       # the repo root (qsub from here)
+OUT=$SCRATCH/legoesm_scaling/cmp01                 # pick a results dir
+
+# 1. preview what would be submitted (no jobs created):
+DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+
+# 2. submit the CPU-sweep + GPU-sweep jobs (one pair per resolution):
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+
+# 3. wait for the queue to drain:
+watch -n 60 qstat -u $USER
+
+# 4. aggregate every job under $OUT and plot the CPU-vs-GPU curves:
+scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT
+#    -> $OUT/all_tidy.csv  +  $OUT/plots/fullnode_cpu_vs_gpu_latlon.png
+```
+
+Repeat step 2 for the other grids into the SAME `$OUT` (then one `finalize`
+covers them all):
+
+```bash
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
+```
+
+First time on this machine? Do the **one-time setup** below before the Quick
+start, and run the **smoke tests** once to catch a broken env before it burns
+batch walltime.
 
 ---
+
+# Part A — one-time environment setup
+
+The CPU and GPU sides need **two different conda envs** — GPU JAX and CPU+MPI JAX
+are incompatible builds. Build both once, edit `_env.sh` once.
 
 ## Step 0 — Edit `_env.sh`
 
@@ -40,8 +79,6 @@ Set the two marked values; the account and `$SCRATCH` are preset:
 
 - `LEGOESM_REPO` → your clone path, e.g. `/glade/work/$USER/legoESM`
 - `LEGOESM_CONDA_ENV` → leave default; each job overrides it (`legoesm-gpu` / `legoesm-mpi`).
-
----
 
 ## Installing legoESM — NOT `pip install -e .`
 
@@ -60,8 +97,6 @@ python -m venv .venv && source .venv/bin/activate && uv sync --extra dev
 
 The steps below use the `install_federation.py` path so everything lands in the
 active conda env.
-
----
 
 ## Step 1 — GPU env (`legoesm-gpu`) for the `deg*` nodes
 
@@ -158,8 +193,6 @@ the `craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge themselves
 at runtime, so once the overlay env is built the jobs carry the right
 environment without the manual exports above.
 
----
-
 ## Step 2 — CPU + MPI env (`legoesm-mpi`) for the `main` queue
 
 `mpi4py`/`mpi4jax` **must be built from source against Cray MPICH**, and **with
@@ -204,67 +237,91 @@ Per `requirements_mpi.txt`, mpi4jax 0.8.x on JAX 0.8–0.9 routes every
 (`STATUS_RETURNING-not-supported`), with little/no speedup measured at np=2 —
 pending the mpi4jax FFI rewrite. Run the np=2 smoke test below and **watch for
 that warning**: if it fires, the CPU-MPI scaling curve reflects mpi4jax overhead
-rather than true comms cost. The GPU sweep is unaffected — run it first.
+rather than true comms cost. The GPU sweep is unaffected.
 
 ---
 
-## Step 3 — Smoke-test each path interactively (before batch)
+# Part B — running a scaling test
+
+## Step 3 — Smoke-test each path (once, before any batch job)
+
+Catches a broken env in 30 s instead of after a 2 h job records garbage.
 
 > When sourcing `_env.sh` interactively, set `JAX_PLATFORMS` yourself first —
 > `_env.sh` keeps an already-set value, so a stale `cpu`/`cuda` from earlier in
 > the same shell would leak in (and a GPU run on `cpu` fails silently). The
-> batch `.pbs` jobs pin it unconditionally, so this only matters interactively.
-> Always confirm with `python -c "import jax; print(jax.default_backend())"`.
+> batch jobs pin it unconditionally, so this only matters interactively. Always
+> confirm with `python -c "import jax; print(jax.default_backend())"`.
 
-**GPU** (on a `deg*` node, env `legoesm-gpu`):
+**GPU** (interactive `deg*` node, env `legoesm-gpu`) — verify multi-GPU route-A
+actually spreads across devices (the #1 failure mode):
 ```bash
-export JAX_PLATFORMS=cuda
-export LEGOESM_CONDA_ENV=legoesm-gpu
+qsub -I -A $PROJECT -q main -l job_priority=premium \
+     -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB -l walltime=00:30:00
+cd /glade/work/$USER/legoESM
+export JAX_PLATFORMS=cuda LEGOESM_CONDA_ENV=legoesm-gpu
 source scripts/cluster/scaling_derecho/_env.sh
-python -c "import jax; print(jax.default_backend())"      # MUST print: gpu
-python scripts/bench/run_levante_gpu_scaling.py \
-    --grid cubed-sphere --physics gray_sbm --mode strong --precision float32 \
-    --n-gpus 1 --n-timing 10
+module load craype-accel-nvidia80; export MPICH_GPU_SUPPORT_ENABLED=1
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}"
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; exec "$@"'
+mpiexec -n 2 bash -c "$PIN" _ python scripts/bench/run_cpu_mpi_scaling.py \
+    --grid latlon --resolution 128 --mode strong --device gpu --latlon-2d --n-timing 10
+#   want: "Ranks: 2" and two DISTINCT GPUs used (not both rank-1 / both GPU 0)
 ```
 
 **CPU-MPI** (interactive `main` node, env `legoesm-mpi`):
 ```bash
 qsub -I -A $PROJECT -q main -l job_priority=premium \
      -l select=1:ncpus=128:mpiprocs=128 -l walltime=00:30:00
-export JAX_PLATFORMS=cpu
-export LEGOESM_CONDA_ENV=legoesm-mpi
+cd /glade/work/$USER/legoESM
+export JAX_PLATFORMS=cpu LEGOESM_CONDA_ENV=legoesm-mpi
 source scripts/cluster/scaling_derecho/_env.sh
+module load gcc cray-mpich
 mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \
-    --grid latlon --resolution 64 --mode single --physics held_suarez --n-timing 10
+    --grid latlon --resolution 64 --mode strong --device cpu --n-timing 10
 # ^ watch for the STATUS_RETURNING slow-path warning
 ```
 
----
+## Step 4 — Submit a campaign (one grid at a time)
 
-## Step 4 — Submit (one grid at a time)
-
-`submit_fullnode.sh` is the only entry point. Run it from anywhere — it `cd`s to
-the repo root so each job's `PBS_O_WORKDIR` resolves. The **outdir is required**;
-each job writes a unique subdir under it.
+`submit_fullnode.sh` is the entry point. Run it from the repo root (so each
+job's `PBS_O_WORKDIR` resolves). The **outdir is required**; every job writes a
+unique subdir under it, so multiple grids can share one `$OUT`.
 
 ```bash
 submit_fullnode.sh <outdir> <grid> [res ...]
 #   <outdir>  REQUIRED scratch dir for all results (created if missing)
 #   <grid>    cubed-sphere | latlon | icosahedral | spectral
 #   [res]     resolutions to cover (default per-grid list if omitted)
+```
 
+Always preview first, then submit:
+
+```bash
+cd /glade/work/$USER/legoESM
 OUT=$SCRATCH/legoesm_scaling/cmp01
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon            # default res (128 256)
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere 48 96 192
+
+DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon   # prints the qsub lines
+scripts/cluster/scaling_derecho/submit_fullnode.sh        $OUT latlon   # actually submits
+```
+
+For each resolution this submits **one CPU-sweep job + one GPU-sweep job** (each
+sweeps its device ladder internally). latlon's default `128 256` → 4 jobs.
+
+Cover the other grids into the SAME `$OUT`:
+```bash
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere
 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
 ```
 
-For each resolution it submits **one CPU-sweep job + one GPU-sweep job** (each
-sweeps its device ladder internally), so a slow high-res case gets its own
-walltime and runs in parallel.
+Override resolutions by listing them; pass knobs as environment variables:
 
-Knobs (environment, passed through to the jobs):
+```bash
+scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere 96 192   # only C96, C192
+PHYSICS=moist PRECISION=float64 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral # one tier only
+```
 
 | Var | Default | Notes |
 |-----|---------|-------|
@@ -273,40 +330,75 @@ Knobs (environment, passed through to the jobs):
 | `DRYRUN` | `0` | `1` = print the `qsub` lines without submitting |
 | `CPU_ONLY` / `GPU_ONLY` | `0` | submit just one side |
 
-```bash
-DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon   # preview first
-PHYSICS=moist PRECISION=float64 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
-```
-
 Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
-icosahedral `6 7`, spectral `85 170`. Override by listing resolutions as args.
+icosahedral `6 7`, spectral `85 170`.
 
----
-
-## Results — aggregate + plot
-
-Each job writes its subdir under `<outdir>` (`<grid>_cpu_res<R>/`,
-`<grid>_a100_res<R>/`) with per-case JSON and its own tidy CSV. Once the queue
-is empty, finalize the whole campaign in one step:
+## Step 5 — Monitor the jobs
 
 ```bash
-qstat -u $USER                                              # wait until empty
-scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT   # aggregate + plot
+qstat -u $USER                         # your queue (R = running, Q = queued)
+qstat -f <jobid> | grep -i comment     # why a job is still queued
+ls $OUT                                # per-job result subdirs appear as jobs start
+tail -f $OUT/latlon_cpu_res128/run.log # live console of one job (rank counts, SYPD/case)
 ```
 
-This runs `aggregate_bcw_scaling.py` over the whole `<outdir>` into
+Each job mirrors its console to `<subdir>/run.log`. A job is done when its
+`run.log` ends with `=== DONE rc=0 ===` and writes its own `*_tidy.csv`. A
+non-zero `rc` means at least one (resolution, device-count) point failed — open
+`run.log` to see which (often a resolution too small for the high rank counts;
+the rest of the curve is still valid).
+
+## Step 6 — Finalize: aggregate + plot
+
+Once `qstat -u $USER` is empty:
+
+```bash
+scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT
+```
+
+This runs `aggregate_bcw_scaling.py` over the whole `$OUT` into
 `$OUT/all_tidy.csv`, then `plot_fullnode_cpu_vs_gpu.py` to render, **for each
 grid**, the CPU and GPU strong-scaling curves (SYPD and Mcells/s vs device
-count) one panel per resolution — `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png` —
-and prints a peak (full-node) GPU/CPU speedup table. Any conda env with legoESM
-installed works (no GPU/MPI env needed for this step).
+count, one panel per resolution) → `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png`,
+and prints a peak (full-node) GPU/CPU speedup table:
+
+```
+grid              res   CPU peak   GPU peak  GPU/CPU   (peak SYPD across the scaling curve)
+latlon            128       6.96       34.8    5.00x
+```
+
+Any conda env with legoESM installed works for this step (no GPU/MPI env needed).
+Re-run it any time to refresh after more jobs land. To inspect the raw numbers:
+
+```bash
+column -s, -t < $OUT/all_tidy.csv | less -S    # grid, backend, n_resource, resolution, sypd, mcells_per_s, ...
+```
 
 ---
+
+## Troubleshooting
+
+- **GPU "scaling" curve is flat / every point says `Ranks: 1`** — the route-A
+  overlay isn't active (a generic `mpi4py` shadows it). Rebuild Step 1b; confirm
+  with the Step 3 GPU smoke test (must show `Ranks: 2`, two distinct GPUs).
+- **`mpiexec ... No host list provided`** — you ran `mpiexec` on a login node.
+  GPU/MPI runs must be inside a PBS allocation (`qsub -I ...` or a batch job).
+- **A CPU `(res, ranks)` point fails** with a "needs ≥2 lat rows" / partition
+  error — that resolution is too small for that rank count. Expected; that point
+  drops out and the rest of the curve stands. Raise the resolution or cap ranks
+  (`RANKS="1 2 4 8 16 32"`).
+- **`cube_fullnode_cpu.sh` rejects `--cpu-bind depth --depth N`** — a PALS
+  version quirk; the fallback is `--cpu-bind depth -d N` (edit the `mpiexec`
+  line).
+- **Empty plot / `no CPU/GPU rows ...`** — `finalize` ran before any job
+  finished, or `$OUT` is wrong. Wait for `run.log` `DONE` lines, re-run finalize.
 
 ## Verify-before-submit checklist
 - [ ] `_env.sh`: `LEGOESM_REPO` set; conda envs named `legoesm-gpu` / `legoesm-mpi`.
-- [ ] GPU env: `jax.default_backend()` == `gpu`, `device_kind` shows A100.
+- [ ] GPU env: `jax.default_backend()` == `gpu`, `device_kind` shows A100, and the
+      Step 3 GPU smoke test shows **2 distinct GPUs** at `-n 2`.
 - [ ] MPI env: `import mpi4jax` succeeds (built under **gcc**, against cray-mpich).
-- [ ] GPU header tokens (`gpu_type=a100`, `job_priority=premium`) schedule on your
-      allocation — confirm with the interactive `qsub -I` in Step 1, adjust the
-      `select=`/`gpu_type` line if not.
+- [ ] GPU header tokens (`gpu_type=a100`, `job_priority`) schedule on your
+      allocation — confirm with the interactive `qsub -I` in Step 1; adjust the
+      `select=`/`gpu_type` line in `fullnode_gpu.sh` / `cube_strong_gpu.sh` if not.
+- [ ] `DRYRUN=1` preview looks right before the real submit.
