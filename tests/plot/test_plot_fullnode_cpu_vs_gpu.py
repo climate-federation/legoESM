@@ -72,6 +72,20 @@ def test_peak_table_uses_curve_max():
     assert d["gpu_over_cpu"] == pytest.approx(6.0)
 
 
+def test_efficiency_curve_normalises_to_smallest_count():
+    # CPU latlon res128: cores 1,2,4 -> sypd 2.0, 3.6, 6.0
+    # eff(N) = (sypd(N)/sypd(1)) / (N/1):  1.0, (3.6/2)/2=0.9, (6/2)/4=0.75
+    pts = plot.group(_sample_rows(), "sypd")["latlon"][128]["CPU"]
+    eff = plot.efficiency_curve(pts)
+    assert eff[0] == (1, pytest.approx(1.0))
+    assert eff[1] == (2, pytest.approx(0.9))
+    assert eff[2] == (4, pytest.approx(0.75))
+
+
+def test_efficiency_curve_empty_on_no_points():
+    assert plot.efficiency_curve([]) == []
+
+
 def test_make_figures_one_png_per_grid(tmp_path):
     csvp = tmp_path / "tidy.csv"
     _write_csv(csvp, _sample_rows())
