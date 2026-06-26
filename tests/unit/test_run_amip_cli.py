@@ -687,3 +687,21 @@ def test_subgrid_autoconv_defaults_off():
     args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.subgrid_autoconversion is False
+
+
+def test_convective_cloud_flag_threads_to_config():
+    """--convective-cloud round-trips into ExperimentConfig (parity with the
+    CMIP slab config config/cmip/cmip_ocean_slab.yaml)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--convective-cloud"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.convective_cloud is True
+
+
+def test_convective_cloud_defaults_off():
+    """Convective cloud cover is opt-in (byte-identical legacy default)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.convective_cloud is False
