@@ -74,3 +74,10 @@ class TestSnapForDay:
         snap, day = pdx._snap_for_day(snaps, None)
         assert day == pytest.approx(90.0)
         assert snap.name == "snapshot_00001.npz"
+
+
+class TestDayOf:
+    def test_reads_time_days(self, tmp_path):
+        snaps = tmp_path / "snapshots"; snaps.mkdir()
+        _write_snap(snaps, 0, 42.0, np.full(6, 11.0))
+        assert pdx._day_of(snaps / "snapshot_00000.npz") == pytest.approx(42.0)
