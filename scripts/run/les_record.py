@@ -22,6 +22,57 @@ import numpy as np
 _HEIGHT_FRACS = (0.05, 0.15, 0.30, 0.60)
 
 
+class TimeMeanAccumulator:
+    """Running time-mean of a driver's planar-mean diagnostic dict.
+
+    GCSS warm-cloud targets are time-MEANS over the quasi-steady window (BOMEX
+    hrs 3-6, RICO the trade-Cu quasi-equilibrium), but shallow-Cu cloud cover and
+    LWP swing wildly step to step, so a single final-timestep snapshot is a noisy,
+    biased estimator (a BOMEX pin run snapshotted LWP=20.6 g/m² off a ~2-8 mean).
+    Feed this the same ``dict`` the driver already computes for its periodic print
+    (ndarray profiles + scalar metrics); it sums the numeric leaves and returns
+    the element-wise mean. Non-numeric leaves (e.g. strings) are ignored, and the
+    leaf set is locked on the first sample so a shape/key drift fails loudly.
+    """
+
+    def __init__(self):
+        self._sum = None
+        self._keys = None
+        self.n = 0
+
+    @staticmethod
+    def _numeric(d):
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, np.ndarray):
+                out[k] = v.astype(float)
+            elif isinstance(v, (int, float, np.floating, np.integer)) and not (
+                    isinstance(v, bool)):
+                out[k] = float(v)
+        return out
+
+    def add(self, d):
+        contrib = self._numeric(d)
+        if self._sum is None:
+            self._sum = {k: np.array(v, dtype=float) for k, v in contrib.items()}
+            self._keys = set(contrib)
+        else:
+            if set(contrib) != self._keys:
+                raise ValueError(
+                    f"diagnostic keys drifted across samples: "
+                    f"{set(contrib) ^ self._keys}")
+            for k, v in contrib.items():
+                self._sum[k] = self._sum[k] + np.asarray(v, dtype=float)
+        self.n += 1
+
+    def mean(self):
+        if self.n == 0:
+            raise ValueError(
+                "no samples accumulated — averaging window empty (avg_from past "
+                "the run end, or print/sample cadence coarser than the window?)")
+        return {k: v / self.n for k, v in self._sum.items()}
+
+
 def select_heights(z, Lz):
     """Indices + heights[m] for the surface (lowest cell) + four BL heights,
     ascending in z, de-duplicated."""

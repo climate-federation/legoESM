@@ -118,6 +118,11 @@ def parse_args():
     p.add_argument("--rad-every", type=int, default=1,
                    help="Stevens-LW recompute cadence [steps].")
     p.add_argument("--print-every", type=int, default=1000)
+    p.add_argument("--avg-from-hours", type=float, default=None,
+                   help="start time [h] of the trailing time-average window for "
+                        "the saved reference profiles/cc/LWP/z_i (GCSS targets are "
+                        "time-means over the quasi-steady Sc deck). Samples at the "
+                        "--print-every cadence. Default: the second half (T/2).")
     p.add_argument("--record-frames", type=int, default=8)
     p.add_argument("--case-label", type=str, default="dycoms")
     p.add_argument("--output", type=Path, default=Path("results/les_dycoms"))
@@ -346,6 +351,9 @@ def main():
     dt = jnp.asarray(dt0, dtype)
     if rec:
         _save(0.0)
+    avg_from = (args.avg_from_hours * 3600.0
+                if args.avg_from_hours is not None else 0.5 * T)
+    acc = les_record.TimeMeanAccumulator()
     t = 0.0; i = 0
     created_tot = 0.0
     next_rec = T / args.record_frames if rec else np.inf
@@ -362,6 +370,11 @@ def main():
             if not np.isfinite(mw) or mw > 1e3:
                 print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
             d = _diag(st, g, ref)
+            if t >= avg_from:
+                acc.add({**d,
+                         "theta": np.asarray(st.theta).mean((0, 1)),
+                         "qv": np.asarray(st.tracers[..., 0]).mean((0, 1)),
+                         "qc": np.asarray(st.tracers[..., 1]).mean((0, 1))})
             print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
                   f"cc={d['cloud_cover']:.2f} LWP={d['lwp']:6.1f} g/m² "
                   f"zi={d['zi']:5.0f} m u*={float(us):.3f} "
@@ -372,15 +385,27 @@ def main():
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
-    d = _diag(st, g, ref)
+    d_snap = _diag(st, g, ref)
+    snap_prof = dict(theta=np.asarray(st.theta).mean((0, 1)),
+                     qv=np.asarray(st.tracers[..., 0]).mean((0, 1)),
+                     qc=np.asarray(st.tracers[..., 1]).mean((0, 1)))
+    if acc.n > 0:
+        dm = acc.mean()                      # time-mean over [avg_from, T]
+    else:
+        print("  [warn] empty averaging window — saving final snapshot instead.")
+        dm = {**d_snap, **snap_prof}
     np.savez(args.output / "dycoms_les_final.npz", z=zc_np,
-             theta=np.asarray(st.theta).mean((0, 1)),
-             qv=np.asarray(st.tracers[..., 0]).mean((0, 1)),
-             qc=np.asarray(st.tracers[..., 1]).mean((0, 1)),
-             cloud_cover=d["cloud_cover"], lwp=d["lwp"], zi=d["zi"])
-    print(f"  FINAL: LWP={d['lwp']:.1f} g/m² (ref 50-80), "
-          f"cloud cover={d['cloud_cover']:.2f} (ref ~1.0), "
-          f"z_i={d['zi']:.0f} m (ref 840-870)")
+             theta=dm["theta"], qv=dm["qv"], qc=dm["qc"],
+             cloud_cover=dm["cloud_cover"], lwp=dm["lwp"], zi=dm["zi"],
+             cloud_cover_snap=d_snap["cloud_cover"], lwp_snap=d_snap["lwp"],
+             zi_snap=d_snap["zi"],
+             avg_from_hours=avg_from / 3600.0, n_avg_samples=acc.n)
+    print(f"  FINAL (time-mean {avg_from/3600.0:.1f}-{T/3600.0:.1f}h, "
+          f"n={acc.n}): LWP={dm['lwp']:.1f} g/m² (ref 50-80), "
+          f"cloud cover={dm['cloud_cover']:.2f} (ref ~1.0), "
+          f"z_i={dm['zi']:.0f} m (ref 840-870)")
+    print(f"  (snapshot: LWP={d_snap['lwp']:.1f}, cc={d_snap['cloud_cover']:.2f}, "
+          f"z_i={d_snap['zi']:.0f} m)")
     return 0
 
 

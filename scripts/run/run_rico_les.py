@@ -115,6 +115,12 @@ def parse_args():
     p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
     p.add_argument("--micro-every", type=int, default=1)
     p.add_argument("--print-every", type=int, default=1000)
+    p.add_argument("--avg-from-hours", type=float, default=None,
+                   help="start time [h] of the trailing time-average window for "
+                        "the saved reference profiles/cc/LWP/precip-rate (GCSS "
+                        "targets are time-means; trade Cu drizzle is intermittent)."
+                        " Samples at the --print-every cadence. Default: the "
+                        "second half of the run (T/2).")
     p.add_argument("--record-frames", type=int, default=24)
     p.add_argument("--case-label", type=str, default="rico")
     p.add_argument("--output", type=Path, default=Path("results/les_rico"))
@@ -217,6 +223,9 @@ def main():
     dt = jnp.asarray(dt0, dtype)
     if rec:
         _save(0.0)
+    avg_from = (args.avg_from_hours * 3600.0
+                if args.avg_from_hours is not None else 0.5 * T)
+    acc = les_record.TimeMeanAccumulator()
     t = 0.0; i = 0
     created_tot, precip_accum = 0.0, 0.0          # accum [kg/m² = mm]
     next_rec = T / args.record_frames if rec else np.inf
@@ -233,6 +242,8 @@ def main():
                 print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
             d = bx.moist_profiles(st, g, ref)
             rate = float(pr) * 86400.0            # kg/m²/s → mm/day
+            if t >= avg_from:
+                acc.add({**d, "precip_mm_day": rate})   # incl. surface precip rate
             print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
                   f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
                   f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
@@ -244,15 +255,25 @@ def main():
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
-    d = bx.moist_profiles(st, g, ref)
+    d_snap = bx.moist_profiles(st, g, ref)
+    if acc.n > 0:
+        dm = acc.mean()                      # time-mean over [avg_from, T]
+    else:
+        print("  [warn] empty averaging window — saving final snapshot instead.")
+        dm = {**d_snap, "precip_mm_day": float('nan')}
     np.savez(args.output / "rico_les_final.npz", z=zc_np,
-             **{k: v for k, v in d.items() if isinstance(v, np.ndarray)},
-             cloud_cover=d["cloud_cover"], lwp=d["lwp"],
-             precip_accum_mm=precip_accum)
-    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} (ref 0.10-0.20), "
-          f"LWP={d['lwp']:.2f} g/m² (ref ~10-20), "
-          f"accum precip={precip_accum:.3f} mm "
-          f"(ref ~0.3 mm/day · {args.hours:.0f} h)")
+             **{k: v for k, v in dm.items() if isinstance(v, np.ndarray)},
+             cloud_cover=dm["cloud_cover"], lwp=dm["lwp"],
+             precip_mm_day=dm["precip_mm_day"],
+             cloud_cover_snap=d_snap["cloud_cover"], lwp_snap=d_snap["lwp"],
+             precip_accum_mm=precip_accum,
+             avg_from_hours=avg_from / 3600.0, n_avg_samples=acc.n)
+    print(f"  FINAL (time-mean {avg_from/3600.0:.1f}-{T/3600.0:.1f}h, "
+          f"n={acc.n}): cloud cover={dm['cloud_cover']:.3f} (ref 0.10-0.20), "
+          f"LWP={dm['lwp']:.2f} g/m² (ref ~10-20), "
+          f"precip={dm['precip_mm_day']:.3f} mm/day (ref ~0.3)")
+    print(f"  (snapshot: cc={d_snap['cloud_cover']:.3f}, LWP={d_snap['lwp']:.2f}; "
+          f"accum precip={precip_accum:.3f} mm over {args.hours:.0f} h)")
     print(f"  profiles -> {args.output}/rico_les_final.npz")
     return 0
 

@@ -48,6 +48,9 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.dynamics import (  # noqa: E402
+    pseudo_incompressible_plane as pin,
+)
 from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
     LagrangianSDMSegmentDiagnostics,
     conserving_positive,
@@ -118,6 +121,14 @@ def parse_args():
     p.add_argument("--dt-max", type=float, default=2.0)
     p.add_argument("--max-wind", type=float, default=12.0)
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--mixed-micro", action="store_true",
+                   help="MIXED PRECISION: float32 dynamics state, but promote the "
+                        "microphysics column (saturation adjustment / q_t-q_sat "
+                        "condensation) to float64. Tests whether the f32 "
+                        "under-condensation bias (#618) lives in the micro "
+                        "saturation step (cheap to fix) vs the f32 advection of "
+                        "q_t (needs f64 dynamics). Requires x64 enabled, so it is "
+                        "mutually exclusive with --f32.")
     p.add_argument("--microphysics", default="morrison",
                    help="any MicrophysicsConfig scheme (swappable; morrison "
                         "default, SAM flavor).")
@@ -201,6 +212,13 @@ def parse_args():
                         "stable), weno5 (sharp, can destabilize moist conv.), "
                         "weno5_hv (WENO5 horizontal + van-Leer vertical — sharp "
                         "cloud field, stable inversion; default).")
+    p.add_argument("--core", choices=["pin", "spectral"], default="pin",
+                   help="LES dynamical core: 'pin' = non-spectral "
+                        "pseudo-incompressible projection core (default; the "
+                        "reference-generation core), 'spectral' = spectral "
+                        "TRUE-LES core (legacy / A-B baseline). Both share the "
+                        "deck, reference column, Morrison adapter, large-scale "
+                        "forcing and diagnostics; only the dycore step differs.")
     p.add_argument("--w-hyperdiff", type=float, default=0.0,
                    help="OPT-IN horizontal w-hyperdiffusion ν₄ [m⁴/s] (momentum "
                         "dissipation; ≈1e5 at dx=100/dt=2).")
@@ -240,28 +258,80 @@ def parse_args():
                    help="apply the sharp spectral cutoff only to monotone q_v; "
                         "hydrometeor tracers remain unfiltered.")
     p.add_argument("--print-every", type=int, default=500)
+    p.add_argument("--avg-from-hours", type=float, default=None,
+                   help="start time [h] of the trailing time-average window for "
+                        "the saved reference profiles/cc/LWP (GCSS targets are "
+                        "time-means, not snapshots; shallow Cu is intermittent). "
+                        "Samples are taken at the --print-every cadence. Default: "
+                        "the second half of the run (T/2).")
     p.add_argument("--record-frames", type=int, default=12)
     p.add_argument("--case-label", type=str, default="bomex")
     p.add_argument("--output", type=Path, default=Path("results/les_bomex"))
     return p.parse_args()
 
 
+def _pin_config(args):
+    """pseudo-incompressible (non-spectral) core config for this case.
+
+    Surface fluxes are filled in later (``_replace``) once the reference column
+    is known; the grid is independent of them so the post-flux re-make is cheap.
+    """
+    scheme = {"van_leer": "van_leer", "weno5": "weno5"}.get(args.scalar_advection)
+    if scheme is None:
+        # Dispatch-hardening: the pin core has no WENO5-horizontal/van-Leer-vertical
+        # hybrid; do NOT silently fall back to a different reconstruction.
+        sys.exit(
+            f"[run_bomex_les] --core pin supports --scalar-advection "
+            f"van_leer|weno5 (got {args.scalar_advection!r}); use --core spectral "
+            f"for weno5_hv.")
+    return pin.PseudoIncompressibleConfig(
+        nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
+        theta_ref0=300.0, scheme=scheme, moist=True, n_tracers=args.n_tracers,
+        sgs=("lasd" if args.dynamic else args.sgs_model), c_s=args.cs,
+        nu_floor=args.nu_floor, hyperdiff_coeff=args.theta_hyperdiff,
+        surface="flux", z0=args.z0, f_cor=_FCOR)
+
+
+def _promote_micro_f64(micro_fn):
+    """Wrap a microphysics callable so it runs in float64 on a float32 state.
+
+    Casts (theta, tracers) up to float64, runs the column microphysics (the
+    saturation adjustment / ``q_t-q_sat`` condensation, where the f32 cancellation
+    that biases #618 lives) in float64, then casts the tendencies back to the
+    input (f32) dtype. The dynamics is left untouched. Requires ``jax_enable_x64``
+    (the caller guarantees this: ``--mixed-micro`` is rejected with ``--f32``)."""
+    def micro(theta, tracers):
+        dth, dtr, pr = micro_fn(theta.astype(jnp.float64),
+                                tracers.astype(jnp.float64))
+        pr = None if pr is None else pr.astype(theta.dtype)
+        return dth.astype(theta.dtype), dtr.astype(tracers.dtype), pr
+
+    micro.scheme_name = getattr(micro_fn, "scheme_name", "unknown")
+    return micro
+
+
 def build(args, dtype):
     """Grid + reference column + IC + forcing profiles from the gSAM deck."""
-    cfg = sl.SpectralLESConfig(
-        nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
-        z0=args.z0, dealias=True, c_s=args.cs,
-        smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
-        time_scheme=args.time_scheme, nu_floor=args.nu_floor,
-        buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
-        w_hyperdiff_coeff=args.w_hyperdiff,
-        div_damping_coeff=args.div_damping,
-        theta_hyperdiff_coeff=args.theta_hyperdiff,
-        moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
-        scalar_advection=args.scalar_advection,
-        filter_monotone_qv=args.filter_monotone_qv,
-        filter_monotone_scalars=args.filter_monotone_scalars)
-    g = sl.make_grid(cfg, dtype=dtype)
+    if args.core == "spectral":
+        cfg = sl.SpectralLESConfig(
+            nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
+            z0=args.z0, dealias=True, c_s=args.cs,
+            smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
+            time_scheme=args.time_scheme, nu_floor=args.nu_floor,
+            buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
+            w_hyperdiff_coeff=args.w_hyperdiff,
+            div_damping_coeff=args.div_damping,
+            theta_hyperdiff_coeff=args.theta_hyperdiff,
+            moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
+            scalar_advection=args.scalar_advection,
+            filter_monotone_qv=args.filter_monotone_qv,
+            filter_monotone_scalars=args.filter_monotone_scalars)
+        g = sl.make_grid(cfg, dtype=dtype)
+    elif args.core == "pin":
+        cfg = _pin_config(args)
+        g = pin.make_grid(cfg, dtype=dtype)
+    else:  # pragma: no cover - argparse choices guard this path.
+        raise ValueError(f"unknown --core {args.core!r}")
     case = Path(args.case_dir)
     if not case.is_dir():
         # The BOMEX forcing (snd/lsf/sfc) is read from a gSAM CASES checkout that
@@ -321,20 +391,37 @@ def build(args, dtype):
           + 0.1 * jax.random.normal(jax.random.PRNGKey(2), (ny, nx, nz), dtype)
           * seed)
     w3 = jnp.zeros((ny, nx, nz + 1), dtype)
-    u3, v3, w3 = sl.project(u3, v3, w3, dt=args.dt, g=g)
     tr = jnp.zeros((ny, nx, nz, args.n_tracers), dtype)
     tr = tr.at[..., 0].set(jnp.asarray(qv_prof, dtype)[None, None, :])
-    st = sl.SpectralLESState(
-        u=u3, v=v3, w=w3, rhs_u_prev=jnp.zeros_like(u3),
-        rhs_v_prev=jnp.zeros_like(v3), rhs_w_prev=jnp.zeros_like(w3),
-        theta=th3, rhs_theta_prev=jnp.zeros_like(th3),
-        tracers=tr, rhs_tracers_prev=jnp.zeros_like(tr))
 
     # Kinematic surface fluxes from the sfc deck (constant; SFC_FLX_FXD):
     #   θ-flux = SHF/(ρ_sfc·c_pd·Π_sfc),  q_v-flux = LHF/(ρ_sfc·L_v).
     rho_sfc = float(ref.rho_c[0]); exn_sfc = float(ref.exner_c[0])
     th_flux = sfc0["shf"] / (rho_sfc * constants.c_pd * exn_sfc)
     qv_flux = sfc0["lhf"] / (rho_sfc * constants.L_v)
+
+    # Divergence-free IC + core-native state. Both cores share the noisy sounding
+    # IC; only the projection signature and the state pytree differ. The pin core
+    # carries surface fluxes in its config (the grid is flux-independent, so the
+    # re-make is cheap) and a π' warm-start slot instead of the spectral AB2 rhs
+    # history.
+    if args.core == "spectral":
+        u3, v3, w3 = sl.project(u3, v3, w3, dt=args.dt, g=g)
+        st = sl.SpectralLESState(
+            u=u3, v=v3, w=w3, rhs_u_prev=jnp.zeros_like(u3),
+            rhs_v_prev=jnp.zeros_like(v3), rhs_w_prev=jnp.zeros_like(w3),
+            theta=th3, rhs_theta_prev=jnp.zeros_like(th3),
+            tracers=tr, rhs_tracers_prev=jnp.zeros_like(tr))
+    else:  # pin
+        cfg = cfg._replace(sfc_theta_flux=th_flux, sfc_qv_flux=qv_flux)
+        g = pin.make_grid(cfg, dtype=dtype)
+        pi0 = jnp.zeros((ny, nx, nz), dtype)
+        # Keep the π' from the IC projection as the first-step BiCGSTAB warm start
+        # (discarding it and seeding pi_prev=0 only slows the first solve).
+        u3, v3, w3, pi0 = pin.project(u3, v3, w3, th3, tr, pi0, args.dt, g)
+        st = pin.PseudoIncompressibleState(
+            u=u3, v=v3, w=w3, theta=th3, pi_prev=pi0, tracers=tr)
+
     forc = dict(ug=jnp.asarray(ug, dtype), vg=jnp.asarray(vg, dtype),
                 w_ls=jnp.asarray(w_ls, dtype),
                 tls=jnp.asarray(tls, dtype), qls=jnp.asarray(qls, dtype),
@@ -657,7 +744,19 @@ def main():
         raise ValueError("--print-every must be >= 1")
     if args.sdm_segment_steps < 1:
         raise ValueError("--sdm-segment-steps must be >= 1")
-    dtype = jnp.float32 if args.f32 else jnp.float64
+    if args.lagrangian_sdm and args.core != "spectral":
+        # The Lagrangian-SDM driver is wired to the spectral core (sl.project /
+        # sl.step throughout run_lagrangian_sdm); fail early rather than build a
+        # pin state it cannot step.
+        sys.exit("--lagrangian-sdm requires --core spectral (pin SDM not wired).")
+    if args.mixed_micro and args.f32:
+        # --f32 disables jax_enable_x64 at import (_F32), so float64 arrays would
+        # be silently truncated to float32 — the mixed-precision micro could not
+        # actually run in f64. Refuse the contradictory combination.
+        sys.exit("--mixed-micro is mutually exclusive with --f32 (it needs x64).")
+    # Mixed precision: float32 dynamics state with x64 left ENABLED (no --f32) so
+    # the wrapped micro can genuinely compute in float64.
+    dtype = jnp.float32 if (args.f32 or args.mixed_micro) else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
     if args.lagrangian_sdm:
@@ -681,8 +780,17 @@ def main():
         dt0 * args.micro_every / args.micro_substeps
         * args.micro_relax_factor)
     micro = make_les_microphysics_fn(micro_cfg, ref, g.dz, micro_dt)
+    if args.mixed_micro:
+        # Promote ONLY the column microphysics to float64; the expensive dynamics
+        # (advection, FFT/projection, SGS) stay float32 so wall time tracks f32.
+        micro = _promote_micro_f64(micro)
     forcing = make_forcing_fn(g, ref, forc, dtype)
     rho_c = jnp.asarray(ref.rho_c, dtype)            # for conserving positivity
+    # pin geostrophic shear enters via the explicit forcing arg (SegmentForcing
+    # doctrine); subsidence/tls/qls stay external (shared make_forcing_fn) for
+    # both cores, and the surface fluxes ride in cfg, so this carries u_g/v_g only.
+    pin_forcing = (pin.PseudoIncompressibleForcing(
+        ug_prof=forc["ug"], vg_prof=forc["vg"]) if args.core == "pin" else None)
 
     # Rayleigh sponge (top 25%, w + fluctuations) — BOMEX dodamping: absorb
     # gravity waves at the inversion-capped lid (same pattern as the dry
@@ -726,11 +834,17 @@ def main():
             state = forcing(state, dt)
             if do_micro:
                 state, created = _apply_micro(state, dt)
-        state, us = sl.step(state, g=g, dt=dt,
-                            u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
-                            first=first, force=(0.0, 0.0),
-                            sfc_theta_flux=forc["th_flux"],
-                            sfc_qv_flux=forc["qv_flux"])
+        if args.core == "spectral":
+            state, us = sl.step(state, g=g, dt=dt,
+                                u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
+                                first=first, force=(0.0, 0.0),
+                                sfc_theta_flux=forc["th_flux"],
+                                sfc_qv_flux=forc["qv_flux"])
+        else:  # pin: surface fluxes via cfg, geostrophic shear via pin_forcing
+            state = pin.step(state, g, dt, pin_forcing)
+            # ponytail: pin.step exposes no friction velocity; u* is print-only
+            # (not in the npz), so report 0 rather than thread a stress diagnostic.
+            us = jnp.asarray(0.0, dtype)
         if args.micro_order == "post":
             state = forcing(state, dt)
             if do_micro:
@@ -740,15 +854,22 @@ def main():
         u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
-        u, v, w = sl.project(u, v, w, dt=dt, g=g)
-        return state._replace(u=u, v=v, w=w), us, created
+        if args.core == "spectral":
+            u, v, w = sl.project(u, v, w, dt=dt, g=g)
+            return state._replace(u=u, v=v, w=w), us, created
+        # pin projection re-imposes the anelastic constraint after the sponge,
+        # warm-started from the previous π'; carry the updated π' forward.
+        u, v, w, pi = pin.project(u, v, w, state.theta, state.tracers,
+                                  state.pi_prev, dt, g)
+        return state._replace(u=u, v=v, w=w, pi_prev=pi), us, created
 
     T = args.hours * 3600.0
     n_steps = int(round(T / dt0))
     print(f"[BOMEX LES] {args.nx}x{args.ny}x{args.nz} dx={g.dx:.0f} dz={g.dz:.0f}"
-          f" dt={dt0:.2f}s {args.time_scheme} "
+          f" dt={dt0:.2f}s core={args.core} {args.time_scheme} "
           f"sgs={'LASD' if args.dynamic else args.sgs_model} "
-          f"micro={micro.scheme_name} f={_FCOR:.2e} dtype={dtype.__name__}")
+          f"micro={micro.scheme_name} f={_FCOR:.2e} "
+          f"dtype={dtype.__name__}{'+f64micro' if args.mixed_micro else ''}")
     print(f"  sfc: SHF={forc['sfc']['shf']:.1f} LHF={forc['sfc']['lhf']:.1f} "
           f"W/m² (θ-flux={forc['th_flux']:.5f} K·m/s, "
           f"q-flux={forc['qv_flux']:.2e} m/s), {n_steps} steps")
@@ -759,11 +880,19 @@ def main():
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
         frame = 0
 
+        def _w_centre(w):
+            # face→centre w: spectral has sl.f2c; the pin core stores w on z-faces
+            # (nz+1) so average adjacent faces (matches sl.f2c's interior average).
+            if args.core == "spectral":
+                return np.asarray(sl.f2c(w))
+            w = np.asarray(w)
+            return 0.5 * (w[..., 1:] + w[..., :-1])
+
         def _save(t_hours):
             nonlocal frame
             les_record.record_frame(
                 args.output, frame, t_hours, args.case_label, zc_np,
-                np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
+                np.asarray(st.u), np.asarray(st.v), _w_centre(st.w),
                 np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c))
@@ -772,6 +901,11 @@ def main():
     dt = jnp.asarray(dt0, dtype)
     if rec:
         _save(0.0)                       # the INITIAL state (codex (f))
+    # Trailing time-average window for the saved reference (GCSS targets are
+    # time-means; a single snapshot is noisy for intermittent shallow Cu).
+    avg_from = (args.avg_from_hours * 3600.0
+                if args.avg_from_hours is not None else 0.5 * T)
+    acc = les_record.TimeMeanAccumulator()
     t = 0.0; i = 0
     created_tot = 0.0
     next_rec = T / args.record_frames if rec else np.inf
@@ -788,6 +922,8 @@ def main():
             if not np.isfinite(mw) or mw > 1e3:
                 print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
             d = moist_profiles(st, g, ref)
+            if t >= avg_from:
+                acc.add(d)                   # accumulate the quasi-steady window
             print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
                   f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
                   f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
@@ -798,13 +934,24 @@ def main():
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
-    d = moist_profiles(st, g, ref)
+    d_snap = moist_profiles(st, g, ref)
+    if acc.n > 0:
+        dm = acc.mean()                      # time-mean over [avg_from, T]
+    else:
+        # window caught no print-cadence samples (very short run / coarse
+        # --print-every); fall back to the snapshot so the npz still writes.
+        print("  [warn] empty averaging window — saving final snapshot instead.")
+        dm = d_snap
     np.savez(args.output / "bomex_les_final.npz", z=zc_np, **{
-        k: v for k, v in d.items() if isinstance(v, np.ndarray)},
-        cloud_cover=d["cloud_cover"], lwp=d["lwp"])
-    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f} (ref 0.10-0.15), "
-          f"LWP={d['lwp']:.2f} g/m² (ref ~5-10), "
-          f"qc_max={d['qc'].max():.2e}")
+        k: v for k, v in dm.items() if isinstance(v, np.ndarray)},
+        cloud_cover=dm["cloud_cover"], lwp=dm["lwp"],
+        cloud_cover_snap=d_snap["cloud_cover"], lwp_snap=d_snap["lwp"],
+        avg_from_hours=avg_from / 3600.0, n_avg_samples=acc.n)
+    print(f"  FINAL (time-mean {avg_from/3600.0:.1f}-{T/3600.0:.1f}h, "
+          f"n={acc.n}): cloud cover={dm['cloud_cover']:.3f} (ref 0.10-0.15), "
+          f"LWP={dm['lwp']:.2f} g/m² (ref ~5-10)")
+    print(f"  (final snapshot: cc={d_snap['cloud_cover']:.3f}, "
+          f"LWP={d_snap['lwp']:.2f} g/m², qc_max={d_snap['qc'].max():.2e})")
     print(f"  profiles -> {args.output}/bomex_les_final.npz")
     return 0
 
