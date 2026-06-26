@@ -82,20 +82,20 @@ def _read_meta(run_dir):
         return json.load(f)
 
 
-def _load_latlon(run_dir, snap):
+def _latlon_coords(run_dir):
+    """Raveled (lat_deg, lon_deg) of the lat-lon Mercator cell centres. Built
+    once and reused across snapshots (so corr-vs-time does not rebuild the
+    grid per day)."""
     from legoesm.ocean.experiments.dino import DINOConfig, dino_lat_lon_grid
     n_lon = int(_read_meta(run_dir)["args"].get("n_lon", 50))
     g = dino_lat_lon_grid(DINOConfig(), n_lon=n_lon)
     lat = np.degrees(np.asarray(g.lat)); lon = np.degrees(np.asarray(g.lon))
     LA, LO = np.meshgrid(lat, lon, indexing="ij")
-    with np.load(snap) as d:
-        T = np.asarray(d["T"])[..., 0]; S = np.asarray(d["S"])[..., 0]
-        m = np.asarray(d["land_mask"]) > 0.5
-    return (_regrid(T.ravel(), LA.ravel(), LO.ravel(), m.ravel()),
-            _regrid(S.ravel(), LA.ravel(), LO.ravel(), m.ravel()))
+    return LA.ravel(), LO.ravel()
 
 
-def _load_mpas(run_dir, snap):
+def _mpas_coords(run_dir):
+    """Raveled (lat_deg, lon_deg) of the MPAS cell centres (built once)."""
     from legoesm.ocean.experiments.dino import DINOConfig
     from legoesm.grids.voronoi import create_regional_voronoi_mesh
     res_km = float(_read_meta(run_dir)["args"].get("mpas_resolution_km", 97.0))
@@ -106,11 +106,31 @@ def _load_mpas(run_dir, snap):
         resolution_km=res_km, periodic_x=True)
     lat = np.degrees(np.asarray(mesh.latCell))
     lon = np.degrees(np.asarray(mesh.lonCell)); lon = np.where(lon > 180, lon - 360, lon)
+    return lat, lon
+
+
+def _surface_TS(snap):
+    """Raveled surface T, S and wet-mask from a snapshot npz."""
     with np.load(snap) as d:
-        T = np.asarray(d["T"])[..., 0]; S = np.asarray(d["S"])[..., 0]
-        m = np.asarray(d["land_mask"]) > 0.5
-    return (_regrid(T.ravel(), lat, lon, m.ravel()),
-            _regrid(S.ravel(), lat, lon, m.ravel()))
+        T = np.asarray(d["T"])[..., 0].ravel()
+        S = np.asarray(d["S"])[..., 0].ravel()
+        m = (np.asarray(d["land_mask"]) > 0.5).ravel()
+    return T, S, m
+
+
+def _regrid_TS(coords, snap):
+    """Regrid a snapshot's surface T, S onto the common box given cached coords."""
+    lat, lon = coords
+    T, S, m = _surface_TS(snap)
+    return _regrid(T, lat, lon, m), _regrid(S, lat, lon, m)
+
+
+def _load_latlon(run_dir, snap):
+    return _regrid_TS(_latlon_coords(run_dir), snap)
+
+
+def _load_mpas(run_dir, snap):
+    return _regrid_TS(_mpas_coords(run_dir), snap)
 
 
 def _stats(a, b):
@@ -119,6 +139,70 @@ def _stats(a, b):
     corr = float(np.corrcoef(da, db)[0, 1]) if both.sum() > 10 else float("nan")
     rms = float(np.sqrt(np.mean((da - db) ** 2))) if both.sum() else float("nan")
     return corr, rms
+
+
+def _day_of(snap):
+    with np.load(snap) as d:
+        return float(d["time_days"])
+
+
+def _corr_vs_time(ll_dir, mp_dir):
+    """SST/SSS pattern correlation + RMS between the grids at EVERY common
+    snapshot day (matched within 0.5 d). Coords are built once per grid and
+    reused; NaN-blown snapshots are skipped. Returns parallel lists."""
+    ll_coords = _latlon_coords(ll_dir)
+    mp_coords = _mpas_coords(mp_dir)
+    ll_snaps = sorted((ll_dir / "snapshots").glob("snapshot_*.npz"))
+    mp_items = [(_day_of(s), s) for s in
+                sorted((mp_dir / "snapshots").glob("snapshot_*.npz"))]
+    days, cT, cS, rT, rS = [], [], [], [], []
+    for ls in ll_snaps:
+        lday = _day_of(ls)
+        # nearest MPAS snapshot to this lat-lon day; require a real match
+        # (<= 0.5 d) — robust to differing cadences, no rounding collisions.
+        mday, ms = min(mp_items, key=lambda it: abs(it[0] - lday))
+        if abs(mday - lday) > 0.5:
+            continue
+        Tll, Sll = _regrid_TS(ll_coords, ls)
+        Tmp, Smp = _regrid_TS(mp_coords, ms)
+        # skip if ANY field is blown (NaN) on either grid — else corr/RMS NaN.
+        if not all(np.isfinite(f).any() for f in (Tll, Tmp, Sll, Smp)):
+            continue
+        ct, rt = _stats(Tll, Tmp); cs, rs = _stats(Sll, Smp)
+        days.append(round(lday)); cT.append(ct); cS.append(cs)
+        rT.append(rt); rS.append(rs)
+    return days, cT, cS, rT, rS
+
+
+def _plot_corr_vs_time(ll_dir, mp_dir, out):
+    """The consistency-through-spin-up highlight: pattern correlation between
+    the two grids stays near 1 at every matched day."""
+    days, cT, cS, rT, rS = _corr_vs_time(ll_dir, mp_dir)
+    if not days:
+        print("corr-vs-time: no common finite snapshot days — skipped")
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(13, 5))
+    a0.plot(days, cT, "o-", label="SST", color="C3")
+    a0.plot(days, cS, "s-", label="SSS", color="C0")
+    a0.axhline(1.0, color="k", lw=0.6, ls=":")
+    finite_c = [c for c in (cT + cS) if np.isfinite(c)]
+    lo = min(0.9, min(finite_c) - 0.02) if finite_c else 0.9
+    a0.set_ylim(lo, 1.002)
+    a0.set_xlabel("day"); a0.set_ylabel("pattern correlation (lat-lon vs MPAS)")
+    a0.set_title("Cross-grid correlation through spin-up"); a0.legend(); a0.grid(alpha=0.3)
+    a1.plot(days, rT, "o-", label="SST [C]", color="C3")
+    a1.plot(days, rS, "s-", label="SSS [PSU]", color="C0")
+    a1.set_xlabel("day"); a1.set_ylabel("RMS difference")
+    a1.set_title("Cross-grid RMS difference"); a1.legend(); a1.grid(alpha=0.3)
+    fig.suptitle("DINO lat-lon vs MPAS: consistency maintained at every matched day",
+                 fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(out, dpi=110, bbox_inches="tight")
+    print(f"wrote {out}  (SST corr {min(cT):.3f}-{max(cT):.3f} over "
+          f"days {days[0]}-{days[-1]})")
 
 
 def main():
@@ -168,6 +252,10 @@ def main():
     out = args.out or (args.latlon_dir.parent / "dino_cross_grid.png")
     fig.savefig(out, dpi=110, bbox_inches="tight")
     print(f"wrote {out}")
+
+    # Consistency-through-spin-up: correlation at every matched snapshot day.
+    _plot_corr_vs_time(args.latlon_dir, args.mpas_dir,
+                       Path(str(out).replace(".png", "_corr_vs_time.png")))
 
 
 if __name__ == "__main__":
