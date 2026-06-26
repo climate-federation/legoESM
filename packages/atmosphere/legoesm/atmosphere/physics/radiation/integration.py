@@ -644,6 +644,11 @@ def _call_radiation_backend(
             sw_heating_rate=result.sw_heating_rate * s,
         )
 
+    # Carry the prescribed TOA insolation (this scope's per-column
+    # ``insolation`` argument, [0, S_0]) so downstream diagnostics read the
+    # true TOA incident SW rather than the clamped top-halo flux (#620).
+    # Set AFTER the daytime->daily-mean rescale rebuild so the field survives.
+    result = result._replace(toa_insolation=insolation)
     return result
 
 
