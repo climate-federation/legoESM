@@ -25,8 +25,10 @@ def test_geometry_is_fplane_channel():
     np.testing.assert_allclose(np.asarray(g.dx_T), fr.DX_M)
     # f-plane: f constant (beta=0), == f0 at every row.
     np.testing.assert_allclose(np.asarray(g.f_T), fr.F0, rtol=1e-9)
-    # Metric-consistent Cartesian pseudo-lat (required for the implicit FS).
-    np.testing.assert_array_equal(np.asarray(g.lat), 0.0)
+    # #514: operators READ the stored uniform dx_v (== dx_m); the geometry's
+    # natural pseudo-lat no longer enters the metric, so the lat=0 workaround is
+    # gone and dx_v is the uniform Cartesian width the implicit FS relies on.
+    np.testing.assert_allclose(np.asarray(g.dx_v), fr.DX_M)
 
 
 def test_vertical_matches_mitgcm_delr():

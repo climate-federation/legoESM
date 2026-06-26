@@ -155,7 +155,8 @@ def build_reentrant_channel_geometry() -> LatLonCGridGeometry:
     return create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DY_M, f0=F0, beta=BETA,
         y_origin_m=0.0, x_origin_m=0.0,
-        cartesian_pseudo_lat=True,
+        # #514: operators read the stored dx_v; the workaround is obsolete.
+        cartesian_pseudo_lat=False,
     )
 
 

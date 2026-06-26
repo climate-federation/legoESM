@@ -87,11 +87,12 @@ def build_gyre_geometry() -> LatLonCGridGeometry:
     return create_beta_plane_cgrid_geometry(
         NY, NX, dx_m=DX_M, dy_m=DY_M, f0=F0, beta=BETA,
         y_origin_m=Y_ORIGIN_M, x_origin_m=X_ORIGIN_M,
-        # Metric-consistent pseudo-lat (lat=0): the implicit free-surface
-        # projection is energy-conserving only when divergence_cgrid's recomputed
-        # cos(lat_v) v-face length matches the gradient's cos_lat=1 metric.  A
-        # non-zero y/radius pseudo-lat leaks ~1% and flips this WBC turbulent.
-        cartesian_pseudo_lat=True,
+        # Post-#514 the C-grid operators READ the stored uniform dx_v (== dx_m)
+        # rather than recomputing cos(grid.lat_v), so the natural nonzero
+        # y/radius pseudo-lat no longer leaks into the implicit free-surface
+        # metric — the cartesian_pseudo_lat=True workaround is obsolete and the
+        # WBC stays laminar with the geometry's natural pseudo-lat.
+        cartesian_pseudo_lat=False,
     )
 
 
