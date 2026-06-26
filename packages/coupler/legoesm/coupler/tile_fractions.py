@@ -185,4 +185,16 @@ def blend_tiles(
             ocean_resp.salt_flux, ice_resp.salt_flux,
             land_resp.salt_flux, lake_resp.salt_flux,
         ),
+        # River runoff sub-component (LAND tile only) — the depth-spreadable
+        # part of ``freshwater_flux``.  Ocean P-E, ice melt and lake P-E are
+        # surface (top-cell) fluxes and are NOT included here.  f_land weight
+        # matches the land term inside ``freshwater_flux`` above.
+        river_runoff_flux=fl * land_resp.freshwater_flux,
+        # Surface non-ocean freshwater = ice melt (exchange-area weight f_water,
+        # F11) + lake P-E (f_lake).  Same weights as inside ``freshwater_flux``;
+        # excludes ocean P-E (kept current by the consumer) and land runoff
+        # (depth-spread channel above).
+        ice_lake_freshwater_flux=(
+            f_water * ice_resp.freshwater_flux + fk * lake_resp.freshwater_flux
+        ),
     )

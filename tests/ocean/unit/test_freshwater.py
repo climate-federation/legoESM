@@ -861,6 +861,8 @@ class TestCouplerAdapter:
             ocean_stress_x=z, ocean_stress_y=z,
             surface_mass_flux=ones * 100.0 / constants.L_v,
             salt_flux=z,
+            river_runoff_flux=z,
+            ice_lake_freshwater_flux=z,
         )
         mask = ones
 

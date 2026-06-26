@@ -1126,8 +1126,37 @@ class CoupledESMDriver:
                  - tile.lw_up - tile.shflx - tile.lhflx)
         evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
         z = jnp.zeros_like(sw_net)
+        # Freshwater into the ocean, SPLIT by vertical-injection channel so each
+        # term lands where it physically belongs:
+        #   * precip/evap  -> ocean P−E (top cell), CURRENT (depends on current SST)
+        #   * runoff       -> LAND river runoff (depth-spread over the ocean's
+        #                     ``runoff_depth_spread_m``, NEMO ``rn_dep_max``)
+        #   * ice_fw       -> ice melt + lake P−E (top cell)
+        # ONLY the two NON-ocean channels are lagged one coupling sub-step (the
+        # surface/coupler step runs AFTER the ocean step — explicit coupling).
+        # Ocean P−E stays CURRENT, so a time-varying precip/evaporation forcing
+        # is delivered without one-step staleness and the aquaplanet path is
+        # byte-identical to the legacy ``runoff=ice_fw=0`` code (no land/ice/lake
+        # tile ⇒ both lagged channels are exactly zero).  The land/ice/lake
+        # exchange is read straight from the lagged blended response's dedicated
+        # sub-channels — NOT reconstructed by subtracting the current ocean P−E
+        # (which would leak a stale-P−E / coastal area-weight residual into
+        # ice_fw).  Direct attribute access (not getattr-with-default) so a
+        # malformed surface response fails loudly instead of silently routing
+        # river runoff into the wrong channel.  Interior-land runoff at fully-dry
+        # cells is gated out by the ocean wet mask (no river-routing map here — a
+        # separate Dai-Trenberth concern); fractional coastal cells receive their
+        # local f_land·runoff.
+        prev = self._last_sfc_response
+        if prev is None:
+            river = z
+            surface_extra = z
+        else:
+            river = prev.river_runoff_flux              # land, depth-spread
+            surface_extra = prev.ice_lake_freshwater_flux  # ice melt + lake, surface
         fw = FreshwaterForcing(
-            precip=atm_forcing.precip_total, evap=evap, runoff=z, ice_fw=z,
+            precip=atm_forcing.precip_total, evap=evap, runoff=river,
+            ice_fw=surface_extra,
         )
         sf = OceanSurfaceForcing(
             sw_down=atm_forcing.sw_down, q_net=q_net,

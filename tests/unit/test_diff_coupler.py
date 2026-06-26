@@ -331,6 +331,8 @@ class TestFluxAccumulatorGrad:
             ocean_stress_y=jnp.zeros(shape),
             surface_mass_flux=jnp.zeros(shape),
             salt_flux=jnp.zeros(shape),
+            river_runoff_flux=jnp.zeros(shape),
+            ice_lake_freshwater_flux=jnp.zeros(shape),
         )
 
     def test_accumulate_and_mean_grad(self):
