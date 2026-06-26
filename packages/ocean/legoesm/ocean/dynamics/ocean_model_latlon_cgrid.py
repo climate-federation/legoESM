@@ -4775,34 +4775,42 @@ class LatLonCGridOceanModel:
 
         return state, trajectory
 
-    def integrate_scan(
-        self,
-        state: LatLonCGridOceanState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[LatLonCGridOceanState, LatLonCGridOceanState]:
-        """Integrate using jax.lax.scan (differentiable).
+    def seed_scan_carry(self, state, dt, **step_kwargs):
+        """Prepare a raw initial state into a CONSTANT-pytree, dtype-stable carry.
 
-        Parameters
-        ----------
-        state : LatLonCGridOceanState
-        n_steps : int
-        dt : float
+        Adds the AB2 / rigid-lid / EKE / TKE carry Fields the step writes (so the
+        pytree treedef is FIXED across iterations — a ``None -> Field`` transition
+        mid-scan crashes ``jax.lax.scan``, and a direct ``step`` loop would change
+        its treedef on the first step) AND reconciles every leaf's dtype to the
+        step's output dtype.
 
-        Returns
-        -------
-        final_state, trajectory (stacked)
+        DTYPE: the step promotes the prognostic dynamics to the working (compute)
+        float precision — driven by the f64 vertical-coordinate geometry under
+        x64 — while pinning EKE / ``eke_diss`` and the rigid-lid streamfunction
+        back to the storage precision (an explicit ``convert_element_type``): a
+        MIXED but stable fixed point (idempotent after one step). Seeding the
+        carry at the working precision, then matching each leaf's dtype to what
+        the step ACTUALLY outputs (discovered via ``jax.eval_shape`` — abstract,
+        no FLOPs), makes ``carry-in == carry-out`` so the scan body's
+        equal-types contract holds. Storage-pinned leaves (EKE / ``eke_diss`` /
+        the rigid-lid streamfunction) are returned to storage precision exactly
+        (their f32->f64->f32 round-trip is exact). This is NOT bit-identical to a
+        raw direct step that begins from f32 storage inputs: the carry feeds the
+        FIRST step its promoted leaves (T/u/v) at the working precision the step
+        would compute in anyway, vs the raw IC's storage precision — an O(1e-7)
+        difference in T (verified ~3.8e-7) that is the unavoidable, and more
+        self-consistent, cost of a fixed-point scan carry. No physics /
+        conservation change. ``work_dtype`` is SELF-TARGETING: on an all-f32
+        build (x32 / f32 geometry) it is f32, so the whole reconciliation is a
+        no-op and the prior behaviour is preserved bit-for-bit; it only promotes
+        when the step would promote anyway (and the un-seeded scan would
+        otherwise crash).
 
-        Notes
-        -----
-        For AB2: the initial carry must have Field (not None) for
-        ``T_flux_div_prev`` / ``S_flux_div_prev`` so the pytree
-        structure is stable across scan iterations.  If they are None,
-        this method pre-initializes them with zero-filled Fields.
-        The first step then uses AB2 with zero previous tendency,
-        giving an effective coefficient of (3/2+eps) ≈ 1.6 rather
-        than the Euler fallback of 1.0.  At typical CFL values
-        (≤ 0.3) this is stable.
+        ``step_kwargs`` (e.g. ``surface_forcing``) MUST match the kwargs of the
+        steps that follow: surface forcing can change a tendency leaf's promoted
+        dtype. ``integrate_scan`` passes none (its ``scan_fn`` calls
+        ``step(state, dt)``); a forced direct-loop driver passes its forcing.
+        Idempotent: re-seeding an already-prepared carry is a no-op.
         """
         # Prime build-once caches from the CONCRETE input state before
         # the scan traces step() with tracers (codex round-2 MINOR).
@@ -4941,6 +4949,58 @@ class LatLonCGridOceanModel:
                 _zI = jnp.zeros((rl.nisle,), dtype=_dt_rl)
                 state = state._replace(
                     psi=_zV, dpsi=_zV, dpsi_prev=_zV, dpsin=_zI, dpsin_prev=_zI)
+
+        # --- dtype reconciliation: carry-in dtype == carry-out dtype ----------
+        # The structural seeding above fixes the TREEDEF; this fixes the DTYPES.
+        # 1) Lift every float leaf to the working precision (the top of the
+        #    state⊕geometry dtype lattice — f64 under x64 because the z-coordinate
+        #    is f64; f32 on an all-f32 build, making the rest a no-op).
+        work_dtype = jnp.result_type(state.T.data.dtype, self.z_coord.dz_ref.dtype)
+        state = jax.tree_util.tree_map(
+            lambda a: a.astype(work_dtype)
+            if jnp.issubdtype(a.dtype, jnp.floating) else a,
+            state,
+        )
+        # 2) Ask the step (abstractly, no FLOPs) what dtype each leaf becomes —
+        #    the dynamics stay at work_dtype, EKE / eke_diss / streamfunction get
+        #    pinned back to storage — and cast the seed to match. Starting from
+        #    the lattice top makes this a single self-consistent pass.
+        target = jax.eval_shape(lambda s: self.step(s, dt, **step_kwargs), state)
+        state = jax.tree_util.tree_map(
+            lambda a, t: a.astype(t.dtype), state, target,
+        )
+        return state
+
+    def integrate_scan(
+        self,
+        state: LatLonCGridOceanState,
+        n_steps: int,
+        dt: float,
+    ) -> tuple[LatLonCGridOceanState, LatLonCGridOceanState]:
+        """Integrate using jax.lax.scan (differentiable).
+
+        Parameters
+        ----------
+        state : LatLonCGridOceanState
+        n_steps : int
+        dt : float
+
+        Returns
+        -------
+        final_state, trajectory (stacked)
+
+        Notes
+        -----
+        For AB2: the initial carry must have Field (not None) for
+        ``T_flux_div_prev`` / ``S_flux_div_prev`` so the pytree
+        structure is stable across scan iterations.  If they are None,
+        this method pre-initializes them with zero-filled Fields.
+        The first step then uses AB2 with zero previous tendency,
+        giving an effective coefficient of (3/2+eps) ≈ 1.6 rather
+        than the Euler fallback of 1.0.  At typical CFL values
+        (≤ 0.3) this is stable.
+        """
+        state = self.seed_scan_carry(state, dt)
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

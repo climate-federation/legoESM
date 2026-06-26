@@ -87,11 +87,18 @@ def test_acc_eke_3d_one_day_finite_and_stable():
     under rigid wind + restoring, and assert the state stays finite + stable
     (max|u| sane, max|T| near the restoring band)."""
     recipe, model = _build_acc_model_3d()
-    state = recipe.initial_state
-    # Rigid-lid island decomposition must be built from the CONCRETE initial state
-    # before the first (jitted) model.step (the in-jit host flood-fill cannot run on
-    # a traced state) — see ocean_model_latlon_cgrid._ensure_rigid_lid_data.
-    model._ensure_rigid_lid_data(state)
+    # recipe.initial_state is the RAW IC: the AB2/rigid-lid carry Fields the step
+    # writes (T_incr_prev/u_incr_prev/psi/dpsi/...) are still None and the fields
+    # sit at the storage dtype, so it is NOT yet a fixed point of model.step. The
+    # model's seed_scan_carry turns it into a constant-pytree, dtype-stable carry
+    # (it also builds the rigid-lid island decomposition from the CONCRETE state,
+    # so the in-jit host flood-fill never runs on a traced state — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data). Pass the SAME
+    # surface_forcing the loop uses: forcing can change a tendency leaf's promoted
+    # dtype, and the carry must match the steps that follow it.
+    seed = model.seed_scan_carry(
+        recipe.initial_state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
+    state = seed
     for _ in range(18):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     assert bool(jnp.all(jnp.isfinite(state.u.data)))
@@ -108,9 +115,21 @@ def test_acc_eke_3d_one_day_finite_and_stable():
     # The eke field keeps its 3-D shape across the step.
     n_lat, n_lon = recipe.grid.n_lat, recipe.grid.n_lon
     assert state.eke.data.shape == (n_lat, n_lon, NZ - 1)
-    # Dtype + pytree treedef are stable across the step (scan-carry requirement).
-    assert state.eke.data.dtype == recipe.initial_state.eke.data.dtype
-    assert jtu.tree_structure(state) == jtu.tree_structure(recipe.initial_state)
+    # Dtype + pytree treedef are stable across the step (the lax.scan equal-types
+    # contract): once prepared into a carry, model.step is a fixed point — neither
+    # the treedef nor ANY leaf dtype drifts over the run. Checking every leaf (not
+    # just eke) keeps this non-vacuous and catches a future per-leaf dtype
+    # regression. (Compared against the prepared `seed`, not the raw
+    # recipe.initial_state, which by construction gains the AB2/rigid-lid carry
+    # Fields + working-precision promotion on the first step.)
+    assert jtu.tree_structure(state) == jtu.tree_structure(seed)
+    leaf_dtype_drift = [
+        (i, getattr(a, "dtype", None), getattr(b, "dtype", None))
+        for i, (a, b) in enumerate(
+            zip(jtu.tree_leaves(seed), jtu.tree_leaves(state)))
+        if getattr(a, "dtype", None) != getattr(b, "dtype", None)
+    ]
+    assert not leaf_dtype_drift, f"leaf dtype drifted across step: {leaf_dtype_drift}"
 
 
 # ---------------------------------------------------------------------------
