@@ -94,9 +94,10 @@ def test_forward_euler_default_runs_and_carry_untouched():
 
 
 def test_unknown_outer_integrator_raises():
-    state, model = _channel("bogus")
+    # An unknown outer_integrator is rejected at CONSTRUCTION (fail-early dispatch
+    # hardening: LatLonCGridOceanModel.__init__ -> _validate_config), not at .step().
     with pytest.raises(ValueError, match="outer_integrator"):
-        model.step(state, dt=_DT)
+        _channel("bogus")
 
 
 def test_double_ab2_rejected():

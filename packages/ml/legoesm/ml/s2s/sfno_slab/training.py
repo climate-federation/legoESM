@@ -41,6 +41,10 @@ class S2STrainingConfig(NamedTuple):
     batch_size: int = 2
     n_autoregressive_steps: int = 42
     grad_clip_norm: float = 1.0
+    # Optimizer selector consumed by ``create_optimizer`` (adamw = the
+    # documented legacy-SFNO default; matches TrainingConfig.optimizer).
+    # Without it create_optimizer raised AttributeError on config.optimizer.
+    optimizer: str = "adamw"
     checkpoint_dir: str = "checkpoints"
     checkpoint_every: int = 1000
     validation_every: int = 1000

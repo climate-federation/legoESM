@@ -34,9 +34,6 @@ from legoesm.ocean.init_mpas import (
     reconstruct_cell_velocity,
 )
 from legoesm.ocean.conservation_mpas import (
-    fix_volume_mpas,
-    fix_heat_mpas,
-    fix_salt_mpas,
     mpas_ocean_conservation_fixer,
 )
 from legoesm.ocean.simple_ocean_mpas import (
@@ -829,8 +826,14 @@ class TestMPASLandFill:
 class TestConservation:
     """Test conservation fixers."""
 
-    def test_volume_conservation(self, state, mesh, z_coord):
-        """Volume fixer restores total volume."""
+    def test_volume_conservation(self, state, mesh, z_coord, config):
+        """Volume fixer restores total volume.
+
+        Exercises the combined ``mpas_ocean_conservation_fixer`` with only the
+        volume leg enabled (the standalone ``fix_volume_mpas`` had no
+        production caller and was removed; the eta correction is identical).
+        ``min_water_column_m=None`` reproduces the unfloored standalone call.
+        """
         mask = state.land_mask.data
         area = mesh.areaCell
 
@@ -840,11 +843,17 @@ class TestConservation:
             eta=state.eta.replace(data=eta_perturbed),
         )
 
+        cfg = config._replace(
+            fix_volume=True, fix_heat=False, fix_salt=False,
+            min_water_column_m=None,
+        )
         # Verify in float64 — the fixer accumulates in float64 but the
         # corrected state may be float32 under the default precision policy.
         _f64 = jnp.float64
         vol_before = jnp.sum(state.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
-        state_fixed = fix_volume_mpas(state_new, state, mesh, z_coord)
+        state_fixed = mpas_ocean_conservation_fixer(
+            state_new, state, mesh, z_coord, cfg,
+        )
         vol_after = jnp.sum(state_fixed.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
 
         # Use absolute tolerance when reference volume is near zero.
@@ -853,8 +862,14 @@ class TestConservation:
         total_area = jnp.sum(mask.astype(_f64) * area.astype(_f64))
         assert jnp.abs(vol_after - vol_before) < 1e-5 * total_area
 
-    def test_heat_conservation(self, state, mesh, z_coord):
-        """Heat fixer restores total heat content."""
+    def test_heat_conservation(self, state, mesh, z_coord, config):
+        """Heat fixer restores total heat content.
+
+        Heat-only leg of the combined ``mpas_ocean_conservation_fixer`` (volume
+        off, so the layer thickness is unchanged and the correction matches the
+        removed standalone ``fix_heat_mpas``).  ``min_water_column_m=None``
+        reproduces the unfloored standalone call.
+        """
         mask = state.land_mask.data
         H_bathy = state.H_bathy.data
 
@@ -866,6 +881,10 @@ class TestConservation:
             T=state.T.replace(data=T_perturbed),
         )
 
+        cfg = config._replace(
+            fix_volume=False, fix_heat=True, fix_salt=False,
+            min_water_column_m=None,
+        )
         _f64 = jnp.float64
         h_k = compute_layer_thickness(state.eta.data, H_bathy, z_coord)
         heat_before = jnp.sum(
@@ -873,7 +892,9 @@ class TestConservation:
             * mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
         )
 
-        state_fixed = fix_heat_mpas(state_new, state, mesh, z_coord)
+        state_fixed = mpas_ocean_conservation_fixer(
+            state_new, state, mesh, z_coord, cfg,
+        )
         h_k_new = compute_layer_thickness(state_fixed.eta.data, H_bathy, z_coord)
         heat_after = jnp.sum(
             state_fixed.T.data.astype(_f64) * h_k_new.astype(_f64)

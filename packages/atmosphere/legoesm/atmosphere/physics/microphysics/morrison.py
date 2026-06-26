@@ -169,17 +169,36 @@ def morrison_microphysics(
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
     )
+    # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
+    # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
+    # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather
+    # than the grid-mean.  cf is the Sundqvist √-form from the local RH, floored
+    # for AD/numeric safety.  When disabled, cf_eff=1 ⇒ identity (grid-mean).
+    if getattr(config, "subgrid_autoconversion", False):
+        RH = q_v / jnp.maximum(q_sat, 1.0e-10)
+        arg = (1.0 - RH) / max(1.0 - config.subgrid_rh_crit, 1.0e-6)
+        arg_safe = jnp.where(arg > 0.0, arg, 1.0)
+        cf_sg = jnp.where(arg > 0.0, 1.0 - jnp.sqrt(arg_safe), 1.0)
+        cf_eff = jnp.clip(cf_sg, config.subgrid_cf_min, 1.0)
+    else:
+        cf_eff = jnp.ones_like(q_c)
+    q_c_ic = q_c / cf_eff
+    q_r_ic = q_r / cf_eff
     # Warm-rain autoconversion + accretion. KK2000 (default) is the SAM
     # M2005 oracle scheme; Seifert-Beheng retained for back-compat.
     if config.warm_rain_scheme == "kk2000":
-        dq_c_au, dN_r_au, x_c = autoconversion_kk2000(q_c, N_c_eff, rho, dt)
-        dq_c_ac = accretion_kk2000(q_c, q_r)
+        dq_c_au, dN_r_au, x_c = autoconversion_kk2000(q_c_ic, N_c_eff, rho, dt)
+        dq_c_au = dq_c_au * cf_eff
+        dN_r_au = dN_r_au * cf_eff
+        dq_c_ac = accretion_kk2000(q_c_ic, q_r_ic) * cf_eff
     elif config.warm_rain_scheme == "seifert_beheng":
         dq_c_au, dN_r_au, x_c = autoconversion_sb(
-            q_c, N_c_eff, rho, config.k_au, config.x_star,
+            q_c_ic, N_c_eff, rho, config.k_au, config.x_star,
             config.autoconversion_sharpness,
         )
-        dq_c_ac = accretion(q_c, q_r, rho, config.k_ac)
+        dq_c_au = dq_c_au * cf_eff
+        dN_r_au = dN_r_au * cf_eff
+        dq_c_ac = accretion(q_c_ic, q_r_ic, rho, config.k_ac) * cf_eff
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; "

@@ -198,8 +198,15 @@ class DiagnosticCollector:
         self.sw_net_sfc: list[float] = []
         self.lw_net_sfc: list[float] = []
         self.dry_mass: list[float] = []
+        self.rsdt: list[float] = []
+        self.hfss: list[float] = []
+        self.hfls: list[float] = []
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
+
+        # Grid rotation angle for cubed-sphere wind rotation to geographic
+        # components.  Set via set_wind_rotation_angle(); None for other grids.
+        self._wind_rotation_angle: np.ndarray | None = None
 
         # Energy budget tracker
         self.energy_tracker = EnergyBudgetTracker()
@@ -378,6 +385,20 @@ class DiagnosticCollector:
         if land_fraction is not None:
             self._fixed_land_fraction = np.asarray(land_fraction)
 
+    def set_wind_rotation_angle(self, angle) -> None:
+        """Register the grid-to-geographic wind rotation angle.
+
+        Parameters
+        ----------
+        angle : array
+            Grid rotation angle [rad] on the native model grid.
+            For cubed-sphere, shape is (6, n, n).  Stored as a NumPy
+            array so the diagnostics path has no JAX dependency at
+            save time.  Used to rotate panel-local (u, v) to geographic
+            (east, north) before computing zonal-mean profile_u.
+        """
+        self._wind_rotation_angle = np.asarray(angle)
+
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
 
@@ -545,7 +566,11 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        sw_up_toa_clr=None,
+        lw_up_toa_clr=None,
         q_i=None,
+        q_s=None,
+        q_g=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -582,6 +607,10 @@ class DiagnosticCollector:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
         _aw = self._area_w
+        # Build a zero-padded sentinel for optional fields (shflx, lhflx,
+        # sw_down_toa) so they can be fused into the single device→host
+        # transfer.  Using jnp.zeros(()) keeps the scalar shape uniform.
+        _zero = jnp.zeros((), dtype=state.T.data.dtype)
         _stats = jnp.stack([
             area_weighted_mean(sst, _aw),
             area_weighted_mean(sic, _aw),
@@ -595,6 +624,9 @@ class DiagnosticCollector:
             area_weighted_mean(state.p_s.data, _aw),
             area_weighted_mean(sw_net_sfc, _aw),
             area_weighted_mean(lw_net_sfc, _aw),
+            area_weighted_mean(sw_down_toa, _aw) if sw_down_toa is not None else _zero,
+            area_weighted_mean(shflx, _aw) if shflx is not None else _zero,
+            area_weighted_mean(lhflx, _aw) if lhflx is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -609,6 +641,9 @@ class DiagnosticCollector:
         mean_ps = float(_stats_host[9])
         mean_sw_sfc = float(_stats_host[10])
         mean_lw_sfc = float(_stats_host[11])
+        mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
+        mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
+        mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -623,6 +658,9 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        self.rsdt.append(mean_rsdt)
+        self.hfss.append(mean_hfss)
+        self.hfls.append(mean_hfls)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
@@ -654,6 +692,10 @@ class DiagnosticCollector:
                 'wind': np.asarray(
                     jnp.sqrt(state.u.data[..., -1] ** 2 + state.v.data[..., -1] ** 2)
                 ),
+                'hfls': (np.asarray(lhflx) if lhflx is not None
+                         else np.zeros_like(np.asarray(sst))),
+                'hfss': (np.asarray(shflx) if shflx is not None
+                         else np.zeros_like(np.asarray(sst))),
             }
 
         # Energy budget
@@ -676,6 +718,7 @@ class DiagnosticCollector:
 
         # Monthly means
         if self.monthly_means and self.monthly_accum is not None and lat_deg_grid is not None:
+            from legoesm import constants as _c
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {
@@ -686,10 +729,42 @@ class DiagnosticCollector:
                 'sw_net_sfc': np.asarray(sw_net_sfc),
                 'lw_net_sfc': np.asarray(lw_net_sfc),
             }
+            # rsdt: TOA incoming SW [W/m²] — available unconditionally
+            if sw_down_toa is not None:
+                fields_2d['rsdt'] = np.asarray(sw_down_toa)
+            # hfss / hfls: surface heat fluxes [W/m²]
+            if shflx is not None:
+                fields_2d['hfss'] = np.asarray(shflx)
+            if lhflx is not None:
+                fields_2d['hfls'] = np.asarray(lhflx)
+            # psl: sea-level pressure via hypsometric equation
+            # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            # Reuse the T_low array already materialised above.
+            _phis_np = np.asarray(state.phis.data)
+            _ps_np = np.asarray(state.p_s.data)
+            fields_2d['psl'] = _ps_np * np.exp(
+                _phis_np / (_c.R_d * np.maximum(fields_2d['T_low'], _c.T_min_atmosphere))
+            )
             self.monthly_accum.add_2d(doy, year, fields_2d, lat_deg_grid)
+            # profile_u: use geographic eastward wind when rotation angle is
+            # available (cubed-sphere).  Panel-local u averaged over latitude
+            # bands produces sign cancellations across cube faces.
+            # Rotation: u_east = cos(angle)*u_grid - sin(angle)*v_grid
+            # (pure NumPy — no JAX dependency in this diagnostic path).
+            if (self._wind_rotation_angle is not None
+                    and hasattr(state, 'v') and state.v is not None):
+                _angle = self._wind_rotation_angle
+                # Angle is (6,n,n); winds are (6,n,n,nlev) — broadcast vertically
+                _cos_a = np.cos(_angle)[..., np.newaxis]
+                _sin_a = np.sin(_angle)[..., np.newaxis]
+                _u_np = np.asarray(state.u.data)
+                _v_np = np.asarray(state.v.data)
+                _u_for_profile = _cos_a * _u_np - _sin_a * _v_np
+            else:
+                _u_for_profile = np.asarray(state.u.data)
             fields_3d = {
                 'T': np.asarray(state.T.data),
-                'u': np.asarray(state.u.data),
+                'u': _u_for_profile,
                 'q_v': np.asarray(q_v) * 1000.0,
             }
             # Cloud-water profiles (g/kg). Guarded: kessler carries q_c but
@@ -707,6 +782,9 @@ class DiagnosticCollector:
                 'precip': mean_precip,
                 'sw_up_toa': mean_sw_toa,
                 'lw_up_toa': mean_lw_toa,
+                'rsdt': mean_rsdt,
+                'hfss': mean_hfss,
+                'hfls': mean_hfls,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -734,6 +812,17 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(lw_up_toa)
             if r is not None:
                 fields_2d['rlut'] = r
+            # Clear-sky TOA outgoing fluxes (Phase 1 of cloud-micro plan):
+            # populated by RRTMGP when do_clear_sky=True; zeros otherwise.
+            # SW_CRE = rsut - rsutcs, LW_CRE = rlutcs - rlut.
+            if sw_up_toa_clr is not None:
+                r = self._regrid_to_latlon_2d(sw_up_toa_clr)
+                if r is not None:
+                    fields_2d['rsutcs'] = r
+            if lw_up_toa_clr is not None:
+                r = self._regrid_to_latlon_2d(lw_up_toa_clr)
+                if r is not None:
+                    fields_2d['rlutcs'] = r
             r = self._regrid_to_latlon_2d(state.p_s.data)
             if r is not None:
                 fields_2d['ps'] = r
@@ -767,10 +856,56 @@ class DiagnosticCollector:
             # incorrect.  These variables will be added when the physics
             # pipeline exposes separate downwelling surface fluxes.
 
-            # NOTE: clt (total cloud cover) is NOT computed here.  The
-            # available binary column cloud mask (q_c > threshold → 100%)
-            # does not represent cloud area fraction as defined by CMIP.
-            # A proper cloud overlap / random-maximum scheme is needed.
+            # Cloud-ice path (clivi), condensed-water path (clwvi) and total
+            # cloud cover (clt).  CMIP convention: clivi = column-integrated
+            # FROZEN condensate (cloud ice + snow + graupel); clwvi = TOTAL
+            # condensed water (liquid + frozen).  Morrison carries prognostic
+            # q_i/q_s/q_g, so sum the frozen species into the ice path and add
+            # them to the condensate path — earlier code hardcoded clivi=0
+            # (a warm-rain-era placeholder) which threw away all model ice.
+            # clt is a random-overlap approximation of a soft layer cloud
+            # fraction (sigmoid on total condensate) — useful for spatial
+            # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
+            if q_c is not None:
+                lwp_field = np.asarray(
+                    column_water_vapor(q_c, state.p_s.data, self.dsigma)
+                )
+                # Frozen condensate path: sum whichever ice species are present
+                # (None for warm-rain microphysics → contributes nothing).
+                q_frozen = None
+                for q_frz in (q_i, q_s, q_g):
+                    if q_frz is not None:
+                        q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
+                if q_frozen is not None:
+                    iwp_field = np.asarray(
+                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma)
+                    )
+                else:
+                    iwp_field = np.zeros_like(lwp_field)
+                r_lwp = self._regrid_to_latlon_2d(lwp_field)
+                r_iwp = self._regrid_to_latlon_2d(iwp_field)
+                if r_lwp is not None and r_iwp is not None:
+                    fields_2d['clivi'] = r_iwp
+                    fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
+                # Layer cloud fraction: soft threshold sigmoid on TOTAL
+                # condensate (liquid + frozen) so high cirrus counts toward clt.
+                # 1 mg/kg threshold with steep slope gives a near-binary
+                # mask that matches the calibration's metric convention.
+                q_cond_np = np.asarray(q_c)
+                if q_frozen is not None:
+                    q_cond_np = q_cond_np + np.asarray(q_frozen)
+                q_thresh = 1e-6
+                sharpness = 1.0e6
+                cf_layer = 1.0 / (1.0 + np.exp(-(q_cond_np - q_thresh) * sharpness))
+                # Random overlap: clt = 1 - prod(1 - cf_layer) along vertical.
+                log_clear = np.sum(
+                    np.log(np.clip(1.0 - cf_layer, 1e-7, 1.0)),
+                    axis=-1,
+                )
+                clt_field = 1.0 - np.exp(log_clear)
+                r_clt = self._regrid_to_latlon_2d(clt_field)
+                if r_clt is not None:
+                    fields_2d['clt'] = r_clt * 100.0  # CMIP units: %
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
@@ -780,7 +915,7 @@ class DiagnosticCollector:
             T_lowest = np.asarray(state.T.data[..., -1])
             phis = np.asarray(state.phis.data)
             p_s_np = np.asarray(state.p_s.data)
-            T_lowest_safe = np.maximum(T_lowest, 200.0)  # avoid div-by-zero
+            T_lowest_safe = np.maximum(T_lowest, _c.T_min_atmosphere)
             psl = p_s_np * np.exp(phis / (_c.R_d * T_lowest_safe))
             r = self._regrid_to_latlon_2d(psl)
             if r is not None:
@@ -951,6 +1086,11 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        # rsdt/hfss/hfls not available in lightweight mode — fill with NaN
+        # so timeseries arrays stay aligned across flush chunks.
+        self.rsdt.append(float('nan'))
+        self.hfss.append(float('nan'))
+        self.hfls.append(float('nan'))
 
         return {
             'mean_sst': mean_sst,
@@ -998,6 +1138,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -1024,6 +1167,9 @@ class DiagnosticCollector:
         self.sw_net_sfc.clear()
         self.lw_net_sfc.clear()
         self.dry_mass.clear()
+        self.rsdt.clear()
+        self.hfss.clear()
+        self.hfls.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -1080,6 +1226,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
@@ -1267,7 +1416,9 @@ class DiagnosticCollector:
                     continue
                 nlev = field_slice.shape[2]
                 plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
-                field_plev = np.transpose(field_slice, (2, 0, 1))
+                # _make_plev_da sorts plev descending (highest pressure first).
+                # Flip the pressure axis so data[0] aligns with plev[0]=max pressure.
+                field_plev = np.transpose(field_slice, (2, 0, 1))[::-1]
                 try:
                     self.cf_writer.write_field(
                         var_name=var_name,

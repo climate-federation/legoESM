@@ -2079,7 +2079,7 @@ def plane_compressible_euler_slow_tendencies(
     _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
-    _use_vreman = _closure == "vreman" and getattr(config, "vreman_c", 0.0) > 0.0
+    _use_vreman = _closure == "vreman" and config.vreman_c > 0.0
     if _use_smag or _use_mol or _use_vreman:
         if _use_mol:
             # DNS: CONSTANT molecular kinematic viscosity ν everywhere — no
@@ -2095,7 +2095,7 @@ def plane_compressible_euler_slow_tendencies(
             # widths, so it behaves on anisotropic Δx≠Δz grids. Purely local
             # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_vreman_K_m_plane(
-                u, v, w, grid, height_coord, getattr(config, "vreman_c", 0.07))
+                u, v, w, grid, height_coord, config.vreman_c)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes
@@ -2630,9 +2630,9 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "or 'none' (inviscid)."
         )
     if closure == "vreman":
-        if getattr(config, "vreman_c", 0.0) <= 0.0:
+        if config.vreman_c <= 0.0:
             raise ValueError(
-                f"vreman_c={getattr(config, 'vreman_c', 0.0)!r} must be > 0 for "
+                f"vreman_c={config.vreman_c!r} must be > 0 for "
                 "turbulence_closure='vreman' (e.g. 0.07 ≈ 2.5·C_s²)."
             )
         if getattr(config, "smagorinsky_dynamic", False):

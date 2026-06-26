@@ -86,17 +86,19 @@ def test_laplacian_scaling_factor_consistency_with_biharmonic():
 
 def test_laplacian_scaling_equator_near_unity():
     """Near the equator the scale must be very close to 1 (no significant
-    damping reduction).  The averaging convention used to interpolate
-    cos(lat) onto v-faces is the same as ``biharmonic_scaling_factor``,
-    which gives cos²(2.5°) ≈ 0.998 at the equator v-face on a 36×72 grid
-    instead of exact 1.0; the same convention is used elsewhere.
+    damping reduction).  The v-face cos(lat_v) is now the single-source
+    cos-OF-interface convention (``vface_zonal_cos_lat``, #516
+    ``d2c9e9826``) rather than the legacy mean-of-cos: the equator v-face
+    interface latitude is exactly 0, so the factor there is cos(0)²=1.0
+    EXACTLY (mean-of-cos gave cos²(2.5°)≈0.998).  The cos-of-interface form
+    is the more faithful O(dlat²)-correct metric and restores strain↔stress
+    adjointness / div↔advection mass-consistency on non-uniform-dlat grids.
     """
     grid = create_latlon_grid(36, 72)
     _, scale_v = laplacian_scaling_factor(grid, power=2)
-    # v-face at index 18 (out of 37) sits at lat = 0; with the averaging
-    # convention it returns ½(cos(-2.5°) + cos(+2.5°))² = cos²(2.5°)
-    cos_2p5 = float(np.cos(np.deg2rad(2.5)))
-    expected = cos_2p5 ** 2                                # ≈ 0.998
+    # v-face at index 18 (out of 37) sits at lat = 0; cos-of-interface gives
+    # cos(0)² = 1.0 exactly (single-source vface_zonal_cos_lat, #516).
+    expected = 1.0
     assert abs(float(scale_v[18]) - expected) < 1e-6
     # The point of this test: scaling is essentially OFF at the equator
     assert float(scale_v[18]) > 0.99

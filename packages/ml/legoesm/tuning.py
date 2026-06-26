@@ -89,6 +89,93 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="medium",
         notes="Controls polar longwave cooling. Lower = colder poles.",
     ),
+    "tau_moist_coeff": TuningParameter(
+        name="tau_moist_coeff",
+        default=0.0115,
+        min_val=0.005,
+        max_val=0.030,
+        units="m^2/kg",
+        description="Gray radiation moisture LW optical-depth coefficient",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Strength of the water-vapour longwave greenhouse in the gray "
+            "scheme: dtau_moist = tau_moist_coeff * column_water. Higher = "
+            "stronger greenhouse, lower OLR. Frierson (2006) default 0.0115."
+        ),
+    ),
+    "linear_frac": TuningParameter(
+        name="linear_frac",
+        default=0.2,
+        min_val=0.05,
+        max_val=0.6,
+        units="1",
+        description="Gray radiation linear vs sigma^4 LW weighting fraction",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Fraction f_l of the linear-in-sigma LW optical-depth profile "
+            "vs the sigma^4 profile. Shifts where the gray greenhouse acts "
+            "vertically. Frierson (2006) default 0.2."
+        ),
+    ),
+    "lw_diff_factor": TuningParameter(
+        name="lw_diff_factor",
+        default=1.66,
+        min_val=1.4,
+        max_val=2.0,
+        units="1",
+        description="Gray radiation LW diffusivity factor D",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Hemispheric-mean two-stream diffusivity factor. Scales the "
+            "effective LW path length; ~5/3 (1.66) is the standard value."
+        ),
+    ),
+    "sfc_emissivity": TuningParameter(
+        name="sfc_emissivity",
+        default=0.97,
+        min_val=0.90,
+        max_val=1.0,
+        units="1",
+        description="Surface longwave emissivity",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Surface LW emissivity for the gray scheme. Lower emissivity "
+            "reduces upward surface LW, warming the surface."
+        ),
+    ),
+    "sw_tau_0": TuningParameter(
+        name="sw_tau_0",
+        default=0.22,
+        min_val=0.0,
+        max_val=0.6,
+        units="1",
+        description="Gray radiation SW optical-depth scale",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Shortwave optical-depth scale: tau_sw(sigma) = sw_tau_0 * "
+            "sigma^sw_exponent. Higher = more atmospheric SW absorption, "
+            "less SW reaching the surface. 0.0 = surface-absorbing limit."
+        ),
+    ),
+    "sw_exponent": TuningParameter(
+        name="sw_exponent",
+        default=2.0,
+        min_val=1.0,
+        max_val=4.0,
+        units="1",
+        description="Gray radiation SW optical-depth vertical exponent",
+        category="radiation",
+        sensitivity="low",
+        notes=(
+            "Exponent of the SW optical-depth profile sigma^sw_exponent; "
+            "controls how SW absorption is distributed in the vertical."
+        ),
+    ),
     "S_0": TuningParameter(
         name="S_0",
         default=constants.S_0,
@@ -120,14 +207,18 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         name="sbm_tau_c",
         default=7200.0,
         min_val=3600.0,
-        max_val=14400.0,
+        max_val=14400.0,  # validated training range (trainable_params.py);
+                          # re-widen tuning + trainable together if intended
         units="s",
         description="Convective relaxation timescale (SBM)",
         category="convection",
         sensitivity="high",
         notes=(
             "Shorter = more aggressive convective adjustment. "
-            "Typical range 2-4 hours."
+            "Typical range 2-4 hours. Upper bound widened to 1e6 s "
+            "(~12 days) after 2026-05-26 diagnostic showed SBM "
+            "over-heats the troposphere by 5-9 K at every level; "
+            "calibration may want to weaken SBM toward off."
         ),
     ),
     "sbm_RH_ref": TuningParameter(
@@ -140,6 +231,329 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         category="convection",
         sensitivity="high",
         notes="Column moistened toward this RH. Higher = wetter atmosphere.",
+    ),
+    "sundqvist_auto_rate": TuningParameter(
+        name="sundqvist_auto_rate",
+        default=1e-3,
+        min_val=2e-4,
+        max_val=5e-3,
+        units="1/s",
+        description="Sundqvist autoconversion rate (cloud water -> rain)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Rate at which cloud water converts to (diagnostic, instantly "
+            "falling) rain: P_auto = auto_rate * q_c. Higher = more "
+            "efficient precipitation and lower cloud water (LWP); lower = "
+            "more cloud water retained. Sundqvist et al. (1989)."
+        ),
+    ),
+    "cloud_rh_crit": TuningParameter(
+        name="cloud_rh_crit",
+        default=0.7,
+        min_val=0.5,
+        max_val=0.95,
+        units="1",
+        description="Critical relative humidity for cloud onset",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Sundqvist cloud-fraction threshold: cloud fraction = "
+            "clamp((RH - rh_crit)/(1 - rh_crit), 0, 1). Higher = less cloud "
+            "cover, higher OSR/OLR. The primary cloud-amount knob."
+        ),
+    ),
+    "cloud_r_eff_liq": TuningParameter(
+        name="cloud_r_eff_liq",
+        default=10.0e-6,
+        min_val=4.0e-6,
+        max_val=20.0e-6,
+        units="m",
+        description="Cloud liquid droplet effective radius (single value, no land/ocean split)",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Sets cloud shortwave optical thickness (tau ~ LWP / r_eff). "
+            "Smaller droplets => optically thicker, brighter clouds => "
+            "higher OSR. Genuinely uncertain (depends on CCN / aerosol). "
+            "Phase 3 (2026-05-26) replaces this in _AMIP_ACTIVE with "
+            "cloud_r_eff_liq_ocean / cloud_r_eff_liq_land; kept here as "
+            "backward-compat for no-land runs."
+        ),
+    ),
+    "cloud_r_eff_liq_ocean": TuningParameter(
+        name="cloud_r_eff_liq_ocean",
+        default=10.0e-6,
+        min_val=6.0e-6,
+        max_val=15.0e-6,
+        units="m",
+        description="Cloud liquid droplet effective radius over ocean",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Ocean has lower CDNC than land (cleaner air, fewer aerosol "
+            "CCN). Realistic value 10-14 um. Calibrated independently of "
+            "cloud_r_eff_liq_land via per-column blend in "
+            "compute_radiation_core (Phase 3 of cloud-micro plan)."
+        ),
+    ),
+    "cloud_r_eff_liq_land": TuningParameter(
+        name="cloud_r_eff_liq_land",
+        default=7.0e-6,
+        min_val=4.0e-6,
+        max_val=10.0e-6,
+        units="m",
+        description="Cloud liquid droplet effective radius over land",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Land has 3x higher CDNC than ocean -> ~30% smaller r_eff -> "
+            "brighter clouds. Realistic value 6-9 um. Calibrated "
+            "independently of cloud_r_eff_liq_ocean."
+        ),
+    ),
+    "sundqvist_evap_coeff": TuningParameter(
+        name="sundqvist_evap_coeff",
+        default=5e-4,
+        min_val=1e-4,
+        max_val=2e-3,
+        units="1",
+        description="Sundqvist sub-cloud rain evaporation coefficient",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Rate at which falling rain re-evaporates in subsaturated "
+            "layers: evap = evap_coeff * subsaturation * P_total. Higher "
+            "= more rain lost to evaporation, drier surface precip and "
+            "moister mid-troposphere; lower = more rain reaches the "
+            "surface. Sundqvist et al. (1989)."
+        ),
+    ),
+    "sbm_cape_threshold": TuningParameter(
+        name="sbm_cape_threshold",
+        default=70.0,
+        min_val=0.0,
+        max_val=200.0,
+        units="J/kg",
+        description="Minimum CAPE to trigger SBM convection",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Columns with CAPE below this are gated off via a smooth "
+            "sigmoid trigger. Higher = convection fires less readily, "
+            "fewer/weaker convective columns; lower = more widespread "
+            "convection."
+        ),
+    ),
+
+    # -- Scheme knobs added for calibration (AIMIP commit 0c747d4) -------
+    # Threaded to the schemes via the calibration's physics_cfg_overrides
+    # dict-of-dicts (keys micro / conv / turb / gwd).
+    "sundqvist_sigmoid_sharpness": TuningParameter(
+        name="sundqvist_sigmoid_sharpness",
+        default=20.0,
+        min_val=5.0,
+        max_val=60.0,
+        units="1",
+        description="Sundqvist cloud-fraction smooth-activation sharpness",
+        category="convection",
+        sensitivity="medium",
+        notes=(
+            "Sharpness of the sigmoid that ramps cloud fraction across the "
+            "critical RH. Higher = sharper (more step-like) cloud onset."
+        ),
+    ),
+    "sbm_T_min_convect": TuningParameter(
+        name="sbm_T_min_convect",
+        default=200.0,
+        min_val=180.0,
+        max_val=260.0,
+        units="K",
+        description="SBM minimum temperature for convective activity",
+        category="convection",
+        sensitivity="medium",
+        notes=(
+            "Layers colder than this are excluded from the SBM convective "
+            "column; caps how high convection can reach."
+        ),
+    ),
+    "louis_l_mix_max": TuningParameter(
+        name="louis_l_mix_max",
+        default=100.0,
+        min_val=20.0,
+        max_val=400.0,
+        units="m",
+        description="Louis turbulence asymptotic mixing length",
+        category="turbulence",
+        sensitivity="high",
+        notes=(
+            "Asymptotic (free-troposphere) mixing length for the Louis "
+            "boundary-layer scheme. Higher = stronger vertical mixing."
+        ),
+    ),
+    "louis_Ck": TuningParameter(
+        name="louis_Ck",
+        default=0.4,
+        min_val=0.1,
+        max_val=0.6,
+        units="1",
+        description="Louis turbulence eddy-diffusivity coefficient",
+        category="turbulence",
+        sensitivity="medium",
+        notes="Scales the Louis eddy diffusivity. Higher = more BL mixing.",
+    ),
+    "louis_Ri_crit": TuningParameter(
+        name="louis_Ri_crit",
+        default=0.25,
+        min_val=0.1,
+        max_val=0.6,
+        units="1",
+        description="Louis turbulence critical Richardson number",
+        category="turbulence",
+        sensitivity="medium",
+        notes=(
+            "Richardson-number scale in the Louis stability functions; "
+            "sets how readily stable layers suppress turbulence."
+        ),
+    ),
+    "louis_b_louis": TuningParameter(
+        name="louis_b_louis",
+        default=5.0,
+        min_val=2.0,
+        max_val=10.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient b",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient b in the Louis (1979/1982) stability functions.",
+    ),
+    "louis_c_louis": TuningParameter(
+        name="louis_c_louis",
+        default=16.6,
+        min_val=5.0,
+        max_val=30.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient c",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient c in the Louis stability functions (1979: 5, updated 16.6).",
+    ),
+    "louis_d_louis": TuningParameter(
+        name="louis_d_louis",
+        default=5.0,
+        min_val=2.0,
+        max_val=15.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient d",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient d in the Louis stability functions.",
+    ),
+    "louis_z0": TuningParameter(
+        name="louis_z0",
+        default=1.0e-4,
+        min_val=1.0e-5,
+        max_val=1.0e-2,
+        units="m",
+        description="Surface-layer aerodynamic roughness length",
+        category="surface",
+        sensitivity="medium",
+        notes=(
+            "Roughness length z0 of the Louis surface layer; sets surface "
+            "drag and exchange. Tuned in log space (spans decades)."
+        ),
+    ),
+    "louis_Ch_neutral": TuningParameter(
+        name="louis_Ch_neutral",
+        default=1.5e-3,
+        min_val=5.0e-4,
+        max_val=5.0e-3,
+        units="1",
+        description="Louis surface-layer neutral scalar-exchange coefficient",
+        category="surface",
+        sensitivity="high",
+        notes=(
+            "Constant-scheme Ch: sets both sensible and latent (evaporation) "
+            "surface flux. Higher = stronger surface heat/moisture fluxes."
+        ),
+    ),
+    "louis_Cd_neutral": TuningParameter(
+        name="louis_Cd_neutral",
+        default=1.5e-3,
+        min_val=5.0e-4,
+        max_val=5.0e-3,
+        units="1",
+        description="Louis surface-layer neutral momentum drag coefficient",
+        category="surface",
+        sensitivity="medium",
+        notes="Constant-scheme Cd: sets surface wind stress and friction velocity.",
+    ),
+    "mcfarlane_k_wave": TuningParameter(
+        name="mcfarlane_k_wave",
+        default=6.283185307e-5,
+        min_val=1.0e-5,
+        max_val=2.0e-4,
+        units="1/m",
+        description="McFarlane orographic GWD horizontal wavenumber",
+        category="gwd",
+        sensitivity="medium",
+        notes=(
+            "Horizontal wavenumber of the launched orographic gravity "
+            "waves; scales the launch stress tau_0 ~ G_0*rho*N*k*h^2*U."
+        ),
+    ),
+    "mcfarlane_N_ref": TuningParameter(
+        name="mcfarlane_N_ref",
+        default=0.01,
+        min_val=0.005,
+        max_val=0.025,
+        units="1/s",
+        description="McFarlane GWD reference Brunt-Vaisala frequency",
+        category="gwd",
+        sensitivity="medium",
+        notes="Reference stratification used in the orographic launch-stress closure.",
+    ),
+    "mcfarlane_directional_spread": TuningParameter(
+        name="mcfarlane_directional_spread",
+        default=1.0,
+        min_val=0.5,
+        max_val=2.0,
+        units="1",
+        description="McFarlane GWD multi-directional spreading factor",
+        category="gwd",
+        sensitivity="low",
+        notes="Spreads the launched wave stress over multiple directions.",
+    ),
+    "mcfarlane_tau_max": TuningParameter(
+        name="mcfarlane_tau_max",
+        default=10.0,
+        min_val=1.0,
+        max_val=30.0,
+        units="Pa",
+        description="McFarlane GWD upper clip on launch stress",
+        category="gwd",
+        sensitivity="low",
+        notes=(
+            "Upper bound on orographic launch stress; protects against "
+            "runaway drag in pathological columns."
+        ),
+    ),
+
+    # -- Cloud / BL cloud ---------------------------------------------------
+    "rh_crit_bl": TuningParameter(
+        name="rh_crit_bl",
+        default=0.7,
+        min_val=0.4,
+        max_val=0.85,
+        units="1",
+        description="Critical RH for boundary-layer cloud onset (Sundqvist)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Only active when cloud_sigma_bl < 1.0 (BL cloud enabled). "
+            "Lower = more marine BL cloud; AMIP recommended ~0.55. "
+            "Default 0.7 = same as free-troposphere rh_crit (disabled)."
+        ),
     ),
 
     # -- Diffusion / turbulence -----------------------------------------
@@ -214,6 +628,54 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="medium",
         notes="Affects net surface SW absorption over land.",
     ),
+    "beta_land": TuningParameter(
+        name="beta_land",
+        default=1.0,
+        min_val=0.1,
+        max_val=1.0,
+        units="1",
+        description="Land soil-moisture evaporation factor (slab land)",
+        category="surface",
+        sensitivity="high",
+        notes=(
+            "Multiplies the bulk latent-heat flux from the land "
+            "surface.  1.0 = wet (saturated) surface; smaller values "
+            "starve evaporation and shift the surface energy budget "
+            "into sensible heat (drier, hotter land)."
+        ),
+    ),
+    "C_land": TuningParameter(
+        name="C_land",
+        default=2.0e5,
+        min_val=5.0e4,
+        max_val=1.0e6,
+        units="J/m^2/K",
+        description="Slab-land effective heat capacity",
+        category="surface",
+        sensitivity="medium",
+        notes=(
+            "Sets the land skin-temperature thermal inertia: smaller "
+            "C_land → larger diurnal range, sharper response to "
+            "radiative forcing; larger C_land → damped, ocean-like "
+            "behaviour.  ~2e5 corresponds to a ~0.15 m active layer "
+            "of moist soil."
+        ),
+    ),
+    "emissivity_land": TuningParameter(
+        name="emissivity_land",
+        default=0.96,
+        min_val=0.85,
+        max_val=1.00,
+        units="1",
+        description="Land surface LW emissivity",
+        category="surface",
+        sensitivity="medium",
+        notes=(
+            "Multiplies both LW absorption and LW emission at the "
+            "land surface.  Tunes the OLR contribution from land "
+            "and the radiative damping rate of T_land."
+        ),
+    ),
     "albedo_ice": TuningParameter(
         name="albedo_ice",
         default=0.65,
@@ -231,13 +693,152 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     "albedo_ocean": TuningParameter(
         name="albedo_ocean",
         default=0.06,
-        min_val=0.03,
+        min_val=0.03,  # matches trainable_params.py validated range
         max_val=0.10,
         units="1",
-        description="Ocean surface albedo",
+        description="Open-ocean surface shortwave albedo",
         category="surface",
-        sensitivity="low",
-        notes="Open-ocean reflectance. Typically 0.06 for diffuse light.",
+        sensitivity="medium",
+        notes=(
+            "Genuine ocean surface reflectance (~0.06) under RRTMGP, where "
+            "clouds carry the planetary SW reflection. Tuned only within a "
+            "tight physical range — it is a surface property, not a free "
+            "planetary-albedo knob."
+        ),
+    ),
+    # ---- Morrison ice-microphysics knobs (sub-stepped Morrison only) ----
+    # Active only when microphysics='morrison'; under Sundqvist the
+    # MicrophysicsConfig hasattr filter skips them silently.
+    "morrison_bergeron_rate": TuningParameter(
+        name="morrison_bergeron_rate",
+        default=1e-3,
+        min_val=1e-4,
+        max_val=1e-2,
+        units="1/s",
+        description="Morrison Bergeron-Findeisen rate (supercooled liquid -> ice)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Primary lever for moving mass from q_c to q_i in the "
+            "mixed-phase zone. Higher = lower LWP, higher IWP, stronger "
+            "LW_CRE. Active only with microphysics='morrison'."
+        ),
+    ),
+    "morrison_rime_coeff": TuningParameter(
+        name="morrison_rime_coeff",
+        default=1.0,
+        min_val=0.1,
+        max_val=5.0,
+        units="1",
+        description="Morrison riming collection efficiency (ice/snow capture q_c)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Controls how aggressively ice and snow collect cloud water. "
+            "Higher = converts liquid to ice/snow faster, reducing LWP and "
+            "raising IWP. Pairs with morrison_bergeron_rate."
+        ),
+    ),
+    "morrison_dep_coeff": TuningParameter(
+        name="morrison_dep_coeff",
+        default=1e-8,
+        min_val=3e-9,
+        max_val=3e-8,
+        units="1",
+        description="Morrison depositional ice growth coefficient (vapor -> q_i)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Morrison-2005 capacitance form: dq_i/dt = dep_coeff * S_i * "
+            "q_i^(1/3) * N_i^(2/3) * f_ice.  Higher = q_i grows faster in "
+            "cold supersaturated layers (cirrus mass).  Direct lever on "
+            "LW_CRE / IWP without affecting LWP.  Range sized so a typical "
+            "cirrus layer (T=220K, N_i=1e5/m^3, q_i=1e-7 kg/kg, S_i=0.1) "
+            "gives dq_i/dt ~ 1e-8 kg/kg/s at the midpoint."
+        ),
+    ),
+    "morrison_agg_coeff": TuningParameter(
+        name="morrison_agg_coeff",
+        default=1e-3,
+        min_val=1e-5,
+        max_val=5e-3,
+        units="1/s",
+        description="Morrison ice-to-snow aggregation rate",
+        category="convection",
+        sensitivity="medium",
+        notes=(
+            "Loss of q_i to q_s (snow). Lower = ice persists longer in "
+            "the column, higher IWP. Snow itself precipitates faster than "
+            "ice so once q_i is aggregated the column loses it."
+        ),
+    ),
+    "morrison_k_au": TuningParameter(
+        name="morrison_k_au",
+        default=6e2,
+        min_val=2e2,
+        max_val=2e3,
+        units="1/(kg*s)",
+        description="Morrison warm-rain autoconversion rate (Seifert-Beheng k_au)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Drains q_c to q_r in warm/mixed columns. Higher = lower LWP "
+            "via warm-rain channel (independent of the ice path). Useful "
+            "when LWP is too high (Morrison runs liquid-rich)."
+        ),
+    ),
+    "sbm_precip_efficiency": TuningParameter(
+        name="sbm_precip_efficiency",
+        default=0.5,
+        min_val=0.2,
+        max_val=0.9,
+        units="1",
+        description="SBM convective precipitation efficiency (fraction direct-to-rain)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Fraction of column-net SBM drying routed directly to the q_r "
+            "tracer; remainder is detrained as condensate (q_c warm, q_i "
+            "cold via the anvil split).  Observed convective precip "
+            "efficiency is environment-dependent (~0.2-0.9); 0.5 is the "
+            "mid-range physical default.  Dominant LWP lever (validated: "
+            "LWP 0.18->0.06 at eps=0.5 in probe 25237929)."
+        ),
+    ),
+    "cloud_rh_ice_crit": TuningParameter(
+        name="cloud_rh_ice_crit",
+        default=0.95,
+        min_val=0.85,
+        max_val=1.05,
+        units="1",
+        description="RH_i cirrus onset threshold (cloud_fraction RH_i branch)",
+        category="clouds",
+        sensitivity="high",
+        notes=(
+            "cf_ice = clamp((RH_i - rh_ice_crit) / (rh_ice_sat - "
+            "rh_ice_crit), 0, 1); total cf = max(cf_warm, cf_ice).  Lower "
+            "= more cirrus area, more LW trapping (lower OLR, higher "
+            "LW_CRE).  Lopez-Coelho (1996) uses ~0.95 for heterogeneous "
+            "cirrus onset; ECMWF/Slingo-Ritter band 0.85-1.05.  Direct "
+            "lever on OLR / LW_CRE via cold-cloud area."
+        ),
+    ),
+    "cloud_rh_ice_sat": TuningParameter(
+        name="cloud_rh_ice_sat",
+        default=1.30,
+        min_val=1.20,
+        max_val=1.50,
+        units="1",
+        description="RH_i value at which cf_ice saturates to 1 (full cirrus)",
+        category="clouds",
+        sensitivity="medium",
+        notes=(
+            "Upper end of the RH_i cirrus ramp; sets the width.  Karcher-"
+            "Lohmann 2002 homogeneous freezing threshold is ~1.40-1.65, "
+            "below which heterogeneous nucleation dominates.  Tighter "
+            "(closer to rh_ice_crit) = sharper cirrus onset; wider = more "
+            "gradual area growth.  Pairs with rh_ice_crit."
+        ),
     ),
 }
 

@@ -108,8 +108,8 @@ def test_coupling_fields_shapes():
     # and ``surface_mass_flux`` (F3) slots in the Physical_Consistency
     # cycle for tile-blended water, ice→ocean heat, ice→ocean stress
     # reaction, and phase-aware moisture mass closure.
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 19  # 13 → 14 (F4) → 15 (F8) → 17 (F9 +2) → 18 (F3 +1) → 19 (salt_flux)
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(sfc) == 21  # 19 (salt_flux) → 20 (river_runoff_flux) → 21 (ice_lake_freshwater_flux)
 
     tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
     assert len(tile) == 19
@@ -812,7 +812,8 @@ def test_accumulator_mean():
         u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
         freshwater_flux=z, ocean_heat_extraction=z,
         ocean_stress_x=z, ocean_stress_y=z,
-        surface_mass_flux=z, salt_flux=z,
+        surface_mass_flux=z, salt_flux=z, river_runoff_flux=z,
+        ice_lake_freshwater_flux=z,
     )
     acc = accumulate(acc, sfc1, 100.0)
 

@@ -27,6 +27,9 @@ from legoesm.diagnostics.energy_budget import area_weighted_mean
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
+# Exact time-unit conversion for the day-valued restoring timescales.
+_SECONDS_PER_DAY = 86400.0
+
 
 def enable_diurnal_surface_land(land_cfg):
     """Switch a ``MultiLayerLandConfig`` to the coupled DIURNAL surface model:
@@ -90,6 +93,10 @@ class CoupledESMDriver:
         self._sfc_state = None
         self._ocean_state = None
         self._ocean_step = None
+        # WOA surface T/S restoring targets (set by the dynamic-ocean WOA init;
+        # None => no target => relaxation skipped).
+        self._ocean_T_target = None
+        self._ocean_S_target = None
         self._last_sfc_response = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
@@ -258,6 +265,10 @@ class CoupledESMDriver:
         from legoesm.core.precision import get_policy
         _sd = get_policy().storage
         z_star = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # WOA surface T/S restoring targets (set in the ocean_ic=="woa" branches;
+        # None => no restoring target available => relaxation skipped).
+        self._ocean_T_target = None
+        self._ocean_S_target = None
 
         if cfg.ocean_ic == "woa":
             # REALISTIC cold start: WOA18 reanalysis T/S + WOA-derived continents
@@ -324,6 +335,11 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
+            # WOA surface restoring targets (top model level [degC]/[PSU]) — the
+            # climatology the optional Newtonian relaxation anchors the surface
+            # toward during the coupled spin-up (CoupledConfig.ocean_restore_*).
+            self._ocean_T_target = jnp.asarray(T_woa[..., 0], dtype=_sd)
+            self._ocean_S_target = jnp.asarray(S_woa[..., 0], dtype=_sd)
             # Balanced cold start (MANDATORY for WOA): the rest-velocity state
             # leaves WOA's baroclinic PGF UNBALANCED -> a violent geostrophic
             # adjustment that goes nonlinear (the standalone ocean blows from
@@ -501,6 +517,10 @@ class CoupledESMDriver:
                 T=base_state.T.replace(data=jnp.asarray(T_woa, dtype=_sd)),
                 S=base_state.S.replace(data=jnp.asarray(S_woa, dtype=_sd)),
             )
+            # WOA surface restoring targets (top level [degC]/[PSU]) — see the
+            # co-located path; anchors the surface during the coupled spin-up.
+            self._ocean_T_target = jnp.asarray(T_woa[..., 0], dtype=_sd)
+            self._ocean_S_target = jnp.asarray(S_woa[..., 0], dtype=_sd)
             self._ocean_state = apply_balanced_init(
                 self._ocean_state, self._ocean_grid, model_z_coord, ocfg,
             )
@@ -571,6 +591,7 @@ class CoupledESMDriver:
         # per-cell PFT params come from the provider; these are the global snow/ice
         # + bulk-transfer values tuned vs ERA5 under physical bounds).
         if (cfg.land_mode != "none"
+                # getattr: optional-config compat gate (land_param_source selector)
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
             import legoesm.land.clm_surface_map as _csm
             if cfg.land_mode == "multilayer":
@@ -586,6 +607,7 @@ class CoupledESMDriver:
         # Spatial soil hydraulics from the CLM reference map (per-column van-
         # Genuchten retention) for the Richards multilayer land.
         if (cfg.land_mode == "multilayer"
+                # getattr: optional-config compat gate (land_param_source selector)
                 and getattr(cfg, "land_param_source", "analytical") == "clm"
                 and self._atm._grid_lat is not None):
             from legoesm.land.clm_surface_map import (
@@ -617,7 +639,7 @@ class CoupledESMDriver:
         # well-posed here.  Carbon must run (differland) so Farquhar has a prognostic
         # LAI; the coupler already initialises + threads the carbon state.
         if (cfg.land_mode == "multilayer"
-                and getattr(cfg, "land_diurnal_surface", True)):
+                and cfg.land_diurnal_surface):
             land_cfg = enable_diurnal_surface_land(land_cfg)
             logger.info("  Land surface: MOST exchange + Farquhar stomata "
                         "(coupled diurnal model)")
@@ -642,7 +664,7 @@ class CoupledESMDriver:
         # same spatial source the slab SST uses — so tropical land does not
         # cold-spin from a uniform 280 K (default off => byte-identical).
         soil_kwargs = {}
-        if getattr(cfg, "warm_start_soil", False):
+        if cfg.warm_start_soil:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
@@ -745,6 +767,7 @@ class CoupledESMDriver:
                            "falling back to scalar params")
             return None
 
+        # getattr: optional-config compat gate (land_param_source selector)
         source = getattr(self.coupled_cfg, "land_param_source", "analytical")
         if source == "clm":
             from legoesm.land.clm_surface_map import clm_surface_provider
@@ -871,7 +894,7 @@ class CoupledESMDriver:
         structure is stable across the run — ``model_driver`` compiles the
         segment kernel once.
         """
-        if not getattr(self.coupled_cfg, "couple_surface_radiation", False):
+        if not self.coupled_cfg.couple_surface_radiation:
             return
 
         from legoesm.forcing.surface_utils import (
@@ -941,7 +964,7 @@ class CoupledESMDriver:
         # feedback is off or before the first coupler step.
         _resp = self._last_sfc_response
         _dyn_sfc = (
-            getattr(self.coupled_cfg, "couple_surface_radiation", False)
+            self.coupled_cfg.couple_surface_radiation
             and _resp is not None
             and getattr(_resp, "albedo", None) is not None
         )
@@ -982,7 +1005,7 @@ class CoupledESMDriver:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
-            S_0 = getattr(acfg, 'S_0', constants.S_0)
+            S_0 = acfg.S_0
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:
@@ -1062,6 +1085,41 @@ class CoupledESMDriver:
             self._ocean_state = self._ocean_step(
                 self._ocean_state, odt, freshwater=fw, surface_forcing=sf,
             )
+        # Optional WOA surface T/S restoring (coupled spin-up anchor) — applied
+        # once per coupling step over the full dt; no-op when the restoring
+        # timescales are 0 or no WOA target was loaded (byte-identical).
+        self._apply_ocean_restoring(dt)
+
+    def _apply_ocean_restoring(self, dt):
+        """Relax the 3D-ocean surface T/S toward the WOA-climatology IC.
+
+        The standard coupled spin-up anchor: a free 3D ocean started from
+        realistic WOA T/S cold-collapses when the dry cold-start atmosphere
+        radiates away the warm ocean's heat faster than it can re-equilibrate
+        (measured -92 K/yr at 15 d even with the air-sea gustiness fix).
+        Newtonian relaxation of the surface layer toward the WOA initial state
+        keeps the surface near observed climatology while the atmosphere spins
+        up.  No-op unless ocean_mode=='dynamic' + ocean_ic=='woa' AND a positive
+        restoring timescale is configured (CoupledConfig.ocean_restore_*).
+        """
+        cfg = self.coupled_cfg
+        tau_T_days = getattr(cfg, "ocean_restore_sst_tau_days", 0.0)
+        tau_S_days = getattr(cfg, "ocean_restore_sss_tau_days", 0.0)
+        if tau_T_days <= 0.0 and tau_S_days <= 0.0:
+            return
+        if self._ocean_T_target is None or self._ocean_S_target is None:
+            return
+        from legoesm.ocean.forcing.surface_relaxation import (
+            apply_surface_relaxation_step,
+        )
+        self._ocean_state = apply_surface_relaxation_step(
+            self._ocean_state,
+            T_target=self._ocean_T_target,
+            S_target=self._ocean_S_target,
+            dt=dt,
+            tau_T_s=tau_T_days * _SECONDS_PER_DAY,
+            tau_S_s=tau_S_days * _SECONDS_PER_DAY,
+        )
 
     def _ocean_surface_KuvC(self):
         """Ocean surface (SST [K], u_sfc, v_sfc [m/s]) at cell centres on the
@@ -1126,8 +1184,37 @@ class CoupledESMDriver:
                  - tile.lw_up - tile.shflx - tile.lhflx)
         evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
         z = jnp.zeros_like(sw_net)
+        # Freshwater into the ocean, SPLIT by vertical-injection channel so each
+        # term lands where it physically belongs:
+        #   * precip/evap  -> ocean P−E (top cell), CURRENT (depends on current SST)
+        #   * runoff       -> LAND river runoff (depth-spread over the ocean's
+        #                     ``runoff_depth_spread_m``, NEMO ``rn_dep_max``)
+        #   * ice_fw       -> ice melt + lake P−E (top cell)
+        # ONLY the two NON-ocean channels are lagged one coupling sub-step (the
+        # surface/coupler step runs AFTER the ocean step — explicit coupling).
+        # Ocean P−E stays CURRENT, so a time-varying precip/evaporation forcing
+        # is delivered without one-step staleness and the aquaplanet path is
+        # byte-identical to the legacy ``runoff=ice_fw=0`` code (no land/ice/lake
+        # tile ⇒ both lagged channels are exactly zero).  The land/ice/lake
+        # exchange is read straight from the lagged blended response's dedicated
+        # sub-channels — NOT reconstructed by subtracting the current ocean P−E
+        # (which would leak a stale-P−E / coastal area-weight residual into
+        # ice_fw).  Direct attribute access (not getattr-with-default) so a
+        # malformed surface response fails loudly instead of silently routing
+        # river runoff into the wrong channel.  Interior-land runoff at fully-dry
+        # cells is gated out by the ocean wet mask (no river-routing map here — a
+        # separate Dai-Trenberth concern); fractional coastal cells receive their
+        # local f_land·runoff.
+        prev = self._last_sfc_response
+        if prev is None:
+            river = z
+            surface_extra = z
+        else:
+            river = prev.river_runoff_flux              # land, depth-spread
+            surface_extra = prev.ice_lake_freshwater_flux  # ice melt + lake, surface
         fw = FreshwaterForcing(
-            precip=atm_forcing.precip_total, evap=evap, runoff=z, ice_fw=z,
+            precip=atm_forcing.precip_total, evap=evap, runoff=river,
+            ice_fw=surface_extra,
         )
         sf = OceanSurfaceForcing(
             sw_down=atm_forcing.sw_down, q_net=q_net,

@@ -1250,11 +1250,14 @@ class PhysicsPipeline:
         )
         sw_up_toa = ad.unflatten_2d(rad_out.sw_flux_up[:, 0])
         lw_up_toa = ad.unflatten_2d(rad_out.lw_flux_up[:, 0])
-        # rsdt = the prescribed TOA insolation (S_0 cos(SZA) / daily-mean), NOT
-        # the quadratically-extrapolated top-halo downwelling flux (which the
-        # _replace_top_flux range-limit caps ~15% low).  See _toa_insolation.
-        sw_down_toa = self._toa_insolation(
-            lat, lon, day_of_year, seconds_of_day, s_0)
+        # rsdt = prescribed TOA incident SW the solver was given (#620), not the
+        # quadratically clamped top-halo SW flux (rad_out.sw_flux_down[:, 0],
+        # ~15% low).  Halo fallback keeps a value for any path (e.g. the
+        # zero-radiation stub) that leaves toa_insolation=None.
+        sw_down_toa = ad.unflatten_2d(
+            rad_out.toa_insolation if rad_out.toa_insolation is not None
+            else rad_out.sw_flux_down[:, 0]
+        )
 
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         if _land_active:
@@ -1613,6 +1616,9 @@ def _build_rrtmgp_radiation_fn(config):
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
+            # Prescribed TOA incident SW = S_0·max(cosθ,0) for the rsdt
+            # diagnostic (#620); matches _compute_insolation's diurnal return.
+            insol = s_0 * cos_zenith
         else:
             # Daytime-effective cos(SZA): use daylight fraction so the solver
             # sees the correct optical path during sunlit hours.  SW fluxes
@@ -1665,6 +1671,10 @@ def _build_rrtmgp_radiation_fn(config):
                 sw_heating_rate=result.sw_heating_rate * s,
             )
 
+        # Carry the prescribed TOA insolation so the CMOR rsdt diagnostic
+        # reads true TOA incident SW, not the clamped top-halo flux (#620).
+        # AFTER the rescale rebuild (which drops the field) so it survives.
+        result = result._replace(toa_insolation=insol)
         return result
 
     return radiation_fn

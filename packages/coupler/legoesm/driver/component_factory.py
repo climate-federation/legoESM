@@ -160,8 +160,16 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     dx_min = _grid_min_dx(grid)
     DT = dc.dt
 
-    # Laplacian viscosity: CFL-safe Smagorinsky-like default
-    A_h = 0.05 * dx_min ** 2 / DT
+    # Laplacian viscosity (2nd-order, scale-NON-selective).  The earlier
+    # default 0.05*dx^2/DT was ~5-10x too strong: it damped a 3000 km
+    # baroclinic eddy in ~5 h (faster than its ~1-2 day growth), crushing the
+    # midlatitude eddy-driven jets and producing spurious equatorial
+    # super-rotation (dry Held-Suarez jet 2.9 vs spectral 37 m/s).  Reduced
+    # ~16x to a level whose eddy-scale (~4000 km) damping time is ~days while
+    # still damping 2*dx grid noise in a few hours; the scale-selective
+    # 4th-order hyperdiff below is the primary grid-noise control.  a_h_scale
+    # exposes it for tuning (0 = rely on hyperdiff alone).
+    A_h = dc.a_h_scale * 3.0e-3 * dx_min ** 2 / DT
 
     # Biharmonic: e-folding time for grid-scale noise
     tau_efold = 24.0 * 3600.0

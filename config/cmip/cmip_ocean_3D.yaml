@@ -1,0 +1,61 @@
+# Canonical coupled CMIP run — full prognostic 3D ocean (LatLonCGridOceanModel)
+# from realistic WOA18 initial conditions.
+#
+#   run_coupled.py --config config/cmip/cmip_ocean_3D.yaml
+#
+# The dynamic-ocean twin of config/cmip/cmip_ocean_slab.yaml: IDENTICAL
+# atmosphere + tuned ("trained") parameters, only the ocean differs (a stepped
+# 3D primitive-equation ocean on the shared lat-lon grid, vs a thermodynamic
+# slab).  Reproduces the run that solved the 3D-ocean cold-collapse and reaches
+# a stable, realistic spin-up (SST drift flips positive / decelerating toward
+# equilibrium; tropical warm pool ~300 K; circulation stable max|v|~20 m/s).
+#
+# The cold-collapse fix = WOA surface T/S Newtonian restoring (tau below): a free
+# 3D ocean from realistic WOA T/S cold-collapses when the dry cold-start
+# atmosphere radiates away the warm ocean heat faster than it can re-equilibrate;
+# the restoring holds the surface near observed climatology while the atmosphere
+# spins up.  Requires --grid latlon (the 3D ocean co-locates with the atm grid).
+#
+# Keys are run_coupled argument dests; --config sets them as DEFAULTS so any
+# explicit CLI flag still overrides.
+
+# --- atmosphere + grid (identical to the slab twin) ---
+preset: slab_richards
+grid: latlon
+resolution: 24
+nlev: 20
+dt: 300.0
+ic: standard
+days: 240
+diag_days: 10                  # atm<->ocean coupling cadence (<=10 d for stability)
+
+# --- radiation (true CMIP6 RRTMGP) ---
+radiation: rrtmgp
+rrtmgp_gpoint_batch_size: 16
+rrtmgp_gpoint_checkpoint: false
+
+# --- physics schemes ---
+convection: sbm
+microphysics: morrison
+clouds: sundqvist
+convective_cloud: true
+
+# --- TUNED air-sea + cloud "trained" parameters (identical to the slab twin) ---
+surface_bulk_scheme: coare3
+surface_gustiness_zi: 300.0
+cloud_q_c_diagnostic: 3.0e-4
+snow_albedo_feedback: true
+
+# --- ocean: prognostic 3D from WOA18 IC + surface restoring (the stabilizer) ---
+ocean: dynamic
+ocean_ic: woa                  # WOA18 T/S initial condition (data/woa18/)
+ocean_nlev: 20
+ocean_dt: 300.0                # ocean sub-step [s]
+ocean_restore_sst_tau_days: 5.0    # WOA surface-T restoring timescale [d]
+ocean_restore_sss_tau_days: 30.0   # WOA surface-S restoring timescale [d]
+
+# --- CMOR output (historical-1850 forcing) ---
+experiment: historical
+start_year: 1850
+cmip_output: true
+cmip_resolution_deg: 5.0
