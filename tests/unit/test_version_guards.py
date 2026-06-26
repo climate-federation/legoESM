@@ -164,9 +164,15 @@ class TestConstantsConsistency:
         )
 
     def test_mpi4jax_max_excl(self):
-        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 10, 0), (
-            "_TESTED_MPI4JAX_MAX_EXCL must match pyproject.toml mpi4jax<0.10 "
-            "(mpi4jax 0.9.0 = the FFI rewrite, issue #567)"
+        # _TESTED_* is the LEGACY (custom-call) generation's upper bound: mpi4jax
+        # 0.8.x paired with jax 0.8-0.9.  mpi4jax 0.9.0 (the FFI rewrite, #567)
+        # is the SECOND generation, validated separately via _FFI_MPI4JAX_* and
+        # paired with jax 0.10+.  Their union [0.8, 0.10) is the pyproject pin
+        # mpi4jax<0.10, so the legacy max stays 0.9 while packaging allows 0.9.
+        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 9, 0), (
+            "_TESTED_MPI4JAX_MAX_EXCL is the legacy-generation upper bound (<0.9); "
+            "the FFI generation (mpi4jax 0.9.x) is covered by _FFI_MPI4JAX_* and the "
+            "pyproject mpi4jax<0.10 pin is the union of both generations"
         )
 
     def test_jax_tested_range(self):
