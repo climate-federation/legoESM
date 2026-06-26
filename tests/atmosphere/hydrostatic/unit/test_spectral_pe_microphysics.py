@@ -504,7 +504,16 @@ class TestSpectralPEDycoreWithMicrophysics:
     ):
         """Convection + microphysics together produce a different
         post-step q_v than either scheme alone (confirms the
-        per-tracer accumulation in the orchestrator)."""
+        per-tracer accumulation in the orchestrator).
+
+        Uses the STATELESS ``sbm`` convection scheme: spectral PE has no
+        per-column PhysicsState carry slot, so its ``step()`` refuses a
+        profile-prognostic scheme (tiedtke/ZM/KF/emanuel/bechtold) that
+        would silently reseed its memory every step (issue #405/#413).
+        ``sbm`` is the deep-convection scheme that exercises the same
+        orchestrator tracer-accumulation path without a carry; it produces
+        a real convective q_v tendency here (verified ~2e-4 kg/kg/step).
+        """
         config = SpectralPEConfig(
             hyperdiff_coeff=_proper_hyperdiff(grid),
             time_integrator="ssp_rk3",
@@ -514,7 +523,7 @@ class TestSpectralPEDycoreWithMicrophysics:
         # Convection-only.
         cfg_conv = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(scheme="tiedtke"),
+            convection=ConvectionConfig(scheme="sbm"),
             turbulence=TurbulenceConfig(scheme="none"),
             microphysics=MicrophysicsConfig(scheme="none"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
@@ -532,7 +541,7 @@ class TestSpectralPEDycoreWithMicrophysics:
         # Both.
         cfg_both = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(scheme="tiedtke"),
+            convection=ConvectionConfig(scheme="sbm"),
             turbulence=TurbulenceConfig(scheme="none"),
             microphysics=MicrophysicsConfig(
                 scheme="kessler", kessler=KesslerConfig(),

@@ -80,6 +80,10 @@ def _acc_recipe_and_model(*, lateral_viscosity_operator=None):
 def _developed_state(recipe, model, n=12):
     """Run a few steps under wind so u/v/T/S/eke are non-trivial (developed flow)."""
     state = recipe.initial_state
+    # Rigid-lid island decomposition must be built from the CONCRETE initial state
+    # before the first (jitted) model.step (the in-jit host flood-fill cannot run on
+    # a traced state) — see ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
     for _ in range(n):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     return state
@@ -562,6 +566,9 @@ def test_3d_path_bit_identical_with_augmentation_off():
         gm_source_mode="parameterized", source_p_diss_iso=False)
     state = recipe.initial_state
     s = state
+    # Warm the rigid-lid concrete cache on each model before its first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model_off._ensure_rigid_lid_data(state)
     for _ in range(5):
         s = model_off.step(s, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     # Reference: the SAME config built independently (no augmentation) — must match
@@ -571,6 +578,7 @@ def test_3d_path_bit_identical_with_augmentation_off():
         source_kdiss_h=False, kdiss_h_flux_form=False,
         gm_source_mode="parameterized", source_p_diss_iso=False)
     s2 = recipe.initial_state
+    model_ref._ensure_rigid_lid_data(s2)
     for _ in range(5):
         s2 = model_ref.step(s2, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     np.testing.assert_array_equal(np.asarray(s.eke.data), np.asarray(s2.eke.data))
@@ -592,6 +600,11 @@ def test_kdiss_h_flux_form_step_differs_from_dynamical_and_dynamical_reproducibl
     s_dyn = recipe.initial_state
     s_flux = recipe.initial_state
     s_dyn2 = recipe.initial_state
+    # Warm each model's rigid-lid concrete cache before its first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model_dyn._ensure_rigid_lid_data(s_dyn)
+    model_flux._ensure_rigid_lid_data(s_flux)
+    model_dyn2._ensure_rigid_lid_data(s_dyn2)
     for _ in range(5):
         s_dyn = model_dyn.step(s_dyn, DT_MOM_S, surface_forcing=recipe.wind_forcing)
         s_flux = model_flux.step(s_flux, DT_MOM_S, surface_forcing=recipe.wind_forcing)
@@ -619,6 +632,10 @@ def test_augmentation_on_increases_eke_source():
     _recipe2, model_on = _acc_model_with_eke()  # recipe default = augmentation ON
     s_off = recipe.initial_state
     s_on = recipe.initial_state
+    # Warm each model's rigid-lid concrete cache before its first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model_off._ensure_rigid_lid_data(s_off)
+    model_on._ensure_rigid_lid_data(s_on)
     for _ in range(6):
         s_off = model_off.step(s_off, DT_MOM_S, surface_forcing=recipe.wind_forcing)
         s_on = model_on.step(s_on, DT_MOM_S, surface_forcing=recipe.wind_forcing)
@@ -660,6 +677,10 @@ def test_augmented_3d_step_is_differentiable():
     differentiable (no nondifferentiable branch leaks into the eke path)."""
     recipe, model = _acc_model_and_default()
     state = recipe.initial_state
+    # Warm the rigid-lid concrete cache before grad traces the step (the in-jit
+    # host flood-fill cannot run on the traced state passed into jax.grad) — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
 
     def loss(T_data):
         st = state._replace(T=state.T.replace(data=T_data))

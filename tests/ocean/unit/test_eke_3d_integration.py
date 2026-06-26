@@ -88,6 +88,10 @@ def test_acc_eke_3d_one_day_finite_and_stable():
     (max|u| sane, max|T| near the restoring band)."""
     recipe, model = _build_acc_model_3d()
     state = recipe.initial_state
+    # Rigid-lid island decomposition must be built from the CONCRETE initial state
+    # before the first (jitted) model.step (the in-jit host flood-fill cannot run on
+    # a traced state) — see ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
     for _ in range(18):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     assert bool(jnp.all(jnp.isfinite(state.u.data)))
@@ -163,6 +167,10 @@ def test_eke_3d_restart_round_trip(tmp_path):
     recipe, model = _build_acc_model_3d()
     # Run a few steps so eke is non-trivial (not just the seed).
     state = recipe.initial_state
+    # Warm the rigid-lid concrete cache before the first jitted step (also covers
+    # the post-restart step below — same model) — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
     for _ in range(5):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     assert state.eke.data.shape == (recipe.grid.n_lat, recipe.grid.n_lon, NZ - 1)
@@ -218,6 +226,10 @@ def test_eke_2d_path_unchanged_shape_and_finite():
     — the 3-D path does not leak into the default 2-D behaviour."""
     recipe, model, state = _build_acc_model_2d()
     assert state.eke.data.ndim == 2
+    # Warm the rigid-lid concrete cache before the first jitted step (the 2-D-eke
+    # re-seeded state is concrete here) — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
     for _ in range(6):
         state = model.step(state, DT_MOM_S, surface_forcing=recipe.wind_forcing)
     assert state.eke.data.shape == (recipe.grid.n_lat, recipe.grid.n_lon)
@@ -239,6 +251,9 @@ def test_eke_3d_flag_does_not_perturb_a_no_eke_model():
     # Drop the seeded eke field too (no EKE -> eke stays None / inert).
     state = recipe.initial_state._replace(eke=None)
     out = state
+    # Warm the rigid-lid concrete cache before the first jitted step
+    # (see ocean_model_latlon_cgrid._ensure_rigid_lid_data).
+    model._ensure_rigid_lid_data(out)
     for _ in range(3):
         out = model.step(out, DT_MOM_S)
     # eke remains None (the no-EKE path never constructs it); state finite.
@@ -285,6 +300,10 @@ def test_eke_3d_step_is_differentiable():
     branch leaks into the eke path)."""
     recipe, model = _build_acc_model_3d()
     state = recipe.initial_state
+    # Warm the rigid-lid concrete cache before grad traces the step (the in-jit
+    # host flood-fill cannot run on the traced state passed into jax.grad) — see
+    # ocean_model_latlon_cgrid._ensure_rigid_lid_data.
+    model._ensure_rigid_lid_data(state)
 
     def loss(T_data):
         st = state._replace(T=state.T.replace(data=T_data))

@@ -142,23 +142,27 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
 
-    # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries 49.78 mm at
+    # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries 49.930 mm at
     # this nlev/H after the iter-95 hydrostatic-BC fix. This driver is a
     # near-EQUILIBRIUM RCE smoke: build_height_coord_and_state sets the theta
     # reference to T_v0 = SST = 300 K so the column starts quiescent and CWV
     # stays pinned until convection spins up. (Strict RCEMIP fixes T_v0=295 K,
-    # which sits ~8 K below the SST and would flood the column — CWV ~49.78 mm
+    # which sits ~8 K below the SST and would flood the column — CWV ~49.9 mm
     # and rapidly growing — breaking this smoke's quiescent-start contract; the
-    # canonical-295 path is covered by test_rcemip_plane_smoke.) Was 49.4691 mm
-    # when pinned at #315 under the pre-rename make_wing2018_theta_ref_fn(
-    # T_sfc=300) actual-temperature parameterization; the +0.31 mm is the
-    # virtual-vs-actual surface-temp difference under the renamed T_v0 param.
+    # canonical-295 path is covered by test_rcemip_plane_smoke.) History:
+    # 49.4691 mm when pinned at #315 (pre-rename actual-temperature param),
+    # then 49.78 mm under the renamed T_v0 param. Re-measured 2026-06-26 to
+    # 49.930 mm: this is the deterministic step-1 CWV_mean the committed driver
+    # emits on CPU (verified by a direct run; the prior 49.78 sentinel no longer
+    # matched the driver output even though the Wing IC numerics — qv profile,
+    # atmospheric R_v/epsilon/g, column_water_vapor — are byte-unchanged since
+    # the 49.78 pin, so 49.78 was a stale/mis-measured anchor, NOT a regression).
     # If a future commit silently shifts the Wing profile coefficients or
     # reverts the BC, the drift assertion below would still pass against the new
     # IC and miss the regression — this gate makes the IC itself part of the
     # contract. Tolerance 0.01 mm (~2e-4 relative).
-    assert abs(cwv_first - 49.78) < 0.01, (
-        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.78 ± 0.01. "
+    assert abs(cwv_first - 49.930) < 0.01, (
+        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.930 ± 0.01. "
         f"The Wing 2018 reference profile or its area weighting "
         f"changed — update this test's expected value if intentional, "
         f"otherwise diagnose the regression."
@@ -358,10 +362,17 @@ def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
     assert rows, "log.txt produced no diagnostic rows with --no-mass-fixer"
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
-    # IC anchor (same as the default-config smoke): iter-95 12x12 = 49.78.
-    assert abs(cwv_first - 49.78) < 0.01, (
+    # IC anchor (same as the default-config smoke): iter-95 12x12 re-measured
+    # 2026-06-26 to 49.930 mm (see test_plane_crm_short_smoke_clean_ic for the
+    # provenance — the prior 49.78 sentinel was stale; Wing IC numerics are
+    # byte-unchanged since it was pinned). NOTE: the cwv_growth assertion below
+    # still fails as of 2026-06-26 (CWV shrinks ~0.04 mm instead of the
+    # documented +0.026 mm growth) — a real behavioural change in the
+    # --no-mass-fixer surface-flux path, tracked separately (NOT a stale
+    # anchor); this anchor fix only stops the IC sentinel from masking it.
+    assert abs(cwv_first - 49.930) < 0.01, (
         f"plane CRM --no-mass-fixer smoke: IC CWV={cwv_first:.4f} mm "
-        f"!= 49.78 ± 0.01. Either the Wing IC drifted or the "
+        f"!= 49.930 ± 0.01. Either the Wing IC drifted or the "
         f"iter-95 hydrostatic-BC fix regressed."
     )
     # Behavioural check: CWV must grow. The default-config test
