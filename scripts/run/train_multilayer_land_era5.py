@@ -32,16 +32,21 @@ SOIL-EQUILIBRIUM TRICK (the "annual value across the whole soil layer"):
            evolving it under the under-resolved offline forcing desiccates the top
            layer -> ET collapse -> runaway.
 
-Trainable per-PFT (17): albedo, emissivity, root depth, bulk exchange Ch, soil thermal
-inertia (C_soil + k_solid -> seasonal-cycle amplitude/phase), and the PLANT water-stress
-thresholds theta_wp/theta_fc (CLM btran, DISTINCT from the soil van-Genuchten retention).
-Roughness z0 and the Farquhar photosynthesis params (Vc_max25/g1/LCMA) are ALSO wired in
-but only become active under ``--bulk most`` / ``--stomata``; the crude offline single-
-column forcing cannot constrain them (~3.7 -> ~12 K RMSE), so they default OFF and need
-the coupled diurnal atmosphere to calibrate.
+The DEFAULT surface exchange is MOST (``--bulk most``), matching the coupled diurnal
+land default — so the roughness z0 is calibrated (the key diurnal-coupling param; the
+2 m T/q vs 10 m wind height split that hurt earlier MOST runs turned out NOT to help,
+default z_ref=10 fits best).  Trainable per-PFT (17): albedo, emissivity, root depth,
+roughness z0, soil thermal inertia (C_soil + k_solid -> seasonal-cycle amplitude/phase),
+and the PLANT water-stress thresholds theta_wp/theta_fc (CLM btran, DISTINCT from the
+soil van-Genuchten retention).  Ch is inert under MOST (used only under ``--bulk
+constant``).  The Farquhar photosynthesis params (Vc_max25/g1/LCMA) are wired in but OFF
+by default (``--stomata``): the offline single column has no atmospheric feedback to
+stabilise them (~3 -> ~12 K RMSE), so they stay at physical CLM5 defaults and are
+calibrated only in the coupled model (where they ARE active).
 
-Result (ERA5 skin T, land, default config + 24-h forcing): global RMSE ~3.7 K, bias
-~+2 K; extratropics at slab quality; residual in the wet tropics.
+Result (ERA5 skin T, land, MOST default + 24-h forcing, full-grid): RMSE 3.15 K, bias
++0.42 K, seasonal-amplitude bias -0.73 K; z0 physically structured (forests ~1-2 m,
+grass/crop/bare ~0.03-0.16 m).
 
 Writes the recommended tuned parameters to ``results/land_tuned_multilayer.json`` —
 it does NOT mutate production defaults.  The values baked as the multilayer default
@@ -102,7 +107,12 @@ _TBL = np.asarray(S._TABLE)              # (17,12) CLM5 init values per column
 # LCMA trainable) are reachable via --bulk most / --stomata, but the crude offline
 # single-column forcing cannot constrain them — they roughly TRIPLE the skin-T RMSE
 # (~3.7 -> ~12 K) and need the coupled diurnal atmosphere to calibrate.
-_BULK_SCHEME = "constant"
+# MOST surface exchange (matches the coupled DIURNAL default -> z0 trainable, RMSE ~3.1
+# vs constant-Ch 3.3).  Farquhar stomata are OFF for the OFFLINE calibration: with no
+# atmospheric feedback the offline single column cannot constrain Vc_max25/g1/LCMA (they
+# triple the RMSE), so they stay at physical CLM5 defaults — they ARE active in the
+# coupled model (land_diurnal_surface).  --stomata re-enables them for experiments.
+_BULK_SCHEME = "most"
 _STOMATA_ON = False
 
 
@@ -318,7 +328,11 @@ def loss_ml(p, data, lam_alb=300.0, lam_pft=2.0, lam_amp=0.5):
     return tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp, (tmse, amse, ppft, samp)
 
 
-def train(data, n_iter=250, lr=3e-2):
+def _params_dict(p):
+    return {k: np.asarray(v).tolist() for k, v in constrain_ext(p).items()}
+
+
+def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50):
     p = init_ext_params()
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
     opt = optax.adam(lr); state = opt.init(p)
@@ -328,8 +342,14 @@ def train(data, n_iter=250, lr=3e-2):
         if it % 20 == 0 or it == n_iter - 1:
             print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} perPFT {float(jnp.sqrt(pp)):.3f} "
-                  f"seas-amp {float(jnp.sqrt(sa)):.3f}")
-    return {k: np.asarray(v).tolist() for k, v in constrain_ext(p).items()}
+                  f"seas-amp {float(jnp.sqrt(sa)):.3f}", flush=True)
+        # periodic checkpoint so a long (slow per-iter) run is interruptible and the
+        # converged params are captured before the final iteration.
+        if ckpt_path and it > 0 and it % ckpt_every == 0:
+            with open(ckpt_path, "w") as f:
+                json.dump(_params_dict(p), f, indent=2)
+            print(f"# checkpoint -> {ckpt_path} (it {it})", flush=True)
+    return _params_dict(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -401,6 +421,7 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
 
 
 def main():
+    global _BULK_SCHEME, _STOMATA_ON
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--diurnal-npz", default="/tmp/era5_diurnal.npz",
@@ -412,18 +433,18 @@ def main():
     ap.add_argument("--iters", type=int, default=250)
     ap.add_argument("--lr", type=float, default=3e-2)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--bulk", choices=["constant", "most"], default="constant",
-                    help="surface exchange: 'constant' (stable, default) or 'most' "
-                         "(makes z0 trainable but degrades the offline fit)")
+    ap.add_argument("--bulk", choices=["constant", "most"], default=_BULK_SCHEME,
+                    help="surface exchange: 'most' (default, matches the coupled "
+                         "diurnal model -> z0 trainable) or 'constant' (per-PFT Ch)")
     ap.add_argument("--stomata", action="store_true",
                     help="enable Farquhar stomata (makes Vc_max25/g1/LCMA trainable; "
                          "degrades the offline fit — needs the coupled model)")
     ap.add_argument("--out", default="results/land_tuned_multilayer.json")
     args = ap.parse_args()
-    global _BULK_SCHEME, _STOMATA_ON
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
-    tuned = train(data, n_iter=args.iters, lr=args.lr)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)
