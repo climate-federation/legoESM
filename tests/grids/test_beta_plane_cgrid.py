@@ -74,23 +74,25 @@ def test_pseudo_lat_is_zero_for_metric_self_consistency():
 
 
 def test_divergence_gradient_metrics_are_mutually_consistent():
-    """Energy-conservation invariant the metric fix restores: ``divergence_cgrid``
-    (continuity, drives eta) and ``gradient_x_cgrid`` (the PGF in the predictor /
-    corrector) must use the SAME zonal metric, else the implicit free-surface
-    predictor-corrector is non-conservative (PGF work != continuity).  The bug was
-    that the divergence recomputed the v-face length as ``R*cos(grid.lat_v)*dlon``
-    (varying) while the gradient used ``dx_u = R*dlon*grid.cos_lat = dx_m``
-    (uniform); with the pseudo-lat now 0 they agree exactly.  This compares the
-    two operators' effective zonal metrics by feeding a linear field and reading
-    back the implied length (non-vacuous: a y/radius pseudo-lat makes the v-face
-    metric ~1.8% short at the north edge, breaking this equality)."""
+    """Energy-conservation invariant the #514 metric fix restores:
+    ``divergence_cgrid`` (continuity, drives eta) and ``gradient_x_cgrid`` (the PGF
+    in the predictor / corrector) must use the SAME zonal metric, else the implicit
+    free-surface predictor-corrector is non-conservative (PGF work != continuity).
+    The bug was that the divergence RECOMPUTED the v-face length as
+    ``R*cos(grid.lat_v)*dlon`` (varying with the pseudo-lat) while the gradient used
+    ``dx_u = R*dlon*grid.cos_lat = dx_m`` (uniform).  Post-#514 the divergence READS
+    the stored uniform ``dx_v == dx_m`` instead of recomputing, so the two agree
+    exactly REGARDLESS of the pseudo-lat — verified here with the natural
+    ``cartesian_pseudo_lat=False`` (nonzero ``y_c/radius``), which is precisely the
+    case the old recompute got ~1.8% short at the north edge.  Non-vacuous: on the
+    pre-#514 recompute path this exact config breaks the div==0 equality."""
     from legoesm.grids.operators_latlon_cgrid import (
         divergence_cgrid,
         gradient_x_cgrid,
     )
     ny, nx = 60, 10
     g = create_beta_plane_cgrid_geometry(ny, nx, dx_m=DX, f0=F0, beta=BETA,
-                                         y_origin_m=0.0, cartesian_pseudo_lat=True)
+                                         y_origin_m=0.0, cartesian_pseudo_lat=False)
     # gradient zonal metric: gradient_x of a unit-slope-in-x field == 1/dx_u.
     ramp_x = jnp.asarray(np.broadcast_to(np.arange(nx, dtype=float) * DX, (ny, nx)).copy())
     gx = np.asarray(gradient_x_cgrid(ramp_x, g))[:, 1:nx]      # interior u-faces
