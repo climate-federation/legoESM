@@ -34,8 +34,10 @@ def test_geometry_is_reentrant_beta_plane_channel():
     assert f.min() < 0.0 and f.max() < 0.0          # f<0 everywhere (SH)
     # beta>0: f increases (less negative) northward.
     assert f[-1, 0] > f[0, 0]
-    # Metric-consistent Cartesian pseudo-lat (required for the implicit FS).
-    np.testing.assert_array_equal(np.asarray(g.lat), 0.0)
+    # #514: operators READ the stored uniform dx_v (== dx_m); the geometry's
+    # natural pseudo-lat no longer enters the metric, so the lat=0 workaround is
+    # gone and dx_v is the uniform Cartesian width the implicit FS relies on.
+    np.testing.assert_allclose(np.asarray(g.dx_v), rc.DX_M)
 
 
 def test_vertical_matches_mitgcm_delr():

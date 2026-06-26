@@ -78,6 +78,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     is_tripolar,
+    reads_stored_vface_metric,
     pad_ns_zero,
     vface_zonal_cos_lat,
 )
@@ -318,14 +319,23 @@ def _helmholtz_coupling_pieces(
         # bit-exact serially while fixing the BANDED zonal-line smoother, which
         # otherwise set dx_v=0 at rank cuts and dropped its meridional diagonal
         # there (codex MED, job 8487913), eroding the M-cut at scale.
-        from legoesm.grids.halo_latlon import (
-            pad_with_pole_bc_lat, zero_polar_lat_ends,
-        )
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0)
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])      # (n_lat+1,)
-        cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
-        dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
+        if reads_stored_vface_metric(grid):
+            # Rich geometry (beta-plane): READ the stored v-face metric (#514).
+            # dx_v is lon-uniform here (tripolar took the 2D branch above), so
+            # column 0 is the full 1D metric the regular path expects; the
+            # Cartesian beta-plane gives the uniform dx_m the recompute of a
+            # nonzero pseudo-lat would get ~1.8% wrong.  Pole rows keep their
+            # stored 0 (multiplied by the walled H_v=0 in merid_sum).
+            dx_v = grid.dx_v[:, 0]                        # (n_lat+1,)
+        else:
+            from legoesm.grids.halo_latlon import (
+                pad_with_pole_bc_lat, zero_polar_lat_ends,
+            )
+            lat_pad = pad_with_pole_bc_lat(
+                grid.lat, halo=1, south_value=0.0, north_value=0.0)
+            lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])      # (n_lat+1,)
+            cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
+            dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
         zonal_E = H_u_E * dy_u[:, None] / dx_u[:, None] * inv_area
         zonal_W = H_u_W * dy_u[:, None] / dx_u[:, None] * inv_area
