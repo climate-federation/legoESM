@@ -515,6 +515,91 @@ class TestTrainingDriver:
         assert callable(fn)
         assert hasattr(fn, 'raw')
 
+    def test_train_step_builds_segment_once(self, monkeypatch):
+        """OOM/recompile guard: the segment fn is built exactly ONCE (one
+        ``filter_jit`` trace), not once per sample*epoch.
+
+        Regression test for the documented ~1.5 GiB/sample leak — the old
+        driver rebuilt ``build_segment_fn`` and re-traced the rollout +
+        reverse adjoint on every ``eqx.filter_value_and_grad`` call because
+        the step was not wrapped in ``eqx.filter_jit``.
+        """
+        import equinox as eqx
+        import optax
+        import legoesm.training.training_driver as td
+        from legoesm.training.trainable_params import TrainablePhysicsParams
+
+        build_count = [0]
+
+        def counting_build(**kw):
+            build_count[0] += 1
+            tau = kw["tau_equator"]
+            c_e = kw["C_E"]
+
+            class _Seg:
+                # ``.raw`` reads the (traced) trainable kwargs so the AD path
+                # to the trainable is real (a zero grad would mean the params
+                # got baked in as constants).
+                def raw(self, carry, n_steps, forcing):
+                    return tau * carry + c_e * forcing
+
+            return _Seg()
+
+        # Lightweight stand-ins exercise the real _build_train_step /
+        # _training_loop control flow (filter_jit, value_and_grad, optimiser
+        # update) without the heavy dycore.
+        monkeypatch.setattr(td, "build_segment_fn", counting_build)
+        monkeypatch.setattr(
+            td, "single_day_rollout",
+            lambda ic, forcing, run_seg_fn, dt: run_seg_fn(ic, 1, forcing),
+        )
+        monkeypatch.setattr(
+            td, "combined_loss",
+            lambda pred, target, sigma_full, grid=None, config=None: jnp.sum(
+                (pred - target) ** 2
+            ),
+        )
+
+        def make_run_seg(trainable):
+            return td._build_training_segment(
+                None, None, _GRID, _SIGMA, 600.0,
+                **trainable.to_segment_kwargs(),
+            )
+
+        params = TrainablePhysicsParams.from_defaults()
+        optimizer = optax.adam(1e-3)
+        train_step = td._build_train_step(
+            make_run_seg, optimizer,
+            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, None,
+        )
+
+        ics = [jnp.asarray(1.0), jnp.asarray(2.0)]
+        targets = [jnp.asarray(0.0), jnp.asarray(0.0)]
+        forcings = [jnp.asarray(0.5), jnp.asarray(1.5)]
+
+        # First call traces once -> build runs once; AD must reach the
+        # trainable (finite, NON-zero gradient).
+        opt_state0 = optimizer.init(eqx.filter(params, eqx.is_array))
+        _, _, loss0, gnorm0 = train_step(
+            params, opt_state0, ics[0], targets[0], forcings[0]
+        )
+        assert jnp.isfinite(loss0)
+        assert float(gnorm0) > 0.0
+        assert build_count[0] == 1
+
+        # 2 epochs x 2 samples = 4 more train_step calls reuse the SAME
+        # compiled step (cache hits) => no extra builds.
+        _, history = td._training_loop(
+            train_step, params, optimizer, ics, targets, forcings,
+            n_epochs=2, log_every=10,
+        )
+        assert build_count[0] == 1, (
+            f"segment fn rebuilt {build_count[0]}x (expected 1); the "
+            "filter_jit-once fix regressed -> per-sample retrace/OOM."
+        )
+        assert len(history) == 2
+        assert all(jnp.isfinite(jnp.asarray(loss)) for loss in history)
+
 
 # ---------------------------------------------------------------------------
 # 9. API signature guards
