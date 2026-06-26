@@ -2182,6 +2182,20 @@ def _resolve_microphysics(config):
             )
         micro_config = micro_config._replace(nc_from_aerosol=True)
 
+    # Sub-grid in-cloud warm-rain closure (#613): evaluate the non-linear
+    # KK2000 warm-rain rates on in-cloud condensate (q_c / cloud fraction).
+    # Fail loudly on a scheme that has no such field rather than silently
+    # ignoring the flag.
+    if getattr(config, "subgrid_autoconversion", False):
+        if "subgrid_autoconversion" not in getattr(micro_config, "_fields", ()):
+            raise ValueError(
+                f"subgrid_autoconversion=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no sub-grid warm-rain "
+                "closure); use --microphysics morrison or drop "
+                "--subgrid-autoconv."
+            )
+        micro_config = micro_config._replace(subgrid_autoconversion=True)
+
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
             MicrophysicsEmulator,

@@ -630,3 +630,60 @@ def test_gustiness_defaults_off():
     cfg = build_config_from_args(args)
     assert cfg.surface_gustiness_zi == 0.0
     assert cfg.cloud_q_c_diagnostic is None
+
+
+def test_cloud_tuning_flags_thread_to_config():
+    """--rh-crit / --cloud-conv-cloud-max reach ExperimentConfig and pass
+    strict validation within their bounds."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--rh-crit", "0.83",
+        "--cloud-conv-cloud-max", "0.25",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_rh_crit == pytest.approx(0.83)
+    assert cfg.cloud_conv_cloud_max == pytest.approx(0.25)
+    assert cfg.validate_strict() is None
+
+
+def test_cloud_tuning_flags_default_none():
+    """Unset cloud-tuning knobs stay None (scheme defaults, byte-identical)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_rh_crit is None
+    assert cfg.cloud_conv_cloud_max is None
+
+
+def test_rh_crit_out_of_bounds_rejected():
+    """An rh_crit outside (0.5, 0.99) must fail strict validation."""
+    parser = build_arg_parser()
+    args = _postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--rh-crit", "1.5"]), parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises((ValueError, AssertionError)):
+        cfg.validate_strict()
+
+
+def test_subgrid_autoconv_flag_threads_to_config():
+    """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--microphysics", "morrison",
+        "--subgrid-autoconv",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.subgrid_autoconversion is True
+    assert cfg.microphysics == "morrison"
+
+
+def test_subgrid_autoconv_defaults_off():
+    """Sub-grid warm-rain closure is opt-in (byte-identical legacy default)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.subgrid_autoconversion is False

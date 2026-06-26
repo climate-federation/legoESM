@@ -341,6 +341,13 @@ class ExperimentConfig(NamedTuple):
     # aerosol_forcing="external" and a specified-Nc double-moment
     # microphysics (morrison); validated in build_physics_pipeline.
     nc_from_aerosol: bool = False
+    # Sub-grid in-cloud warm-rain closure (#613): evaluate the non-linear
+    # Morrison KK2000 autoconversion/accretion on in-cloud q_c (q_c / cloud
+    # fraction), then scale back — recovers the drizzle that grid-mean rates
+    # under-produce in partly-filled boxes at coarse resolution (raises precip
+    # AND drains suspended cloud water -> lower LWP).  Morrison only; validated
+    # in build_physics_pipeline.
+    subgrid_autoconversion: bool = False
 
     # Sub-grid in-cloud autoconversion/accretion (Morrison & Gettelman 2008):
     # evaluate warm-rain rates on in-cloud q_c/cf and scale by cf so the

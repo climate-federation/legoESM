@@ -645,6 +645,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
+    # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
+    # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
+    parser.add_argument("--cloud-conv-cloud-max", type=float, default=None,
+                        dest="conv_cloud_max",
+                        help="Cap on convective (Slingo 1987) cloud cover "
+                             "(CloudConfig.conv_cloud_max). Limits anvil "
+                             "over-reflection. Bounds (0.1, 1.0).")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -870,6 +878,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_beta_min=args.land_beta_min,
         land_bucket_w_init_frac=args.land_bucket_w_init_frac,
         land_stomatal_beta=args.land_stomatal_beta,
+        cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
         albedo_ice=args.albedo_ice,
