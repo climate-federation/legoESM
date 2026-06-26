@@ -4,7 +4,7 @@
 #PBS -q main
 #PBS -l job_priority=regular
 #PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
-#PBS -l walltime=02:00:00
+#PBS -l walltime=03:00:00
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
