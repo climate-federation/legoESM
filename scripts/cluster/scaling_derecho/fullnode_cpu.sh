@@ -2,7 +2,7 @@
 #PBS -N fullnode_cpu
 #PBS -A P08010000
 #PBS -q main
-#PBS -l job_priority=regular
+#PBS -l job_priority=premium
 #PBS -l select=1:ncpus=128:mpiprocs=128
 #PBS -l walltime=03:00:00
 #PBS -j oe
