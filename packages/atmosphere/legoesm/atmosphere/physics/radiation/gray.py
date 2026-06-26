@@ -376,4 +376,6 @@ def gray_radiation(
         heating_rate=total_hr,
         lw_heating_rate=lw_hr,
         sw_heating_rate=sw_hr,
+        # Prescribed TOA incident SW for the CMOR rsdt diagnostic (#620).
+        toa_insolation=insolation,
     )

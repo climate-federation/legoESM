@@ -34,6 +34,13 @@ class RadiationOutput(NamedTuple):
         LW radiative heating rate [K/s], shape (ncol, nlev).
     sw_heating_rate : jax.Array
         SW radiative heating rate [K/s], shape (ncol, nlev).
+    toa_insolation : jax.Array or None
+        Prescribed TOA incident SW the solver was given (ncol,) [W/m^2]
+        (#620).  This is ``S_0·cos(SZA)`` (diurnal) or the daily-mean /
+        RCE insolation, bounded [0, S_0] and 0 at night.  Used for the
+        CMOR ``rsdt`` diagnostic so it reflects the true TOA insolation
+        rather than the quadratically clamped top-halo SW flux.  ``None``
+        (default) for paths that do not set it (e.g. zero-radiation stub).
     """
     lw_flux_up: jax.Array
     lw_flux_down: jax.Array
@@ -42,3 +49,4 @@ class RadiationOutput(NamedTuple):
     heating_rate: jax.Array
     lw_heating_rate: jax.Array
     sw_heating_rate: jax.Array
+    toa_insolation: jax.Array | None = None   # (ncol,) prescribed TOA incident SW [W/m^2] (#620)
