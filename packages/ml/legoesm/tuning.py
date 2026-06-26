@@ -207,7 +207,8 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         name="sbm_tau_c",
         default=7200.0,
         min_val=3600.0,
-        max_val=1.0e6,
+        max_val=14400.0,  # validated training range (trainable_params.py);
+                          # re-widen tuning + trainable together if intended
         units="s",
         description="Convective relaxation timescale (SBM)",
         category="convection",
@@ -692,7 +693,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     "albedo_ocean": TuningParameter(
         name="albedo_ocean",
         default=0.06,
-        min_val=0.05,
+        min_val=0.03,  # matches trainable_params.py validated range
         max_val=0.10,
         units="1",
         description="Open-ocean surface shortwave albedo",
