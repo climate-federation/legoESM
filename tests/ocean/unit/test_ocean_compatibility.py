@@ -28,11 +28,7 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_model import OceanModel
-from legoesm.ocean.conservation import (
-    fix_volume_ocean,
-    fix_heat_ocean,
-    fix_salt_ocean,
-)
+from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
 # ==============================================================================
@@ -267,24 +263,33 @@ class TestMPIAwareness:
         grad_source = inspect.getsource(_gradient_x_raw)
         assert "gradient_x(" in grad_source
 
-    def test_conservation_fixer_produces_correct_output(self, grid, z_coord, state):
-        """Conservation fixer should produce an OceanState with finite data."""
+    def test_conservation_fixer_produces_correct_output(
+        self, grid, z_coord, state, config,
+    ):
+        """Conservation fixer should produce an OceanState with finite data.
+
+        Volume-only leg of the combined ``ocean_conservation_fixer`` (the
+        standalone ``fix_volume_ocean`` had no production caller and was
+        removed; the combined fixer is the live path).
+        """
         perturbed = state._replace(
             eta=state.eta.replace(
                 data=state.eta.data + 0.01 * jnp.ones_like(state.eta.data),
             ),
         )
-        fixed = fix_volume_ocean(perturbed, state, grid)
+        cfg = config._replace(fix_volume=True, fix_heat=False, fix_salt=False)
+        fixed = ocean_conservation_fixer(perturbed, state, grid, z_coord, cfg)
         assert jnp.all(jnp.isfinite(fixed.eta.data))
 
-    def test_heat_conservation_fixer(self, grid, z_coord, state):
+    def test_heat_conservation_fixer(self, grid, z_coord, state, config):
         """Heat fixer should produce finite output."""
         perturbed = state._replace(
             T=state.T.replace(
                 data=state.T.data + 0.1 * jnp.ones_like(state.T.data),
             ),
         )
-        fixed = fix_heat_ocean(perturbed, state, grid, z_coord)
+        cfg = config._replace(fix_volume=False, fix_heat=True, fix_salt=False)
+        fixed = ocean_conservation_fixer(perturbed, state, grid, z_coord, cfg)
         assert jnp.all(jnp.isfinite(fixed.T.data))
 
     def test_spectral_conservation_uses_mpi_aware_reductions(self):

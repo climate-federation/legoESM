@@ -571,6 +571,7 @@ class CoupledESMDriver:
         # per-cell PFT params come from the provider; these are the global snow/ice
         # + bulk-transfer values tuned vs ERA5 under physical bounds).
         if (cfg.land_mode != "none"
+                # getattr: optional-config compat gate (land_param_source selector)
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
             import legoesm.land.clm_surface_map as _csm
             if cfg.land_mode == "multilayer":
@@ -586,6 +587,7 @@ class CoupledESMDriver:
         # Spatial soil hydraulics from the CLM reference map (per-column van-
         # Genuchten retention) for the Richards multilayer land.
         if (cfg.land_mode == "multilayer"
+                # getattr: optional-config compat gate (land_param_source selector)
                 and getattr(cfg, "land_param_source", "analytical") == "clm"
                 and self._atm._grid_lat is not None):
             from legoesm.land.clm_surface_map import (
@@ -617,7 +619,7 @@ class CoupledESMDriver:
         # well-posed here.  Carbon must run (differland) so Farquhar has a prognostic
         # LAI; the coupler already initialises + threads the carbon state.
         if (cfg.land_mode == "multilayer"
-                and getattr(cfg, "land_diurnal_surface", True)):
+                and cfg.land_diurnal_surface):
             land_cfg = enable_diurnal_surface_land(land_cfg)
             logger.info("  Land surface: MOST exchange + Farquhar stomata "
                         "(coupled diurnal model)")
@@ -642,7 +644,7 @@ class CoupledESMDriver:
         # same spatial source the slab SST uses — so tropical land does not
         # cold-spin from a uniform 280 K (default off => byte-identical).
         soil_kwargs = {}
-        if getattr(cfg, "warm_start_soil", False):
+        if cfg.warm_start_soil:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
@@ -745,6 +747,7 @@ class CoupledESMDriver:
                            "falling back to scalar params")
             return None
 
+        # getattr: optional-config compat gate (land_param_source selector)
         source = getattr(self.coupled_cfg, "land_param_source", "analytical")
         if source == "clm":
             from legoesm.land.clm_surface_map import clm_surface_provider
@@ -871,7 +874,7 @@ class CoupledESMDriver:
         structure is stable across the run — ``model_driver`` compiles the
         segment kernel once.
         """
-        if not getattr(self.coupled_cfg, "couple_surface_radiation", False):
+        if not self.coupled_cfg.couple_surface_radiation:
             return
 
         from legoesm.forcing.surface_utils import (
@@ -941,7 +944,7 @@ class CoupledESMDriver:
         # feedback is off or before the first coupler step.
         _resp = self._last_sfc_response
         _dyn_sfc = (
-            getattr(self.coupled_cfg, "couple_surface_radiation", False)
+            self.coupled_cfg.couple_surface_radiation
             and _resp is not None
             and getattr(_resp, "albedo", None) is not None
         )
@@ -982,7 +985,7 @@ class CoupledESMDriver:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
-            S_0 = getattr(acfg, 'S_0', constants.S_0)
+            S_0 = acfg.S_0
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:
