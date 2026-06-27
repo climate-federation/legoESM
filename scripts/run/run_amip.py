@@ -394,6 +394,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "'+'-joined composite of the diagnostic sources "
                              "(e.g. 'hines+mcfarlane' to run non-orographic + "
                              "orographic together). Validated in ExperimentConfig.")
+    # Tuned air-sea + cloud knobs (the CMIP-realism calibration) — mirror
+    # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
+    # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
+    parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
+                             "MOST with convective gustiness; the tuned slab value).")
+    parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
+                        default=0.0,
+                        help="COARE convective-gustiness BL depth z_i [m] (0=off; "
+                             "tuned slab value 300).")
+    parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
+                        default=None,
+                        help="In-cloud diagnostic condensate fed to radiation "
+                             "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
+    parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
+                        help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--convective-cloud", dest="convective_cloud",
+                        action="store_true", default=False,
+                        help="Add the convective (thin-cirrus) cloud-fraction "
+                             "source (the tuned slab value is ON).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
@@ -681,6 +702,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
+        # Tuned air-sea + cloud calibration (mirror run_coupled).
+        surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_gustiness_zi=args.surface_gustiness_zi,
+        cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
+        cloud_rh_crit=args.cloud_rh_crit,
+        convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
         topography=args.topography,
