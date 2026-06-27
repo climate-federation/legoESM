@@ -14,7 +14,7 @@ scaling_derecho/
 ├── _env.sh              # shared env, sourced by every job (edit 2 values, Step 0)
 ├── submit_fullnode.sh   # ►ENTRY POINT◄  submit_fullnode.sh <outdir> <grid> [res...]
 ├── fullnode_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
-├── fullnode_gpu.sh      # GPU scaling sweep (latlon/ico = 1->2->4 A100, route-A; spectral = 1)
+├── fullnode_gpu.sh      # GPU scaling sweep (latlon = 1->2->4 A100; ico = 1->2->4->… multi-node via NODES; spectral = 1)
 ├── cube_fullnode_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
 ├── cube_strong_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
 └── finalize_fullnode.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
@@ -329,9 +329,16 @@ GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral #
 | `PRECISION` | `float32` | `float32` \| `float64` |
 | `DRYRUN` | `0` | `1` = print the `qsub` lines without submitting |
 | `CPU_ONLY` / `GPU_ONLY` | `0` | submit just one side |
+| `NODES` | `1` | **icosahedral GPU only**: `>1` overrides the GPU job's `select=` to span N nodes (4 A100/node), so the A100 curve goes multi-node (1→2→4→8→16… GPUs, self-capped to `NODES*4`). Rejected for latlon/spectral (see issue #641). |
 
 Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
-icosahedral `6 7`, spectral `85 170`.
+icosahedral `6 7 8` (L8 = 655,362 cells, ~25 km; needs several A100s — pair with
+`NODES>1`), spectral `85 170`.
+
+```bash
+# Multi-node icosahedral A100 sweep: 4 nodes = 16 A100, up through level 8.
+NODES=4 GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
+```
 
 ## Step 5 — Monitor the jobs
 

@@ -9,14 +9,21 @@
 #PBS -k eod
 # ===========================================================================
 # GPU STRONG-SCALING sweep for latlon / icosahedral / spectral -- the GPU half
-# of the CPU-vs-A100 comparison.  Sweeps 1->2->4 A100 (one rank per GPU, route-A
-# mpi4jax) AT EACH resolution, so the GPU side is a real scaling curve up to the
-# full GPU node -- not a single A100.  Spectral has no MPI path (1 GPU only).
+# of the CPU-vs-A100 comparison.  One rank per GPU (route-A mpi4jax) AT EACH
+# resolution, so the GPU side is a real scaling curve -- not a single A100.
+# latlon sweeps 1->2->4 (single node); icosahedral can go MULTI-NODE
+# (1->2->4->8->16 ...) -- its MPAS cell partition is a genuine domain
+# decomposition with no face/divisor cap (see issue #641 for why the other
+# grids cannot).  Spectral has no MPI path (1 GPU only).
 # Pair with fullnode_cpu.sh; SAME driver (run_cpu_mpi_scaling.py) + resolutions.
 #
 # REQUIRES the route-A overlay env (legoesm-gpu with a CUDA-built mpi4jax; see
 # README Step 1b) -- multi-GPU mpi4jax halos.  Cubed-sphere is handled by
 # cube_strong_gpu.sh (face-scatter, RANKS=1 2 3).
+#
+# Multi-node: submit_fullnode.sh sets NODES>1 and overrides the qsub `select=`
+# to span nodes; this script then sweeps GPU_RANKS up to NODES*4.  Direct:
+#   GRID=icosahedral RESOLUTIONS="7 8" GPU_RANKS="1 2 4 8" ./fullnode_gpu.sh
 #
 # Driven by submit_fullnode.sh (one job per resolution).  Direct:
 #   GRID=latlon RESOLUTIONS=256 ./fullnode_gpu.sh
@@ -47,9 +54,20 @@ GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
 PRECISION="${PRECISION:-float32}"
 EXTRA=""
-NGPUS_DETECT="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
-NGPUS="${NGPUS:-${NGPUS_DETECT}}"
-if ! [ "$NGPUS" -ge 1 ] 2>/dev/null; then NGPUS=4; fi
+# Total GPUs across ALL allocated nodes = the MPI slots PBS granted (one line
+# per slot in $PBS_NODEFILE; mpiprocs=4 -> 4 lines/node).  Do NOT use a per-node
+# `nvidia-smi -L` count: on a multi-node `select=` it sees only one node's 4
+# GPUs and silently SKIPs every >4-GPU (multi-node) point -- the GPU analog of
+# the $NCPUS/_CORES single-node-undercount trap fixed on the CPU side.  An
+# explicit NGPUS override still wins; nvidia-smi is the off-PBS fallback.
+TOTAL_GPUS="${NGPUS:-}"
+if [ -z "$TOTAL_GPUS" ]; then
+    TOTAL_GPUS="$( { [ -n "${PBS_NODEFILE:-}" ] && wc -l < "$PBS_NODEFILE"; } 2>/dev/null | tr -d '[:space:]' )"
+fi
+if [ -z "$TOTAL_GPUS" ]; then
+    TOTAL_GPUS="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+fi
+if ! [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null; then TOTAL_GPUS=4; fi
 case "$GRID" in
   cubed-sphere)
     echo "ERROR: cubed-sphere GPU uses cube_strong_gpu.sh (face-scatter)." >&2
@@ -59,8 +77,10 @@ case "$GRID" in
     EXTRA="--latlon-2d"
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
-    GPU_RANKS="${GPU_RANKS:-1 2 4}"
-    RESOLUTIONS="${RESOLUTIONS:-6 7}" ;;
+    # Multi-node ladder (powers of 2 -> MPAS cell partition); capped below to
+    # TOTAL_GPUS so the same default is correct on 1 node (1 2 4) or N nodes.
+    GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
+    RESOLUTIONS="${RESOLUTIONS:-6 7 8}" ;;
   spectral)
     GPU_RANKS="1"                            # no MPI -> 1 GPU only
     RESOLUTIONS="${RESOLUTIONS:-85 170}" ;;
@@ -78,14 +98,14 @@ CAMP="${CAMP:-$SCRATCH/legoesm_scaling/${GRID}_gpu_${STAMP}}"
 mkdir -p "$CAMP"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
-echo "=== $GRID GPU strong scaling: gpus=[$GPU_RANKS] (NGPUS=$NGPUS) res=[$RESOLUTIONS] ==="
+echo "=== $GRID GPU strong scaling: gpus=[$GPU_RANKS] (TOTAL_GPUS=$TOTAL_GPUS) res=[$RESOLUTIONS] ==="
 echo "    physics=$PHYSICS prec=$PRECISION  outdir=$CAMP"
 
 rc_all=0
 for R in $RESOLUTIONS; do
   for N in $GPU_RANKS; do
-    if [ "$N" -gt "$NGPUS" ]; then
-      echo "--- $GRID res=$R N=$N > NGPUS=$NGPUS -- SKIP (single node) ---"
+    if [ "$N" -gt "$TOTAL_GPUS" ]; then
+      echo "--- $GRID res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP (not enough GPUs allocated) ---"
       continue
     fi
     echo "--- $GRID res=$R gpus=$N ---"

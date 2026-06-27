@@ -55,7 +55,7 @@ if [ "${#RES[@]}" -eq 0 ]; then
     case "$GRID" in
         cubed-sphere) RES=(48 96 192) ;;
         latlon)       RES=(128 256) ;;
-        icosahedral)  RES=(6 7) ;;
+        icosahedral)  RES=(6 7 8) ;;
         spectral)     RES=(85 170) ;;
         *) echo "ERROR: unknown grid '$GRID'" >&2; exit 2 ;;
     esac
@@ -71,6 +71,24 @@ fi
 EXTRA_VARS=""
 if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; fi
 if [ -n "${PRECISION:-}" ]; then EXTRA_VARS="${EXTRA_VARS},PRECISION=${PRECISION}"; fi
+
+# Multi-node GPU sweep (icosahedral only).  NODES>1 overrides the GPU job's
+# `select=` to span N nodes (4 A100/node); fullnode_gpu.sh's default GPU_RANKS
+# (1 2 4 8 16 ...) then self-caps to the granted TOTAL_GPUS = NODES*4, so the
+# A100 curve runs past one node.  latlon route-A is only validated to 4 GPU and
+# spectral has no MPI path, so multi-node is rejected for them -- the other
+# grids' multi-GPU blockers are tracked in issue #641.  CPU side is unchanged
+# (already a full-node 1..128 rank sweep on one node).
+NODES="${NODES:-1}"
+GPU_SELECT=()
+if [ "${NODES}" -gt 1 ]; then
+    if [ "$GRID" != "icosahedral" ]; then
+        echo "ERROR: NODES>1 (multi-node GPU) is only supported for icosahedral; got '$GRID' (see #641)." >&2
+        exit 2
+    fi
+    GPU_SELECT=(-l "select=${NODES}:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB")
+    echo "=== multi-node GPU: ${NODES} nodes x 4 A100 = $((NODES * 4)) GPUs (icosahedral) ==="
+fi
 
 submit() {  # submit "<label>" <qsub args...>
     local label="$1"; shift
@@ -104,7 +122,9 @@ for R in "${RES[@]}"; do
         submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$CPU_SCRIPT"
     fi
     if [ "${CPU_ONLY:-0}" != "1" ]; then
-        submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$GPU_SCRIPT"
+        # GPU_SELECT (set when NODES>1) overrides the script's #PBS select=
+        # directive at qsub time to span multiple nodes; empty on 1 node.
+        submit "gpu ${GRID} res=${R} (A100 sweep)" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$GPU_VARS" "$GPU_SCRIPT"
     fi
 done
 

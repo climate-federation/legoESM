@@ -66,7 +66,7 @@ case "$GRID" in
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
     RANKS="${RANKS:-1 2 4 8 16 32 64 128}"   # MPAS partitions; powers of 2
-    RESOLUTIONS="${RESOLUTIONS:-6 7}" ;;
+    RESOLUTIONS="${RESOLUTIONS:-6 7 8}" ;;
   spectral)
     RANKS="1"                                 # no MPI -> single point...
     THREADS="${THREADS_SPECTRAL:-$_CORES}"    # ...fill the node with XLA threads

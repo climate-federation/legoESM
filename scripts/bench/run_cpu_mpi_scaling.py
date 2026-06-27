@@ -261,7 +261,7 @@ WEAK_BASE_ICO = 4  # subdivision level
 # Strong scaling resolution sets
 STRONG_RES_CS = [24, 48, 96]
 STRONG_RES_LL = [64, 128, 256]
-STRONG_RES_ICO = [4, 5, 6]
+STRONG_RES_ICO = [4, 5, 6, 7, 8]  # levels 4-8 (L8 = 655,362 cells, ~25 km)
 STRONG_RES_SP = [21, 42]
 
 
