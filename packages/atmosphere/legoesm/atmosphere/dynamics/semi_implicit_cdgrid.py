@@ -315,6 +315,10 @@ def cg_helmholtz_solve(
 
     tilde_rhs = sqrt_area * rhs
     tilde_x0 = sqrt_area * rhs  # warm start at rhs in physical space
+    # NOTE (pinned jax==0.10.1): ``cg`` takes ``tol=`` (verified honored by
+    # test_residual_meets_production_tolerance).  A LATER jax renames it to
+    # ``rtol=`` and emits a DeprecationWarning; when bumping jax, switch this
+    # keyword to ``rtol=tol`` (``rtol=`` raises TypeError on 0.10.1 today).
     tilde_sol, _info = jax.scipy.sparse.linalg.cg(
         B_op, tilde_rhs, x0=tilde_x0, tol=tol, maxiter=maxiter,
     )
