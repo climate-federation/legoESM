@@ -126,3 +126,4 @@ docs/_build/
 *.sbatch
 *.out
 *.err
+*.pyc
