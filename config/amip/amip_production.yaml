@@ -43,23 +43,28 @@ diurnal_cycle: true
 # --- Cloud tuning -------------------------------------------------------------
 # rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)
 # — NOT pinned here.
-q_c_diagnostic: 3.0e-4      # Pierre's tuned "thinner cloud" value
-# convective_cloud (Slingo-1987 cumulus cloud fraction): OFF. A matched 30-day
-# C48/L40 A/B (equilibrated; jobs 25929869 ON vs 25929870 OFF) settled this: ON
-# warms the tropics only +0.55 K (~12% of the ~4.5 K cold bias it was meant to
-# fix) while wrecking the TOA budget — albedo 0.295->0.370, OLR 234.7->213.3,
-# rsut 100.5->126.3 (all ~25 W/m^2 off CERES). Its net-TOA looks better (+1.4 vs
-# +5.8) only because too-bright SW and too-trapped LW cancel (right number, wrong
-# physics). SBM ALONE is CMIP6-class (albedo 0.295 vs 0.290, rsut 100.5 vs 99),
-# so production ships conv-cloud OFF; the tropical cold bias is a convective-
-# heating / surface-flux problem, not a cloud-radiative one.
-convective_cloud: false
+cloud_q_c_diagnostic: 3.0e-4   # tuned "thinner cloud" value (== cmip_tuned_physics.yaml)
+# convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
+# canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
+# convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the
+# coupled CMIP config (the stated purpose of the run_coupled-mirrored knobs, #647:
+# isolate the tuned atmosphere under prescribed SST).
+#   DOCUMENTED FINDING (not a reason to diverge): a matched 30-day C48/L40 A/B
+#   (jobs 25929869 ON vs 25929870 OFF, both q_c=3e-4) shows that under PRESCRIBED
+#   SST conv-cloud=ON degrades the TOA budget — albedo 0.295->0.370, OLR
+#   234.7->213.3, rsut 100.5->126.3 (~25 W/m^2 off CERES) — for only +0.55 K of
+#   near-surface air warming. That degradation is expected: conv-cloud's benefit
+#   in the COUPLED base is OLR-trapping warming a FREE surface (cuts the ~4.5 K
+#   tropical cold bias / SST drift); with SST pinned that lever is inert and only
+#   the radiative cost shows. AMIP thus EXPOSES conv-cloud as a coupled-mode
+#   SST-drift compensator. Kept ON here for parameter-identity with the tuned base.
+convective_cloud: true
 
 # --- Tiled surface + interactive land -----------------------------------------
 # COARE3 ocean / land-MOST surface fluxes + Manabe soil bucket + Jarvis stomatal.
 slab_land_active: true
 surface_bulk_scheme: coare3
-gustiness_zi: 300.0
+surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
 surface_tiled: true
 surface_z0_land: 0.1
 land_soil_bucket: true

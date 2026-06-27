@@ -30,7 +30,6 @@ maybe_init_jax_distributed()
 
 from legoesm import constants
 from legoesm.driver.config import (
-    VALID_CONVECTION_SCHEMES,
     DycoreConfig,
     ExperimentConfig,
     GridConfig,
@@ -65,54 +64,11 @@ def _print_forcing_activity(args) -> None:
         return "ACTIVE" if active else "inert  (gray radiation)"
 
     print("[run_amip] Forcing-channel activity for this run:")
-    print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
+    print("  SST/SIC                              ACTIVE        (radiation-independent)")
     if solar_file_active:
-        print(f"  Solar TSI                            ACTIVE        (time-varying from file)")
+        print("  Solar TSI                            ACTIVE        (time-varying from file)")
     else:
-        print(f"  Solar TSI                            constant S_0  (--solar-source constant)")
-    print(f"  Greenhouse gases (transient annual)  "
-          f"{_flag(rad_active and getattr(args, 'ghg_forcing', 'constant') == 'external')}")
-    print(f"  Ozone (cyclic clim or interannual)   "
-          f"{_flag(rad_active and getattr(args, 'ozone_forcing', 'inline') == 'external')}")
-    if aerosol_active:
-        print(f"  Tropospheric aerosol (Kinne)         {_flag(rad_active)}")
-    if volcanic_active:
-        print(f"  Volcanic stratospheric AOD           {_flag(rad_active)}")
-    if not rad_active:
-        print(
-            "[run_amip] NOTE: --radiation gray disables GHG/ozone/aerosol/"
-            "volcanic. Use --radiation rrtmg for production AMIP."
-        )
-
-
-def _print_forcing_activity(args) -> None:
-    """Print a forcing-channel activity summary (call on rank-0 only).
-
-    Mirrors the table in ``run_amip_cmip6_deck.py`` for the direct AMIP
-    path.  GHG/ozone/aerosol/volcanic are gated on rrtmg/rrtmgp radiation;
-    SST/SIC is always active; solar file threading is active when
-    ``--solar-source`` is file-based.
-    """
-    rad_active = getattr(args, "radiation", "gray") in ("rrtmg", "rrtmgp")
-    aerosol_active = getattr(args, "aerosol_forcing", "off") == "external"
-    volcanic_active = (
-        aerosol_active
-        and bool(getattr(args, "volcanic_aerosol_file", ""))
-        and getattr(args, "volcanic_aerosol_scale", 0.0) > 0.0
-    )
-    solar_file_active = getattr(args, "solar_source", "constant") in (
-        "file", "spectral_file"
-    )
-
-    def _flag(active: bool) -> str:
-        return "ACTIVE" if active else "inert  (gray radiation)"
-
-    print("[run_amip] Forcing-channel activity for this run:")
-    print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
-    if solar_file_active:
-        print(f"  Solar TSI                            ACTIVE        (time-varying from file)")
-    else:
-        print(f"  Solar TSI                            constant S_0  (--solar-source constant)")
+        print("  Solar TSI                            constant S_0  (--solar-source constant)")
     print(f"  Greenhouse gases (transient annual)  "
           f"{_flag(rad_active and getattr(args, 'ghg_forcing', 'constant') == 'external')}")
     print(f"  Ozone (cyclic clim or interannual)   "

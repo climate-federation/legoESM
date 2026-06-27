@@ -501,7 +501,6 @@ def test_slurm_ntasks_1_does_not_trigger_distributed(monkeypatch):
     """SLURM_NTASKS=1 (set in every sbatch job) must NOT set distributed=True.
     Regression guard: prior bug made all single-task GPU sbatch jobs enter the
     MPI path and crash on SingleRankLayout.ownership."""
-    import os
     monkeypatch.setenv("SLURM_NTASKS", "1")
     monkeypatch.delenv("OMPI_COMM_WORLD_SIZE", raising=False)
     monkeypatch.delenv("PMI_SIZE", raising=False)
@@ -759,11 +758,14 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.turbulence == "louis"         # required by the tiled surface
     assert cfg.surface_tiled is True
     assert cfg.start_year == 1979
-    # rh_crit left at the calibrated default; convective_cloud OFF — the 30-day
-    # C48 A/B (jobs 25929869 ON vs 25929870 OFF) showed ON wrecks the TOA budget
-    # (albedo 0.295->0.370, OLR 234.7->213.3) for only +0.55 K tropical warming,
-    # so production ships SBM-alone (CMIP6-class: albedo 0.295 vs 0.290 target).
-    assert cfg.convective_cloud is False
+    # convective_cloud ON — mirrors the canonical tuned base
+    # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
+    # parameters; the 30-day A/B TOA cost under prescribed SST is a documented
+    # finding (see the YAML header), not a reason to diverge from the base.
+    assert cfg.convective_cloud is True
+    # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
+    assert cfg.surface_gustiness_zi == 300.0
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
