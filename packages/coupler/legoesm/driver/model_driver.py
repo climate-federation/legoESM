@@ -156,6 +156,9 @@ class ModelDriver:
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
+        # Prognostic multilayer (Richards) land state, carried in SegmentCarry.land_ml
+        # and persisted across segments.  None ⇒ slab-land (scalar T_land) path.
+        self._land_ml_state = None
         self._fric_decay = None
         self._qv_smooth_coeff = None
         self._hyperdiffusion_3d_fn = None
@@ -1182,6 +1185,73 @@ class ModelDriver:
                 f"  Land tile: ACTIVE (slab land, C_land="
                 f"{self.physics.C_land:.1e} J/m2/K)"
             )
+
+            # MULTILAYER (Richards) override: when use_multilayer_land, the
+            # differentiable segment advances a per-column MultiLayerLandState
+            # (SegmentCarry.land_ml) in place of the scalar slab T_land, using the
+            # faithful CLM default (PFT veg params + reference-soil thermal/hydro).
+            # Reuses the land mask (f_land) loaded above; the slab knobs become
+            # unused (the land/ocean blend reads the multilayer surface T+albedo).
+            if getattr(self.config, "use_multilayer_land", False):
+                self._setup_multilayer_land(_sd)
+
+    def _setup_multilayer_land(self, storage_dtype) -> None:
+        """Activate the differentiable multilayer (Richards) land tile.
+
+        Loads the CLM reference surface map onto the model columns, builds the
+        per-column ``LandSurfaceParams`` + ``MultiLayerLandConfig`` (faithful CLM
+        default via :func:`clm_multilayer_setup`), wires them onto the physics
+        pipeline (``land_ml_*`` attrs consumed by ``compute_radiation_core``), and
+        seeds an initial ``MultiLayerLandState`` warm-started from the near-surface
+        air temperature (no tropical cold spin-up).  The state then rides
+        ``SegmentCarry.land_ml`` and persists across segments (see the run loop).
+
+        Raises if the CLM surfdata cannot be mapped — ``use_multilayer_land`` must
+        NOT silently degrade to the slab (that would run different land physics
+        silently, the issue-#405 bug class)."""
+        import numpy as _np
+        from legoesm.land import init_multilayer_land_state
+        from legoesm.land.clm_surface_map import (
+            load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
+        )
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.soil_grid import SoilGridConfig
+
+        ad = self.physics.adapter
+        # column-order latitude / longitude.  grid.lat is geographic latitude in
+        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
+        # regrids onto DEGREE coordinates; the land tile consumes radians.
+        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
+        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        lat_deg = _np.degrees(lat_rad)
+        lon_deg = _np.degrees(lon_rad)
+        # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
+        # the CLM reference surfdata onto the model columns.
+        surface_map = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+
+        # Non-spatial defaults (soil grid depth/layers, Richards, carbon, stomata)
+        # from the config; clm_multilayer_setup overwrites only hydraulics/thermal.
+        base = MultiLayerLandConfig(
+            soil_grid=SoilGridConfig(
+                n_layers=self.config.multilayer_n_layers,
+                total_depth=self.config.multilayer_soil_depth,
+            ),
+        )
+        params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+        self.physics.land_ml_cfg = cfg
+        self.physics.land_ml_params = params
+        self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
+        self.physics.land_ml_doy = 0.0
+
+        ncol = lat_deg.shape[0]
+        T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
+            storage_dtype)
+        self._land_ml_state = init_multilayer_land_state(ncol, cfg, T_init=T_init)
+        logger.info(
+            "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
+            cfg.soil_grid.n_layers, ncol,
+        )
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -5626,6 +5696,23 @@ class ModelDriver:
         t_jit = 0.0
         t_start = time.time()
 
+        # Multilayer (Richards) land is validated single-device / single-rank only:
+        # the prognostic land state rides the carry with no partition spec, so a
+        # device-mesh shard_pytree (SPMD) or multi-rank MPI scatter would mis-handle
+        # it.  Fail LOUDLY rather than silently degrade to the slab or shard a state
+        # that has no sharding contract (CLAUDE.md: no silent degrade under SPMD/MPI;
+        # mirrors the increment-1 single-rank scope of SegmentCarry.land_ml).
+        if (self._land_ml_state is not None
+                and self._device_config is not None
+                and getattr(self._device_config, "is_distributed", False)):
+            raise NotImplementedError(
+                "use_multilayer_land is not yet supported under distributed "
+                "execution (SPMD device mesh or multi-rank MPI): the multilayer "
+                "land state has no partition spec and is validated single-rank "
+                "only.  Run on a single device / single MPI rank, or use slab "
+                "land (use_multilayer_land=False) for distributed runs."
+            )
+
         # while (not ``range(n_segments)``): the adaptive-dt path halves
         # DT and recomputes ``n_steps_total``/``segment_length`` mid-run
         # — a fixed segment count would TRUNCATE the run after a CFL
@@ -5728,6 +5815,11 @@ class ModelDriver:
                 conv_precip_prev=(getattr(self, "_conv_precip_prev", None)
                                   if self._ensemble_size == 1 else None),
                 T_land=T_land,
+                # Prognostic multilayer land state (None ⇒ slab path, byte-identical
+                # carry).  Seeded in _setup_multilayer_land; the segment advances it
+                # and the readback below persists it across segment boundaries.
+                land_ml=(self._land_ml_state
+                         if self._ensemble_size == 1 else None),
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
@@ -5787,6 +5879,10 @@ class ModelDriver:
             # (single-member only — see pack_carry above).
             if self._ensemble_size == 1:
                 self._conv_precip_prev = carry.conv_precip_prev
+                # Persist the evolved multilayer land state across segments (the
+                # prognostic soil column — no-op when slab/None).
+                if self._land_ml_state is not None:
+                    self._land_ml_state = carry.land_ml
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)

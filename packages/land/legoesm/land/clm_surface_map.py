@@ -348,3 +348,26 @@ def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = N
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
                                    m["glacier_frac"], variant=variant)
+
+
+def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "multilayer"):
+    """The faithful CLM-default MULTILAYER land setup from a :func:`load_clm_surface`
+    map: per-column ``(LandSurfaceParams, MultiLayerLandConfig)``.
+
+    Composes the already-factored pieces (no re-derivation): PFT-weighted veg params
+    (:class:`CLMSurfaceParamProvider`), reference-soil van-Genuchten hydraulics
+    (:func:`clm_hydraulics_config`), and per-cell texture x per-PFT-scale soil thermal
+    inertia blended toward ice on glacier cells (:func:`clm_multilayer_thermal_config`).
+    ``base_config`` (a ``MultiLayerLandConfig``) supplies the non-spatial defaults
+    (soil grid, Richards, carbon, stomata); only ``hydraulics``/``thermal`` are
+    overwritten with the spatial maps.  Pure — the model driver and any calibrator
+    share ONE definition."""
+    from legoesm.land import MultiLayerLandConfig
+    base = base_config if base_config is not None else MultiLayerLandConfig()
+    provider = CLMSurfaceParamProvider(
+        surface_map["pft_fractions"], surface_map["theta_wp"], surface_map["theta_fc"],
+        surface_map["glacier_frac"], variant=variant)
+    cfg = base._replace(
+        hydraulics=clm_hydraulics_config(surface_map),
+        thermal=clm_multilayer_thermal_config(surface_map))
+    return provider(), cfg
