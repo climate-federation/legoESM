@@ -98,12 +98,6 @@ class CoupledESMDriver:
         self._ocean_T_target = None
         self._ocean_S_target = None
         self._last_sfc_response = None
-        # Ocean-tile (shflx, lhflx) [W/m2, +up] that DROVE the most recent
-        # dynamic-ocean step (set by _assemble_ocean_forcing).  When the
-        # SHARED-flux coupling is on, the SAME numbers are fed back to the
-        # atmosphere so the air-sea budget closes; None for the slab ocean / before
-        # the first dynamic-ocean step.
-        self._last_ocean_sfc_flux = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
 
@@ -940,22 +934,24 @@ class CoupledESMDriver:
 
         Gated on ``CoupledConfig.couple_surface_fluxes`` (default False => no-op,
         existing coupled runs byte-identical).  When enabled, the atmosphere
-        consumes the SAME surface ``shflx``/``lhflx`` the ocean was driven by
-        instead of recomputing its own bulk fluxes -- ONE authoritative surface
-        flux on both sides:
+        consumes the coupler's TILE-BLENDED surface ``shflx``/``lhflx`` (its bulk
+        scheme, q_sfc = 0.98*q_sat mixing ratio, ocean-tile C_H/C_E) instead of
+        recomputing its OWN INDEPENDENT bulk fluxes.  This is the blended TOTAL
+        surface flux (f_ocean*ocean + f_ice*ice + f_land*land + f_lake*lake), the
+        correct forcing for the atmosphere bottom-level tendency over ALL tiles.
 
-        * DYNAMIC ocean: ``_assemble_ocean_forcing`` stashes the OCEAN-TILE
-          (shflx, lhflx) it subtracts in ``q_net`` (``_last_ocean_sfc_flux``, on
-          the ocean grid).  This hook hands the atmosphere the IDENTICAL arrays
-          (remapped ocean->atm; identity for the shared-grid Phase-1 ocean), so
-          the heat/water leaving the ocean EQUALS the heat/water entering the
-          atmosphere -- the budget closes EXACTLY (lagged one coupling segment by
-          the standard explicit coupling).
-        * SLAB ocean (no ``_assemble_ocean_forcing``): fall back to the coupler's
-          tile-blended ``_last_sfc_response.shflx``/``lhflx`` (the slab is a
-          thermodynamic relaxation model that self-computes its own exchange, so
-          this only makes the ATMOSPHERE use the coupler flux -- not a closed
-          slab budget; the dynamic ocean is the flux-coupled target).
+        Air-sea budget closure: the blended flux fed to the atmosphere and the
+        ocean-tile ``tile.shflx``/``tile.lhflx`` that the dynamic ocean q_net
+        SINKS BOTH derive from the SAME coupler ``ocean_tile_response`` -- the
+        atmosphere no longer runs its own independent surface bulk calc, so over
+        the ocean fraction the two are the same partition (blended ocean
+        component = f_ocean*ocean_tile; the ocean column receives ocean_tile over
+        its wet area).  For an all-ocean cell blended == ocean_tile EXACTLY, so
+        heat/water leaving the ocean == heat/water entering the atmosphere
+        (proven in tests/unit/test_air_sea_flux_coupling_conservation.py).  Over
+        a MIXED cell the atmosphere is correctly forced by the blended flux while
+        the ocean gets the ocean component -- the air-sea (ocean) exchange still
+        closes; land/ice/lake heat goes to those reservoirs, not the ocean.
 
         Sign convention: ``shflx``/``lhflx`` are [W/m2, positive UP =
         surface->atmosphere], exactly the convention the atmosphere's bulk
@@ -964,29 +960,31 @@ class CoupledESMDriver:
         as a unit of heat into the atmosphere (and evap mass leaving the ocean
         arrives as vapour into the atmosphere).
 
-        Returns ``(None, None)`` until the first ocean/coupler step populates the
-        stash (segment 0 falls back to the atmosphere's own bulk fluxes, as
-        before).  The hook being installed (or not) is fixed for the whole run;
-        within a flux-coupled run ``model_driver`` packs ``None`` on segment 0
-        and arrays thereafter -- a one-time recompile when the override first
-        appears, identical to the ``couple_surface_radiation`` lag.
+        Returns ``(None, None)`` until the first coupler step populates
+        ``_last_sfc_response`` (segment 0 falls back to the atmosphere's own bulk
+        fluxes, as before).  The hook being installed (or not) is fixed for the
+        whole run; within a flux-coupled run ``model_driver`` packs ``None`` on
+        segment 0 and arrays thereafter -- a one-time recompile when the override
+        first appears, identical to the ``couple_surface_radiation`` lag.
         """
         if not self.coupled_cfg.couple_surface_fluxes:
             return
 
         def _coupled_get_sfc_flux_override(day):
-            # Prefer the EXACT ocean-tile flux that drove the dynamic ocean
-            # (remapped onto the atmosphere grid) so both sides use one array.
-            ocean_flux = getattr(self, "_last_ocean_sfc_flux", None)
-            if ocean_flux is not None:
-                from legoesm.coupler.grid_remap import remap_field
-                rem = getattr(self, "_grid_remapper", None)
-                sh, lh = ocean_flux
-                if rem is not None:
-                    sh = remap_field(sh, rem.o2a)
-                    lh = remap_field(lh, rem.o2a)
-                return sh, lh
-            # Slab fallback: the coupler's tile-blended surface flux.
+            # The atmosphere gets the coupler's TILE-BLENDED surface flux
+            # (f_ocean*ocean + f_ice*ice + f_land*land + f_lake*lake) -- the
+            # correct TOTAL surface flux for the atmosphere bottom-level tendency
+            # over ALL tiles, so a mixed (land/ice) cell is forced by its own
+            # tiles, not by the ocean-tile flux.  It is already on the ATMOSPHERE
+            # grid (step_surface runs on the atm-grid forcing), so no remap.  The
+            # AIR-SEA budget closes because this blended flux and the ocean
+            # q_net's ``tile.shflx``/``tile.lhflx`` BOTH derive from the SAME
+            # coupler ``ocean_tile_response`` (no longer the atmosphere's old
+            # INDEPENDENT bulk calc): over the ocean fraction the blended flux's
+            # ocean component is f_ocean*ocean_tile and the ocean column receives
+            # ocean_tile over its wet area -- the same partition.  For an
+            # all-ocean cell blended == ocean_tile exactly (proven in the
+            # conservation tests).
             r = self._last_sfc_response
             if r is None or getattr(r, "shflx", None) is None:
                 return None, None
@@ -994,7 +992,7 @@ class CoupledESMDriver:
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(
-            "  Shared air-sea fluxes: ocean/coupler SH/LH -> atmosphere surface"
+            "  Shared air-sea fluxes: coupler blended SH/LH -> atmosphere surface"
         )
 
     # ==================================================================
@@ -1348,13 +1346,6 @@ class CoupledESMDriver:
             sw_down=sw_net, q_net=q_net,
             tau_x=tile.tau_x, tau_y=tile.tau_y, freshwater=None,
         )
-        # Stash the ocean-tile turbulent fluxes that DROVE this ocean step (the
-        # exact shflx/lhflx subtracted in q_net), on the OCEAN grid, so the
-        # SHARED-flux feedback can hand the ATMOSPHERE the IDENTICAL numbers next
-        # segment (``_override_sfc_fluxes``) -- the air-sea heat+water budget then
-        # closes provably (same flux out of the ocean == into the atmosphere,
-        # lagged one coupling segment by the standard explicit coupling).
-        self._last_ocean_sfc_flux = (tile.shflx, tile.lhflx)
         return sf, fw
 
     def _step_co2_tracer(self, dt):

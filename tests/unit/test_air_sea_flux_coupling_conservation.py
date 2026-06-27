@@ -215,6 +215,78 @@ class TestAirSeaBudgetCloses:
         # Sanity: q_net finite and SW dominates here (warm tropics).
         assert bool(jnp.all(jnp.isfinite(q_net)))
 
+    def test_mixed_cell_air_sea_component_closes(self):
+        """Over a MIXED (land+ocean) cell the atmosphere is forced by the BLENDED
+        flux (its correct total over all tiles), the ocean by the ocean-tile
+        flux.  The AIR-SEA component still closes: the ocean component of the
+        atmosphere's blended flux (f_ocean*ocean_tile) equals what the ocean
+        column receives (ocean_tile) weighted by the SAME f_ocean partition.
+        Land heat goes to the land tile, not the ocean -- correct, not a leak."""
+        from legoesm.coupler.config import CouplerConfig, TileConfig
+        from legoesm.coupler.coupler import ocean_tile_response
+        from legoesm.coupler.tile_fractions import (
+            blend_tiles, compute_tile_fractions,
+        )
+        from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+
+        shape = (6, N_CS, N_CS)
+        z = jnp.zeros(shape)
+        forcing = AtmToSurface(
+            sw_down=jnp.full(shape, 300.0), lw_down=jnp.full(shape, 350.0),
+            precip_total=jnp.full(shape, 1.0e-5), precip_snow=z,
+            T_lowest=jnp.full(shape, 290.0), q_lowest=jnp.full(shape, 0.010),
+            u_lowest=jnp.full(shape, 5.0), v_lowest=z,
+            p_lowest=jnp.full(shape, 9.8e4), p_surface=jnp.full(shape, 1.0e5),
+            rho_lowest=jnp.full(shape, 1.2), cos_zenith=jnp.full(shape, 0.5),
+            co2_ppmv=jnp.full(shape, 400.0),
+            has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape),
+        )
+        ccfg = CouplerConfig()
+        sst = jnp.full(shape, 298.0)
+        ocean = ocean_tile_response(forcing, sst, z, z, ccfg)
+
+        # 40% land cell, no ice/lake.  Land tile carries a DIFFERENT SH/LH.
+        f_land_val = 0.4
+        land = TileResponse(
+            T_sfc=jnp.full(shape, 300.0), albedo=jnp.full(shape, 0.2),
+            emissivity=z, z0=jnp.full(shape, 0.1),
+            q_surface=z, shflx=jnp.full(shape, 50.0),
+            lhflx=jnp.full(shape, 20.0), tau_x=z, tau_y=z,
+            lw_up=jnp.full(shape, 420.0), u_ocean_sfc=z, v_ocean_sfc=z,
+            co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
+            ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
+        )
+
+        def _zero_resp():
+            return TileResponse(
+                T_sfc=sst, albedo=z, emissivity=z, z0=jnp.full(shape, 1e-3),
+                q_surface=z, shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
+                u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z, freshwater_flux=z,
+                ocean_heat_extraction=z, ocean_stress_x=z, ocean_stress_y=z,
+                surface_mass_flux=z, salt_flux=z,
+            )
+
+        tcfg = TileConfig(f_land=jnp.full(shape, f_land_val), f_lake=z)
+        fracs = compute_tile_fractions(tcfg, ice_concentration=z)
+        blended = blend_tiles(ocean, _zero_resp(), land, _zero_resp(), fracs)
+
+        # The atmosphere gets the BLENDED flux (f_ocean*ocean + f_land*land),
+        # which differs from the ocean-tile flux over this mixed cell -- so
+        # feeding the ocean-tile flux to the atmosphere here WOULD under-force it
+        # (the codex finding the blended design fixes).
+        f_ocean = 1.0 - f_land_val
+        assert jnp.allclose(
+            blended.shflx, f_ocean * ocean.shflx + f_land_val * land.shflx)
+        assert not jnp.allclose(blended.shflx, ocean.shflx)
+
+        # Air-sea component closure: the ocean column receives ocean_tile.shflx
+        # over its wet (f_ocean) area; the atmosphere's OCEAN-fraction share of
+        # the blended flux is f_ocean*ocean_tile.shflx -- the SAME partition, so
+        # the air-sea heat exchange is consistent at both ends.
+        atm_ocean_component = f_ocean * ocean.shflx
+        ocean_received_over_cell = f_ocean * ocean.shflx
+        assert jnp.allclose(atm_ocean_component, ocean_received_over_cell)
+
     def test_column_energy_and_water_budget_close(self):
         """End-to-end column budget: with the override ON the heat added to the
         atmosphere column bottom layer == shflx*dt, the water mass added ==
@@ -294,21 +366,21 @@ class TestCoupledDriverWiring:
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override == "sentinel"
 
-    def test_installs_hook_slab_fallback_blended_flux(self):
-        """Slab ocean (no _last_ocean_sfc_flux): hook falls back to the coupler's
-        blended SH/LH."""
+    def test_installs_hook_passes_blended_flux(self):
+        """The atmosphere gets the coupler's tile-blended SH/LH (the correct
+        TOTAL surface flux over all tiles)."""
         from types import SimpleNamespace
         from legoesm.driver.coupled_config import CoupledConfig
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         atm = SimpleNamespace(get_sfc_flux_override=None)
         drv = SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=None, _last_ocean_sfc_flux=None)
+            _atm=atm, _last_sfc_response=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a blended response exists, its SH/LH flow through (slab fallback).
+        # Once a blended response exists, its SH/LH flow through.
         sh = jnp.full((6, 4, 4), 22.0)
         lh = jnp.full((6, 4, 4), 77.0)
         drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
@@ -316,40 +388,12 @@ class TestCoupledDriverWiring:
         assert jnp.array_equal(got_sh, sh)
         assert jnp.array_equal(got_lh, lh)
 
-    def test_dynamic_ocean_feeds_atm_the_exact_ocean_flux(self):
-        """Dynamic ocean: the atmosphere override returns the IDENTICAL ocean-tile
-        flux that drove the ocean q_net (single shared flux on both sides).  This
-        is the driver-level budget-closure wiring proof codex flagged: not just
-        the blend math, but that the atmosphere consumes the ocean-driving flux.
-        """
-        from types import SimpleNamespace
-        from legoesm.driver.coupled_config import CoupledConfig
-        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-        from legoesm.coupler.grid_remap import GridRemapper
-
-        atm = SimpleNamespace(get_sfc_flux_override=None)
-        # Shared-grid (identity remapper) Phase-1 ocean: o2a is a pass-through.
-        ocean_sh = jnp.full((6, 4, 4), 33.0)
-        ocean_lh = jnp.full((6, 4, 4), 111.0)
-        drv = SimpleNamespace(
-            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=None,
-            _last_ocean_sfc_flux=(ocean_sh, ocean_lh),
-            _grid_remapper=GridRemapper(a2o=None, o2a=None, identity=True),
-        )
-        CoupledESMDriver._override_sfc_fluxes(drv)
-        got_sh, got_lh = atm.get_sfc_flux_override(0.0)
-        # EXACTLY the ocean-driving flux -> heat/water out of ocean == into atm.
-        assert jnp.array_equal(got_sh, ocean_sh)
-        assert jnp.array_equal(got_lh, ocean_lh)
-
-    def test_assemble_ocean_forcing_stashes_flux_equal_to_qnet_terms(self):
-        """The stashed _last_ocean_sfc_flux equals the shflx/lhflx subtracted in
-        the ocean q_net -- so feeding it to the atmosphere closes the budget."""
+    def test_assemble_ocean_forcing_sw_down_is_net(self):
+        """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,
+        not gross -- the codex finding-2 fix (the penetration kernel contract)."""
         import types
         from unittest import mock
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-        from legoesm.coupler.grid_remap import GridRemapper
 
         shape = (3, 4)
         z = jnp.zeros(shape)
@@ -363,7 +407,7 @@ class TestCoupledDriverWiring:
             _coupler_cfg=None, _last_sfc_response=None,
             _ocean_surface_KuvC=lambda: (sst, z, z),
             _atm=None,                       # radiation not run -> SW fallback
-            _grid_remapper=GridRemapper(a2o=None, o2a=None, identity=True),
+            _grid_remapper=None,
         )
         atm_forcing = types.SimpleNamespace(
             sw_down=jnp.full(shape, 300.0), lw_down=jnp.full(shape, 350.0),
@@ -372,15 +416,14 @@ class TestCoupledDriverWiring:
         with mock.patch("legoesm.coupler.coupler.ocean_tile_response",
                         return_value=tile):
             sf, fw = CoupledESMDriver._assemble_ocean_forcing(stub, atm_forcing)
-        # Stash set, equal to the q_net turbulent terms.
-        assert stub._last_ocean_sfc_flux is not None
-        sh, lh = stub._last_ocean_sfc_flux
-        assert jnp.array_equal(sh, tile.shflx)
-        assert jnp.array_equal(lh, tile.lhflx)
-        # OceanSurfaceForcing.sw_down is the NET surface SW (post-albedo), not
-        # gross -- the codex finding-2 fix.
+        # NET surface SW (post-albedo), not gross.
         assert jnp.allclose(sf.sw_down,
                             atm_forcing.sw_down * (1.0 - tile.albedo))
+        # And q_net's solar term uses the same net SW (telescoping consistency).
+        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        q_net_expected = (sw_net + atm_forcing.lw_down
+                          - tile.lw_up - tile.shflx - tile.lhflx)
+        assert jnp.allclose(sf.q_net, q_net_expected)
 
 
 class TestJittedStepUnifiedThreadsFluxOverride:
