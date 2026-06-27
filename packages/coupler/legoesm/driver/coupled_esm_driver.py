@@ -326,7 +326,10 @@ class CoupledESMDriver:
         # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
         # 0.125; see omip_smag_cap_stabilizer).
         ocfg = _oc._replace(
-            barotropic_solver="implicit_cn",
+            # barotropic_solver was nested into BarotropicConfig (#640); a direct
+            # _replace can't route the flat kwarg the way from_flat does, so nest
+            # it explicitly.
+            barotropic=_oc.barotropic._replace(barotropic_solver="implicit_cn"),
             momentum_time_integrator="rk3",
             pgf_scheme="smc03",
             implicit_vertical_mixing=True,
