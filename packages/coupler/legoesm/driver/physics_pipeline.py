@@ -156,6 +156,15 @@ class PhysicsPipeline:
         self.f_land = None
         self.albedo_land = None
         self.rad_update_steps = 1
+        # Optional MULTILAYER (Richards) land tile.  When ``land_ml_cfg`` is set the
+        # differentiable forward advances a MultiLayerLandState (carried in
+        # SegmentCarry.land_ml) in place of the scalar-T_land slab, supplying the land
+        # surface temperature and albedo for the blend.  All None ⇒ slab path.
+        self.land_ml_cfg = None        # MultiLayerLandConfig
+        self.land_ml_params = None     # LandSurfaceParams (per land column)
+        self.land_ml_lat = None        # (ncol,) latitude [rad], column order
+        self.land_ml_doy = 0.0
+        self.land_ml_u_min = 1.0
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         # ``dynamic_albedo``: zenith-angle-dependent ocean albedo
@@ -252,6 +261,40 @@ class PhysicsPipeline:
 
         dt_rad = dt * self.rad_update_steps
         return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
+
+    def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
+                                   T, p_s, q_v, u, v, precip_col, dt):
+        """Advance the MULTILAYER (Richards) land tile one radiation step and return
+        ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
+
+        Builds the ``AtmToSurface`` forcing from the lowest atmospheric level (T, q,
+        wind, p) plus the surface down-welling SW/LW and the lagged precip, then steps
+        ``step_multilayer_land`` with the pipeline's land config / per-column params.
+        Pure + differentiable w.r.t. the land params (the whole point of the refactor).
+        Deferred land imports avoid a core->land top-level cross-package cycle."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.multilayer_land import step_multilayer_land
+        from legoesm.thermo import saturation_mixing_ratio
+        ad = self.adapter
+        f2 = lambda g: ad.flatten_2d(g)
+        T_air = f2(T[..., -1]); q_air = f2(q_v[..., -1])
+        u_low = f2(u[..., -1]); v_low = f2(v[..., -1]); p_s_col = f2(p_s)
+        rho = p_s_col / (constants.R_d * T_air)
+        precip = precip_col if precip_col is not None else jnp.zeros_like(p_s_col)
+        ones = jnp.ones_like(p_s_col)
+        forcing = AtmToSurface(
+            sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
+            precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
+            T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
+            p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
+            cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
+            has_radiation=ones, has_precipitation=ones)
+        dt_rad = dt * self.rad_update_steps
+        land_new, resp, _ = step_multilayer_land(
+            land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
+            lat=self.land_ml_lat, doy=self.land_ml_doy,
+            land_params=self.land_ml_params)
+        return land_new, resp.T_sfc, resp.albedo
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
