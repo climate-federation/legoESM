@@ -182,6 +182,12 @@ class SegmentCarry(NamedTuple):
     # diagnosis.  ``None`` (warm-rain / convective_cloud off) ⇒ byte-identical
     # legacy carry; pack_carry seeds a zeros array for production runs so the
     # feature can read it when ``PhysicsPipeline._cloud_convective`` is set.
+    land_ml: object = None
+    # Optional MULTILAYER (Richards) land state (a MultiLayerLandState pytree) when
+    # the differentiable forward runs the multilayer coupler tile instead of the
+    # embedded slab.  ``None`` (the default) ⇒ slab path, byte-identical legacy carry;
+    # when present it is advanced in place of the scalar ``T_land`` and supplies the
+    # land surface temperature (``T_soil[:, 0]``) to the surface blend.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -195,6 +201,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
                conv_precip_prev=None,
+               land_ml=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -290,6 +297,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
+        land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
     )
 
 
@@ -994,6 +1002,9 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
+                # multilayer land tile is single-rank only (calibration) -> carry the
+                # state through unchanged on the MPI/owned-face path.
+                land_ml_new = carry.land_ml
             else:
                 _dm_in = {}
                 for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
@@ -1032,6 +1043,9 @@ def build_segment_fn(
                 # 2-tuple wrappers (neural / SFNO training) leave the land
                 # tile inert by carrying ``T_land`` through unchanged.
                 T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
+                # optional 4th value: the advanced MULTILAYER land state (when the
+                # multilayer tile is active); else carry the (None / unused) state on.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
 
                 # --- State update ---
                 _phys_dT_dt = phys_out.dT_dt
@@ -1165,6 +1179,7 @@ def build_segment_fn(
                                   carry.gwd_spectrum)),
                 conv_precip_prev=_match_dtype(
                     conv_precip_prev_new, carry.conv_precip_prev),
+                land_ml=land_ml_new,
             )
             return new_carry, None
         return _single_step

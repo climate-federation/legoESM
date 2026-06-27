@@ -94,7 +94,10 @@ class TestScalingReadiness:
         leaves, treedef = jax.tree.flatten(carry)
         reconstructed = treedef.unflatten(leaves)
         assert isinstance(reconstructed, SegmentCarry)
-        assert len(leaves) == len(SegmentCarry._fields)
+        # one leaf per non-None field (optional fields absent here, e.g. land_ml=None,
+        # contribute no leaves — None is an empty pytree subtree)
+        n_present = sum(getattr(carry, f) is not None for f in SegmentCarry._fields)
+        assert len(leaves) == n_present
 
     def test_segment_forcing_is_valid_pytree(self):
         """SegmentForcing flattens and unflattens correctly."""
@@ -165,7 +168,11 @@ class TestScalingReadiness:
         )
         for field_name in SegmentCarry._fields:
             val = getattr(carry, field_name)
-            assert isinstance(val, jax.Array), f"{field_name} is {type(val)}"
+            if val is None:                      # optional field absent (e.g. land_ml)
+                continue
+            leaves = jax.tree.leaves(val)
+            assert leaves and all(isinstance(leaf, jax.Array) for leaf in leaves), (
+                f"{field_name} has non-array leaves: {type(val)}")
 
     def test_raw_segment_fn_available(self):
         """build_segment_fn returns function with .raw attribute for training."""
