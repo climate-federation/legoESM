@@ -43,3 +43,37 @@ two are fixed and on by default, the third bounds the run to ~90 days:
 
 Diagnostic sweeps used one-off `--mpas-eq-visc-boost` / `--dt` overrides on top
 of these configs and are not themselves committed (they were throwaway probes).
+
+## Fidelity to Kamm et al. 2025 (GMD 18, 8091–8107)
+
+**Match exactly** (verified against the paper + the upstream NEMO namelist):
+domain / channel / depth, 36 z* levels, wind-stress knots, T*/S* restoring
+targets + coefficients (A_Θ=40, A_S=3.858e-3), Jerlov-I shortwave penetration
+(ζ=0.35/23 m, 0.58/0.42), background vertical visc/diff (1.2e-4 / 1.2e-5),
+convective adjustment (100 m²/s), quadratic bottom drag, energy/enstrophy
+vector-invariant momentum advection, FCT/TVD tracer advection.
+
+**Remaining gaps** (not bit-identical to the paper):
+- **Vertical mixing**: the paper uses NEMO TKE. `--vmix tke` selects our TKE
+  closure configured to the paper, but it is **unstable in our 1° DINO**
+  (lat-lon blows up ~day 40 — our TKE / lateral-viscosity tuning differs from
+  NEMO's). The stable default is **KPP**; the configs use `vmix: kpp`. On MPAS
+  the vertical mixing is implicit constant-coefficient, so the scheme is inert.
+- **EOS**: ours = Wright (1997); paper = Roquet/Caneill simplified polynomial.
+- **Restoring**: ours = annual-mean; paper = seasonal (360-day, 1-month lag).
+- **Spin-up**: the paper's R1 numbers are at **3000-year equilibrium**; our runs
+  are ≤1 year, so equilibrium diagnostics (ACC 206 Sv, MOC, deep stratification)
+  are reached only in trajectory, not in magnitude.
+
+## Barotropic streamfunction + ACC transport
+
+```bash
+JAX_ENABLE_X64=1 python scripts/plot/plot_dino_acc.py results/dino_latlon  # lat-lon only
+# -> dino_acc.png: ACC channel-transport spin-up series vs the paper's 206 Sv
+#    + the barotropic streamfunction map (gyres + channel; cf. paper Fig. 4)
+```
+
+Reuses the canonical partial-cell `ocean.diagnostics_streamfunction.barotropic_streamfunction`
++ `ocean.diagnostics_climate.acc_transport`. A KPP 365-day run spins the ACC up
+0 → ~48 Sv (≈¼ of the 206 Sv equilibrium — the wind-driven transport establishes
+over the first year; the rest is the multi-millennial baroclinic adjustment).
