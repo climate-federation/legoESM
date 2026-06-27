@@ -90,6 +90,32 @@ class TestDINOConfig:
         mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
         assert mc2.equatorial_visc_boost == pytest.approx(12.0)
 
+    def test_vmix_scheme_default_and_dispatch(self):
+        """The shared vertical-mixing helper selects the paper's TKE closure by
+        default (with the paper background visc/diff + convective ceiling) and
+        KPP on request, and raises on an unknown scheme (dispatch hardening)."""
+        import dataclasses
+        cfg = DINOConfig()
+        # Default is the stable KPP closure (TKE = paper's scheme but unstable
+        # in our 1deg DINO past ~day 40 — see DINOConfig.vmix_scheme).
+        assert cfg.vmix_scheme == "kpp"
+        vm_kpp = dino._dino_vertical_mixing_config(cfg)
+        assert vm_kpp.scheme == "kpp"
+        assert vm_kpp.kpp.K_bg == pytest.approx(cfg.K_v_bg)
+        # The paper-faithful TKE config maps the paper background + ceiling, and
+        # prandtl_mode="constant" is required or kappaH_min/kappaM_max are dead.
+        vm = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke"))
+        assert vm.scheme == "tke"
+        assert vm.tke.prandtl_mode == "constant"
+        assert vm.tke.kappaM_min == pytest.approx(cfg.A_v_bg)
+        assert vm.tke.kappaH_min == pytest.approx(cfg.K_v_bg)
+        assert vm.tke.kappaM_max == pytest.approx(cfg.K_conv)
+        assert vm.tke.bg_diff_scale == pytest.approx(0.0)  # constant bg (no Bryan-Lewis)
+        with pytest.raises(ValueError):
+            dino._dino_vertical_mixing_config(
+                dataclasses.replace(cfg, vmix_scheme="bogus"))
+
     def test_registry_entry(self):
         assert "dino" in AVAILABLE_EXPERIMENTS
         assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG

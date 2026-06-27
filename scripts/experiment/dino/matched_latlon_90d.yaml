@@ -7,4 +7,5 @@ grid: latlon
 days: 90
 snapshot_every_days: 5
 n_lon: 50                 # 1deg R1 (~9900 cells)
+vmix: kpp                 # stable closure; TKE (paper's scheme) blows up ~day 40 here
 output_dir: results/dino_latlon
