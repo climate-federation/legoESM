@@ -259,8 +259,9 @@ class TestTransportConservation:
         ``h*conc == vol_n`` exactly.  We replicate both recovery formulas on a
         synthetic transported pair to isolate the changed branch."""
         from legoesm.ice import transport as _T
-        vol_floor = _T._VOL_FLOOR     # volume threshold [m]
-        conc_floor = _T._CONC_FLOOR   # division floor [area fraction]
+        vol_floor = _T._VOL_FLOOR        # volume threshold [m]
+        conc_floor = _T._CONC_FLOOR      # division floor [area fraction]
+        h_cap = _T._H_RECOVER_MAX_M      # physical thickness ceiling [m]
         # Synthetic post-transport fields: one margin cell with volume but
         # zero concentration, one normal interior cell, one ice-free cell.
         vol_n = jnp.array([0.4, 1.8, 0.0])      # m (per grid-cell area)
@@ -274,19 +275,26 @@ class TestTransportConservation:
         # The margin cell's volume is destroyed by the old formula.
         assert float(vol_recon_old[0]) == 0.0 and float(vol_n[0]) > 0.0
 
-        # --- NEW recovery (the fix) ---
+        # --- NEW recovery (the fix, mirroring transport.py) ---
         has_vol = vol_n > vol_floor
-        conc_out = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 0.0)
-        conc_safe = jnp.where(has_vol, conc_out, 1.0)
-        h_new = jnp.where(has_vol, vol_n / conc_safe, 0.0)
+        conc_floored = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 1.0)
+        h_raw = jnp.where(has_vol, vol_n / conc_floored, 0.0)
+        h_new = jnp.where(has_vol, jnp.minimum(h_raw, h_cap), 0.0)
+        h_safe = jnp.where(has_vol, jnp.maximum(h_new, conc_floor), 1.0)
+        conc_out = jnp.where(has_vol, vol_n / h_safe, 0.0)
         vol_recon_new = h_new * conc_out
         # Volume reconstructed EXACTLY on every cell, including the margin.
         assert jnp.allclose(vol_recon_new, vol_n, atol=1e-15), (
             "fix must reconstruct transported volume exactly"
         )
-        # h is finite and bounded by vol/floor (no spike to inf).
+        # The margin cell yields a PHYSICAL (h, conc): h capped at the ceiling
+        # (not an absurd vol/_CONC_FLOOR spike) and conc = vol/h_cap.
         assert jnp.all(jnp.isfinite(h_new))
-        assert float(h_new[0]) <= float(vol_n[0]) / conc_floor + 1.0
+        assert float(h_new[0]) == pytest.approx(h_cap, rel=1e-9)
+        assert float(conc_out[0]) == pytest.approx(float(vol_n[0]) / h_cap, rel=1e-9)
+        # The normal interior cell is UNCHANGED (h_raw < ceiling).
+        assert float(h_new[1]) == pytest.approx(2.0, rel=1e-9)
+        assert float(conc_out[1]) == pytest.approx(0.9, rel=1e-9)
 
 
 # ==============================================================================

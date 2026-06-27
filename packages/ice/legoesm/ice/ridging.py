@@ -164,12 +164,20 @@ def _ridging_column_kernel(
     H_min = 2.0 * h_part
     H_max = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part, 1e-6)), H_star)
     H_max = jnp.minimum(H_max, hi[-1])                       # ceiling at top bound
-    # Guarantee a valid top bin width so the clip bounds below stay ordered even
-    # for a tiny H_max (small mu_rdg): lo[0] + width <= H_max <= hi[-1].
-    H_max = jnp.maximum(H_max, lo[0] + _MIN_RIDGE_WIDTH_M)
-    # Floor H_min at the bottom bound and keep it at least ``_MIN_RIDGE_WIDTH_M``
-    # below H_max so the range is valid AND fully inside [lo[0], hi[-1]].
-    H_min = jnp.clip(H_min, lo[0], H_max - _MIN_RIDGE_WIDTH_M)
+    # NORMAL case (H_min + width <= hi[-1]): keep the original Lipscomb range,
+    # flooring H_max above the physical H_min = 2*h_part.  This preserves the
+    # ridge thickness distribution for ordinary thin/mixed/thick states (the
+    # round-2 unconditional ``clip(H_min, lo[0], H_max-width)`` wrongly thinned
+    # the ridge and inflated ridge area whenever mu*sqrt(h_part) < 2*h_part,
+    # i.e. h_part > (mu/2)^2; codex R3-1).
+    H_max_normal = jnp.maximum(H_max, H_min + _MIN_RIDGE_WIDTH_M)
+    # OVER-THICK defensive case (H_min would exceed the top bound hi[-1]): the
+    # whole physical range sits above every category, so collapse it into the
+    # TOP bin [hi[-1]-width, hi[-1]] -> the entire ridge routes to the top
+    # category while ``sum(dV_ridge_to_cat) == V_part_total`` (codex R2-1).
+    over_thick = H_min > (hi[-1] - _MIN_RIDGE_WIDTH_M)
+    H_min = jnp.where(over_thick, hi[-1] - _MIN_RIDGE_WIDTH_M, H_min)
+    H_max = jnp.where(over_thick, hi[-1], H_max_normal)
     H_width = H_max - H_min
 
     # Snow donated by participating ice.  Fraction retained in

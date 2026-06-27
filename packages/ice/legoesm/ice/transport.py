@@ -50,6 +50,14 @@ _CONC_FLOOR: float = 1e-12          # [dimensionless area fraction]
 # carry DIFFERENT units, so name them separately.  A cell with 0 < vol <= this
 # carries <1e-9 kg/m^2 of ice and is treated as ice-free.
 _VOL_FLOOR: float = 1e-12           # [m of ice per m^2 grid cell]
+# Physical ceiling [m] on the RECONSTRUCTED ice thickness h = vol/conc.  When
+# independent vol/conc limiting leaves vol > 0 with conc ~ 0, a bare conc floor
+# gives an absurd h ( vol/_CONC_FLOOR ~ 1e12 m ) that would poison the
+# downstream thermo/ridging.  Instead cap h at this ceiling and set
+# conc = vol / h_cap, which conserves the volume EXACTLY (vol = h*conc) while
+# keeping BOTH h and conc physical.  Matches the ITD top bound hi[-1] = 100 m
+# (the model's maximum ice thickness).  codex R3-2.
+_H_RECOVER_MAX_M: float = 100.0     # [m of ice]
 # Wide, NON-BINDING numerical-safety clamp for the recovered temperature.
 # Rationale (identical to the salinity channel in sea_ice.py): a monotone-PPM
 # ratio can overshoot the donor min/max by a hair at CFL<=1, and under CFL>1
@@ -338,16 +346,26 @@ def advect_ice_tracers(
     # ``vol_new > 0`` while ``conc_new`` has limited to ~0.  Returning
     # ``h_new = 0`` there (the old ``has_ice = conc_new > 0`` test) would make
     # ``h_new*conc_new = 0 != vol_new`` and VANISH the volume — a mass sink.
-    # Instead: where volume exists, floor the concentration at ``_CONC_FLOOR``
-    # and set ``h = vol/conc_floored`` so the returned (h, conc) reconstruct
-    # the conserved volume exactly (``h_new*conc_out == vol_new``), and the
-    # floor also bounds the ``h = vol/conc`` spike at ``vol/_CONC_FLOOR``.
-    # AD-safe: substitute a benign placeholder into the denominator BEFORE
+    # Instead, where volume exists: form ``h_raw = vol/max(conc, _CONC_FLOOR)``,
+    # CAP it at the physical ceiling ``_H_RECOVER_MAX_M``, and RE-DERIVE the
+    # concentration as ``conc_out = vol/h`` so the returned (h, conc)
+    # reconstruct the conserved volume EXACTLY (``h_new*conc_out == vol_new``)
+    # AND stay physical even on a vol>0 / conc~0 margin cell (no absurd
+    # ``vol/_CONC_FLOOR`` thickness poisoning the downstream thermo).
+    # AD-safe: substitute a benign placeholder into every denominator BEFORE
     # dividing so the true-branch arithmetic is finite at every cotangent.
     has_vol = vol_new > _VOL_FLOOR
-    conc_out = jnp.where(has_vol, jnp.maximum(conc_new, _CONC_FLOOR), 0.0)
-    conc_safe = jnp.where(has_vol, conc_out, 1.0)
-    h_new = jnp.where(has_vol, vol_new / conc_safe, 0.0)
+    conc_floored = jnp.where(has_vol, jnp.maximum(conc_new, _CONC_FLOOR), 1.0)
+    h_raw = jnp.where(has_vol, vol_new / conc_floored, 0.0)
+    # Cap the reconstructed thickness at the physical ceiling and RE-DERIVE the
+    # concentration from the conserved volume (conc = vol / h_cap) so that a
+    # vol>0 / conc~0 margin cell yields a PHYSICAL (h, conc) pair instead of an
+    # absurd h ~ vol/_CONC_FLOOR, while keeping ``h_new * conc_out == vol_new``
+    # EXACTLY (volume-conserving).  No-op (h_raw <= ceiling) for every ordinary
+    # cell.  codex R3-2.
+    h_new = jnp.where(has_vol, jnp.minimum(h_raw, _H_RECOVER_MAX_M), 0.0)
+    h_safe = jnp.where(has_vol, jnp.maximum(h_new, _CONC_FLOOR), 1.0)
+    conc_out = jnp.where(has_vol, vol_new / h_safe, 0.0)
     vol_safe = jnp.where(has_vol, vol_new, 1.0)
     # Empty (ice-free) cells are filled at the basal/ocean freezing point
     # T_freeze_ocean (271.35 K) — there is no ice surface there.
