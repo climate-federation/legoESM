@@ -167,6 +167,7 @@ class TestRadiationCoreLand:
     def test_land_tile_updates_T_land(self):
         """With the land tile active the slab temperature evolves."""
         pipe, _ = _pipeline(land=True)
+        pipe.slab_land_active = True   # step T_land (not the passive blend-only mode)
         T, p_s, q_v, sst, sic, lat, lon, u, v = _rad_inputs()
         T_land = jnp.full((6, N_CS, N_CS), 250.0)
         out = pipe.compute_radiation_core(
@@ -259,6 +260,7 @@ class TestStepUnifiedLand:
     def test_jitted_step_unified_threads_T_land(self):
         """The jitted step_unified advances T_land through its lax.cond."""
         pipe, _ = _pipeline(land=True)
+        pipe.slab_land_active = True   # step T_land (not the passive blend-only mode)
         step_fn = pipe.build_step_unified()
         ad = pipe.adapter
         shape_2d = ad.shape_2d
@@ -334,6 +336,64 @@ class TestStepUnifiedLand:
         assert jnp.all(jnp.isfinite(land_ml_new.T_soil))
         assert not jnp.array_equal(land_ml_new.T_soil, land_ml.T_soil)
         assert jnp.all((land_ml_new.theta_soil >= 0.0) & (land_ml_new.theta_soil <= 1.0))
+
+    def test_tiled_surface_flux_changes_tendencies(self):
+        """With louis + coare3 + an active land tile, enabling tiled surface
+        fluxes (land Monin-Obukhov on the land tile, coare3 on the ocean
+        tile) changes the BL tendencies vs running coare3 on the blended
+        surface — proving the per-tile flux is wired into the compiled
+        physics step (and that the land scheme genuinely differs)."""
+
+        def _build(tiled):
+            pipe, _ = _pipeline(land=True, turbulence="louis",
+                                surface_bulk_scheme="coare3")
+            pipe.slab_land_active = True
+            pipe.surface_tiled = tiled
+            pipe.surface_z0_land = 0.1
+            # A land/ocean mosaic so BOTH tiles contribute to the blend.
+            pipe.f_land = jnp.full((6, N_CS, N_CS), 0.5)
+            return pipe
+
+        def _run(pipe):
+            step_fn = pipe.build_step_unified()
+            ad = pipe.adapter
+            shape_2d = ad.shape_2d
+            shape_3d = (*shape_2d, NLEV)
+            T = jnp.full(shape_3d, 285.0)
+            p_s = jnp.full(shape_2d, 1.0e5)
+            q_v = jnp.full(shape_3d, 0.006)
+            q_c = jnp.zeros(shape_3d)
+            q_r = jnp.zeros(shape_3d)
+            u = jnp.full(shape_3d, 5.0)
+            v = jnp.zeros(shape_3d)
+            sst = jnp.full(shape_2d, 295.0)
+            sic = jnp.zeros(shape_2d)
+            lat = jnp.full(shape_2d, 0.4)
+            lon = jnp.full(shape_2d, 1.0)
+            held_3d = jnp.zeros(shape_3d)
+            held_2d = jnp.zeros(shape_2d)
+            o3 = jnp.zeros((ad.ncol, NLEV))
+            aerosol = jnp.zeros((ad.ncol, NLEV))
+            T_land = jnp.full(shape_2d, 300.0)  # warm land vs 295 K ocean
+            # step_unified returns a 4-tuple since the differentiable land
+            # refactor (physics_out, held, T_land_new, land_ml_new).
+            phys_out, _, _, _ = step_fn(
+                jnp.bool_(True),
+                T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,)), u, v,
+                sst, sic, lat, lon, 100.0, 43200.0, 600.0,
+                jnp.array([]), constants.S_0, o3, aerosol,
+                held_3d, held_2d, held_2d, held_2d, held_2d, held_2d,
+                T_land=T_land,
+            )
+            return phys_out
+
+        out_tiled = _run(_build(True))
+        out_plain = _run(_build(False))
+
+        assert jnp.all(jnp.isfinite(out_tiled.dT_dt))
+        # Tiled land Monin-Obukhov flux differs from coare3-on-the-blend, so
+        # the resulting BL temperature tendency must differ somewhere.
+        assert not jnp.allclose(out_tiled.dT_dt, out_plain.dT_dt)
 
     def test_jitted_step_unified_threads_sfc_override(self):
         """step_unified threads the coupler-provided surface albedo / skin

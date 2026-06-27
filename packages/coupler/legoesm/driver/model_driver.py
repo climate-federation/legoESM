@@ -173,6 +173,7 @@ class ModelDriver:
         # START_DAY normalization in _prepare_run_context / _run_spectral
         # (FIX_RESTART_TIME).
         self._loaded_checkpoint_step_day: tuple | None = None
+        self._last_checkpoint_step: int | None = None
 
         # MPI distributed state (populated by _setup_parallel)
         self._mpi_rank: int | None = None
@@ -997,8 +998,14 @@ class ModelDriver:
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
 
             if cfg.grid.grid_type == "cubed_sphere":
+                _target_phis = (
+                    self._phis_data
+                    if self._phis_data is not None and jnp.any(self._phis_data != 0)
+                    else None
+                )
                 carry = era5_to_cubedsphere_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    target_phis=_target_phis,
                 )
             elif cfg.dycore.discretization == "spectral":
                 carry = era5_to_spectral_carry(
@@ -1112,6 +1119,15 @@ class ModelDriver:
                 f"CWV={_h2[1]:.1f} kg/m2"
             )
 
+            # ERA5 phis is kept for dynamics — substituting ETOPO phis at t=0
+            # while keeping ERA5 winds creates a pressure-gradient imbalance
+            # (local delta can reach ~15 % p_s over Tibet/Andes) that drives
+            # a gravity wave transient exceeding CFL within the first day.
+            # ETOPO is used for CMOR orog and for f_land (passive surface tile);
+            # the dynamics run with the ERA5 orography that is consistent with
+            # the ERA5 initial wind field.  Proper ETOPO-in-dynamics requires
+            # building a balanced IC on ETOPO from the outset (future work).
+
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
 
@@ -1152,10 +1168,15 @@ class ModelDriver:
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
 
-        # Activate the slab-land surface tile when a land-sea mask was
-        # loaded in _create_topography.  f_land / albedo_land are static
-        # surface fields; the slab steps once per radiation sub-cycle.
-        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+        # Activate land surface when f_land was loaded in _create_topography.
+        # Two modes, distinguished by whether an explicit --land-mask-file was
+        # given (full slab, slab_land_active=True) or only --topography was
+        # given (passive: albedo + T_sfc blend, T_land carried but not stepped).
+        _has_land = (
+            self._f_land is not None
+            and bool(jnp.any(self._f_land > 0))
+        )
+        if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
             _sd = get_policy().storage
@@ -1180,11 +1201,58 @@ class ModelDriver:
                 self.physics.albedo_land = (
                     land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
                 )
-            self.physics.rad_update_steps = self.config.rad_update_steps
-            logger.info(
-                f"  Land tile: ACTIVE (slab land, C_land="
-                f"{self.physics.C_land:.1e} J/m2/K)"
+            _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
+                getattr(self.config, "slab_land_active", False)
             )
+            if _activate:
+                self.physics.slab_land_active = True
+                self.physics.rad_update_steps = self.config.rad_update_steps
+                # Tiled (mosaic) surface fluxes: ocean bulk scheme on the
+                # ocean tile, land Monin-Obukhov on the land tile (validated
+                # to require louis + an active land tile in validate_strict).
+                _tiled = bool(getattr(self.config, "surface_tiled", False))
+                self.physics.surface_tiled = _tiled
+                self.physics.surface_z0_land = float(
+                    getattr(self.config, "surface_z0_land", 0.1)
+                )
+                # Prognostic soil-water bucket: soil-moisture-limited land
+                # evaporation (beta) instead of a saturated wet surface.
+                _bucket = bool(getattr(self.config, "land_soil_bucket", False))
+                self.physics.land_soil_bucket = _bucket
+                self.physics.land_bucket_w_max = float(
+                    getattr(self.config, "land_bucket_w_max", 150.0)
+                )
+                self.physics.land_beta_min = float(
+                    getattr(self.config, "land_beta_min", 0.1)
+                )
+                self.physics.land_bucket_w_init_frac = float(
+                    getattr(self.config, "land_bucket_w_init_frac", 0.5)
+                )
+                # Stomatal soil-water limitation: route beta_soil through the
+                # shared land Jarvis model (legoesm.land.carbon.stomata).
+                _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))
+                self.physics.land_stomatal_beta = _stomatal
+                if _stomatal:
+                    from legoesm.land.carbon.stomata import StomataConfig
+                    self.physics.stomata_config = StomataConfig()
+                logger.info(
+                    f"  Land tile: ACTIVE (slab land, C_land="
+                    f"{self.physics.C_land:.1e} J/m2/K, "
+                    f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    f"tiled_surface={_tiled}"
+                    + (f", z0_land={self.physics.surface_z0_land:g}m" if _tiled else "")
+                    + (f", soil_bucket(W_max={self.physics.land_bucket_w_max:g}"
+                       f" kg/m2, beta_min={self.physics.land_beta_min:g})"
+                       if _bucket else "")
+                    + (", stomatal_beta(Jarvis)" if _stomatal else "")
+                    + ")"
+                )
+            else:
+                logger.info(
+                    f"  Land tile: PASSIVE (albedo + T_sfc blend, "
+                    f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    "T_land carried but not stepped)"
+                )
 
             # MULTILAYER (Richards) override: when use_multilayer_land, the
             # differentiable segment advances a per-column MultiLayerLandState
@@ -1518,9 +1586,8 @@ class ModelDriver:
                 start_year=self.config.start_year,
             )
             # Register time-invariant fields for the CMIP6 ``fx`` file.
-            # Topography was set up earlier in ``_create_topography``; we
-            # materialize to host arrays so the accumulator owns no JAX
-            # references and the driver remains free to free device buffers.
+            # _phis_data is the ETOPO field; dynamics run with ERA5 phis but
+            # CMOR orog reports the ETOPO field (the intended mountain mask).
             self.diagnostics.set_fixed_fields(
                 phis=np.asarray(self._phis_data),
                 land_fraction=np.asarray(self._f_land),
@@ -2092,7 +2159,8 @@ class ModelDriver:
                 layout = make_layout(topo.rank, topo.n_processes, n)
                 set_active_layout(layout)
 
-            if layout is not None:
+            from legoesm.parallel.layout import DistributedLayout
+            if isinstance(layout, DistributedLayout):
                 # Store MPI metadata for later phases
                 self._layout = layout
                 self._mpi_rank = topo.rank
@@ -2645,6 +2713,7 @@ class ModelDriver:
         canonical file.  For replicated state, only rank 0 writes and
         signals completion via a lightweight barrier.
         """
+        self._last_checkpoint_step = step
         elapsed_day = day - self.config.start_day
 
         # MPAS path: the Voronoi hydrostatic state is ``u`` (edge-normal,
@@ -3488,7 +3557,8 @@ class ModelDriver:
         logger.info(
             f"Wallclock budget {max_wall:.0f}s nearly reached at day {day:.2f}; "
             f"checkpointing and exiting cleanly for restart.")
-        ckpt_fn(step, day)
+        if step != self._last_checkpoint_step:
+            ckpt_fn(step, day)
         self.diagnostics.flush_to_disk(self._output_dir)
         sys.exit(0)
 
@@ -5340,6 +5410,21 @@ class ModelDriver:
         else:
             T_land = None
 
+        # Prognostic soil-water bucket [kg/m^2] — restored from the
+        # checkpoint when available, otherwise seeded at a fraction of the
+        # bucket capacity.  ``None`` (no carry, byte-identical legacy path)
+        # unless the bucket is active.
+        if (self.physics is not None and self.physics.f_land is not None
+                and getattr(self.physics, "land_soil_bucket", False)):
+            _w_init = (self.physics.land_bucket_w_max
+                       * self.physics.land_bucket_w_init_frac)
+            w_land = _aux.get(
+                "w_land",
+                jnp.full_like(self.state.p_s.data.astype(_sd), _w_init),
+            )
+        else:
+            w_land = None
+
         # Stateful-physics carries (issue #413): prognostic turbulent
         # energy (tke / qke) and the prognostic-spectral GWD wave-action
         # spectrum, seeded via the canonical ``init_physics_state`` and
@@ -5449,6 +5534,7 @@ class ModelDriver:
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
             "T_land": T_land,
+            "w_land": w_land,
             "tke": tke,
             "qke": qke,
             "gwd_spectrum": gwd_spectrum,
@@ -5527,6 +5613,7 @@ class ModelDriver:
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
+        w_land = ctx["w_land"]
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
@@ -5820,6 +5907,7 @@ class ModelDriver:
                 # and the readback below persists it across segment boundaries.
                 land_ml=(self._land_ml_state
                          if self._ensemble_size == 1 else None),
+                w_land=w_land,
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
@@ -5983,6 +6071,10 @@ class ModelDriver:
             if carry.T_land is not None:
                 T_land = carry.T_land
                 self._carry_aux["T_land"] = T_land
+            # Soil-water bucket: carry to the next segment + checkpoint.
+            if carry.w_land is not None:
+                w_land = carry.w_land
+                self._carry_aux["w_land"] = w_land
             # Stateful-physics carries (issue #413): thread the FULL
             # (per-member under ensembles) fields to the next segment
             # and persist them via carry_aux (mirrors T_land).
@@ -6240,6 +6332,8 @@ class ModelDriver:
         # T_sfc consistently with the compiled-segment path.  ``None``
         # when the land tile is inactive.
         T_land = ctx["T_land"]
+        # Soil-water bucket (None unless active): threaded like T_land.
+        w_land = ctx["w_land"]
         # Stateful-physics carries (issue #413), mirroring the compiled
         # path: None for diagnostic schemes (zero overhead).
         phys_tke = ctx["tke"]
@@ -6334,10 +6428,12 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                T_land=T_land, **_dm_step_in,
+                T_land=T_land, w_land=w_land, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
+        if phys_out.w_land is not None:
+            w_land = phys_out.w_land
         # Stash the FULL restart-relevant carry set at the warmup step
         # (codex rounds 4/6/8): a one-step run never enters the main
         # loop, and _finalize_run would otherwise checkpoint stale or
@@ -6354,6 +6450,8 @@ class ModelDriver:
         })
         if T_land is not None:
             self._carry_aux["T_land"] = T_land
+        if w_land is not None:
+            self._carry_aux["w_land"] = w_land
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -6462,10 +6560,12 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                    T_land=T_land, **_dm_step_in,
+                    T_land=T_land, w_land=w_land, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
+            if phys_out.w_land is not None:
+                w_land = phys_out.w_land
             # Persist the full restart-relevant set per step (codex
             # rounds 6/8): checkpoints can fire on any step, so the
             # held-radiation fields and every carry must be current —
@@ -6481,6 +6581,8 @@ class ModelDriver:
             })
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
+            if w_land is not None:
+                self._carry_aux["w_land"] = w_land
             # Stateful-physics carries (issue #413): feed the updated
             # values back next step + persist for checkpoints.
             if phys_out.tke is not None:

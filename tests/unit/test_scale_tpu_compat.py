@@ -62,6 +62,8 @@ class TestSegmentCarryPytree:
             tke=jnp.zeros((6 * n * n, nlev)),
             qke=jnp.zeros((6 * n * n, nlev)),
             gwd_spectrum=jnp.zeros((6 * n * n, 1, 1)),
+            conv_precip_prev=jnp.zeros(shape2d),
+            w_land=jnp.zeros(shape2d),
         )
 
     def test_is_namedtuple(self):
