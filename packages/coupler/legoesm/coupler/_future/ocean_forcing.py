@@ -1,4 +1,32 @@
-"""Assemble PROGNOSTIC-ocean surface forcing from the SEA-ICE tile's ice->ocean
+"""**NOT YET WIRED INTO ANY PRODUCTION DRIVER** (F11 two-way ice<->ocean).
+
+This module is the VALIDATED ice->ocean forcing mapper (see the extensive sign /
+conservation test suite ``tests/unit/test_ice_ocean_two_way.py``) for the
+two-way sea-ice <-> prognostic-ocean back-reaction.  It has no production caller:
+``CoupledESMDriver`` runs an aquaplanet Phase-1 dynamic ocean with NO sea-ice
+tile (ice concentration == 0 everywhere), so this mapper would return all-zeros
+there and its non-zero ice path cannot be exercised / sign-validated by any
+in-scope coupled run.  It is parked here (mirroring ``ice/_future/
+bitz_lipscomb.py``) until an ice-coupled dynamic-ocean configuration exists.
+
+Wire it into ``CoupledESMDriver._assemble_ocean_forcing`` by:
+
+1. surfacing the RAW ice ``TileResponse`` + the resolved ``TileFractions`` from
+   ``coupler.step_surface`` (which today returns only the blended
+   ``SurfaceToAtm``) -- e.g. an optional extra return or a stashed attribute;
+2. calling ``ice_ocean_forcing_from_ice_response(ice_resp, fracs)`` and ADDING
+   its ``q_net`` (basal heat extraction), ``tau_x/tau_y`` (ice stress
+   back-reaction), ``salt_flux`` (brine) and ``ice_fw`` (melt/freeze freshwater)
+   to the ocean-tile forcing already assembled there -- remapped onto the ocean
+   grid (``_grid_remapper.a2o``) like the other lagged sub-channels;
+3. verifying each exchanged flux carries the SAME sign at BOTH ends (basal heat
+   leaving the ocean == entering the ice; brine +into ocean on freeze; ice
+   stress on the ocean == -tau atmosphere convention) against an ICE-COUPLED
+   validation run -- the verification this audit could not complete.
+
+The detailed per-ocean-model consumption contract and sign conventions follow.
+
+Assemble PROGNOSTIC-ocean surface forcing from the SEA-ICE tile's ice->ocean
 exchange (F11 two-way ice<->ocean coupling).
 
 A prognostic ocean ingests surface forcing through ``OceanSurfaceForcing``

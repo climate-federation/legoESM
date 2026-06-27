@@ -374,6 +374,16 @@ def mynn25_turbulence(
     Km_half = L * q_half * SM
     Kh_half = L * q_half * SH
     Kq_half = L * q_half * (3.0 * SM)        # NN09 eq 67
+    # Sign convention: eddy diffusivities are >= 0 (down-gradient mixing).
+    # In strongly stable layers the level-2 rescaled stability functions
+    # ``SM25``/``SH25`` numerators (only the denominator ``D25`` is floored
+    # upstream) can go NEGATIVE, giving Km/Kh<0 -> ANTI-diffusive mixing in
+    # the implicit tridiagonal solve (an upgradient flux / numerical energy
+    # source).  Floor at 0 so mixing only ever diffuses (MYNN intends K->0,
+    # not K<0, in the fully stable limit).
+    Km_half = jnp.maximum(Km_half, 0.0)
+    Kh_half = jnp.maximum(Kh_half, 0.0)
+    Kq_half = jnp.maximum(Kq_half, 0.0)
 
     # Layer thicknesses at full levels (positive).
     dz_layer = jnp.maximum(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0)

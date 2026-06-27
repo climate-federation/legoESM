@@ -26,6 +26,55 @@ from legoesm.training.dycore_rollout import single_day_rollout
 logger = logging.getLogger(__name__)
 
 
+# Default gradient-clip norm and warmup for the dycore training drivers.  A raw
+# optax.adam(lr)/adamw(lr) has NO clipping or warmup, so a single large adjoint
+# (chaotic dynamics, a bad sample) can blow the parameters up before the loop's
+# NaN guard even fires.  Routing through ml.training.create_optimizer adds
+# warmup -> cosine decay + global-norm clipping (single source of truth; no
+# re-implemented schedule here).
+_DRIVER_GRAD_CLIP_NORM = 1.0
+_DRIVER_WARMUP_STEPS = 100
+
+
+def _make_driver_optimizer(
+    lr: float,
+    optimizer_kind: str,
+    n_epochs: int,
+    n_samples: int,
+    *,
+    weight_decay: float = 0.0,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
+):
+    """Build a warmup+cosine+clip optimizer via ``ml.training.create_optimizer``.
+
+    The dycore training modes only expose a peak ``lr``; this derives the total
+    step count (``n_epochs * n_samples``) for the cosine schedule and clamps the
+    warmup to it, then defers to the shared optimizer factory so clipping and the
+    schedule are NOT re-implemented per mode.
+    """
+    from legoesm.ml.training import TrainingConfig, create_optimizer
+
+    total_steps = max(int(n_epochs) * max(int(n_samples), 1), 1)
+    # A linear warmup makes the LR exactly 0 on every step < warmup (step 0
+    # always included for warmup >= 1), so a SHORT run (a 1-step smoke or a
+    # few-step fine-tune) whose whole length is <= the warmup would return
+    # init_value (lr == 0) and silently skip the update the raw optax.adam(lr)
+    # path DID perform.  Disable warmup entirely when the run is no longer than
+    # the requested warmup (warmup == 0 -> full peak LR from step 0, pure cosine
+    # decay); otherwise keep the full warmup for a normal-length run.
+    warmup = int(warmup_steps) if total_steps > int(warmup_steps) else 0
+    cfg = TrainingConfig(
+        lr=lr,
+        warmup_steps=warmup,
+        total_steps=total_steps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+        optimizer=optimizer_kind,
+    )
+    return create_optimizer(cfg)
+
+
 # ======================================================================
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
@@ -229,6 +278,8 @@ def train_physics_params(
     n_epochs: int = 100,
     lr: float = 1e-3,
     dt: float = 600.0,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -265,7 +316,10 @@ def train_physics_params(
             **trainable.to_segment_kwargs(),
         )
 
-    optimizer = optax.adam(lr)
+    optimizer = _make_driver_optimizer(
+        lr, "adam", n_epochs, len(initial_carries),
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
+    )
     train_step = _build_train_step(
         make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
     )
@@ -292,6 +346,9 @@ def train_neural_gcm(
     n_epochs: int = 100,
     lr: float = 1e-4,
     dt: float = 600.0,
+    weight_decay: float = 1e-5,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -318,7 +375,11 @@ def train_neural_gcm(
         step_unified = make_neural_step_unified(nn_phys, adapter)
         return _build_training_segment(model, step_unified, grid, sigma, dt)
 
-    optimizer = optax.adamw(lr, weight_decay=1e-5)
+    optimizer = _make_driver_optimizer(
+        lr, "adamw", n_epochs, len(initial_carries),
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
+    )
     train_step = _build_train_step(
         make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
     )
@@ -347,6 +408,9 @@ def train_sfno_coupled(
     dt: float = 600.0,
     coupling_mode: str = "correction",
     physics_pipeline=None,
+    weight_decay: float = 1e-5,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -389,7 +453,11 @@ def train_sfno_coupled(
         )
         return _build_training_segment(model, step_unified, grid, sigma, dt)
 
-    optimizer = optax.adamw(lr, weight_decay=1e-5)
+    optimizer = _make_driver_optimizer(
+        lr, "adamw", n_epochs, len(initial_carries),
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
+    )
     train_step = _build_train_step(
         make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
     )

@@ -144,6 +144,15 @@ class ModelDriver:
         # SegmentForcing so the sea-ice/ocean/land albedo + skin-T feedbacks
         # reach the atmosphere.  None (AMIP / standalone) ⇒ static blend.
         self.get_sfc_override = None
+        # Optional per-segment SHARED surface-flux feedback hook.  A coupled
+        # driver sets this to a callable ``day -> (sfc_shflx, sfc_lhflx)``
+        # (each grid-shaped [W/m2, +up] or None) returning the coupler's
+        # tile-blended sensible / latent heat flux; threaded into the surface
+        # tendency as traced SegmentForcing so the atmosphere consumes the SAME
+        # surface fluxes the coupler feeds the ocean (air-sea budget closure).
+        # None (AMIP / standalone) means the atmosphere computes its own bulk
+        # surface fluxes (byte-identical to the pre-shared-flux behaviour).
+        self.get_sfc_flux_override = None
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
@@ -5674,6 +5683,14 @@ class ModelDriver:
             if self.get_sfc_override is not None:
                 _sfc_albedo_ovr, _sfc_T_ovr = self.get_sfc_override(day)
 
+            # Coupler-provided SHARED surface SH/LH fluxes for this segment
+            # (None unless a coupled driver wired the shared-flux feedback).
+            # When present the atmosphere consumes these instead of its own
+            # bulk fluxes so the air-sea heat+water budget closes.
+            _sfc_shflx_ovr, _sfc_lhflx_ovr = (None, None)
+            if self.get_sfc_flux_override is not None:
+                _sfc_shflx_ovr, _sfc_lhflx_ovr = self.get_sfc_flux_override(day)
+
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
                 sst=sst, sic=sic,
@@ -5684,6 +5701,8 @@ class ModelDriver:
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
+                sfc_shflx_override=_sfc_shflx_ovr,
+                sfc_lhflx_override=_sfc_lhflx_ovr,
             )
 
             # Pack state into carry

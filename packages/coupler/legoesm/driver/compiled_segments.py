@@ -459,6 +459,21 @@ class SegmentForcing(NamedTuple):
     # is created at import and the pytree carries no spurious empty leaf.
     sfc_albedo_override: jax.Array | None = None
     sfc_T_override: jax.Array | None = None
+    # Coupler-provided SHARED surface turbulent heat fluxes — the tile-blended
+    # sensible / latent heat flux [W/m2, positive UP = surface→atmosphere] the
+    # coupler computed for this segment (its bulk scheme, q_sfc = 0.98·q_sat
+    # mixing ratio, ocean-tile C_H/C_E).  When present, the atmosphere's surface
+    # tendency consumes THESE fluxes (the bottom-level T/q kick in
+    # physics_step_no_rad) instead of recomputing its own bulk SH/LH, so the
+    # heat + water leaving the atmosphere equals what the coupler feeds the
+    # ocean — the air-sea budget closes (single authoritative flux calc on both
+    # sides).  ``None`` for AMIP / standalone / uncoupled runs ⇒ the atmosphere
+    # computes its own bulk fluxes (byte-identical to the pre-shared-flux
+    # behaviour).  Grid-shaped, like sst/sic.  Kept None (not a (0,)
+    # placeholder) so no module-scope device op is created at import and the
+    # pytree carries no spurious empty leaf.
+    sfc_shflx_override: jax.Array | None = None
+    sfc_lhflx_override: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -501,6 +516,8 @@ def pack_forcing(
     ghg_vmr=None,
     sfc_albedo_override=None,
     sfc_T_override=None,
+    sfc_shflx_override=None,
+    sfc_lhflx_override=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -514,6 +531,12 @@ def pack_forcing(
         this segment (grid-shaped, like sst/sic).  ``None`` (default) leaves
         the radiation's static internal blend untouched — byte-identical for
         AMIP / standalone runs.
+    sfc_shflx_override, sfc_lhflx_override : jax.Array or None
+        Coupler-provided tile-blended sensible / latent heat flux [W/m2,
+        positive UP] for this segment (grid-shaped, like sst/sic).  ``None``
+        (default) leaves the atmosphere computing its own bulk surface fluxes —
+        byte-identical for AMIP / standalone runs.  When present the atmosphere
+        surface tendency consumes these instead, closing the air-sea budget.
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -548,6 +571,14 @@ def pack_forcing(
         ),
         sfc_T_override=(
             None if sfc_T_override is None else jnp.asarray(sfc_T_override)
+        ),
+        sfc_shflx_override=(
+            None if sfc_shflx_override is None
+            else jnp.asarray(sfc_shflx_override)
+        ),
+        sfc_lhflx_override=(
+            None if sfc_lhflx_override is None
+            else jnp.asarray(sfc_lhflx_override)
         ),
     )
 
@@ -884,6 +915,8 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_shflx_override=forcing.sfc_shflx_override,
+                    sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=_T_land_in,
                     conv_precip=carry.conv_precip_prev[_ofi],
                     **_dm_in,
@@ -987,6 +1020,8 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_shflx_override=forcing.sfc_shflx_override,
+                    sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=carry.T_land,
                     conv_precip=carry.conv_precip_prev,
                     **_dm_in,

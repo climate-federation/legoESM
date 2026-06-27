@@ -43,7 +43,6 @@ from legoesm.ocean.dynamics.barotropic_common import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     depth_average_to_faces,
-    implicit_bottom_drag_factor,
 )
 
 
@@ -268,27 +267,26 @@ def barotropic_substeps_latlon_cgrid(
     # Cosine time filter for time-averaging (replaces box-average).
     # Cosine-bell (Hanning) window suppresses the side lobes of the box
     # filter that alias barotropic modes into the baroclinic coupling.
-    # Transport accumulators (Hu, Hv) MUST remain box-filtered for exact
-    # volume conservation with the discrete continuity equation.
     # Averaging filter for eta/U/V + the matching transport weights for Hu/Hv.
     # "power_law" = Shchepetkin-McWilliams (2005) extended-window filter (ROMS/
     # MOM6/Oceananigans), which damps the 2Δx barotropic Coriolis null mode the
     # first-order cosine filter excites (docs/issues/barotropic_mode_noise.md).
-    # The cosine/box path is bit-identical to before: w_transport = 1/n_substeps
-    # per substep, so Hu_avg = sum(w_transport*flux) == sum(flux)/n_substeps.
+    # For box/cosine the transport weights are NO LONGER a flat 1/n: they are the
+    # continuity-consistent SM2005 tail-sum ``tail_j/(n·w_total)`` returned by
+    # compute_filter_weights, so the discrete continuity invariant
+    # ``div(Hu_avg) == (eta_old - eta_avg)/dt`` (which the flux-form tracer step
+    # needs to preserve a uniform tracer) holds for EVERY filter — the flat 1/n
+    # broke it for both box (~95%) and cosine (~99%).
     if config.barotropic.barotropic_time_filter == "power_law":
         w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
             n_substeps, eta.dtype,
         )
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        w_filter, w_total = compute_filter_weights(
+        w_filter, w_total, w_transport = compute_filter_weights(
             n_substeps, eta.dtype, use_cosine=use_cosine_filter,
         )
         n_loop = n_substeps
-        w_transport = jnp.full(
-            (n_substeps,), 1.0 / n_substeps, dtype=eta.dtype,
-        )
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.barotropic.bebt
@@ -414,14 +412,16 @@ def barotropic_substeps_latlon_cgrid(
                 V_bar_new + div_damp_coeff * div_damp_area_v * grad_div_y
             ) * v_mask
 
-        # Bottom drag: -r * U_bar / H_total
-        if config.bottom_drag.bottom_drag_r > 0:
-            U_bar_new = U_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag.bottom_drag_r, H_u,
-            )
-            V_bar_new = V_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag.bottom_drag_r, H_v,
-            )
+        # Bottom drag — SINGLE OWNER (finding #6 fix).
+        # The 3D PE tendency (``_bc_bottom_drag``) already applies the full
+        # bottom drag ``-r·u_bot/h_bot`` (with BBL / partial-cell handling) to
+        # ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the barotropic
+        # mode through ``F_slow_u``/``F_slow_v`` and applied at every substep
+        # above.  Re-applying ``implicit_bottom_drag_factor`` here would make the
+        # effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2 finding #1).
+        # The drag is therefore owned exclusively by the 3D tendency / F_slow;
+        # we do NOT re-apply it here.  (The implicit-CN solver already relied on
+        # F_slow alone, so the two barotropic paths are now consistent.)
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
@@ -472,9 +472,11 @@ def barotropic_substeps_latlon_cgrid(
             0, n_loop, fori_body, init_carry,
         )
 
-    # Time-averaged barotropic transport: w_transport already carries the
-    # 1/n_substeps normalisation (box/cosine) or the SM2005 secondary weights
-    # (power_law), so the accumulator IS the time-averaged transport.
+    # Time-averaged barotropic transport: w_transport already carries the full
+    # continuity-consistent normalisation — the SM2005 tail-sum
+    # ``tail_j/(n·w_total)`` (box/cosine) or the SM2005 secondary weights
+    # (power_law) — so the accumulator IS the time-averaged transport ``Hu_avg``
+    # that closes ``div(Hu_avg) == (eta_old - eta_avg)/dt``.
     Hu_avg = Hu_sum_f
     Hv_avg = Hv_sum_f
 

@@ -147,13 +147,17 @@ def dst3_to_u_points(
     f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j))
 
     # --- Negative flow (from cell j to cell j-1) ---
-    # Donor = f_j, Downstream = f_jm1, Upwind-of-donor = f_jp1
+    # Donor = f_j, Downstream = f_jm1, Upwind-of-donor (upup) = f_jp1
     delta_neg = f_jm1 - f_j              # local gradient (downstream - donor)
-    # Match TVD convention: r = (f_{j+1}-f_j) / (f_{j-1}-f_j)
-    # This makes negative flow default to upwind at smooth monotone fields,
-    # providing essential implicit diffusion for forward-Euler stability.
+    # Canonical DST-3 smoothness ratio (matches the vertical sibling
+    # ``flux_form_vertical_tracer_advection_dst3`` and the positive-flow branch
+    # above):  r = (donor - upup) / (downstream - donor).  On a smooth monotone
+    # field donor-upup == downstream-donor -> r=+1 -> psi(1)=1 -> full 3rd-order,
+    # SYMMETRIC with the u>0 branch.  The prior numerator (upup - donor) was
+    # negated, giving r=-1 -> van_leer(-1)=0 -> 1st-order/over-diffusive for u<0
+    # ONLY (direction-asymmetric diffusion).
     r_neg = grad_safe_ratio(
-        f_jp1 - f_j,
+        f_j - f_jp1,
         jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
         jnp.abs(delta_neg) > t_grad,
     )
@@ -261,11 +265,16 @@ def dst3_to_v_points(
     f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_south, f_north),
                            jnp.maximum(f_south, f_north))
 
-    # --- Negative flow (north to south): donor = f_north, downstream = f_south ---
-    delta_neg = f_south - f_north
-    # Match TVD convention for implicit diffusion stability
+    # --- Negative flow (north to south): donor = f_north, downstream = f_south,
+    #     upwind-of-donor (upup) = f_north2 ---
+    delta_neg = f_south - f_north        # downstream - donor
+    # Canonical DST-3 smoothness ratio (matches the vertical sibling and the
+    # positive-flow branch above):  r = (donor - upup) / (downstream - donor).
+    # The prior numerator (upup - donor) = (f_north2 - f_north) was negated,
+    # giving r=-1 on a smooth monotone field -> van_leer(-1)=0 -> 1st-order/
+    # over-diffusive for v<0 ONLY (direction-asymmetric diffusion).
     r_neg = grad_safe_ratio(
-        f_north2 - f_north,
+        f_north - f_north2,
         jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
         jnp.abs(delta_neg) > t_grad,
     )
@@ -1100,8 +1109,11 @@ def _flux_form_vertical_tracer_advection_weno(
     # Stencil is ordered top-to-bottom (increasing level index).
     # f_plus = left-biased (from above), f_minus = right-biased (from below).
     # Upward flow (w > 0): donor is below → use f_minus.
-    # Downward flow (w < 0): donor is above → use f_plus.
-    T_face = jnp.where(w_int >= 0, f_minus, f_plus)
+    # Downward flow (w <= 0): donor is above → use f_plus.
+    # Tie at w==0 -> f_plus (donor-above), matching the dst3/ppm/fct vertical
+    # convention (all split on ``w_int > 0.0``).  At w==0 the flux is zero
+    # regardless of the pick, so the choice only fixes a consistent convention.
+    T_face = jnp.where(w_int > 0, f_minus, f_plus)
 
     F_interior = w_int * T_face
 

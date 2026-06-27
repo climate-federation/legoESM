@@ -4,7 +4,7 @@
 Uses the real boundary-condition files from
   /pool/data/ICON/grids/public/mpim/
 as described in docs/cmip6_forcings.md, and ERA5 initial conditions
-prepared by scripts/prep_levante_era5_ic.py.
+prepared by scripts/data/prep_levante_era5_ic.py.
 
 Forcing channels
 ----------------
@@ -31,7 +31,7 @@ Usage::
 
 ERA5 IC preparation::
 
-    python scripts/prep_levante_era5_ic.py \\
+    python scripts/data/prep_levante_era5_ic.py \\
         --year 1979 --month 1 --day 1 \\
         --out /scratch/b/b309178/era5_ic_1979-01-01.zarr
 """
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     # Initial conditions / restart
     parser.add_argument("--ic-zarr", type=str, default="",
                         help="Path to ERA5 IC Zarr store "
-                             "(from scripts/prep_levante_era5_ic.py). "
+                             "(from scripts/data/prep_levante_era5_ic.py). "
                              "If empty, uses held_suarez default IC.")
     parser.add_argument("--restart-from", type=str, default="",
                         help="Checkpoint .npz from a previous segment. "

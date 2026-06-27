@@ -261,6 +261,7 @@ class PhysicsPipeline:
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
                             T_land=None, aerosol_od=None,
+                            sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None):
         """Convection + microphysics + BL exchange with held radiation.
 
@@ -755,9 +756,53 @@ class PhysicsPipeline:
             or self.physics_parameterization is not None
         )
 
+        # --- SHARED air-sea surface fluxes (coupler-authoritative) -----------
+        # When the coupled driver supplies the tile-blended surface SH/LH (its
+        # bulk scheme, q_sfc = 0.98*q_sat mixing ratio, ocean-tile C_H/C_E),
+        # the atmosphere DISCARDS its own bulk estimate and uses the coupler's
+        # numbers so the heat + water leaving the atmosphere EQUALS what the
+        # coupler feeds the ocean (the air-sea budget closes).  ``None`` vs
+        # array is a STATIC structural choice (set once by the driver closure
+        # for the whole run), so a Python ``if`` is correct here -- the JAX
+        # feature-gating exception (NOT a data-dependent jnp.where, which would
+        # trace both branches).  Sign convention: both override fields are
+        # [W/m2, positive UP = surface->atmosphere], identical to the bulk
+        # ``shflx``/``lhflx`` they replace, so the downstream bottom-level T/q
+        # kick (positive shflx warms the surface air; positive lhflx moistens
+        # it) and the returned PhysicsOutput diagnostics are sign-consistent
+        # with the ocean side (which applies q_net = ... - shflx - lhflx, i.e.
+        # the SAME positive-up fluxes as a heat SINK on the ocean).
+        _flux_override = (
+            sfc_shflx_override is not None and sfc_lhflx_override is not None
+        )
+        if _flux_override:
+            if turb_owns_surface:
+                # A turbulence / unified-physics scheme applies the surface
+                # flux as the IMPLICIT bottom BC of its vertical-diffusion
+                # solve; overlaying the coupler flux on top would double-count
+                # (or silently disagree with) the surface exchange.  The
+                # shared-flux air-sea coupling is only well-posed against the
+                # explicit bulk-BL surface path -- fail LOUDLY rather than
+                # corrupt the budget (CLAUDE.md: no silent degradation).
+                raise ValueError(
+                    "Coupler shared surface-flux override (couple_surface_"
+                    "fluxes) is incompatible with a turbulence / unified-"
+                    "physics scheme that owns surface exchange: the turbulence "
+                    "scheme already applies the surface flux as its implicit "
+                    "bottom boundary condition, so the override would double-"
+                    "count it.  Use the bulk-BL surface path (no turbulence "
+                    "scheme) when enabling shared air-sea fluxes, or extend the "
+                    "turbulence surface BC to ingest the coupler flux first."
+                )
+            shflx = sfc_shflx_override
+            lhflx = sfc_lhflx_override
+
         dT_dt = dT_dt_rad + dT_dt_conv + dT_dt_micro
         dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
 
+        # Apply the explicit bottom-level surface kick from the bulk path OR
+        # the coupler override (``_flux_override`` implies ``not
+        # turb_owns_surface`` here -- the turbulence case raised above).
         if not turb_owns_surface:
             evap_rate = lhflx / constants.L_v
             dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
@@ -1323,6 +1368,8 @@ class PhysicsPipeline:
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
                          sfc_T_override=None,
+                         sfc_shflx_override=None,
+                         sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None):
 
@@ -1337,6 +1384,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
+                 sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum, conv_precip) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -1365,6 +1413,8 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    sfc_shflx_override=sfc_shflx_override,
+                    sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                 )
 
@@ -1400,6 +1450,7 @@ class PhysicsPipeline:
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
+                 sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum, conv_precip) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
@@ -1411,6 +1462,8 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    sfc_shflx_override=sfc_shflx_override,
+                    sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                 )
 
@@ -1442,6 +1495,7 @@ class PhysicsPipeline:
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
+                    sfc_shflx_override, sfc_lhflx_override,
                     tke, qke, gwd_spectrum, conv_precip)
 
             # Issue #316 fix: when the caller knows at build time which

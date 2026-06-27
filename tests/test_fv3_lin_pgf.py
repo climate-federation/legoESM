@@ -174,3 +174,113 @@ def test_surface_pressure_tilt_produces_pgf(small_cube):
     assert other_max < 0.5 * face0_signal, (
         f"Other faces show {other_max:.3e}, face 0 signal {face0_signal:.3e}"
     )
+
+
+def test_denom_floor_is_strictly_nonzero_at_zero():
+    """Regression: the denominator floor must be NONZERO when denom==0.
+
+    ``jnp.sign(0.0) == 0.0`` so the old guard
+    ``where(|d|>eps, d, sign(d)*eps)`` returned 0 at ``d==0`` and
+    reintroduced a 0/0 (NaN value AND NaN gradient).  The fixed guard
+    maps sign(0) -> +1.  We replicate the in-module floor expression and
+    assert it is strictly positive at ``d==0`` and has a finite gradient.
+    """
+    from legoesm.atmosphere.dynamics._fv3_lin_pgf import _PGF_DENOM_FLOOR
+
+    def safe_denom(d):
+        sgn = jnp.sign(d)
+        floor_sign = sgn + (1.0 - jnp.abs(sgn))
+        return jnp.where(jnp.abs(d) > _PGF_DENOM_FLOOR, d, floor_sign * _PGF_DENOM_FLOOR)
+
+    # value at exactly zero is the +floor, not 0.
+    val0 = float(safe_denom(jnp.array(0.0)))
+    assert val0 == pytest.approx(_PGF_DENOM_FLOOR), val0
+    assert val0 != 0.0
+
+    # 1/denom and its gradient are finite at d==0 (the actual divide).
+    def recip(d):
+        return 1.0 / safe_denom(d)
+
+    r = float(recip(jnp.array(0.0)))
+    g = float(jax.grad(recip)(jnp.array(0.0)))
+    assert jnp.isfinite(r), r
+    assert jnp.isfinite(g), g
+
+
+def test_pgf_gradient_finite_through_full_field(small_cube):
+    """End-to-end: jax.grad through the full PGF is finite even when a
+    column is pushed to a near-degenerate (zero-δp^κ) state.
+
+    We differentiate a scalar of the PGF w.r.t. ``p_s`` and ``T`` at a
+    realistic state and assert NO NaN/Inf gradients anywhere.
+    """
+    _, cdgrid, coord, n, nlev = small_cube
+
+    T = jnp.full((6, n, n, nlev), 285.0)
+    phis = jnp.zeros((6, n, n))
+    p_s = jnp.full((6, n, n), constants.p_ref)
+
+    def scalar_of_pgf(p_s_in, T_in):
+        px, py = fv3_lin1997_pgf_3d_cgrid(T_in, p_s_in, phis, coord, cdgrid)
+        return jnp.sum(px ** 2) + jnp.sum(py ** 2)
+
+    gp, gt = jax.grad(scalar_of_pgf, argnums=(0, 1))(p_s, T)
+    assert bool(jnp.all(jnp.isfinite(gp))), "non-finite grad wrt p_s"
+    assert bool(jnp.all(jnp.isfinite(gt))), "non-finite grad wrt T"
+
+
+def _coord_with_zero_thickness_layer(coord, k_dup=3):
+    """Return a copy of ``coord`` with interface ``k_dup+1`` collapsed onto
+    ``k_dup`` so layer ``k_dup`` has EXACTLY zero pressure thickness -> the
+    production ``compute_pkappa_half`` yields δp^κ == 0 -> the Lin PGF
+    denominator ``wk_W + wk_E`` is EXACTLY 0 at that level (drives the real
+    divide-by-zero the floor guards).  ``A_full``/``B_full``/``dA``/``dB`` for
+    the degenerate layer are set consistently so the geopotential recurrence
+    stays finite.
+    """
+    A_half = coord.A_half.at[k_dup + 1].set(coord.A_half[k_dup])
+    B_half = coord.B_half.at[k_dup + 1].set(coord.B_half[k_dup])
+    A_full = 0.5 * (A_half[:-1] + A_half[1:])
+    B_full = 0.5 * (B_half[:-1] + B_half[1:])
+    dA = A_half[1:] - A_half[:-1]
+    dB = B_half[1:] - B_half[:-1]
+    return coord._replace(
+        A_half=A_half, B_half=B_half, A_full=A_full, B_full=B_full,
+        dA=dA, dB=dB,
+    )
+
+
+def test_pgf_production_denominator_exactly_zero_is_finite(small_cube):
+    """Regression for the sign(0)->+1 denominator floor, driven through the
+    PRODUCTION ``fv3_lin1997_pgf_3d_cgrid`` with a coordinate that makes the
+    Lin cross-product denominator EXACTLY zero (a zero-thickness layer).
+
+    Without the floor (or with the old ``sign(d)*eps`` that returns 0 at d==0)
+    this produces a 0/0 -> NaN value AND NaN gradient.  Assert both the PGF and
+    its gradient are finite at the degenerate level.
+    """
+    _, cdgrid, coord, n, nlev = small_cube
+    k_dup = 3
+    deg_coord = _coord_with_zero_thickness_layer(coord, k_dup=k_dup)
+
+    # Confirm the production denominator really is exactly zero at k_dup
+    # (non-vacuous): p^κ is equal across the collapsed interface.
+    p_s = jnp.full((6, n, n), constants.p_ref)
+    pk_half = compute_pkappa_half(p_s, deg_coord)        # (6,n,n,nlev+1)
+    wk = pk_half[..., 1:] - pk_half[..., :-1]            # (6,n,n,nlev)
+    assert float(jnp.max(jnp.abs(wk[..., k_dup]))) == 0.0, "layer not degenerate"
+
+    T = jnp.full((6, n, n, nlev), 285.0)
+    phis = jnp.zeros((6, n, n))
+
+    px, py = fv3_lin1997_pgf_3d_cgrid(T, p_s, phis, deg_coord, cdgrid)
+    assert bool(jnp.all(jnp.isfinite(px))), "non-finite PGF (x) at zero denom"
+    assert bool(jnp.all(jnp.isfinite(py))), "non-finite PGF (y) at zero denom"
+
+    def scalar_of_pgf(p_s_in, T_in):
+        qx, qy = fv3_lin1997_pgf_3d_cgrid(T_in, p_s_in, phis, deg_coord, cdgrid)
+        return jnp.sum(qx ** 2) + jnp.sum(qy ** 2)
+
+    gp, gt = jax.grad(scalar_of_pgf, argnums=(0, 1))(p_s, T)
+    assert bool(jnp.all(jnp.isfinite(gp))), "non-finite grad wrt p_s at zero denom"
+    assert bool(jnp.all(jnp.isfinite(gt))), "non-finite grad wrt T at zero denom"
