@@ -193,6 +193,32 @@ class DINOConfig:
     U_T: float = 0.027             # tracer diffusivity velocity scale [m/s] (rn_Ut)
 
     # ------------------------------------------------------------------
+    # MPAS-only equatorial viscosity boost (grid-specific stabilizer).
+    # The lat-lon path protects the equatorial waveguide with A_h_eq_boost
+    # (above): where f→0 the Coriolis restoring vanishes and the forced
+    # equatorial jet is numerically unconstrained. The MPAS implicit-CN
+    # barotropic solver's Coriolis predictor-corrector has the SAME blind
+    # spot — without protection the wind-driven equatorial jet runs away
+    # (DIAGNOSED: |u| 1.8→7.6 m/s by day 20 → NaN by day 30; fastest edges
+    # all at |lat|<3°; dt-independent, forcing-required, viscosity-of-the-
+    # uniform-kind-insensitive → a dynamical f→0 mode, not grid noise).
+    # MPASOceanConfig.equatorial_visc_boost applies the SAME tight-Gaussian
+    # A_h·(1 + boost·exp(−½(lat/σ)²)) profile the lat-lon A_h_eq_boost uses
+    # (σ=5° matches A_h_eq_sigma_deg). IGNORED on the lat-lon path. Boost
+    # SWEEP: boost=3 NaNs day50; boost=5 stable but jet peaks 4.5 m/s; boost=8
+    # peaks ~2.1 m/s — chosen default (≈9× A_h at the equator, MPAS 3–10 range).
+    # SCOPE: this cures the EARLY equatorial mode (stable days 0–~90, was NaN
+    # day 30). A SEPARATE instability (#3) limits the full year: the regional
+    # Voronoi mesh has distorted (anisotropic dcEdge≪dvEdge) cells in the
+    # southern re-entrant-channel / buffer transition (lat≈−67°) — see
+    # _diag_dino_mpas_blowup.py — and as the ACC jet matures there (~day 100)
+    # those cells go unstable (|u| regrows → NaN ~day 130), viscosity-
+    # insensitive (boost 8/12, baro-u-visc 0/1e4/3e4 all NaN day 130). That is
+    # a mesh-quality issue (the generator skips Lloyd, voronoi.py:1701), not a
+    # config knob; full-year MPAS DINO needs a better southern-channel mesh.
+    mpas_equatorial_visc_boost: float = 8.0   # low-lat A_h boost factor [-]
+
+    # ------------------------------------------------------------------
     # Bottom drag (paper Sect 2.1 "nonlinear friction term"; namelist
     # rn_drag = 1e-3 quadratic).
     # ------------------------------------------------------------------
@@ -1195,6 +1221,11 @@ def dino_mpas_model_config(
     model_config = MPASOceanConfig(
         rho_0=cfg.rho_0,
         A_h=A_h,
+        # Equatorial-waveguide stabilizer (f→0): boosts A_h near the equator
+        # with the same tight Gaussian the lat-lon A_h_eq_boost uses. Without
+        # it the forced equatorial jet runs away on the implicit-CN MPAS path
+        # — see the mpas_equatorial_visc_boost note in DINOConfig.
+        equatorial_visc_boost=cfg.mpas_equatorial_visc_boost,
         K_h=K_h,
         A_v=cfg.A_v_bg,
         K_v=cfg.K_v_bg,

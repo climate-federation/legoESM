@@ -67,6 +67,29 @@ class TestDINOConfig:
         assert len(cfg.wind_tau_lats_deg) == 7
         assert len(cfg.wind_tau_values) == 7
 
+    def test_mpas_equatorial_visc_boost_propagates(self):
+        """The MPAS-only equatorial viscosity boost
+        (``mpas_equatorial_visc_boost``) must reach the ``MPASOceanConfig``.
+        Without it the forced f→0 equatorial jet runs away on the implicit-CN
+        MPAS path (|u| 1.8→7.6 m/s by day 20 → NaN by day 30; fastest edges
+        all at |lat|<3°). It mirrors the lat-lon ``A_h_eq_boost`` mechanism.
+        ``physics`` is left off so the stub mesh only needs ``areaCell``.
+        """
+        import dataclasses
+        from types import SimpleNamespace
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))  # ~100 km cells
+        cfg = DINOConfig()
+        assert cfg.mpas_equatorial_visc_boost == pytest.approx(8.0)
+        mc, phys = dino.dino_mpas_model_config(mesh, cfg, physics=False)
+        assert mc.equatorial_visc_boost == pytest.approx(
+            cfg.mpas_equatorial_visc_boost)
+        assert phys is None
+        # Override (the run_dino --mpas-eq-visc-boost flag) propagates. Use a
+        # value distinct from the 8.0 default so the assert is non-vacuous.
+        cfg2 = dataclasses.replace(cfg, mpas_equatorial_visc_boost=12.0)
+        mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
+        assert mc2.equatorial_visc_boost == pytest.approx(12.0)
+
     def test_registry_entry(self):
         assert "dino" in AVAILABLE_EXPERIMENTS
         assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG
