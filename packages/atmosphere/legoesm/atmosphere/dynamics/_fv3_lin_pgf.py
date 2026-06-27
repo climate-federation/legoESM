@@ -60,6 +60,11 @@ from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.vertical import HybridSigmaPressureCoordinate
 
+# --- numerics floors (one-off; not a tunable scheme coefficient) ---
+# Strictly-positive denominator floor for the Lin (1997) cross-product PGF
+# divide.  FV3 uses no floor; we add one for autodiff / float32 NaN-safety.
+_PGF_DENOM_FLOOR: float = 1e-12  # coeff-ok: numerics divide-by-zero floor
+
 
 def compute_pkappa_half(
     p_s: jax.Array,
@@ -261,8 +266,15 @@ def fv3_lin1997_pgf_3d_cgrid(
     # Safety floor for the denominator (FV3 uses no floor — relies on the
     # dynamics never producing zero δp^κ in a stable atmosphere; we add a
     # conservative epsilon to keep autodiff and float32 paths NaN-safe).
+    # NOTE: ``jnp.sign(0) == 0`` would zero the floor and reintroduce a
+    # 0/0 (NaN value AND NaN gradient) exactly at ``denom == 0``.  Map the
+    # sign-of-zero to +1 so the floor is ALWAYS strictly nonzero.
+    _sgn_x = jnp.sign(denom_x)
+    _floor_sign_x = _sgn_x + (1.0 - jnp.abs(_sgn_x))  # +1 where denom_x == 0
     denom_x_safe = jnp.where(
-        jnp.abs(denom_x) > 1e-12, denom_x, jnp.sign(denom_x) * 1e-12,
+        jnp.abs(denom_x) > _PGF_DENOM_FLOOR,
+        denom_x,
+        _floor_sign_x * _PGF_DENOM_FLOOR,
     )
 
     # rdxc shape: (6, n+1, n).  Broadcast over the trailing nlev axis.
@@ -296,8 +308,12 @@ def fv3_lin1997_pgf_3d_cgrid(
     )
 
     denom_y = wk_S + wk_N
+    _sgn_y = jnp.sign(denom_y)
+    _floor_sign_y = _sgn_y + (1.0 - jnp.abs(_sgn_y))  # +1 where denom_y == 0
     denom_y_safe = jnp.where(
-        jnp.abs(denom_y) > 1e-12, denom_y, jnp.sign(denom_y) * 1e-12,
+        jnp.abs(denom_y) > _PGF_DENOM_FLOOR,
+        denom_y,
+        _floor_sign_y * _PGF_DENOM_FLOOR,
     )
 
     rdyc = cdgrid.rdyc[..., None]                       # (6, n, n+1, 1)

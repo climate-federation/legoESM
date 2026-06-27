@@ -68,7 +68,10 @@ def test_modon_ic_fields():
 def test_modon_prognostic_run_stable_and_conserves_mass():
     """Short non-rotating SW integration: finite, mass-conserving, modons evolve,
     no cube-corner blow-up."""
-    n = 24
+    # N=36: the iter1009 dual-target preset is CALIBRATED/validated at C36
+    # (audit item 13).  The prior C24 ran the preset at an uncalibrated
+    # resolution where its div-damp/filter coefficients are off-design.
+    n = 36
     grid = create_cubed_sphere(n)
     model = FV3EdgeShallowWaterModel(grid, iter1009_dual_target_config(n))
     state, cd_nr = colliding_modons_cdgrid(grid, model.cdgrid)
@@ -91,8 +94,8 @@ def test_modon_prognostic_run_stable_and_conserves_mass():
     # FV3 flux-form cube SW conserves mass to the divergence-damping/filter
     # roundoff, not machine precision (cf. the established cube SW convention
     # test_fv_cubesphere.py: mass_drift < 1e-4).  h is uniform so mass0 is
-    # IC-independent; the ~1.5 ppm 8 h drift here is the scheme's, set at the
-    # uncalibrated C24 (the iter1009 dual-target preset is validated at N=36).
+    # IC-independent; the drift here is the scheme's at the CALIBRATED C36
+    # (the iter1009 dual-target preset is validated at N=36).
     # 1e-5 keeps a real regression guard (100x tighter than the cube convention)
     # with comfortable margin over the measured drift.
     assert abs(mass1 / mass0 - 1.0) < 1e-5           # mass conserved (cube SW)

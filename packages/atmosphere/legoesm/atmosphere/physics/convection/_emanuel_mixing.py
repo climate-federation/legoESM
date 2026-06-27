@@ -114,6 +114,10 @@ _EMANUEL_CHI_B = 122.0
 _LCL_SIGMOID_WIDTH_PA = 200.0
 _DBO_ENTRAIN_COEFF = 2.0e-4
 _STRICT_INDEX_SHARPNESS = 20.0
+# Cloud-base mass-flux scale [kg/m^2/s] for the smooth "convecting column"
+# activation indicator ``σ(M_b / scale)`` (~1 when M_b>0).  Numerics smoothing
+# width, not a tunable closure; M_b magnitudes are O(0.01-0.1) kg/m^2/s.
+_MB_ACTIVE_SCALE_KG_M2_S = 1.0e-3
 _EPMAX_DEFAULT = 0.999
 _TETENS_MIN_VALID_K = 180.0
 
@@ -860,7 +864,7 @@ def emanuel_mixing_tendencies(
     # Zero out tendencies outside the convecting column (where M_b≈0 the
     # whole matrix is ≈0, so this is automatic; we add an explicit gate on
     # the in-cloud + sub-cloud region for safety).
-    active_col = jax.nn.sigmoid(M_b / 1e-3)[:, None]  # ~1 when M_b>0; coeff-ok: activation smoothing
+    active_col = jax.nn.sigmoid(M_b / _MB_ACTIVE_SCALE_KG_M2_S)[:, None]  # ~1 when M_b>0
     ft = ft * active_col
     fq = fq * active_col
     dqc = dqc * active_col

@@ -40,21 +40,8 @@ from .common import (
 from legoesm import constants
 
 
-# Default parameters
-TC1_PARAMS = {
-    "T_s": 300.0,                    # Surface temperature [K]
-    "lapse_tropo": -5.0e-3,          # Tropospheric lapse rate [K/m]
-    "lapse_strato": 5.0e-3,          # Stratospheric lapse rate [K/m]
-    "z_tropopause": 20000.0,         # Tropopause height [m]
-    "H": 40000.0,                    # Model top [m]
-    "u0": 20.0,                      # Background zonal wind [m/s]
-    "mountain_lat": 20.0 * jnp.pi / 180.0,  # Mountain center latitude [rad]
-    "mountain_lon": 0.0,             # Mountain center longitude [rad]
-    "mountain_height": 2000.0,       # Mountain peak [m]
-    "mountain_halfwidth": 72.0e3,    # Mountain half-width [m]
-    "sponge_width": 10000.0,         # Sponge layer width from top [m]
-    "sponge_coeff": 0.05,            # Sponge damping rate [1/s]
-}
+# Default parameters (single source of truth in the package; audit item 9).
+from legoesm.atmosphere.dynamics.dcmip2025_ic import TC1_PARAMS  # noqa: E402,F401
 
 
 def dcmip25_tc1_topography(

@@ -122,6 +122,7 @@ __param_spec__ = {
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
+            "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
             "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
@@ -976,6 +977,11 @@ class EmanuelConfig(NamedTuple):
     # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
     # transition, matching the shared LCL crossing sharpness.
     lcl_pressure_sharpness: float = 1.0e-3
+    # Sharpness [1/level] of the below-LCL smooth index indicator used by the
+    # optional unsaturated-downdraft re-evaporation (surface-last: level index
+    # > k_lcl_smooth ⇒ below LCL).  Default 2.0 gives an ~1-level transition,
+    # matching the historical inline value.  Numerics (not a tunable closure).
+    below_lcl_index_sharpness: float = 2.0
     # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
     # relaxed CBMF so it is ~0 when the relaxation target goes negative
     # (stable column) without a hard ``max`` that would kill the gradient.
