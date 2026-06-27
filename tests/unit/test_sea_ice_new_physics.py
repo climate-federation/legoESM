@@ -514,6 +514,43 @@ class TestRidging:
         # verified to FAIL this assert with the clamp removed).
         assert rel < 5e-2, f"ridge volume not conserved (high H_star): rel={rel:.3f}"
 
+    def test_ridging_overthick_range_stays_in_itd_support(self):
+        """Codex R2: when the participating mean thickness is so large that
+        H_min = 2*h_part would exceed the ITD top bound hi[-1]=100 m, the ridge
+        thickness range MUST still be clamped INTO [lo[0], hi[-1]] so the
+        overlap integral partitions it (sum overlap_frac == 1) and no ridge
+        volume is dropped.  Replicates the clamp the kernel applies.
+
+        NOTE: this branch is effectively unreachable through ``apply_ridging``
+        because the participation function suppresses thick-ice participation
+        (so the volume-weighted h_part stays small); the clamp is DEFENSIVE
+        depth.  We test the clamp logic directly to lock the guarantee."""
+        from legoesm.ice import transport  # noqa: F401  (ensure pkg import)
+        from legoesm.ice.itd import category_bounds, upper_bounds
+        from legoesm.ice import ridging as _R
+        lo = category_bounds(5)
+        hi = upper_bounds(5)
+        width = _R._MIN_RIDGE_WIDTH_M
+        for h_part in (0.5, 5.0, 49.0, 80.0, 150.0):   # last few force H_min>hi[-1]
+            H_min = 2.0 * h_part
+            H_max = min(4.0 * (max(h_part, 1e-6) ** 0.5), 300.0)  # mu=4, H_star=300
+            # Apply the SAME clamp sequence as the kernel.
+            H_max = min(H_max, float(hi[-1]))
+            H_max = max(H_max, float(lo[0]) + width)
+            H_min = min(max(H_min, float(lo[0])), H_max - width)
+            # Range must be valid AND fully inside the supported ITD domain so
+            # the uniform-g overlap is a full partition.
+            assert H_min < H_max, f"empty range at h_part={h_part}"
+            assert H_min >= float(lo[0]) - 1e-12
+            assert H_max <= float(hi[-1]) + 1e-12
+            # Overlap of [H_min,H_max] with the union of categories == full width.
+            a_over = jnp.maximum(lo, H_min)
+            b_over = jnp.minimum(hi, H_max)
+            overlap = jnp.sum(jnp.maximum(b_over - a_over, 0.0))
+            assert float(overlap) == pytest.approx(H_max - H_min, rel=1e-9), (
+                f"overlap != range width at h_part={h_part} -> volume would drop"
+            )
+
     def test_ridging_conserves_pond_water(self):
         """Ridging drains pond water from the deforming ice to the ocean
         (it does not silently vanish): total pond water = retained + drained

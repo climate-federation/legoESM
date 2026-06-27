@@ -45,6 +45,9 @@ from legoesm.ice.itd import category_bounds, upper_bounds
 # rho_ice [kg/m^3]; the 1e-3 converts g/kg -> kg/kg so salt is in kg.
 _RIDGE_DEFAULTS = RidgingConfig()
 _PSU_TO_FRACTION = 1.0e-3
+# Minimum ridge-thickness range width [m]: keeps H_max strictly above H_min so
+# the uniform-g overlap integral has a finite, well-defined support.
+_MIN_RIDGE_WIDTH_M = 1.0e-3
 
 
 def participation_weights(
@@ -148,19 +151,25 @@ def _ridging_column_kernel(
     )
 
     # Ridge thickness range (Hibler / Lipscomb).
+    # The fixed categories contiguously tile ``[lo[0], hi[-1]] = [0, 100] m``.
+    # The overlap integral below conserves ridge area+volume ONLY when the WHOLE
+    # range ``[H_min, H_max]`` lies inside that support, so ``sum_j overlap_frac
+    # == 1``.  Clamp BOTH endpoints into ``[lo[0], hi[-1]]`` (finding #7 + codex
+    # R2-1): clamping only the CEILING was insufficient — when participating ice
+    # is so thick that ``H_min = 2*h_part > hi[-1]`` (and the ``max(H_max,
+    # H_min+width)`` floor then lifts H_max back above hi[-1]), the range sits
+    # entirely ABOVE every category and ALL the ridged volume is dropped.
+    # Clamping H_min down into the top bin routes such an over-thick ridge into
+    # the top category while preserving ``sum(dV_ridge_to_cat) == V_part_total``.
     H_min = 2.0 * h_part
     H_max = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part, 1e-6)), H_star)
-    # Clamp the ridge-thickness CEILING to the ITD top bound ``hi[-1]`` (the
-    # categories contiguously tile ``[lo[0], hi[-1]] = [0, 100] m``).  When a
-    # user raises ``H_star`` above hi[-1] (the config bound allows up to 200 m),
-    # an unclamped ``H_max > hi[-1]`` makes the overlap integral below cover
-    # only ``[H_min, hi[-1]]`` of the ``[H_min, H_max]`` ridge range, so
-    # ``sum_j overlap_frac < 1`` and the ridge area+volume ABOVE hi[-1] are
-    # silently DROPPED (conservation leak).  Clamping to hi[-1] keeps the
-    # overlap a full partition of ``[H_min, H_max]`` so ridge area and volume
-    # are conserved (finding #7).
-    H_max = jnp.minimum(H_max, hi[-1])
-    H_max = jnp.maximum(H_max, H_min + 1e-3)  # coeff-ok: min ridge-thickness width [m]
+    H_max = jnp.minimum(H_max, hi[-1])                       # ceiling at top bound
+    # Guarantee a valid top bin width so the clip bounds below stay ordered even
+    # for a tiny H_max (small mu_rdg): lo[0] + width <= H_max <= hi[-1].
+    H_max = jnp.maximum(H_max, lo[0] + _MIN_RIDGE_WIDTH_M)
+    # Floor H_min at the bottom bound and keep it at least ``_MIN_RIDGE_WIDTH_M``
+    # below H_max so the range is valid AND fully inside [lo[0], hi[-1]].
+    H_min = jnp.clip(H_min, lo[0], H_max - _MIN_RIDGE_WIDTH_M)
     H_width = H_max - H_min
 
     # Snow donated by participating ice.  Fraction retained in
