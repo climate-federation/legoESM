@@ -700,6 +700,142 @@ class DynBottomDragConfig(NamedTuple):
                                            # bottom_drag_r at |u|→0.
 
 
+class BarotropicConfig(NamedTuple):
+    """Barotropic free-surface solver parameters (#501 config grouping).
+
+    The split-explicit substep loop, the implicit-CN PCG knobs, and the
+    rigid-lid streamfunction-solver knobs.  Field names retain their original
+    flat names so the YAML / legacy-kwarg interface maps 1:1 through
+    ``LatLonCGridOceanConfig.from_flat`` / ``flat_fields``.
+    """
+
+    n_barotropic_substeps: int = 30
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
+    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
+    differentiable_barotropic: bool = False
+    # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
+    # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
+    # global mass-conserving redistribute runs ONCE per outer barotropic step on
+    # the time-averaged eta, instead of EVERY substep.  clamp_and_redistribute
+    # does n_iter=3 batched allreduces/call, so this cuts the barotropic SUBCYCLE
+    # from ~3*n_substeps allreduces/step (e.g. 90 at n_substeps=30; doubled if
+    # barotropic diffusion is active) to 3 -> a halo-only subcycle = the
+    # multi-node strong-scaling lever (the implicit_cn analogue is the
+    # 120-allreduce PCG wall).  NOTE: the outer-step fix_eta_drift fixer is a
+    # SEPARATE reduction, unaffected by this flag.  BIT-IDENTICAL to the
+    # per-substep-redistribute path whenever no cell hits eta_floor (deep ocean,
+    # no wetting/drying), since both the local jnp.maximum and the redistribute
+    # are then no-ops; differs only in active wetting/drying, where per-step (not
+    # per-substep) global mass correction is the SOTA-standard approximation
+    # (loses per-substep far-field sea-level compensation).  Default False.
+    barotropic_local_subcycle_clamp: bool = False
+    # AB2 time-centering of the barotropic slow forcing F_slow (matches the
+    # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
+    # tendency, vs legoESM's default current-time depth-mean).  Investigated for
+    # the §5 no-in-substep-Coriolis path's barotropic geostrophic balance
+    # (docs/dev-notes/issues/barotropic_mode_noise.md). Default False = bit-identical.
+    barotropic_slow_forcing_ab2: bool = False
+    # Barotropic solver selection (see docs/dev-notes/issues/barotropic_mode_noise.md).
+    # ``"explicit_substep"`` (default) → existing forward-backward substep
+    # loop with cosine/box time filter.
+    # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
+    # Helmholtz solve.  Eliminates the chequerboard mode by construction;
+    # no substepping, no time filter, no divergence damping needed.
+    barotropic_solver: str = "explicit_substep"
+    # Implicit-solver knobs (only used when ``barotropic_solver = 'implicit_cn'``).
+    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
+    # fully backward (1st-order, maximum damping).  0.55 is the standard
+    # MITgcm/MPAS-O choice — slightly past CN for chequerboard suppression
+    # while staying close to 2nd-order in time.
+    barotropic_implicit_theta_eta: float = 0.55
+    barotropic_implicit_theta_pgf: float = 0.55
+    barotropic_implicit_pcg_tol: float = 1.0e-10
+    barotropic_implicit_pcg_maxiter: int = 200
+    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
+    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
+    # dependent ``while_loop`` desynchronise the collective schedule), so
+    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
+    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
+    # ``fori_loop`` => uniform collective schedule, no deadlock),
+    # UNROLLED and differentiated straight through (the halo
+    # ``_sendrecv_vjp`` + the ``allreduce(SUM)`` dots are AD-safe;
+    # ``custom_linear_solve`` is NOT used because it cannot transpose the
+    # MPI-halo ``custom_vjp`` — see barotropic_common's module note).  The
+    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
+    # conservative estimate for 1e-10 residual on a diagonally-dominant
+    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
+    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
+    # tripole-fold / coastal conditioning can require more.  See
+    # docs/ocean/experiments/distributed_barotropic_pcg.md.
+    barotropic_implicit_pcg_fixed_iters: int = 60
+    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    # Force the fixed-iteration PCG even when not distributed.  Two uses:
+    # (1) solver-matched serial parity references — the np>=2 implicit_cn
+    # path ALWAYS runs the fixed-M PCG, so a serial reference using stock
+    # CG differs at the solver-residual level by construction (parity
+    # bisect job 8459362: identical "MISMATCH" across all halo knobs);
+    # (2) performance — the fixed-M PCG measured FASTER single-rank than
+    # stock CG (20.8 vs 24.6 ms, job 8458701).  Under a single process
+    # the PCG's global dots are plain local sums (``is_multi_process()``
+    # gate), so this is safe pre-arming inside an MPI job.
+    barotropic_implicit_force_pcg: bool = False
+    # Distributed-PCG body variant (only used on the fixed-M PCG path):
+    #   "standard"      — 2 sequentially-dependent reductions/iter.
+    #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
+    #                     reduction/iter (M+1 vs 2M+1 per solve) — the
+    #                     multi-node weak-scaling lever (probe 8460255:
+    #                     np32 weak growth was allreduce-latency-bound).
+    # Equivalent in exact arithmetic; differs at round-off (solver-
+    # tolerance lane, not bit-exact).  Validated at solver dispatch
+    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
+    # measured): single_reduce wins ONLY when the barotropic reductions
+    # dominate the step — small per-rank tiles / high rank counts /
+    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
+    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
+    # is ~6-7% of the step (vmix dominates), so the variant is
+    # within-noise neutral — NOT worth flipping the default and risking
+    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
+    barotropic_implicit_pcg_variant: str = "standard"
+    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
+    # solver entry; unknown ⇒ ValueError):
+    #   "jacobi"     — inverse diagonal (legacy default).
+    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
+    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
+    #                  band MPI (each rank owns full longitude rows) and
+    #                  inverts exactly the pole-tightened zonal
+    #                  couplings that dominate the lat-lon condition
+    #                  number — the EVP-block-preconditioner principle
+    #                  (CESM POP, GMD 9:4209: fewer latency-bound
+    #                  iterations for cheap local FLOPs).  W-self-adjoint
+    #                  by construction (single_reduce-compatible).
+    # OPT-IN, regime-dependent (measured, same caveat as the variant
+    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
+    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
+    # tile (rows/rank=48, job 8475875) where the barotropic solve is
+    # only ~6-7% of the step AND the cyclic-Thomas's sequential
+    # per-iteration FLOPs offset the M=60→20 iteration cut when
+    # compute-bound.  Use it on reduction-latency-bound decks; the
+    # default stays "jacobi".
+    barotropic_implicit_preconditioner: str = "jacobi"
+    # Rigid-lid streamfunction solver knobs (only used when
+    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
+    # surface entirely: the depth-integrated flow is non-divergent and carried
+    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
+    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
+    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
+    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
+    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
+    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
+    # net transport through multiply-connected/periodic-channel domains is set
+    # by the island line-integral constraints (see rigid_lid_islands.py).
+    rigid_lid_cg_tol: float = 1.0e-11
+    rigid_lid_cg_maxiter: int = 1000
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -850,7 +986,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # === Chronological (positional-stability) tail — grouped in the docstring
     #     map, NOT by field order: barotropic solver, conservation, numerics
     #     choices, runtime-check bounds, polar-cap boost, EOS/physics, constants.
-    n_barotropic_substeps: int = 30
+    barotropic: BarotropicConfig = BarotropicConfig()
     hyperdiff_coeff: float = 0.0
     use_conservation_fixer: bool = False
     fix_volume: bool = True
@@ -867,12 +1003,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # practice.  Default-on for lat-lon C-grid; MPAS already conserves
     # to machine precision.
     fix_eta_drift: bool = True
-    barotropic_diffusion_alpha: float = 0.01
-    barotropic_diffusion_dt_ref: float = 60.0
-    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
-    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
-    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
     max_abs_eta_m: float = 1.0e4
@@ -880,23 +1010,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     temperature_max_c: float = 45.0
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
-    differentiable_barotropic: bool = False
-    # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
-    # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
-    # global mass-conserving redistribute runs ONCE per outer barotropic step on
-    # the time-averaged eta, instead of EVERY substep.  clamp_and_redistribute
-    # does n_iter=3 batched allreduces/call, so this cuts the barotropic SUBCYCLE
-    # from ~3*n_substeps allreduces/step (e.g. 90 at n_substeps=30; doubled if
-    # barotropic diffusion is active) to 3 -> a halo-only subcycle = the
-    # multi-node strong-scaling lever (the implicit_cn analogue is the
-    # 120-allreduce PCG wall).  NOTE: the outer-step fix_eta_drift fixer is a
-    # SEPARATE reduction, unaffected by this flag.  BIT-IDENTICAL to the
-    # per-substep-redistribute path whenever no cell hits eta_floor (deep ocean,
-    # no wetting/drying), since both the local jnp.maximum and the redistribute
-    # are then no-ops; differs only in active wetting/drying, where per-step (not
-    # per-substep) global mass correction is the SOTA-standard approximation
-    # (loses per-substep far-field sea-level compensation).  Default False.
-    barotropic_local_subcycle_clamp: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     # When True, remove the area-mean of the net freshwater flux from the
@@ -1016,107 +1129,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # strict no-op where there is no land (periodic/global aquaplanet).  Default
     # ON: the masked cold-cell contamination is a bug for any masked-land run.
     tracer_wall_neumann_fill: bool = True
-    # AB2 time-centering of the barotropic slow forcing F_slow (matches the
-    # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
-    # tendency, vs legoESM's default current-time depth-mean).  Investigated for
-    # the §5 no-in-substep-Coriolis path's barotropic geostrophic balance
-    # (docs/dev-notes/issues/barotropic_mode_noise.md). Default False = bit-identical.
-    barotropic_slow_forcing_ab2: bool = False
-    # Barotropic solver selection (see docs/dev-notes/issues/barotropic_mode_noise.md).
-    # ``"explicit_substep"`` (default) → existing forward-backward substep
-    # loop with cosine/box time filter.
-    # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
-    # Helmholtz solve.  Eliminates the chequerboard mode by construction;
-    # no substepping, no time filter, no divergence damping needed.
-    barotropic_solver: str = "explicit_substep"
-    # Implicit-solver knobs (only used when ``barotropic_solver = 'implicit_cn'``).
-    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
-    # fully backward (1st-order, maximum damping).  0.55 is the standard
-    # MITgcm/MPAS-O choice — slightly past CN for chequerboard suppression
-    # while staying close to 2nd-order in time.
-    barotropic_implicit_theta_eta: float = 0.55
-    barotropic_implicit_theta_pgf: float = 0.55
-    barotropic_implicit_pcg_tol: float = 1.0e-10
-    barotropic_implicit_pcg_maxiter: int = 200
-    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
-    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
-    # dependent ``while_loop`` desynchronise the collective schedule), so
-    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
-    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
-    # ``fori_loop`` => uniform collective schedule, no deadlock),
-    # UNROLLED and differentiated straight through (the halo
-    # ``_sendrecv_vjp`` + the ``allreduce(SUM)`` dots are AD-safe;
-    # ``custom_linear_solve`` is NOT used because it cannot transpose the
-    # MPI-halo ``custom_vjp`` — see barotropic_common's module note).  The
-    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
-    # conservative estimate for 1e-10 residual on a diagonally-dominant
-    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
-    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
-    # tripole-fold / coastal conditioning can require more.  See
-    # docs/ocean/experiments/distributed_barotropic_pcg.md.
-    barotropic_implicit_pcg_fixed_iters: int = 60
-    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    # Force the fixed-iteration PCG even when not distributed.  Two uses:
-    # (1) solver-matched serial parity references — the np>=2 implicit_cn
-    # path ALWAYS runs the fixed-M PCG, so a serial reference using stock
-    # CG differs at the solver-residual level by construction (parity
-    # bisect job 8459362: identical "MISMATCH" across all halo knobs);
-    # (2) performance — the fixed-M PCG measured FASTER single-rank than
-    # stock CG (20.8 vs 24.6 ms, job 8458701).  Under a single process
-    # the PCG's global dots are plain local sums (``is_multi_process()``
-    # gate), so this is safe pre-arming inside an MPI job.
-    barotropic_implicit_force_pcg: bool = False
-    # Distributed-PCG body variant (only used on the fixed-M PCG path):
-    #   "standard"      — 2 sequentially-dependent reductions/iter.
-    #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
-    #                     reduction/iter (M+1 vs 2M+1 per solve) — the
-    #                     multi-node weak-scaling lever (probe 8460255:
-    #                     np32 weak growth was allreduce-latency-bound).
-    # Equivalent in exact arithmetic; differs at round-off (solver-
-    # tolerance lane, not bit-exact).  Validated at solver dispatch
-    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
-    # measured): single_reduce wins ONLY when the barotropic reductions
-    # dominate the step — small per-rank tiles / high rank counts /
-    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
-    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
-    # is ~6-7% of the step (vmix dominates), so the variant is
-    # within-noise neutral — NOT worth flipping the default and risking
-    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
-    barotropic_implicit_pcg_variant: str = "standard"
-    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
-    # solver entry; unknown ⇒ ValueError):
-    #   "jacobi"     — inverse diagonal (legacy default).
-    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
-    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
-    #                  band MPI (each rank owns full longitude rows) and
-    #                  inverts exactly the pole-tightened zonal
-    #                  couplings that dominate the lat-lon condition
-    #                  number — the EVP-block-preconditioner principle
-    #                  (CESM POP, GMD 9:4209: fewer latency-bound
-    #                  iterations for cheap local FLOPs).  W-self-adjoint
-    #                  by construction (single_reduce-compatible).
-    # OPT-IN, regime-dependent (measured, same caveat as the variant
-    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
-    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
-    # tile (rows/rank=48, job 8475875) where the barotropic solve is
-    # only ~6-7% of the step AND the cyclic-Thomas's sequential
-    # per-iteration FLOPs offset the M=60→20 iteration cut when
-    # compute-bound.  Use it on reduction-latency-bound decks; the
-    # default stays "jacobi".
-    barotropic_implicit_preconditioner: str = "jacobi"
-    # Rigid-lid streamfunction solver knobs (only used when
-    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
-    # surface entirely: the depth-integrated flow is non-divergent and carried
-    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
-    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
-    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
-    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
-    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
-    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
-    # net transport through multiply-connected/periodic-channel domains is set
-    # by the island line-integral constraints (see rigid_lid_islands.py).
-    rigid_lid_cg_tol: float = 1.0e-11
-    rigid_lid_cg_maxiter: int = 1000
     # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
     # (default): existing centered-diff p_prime + Adcroft & Campin 2004
     # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
@@ -1589,6 +1601,9 @@ class LatLonCGridOceanConfig(NamedTuple):
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
+        _bt = {k: flat.pop(k) for k in BarotropicConfig._fields if k in flat}
+        if _bt:
+            nested["barotropic"] = BarotropicConfig(**_bt)
         return cls(**nested, **flat)
 
     @classmethod
@@ -1599,6 +1614,20 @@ class LatLonCGridOceanConfig(NamedTuple):
         so the flat construction / YAML interface stays 1:1 with the pre-grouping
         field set even though the storage is nested.  Extend per nested group.
         """
-        names = set(cls._fields) - {"bottom_drag"}
+        names = set(cls._fields) - {"bottom_drag", "barotropic"}
         names |= set(DynBottomDragConfig._fields)
+        names |= set(BarotropicConfig._fields)
         return frozenset(names)
+
+    def flat_get(self, name: str):
+        """Read a field by its FLAT name (#501) — the read-side inverse of
+        :meth:`from_flat` / :meth:`flat_fields`.  Resolves the grouped members
+        through their nested sub-config, so reflective code that iterates flat
+        field names (recipe-card audits, parity loops) keeps working:
+        ``cfg.flat_get("barotropic_solver")`` == ``cfg.barotropic.barotropic_solver``.
+        """
+        if name in DynBottomDragConfig._fields:
+            return getattr(self.bottom_drag, name)
+        if name in BarotropicConfig._fields:
+            return getattr(self.barotropic, name)
+        return getattr(self, name)

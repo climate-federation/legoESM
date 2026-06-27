@@ -606,7 +606,7 @@ def main():
         "bottom_drag_bbl_thickness": float(ocean_config.bottom_drag.bottom_drag_bbl_thickness),
         "bottom_drag_bg_velocity": float(ocean_config.bottom_drag.bottom_drag_bg_velocity),
         "pgf_scheme": ocean_config.pgf_scheme,
-        "barotropic_solver": ocean_config.barotropic_solver,
+        "barotropic_solver": ocean_config.barotropic.barotropic_solver,
         "momentum_advection": ocean_config.momentum_advection,
         "tracer_advection": ocean_config.tracer_advection,
         "eos": ocean_config.eos,

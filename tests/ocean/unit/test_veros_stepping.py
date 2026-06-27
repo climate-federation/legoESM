@@ -68,5 +68,5 @@ def test_splats_into_config_without_collision():
         **veros_faithful_stepping(with_surface_forcing=True, dt_mom_ratio=9.0),
     )
     assert cfg.outer_integrator == "ab2"
-    assert cfg.barotropic_solver == "rigid_lid"
+    assert cfg.barotropic.barotropic_solver == "rigid_lid"
     assert cfg.dt_mom_ratio == 9.0

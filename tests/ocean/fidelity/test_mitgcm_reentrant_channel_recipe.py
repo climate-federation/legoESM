@@ -113,7 +113,7 @@ def test_config_is_gm_redi_linear_eos_channel():
     assert c.gm_redi.kappa_Redi == rc.GM_BACKGROUND_K
     assert c.A_h == rc.VISC_AH and c.K_h == 0.0
     assert c.A_v == rc.VISC_AR and c.K_v == 1.0e-5
-    assert c.barotropic_solver == "implicit_unsplit"
+    assert c.barotropic.barotropic_solver == "implicit_unsplit"
     assert c.implicit_vertical_mixing is True
     # ivdc convective adjustment via the enhanced-diffusion scheme.
     assert c.physics.convection.scheme == "enhanced_diffusion"

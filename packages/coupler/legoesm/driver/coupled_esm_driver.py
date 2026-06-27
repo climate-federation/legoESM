@@ -381,7 +381,7 @@ class CoupledESMDriver:
             "  Ocean: mode=dynamic (3D LatLonCGridOceanModel), "
             f"ic={cfg.ocean_ic}, ocean_frac={_ocean_frac:.2f}, "
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
-            f"barotropic={ocfg.barotropic_solver}, "
+            f"barotropic={ocfg.barotropic.barotropic_solver}, "
             f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
 
     def _build_tripole_ocean_config(self):
@@ -544,7 +544,7 @@ class CoupledESMDriver:
             "  Ocean: mode=dynamic (3D LatLonCGridOceanModel, TRIPOLE), "
             f"ic={cfg.ocean_ic}, ocean_frac={_ocean_frac:.2f}, "
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
-            f"barotropic={ocfg.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
+            f"barotropic={ocfg.barotropic.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
             f"mesh={cfg.tripole_mesh_path}")
 
     def _init_coupler(self):

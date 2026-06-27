@@ -1785,7 +1785,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     # 3D velocity clip — caps ALL velocity components (barotropic +
     # baroclinic) after each step.  The barotropic-only MAXVEL inside
     # the split-explicit solver doesn't prevent baroclinic blowup.
-    _maxvel_3d = model.config.maxvel_barotropic
+    _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     @jax.jit
@@ -1951,7 +1951,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         freeze_mask_static = None
         T_freeze_C_static = -1.8
 
-    _maxvel_3d = model.config.maxvel_barotropic
+    _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     lat_2d = jra55_state["lat_2d"]

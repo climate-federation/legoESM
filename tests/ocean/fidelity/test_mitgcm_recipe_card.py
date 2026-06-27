@@ -23,7 +23,7 @@ def test_canonical_config_builds_a_valid_model():
         eos_linear=c.eos_linear, physics=c.physics,
     )
     # canonical card pins MITgcm's actual algorithm
-    assert cfg.barotropic_solver == "implicit_unsplit"
+    assert cfg.barotropic.barotropic_solver == "implicit_unsplit"
     assert cfg.momentum_advection == "flux_form"
     assert cfg.coriolis_scheme == "explicit_ab2"
     assert cfg.lateral_viscosity_operator == "flux_divergence"
@@ -54,7 +54,9 @@ def test_block_mapping_references_real_config_fields():
         # every top-level token the field column names must be a real config field
         for tok in field.replace("+", " ").replace("/", " ").replace(".", " ").split():
             if tok in top_level:
-                assert hasattr(cfg, tok), tok
+                # #501: a token may be a flat member of a nested sub-config
+                # (barotropic_solver -> config.barotropic.barotropic_solver).
+                assert hasattr(cfg, tok) or tok in cfg.flat_fields(), tok
 
 
 def test_card_choices_match_the_actual_recipes():
@@ -72,7 +74,7 @@ def test_card_choices_match_the_actual_recipes():
     for f in ("barotropic_solver", "momentum_advection", "momentum_flux_scheme",
               "tracer_advection", "coriolis_scheme", "lateral_viscosity_operator",
               "lateral_side_bc", "outer_integrator", "ab2_scope", "eos"):
-        assert getattr(card, f) == getattr(c, f), f
+        assert card.flat_get(f) == c.flat_get(f), f  # #501: flat-name read
 
 
 # The numerics the card HARD-PINS — identical in every MITgcm tutorial deck, so
@@ -127,4 +129,4 @@ def test_all_recipes_route_through_the_card_shared_block():
     (so the card is the single auditable source, not one of six copies)."""
     for label, cfg in _all_recipe_configs():
         for field, want in _PINNED.items():
-            assert getattr(cfg, field) == want, f"{label}.{field} != {want!r}"
+            assert cfg.flat_get(field) == want, f"{label}.{field} != {want!r}"

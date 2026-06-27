@@ -80,7 +80,7 @@ def test_implicit_unsplit_requires_ab2():
     r = bg.build_baroclinic_gyre_recipe()
     # matsuno_split Coriolis so the explicit_ab2-Coriolis guard doesn't fire first;
     # the implicit_unsplit-requires-ab2 guard is checked at step time.
-    cfg = r.config._replace(barotropic_solver="implicit_unsplit",
+    cfg = r.config._replace(barotropic=r.config.barotropic._replace(barotropic_solver="implicit_unsplit"),
                             coriolis_scheme="matsuno_split",
                             outer_integrator="forward_euler")
     m = LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
@@ -103,7 +103,7 @@ def test_implicit_unsplit_rejects_unsupported_physics():
         {"ab2_scope": "advective"},
         {"momentum_friction_additive": True},
     ):
-        cfg = r.config._replace(barotropic_solver="implicit_unsplit", **override)
+        cfg = r.config._replace(barotropic=r.config.barotropic._replace(barotropic_solver="implicit_unsplit"), **override)
         with pytest.raises(ValueError, match="implicit_unsplit.*does not yet support"):
             LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
 
@@ -119,7 +119,7 @@ def test_implicit_unsplit_threads_gm_redi():
     from legoesm.ocean.fidelity import mitgcm_reentrant_channel_recipe as rc
     r = rc.build_reentrant_channel_recipe()
     assert r.config.gm_redi is not None     # the recipe really uses GM/Redi
-    cfg = r.config._replace(barotropic_solver="implicit_unsplit")
+    cfg = r.config._replace(barotropic=r.config.barotropic._replace(barotropic_solver="implicit_unsplit"))
     m = LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)   # builds = GM/Redi accepted
     s = r.state
     sp = getattr(r, "sponge", None)
@@ -138,7 +138,7 @@ def test_implicit_unsplit_runs_finite():
     )
     from legoesm.ocean.fidelity import mitgcm_baroclinic_gyre_recipe as bg
     r = bg.build_baroclinic_gyre_recipe()
-    cfg = r.config._replace(barotropic_solver="implicit_unsplit")
+    cfg = r.config._replace(barotropic=r.config.barotropic._replace(barotropic_solver="implicit_unsplit"))
     m = LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
     s = r.state
     for _ in range(10):
@@ -163,7 +163,7 @@ def test_implicit_unsplit_suppresses_checkerboard():
     r = bg.build_baroclinic_gyre_recipe()
 
     def run30(solver):
-        cfg = r.config._replace(barotropic_solver=solver)
+        cfg = r.config._replace(barotropic=r.config.barotropic._replace(barotropic_solver=solver))
         m = LatLonCGridOceanModel(r.geometry, r.z_coord, cfg)
         s = r.state
         for _ in range(2160):

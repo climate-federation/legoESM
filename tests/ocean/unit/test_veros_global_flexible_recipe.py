@@ -146,7 +146,7 @@ def test_dycore_and_stepping_mapping():
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     assert cfg.outer_integrator == "ab2"
     assert cfg.ab2_scope == "advective"
-    assert cfg.barotropic_solver == "rigid_lid"
+    assert cfg.barotropic.barotropic_solver == "rigid_lid"
     assert cfg.coriolis_scheme == "explicit_ab2"
     assert cfg.momentum_friction_additive is True
     assert cfg.vertical_momentum_scheme == "centered_full"

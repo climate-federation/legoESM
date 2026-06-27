@@ -103,7 +103,7 @@ def main():
 
     print(f"=== Follow-up A: 10-year fresh spinup with implicit solver ===")
     print(f"  Output: {OUTPUT_DIR}")
-    print(f"  barotropic_solver = {ocean_config.barotropic_solver}")
+    print(f"  barotropic_solver = {ocean_config.barotropic.barotropic_solver}")
     print(f"  Grid: 36×72 (5°), 20 levels, H_max={config.H_max} m")
     print(f"  dt = {dt} s, n_steps = {n_steps:,} ({total_years} sim-yr)")
     print(f"  Block size: {block_size} steps  ({n_steps // block_size} blocks)")

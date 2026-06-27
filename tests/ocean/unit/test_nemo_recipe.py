@@ -37,8 +37,8 @@ def test_nemo_model_config_selects_canonical_blocks():
     assert cfg.ke_gradient_scheme == "hollingsworth"
     assert cfg.tracer_advection == "ppm_fct"
     assert cfg.pgf_scheme == "smc03"
-    assert cfg.barotropic_solver == "explicit_substep"
-    assert cfg.barotropic_time_filter == "cosine"
+    assert cfg.barotropic.barotropic_solver == "explicit_substep"
+    assert cfg.barotropic.barotropic_time_filter == "cosine"
     assert cfg.momentum_time_integrator == "rk3"
     assert cfg.adaptive_implicit_vertadv is True
     assert cfg.implicit_vertical_mixing is True

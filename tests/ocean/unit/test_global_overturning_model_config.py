@@ -115,7 +115,7 @@ class TestOverrides:
             n_barotropic_substeps=30,
             bottom_drag_bbl_thickness=100.0,
         )
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.B_h == 5.0e9
         assert mc.C_smag == 0.2
         assert mc.A_h == 1.234e5            # override beats config.A_h
@@ -206,7 +206,7 @@ class TestMPASFactory:
             barotropic_u_viscosity=1.0e3,
         )
         assert mc.A_h == 9.9e5             # override beats config.A_h
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.barotropic_u_viscosity == 1.0e3
 
     def test_gm_redi_off_by_default(self):

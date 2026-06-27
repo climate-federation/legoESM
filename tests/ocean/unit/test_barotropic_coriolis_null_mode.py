@@ -44,7 +44,7 @@ def _rest_setup():
     r = build_silvestri_baroclinic_jet_setup(
         n_lat=24, n_lon=16, scheme="W9V", nlev=4,
         config=SilvestriJetConfig(), stabilize=False)
-    cfg = r.model_config._replace(barotropic_diffusion_alpha=0.0)
+    cfg = r.model_config._replace(barotropic=r.model_config.barotropic._replace(barotropic_diffusion_alpha=0.0))
     s = r.initial_state
     z_u = jnp.zeros_like(s.u.data)
     z_v = jnp.zeros_like(s.v.data)
@@ -130,6 +130,6 @@ def test_explicit_ab2_config_gates_in_substep_coriolis():
         config=SilvestriJetConfig(), stabilize=False)
     mc = r.model_config
     assert mc.coriolis_scheme == "explicit_ab2"
-    assert mc.barotropic_solver == "explicit_substep"
-    assert mc.barotropic_slow_forcing_ab2 is True
-    assert mc.barotropic_diffusion_alpha == 0.0
+    assert mc.barotropic.barotropic_solver == "explicit_substep"
+    assert mc.barotropic.barotropic_slow_forcing_ab2 is True
+    assert mc.barotropic.barotropic_diffusion_alpha == 0.0
