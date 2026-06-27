@@ -981,22 +981,38 @@ class CoupledESMDriver:
         # received there.  Refuse it LOUDLY rather than silently break the budget
         # (CLAUDE.md: no silent degradation).  An aquaplanet dynamic ocean (no
         # land tile) is fine: the partitions trivially agree (all ocean).
+        # Divergence can come from EITHER partition: the atmosphere having land
+        # (TileConfig.f_land > 0) OR the dynamic OCEAN masking dry cells
+        # (continents) while the atmosphere does not (e.g. f_land_mode='zero'
+        # with a WOA/tripole ocean -- the atm is all-ocean but the ocean masks
+        # land, so the atm gets shared flux over cells the ocean never wetted).
+        # Only f_land_mode='from_ocean' ties BOTH masks to one source.
         _tc = getattr(self, "_tile_config", None)
-        _has_land = (
+        _has_atm_land = (
             _tc is not None
             and float(jnp.max(jnp.abs(jnp.asarray(_tc.f_land)))) > 0.0
         )
+        # Ocean wet mask is 1=ocean, 0=land (set by the dynamic-ocean init); any
+        # cell < 1 is a dry (continent) cell.  None / all-wet aquaplanet => no
+        # dry cells => the partitions trivially agree.
+        _omask = getattr(self, "_ocean_land_mask", None)
+        _ocean_has_dry = (
+            _omask is not None
+            and float(jnp.min(jnp.asarray(_omask))) < 1.0
+        )
         if (getattr(self, "_is_dynamic_ocean", False)
-                and _has_land
+                and (_has_atm_land or _ocean_has_dry)
                 and self.coupled_cfg.f_land_mode != "from_ocean"):
             raise ValueError(
-                "couple_surface_fluxes=True with a dynamic ocean and non-zero "
-                "land fraction requires f_land_mode='from_ocean' so the "
-                "atmosphere land/ocean partition matches the ocean wet mask "
-                "(otherwise the shared-flux air-sea budget does not close over "
-                f"coastal cells); got f_land_mode={self.coupled_cfg.f_land_mode!r}. "
-                "Set f_land_mode='from_ocean' (dynamic+WOA), or use an aquaplanet "
-                "(no land tile), or disable couple_surface_fluxes."
+                "couple_surface_fluxes=True with a dynamic ocean that has land "
+                "(atmosphere f_land>0 and/or a masked-dry ocean wet mask) "
+                "requires f_land_mode='from_ocean' so the atmosphere land/ocean "
+                "partition matches the ocean wet mask (otherwise the shared-flux "
+                "air-sea budget does not close over coastal/continental cells); "
+                f"got f_land_mode={self.coupled_cfg.f_land_mode!r}. Set "
+                "f_land_mode='from_ocean' (dynamic+WOA/tripole), or use an "
+                "all-ocean aquaplanet (ocean_ic='rest', no land tile), or "
+                "disable couple_surface_fluxes."
             )
 
         def _coupled_get_sfc_flux_override(day):

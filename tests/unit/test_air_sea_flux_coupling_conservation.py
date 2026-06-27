@@ -513,7 +513,7 @@ class TestSharedFluxClosurePreconditionGuard:
     f_land_mode='from_ocean' so the atm/ocean land partitions match; otherwise
     the air-sea budget cannot close over coastal cells -> raise (codex HIGH)."""
 
-    def _stub(self, *, dynamic, f_land_val, f_land_mode):
+    def _stub(self, *, dynamic, f_land_val, f_land_mode, ocean_mask_val=1.0):
         from types import SimpleNamespace
         from legoesm.driver.coupled_config import CoupledConfig
         from legoesm.coupler.config import TileConfig
@@ -521,11 +521,13 @@ class TestSharedFluxClosurePreconditionGuard:
         atm = SimpleNamespace(get_sfc_flux_override=None)
         tc = TileConfig(f_land=jnp.full(shape, f_land_val),
                         f_lake=jnp.zeros(shape))
+        # Ocean wet mask: 1=ocean, 0=land.  ocean_mask_val < 1 => has dry cells.
         return SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True,
                                       f_land_mode=f_land_mode),
             _atm=atm, _last_sfc_response=None, _is_dynamic_ocean=dynamic,
             _tile_config=tc,
+            _ocean_land_mask=jnp.full(shape, ocean_mask_val),
         )
 
     def test_dynamic_land_analytical_raises(self):
@@ -543,12 +545,33 @@ class TestSharedFluxClosurePreconditionGuard:
 
     def test_dynamic_aquaplanet_ok(self):
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-        drv = self._stub(dynamic=True, f_land_val=0.0, f_land_mode="analytical")
-        CoupledESMDriver._override_sfc_fluxes(drv)   # no land -> no raise
+        # No atm land AND all-wet ocean mask -> partitions trivially agree.
+        drv = self._stub(dynamic=True, f_land_val=0.0, f_land_mode="analytical",
+                         ocean_mask_val=1.0)
+        CoupledESMDriver._override_sfc_fluxes(drv)   # no raise
         assert drv._atm.get_sfc_flux_override is not None
 
     def test_slab_land_ok(self):
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         drv = self._stub(dynamic=False, f_land_val=0.4, f_land_mode="analytical")
         CoupledESMDriver._override_sfc_fluxes(drv)   # slab -> no raise
+        assert drv._atm.get_sfc_flux_override is not None
+
+    def test_dynamic_zero_landmode_but_ocean_has_continents_raises(self):
+        """codex round-4: f_land_mode='zero' (all-ocean atm) but the dynamic
+        WOA/tripole ocean masks dry cells -> partitions diverge -> must raise."""
+        import pytest
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=True, f_land_val=0.0, f_land_mode="zero",
+                         ocean_mask_val=0.0)   # 0 => a dry (continent) cell
+        with pytest.raises(ValueError, match="from_ocean"):
+            CoupledESMDriver._override_sfc_fluxes(drv)
+
+    def test_dynamic_zero_landmode_allwet_ocean_ok(self):
+        """f_land_mode='zero' with an all-wet ocean mask (rest aquaplanet) is the
+        provably-all-ocean case -> no raise."""
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=True, f_land_val=0.0, f_land_mode="zero",
+                         ocean_mask_val=1.0)
+        CoupledESMDriver._override_sfc_fluxes(drv)   # no raise
         assert drv._atm.get_sfc_flux_override is not None
