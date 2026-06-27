@@ -49,9 +49,16 @@ _BRINE_DEFAULTS = BrineConfig()
 class SaltBudgetResult(NamedTuple):
     """Output of :func:`update_salinity_and_salt_flux`.
 
-    ``S_ice_new`` is the post-step bulk ice salinity per category;
-    ``salt_flux_to_ocean`` is positive when salt enters the ocean
-    (brine rejection during freezing or salt release during melt).
+    ``S_ice_new`` is the post-step bulk ice salinity per category.
+    ``salt_flux_to_ocean`` follows ``+ve = salt INTO the ocean``
+    (== the DROP in the ice column's stored salt, ``(salt_old -
+    salt_stored)/dt``).  Sign by process (see module docstring): MELT /
+    sublimation-rejection give POSITIVE flux (ice releases its salt);
+    LEAD FREEZING and snow-ice flooding give NEGATIVE flux (the new
+    low-salinity ice takes salt from the ocean).  Net brine rejection at
+    the ocean during freezing is the combination of this small negative
+    salt flux and the paired freshwater removal — it is NOT a positive
+    salt-channel flux here.
     """
     S_ice_new: jnp.ndarray
     salt_flux_to_ocean: jnp.ndarray   # [kg(salt)/m²/s]

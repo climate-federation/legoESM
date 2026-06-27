@@ -440,6 +440,27 @@ class TestCustomBounds:
                     f"{name} above custom bound: {float(val.max())} > {float(hi[j])}"
                 )
 
+    def test_neural_custom_param_names_reorder(self):
+        """Finding #1 (codex round 1): NeuralParamProvider with a REORDERED
+        ``param_names`` but DEFAULT bounds must build the bounds from THOSE names
+        (in that order), not from the fixed PARAM_NAMES order — otherwise the
+        sigmoid applies the wrong per-parameter [lo,hi] to each output column.
+        (A reorder keeps all 12 names so the LandSurfaceParams build succeeds; a
+        true subset is unsupported by LandSurfaceParams, which has no field
+        defaults.)"""
+        reordered = tuple(reversed(PARAM_NAMES))   # all 12, reversed order
+        provider = NeuralParamProvider(
+            key=KEY, n_input=20, param_names=reordered,   # no param_bounds!
+        )
+        features = jax.random.normal(KEY, (NCOL, 20))
+        params = provider(features)  # must not raise, and bounds must match
+        for name in reordered:
+            val = getattr(params, name)
+            lo, hi = PARAM_BOUNDS[name]
+            assert jnp.all(val >= lo - 1e-6) and jnp.all(val <= hi + 1e-6), (
+                f"{name} out of its bounds -> bounds not built from param_names"
+            )
+
     def test_pft_constrained_table_uses_instance_bounds(self):
         # Direct contrast: an instance carrying custom bounds must NOT reproduce
         # the default-bounds table.

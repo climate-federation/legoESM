@@ -187,7 +187,7 @@ class TestTransportConservation:
         enth = T * vol
         vol_n = jnp.maximum(vol + dt * _T._ppm_tendency_2d(vol, u, v, grid), 0.0)
         enth_n = enth + dt * _T._ppm_tendency_2d(enth, u, v, grid)
-        has_vol = vol_n > _T._CONC_FLOOR
+        has_vol = vol_n > _T._VOL_FLOOR
         T_raw = jnp.where(has_vol, enth_n / jnp.where(has_vol, vol_n, 1.0), 271.0)
         overshoot = jnp.any(has_vol & (T_raw > constants.T_freeze))
         assert bool(overshoot), "test precondition: need a melt-point overshoot"
@@ -197,12 +197,20 @@ class TestTransportConservation:
         )
         enth_new_state = jnp.sum(T_new * h_new * a_new)
         enth_transported = jnp.sum(jnp.where(has_vol, enth_n, 0.0))
-        # The new state's enthalpy matches the transported enthalpy on ice
-        # cells (the wide safety clamp at T_freeze+50 is non-binding for the
-        # ~700 K overshoot only if it exceeds it; here verify the deleted
-        # energy is far smaller than the OLD melt-point clip would delete).
+        # The new state's enthalpy equals EXACTLY the transported enthalpy with
+        # T clamped only to the WIDE safety band [T_min-50, T_freeze+50]: the
+        # new clamp can only bite above that band, so the deleted energy is
+        # quantified, not just "less than the old".
+        T_lo = _T._T_ICE_MIN_DEFAULT - _T._T_SAFETY_MARGIN_K
+        T_hi = float(constants.T_freeze) + _T._T_SAFETY_MARGIN_K
+        enth_wide = jnp.sum(jnp.where(has_vol, jnp.clip(T_raw, T_lo, T_hi) * vol_n, 0.0))
+        assert jnp.allclose(enth_new_state, enth_wide, rtol=1e-12), (
+            "new state must equal the wide-safety-clamped transported enthalpy"
+        )
+        # And it deletes STRICTLY less energy than the old melt-point clip,
+        # which bound T at T_freeze (the bug this fix removes).
         old_clip_T = jnp.clip(T_raw, _T._T_ICE_MIN_DEFAULT, constants.T_freeze)
-        enth_old_clip = jnp.sum(old_clip_T * vol_n)
+        enth_old_clip = jnp.sum(jnp.where(has_vol, old_clip_T * vol_n, 0.0))
         new_err = float(jnp.abs(enth_new_state - enth_transported))
         old_err = float(jnp.abs(enth_old_clip - enth_transported))
         assert new_err < old_err, (
@@ -251,7 +259,8 @@ class TestTransportConservation:
         ``h*conc == vol_n`` exactly.  We replicate both recovery formulas on a
         synthetic transported pair to isolate the changed branch."""
         from legoesm.ice import transport as _T
-        floor = _T._CONC_FLOOR
+        vol_floor = _T._VOL_FLOOR     # volume threshold [m]
+        conc_floor = _T._CONC_FLOOR   # division floor [area fraction]
         # Synthetic post-transport fields: one margin cell with volume but
         # zero concentration, one normal interior cell, one ice-free cell.
         vol_n = jnp.array([0.4, 1.8, 0.0])      # m (per grid-cell area)
@@ -266,8 +275,8 @@ class TestTransportConservation:
         assert float(vol_recon_old[0]) == 0.0 and float(vol_n[0]) > 0.0
 
         # --- NEW recovery (the fix) ---
-        has_vol = vol_n > floor
-        conc_out = jnp.where(has_vol, jnp.maximum(conc_n, floor), 0.0)
+        has_vol = vol_n > vol_floor
+        conc_out = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 0.0)
         conc_safe = jnp.where(has_vol, conc_out, 1.0)
         h_new = jnp.where(has_vol, vol_n / conc_safe, 0.0)
         vol_recon_new = h_new * conc_out
@@ -277,7 +286,7 @@ class TestTransportConservation:
         )
         # h is finite and bounded by vol/floor (no spike to inf).
         assert jnp.all(jnp.isfinite(h_new))
-        assert float(h_new[0]) <= float(vol_n[0]) / floor + 1.0
+        assert float(h_new[0]) <= float(vol_n[0]) / conc_floor + 1.0
 
 
 # ==============================================================================

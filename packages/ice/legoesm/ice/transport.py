@@ -41,9 +41,15 @@ from legoesm.grids.voronoi import VoronoiMesh
 # limits) so the signature defaults reference a Name, not a bare literal.
 _T_ICE_MIN_DEFAULT: float = 180.0   # == SeaIceConfig.T_ice_min [K]
 # Concentration floor used when recovering an intensive tracer ratio
-# (h = vol/conc, T = enth/vol).  Matches the 1e-12 area floor used by the
-# thermo/lead-freeze volume recovery in sea_ice.py (V_after > 1e-12 pattern).
+# (h = vol/conc).  Floors the DENOMINATOR so the h = vol/conc spike is bounded.
 _CONC_FLOOR: float = 1e-12          # [dimensionless area fraction]
+# Volume floor [m of ice per m^2 of grid cell] deciding whether a cell still
+# holds ice for the recovery branch.  Distinct from ``_CONC_FLOOR`` (a
+# concentration) — they share the 1e-12 numeric value (the same threshold the
+# thermo/lead-freeze recovery in sea_ice.py uses, ``V_after > 1e-12``) but
+# carry DIFFERENT units, so name them separately.  A cell with 0 < vol <= this
+# carries <1e-9 kg/m^2 of ice and is treated as ice-free.
+_VOL_FLOOR: float = 1e-12           # [m of ice per m^2 grid cell]
 # Wide, NON-BINDING numerical-safety clamp for the recovered temperature.
 # Rationale (identical to the salinity channel in sea_ice.py): a monotone-PPM
 # ratio can overshoot the donor min/max by a hair at CFL<=1, and under CFL>1
@@ -338,7 +344,7 @@ def advect_ice_tracers(
     # floor also bounds the ``h = vol/conc`` spike at ``vol/_CONC_FLOOR``.
     # AD-safe: substitute a benign placeholder into the denominator BEFORE
     # dividing so the true-branch arithmetic is finite at every cotangent.
-    has_vol = vol_new > _CONC_FLOOR
+    has_vol = vol_new > _VOL_FLOOR
     conc_out = jnp.where(has_vol, jnp.maximum(conc_new, _CONC_FLOOR), 0.0)
     conc_safe = jnp.where(has_vol, conc_out, 1.0)
     h_new = jnp.where(has_vol, vol_new / conc_safe, 0.0)

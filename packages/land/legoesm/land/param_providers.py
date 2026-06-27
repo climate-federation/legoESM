@@ -196,10 +196,14 @@ class NeuralParamProvider(eqx.Module):
         param_bounds: list[tuple[float, float]] | None = None,
         param_names: tuple[str, ...] | None = None,
     ):
-        if param_bounds is None:
-            param_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
+        # Resolve ``param_names`` FIRST, then default ``param_bounds`` from
+        # THOSE names (not the full PARAM_NAMES) so a custom name subset/reorder
+        # gets length-consistent bounds — otherwise a 12-entry default-bounds
+        # list mismatches a shorter ``raw`` in ``_forward_single`` (finding #1).
         if param_names is None:
             param_names = PARAM_NAMES
+        if param_bounds is None:
+            param_bounds = [PARAM_BOUNDS[n] for n in param_names]
 
         n_output = len(param_names)
         keys = jax.random.split(key, n_hidden + 1)

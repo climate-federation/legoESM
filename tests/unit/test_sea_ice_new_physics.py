@@ -1483,37 +1483,45 @@ class TestThinIceAblationClosure:
 # ==============================================================================
 
 class TestMulticatAtmFluxAggregation:
-    """The multicat sensible-heat / stress response to the atmosphere must use
-    the POST-thermo concentration basis for BOTH numerator and denominator, so
-    that blend_tiles (which re-weights by f_ice proportional to the POST conc)
-    recovers the true per-grid-cell flux.  The old code divided the
-    post-conc-weighted numerator by max(sum_pre, sum_post), under-reporting
-    SH/stress under net melt.  This isolates the aggregation contract."""
+    """The multicat sensible-heat / stress response to the atmosphere keeps the
+    per-grid-cell numerator ``Sum_k flux_k*conc_post_k`` and divides by the
+    FINAL aggregated concentration ``conc_agg`` -- the SAME concentration
+    ``f_ice`` later multiplies by -- so the delivered flux ``resp * f_ice``
+    recovers the per-cell total EXACTLY, regardless of net melt (the old
+    max(pre,post) denominator under-reported under melt, finding #9) or of
+    ITD-remap/ridging area change between thermo and the response (finding #4).
 
-    def test_post_step_basis_recovers_per_cell_flux(self):
-        from legoesm.ice.sea_ice import step_sea_ice  # ensure module imports
+    Full multicat ``step_sea_ice`` paths are exercised by the sea-ice stress
+    suite; this isolates the normalisation algebra the fix changed."""
+
+    def test_conc_agg_basis_recovers_per_cell_flux(self):
         import numpy as np
-        # Two categories with NET MELT: post concentration < pre concentration.
+        # Two categories; conc_agg differs from BOTH sum_pre and sum_post (as it
+        # would after ridging compacts area between thermo and the response).
         shflx_k = jnp.array([20.0, -5.0])          # per-cat sensible heat [W/m2]
-        conc_pre = jnp.array([0.5, 0.4])           # sum_pre = 0.9
-        conc_post = jnp.array([0.3, 0.2])          # sum_post = 0.5  (melt)
+        conc_pre = jnp.array([0.5, 0.4])           # sum_pre  = 0.9
+        conc_post = jnp.array([0.3, 0.2])          # sum_post = 0.5  (net melt)
+        conc_agg = 0.42                            # post-ridging aggregate area
         sum_pre = float(jnp.sum(conc_pre))
         sum_post = float(jnp.sum(conc_post))
-        assert sum_post < sum_pre  # net melt regime
+        assert sum_post < sum_pre                  # net melt regime
+        assert conc_agg != sum_post                # ridging changed the area
 
-        numer = float(jnp.sum(shflx_k * conc_post))   # post-conc weighting
-        # NEW (fixed) response: divide by the POST basis.
-        shflx_resp_new = numer / max(sum_post, 1e-30)
-        # OLD (buggy) response: divide by max(pre, post).
-        shflx_resp_old = numer / max(max(sum_pre, sum_post), 1e-30)
+        # Per-grid-cell SH total the atmosphere must receive (computed at the
+        # post-thermo areas the bulk flux acted on).
+        numer = float(jnp.sum(shflx_k * conc_post))
 
-        # blend_tiles re-multiplies by f_ice proportional to the POST conc; the
-        # delivered per-cell sensible heat must equal the true Sum(shflx*conc_post).
-        delivered_new = shflx_resp_new * sum_post
-        delivered_old = shflx_resp_old * sum_post
+        # NEW response: numerator / conc_agg, then blend re-multiplies by
+        # f_ice (proportional to conc_agg) -> conc_agg cancels EXACTLY.
+        shflx_resp_new = numer / max(conc_agg, 1e-30)
+        delivered_new = shflx_resp_new * conc_agg
         assert np.isclose(delivered_new, numer, rtol=1e-12), (
-            "post-basis response must recover the per-cell sensible heat"
+            "conc_agg-basis response must recover the per-cell sensible heat"
         )
-        # The old basis under-reports under net melt (non-vacuous contrast).
-        assert delivered_old < numer - 1e-6
-        assert np.isclose(delivered_old, numer * sum_post / sum_pre, rtol=1e-12)
+
+        # OLD response: numerator / max(pre, post), then blend by conc_agg.
+        shflx_resp_old = numer / max(max(sum_pre, sum_post), 1e-30)
+        delivered_old = shflx_resp_old * conc_agg
+        # The old basis mis-delivers (scaled by conc_agg/max(pre,post)).
+        assert not np.isclose(delivered_old, numer, rtol=1e-6)
+        assert np.isclose(delivered_old, numer * conc_agg / sum_pre, rtol=1e-12)

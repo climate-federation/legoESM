@@ -2386,18 +2386,15 @@ def _step_dynamic_v2(
         # any concentration history without a 1/conc normalisation (F11).
         sum_conc_pre = jnp.sum(conc_pre, axis=-1, keepdims=False)
         sum_conc_post = jnp.sum(conc, axis=-1, keepdims=False)
-        # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis: it matches
-        # the single-cat ``conc_basis`` contract so resp.lhflx * max(pre,post)
-        # == L_s * sublim_mass_total identically across paths (sublim_mass_total
-        # is on the INPUT-conc basis).  The SENSIBLE-heat and STRESS numerators
-        # are weighted by the POST-thermo conc, and blend_tiles re-multiplies
-        # them by f_ice ∝ POST conc, so they must divide by ``sum_conc_post``,
-        # NOT max(pre, post): under net melt (post < pre) the old shared
-        # denominator under-reported SH/stress to the atmosphere (finding #9).
+        # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis only: it
+        # matches the single-cat ``conc_basis`` contract so resp.lhflx *
+        # max(pre,post) == L_s * sublim_mass_total identically across paths
+        # (sublim_mass_total is on the INPUT-conc basis).  The SH/STRESS
+        # numerators are kept per-grid-cell and divided by ``conc_agg`` at the
+        # response build (findings #9 + #4), NOT by this latent basis.
         sum_conc_safe = jnp.maximum(
             jnp.maximum(sum_conc_pre, sum_conc_post), 1e-30,
         )
-        sum_conc_post_safe = jnp.maximum(sum_conc_post, 1e-30)
         fw_per_cat = jnp.stack(fw_flux_list, axis=-1)
         heat_per_cat = jnp.stack(ocean_heat_list, axis=-1)
         fw_flux_total = jnp.sum(fw_per_cat, axis=-1)
@@ -2411,14 +2408,20 @@ def _step_dynamic_v2(
         sw_pen_total = jnp.sum(jnp.stack(sw_pen_list, axis=-1), axis=-1)
         ocean_heat_total = ocean_heat_total - sw_pen_total
 
-        # Atmosphere-coupler fluxes stay PER-ICE-TILE (blend_tiles re-multiplies
-        # by the post-step ``f_ice``): the atmosphere sees the instantaneous
-        # surface, so the post-step fraction is the right weight.  Stored
-        # already concentration-weighted, then normalised by the ice fraction.
-        shflx_resp = (
-            jnp.sum(jnp.stack(shflx_aggsum_components, axis=-1), axis=-1)
-            / sum_conc_post_safe
-        )
+        # Atmosphere-coupler SH / stress: keep the PER-GRID-CELL numerators
+        # (Sum_k flux_k * conc_post_k) here and defer the per-ice-tile division
+        # to the response build, where it is divided by ``conc_agg`` -- the SAME
+        # aggregated concentration ``f_ice`` later multiplies by.  This makes the
+        # delivered flux ``shflx_resp * f_ice`` recover the per-cell total
+        # EXACTLY even when ITD remap / ridging change the aggregate area between
+        # the thermo step and the response (findings #9 + #4).  ``sum_conc_post``
+        # equals ``conc_agg`` only when no area-changing ridging fires.
+        shflx_pergrid_num = jnp.sum(
+            jnp.stack(shflx_aggsum_components, axis=-1), axis=-1)
+        tau_x_pergrid_num = jnp.sum(
+            jnp.stack(tau_x_components, axis=-1), axis=-1)
+        tau_y_pergrid_num = jnp.sum(
+            jnp.stack(tau_y_components, axis=-1), axis=-1)
         # LATENT: derive the per-ice-area latent from the REALIZED sublimation
         # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
         # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
@@ -2426,14 +2429,6 @@ def _step_dynamic_v2(
         # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
         lhflx_resp = constants.L_s * sublim_mass_total / sum_conc_safe
-        tau_x_resp = (
-            jnp.sum(jnp.stack(tau_x_components, axis=-1), axis=-1)
-            / sum_conc_post_safe
-        )
-        tau_y_resp = (
-            jnp.sum(jnp.stack(tau_y_components, axis=-1), axis=-1)
-            / sum_conc_post_safe
-        )
 
     else:
         result = _thermo_v2(
@@ -2582,6 +2577,14 @@ def _step_dynamic_v2(
     # ---- 7. Build response ----
     if is_multicat:
         h_agg, T_agg, conc_agg = aggregate_state(h, T_ice, conc)
+        # Per-ice-tile SH / stress: divide the per-grid-cell numerators by the
+        # FINAL aggregated concentration (the one ``f_ice`` multiplies by), so
+        # ``resp * f_ice`` recovers the per-cell total exactly even after ITD
+        # remap / ridging changed the aggregate area (findings #9 + #4).
+        conc_agg_safe = jnp.maximum(conc_agg, 1e-30)
+        shflx_resp = shflx_pergrid_num / conc_agg_safe
+        tau_x_resp = tau_x_pergrid_num / conc_agg_safe
+        tau_y_resp = tau_y_pergrid_num / conc_agg_safe
     else:
         h_agg, T_agg, conc_agg = h, T_ice, conc
 
