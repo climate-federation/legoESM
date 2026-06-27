@@ -33,13 +33,13 @@ def test_mpas_factory_selects_canonical_blocks():
     assert mc.eos == "wright"
     assert mc.tracer_advection == "tvd"
     assert mc.pgf_scheme == "adcroft"
-    assert mc.barotropic.barotropic_solver == "implicit_cn"
+    assert mc.barotropic_solver == "implicit_cn"  # MPAS: flat (not grouped)
     assert mc.pv_scheme == "enstrophy"
     assert mc.implicit_vertical_mixing is True
     assert mc.A_h == pytest.approx(1.0e5)
     assert mc.C_smag_lap == pytest.approx(0.33)
     assert mc.K_zeta_bih == pytest.approx(1.0e14)
-    assert mc.barotropic.barotropic_implicit_pcg_maxiter == 300
+    assert mc.barotropic_implicit_pcg_maxiter == 300  # MPAS: flat (not grouped)
     assert mc.normalize_freshwater is True
     assert mc.gm_redi is not None
     assert mc.gm_redi.kappa_GM == pytest.approx(600.0)

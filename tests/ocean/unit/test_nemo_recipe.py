@@ -49,9 +49,9 @@ def test_nemo_model_config_selects_canonical_blocks():
     assert cfg.A_h_eq_boost == pytest.approx(1.0)
     assert cfg.A_h_eq_sigma_deg == pytest.approx(5.0)
     assert cfg.C_smag_lap == pytest.approx(0.33)
-    assert cfg.bottom_drag_r == pytest.approx(2.5e-4)
-    assert cfg.bottom_drag_bg_velocity == pytest.approx(0.1)
-    assert cfg.bottom_drag_bbl_thickness == pytest.approx(100.0)
+    assert cfg.bottom_drag.bottom_drag_r == pytest.approx(2.5e-4)
+    assert cfg.bottom_drag.bottom_drag_bg_velocity == pytest.approx(0.1)
+    assert cfg.bottom_drag.bottom_drag_bbl_thickness == pytest.approx(100.0)
     assert cfg.normalize_freshwater is True
     assert cfg.runoff_depth_spread_m == pytest.approx(150.0)
 

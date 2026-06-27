@@ -78,7 +78,7 @@ class TestDefaults:
         mc = eady_uniform_model_config(cfg)
         assert mc.A_v == cfg.A_v
         assert mc.K_v == cfg.K_v
-        assert mc.bottom_drag_r == cfg.bottom_drag_coeff
+        assert mc.bottom_drag.bottom_drag_r == cfg.bottom_drag_coeff
 
     def test_none_config(self):
         assert eady_uniform_model_config(None).pgf_scheme == "smc03"

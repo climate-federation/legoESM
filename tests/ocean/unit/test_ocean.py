@@ -918,7 +918,7 @@ class TestOceanModel:
         state_new = barotropic_substeps(
             state_bad,
             dt_s=60.0,
-            n_substeps=config.barotropic.n_barotropic_substeps,
+            n_substeps=config.n_barotropic_substeps,  # cube OceanConfig: flat (not grouped)
             grid=ocean_grid,
             z_coord=ocean_z_coord,
             config=config,
