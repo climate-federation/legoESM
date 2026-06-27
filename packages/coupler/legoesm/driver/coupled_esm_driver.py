@@ -130,6 +130,11 @@ class CoupledESMDriver:
         #    temperature back to the atmosphere's radiation (opt-in).
         self._override_sfc()
 
+        # 7. Optionally feed the coupler's blended surface SH/LH fluxes back to
+        #    the atmosphere surface tendency (opt-in) so the air-sea budget
+        #    closes (single shared flux calc on both sides).
+        self._override_sfc_fluxes()
+
         logger.info("CoupledESM: all components initialized")
         logger.info(f"  ocean_mode={self.coupled_cfg.ocean_mode}, "
                     f"land_mode={self.coupled_cfg.land_mode}, "
@@ -923,6 +928,49 @@ class CoupledESMDriver:
             "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
         )
 
+    def _override_sfc_fluxes(self):
+        """Feed the coupler's tile-blended surface SH/LH fluxes back to the
+        atmosphere surface tendency each segment (SHARED air-sea fluxes).
+
+        Gated on ``CoupledConfig.couple_surface_fluxes`` (default False => no-op,
+        existing coupled runs byte-identical).  When enabled, the atmosphere
+        consumes the coupler's blended ``shflx``/``lhflx`` (its bulk scheme,
+        q_sfc = 0.98*q_sat mixing ratio, ocean-tile C_H/C_E) instead of
+        recomputing its own bulk surface fluxes, so the heat + water leaving the
+        atmosphere over the ocean tile EQUALS what the coupler feeds the ocean
+        (``_assemble_ocean_forcing``/``_step_ocean``) -- the air-sea budget
+        closes (single authoritative surface-flux calc on both sides).
+
+        Sign convention: ``SurfaceToAtm.shflx``/``lhflx`` are [W/m2, positive UP
+        = surface->atmosphere], exactly the convention the atmosphere's bulk
+        ``shflx``/``lhflx`` use; the ocean receives ``q_net = ... - shflx -
+        lhflx`` (the SAME positive-up fluxes as a heat SINK), so a unit of heat
+        leaving the atmosphere arrives as a unit of heat into the ocean.
+
+        Returns ``(None, None)`` until the first coupler step populates
+        ``_last_sfc_response`` (segment 0 falls back to the atmosphere's own
+        bulk fluxes, as before).  The ``SegmentForcing`` pytree stays stable
+        across the run: ``model_driver`` packs ``None`` on segment 0 and arrays
+        thereafter, but the gate (this hook installed or not) is fixed for the
+        whole run, so the compiled segment kernel that consumes the override is
+        only built once the override first appears -- identical to the
+        ``couple_surface_radiation`` lag.  A coupled run that wants a fully
+        flux-coupled segment 0 should spin up one coupler step first.
+        """
+        if not self.coupled_cfg.couple_surface_fluxes:
+            return
+
+        def _coupled_get_sfc_flux_override(day):
+            r = self._last_sfc_response
+            if r is None or getattr(r, "shflx", None) is None:
+                return None, None
+            return r.shflx, r.lhflx
+
+        self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
+        logger.info(
+            "  Shared air-sea fluxes: coupler SH/LH -> atmosphere surface"
+        )
+
     # ==================================================================
     # Coupling step
     # ==================================================================
@@ -941,7 +989,14 @@ class CoupledESMDriver:
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
-        rho_low = p_low / (constants.R_d * T_low)
+        # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
+        # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
+        # tropics (q_v ~ 17 g/kg) and biases every downstream bulk-flux surface
+        # stress / turbulent flux that reads forcing.rho_lowest -- the SAME T_v
+        # correction the canonical extract_atm_to_surface uses (single
+        # convention across the coupling-field extractors).
+        T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
+        rho_low = p_low / (constants.R_d * T_v_low)
 
         # Radiation and precipitation from last atmosphere physics
         aux = getattr(self._atm, '_carry_aux', {})
@@ -1172,6 +1227,7 @@ class CoupledESMDriver:
         aquaplanet Phase-1 run has no ice tile."""
         from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.grid_remap import remap_field
         from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm import constants
@@ -1179,7 +1235,31 @@ class CoupledESMDriver:
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
         tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
-        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        # Net surface shortwave (positive INTO ocean).  Use the radiation's
+        # ACTUAL net surface SW -- the value the atmosphere SW solver removed
+        # from TOA using the blended surface albedo it was given -- NOT a
+        # second albedo round-trip.  ``_build_atm_forcing`` reconstructs
+        # ``sw_down = sw_net_sfc / (1 - albedo_eff)`` with the BLENDED albedo;
+        # re-netting that gross ``sw_down`` here with the OCEAN-tile albedo
+        # (a DIFFERENT albedo over sea-ice / zenith-dependent ocean) made the
+        # ocean absorb a non-physical amount of SW (energy non-conservation:
+        # the ocean got MORE SW than radiation took out of the column over a
+        # bright ice cell).  Reading the radiation net SW (remapped onto the
+        # ocean grid; identity for the shared-grid Phase-1 ocean) closes the
+        # SW budget: ocean-absorbed SW == radiation surface-net SW, and over an
+        # all-ocean cell albedo_eff == ocean albedo so this is byte-identical to
+        # the old round-trip.  Fall back to the round-trip only if radiation has
+        # not run yet (segment 0 before the first physics step).
+        _atm = getattr(self, "_atm", None)
+        _aux = getattr(_atm, "_carry_aux", {}) if _atm is not None else {}
+        _sw_net_atm = _aux.get("held_sw_net_sfc", None)
+        _remapper = getattr(self, "_grid_remapper", None)
+        if _sw_net_atm is not None and _remapper is not None:
+            sw_net = remap_field(_sw_net_atm, _remapper.a2o)
+        else:
+            # Radiation has not run yet (segment 0 before the first physics step)
+            # -- fall back to the single-albedo net of the gross sw_down.
+            sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
         q_net = (sw_net + atm_forcing.lw_down
                  - tile.lw_up - tile.shflx - tile.lhflx)
         evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
@@ -1210,8 +1290,21 @@ class CoupledESMDriver:
             river = z
             surface_extra = z
         else:
+            # The lagged blended surface response lives on the ATMOSPHERE grid;
+            # its river-runoff / ice-lake freshwater sub-channels must be REMAPPED
+            # onto the OCEAN grid before joining the ocean-grid precip/evap in
+            # FreshwaterForcing -- otherwise on a tripole (cross-grid) coupling
+            # these atm-grid arrays are placed beside ocean-grid fields (shape
+            # mismatch -> crash, or silent wrong-grid injection).  The
+            # conservative scalar remap is sign-preserving, so ``river`` stays
+            # +INTO ocean and ``ice_fw`` keeps its melt(+)/freeze(-) sign at both
+            # ends.  Identity (shared-grid Phase-1 ocean / no remapper) is an
+            # exact pass-through -> byte-identical to the single-grid path.
             river = prev.river_runoff_flux              # land, depth-spread
             surface_extra = prev.ice_lake_freshwater_flux  # ice melt + lake, surface
+            if _remapper is not None:
+                river = remap_field(river, _remapper.a2o)
+                surface_extra = remap_field(surface_extra, _remapper.a2o)
         fw = FreshwaterForcing(
             precip=atm_forcing.precip_total, evap=evap, runoff=river,
             ice_fw=surface_extra,
