@@ -22,7 +22,12 @@ from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.config import TileConfig
 from legoesm.coupler.tile_fractions import compute_tile_fractions
-from legoesm.coupler.ocean_forcing import ice_ocean_forcing_from_ice_response
+# F11 mapper currently parked in coupler/_future (NOT YET WIRED into any
+# production driver -- aquaplanet Phase-1 dynamic ocean has no ice tile);
+# the capability + sign/conservation contract stay validated here.
+from legoesm.coupler._future.ocean_forcing import (
+    ice_ocean_forcing_from_ice_response,
+)
 from legoesm import constants
 
 
