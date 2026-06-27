@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -159,12 +160,14 @@ class TestRadiationCoreLand:
             jnp.zeros(0), constants.S_0, None, None,
             u=u, v=v, dt=600.0, T_land=T_land,
         )
-        assert len(out) == 7
+        assert len(out) == 8          # + land_ml_new (None on the slab path)
         assert jnp.array_equal(out[6], T_land)
+        assert out[7] is None
 
     def test_land_tile_updates_T_land(self):
         """With the land tile active the slab temperature evolves."""
         pipe, _ = _pipeline(land=True)
+        pipe.slab_land_active = True   # step T_land (not the passive blend-only mode)
         T, p_s, q_v, sst, sic, lat, lon, u, v = _rad_inputs()
         T_land = jnp.full((6, N_CS, N_CS), 250.0)
         out = pipe.compute_radiation_core(
@@ -257,6 +260,7 @@ class TestStepUnifiedLand:
     def test_jitted_step_unified_threads_T_land(self):
         """The jitted step_unified advances T_land through its lax.cond."""
         pipe, _ = _pipeline(land=True)
+        pipe.slab_land_active = True   # step T_land (not the passive blend-only mode)
         step_fn = pipe.build_step_unified()
         ad = pipe.adapter
         shape_2d = ad.shape_2d
@@ -279,7 +283,7 @@ class TestStepUnifiedLand:
         aerosol = jnp.zeros((ad.ncol, NLEV))
         T_land = jnp.full(shape_2d, 250.0)
 
-        phys_out, new_held, T_land_new = step_fn(
+        phys_out, new_held, T_land_new, _land_ml = step_fn(
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,)), u, v,
             sst, sic, lat, lon, 100.0, 43200.0, 600.0,
@@ -291,6 +295,47 @@ class TestStepUnifiedLand:
         assert jnp.all(jnp.isfinite(T_land_new))
         # Land tile active → the slab skin temperature must evolve.
         assert not jnp.array_equal(T_land_new, T_land)
+
+    def test_jitted_step_unified_advances_multilayer_land(self):
+        """End-to-end: the jitted step_unified runs the MULTILAYER coupler tile (not
+        the slab) when the pipeline carries a land_ml state — the soil column advances
+        through the segment, and rides the SegmentCarry.land_ml field (the refactor)."""
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.soil_grid import SoilGridConfig
+        from legoesm.land.multilayer_land import init_multilayer_land_state
+        from legoesm.land.surface_params import LandSurfaceParams
+        pipe, _ = _pipeline(land=True)
+        ad = pipe.adapter
+        shape_2d = ad.shape_2d; shape_3d = (*shape_2d, NLEV); ncol = ad.ncol
+        cfg = MultiLayerLandConfig(
+            soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0), bulk_scheme="most")
+        c = lambda x: jnp.full(ncol, float(x))
+        pipe.land_ml_cfg = cfg
+        pipe.land_ml_lat = jnp.full(ncol, 0.4)
+        pipe.land_ml_params = LandSurfaceParams(
+            albedo_veg=c(0.2), emissivity=c(0.97), z0=c(0.1), W_max=c(150.0),
+            C_soil=c(2.0e6), d_soil=c(1.0), root_depth=c(1.0), theta_wp=c(0.12),
+            theta_fc=c(0.30), Vc_max25=c(50.0), LCMA=c(50.0), g1=c(9.0))
+        land_ml = init_multilayer_land_state(ncol, cfg, T_init=285.0)
+        step_fn = pipe.build_step_unified(static_need_rad=True)
+        held_3d = jnp.zeros(shape_3d); held_2d = jnp.zeros(shape_2d)
+        _po, _nh, _Tl, land_ml_new = step_fn(
+            jnp.bool_(True),
+            jnp.full(shape_3d, 288.0), jnp.full(shape_2d, 1.0e5),
+            jnp.full(shape_3d, 0.006), jnp.zeros(shape_3d), jnp.zeros(shape_3d),
+            jnp.zeros((ncol,)), jnp.full(shape_3d, 3.0), jnp.zeros(shape_3d),
+            jnp.full(shape_2d, 290.0), jnp.zeros(shape_2d), jnp.full(shape_2d, 0.4),
+            jnp.full(shape_2d, 1.0), 100.0, 43200.0, 600.0,
+            jnp.array([]), constants.S_0, jnp.zeros((ncol, NLEV)),
+            jnp.zeros((ncol, NLEV)),
+            held_3d, held_2d, held_2d, held_2d, held_2d, held_2d,
+            T_land=jnp.zeros(shape_2d), land_ml=land_ml,
+        )
+        # the multilayer state advanced (not the slab), stays finite + physical
+        assert land_ml_new is not None
+        assert jnp.all(jnp.isfinite(land_ml_new.T_soil))
+        assert not jnp.array_equal(land_ml_new.T_soil, land_ml.T_soil)
+        assert jnp.all((land_ml_new.theta_soil >= 0.0) & (land_ml_new.theta_soil <= 1.0))
 
     def test_tiled_surface_flux_changes_tendencies(self):
         """With louis + coare3 + an active land tile, enabling tiled surface
@@ -330,7 +375,9 @@ class TestStepUnifiedLand:
             o3 = jnp.zeros((ad.ncol, NLEV))
             aerosol = jnp.zeros((ad.ncol, NLEV))
             T_land = jnp.full(shape_2d, 300.0)  # warm land vs 295 K ocean
-            phys_out, _, _ = step_fn(
+            # step_unified returns a 4-tuple since the differentiable land
+            # refactor (physics_out, held, T_land_new, land_ml_new).
+            phys_out, _, _, _ = step_fn(
                 jnp.bool_(True),
                 T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,)), u, v,
                 sst, sic, lat, lon, 100.0, 43200.0, 600.0,
@@ -384,20 +431,73 @@ class TestStepUnifiedLand:
                 T_land=None, **extra,
             )
 
-        _, base_held, _ = _run()
+        _, base_held, _, _ = _run()
         # held tuple: (dT_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
         #              sw_down_toa).  A much brighter coupler albedo lowers
         # surface net SW.
-        _, alb_held, _ = _run(sfc_albedo_override=jnp.full(shape_2d, 0.6))
+        _, alb_held, _, _ = _run(sfc_albedo_override=jnp.full(shape_2d, 0.6))
         assert not jnp.allclose(base_held[1], alb_held[1])
         assert bool(jnp.all(alb_held[1] <= base_held[1] + 1e-9))
         # A much colder coupler skin temperature changes surface net LW.
-        _, T_held, _ = _run(sfc_T_override=jnp.full(shape_2d, 230.0))
+        _, T_held, _, _ = _run(sfc_T_override=jnp.full(shape_2d, 230.0))
         assert not jnp.allclose(base_held[2], T_held[2])
         # Override = None reproduces the baseline exactly (byte-identical).
-        _, none_held, _ = _run(sfc_albedo_override=None, sfc_T_override=None)
+        _, none_held, _, _ = _run(sfc_albedo_override=None, sfc_T_override=None)
         for b, n in zip(base_held, none_held):
             assert jnp.array_equal(b, n)
+
+
+class TestMultilayerLandTile:
+    """The PhysicsPipeline multilayer land tile (refactor enabling differentiable
+    coupled calibration of the multilayer land params)."""
+
+    def _setup(self, z0_val=0.1):
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.soil_grid import SoilGridConfig
+        from legoesm.land.multilayer_land import init_multilayer_land_state
+        from legoesm.land.surface_params import LandSurfaceParams
+        pipe, _ = _pipeline(land=True)
+        ncol = 6 * N_CS * N_CS
+        cfg = MultiLayerLandConfig(
+            soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
+            bulk_scheme="most")           # MOST -> z0 matters
+        c = lambda v: jnp.full(ncol, v)   # keep traced (z0 is the grad target)
+        pipe.land_ml_cfg = cfg
+        pipe.land_ml_lat = jnp.zeros(ncol)
+        pipe.land_ml_params = LandSurfaceParams(
+            albedo_veg=c(0.2), emissivity=c(0.97), z0=c(z0_val), W_max=c(150.0),
+            C_soil=c(2.0e6), d_soil=c(1.0), root_depth=c(1.0), theta_wp=c(0.12),
+            theta_fc=c(0.30), Vc_max25=c(50.0), LCMA=c(50.0), g1=c(9.0))
+        land_ml = init_multilayer_land_state(ncol, cfg, T_init=285.0)
+        s2 = (6, N_CS, N_CS); s3 = (*s2, NLEV)
+        atm = dict(T=jnp.full(s3, 288.0), p_s=jnp.full(s2, 1.0e5),
+                   q_v=jnp.full(s3, 0.006), u=jnp.full(s3, 4.0), v=jnp.zeros(s3))
+        sw = jnp.full(ncol, 400.0); lw = jnp.full(ncol, 340.0)
+        return pipe, land_ml, atm, sw, lw, ncol
+
+    def test_step_returns_finite_columnar(self):
+        pipe, land_ml, atm, sw, lw, ncol = self._setup()
+        land_new, T_sfc, albedo = pipe._step_multilayer_land_tile(
+            land_ml, sw, lw, atm["T"], atm["p_s"], atm["q_v"], atm["u"], atm["v"],
+            None, 1800.0)
+        assert T_sfc.shape == (ncol,) and jnp.all(jnp.isfinite(T_sfc))
+        assert jnp.all((albedo > 0.0) & (albedo < 1.0))
+        assert land_new.T_soil.shape == land_ml.T_soil.shape
+
+    def test_differentiable_wrt_z0(self):
+        """jax.grad of the tile's surface T w.r.t. the roughness z0 — the capability
+        the slab-embedded T_land cannot provide (the refactor's point)."""
+        _, _, atm, sw, lw, ncol = self._setup()
+
+        def mean_Tsfc(z0_val):
+            pipe, land_ml, _a, _sw, _lw, _ = self._setup(z0_val=z0_val)
+            _, T_sfc, _ = pipe._step_multilayer_land_tile(
+                land_ml, sw, lw, atm["T"], atm["p_s"], atm["q_v"], atm["u"],
+                atm["v"], None, 1800.0)
+            return jnp.mean(T_sfc)
+
+        g = jax.grad(mean_Tsfc)(0.1)
+        assert jnp.isfinite(g) and abs(float(g)) > 0.0
 
 
 if __name__ == "__main__":

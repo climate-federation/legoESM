@@ -551,6 +551,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
                              "When set (with --land-mask-file), overrides the "
                              "latitude-vegetation albedo on the land tile.")
+    parser.add_argument("--use-multilayer-land", action="store_true",
+                        help="Replace the slab land tile with the differentiable "
+                             "multilayer (8-layer Richards) soil column, carried in "
+                             "the segment state and warm-started from the CLM "
+                             "reference surface map.  Requires --land-mask-file.")
+    parser.add_argument("--multilayer-n-layers", type=int,
+                        default=_EXPERIMENT_DEFAULTS.multilayer_n_layers,
+                        help="Number of soil layers for --use-multilayer-land.")
+    parser.add_argument("--multilayer-soil-depth", type=float,
+                        default=_EXPERIMENT_DEFAULTS.multilayer_soil_depth,
+                        help="Total soil-column depth [m] for --use-multilayer-land.")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -834,6 +845,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
+        use_multilayer_land=args.use_multilayer_land,
+        multilayer_n_layers=args.multilayer_n_layers,
+        multilayer_soil_depth=args.multilayer_soil_depth,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,

@@ -149,5 +149,40 @@ def test_multilayer_extended_bake(tmp_path):
     assert np.all(np.asarray(th.C_soil) > 0) and np.all(np.asarray(th.k_solid) > 0)
 
 
+def test_clm_multilayer_setup_builds_params_and_config(tmp_path):
+    """clm_multilayer_setup composes the faithful CLM default multilayer land:
+    per-column LandSurfaceParams + a MultiLayerLandConfig whose hydraulics/thermal
+    carry the spatial maps while the non-spatial sub-configs come from base."""
+    from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.surface_params import LandSurfaceParams
+
+    f = str(tmp_path / "s.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(70, -70, 4); lon = np.linspace(20, 300, 5)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    ncol = LA.size
+
+    base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5))
+    params, cfg = clm_multilayer_setup(m, base_config=base)
+
+    # params: per-column LandSurfaceParams, physical albedo/emissivity ranges
+    assert isinstance(params, LandSurfaceParams)
+    assert np.asarray(params.albedo_veg).shape == (ncol,)
+    assert np.all((np.asarray(params.albedo_veg) >= 0.0)
+                  & (np.asarray(params.albedo_veg) <= 1.0))
+    assert np.all((np.asarray(params.emissivity) > 0.8)
+                  & (np.asarray(params.emissivity) <= 1.0))
+    # config: base's soil grid survives; hydraulics/thermal are the spatial maps
+    assert isinstance(cfg, MultiLayerLandConfig)
+    assert cfg.soil_grid.n_layers == 6 and cfg.soil_grid.total_depth == 2.5
+    assert np.asarray(cfg.thermal.C_soil).shape == (ncol, 1)
+    assert np.all(np.asarray(cfg.thermal.C_soil) > 0)
+    assert np.all(np.asarray(cfg.thermal.k_solid) > 0)
+    assert np.asarray(cfg.hydraulics.theta_sat).shape == (ncol, 1)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

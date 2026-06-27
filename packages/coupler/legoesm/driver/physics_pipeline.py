@@ -156,6 +156,15 @@ class PhysicsPipeline:
         self.f_land = None
         self.albedo_land = None
         self.rad_update_steps = 1
+        # Optional MULTILAYER (Richards) land tile.  When ``land_ml_cfg`` is set the
+        # differentiable forward advances a MultiLayerLandState (carried in
+        # SegmentCarry.land_ml) in place of the scalar-T_land slab, supplying the land
+        # surface temperature and albedo for the blend.  All None ⇒ slab path.
+        self.land_ml_cfg = None        # MultiLayerLandConfig
+        self.land_ml_params = None     # LandSurfaceParams (per land column)
+        self.land_ml_lat = None        # (ncol,) latitude [rad], column order
+        self.land_ml_doy = 0.0
+        self.land_ml_u_min = 1.0
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -378,6 +387,40 @@ class PhysicsPipeline:
         dt_rad = dt * self.rad_update_steps
         return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
 
+    def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
+                                   T, p_s, q_v, u, v, precip_col, dt):
+        """Advance the MULTILAYER (Richards) land tile one radiation step and return
+        ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
+
+        Builds the ``AtmToSurface`` forcing from the lowest atmospheric level (T, q,
+        wind, p) plus the surface down-welling SW/LW and the lagged precip, then steps
+        ``step_multilayer_land`` with the pipeline's land config / per-column params.
+        Pure + differentiable w.r.t. the land params (the whole point of the refactor).
+        Deferred land imports avoid a core->land top-level cross-package cycle."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.multilayer_land import step_multilayer_land
+        from legoesm.thermo import saturation_mixing_ratio
+        ad = self.adapter
+        f2 = lambda g: ad.flatten_2d(g)
+        T_air = f2(T[..., -1]); q_air = f2(q_v[..., -1])
+        u_low = f2(u[..., -1]); v_low = f2(v[..., -1]); p_s_col = f2(p_s)
+        rho = p_s_col / (constants.R_d * T_air)
+        precip = precip_col if precip_col is not None else jnp.zeros_like(p_s_col)
+        ones = jnp.ones_like(p_s_col)
+        forcing = AtmToSurface(
+            sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
+            precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
+            T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
+            p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
+            cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
+            has_radiation=ones, has_precipitation=ones)
+        dt_rad = dt * self.rad_update_steps
+        land_new, resp, _ = step_multilayer_land(
+            land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
+            lat=self.land_ml_lat, doy=self.land_ml_doy,
+            land_params=self.land_ml_params)
+        return land_new, resp.T_sfc, resp.albedo
+
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
@@ -507,12 +550,18 @@ class PhysicsPipeline:
         # Recover the surface downwelling SW from the held net SW for the
         # Jarvis PAR term (sw_net = sw_down*(1-albedo); over a land tile the
         # blend albedo ≈ albedo_land, so this is accurate where stomata
-        # apply).  Unused (dead-code-eliminated) unless land_stomatal_beta.
-        _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - self.albedo_land, 1e-3)
-        beta_land = self._land_beta(
-            w_land, T_land=T_land, sw_down_sfc=_sw_down_sfc,
-            q_air=q_v[..., -1], p_s=p_s,
-        )
+        # apply).  Only computed when a land tile is present — ``albedo_land``
+        # is ``None`` on ocean-only runs (``1.0 - None`` is an eager Python
+        # subtraction, NOT dead-code-eliminated), so guard it; beta stays None
+        # (=1, wet surface) with no land albedo.
+        if self.albedo_land is not None:
+            _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - self.albedo_land, 1e-3)
+            beta_land = self._land_beta(
+                w_land, T_land=T_land, sw_down_sfc=_sw_down_sfc,
+                q_air=q_v[..., -1], p_s=p_s,
+            )
+        else:
+            beta_land = None
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -1279,11 +1328,13 @@ class PhysicsPipeline:
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
                                sfc_T_override=None,
-                               conv_precip=None, w_land=None):
+                               conv_precip=None, land_ml=None, w_land=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
-        lw_up_toa, sw_down_toa, T_land_new)`` as a 7-tuple.
+        lw_up_toa, sw_down_toa, T_land_new, land_ml_new)`` as an 8-tuple
+        (``land_ml_new`` is the advanced multilayer land state, or the
+        unchanged ``land_ml`` / ``None`` on the slab path).
 
         When the land tile is active (``self.f_land is not None``) the
         surface temperature/albedo/emissivity passed to the radiation
@@ -1335,12 +1386,22 @@ class PhysicsPipeline:
             albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
         emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
 
-        # --- Land tile: blend land surface into T_sfc / albedo / emissivity
-        _land_active = self.f_land is not None and T_land is not None
+        # --- Land tile: blend land surface into T_sfc / albedo / emissivity.
+        # MULTILAYER tile (land_ml present) supplies the surface T (top soil layer) +
+        # per-column albedo/emissivity; else the scalar-T_land slab.
+        _ml_active = self.land_ml_cfg is not None and land_ml is not None
+        _land_active = self.f_land is not None and (T_land is not None or _ml_active)
         if _land_active:
-            T_sfc = self._blend_land(T_sfc, T_land)
-            albedo = self._blend_land(albedo, self.albedo_land)
-            emissivity = self._blend_land(emissivity, self.emissivity_land)
+            if _ml_active:
+                T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
+                alb_land = ad.unflatten_2d(self.land_ml_params.albedo_veg)
+                emis_land = ad.unflatten_2d(self.land_ml_params.emissivity)
+            else:
+                T_land_grid, alb_land, emis_land = (
+                    T_land, self.albedo_land, self.emissivity_land)
+            T_sfc = self._blend_land(T_sfc, T_land_grid)
+            albedo = self._blend_land(albedo, alb_land)
+            emissivity = self._blend_land(emissivity, emis_land)
 
         # --- Coupler-provided dynamic surface overrides ---
         # In a coupled run the ocean/sea-ice/land tile models compute dynamic
@@ -1541,12 +1602,22 @@ class PhysicsPipeline:
             else rad_out.sw_flux_down[:, 0]
         )
 
+        # --- Land skin-temperature / soil-state update ---
+        if _ml_active:
+            # MULTILAYER: advance the Richards soil column from the surface SW/LW
+            # (column space) + the lagged precip; the slab T_land rides through.
+            precip_col = (ad.flatten_2d(conv_precip)
+                          if conv_precip is not None else None)
+            land_ml_new, _, _ = self._step_multilayer_land_tile(
+                land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
+                T, p_s, q_v, u, v, precip_col, dt)
+            T_land_new = T_land
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         # ``beta_land`` (None unless the soil-water bucket is active)
         # soil-moisture-limits the land latent flux, so a dry bucket warms
         # the land skin (desert-heating).  w_land itself is advanced in
         # physics_step_no_rad (where total precip is available).
-        if _land_active and self.slab_land_active:
+        elif _land_active and self.slab_land_active:
             lw_down_sfc = ad.unflatten_2d(rad_out.lw_flux_down[:, -1])
             T_land_new = self._step_slab_land(
                 T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
@@ -1555,11 +1626,13 @@ class PhysicsPipeline:
                     q_air=q_v[..., -1], p_s=p_s,
                 ),
             )
+            land_ml_new = land_ml
         else:
             T_land_new = T_land
+            land_ml_new = land_ml
 
         return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
-                sw_down_toa, T_land_new)
+                sw_down_toa, T_land_new, land_ml_new)
 
     def build_step_unified(self, static_need_rad: bool | None = None):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
@@ -1616,7 +1689,7 @@ class PhysicsPipeline:
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
-                         conv_precip=None, w_land=None):
+                         conv_precip=None, land_ml=None, w_land=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1630,10 +1703,10 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-                 sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
+                 sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
                     pipeline.compute_radiation_core(
                         T, p_s, q_v, sst, sic, lat, lon,
                         day_of_year, seconds_of_day,
@@ -1647,7 +1720,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
-                        conv_precip=conv_precip, w_land=w_land,
+                        conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1683,7 +1756,7 @@ class PhysicsPipeline:
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
                 )
-                return physics_out, new_held, _cast(T_land_new)
+                return physics_out, new_held, _cast(T_land_new), land_ml_new
 
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1697,7 +1770,7 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1730,7 +1803,9 @@ class PhysicsPipeline:
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
                 )
-                return physics_out, new_held, _cast(T_land)
+                # multilayer land state (if any) rides through the no-rad sub-steps
+                # unchanged — it advances only on radiation steps (like the slab).
+                return physics_out, new_held, _cast(T_land), land_ml
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
@@ -1743,7 +1818,7 @@ class PhysicsPipeline:
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
                     sfc_shflx_override, sfc_lhflx_override,
-                    tke, qke, gwd_spectrum, conv_precip, w_land)
+                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
