@@ -894,6 +894,34 @@ def mpas_ocean_baroclinic_tendencies(
         # (the same correction the free-surface eta path applies for volume in
         # ocean_model_mpas.step) -- without it an unbalanced ∮(P-E+R) drifts the
         # mean salinity even though volume is conserved.
+        #
+        # FAIL-FAST under multi-rank MPAS (codex round-2 #1/#2, round-3 placement):
+        # the salt freshwater normalization below AND the sibling eta
+        # normalization (ocean_model_mpas.step) are rank-local area-means with NO
+        # owned-cell mask, so an MPI Voronoi run would silently halo-double-count
+        # and apply inconsistent volume vs salt corrections.  Guard the SINGLE
+        # reduction SOURCE here (the public ``MPASOceanModel.tendencies`` entry,
+        # which ``_step_impl`` also routes through first) so a DIRECT tendency
+        # call is refused too — not just a full step.  ``is_multi_process()``
+        # alone misses the layout-less Voronoi MPI path, so also check
+        # ``mpi_world_size()`` (the established MPAS fail-fast predicate).  Inert
+        # single-rank.  Remove when owned-mask plumbing lands on both paths
+        # (the freshwater helper already exposes ``owned_mask`` +
+        # ``global_sum_if_distributed``).
+        if bool(getattr(config, "normalize_freshwater", False)):
+            from legoesm.parallel.reductions import (
+                is_multi_process, mpi_world_size,
+            )
+            if is_multi_process() or mpi_world_size() > 1:
+                raise NotImplementedError(
+                    "normalize_freshwater=True under multi-rank MPAS is not yet "
+                    "supported: the top-layer-salt and eta freshwater means are "
+                    "rank-local (no owned-cell mask), so an MPI Voronoi run would "
+                    "silently apply halo-double-counted and inconsistent volume "
+                    "vs salt corrections.  Run single-rank, or set "
+                    "normalize_freshwater=False, until owned-mask plumbing lands "
+                    "on both paths."
+                )
         _spread_m = float(getattr(config, "runoff_depth_spread_m", 0.0))
         if _spread_m > 0.0:
             # NEMO-style runoff depth spreading (rn_dep_max=150): the runoff

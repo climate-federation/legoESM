@@ -178,6 +178,7 @@ def normalize_freshwater_net(
     F_fw: jnp.ndarray,
     area: jnp.ndarray,
     mask: jnp.ndarray,
+    owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Remove the ocean-area-weighted global mean of a freshwater flux.
 
@@ -193,16 +194,56 @@ def normalize_freshwater_net(
     actually touches), so the mean removal matches the applied flux exactly --
     ``apply_freshwater_virtual_salt_top`` uses ``mask * (h_top > 1e-3)``.
 
-    NOTE: single-device local ``jnp.sum`` (matching the eta normalization in
-    ``ocean_model_mpas.step``); correct for the single-GPU OMIP runs.  An
-    MPI-sharded run needs the TRUE global mean over OWNED cells only -- a plain
-    ``ocean_global_sum`` allreduce would DOUBLE-COUNT MPAS Voronoi halo cells
-    (codex), so the proper fix threads an ``owned_mask`` (cf. ``conservation_mpas``)
-    through both this helper and the eta path.  Deferred (no MPI-sharded OMIP runs
-    yet); the local sum is exact on one rank.
+    MPI correctness (codex finding #7 + round-2 #1)
+    -----------------------------------------------
+    The global mean MUST be taken over OWNED cells only on a sharded run --
+    a plain local ``jnp.sum`` over each rank's (owned + halo) cells, then
+    nothing, is single-rank-correct but UNDER/OVER-counts halo cells on MPI;
+    a naive global allreduce of the unmasked local sum would DOUBLE-COUNT MPAS
+    Voronoi halo cells.  Pass ``owned_mask`` (1.0 owned, 0.0 halo;
+    cf. ``conservation_mpas``) to make the reduction MPI-correct: the local
+    accumulators are restricted to owned cells and reduced with the MPAS-aware
+    :func:`legoesm.parallel.reductions.global_sum_if_distributed`.  This is the
+    canonical owned-cell reduction (used by ``conservation_mpas``/``eta_floor``)
+    keyed on ``is_multi_process()`` -- NOT ``ocean_global_sum``, which keys on
+    ``is_distributed()`` and would MISS the Voronoi/MPAS MPI layout (that path
+    does not arm the global halo backend, so ``is_distributed()`` is False) and
+    silently return a rank-local mean.  It is identity on one rank.
+
+    ``owned_mask=None`` (the default) keeps the BIT-IDENTICAL single-rank local
+    sum — correct for the single-GPU OMIP runs and every current caller.
+
+    SCOPE: this helper provides the correct owned-cell reduction, but the
+    production MPAS callers (``ocean_pe_mpas`` virtual-salt / runoff-spread,
+    ``ocean_tendency_common`` top-layer wrapper) and the SEPARATE eta freshwater
+    normalization (``ocean_model_mpas.step``) do NOT yet thread ``owned_mask``;
+    until they do AND the eta path uses the same owned-cell reduction, an
+    MPI-sharded MPAS ``normalize_freshwater`` run still normalizes volume (eta)
+    and salt with different (rank-local) corrections.  Tracked as MPAS-MPI
+    freshwater work, not part of the single-rank-correct default.
     """
     w = area * mask
-    F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+    if owned_mask is None:
+        # Single-rank / shard-replicated: local sum is the global sum.
+        F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+    else:
+        # MPI/SPMD: restrict local accumulators to OWNED cells (no halo
+        # double-count) then reduce globally.  Use the MPAS-AWARE reduction
+        # ``global_sum_if_distributed`` (keyed on ``is_multi_process()``), NOT
+        # ``ocean_global_sum``: the Voronoi/MPAS MPI path builds a partition
+        # layout WITHOUT arming the global halo backend, so ``is_distributed()``
+        # stays False there and ``ocean_global_sum`` would silently return the
+        # RANK-LOCAL owned-cell mean (codex review #1).  ``global_sum_if_
+        # distributed`` is the canonical owned-cell reduction used by
+        # ``conservation_mpas`` / ``eta_floor``; it is identity on one rank
+        # (so serial stays bit-identical) and is built on ``global_sum_mpi``
+        # (allreduce SUM, full VJP -> AD-safe).
+        from legoesm.parallel.reductions import global_sum_if_distributed
+        w_owned = w * owned_mask.astype(w.dtype)
+        num_local = jnp.sum(F_fw * w_owned)
+        den_local = jnp.sum(w_owned)
+        num, den = global_sum_if_distributed(jnp.stack([num_local, den_local]))
+        F_mean = num / jnp.maximum(den, 1.0e-10)
     return F_fw - F_mean * mask
 
 
@@ -213,6 +254,7 @@ def normalized_virtual_salt_flux(
     rho_0: float,
     area: jnp.ndarray,
     mask: jnp.ndarray,
+    owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Top-layer virtual-salt tendency [PSU/s] with GLOBAL-SALT conservation.
 
@@ -223,11 +265,15 @@ def normalized_virtual_salt_flux(
     EFFECTIVE WET mask (cells the salt flux actually touches; the closure zeroes
     ``h_top<=1mm``) so the mean removal exactly matches the applied flux.  The
     (un-normalized) restoring channel is re-added.
+
+    ``owned_mask`` (optional, codex finding #7) makes the global-mean reduction
+    MPI/SPMD-correct over OWNED cells; ``None`` keeps the bit-identical
+    single-rank local sum (see :func:`normalize_freshwater_net`).
     """
     F_phys = (freshwater.precip - freshwater.evap
               + freshwater.runoff + freshwater.ice_fw)
     wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
-    F_phys = normalize_freshwater_net(F_phys, area, wet)
+    F_phys = normalize_freshwater_net(F_phys, area, wet, owned_mask=owned_mask)
     restoring = getattr(freshwater, "restoring", None)
     F_fw = F_phys if restoring is None else (F_phys + restoring)
     return virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
@@ -243,6 +289,7 @@ def runoff_spread_virtual_salt_tendency_3d(
     runoff_spread_m: float,
     area: jnp.ndarray | None = None,
     normalize: bool = False,
+    owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """FULL-COLUMN virtual-salt tendency [PSU/s] with the RUNOFF component
     spread over the top ``runoff_spread_m`` metres (NEMO ``rn_dep_max=150``).
@@ -309,11 +356,15 @@ def runoff_spread_virtual_salt_tendency_3d(
             raise ValueError("normalize=True requires `area`")
         # Mean over the SAME physical net + effective-wet mask as
         # normalized_virtual_salt_flux, so the global closure is unchanged.
+        # Reuse normalize_freshwater_net (single reduction owner; MPI/SPMD-
+        # correct when owned_mask is threaded — codex finding #7) instead of an
+        # inline local sum.  ``F_top - F_mean*wet`` == normalize(F_top+R) - R
+        # restricted to the wet mask: normalize subtracts the mean of (F_top+R)
+        # from (F_top+R), and we keep R un-normalized (it is spread below), so
+        # add R back after normalisation.
         wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
-        F_phys = F_top + R
-        w = area * wet
-        F_mean = jnp.sum(F_phys * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
-        F_top = F_top - F_mean * wet
+        F_top = normalize_freshwater_net(
+            F_top + R, area, wet, owned_mask=owned_mask) - R
     if restoring is not None:
         F_top = F_top + restoring
     dS_top = virtual_salt_flux_from_net(F_top, S_ref, h_top, rho_0)

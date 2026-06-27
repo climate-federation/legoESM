@@ -677,25 +677,20 @@ def implicit_bottom_drag_factor(
     form would diverge for ``dt·r/H > 2``, a hazard in shallow-shelf
     and inundation configurations).
 
-    Known limitation — combined drag application
-    --------------------------------------------
-    The explicit barotropic substep loops in this codebase apply this
-    factor *in addition to* a depth-mean bottom drag carried by
-    ``F_slow_u`` / ``F_slow_v`` (the depth-average of the 3D PE solver's
-    ``du_dt``, which already contains a bottom-cell drag of magnitude
-    ``-r·u_bot / dz_bot`` whose depth-average is ``-r·u_bot / H``).
-    The Crank-Nicolson implicit barotropic solver
-    (``barotropic_implicit_*``) intentionally relies on ``F_slow``
-    alone and does *not* apply this factor.  Effective barotropic-mode
-    drag in the explicit path is therefore ``≈ 2·r/H`` rather than
-    ``r/H`` (codex adversarial review iter-2 finding #1).  Resolving
-    this requires single-owner drag plumbing: either subtract the
-    depth-mean bottom drag from ``F_slow_u`` before the barotropic
-    substep, or remove the bottom-drag contribution from the 3D
-    solver's ``du_dt`` for the barotropic-explicit path.  Tracked as
-    open architectural debt; do not silently change call-site
-    semantics without a paired update to ``F_slow`` construction in
-    ``ocean_model_*.py``.
+    Single-owner bottom drag (RESOLVED — was codex iter-2 finding #1)
+    ----------------------------------------------------------------
+    The 3D PE solvers already apply the full bottom drag ``-r·u_bot/h_bot``
+    (with BBL / partial-cell handling) to ``du_dt``; its depth-mean
+    ``-r·u_bot/H`` is carried into the barotropic mode through ``F_slow_u`` /
+    ``F_slow_v`` and applied at every substep.  The explicit barotropic substep
+    loops therefore NO LONGER multiply by this factor (it would double-count to
+    an effective ``≈ 2·r/H``) — drag is owned exclusively by the 3D tendency /
+    F_slow, matching the Crank-Nicolson implicit solver
+    (``barotropic_implicit_*``), which always relied on ``F_slow`` alone.  This
+    helper is retained for the implicit-vertical-drag use cases that legitimately
+    DO want an unconditionally-stable standalone ``dU/dt = -r·U/H`` update; any
+    new caller MUST confirm the drag is not already in its ``F_slow`` to avoid
+    re-introducing the double count.
 
     Parameters
     ----------

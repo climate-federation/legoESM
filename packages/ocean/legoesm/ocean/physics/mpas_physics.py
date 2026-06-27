@@ -74,14 +74,63 @@ def make_mpas_ocean_physics(
             "C-grid."
         )
 
-    # Warn about unsupported physics schemes that would be silently ignored.
+    # Bail loudly on a vertical_mixing scheme whose K-PROFILE the MPAS factory
+    # does not wire in and would SILENTLY DROP (finding #4).  Supported here:
+    #   - "kpp"      : K-profile applied (above);
+    #   - "none"     : no scheme K-profile;
+    #   - "constant" : the DEFAULT — MPAS gets constant background viscosity /
+    #                  diffusivity from ``MPASOceanConfig.A_v``/``K_v`` through the
+    #                  implicit vertical solver (ocean_model_mpas.step), NOT through
+    #                  this physics K-profile, so accepting it is correct (no silent
+    #                  drop of a scheme-specific profile).
+    # "richardson"/"tke" DO compute a scheme-specific K-profile that MPAS would
+    # silently ignore, and "catke" is rejected above — so reject those (and any
+    # typo) rather than warn-and-drop, matching the sibling surface_forcing
+    # (NotImplementedError) and convection guards (dispatch discipline; CLAUDE.md
+    # "Dispatch").  ``vm_scheme`` is the static config value -> raising at factory
+    # build time is jit-safe.
+    if vm_config is not None and vm_scheme not in ("none", "kpp", "constant"):
+        raise NotImplementedError(
+            f"MPAS ocean physics does not implement vertical_mixing scheme "
+            f"{vm_scheme!r} (its K-profile would be silently ignored). Supported "
+            "on MPAS: {'none', 'kpp', 'constant'} ('constant' via the "
+            "MPASOceanConfig.A_v/K_v background + implicit solver).  'catke' is "
+            "rejected separately; 'richardson'/'tke' are wired for the lat-lon "
+            "C-grid only."
+        )
+
+    # ``constant`` on MPAS is honoured via ``MPASOceanConfig.A_v``/``K_v`` (the
+    # implicit solver background), NOT via ``VerticalMixingConfig.constant``.  The
+    # DEFAULT ConstantVerticalMixingConfig (A_v=1e-3, K_v=1e-4) MATCHES the MPAS
+    # background defaults, so the default path is exact.  But a user who sets a
+    # NON-DEFAULT ``constant.A_v``/``constant.K_v`` here would have it SILENTLY
+    # ignored on MPAS (footgun; codex review #3) — raise so they set the values
+    # on ``MPASOceanConfig`` instead (static config value -> jit-safe at build).
+    if vm_config is not None and vm_scheme == "constant":
+        _const = getattr(vm_config, "constant", None)
+        if _const is not None:
+            _default_const = type(_const)()
+            if (_const.A_v != _default_const.A_v
+                    or _const.K_v != _default_const.K_v):
+                raise NotImplementedError(
+                    "MPAS ocean honours constant vertical mixing through "
+                    "MPASOceanConfig.A_v/K_v (the implicit-solver background), "
+                    "not VerticalMixingConfig.constant.  A non-default "
+                    f"constant.A_v={_const.A_v!r}/K_v={_const.K_v!r} would be "
+                    "silently ignored on MPAS — set MPASOceanConfig.A_v/K_v "
+                    "instead (the default constant config IS consumed and need "
+                    "not be changed)."
+                )
+
+    # Warn about the remaining physics schemes that would be silently ignored on
+    # MPAS (lateral mixing / shortwave penetration are not yet wired in here).
     # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
-    # ``vertical_mixing="kpp"`` is now supported (above); other schemes
-    # (constant, richardson) are not yet wired in.
+    # NB: ``vertical_mixing.scheme="constant"`` is accepted above — MPAS applies a
+    # constant background A_v/K_v via ``MPASOceanConfig.A_v``/``K_v`` (its own
+    # field), not via ``vertical_mixing.constant``; that subtlety belongs to the
+    # MPAS step, not this factory (which has no MPASOceanConfig to compare).
     import warnings
     _unsupported = []
-    if vm_config is not None and vm_scheme not in ("none", "kpp"):
-        _unsupported.append(f"vertical_mixing={vm_scheme!r}")
     for attr in ("lateral_mixing", "shortwave_penetration"):
         sub = getattr(config, attr, None)
         if sub is not None and getattr(sub, "scheme", "none") != "none":
