@@ -59,10 +59,17 @@ def compute_normalization_stats(
         Per-channel mean and std arrays of shape (n_channels,).
     """
     axes = tuple(range(data.ndim - 1))
+    # Floor the VARIANCE before the sqrt (not the std after it).  For a constant
+    # channel var == 0, and d(sqrt(var))/dvar = 1/(2 sqrt(var)) -> inf there, so
+    # the backward pass is 0 * inf = NaN even though jnp.maximum(std, eps) makes
+    # the forward value finite.  Clamping var to eps**2 first gives std >= eps
+    # AND a finite gradient.
+    var_floor = eps * eps
 
     if weights is None:
         mean = jnp.mean(data, axis=axes)
-        std = jnp.std(data, axis=axes)
+        var = jnp.mean((data - mean) ** 2, axis=axes)
+        std = jnp.sqrt(jnp.maximum(var, var_floor))
     else:
         # Weighted mean and std over the sample + spatial dimensions.
         # Align the weight axes to the SPATIAL dims (immediately after the
@@ -80,7 +87,8 @@ def compute_normalization_stats(
         w_sum = jnp.sum(w_b, axis=axes)
         mean = jnp.sum(data * w_b, axis=axes) / w_sum
         var = jnp.sum((data - mean) ** 2 * w_b, axis=axes) / w_sum
-        std = jnp.sqrt(var)
+        # Clamp variance before sqrt (see the var_floor note above) so a constant
+        # channel yields std == eps with a finite gradient instead of 0 * inf.
+        std = jnp.sqrt(jnp.maximum(var, var_floor))
 
-    std = jnp.maximum(std, eps)
     return NormalizationStats(mean=mean, std=std)

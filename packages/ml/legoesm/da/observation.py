@@ -33,12 +33,47 @@ class Observation(NamedTuple):
 # ---------------------------------------------------------------------------
 
 class DiagonalR(NamedTuple):
-    """Diagonal observation error covariance."""
-    sigma: jax.Array  # shape (n_obs,)
+    """Diagonal observation error covariance.
+
+    ``inv_multiply`` divides by ``sigma**2``; a zero observation error std would
+    make that ``inf``/``NaN`` (and a non-finite gradient).  ``DiagonalR`` is a
+    pytree ``NamedTuple`` (``typing.NamedTuple`` forbids a custom ``__new__``),
+    so the divide is floored at the smallest positive normal of ``sigma``'s
+    dtype — a no-op for any physical observation error, but it keeps a
+    degenerate zero std finite instead of poisoning the cost-gradient.  Validate
+    ``sigma > 0`` up front with :meth:`validate` when you control construction.
+    """
+    sigma: jax.Array  # shape (n_obs,), strictly positive
+
+    def validate(self) -> "DiagonalR":
+        """Raise if any concrete ``sigma`` entry is non-positive / non-finite.
+
+        Returns ``self`` for chaining.  Skipped (no-op) when ``sigma`` is a
+        traced abstract value, since a Python-truthy check is impossible there.
+        """
+        sigma = jnp.asarray(self.sigma)
+        if not isinstance(sigma, jax.core.Tracer):
+            if not bool(jnp.all(jnp.isfinite(sigma) & (sigma > 0))):
+                raise ValueError(
+                    "DiagonalR.sigma must be strictly positive and finite "
+                    "(observation error std); a zero/negative entry makes "
+                    "R^{-1} = 1/sigma**2 non-finite."
+                )
+        return self
 
     def inv_multiply(self, d: jax.Array) -> jax.Array:
-        """R^{-1} @ d = d / sigma^2."""
-        return d / (self.sigma ** 2)
+        """R^{-1} @ d = d / sigma^2 (floored against a zero std).
+
+        Uses a double-``where`` so a zero-std entry yields a finite VALUE *and* a
+        finite GRADIENT: the differentiated branch divides by a safe ``1`` where
+        sigma**2 underflows the floor (otherwise the VJP of ``1/sigma**2`` is
+        ``-1/sigma**4`` and ``floor**2`` underflows to 0, giving ``-inf*0=NaN``).
+        """
+        sigma2 = self.sigma ** 2
+        floor = jnp.asarray(jnp.finfo(sigma2.dtype).tiny, dtype=sigma2.dtype)
+        ok = sigma2 > floor
+        safe = jnp.where(ok, sigma2, jnp.ones_like(sigma2))
+        return jnp.where(ok, d / safe, d / floor)
 
 
 # ---------------------------------------------------------------------------

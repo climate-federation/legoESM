@@ -16,6 +16,12 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+# Crossover for the two numerically-stable softplus-inverse branches.  Below it
+# log(expm1(x)) is accurate (and expm1 cannot overflow once x is clamped here);
+# above it x + log1p(-exp(-x)) is accurate AND avoids the expm1 overflow that
+# log(expm1(x)) hits for large x (x > ~88 in float32).  ~20 sits comfortably in
+# the accurate range of both forms in float32 and float64.
+_SOFTPLUS_INV_CROSSOVER = 20.0
 
 
 # Fields that are never included in the control vector (boundary conditions).
@@ -131,8 +137,23 @@ def _forward_transform(x: jax.Array, transform: str) -> jax.Array:
     elif transform == "log":
         return jnp.log(jnp.maximum(x, _TINY))
     elif transform == "softplus":
-        # softplus inverse: log(exp(x) - 1), numerically stable
-        return x + jnp.log1p(-jnp.exp(-x))
+        # softplus inverse log(exp(x) - 1), branched for numerical stability in
+        # BOTH tails.  softplus maps R -> (0, inf), so a state <= 0 (e.g. q == 0)
+        # has no finite pre-image; clamp to the smallest normal float so the
+        # inverse stays finite AND grad-finite on a degenerate zero state (the
+        # clamp is constant there -> zero gradient).
+        #   - small x: log(expm1(x)) is accurate near 0, where the legacy
+        #     x + log1p(-exp(-x)) is catastrophic (exp(-x) rounds to 1.0 ->
+        #     log1p(0) = -inf).
+        #   - large x: x + log1p(-exp(-x)) is accurate, where log(expm1(x))
+        #     OVERFLOWS (expm1(x) -> inf for x > ~88 in float32).
+        # The min/max clamps keep each branch's input in range so the where-
+        # masked branch never produces an inf that would poison the gradient.
+        x = jnp.maximum(x, _TINY)
+        crossover = jnp.asarray(_SOFTPLUS_INV_CROSSOVER, dtype=x.dtype)
+        small = jnp.log(jnp.expm1(jnp.minimum(x, crossover)))
+        large = x + jnp.log1p(-jnp.exp(-jnp.maximum(x, crossover)))
+        return jnp.where(x < crossover, small, large)
     else:
         raise ValueError(f"Unknown transform: {transform}")
 
@@ -173,6 +194,13 @@ def control_to_state(x: jax.Array, spec: ControlVectorSpec, template_state):
     Static fields (phis, h_s, H_bathy, land_mask) are copied from
     template_state unchanged.
     """
+    if x.ndim != 1 or x.shape[0] != spec.total_size:
+        raise ValueError(
+            f"control vector has shape {tuple(x.shape)}; expected a 1-D array of "
+            f"size {spec.total_size}. dynamic_slice silently CLAMPS out-of-range "
+            f"offsets, so a wrong-sized control would corrupt the analysis."
+        )
+
     replacements = {}
     tracer_replacements = {}
 
@@ -215,6 +243,14 @@ def control_to_increment(dx: jax.Array, spec: ControlVectorSpec, template_state)
     Returns a state where each field contains the increment values.
     Static fields are set to zero.
     """
+    if dx.ndim != 1 or dx.shape[0] != spec.total_size:
+        raise ValueError(
+            f"control increment has shape {tuple(dx.shape)}; expected a 1-D "
+            f"array of size {spec.total_size}. dynamic_slice silently CLAMPS "
+            f"out-of-range offsets, so a wrong-sized increment would corrupt the "
+            f"analysis."
+        )
+
     # Build a zero state for the increment
     zero_state = jax.tree.map(lambda leaf: jnp.zeros_like(leaf), template_state)
 

@@ -40,21 +40,31 @@ def area_weighted_mse(
     """
     sq_err = (pred - target) ** 2  # (..., n_lat, n_lon, n_channels)
 
-    # Apply spatial mask
-    if mask is not None:
-        sq_err = sq_err * mask[..., None]
-
     # Weight by latitude.  ``weights`` are Gauss-Legendre weights on
     # μ = sin(lat) summing to 2.0 — they encode the cos(lat) area
-    # element directly.  The proper area-weighted mean is
-    #     Σ(sq·w) / (B · Σw · n_lon · n_channels)
-    # whereas ``jnp.mean(sq·w)`` divides by the full array size
-    # (= B · n_lat · n_lon · n_channels).  Correcting by the ratio
-    # ``n_lat / Σw`` gives the resolution-independent weighted mean.
+    # element directly.
     w = weights[:, None, None]  # (n_lat, 1, 1)
-    weighted = sq_err * w
-    n_lat = weights.shape[0]
-    return jnp.mean(weighted) * n_lat / jnp.sum(weights)
+
+    if mask is None:
+        # NO-MASK PATH — kept byte-identical to the original.  The proper
+        # area-weighted mean is Σ(sq·w) / (B · Σw · n_lon · n_channels);
+        # jnp.mean(sq·w) divides by the full array size (B · n_lat · n_lon ·
+        # n_channels), so the ratio n_lat / Σw recovers it.
+        weighted = sq_err * w
+        n_lat = weights.shape[0]
+        return jnp.mean(weighted) * n_lat / jnp.sum(weights)
+
+    # MASKED PATH — normalise by the ACTUAL summed mask·weight, not the full
+    # array size.  Zeroing the numerator with mask[..., None] but still dividing
+    # by jnp.mean (full size) biases the MSE LOW by the unmasked fraction.  The
+    # weighted mean over the kept cells is Σ(sq·mask·w) / Σ(mask·w); with mask≡1
+    # over a region this equals the unmasked area_weighted_mse of that region.
+    mask_b = jnp.broadcast_to(mask[..., None], sq_err.shape)
+    weight_b = jnp.broadcast_to(w, sq_err.shape) * mask_b
+    denom = jnp.sum(weight_b)
+    # Guard a fully-masked input (denom == 0 -> 0/0 NaN, inf gradient).
+    denom = jnp.maximum(denom, jnp.asarray(jnp.finfo(sq_err.dtype).tiny, sq_err.dtype))
+    return jnp.sum(sq_err * weight_b) / denom
 
 
 def latitude_weighted_rmse(

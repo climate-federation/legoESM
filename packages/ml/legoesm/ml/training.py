@@ -194,58 +194,56 @@ def _muon_partitioned_optimizer(
     )
 
 
-@eqx.filter_jit(donate="warn")
-def train_step(
-    model: eqx.Module,
-    opt_state: optax.OptState,
-    optimizer: optax.GradientTransformation,
-    batch_input: jnp.ndarray,
-    batch_target: jnp.ndarray,
-    grid: GaussianGrid,
-) -> tuple[eqx.Module, optax.OptState, jnp.ndarray]:
-    """Single JIT-compiled training step.
+def make_train_step(optimizer: optax.GradientTransformation, grid: GaussianGrid):
+    """Build the JIT-compiled SFNO training step ONCE.
 
-    Donates the input ``model`` and ``opt_state`` buffers (``donate="warn"``)
-    so XLA can reuse the underlying device memory for the updated values
-    instead of holding both copies live until reassignment.  For SFNO with
-    typical (embed_dim=256, n_blocks=8) this halves the peak weight +
-    optimiser-state memory at every step on Levante.  The Equinox
-    ``"warn"`` mode preserves correctness if the caller ever needs to
-    keep the inputs (it falls back to non-donation with a runtime warning
-    instead of silently stale buffers).
-
-    Parameters
-    ----------
-    model : eqx.Module (SFNO)
-        Current model.
-    opt_state : optax.OptState
-        Current optimizer state.
-    optimizer : optax.GradientTransformation
-        Optimizer.
-    batch_input : array, shape (batch_size, n_lat, n_lon, n_channels)
-        Input batch.
-    batch_target : array, shape (batch_size, n_lat, n_lon, n_channels)
-        Target batch.
-    grid : GaussianGrid
-        Grid for area-weighted loss.
+    ``optimizer`` and ``grid`` are captured as closure constants instead of
+    being passed as call arguments, because :func:`eqx.filter_jit` with
+    ``donate="warn"`` marks EVERY array-leaf argument as donatable.  ``grid``
+    and the ``optimizer`` state are REUSED every iteration and never returned,
+    so donating them invalidated their buffers and triggered deleted-buffer
+    reuse on a donating backend.  Only the per-step ``model`` / ``opt_state``
+    (returned) and the consumed ``batch_*`` arrays remain donatable args.
 
     Returns
     -------
-    (updated_model, updated_opt_state, loss)
+    callable
+        ``(model, opt_state, batch_input, batch_target) ->
+        (model, opt_state, loss)`` wrapped in ``eqx.filter_jit(donate="warn")``.
     """
-    def loss_fn(model):
-        # vmap over batch dimension
-        pred = jax.vmap(lambda x: model(x, grid))(batch_input)
-        return area_weighted_mse(
-            pred, batch_target,
-            grid.weights,
-        )
 
-    loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
-    updates, opt_state = optimizer.update(grads, opt_state, model)
-    model = eqx.apply_updates(model, updates)
+    @eqx.filter_jit(donate="warn")
+    def train_step(
+        model: eqx.Module,
+        opt_state: optax.OptState,
+        batch_input: jnp.ndarray,
+        batch_target: jnp.ndarray,
+    ) -> tuple[eqx.Module, optax.OptState, jnp.ndarray]:
+        """Single JIT-compiled training step.
 
-    return model, opt_state, loss
+        Donates the input ``model`` and ``opt_state`` buffers (``donate="warn"``)
+        so XLA can reuse the underlying device memory for the updated values
+        instead of holding both copies live until reassignment.  For SFNO with
+        typical (embed_dim=256, n_blocks=8) this halves the peak weight +
+        optimiser-state memory at every step on Levante.  ``grid`` and
+        ``optimizer`` are closed over (NOT donatable args) so their reused
+        buffers are never invalidated.
+        """
+        def loss_fn(model):
+            # vmap over batch dimension
+            pred = jax.vmap(lambda x: model(x, grid))(batch_input)
+            return area_weighted_mse(
+                pred, batch_target,
+                grid.weights,
+            )
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+        updates, opt_state = optimizer.update(grads, opt_state, model)
+        model = eqx.apply_updates(model, updates)
+
+        return model, opt_state, loss
+
+    return train_step
 
 
 def save_checkpoint(
@@ -353,6 +351,9 @@ def train_sfno(
 
     optimizer = create_optimizer(training_config)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    # Build the jitted step ONCE; optimizer + grid are closed over (not
+    # donatable args) so their reused buffers survive across steps.
+    train_step = make_train_step(optimizer, grid)
 
     train_iter = create_training_iterator(
         era5_config,
@@ -373,8 +374,7 @@ def train_sfno(
     for step in range(training_config.total_steps):
         batch_input, batch_target = next(train_iter)
         model, opt_state, loss = train_step(
-            model, opt_state, optimizer,
-            batch_input, batch_target, grid,
+            model, opt_state, batch_input, batch_target,
         )
 
         if step % log_every == 0:
