@@ -22,11 +22,10 @@ import numpy as np
 # xarray is a heavy import (only needed for the .nc read in score()); keep it
 # function-scoped so the area-weighting math stays importable/testable cheaply.
 
-# ACE model-level temperatures + named diagnostics worth scoring.  air_*_4 is
-# the mid-column (~500 hPa analog); TMP850/TMP2m are named pressure/surface
-# fields ACE emits directly.
-_VARS = ["air_temperature_4", "TMP850", "TMP2m", "air_temperature_0",
-         "air_temperature_7"]
+# ACE emits TMP500/TMP850/TMP2m as DIRECT pressure/surface temperatures (the
+# training_validation truth carries them too) — TMP500 is the exact T@500hPa,
+# the apples-to-apples match for the legoESM AIMIP families' headline metric.
+_VARS = ["TMP500", "TMP850", "TMP2m", "air_temperature_4"]
 
 
 def _area_weighted_rmse_bias(pred, tgt, lat):
@@ -41,45 +40,59 @@ def _area_weighted_rmse_bias(pred, tgt, lat):
     return rmse, bias
 
 
-def score(run_dir: str) -> dict:
+def score(run_dir: str, truth_path: str, step: int = 1) -> dict:
+    """Score ACE predictions vs an EXTERNAL ERA5 truth file.
+
+    The fme inference run writes ``autoregressive_predictions.nc`` but its
+    ``autoregressive_target.nc`` carries no verification fields, so the
+    truth is taken from the shipped ``training_validation`` ERA5 dataset
+    (which DOES hold TMP500/TMP850/...), aligned by the prediction's
+    ``valid_time``.  ``step`` is the forecast-step index to score (1 = the
+    first 6 h lead, matching the AIMIP families).
+    """
     import xarray as xr
     run = Path(run_dir)
     pred = xr.open_dataset(run / "autoregressive_predictions.nc")
-    tgt = xr.open_dataset(run / "autoregressive_target.nc")
-    # Identify lat coordinate name.
+    truth = xr.open_dataset(truth_path)
     latname = next((c for c in ("lat", "latitude", "grid_yt") if c in pred.coords),
                    None)
     if latname is None:
         raise SystemExit(f"no lat coord in {list(pred.coords)}")
     lat = pred[latname].values
-    # First forecast step (the 6 h lead) — dim is usually 'time'/'timestep'.
     tdim = next((d for d in ("time", "timestep", "forecast_step", "sample")
                  if d in pred.dims), None)
+    if tdim is None:
+        raise SystemExit(f"no time-like dim in predictions {list(pred.dims)}")
+    idx = step if pred.sizes[tdim] > step else pred.sizes[tdim] - 1
 
     out = {}
     for v in _VARS:
-        if v not in pred or v not in tgt:
+        if v not in pred or v not in truth:
             continue
-        p, t = pred[v], tgt[v]
-        if tdim is not None and tdim in p.dims:
-            # step index 1 = first PREDICTED step (0 is the IC); fall back to 0.
-            idx = 1 if p.sizes[tdim] > 1 else 0
-            p = p.isel({tdim: idx})
-            t = t.isel({tdim: idx})
-        # collapse any leftover singleton (ensemble/sample) dims
-        p = p.squeeze()
-        t = t.squeeze()
+        p = pred[v].isel({tdim: idx}).squeeze()
+        # Align the truth to this prediction's valid time.
+        vt = p["valid_time"].values if "valid_time" in p.coords else None
+        ttdim = next((d for d in ("time", "valid_time") if d in truth[v].dims), None)
+        if vt is not None and ttdim is not None:
+            t = truth[v].sel({ttdim: vt}, method="nearest").squeeze()
+        elif ttdim is not None:
+            t = truth[v].isel({ttdim: idx}).squeeze()
+        else:
+            t = truth[v].squeeze()
         rmse, bias = _area_weighted_rmse_bias(p.values, t.values, lat)
         out[v] = {"rmse": rmse, "bias": bias}
         print(f"  {v:20s} rmse={rmse:8.3f}  bias={bias:+8.3f}")
+    if not out:
+        print("  (no scored vars — check var names match between pred + truth)")
     return out
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: score_ace_baseline.py <ace_run_dir>")
-    print(f"ACE2-ERA5 baseline skill (first 6h step), area-weighted:")
-    res = score(sys.argv[1])
+    if len(sys.argv) != 3:
+        raise SystemExit(
+            "usage: score_ace_baseline.py <ace_run_dir> <era5_truth.nc>")
+    print("ACE2-ERA5 baseline skill (first 6h step), area-weighted:")
+    res = score(sys.argv[1], sys.argv[2])
     import json
     (Path(sys.argv[1]) / "ace_baseline_score.json").write_text(json.dumps(res, indent=2))
     print(f"wrote {sys.argv[1]}/ace_baseline_score.json")
