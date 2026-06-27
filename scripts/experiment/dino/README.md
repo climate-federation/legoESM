@@ -19,6 +19,8 @@ unknown key is a hard error (typo guard).
 | `matched_mpas_90d.yaml`   | MPAS Voronoi     | 90 d / 5 d | cross-grid consistency pair |
 | `prev_latlon_full_year.yaml` | lat-lon Mercator | 365 d / 10 d | original full-year deliverable |
 | `prev_mpas_90d.yaml`      | MPAS Voronoi     | 90 d / 10 d | original clean 90-day deliverable |
+| `acc_kpp_latlon_365d.yaml` | lat-lon, KPP     | 365 d / 5 d | barotropic-Psi + ACC-transport spin-up |
+| `paper_tke_latlon.yaml`   | lat-lon, **TKE** | 90 d / 5 d  | paper-faithful vmix (UNSTABLE ~day 40) |
 
 Cross-grid comparison (after running a matched pair):
 
