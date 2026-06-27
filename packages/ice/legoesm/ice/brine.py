@@ -1,24 +1,30 @@
 """Sea-ice bulk salinity + brine rejection.
 
 Tracks a single bulk-mean salinity ``S_ice`` per ice category and
-computes the salt mass flux to the ocean implied by the per-process
-ice-mass budget over a thermodynamic step:
+computes the salt mass flux to the ocean as the drop in the ice column's
+stored salt over a thermodynamic step:
 
-- **Lead freezing**: open-water ice forms at ``S_ice_new`` (low
-  bulk salinity, default 4 PSU).  The remainder of the ocean's
-  salt stays in the ocean → brine rejection into ocean.
-- **Basal / surface melt and sublimation**: ice salt is returned
-  to the ocean at the ice's current ``S_ice``.
-- **Snow-ice flooding**: new white ice forms with salinity
-  ``S_white = pore_frac · S_ocean``.  The seawater that filled
-  the snow pores carried this salt out of the ocean column → salt
-  uptake into ice (negative salt flux).
+    salt_flux = (salt_old - salt_stored) / dt   [kg(salt)/m²/s, +ve = INTO ocean]
 
-Net salt flux to ocean:
-    salt_flux  = − Δ(S_ice · V_ice · ρ_ice) / dt          [kg(salt)/m²/s]
-              = + brine_release_from_freezing
-                + salt_release_from_melt
-                − salt_uptake_in_white_ice
+so salt is conserved BY CONSTRUCTION (``salt_old = salt_stored + salt_flux*dt``).
+Read each process through this single definition:
+
+- **Lead freezing**: new ice forms at the low bulk salinity ``S_lead_ice``
+  (default 4 PSU), so the column's stored salt INCREASES and this term makes
+  ``salt_flux`` NEGATIVE — i.e. the ocean loses the (small) salt that the new
+  low-salinity ice took.  Brine REJECTION still occurs at the ocean: it is the
+  NET of this small salt loss and the paired freshwater flux, which removes
+  ``ρ_ice·ΔV`` of (nearly fresh) water from the mixed layer.  Removing
+  low-salinity ice from the ocean leaves it saltier, the physically correct
+  brine-rejection outcome — but the *salt-channel* sign of the freezing term
+  itself is NEGATIVE, not a positive "brine release".
+- **Basal / surface melt and sublimation**: ice salt is returned to the ocean
+  at the ice's current ``S_ice`` → stored salt DROPS → POSITIVE ``salt_flux``.
+  (Sublimation retains its salt in the surviving ice until the column fully
+  sublimates or exceeds ``S_ice_max``, then the residual is rejected.)
+- **Snow-ice flooding**: white ice forms with ``S_white = pore_frac · S_ocean``;
+  the seawater that filled the snow pores carried this salt out of the ocean →
+  stored salt INCREASES → NEGATIVE ``salt_flux`` (salt uptake into ice).
 
 with ``S_ice`` in PSU (≈ g/kg → ×1e-3 to get kg of salt per kg of ice).
 
@@ -43,9 +49,16 @@ _BRINE_DEFAULTS = BrineConfig()
 class SaltBudgetResult(NamedTuple):
     """Output of :func:`update_salinity_and_salt_flux`.
 
-    ``S_ice_new`` is the post-step bulk ice salinity per category;
-    ``salt_flux_to_ocean`` is positive when salt enters the ocean
-    (brine rejection during freezing or salt release during melt).
+    ``S_ice_new`` is the post-step bulk ice salinity per category.
+    ``salt_flux_to_ocean`` follows ``+ve = salt INTO the ocean``
+    (== the DROP in the ice column's stored salt, ``(salt_old -
+    salt_stored)/dt``).  Sign by process (see module docstring): MELT /
+    sublimation-rejection give POSITIVE flux (ice releases its salt);
+    LEAD FREEZING and snow-ice flooding give NEGATIVE flux (the new
+    low-salinity ice takes salt from the ocean).  Net brine rejection at
+    the ocean during freezing is the combination of this small negative
+    salt flux and the paired freshwater removal — it is NOT a positive
+    salt-channel flux here.
     """
     S_ice_new: jnp.ndarray
     salt_flux_to_ocean: jnp.ndarray   # [kg(salt)/m²/s]
