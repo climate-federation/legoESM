@@ -1151,17 +1151,17 @@ class LatLonCGridOceanModel:
                 "double-apply the forcing. Pass surface_forcing= (and "
                 "freshwater=) to step() instead.",
             )
-        if config.max_abs_eta_m <= 0.0:
+        if config.runtime_checks.max_abs_eta_m <= 0.0:
             raise ValueError(
-                f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
-        if config.temperature_min_c >= config.temperature_max_c:
+                f"max_abs_eta_m must be > 0, got {config.runtime_checks.max_abs_eta_m!r}")
+        if config.runtime_checks.temperature_min_c >= config.runtime_checks.temperature_max_c:
             raise ValueError(
-                f"temperature_min_c ({config.temperature_min_c}) must be "
-                f"< temperature_max_c ({config.temperature_max_c})")
-        if config.salinity_min_psu >= config.salinity_max_psu:
+                f"temperature_min_c ({config.runtime_checks.temperature_min_c}) must be "
+                f"< temperature_max_c ({config.runtime_checks.temperature_max_c})")
+        if config.runtime_checks.salinity_min_psu >= config.runtime_checks.salinity_max_psu:
             raise ValueError(
-                f"salinity_min_psu ({config.salinity_min_psu}) must be "
-                f"< salinity_max_psu ({config.salinity_max_psu})")
+                f"salinity_min_psu ({config.runtime_checks.salinity_min_psu}) must be "
+                f"< salinity_max_psu ({config.runtime_checks.salinity_max_psu})")
         _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid",
                           "implicit_unsplit"}
         if config.barotropic.barotropic_solver not in _valid_solvers:
@@ -4637,7 +4637,7 @@ class LatLonCGridOceanModel:
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
                               sponge=sponge)
-        if self.config.enable_runtime_checks:
+        if self.config.runtime_checks.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
 
@@ -4703,30 +4703,30 @@ class LatLonCGridOceanModel:
                 f"threshold={self.config.min_water_column_m:.6g} m",
             )
 
-        if eta_abs > self.config.max_abs_eta_m:
+        if eta_abs > self.config.runtime_checks.max_abs_eta_m:
             raise ValueError(
                 f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
-                f"threshold {self.config.max_abs_eta_m:.3g}",
+                f"threshold {self.config.runtime_checks.max_abs_eta_m:.3g}",
             )
 
         if any_wet_h and (
-            T_min < self.config.temperature_min_c
-            or T_max > self.config.temperature_max_c
+            T_min < self.config.runtime_checks.temperature_min_c
+            or T_max > self.config.runtime_checks.temperature_max_c
         ):
             raise ValueError(
                 f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
-                f"outside bounds [{self.config.temperature_min_c:.3f}, "
-                f"{self.config.temperature_max_c:.3f}]",
+                f"outside bounds [{self.config.runtime_checks.temperature_min_c:.3f}, "
+                f"{self.config.runtime_checks.temperature_max_c:.3f}]",
             )
 
         if any_wet_h and (
-            S_min < self.config.salinity_min_psu
-            or S_max > self.config.salinity_max_psu
+            S_min < self.config.runtime_checks.salinity_min_psu
+            or S_max > self.config.runtime_checks.salinity_max_psu
         ):
             raise ValueError(
                 f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
-                f"outside bounds [{self.config.salinity_min_psu:.3f}, "
-                f"{self.config.salinity_max_psu:.3f}]",
+                f"outside bounds [{self.config.runtime_checks.salinity_min_psu:.3f}, "
+                f"{self.config.runtime_checks.salinity_max_psu:.3f}]",
             )
 
     def integrate(
@@ -4767,7 +4767,7 @@ class LatLonCGridOceanModel:
             )
 
         trajectory = [state]
-        step_fn = self.step_checked if self.config.enable_runtime_checks else self.step
+        step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
         for i in range(n_steps):
             state = step_fn(state, dt)
             if (i + 1) % save_every == 0:

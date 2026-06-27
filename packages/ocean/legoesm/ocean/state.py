@@ -836,6 +836,29 @@ class BarotropicConfig(NamedTuple):
     rigid_lid_cg_maxiter: int = 1000
 
 
+class RuntimeChecksConfig(NamedTuple):
+    """Runtime validity-bound parameters (#501 config grouping).
+
+    The sanity bounds checked by ``_assert_runtime_invariants`` (gated by
+    ``enable_runtime_checks``): the maximum |eta| and the tracer (T, S) min/max
+    bounds.  Field names are unchanged so the flat YAML / legacy-kwarg interface
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+
+    ``min_water_column_m`` is deliberately NOT grouped here: it is a physical
+    wet-cell thickness floor read by grid-agnostic shared code
+    (``ocean_conservation_fixer``, layer-thickness helpers) that also runs on the
+    cube ``OceanConfig`` path, so it stays a flat field to keep that read uniform
+    across config types.
+    """
+
+    enable_runtime_checks: bool = False
+    max_abs_eta_m: float = 1.0e4
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -1003,13 +1026,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # practice.  Default-on for lat-lon C-grid; MPAS already conserves
     # to machine precision.
     fix_eta_drift: bool = True
-    enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
-    max_abs_eta_m: float = 1.0e4
-    temperature_min_c: float = -5.0
-    temperature_max_c: float = 45.0
-    salinity_min_psu: float = 0.0
-    salinity_max_psu: float = 50.0
+    runtime_checks: RuntimeChecksConfig = RuntimeChecksConfig()
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     # When True, remove the area-mean of the net freshwater flux from the
@@ -1604,6 +1622,9 @@ class LatLonCGridOceanConfig(NamedTuple):
         _bt = {k: flat.pop(k) for k in BarotropicConfig._fields if k in flat}
         if _bt:
             nested["barotropic"] = BarotropicConfig(**_bt)
+        _rc = {k: flat.pop(k) for k in RuntimeChecksConfig._fields if k in flat}
+        if _rc:
+            nested["runtime_checks"] = RuntimeChecksConfig(**_rc)
         return cls(**nested, **flat)
 
     @classmethod
@@ -1614,9 +1635,10 @@ class LatLonCGridOceanConfig(NamedTuple):
         so the flat construction / YAML interface stays 1:1 with the pre-grouping
         field set even though the storage is nested.  Extend per nested group.
         """
-        names = set(cls._fields) - {"bottom_drag", "barotropic"}
+        names = set(cls._fields) - {"bottom_drag", "barotropic", "runtime_checks"}
         names |= set(DynBottomDragConfig._fields)
         names |= set(BarotropicConfig._fields)
+        names |= set(RuntimeChecksConfig._fields)
         return frozenset(names)
 
     def flat_get(self, name: str):
@@ -1630,4 +1652,6 @@ class LatLonCGridOceanConfig(NamedTuple):
             return getattr(self.bottom_drag, name)
         if name in BarotropicConfig._fields:
             return getattr(self.barotropic, name)
+        if name in RuntimeChecksConfig._fields:
+            return getattr(self.runtime_checks, name)
         return getattr(self, name)
