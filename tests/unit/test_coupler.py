@@ -894,6 +894,7 @@ def test_full_coupler_step_multilayer_richards():
     tile_cfg = TileConfig(f_land=jnp.full(SHAPE, 0.5), f_lake=jnp.zeros(SHAPE))
     sst = jnp.full(SHAPE, 300.0); zu = jnp.zeros(SHAPE)
 
+    theta_init = sfc_state.land.theta_soil
     for _ in range(3):
         sfc_state, blended = step_fn(sfc_state, forcing, tile_cfg, sst, zu, zu, DT)
 
@@ -907,6 +908,9 @@ def test_full_coupler_step_multilayer_richards():
     assert jnp.all(jnp.isfinite(sfc_state.land.theta_soil))
     assert jnp.all(sfc_state.land.theta_soil >= 0.0)
     assert jnp.all(sfc_state.land.theta_soil <= 1.0)
+    # soil moisture EVOLVES (Richards) in the coupled model — it is NOT frozen (the
+    # frozen-moisture trick lives only in the offline calibrator, for tractability).
+    assert float(jnp.max(jnp.abs(sfc_state.land.theta_soil - theta_init))) > 0.0
     assert float(sfc_state.accumulator.total_dt) == pytest.approx(3 * DT, abs=1e-6)
 
 

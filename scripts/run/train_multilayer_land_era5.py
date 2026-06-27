@@ -151,6 +151,7 @@ BOUNDS_EXT = dict(
     # per-PFT SCALE on the per-cell texture-derived soil thermal k_solid / C_solid
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
+    th_glacier_cboost=(1.0, 15.0),                     # deep-ice inertia boost (glacier)
     glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85))
 
 
@@ -187,6 +188,7 @@ def init_ext_params() -> dict:
         # k_base~5 -> k_scale~0.35 gives k_solid~1.8; C_base~2.3e6 -> c_scale~0.9)
         pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
         pft_cscale=_inv_ext(full(0.9), "pft_cscale"),
+        th_glacier_cboost=jnp.asarray(_inv_ext(5.0, "th_glacier_cboost")),
         glac_alb=_inv_ext(0.55, "glac_alb"), snow_max=_inv_ext(0.80, "snow_max"),
     ).items()}
 
@@ -220,16 +222,14 @@ def build_multilayer_cfg(cp, data):
     col = lambda k: data["vg_" + k].reshape(-1, 1)
     hyd = SoilHydraulicsConfig(theta_r=col("theta_r"), theta_sat=col("theta_sat"),
                                alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
-    # Soil thermal inertia: per-cell TEXTURE (sand/clay -> Oleson solid k/C) times a
-    # per-PFT calibration scale -> (ncol,1) so it broadcasts over soil layers.  The
-    # texture supplies the within-PFT spatial variation a per-PFT constant cannot.
-    from legoesm.land.soil_texture import (
-        soil_solid_conductivity, soil_solid_heat_capacity)
-    k_base = soil_solid_conductivity(data["pct_sand"], data["pct_clay"])
-    c_base = soil_solid_heat_capacity(data["pct_sand"], data["pct_clay"])
-    thermal = SoilThermalConfig(
-        k_solid=(k_base * (data["pft"] @ cp["pft_kscale"])).reshape(-1, 1),
-        C_soil=(c_base * (data["pft"] @ cp["pft_cscale"])).reshape(-1, 1))
+    # Soil thermal inertia: per-cell TEXTURE (sand/clay) x per-PFT scale, blended
+    # toward ICE on glacier cells (deep-ice inertia boost).  Reuse the SHARED
+    # definition so the calibrator and the bake never diverge.
+    from legoesm.land.clm_surface_map import multilayer_thermal_arrays
+    k_eff, c_eff = multilayer_thermal_arrays(
+        data["pft"], data["pct_sand"], data["pct_clay"], data["fg"],
+        cp["pft_kscale"], cp["pft_cscale"], cp["th_glacier_cboost"])
+    thermal = SoilThermalConfig(k_solid=k_eff.reshape(-1, 1), C_soil=c_eff.reshape(-1, 1))
     ch = data["pft"] @ cp["pft_ch"]              # per-PFT bulk exchange coefficient
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
