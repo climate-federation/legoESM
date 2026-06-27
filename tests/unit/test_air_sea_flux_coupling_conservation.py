@@ -506,3 +506,49 @@ class TestJittedStepUnifiedThreadsFluxOverride:
         g = jax.grad(_loss)(20.0)
         assert np.isfinite(float(g))
         assert abs(float(g)) > 0.0
+
+
+class TestSharedFluxClosurePreconditionGuard:
+    """couple_surface_fluxes + dynamic ocean + continents must use
+    f_land_mode='from_ocean' so the atm/ocean land partitions match; otherwise
+    the air-sea budget cannot close over coastal cells -> raise (codex HIGH)."""
+
+    def _stub(self, *, dynamic, f_land_val, f_land_mode):
+        from types import SimpleNamespace
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.coupler.config import TileConfig
+        shape = (6, 4, 4)
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        tc = TileConfig(f_land=jnp.full(shape, f_land_val),
+                        f_lake=jnp.zeros(shape))
+        return SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True,
+                                      f_land_mode=f_land_mode),
+            _atm=atm, _last_sfc_response=None, _is_dynamic_ocean=dynamic,
+            _tile_config=tc,
+        )
+
+    def test_dynamic_land_analytical_raises(self):
+        import pytest
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=True, f_land_val=0.4, f_land_mode="analytical")
+        with pytest.raises(ValueError, match="from_ocean"):
+            CoupledESMDriver._override_sfc_fluxes(drv)
+
+    def test_dynamic_land_from_ocean_ok(self):
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=True, f_land_val=0.4, f_land_mode="from_ocean")
+        CoupledESMDriver._override_sfc_fluxes(drv)   # no raise
+        assert drv._atm.get_sfc_flux_override is not None
+
+    def test_dynamic_aquaplanet_ok(self):
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=True, f_land_val=0.0, f_land_mode="analytical")
+        CoupledESMDriver._override_sfc_fluxes(drv)   # no land -> no raise
+        assert drv._atm.get_sfc_flux_override is not None
+
+    def test_slab_land_ok(self):
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        drv = self._stub(dynamic=False, f_land_val=0.4, f_land_mode="analytical")
+        CoupledESMDriver._override_sfc_fluxes(drv)   # slab -> no raise
+        assert drv._atm.get_sfc_flux_override is not None

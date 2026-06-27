@@ -970,6 +970,35 @@ class CoupledESMDriver:
         if not self.coupled_cfg.couple_surface_fluxes:
             return
 
+        # Air-sea closure precondition (codex HIGH): the blended flux fed to the
+        # atmosphere closes the air-sea exchange against the ocean q_net ONLY when
+        # the atmosphere's land/ocean partition (TileConfig.f_land) and the
+        # dynamic ocean's wet mask are the SAME partition.  For a dynamic ocean
+        # with CONTINENTS that holds only under f_land_mode='from_ocean' (both
+        # masks from one WOA source); the default 'analytical' land (crude lat
+        # bands) diverges from the WOA wet mask over coastal cells, so the
+        # atmosphere would be force-balanced against a flux the ocean never
+        # received there.  Refuse it LOUDLY rather than silently break the budget
+        # (CLAUDE.md: no silent degradation).  An aquaplanet dynamic ocean (no
+        # land tile) is fine: the partitions trivially agree (all ocean).
+        _tc = getattr(self, "_tile_config", None)
+        _has_land = (
+            _tc is not None
+            and float(jnp.max(jnp.abs(jnp.asarray(_tc.f_land)))) > 0.0
+        )
+        if (getattr(self, "_is_dynamic_ocean", False)
+                and _has_land
+                and self.coupled_cfg.f_land_mode != "from_ocean"):
+            raise ValueError(
+                "couple_surface_fluxes=True with a dynamic ocean and non-zero "
+                "land fraction requires f_land_mode='from_ocean' so the "
+                "atmosphere land/ocean partition matches the ocean wet mask "
+                "(otherwise the shared-flux air-sea budget does not close over "
+                f"coastal cells); got f_land_mode={self.coupled_cfg.f_land_mode!r}. "
+                "Set f_land_mode='from_ocean' (dynamic+WOA), or use an aquaplanet "
+                "(no land tile), or disable couple_surface_fluxes."
+            )
+
         def _coupled_get_sfc_flux_override(day):
             # The atmosphere gets the coupler's TILE-BLENDED surface flux
             # (f_ocean*ocean + f_ice*ice + f_land*land + f_lake*lake) -- the
