@@ -28,10 +28,11 @@
 #     snow-albedo feedback (snow tracked thermodynamically but radiatively
 #     invisible); snow_albedo_feedback lives in the full land model, so it
 #     comes bundled with the land-model choice, NOT a standalone flag.
-#   * convective_cloud: ON in the YAML (parity with Pierre's cmip_ocean_slab.yaml
-#     + the 2026-06-26 decision). The SBM structural fix was validated WITHOUT it
-#     (job 25918469); the SBM + convective_cloud=true combination is pending its
-#     own C48/L40 forward validation.
+#   * convective_cloud: OFF in the YAML. A 30-day C48 A/B (jobs 25929869 ON vs
+#     25929870 OFF) showed ON warms the tropics only +0.55 K while pushing albedo
+#     0.295->0.370 and OLR 234.7->213.3 (~25 W/m^2 off CERES); SBM-alone is
+#     CMIP6-class (albedo 0.295 vs 0.290). The tropical cold bias is a convective-
+#     heating / surface-flux issue, not cloud-radiative.
 # =============================================================================
 
 # --- Machine-specific paths (Levante defaults; override via the environment) ---

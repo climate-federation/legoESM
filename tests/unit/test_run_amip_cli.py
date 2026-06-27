@@ -759,9 +759,11 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.turbulence == "louis"         # required by the tiled surface
     assert cfg.surface_tiled is True
     assert cfg.start_year == 1979
-    # rh_crit left at the calibrated default; convective_cloud ON (parity with
-    # Pierre's cmip_ocean_slab.yaml + the 2026-06-26 decision).
-    assert cfg.convective_cloud is True
+    # rh_crit left at the calibrated default; convective_cloud OFF — the 30-day
+    # C48 A/B (jobs 25929869 ON vs 25929870 OFF) showed ON wrecks the TOA budget
+    # (albedo 0.295->0.370, OLR 234.7->213.3) for only +0.55 K tropical warming,
+    # so production ships SBM-alone (CMIP6-class: albedo 0.295 vs 0.290 target).
+    assert cfg.convective_cloud is False
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():

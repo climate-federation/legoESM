@@ -44,13 +44,16 @@ diurnal_cycle: true
 # rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)
 # — NOT pinned here.
 q_c_diagnostic: 3.0e-4      # Pierre's tuned "thinner cloud" value
-# convective_cloud (Slingo-1987 cumulus cloud fraction): ON, for parity with
-# Pierre's authoritative config/cmip/cmip_ocean_slab.yaml and per the 2026-06-26
-# decision — adds the convective cloud cover that addresses the residual tropical
-# cold bias. NOTE: the SBM structural fix was validated WITHOUT it (job 25918469,
-# albedo 0.292 / pr 3.2); this SBM + convective_cloud=true combination is pending
-# its own C48/L40 forward validation (the next pilot run).
-convective_cloud: true
+# convective_cloud (Slingo-1987 cumulus cloud fraction): OFF. A matched 30-day
+# C48/L40 A/B (equilibrated; jobs 25929869 ON vs 25929870 OFF) settled this: ON
+# warms the tropics only +0.55 K (~12% of the ~4.5 K cold bias it was meant to
+# fix) while wrecking the TOA budget — albedo 0.295->0.370, OLR 234.7->213.3,
+# rsut 100.5->126.3 (all ~25 W/m^2 off CERES). Its net-TOA looks better (+1.4 vs
+# +5.8) only because too-bright SW and too-trapped LW cancel (right number, wrong
+# physics). SBM ALONE is CMIP6-class (albedo 0.295 vs 0.290, rsut 100.5 vs 99),
+# so production ships conv-cloud OFF; the tropical cold bias is a convective-
+# heating / surface-flux problem, not a cloud-radiative one.
+convective_cloud: false
 
 # --- Tiled surface + interactive land -----------------------------------------
 # COARE3 ocean / land-MOST surface fluxes + Manabe soil bucket + Jarvis stomatal.
