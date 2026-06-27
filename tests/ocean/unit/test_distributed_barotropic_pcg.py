@@ -447,7 +447,7 @@ class TestLatLonSolverMassAndResidual:
         )
         state_new, (_Hu, _Hv), rel = out
         assert jnp.isfinite(rel)
-        assert float(rel) <= config.barotropic_implicit_pcg_residual_tol, (
+        assert float(rel) <= config.barotropic.barotropic_implicit_pcg_residual_tol, (
             f"global rel residual {float(rel):.3e} exceeds tol"
         )
 
@@ -527,7 +527,7 @@ class TestForcePCGConfigPlumb:
     def test_default_off(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
-        assert LatLonCGridOceanConfig.from_flat().barotropic_implicit_force_pcg is False
+        assert LatLonCGridOceanConfig.from_flat().barotropic.barotropic_implicit_force_pcg is False
 
     def test_force_pcg_step_matches_stock_cg_step(self):
         """One implicit_cn model step with force_pcg=True equals the
@@ -765,5 +765,5 @@ class TestSingleReducePCG:
     def test_config_field_plumb(self):
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
-        assert (LatLonCGridOceanConfig.from_flat().barotropic_implicit_pcg_variant
+        assert (LatLonCGridOceanConfig.from_flat().barotropic.barotropic_implicit_pcg_variant
                 == "standard")

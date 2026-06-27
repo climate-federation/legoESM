@@ -7,9 +7,16 @@ nests, extend the field lists here.
 """
 import pytest
 
-from legoesm.ocean.state import DynBottomDragConfig, LatLonCGridOceanConfig
+from legoesm.ocean.state import (
+    BarotropicConfig,
+    DynBottomDragConfig,
+    LatLonCGridOceanConfig,
+)
 
 _BD = ("bottom_drag_r", "bottom_drag_bbl_thickness", "bottom_drag_bg_velocity")
+_BT = ("n_barotropic_substeps", "bebt", "barotropic_solver",
+       "barotropic_implicit_preconditioner", "rigid_lid_cg_tol",
+       "barotropic_slow_forcing_ab2")  # representative barotropic fields
 
 
 def test_bottom_drag_is_nested_not_flat():
@@ -49,11 +56,12 @@ def test_from_flat_unknown_field_is_loud():
 
 def test_flat_fields_is_one_to_one_with_pre_grouping_set():
     ff = LatLonCGridOceanConfig.flat_fields()
-    assert "bottom_drag" not in ff          # the nested field name is NOT a flat key
-    for f in _BD:
-        assert f in ff                       # its members ARE flat keys
-    # every other top-level field is unchanged
-    for f in set(LatLonCGridOceanConfig._fields) - {"bottom_drag"}:
+    # nested field names are NOT flat keys; their members ARE
+    assert "bottom_drag" not in ff and "barotropic" not in ff
+    for f in (*_BD, *_BT):
+        assert f in ff
+    # every other (non-grouped) top-level field is unchanged
+    for f in set(LatLonCGridOceanConfig._fields) - {"bottom_drag", "barotropic"}:
         assert f in ff
 
 
@@ -107,3 +115,51 @@ def test_from_flat_both_flat_and_nested_is_loud():
     with pytest.raises(TypeError):
         LatLonCGridOceanConfig.from_flat(
             bottom_drag_r=1.0, bottom_drag=DynBottomDragConfig())
+
+
+# ----------------------------------------------------------- BarotropicConfig (PR2)
+
+def test_barotropic_is_nested_not_flat():
+    top = set(LatLonCGridOceanConfig._fields)
+    assert "barotropic" in top
+    assert len(BarotropicConfig._fields) == 22
+    for f in _BT:
+        assert f not in top, f"{f} must be nested, not a top-level field"
+        assert f in BarotropicConfig._fields
+    assert isinstance(LatLonCGridOceanConfig().barotropic, BarotropicConfig)
+
+
+def test_barotropic_from_flat_distributes():
+    c = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn",
+                                         n_barotropic_substeps=40, bebt=0.3)
+    assert c.barotropic.barotropic_solver == "implicit_cn"
+    assert c.barotropic.n_barotropic_substeps == 40
+    assert c.barotropic.bebt == 0.3
+
+
+def test_barotropic_flat_fields_and_both_groups_coexist():
+    ff = LatLonCGridOceanConfig.flat_fields()
+    assert "barotropic" not in ff and "bottom_drag" not in ff
+    for f in (*_BT, *_BD):
+        assert f in ff
+    # the two nested groups distribute together in one from_flat call
+    c = LatLonCGridOceanConfig.from_flat(barotropic_solver="rigid_lid",
+                                         bottom_drag_r=2.5e-3)
+    assert c.barotropic.barotropic_solver == "rigid_lid"
+    assert c.bottom_drag.bottom_drag_r == 2.5e-3
+
+
+def test_barotropic_yaml_flat_key_routes_to_nested():
+    from legoesm.ocean.config import OceanExperimentConfig  # noqa: PLC0415
+    cfg = OceanExperimentConfig({"grid": {"type": "latlon_cgrid"},
+                                 "ocean": {"barotropic_solver": "implicit_cn"}}).to_ocean_config()
+    assert cfg.barotropic.barotropic_solver == "implicit_cn"
+
+
+def test_barotropic_old_flat_checkpoint_decodes_into_nested():
+    from legoesm.ocean.config import ocean_config_from_dict  # noqa: PLC0415
+    tag = f"{LatLonCGridOceanConfig.__module__}:LatLonCGridOceanConfig"
+    cfg = ocean_config_from_dict({"__type__": tag, "barotropic_solver": "rigid_lid",
+                                  "n_barotropic_substeps": 12})
+    assert cfg.barotropic.barotropic_solver == "rigid_lid"
+    assert cfg.barotropic.n_barotropic_substeps == 12

@@ -440,7 +440,7 @@ def rigid_lid_step(psi, dpsi, dpsi_prev, dpsin, dpsin_prev,
     # 3. Interior solve: L(dψ_new) = rhs, ψ=0 on land.
     dpsi_new = solve_streamfunction_interior(
         rhs, rl_data, grid, guess,
-        tol=config.rigid_lid_cg_tol, maxiter=config.rigid_lid_cg_maxiter,
+        tol=config.barotropic.rigid_lid_cg_tol, maxiter=config.barotropic.rigid_lid_cg_maxiter,
     )
 
     # 4. Island constants from the circulation constraints:

@@ -37,7 +37,7 @@ def _setup(ab2_fslow):
         config=SilvestriJetConfig(), stabilize=False)
     # §5 wires the faithful stack (explicit_ab2 + ab2_fslow + alpha=0); flip
     # ONLY barotropic_slow_forcing_ab2 to isolate it.
-    mc = r.model_config._replace(barotropic_slow_forcing_ab2=ab2_fslow)
+    mc = r.model_config._replace(barotropic=r.model_config.barotropic._replace(barotropic_slow_forcing_ab2=ab2_fslow))
     m = LatLonCGridOceanModel(r.grid, r.z_coord, mc)
 
     def zf(d):
@@ -66,7 +66,8 @@ def test_flag_requires_explicit_ab2_coriolis():
         n_lat=24, n_lon=16, scheme="W9V", nlev=4,
         config=SilvestriJetConfig(), stabilize=False)
     bad = r.model_config._replace(
-        barotropic_slow_forcing_ab2=True, coriolis_scheme="matsuno_split")
+        barotropic=r.model_config.barotropic._replace(barotropic_slow_forcing_ab2=True),
+        coriolis_scheme="matsuno_split")
     with pytest.raises(ValueError, match="explicit_ab2"):
         LatLonCGridOceanModel(r.grid, r.z_coord, bad)
 
@@ -78,7 +79,8 @@ def test_flag_requires_total_ab2_scope():
         n_lat=24, n_lon=16, scheme="W9V", nlev=4,
         config=SilvestriJetConfig(), stabilize=False)
     bad = r.model_config._replace(
-        barotropic_slow_forcing_ab2=True, ab2_scope="advective")
+        barotropic=r.model_config.barotropic._replace(barotropic_slow_forcing_ab2=True),
+        ab2_scope="advective")
     with pytest.raises(ValueError, match="advective"):
         LatLonCGridOceanModel(r.grid, r.z_coord, bad)
 
@@ -98,7 +100,7 @@ def test_flag_on_stores_current_F_slow_and_is_live():
     r_on = build_silvestri_baroclinic_jet_setup(
         n_lat=24, n_lon=16, scheme="W9V", nlev=4,
         config=SilvestriJetConfig(), stabilize=False)
-    assert r_on.model_config.barotropic_slow_forcing_ab2 is True
+    assert r_on.model_config.barotropic.barotropic_slow_forcing_ab2 is True
     assert r_on.initial_state.F_slow_u_prev is not None
 
     r, m_on, s_on = _setup(True)

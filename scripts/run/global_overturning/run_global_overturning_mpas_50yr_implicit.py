@@ -163,8 +163,8 @@ def main():
           f"α={config.visbeck_alpha}, κ∈[{config.visbeck_kappa_min:.0f},"
           f"{config.visbeck_kappa_max:.0f}])")
     print(f"  Convection: enhanced_diffusion (K_conv=1.0)")
-    print(f"  Barotropic: implicit_cn θ={ocean_config.barotropic_implicit_theta_eta} "
-          f"(PCG tol={ocean_config.barotropic_implicit_pcg_tol:.0e})")
+    print(f"  Barotropic: implicit_cn θ={ocean_config.barotropic.barotropic_implicit_theta_eta} "
+          f"(PCG tol={ocean_config.barotropic.barotropic_implicit_pcg_tol:.0e})")
     print(f"  Restart cadence: every {args.restart_every_years} yr")
     print()
 

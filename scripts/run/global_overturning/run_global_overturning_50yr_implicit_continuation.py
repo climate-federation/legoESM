@@ -110,7 +110,7 @@ def main():
     print(f"=== 40-yr continuation: spinup yr 10 → sim-yr 50 ===")
     print(f"  Restart from: {SPINUP_RESTART}")
     print(f"  Output: {OUTPUT_DIR}")
-    print(f"  barotropic_solver = {ocean_config.barotropic_solver}")
+    print(f"  barotropic_solver = {ocean_config.barotropic.barotropic_solver}")
     print(f"  dt = {dt} s, n_steps = {n_steps:,} ({extension_years} more sim-yr)")
     print(f"  Block size: {block_size}  (~{n_steps // block_size} blocks)")
     print(f"  Restart cadence: every {restart_every_years} yr "

@@ -142,7 +142,7 @@ def run(resolution: str, days: float, dt: float, out: str, no_sponge: bool = Fal
         _mom = (cfg.momentum_advection if cfg.momentum_advection != "vector_invariant"
                 else f"vec_inv+{cfg.ke_gradient_scheme}")
         print(f"== REBUILT Eady: {n_lat}x{n_lon}, dt={dt:.0f}s, {days:.0f}d, fp64 | "
-              f"{cfg.barotropic_solver}/trac={cfg.tracer_advection}/mom={_mom}/"
+              f"{cfg.barotropic.barotropic_solver}/trac={cfg.tracer_advection}/mom={_mom}/"
               f"rk3+ab2/smc03 | U={cfg_e.U_surface} sponge={not no_sponge} | "
               f"Csmag={cfg.C_smag} Cleith={cfg.C_leith} cap={smag_cfl_safety} "
               f"B_h={cfg.B_h} ==")
@@ -272,7 +272,7 @@ def main() -> int:
         smag_cfl_safety=args.smag_cfl_safety,
         momentum_advection=args.momentum_advection,
         ke_gradient_scheme=args.ke_gradient, tracer_advection=args.tracer_advection,
-        barotropic_solver=args.barotropic_solver)
+        barotropic_solver=args.barotropic.barotropic_solver)
     return 0
 
 

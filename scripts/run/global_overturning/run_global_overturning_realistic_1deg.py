@@ -208,7 +208,7 @@ def main():
     print(f"  Coord:                 partial cells (z* + h_partial)")
     print(f"  PGF scheme:            {ocean_config.pgf_scheme}")
     print(f"  Momentum advection:    {ocean_config.momentum_advection} (AL81)")
-    print(f"  Barotropic solver:     {ocean_config.barotropic_solver}")
+    print(f"  Barotropic solver:     {ocean_config.barotropic.barotropic_solver}")
     print(f"  Bottom drag:           r = {ocean_config.bottom_drag.bottom_drag_r:.1e} 1/s")
     print(f"  B_h biharmonic:        {ocean_config.B_h:.1e} m⁴/s")
     print(f"  A_h Laplacian:         {ocean_config.A_h:.1e} m²/s  "

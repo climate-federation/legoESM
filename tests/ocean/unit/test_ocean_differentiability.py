@@ -390,12 +390,12 @@ class TestBarotropicBottomDragDiff:
         """Gradient of output eta w.r.t. input eta through barotropic loop."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
         def loss(eta_data):
             s = state._replace(eta=state.eta.replace(data=eta_data))
             s_out, _transport = baro_fn(
-                s, dt_s, config.n_barotropic_substeps, grid, z_coord, config,
+                s, dt_s, config.barotropic.n_barotropic_substeps, grid, z_coord, config,
             )
             return jnp.sum(s_out.eta.data ** 2)
 
@@ -413,12 +413,12 @@ class TestBarotropicBottomDragDiff:
         """Gradient of output u w.r.t. input u through barotropic loop."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
         def loss(u_data):
             s = state._replace(u=state.u.replace(data=u_data))
             s_out, _transport = baro_fn(
-                s, dt_s, config.n_barotropic_substeps, grid, z_coord, config,
+                s, dt_s, config.barotropic.n_barotropic_substeps, grid, z_coord, config,
             )
             return jnp.sum(s_out.u.data ** 2)
 
@@ -436,14 +436,14 @@ class TestBarotropicBottomDragDiff:
         """Bottom drag in barotropic solver contributes to the gradient."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
         config_no_drag = config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
             s_out, _ = baro_fn(
-                s, dt_s, cfg.n_barotropic_substeps, grid, z_coord, cfg,
+                s, dt_s, cfg.barotropic.n_barotropic_substeps, grid, z_coord, cfg,
             )
             return jnp.sum(s_out.u.data ** 2)
 
@@ -464,11 +464,11 @@ class TestBarotropicBottomDragDiff:
         """
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        config_fori = config._replace(differentiable_barotropic=False)
-        dt_s = dt_baroclinic / config_fori.n_barotropic_substeps
+        config_fori = config._replace(barotropic=config.barotropic._replace(differentiable_barotropic=False))
+        dt_s = dt_baroclinic / config_fori.barotropic.n_barotropic_substeps
 
         s_out, _transport = baro_fn(
-            state, dt_s, config_fori.n_barotropic_substeps, grid, z_coord, config_fori,
+            state, dt_s, config_fori.barotropic.n_barotropic_substeps, grid, z_coord, config_fori,
         )
         assert jnp.all(jnp.isfinite(s_out.eta.data)), "Non-finite eta from fori_loop"
 

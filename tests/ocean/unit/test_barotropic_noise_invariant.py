@@ -321,7 +321,7 @@ def test_implicit_solver_default_is_explicit_substep():
     """Default config uses the legacy explicit substep so existing
     experiments are bit-stable."""
     cfg = LatLonCGridOceanConfig.from_flat()
-    assert cfg.barotropic_solver == "explicit_substep"
+    assert cfg.barotropic.barotropic_solver == "explicit_substep"
 
 
 def test_invalid_barotropic_solver_rejected():

@@ -57,7 +57,7 @@ def main():
         # ---- THE TEST KNOB ----
         barotropic_div_damp=0.1,
     )
-    print(f"barotropic_div_damp = {ocean_config.barotropic_div_damp}")
+    print(f"barotropic_div_damp = {ocean_config.barotropic.barotropic_div_damp}")
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
 
     template = create_initial_conditions("latlon", grid, z_coord, config)

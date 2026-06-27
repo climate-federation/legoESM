@@ -61,7 +61,7 @@ class TestDefaults:
         assert mc.pgf_scheme == "smc03"
         assert mc.tracer_time_integrator == "rk3"
         assert mc.outer_integrator == "ab2"
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.momentum_advection == "weno5"
         assert mc.tracer_advection == "weno5"
 

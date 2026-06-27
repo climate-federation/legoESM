@@ -27,7 +27,7 @@ def test_builds_valid_config_with_pinned_choices():
     assert isinstance(cfg, LatLonCGridOceanConfig)
     # Pinned faithful choices.
     assert cfg.eos == "linear"
-    assert cfg.differentiable_barotropic is True
+    assert cfg.barotropic.differentiable_barotropic is True
     assert cfg.use_conservation_fixer is False
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     # Default (per-deck) scheme choices for the gyre/jet cases.
@@ -48,7 +48,7 @@ def test_per_deck_axes_are_honoured():
     assert cfg.g == 0.1
     assert cfg.A_h == 5.0e3
     assert cfg.momentum_advection == "weno9"
-    assert cfg.barotropic_solver == "explicit_substep"
+    assert cfg.barotropic.barotropic_solver == "explicit_substep"
     assert abs(cfg.bottom_drag.bottom_drag_r - 1.0 / (60 * 86400)) < 1e-30
 
 
