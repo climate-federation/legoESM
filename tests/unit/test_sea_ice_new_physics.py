@@ -521,10 +521,11 @@ class TestRidging:
         overlap integral partitions it (sum overlap_frac == 1) and no ridge
         volume is dropped.  Replicates the clamp the kernel applies.
 
-        NOTE: this branch is effectively unreachable through ``apply_ridging``
-        because the participation function suppresses thick-ice participation
-        (so the volume-weighted h_part stays small); the clamp is DEFENSIVE
-        depth.  We test the clamp logic directly to lock the guarantee."""
+        NOTE: with the DEFAULT e_star the participation function suppresses
+        thick-ice participation so h_part stays small, but ``apply_ridging``
+        exposes ``e_star`` -- a large e_star gives thick ice ~full participation
+        and h_part can exceed hi[-1]/2, making this branch reachable (codex R3).
+        We test the clamp logic directly to lock the guarantee across h_part."""
         from legoesm.ice import transport  # noqa: F401  (ensure pkg import)
         from legoesm.ice.itd import category_bounds, upper_bounds
         from legoesm.ice import ridging as _R
@@ -550,6 +551,30 @@ class TestRidging:
             assert float(overlap) == pytest.approx(H_max - H_min, rel=1e-9), (
                 f"overlap != range width at h_part={h_part} -> volume would drop"
             )
+
+    def test_ridging_conserves_volume_overthick_reachable(self):
+        """Codex R3 (end-to-end, non-vacuous): the over-thick branch IS
+        reachable through ``apply_ridging`` with a large ``e_star`` (which lets
+        thick ice participate fully, so the participating mean thickness h_part
+        exceeds hi[-1]/2 and H_min = 2*h_part > hi[-1]).  Total ice volume must
+        be conserved; the ridge routes entirely into the top category.  Without
+        the both-endpoint clamp this dropped 100% of the ridged volume."""
+        n_cat = 5
+        # All area in a 60 m category; e_star huge -> ~full participation.
+        a_cat = jnp.zeros((1, n_cat)).at[0, -1].set(0.2)
+        h_cat = jnp.zeros((1, n_cat)).at[0, -1].set(60.0)
+        V_snow_cat = jnp.zeros_like(h_cat)
+        S_ice_cat = jnp.full(h_cat.shape, 4.0)
+        V_before = float(jnp.sum(h_cat * a_cat))
+        ridge = apply_ridging(
+            a_cat, h_cat, V_snow_cat, S_ice_cat, jnp.array([2e-4]),
+            n_cat=n_cat, dt=3600.0, e_star=1e9, H_star=300.0, mu_rdg=4.0,
+        )
+        V_after = float(jnp.sum(ridge["h"] * ridge["a"]))
+        rel = abs(V_after - V_before) / max(V_before, 1e-12)
+        assert rel < 1e-9, f"over-thick ridge volume not conserved: rel={rel:.3e}"
+        # The ridged volume lands in the TOP category (clamped into the top bin).
+        assert float(ridge["h"][0, -1]) <= 100.0 + 1e-6
 
     def test_ridging_conserves_pond_water(self):
         """Ridging drains pond water from the deforming ice to the ocean
