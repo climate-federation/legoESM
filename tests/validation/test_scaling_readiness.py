@@ -90,6 +90,8 @@ class TestScalingReadiness:
             N_c=jnp.zeros(s3), N_r=jnp.zeros(s3), N_i=jnp.zeros(s3),
             tke=jnp.zeros((6 * 8 * 8, 10)), qke=jnp.zeros((6 * 8 * 8, 10)),
             gwd_spectrum=jnp.zeros((6 * 8 * 8, 1, 1)),
+            conv_precip_prev=jnp.zeros(s2),
+            w_land=jnp.zeros(s2),
         )
         leaves, treedef = jax.tree.flatten(carry)
         reconstructed = treedef.unflatten(leaves)
@@ -162,6 +164,8 @@ class TestScalingReadiness:
             N_c=jnp.zeros(s3), N_r=jnp.zeros(s3), N_i=jnp.zeros(s3),
             tke=jnp.zeros((6 * 4 * 4, 3)), qke=jnp.zeros((6 * 4 * 4, 3)),
             gwd_spectrum=jnp.zeros((6 * 4 * 4, 1, 1)),
+            conv_precip_prev=jnp.zeros(s2),
+            w_land=jnp.zeros(s2),
         )
         for field_name in SegmentCarry._fields:
             val = getattr(carry, field_name)

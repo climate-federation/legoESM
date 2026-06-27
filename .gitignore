@@ -101,9 +101,9 @@ forcing_amip/
 keys.pub
 keys
 
-# new_test_dycores: temporary probe scripts created during ralph-loop
-# iterations.  These are local-only audit scripts (e.g. _probe_iter59_substep.py,
-# _probe_iter61_cb_error_map.py, _probe_iter63_c72.py) — never to be committed.
+# Temporary / throwaway debug scripts — never committed.
+# scripts/tmp/ is the canonical bucket for one-off probes and scratch.
+scripts/tmp/
 _probe_*.py
 
 # Local codex-bridge SQLite review database; per-clone artifact carrying
@@ -126,3 +126,4 @@ docs/_build/
 *.sbatch
 *.out
 *.err
+*.pyc

@@ -8,7 +8,7 @@ by construction. (The same rules live in `CLAUDE.md` for AI-assisted work.)
 ## Development setup
 
 ```bash
-git clone https://github.com/gentine/legoESM
+git clone https://github.com/climate-federation/legoESM
 cd legoESM
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"

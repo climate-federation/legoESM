@@ -182,6 +182,13 @@ class SegmentCarry(NamedTuple):
     # diagnosis.  ``None`` (warm-rain / convective_cloud off) ⇒ byte-identical
     # legacy carry; pack_carry seeds a zeros array for production runs so the
     # feature can read it when ``PhysicsPipeline._cloud_convective`` is set.
+    w_land: jax.Array = None
+    # Prognostic slab-land soil water [kg/m²] (Manabe bucket).  ``None``
+    # unless the soil-water bucket is active (``PhysicsPipeline.
+    # land_soil_bucket``) ⇒ byte-identical legacy carry.  Advanced each
+    # physics step in ``physics_step_no_rad`` (precip source, beta-limited
+    # land evaporation sink); sets the land evaporation efficiency beta that
+    # limits land latent heat.  Threaded exactly like ``T_land``.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -194,7 +201,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
-               conv_precip_prev=None,
+               conv_precip_prev=None, w_land=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -290,6 +297,9 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
+        # Soil-water bucket: None unless the bucket is active (identical
+        # legacy carry); the land tile reads it only when active.
+        w_land=None if w_land is None else _promote(w_land, storage),
     )
 
 
@@ -876,6 +886,8 @@ def build_segment_fn(
                 _ofi = owned_face_ids
                 _T_land_in = (carry.T_land[_ofi]
                               if carry.T_land is not None else None)
+                _w_land_in = (carry.w_land[_ofi]
+                              if carry.w_land is not None else None)
                 # Double-moment tracers (None for warm-rain) → number-aware
                 # radiation r_eff. Passed by KEYWORD so the neural/SFNO
                 # step_unified wrappers (which parse the positional tail by
@@ -919,6 +931,7 @@ def build_segment_fn(
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=_T_land_in,
                     conv_precip=carry.conv_precip_prev[_ofi],
+                    w_land=_w_land_in,
                     **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
@@ -994,6 +1007,16 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
+                # Soil-water bucket: w_land_new rides PhysicsOutput
+                # (advanced in physics_step_no_rad), scattered at owned
+                # indices.  Carried through unchanged for legacy wrappers
+                # that don't populate it.
+                w_land_new = (
+                    carry.w_land.at[_ofi].set(phys_out.w_land)
+                    if (carry.w_land is not None
+                        and phys_out.w_land is not None)
+                    else carry.w_land
+                )
             else:
                 _dm_in = {}
                 for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
@@ -1024,6 +1047,7 @@ def build_segment_fn(
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=carry.T_land,
                     conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land,
                     **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
@@ -1032,6 +1056,11 @@ def build_segment_fn(
                 # 2-tuple wrappers (neural / SFNO training) leave the land
                 # tile inert by carrying ``T_land`` through unchanged.
                 T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
+                # Soil-water bucket rides PhysicsOutput (advanced in
+                # physics_step_no_rad); carried through for legacy wrappers.
+                w_land_new = (phys_out.w_land
+                              if phys_out.w_land is not None
+                              else carry.w_land)
 
                 # --- State update ---
                 _phys_dT_dt = phys_out.dT_dt
@@ -1165,6 +1194,8 @@ def build_segment_fn(
                                   carry.gwd_spectrum)),
                 conv_precip_prev=_match_dtype(
                     conv_precip_prev_new, carry.conv_precip_prev),
+                w_land=(None if carry.w_land is None
+                        else _match_dtype(w_land_new, carry.w_land)),
             )
             return new_carry, None
         return _single_step
@@ -1290,6 +1321,8 @@ def build_segment_fn(
             _ofi = owned_face_ids
             _T_land_in = (carry.T_land[_ofi]
                           if carry.T_land is not None else None)
+            _w_land_in = (carry.w_land[_ofi]
+                          if carry.w_land is not None else None)
 
             def _own(fld):
                 return None if fld is None else fld[_ofi]
@@ -1314,6 +1347,7 @@ def build_segment_fn(
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=_own(carry.conv_precip_prev),
+                    w_land=_w_land_in,
                 )
             held_new = (
                 carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
@@ -1348,6 +1382,7 @@ def build_segment_fn(
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land,
                 )
             held_new = (
                 dT_dt_rad, sw_net_sfc, lw_net_sfc,
