@@ -161,6 +161,18 @@ class DINOConfig:
     A_v_bg: float = 1.2e-4         # background vertical viscosity [m²/s]
     K_v_bg: float = 1.2e-5         # background vertical diffusivity [m²/s]
     K_conv: float = 100.0          # enhanced-diffusion convective K [m²/s] (rn_evd)
+    # Vertical-mixing turbulence closure. The paper (Kamm et al. 2025) uses the
+    # NEMO TKE scheme (Blanke & Delecluse 1993); "tke" selects our TKE closure
+    # configured to the paper (background visc/diff = A_v_bg / K_v_bg, convective
+    # ceiling K_conv, constant background, prandtl_mode="constant"). HOWEVER our
+    # TKE is currently UNSTABLE in this 1deg DINO: the lower diffusivity makes the
+    # lat-lon run too energetic and it blows up near day ~40 (our TKE +
+    # lateral-viscosity tuning differs from NEMO's, where TKE is stable for 3000
+    # yr). So the DEFAULT is "kpp" (our stable closure, full-year stable); "tke"
+    # is the paper-faithful option for the short (<~40 day) window. This is a
+    # documented fidelity gap alongside the EOS (Wright vs Roquet) and the
+    # annual-mean-vs-seasonal restoring. Set per run via --vmix.
+    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper, unstable >~day 40)
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization (Visbeck 1997; decisions
@@ -1012,6 +1024,46 @@ def dino_lat_lon_state(
     return state
 
 
+def _dino_vertical_mixing_config(cfg: DINOConfig):
+    """Shared DINO vertical-mixing config (used by both grid model-configs so
+    the closure is identical across lat-lon and MPAS).
+
+    ``cfg.vmix_scheme == "tke"`` selects the NEMO-style TKE closure the paper
+    uses, configured with the paper's constant background visc/diff
+    (``A_v_bg`` / ``K_v_bg``) and the convective ceiling (``K_conv``), with the
+    depth-dependent Bryan-Lewis background switched OFF (``bg_diff_scale=0``) to
+    match the paper's constant background. ``"kpp"`` keeps the prior KPP closure.
+    Convective adjustment itself is handled by the enhanced-diffusion convection
+    scheme (``K_conv``) on top, as in the paper.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, TKEConfig, VerticalMixingConfig,
+    )
+    if cfg.vmix_scheme == "tke":
+        # prandtl_mode="constant" is REQUIRED for the paper background to take
+        # effect: with the default "unit" mode kappaH_min is dead (the tracer
+        # floor inherits kappaM_min) and kappaM_max is ignored. "constant" gives
+        # K_H = max(kappaH_min, K_M / Prandtl_tke0) and applies the kappaM_max
+        # ceiling, so K_v_bg (1.2e-5) and the convective ceiling (K_conv) are
+        # honored (Prandtl_tke0 default 10 = A_v_bg / K_v_bg). The TKE step is
+        # fed N2 + shear_sq by the vertical-mixing integration.
+        return VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(
+                prandtl_mode="constant",
+                kappaM_min=cfg.A_v_bg, kappaH_min=cfg.K_v_bg,
+                kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            ),
+        )
+    if cfg.vmix_scheme == "kpp":
+        return VerticalMixingConfig(
+            scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
+        )
+    raise ValueError(
+        f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; "
+        "expected 'tke' or 'kpp'")
+
+
 def dino_lat_lon_model_config(
     grid,
     cfg: DINOConfig | None = None,
@@ -1083,14 +1135,8 @@ def dino_lat_lon_model_config(
             SurfaceForcingConfig,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-        from legoesm.ocean.physics.vertical_mixing.config import (
-            KPPConfig, VerticalMixingConfig,
-        )
         physics_cfg = OceanPhysicsConfig(
-            vertical_mixing=VerticalMixingConfig(
-                scheme="kpp",
-                kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
-            ),
+            vertical_mixing=_dino_vertical_mixing_config(cfg),
             # GM/Redi goes on the model config directly, not here.
             lateral_mixing=LateralMixingConfig(scheme="none"),
             convection=OceanConvectionConfig(
@@ -1253,15 +1299,9 @@ def dino_mpas_model_config(
     )
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-    from legoesm.ocean.physics.vertical_mixing.config import (
-        KPPConfig, VerticalMixingConfig,
-    )
 
     physics_config = OceanPhysicsConfig(
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
-        ),
+        vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
             gm_redi=GMRediConfig(

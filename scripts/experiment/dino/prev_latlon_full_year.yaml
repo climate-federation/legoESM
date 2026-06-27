@@ -6,4 +6,5 @@ grid: latlon
 days: 365                 # driver hard cap
 snapshot_every_days: 10
 n_lon: 50
+vmix: kpp                 # original deliverable used KPP (pre-TKE-switch)
 output_dir: results/dino_latlon_full_year
