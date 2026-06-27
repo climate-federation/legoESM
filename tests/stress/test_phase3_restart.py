@@ -218,3 +218,95 @@ class TestZarrCheckpoint:
             np.asarray(state_loaded.p_s.data), ps_before,
             err_msg="p_s not bit-identical after Zarr roundtrip",
         )
+
+
+# ---------------------------------------------------------------------------
+# 3.4  Dynamic 3D-ocean restart reproducibility (ckpt v2)
+# ---------------------------------------------------------------------------
+
+def _make_dynamic_driver(days=4, output_dir=None, nlev=4):
+    """Coupled driver with the prognostic 3D LatLonCGridOcean (ocean_mode=
+    'dynamic') on a small shared lat-lon grid, rest IC (no WOA files).
+    diag_days=1 so straight/restart segment boundaries (= coupling sub-steps)
+    align, exactly like the slab harness above."""
+    from legoesm.driver.config import (
+        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+    )
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    atm_config = ExperimentConfig(
+        # dt=150 s is below the latlon-C16 pole-cell CFL so it is NOT clamped at
+        # runtime — straight and restarted runs then share an identical step
+        # schedule (steps_per_day below stays exact).
+        grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+        dycore=DycoreConfig(dt=150.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
+        output=OutputConfig(diag_days=1, checkpoint_days=0),
+        radiation="gray", convection="none", days=days,
+    )
+    coupled_cfg = CoupledConfig(
+        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_nlev=nlev, ocean_dt_s=300.0, ocean_ic="rest",
+    )
+    driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)
+    driver.setup()
+    return driver
+
+
+class TestDynamicOceanRestart:
+    """Run 4 days straight vs 2+2 with a ckpt-v2 restart; the prognostic 3D
+    ocean (T,S,u,eta) AND the atmosphere reproduce within the same atm-carry
+    reset transient the slab restart documents.  A gross checkpoint bug (wrong /
+    missing ocean leaves) would restore the ocean to its IC -> O(1) mismatch."""
+
+    def test_dynamic_ocean_restart_reproducibility(self, tmp_path):
+        # --- Run A: 4 days straight (reference trajectory) ---
+        dir_a = tmp_path / "dyn_a"
+        dir_a.mkdir()
+        da = _make_dynamic_driver(days=4, output_dir=str(dir_a))
+        da.run()
+        T_ref = np.asarray(da.state.T.data)
+        oT_ref = np.asarray(da.ocean_state.T.data)
+        assert np.all(np.isfinite(oT_ref))
+
+        # --- Run B: 2 days, REAL save_checkpoint, restart, 2 more ---
+        dir_b = tmp_path / "dyn_b"
+        dir_b.mkdir()
+        db1 = _make_dynamic_driver(days=2, output_dir=str(dir_b))
+        db1.run()
+        # Snapshot the EVOLVED day-2 ocean — the state the checkpoint must
+        # reproduce exactly through the driver's own save path.
+        b1 = {k: np.asarray(getattr(db1.ocean_state, k).data)
+              for k in ("T", "S", "u", "v", "eta", "w")}
+        steps_per_day = int(86400.0 / 150.0)
+        db1.save_checkpoint(2 * steps_per_day, 2.0)
+
+        dir_b2 = tmp_path / "dyn_b2"
+        dir_b2.mkdir()
+        db2 = _make_dynamic_driver(days=4, output_dir=str(dir_b2))
+        ckpts = list(dir_b.glob("checkpoint_day_*.npz"))
+        assert ckpts, f"No atm checkpoint in {dir_b}"
+        step, day = db2._atm.load_checkpoint(ckpts[0])
+        db2.load_coupled_checkpoint(2.0, checkpoint_dir=str(dir_b))  # 3D ocean
+
+        # PRIMARY GATE (magnitude-independent): the loaded 3D-ocean prognostic
+        # state == the evolved day-2 state BITWISE, through the driver's REAL
+        # save_checkpoint -> npz -> load_coupled_checkpoint path (not the unit
+        # test's hand-built npz).  A missing/wrong/zeroed ocean leaf mismatches
+        # here regardless of how weakly the short gray-aquaplanet spun the ocean.
+        for k, ref in b1.items():
+            np.testing.assert_array_equal(
+                np.asarray(getattr(db2.ocean_state, k).data), ref,
+                err_msg=f"ocean leaf {k} not bit-identical after ckpt-v2 restore")
+
+        # --- Continue to day 4: the restart trajectory tracks the straight run
+        # within the documented atm-carry-reset transient (a gross bug => O(1+)K).
+        db2.run(start_step=step, start_day=day)
+        np.testing.assert_allclose(
+            np.asarray(db2.ocean_state.T.data), oT_ref, atol=0.3, rtol=1e-2,
+            err_msg="ocean T not reproduced after restart")
+        np.testing.assert_allclose(
+            np.asarray(db2.state.T.data), T_ref, atol=0.2, rtol=1e-3,
+            err_msg="atm T not reproduced after restart")
