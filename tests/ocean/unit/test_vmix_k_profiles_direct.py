@@ -116,3 +116,26 @@ class TestConstantScheme:
             state, z, None, cfg, A_v_background=5e-4, K_v_background=2e-4)
         assert jnp.allclose(K1 - K0, 2e-4)
         assert jnp.allclose(A1 - A0, 5e-4)
+
+
+class TestUnknownSchemeRaises:
+    """Finding #3: an unknown vertical_mixing scheme must RAISE, not silently
+    fall through to a zero K_v/A_v ('be defensive') return that disables vertical
+    mixing on a typo (dispatch hardening; CLAUDE.md 'Dispatch')."""
+
+    def test_unknown_scheme_raises_value_error(self, grid_z_state):
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(scheme="kpp_typo"), **_base())
+        with pytest.raises(ValueError, match="unknown vertical_mixing.scheme"):
+            compute_vertical_K_profiles(state, z, None, cfg)
+
+    def test_none_scheme_still_returns_zeros(self, grid_z_state):
+        """The explicit 'none' gate must keep returning background floors (here
+        zero) — the raise must not catch the legitimate 'none' value."""
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(scheme="none"), **_base())
+        K, A = compute_vertical_K_profiles(state, z, None, cfg)
+        assert jnp.allclose(K, 0.0)
+        assert jnp.allclose(A, 0.0)

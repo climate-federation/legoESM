@@ -618,9 +618,16 @@ class MPASOceanModel:
             # This prevents global volume drift from unbalanced P-E+R
             # (standard OMIP practice for runs without sea ice).  Local
             # ``jnp.sum`` (exact single-rank, matching the salt virtual-salt
-            # normalization which removes the same area-mean).  MPI-sharded runs
-            # need an owned-cell mask to avoid Voronoi halo double-counting
-            # (codex) -- a shared follow-up with the salt path.
+            # normalization which removes the same area-mean).
+            #
+            # MPI: this eta mean is rank-local (no owned-cell mask), as is the
+            # sibling top-layer-salt mean in ``mpas_ocean_baroclinic_tendencies``
+            # (ocean_pe_mpas).  A multi-rank MPAS run with normalize_freshwater is
+            # refused by the SINGLE fail-fast guard at that tendency reduction
+            # SOURCE (codex round-3) — which ``self.tendencies(...)`` above (step
+            # 1) hits FIRST, so this eta block is never reached under MPI.  Keep
+            # this local sum (single-rank-correct) until owned-mask plumbing
+            # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
