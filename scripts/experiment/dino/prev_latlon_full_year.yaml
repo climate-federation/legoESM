@@ -1,0 +1,9 @@
+# DINO lat-lon Mercator — original full 1-year run (the first "both grids"
+# deliverable). Stable for the whole year (|u|~1.4 m/s, T 2.5-25.9 C).
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/prev_latlon_full_year.yaml
+grid: latlon
+days: 365                 # driver hard cap
+snapshot_every_days: 10
+n_lon: 50
+output_dir: results/dino_latlon_full_year

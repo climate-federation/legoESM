@@ -1,0 +1,13 @@
+# DINO MPAS regional Voronoi (unstructured) — matched cross-grid window.
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/matched_mpas_90d.yaml
+# Pairs with matched_latlon_90d.yaml. 90 d = the MPAS stable window; the full
+# year is blocked by the distorted southern-channel instability (#3, ~day 130).
+# mpas_eq_visc_boost=8 is the DINOConfig default (here for explicitness); it
+# stabilizes the forced f->0 equatorial jet (days 0-30 otherwise NaN).
+grid: mpas
+days: 90
+snapshot_every_days: 5
+mpas_resolution_km: 97.0  # ~9686 cells, area-matched to the 50-col Mercator
+mpas_eq_visc_boost: 8.0
+output_dir: results/dino_mpas
