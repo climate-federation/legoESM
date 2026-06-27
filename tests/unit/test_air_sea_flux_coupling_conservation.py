@@ -294,25 +294,93 @@ class TestCoupledDriverWiring:
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override == "sentinel"
 
-    def test_installs_hook_and_passes_blended_flux(self):
+    def test_installs_hook_slab_fallback_blended_flux(self):
+        """Slab ocean (no _last_ocean_sfc_flux): hook falls back to the coupler's
+        blended SH/LH."""
         from types import SimpleNamespace
         from legoesm.driver.coupled_config import CoupledConfig
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         atm = SimpleNamespace(get_sfc_flux_override=None)
         drv = SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=None)
+            _atm=atm, _last_sfc_response=None, _last_ocean_sfc_flux=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a response exists, its blended SH/LH flow through.
+        # Once a blended response exists, its SH/LH flow through (slab fallback).
         sh = jnp.full((6, 4, 4), 22.0)
         lh = jnp.full((6, 4, 4), 77.0)
         drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
         got_sh, got_lh = atm.get_sfc_flux_override(0.0)
         assert jnp.array_equal(got_sh, sh)
         assert jnp.array_equal(got_lh, lh)
+
+    def test_dynamic_ocean_feeds_atm_the_exact_ocean_flux(self):
+        """Dynamic ocean: the atmosphere override returns the IDENTICAL ocean-tile
+        flux that drove the ocean q_net (single shared flux on both sides).  This
+        is the driver-level budget-closure wiring proof codex flagged: not just
+        the blend math, but that the atmosphere consumes the ocean-driving flux.
+        """
+        from types import SimpleNamespace
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        from legoesm.coupler.grid_remap import GridRemapper
+
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        # Shared-grid (identity remapper) Phase-1 ocean: o2a is a pass-through.
+        ocean_sh = jnp.full((6, 4, 4), 33.0)
+        ocean_lh = jnp.full((6, 4, 4), 111.0)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=None,
+            _last_ocean_sfc_flux=(ocean_sh, ocean_lh),
+            _grid_remapper=GridRemapper(a2o=None, o2a=None, identity=True),
+        )
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        got_sh, got_lh = atm.get_sfc_flux_override(0.0)
+        # EXACTLY the ocean-driving flux -> heat/water out of ocean == into atm.
+        assert jnp.array_equal(got_sh, ocean_sh)
+        assert jnp.array_equal(got_lh, ocean_lh)
+
+    def test_assemble_ocean_forcing_stashes_flux_equal_to_qnet_terms(self):
+        """The stashed _last_ocean_sfc_flux equals the shflx/lhflx subtracted in
+        the ocean q_net -- so feeding it to the atmosphere closes the budget."""
+        import types
+        from unittest import mock
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        from legoesm.coupler.grid_remap import GridRemapper
+
+        shape = (3, 4)
+        z = jnp.zeros(shape)
+        tile = types.SimpleNamespace(
+            albedo=jnp.full(shape, 0.06), lw_up=jnp.full(shape, 400.0),
+            shflx=jnp.full(shape, 12.0), lhflx=jnp.full(shape, 60.0),
+            tau_x=z, tau_y=z,
+        )
+        sst = jnp.full(shape, 290.0)
+        stub = types.SimpleNamespace(
+            _coupler_cfg=None, _last_sfc_response=None,
+            _ocean_surface_KuvC=lambda: (sst, z, z),
+            _atm=None,                       # radiation not run -> SW fallback
+            _grid_remapper=GridRemapper(a2o=None, o2a=None, identity=True),
+        )
+        atm_forcing = types.SimpleNamespace(
+            sw_down=jnp.full(shape, 300.0), lw_down=jnp.full(shape, 350.0),
+            precip_total=jnp.full(shape, 1e-5),
+        )
+        with mock.patch("legoesm.coupler.coupler.ocean_tile_response",
+                        return_value=tile):
+            sf, fw = CoupledESMDriver._assemble_ocean_forcing(stub, atm_forcing)
+        # Stash set, equal to the q_net turbulent terms.
+        assert stub._last_ocean_sfc_flux is not None
+        sh, lh = stub._last_ocean_sfc_flux
+        assert jnp.array_equal(sh, tile.shflx)
+        assert jnp.array_equal(lh, tile.lhflx)
+        # OceanSurfaceForcing.sw_down is the NET surface SW (post-albedo), not
+        # gross -- the codex finding-2 fix.
+        assert jnp.allclose(sf.sw_down,
+                            atm_forcing.sw_down * (1.0 - tile.albedo))
 
 
 class TestJittedStepUnifiedThreadsFluxOverride:
