@@ -261,7 +261,6 @@ class TestTransportConservation:
         from legoesm.ice import transport as _T
         vol_floor = _T._VOL_FLOOR        # volume threshold [m]
         conc_floor = _T._CONC_FLOOR      # division floor [area fraction]
-        h_cap = _T._H_RECOVER_MAX_M      # physical thickness ceiling [m]
         # Synthetic post-transport fields: one margin cell with volume but
         # zero concentration, one normal interior cell, one ice-free cell.
         vol_n = jnp.array([0.4, 1.8, 0.0])      # m (per grid-cell area)
@@ -275,26 +274,61 @@ class TestTransportConservation:
         # The margin cell's volume is destroyed by the old formula.
         assert float(vol_recon_old[0]) == 0.0 and float(vol_n[0]) > 0.0
 
-        # --- NEW recovery (the fix, mirroring transport.py) ---
+        # --- NEW recovery (the fix, mirroring transport.py bare-floor) ---
         has_vol = vol_n > vol_floor
-        conc_floored = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 1.0)
-        h_raw = jnp.where(has_vol, vol_n / conc_floored, 0.0)
-        h_new = jnp.where(has_vol, jnp.minimum(h_raw, h_cap), 0.0)
-        h_safe = jnp.where(has_vol, jnp.maximum(h_new, conc_floor), 1.0)
-        conc_out = jnp.where(has_vol, vol_n / h_safe, 0.0)
+        conc_out = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 0.0)
+        conc_safe = jnp.where(has_vol, conc_out, 1.0)
+        h_new = jnp.where(has_vol, vol_n / conc_safe, 0.0)
         vol_recon_new = h_new * conc_out
-        # Volume reconstructed EXACTLY on every cell, including the margin.
+        # Volume reconstructed EXACTLY on every cell, including the margin
+        # (h_new*conc_out == vol_n), so no per-cell mass sink.
         assert jnp.allclose(vol_recon_new, vol_n, atol=1e-15), (
             "fix must reconstruct transported volume exactly"
         )
-        # The margin cell yields a PHYSICAL (h, conc): h capped at the ceiling
-        # (not an absurd vol/_CONC_FLOOR spike) and conc = vol/h_cap.
+        # h is finite and bounded by vol/_CONC_FLOOR (no spike to inf).  We
+        # intentionally do NOT cap h / re-derive conc here: the shared helper
+        # also transports snow/pond (h-slot) whose callers pair the returned
+        # THICKNESS with the ICE concentration, so altering conc would break
+        # their inventory (codex R4-1).
         assert jnp.all(jnp.isfinite(h_new))
-        assert float(h_new[0]) == pytest.approx(h_cap, rel=1e-9)
-        assert float(conc_out[0]) == pytest.approx(float(vol_n[0]) / h_cap, rel=1e-9)
-        # The normal interior cell is UNCHANGED (h_raw < ceiling).
+        assert float(h_new[0]) <= float(vol_n[0]) / conc_floor + 1.0
+        # The normal interior cell is UNCHANGED.
         assert float(h_new[1]) == pytest.approx(2.0, rel=1e-9)
         assert float(conc_out[1]) == pytest.approx(0.9, rel=1e-9)
+
+    def test_snow_inventory_conserved_through_transport(self):
+        """Codex R4-1: the SHARED transport helper carries snow (and pond) in
+        the h-slot and the caller pairs the returned snow THICKNESS with the
+        ICE concentration.  The ice-channel recovery must therefore NOT alter
+        the ice concentration (e.g. via an h-cap), or h_snow*conc_ice would no
+        longer equal the transported snow volume.  Replicate the production
+        two-call pattern (ice then snow against the SAME pre-transport conc) and
+        assert the snow inventory is conserved to the operator floor."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Sharp ice + snow margin so the conc limiter is stressed.
+        h = jnp.zeros(shape).at[0, :, 1:4].set(2.0)
+        a = jnp.zeros(shape).at[0, :, 1:4].set(0.7)
+        h_snow = jnp.zeros(shape).at[0, :, 1:4].set(0.3)
+        T = jnp.full(shape, 263.0)
+        u = jnp.full(shape, 0.06)
+        v = jnp.zeros(shape)
+        dt = 3600.0
+        conc0 = a
+        snow_vol_before = float(jnp.sum(h_snow * conc0))
+        # ICE call (returns the post-transport ice concentration).
+        _, conc_ice, _ = advect_ice_tracers(h, a, T, u, v, grid, dt)
+        # SNOW call against the SAME pre-transport conc (production pattern).
+        h_snow_new, _, _ = advect_ice_tracers(h_snow, conc0, T, u, v, grid, dt)
+        # The snow inventory the caller reconstructs is h_snow_new * conc_ice.
+        snow_vol_after = float(jnp.sum(h_snow_new * conc_ice))
+        rel = abs(snow_vol_after - snow_vol_before) / max(snow_vol_before, 1e-12)
+        # Conserved to the cubed-sphere FV operator floor (~1e-5; the same
+        # seam/positivity floor the ice-volume transport sees).  An ice-channel
+        # recovery that ALTERED conc (e.g. the reverted h-cap) firing on a margin
+        # cell would inject an O(1) error here.
+        assert rel < 5e-5, f"snow inventory not conserved through transport: rel={rel:.3e}"
 
 
 # ==============================================================================

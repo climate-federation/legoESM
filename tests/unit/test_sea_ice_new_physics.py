@@ -532,19 +532,29 @@ class TestRidging:
         lo = category_bounds(5)
         hi = upper_bounds(5)
         width = _R._MIN_RIDGE_WIDTH_M
-        for h_part in (0.5, 5.0, 49.0, 80.0, 150.0):   # last few force H_min>hi[-1]
-            H_min = 2.0 * h_part
+        hi_top = float(hi[-1])
+        for h_part in (0.5, 5.0, 49.0, 80.0, 150.0):   # last two force H_min>hi[-1]
+            # Replicate the COMMITTED kernel logic exactly: ceiling clamp, then a
+            # normal/over-thick split (NOT the round-2 unconditional clip).
+            H_min0 = 2.0 * h_part
             H_max = min(4.0 * (max(h_part, 1e-6) ** 0.5), 300.0)  # mu=4, H_star=300
-            # Apply the SAME clamp sequence as the kernel.
-            H_max = min(H_max, float(hi[-1]))
-            H_max = max(H_max, float(lo[0]) + width)
-            H_min = min(max(H_min, float(lo[0])), H_max - width)
-            # Range must be valid AND fully inside the supported ITD domain so
-            # the uniform-g overlap is a full partition.
+            H_max = min(H_max, hi_top)
+            H_max_normal = max(H_max, H_min0 + width)
+            over_thick = H_min0 > (hi_top - width)
+            H_min = (hi_top - width) if over_thick else H_min0
+            H_max = hi_top if over_thick else H_max_normal
+            # In the NORMAL regime the range must be BIT-IDENTICAL to the original
+            # Lipscomb range (regression guard for codex R3-1: the round-2 clip
+            # wrongly thinned ordinary ridges).
+            if not over_thick:
+                assert H_min == pytest.approx(H_min0, rel=0, abs=0), (
+                    f"normal H_min changed at h_part={h_part}"
+                )
+                assert H_max == pytest.approx(max(min(4.0*(max(h_part,1e-6)**0.5),300.0), H_min0+width), rel=0)
+            # Range valid AND fully inside [lo[0], hi[-1]] so overlap partitions.
             assert H_min < H_max, f"empty range at h_part={h_part}"
             assert H_min >= float(lo[0]) - 1e-12
-            assert H_max <= float(hi[-1]) + 1e-12
-            # Overlap of [H_min,H_max] with the union of categories == full width.
+            assert H_max <= hi_top + 1e-12
             a_over = jnp.maximum(lo, H_min)
             b_over = jnp.minimum(hi, H_max)
             overlap = jnp.sum(jnp.maximum(b_over - a_over, 0.0))
