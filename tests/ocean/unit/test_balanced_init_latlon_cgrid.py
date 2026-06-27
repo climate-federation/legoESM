@@ -50,7 +50,7 @@ def _baroclinic_state(grid, z_coord):
 def test_balanced_init_runs_and_bounds():
     grid = create_latlon_grid(n_lat=24, n_lon=48)
     z_coord = create_ocean_z_star(10, H_max=5500.0)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     st = _baroclinic_state(grid, z_coord)
 
     out = apply_balanced_init(st, grid, z_coord, cfg, max_speed=2.5)
@@ -74,7 +74,7 @@ def test_balanced_init_runs_and_bounds():
 def test_balanced_init_no_ssh_option():
     grid = create_latlon_grid(n_lat=24, n_lon=48)
     z_coord = create_ocean_z_star(10, H_max=5500.0)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     st = _baroclinic_state(grid, z_coord)
     # eta left at the rest value (0) when with_ssh=False.
     out = apply_balanced_init(st, grid, z_coord, cfg, with_ssh=False)

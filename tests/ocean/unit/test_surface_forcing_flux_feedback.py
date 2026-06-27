@@ -382,7 +382,7 @@ def _basin_flux_feedback(*, surface_forcing_implicit, barotropic_solver="explici
         surface_forcing=SurfaceForcingConfig(
             scheme="flux_feedback", flux_feedback=_cfg_veros()),
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver=barotropic_solver,
         outer_integrator="ab2",

@@ -208,7 +208,7 @@ def test_ocean_model_runs_and_coriolis_acts():
     g = create_beta_plane_cgrid_geometry(16, 16, dx_m=50e3, f0=f0, beta=0.0)
     z = create_ocean_z_star(1, H_max=500.0)
     base = rest_state_latlon_cgrid_ocean(g, z, land_lat_threshold=90.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         use_conservation_fixer=False,
         enable_runtime_checks=False,
         n_barotropic_substeps=40,

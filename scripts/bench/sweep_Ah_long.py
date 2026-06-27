@@ -39,7 +39,7 @@ gbw_config = GlobalBarotropicWindConfig(A_h=A_h)
 physics = create_forcings("latlon", None, gbw_config)
 grid = create_latlon_grid(n_lat=36, n_lon=72)
 z_coord = create_ocean_z_star(n_levels=nlev, H_max=5500.0)
-config_ = LatLonCGridOceanConfig(
+config_ = LatLonCGridOceanConfig.from_flat(
     n_barotropic_substeps=30, physics=physics, A_h=A_h,
 )
 model = LatLonCGridOceanModel(grid, z_coord, config_)

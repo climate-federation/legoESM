@@ -305,7 +305,7 @@ class TestReuse:
         mc = global_overturning_model_config(
             cfg, eos_config=create_eos_config(cfg),
             recipe="legoesm_linear_v1", barotropic_solver="implicit_cn")
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
 
     def test_default_recipe_is_legoesm_linear(self):
         cfg = GlobalOverturningConfig()

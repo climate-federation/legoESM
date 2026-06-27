@@ -198,12 +198,12 @@ def barotropic_substeps_latlon_cgrid(
     # The cell-center form nu_cell * laplacian(eta) is non-conservative
     # when nu_cell varies spatially (area varies as cos(lat) on latlon).
     baro_alpha = jnp.asarray(
-        config.barotropic_diffusion_alpha, dtype=eta.dtype,
-    ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+        config.barotropic.barotropic_diffusion_alpha, dtype=eta.dtype,
+    ) * (dt_s / jnp.asarray(config.barotropic.barotropic_diffusion_dt_ref, dtype=eta.dtype))
 
     # Precompute face-centered diffusion coefficients (grid geometry only,
     # constant across substeps).
-    if config.barotropic_diffusion_alpha > 0.0:
+    if config.barotropic.barotropic_diffusion_alpha > 0.0:
         area = _area  # already cast to _dt above
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
@@ -246,11 +246,11 @@ def barotropic_substeps_latlon_cgrid(
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
     # while leaving geostrophic (rotational) flow untouched (#205).
-    use_div_damp = config.barotropic_div_damp > 0.0
+    use_div_damp = config.barotropic.barotropic_div_damp > 0.0
     if use_div_damp:
         div_damp_coeff = jnp.asarray(
-            config.barotropic_div_damp, dtype=eta.dtype,
-        ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+            config.barotropic.barotropic_div_damp, dtype=eta.dtype,
+        ) * (dt_s / jnp.asarray(config.barotropic.barotropic_diffusion_dt_ref, dtype=eta.dtype))
         # u-face area: average of adjacent cells (_area already cast to _dt)
         div_damp_area_u = 0.5 * (jnp.roll(_area, 1, axis=1) + _area)
         div_damp_area_u = jnp.concatenate(
@@ -277,20 +277,20 @@ def barotropic_substeps_latlon_cgrid(
     # ``div(Hu_avg) == (eta_old - eta_avg)/dt`` (which the flux-form tracer step
     # needs to preserve a uniform tracer) holds for EVERY filter — the flat 1/n
     # broke it for both box (~95%) and cosine (~99%).
-    if config.barotropic_time_filter == "power_law":
+    if config.barotropic.barotropic_time_filter == "power_law":
         w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
             n_substeps, eta.dtype,
         )
     else:
-        use_cosine_filter = config.barotropic_time_filter == "cosine"
+        use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
         w_filter, w_total, w_transport = compute_filter_weights(
             n_substeps, eta.dtype, use_cosine=use_cosine_filter,
         )
         n_loop = n_substeps
 
     # BEBT semi-implicit parameter and MAXVEL clipping
-    bebt = config.bebt
-    _maxvel = config.maxvel_barotropic
+    bebt = config.barotropic.bebt
+    _maxvel = config.barotropic.maxvel_barotropic
     use_maxvel = _maxvel > 0.0
 
     # Accumulators for time-averaged barotropic transport (Phase 2a, issue #102).
@@ -354,7 +354,7 @@ def barotropic_substeps_latlon_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
         ).astype(eta.dtype)
         eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
-        if config.barotropic_local_subcycle_clamp:
+        if config.barotropic.barotropic_local_subcycle_clamp:
             # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
             # The global mass-conserving redistribute is deferred to ONCE per
             # outer step (post-loop, on the time-averaged eta).
@@ -429,7 +429,7 @@ def barotropic_substeps_latlon_cgrid(
             V_bar_new = maxvel_clip(V_bar_new, _maxvel)
 
         # Optional Laplacian damping on eta (flux-form: conservative)
-        if config.barotropic_diffusion_alpha > 0.0:
+        if config.barotropic.barotropic_diffusion_alpha > 0.0:
             grad_x = gradient_x_cgrid(eta_new * mask, grid)
             grad_y = gradient_y_cgrid(eta_new * mask, grid)
             flux_x = nu_face_u * grad_x * diff_u_mask
@@ -437,7 +437,7 @@ def barotropic_substeps_latlon_cgrid(
             eta_new = (
                 eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(eta.dtype)
             ) * mask
-            if config.barotropic_local_subcycle_clamp:
+            if config.barotropic.barotropic_local_subcycle_clamp:
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, _area)
@@ -452,7 +452,7 @@ def barotropic_substeps_latlon_cgrid(
 
     init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
 
-    if config.differentiable_barotropic:
+    if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
         def scan_body(carry, wts_i):
             new_carry = substep_body(wts_i, carry)
@@ -491,7 +491,7 @@ def barotropic_substeps_latlon_cgrid(
     # per-substep path) when no cell hit eta_floor; this single call's 3 batched
     # allreduces replace the subcycle's ~3*n_substeps (the outer-step
     # fix_eta_drift fixer is separate, unaffected).
-    if config.barotropic_local_subcycle_clamp:
+    if config.barotropic.barotropic_local_subcycle_clamp:
         eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
     # Correct 3D velocities: preserve baroclinic structure.

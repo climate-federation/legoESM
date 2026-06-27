@@ -124,7 +124,7 @@ def run(args):
           f"{float(jnp.max(H_bathy)):.0f}] m")
 
     cfg = MPASOceanConfig(
-        barotropic_solver=args.barotropic_solver,
+        barotropic_solver=args.barotropic.barotropic_solver,
         A_h=args.A_h, A_v=args.A_v, K_v=1.0e-4, K_h=args.K_h,
         B_h=args.B_h, C_smag=args.C_smag,
         K_zeta_bih=args.k_zeta_bih,

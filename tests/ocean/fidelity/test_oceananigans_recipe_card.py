@@ -27,7 +27,7 @@ def test_builds_valid_config_with_pinned_choices():
     assert isinstance(cfg, LatLonCGridOceanConfig)
     # Pinned faithful choices.
     assert cfg.eos == "linear"
-    assert cfg.differentiable_barotropic is True
+    assert cfg.barotropic.differentiable_barotropic is True
     assert cfg.use_conservation_fixer is False
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     # Default (per-deck) scheme choices for the gyre/jet cases.
@@ -48,8 +48,8 @@ def test_per_deck_axes_are_honoured():
     assert cfg.g == 0.1
     assert cfg.A_h == 5.0e3
     assert cfg.momentum_advection == "weno9"
-    assert cfg.barotropic_solver == "explicit_substep"
-    assert abs(cfg.bottom_drag_r - 1.0 / (60 * 86400)) < 1e-30
+    assert cfg.barotropic.barotropic_solver == "explicit_substep"
+    assert abs(cfg.bottom_drag.bottom_drag_r - 1.0 / (60 * 86400)) < 1e-30
 
 
 def test_overrides_patch_remaining_fields():
@@ -68,10 +68,16 @@ def test_block_mapping_fields_exist_on_config():
         "momentum_advection", "coriolis_scheme", "barotropic_solver",
         "bottom_drag_r", "tracer_advection",
     }
+    # #501: a token may be a direct attribute OR a flat member of a nested
+    # sub-config (e.g. bottom_drag_r -> config.bottom_drag.bottom_drag_r); both
+    # are real, addressable fields of the wiring diagram (flat_fields is the 1:1
+    # flat name set kept stable across grouping).
+    flat = cfg.flat_fields() if hasattr(cfg, "flat_fields") else set()
     for _construct, legoesm_field, _note in OCEANANIGANS_BLOCK_MAPPING:
         for tok in single_fields:
             if legoesm_field == tok:
-                assert hasattr(cfg, tok), f"block-mapping field {tok!r} missing"
+                assert hasattr(cfg, tok) or tok in flat, (
+                    f"block-mapping field {tok!r} missing")
 
 
 def test_mapping_flags_approx_rows():

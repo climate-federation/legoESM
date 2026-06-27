@@ -120,7 +120,7 @@ def _physics(tke_cfg):
 def _model(tke_cfg, **cfg_kwargs):
     grid, z_coord = _grid_z()
     cfg_kwargs.setdefault("implicit_vertical_mixing", True)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4,
         K_v=0.0,
         physics=_physics(tke_cfg),

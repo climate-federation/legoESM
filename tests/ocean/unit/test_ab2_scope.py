@@ -85,7 +85,7 @@ def _channel(n_lat=8, n_lon=16, with_gm_redi=False, **cfg_kw):
     cfg_kw.setdefault("K_v", 1.0e-4)
     cfg_kw.setdefault("K_h", 500.0)
     cfg_kw.setdefault("bottom_drag_r", 1.0e-3)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=8, enable_runtime_checks=False, **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)
 

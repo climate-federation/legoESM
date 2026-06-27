@@ -110,13 +110,13 @@ def test_ah_scaling_off_is_identity():
     guard."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    config_off = LatLonCGridOceanConfig(A_h=1e5, A_h_lat_scaling=False)
-    config_on = LatLonCGridOceanConfig(A_h=1e5, A_h_lat_scaling=True)
+    config_off = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=False)
+    config_on = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=True)
     assert config_off.A_h_lat_scaling is False
     assert config_on.A_h_lat_scaling is True
     # NamedTuple default: pre-existing call sites that don't pass the flag
     # default to False.
-    config_legacy = LatLonCGridOceanConfig(A_h=1e5)
+    config_legacy = LatLonCGridOceanConfig.from_flat(A_h=1e5)
     assert config_legacy.A_h_lat_scaling is False
 
 
@@ -207,7 +207,7 @@ def test_ah_cos_power_default_is_one():
     convention (constant grid Reynolds number) — so adding it does not
     change behavior for any legacy config."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig(A_h=1e5, A_h_lat_scaling=True)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=True)
     assert cfg.A_h_cos_power == 1
 
 

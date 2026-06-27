@@ -142,7 +142,7 @@ def main():
         "no_Ah":    (base._replace(A_h=0.0), physics_fn),
         "no_smag":  (base._replace(C_smag=0.0), physics_fn),
         "no_kzeta": (base._replace(K_zeta_bih=0.0), physics_fn),
-        "no_drag":  (base._replace(bottom_drag_r=0.0), physics_fn),
+        "no_drag":  (base._replace(bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0)), physics_fn),
     }
 
     tendencies = {}

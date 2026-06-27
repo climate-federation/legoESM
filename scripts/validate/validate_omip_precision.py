@@ -83,7 +83,7 @@ def _build_channel(n_lat: int, n_lon: int, n_levels: int = 4):
     u *= np.asarray(state.u_mask.data)[..., None]
     u[:, -1] = u[:, 0]
     state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=8, enable_runtime_checks=False,
         implicit_vertical_mixing=True, A_h=2.0e4, A_v=1.0e-3, K_v=1.0e-4,
         K_h=500.0, bottom_drag_r=1.0e-3)

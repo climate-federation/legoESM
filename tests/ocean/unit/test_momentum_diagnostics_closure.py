@@ -79,7 +79,7 @@ def z_coord():
 def test_diagnostic_closure_no_drag_no_physics(grid, z_coord):
     """With minimal config (only A_h active), Σ components == total to
     machine precision."""
-    cfg = LatLonCGridOceanConfig(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1.0e4, A_v=0.0, bottom_drag_r=0.0)
     state = _perturbed_state(grid, z_coord)
 
     tendencies, diag = latlon_cgrid_ocean_baroclinic_tendencies(
@@ -110,7 +110,7 @@ def test_diagnostic_closure_no_drag_no_physics(grid, z_coord):
 def test_diagnostic_closure_full_config(grid, z_coord):
     """With every momentum term active that can be (A_h, A_v,
     bottom_drag), closure to machine precision."""
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e5, A_v=1.0e-3, bottom_drag_r=1.1e-3,
     )
     state = _perturbed_state(grid, z_coord)
@@ -132,7 +132,7 @@ def test_default_signature_unchanged(grid, z_coord):
     """Default call (diagnose_momentum=False) must return a single
     LatLonCGridOceanTendencies, not a tuple."""
     from legoesm.ocean.state import LatLonCGridOceanTendencies
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     state = _perturbed_state(grid, z_coord)
     out = latlon_cgrid_ocean_baroclinic_tendencies(
         state, grid, z_coord, cfg,
@@ -145,7 +145,7 @@ def test_diagnose_returns_tuple(grid, z_coord):
     from legoesm.ocean.state import (
         LatLonCGridOceanTendencies, MomentumTendencyDiagnostics,
     )
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     state = _perturbed_state(grid, z_coord)
     out = latlon_cgrid_ocean_baroclinic_tendencies(
         state, grid, z_coord, cfg, diagnose_momentum=True,

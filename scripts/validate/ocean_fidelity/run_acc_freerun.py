@@ -116,12 +116,12 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # Dissipation-audit knob: Veros applies -r_bot·u (a RATE, 1e-5/s) at the
         # bottom cell with NO /dz; legoESM applies -r·u/h_bot. To match Veros's
         # ~28h drag, r ≈ r_bot·h_bot ≈ 1e-5·276 ≈ 2.8e-3 (flat-bottom ACC).
-        cfg = cfg._replace(bottom_drag_r=bottom_drag_r)
+        cfg = cfg._replace(bottom_drag=cfg.bottom_drag._replace(bottom_drag_r=bottom_drag_r))
     if barotropic_solver is not None:
         # Rigid-lid fidelity: match Veros's barotropic FORMULATION (streamfunction
         # rather than the legoESM split-explicit free surface). The dissipation
         # audit isolated the barotropic formulation as the genuine ACC gap.
-        cfg = cfg._replace(barotropic_solver=barotropic_solver)
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(barotropic_solver=barotropic_solver))
     if dt_mom_ratio is not None:
         # Veros dt_mom≠dt_tracer asynchronous stepping (#44 Stage B): the `dt`
         # passed here IS dt_tracer (the clock); momentum + barotropic + implicit
@@ -170,7 +170,7 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
     # Rigid-lid: pre-build the static island/depth data (host-side flood-fill)
     # and seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
     # zero so the jitted scan keeps a constant pytree (None -> array would crash).
-    if cfg.barotropic_solver == "rigid_lid" and state.psi is None:
+    if cfg.barotropic.barotropic_solver == "rigid_lid" and state.psi is None:
         rl = model._ensure_rigid_lid_data(state)
         _zV = jnp.zeros((recipe.grid.n_lat + 1, recipe.grid.n_lon + 1),
                         dtype=state.u.data.dtype)
@@ -316,7 +316,7 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64())
     try:
         _oi = args.outer_integrator or "recipe default (forward_euler)"
-        _bs = args.barotropic_solver or "recipe default (free surface)"
+        _bs = args.barotropic.barotropic_solver or "recipe default (free surface)"
         _dr = f"dt_mom={args.dt/args.dt_mom_ratio:.0f}s (ratio {args.dt_mom_ratio:g})" \
             if args.dt_mom_ratio else "dt_mom=dt_tracer (synchronous)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
@@ -325,7 +325,7 @@ def main() -> int:
         lego_state, recipe = _run_legoesm(
             years, args.dt, outer_integrator=args.outer_integrator,
             bottom_drag_r=args.bottom_drag_r,
-            barotropic_solver=args.barotropic_solver,
+            barotropic_solver=args.barotropic.barotropic_solver,
             dt_mom_ratio=args.dt_mom_ratio,
             momentum_friction_additive=args.momentum_friction_additive)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)

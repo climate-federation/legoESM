@@ -94,7 +94,7 @@ class TestEndToEndIntegration:
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid, partial_coord, cfg)
         s_new = model.step(state, 600.0)
         assert jnp.all(jnp.isfinite(s_new.eta.data))
@@ -125,7 +125,7 @@ class TestEndToEndIntegration:
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid, partial_coord, cfg)
         s = state
         for _ in range(24):
@@ -161,7 +161,7 @@ class TestFlatBottomForwardBitExact:
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
 
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model_zstar = LatLonCGridOceanModel(grid, z_coord, cfg)
         model_partial = LatLonCGridOceanModel(grid, partial_coord, cfg)
 
@@ -188,7 +188,7 @@ class TestFlatBottomForwardBitExact:
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
 
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model_zstar = LatLonCGridOceanModel(grid, z_coord, cfg)
         model_partial = LatLonCGridOceanModel(grid, partial_coord, cfg)
 
@@ -229,7 +229,7 @@ class TestFlatBottomADBitExact:
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
 
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model_zstar = LatLonCGridOceanModel(grid, z_coord, cfg)
         model_partial = LatLonCGridOceanModel(grid, partial_coord, cfg)
 

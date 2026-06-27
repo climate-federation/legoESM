@@ -88,7 +88,7 @@ def seed_freerun_carries(model, state, cfg, grid):
             T_incr_prev=_z(state.T), S_incr_prev=_z(state.S),
             u_incr_prev=_z(state.u), v_incr_prev=_z(state.v))
 
-    if cfg.barotropic_solver == "rigid_lid" and state.psi is None:
+    if cfg.barotropic.barotropic_solver == "rigid_lid" and state.psi is None:
         rl = model._ensure_rigid_lid_data(state)
         _zV = jnp.zeros((grid.n_lat + 1, grid.n_lon + 1), dtype=state.u.data.dtype)
         _zI = jnp.zeros((rl.nisle,), dtype=state.u.data.dtype)

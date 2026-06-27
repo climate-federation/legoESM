@@ -169,7 +169,7 @@ def main():
     tend_no_kzeta = mpas_ocean_baroclinic_tendencies(state, mesh, pc_coord,
                     config._replace(K_zeta_bih=0.0), physics_fn=physics_fn)
     tend_no_drag = mpas_ocean_baroclinic_tendencies(state, mesh, pc_coord,
-                    config._replace(bottom_drag_r=0.0), physics_fn=physics_fn)
+                    config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0)), physics_fn=physics_fn)
     print(f"  Done in {time.time()-t0:.1f}s")
 
     # du_dt_full includes F_slow_u (depth-mean) + du_dt_3d (perturbation)

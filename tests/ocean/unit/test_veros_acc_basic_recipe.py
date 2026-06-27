@@ -236,7 +236,7 @@ def test_acc_basic_free_run_ships_faithful_stepping_composition():
     free = build_acc_basic_model_config(with_surface_forcing=True)
     assert free.outer_integrator == "ab2"
     assert free.dt_mom_ratio == 9.0           # DT_TRACER_S / DT_MOM_S
-    assert free.barotropic_solver == "rigid_lid"
+    assert free.barotropic.barotropic_solver == "rigid_lid"
     assert free.coriolis_scheme == "explicit_ab2"
     assert free.ab2_scope == "advective"
     assert free.momentum_friction_additive is True

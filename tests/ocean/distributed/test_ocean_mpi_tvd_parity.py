@@ -440,7 +440,7 @@ class TestOceanMPIStepParity:
         z_coord = create_ocean_z_star(n_levels=N_LEV)
         # tvd is the production default; explicit_substep is the only
         # MPI-safe barotropic solver (fixed collective schedule).
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             tracer_advection="tvd",
             barotropic_solver="explicit_substep",
         )

@@ -49,11 +49,11 @@ def test_local_clamp_bit_identical_deep_ocean():
     z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
     state = _state(grid, z_coord)
 
-    cfg_off = LatLonCGridOceanConfig(bottom_drag_r=0.0)
-    cfg_on = LatLonCGridOceanConfig(
+    cfg_off = LatLonCGridOceanConfig.from_flat(bottom_drag_r=0.0)
+    cfg_on = LatLonCGridOceanConfig.from_flat(
         bottom_drag_r=0.0, barotropic_local_subcycle_clamp=True)
-    assert cfg_off.barotropic_local_subcycle_clamp is False
-    assert cfg_on.barotropic_local_subcycle_clamp is True
+    assert cfg_off.barotropic.barotropic_local_subcycle_clamp is False
+    assert cfg_on.barotropic.barotropic_local_subcycle_clamp is True
 
     out_off = barotropic_substeps_latlon_cgrid(state, 30.0, 12, grid, z_coord, cfg_off)
     out_on = barotropic_substeps_latlon_cgrid(state, 30.0, 12, grid, z_coord, cfg_on)

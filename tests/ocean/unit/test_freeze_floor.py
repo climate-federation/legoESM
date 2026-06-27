@@ -45,7 +45,7 @@ def _model(freeze_floor=False, n_lat=8, n_lon=16, **cfg_kw):
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, n_barotropic_substeps=8,
         enable_runtime_checks=False, freeze_floor=freeze_floor, **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -54,7 +54,7 @@ def _model(freeze_floor=False, n_lat=8, n_lon=16, **cfg_kw):
 def test_default_freeze_temp_from_constants():
     """Default floor = T_freeze_ocean - T_freeze (= -1.8 C), not a literal."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     expected = constants.T_freeze_ocean - constants.T_freeze
     assert cfg.freeze_floor_temp_c == pytest.approx(expected)
     assert cfg.freeze_floor_temp_c == pytest.approx(-1.8, abs=1e-9)

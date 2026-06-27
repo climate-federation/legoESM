@@ -84,7 +84,7 @@ class TestTripoleDynamicOcean(unittest.TestCase):
         drv = self._build()
         # OMIP-validated tripole recipe (NOT the lat-lon smc03/rk3 recipe).
         ocfg = drv._ocean_model.config
-        self.assertEqual(ocfg.barotropic_solver, "implicit_cn")
+        self.assertEqual(ocfg.barotropic.barotropic_solver, "implicit_cn")
         self.assertEqual(ocfg.pgf_scheme, "adcroft")
         self.assertAlmostEqual(ocfg.C_smag_lap, 0.33, places=6)
         self.assertTrue(ocfg.implicit_vertical_mixing)

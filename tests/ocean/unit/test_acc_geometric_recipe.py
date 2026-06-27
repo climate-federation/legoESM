@@ -66,7 +66,7 @@ def test_geometric_override_threads_config_and_seeds_2d():
     assert r.initial_state.eke.data.shape == (r.grid.n_lat, r.grid.n_lon)
     # The faithful free-run stepping bundle still rides along.
     assert r.model_config.outer_integrator == "ab2"
-    assert r.model_config.barotropic_solver == "rigid_lid"
+    assert r.model_config.barotropic.barotropic_solver == "rigid_lid"
 
 
 def test_forward_step_preserves_eke_carry_pytree():

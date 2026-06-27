@@ -71,7 +71,7 @@ def build_setup():
         coriolis_scheme=os.environ.get("CORIOLIS_SCHEME", "matsuno_split"),
         bottom_drag_r=0.0, tracer_advection="weno7", weno_smoothness="split")
     cfg = cfg._replace(
-        barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0,
+        barotropic=cfg.barotropic._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0),
         # The §5 closure: full-velocity vertical momentum advection (default True via the
         # recipe; the env hook lets us A/B the perturbation form on the sphere).
         weno_vertadv_full_velocity=os.environ.get("VERTADV_FULL", "1") == "1")

@@ -93,7 +93,7 @@ def build_setup():
         bottom_drag_r=0.0, tracer_advection="weno7",
         weno_smoothness=os.environ.get("WENO_SMOOTH", "split"))
     cfg = cfg._replace(
-        barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0,
+        barotropic=cfg.barotropic._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0),
         weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH", "standard") or None,
         vortcor_reconstruct_zeta=os.environ.get("VORTCOR_ZETA", "0") == "1",
         vortcor_enstrophy_metric=os.environ.get("VORTCOR_METRIC", "0") == "1",

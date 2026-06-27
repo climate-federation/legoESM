@@ -276,7 +276,7 @@ def build_silvestri_baroclinic_jet_setup(
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max,
                                   dz_surface=_dz, dz_deep=_dz)
 
-    base_config = LatLonCGridOceanConfig(
+    base_config = LatLonCGridOceanConfig.from_flat(
         # FAITHFUL barotropic stack = the Oceananigans split-explicit oracle's,
         # with NO dissipation backstop (barotropic_diffusion_alpha=0). The
         # eddy-resolving turbulent blow-up was the C-grid barotropic Coriolis
@@ -352,7 +352,7 @@ def build_silvestri_baroclinic_jet_setup(
     # IC).  Required: any driver using barotropic_slow_forcing_ab2 under
     # lax.scan MUST seed these (else a step-1 None→Field transition breaks the
     # scan carry); build_silvestri does it here.  No-op for the default stack.
-    if getattr(model_config, "barotropic_slow_forcing_ab2", False):
+    if getattr(model_config.barotropic, "barotropic_slow_forcing_ab2", False):
         from legoesm.core.field import Field as _Field_fs0
         _z_u = jnp.zeros_like(initial_state.u.data[:, :, 0])
         _z_v = jnp.zeros_like(initial_state.v.data[:, :, 0])

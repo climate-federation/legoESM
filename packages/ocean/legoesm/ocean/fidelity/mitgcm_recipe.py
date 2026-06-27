@@ -139,7 +139,7 @@ def mitgcm_canonical_ocean_config(
         vmix["A_v"] = A_v
     if K_v is not None:
         vmix["K_v"] = K_v
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         # --- per-deck dimensional knobs ---
         g=g,
         rho_0=rho_0,

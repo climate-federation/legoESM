@@ -50,14 +50,24 @@ def _flat_basin(n_lat=24, n_lon=48, H=4000.0, lat_cap_deg=80.0):
 
 
 def _cfg(**over):
-    base = dict(
-        bottom_drag_r=0.0, bebt=0.0, maxvel_barotropic=0.0,
-        barotropic_diffusion_alpha=0.0, fix_eta_drift=False,
+    # #644 (config grouping) nested the barotropic + bottom-drag knobs into
+    # BarotropicConfig / the bottom-drag sub-config. Route flat test kwargs to the
+    # right leaf by NamedTuple field membership (robust to exact field placement).
+    cfg = LatLonCGridOceanConfig(fix_eta_drift=False)
+    baro = cfg.barotropic._replace(
+        bebt=0.0, maxvel_barotropic=0.0, barotropic_diffusion_alpha=0.0,
         barotropic_local_subcycle_clamp=False,
         barotropic_solver="explicit_substep",
     )
-    base.update(over)
-    return LatLonCGridOceanConfig(**base)
+    drag = cfg.bottom_drag._replace(bottom_drag_r=0.0)
+    for k, v in over.items():
+        if k in drag._fields:
+            drag = drag._replace(**{k: v})
+        elif k in baro._fields:
+            baro = baro._replace(**{k: v})
+        else:
+            cfg = cfg._replace(**{k: v})
+    return cfg._replace(barotropic=baro, bottom_drag=drag)
 
 
 class TestBarotropicContinuityInvariant:

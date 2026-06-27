@@ -101,7 +101,7 @@ def _basin(*, surface_forcing_implicit, outer_integrator="ab2",
     T = np.array(state.T.data)
     T[:, :, 0] = 40.0
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3,
         implicit_vertical_mixing=implicit_vertical_mixing,
         enable_runtime_checks=False, barotropic_solver=barotropic_solver,
@@ -243,7 +243,7 @@ def test_no_forcing_conserves_tracer_mass():
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver="rigid_lid",
         outer_integrator="ab2", dt_mom_ratio=9.0,
@@ -281,7 +281,7 @@ def test_requires_implicit_vertical_mixing():
     )
     grid = create_latlon_grid(_N_LAT, _N_LON)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         surface_forcing_implicit=True, implicit_vertical_mixing=False)
     with pytest.raises(ValueError, match="requires implicit_vertical_mixing"):
         LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -335,7 +335,7 @@ def test_q_net_routed_to_surface_tracer_forcing():
     q_net = jnp.full((_N_LAT, _N_LON), 50.0)   # +50 W/m² into ocean
     sf = OceanSurfaceForcing(q_net=q_net)
 
-    cfg_e = LatLonCGridOceanConfig(
+    cfg_e = LatLonCGridOceanConfig.from_flat(
         implicit_vertical_mixing=True, enable_runtime_checks=False,
         surface_forcing_implicit=False, physics=None)
     cfg_i = cfg_e._replace(surface_forcing_implicit=True)

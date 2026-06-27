@@ -56,9 +56,9 @@ def main():
         # ---- THE CHANGE ----
         barotropic_solver="implicit_cn",          # n_barotropic_substeps unused
     )
-    print(f"barotropic_solver = {ocean_config.barotropic_solver}")
-    print(f"theta_eta = {ocean_config.barotropic_implicit_theta_eta}")
-    print(f"theta_pgf = {ocean_config.barotropic_implicit_theta_pgf}")
+    print(f"barotropic_solver = {ocean_config.barotropic.barotropic_solver}")
+    print(f"theta_eta = {ocean_config.barotropic.barotropic_implicit_theta_eta}")
+    print(f"theta_pgf = {ocean_config.barotropic.barotropic_implicit_theta_pgf}")
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
 
     template = create_initial_conditions("latlon", grid, z_coord, config)

@@ -361,7 +361,7 @@ def _build_global_problem(
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
     import os as _os
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         barotropic_solver=baro_solver,
         barotropic_implicit_force_pcg=force_pcg,
         barotropic_implicit_pcg_variant=pcg_variant,
@@ -1037,7 +1037,7 @@ def _make_phase_advancers(model, dt: float):
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
             barotropic_substeps_latlon_cgrid,
         )
-        n_sub = config.n_barotropic_substeps
+        n_sub = config.barotropic.n_barotropic_substeps
         dt_s = dt_mom / n_sub
         state_new, _ = barotropic_substeps_latlon_cgrid(
             state, dt_s, n_sub, grid, z_coord, config,
@@ -1058,8 +1058,8 @@ def _make_phase_advancers(model, dt: float):
                   "(EOS+PGF+momadv+w); no global reduction"),
         ),
     }
-    if config.barotropic_solver == "implicit_cn":
-        M = int(config.barotropic_implicit_pcg_fixed_iters)
+    if config.barotropic.barotropic_solver == "implicit_cn":
+        M = int(config.barotropic.barotropic_implicit_pcg_fixed_iters)
         # Predictor + RHS-divergence halos (config/shape-fixed, value-
         # independent); 2*M in-loop allreduces from the distributed PCG.
         specs["barotropic"] = PhaseSpec(
@@ -1074,7 +1074,7 @@ def _make_phase_advancers(model, dt: float):
                   f"regardless of resolution — the weak-scaling lever vs "
                   f"explicit_substep)"),
         )
-    elif config.barotropic_solver == "explicit_substep":
+    elif config.barotropic.barotropic_solver == "explicit_substep":
         # Codex finding 3 (+ re-review): do not hide the explicit-substep
         # barotropic block in the residual, and count its reductions
         # CORRECTLY.  Each of the n_sub substeps runs the eta-floor
@@ -1102,8 +1102,8 @@ def _make_phase_advancers(model, dt: float):
         _fi = int(
             _inspect.signature(_cr).parameters["n_iter"].default
         )
-        n_sub = int(config.n_barotropic_substeps)
-        _alpha_on = float(getattr(config, "barotropic_diffusion_alpha", 0.0)) > 0.0
+        n_sub = int(config.barotropic.n_barotropic_substeps)
+        _alpha_on = float(getattr(config.barotropic, "barotropic_diffusion_alpha", 0.0)) > 0.0
         _red_per_sub = _fi * (2 if _alpha_on else 1)
         _halo_per_sub = 4 + (2 if _alpha_on else 0)
         specs["barotropic"] = PhaseSpec(
@@ -1119,7 +1119,7 @@ def _make_phase_advancers(model, dt: float):
                   f"avoids; NOT directly comparable to the 2*M PCG-dots "
                   f"integer)"),
         )
-    elif config.barotropic_solver == "rigid_lid":
+    elif config.barotropic.barotropic_solver == "rigid_lid":
         # rigid_lid needs the host-side island flood-fill (rl_data built
         # from the concrete state via _ensure_rigid_lid_data) + a CG solve
         # whose iteration count is residual-dependent — not cleanly
@@ -1755,11 +1755,11 @@ def profile_phases(
     # Barotropic reduction-latency FLOOR (config-derived, timing-free):
     # 2*M allreduces/step * per-allreduce latency.  M is the fixed PCG
     # iteration count; only meaningful on the distributed implicit_cn path.
-    M = int(model.config.barotropic_implicit_pcg_fixed_iters)
+    M = int(model.config.barotropic.barotropic_implicit_pcg_fixed_iters)
     allreduce_count = 2 * M
     baro_latency_floor_ms = (
         allreduce_count * allreduce_latency_us / 1000.0
-        if (n_ranks > 1 and model.config.barotropic_solver == "implicit_cn")
+        if (n_ranks > 1 and model.config.barotropic.barotropic_solver == "implicit_cn")
         else 0.0
     )
 

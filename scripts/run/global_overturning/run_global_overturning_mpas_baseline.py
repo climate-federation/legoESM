@@ -167,7 +167,7 @@ def main():
         config, physics=physics, eos_config=eos_config,
         A_h=a_h_used,                                   # lifted to MPAS A_h floor
         barotropic_u_viscosity=args.baro_u_viscosity,
-        barotropic_solver=args.barotropic_solver,
+        barotropic_solver=args.barotropic.barotropic_solver,
     )
 
     print(f"=== MPAS baseline: {total_years:g}-year fresh spinup (no GM/Redi) ===")
@@ -182,13 +182,13 @@ def main():
     print(f"  A_v = {config.A_v:.1e}, K_v = {config.K_v:.1e}, "
           f"bottom_drag_r = {config.bottom_drag_coeff:.4f}")
     print(f"  GM/Redi: DISABLED (no MPAS port yet)")
-    if ocean_config.barotropic_solver == "implicit_cn":
+    if ocean_config.barotropic.barotropic_solver == "implicit_cn":
         print(f"  Barotropic solver: implicit Crank-Nicolson "
-              f"(θ_eta=θ_pgf={ocean_config.barotropic_implicit_theta_eta}, "
-              f"PCG tol={ocean_config.barotropic_implicit_pcg_tol:.0e})")
+              f"(θ_eta=θ_pgf={ocean_config.barotropic.barotropic_implicit_theta_eta}, "
+              f"PCG tol={ocean_config.barotropic.barotropic_implicit_pcg_tol:.0e})")
     else:
         print(f"  Barotropic solver: explicit subcycle "
-              f"(n_barotropic_substeps={ocean_config.n_barotropic_substeps})")
+              f"(n_barotropic_substeps={ocean_config.barotropic.n_barotropic_substeps})")
     print(f"  Barotropic u_bar viscosity: "
           f"{ocean_config.barotropic_u_viscosity:.1e} m²/s "
           f"({'enabled' if ocean_config.barotropic_u_viscosity > 0 else 'disabled'})")

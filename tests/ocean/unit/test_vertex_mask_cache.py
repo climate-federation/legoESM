@@ -34,7 +34,7 @@ from legoesm.ocean.vertical import create_ocean_z_star
 def _build(n_lat=12, n_lon=24, nlev=3, land=True):
     grid = create_latlon_grid(n_lat, n_lon)
     z = create_ocean_z_star(n_levels=nlev)
-    model = LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig())
+    model = LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat())
     mask_override = None
     if land:
         m = np.ones((n_lat, n_lon))
