@@ -152,7 +152,7 @@ def consume_from_snow_then_ice(
     rho_snow: float,
     rho_ice: float,
     L_f: float,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Convert melt energy into snow then ice removal.
 
     Snow is consumed first; any remaining energy melts ice.  Both
@@ -180,6 +180,15 @@ def consume_from_snow_then_ice(
         freshwater accounting.
     ice_melt_m : array
         Ice column actually melted [m, of ice].
+    unconsumed_energy_per_area : array
+        Surface melt energy [J/m²] left over AFTER the snow + the FULL
+        ice column latent capacity has been consumed (i.e. the column
+        melted out with surplus heat).  Non-negative.  Sign/energy
+        convention: this is heat that arrived at the surface but found no
+        ice/snow left to melt; the caller MUST route it to the ocean
+        mixed layer (ocean GAINS this heat) so the column+ocean energy
+        budget closes.  It was previously dropped (lost) on a melt-out
+        step — finding #6.
     """
     E_pos = jnp.maximum(energy_per_area, 0.0)
 
@@ -193,17 +202,25 @@ def consume_from_snow_then_ice(
     # capacity.  Without the cap the *reported* ``ice_melt_m`` could exceed
     # ``h_ice`` (while ``h_ice_new`` clamped to 0), inflating the freshwater /
     # salt / pond diagnostics the callers build from it — reporting more ice
-    # melted than ever existed (energy/mass non-closure).  Any energy left
-    # after the column is fully ablated is not melt (no ice remains); it is
-    # left unrouted here (bounded by < h_ice_min*rho_ice*L_f per step) and
-    # the column simply melts out.
+    # melted than ever existed (energy/mass non-closure).
     energy_remaining = E_pos - energy_for_snow
     ice_melt_capacity_kg_m2 = jnp.maximum(h_ice, 0.0) * rho_ice
     energy_for_ice = jnp.minimum(energy_remaining, ice_melt_capacity_kg_m2 * L_f)
     ice_melt_m = (energy_for_ice / L_f) / rho_ice
     h_ice_new = jnp.maximum(h_ice - ice_melt_m, 0.0)
 
-    return h_snow_new, h_ice_new, snow_melt_m, ice_melt_m
+    # Energy left after the snow AND the full ice column have melted (column
+    # fully ablated with surplus heat).  Previously dropped (silently lost);
+    # now RETURNED so the caller credits the ocean mixed layer (finding #6).
+    # >= 0 by construction (energy_for_snow + energy_for_ice <= E_pos).
+    unconsumed_energy_per_area = jnp.maximum(
+        E_pos - energy_for_snow - energy_for_ice, 0.0,
+    )
+
+    return (
+        h_snow_new, h_ice_new, snow_melt_m, ice_melt_m,
+        unconsumed_energy_per_area,
+    )
 
 
 def consume_sublimation_from_snow_then_ice(

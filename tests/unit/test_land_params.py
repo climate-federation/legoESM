@@ -386,6 +386,80 @@ class TestFactory:
             create_land_param_provider("neural", NCOL, land_config)
 
 
+class TestCustomBounds:
+    """Finding #10: providers built with CUSTOM param_bounds must apply THOSE
+    bounds in the sigmoid constraint, not the module-global bounds_arrays()
+    (fixed 12-param PARAM_NAMES order).  Previously _constrained_table and
+    _forward_single called bounds_arrays(), silently ignoring custom bounds."""
+
+    def test_pft_custom_bounds_honored(self):
+        # Tighter, DIFFERENT bounds than the defaults (full 12-param order).
+        default_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
+        custom_bounds = [(lo + 0.1 * (hi - lo), hi - 0.1 * (hi - lo))
+                         for (lo, hi) in default_bounds]
+        fracs = jnp.zeros((NCOL, N_PFT_CLM5)).at[:, 1].set(1.0)
+        provider = PFTParamProvider.from_defaults(
+            fracs, param_bounds=custom_bounds,
+        )
+        params = provider()
+        # Round-trip self-consistency: the constrained table built with the
+        # SAME custom bounds must reproduce the output (would FAIL if the
+        # forward sigmoid used the default bounds while from_defaults used the
+        # custom ones).
+        lo = jnp.array([b[0] for b in custom_bounds])
+        hi = jnp.array([b[1] for b in custom_bounds])
+        constrained = lo + (hi - lo) * jax.nn.sigmoid(provider.raw_table)
+        for i, name in enumerate(PARAM_NAMES):
+            actual = getattr(params, name)
+            assert jnp.allclose(actual, constrained[1, i], atol=1e-4), name
+            # Every output must respect the CUSTOM (tighter) bounds.
+            assert jnp.all(actual >= lo[i] - 1e-6)
+            assert jnp.all(actual <= hi[i] + 1e-6)
+
+    def test_neural_custom_bounds_honored(self):
+        default_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
+        # Shift the bounds well away from the defaults so a default-bounds
+        # sigmoid would produce out-of-range values.
+        custom_bounds = [(lo + 0.25 * (hi - lo), lo + 0.45 * (hi - lo))
+                         for (lo, hi) in default_bounds]
+        provider = NeuralParamProvider(
+            key=KEY, n_input=20, param_bounds=custom_bounds,
+        )
+        lo = jnp.array([b[0] for b in custom_bounds])
+        hi = jnp.array([b[1] for b in custom_bounds])
+        for seed in range(4):
+            features = jax.random.normal(jax.random.PRNGKey(seed), (NCOL, 20))
+            params = provider(features)
+            for j, name in enumerate(PARAM_NAMES):
+                val = getattr(params, name)
+                # Outputs must fall inside the CUSTOM band (sigmoid range).
+                assert jnp.all(val >= lo[j] - 1e-6), (
+                    f"{name} below custom bound: {float(val.min())} < {float(lo[j])}"
+                )
+                assert jnp.all(val <= hi[j] + 1e-6), (
+                    f"{name} above custom bound: {float(val.max())} > {float(hi[j])}"
+                )
+
+    def test_pft_constrained_table_uses_instance_bounds(self):
+        # Direct contrast: an instance carrying custom bounds must NOT reproduce
+        # the default-bounds table.
+        default_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
+        custom_bounds = [(lo, lo + 0.2 * (hi - lo))
+                         for (lo, hi) in default_bounds]
+        fracs = jnp.ones((NCOL, N_PFT_CLM5)) / N_PFT_CLM5
+        prov_default = PFTParamProvider.from_defaults(fracs)
+        prov_custom = PFTParamProvider.from_defaults(
+            fracs, param_bounds=custom_bounds,
+        )
+        # The two providers must produce DIFFERENT albedo (custom band is tighter
+        # and lower), proving the instance bounds drive the constraint.
+        a_def = prov_default().albedo_veg
+        a_cus = prov_custom().albedo_veg
+        assert not jnp.allclose(a_def, a_cus), (
+            "custom bounds changed nothing -> bounds_arrays() still used"
+        )
+
+
 class TestReadSpatialParam:
     """read_spatial_param: the shared slab/multilayer spatial-param accessor
     (deduped from per-module _get helpers, ponytail 2026-06-17)."""

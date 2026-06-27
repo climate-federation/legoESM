@@ -1638,12 +1638,21 @@ def _thermo_v2(
     sw_absorbed = sw_result.sw_absorbed_surface
     sw_penetrated = sw_result.sw_penetrated
 
-    # Longwave net.
+    # Longwave net (gray-radiation surface BC; positive = into surface).
+    # Upward LW = thermal emission + reflected downwelling:
+    #   lw_up = e*sigma*T^4 + (1-e)*lw_down.
+    # Net LW at the skin is the full downwelling minus the full upwelling,
+    #   lw_net = lw_down - lw_up = e*lw_down - e*sigma*T^4,
+    # i.e. (absorbed downwelling) - (emitted).  Writing it as
+    #   e*lw_down - lw_up
+    # double-removes the reflected (1-e)*lw_down term (already inside lw_up),
+    # under-counting lw_net by (1-e)*lw_down (~8 W/m^2 at e=0.97).  This
+    # matches core.surface_radiation_fluxes used by _thermo_single.
     lw_up = (
         config.emissivity_ice * constants.sigma_sb * T_ice ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
-    lw_net = config.emissivity_ice * forcing.lw_down - lw_up
+    lw_net = forcing.lw_down - lw_up
     # Q_sfc is the net heat available at the surface skin.
     Q_sfc = sw_absorbed + lw_net - shflx - lhflx
 
@@ -1698,9 +1707,19 @@ def _thermo_v2(
     # energy is under-counted by the conductive term and heat is lost.
     excess_W = jnp.maximum(T_trial - config.T_melt_surface, 0.0) * (cap_dt + K_cond)
     energy_for_melt = excess_W * dt  # [J/m²]
-    h_snow_after_melt, h_after_melt, snow_melt_m, ice_melt_m = consume_from_snow_then_ice(
+    (
+        h_snow_after_melt, h_after_melt, snow_melt_m, ice_melt_m,
+        surface_melt_unconsumed_J,
+    ) = consume_from_snow_then_ice(
         energy_for_melt, h_snow, h, config.snow.rho_snow, config.rho_ice, config.L_f,
     )
+    # Surplus surface-melt energy left after the column fully ablated [J/m^2,
+    # per-ice-area].  It must warm the ocean mixed layer (finding #6): convert
+    # to a per-grid-cell flux and CREDIT the ocean below (negative contribution
+    # to ocean_heat_extraction, whose +sign means ocean LOSES heat to the ice).
+    # Weighted by the INPUT ``conc`` (the same ice-area snapshot used for
+    # ``F_ocean * conc`` and the penetrated-SW channel).
+    surface_melt_ocean_gain = surface_melt_unconsumed_J / dt * conc  # [W/m^2]
 
     # 6. Basal exchange (ocean side).  After clipping ``h`` at zero
     #    we recover the *actual* basal mass change so the FW + salt
@@ -2073,6 +2092,10 @@ def _thermo_v2(
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
         + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        # Surplus surface-melt heat from a melt-out step warms the ocean
+        # (ocean GAINS -> NEGATIVE extraction); previously this energy was
+        # dropped on the floor (finding #6).
+        - surface_melt_ocean_gain
     )
 
     # Pack diagnostics for the caller.
@@ -2363,9 +2386,18 @@ def _step_dynamic_v2(
         # any concentration history without a 1/conc normalisation (F11).
         sum_conc_pre = jnp.sum(conc_pre, axis=-1, keepdims=False)
         sum_conc_post = jnp.sum(conc, axis=-1, keepdims=False)
+        # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis: it matches
+        # the single-cat ``conc_basis`` contract so resp.lhflx * max(pre,post)
+        # == L_s * sublim_mass_total identically across paths (sublim_mass_total
+        # is on the INPUT-conc basis).  The SENSIBLE-heat and STRESS numerators
+        # are weighted by the POST-thermo conc, and blend_tiles re-multiplies
+        # them by f_ice ∝ POST conc, so they must divide by ``sum_conc_post``,
+        # NOT max(pre, post): under net melt (post < pre) the old shared
+        # denominator under-reported SH/stress to the atmosphere (finding #9).
         sum_conc_safe = jnp.maximum(
             jnp.maximum(sum_conc_pre, sum_conc_post), 1e-30,
         )
+        sum_conc_post_safe = jnp.maximum(sum_conc_post, 1e-30)
         fw_per_cat = jnp.stack(fw_flux_list, axis=-1)
         heat_per_cat = jnp.stack(ocean_heat_list, axis=-1)
         fw_flux_total = jnp.sum(fw_per_cat, axis=-1)
@@ -2383,7 +2415,10 @@ def _step_dynamic_v2(
         # by the post-step ``f_ice``): the atmosphere sees the instantaneous
         # surface, so the post-step fraction is the right weight.  Stored
         # already concentration-weighted, then normalised by the ice fraction.
-        shflx_resp = jnp.sum(jnp.stack(shflx_aggsum_components, axis=-1), axis=-1) / sum_conc_safe
+        shflx_resp = (
+            jnp.sum(jnp.stack(shflx_aggsum_components, axis=-1), axis=-1)
+            / sum_conc_post_safe
+        )
         # LATENT: derive the per-ice-area latent from the REALIZED sublimation
         # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
         # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
@@ -2391,8 +2426,14 @@ def _step_dynamic_v2(
         # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
         lhflx_resp = constants.L_s * sublim_mass_total / sum_conc_safe
-        tau_x_resp = jnp.sum(jnp.stack(tau_x_components, axis=-1), axis=-1) / sum_conc_safe
-        tau_y_resp = jnp.sum(jnp.stack(tau_y_components, axis=-1), axis=-1) / sum_conc_safe
+        tau_x_resp = (
+            jnp.sum(jnp.stack(tau_x_components, axis=-1), axis=-1)
+            / sum_conc_post_safe
+        )
+        tau_y_resp = (
+            jnp.sum(jnp.stack(tau_y_components, axis=-1), axis=-1)
+            / sum_conc_post_safe
+        )
 
     else:
         result = _thermo_v2(

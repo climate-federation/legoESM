@@ -150,6 +150,16 @@ def _ridging_column_kernel(
     # Ridge thickness range (Hibler / Lipscomb).
     H_min = 2.0 * h_part
     H_max = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part, 1e-6)), H_star)
+    # Clamp the ridge-thickness CEILING to the ITD top bound ``hi[-1]`` (the
+    # categories contiguously tile ``[lo[0], hi[-1]] = [0, 100] m``).  When a
+    # user raises ``H_star`` above hi[-1] (the config bound allows up to 200 m),
+    # an unclamped ``H_max > hi[-1]`` makes the overlap integral below cover
+    # only ``[H_min, hi[-1]]`` of the ``[H_min, H_max]`` ridge range, so
+    # ``sum_j overlap_frac < 1`` and the ridge area+volume ABOVE hi[-1] are
+    # silently DROPPED (conservation leak).  Clamping to hi[-1] keeps the
+    # overlap a full partition of ``[H_min, H_max]`` so ridge area and volume
+    # are conserved (finding #7).
+    H_max = jnp.minimum(H_max, hi[-1])
     H_max = jnp.maximum(H_max, H_min + 1e-3)  # coeff-ok: min ridge-thickness width [m]
     H_width = H_max - H_min
 

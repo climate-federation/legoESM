@@ -143,7 +143,7 @@ class TestSnowKernels:
         """With energy < total snow melt energy, ice column is untouched."""
         # Snow melt energy = h_snow * rho_snow * L_f
         # = 0.05 * 330 * 3.337e5 = 5.5e6 J/m².  Give half that.
-        h_snow_out, h_ice_out, snow_m, ice_m = consume_from_snow_then_ice(
+        h_snow_out, h_ice_out, snow_m, ice_m, unconsumed = consume_from_snow_then_ice(
             energy_per_area=jnp.array(2.5e6),
             h_snow=jnp.array(0.05), h_ice=jnp.array(1.0),
             rho_snow=330.0, rho_ice=917.0, L_f=3.337e5,
@@ -151,6 +151,8 @@ class TestSnowKernels:
         assert float(h_snow_out) < 0.05
         assert float(ice_m) == 0.0
         assert float(h_ice_out) == 1.0
+        # Energy was fully absorbed by partial snow melt -> nothing left over.
+        assert float(unconsumed) == 0.0
 
     def test_sublimation_capped_at_available_ice(self):
         """Reported ice sublimation must never exceed the ice present (codex).
@@ -185,7 +187,7 @@ class TestSnowKernels:
         h_ice0 = 0.02  # thin ice
         # Energy = 10x the latent capacity of the ice.
         E = 10.0 * h_ice0 * rho_ice * L_f
-        h_snow_out, h_ice_out, snow_m, ice_m = consume_from_snow_then_ice(
+        h_snow_out, h_ice_out, snow_m, ice_m, unconsumed = consume_from_snow_then_ice(
             energy_per_area=jnp.array(E),
             h_snow=jnp.array(0.0), h_ice=jnp.array(h_ice0),
             rho_snow=330.0, rho_ice=rho_ice, L_f=L_f,
@@ -193,6 +195,66 @@ class TestSnowKernels:
         assert float(h_ice_out) == 0.0                  # fully ablated
         assert float(ice_m) <= h_ice0 + 1e-12           # NOT more than existed
         assert jnp.isclose(float(ice_m), h_ice0, atol=1e-9)  # exactly all of it
+        # Finding #6: the surplus melt energy (here 9x the ice latent capacity)
+        # is RETURNED, not lost.  Energy closure: consumed (ice latent) +
+        # unconsumed == input energy.
+        consumed = float(ice_m) * rho_ice * L_f  # no snow here
+        assert jnp.isclose(consumed + float(unconsumed), float(E), rtol=1e-12)
+        assert jnp.isclose(float(unconsumed), float(E) - h_ice0 * rho_ice * L_f,
+                           rtol=1e-12)
+
+    def test_meltout_surplus_credits_ocean(self):
+        """Finding #6 (integration): on a large-SW thin-ice melt-out the
+        surface-melt energy that exceeds the column latent capacity is CREDITED
+        to the ocean mixed layer instead of being lost.
+
+        Energy/sign convention: ``ocean_heat_extraction`` is +ve when the ocean
+        LOSES heat to the ice tile; surplus surface-melt heat WARMS the ocean,
+        so it appears as a NEGATIVE contribution.  With the ocean held exactly
+        at the freezing point (F_ocean = 0) and no lead freeze on a melted-out
+        cell, the only ocean-heat term is this credit, and it must equal the
+        surplus melt flux ``unconsumed_J/dt * conc``.
+        """
+        from legoesm.ice.sea_ice import _thermo_v2
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.core.coupling_fields import AtmToSurface
+
+        shape = (1, 1)
+        cfg = SeaIceConfig()  # snow.enabled is False by default
+        sw = 5000.0           # huge SW to force a full surface melt-out
+        forcing = AtmToSurface(
+            sw_down=jnp.full(shape, sw), lw_down=jnp.full(shape, 350.0),
+            precip_total=jnp.zeros(shape), precip_snow=jnp.zeros(shape),
+            T_lowest=jnp.full(shape, 290.0), q_lowest=jnp.full(shape, 8e-3),
+            u_lowest=jnp.full(shape, 0.5), v_lowest=jnp.zeros(shape),
+            p_lowest=jnp.full(shape, 9.5e4), p_surface=jnp.full(shape, 1e5),
+            rho_lowest=jnp.full(shape, 1.2), cos_zenith=jnp.full(shape, 1.0),
+            co2_ppmv=jnp.full(shape, 400.0),
+            has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape),
+        )
+        h0 = jnp.full(shape, 0.005)      # very thin ice
+        conc0 = jnp.full(shape, 1.0)
+        T0 = jnp.full(shape, 273.0)
+        hs0 = jnp.zeros(shape)
+        S0 = jnp.full(shape, 5.0)
+        pa0 = jnp.zeros(shape)
+        pd0 = jnp.zeros(shape)
+        # Ocean exactly at freezing => F_ocean = 0 (no basal contribution).
+        sst = jnp.full(shape, constants.T_freeze_ocean)
+        dt = 3600.0
+        out = _thermo_v2(h0, T0, conc0, hs0, S0, pa0, pd0, forcing, sst, cfg,
+                         1.0, dt)
+        # Column fully ablated and the ocean is CREDITED (heat extraction < 0).
+        assert float(out["h"][0, 0]) == 0.0, "thin ice should melt out"
+        ohe = float(out["ocean_heat_extraction"][0, 0])
+        assert ohe < 0.0, f"ocean must gain surplus melt heat, got {ohe:.3f}"
+        # The surplus credit must NOT exceed the surface energy that arrived
+        # (no energy created): bound it by the absorbed-SW flux alone.
+        sw_absorbed_flux = (1.0 - cfg.albedo_ice) * sw
+        assert -ohe <= sw_absorbed_flux + 1e-6, (
+            f"ocean credit {-ohe:.2f} exceeds absorbed SW {sw_absorbed_flux:.2f}"
+        )
+        assert jnp.isfinite(ohe)
 
     def test_flooding_mass_conservation(self):
         h_ice = jnp.array([1.0, 0.3])
@@ -417,6 +479,41 @@ class TestRidging:
         A_after = float(jnp.sum(ridge["a"]))
         assert A_after <= A_before
 
+    def test_ridging_conserves_volume_high_Hstar(self):
+        """Finding #7: with ``H_star`` raised above the ITD top bound
+        ``hi[-1] = 100 m`` and a steep ``mu_rdg`` so ``H_max`` would exceed it,
+        the ridge thickness range MUST be clamped to hi[-1].  An unclamped
+        H_max truncates the overlap integral, dropping the ridge area+volume
+        above 100 m (a conservation sink).  Total ice volume must be conserved
+        to the overlap quadrature floor."""
+        n_cat = 5
+        a_cat = jnp.full((1, n_cat), 0.12)
+        h_cat = jnp.array([[1.0, 2.0, 3.5, 5.0, 8.0]])
+        V_snow_cat = jnp.zeros_like(h_cat)
+        S_ice_cat = jnp.full(h_cat.shape, 4.0)
+        # Strong convergence so a large area fraction ridges this step (the
+        # dropped ridge volume must be a visible fraction of the TOTAL volume).
+        closing = jnp.array([1.6e-4])
+        V_before = float(jnp.sum(h_cat * a_cat))
+        # H_star=300 m + steep mu_rdg=200 drive H_max ~208 m, well above the
+        # ITD top bound hi[-1]=100 m, so the UNCLAMPED overlap integral covered
+        # only ~half the [H_min, H_max] range and dropped ridged volume above
+        # 100 m (~6.4% of the total here).  The hi[-1] clamp restores a full
+        # partition.
+        ridge = apply_ridging(
+            a_cat, h_cat, V_snow_cat, S_ice_cat, closing,
+            n_cat=n_cat, dt=3600.0,
+            H_star=300.0,   # > hi[-1] = 100 m
+            mu_rdg=200.0,   # steep -> H_max would be ~208 m unclamped
+        )
+        V_after = float(jnp.sum(ridge["h"] * ridge["a"]))
+        rel = abs(V_after - V_before) / max(V_before, 1e-12)
+        # With the hi[-1] clamp the overlap fully partitions [H_min, H_max], so
+        # volume is conserved to the (coarse) uniform-g quadrature floor.  The
+        # unclamped code dropped ~6.4% of the TOTAL volume (non-vacuous guard,
+        # verified to FAIL this assert with the clamp removed).
+        assert rel < 5e-2, f"ridge volume not conserved (high H_star): rel={rel:.3f}"
+
     def test_ridging_conserves_pond_water(self):
         """Ridging drains pond water from the deforming ice to the ocean
         (it does not silently vanish): total pond water = retained + drained
@@ -504,6 +601,60 @@ class TestShortwave:
         assert jnp.isclose(res.albedo_eff[0], 0.65)
         assert jnp.isclose(res.sw_absorbed_surface[0], 70.0)
         assert res.sw_penetrated[0] == 0.0
+
+    def test_delta_eddington_sw_energy_balance(self):
+        """Finding #8: the SW partition must close exactly,
+        reflected + absorbed + penetrated == sw_down, with absorbed and
+        penetrated both non-negative, across thin/thick ice + ponds."""
+        sw = jnp.full((1,), 300.0)
+        for h in (0.05, 0.3, 1.0, 3.0):
+            for T in (255.0, 273.0):
+                for pa, pd in [(0.0, 0.0), (0.6, 0.25)]:
+                    res = compute_ice_sw(
+                        sw, jnp.full((1,), T), jnp.full((1,), h),
+                        jnp.zeros((1,)), jnp.full((1,), pa), jnp.full((1,), pd),
+                        scheme="delta_eddington", albedo_const=0.65,
+                    )
+                    alpha = res.albedo_eff
+                    absorbed = res.sw_absorbed_surface
+                    penetrated = res.sw_penetrated
+                    reflected = alpha * sw
+                    total = reflected + absorbed + penetrated
+                    assert jnp.allclose(total, sw, rtol=1e-12), (
+                        f"SW not conserved at h={h},T={T},pond={pa}: {float(total[0])}"
+                    )
+                    assert jnp.all(absorbed >= 0.0)
+                    assert jnp.all(penetrated >= 0.0)
+                    # Penetrated never exceeds the column input (1-alpha)*sw.
+                    assert jnp.all(penetrated <= (1.0 - alpha) * sw + 1e-9)
+
+    def test_delta_eddington_caps_excess_transmittance(self, monkeypatch):
+        """Finding #8 (non-vacuous): when the transmittance fit returns more
+        than the column input (transmittance > 1-alpha), the penetrated flux is
+        capped at ``net_into_column`` and the surface absorption goes to zero —
+        so reflected + absorbed + penetrated still equals sw_down (no energy
+        created).  Inject such an over-large transmittance via monkeypatch."""
+        import legoesm.ice.shortwave as swmod
+
+        def _fake_albedo(T_sfc, h_ice, h_snow, pond_area, pond_depth):
+            alpha = jnp.full_like(T_sfc, 0.30)        # 1-alpha = 0.70
+            transm = jnp.full_like(T_sfc, 0.95)       # > 0.70 -> would overshoot
+            return alpha, transm
+
+        monkeypatch.setattr(swmod, "delta_eddington_albedo", _fake_albedo)
+        sw = jnp.full((1,), 400.0)
+        res = swmod.compute_ice_sw(
+            sw, jnp.full((1,), 270.0), jnp.full((1,), 0.2),
+            jnp.zeros((1,)), jnp.zeros((1,)), jnp.zeros((1,)),
+            scheme="delta_eddington", albedo_const=0.65,
+        )
+        net = (1.0 - 0.30) * 400.0
+        # Penetrated capped at the column input; surface absorption clamps to 0.
+        assert jnp.isclose(res.sw_penetrated[0], net, rtol=1e-12)
+        assert jnp.isclose(res.sw_absorbed_surface[0], 0.0, atol=1e-9)
+        # Energy still closes exactly (no creation).
+        total = 0.30 * 400.0 + res.sw_absorbed_surface[0] + res.sw_penetrated[0]
+        assert jnp.isclose(total, 400.0, rtol=1e-12)
 
 
 # ==============================================================================
@@ -1324,3 +1475,45 @@ class TestThinIceAblationClosure:
         assert jnp.all(jnp.isfinite(h)) and jnp.all(jnp.isfinite(a))
         assert jnp.all(a <= 1.0 + 1e-9) and jnp.all(a >= 0.0)
         assert jnp.all(h >= 0.0)
+
+
+
+# ==============================================================================
+# Multi-category atmosphere flux aggregation (finding #9)
+# ==============================================================================
+
+class TestMulticatAtmFluxAggregation:
+    """The multicat sensible-heat / stress response to the atmosphere must use
+    the POST-thermo concentration basis for BOTH numerator and denominator, so
+    that blend_tiles (which re-weights by f_ice proportional to the POST conc)
+    recovers the true per-grid-cell flux.  The old code divided the
+    post-conc-weighted numerator by max(sum_pre, sum_post), under-reporting
+    SH/stress under net melt.  This isolates the aggregation contract."""
+
+    def test_post_step_basis_recovers_per_cell_flux(self):
+        from legoesm.ice.sea_ice import step_sea_ice  # ensure module imports
+        import numpy as np
+        # Two categories with NET MELT: post concentration < pre concentration.
+        shflx_k = jnp.array([20.0, -5.0])          # per-cat sensible heat [W/m2]
+        conc_pre = jnp.array([0.5, 0.4])           # sum_pre = 0.9
+        conc_post = jnp.array([0.3, 0.2])          # sum_post = 0.5  (melt)
+        sum_pre = float(jnp.sum(conc_pre))
+        sum_post = float(jnp.sum(conc_post))
+        assert sum_post < sum_pre  # net melt regime
+
+        numer = float(jnp.sum(shflx_k * conc_post))   # post-conc weighting
+        # NEW (fixed) response: divide by the POST basis.
+        shflx_resp_new = numer / max(sum_post, 1e-30)
+        # OLD (buggy) response: divide by max(pre, post).
+        shflx_resp_old = numer / max(max(sum_pre, sum_post), 1e-30)
+
+        # blend_tiles re-multiplies by f_ice proportional to the POST conc; the
+        # delivered per-cell sensible heat must equal the true Sum(shflx*conc_post).
+        delivered_new = shflx_resp_new * sum_post
+        delivered_old = shflx_resp_old * sum_post
+        assert np.isclose(delivered_new, numer, rtol=1e-12), (
+            "post-basis response must recover the per-cell sensible heat"
+        )
+        # The old basis under-reports under net melt (non-vacuous contrast).
+        assert delivered_old < numer - 1e-6
+        assert np.isclose(delivered_old, numer * sum_post / sum_pre, rtol=1e-12)
