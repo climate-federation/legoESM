@@ -35,7 +35,7 @@ class TestBaseAssembly:
         gm_redi = create_gm_redi_config(cfg)
         actual = global_overturning_model_config(
             cfg, physics=physics, eos_config=eos, gm_redi_cfg=gm_redi)
-        expected = LatLonCGridOceanConfig(
+        expected = LatLonCGridOceanConfig.from_flat(
             physics=physics,
             eos="linear",
             eos_linear=eos,
@@ -63,7 +63,7 @@ class TestBaseAssembly:
         assert mc.A_h == cfg.A_h
         assert mc.A_v == cfg.A_v
         assert mc.K_v == cfg.K_v
-        assert mc.bottom_drag_r == cfg.bottom_drag_coeff
+        assert mc.bottom_drag.bottom_drag_r == cfg.bottom_drag_coeff
         assert mc.eos == "linear"
         assert mc.eos_linear is not None
         # T-only buoyancy: linear EOS carries the config's alpha_T, beta_S=0.
@@ -76,13 +76,13 @@ class TestBaseAssembly:
         default (the structural SCHEME fields are pinned separately; see
         test_recipe_snapshots)."""
         mc = global_overturning_model_config(GlobalOverturningConfig())
-        default = LatLonCGridOceanConfig()
+        default = LatLonCGridOceanConfig.from_flat()
         for field in ("B_h", "C_smag", "C_smag_lap", "slope_foot_alpha",
                       "A_h_lat_scaling", "A_h_floor", "A_h_eq_boost",
                       "A_h_eq_sigma_deg", "A_h_merid", "n_barotropic_substeps",
                       "bottom_drag_bbl_thickness", "bottom_drag_bg_velocity",
                       "maxvel_barotropic"):
-            assert getattr(mc, field) == getattr(default, field), field
+            assert mc.flat_get(field) == default.flat_get(field), field
 
     def test_none_config_uses_defaults(self):
         assert global_overturning_model_config(None).A_h == \
@@ -115,12 +115,12 @@ class TestOverrides:
             n_barotropic_substeps=30,
             bottom_drag_bbl_thickness=100.0,
         )
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.B_h == 5.0e9
         assert mc.C_smag == 0.2
         assert mc.A_h == 1.234e5            # override beats config.A_h
         assert mc.A_h_lat_scaling is True
-        assert mc.bottom_drag_bbl_thickness == 100.0
+        assert mc.bottom_drag.bottom_drag_bbl_thickness == 100.0
 
     def test_unknown_field_raises(self):
         with pytest.raises(TypeError):
@@ -187,7 +187,7 @@ class TestMPASFactory:
         assert mc.A_h == cfg.A_h
         assert mc.A_v == cfg.A_v
         assert mc.K_v == cfg.K_v
-        assert mc.bottom_drag_r == cfg.bottom_drag_coeff
+        assert mc.bottom_drag_r == cfg.bottom_drag_coeff  # MPAS: flat (not grouped)
         assert mc.eos == "linear"          # NB: MPASOceanConfig defaults to "wright"
         assert mc.eos_linear is not None
 
@@ -206,7 +206,7 @@ class TestMPASFactory:
             barotropic_u_viscosity=1.0e3,
         )
         assert mc.A_h == 9.9e5             # override beats config.A_h
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic_solver == "implicit_cn"  # MPAS: flat (not grouped)
         assert mc.barotropic_u_viscosity == 1.0e3
 
     def test_gm_redi_off_by_default(self):

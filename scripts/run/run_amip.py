@@ -23,6 +23,11 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
+# Early JAX distributed init — must happen before any legoESM/JAX import that
+# triggers XLA backend discovery (jax.numpy import in core/precision.py).
+from legoesm.parallel.early_init import maybe_init_jax_distributed
+maybe_init_jax_distributed()
+
 from legoesm import constants
 from legoesm.driver.config import (
     DycoreConfig,
@@ -73,6 +78,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["cubed_sphere", "gaussian", "latlon",
                                  "mpas",
                                  "voronoi", "icosahedral", "mpas_voronoi"])
+    parser.add_argument("--use-duogrid", action="store_true", default=False,
+                        help="Enable FV3 Duo-Grid halo exchange (required for MPI multi-node)")
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -191,6 +198,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
     parser.add_argument("--restart-from", type=str, default=None)
+    parser.add_argument("--restart-start-day", type=float, default=None,
+                        help="Override start_day after loading checkpoint. "
+                             "Pass 0.0 at year boundaries to reset the day counter.")
     parser.add_argument("--checkpoint-format", type=str,
                         default=_OUTPUT_DEFAULTS.checkpoint_format,
                         choices=["npz", "zarr"],
@@ -231,6 +241,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
                         help="RRTMGP g-point batch size (0 = auto/checkpointed)")
+    parser.add_argument("--no-rrtmgp-gpoint-checkpoint",
+                        dest="rrtmgp_gpoint_checkpoint",
+                        action="store_false",
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_checkpoint,
+                        help="Disable per-g-point jax.checkpoint(prevent_cse=True) "
+                             "in the RRTMGP two-stream scan. False = plain lax.scan: "
+                             "smaller compiled footprint / faster cold compile for "
+                             "FORWARD/inference runs (relieves the MPAS/L5 XLA compile "
+                             "wall). Keep True for reverse-mode AD / training.")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -358,9 +377,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Load and apply volcanic longwave aerosol optical depth")
 
     # Subgrid physics
-    parser.add_argument("--convection", type=str, default="sbm",
+    parser.add_argument("--convection", type=str, default="tiedtke",
                         choices=[
                             "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
+                            "zhang_mcfarlane", "kain_fritsch", "emanuel",
+                            "tiedtke", "bechtold",
                         ])
     parser.add_argument("--turbulence", type=str, default="none",
                         choices=[
@@ -368,10 +389,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
     parser.add_argument("--gravity-wave-drag", type=str, default="none",
-                        choices=[
-                            "none", "rayleigh", "lindzen", "mcfarlane",
-                            "hines", "prognostic_spectral", "ml_emulator",
-                        ])
+                        help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
+                             "hines, prognostic_spectral, ml_emulator, or a "
+                             "'+'-joined composite of the diagnostic sources "
+                             "(e.g. 'hines+mcfarlane' to run non-orographic + "
+                             "orographic together). Validated in ExperimentConfig.")
+    # Tuned air-sea + cloud knobs (the CMIP-realism calibration) — mirror
+    # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
+    # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
+    parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
+                             "MOST with convective gustiness; the tuned slab value).")
+    parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
+                        default=0.0,
+                        help="COARE convective-gustiness BL depth z_i [m] (0=off; "
+                             "tuned slab value 300).")
+    parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
+                        default=None,
+                        help="In-cloud diagnostic condensate fed to radiation "
+                             "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
+    parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
+                        help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--convective-cloud", dest="convective_cloud",
+                        action="store_true", default=False,
+                        help="Add the convective (thin-cirrus) cloud-fraction "
+                             "source (the tuned slab value is ON).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
@@ -389,6 +432,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics
     parser.add_argument("--clouds", type=str, default="none",
                         choices=["none", "sundqvist", "xu_randall"])
+    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.7,
+                        help="Critical RH for BL cloud onset (Sundqvist). "
+                             "Only active when --cloud-sigma-bl < 1.0. "
+                             "Recommended ~0.55 for AMIP. Default 0.7 (disabled).")
+    parser.add_argument("--cloud-sigma-bl", type=float, default=1.0,
+                        help="Sigma level (p/p_s) above which rh_crit_bl applies. "
+                             "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")
     parser.add_argument("--microphysics", type=str, default="none",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
@@ -400,6 +450,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the constant Nc_0.  Requires "
                              "--aerosol-forcing external and "
                              "--microphysics morrison.")
+    parser.add_argument("--subgrid-autoconversion", action="store_true",
+                        default=False,
+                        help="Evaluate warm-rain autoconversion/accretion on "
+                             "in-cloud water q_c/cf and scale by cloud fraction "
+                             "(Morrison & Gettelman 2008 sub-grid closure) so "
+                             "the non-linear KK2000 rate is not under-fed by "
+                             "the grid-mean.  Requires --microphysics morrison.")
+    parser.add_argument("--convective-precip-efficiency", type=float,
+                        default=0.0,
+                        help="Tiedtke convective precipitation efficiency "
+                             "[0,1] (1989 in-updraft precipitation). >0 "
+                             "diverts that fraction of convective condensate "
+                             "to rain (sediments via microphysics, invisible "
+                             "to radiation) instead of detraining it all as "
+                             "suspended cloud. Observed CPE ~0.5-0.9. Requires "
+                             "--convection tiedtke.")
+    parser.add_argument("--convective-buoyancy-death-memory",
+                        action="store_true",
+                        help="Tiedtke plume buoyancy-death memory: once a "
+                             "plume exhausts its cumulative buoyancy budget it "
+                             "stays dead instead of reviving above an inversion "
+                             "(default off lets dead plumes resume nonzero M_u "
+                             "aloft, leaking convective heating to the ~100 hPa "
+                             "cold point). Requires --convection tiedtke.")
     parser.add_argument("--nc-from-aerosol", action="store_true",
                         dest="aerosol_ccn",
                         help="Alias for --aerosol-ccn")
@@ -412,6 +486,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
                              "When set, activates the slab-land surface tile "
                              "with the land fraction from this file.")
+    parser.add_argument("--albedo-land-file", type=str, default="",
+                        help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
+                             "When set (with --land-mask-file), overrides the "
+                             "latitude-vegetation albedo on the land tile.")
+    parser.add_argument("--subgrid-orography-file", type=str, default="",
+                        help="Subgrid orographic stddev NetCDF (ICON-extpar "
+                             "SSO_STDH on a regular lat-lon grid). When set with "
+                             "an orographic GWD scheme (mcfarlane/lindzen), the "
+                             "per-column launch height comes from this field "
+                             "(real mountains, ~0 over ocean) instead of the "
+                             "scalar 500 m default.")
+    parser.add_argument("--albedo-land-month", type=int, default=0,
+                        help="Month (1-12) to pick from a monthly land-albedo "
+                             "climatology; 0 = annual mean (default).")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -526,6 +614,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top or 200.0,
         stretching=args.stretching or 2.0,
+        use_duogrid=getattr(args, "use_duogrid", False),
     )
 
     dycore_config = DycoreConfig(
@@ -578,6 +667,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         unfused_radiation=args.unfused_radiation,
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
+        rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         diurnal_cycle=args.diurnal_cycle,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
@@ -602,17 +692,31 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         cloud_scheme=args.clouds,
+        cloud_rh_crit_bl=args.cloud_rh_crit_bl,
+        cloud_sigma_bl=args.cloud_sigma_bl,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
+        subgrid_autoconversion=args.subgrid_autoconversion,
+        convective_precip_efficiency=args.convective_precip_efficiency,
+        convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
+        # Tuned air-sea + cloud calibration (mirror run_coupled).
+        surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_gustiness_zi=args.surface_gustiness_zi,
+        cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
+        cloud_rh_crit=args.cloud_rh_crit,
+        convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
+        albedo_land_path=args.albedo_land_file,
+        albedo_land_month=args.albedo_land_month,
+        subgrid_orography_path=args.subgrid_orography_file,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
         albedo_ice=args.albedo_ice,
@@ -681,13 +785,27 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
             parser.error("--aerosol-ccn requires --microphysics morrison "
                          "(the only scheme with a specified-Nc aerosol "
                          "mode)")
-        if (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-                or args.discretization in ("spectral", "mpas")):
-            parser.error("--aerosol-ccn is wired through the coupled "
-                         "physics pipeline (cubed_sphere / latlon only); "
-                         "the MPAS and spectral standalone paths do not "
-                         "fill the specified-Nc field yet.")
+        # MPAS now fills the specified-Nc field via the combined-physics
+        # microphysics + radiation factories (driven by the morrison
+        # ``nc_from_aerosol`` switch).  Only the SPECTRAL standalone path
+        # still lacks the fill.
+        if args.discretization == "spectral":
+            parser.error("--aerosol-ccn is not wired on the spectral "
+                         "standalone path yet (the specified-Nc field is "
+                         "not filled there); use cubed_sphere / latlon / "
+                         "mpas, or drop --aerosol-ccn.")
+    if args.subgrid_autoconversion and args.microphysics != "morrison":
+        parser.error("--subgrid-autoconversion requires --microphysics "
+                     "morrison (the in-cloud closure lives in the Morrison "
+                     "warm-rain path)")
+    if args.convective_precip_efficiency > 0.0 and args.convection != "tiedtke":
+        parser.error("--convective-precip-efficiency requires --convection "
+                     "tiedtke (only Tiedtke implements in-updraft "
+                     "precipitation)")
+    if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
+        parser.error("--convective-buoyancy-death-memory requires --convection "
+                     "tiedtke (plume buoyancy-death memory is a Tiedtke "
+                     "plume-integrator option)")
     if args.dynamic_albedo and (
             args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
                                "mpas")
@@ -911,6 +1029,10 @@ def main(argv: list[str] | None = None):
         start_step, start_day = driver.load_checkpoint(restart_path)
         if _is_root:
             print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+        if args.restart_start_day is not None:
+            start_day = args.restart_start_day
+            if _is_root:
+                print(f"  start_day overridden to {start_day:.2f} (year-boundary restart)")
 
     if args.profile > 0:
         import jax

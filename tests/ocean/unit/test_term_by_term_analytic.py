@@ -169,7 +169,7 @@ def _zero_dynamics_config(
     n_barotropic_substeps: int = 10,
 ) -> LatLonCGridOceanConfig:
     """Config with every dissipation / dispersion knob disabled."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=A_h,
         A_h_lat_scaling=False,
         A_h_eq_boost=1.0,

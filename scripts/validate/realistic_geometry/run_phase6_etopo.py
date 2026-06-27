@@ -444,7 +444,7 @@ def main():
             kappa_Redi=args.K_Redi,
             S_max=args.S_max,
         )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         barotropic_solver="implicit_cn",
         physics=None,
         A_h=args.A_h,

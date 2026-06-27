@@ -518,11 +518,22 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         )
         return out.K_v, out.A_v, None
 
-    # "none" — handled by the caller, but be defensive.
-    nlev = state.T.data.shape[-1]
-    shape = state.T.data.shape[:-1] + (nlev - 1,)
-    dtype = state.T.data.dtype
-    return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
+    if scheme == "none":
+        # No background closure here (handled by the caller); zero K_v/A_v.
+        nlev = state.T.data.shape[-1]
+        shape = state.T.data.shape[:-1] + (nlev - 1,)
+        dtype = state.T.data.dtype
+        return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
+
+    # Dispatch hardening: an unknown scheme must NOT silently fall through to a
+    # zero-mixing "be defensive" return (that disables vertical mixing on a typo,
+    # masking the error).  ``scheme`` is the static config value, so raising at
+    # function entry is jit-safe (this is the same defense used by the sibling
+    # factories — see CLAUDE.md "Dispatch").
+    raise ValueError(
+        f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
+        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+    )
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,

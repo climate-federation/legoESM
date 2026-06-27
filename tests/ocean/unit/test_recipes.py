@@ -42,8 +42,11 @@ class TestRegistry:
         # The proven OMIP NEMO-match recipes (#500) appear in the menu.
         assert "omip_nemo_match_mpas_v1" in all_recipes
         assert "omip_nemo_match_tripole_v1" in all_recipes
+        # The MPAS sibling of default_wright_v1, added with the MPAS catalog (#490).
+        assert "default_wright_mpas_v1" in all_recipes
         assert list_recipes("mpas") == [
-            "legoesm_linear_mpas_v1", "omip_nemo_match_mpas_v1"]
+            "default_wright_mpas_v1", "legoesm_linear_mpas_v1",
+            "omip_nemo_match_mpas_v1"]
         assert "omip_nemo_match_tripole_v1" in list_recipes("latlon")
 
     def test_get_recipe_returns_copy(self):
@@ -81,7 +84,7 @@ class TestCatalogMatchesFactories:
     def test_legoesm_linear_v1_is_go_default(self):
         mc = global_overturning_model_config(GlobalOverturningConfig())
         for k, v in get_recipe("legoesm_linear_v1").items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
 
     def test_legoesm_linear_mpas_v1_is_go_mpas_default(self):
         mc = global_overturning_mpas_model_config(GlobalOverturningConfig())
@@ -91,14 +94,14 @@ class TestCatalogMatchesFactories:
     def test_eady_weno5_v1_is_eady_default(self):
         mc = eady_uniform_model_config(EadyUniformConfig())
         for k, v in get_recipe("eady_weno5_v1").items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
 
     def test_veros_faithful_v1_is_acc_dycore(self):
         """Drift guard for veros_faithful_v1 == build_acc_recipe(free-run)."""
         from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
         mc = build_acc_recipe(with_surface_forcing=True).model_config
         for k, v in get_recipe("veros_faithful_v1").items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
 
     def test_nemo_dino_v1_is_dino_dycore(self):
         """Drift guard for nemo_dino_v1 == dino_lat_lon_model_config."""
@@ -108,7 +111,7 @@ class TestCatalogMatchesFactories:
                                     lon_west_deg=0.0, lon_east_deg=50.0)
         mc, _ = dino_lat_lon_model_config(grid, DINOConfig())
         for k, v in get_recipe("nemo_dino_v1").items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
 
     def test_omip_nemo_match_mpas_v1_is_factory_dycore(self):
         """Drift guard: catalog == nemo_match_mpas_model_config scheme fields."""
@@ -126,7 +129,7 @@ class TestCatalogMatchesFactories:
         )
         mc = nemo_match_tripole_model_config()
         for k, v in get_recipe("omip_nemo_match_tripole_v1", "latlon").items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
 
 
 # The PROVEN OMIP MPAS ico6 dycore — a FROZEN snapshot of the scheme + coefficient
@@ -216,7 +219,7 @@ class TestOMIPNemoMatchFactories:
         )
         mc = nemo_match_tripole_model_config()
         for k, v in _FROZEN_TRIPOLE_DYCORE.items():
-            assert getattr(mc, k) == v, k
+            assert mc.flat_get(k) == v, k
         assert mc.gm_redi is not None
         assert mc.gm_redi.visbeck.enabled is False
         for k, v in _FROZEN_GM_REDI.items():
@@ -302,7 +305,7 @@ class TestReuse:
         mc = global_overturning_model_config(
             cfg, eos_config=create_eos_config(cfg),
             recipe="legoesm_linear_v1", barotropic_solver="implicit_cn")
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
 
     def test_default_recipe_is_legoesm_linear(self):
         cfg = GlobalOverturningConfig()
@@ -310,7 +313,7 @@ class TestReuse:
         b = global_overturning_model_config(
             cfg, eos_config=create_eos_config(cfg), recipe="legoesm_linear_v1")
         for f in ("eos", "outer_integrator", "barotropic_solver", "pgf_scheme"):
-            assert getattr(a, f) == getattr(b, f)
+            assert a.flat_get(f) == b.flat_get(f)
 
     def test_unknown_recipe_raises_from_factory(self):
         with pytest.raises(ValueError, match="unknown latlon recipe"):

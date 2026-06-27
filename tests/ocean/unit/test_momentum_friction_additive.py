@@ -80,7 +80,7 @@ def _channel(n_lat=8, n_lon=16, **cfg_kw):
     state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
     cfg_kw.setdefault("implicit_vertical_mixing", True)
     cfg_kw.setdefault("outer_integrator", "ab2")
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, A_v=1.0e-3, K_v=1.0e-4, bottom_drag_r=1.0e-3,
         n_barotropic_substeps=8, enable_runtime_checks=False, **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)

@@ -28,7 +28,7 @@ def test_default_config_resolves_to_latlon_namedtuple():
     rt = cfg.to_ocean_config()
     assert isinstance(rt, LatLonCGridOceanConfig)
     # Empty ocean: {} means every runtime default is preserved.
-    assert rt == LatLonCGridOceanConfig()
+    assert rt == LatLonCGridOceanConfig.from_flat()
 
 
 def test_from_yaml_deep_merges_onto_defaults(tmp_path):
@@ -61,7 +61,9 @@ def test_dot_get_set_roundtrip():
     cfg = OceanExperimentConfig()
     cfg.set("ocean.bottom_drag_r", 2.5e-3)
     assert cfg.get("ocean.bottom_drag_r") == 2.5e-3
-    assert cfg.to_ocean_config().bottom_drag_r == 2.5e-3
+    # #501: stored nested (config.bottom_drag.bottom_drag_r); the flat YAML key
+    # ocean.bottom_drag_r still routes here via flat_fields + from_flat.
+    assert cfg.to_ocean_config().bottom_drag.bottom_drag_r == 2.5e-3
     assert cfg.get("nonexistent.key", "fallback") == "fallback"
 
 
@@ -311,7 +313,9 @@ def test_validate_strict_rejects_bad_barotropic_solver():
 
 def test_validate_strict_rejects_nonpositive_dt():
     cfg = OceanExperimentConfig.from_dict({"time": {"dt_seconds": 0}})
-    with pytest.raises(ValueError, match="time.dt_seconds must be > 0"):
+    # Routed through the shared setup_selector.require_positive_finite helper
+    # (#388), whose message is "<name> must be a finite number > 0, got <v>".
+    with pytest.raises(ValueError, match=r"time\.dt_seconds must be a finite number > 0"):
         cfg.validate_strict()
 
 

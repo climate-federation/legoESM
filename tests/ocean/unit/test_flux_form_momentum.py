@@ -50,7 +50,7 @@ def _setup(u_vals, v_vals, scheme="centered"):
     mask = jnp.ones((nlat, nlon))
     du0 = jnp.zeros((nlat, nlon + 1, _NLEV))
     dv0 = jnp.zeros((nlat + 1, nlon, _NLEV))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         momentum_advection="flux_form", momentum_flux_scheme=scheme,
     )
     return du0, dv0, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg
@@ -248,7 +248,7 @@ def test_F7_gyre_stability_flux_form():
     )
 
     def _run(scheme):
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             momentum_advection=scheme, momentum_flux_scheme="upwind",
             A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
             n_barotropic_substeps=8, enable_runtime_checks=False,

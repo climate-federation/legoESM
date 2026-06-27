@@ -34,6 +34,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
     pad_ns_zero_multi,
     is_tripolar,
+    reads_stored_vface_metric,
     fold_is_local,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
@@ -1330,6 +1331,23 @@ def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
         pad_with_pole_bc_lat,
         zero_polar_lat_ends,
     )
+    if reads_stored_vface_metric(grid):
+        # Rich geometry with an explicit stored v-face metric (#514): READ it
+        # instead of recomputing cos(grid.lat_v).  On a Cartesian beta-plane the
+        # recompute is WRONG (the pseudo-lat is a nonzero y_c/radius while the
+        # stored dx_v is the uniform dx_m); on a spherical rich geometry it is
+        # merely redundant.  dx_v is lon-uniform for every geometry that reaches
+        # this helper (tripolar reads the 2D dx_v directly and never calls here),
+        # so column 0 carries the full metric.  cos(lat_v) = dx_v / (R*dlon):
+        # beta-plane -> exactly 1 (R*dlon == dx_m sentinel).  zero_polar_lat_ends
+        # enforces this helper's poles==0 CONTRACT (the beta-plane stored dx_v is
+        # a uniform dx_m at every row, NOT pole-zeroed; spherical stored dx_v is
+        # already 0 there so the clamp is a no-op) — stress/viscosity divide by
+        # this at the walls and rely on the zero.
+        cos_lat_v = grid.dx_v[:, 0] / (grid.radius * grid.dlon)
+        return zero_polar_lat_ends(
+            jnp.asarray(cos_lat_v, dtype=jnp.result_type(float))
+        )
     # Compute the interface latitudes in the working float precision
     # (float64 under JAX_ENABLE_X64, else float32).  ``grid.lat`` is
     # stored float32, but ``cos(½(lat[j-1]+lat[j]))`` is the

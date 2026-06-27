@@ -159,7 +159,7 @@ def main() -> int:
     n_cells = int(mesh.nCells)
     n_edges = int(mesh.nEdges)
     n_vertices = int(mesh.nVertices)
-    n_baro_sub = int(cfg.n_barotropic_substeps)
+    n_baro_sub = int(cfg.barotropic.n_barotropic_substeps)
     cell_lev = n_cells * n_levels
     edge_lev = n_edges * n_levels
 
@@ -170,7 +170,7 @@ def main() -> int:
         f"cell-lev d.o.f.: {cell_lev:,}  edge-lev d.o.f.: {edge_lev:,}\n"
         f"tracer_advection={cfg.tracer_advection}  "
         f"implicit_vertical_mixing={cfg.implicit_vertical_mixing}  "
-        f"barotropic_solver={cfg.barotropic_solver}\n"
+        f"barotropic_solver={cfg.barotropic.barotropic_solver}\n"
         f"build wall: {build_s:.2f}s"
     )
 

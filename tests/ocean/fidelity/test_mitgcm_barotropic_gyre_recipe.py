@@ -48,7 +48,7 @@ def test_geometry_uses_beta_plane_with_mitgcm_params():
 def test_config_is_barotropic_constant_density():
     c = gyre.build_gyre_config()
     assert c.A_h == gyre.VISC_AH
-    assert c.bottom_drag_r == 0.0
+    assert c.bottom_drag.bottom_drag_r == 0.0  # #501: nested DynBottomDragConfig
     assert c.gm_redi is None
     assert c.eos == "linear"
     assert c.eos_linear.alpha_T == 0.0 and c.eos_linear.beta_S == 0.0
@@ -67,18 +67,24 @@ def test_config_pins_mitgcm_faithful_unsplit_numerics():
     assert c.coriolis_energy_conserving is False        # MITgcm face-f, not Sadourny
     assert c.momentum_advection == "flux_form"
     assert c.momentum_flux_scheme == "centered"          # MITgcm 2nd-order centered
-    assert c.barotropic_solver == "implicit_cn"
-    assert c.barotropic_implicit_theta_eta == 1.0
-    assert c.barotropic_implicit_theta_pgf == 1.0
+    assert c.barotropic.barotropic_solver == "implicit_cn"
+    assert c.barotropic.barotropic_implicit_theta_eta == 1.0
+    assert c.barotropic.barotropic_implicit_theta_pgf == 1.0
 
 
-def test_geometry_uses_metric_consistent_pseudo_lat():
-    """The gyre geometry opts into the Cartesian (lat=0) pseudo-lat so the
-    implicit free-surface projection is energy-conserving (the iteration-7 fix);
-    a non-zero pseudo-lat is the ~1% metric leak that ran this gyre turbulent."""
+def test_geometry_uses_natural_pseudo_lat_with_stored_metric():
+    """#514: the gyre geometry no longer needs the Cartesian (lat=0) pseudo-lat
+    workaround.  The C-grid operators READ the stored uniform v-face metric
+    (``dx_v == dx_m``) instead of recomputing ``cos(grid.lat_v)``, so the
+    energy-conserving implicit free surface holds with the geometry's NATURAL
+    nonzero pseudo-lat — the ~1% metric leak that ran this gyre turbulent is
+    gone at the source.  The laminar dipole (test_mitgcm_gyre_canonical) confirms
+    the dynamics stay laminar with this geometry."""
     g = gyre.build_gyre_geometry()
-    np.testing.assert_array_equal(np.asarray(g.lat), 0.0)
-    np.testing.assert_allclose(np.cos(np.asarray(g.lat)), np.asarray(g.cos_lat))
+    # Natural pseudo-lat is now nonzero (the lat=0 workaround is removed).
+    assert float(np.abs(np.asarray(g.lat)).max()) > 0.0
+    # The metric the operators actually read is the uniform Cartesian dx_m.
+    np.testing.assert_allclose(np.asarray(g.dx_v), gyre.DX_M)
 
 
 def test_explicit_ab2_rejects_energy_conserving_coriolis():

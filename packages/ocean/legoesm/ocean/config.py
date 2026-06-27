@@ -342,7 +342,12 @@ class OceanExperimentConfig:
         ConfigClass, _ = _resolve_target(grid_type)
 
         ocean = dict(self.get("ocean") or {})
-        known = set(ConfigClass._fields)
+        # #501: a config with nested sub-configs (LatLonCGridOceanConfig) accepts
+        # its members' FLAT names as ocean.* keys, kept 1:1 via flat_fields() so
+        # the public flat YAML interface is unchanged by the grouping.
+        known = (set(ConfigClass.flat_fields())
+                 if hasattr(ConfigClass, "flat_fields")
+                 else set(ConfigClass._fields))
         unknown = sorted(k for k in ocean if k not in known)
         if unknown:
             raise ValueError(
@@ -390,6 +395,10 @@ class OceanExperimentConfig:
                     f"ocean.{field} must be a mapping, got {type(val).__name__}")
             ocean[field] = _build_nested_config(sub_type, val, path=field)
 
+        # #501: route flat ocean.* keys through from_flat so grouped members
+        # (e.g. bottom_drag_r) land in their sub-config; flat configs unchanged.
+        if hasattr(ConfigClass, "from_flat"):
+            return ConfigClass.from_flat(**ocean)
         return ConfigClass(**ocean)
 
     # ------------------------------------------------------- validation hooks
@@ -732,12 +741,20 @@ def _resolve_config_type(tag: str):
 def _decode_config(obj):
     if isinstance(obj, dict) and "__type__" in obj:
         cls = _resolve_config_type(obj["__type__"])
+        # #501: accept BOTH the nested sub-config field name (new checkpoints) AND
+        # the grouped members' flat names (OLD pre-grouping checkpoints), then route
+        # through from_flat so an old flat ``bottom_drag_r`` is DISTRIBUTED into
+        # ``bottom_drag`` rather than silently dropped to the default.
         known = set(cls._fields)
+        if hasattr(cls, "flat_fields"):
+            known |= set(cls.flat_fields())
         fields = {
             k: _decode_config(v)
             for k, v in obj.items()
             if k != "__type__" and k in known
         }
+        if hasattr(cls, "from_flat"):
+            return cls.from_flat(**fields)
         return cls(**fields)
     if isinstance(obj, dict):
         return {k: _decode_config(v) for k, v in obj.items()}

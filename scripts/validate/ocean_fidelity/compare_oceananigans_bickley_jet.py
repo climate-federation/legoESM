@@ -100,8 +100,8 @@ def build_bickley():
         weno_smoothness="split",
     )
     # ImplicitFreeSurface is fully implicit (backward Euler) -> theta=1.0.
-    cfg = cfg._replace(barotropic_implicit_theta_eta=1.0,
-                       barotropic_implicit_theta_pgf=1.0,
+    cfg = cfg._replace(barotropic=cfg.barotropic._replace(barotropic_implicit_theta_eta=1.0,
+                       barotropic_implicit_theta_pgf=1.0),
                        vortcor_enstrophy_metric=os.environ.get("VORTCOR_METRIC", "0") == "1",
                        vortcor_reconstruct_zeta=os.environ.get("VORTCOR_ZETA", "0") == "1",
                        weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH") or None)

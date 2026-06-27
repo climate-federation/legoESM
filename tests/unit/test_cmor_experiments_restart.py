@@ -260,6 +260,73 @@ class TestDiagnosticCollector(unittest.TestCase):
             self.assertEqual(collector.cf_writer.experiment_id, "piControl")
             collector.cf_writer.close()
 
+    def test_3d_plev_ordering_surface_warm_toa_cold(self):
+        """CMOR ta: highest pressure (surface) maps to highest temperature.
+
+        _write_cmip_data stores 3-D fields in ascending pressure order
+        (100 Pa at index 0), but CMIP6 convention requires descending plev
+        (100000 Pa at index 0).  The [::-1] flip in _write_cmip_data must
+        align data[0] with plev[0]=100000 Pa.
+        """
+        import xarray as xr
+        from legoesm.driver.diagnostics import DiagnosticCollector
+        from legoesm.io.cmor_output import CMIP6_PLEV19
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 5-degree grid: 36 lat × 72 lon
+            cmip_res = 5.0
+            nlat = int(round(180.0 / cmip_res))   # 36
+            nlon = int(round(360.0 / cmip_res))   # 72
+            nlev = len(CMIP6_PLEV19)              # 19
+
+            collector = DiagnosticCollector(
+                nlev=40,
+                sigma_full=np.linspace(0.025, 0.993, 40),
+                dsigma=np.full(40, 0.025),
+                experiment_id="test",
+                cmip_output=True,
+                output_dir=tmpdir,
+                cmip_resolution_deg=cmip_res,
+            )
+
+            # Build a test temperature field in ascending pressure order:
+            # level 0 = 100 Pa (TOA, cold=100 K), level 18 = 100000 Pa (surface=280 K).
+            T_ascending = 100.0 + np.arange(nlev) * 10.0  # [100, 110, ..., 280] K
+
+            # Shape: (nlat, nlon, nlev) as stored by SpatialMonthlyAccumulator.
+            field_3d = np.broadcast_to(
+                T_ascending[np.newaxis, np.newaxis, :],
+                (nlat, nlon, nlev),
+            ).copy()
+
+            # Inject directly into the monthly accumulator (bypass collect()).
+            collector._spatial_monthly.add_3d(15.0, 0, {"ta": field_3d})
+
+            collector._write_cmip_monthly_files()
+            collector.cf_writer.close()
+
+            nc_files = [
+                os.path.join(root, f)
+                for root, _, files in os.walk(tmpdir)
+                for f in files
+                if "ta_" in f and f.endswith(".nc")
+            ]
+            self.assertEqual(len(nc_files), 1, f"Expected 1 ta file, got {nc_files}")
+
+            ds = xr.open_dataset(nc_files[0])
+            plev_vals = ds["plev"].values   # CMIP6: descending [100000, ..., 100] Pa
+            ta_vals = ds["ta"].values[0, :, 0, 0]  # (time, plev, lat, lon)
+
+            # plev must be descending (CMIP6 convention)
+            self.assertGreater(plev_vals[0], plev_vals[-1])
+            # T at highest pressure (surface=plev[0]) must be warm, not cold
+            self.assertGreater(ta_vals[0], ta_vals[-1])
+            # Surface (plev[0]=100000 Pa) → T_ascending[-1] = 280 K
+            self.assertAlmostEqual(ta_vals[0], T_ascending[-1], delta=1.0)
+            # TOA (plev[-1]=100 Pa) → T_ascending[0] = 100 K
+            self.assertAlmostEqual(ta_vals[-1], T_ascending[0], delta=1.0)
+            ds.close()
+
 
 # ======================================================================
 # Experiment templates
@@ -702,7 +769,10 @@ class TestTuningParameters(unittest.TestCase):
         from legoesm.tuning import TUNING_PARAMETERS
 
         categories = {p.category for p in TUNING_PARAMETERS.values()}
-        expected = {"dynamics", "radiation", "convection", "diffusion", "surface"}
+        expected = {
+            "dynamics", "radiation", "convection", "diffusion", "surface",
+            "turbulence", "gwd", "clouds",
+        }
         self.assertEqual(expected, categories)
 
     def test_ranges_valid(self):

@@ -48,7 +48,7 @@ uv pip install --python "$VENV/bin/python" -r requirements_mpi.txt
 # mpi4py / mpi4jax must be COMPILED against the local MPICH (no binary wheels).
 uv pip install --python "$VENV/bin/python" --no-binary mpi4py,mpi4jax \
     --reinstall-package mpi4py --reinstall-package mpi4jax \
-    "mpi4py>=4.0,<5.0" "mpi4jax==0.8.1.post2"
+    "mpi4py>=4.0,<5.0" "mpi4jax==0.9.0"
 echo "== installing legoESM (editable) + pytest, re-pinning jax 0.9.2 =="
 uv pip install --python "$VENV/bin/python" -e . pytest pytest-timeout
 uv pip install --python "$VENV/bin/python" "jax==0.9.2" "jaxlib==0.9.2"

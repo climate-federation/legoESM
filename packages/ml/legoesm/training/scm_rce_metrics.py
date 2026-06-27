@@ -20,6 +20,21 @@ from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
 PRECIP_NORMALIZATION_MM_DAY = 3.0
 PRECIP_SCORE_WEIGHT = 1.0
 
+
+def _safe_sqrt(x: jax.Array) -> jax.Array:
+    """``sqrt`` with a finite gradient at ``x == 0``.
+
+    ``sqrt(0)`` is itself finite (0) but its derivative ``1/(2 sqrt(0)) = inf``,
+    so a PERFECT fit (residual == 0 — the exact minimiser the trainer targets)
+    produces a NaN gradient.  The double-``where`` masks the zero out of the
+    branch that is differentiated, giving the EXACT value ``sqrt(0) == 0`` on
+    the forward pass AND a finite (zero) gradient on the backward pass — so the
+    existing "metrics are exactly 0 at a matching profile" invariant is kept.
+    """
+    x = jnp.asarray(x)
+    safe_x = jnp.where(x > 0, x, jnp.ones_like(x))
+    return jnp.where(x > 0, jnp.sqrt(safe_x), jnp.zeros_like(x))
+
 MADIAB_MEAN_TOL_K = 8.0
 MADIAB_MAX_TOL_K = 30.0
 TROP_MIN_Z_KM = 12.0
@@ -35,14 +50,20 @@ def weighted_std(profile: jax.Array, weights: jax.Array) -> jax.Array:
     weights = jnp.asarray(weights, dtype=profile.dtype)
     mean = jnp.sum(weights * profile)
     var = jnp.sum(weights * (profile - mean) ** 2)
-    return jnp.sqrt(jnp.maximum(var, jnp.asarray(0.0, dtype=profile.dtype)))
+    # _safe_sqrt keeps the gradient finite for a perfectly uniform profile
+    # (var == 0) while still returning exactly 0.
+    return _safe_sqrt(var)
 
 
 def weighted_rmse(diff: jax.Array, weights: jax.Array) -> jax.Array:
-    """Mass-weighted vertical RMSE."""
+    """Mass-weighted vertical RMSE.
+
+    Uses a floored sqrt so the gradient stays finite at a perfect fit
+    (``diff == 0`` makes ``d sqrt(s)/ds = 1/(2 sqrt(s))`` blow up at ``s == 0``).
+    """
     diff = jnp.asarray(diff)
     weights = jnp.asarray(weights, dtype=diff.dtype)
-    return jnp.sqrt(jnp.sum(weights * diff ** 2))
+    return _safe_sqrt(jnp.sum(weights * diff ** 2))
 
 
 def score_profiles_jax(
@@ -70,7 +91,7 @@ def score_profiles_jax(
     T_rmse = weighted_rmse((T_profile - T_ref) / T_std, weights)
     qv_rmse = weighted_rmse((qv_profile - qv_ref) / qv_std, weights)
     cloud_rmse = weighted_rmse((qcond_profile - qcond_ref) / qcond_std, weights)
-    combined = jnp.sqrt((T_rmse**2 + qv_rmse**2 + cloud_rmse**2) / 3.0)
+    combined = _safe_sqrt((T_rmse**2 + qv_rmse**2 + cloud_rmse**2) / 3.0)
     return T_rmse, qv_rmse, cloud_rmse, combined
 
 
@@ -125,7 +146,7 @@ def score_profiles_precip_jax(
         normalization_mm_day=precip_normalization_mm_day,
     )
     weight = jnp.asarray(precip_weight, dtype=T_rmse.dtype)
-    combined = jnp.sqrt(
+    combined = _safe_sqrt(
         (T_rmse**2 + qv_rmse**2 + cloud_rmse**2 + weight * precip_rmse**2)
         / (3.0 + weight)
     )

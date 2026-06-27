@@ -68,7 +68,7 @@ def _channel(outer_integrator="forward_euler", n_lat=8, n_lon=16, **cfg_kw):
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
     cfg_kw.setdefault("implicit_vertical_mixing", True)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3,
         n_barotropic_substeps=8, enable_runtime_checks=False,
         outer_integrator=outer_integrator, **cfg_kw)
@@ -94,9 +94,10 @@ def test_forward_euler_default_runs_and_carry_untouched():
 
 
 def test_unknown_outer_integrator_raises():
-    state, model = _channel("bogus")
+    # An unknown outer_integrator is rejected at CONSTRUCTION (fail-early dispatch
+    # hardening: LatLonCGridOceanModel.__init__ -> _validate_config), not at .step().
     with pytest.raises(ValueError, match="outer_integrator"):
-        model.step(state, dt=_DT)
+        _channel("bogus")
 
 
 def test_double_ab2_rejected():

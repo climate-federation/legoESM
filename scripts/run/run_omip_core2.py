@@ -1743,7 +1743,7 @@ def _route_ice_response_to_ocean(sf, fw, resp, ocean_mask, ice_conc):
       with P - E).
     * ``resp.ocean_stress_x/y`` [Pa, + = force ON the ocean] -> ADD into
       ``sf.tau_x/tau_y`` weighted by the ice concentration.  Per the EXISTING F11
-      convention (``coupler.ocean_forcing``: ``tau = -f_ice*ocean_stress``), the
+      convention (``coupler._future.ocean_forcing``: ``tau = -f_ice*ocean_stress``), the
       core applies ``-tau`` as the ocean reaction, so a per-cell ``-conc*stress``
       delivers ``+conc*stress`` force on the ocean — the ice's drag back-reaction
       ADDED to the open-water CORE-II wind stress already on ``sf``.
@@ -2766,10 +2766,10 @@ def main() -> int:
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
-            barotropic_solver=args.barotropic_solver,
-            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
-            n_barotropic_substeps=args.n_barotropic_substeps,
-            barotropic_time_filter=args.barotropic_time_filter,
+            barotropic_solver=args.barotropic.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.barotropic.n_barotropic_substeps,
+            barotropic_time_filter=args.barotropic.barotropic_time_filter,
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
@@ -2838,10 +2838,10 @@ def main() -> int:
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             tracer_advection=args.tracer_advection,
-            barotropic_solver=args.barotropic_solver,
-            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
-            n_barotropic_substeps=args.n_barotropic_substeps,
-            barotropic_time_filter=args.barotropic_time_filter,
+            barotropic_solver=args.barotropic.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.barotropic.n_barotropic_substeps,
+            barotropic_time_filter=args.barotropic.barotropic_time_filter,
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,

@@ -18,6 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -43,19 +44,30 @@ def resolve_var(ds, name):
     return None
 
 
-from legoesm.training.vertical_interp import interp_pressure_to_sigma
+from legoesm.training.vertical_interp import (
+    interp_pressure_to_sigma,
+    interp_pressure_to_hybrid,
+)
 
 logger = logging.getLogger(__name__)
 
-# Public ARCO-ERA5 store (Analysis-Ready Cloud-Optimized ERA5 on GCS,
-# anon-readable).  Source of the radiation-flux TARGETS: the default WB2
-# state store's ``mean_*_radiation_flux`` variables are NaN at every
-# analysis time (probe 8533800 — 0/20 sampled times populated), but
-# ARCO-ERA5 carries the same ERA5 fields with clean W/m² mean-rate fluxes
-# (probe 8533818).  Same 0.25° 1440×721 grid as the WB2 state store.
-ARCO_ERA5_ZARR = (
-    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
-)
+
+def _hybrid_p_s_floor(sigma, dp_floor: float = 100.0) -> float:
+    """Minimum surface pressure for all hybrid layer thicknesses >= dp_floor.
+
+    The L40 hybrid coordinate develops near-zero or negative layer thicknesses
+    (dp = dA*p_ref + dB*p_s < dp_floor) when p_s << p_ref.  This returns the
+    smallest p_s that keeps every level's dp above dp_floor Pa.
+    """
+    import numpy as _np
+    dA = _np.asarray(sigma.dA)
+    dB = _np.asarray(sigma.dB)
+    p_ref = float(sigma.p_ref)
+    # dp(k) = dA[k]*p_ref + dB[k]*p_s >= dp_floor
+    # → p_s >= (dp_floor - dA[k]*p_ref) / dB[k]  when dB[k] > 0
+    p_s_per_level = _np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+    return float(_np.max(p_s_per_level))
+
 
 # Module-level cache for regridding weights (expensive to recompute)
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
@@ -116,21 +128,6 @@ class TrainingERA5Config(NamedTuple):
     time_range: tuple = ("1979-01-01", "2020-12-31")
     dt_hours: int = 6
     local_cache_dir: str = ""     # empty = no cache
-    # Radiation-flux targets for AIMIP TOA + surface flux supervision.
-    # When True, ``load_era5_slice`` also loads ERA5 TOA/surface radiation
-    # and derives the four model-comparable fluxes (rsut, OLR, surface net
-    # SW, surface net LW) so the target carry's ``held_*`` fields hold real
-    # observations instead of zeros.  Default False → byte-identical legacy.
-    load_radiation_fluxes: bool = False
-    # Radiation-flux TARGETS come from a SEPARATE store: the WB2 state
-    # store's flux vars are all-NaN, so fluxes are read from ARCO-ERA5
-    # (clean ``mean_*_radiation_flux`` in W/m², same 0.25° grid).  Set to
-    # "" to read fluxes from the state ``zarr_store`` instead (only valid
-    # if that store actually populates them).
-    flux_zarr: str = ARCO_ERA5_ZARR
-    # ARCO ``mean_*_radiation_flux`` are W/m² mean rates → divide by 1.0
-    # (no-op).  A store accumulating J/m² over the hour would need 3600.0.
-    flux_accum_seconds: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -210,22 +207,9 @@ class ERA5Slice(NamedTuple):
     lat: np.ndarray        # (n_lat,) latitude [rad]
     lon: np.ndarray        # (n_lon,) longitude [rad]
     plev_Pa: np.ndarray    # (n_plev,) pressure levels [Pa], ascending
-    # Optional radiation-flux targets [W/m²] (None unless
-    # ``config.load_radiation_fluxes``).  Conventions match the model's
-    # ``SegmentCarry.held_*`` fields:
-    #   rsut       = TOA outgoing (reflected) SW, positive up
-    #   olr        = TOA outgoing LW (OLR/rlut), positive up
-    #   sfc_net_sw = surface net SW (down − up), positive down
-    #   sfc_net_lw = surface net LW (down − up), positive down (usually <0)
-    rsut: np.ndarray = None        # (n_lat, n_lon)
-    olr: np.ndarray = None         # (n_lat, n_lon)
-    sfc_net_sw: np.ndarray = None  # (n_lat, n_lon)
-    sfc_net_lw: np.ndarray = None  # (n_lat, n_lon)
 
 
-def load_era5_slice(
-    config: TrainingERA5Config, time_idx: int, ds=None, flux_ds=None
-) -> ERA5Slice:
+def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
     Parameters
@@ -233,18 +217,13 @@ def load_era5_slice(
     config : TrainingERA5Config
     time_idx : int
         Time index into the dataset.
-    ds : xarray.Dataset, optional
-        Pre-opened ERA5 store.  Pass it when looping over many snapshots
-        (the AIMIP window loader) so the GCS zarr is opened once instead
-        of per slice.  ``None`` opens the store from ``config`` (legacy).
 
     Returns
     -------
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
     store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    if ds is None:
-        ds = open_era5_zarr(store)
+    ds = open_era5_zarr(store)
 
     # Select time
     ds_t = ds.isel(time=time_idx)
@@ -292,70 +271,6 @@ def load_era5_slice(
             data = data[0]
         return data.astype(np.float32)
 
-    # Optional radiation-flux targets (TOA + surface) for AIMIP flux
-    # supervision.  The WB2 store provides ``mean_*_radiation_flux`` vars
-    # in W/m² (probe-verified).  Derive the four model-comparable fluxes:
-    #   rsut       = top_downward_SW − top_net_SW   (reflected up, +up)
-    #   OLR        = −top_net_LW                     (TOA net LW = −OLR)
-    #   sfc_net_sw = surface_net_SW                  (down − up, +down)
-    #   sfc_net_lw = surface_net_LW                  (down − up, +down)
-    # ``flux_accum_seconds`` (default 1.0) converts an accumulated-J/m²
-    # store to W/m²; it is a no-op for the W/m² WB2 store.
-    rsut = olr = sfc_net_sw = sfc_net_lw = None
-    if config.load_radiation_fluxes:
-        fzarr = config.flux_zarr or store
-        if flux_ds is None:
-            flux_ds = open_era5_zarr(fzarr) if config.flux_zarr else ds
-        # Select the flux-store snapshot at the SAME timestamp as the state
-        # slice (ARCO is hourly; the WB2 6h analysis times are a subset,
-        # matched exactly by datetime).
-        fds_t = flux_ds.sel(time=ds_t.time.values, method="nearest")
-        # Align the flux-store lat ordering to the state grid: the fluxes
-        # are regridded later with era5.lat/era5.lon, so they must share
-        # that ordering.  Same 0.25° ERA5 grid + same 0..360 lon origin, so
-        # only the lat sense can differ (ARCO is N->S, WB2 may be S->N).
-        flux_lat_deg = np.asarray(flux_ds.lat.values, dtype=np.float64)
-        state_lat_deg = np.rad2deg(lat)
-        flip_lat = (np.sign(flux_lat_deg[1] - flux_lat_deg[0])
-                    != np.sign(state_lat_deg[1] - state_lat_deg[0]))
-
-        def _flux_2d(name):
-            r = resolve_var(fds_t, name)
-            src = fds_t
-            if r is None:
-                r = resolve_var(flux_ds, name)
-                src = flux_ds
-            if r is None:
-                raise ValueError(
-                    f"load_radiation_fluxes=True but flux variable {name!r} "
-                    f"is absent from {fzarr}.  Run "
-                    f"scripts/tmp/_probe_arco_era5.py to list available "
-                    f"radiation variables."
-                )
-            d = np.asarray(src[r].values).squeeze()
-            while d.ndim > 2:
-                d = d[0]
-            if d.shape != (len(lat), len(lon)):
-                raise ValueError(
-                    f"flux field {name!r} grid {d.shape} != state grid "
-                    f"{(len(lat), len(lon))}; flux_zarr must match the state "
-                    f"store resolution (both 0.25° ERA5)."
-                )
-            if flip_lat:
-                d = d[::-1]
-            return d.astype(np.float32)
-
-        acc = np.float32(config.flux_accum_seconds)
-        toa_dn_sw = _flux_2d("mean_top_downward_short_wave_radiation_flux")
-        toa_net_sw = _flux_2d("mean_top_net_short_wave_radiation_flux")
-        toa_net_lw = _flux_2d("mean_top_net_long_wave_radiation_flux")
-        sfc_net_sw_v = _flux_2d("mean_surface_net_short_wave_radiation_flux")
-        sfc_net_lw_v = _flux_2d("mean_surface_net_long_wave_radiation_flux")
-        rsut = (toa_dn_sw - toa_net_sw) / acc
-        olr = (-toa_net_lw) / acc
-        sfc_net_sw = sfc_net_sw_v / acc
-        sfc_net_lw = sfc_net_lw_v / acc
-
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
@@ -367,122 +282,13 @@ def load_era5_slice(
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
-        rsut=rsut,
-        olr=olr,
-        sfc_net_sw=sfc_net_sw,
-        sfc_net_lw=sfc_net_lw,
     )
-
-
-def _era5_held_fluxes(era5: ERA5Slice, regrid_2d_fn, shape_2d):
-    """Regrid ERA5 radiation-flux targets onto the model grid for the carry.
-
-    Returns ``(held_sw_up_toa, held_lw_up_toa, held_sw_net_sfc,
-    held_lw_net_sfc)`` — i.e. (rsut, OLR, surface net SW, surface net LW) —
-    each mapped to the model 2D layout by ``regrid_2d_fn`` (a grid-specific
-    callback: Gaussian/lat-lon interpolation or cubed-sphere ``regrid_scalar``).
-    When the slice carries no fluxes (``load_radiation_fluxes=False``) returns
-    four ``jnp.zeros(shape_2d)`` — byte-identical to the legacy zero-fill.
-
-    ``held_sw_down_toa`` (rsdt) is intentionally NOT set from ERA5: it is
-    prescribed insolation that the dycore computes each step, and the flux
-    loss does not penalize it.  One shared implementation so the spectral /
-    lat-lon / cubed-sphere builders never re-derive flux-target packing.
-    """
-    if era5.rsut is None:
-        z = jnp.zeros(shape_2d)
-        return z, z, z, z
-    return (
-        jnp.asarray(regrid_2d_fn(era5.rsut)),
-        jnp.asarray(regrid_2d_fn(era5.olr)),
-        jnp.asarray(regrid_2d_fn(era5.sfc_net_sw)),
-        jnp.asarray(regrid_2d_fn(era5.sfc_net_lw)),
-    )
-
-
-def prognostic_carry_seeds(
-    microphysics: str,
-    turbulence: str,
-    shape_3d,
-):
-    """Extra ``pack_carry`` kwargs seeding the conditional prognostic carries.
-
-    The warm-rain carry (``q_v``/``q_c``/``q_r`` + diagnostic turbulence)
-    needs nothing beyond the three microphysics slots every ERA5 carry
-    already passes, so for ``kessler``/``sundqvist`` + a diagnostic
-    turbulence scheme this returns ``{}`` and the carry pytree is
-    BYTE-IDENTICAL to the legacy warm-rain carry (``q_i``…``N_i``/``tke``/
-    ``qke`` stay ``None`` ⇒ the ``lax.scan`` carry structure and the
-    ``_dm_upd(None tendency)`` path are unchanged).  Seeding non-``None``
-    extras would flip the carry structure, so the warm-rain branch must
-    return ``{}``.
-
-    Two conditions add seeds (mirroring the production driver's
-    ``ModelDriver`` IC seeding, model_driver.py): a double-moment /
-    bin microphysics scheme that writes more than the three warm-rain
-    tracer slots gets ``q_i``…``N_i`` seeded as ``jnp.zeros(shape_3d)``;
-    a STATEFUL turbulence scheme (``carries_energy`` — tke / mynn25 /
-    clubb* / edmf) gets its prognostic energy carry (``tke`` or ``qke``)
-    seeded as ``jnp.zeros(shape_3d)``.  All double-moment schemes guard
-    their mean-size / fall-speed divides with ``jnp.where(q>eps,…)`` /
-    ``safe_divide`` / number floors, so a zero seed is forward- and
-    gradient-safe (produces zero tendencies at ``t=0``).
-
-    Parameters
-    ----------
-    microphysics : str
-        Microphysics scheme name (``ExperimentConfig.microphysics``).
-    turbulence : str
-        Turbulence scheme name (``ExperimentConfig.turbulence``).
-    shape_3d : tuple
-        Model 3-D field shape ``(..., nlev)`` — the shape of ``q_v``.
-
-    Returns
-    -------
-    dict
-        Keyword arguments to splat into :func:`pack_carry`.
-    """
-    from legoesm.driver.physics_pipeline import (
-        required_microphysics_tracer_slots,
-    )
-    from legoesm.atmosphere.physics.turbulence.integration import (
-        turbulence_scheme_traits,
-    )
-
-    seeds: dict = {}
-
-    # Double-moment / bin microphysics: seed the hydrometeor + number
-    # carries the scheme writes beyond the warm-rain [q_v, q_c, q_r]
-    # slots.  Slot layout (see validate_microphysics_tracer_slots):
-    # [3]=q_i [4]=q_s [5]=q_g [6]=N_c [7]=N_r [8]=N_i.  ``>3`` is the
-    # warm-rain guard: kessler / sundqvist (3 slots) and SDM's default
-    # condensation-only path (2 slots) keep these ``None``.
-    if required_microphysics_tracer_slots(microphysics) > 3:
-        for _name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-            seeds[_name] = jnp.zeros(shape_3d)
-
-    # Stateful turbulence: seed the prognostic energy carry (tke or qke).
-    # Diagnostic schemes (louis / smagorinsky / ysu / holtslag_boville /
-    # vreman) report carries_energy=False ⇒ no seed, carry unchanged.
-    # NB the tke/qke carry is stored FLATTENED per-column (ncol, nlev) — NOT
-    # the grid-shaped (n_lat, n_lon, nlev) layout the microphysics tracers
-    # use — so a grid-shaped seed fails the scheme's carry-shape check
-    # (issue #405/#413: "expected (ncol, nlev)").  ncol = product of the
-    # horizontal dims (n_lat*n_lon for lat-lon, 6*n*n for cubed-sphere).
-    _traits = turbulence_scheme_traits(turbulence)
-    if _traits.carries_energy:
-        _ncol = int(np.prod(shape_3d[:-1]))
-        seeds[_traits.energy_field] = jnp.zeros((_ncol, shape_3d[-1]))
-
-    return seeds
 
 
 def era5_to_spectral_carry(
     era5: ERA5Slice,
     grid,
     sigma,
-    microphysics: str = "none",
-    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -504,6 +310,8 @@ def era5_to_spectral_carry(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
 
     # ERA5 is on 1440x721 lat-lon; regrid to Gaussian grid via simple
@@ -512,14 +320,26 @@ def era5_to_spectral_carry(
         era5, grid,
     )
 
-    # Vertical interpolation: pressure levels → sigma levels
+    # Vertical interpolation: pressure levels → model levels.
+    # Use TRUE hybrid pressure p(k) = A(k)*p_ref + B(k)*p_s to avoid
+    # the sigma approximation error over steep terrain (see cubed-sphere
+    # path comment for details).
     p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+        def _vinterp(f):
+            return interp_pressure_to_hybrid(jnp.asarray(f), plev, p_s_jax, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+        def _vinterp(f):
+            return interp_pressure_to_sigma(jnp.asarray(f), plev, p_s_jax, sigma_f)
 
-    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
-    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
-    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
+    T_model = _vinterp(T_ll)
+    u_model = _vinterp(u_ll)
+    v_model = _vinterp(v_ll)
     # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air).  The
     # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
     # / mass dry air) — saturation_mixing_ratio in thermo.py returns
@@ -528,10 +348,7 @@ def era5_to_spectral_carry(
     # boundary: r = q / (1 − q).  In the tropical PBL (q ≈ 0.025) the
     # bias from skipping this conversion is ~3% of q.  Clip to avoid
     # division blow-up at q = 1.
-    q_specific = jnp.maximum(
-        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
-        0.0,
-    )
+    q_specific = jnp.maximum(_vinterp(q_ll), 0.0)
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
 
@@ -551,27 +368,22 @@ def era5_to_spectral_carry(
         phis=Field(phis_jax, name="phis", dims=dims_2d, units="m2/s2"),
     )
 
-    # Pack into SegmentCarry; held radiation fluxes hold ERA5 targets
-    # when loaded (else zeros — legacy behaviour).
+    # Pack into SegmentCarry with zero held fields
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
 
-    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
-        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
-    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=snsw_m,
-        held_lw_net_sfc=snlw_m,
-        held_sw_up_toa=rsut_m,
-        held_lw_up_toa=olr_m,
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
-        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -579,8 +391,6 @@ def era5_to_cubedsphere_carry(
     era5: ERA5Slice,
     grid,
     sigma,
-    microphysics: str = "none",
-    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -602,6 +412,8 @@ def era5_to_cubedsphere_carry(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
     n_lon_era5 = era5.T.shape[1]
     weights = _get_cs_weights(n_lon_era5, grid)
@@ -614,28 +426,114 @@ def era5_to_cubedsphere_carry(
         return regrid_scalar(jnp.asarray(flat), weights)
 
     T_cs = _regrid_3d(era5.T)
-    u_cs = _regrid_3d(era5.u)
-    v_cs = _regrid_3d(era5.v)
     q_cs = _regrid_3d(era5.q)
+
+    # Regrid winds then rotate from geographic (east, north) to local panel
+    # (x, y) coordinates.  ERA5 u/v are in geographic frame; the cubed-sphere
+    # dycore expects winds in the local panel frame.  On equatorial faces the
+    # angle is ~0 so the rotation is a no-op; on polar faces it can be ±90°,
+    # which is exactly where the ~100 m/s polar-vortex jet would otherwise be
+    # placed in the wrong direction, triggering immediate numerical blowup.
+    u_cs_geo = _regrid_3d(era5.u)  # (6, n, n, n_plev) in geographic frame
+    v_cs_geo = _regrid_3d(era5.v)
+    _angle = jnp.asarray(grid.angle)[..., None]  # (6, n, n, 1) → broadcasts
+    _cos_a = jnp.cos(_angle)
+    _sin_a = jnp.sin(_angle)
+    u_cs = _cos_a * u_cs_geo + _sin_a * v_cs_geo
+    v_cs = -_sin_a * u_cs_geo + _cos_a * v_cs_geo
 
     # Regrid 2D fields
     p_s_cs = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)
-    phis_cs = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
+    phis_cs_raw = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
 
-    # Vertical interpolation
+    # Apply topography smoothing to match load_real_topography defaults
+    # (topo_smoothing=4, topo_edge_blend=0.3).  Without this, raw ERA5 phis
+    # has steep gradients near cubed-sphere face boundaries: the northern
+    # Tibet slope (~37°N) sits only 3-4 cells from face 1's polar edge, and
+    # the Arakawa-Lamb gradient scheme amplifies face-boundary gradient errors
+    # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
+    # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
+    # even from rest.
+    from legoesm.grids.topography import smooth_phis_cubed_sphere
+    phis_cs = smooth_phis_cubed_sphere(phis_cs_raw)
+
+    # Barometric p_s correction for hydrostatic consistency with smoothed phis.
+    # Smoothing phis lowers terrain gradients (dB_dx ↓), but without this
+    # adjustment ln_ps is unchanged, so the split-PGF correction term
+    # pg_corr_x = R_d × T × B × p_s/p × dln_ps/dx stays the same while
+    # dB_dx decreases — WORSENING the cancellation residual over Tibet.
+    # Barometric formula: p_s_new = p_s × exp[(phis_raw − phis_smooth) / (R_d × T_sfc)]
+    # Derivation: hydrostatic dln_p = −dΦ / (R_d × T) → Δln_p = −ΔΦ / (R_d × T)
+    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = 1000 hPa).
+    _T_sfc_cs = T_cs[..., -1]  # (6, n, n) — 1000 hPa, nearest to surface
+    _delta_phis = phis_cs_raw - phis_cs  # > 0 where terrain was lowered by smoothing
+    p_s_corrected = p_s_cs * jnp.exp(_delta_phis / (constants.R_d * _T_sfc_cs))
+
+    # Enforce a minimum surface pressure to prevent degenerate hybrid levels.
+    # The L40 hybrid coordinate has p(k) = A(k)*p_ref + B(k)*p_s.  Near the
+    # surface the A coefficients decrease toward 0 while B → 1; when p_s << p_ref
+    # the A*p_ref term dominates and adjacent levels can have |dp| < 1 Pa or
+    # even dp < 0 (inverted).  At p_s = 56703 Pa (Tibet, 4751 m), 19 of 40
+    # levels are underground and the arch-peak at level 28–29 has dp = −1 Pa,
+    # causing catastrophic vertical-velocity amplification in the continuity eq.
+    # Fix: raise p_s to p_s_floor wherever needed; simultaneously lower phis
+    # by the barometric-formula equivalent so the split-PGF cancellation is
+    # maintained (phis consistent with raised p_s).
+    if _is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
+        phis_cs = phis_cs - constants.R_d * _T_sfc_cs * _ln_ratio
+        p_s_cs = jnp.maximum(p_s_corrected, p_s_floor)
+    else:
+        p_s_cs = p_s_corrected
+
+    # Vertical interpolation.
+    # CRITICAL: for hybrid sigma-pressure coordinates, use the TRUE level
+    # pressure p(k) = A(k)*p_ref + B(k)*p_s — NOT the sigma approximation
+    # (A+B)*p_s.  Over steep terrain (Tibet, Andes) where p_s << p_ref, the
+    # sigma approximation misplaces upper levels by 100-180 hPa, introducing
+    # ~20 K temperature errors and ~70 m/s wind imbalances that cause
+    # immediate numerical blowup.
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
-    T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f)
-    u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f)
-    v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+        def _vinterp(field_cs):
+            return interp_pressure_to_hybrid(field_cs, plev, p_s_cs, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+        def _vinterp(field_cs):
+            return interp_pressure_to_sigma(field_cs, plev, p_s_cs, sigma_f)
+
+    T_model = _vinterp(T_cs)
+    u_model = _vinterp(u_cs)
+    v_model = _vinterp(v_cs)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
     # RATIO (see comment at the lat-lon path above).  Convert
     # r = q / (1 − q) at the boundary.
-    q_specific = jnp.maximum(
-        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f), 0.0,
-    )
+    q_specific = jnp.maximum(_vinterp(q_cs), 0.0)
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
+
+    if logger.isEnabledFor(logging.INFO):
+        import jax as _jax
+        _hT = _jax.device_get(T_model)
+        _hu = _jax.device_get(u_model)
+        _hv = _jax.device_get(v_model)
+        _hps = _jax.device_get(p_s_cs)
+        _hphis = _jax.device_get(phis_cs)
+        _hphis_raw = _jax.device_get(phis_cs_raw)
+        _p_s_floor_val = _hybrid_p_s_floor(sigma, dp_floor=100.0) if _is_hybrid else 0.0
+        logger.info(
+            f"  ERA5→CS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
+            f"u=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
+            f"v=[{float(_hv.min()):.0f},{float(_hv.max()):.0f}]m/s "
+            f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
+            f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2 "
+            f"(raw phis peak={float(_hphis_raw.max()):.0f}, "
+            f"p_s_floor={_p_s_floor_val:.0f}Pa)"
+        )
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -651,22 +549,18 @@ def era5_to_cubedsphere_carry(
     shape_3d = T_model.shape
     shape_2d = p_s_cs.shape
 
-    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
-        era5, lambda f: regrid_scalar(jnp.asarray(f.ravel()), weights), shape_2d,
-    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=snsw_m,
-        held_lw_net_sfc=snlw_m,
-        held_sw_up_toa=rsut_m,
-        held_lw_up_toa=olr_m,
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
-        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -674,8 +568,6 @@ def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
     sigma,
-    microphysics: str = "none",
-    turbulence: str = "none",
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -696,17 +588,6 @@ def era5_to_latlon_carry(
     era5 : ERA5Slice
     grid : LatLonGrid  (exposes ``.lat`` / ``.lon`` in radians)
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
-    microphysics : str, default ``"none"``
-        Microphysics scheme name.  A double-moment / bin scheme
-        (``morrison``/``seifert_beheng``/``thompson``/``p3``/
-        ``fast_sbm``/``ml_emulator``) seeds the extra hydrometeor +
-        number carries; warm-rain (``kessler``/``sundqvist``) leaves
-        them ``None`` (carry byte-identical).  See
-        :func:`prognostic_carry_seeds`.
-    turbulence : str, default ``"none"``
-        Turbulence scheme name.  A stateful scheme (``tke``/``mynn25``/
-        ``clubb*``/``edmf``) seeds the ``tke``/``qke`` energy carry;
-        diagnostic schemes leave them ``None``.
 
     Returns
     -------
@@ -755,22 +636,171 @@ def era5_to_latlon_carry(
 
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
-    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
-        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
-    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=snsw_m,
-        held_lw_net_sfc=snlw_m,
-        held_sw_up_toa=rsut_m,
-        held_lw_up_toa=olr_m,
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
-        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
+    )
+
+
+class MPASCarry(NamedTuple):
+    """ERA5 initial condition on an MPAS/Voronoi mesh.
+
+    Unlike the cube/lat-lon ``SegmentCarry`` (which stores cell-centred
+    ``u``/``v``), the MPAS hydrostatic state carries the horizontal wind as
+    the **edge-normal** component on mesh edges, and has no separate ``v``.
+    """
+    u: jnp.ndarray      # (nEdges, nlev) edge-normal velocity [m/s]
+    T: jnp.ndarray      # (nCells, nlev) temperature [K]
+    p_s: jnp.ndarray    # (nCells,) surface pressure [Pa]
+    phis: jnp.ndarray   # (nCells,) surface geopotential [m^2/s^2]
+    q_v: jnp.ndarray    # (nCells, nlev) water vapour mixing ratio [kg/kg]
+
+
+def era5_to_mpas_carry(
+    era5: ERA5Slice,
+    mesh,
+    sigma,
+):
+    """Convert an ERA5 slice to an initial condition on an MPAS/Voronoi mesh.
+
+    The MPAS hydrostatic dycore stores the prognostic horizontal velocity as
+    the **edge-normal** component ``u`` on mesh edges (no cell-centred ``v``),
+    with scalars (``T``/``p_s``/``phis``/tracers) at cell centres.  This
+    builds that state from ERA5:
+
+    1. Horizontal regrid (KD-tree inverse-distance) of the regular ERA5
+       lat-lon fields onto the mesh — scalars to cell centres
+       (``latCell``/``lonCell``), winds to edge midpoints
+       (``latEdge``/``lonEdge``).
+    2. Edge-normal projection of the geographic ERA5 (east, north) winds
+       via ``angleEdge`` (eastward = 0):
+       ``u_n = u_east·cos(angleEdge) + v_north·sin(angleEdge)`` — the inverse
+       of the ``reconstruct_cell_velocity`` the physics uses.
+    3. Vertical interpolation from ERA5 pressure levels to the model
+       sigma/hybrid levels (true level pressure ``A·p_ref + B·p_s`` for
+       hybrid), with a hybrid ``p_s`` floor over high terrain.
+    4. Specific humidity → mixing ratio (``r = q/(1−q)``), matching the
+       cube/lat-lon convention.
+
+    Parameters
+    ----------
+    era5 : ERA5Slice
+    mesh : VoronoiMesh
+        Exposes ``latCell``/``lonCell``/``latEdge``/``lonEdge``/``angleEdge``
+        (radians) and ``nCells``/``nEdges``.
+    sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    MPASCarry
+    """
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar,
+    )
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    sigma_full = np.asarray(sigma.sigma_full)
+
+    era5_lat = np.asarray(era5.lat)  # radians
+    era5_lon = np.asarray(era5.lon)  # radians
+
+    # Horizontal regrid weights: ERA5 lat-lon -> cell centres / edge midpoints.
+    cell_w = compute_latlon_to_voronoi_weights(
+        era5_lat, era5_lon,
+        np.asarray(mesh.latCell), np.asarray(mesh.lonCell),
+    )
+    edge_w = compute_latlon_to_voronoi_weights(
+        era5_lat, era5_lon,
+        np.asarray(mesh.latEdge), np.asarray(mesh.lonEdge),
+    )
+
+    # Scalars at cells (nCells, n_plev) / (nCells,).
+    T_cell = regrid_scalar(jnp.asarray(era5.T), cell_w)
+    q_cell = regrid_scalar(jnp.asarray(era5.q), cell_w)
+    p_s_cell = regrid_scalar(jnp.asarray(era5.p_s), cell_w)
+    phis_cell = regrid_scalar(jnp.asarray(era5.phis), cell_w)
+
+    # Winds at edge midpoints (geographic east/north), then project to the
+    # edge normal.  ERA5 u/v are in the geographic frame; angleEdge gives the
+    # edge-normal direction relative to local east.
+    u_east_edge = regrid_scalar(jnp.asarray(era5.u), edge_w)   # (nEdges, n_plev)
+    v_north_edge = regrid_scalar(jnp.asarray(era5.v), edge_w)
+    angle = jnp.asarray(mesh.angleEdge)[:, None]               # (nEdges, 1)
+    u_n_edge = u_east_edge * jnp.cos(angle) + v_north_edge * jnp.sin(angle)
+
+    # Surface pressure at edges (for placing the wind levels over terrain).
+    p_s_edge = regrid_scalar(jnp.asarray(era5.p_s), edge_w)
+
+    # Hybrid p_s floor over high terrain: raise p_s where the hybrid layers
+    # would become degenerate (dp < dp_floor), and lower phis by the
+    # barometric equivalent so the split-PGF cancellation is preserved.
+    # No phis smoothing is applied (the coarse mesh is already smooth and
+    # there is no mesh-native cube-edge artefact to blend), so unlike the
+    # cubed-sphere path there is no smoothing-driven p_s correction.
+    if _is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+        _T_sfc = T_cell[..., -1]  # 1000 hPa (plev ascending -> last index)
+        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_cell))
+        phis_cell = phis_cell - constants.R_d * _T_sfc * _ln_ratio
+        p_s_cell = jnp.maximum(p_s_cell, p_s_floor)
+        p_s_edge = jnp.maximum(p_s_edge, p_s_floor)
+
+    # Vertical interpolation to model levels.
+    plev = jnp.asarray(era5.plev_Pa)
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+
+        def _vinterp_cell(field):
+            return interp_pressure_to_hybrid(field, plev, p_s_cell, _A, _B, _p_ref)
+
+        def _vinterp_edge(field):
+            return interp_pressure_to_hybrid(field, plev, p_s_edge, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+
+        def _vinterp_cell(field):
+            return interp_pressure_to_sigma(field, plev, p_s_cell, sigma_f)
+
+        def _vinterp_edge(field):
+            return interp_pressure_to_sigma(field, plev, p_s_edge, sigma_f)
+
+    T_model = _vinterp_cell(T_cell)
+    u_model = _vinterp_edge(u_n_edge)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO.
+    q_specific = jnp.clip(jnp.maximum(_vinterp_cell(q_cell), 0.0), 0.0, 0.99)
+    q_model = q_specific / (1.0 - q_specific)
+
+    if logger.isEnabledFor(logging.INFO):
+        import jax as _jax
+        _hT = _jax.device_get(T_model)
+        _hu = _jax.device_get(u_model)
+        _hps = _jax.device_get(p_s_cell)
+        _hphis = _jax.device_get(phis_cell)
+        logger.info(
+            f"  ERA5->MPAS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
+            f"u_n=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
+            f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
+            f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2"
+        )
+
+    return MPASCarry(
+        u=u_model,
+        T=T_model,
+        p_s=p_s_cell,
+        phis=phis_cell,
+        q_v=q_model,
     )
 
 

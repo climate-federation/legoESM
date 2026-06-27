@@ -73,7 +73,7 @@ def _smooth_config(kappa_gm=500.0, kappa_redi=500.0):
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=1000.0, K_h=100.0, A_v=1e-3, K_v=1e-4, bottom_drag_r=1e-3,
         tracer_advection="centered", n_barotropic_substeps=4,
         differentiable_barotropic=True, enable_runtime_checks=False,

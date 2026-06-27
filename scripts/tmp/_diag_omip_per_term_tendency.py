@@ -116,9 +116,9 @@ def main() -> int:
             B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
-            barotropic_solver=args.barotropic_solver,
-            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
-            n_barotropic_substeps=args.n_barotropic_substeps,
+            barotropic_solver=args.barotropic.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.barotropic.n_barotropic_substeps,
         )
     else:
         nlat, nlon = (int(x) for x in args.latlon_res.split("x"))
@@ -132,9 +132,9 @@ def main() -> int:
             B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
-            barotropic_solver=args.barotropic_solver,
-            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
-            n_barotropic_substeps=args.n_barotropic_substeps,
+            barotropic_solver=args.barotropic.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.barotropic.n_barotropic_substeps,
         )
 
     lat_T_deg = np.rad2deg(np.asarray(grid.lat_T))

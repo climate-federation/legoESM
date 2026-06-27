@@ -124,7 +124,7 @@ def main():
         T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
     )
 
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         barotropic_solver="implicit_cn",
         physics=None,
         bottom_drag_r=1.0e-3,

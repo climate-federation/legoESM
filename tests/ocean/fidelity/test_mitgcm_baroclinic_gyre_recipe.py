@@ -79,7 +79,7 @@ def test_config_is_faithful_baroclinic():
     assert c.eos == "linear" and c.eos_linear.alpha_T == bg.T_ALPHA
     assert c.A_h == bg.VISC_AH and c.lateral_viscosity_operator == "flux_divergence"
     assert c.lateral_side_bc == "no_slip" and c.K_h == bg.DIFF_KH_T
-    assert c.barotropic_solver == "implicit_unsplit"   # MITgcm-faithful unsplit FS
+    assert c.barotropic.barotropic_solver == "implicit_unsplit"   # MITgcm-faithful unsplit FS
     assert c.physics.convection.scheme == "enhanced_diffusion"
     assert c.physics.surface_forcing.scheme == "restoring"
 

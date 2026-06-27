@@ -200,7 +200,7 @@ def build_acc_basic_model_config(grid: LatLonGrid | None = None, *,
     viscosity with cos(lat), nonlin2 EOS, implicit vmix, K_v=0, faithful bottom
     drag, implicit surface forcing) are SHARED with acc verbatim -- which is the
     whole point of the transfer test."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,

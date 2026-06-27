@@ -94,7 +94,7 @@ def main():
     physics = create_forcings("latlon", grid, config)
     eos_config = create_eos_config(config)
 
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30,
         physics=physics,
         A_h=config.A_h,

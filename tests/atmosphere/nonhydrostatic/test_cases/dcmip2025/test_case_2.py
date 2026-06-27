@@ -49,26 +49,8 @@ from legoesm import constants
 
 
 # Default parameters
-TC2_PARAMS = {
-    "small_earth_factor": 20.0,      # Radius reduction factor
-    "T0": 250.0,                     # Isothermal temperature [K]
-    "u0": 20.0,                      # Background zonal wind [m/s]
-    "H": 30000.0,                    # Model top [m]
-    "sponge_width": 15000.0,         # Sponge layer width [m]
-    "sponge_coeff": 1.0 / (0.1 * 86400.0),  # 0.1-day timescale [1/s]
-    # Gap flow (2a) specific
-    "chain_h0": 2000.0,              # Mountain chain height [m]
-    "chain_halfwidth_lon": 50.0e3,   # E-W half-width [m] (on small Earth)
-    "chain_halfwidth_lat": 500.0e3,  # N-S half-extent [m]
-    "gap_halfwidth": 50.0e3,         # Gap half-width [m]
-    "chain_lon": jnp.pi,             # Chain center longitude [rad]
-    "gap_lat": 0.0,                  # Gap latitude [rad]
-    # Vortex shedding (2b) specific
-    "mountain_h0": 2000.0,           # Mountain height [m]
-    "mountain_d": 50.0e3,            # Mountain half-width [m]
-    "mountain_lat": 10.0 * jnp.pi / 180.0,  # Off-equator for asymmetry [rad]
-    "mountain_lon": jnp.pi,
-}
+# Default parameters (single source of truth in the package; audit item 9).
+from legoesm.atmosphere.dynamics.dcmip2025_ic import TC2_PARAMS  # noqa: E402,F401
 
 
 def dcmip25_tc2a_topography(

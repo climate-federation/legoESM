@@ -159,7 +159,7 @@ def test_unknown_preconditioner_refuses():
     from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
         _select_preconditioner,
     )
-    assert (LatLonCGridOceanConfig().barotropic_implicit_preconditioner
+    assert (LatLonCGridOceanConfig.from_flat().barotropic.barotropic_implicit_preconditioner
             == "jacobi")
     grid, H_u, H_v, coeff, mask, _, _ = _setup(coastal=False)
     inv_diag = _helmholtz_inv_diag(H_u, H_v, coeff, grid, mask)

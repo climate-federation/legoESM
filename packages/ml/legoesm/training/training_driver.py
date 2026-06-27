@@ -15,7 +15,6 @@ import logging
 import time
 from typing import Callable
 
-import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
@@ -27,30 +26,64 @@ from legoesm.training.dycore_rollout import single_day_rollout
 logger = logging.getLogger(__name__)
 
 
+# Default gradient-clip norm and warmup for the dycore training drivers.  A raw
+# optax.adam(lr)/adamw(lr) has NO clipping or warmup, so a single large adjoint
+# (chaotic dynamics, a bad sample) can blow the parameters up before the loop's
+# NaN guard even fires.  Routing through ml.training.create_optimizer adds
+# warmup -> cosine decay + global-norm clipping (single source of truth; no
+# re-implemented schedule here).
+_DRIVER_GRAD_CLIP_NORM = 1.0
+_DRIVER_WARMUP_STEPS = 100
+
+
+def _make_driver_optimizer(
+    lr: float,
+    optimizer_kind: str,
+    n_epochs: int,
+    n_samples: int,
+    *,
+    weight_decay: float = 0.0,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
+):
+    """Build a warmup+cosine+clip optimizer via ``ml.training.create_optimizer``.
+
+    The dycore training modes only expose a peak ``lr``; this derives the total
+    step count (``n_epochs * n_samples``) for the cosine schedule and clamps the
+    warmup to it, then defers to the shared optimizer factory so clipping and the
+    schedule are NOT re-implemented per mode.
+    """
+    from legoesm.ml.training import TrainingConfig, create_optimizer
+
+    total_steps = max(int(n_epochs) * max(int(n_samples), 1), 1)
+    # A linear warmup makes the LR exactly 0 on every step < warmup (step 0
+    # always included for warmup >= 1), so a SHORT run (a 1-step smoke or a
+    # few-step fine-tune) whose whole length is <= the warmup would return
+    # init_value (lr == 0) and silently skip the update the raw optax.adam(lr)
+    # path DID perform.  Disable warmup entirely when the run is no longer than
+    # the requested warmup (warmup == 0 -> full peak LR from step 0, pure cosine
+    # decay); otherwise keep the full warmup for a normal-length run.
+    warmup = int(warmup_steps) if total_steps > int(warmup_steps) else 0
+    cfg = TrainingConfig(
+        lr=lr,
+        warmup_steps=warmup,
+        total_steps=total_steps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+        optimizer=optimizer_kind,
+    )
+    return create_optimizer(cfg)
+
+
 # ======================================================================
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
 
-def _build_training_segment(model, step_unified, grid, sigma, dt, *,
-                            microphysics="none", rad_update_steps=1,
-                            **extra_kwargs):
+def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs):
     """Build a segment function with standard training defaults.
 
     Encapsulates the boilerplate kwargs shared by all training modes.
     Returns the compiled segment function (use ``.raw`` for AD).
-
-    ``microphysics`` selects the prognostic-condensate scheme applied in the
-    carry hot loop (``"none"`` keeps the saturation-adjustment closure).  The
-    classical physics variant threads its real scheme (e.g. ``"kessler"``)
-    here so q_c/q_r/precip evolve; NN-replacement variants keep ``"none"``
-    (the network subsumes condensation).
-
-    ``rad_update_steps`` sub-cycles radiation: rrtmgp runs every N dynamics
-    steps (1 = every step).  N>1 cuts the dominant rrtmgp cost of the
-    classical variant — radiation varies slowly, so hourly-ish updates are
-    standard GCM practice and keep ``held_*`` fresh enough for the flux loss
-    (the last update lands within N steps of the rollout end).  Moot for the
-    NN-replacement variants (their step_unified ignores ``need_rad``).
     """
     sigma_full = jnp.asarray(sigma.sigma_full)
     return build_segment_fn(
@@ -60,43 +93,95 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, *,
         sigma_full=sigma_full,
         dsigma=jnp.asarray(sigma.dsigma),
         dt=dt,
-        rad_update_steps=rad_update_steps,
-        microphysics=microphysics,
+        rad_update_steps=1,
+        microphysics="none",
         fix_moisture=False,
         fix_mass=False,
         fric_decay=jnp.ones(sigma_full.shape[0]),
         qv_smooth_coeff=0.0,
-        # 2D horizontal coords (GridProtocol ``grid_lat``/``grid_lon``):
-        # radiation's compute_radiation_core flattens lat to (ncol,), so it
-        # needs the 2D (n_lat, n_lon) field, not the 1D ``grid.lat`` (which
-        # on a lat-lon / Gaussian grid is just the n_lat latitudes).  Equal
-        # to ``grid.lat`` on cubed-sphere (already 2D), so this is safe for
-        # every grid the training driver targets.
-        lat=grid.grid_lat,
-        lon=grid.grid_lon,
+        lat=grid.lat,
+        lon=grid.lon,
         start_day=0.0,
         gradient_checkpoint=True,
         **extra_kwargs,
     )
 
 
-# Public alias: the AIMIP lat-lon orchestrator reuses this exact segment
-# build for held-out evaluation (same defaults as training) rather than
-# importing the private symbol or re-deriving the kwargs.
-build_training_segment = _build_training_segment
+def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config):
+    """Build the ONCE-jitted differentiable train step shared by all modes.
+
+    This is the core of the OOM/recompile fix.  The previous driver built
+    ``run_seg = build_segment_fn(...)`` -- and therefore the whole closure
+    tree -- inside ``loss_fn`` on EVERY ``eqx.filter_value_and_grad`` call,
+    with no ``filter_jit`` on the step.  The full windowed rollout + reverse
+    adjoint was thus re-traced eagerly every sample*epoch (the documented
+    ~1.5 GiB/sample leak).  Wrapping the whole step in :func:`eqx.filter_jit`
+    traces the build/rollout/adjoint exactly ONCE and caches the XLA graph;
+    subsequent samples are pure forward+backward+update calls.
+
+    Parameters
+    ----------
+    make_run_seg : callable
+        ``(trainable) -> compiled segment fn`` (use ``.raw`` for AD).
+        Called INSIDE the differentiated ``loss_fn`` with the TRACED
+        trainable leaf so (a) gradients flow into the trainable and
+        (b) the segment build is captured by the single surrounding
+        ``filter_jit`` trace rather than rebuilt eagerly per sample.
+        Pre-building it OUTSIDE the loss with concrete params would bake
+        the params in as constants and zero their gradients.  The three
+        modes differ ONLY in this factory: physics-param tuning feeds
+        ``params.to_segment_kwargs()``; neural-GCM / SFNO build their
+        ``step_unified`` from the (traced) network.
+    optimizer : optax.GradientTransformation
+        Captured as a closure constant (static under ``filter_jit``); its
+        ``update`` runs inside the jitted step.
+    sigma_full, grid, dt, loss_config
+        Static rollout/loss configuration captured in the closure.
+
+    Returns
+    -------
+    callable
+        ``eqx.filter_jit``-wrapped
+        ``(params, opt_state, ic, target, forcing) ->
+        (params, opt_state, loss, grad_norm)``.  ``ic``/``target``/
+        ``forcing`` are TRACED ARGS (SegmentForcing doctrine), never
+        closure-captured, so changing per-sample values neither bake in
+        nor force recompiles.
+    """
+    def _train_step(params, opt_state, ic, target, forcing):
+        def loss_fn(trainable):
+            run_seg = make_run_seg(trainable)
+            # ``.raw`` = the non-JIT, non-donating segment variant.  Buffer
+            # donation conflicts with reverse-mode AD, so it MUST stay
+            # inside ``filter_value_and_grad`` (do not swap for a donating
+            # variant).
+            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            return combined_loss(
+                pred, target, sigma_full, grid=grid, config=loss_config,
+            )
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+        updates, opt_state = optimizer.update(
+            eqx.filter(grads, eqx.is_array),
+            opt_state,
+            eqx.filter(params, eqx.is_array),
+        )
+        params = eqx.apply_updates(params, updates)
+        return params, opt_state, loss, grad_norm
+
+    return eqx.filter_jit(_train_step)
 
 
 def _training_loop(
-    make_loss_fn: Callable,
+    train_step: Callable,
     params,
     optimizer,
     initial_carries,
     target_carries,
     forcings,
-    sigma_full,
     *,
     n_epochs: int = 100,
-    loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
     log_params: bool = False,
 ):
@@ -104,15 +189,19 @@ def _training_loop(
 
     Parameters
     ----------
-    make_loss_fn : callable
-        ``(params, ic, target, forcing) -> scalar_loss``
-        Factory that creates the differentiable loss for one sample.
+    train_step : callable
+        ``(params, opt_state, ic, target, forcing) ->
+        (params, opt_state, loss, grad_norm)``.  Built ONCE per training
+        call by :func:`_build_train_step` and wrapped in ``eqx.filter_jit``
+        so the segment fn / rollout / adjoint is traced a single time
+        instead of eagerly per sample*epoch.
     params : eqx.Module
         Initial learnable parameters.
     optimizer : optax.GradientTransformation
+        Used here only to initialise ``opt_state``; the per-step update
+        lives inside ``train_step``.
     initial_carries, target_carries, forcings : lists of training data
-    sigma_full : jax.Array
-    n_epochs, loss_config, log_every : training config
+    n_epochs, log_every : training config
     log_params : bool
         If True, log parameter values each epoch (for physics param tuning).
 
@@ -121,46 +210,20 @@ def _training_loop(
     params : updated parameters
     loss_history : list[float]
     """
-    # Persistent cross-process XLA compile cache: the RRTMGP radiation graph
-    # cold-compiles in ~2600 s; without the cache every training launch re-pays
-    # it.  Idempotent + must precede the first ``filter_jit`` compile below.
-    # Function-scope import keeps the ml->runtime dependency off module init.
-    from legoesm.runtime.backend import enable_persistent_compile_cache
-    enable_persistent_compile_cache()
-
-    # Optimize INEXACT (float/complex) arrays only — exactly what
-    # eqx.filter_value_and_grad differentiates.  is_array would also pull in
-    # any INT arrays (e.g. an SFNO's non-static Gaussian grid index arrays
-    # ms/ls), which then get None grad → optax tree-structure mismatch
-    # ("Expected None, got Array").
-    opt_state = optimizer.init(eqx.filter(params, eqx.is_inexact_array))
+    opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
     loss_history = []
-
-    # Build the value-and-grad ONCE and JIT it, with (params, ic, target,
-    # forcing) all as traced arguments.  Critical for the rrtmgp cost: the
-    # differentiable rollout's reverse-mode HLO (dominated by rrtmgp) is huge
-    # and compiles for HOURS at high resolution.  The old code rebuilt the
-    # segment inside loss_fn and called an UN-jitted value_and_grad every
-    # sample/epoch -> that ~hours compile was paid EVERY iteration (measured
-    # ~3 h/epoch at n_lat=48).  filter_jit keys on shapes/structure, which are
-    # identical across samples and epochs, so the compile happens ONCE and
-    # every subsequent step reuses it (CLAUDE.md: build once, pass changing
-    # values as args).  make_loss_fn ignores its first arg; we differentiate
-    # the explicit ``p`` (filter_value_and_grad differentiates arg 0 only,
-    # so ic/target/forcing are non-differentiated traced inputs).
-    def _loss_scalar(p, ic, target, forcing):
-        return make_loss_fn(p, ic, target, forcing)(p)
-
-    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(_loss_scalar))
 
     for epoch in range(n_epochs):
         epoch_loss = 0.0
         t0 = time.time()
+        grad_norm_val = 0.0
 
         for sample_idx, (ic, target, forcing) in enumerate(
             zip(initial_carries, target_carries, forcings)
         ):
-            loss, grads = value_and_grad(params, ic, target, forcing)
+            params, opt_state, loss, grad_norm = train_step(
+                params, opt_state, ic, target, forcing
+            )
 
             # --- NaN / Inf detection (outside JIT, values are materialized) ---
             loss_val = float(loss)
@@ -170,7 +233,6 @@ def _training_loop(
                     f"(loss={loss_val}). "
                     "Check CFL conditions, parameter bounds, and input data."
                 )
-            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
             grad_norm_val = float(grad_norm)
             if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
                 raise RuntimeError(
@@ -180,13 +242,6 @@ def _training_loop(
                 )
 
             epoch_loss += loss_val
-
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_inexact_array),
-                opt_state,
-                eqx.filter(params, eqx.is_inexact_array),
-            )
-            params = eqx.apply_updates(params, updates)
 
         avg_loss = epoch_loss / max(len(initial_carries), 1)
         loss_history.append(avg_loss)
@@ -211,86 +266,6 @@ def _training_loop(
 # Mode 1: Physics parameter tuning
 # ======================================================================
 
-def multi_step_rollout_loss(
-    ic, forcing, run_seg_raw, *, dt, rollout_hours, target,
-    sigma_full, grid, loss_config, truncated_bptt=True,
-):
-    """Single- or multi-step autoregressive supervision loss (shared by
-    every AIMIP trainer so the rollout+loss is defined ONCE).
-
-    ``loss_config.multi_step_hours`` empty  ->  ONE ``single_day_rollout``
-    to ``rollout_hours`` vs ``target`` (a single SegmentCarry): the legacy
-    single-horizon path, bit-identical to the old inline trainer body.
-
-    Non-empty  ->  GenCast-style multi-step (NeuralGCM / AIMIP protocol):
-    chain autoregressive segments between consecutive leads and sum
-    ``combined_loss`` after each segment against ``target[k]`` (``target``
-    is then a tuple of K carries), weighted by
-    ``loss_config.multi_step_weights`` (default uniform, normalised by the
-    weight sum).
-
-    ``truncated_bptt`` (default True) ``stop_gradient``s the carry between
-    segments, so each loss term backprops ONLY through its own segment.
-    The lat-lon primitive-equation ADJOINT explodes to NaN through a
-    >~6 h differentiable chain even when the forward is finite (job
-    8533825) — so full backprop-through-time over a 24 h+ multi-step
-    rollout is unusable on this stack.  Truncated BPTT keeps every
-    gradient a stable short-horizon adjoint while the FORWARD still chains
-    autoregressively: the model is supervised on its OWN drifted
-    6/12/18 h states, not only the ERA5 IC, which is the point of
-    multi-step training.  The spectral stack uses full BPTT (it is
-    adjoint-stable); this flag exists for the lat-lon stack.
-
-    NB the per-segment ``forcing`` is reused as-is; the diurnal solar
-    phase is therefore held at the IC time-of-day across segments.
-    # ponytail: approximate diurnal phase across segments; thread
-    # forcing.seconds_of_day per lead if a diurnal-sensitive metric needs it.
-    """
-    ms_hours = tuple(int(h) for h in (loss_config.multi_step_hours or ()))
-    if not ms_hours:
-        pred = single_day_rollout(
-            ic, forcing, run_seg_raw, dt=dt, hours=rollout_hours)
-        return combined_loss(
-            pred, target, sigma_full, grid=grid, config=loss_config)
-
-    # Segment lengths = gaps between consecutive (sorted) leads.
-    leads = sorted(ms_hours)
-    seg_hours, prev = [], 0
-    for h in leads:
-        gap = h - prev
-        if gap <= 0:
-            raise ValueError(
-                f"multi_step_hours={ms_hours} must be strictly increasing "
-                "positive hour leads.")
-        seg_hours.append(gap)
-        prev = h
-    if not isinstance(target, (tuple, list)) or len(target) != len(seg_hours):
-        raise ValueError(
-            f"multi-step loss needs {len(seg_hours)} target carries (one per "
-            f"lead {leads}); got "
-            f"{type(target).__name__} of length "
-            f"{len(target) if isinstance(target, (tuple, list)) else 'n/a'}.")
-    weights = tuple(float(w) for w in (loss_config.multi_step_weights or ()))
-    if weights and len(weights) != len(seg_hours):
-        raise ValueError(
-            f"multi_step_weights length {len(weights)} != number of leads "
-            f"{len(seg_hours)}.")
-    if not weights:
-        weights = (1.0,) * len(seg_hours)
-    wsum = float(sum(weights))
-
-    state = ic
-    total = jnp.asarray(0.0)
-    for k, sh in enumerate(seg_hours):
-        state = single_day_rollout(
-            state, forcing, run_seg_raw, dt=dt, hours=sh)
-        total = total + weights[k] * combined_loss(
-            state, target[k], sigma_full, grid=grid, config=loss_config)
-        if truncated_bptt:
-            state = jax.lax.stop_gradient(state)
-    return total / wsum
-
-
 def train_physics_params(
     model,
     grid,
@@ -303,11 +278,8 @@ def train_physics_params(
     n_epochs: int = 100,
     lr: float = 1e-3,
     dt: float = 600.0,
-    rollout_hours: float = 24.0,
-    grad_clip: float = 1.0,
-    microphysics: str = "none",
-    rad_update_steps: int = 1,
-    rad_stop_gradient: bool = False,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -331,72 +303,30 @@ def train_physics_params(
     """
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
-    # Single source of truth: the segment's saturation-adjustment toggle
-    # (do_sat_adjust = microphysics=='none') MUST match whether the pipeline
-    # actually produces condensate tendencies.  micro_fn is None iff the
-    # pipeline microphysics is 'none' (_resolve_microphysics).  A mismatch
-    # (e.g. microphysics='kessler' but a 'none' pipeline) would disable
-    # sat-adjust while step_unified returns zero dq_c/dq_r -> supersaturation
-    # accumulates unchecked.  Fail loud rather than silently blow up.
-    _pipeline_has_micro = getattr(physics_pipeline, "micro_fn", None) is not None
-    if _pipeline_has_micro != (microphysics != "none"):
-        raise ValueError(
-            f"microphysics={microphysics!r} disagrees with the physics_pipeline "
-            f"(micro_fn is {'set' if _pipeline_has_micro else 'None'}). Build the "
-            "pipeline and pass the segment microphysics from the SAME config so "
-            "the saturation-adjustment toggle matches the condensate scheme."
-        )
-
-    # rad_update_steps must update radiation at least once within the rollout,
-    # else held_* stay at their IC value (zeroed) at the rollout end -> the
-    # flux loss compares stale/zero fluxes and no gradient reaches radiation
-    # params.  Last update lands at floor(n_steps/N)*N, so require N <= n_steps.
-    _n_steps = max(1, int(round(rollout_hours * 3600.0 / dt)))
-    if not 1 <= rad_update_steps <= _n_steps:
-        raise ValueError(
-            f"rad_update_steps={rad_update_steps} must be in [1, n_steps="
-            f"{_n_steps}] (rollout_hours={rollout_hours}, dt={dt}); a larger "
-            "value never updates radiation during the rollout, leaving held_* "
-            "fluxes stale/zero with no flux-loss gradient to radiation params."
-        )
-
     params = TrainablePhysicsParams.from_defaults()
-    # NB radiation sub-cycling: the ``.raw`` AD path (used here) always routes
-    # to build_segment_fn's ``_run_single`` (the subcycle dispatch reads
-    # int(step_index), not traceable under grad), which ALREADY cond-gates
-    # rrtmgp to ~1/rad_update_steps at runtime — bit-equivalent to the nested
-    # subcycle, only XLA compile-time differs (and the once-jit + persistent
-    # cache amortize that).  So passing step_unified_no_rad / static_need_rad
-    # here does NOT cut training runtime; the rrtmgp adjoint cost is inherent.
-    # The real runtime lever is --radiation-as-forcing (drop the rrtmgp adjoint
-    # entirely), threaded via rad_stop_gradient.
-    step_unified = physics_pipeline.build_step_unified(
-        rad_stop_gradient=rad_stop_gradient)
+    step_unified = physics_pipeline.build_step_unified()
     sigma_full = jnp.asarray(sigma.sigma_full)
 
-    def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(params_):
-            seg_kw = params_.to_segment_kwargs()
-            run_seg = _build_training_segment(
-                model, step_unified, grid, sigma, dt,
-                microphysics=microphysics, rad_update_steps=rad_update_steps,
-                **seg_kw,
-            )
-            return multi_step_rollout_loss(
-                ic, forcing, run_seg.raw, dt=dt, rollout_hours=rollout_hours,
-                target=target, sigma_full=sigma_full, grid=grid,
-                loss_config=loss_config)
-        return loss_fn
+    def make_run_seg(trainable):
+        # ``step_unified`` is param-independent (built once above); only the
+        # segment kwargs carry the (traced) trainable values, so the gradient
+        # path to ``trainable`` runs through ``build_segment_fn``.
+        return _build_training_segment(
+            model, step_unified, grid, sigma, dt,
+            **trainable.to_segment_kwargs(),
+        )
 
-    # Gradient clipping guards against the occasional adjoint spike from
-    # the long differentiable rollout (esp. with the shorter horizons).
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip), optax.adam(lr))
+    optimizer = _make_driver_optimizer(
+        lr, "adam", n_epochs, len(initial_carries),
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
+    )
+    train_step = _build_train_step(
+        make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+    )
     return _training_loop(
-        make_loss_fn, params, optimizer,
-        initial_carries, target_carries, forcings, sigma_full,
-        n_epochs=n_epochs, loss_config=loss_config,
-        log_every=log_every, log_params=True,
+        train_step, params, optimizer,
+        initial_carries, target_carries, forcings,
+        n_epochs=n_epochs, log_every=log_every, log_params=True,
     )
 
 
@@ -416,8 +346,9 @@ def train_neural_gcm(
     n_epochs: int = 100,
     lr: float = 1e-4,
     dt: float = 600.0,
-    rollout_hours: float = 24.0,
-    grad_clip: float = 1.0,
+    weight_decay: float = 1e-5,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -440,102 +371,23 @@ def train_neural_gcm(
     sigma_full = jnp.asarray(sigma.sigma_full)
     adapter = make_adapter(grid)
 
-    def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(nn_phys):
-            step_unified = make_neural_step_unified(nn_phys, adapter)
-            run_seg = _build_training_segment(
-                model, step_unified, grid, sigma, dt,
-            )
-            return multi_step_rollout_loss(
-                ic, forcing, run_seg.raw, dt=dt, rollout_hours=rollout_hours,
-                target=target, sigma_full=sigma_full, grid=grid,
-                loss_config=loss_config)
-        return loss_fn
+    def make_run_seg(nn_phys):
+        step_unified = make_neural_step_unified(nn_phys, adapter)
+        return _build_training_segment(model, step_unified, grid, sigma, dt)
 
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip),
-        optax.adamw(lr, weight_decay=1e-5))
+    optimizer = _make_driver_optimizer(
+        lr, "adamw", n_epochs, len(initial_carries),
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
+    )
+    train_step = _build_train_step(
+        make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+    )
     return _training_loop(
-        make_loss_fn, neural_physics, optimizer,
-        initial_carries, target_carries, forcings, sigma_full,
-        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
+        train_step, neural_physics, optimizer,
+        initial_carries, target_carries, forcings,
+        n_epochs=n_epochs, log_every=log_every,
     )
-
-
-def train_sfno_latlon(
-    model,
-    grid,
-    sigma,
-    sfno,
-    gauss_grid,
-    nlev,
-    regrid_ll2g,
-    regrid_g2ll,
-    gauss_n_lat,
-    gauss_n_lon,
-    initial_carries,
-    target_carries,
-    forcings,
-    *,
-    flux_head=None,
-    n_epochs: int = 100,
-    lr: float = 5e-4,
-    dt: float = 600.0,
-    rollout_hours: float = 24.0,
-    grad_clip: float = 1.0,
-    tendency_scale: float = 1.0e-5,
-    loss_config: LossConfig = LossConfig(),
-    log_every: int = 10,
-):
-    """Train an SFNO on a LAT-LON carry via the Gaussian-regrid bridge.
-
-    The SFNO lives on a Gaussian grid (its SHT requires it); the bridge
-    (``make_sfno_step_unified_latlon``) regrids the lat-lon prognostics to
-    Gaussian, runs the SFNO, and regrids the tendencies back — all
-    differentiable.  Replacement mode (SFNO is the physics).
-
-    ``flux_head`` (optional eqx column MLP) is trained jointly so the SFNO's
-    predicted TOA/surface fluxes feed the radiation-flux loss.  Returns the
-    trained ``SFNOPhysics`` (sfno + flux_head rewrapped with the grid).
-    """
-    from legoesm.training.sfno_dycore_coupling import (
-        make_sfno_step_unified_latlon, SFNOPhysics,
-    )
-
-    sigma_full = jnp.asarray(sigma.sigma_full)
-
-    # Differentiate the SFNO + flux_head (all float/complex params) as a
-    # tuple; the Gaussian grid (with INT spherical-harmonic index arrays
-    # ms/ls) stays a closure const — bundling it into the differentiated
-    # module makes eqx grad emit an Array cotangent for the int leaves where
-    # it expects None ("Expected None, got Array").
-    def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(params_):
-            sfno_, flux_head_ = params_
-            sphys = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev,
-                                flux_head=flux_head_)
-            step_unified = make_sfno_step_unified_latlon(
-                sphys, regrid_ll2g, regrid_g2ll, gauss_n_lat, gauss_n_lon,
-                tendency_scale=tendency_scale,
-            )
-            run_seg = _build_training_segment(model, step_unified, grid, sigma, dt)
-            return multi_step_rollout_loss(
-                ic, forcing, run_seg.raw, dt=dt, rollout_hours=rollout_hours,
-                target=target, sigma_full=sigma_full, grid=grid,
-                loss_config=loss_config)
-        return loss_fn
-
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip),
-        optax.adamw(lr, weight_decay=1e-5))
-    trained_params, hist = _training_loop(
-        make_loss_fn, (sfno, flux_head), optimizer,
-        initial_carries, target_carries, forcings, sigma_full,
-        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
-    )
-    sfno_t, flux_head_t = trained_params
-    return SFNOPhysics(sfno=sfno_t, grid=gauss_grid, nlev=nlev,
-                       flux_head=flux_head_t), hist
 
 
 # ======================================================================
@@ -554,10 +406,11 @@ def train_sfno_coupled(
     n_epochs: int = 100,
     lr: float = 5e-4,
     dt: float = 600.0,
-    rollout_hours: float = 24.0,
-    grad_clip: float = 1.0,
     coupling_mode: str = "correction",
     physics_pipeline=None,
+    weight_decay: float = 1e-5,
+    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
+    warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -577,9 +430,7 @@ def train_sfno_coupled(
     sfno_physics : updated SFNOPhysics
     list[float] — loss history
     """
-    from legoesm.training.sfno_dycore_coupling import (
-        make_sfno_step_unified, SFNOPhysics,
-    )
+    from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -594,41 +445,24 @@ def train_sfno_coupled(
             )
         traditional_step = physics_pipeline.build_step_unified()
 
-    # Differentiate ONLY the SFNO (float/complex params).  SFNOPhysics.grid is
-    # a non-static GaussianGrid whose FLOAT leaves (Pnm/Hnm/wPnm/lap — the SHT
-    # transform matrices) would otherwise be swept up by is_inexact_array and
-    # corrupted by AdamW (grad + weight decay) — and its INT index arrays
-    # ms/ls would break optax's tree structure.  The grid + nlev are closure
-    # consts; only sfno_physics.sfno is trained.
-    sfno0 = sfno_physics.sfno
-    gauss_grid = sfno_physics.grid
-    nlev = sfno_physics.nlev
+    def make_run_seg(sfno_ph):
+        step_unified = make_sfno_step_unified(
+            sfno_ph,
+            mode=coupling_mode,
+            traditional_step_unified=traditional_step,
+        )
+        return _build_training_segment(model, step_unified, grid, sigma, dt)
 
-    def make_loss_fn(_params, ic, target, forcing):
-        def loss_fn(sfno_):
-            sfno_ph = SFNOPhysics(sfno=sfno_, grid=gauss_grid, nlev=nlev)
-            step_unified = make_sfno_step_unified(
-                sfno_ph,
-                mode=coupling_mode,
-                traditional_step_unified=traditional_step,
-            )
-            run_seg = _build_training_segment(
-                model, step_unified, grid, sigma, dt,
-            )
-            return multi_step_rollout_loss(
-                ic, forcing, run_seg.raw, dt=dt, rollout_hours=rollout_hours,
-                target=target, sigma_full=sigma_full, grid=grid,
-                loss_config=loss_config)
-        return loss_fn
-
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip),
-        optax.adamw(lr, weight_decay=1e-5))
-    trained_sfno, hist = _training_loop(
-        make_loss_fn, sfno0, optimizer,
-        initial_carries, target_carries, forcings, sigma_full,
-        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
+    optimizer = _make_driver_optimizer(
+        lr, "adamw", n_epochs, len(initial_carries),
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
     )
-    # Re-wrap the trained SFNO so the caller gets a usable SFNOPhysics back
-    # (preserves the previous return contract).
-    return SFNOPhysics(sfno=trained_sfno, grid=gauss_grid, nlev=nlev), hist
+    train_step = _build_train_step(
+        make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+    )
+    return _training_loop(
+        train_step, sfno_physics, optimizer,
+        initial_carries, target_carries, forcings,
+        n_epochs=n_epochs, log_every=log_every,
+    )

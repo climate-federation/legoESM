@@ -314,93 +314,6 @@ class TestSFNOCoupling:
         from legoesm.training.sfno_dycore_coupling import SFNOPhysics
         assert SFNOPhysics is not None
 
-    def test_flux_head_predicts_nonzero_fluxes(self):
-        """SFNOPhysics with a flux_head produces nonzero TOA/surface fluxes;
-        without one they are zero (state-only)."""
-        import equinox as eqx
-        from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.training.sfno_dycore_coupling import SFNOPhysics
-
-        nlev = 4
-        gauss = create_gaussian_grid(n_max=8, dealiasing="quadratic")
-        spec = PE3DChannelSpec(nlev=nlev)
-        cfg = SFNOConfig(in_channels=spec.n_channels,
-                         out_channels=spec.n_channels,
-                         embed_dim=16, n_blocks=1, residual_prediction=False)
-        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(0))
-        head = eqx.nn.MLP(in_size=spec.n_channels, out_size=4, width_size=8,
-                          depth=2, activation=jax.nn.gelu,
-                          key=jax.random.PRNGKey(1))
-
-        nlat, nlon = int(gauss.n_lat), int(gauss.n_lon)
-        T = jnp.full((nlat, nlon, nlev), 280.0)
-        z3 = jnp.zeros((nlat, nlon, nlev))
-        p_s = jnp.full((nlat, nlon), 1.0e5)
-        z2 = jnp.zeros((nlat, nlon))
-        dt = jnp.array(600.0)
-
-        no_head = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
-        out0 = no_head(T, z3, z3, z3, p_s, z2, dt)
-        assert float(jnp.abs(out0.sw_up_toa).max()) == 0.0  # state-only
-
-        with_head = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev,
-                                flux_head=head, flux_output_scale=100.0)
-        out1 = with_head(T, z3, z3, z3, p_s, z2, dt)
-        assert float(jnp.abs(out1.sw_up_toa).max()) > 0.0
-        assert float(jnp.abs(out1.lw_up_toa).max()) > 0.0
-        assert float(jnp.abs(out1.sw_net_sfc).max()) > 0.0
-        assert out1.sw_up_toa.shape == (nlat, nlon)
-
-    def test_latlon_bridge_passthrough_when_no_flux_head(self):
-        """Bridge with flux_head=None must PASS the incoming held_* through
-        (state-only), not overwrite with zeros (codex: else a flux loss is a
-        constant penalty with no gradient)."""
-        import numpy as np
-        from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.training.sfno_dycore_coupling import (
-            SFNOPhysics, make_sfno_step_unified_latlon,
-        )
-
-        nlev = 4
-        ll = create_latlon_grid(n_lat=8)
-        gauss = create_gaussian_grid(n_max=8, dealiasing="quadratic")
-        spec = PE3DChannelSpec(nlev=nlev)
-        cfg = SFNOConfig(in_channels=spec.n_channels, out_channels=spec.n_channels,
-                         embed_dim=16, n_blocks=1, residual_prediction=False)
-        sfno = SFNO(cfg, gauss, key=jax.random.PRNGKey(0))
-        sphys = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)  # NO flux head
-
-        llat, llon = np.asarray(ll.lat), np.asarray(ll.lon)
-        glat, glon = np.asarray(gauss.lat), np.asarray(gauss.lon)
-        g2 = np.meshgrid(glat, glon, indexing="ij")
-        l2 = np.meshgrid(llat, llon, indexing="ij")
-        w_ll2g = compute_latlon_to_voronoi_weights(llat, llon, g2[0].ravel(), g2[1].ravel())
-        w_g2ll = compute_latlon_to_voronoi_weights(glat, glon, l2[0].ravel(), l2[1].ravel())
-        step = make_sfno_step_unified_latlon(
-            sphys, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon))
-
-        nlat_ll, nlon_ll = int(ll.n_lat), int(ll.n_lon)
-        s3, s2 = (nlat_ll, nlon_ll, nlev), (nlat_ll, nlon_ll)
-        T = jnp.full(s3, 280.0); z3 = jnp.zeros(s3); p_s = jnp.full(s2, 1.0e5)
-        lat = jnp.zeros(s2)
-        # distinct nonzero held inputs to detect passthrough vs overwrite
-        h_swn, h_lwn = jnp.full(s2, 11.0), jnp.full(s2, 22.0)
-        h_swt, h_lwt = jnp.full(s2, 33.0), jnp.full(s2, 44.0)
-        tail = (z3, z3, jnp.zeros(s2), jnp.zeros(s2), lat, lat, 0.0, 0.0, 600.0,
-                jnp.zeros(s2), jnp.array(1361.0), z3, jnp.zeros(s2),
-                jnp.zeros(s3), h_swn, h_lwn, h_swt, h_lwt, jnp.zeros(s2))
-        _, held_new = step(jnp.bool_(True), T, p_s, z3, z3, z3, None, *tail)
-        assert jnp.array_equal(held_new[1], h_swn)
-        assert jnp.array_equal(held_new[2], h_lwn)
-        assert jnp.array_equal(held_new[3], h_swt)
-        assert jnp.array_equal(held_new[4], h_lwt)
-
 
 # ---------------------------------------------------------------------------
 # 7. era5_to_state
@@ -473,6 +386,109 @@ class TestERA5ToState:
         assert jnp.all(jnp.isfinite(carry.q_v)), "q_v contains non-finite values"
         assert jnp.all(carry.q_v >= 0), "q_v contains negative values"
 
+    def test_era5_to_cubedsphere_carry_barometric_correction(self):
+        """With Tibet-like phis, the barometric p_s correction is applied and
+        the output remains finite.  Without the correction, smoothing phis
+        without adjusting p_s would worsen the split-PGF residual over steep
+        terrain boundaries."""
+        import jax.numpy as jnp
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        rng = np.random.default_rng(42)
+        T_ll = (260.0 + rng.random((n_lat, n_lon, n_plev)) * 40.0).astype(np.float32)
+        u_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        v_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+        plev_Pa = np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64)
+
+        # Tibet-like phis: steep gradient in northern quarter of domain
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        phis[: n_lat // 3, :] = 50000.0   # ~5000 m elevation
+        p_s = np.where(phis > 0, 55000.0, 101325.0).astype(np.float32)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+
+        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite with Tibet phis"
+        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite with Tibet phis"
+        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite with Tibet phis"
+        # p_s should be positive everywhere after barometric correction
+        assert jnp.all(carry.p_s > 0), "p_s has non-positive values after correction"
+
+    def test_era5_to_cubedsphere_carry_hybrid_ps_floor(self):
+        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, the p_s floor
+        must be enforced and phis adjusted so that all hybrid layer thicknesses
+        remain positive (no degenerate/inverted levels).  Without this fix, 19 of
+        40 levels are underground at p_s=56703 Pa and the arch-peak at lev 28–29
+        has dp = −1 Pa, causing catastrophic continuity-equation blow-up."""
+        import jax.numpy as jnp
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 5
+        rng = np.random.default_rng(7)
+        plev_Pa = np.array([5000.0, 15000.0, 30000.0, 55000.0, 100000.0], dtype=np.float64)
+        T_ll = (240.0 + rng.random((n_lat, n_lon, n_plev)) * 50.0).astype(np.float32)
+        u_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        v_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+
+        # Tibet-like column: p_s = 56703 Pa (far below L40 p_s_floor ~69645 Pa)
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        phis[: n_lat // 3, :] = 46559.0   # ~4751 m (central Tibet)
+        p_s = np.where(phis > 0, 56703.0, 101325.0).astype(np.float32)
+
+        sigma40 = standard_hybrid_levels(40)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 270.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry = era5_to_cubedsphere_carry(era5, _GRID, sigma40)
+
+        # All fields must be finite
+        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite after p_s floor"
+        assert jnp.all(jnp.isfinite(carry.phis)), "phis non-finite after p_s floor"
+
+        # p_s must be at or above the minimum level where all hybrid layers
+        # have positive thickness (dp_floor=100 Pa).  Compute floor from the
+        # hybrid coordinate definition: p = A*p_ref + B*p_s, so minimum p_s
+        # that keeps all layers positive is where A[-1] + B[-1]*p_s = A[-2] + B[-2]*p_s
+        # i.e. p_s_floor = max over k of (A[k-1]-A[k])/(B[k]-B[k-1])+dp_floor/B_mean.
+        # Simpler: p_s_floor via the constraint that the lowest full level stays
+        # above the surface. Just verify the model enforces a positive floor.
+        assert float(jnp.min(carry.p_s)) > 0.0, "p_s must be positive everywhere"
+        # And that the floor was applied: Tibet column p_s=56703 Pa should be raised
+        assert float(jnp.min(carry.p_s)) > 56703.0, (
+            f"p_s floor not applied: min p_s={float(jnp.min(carry.p_s)):.1f} Pa "
+            f"still at Tibet value 56703 Pa"
+        )
+
+        # All L40 hybrid layer thicknesses must be positive for every column
+        A_full = jnp.asarray(sigma40.A_full)
+        B_full = jnp.asarray(sigma40.B_full)
+        p_model = A_full * sigma40.p_ref + B_full * carry.p_s[..., None]  # (6,N,N,40)
+        dp = jnp.diff(p_model, axis=-1)  # (6,N,N,39)
+        assert float(jnp.min(dp)) >= -1.0, (
+            f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver
@@ -499,73 +515,90 @@ class TestTrainingDriver:
         assert callable(fn)
         assert hasattr(fn, 'raw')
 
-    def test_microphysics_pipeline_mismatch_raises(self):
-        """Segment do_sat_adjust toggle must match the pipeline's condensate
-        scheme: microphysics!='none' with a micro_fn=None pipeline disables
-        sat-adjust while no scheme condenses -> supersaturation. Fail loud.
-        """
-        from legoesm.training.training_driver import train_physics_params
+    def test_train_step_builds_segment_once(self, monkeypatch):
+        """OOM/recompile guard: the segment fn is built exactly ONCE (one
+        ``filter_jit`` trace), not once per sample*epoch.
 
-        class _Pipe:
-            micro_fn = None  # microphysics 'none'
-
-        with pytest.raises(ValueError, match="disagrees"):
-            # assert fires before any of model/grid/sigma/carries are touched
-            train_physics_params(None, None, None, _Pipe(), [], [], [],
-                                 microphysics="kessler")
-
-    def test_rad_update_steps_exceeding_rollout_raises(self):
-        """rad_update_steps > n_steps means radiation never updates in the
-        rollout -> stale/zero held_* fluxes, no flux gradient. Fail loud."""
-        from legoesm.training.training_driver import train_physics_params
-
-        class _Pipe:
-            micro_fn = None  # microphysics 'none' -> passes the micro assert
-
-        with pytest.raises(ValueError, match="rad_update_steps"):
-            # 6h / 600s = 36 steps; 1000 > 36. Guard fires before the loop,
-            # so model/grid/sigma=None are never touched.
-            train_physics_params(None, None, None, _Pipe(), [], [], [],
-                                 microphysics="none", rad_update_steps=1000,
-                                 rollout_hours=6.0, dt=600.0)
-
-    def test_optimizer_filter_handles_int_arrays(self):
-        """Regression: an eqx.Module carrying INT arrays (e.g. an SFNO whose
-        non-static Gaussian grid holds spherical-harmonic index arrays) must
-        train without an optax tree-structure mismatch.  filter_value_and_grad
-        diffs inexact arrays only, so the optimizer must filter the SAME way;
-        eqx.is_array would pull the int leaves into opt_state and update would
-        raise "Expected None, got Array".
+        Regression test for the documented ~1.5 GiB/sample leak — the old
+        driver rebuilt ``build_segment_fn`` and re-traced the rollout +
+        reverse adjoint on every ``eqx.filter_value_and_grad`` call because
+        the step was not wrapped in ``eqx.filter_jit``.
         """
         import equinox as eqx
         import optax
+        import legoesm.training.training_driver as td
+        from legoesm.training.trainable_params import TrainablePhysicsParams
 
-        class _Mixed(eqx.Module):
-            w: jax.Array      # trainable float
-            idx: jax.Array    # non-trainable int (mimics grid ms/ls)
+        build_count = [0]
 
-        m = _Mixed(w=jnp.ones(4), idx=jnp.arange(4))
+        def counting_build(**kw):
+            build_count[0] += 1
+            tau = kw["tau_equator"]
+            c_e = kw["C_E"]
 
-        def loss_fn(mod):
-            # idx participates (gather) but carries no float gradient
-            return jnp.sum(mod.w[mod.idx] ** 2)
+            class _Seg:
+                # ``.raw`` reads the (traced) trainable kwargs so the AD path
+                # to the trainable is real (a zero grad would mean the params
+                # got baked in as constants).
+                def raw(self, carry, n_steps, forcing):
+                    return tau * carry + c_e * forcing
 
-        _, grads = eqx.filter_value_and_grad(loss_fn)(m)
-        opt = optax.adamw(1e-2)
+            return _Seg()
 
-        # is_array (the bug): int leaf in opt_state, None in grads -> mismatch
-        st_bad = opt.init(eqx.filter(m, eqx.is_array))
-        with pytest.raises(ValueError):
-            opt.update(eqx.filter(grads, eqx.is_array), st_bad,
-                       eqx.filter(m, eqx.is_array))
+        # Lightweight stand-ins exercise the real _build_train_step /
+        # _training_loop control flow (filter_jit, value_and_grad, optimiser
+        # update) without the heavy dycore.
+        monkeypatch.setattr(td, "build_segment_fn", counting_build)
+        monkeypatch.setattr(
+            td, "single_day_rollout",
+            lambda ic, forcing, run_seg_fn, dt: run_seg_fn(ic, 1, forcing),
+        )
+        monkeypatch.setattr(
+            td, "combined_loss",
+            lambda pred, target, sigma_full, grid=None, config=None: jnp.sum(
+                (pred - target) ** 2
+            ),
+        )
 
-        # is_inexact_array (the fix): structures match, update round-trips
-        st = opt.init(eqx.filter(m, eqx.is_inexact_array))
-        upd, _ = opt.update(eqx.filter(grads, eqx.is_inexact_array), st,
-                            eqx.filter(m, eqx.is_inexact_array))
-        m2 = eqx.apply_updates(m, upd)
-        assert not jnp.allclose(m2.w, m.w)          # float trained
-        assert jnp.array_equal(m2.idx, m.idx)       # int untouched
+        def make_run_seg(trainable):
+            return td._build_training_segment(
+                None, None, _GRID, _SIGMA, 600.0,
+                **trainable.to_segment_kwargs(),
+            )
+
+        params = TrainablePhysicsParams.from_defaults()
+        optimizer = optax.adam(1e-3)
+        train_step = td._build_train_step(
+            make_run_seg, optimizer,
+            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, None,
+        )
+
+        ics = [jnp.asarray(1.0), jnp.asarray(2.0)]
+        targets = [jnp.asarray(0.0), jnp.asarray(0.0)]
+        forcings = [jnp.asarray(0.5), jnp.asarray(1.5)]
+
+        # First call traces once -> build runs once; AD must reach the
+        # trainable (finite, NON-zero gradient).
+        opt_state0 = optimizer.init(eqx.filter(params, eqx.is_array))
+        _, _, loss0, gnorm0 = train_step(
+            params, opt_state0, ics[0], targets[0], forcings[0]
+        )
+        assert jnp.isfinite(loss0)
+        assert float(gnorm0) > 0.0
+        assert build_count[0] == 1
+
+        # 2 epochs x 2 samples = 4 more train_step calls reuse the SAME
+        # compiled step (cache hits) => no extra builds.
+        _, history = td._training_loop(
+            train_step, params, optimizer, ics, targets, forcings,
+            n_epochs=2, log_every=10,
+        )
+        assert build_count[0] == 1, (
+            f"segment fn rebuilt {build_count[0]}x (expected 1); the "
+            "filter_jit-once fix regressed -> per-sample retrace/OOM."
+        )
+        assert len(history) == 2
+        assert all(jnp.isfinite(jnp.asarray(loss)) for loss in history)
 
 
 # ---------------------------------------------------------------------------

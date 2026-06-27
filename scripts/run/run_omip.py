@@ -675,7 +675,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             _K_h = K_h_override if K_h_override is not None else 1e3
             _C_smag = C_smag if C_smag is not None else 0.0
             _C_leith = C_leith if C_leith is not None else 0.0
-            config = LatLonCGridOceanConfig(
+            config = LatLonCGridOceanConfig.from_flat(
                 A_h=_A_h, A_h_lat_scaling=(not no_lat_scaling),
                 A_h_floor=A_h_floor,
                 A_h_eq_boost=A_h_eq_boost,
@@ -733,7 +733,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # an ocean test-matrix regression run.
             )
         else:
-            config = LatLonCGridOceanConfig(
+            config = LatLonCGridOceanConfig.from_flat(
                 A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=True,
@@ -805,7 +805,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # overlay only the run-dependent SETUP physics above.
         config = nemo_match_mpas_model_config(physics=physics)
         # Enforce global surface-freshwater balance, exactly as the lat-lon/tripole
-        # config does (LatLonCGridOceanConfig(normalize_freshwater=True) above).
+        # config does (LatLonCGridOceanConfig.from_flat(normalize_freshwater=True) above).
         # The CORE-II P-E+R integral is a net ~+0.65 Sv freshwater input (a true
         # forcing imbalance, identical on every grid); without this the MPAS ocean
         # accumulates it as a ~-0.5 PSU global-mean fresh drift in 90 days, while
@@ -1788,7 +1788,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     # 3D velocity clip — caps ALL velocity components (barotropic +
     # baroclinic) after each step.  The barotropic-only MAXVEL inside
     # the split-explicit solver doesn't prevent baroclinic blowup.
-    _maxvel_3d = model.config.maxvel_barotropic
+    _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     @jax.jit
@@ -1954,7 +1954,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         freeze_mask_static = None
         T_freeze_C_static = -1.8
 
-    _maxvel_3d = model.config.maxvel_barotropic
+    _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     lat_2d = jra55_state["lat_2d"]

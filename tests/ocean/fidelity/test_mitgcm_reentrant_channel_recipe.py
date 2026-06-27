@@ -34,8 +34,10 @@ def test_geometry_is_reentrant_beta_plane_channel():
     assert f.min() < 0.0 and f.max() < 0.0          # f<0 everywhere (SH)
     # beta>0: f increases (less negative) northward.
     assert f[-1, 0] > f[0, 0]
-    # Metric-consistent Cartesian pseudo-lat (required for the implicit FS).
-    np.testing.assert_array_equal(np.asarray(g.lat), 0.0)
+    # #514: operators READ the stored uniform dx_v (== dx_m); the geometry's
+    # natural pseudo-lat no longer enters the metric, so the lat=0 workaround is
+    # gone and dx_v is the uniform Cartesian width the implicit FS relies on.
+    np.testing.assert_allclose(np.asarray(g.dx_v), rc.DX_M)
 
 
 def test_vertical_matches_mitgcm_delr():
@@ -111,7 +113,7 @@ def test_config_is_gm_redi_linear_eos_channel():
     assert c.gm_redi.kappa_Redi == rc.GM_BACKGROUND_K
     assert c.A_h == rc.VISC_AH and c.K_h == 0.0
     assert c.A_v == rc.VISC_AR and c.K_v == 1.0e-5
-    assert c.barotropic_solver == "implicit_unsplit"
+    assert c.barotropic.barotropic_solver == "implicit_unsplit"
     assert c.implicit_vertical_mixing is True
     # ivdc convective adjustment via the enhanced-diffusion scheme.
     assert c.physics.convection.scheme == "enhanced_diffusion"

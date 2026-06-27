@@ -24,16 +24,19 @@ from legoesm.parallel.profiling import mpi_timer
 _TESTED_JAX_MIN = (0, 8, 0)
 _TESTED_JAX_MAX_EXCL = (0, 10, 0)
 _TESTED_MPI4JAX_MIN = (0, 8, 0)
-_TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
+_TESTED_MPI4JAX_MAX_EXCL = (0, 10, 0)
 
-# mpi4jax 0.8.x uses the deprecated API_VERSION_STATUS_RETURNING custom-call
-# convention removed in JAX 0.10.  Until mpi4jax ships an FFI-based release,
-# pin JAX < 0.10 for MPI workloads.  The warning from XLA is cosmetic for now
-# (the API still functions) but will become a hard error once JAX 0.10 ships.
+# mpi4jax 0.9.0 shipped the FFI rewrite (mpi4jax#289): the collectives now use
+# JAX's modern FFI mechanism instead of the legacy API_VERSION_STATUS_RETURNING
+# custom call, so they no longer emit the XLA deprecation warning and survive
+# the legacy-API removal in JAX 0.10.  Validated np=2 on this stack (issue #567):
+# mpi4jax 0.8.1 emits STATUS_RETURNING, 0.9.0 does not (allreduce numerics
+# match).  Prefer mpi4jax >= 0.9; 0.8.x still functions but on the deprecated
+# (warned, slow) custom-call path.
 _MPI4JAX_FFI_MIGRATION_NOTE = (
-    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed "
-    "in JAX 0.10.  Monitor https://github.com/mpi4jax/mpi4jax for an FFI-based "
-    "release.  Until then, pin JAX < 0.10 for MPI workloads."
+    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed in "
+    "JAX 0.10.  Upgrade to mpi4jax >= 0.9 (the FFI rewrite, mpi4jax#289), which "
+    "uses JAX's FFI mechanism and works on JAX 0.10+."
 )
 
 
@@ -90,7 +93,7 @@ def _check_mpi4jax_api_version_deprecation() -> str | None:
         return (
             "mpi4jax is using the deprecated API_VERSION_STATUS_RETURNING "
             "custom-call interface, which is incompatible with modern JAX. "
-            "Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+            "Upgrade mpi4jax: pip install 'mpi4jax>=0.9,<0.10'"
         )
 
     # Also check via XLA custom call registration if available.
@@ -101,7 +104,7 @@ def _check_mpi4jax_api_version_deprecation() -> str | None:
                 return (
                     f"mpi4jax xla_bridge uses deprecated attribute "
                     f"'{attr_name}', indicating an incompatible custom-call "
-                    "API. Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+                    "API. Upgrade mpi4jax: pip install 'mpi4jax>=0.9,<0.10'"
                 )
 
     return None
@@ -129,7 +132,7 @@ def _validate_mpi_runtime_versions(
             f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)} "
             f"because older versions use incompatible token semantics. "
             f"Detected mpi4jax=={mpi4jax_version}. "
-            f"Fix: pip install 'mpi4jax>=0.8,<0.9'",
+            f"Fix: pip install 'mpi4jax>=0.9,<0.10'",
         )
 
     # Detect API_VERSION_STATUS_RETURNING deprecation (fail-fast).
@@ -163,7 +166,7 @@ def _validate_mpi_runtime_versions(
         + ". MPI execution may fail or produce incorrect results. "
         + _MPI4JAX_FFI_MIGRATION_NOTE + " "
         "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, "
-        "or install tested versions: pip install 'mpi4jax>=0.8,<0.9'"
+        "or install tested versions: pip install 'mpi4jax>=0.9,<0.10'"
     )
     if strict:
         raise RuntimeError(msg)

@@ -152,7 +152,7 @@ def test_model_construction_with_tke():
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4,
         implicit_vertical_mixing=True,
         physics=physics,

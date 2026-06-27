@@ -76,8 +76,8 @@ def _build(partial: bool, pgf_scheme: str, orient: str = "x"):
         momentum_advection="weno5", barotropic_solver="implicit_cn",
         coriolis_scheme="explicit_ab2", bottom_drag_r=0.0,
         tracer_advection="weno5", weno_smoothness="split")
-    cfg = cfg._replace(barotropic_implicit_theta_eta=1.0,
-                       barotropic_implicit_theta_pgf=1.0, pgf_scheme=pgf_scheme)
+    cfg = cfg._replace(barotropic=cfg.barotropic._replace(barotropic_implicit_theta_eta=1.0,
+                       barotropic_implicit_theta_pgf=1.0), pgf_scheme=pgf_scheme)
     wall = jnp.ones((NY, NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     state = rest_state_latlon_cgrid_ocean(
         grid, z, land_mask_override=wall, H_bathy_override=jnp.asarray(Hb),

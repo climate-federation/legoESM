@@ -5,7 +5,10 @@ velocity field using **conservative monotone PPM** flux-form transport
 on the cubed sphere (Colella–Woodward piecewise-parabolic with the
 Colella–Woodward monotonicity limiter).  Volume ``h*a`` and area ``a``
 remain in [0, ∞) and [0, 1] respectively without post-step clipping,
-and enthalpy ``T*h*a`` is advected consistently with volume.
+and enthalpy ``T*h*a`` is advected in flux form (conserving total
+enthalpy to machine precision); the recovered ``T = enth/vol`` is clamped
+only to a wide non-binding safety range so the energy-conserving transport
+is never undone by a hard physical clip (see finding #2).
 
 The previous centered scheme was non-monotone — it produced negative
 thickness, concentration > 1, and out-of-range temperatures, which the
@@ -30,6 +33,35 @@ from legoesm.core.operators_voronoi import (
 )
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
+
+
+# Numerical-stability bounds for the temperature/enthalpy channel.  These
+# MIRROR ``SeaIceConfig.T_ice_min`` / ``SeaIceConfig.T_melt_surface`` (both
+# documented in config.py as numerics-only bounds, NOT physical conservation
+# limits) so the signature defaults reference a Name, not a bare literal.
+_T_ICE_MIN_DEFAULT: float = 180.0   # == SeaIceConfig.T_ice_min [K]
+# Concentration floor used when recovering an intensive tracer ratio
+# (h = vol/conc).  Floors the DENOMINATOR so the h = vol/conc spike is bounded.
+_CONC_FLOOR: float = 1e-12          # [dimensionless area fraction]
+# Volume floor [m of ice per m^2 of grid cell] deciding whether a cell still
+# holds ice for the recovery branch.  Distinct from ``_CONC_FLOOR`` (a
+# concentration) — they share the 1e-12 numeric value (the same threshold the
+# thermo/lead-freeze recovery in sea_ice.py uses, ``V_after > 1e-12``) but
+# carry DIFFERENT units, so name them separately.  A cell with 0 < vol <= this
+# carries <1e-9 kg/m^2 of ice and is treated as ice-free.
+_VOL_FLOOR: float = 1e-12           # [m of ice per m^2 grid cell]
+# Wide, NON-BINDING numerical-safety clamp for the recovered temperature.
+# Rationale (identical to the salinity channel in sea_ice.py): a monotone-PPM
+# ratio can overshoot the donor min/max by a hair at CFL<=1, and under CFL>1
+# (limiter monotonicity not guaranteed) it can overshoot grossly.  A HARD clamp
+# at the physical melt point deletes/creates enthalpy with NO accounting (the
+# flux-form enthalpy transport already conserves total energy to machine
+# precision), so we clamp only to a wide range that catches NaN/absurd values
+# for downstream stability while leaving the physical melt point to the
+# conservative thermodynamics.  At the supported CFL<=1 (enforce with
+# SeaIceConfig.transport_subcycles>1) this clamp is non-binding and energy is
+# conserved exactly.
+_T_SAFETY_MARGIN_K: float = 50.0    # widen [T_ice_min, T_max] by this on each side
 
 
 def _is_latlon_grid(grid) -> bool:
@@ -215,7 +247,7 @@ def advect_ice_tracers(
     v_ice: jnp.ndarray,
     grid,
     dt: float,
-    T_ice_min: float = 180.0,
+    T_ice_min: float = _T_ICE_MIN_DEFAULT,
     T_freeze_ocean: float = constants.T_freeze_ocean,
     T_max: float = constants.T_freeze,
     n_subcycles: int = 1,
@@ -244,8 +276,14 @@ def advect_ice_tracers(
     grid : CubedSphereGrid
     dt : float
         Timestep [s].
-    T_ice_min, T_freeze_ocean : float
-        Physical temperature bounds [K].
+    T_ice_min, T_max : float
+        Numerical-stability bounds [K] for the recovered intensive ratio
+        (temperature, or salinity when this channel transports salt).  They
+        are widened by ``_T_SAFETY_MARGIN_K`` into a NON-BINDING safety clamp
+        (see finding #2) — the physical melt point is enforced conservatively
+        by the downstream thermodynamics, not deleted here.
+    T_freeze_ocean : float
+        Ice-free fill value [K] for cells with no ice volume.
     n_subcycles : int, default 1
         Number of PPM substeps inside the step.  Static (treated as a
         Python int, not a traced value), so changing it triggers a
@@ -290,28 +328,55 @@ def advect_ice_tracers(
             _body, (vol, conc, enth), xs=None, length=n_subcycles,
         )
 
-    # Recover thickness and temperature.  AD-safe pattern: substitute a
-    # benign placeholder (1.0) into the denominator BEFORE dividing, so
-    # the true-branch arithmetic is computed on a finite value at every
-    # cotangent location.  The previous ``maximum(x, 1e-20)`` floor
-    # produced subnormal squared denominators in fp32 (FTZ → 0 → NaN in
-    # the reverse pass through ``jnp.where``).
-    has_ice = conc_new > 0.0
-    conc_safe = jnp.where(has_ice, conc_new, 1.0)
-    h_new = jnp.where(has_ice, vol_new / conc_safe, 0.0)
-    has_vol = vol_new > 0.0
+    # --- Recover thickness from the CONSERVED volume (finding #3) ----------
+    # Mass-conservation convention: the advected, conserved quantity is the
+    # ice VOLUME ``vol = h*conc`` (and enthalpy ``enth = T*vol``); ``h`` and
+    # ``T`` are intensive ratios reconstructed AFTER transport.  Volume
+    # retention MUST therefore be keyed off ``vol_new``, not ``conc_new``:
+    # ``vol`` and ``conc`` are advected as INDEPENDENT PPM scalars (their
+    # limiters can disagree), so a margin cell can end the step with
+    # ``vol_new > 0`` while ``conc_new`` has limited to ~0.  Returning
+    # ``h_new = 0`` there (the old ``has_ice = conc_new > 0`` test) would make
+    # ``h_new*conc_new = 0 != vol_new`` and VANISH the volume — a mass sink.
+    # Instead: where volume exists, floor the concentration at ``_CONC_FLOOR``
+    # and set ``h = vol/conc_floored`` so the returned (h, conc) reconstruct
+    # the conserved volume exactly (``h_new*conc_out == vol_new``); the floor
+    # bounds the ``h = vol/conc`` spike at ``vol/_CONC_FLOOR``.  We do NOT
+    # re-derive conc from a capped h here: this SAME helper transports the snow
+    # and pond inventories (in the h-slot) and the salinity (in the T-slot),
+    # and those callers pair the returned THICKNESS with the ICE concentration,
+    # so altering ``conc_out`` (or capping h) would break their inventory
+    # (codex R4-1).  The bare floor matches the model's existing recovery
+    # convention (sea_ice.py ``vol/max(conc, 1e-12)``); the rare absurd-h margin
+    # cell is bounded by ``vol/_CONC_FLOOR`` and handled by the same downstream
+    # thermo that already consumes that pattern.
+    # AD-safe: substitute a benign placeholder into the denominator BEFORE
+    # dividing so the true-branch arithmetic is finite at every cotangent.
+    has_vol = vol_new > _VOL_FLOOR
+    conc_out = jnp.where(has_vol, jnp.maximum(conc_new, _CONC_FLOOR), 0.0)
+    conc_safe = jnp.where(has_vol, conc_out, 1.0)
+    h_new = jnp.where(has_vol, vol_new / conc_safe, 0.0)
     vol_safe = jnp.where(has_vol, vol_new, 1.0)
-    # Empty (ice-free) cells are filled at the basal/ocean freezing
-    # point T_freeze_ocean (271.35 K) — there is no ice surface there.
+    # Empty (ice-free) cells are filled at the basal/ocean freezing point
+    # T_freeze_ocean (271.35 K) — there is no ice surface there.
     T_new = jnp.where(has_vol, enth_new / vol_safe, T_freeze_ocean)
 
-    # Defensive temperature bounds — monotone advection keeps T_new in
-    # the input range, so this only fires on round-off.  The UPPER bound
-    # is the SURFACE melt point ``T_max`` (273.15 K), not the basal
-    # freezing point: ice legitimately carried at the surface melt point
-    # by a prior step must not be re-clamped down to 271.35 K here, which
-    # would delete enthalpy and undo the surface-vs-basal melt-point
-    # split (codex finding).
-    T_new = jnp.clip(T_new, T_ice_min, T_max)
+    # --- Energy-conserving temperature treatment (finding #2) -------------
+    # ``enth`` is advected in flux form, which conserves total enthalpy to
+    # machine precision; the conserved energy is then carried by ``T*vol``.
+    # The PREVIOUS hard clip ``clip(T_new, T_ice_min, T_max)`` deleted/created
+    # energy whenever it fired: under CFL>1 the independent vol/enth limiters
+    # let ``T = enth/vol`` overshoot (verified up to ~700 K), and clamping T
+    # to the melt point silently removed that enthalpy with no flux to credit
+    # it -> energy non-conservation.  We instead clamp ONLY to a wide,
+    # non-binding numerical-safety range (cf. the salinity channel in
+    # sea_ice.py, which makes the identical choice for the same reason): this
+    # catches NaN/absurd values for downstream stability without touching the
+    # physical melt point.  At the supported CFL<=1 (force with
+    # transport_subcycles>1) PPM is monotone, this clamp is non-binding, and
+    # energy is conserved exactly across the step.
+    T_lo = T_ice_min - _T_SAFETY_MARGIN_K
+    T_hi = T_max + _T_SAFETY_MARGIN_K
+    T_new = jnp.clip(T_new, T_lo, T_hi)
 
-    return h_new, conc_new, T_new
+    return h_new, conc_out, T_new

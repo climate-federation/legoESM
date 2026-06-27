@@ -195,6 +195,20 @@ class MPASOceanConfig(NamedTuple):
                                             # p_prime uses dz_ref while AC
                                             # uses h_partial → mismatch →
                                             # spurious PGF at step edges.
+                                            # SCHEME COUPLING: this flag
+                                            # takes effect ONLY for
+                                            # ``pgf_scheme="adcroft"`` (its
+                                            # matched partner).  The bare
+                                            # "centered" scheme has no face
+                                            # correction, so h_actual p_prime
+                                            # would difference pressures at
+                                            # mismatched centroid depths
+                                            # across a bottom-level step and
+                                            # go unstable; centered always
+                                            # uses the dz_ref reference-depth
+                                            # grid regardless of this flag.
+                                            # smc03/ahh08/zero drop p_prime,
+                                            # so it is moot for them.
     use_baroclinic_rho_ref: bool = False  # DYNAMIC (legacy / discouraged):
                                            # subtracts ρ_ref(z) computed
                                            # as wet-cell mean of ρ on

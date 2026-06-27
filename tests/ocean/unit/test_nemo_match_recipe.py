@@ -33,13 +33,13 @@ def test_mpas_factory_selects_canonical_blocks():
     assert mc.eos == "wright"
     assert mc.tracer_advection == "tvd"
     assert mc.pgf_scheme == "adcroft"
-    assert mc.barotropic_solver == "implicit_cn"
+    assert mc.barotropic_solver == "implicit_cn"  # MPAS: flat (not grouped)
     assert mc.pv_scheme == "enstrophy"
     assert mc.implicit_vertical_mixing is True
     assert mc.A_h == pytest.approx(1.0e5)
     assert mc.C_smag_lap == pytest.approx(0.33)
     assert mc.K_zeta_bih == pytest.approx(1.0e14)
-    assert mc.barotropic_implicit_pcg_maxiter == 300
+    assert mc.barotropic_implicit_pcg_maxiter == 300  # MPAS: flat (not grouped)
     assert mc.normalize_freshwater is True
     assert mc.gm_redi is not None
     assert mc.gm_redi.kappa_GM == pytest.approx(600.0)
@@ -56,11 +56,11 @@ def test_tripole_factory_selects_canonical_blocks():
     assert mc.pgf_scheme == "adcroft"
     # ke_gradient intentionally the centered default (NOT fold-aware hollingsworth).
     assert mc.ke_gradient_scheme == "centered"
-    assert mc.barotropic_solver == "implicit_cn"
+    assert mc.barotropic.barotropic_solver == "implicit_cn"
     assert mc.coriolis_scheme == "matsuno_split"
     assert mc.outer_integrator == "forward_euler"
     assert mc.tracer_time_integrator == "euler"
-    assert mc.n_barotropic_substeps == 30
+    assert mc.barotropic.n_barotropic_substeps == 30
     assert mc.freshwater_closure == "virtual_salt_flux"
     assert mc.gm_redi is not None
     assert mc.gm_redi.kappa_GM == pytest.approx(600.0)
@@ -124,19 +124,28 @@ def test_mpas_factory_builds_valid_model_and_one_step_is_finite():
     assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
-def test_tripole_factory_builds_valid_latlon_model():
+def test_tripole_factory_builds_valid_model_and_one_step_is_finite():
     """The tripole factory config constructs a valid lat-lon C-grid model on a
-    small synthetic grid (no eORCA mesh file needed for the dycore validators)."""
+    small synthetic grid (no eORCA mesh file needed for the dycore validators)
+    AND a step stays finite — the tripole card was previously only constructed,
+    never stepped (issue #501).  The eORCA north-fold is not exercised on this
+    synthetic grid; this gates the dycore scheme stack the card selects."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.vertical import create_ocean_z_star
 
     grid = create_latlon_grid(8, 16)
     z_coord = create_ocean_z_star(n_levels=3, H_max=4000.0)
     config = nemo_match_tripole_model_config()
-    LatLonCGridOceanModel(grid, z_coord, config)
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+    state = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    new_state = model.step(state, dt=60.0)
+    assert bool(jnp.all(jnp.isfinite(new_state.T.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.u.data)))
+    assert bool(jnp.all(jnp.isfinite(new_state.eta.data)))
 
 
 def test_block_mapping_is_explicit():

@@ -556,5 +556,5 @@ class TestConfigDispatch:
     @pytest.mark.parametrize("scheme", ["weno5", "weno7"])
     def test_config_field_accepted(self, scheme):
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = LatLonCGridOceanConfig(tracer_advection=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_advection=scheme)
         assert cfg.tracer_advection == scheme

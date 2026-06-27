@@ -132,7 +132,7 @@ def test_scan_block_equals_manual_steps():
         grid, z_coord, T_water_init_C=18.0, T_deep=2.0,
         S_uniform=35.0, H_max=4000.0,
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1e4, B_h=0.0, K_h=0.0, K_bih=0.0,
         bottom_drag_r=0.0, n_barotropic_substeps=3,
         barotropic_solver="explicit_substep",

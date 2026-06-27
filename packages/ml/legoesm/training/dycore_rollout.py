@@ -27,7 +27,6 @@ class RolloutConfig(NamedTuple):
     n_days: int = 1
     dt: float = 600.0             # timestep [s]
     segment_steps: int = 144      # steps per segment (= 1 day at dt=600)
-    save_every_n_segments: int = 1  # save state every N segments for loss
     gradient_checkpoint: bool = True
     # Adjoint-memory schedule for the per-segment checkpoint.  Only "none" and
     # "uniform" are valid here because this rollout returns the full per-segment
@@ -53,8 +52,9 @@ def differentiable_rollout(
     """Run a multi-day differentiable rollout through the compiled dycore.
 
     Chains ``config.n_days`` segments together using ``jax.lax.scan``.
-    Each segment runs ``config.segment_steps`` time steps.  Intermediate
-    states are saved at intervals for multi-day loss computation.
+    Each segment runs ``config.segment_steps`` time steps.  EVERY segment's
+    state is stacked into ``saved_states`` for multi-day loss computation
+    (one save per day; there is no save stride).
 
     Gradient checkpointing is applied per segment so that the memory
     cost is O(segment_steps) rather than O(total_steps).

@@ -53,12 +53,12 @@ def run_eady(scheme: str, n_lat: int, n_lon: int, days: float, dt: float = 300.0
         eos_linear=LinearEOSConfig(
             alpha_T=eu_config.alpha_T, rho_ref=eu_config.rho_0,
             T_ref=eu_config.T_ref_C, S_ref=eu_config.S_uniform),
-        barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
-        barotropic_div_damp=eu_config.barotropic_div_damp,
+        barotropic_diffusion_alpha=eu_config.barotropic.barotropic_diffusion_alpha,
+        barotropic_div_damp=eu_config.barotropic.barotropic_div_damp,
         tracer_advection=scheme,
         physics=physics,
     )
-    cfg = LatLonCGridOceanConfig(**kw)
+    cfg = LatLonCGridOceanConfig.from_flat(**kw)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     state = eu_ic("latlon_channel", grid, z_coord, eu_config)
 

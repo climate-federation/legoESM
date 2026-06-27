@@ -573,6 +573,7 @@ class TestTurbulenceGWDMPASStatus:
         from legoesm.atmosphere.physics.turbulence.integration import (
             make_turbulence_physics,
         )
+        from legoesm.core.field import Field
         turb_fn = make_turbulence_physics(
             TurbulenceConfig(scheme="louis"), model_type="mpas", dt=300.0,
         )
@@ -580,6 +581,23 @@ class TestTurbulenceGWDMPASStatus:
         assert getattr(turb_fn, "_wants_forcing", False) is True, (
             "MPAS turbulence physics_fn must be forcing-aware so the MPAS step "
             "threads forcing + consumes its tracer/TKE tendencies."
+        )
+        # The held_suarez_init_mpas fixture is a RESTING state (u_edge ≡ 0).
+        # Louis turbulence is shear-driven, so a zero-wind column yields
+        # exactly-zero tendencies — physically correct, but it cannot prove
+        # the bridge is "not a stub".  Impose a sheared edge-normal wind
+        # (linear 0→20 m/s in the vertical, mirroring the lat-lon validator
+        # column) so the resolved gradient actually drives vertical mixing.
+        nedges, nlev = mpas_state.u.data.shape
+        u_shear = jnp.broadcast_to(
+            jnp.linspace(0.0, 20.0, nlev)[None, :], (nedges, nlev),
+        ).astype(mpas_state.u.data.dtype)
+        mpas_state = mpas_state._replace(
+            u=Field(
+                data=u_shear, name="u", dims=mpas_state.u.dims,
+                units="m/s",
+                staggering=getattr(mpas_state.u, "staggering", "edge"),
+            ),
         )
         # Invoke the bridge end-to-end (forcing defaults to None and is handled).
         result = turb_fn(mpas_state, mpas_mesh, sigma_coord)

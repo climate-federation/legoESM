@@ -124,6 +124,45 @@ def fold_is_local(grid) -> bool:
     return fold is not None and bool(fold.is_active) and fold.fold_j >= 0
 
 
+def _has_2d_vface_metric(grid) -> bool:
+    """True if ``grid`` carries an explicit 2D stored v-face zonal metric.
+
+    Rich ``LatLonCGridGeometry`` (tripolar, spherical/Mercator, beta-plane)
+    builds ``dx_v`` of shape ``(n_lat+1, n_lon)`` at construction; the lean
+    ``LatLonGrid`` lacks the field entirely.
+    """
+    dxv = getattr(grid, "dx_v", None)
+    return dxv is not None and getattr(dxv, "ndim", 0) == 2
+
+
+def reads_stored_vface_metric(grid) -> bool:
+    """True if the v-face zonal length metric must be READ from the grid's
+    stored ``dx_v`` rather than recomputed as ``R*cos(grid.lat_v)*dlon``.
+
+    Generalizes :func:`is_tripolar` (#514/#515): the recompute reconstructs the
+    metric from ``cos(grid.lat)``, which is WRONG on a Cartesian **beta-plane**
+    (whose stored metric is the uniform ``dx_m`` but whose pseudo-lat is a
+    nonzero ``y_c/radius``) and merely redundant on a spherical rich geometry
+    (whose stored ``dx_v`` is bit-identical to the recompute in the core).
+
+    Reads stored when the grid carries an explicit 2D ``dx_v`` (any rich
+    geometry) EXCEPT under a meridionally-periodic (y-reentrant) topology,
+    where the pole v-faces must be wrap-padded (recomputed via
+    ``pad_with_pole_bc_lat``), not the stored closed-domain pole-zeros.
+    Tripolar always reads stored (its fold metric is never recomputable).
+
+    Resolves statically: ``grid`` is a trace-time constant and
+    ``get_meridionally_periodic()`` is a concrete module bool, so the calling
+    ``if`` is a compile-time branch (the sanctioned feature-gating pattern),
+    never traced control flow.
+    """
+    if is_tripolar(grid):
+        return True
+    from legoesm.grids.halo_latlon import get_meridionally_periodic
+
+    return _has_2d_vface_metric(grid) and not get_meridionally_periodic()
+
+
 def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """Pad south/north rows for a v-face or vertex scalar quantity.
 
@@ -731,11 +770,12 @@ def divergence_cgrid(
         net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
     # --- Meridional face length (zonal extent of v-face) ---
-    # On a regular lat-lon grid this is the 1D array
-    # R*cos(lat_v)*dlon; on a tripolar grid (dlat==0 sentinel) it
-    # is the 2D array grid.dx_v.
-    if is_tripolar(grid):
-        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D for tripolar
+    # On a lean lat-lon grid this is the 1D array R*cos(lat_v)*dlon; a rich
+    # geometry that carries an explicit 2D stored metric (tripolar, beta-plane,
+    # spherical) reads grid.dx_v directly (#514) — the recompute reconstructs
+    # cos(grid.lat_v), which is WRONG on a Cartesian beta-plane.
+    if reads_stored_vface_metric(grid):
+        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D stored metric
     else:
         # v-face latitudes at ALL n_lat+1 local faces, cell-pad-first:
         # pad the CELL-CENTRE latitudes by one row through the
@@ -1145,7 +1185,7 @@ def gradient_curl_to_v(
     face row on the rank that owns the tripolar seam — bit-identical to
     the old ``pad_ns_scalar`` output on the local backend.
     """
-    if is_tripolar(grid):
+    if reads_stored_vface_metric(grid):
         # Full 2D dx_v at ALL n_lat+1 v-faces.  The band slice already
         # carries the exact global metric at partition-cut rows
         # ([s:e+1]).  Floor the denominator like gradient_y_cgrid

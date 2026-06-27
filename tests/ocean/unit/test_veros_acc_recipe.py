@@ -485,7 +485,7 @@ def test_latlon_model_rejects_physics_lateral_mixing():
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    bad = LatLonCGridOceanConfig(
+    bad = LatLonCGridOceanConfig.from_flat(
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(
                 scheme="gm_redi", gm_redi=ACC_GM_REDI_CONFIG,
@@ -582,7 +582,7 @@ def test_free_run_ships_faithful_stepping_composition():
     free = build_acc_model_config(with_surface_forcing=True)
     assert free.outer_integrator == "ab2"
     assert free.dt_mom_ratio == 9.0          # dt_tracer 43200 / dt_mom 4800
-    assert free.barotropic_solver == "rigid_lid"
+    assert free.barotropic.barotropic_solver == "rigid_lid"
     assert free.coriolis_scheme == "explicit_ab2"   # the energy lever
     assert free.ab2_scope == "advective"
     assert free.momentum_friction_additive is True
@@ -592,7 +592,7 @@ def test_free_run_ships_faithful_stepping_composition():
     probe = build_acc_model_config(with_surface_forcing=False)
     assert probe.outer_integrator == "forward_euler"
     assert probe.dt_mom_ratio == 1.0
-    assert probe.barotropic_solver == "explicit_substep"
+    assert probe.barotropic.barotropic_solver == "explicit_substep"
     assert probe.coriolis_scheme == "matsuno_split"
     assert probe.ab2_scope == "total"
     assert probe.momentum_friction_additive is False
@@ -639,7 +639,7 @@ def test_veros_block_mapping_fields_are_real_config_fields():
     are sub-config/documentation rows, skipped here."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     # documentation rows whose middle column names a sub-config / dotted path
     # rather than a bare top-level scheme field (skipped by the field check).
     doc_rows = {"ConstantsConfig"}

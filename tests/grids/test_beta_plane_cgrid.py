@@ -47,50 +47,53 @@ def test_metrics_are_uniform_cartesian():
     np.testing.assert_allclose(np.asarray(g.sin_alpha_u), 0.0)
 
 
-def test_pseudo_lat_is_zero_for_metric_self_consistency():
-    """The pseudo-``lat`` MUST be 0 so that operators which recompute
-    ``cos(grid.lat)`` for a metric (``divergence_cgrid`` v-face length and the
-    flux-form momentum advection) agree with the ones that read the ``cos_lat=1``
-    metric field (``gradient_x_cgrid``).  A non-zero
-    ``y_c/radius`` pseudo-lat would leave a ``1-cos(y_c/radius)`` (~1.8% at
-    ``|y_c|/radius=0.19``) grad<->div metric mismatch that makes the implicit
-    free surface non-conservative and flips the marginally-resolved gyre
-    turbulent (docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md, the
-    iteration-7 resolution)."""
-    # A tall box (y up to ~1e6 m) is exactly where the old y_c/radius pseudo-lat
-    # reached |lat|~0.19 rad and the cos(lat) error bit.
-    g = create_beta_plane_cgrid_geometry(60, 10, dx_m=DX, f0=F0, beta=BETA,
-                                         y_origin_m=0.0, cartesian_pseudo_lat=True)
-    np.testing.assert_array_equal(np.asarray(g.lat), 0.0)
-    np.testing.assert_array_equal(np.asarray(g.lat_T), 0.0)
-    # cos(grid.lat) (what the operators recompute) == grid.cos_lat (the metric).
-    np.testing.assert_allclose(np.cos(np.asarray(g.lat)), np.asarray(g.cos_lat))
-    # The v-face zonal length the divergence recomputes, R*cos(lat_v)*dlon, must
-    # equal the uniform stored dx_v (== dx_m) the gradient/explicit metrics use.
-    lat_v = 0.5 * (np.concatenate([[0.0], np.asarray(g.lat)]) +
-                   np.concatenate([np.asarray(g.lat), [0.0]]))
-    face_dx_v = g.radius * np.cos(lat_v) * g.dlon
-    np.testing.assert_allclose(face_dx_v, DX, rtol=1e-12)
+def test_divergence_independent_of_pseudo_lat_post_514():
+    """#514: operators READ the stored uniform ``dx_v`` rather than recomputing
+    ``R*cos(grid.lat_v)*dlon``, so the v-face metric — and any operator built on
+    it — is IDENTICAL whether the pseudo-lat is pinned to 0
+    (``cartesian_pseudo_lat=True``) or carries the natural nonzero ``y_c/radius``
+    (``False``).  This pins that the ``cartesian_pseudo_lat`` workaround is now
+    OBSOLETE.  Non-vacuous: the two geometries have genuinely different
+    ``grid.lat`` (asserted below), so on the pre-#514 recompute path the
+    ``False`` divergence would differ by the ``1-cos(y_c/radius)`` (~1.8% at
+    ``|y_c|/radius=0.19``) metric error — here they match bit-for-bit."""
+    from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+    ny, nx = 60, 10
+    g_pin = create_beta_plane_cgrid_geometry(ny, nx, dx_m=DX, f0=F0, beta=BETA,
+                                             y_origin_m=0.0, cartesian_pseudo_lat=True)
+    g_nat = create_beta_plane_cgrid_geometry(ny, nx, dx_m=DX, f0=F0, beta=BETA,
+                                             y_origin_m=0.0, cartesian_pseudo_lat=False)
+    # The two geometries differ ONLY in pseudo-lat (pinned 0 vs natural y_c/R).
+    np.testing.assert_array_equal(np.asarray(g_pin.lat), 0.0)
+    assert float(np.abs(np.asarray(g_nat.lat)).max()) > 0.1  # natural lat ~0.19
+    # Same divergence input -> identical output (operators read the stored dx_v).
+    v = jnp.asarray(np.ones((ny + 1, nx))).at[0].set(0.0).at[-1].set(0.0)
+    u = jnp.zeros((ny, nx + 1))
+    d_pin = np.asarray(divergence_cgrid(u, v, g_pin))
+    d_nat = np.asarray(divergence_cgrid(u, v, g_nat))
+    np.testing.assert_array_equal(d_pin, d_nat)
 
 
 def test_divergence_gradient_metrics_are_mutually_consistent():
-    """Energy-conservation invariant the metric fix restores: ``divergence_cgrid``
-    (continuity, drives eta) and ``gradient_x_cgrid`` (the PGF in the predictor /
-    corrector) must use the SAME zonal metric, else the implicit free-surface
-    predictor-corrector is non-conservative (PGF work != continuity).  The bug was
-    that the divergence recomputed the v-face length as ``R*cos(grid.lat_v)*dlon``
-    (varying) while the gradient used ``dx_u = R*dlon*grid.cos_lat = dx_m``
-    (uniform); with the pseudo-lat now 0 they agree exactly.  This compares the
-    two operators' effective zonal metrics by feeding a linear field and reading
-    back the implied length (non-vacuous: a y/radius pseudo-lat makes the v-face
-    metric ~1.8% short at the north edge, breaking this equality)."""
+    """Energy-conservation invariant the #514 metric fix restores:
+    ``divergence_cgrid`` (continuity, drives eta) and ``gradient_x_cgrid`` (the PGF
+    in the predictor / corrector) must use the SAME zonal metric, else the implicit
+    free-surface predictor-corrector is non-conservative (PGF work != continuity).
+    The bug was that the divergence RECOMPUTED the v-face length as
+    ``R*cos(grid.lat_v)*dlon`` (varying with the pseudo-lat) while the gradient used
+    ``dx_u = R*dlon*grid.cos_lat = dx_m`` (uniform).  Post-#514 the divergence READS
+    the stored uniform ``dx_v == dx_m`` instead of recomputing, so the two agree
+    exactly REGARDLESS of the pseudo-lat — verified here with the natural
+    ``cartesian_pseudo_lat=False`` (nonzero ``y_c/radius``), which is precisely the
+    case the old recompute got ~1.8% short at the north edge.  Non-vacuous: on the
+    pre-#514 recompute path this exact config breaks the div==0 equality."""
     from legoesm.grids.operators_latlon_cgrid import (
         divergence_cgrid,
         gradient_x_cgrid,
     )
     ny, nx = 60, 10
     g = create_beta_plane_cgrid_geometry(ny, nx, dx_m=DX, f0=F0, beta=BETA,
-                                         y_origin_m=0.0, cartesian_pseudo_lat=True)
+                                         y_origin_m=0.0, cartesian_pseudo_lat=False)
     # gradient zonal metric: gradient_x of a unit-slope-in-x field == 1/dx_u.
     ramp_x = jnp.asarray(np.broadcast_to(np.arange(nx, dtype=float) * DX, (ny, nx)).copy())
     gx = np.asarray(gradient_x_cgrid(ramp_x, g))[:, 1:nx]      # interior u-faces
@@ -120,9 +123,11 @@ def test_vorticity_operators_correct_scale_on_beta_plane():
         flux_divergence_viscosity_cgrid,
         vector_laplacian_cgrid,
     )
+    # Natural (nonzero) pseudo-lat post-#514: the ocean vorticity operators read
+    # the stored area_q / v-face dx_v, so this holds without the workaround.
     ny, nx = 32, 4
     g = create_beta_plane_cgrid_geometry(ny, nx, dx_m=DX, dy_m=DX, f0=F0, beta=0.0,
-                                         y_origin_m=0.0, cartesian_pseudo_lat=True)
+                                         y_origin_m=0.0, cartesian_pseudo_lat=False)
     ly = DX * ny
     y_c = (np.arange(ny) + 0.5) * DX
     k = 2 * np.pi / ly
@@ -203,7 +208,7 @@ def test_ocean_model_runs_and_coriolis_acts():
     g = create_beta_plane_cgrid_geometry(16, 16, dx_m=50e3, f0=f0, beta=0.0)
     z = create_ocean_z_star(1, H_max=500.0)
     base = rest_state_latlon_cgrid_ocean(g, z, land_lat_threshold=90.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         use_conservation_fixer=False,
         enable_runtime_checks=False,
         n_barotropic_substeps=40,

@@ -139,14 +139,14 @@ def test_dycore_and_stepping_mapping():
     assert DT_MOM_S == 1800.0 and DT_TRACER_S == 14400.0
     assert cfg.dt_mom_ratio == 8.0 == DT_MOM_RATIO
     assert cfg.eos == "veros_gsw"           # eq_of_state_type = 5
-    assert cfg.bottom_drag_r == 0.0         # Veros r_bot default
+    assert cfg.bottom_drag.bottom_drag_r == 0.0         # Veros r_bot default
     # A_h is a setup LITERAL (5e4), not the degtom³ formula.
     assert cfg.A_h == 5.0e4 == GLOBAL_FLEX_A_H
     assert cfg.A_h_lat_scaling is True and cfg.A_h_cos_power == 1
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     assert cfg.outer_integrator == "ab2"
     assert cfg.ab2_scope == "advective"
-    assert cfg.barotropic_solver == "rigid_lid"
+    assert cfg.barotropic.barotropic_solver == "rigid_lid"
     assert cfg.coriolis_scheme == "explicit_ab2"
     assert cfg.momentum_friction_additive is True
     assert cfg.vertical_momentum_scheme == "centered_full"

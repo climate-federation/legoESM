@@ -138,7 +138,7 @@ class TestDiagonalCoastline:
             T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid_18x36, z_coord, cfg,
         )
@@ -157,7 +157,7 @@ class TestDiagonalCoastline:
             T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             enable_runtime_checks=True,    # exercises mask consistency
         )
@@ -251,7 +251,7 @@ class TestIslandTopology:
         S0 = float(jnp.sum(jnp.where(wet3, state.S.data * h0, 0.0)
                             * grid_18x36.area[..., None]))
         # Step 12 hours
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid_18x36, z_coord, cfg)
         s = state
         for _ in range(12):
@@ -305,7 +305,7 @@ class TestIslandTopology:
         bad_state = state._replace(
             land_mask=state.land_mask.replace(data=new_mask),
         )
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             enable_runtime_checks=True,
         )
@@ -370,7 +370,7 @@ class TestRealisticMaskConsistency:
         )
         state = rest_state_ocean_realistic(grid, z, cfg)
         # Build a model with runtime checks ENABLED and try one step.
-        ocean_cfg = LatLonCGridOceanConfig(
+        ocean_cfg = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn",
             enable_runtime_checks=True,
         )

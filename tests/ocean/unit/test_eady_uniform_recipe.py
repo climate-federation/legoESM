@@ -40,7 +40,7 @@ def test_recipe_shape_and_corrected_stack():
                          "wall_mask", "initial_state")
     c = r.model_config
     # Corrected eddy-resolving dycore parts (vs the stale April-2026 baseline).
-    assert c.barotropic_solver == "implicit_cn"
+    assert c.barotropic.barotropic_solver == "implicit_cn"
     assert c.tracer_advection == "weno5"
     assert c.momentum_advection == "weno5"
     assert c.tracer_time_integrator == "rk3"

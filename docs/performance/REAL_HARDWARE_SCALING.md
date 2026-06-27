@@ -33,7 +33,7 @@ cd /Users/pierregentine/legoESM
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-python -m pip install "mpi4py>=4.1,<5" "mpi4jax>=0.8,<0.9"
+python -m pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"
 ```
 
 MPI runtime:

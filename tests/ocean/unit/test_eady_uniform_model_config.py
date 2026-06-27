@@ -30,7 +30,7 @@ class TestDefaults:
             S_ref=cfg.S_uniform,
         )
         actual = eady_uniform_model_config(cfg, physics=physics, eos_config=eos)
-        expected = LatLonCGridOceanConfig(
+        expected = LatLonCGridOceanConfig.from_flat(
             physics=physics,
             eos="linear",
             eos_linear=eos,
@@ -61,7 +61,7 @@ class TestDefaults:
         assert mc.pgf_scheme == "smc03"
         assert mc.tracer_time_integrator == "rk3"
         assert mc.outer_integrator == "ab2"
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.momentum_advection == "weno5"
         assert mc.tracer_advection == "weno5"
 
@@ -78,7 +78,7 @@ class TestDefaults:
         mc = eady_uniform_model_config(cfg)
         assert mc.A_v == cfg.A_v
         assert mc.K_v == cfg.K_v
-        assert mc.bottom_drag_r == cfg.bottom_drag_coeff
+        assert mc.bottom_drag.bottom_drag_r == cfg.bottom_drag_coeff
 
     def test_none_config(self):
         assert eady_uniform_model_config(None).pgf_scheme == "smc03"

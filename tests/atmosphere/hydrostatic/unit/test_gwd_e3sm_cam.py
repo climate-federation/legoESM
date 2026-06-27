@@ -179,6 +179,171 @@ def test_oro_momentum_conservation(_oracle_constants):
     np.testing.assert_allclose(mom_sink, net_absorbed, rtol=1e-10)
 
 
+def test_gwd_damping_factor_never_amplifies_stress():
+    """Regression: the saturation-damping factor exp(-2*mi*rog*t*dpiln)
+    must NEVER exceed 1 (stress can only DECREASE upward through it).
+
+    ``mi = Im(m)`` is the wave-damping rate.  AT THE FORMULA LEVEL ``mi``
+    goes NEGATIVE if the wave diffusivity ``d`` is forced sufficiently
+    negative that ``alpha + ni^2/ubmc2 * d < 0`` -> ``mi < 0`` ->
+    ``exp(+...) > 1`` (the column would AMPLIFY stress upward, an unphysical
+    momentum source).  NOTE: this regime is NOT reachable through the
+    orographic ``gw_drag_prof`` path — there ``d = max(dback, dscal*dsat)``
+    with ``dscal<=1`` and the dominating ``+alpha`` term keeps ``mi >= 0``
+    for every reachable ``(alpha, dback)`` (so the floor is a DEFENSIVE
+    guard, see the floor note in ``e3sm_cam.py``).  This unit test pins the
+    floor's FORMULA-level correctness by forcing ``d`` negative directly.
+
+    We replicate the exact in-module ``mi``/``wrk`` expression at a
+    deliberately pathological operating point and assert that the
+    ``mi = max(mi, 0)`` floor forces the damping factor <= 1.  Proven
+    non-vacuous below: the UNCLAMPED factor at this point is > 1.
+    """
+    # Formula-level pathological point that drives mi<0 unclamped (d forced
+    # negative directly; not reachable via the orographic production path).
+    ni_k = 0.02       # 1/s (stratospheric N)
+    kwv = KWV
+    ubmc2 = 25.0      # (m/s)^2
+    alpha_k = 1.0e-5  # 1/s  (Newtonian cooling, > 0)
+    d = -50.0         # diffusivity forced negative (formula-level only)
+    rog = ORACLE_RAIR / ORACLE_G
+    t_mid = 250.0
+    dpiln = 0.05      # piln[k+1]-piln[k] > 0 (pressure increases downward)
+
+    inner = alpha_k + ni_k ** 2 / ubmc2 * d
+    mi_unclamped = ni_k / (2.0 * kwv * ubmc2) * inner
+    # Confirm the operating point really would flip the sign (non-vacuous).
+    assert mi_unclamped < 0.0, f"setup not pathological: mi={mi_unclamped:.3e}"
+    wrk_unclamped = -2.0 * mi_unclamped * rog * t_mid * dpiln
+    assert float(jnp.exp(wrk_unclamped)) > 1.0, "unclamped factor not >1"
+
+    # With the production floor mi=max(mi,0):
+    mi = max(mi_unclamped, 0.0)
+    wrk = -2.0 * mi * rog * t_mid * dpiln
+    factor = float(jnp.exp(wrk))
+    assert factor <= 1.0 + 1e-12, f"damping factor {factor:.6e} amplifies stress"
+
+
+def test_stress_non_increasing_upward_realistic_column(_oracle_constants):
+    """End-to-end: in a realistic orographic column the propagating stress
+    is non-increasing upward, and the field is finite (sanity that the
+    mi-floor did not perturb the normal-physics path).
+    """
+    pver = 40
+    pint, pmid, T, zm, z_half, u, v = _build_column(pver)
+    to = lambda a: jnp.asarray(a[None, :])
+    pint_c = jnp.asarray(pint[None, :])
+    dpm = jnp.abs(pint_c[:, 1:] - pint_c[:, :-1])
+    rdpm = 1.0 / dpm
+    piln = jnp.log(pint_c)
+    cfg = E3SMCAMConfig(
+        source="orographic", kwv=KWV, effgw=1.0,
+        orographic=E3SMOrographicConfig(sgh_default=200.0),
+    )
+    rhoi, ti, nm, ni = gw_prof(
+        to(T), to(pmid), pint_c, ORACLE_CPAIR, ORACLE_RAIR, ORACLE_G, cfg.n2min
+    )
+    sgh = jnp.full((1,), 200.0)
+    tau0, src, tend, xv, yv, c, ubm, ubi = gw_oro_src(
+        to(u), to(v), to(T), sgh, to(pmid), pint_c, dpm, to(zm), nm,
+        ORACLE_RAIR, KWV, 1.0, 10.0, 2.0,
+    )
+    tau, utgw, vtgw, gwut = gw_drag_prof(
+        tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
+        ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
+        orographic_only=True, do_taper=False,
+    )
+    tau_total = np.array(jnp.sum(jnp.abs(tau[0]), axis=0))
+    src_k = int(src[0])
+    for k in range(src_k):
+        assert tau_total[k] <= tau_total[k + 1] + 1e-12, (
+            f"stress grows upward at interface k={k}: "
+            f"tau[{k}]={tau_total[k]:.6e} > tau[{k+1}]={tau_total[k+1]:.6e}"
+        )
+    assert bool(jnp.all(jnp.isfinite(tau))), "non-finite stress"
+    assert bool(jnp.all(jnp.isfinite(utgw))), "non-finite tendency"
+
+
+def test_production_negative_dback_stays_stable_and_stress_monotone(
+    _oracle_constants,
+):
+    """Production robustness guard for the saturation-damping path under a
+    pathological NEGATIVE background diffusivity ``dback`` (codex round 1 #3 /
+    round 2: a real production-path test).
+
+    NOTE on the ``mi = max(mi, 0)`` floor: an empirical sweep showed the floor
+    does NOT BIND in the orographic ``gw_drag_prof`` path (``mi`` ~ alpha +
+    ni**2/ubmc2*d and the +alpha term keeps it >= 0 for every reachable
+    (alpha, dback)).  The floor is a DEFENSIVE guard against a hypothetical
+    inverted-diffusivity config; its formula-level correctness is pinned by
+    ``test_gwd_damping_factor_never_amplifies_stress``.  This test verifies the
+    COMPLEMENTARY property: a strongly negative ``dback`` keeps production
+    finite and stress non-increasing upward.
+    """
+    pver = 40
+    pint, pmid, T, zm, z_half, u, v = _build_column(pver)
+    to = lambda a: jnp.asarray(a[None, :])
+    pint_c = jnp.asarray(pint[None, :])
+    dpm = jnp.abs(pint_c[:, 1:] - pint_c[:, :-1])
+    rdpm = 1.0 / dpm
+    piln = jnp.log(pint_c)
+    # Strongly negative dback exercises d = max(dback, dscal*dsat) where
+    # dscal*dsat < 0 (alpha=1e-4, dback=-500 verified to take this branch; see
+    # the non-vacuity guard below).
+    cfg = E3SMCAMConfig(
+        source="orographic", kwv=KWV, effgw=1.0,
+        dback=-500.0,
+        orographic=E3SMOrographicConfig(sgh_default=200.0),
+    )
+    rhoi, ti, nm, ni = gw_prof(
+        to(T), to(pmid), pint_c, ORACLE_CPAIR, ORACLE_RAIR, ORACLE_G, cfg.n2min
+    )
+    sgh = jnp.full((1,), 200.0)
+    tau0, src, tend, xv, yv, c, ubm, ubi = gw_oro_src(
+        to(u), to(v), to(T), sgh, to(pmid), pint_c, dpm, to(zm), nm,
+        ORACLE_RAIR, KWV, 1.0, 10.0, 2.0,
+    )
+    # Newtonian-cooling alpha at interfaces.  1e-4 is large enough that
+    # dscal*dsat goes negative at some interfaces in this column so the
+    # negative-dback branch of d=max(dback,dscal*dsat) is actually taken
+    # (1e-5 leaves dsat>0 and the branch stays unexercised -> vacuous).  This
+    # changes d (and the output) but NOT the sign of mi (see the floor note in
+    # e3sm_cam.py: the +alpha term keeps mi>=0 in the orographic path).
+    alpha_iface = jnp.full((1, pver + 1), 1.0e-4)
+    tau, utgw, vtgw, gwut = gw_drag_prof(
+        tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
+        ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
+        orographic_only=True, do_taper=False, alpha_iface=alpha_iface,
+    )
+    tau_total = np.array(jnp.sum(jnp.abs(tau[0]), axis=0))
+    src_k = int(src[0])
+    for k in range(src_k):
+        assert tau_total[k] <= tau_total[k + 1] + 1e-12, (
+            f"stress grows upward at interface k={k} (negative-dback path unstable?): "
+            f"tau[{k}]={tau_total[k]:.6e} > tau[{k+1}]={tau_total[k+1]:.6e}"
+        )
+    assert bool(jnp.all(jnp.isfinite(tau))), "non-finite stress"
+
+    # Non-vacuity (codex rounds 2-3): prove the negative-dback branch is
+    # actually taken through production.  ``d = max(dback, dscal*dsat)`` only
+    # differs between dback=-500 and dback=0 when ``dscal*dsat < 0`` at some
+    # interface — i.e. the saturated/cooled regime.  Re-run with dback=0 and
+    # assert the propagating stress profile DIFFERS, so this test cannot
+    # silently go vacuous.  (This exercises the negative-d branch, not the mi<0
+    # floor itself, which does not bind in the orographic path.)
+    cfg0 = cfg._replace(dback=0.0)
+    tau0_pos, *_ = gw_drag_prof(
+        tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
+        ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg0,
+        orographic_only=True, do_taper=False, alpha_iface=alpha_iface,
+    )
+    tau_total_pos = np.array(jnp.sum(jnp.abs(tau0_pos[0]), axis=0))
+    assert np.max(np.abs(tau_total - tau_total_pos)) > 1e-12, (
+        "negative dback did not change the production stress -> the "
+        "negative-d branch is not exercised; this test would be vacuous"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level driver: physics + AD properties
 # ---------------------------------------------------------------------------

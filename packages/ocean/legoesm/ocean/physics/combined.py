@@ -132,7 +132,7 @@ def make_ocean_physics(
         profiles via an implicit backward-Euler solve.  Non-local
         terms (KPP counter-gradient flux) are still applied
         explicitly.  This is the mode required for
-        ``LatLonCGridOceanConfig(implicit_vertical_mixing=True)``.
+        ``LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True)``.
 
     Returns
     -------

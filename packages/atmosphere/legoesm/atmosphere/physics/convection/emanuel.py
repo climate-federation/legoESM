@@ -413,7 +413,8 @@ def emanuel_convection(
         # than k_lcl_smooth ⇒ below).
         nlev_idx = jnp.arange(nlev, dtype=T.dtype)
         below_lcl = jax.nn.sigmoid(
-            2.0 * (nlev_idx[None, :] - k_lcl_smooth[:, None])
+            config.below_lcl_index_sharpness
+            * (nlev_idx[None, :] - k_lcl_smooth[:, None])
         )                                                # (ncol, nlev)
         # Column-integrated condensate source [kg/m^2/s] and below-LCL
         # mass [kg/m^2] both reduce ``* dp / g`` over the level axis —

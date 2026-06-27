@@ -30,6 +30,8 @@ def _synthetic_data(ncol=12):
     c = lambda v: jnp.full((ncol,), v)
     data = dict(forc=f, lat=jnp.asarray(lat), pft=jnp.asarray(pft),
                 fg=jnp.asarray(rng.random(ncol) * 0.3), wp=c(0.12), fc=c(0.30),
+                pct_sand=jnp.asarray(rng.uniform(20, 80, ncol)),   # %sand for texture k/C
+                pct_clay=jnp.asarray(rng.uniform(5, 40, ncol)),
                 skt=jnp.broadcast_to(jnp.asarray(Tair), (12, ncol)),
                 alb=jnp.full((12, ncol), 0.2), t0=jnp.asarray(Tair),
                 dom_onehot=jnp.asarray(oh), w=jnp.cos(jnp.asarray(lat)))
@@ -60,25 +62,29 @@ def test_loss_is_differentiable():
     data = _synthetic_data()
     g = jax.grad(lambda p: loss_ml(p, data)[0])(init_ext_params())
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
-    # In the DEFAULT (stable) config these knobs are trainable: albedo (net SW),
-    # per-PFT soil thermal inertia (C_soil, k_solid -> seasonal cycle) and bulk
-    # exchange (Ch).  theta_wp is data-dependent (test_water_stress_response); z0 and
-    # the Farquhar params (Vc_max25/g1/LCMA) are inert unless --bulk most / --stomata
-    # (test_most_stomata_activate_params).
-    for k in ("pft_alb", "pft_csoil", "pft_ksolid", "pft_ch"):
+    # In the DEFAULT (MOST, stomata off) config these knobs are trainable: albedo
+    # (net SW), per-PFT soil thermal inertia (C_soil, k_solid -> seasonal cycle) and
+    # the MOST roughness z0.  theta_wp is data-dependent (test_water_stress_response);
+    # Ch is inert under MOST and the Farquhar params (Vc_max25/g1/LCMA) are inert
+    # unless --stomata (test_bulk_stomata_toggle_params).
+    for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
 
 
-def test_most_stomata_activate_params():
-    """--bulk most makes z0 trainable; --stomata makes Vc_max25/g1/LCMA trainable."""
+def test_bulk_stomata_toggle_params():
+    """--bulk constant makes Ch trainable (z0 inert); --stomata makes the Farquhar
+    photosynthesis params (Vc_max25/g1/LCMA) trainable."""
     import scripts.run.train_multilayer_land_era5 as M
     data = _synthetic_data()
     saved = (M._BULK_SCHEME, M._STOMATA_ON)
     try:
+        M._BULK_SCHEME, M._STOMATA_ON = "constant", False
+        g = jax.grad(lambda p: M.loss_ml(p, data)[0])(init_ext_params())
+        assert float(jnp.max(jnp.abs(g["pft_ch"]))) > 0.0, "pft_ch zero under constant bulk"
         M._BULK_SCHEME, M._STOMATA_ON = "most", True
         g = jax.grad(lambda p: M.loss_ml(p, data)[0])(init_ext_params())
-        for k in ("pft_z0", "pft_vcmax", "pft_g1", "pft_lcma"):
-            assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient under most+stomata"
+        for k in ("pft_vcmax", "pft_g1", "pft_lcma"):
+            assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} zero under most+stomata"
     finally:
         M._BULK_SCHEME, M._STOMATA_ON = saved
 
