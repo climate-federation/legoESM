@@ -245,3 +245,31 @@ def test_issue484_new_amip_flags_flow_to_config():
     assert cfg.k_free_per_day == 0.2
     assert cfg.nc_from_aerosol is True
     cfg.validate_strict()
+
+
+def test_tuned_slab_knobs_flow_to_config():
+    """The tuned air-sea + cloud knobs (mirroring run_coupled) round-trip into
+    ExperimentConfig so AMIP can run with the tuned slab parameters; the defaults
+    keep the prior AMIP behaviour (constant / 0 / None / off)."""
+    parser = build_arg_parser()
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.surface_bulk_scheme == "constant"
+    assert d.surface_gustiness_zi == 0.0
+    assert d.cloud_q_c_diagnostic is None
+    assert d.cloud_rh_crit is None
+    assert d.convective_cloud is False
+
+    c = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-bulk-scheme", "coare3",
+        "--gustiness-zi", "300",
+        "--q-c-diagnostic", "3e-4",
+        "--rh-crit", "0.8",
+        "--convective-cloud",
+    ]), parser))
+    assert c.surface_bulk_scheme == "coare3"
+    assert c.surface_gustiness_zi == 300.0
+    assert c.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    assert c.cloud_rh_crit == 0.8
+    assert c.convective_cloud is True
