@@ -297,8 +297,12 @@ def test_latlon_rejects_external_scheme_to_avoid_double_apply():
     zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
     ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
     base = OceanPhysicsConfig()
+    # lateral_mixing defaults to "harmonic" (cubed-sphere-only), which the
+    # lat-lon model rejects with a DIFFERENT guard; set it to "none" so this
+    # test actually reaches the surface_forcing="external" double-apply guard.
     bad_phys = OceanPhysicsConfig(
-        surface_forcing=type(base.surface_forcing)(scheme="external"))
+        surface_forcing=type(base.surface_forcing)(scheme="external"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"))
     with pytest.raises(ValueError, match="external.*not supported on the"):
         LatLonCGridOceanModel(
             grid, zc, config=LatLonCGridOceanConfig(physics=bad_phys))
