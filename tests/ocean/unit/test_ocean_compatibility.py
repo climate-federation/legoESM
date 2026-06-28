@@ -113,7 +113,7 @@ class TestMetalCompatibility:
 
         # Verify the class has the routing infrastructure without
         # creating a grid (which requires x64 to be enabled).
-        # The Metal detection itself (get_backend / "metal" branch) lives in
+        # The Apple GPU detection itself (get_backend / "mps" branch) lives in
         # the shared parallel.metal.place_spectral_grid helper now — the
         # constructor just unpacks its placement.
         init_source = inspect.getsource(SpectralOceanModel.__init__)
@@ -125,7 +125,7 @@ class TestMetalCompatibility:
         from legoesm.parallel.metal import place_spectral_grid
         helper_source = inspect.getsource(place_spectral_grid)
         assert "get_backend" in helper_source
-        assert "metal" in helper_source.lower()
+        assert "mps" in helper_source.lower()
 
         step_source = inspect.getsource(SpectralOceanModel.step)
         assert "_use_cpu_for_spectral" in step_source

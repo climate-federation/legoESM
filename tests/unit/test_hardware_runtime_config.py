@@ -194,5 +194,5 @@ class TestConservationPrecisionHook:
 
     def test_accumulation_dtype_falls_back_when_float64_unavailable(self):
         set_policy(PrecisionPolicy.mixed())
-        with patch("legoesm.runtime.backend.get_backend", return_value="metal"):
+        with patch("legoesm.runtime.backend.get_backend", return_value="mps"):
             assert _accumulation_dtype() == jnp.float32

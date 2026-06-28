@@ -47,7 +47,7 @@ COMPONENTS: tuple[str, ...] = ("atmosphere", "ocean", "land", "ice")
 #: Hardware architectures legoESM can target (JAX platforms).  Validation only
 #: checks the *name*; whether a given device is actually present is decided at
 #: configure time by :func:`legoesm.runtime.backend.configure_backend`.
-ARCHITECTURES: tuple[str, ...] = ("cpu", "gpu", "tpu", "metal")
+ARCHITECTURES: tuple[str, ...] = ("cpu", "gpu", "tpu", "mps")
 
 #: User-facing grid aliases -> canonical factory grid_type.  The MPAS Voronoi mesh
 #: is built on an icosahedral base (``grids.voronoi._icosahedral_base``), so
@@ -112,8 +112,8 @@ def validate_runtime(
 
     Each axis is checked against its available set, and the one real
     cross-constraint is enforced: an **fp64-storage precision** (``fp64`` /
-    ``mixed_fp64_storage``) needs an **fp64-capable backend**, which Apple
-    ``metal`` is not — that combination raises rather than silently truncating
+    ``mixed_fp64_storage``) needs an **fp64-capable backend**, which the Apple
+    GPU ``mps`` (MLX) is not — that combination raises rather than silently truncating
     state to float32.  ``None`` on an axis skips it (leave it at the default /
     already-configured value).  Raises ``ValueError`` on any invalid choice.
     """
@@ -333,7 +333,7 @@ def instantiate(
         ``operators=True`` with ``nesting=True`` is rejected (a nest is a grid
         PAIR, not one grid).
     architecture
-        ``"cpu"`` | ``"gpu"`` | ``"tpu"`` | ``"metal"`` (or ``None`` to leave the
+        ``"cpu"`` | ``"gpu"`` | ``"tpu"`` | ``"mps"`` (or ``None`` to leave the
         current backend).  Validated by :func:`validate_runtime`.
     precision
         ``"fp32"`` | ``"fp64"`` | ``"mixed"`` | ``"mixed_fp64_storage"`` (or

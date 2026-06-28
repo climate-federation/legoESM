@@ -1,17 +1,18 @@
-"""Mac Metal GPU + CPU hybrid routing.
+"""Mac Apple GPU (Metal) + CPU hybrid routing.
 
-Apple Metal GPUs lack float64 and complex128 support, so the
-spectral solver must run on CPU while the finite-volume solver
-(cubed-sphere, float32) can benefit from Metal acceleration.
+Apple GPUs (via the ``mps`` backend — jax-mps / MLX) lack float64 and
+complex128 support, so the spectral solver must run on CPU while the
+finite-volume solver (cubed-sphere, float32) can benefit from GPU
+acceleration.
 
 This module provides automatic device routing:
 
-- :func:`get_metal_config` — detect Metal and get both devices.
+- :func:`get_metal_config` — detect the Apple GPU and get both devices.
 - :func:`to_cpu` / :func:`to_metal` — transfer arrays between devices.
 - Model classes use these to route computation transparently.
 
-When not running on Metal (or when Metal is non-functional and has
-fallen back to CPU), all functions are no-ops.
+When not running on the Apple GPU (``mps``) backend, all functions are
+no-ops.
 """
 
 from __future__ import annotations
@@ -24,17 +25,16 @@ from legoesm.runtime.backend import check_spectral_backend, get_backend
 
 
 class MetalConfig(NamedTuple):
-    """Metal device configuration.
+    """Apple GPU (Metal) device configuration.
 
     Attributes
     ----------
     metal_device : jax.Device or None
-        The Metal GPU device, or ``None`` if not on Metal.
+        The Apple GPU device, or ``None`` if not on the ``mps`` backend.
     cpu_device : jax.Device
         The CPU device (always available).
     is_metal : bool
-        ``True`` if the default backend is Metal **and** it is functional.
-        ``False`` when Metal was detected but fell back to CPU.
+        ``True`` if the default backend is the Apple GPU (``mps``).
     """
     metal_device: jax.Device | None
     cpu_device: jax.Device
@@ -42,20 +42,16 @@ class MetalConfig(NamedTuple):
 
 
 def get_metal_config() -> MetalConfig:
-    """Detect the Metal backend and resolve CPU/GPU devices.
-
-    If Metal is detected but non-functional (e.g. jax-metal / JAX version
-    mismatch), ``is_metal`` will be ``False`` because the runtime has
-    already fallen back to CPU.
+    """Detect the Apple GPU (``mps``) backend and resolve CPU/GPU devices.
 
     Returns
     -------
     MetalConfig
     """
-    backend = get_backend()  # triggers health check & fallback
+    backend = get_backend()
     cpu_device = jax.devices("cpu")[0]
 
-    if backend == "metal":
+    if backend == "mps":
         metal_devices = jax.devices()
         metal_device = metal_devices[0] if metal_devices else None
         return MetalConfig(
@@ -79,9 +75,9 @@ class SpectralDevicePlacement(NamedTuple):
     grid
         The (possibly CPU-transferred) grid to store on the model.
     use_cpu_for_spectral : bool
-        ``True`` only on a functional Metal backend.
+        ``True`` only on the Apple GPU (``mps``) backend.
     cpu_device, default_device : jax.Device or None
-        Set only when routing is active (Metal); ``None`` otherwise — matches
+        Set only when routing is active (``mps``); ``None`` otherwise — matches
         the sentinel convention the spectral dycores already use.
     """
 
@@ -94,9 +90,9 @@ class SpectralDevicePlacement(NamedTuple):
 def place_spectral_grid(grid, *, allow_unsupported: bool = False) -> SpectralDevicePlacement:
     """Route a spectral grid to a device that supports float64/complex128.
 
-    On Metal the grid is transferred to CPU (Metal lacks fp64/complex128) and
-    the returned flags let the model run its transforms there; on every other
-    backend the grid is returned untouched after
+    On the Apple GPU (``mps``) the grid is transferred to CPU (MLX lacks
+    fp64/complex128) and the returned flags let the model run its transforms
+    there; on every other backend the grid is returned untouched after
     :func:`legoesm.runtime.backend.check_spectral_backend` verifies fp64
     support (or merely warns with ``allow_unsupported=True``).
 
@@ -106,7 +102,7 @@ def place_spectral_grid(grid, *, allow_unsupported: bool = False) -> SpectralDev
     those blocks. Must run before any float64 computation on the grid.
     """
     backend = get_backend()
-    if backend == "metal":
+    if backend == "mps":
         cpu_device = jax.devices("cpu")[0]
         return SpectralDevicePlacement(
             grid=jax.device_put(grid, cpu_device),
@@ -140,9 +136,9 @@ def to_cpu(array: jax.Array) -> jax.Array:
 
 
 def to_metal(array: jax.Array) -> jax.Array:
-    """Transfer an array to the default Metal device.
+    """Transfer an array to the default Apple GPU (``mps``) device.
 
-    If not on Metal (or Metal fell back to CPU), returns the array unchanged.
+    If not on the ``mps`` backend, returns the array unchanged.
 
     Parameters
     ----------
@@ -151,10 +147,10 @@ def to_metal(array: jax.Array) -> jax.Array:
 
     Returns
     -------
-    jax.Array on the Metal device (or unchanged).
+    jax.Array on the Apple GPU device (or unchanged).
     """
     backend = get_backend()
-    if backend != "metal":
+    if backend != "mps":
         return array
     metal = jax.devices()[0]
     return jax.device_put(array, metal)
@@ -179,9 +175,6 @@ def route_to_cpu(pytree):
 def route_to_default(pytree):
     """Transfer an entire pytree to the effective default device.
 
-    When Metal has fallen back to CPU, this routes to CPU (not to the
-    non-functional Metal device).
-
     Parameters
     ----------
     pytree
@@ -191,8 +184,8 @@ def route_to_default(pytree):
     -------
     Pytree with all array leaves on the default device.
     """
-    # jax.config.jax_default_device is set when Metal fell back to CPU.
-    # jax.devices()[0] would still return the Metal device in that case.
+    # Honour an explicit ``jax_default_device`` override if one is set;
+    # otherwise route to the backend's first device.
     default = getattr(jax.config, "jax_default_device", None)
     if default is None:
         default = jax.devices()[0]
@@ -200,11 +193,8 @@ def route_to_default(pytree):
 
 
 def is_metal_backend() -> bool:
-    """Check if the default JAX backend is Metal **and** functional.
-
-    Returns ``False`` when Metal was detected but fell back to CPU.
-    """
-    return get_backend() == "metal"
+    """Check if the default JAX backend is the Apple GPU (``mps``)."""
+    return get_backend() == "mps"
 
 
 def _is_on_device(x, device):
@@ -228,21 +218,20 @@ def _put_if_needed(x, device):
 
 
 def ensure_spectral_on_cpu(fn):
-    """Wrap a function so that on Metal, inputs are routed to CPU.
+    """Wrap a function so that on the Apple GPU (``mps``), inputs are routed to CPU.
 
-    On Metal, float64 and complex128 are unsupported. This decorator
+    On ``mps``, float64 and complex128 are unsupported. This decorator
     transfers inputs to CPU, runs the function, and transfers results
     back to the default device.
 
     Skips redundant transfers when inputs are already on the target
     device (e.g., within a ``lax.scan`` body that already runs on CPU).
 
-    On non-Metal backends this is a no-op wrapper.
+    On non-``mps`` backends this is a no-op wrapper.
 
-    The Metal-vs-non-Metal check is repeated at *call* time as well as
-    at decoration time: if Metal silently falls back to CPU (which
-    flips ``is_metal_backend()`` to False), the wrapper short-circuits
-    so we don't pay the device→device tree-map roundtrip on every call.
+    The mps-vs-non-mps check is repeated at *call* time as well as at
+    decoration time so the wrapper short-circuits when there is nothing
+    to route, avoiding the device→device tree-map roundtrip on every call.
     """
     if not is_metal_backend():
         return fn
@@ -250,8 +239,8 @@ def ensure_spectral_on_cpu(fn):
     _cpu = jax.devices("cpu")[0]
 
     def wrapper(*args, **kwargs):
-        # Re-check at call time — Metal may have fallen back to CPU
-        # since decoration; in that case there is nothing to route.
+        # Re-check at call time for robustness; if the backend is no
+        # longer mps there is nothing to route.
         if not is_metal_backend():
             return fn(*args, **kwargs)
         args_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), args)

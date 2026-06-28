@@ -378,18 +378,19 @@ def create_gaussian_grid(
     from legoesm.runtime.backend import check_spectral_backend, get_backend
     backend = get_backend()
 
-    # On Metal we can still run spectral dynamics by hosting grid/transforms on
-    # CPU and routing the spectral model there. Keep strict x64 requirement.
-    if backend == "metal":
+    # On the Apple GPU (mps) backend we can still run spectral dynamics by
+    # hosting grid/transforms on CPU and routing the spectral model there.
+    # Keep strict x64 requirement.
+    if backend == "mps":
         if not jax.config.jax_enable_x64:
             raise ValueError(
-                "Gaussian spectral grid on Metal requires JAX_ENABLE_X64=True "
-                "for CPU spectral fallback."
+                "Gaussian spectral grid on Apple GPU (mps) requires "
+                "JAX_ENABLE_X64=True for CPU spectral fallback."
             )
         if not allow_unsupported_backend:
             warnings.warn(
-                "Metal backend detected. Creating Gaussian spectral grid on CPU "
-                "for spectral fallback.",
+                "Apple GPU (mps) backend detected. Creating Gaussian spectral "
+                "grid on CPU for spectral fallback.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -460,7 +461,7 @@ def create_gaussian_grid(
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * float(omega) * sin_lat_np[:, None] * np.ones((1, n_lon))
 
-    target_device = jax.devices("cpu")[0] if backend == "metal" else None
+    target_device = jax.devices("cpu")[0] if backend == "mps" else None
 
     def _to_jax(array, dtype):
         np_arr = np.asarray(array, dtype=dtype)

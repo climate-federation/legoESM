@@ -548,9 +548,9 @@ class TestMetalConfig:
     """Tests for Metal detection."""
 
     def test_metal_config_on_cpu(self):
-        """On non-Metal backends, is_metal=False."""
+        """On non-mps backends, is_metal=False."""
         config = get_metal_config()
-        if get_backend() != "METAL":
+        if get_backend() != "MPS":
             assert config.is_metal is False
             assert config.metal_device is None
 
