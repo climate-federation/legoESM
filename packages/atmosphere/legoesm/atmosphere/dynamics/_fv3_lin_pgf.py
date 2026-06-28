@@ -337,13 +337,46 @@ def project_cgrid_pgf_to_dgrid_corners(
         pgf_x_d(i, j) = 0.5 * (pgf_x_c(i, j-1) + pgf_x_c(i, j))
         pgf_y_d(i, j) = 0.5 * (pgf_y_c(i-1, j) + pgf_y_c(i, j))
 
-    Boundary rows/cols (j=0, j=n in pgf_x; i=0, i=n in pgf_y) use a
-    single-cell value (same as halo "edge" pad) — the dynamics will
-    still be advected by halo exchange in the next step.
+    Boundary rows/cols (j=0, j=n in pgf_x; i=0, i=n in pgf_y) read the
+    TRUE cross-face cubed-sphere neighbour via the staggered D-grid
+    vector halo (:func:`pad_halo_dgrid_vector_4d`), so the corner-row
+    PGF is second-order accurate at every panel seam.
+
+    Cube-seam correctness (sign/metric convention)
+    ----------------------------------------------
+    The PGF acceleration ``(pgf_x_c, pgf_y_c)`` is a physical (geographic)
+    vector whose face-local components transform across cube-panel seams
+    exactly like the prognostic D-grid wind ``(u_d, v_d)``: the 16/24
+    same-axis seams copy the component unchanged; the 8/24 axis-swap
+    seams (faces 1,3 N/S ↔ faces 4,5 E/W) rotate 90° so the
+    x-component on one face maps to the (signed) y-component on the
+    neighbour.  We therefore reuse the FV3-faithful, MPI-validated
+    ``pad_halo_dgrid_vector_4d`` (the same primitive the live PE/NH
+    dycores use for the ``du_normal``/``dv_normal`` D-grid wind-increment
+    projection in ``primitive_eq_cdgrid`` and ``compressible_euler_cdgrid``).
+
+    STAGGERING MAP (this is the crux — the shapes cross over):
+    ``pad_halo_dgrid_vector_4d`` is defined for the FV3 DGRID_NE
+    convention ``u_d`` at v-edges ``(6, n, n+1, nlev)`` and ``v_d`` at
+    u-edges ``(6, n+1, n, nlev)``.  Our ``pgf_y_c`` (x-cell-centre /
+    y-face, ``(6, n, n+1, nlev)``) matches the ``u_d`` slot, and our
+    ``pgf_x_c`` (x-face / y-cell-centre, ``(6, n+1, n, nlev)``) matches
+    the ``v_d`` slot.  Hence the call is
+    ``pad_halo_dgrid_vector_4d(u_d=pgf_y_c, v_d=pgf_x_c)``.
+
+    Previously these boundary rows used ``jnp.pad(..., mode="edge")``,
+    which REPLICATES the same-face edge value instead of reading the
+    neighbour face — a first-order-wrong corner PGF and a direct source
+    of the cube-imprint the W2 v-wind visual-regression gate guards
+    against (measured ~33 % of the interior PGF signal at the seam row).
 
     Note: this is a SIMPLE 2-point average, NOT the A-L 4-point
     matrix.  It does not amplify halo errors at panel boundaries the
     way A-L does — that's the point of the cross-product PGF approach.
+
+    In a uniform hydrostatic state the cross-face neighbour PGF is also
+    exactly zero, so the projection preserves the zero-corner property
+    by construction (verified by the unit test).
 
     Parameters
     ----------
@@ -355,12 +388,24 @@ def project_cgrid_pgf_to_dgrid_corners(
     pgf_x_d : (6, n+1, n+1, nlev) — D-grid corner u tendency
     pgf_y_d : (6, n+1, n+1, nlev) — D-grid corner v tendency
     """
-    # x-PGF: u-faces (n+1, n) → corners (n+1, n+1).  Average over j.
-    pgf_x_pad_j = jnp.pad(pgf_x_c, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge")
+    from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+
+    # Cross-face staggered vector halo.  ``pgf_y_c`` fills the DGRID_NE
+    # ``u_d`` slot (v-edges, (6,n,n+1)); ``pgf_x_c`` fills the ``v_d``
+    # slot (u-edges, (6,n+1,n)).  The 8 axis-swap seams apply the
+    # component swap + sign internally (FV3-faithful, bit-for-bit
+    # validated incl. MPI — see legoesm.grids.dgrid_halo).
+    pgf_y_full, pgf_x_full = pad_halo_dgrid_vector_4d(pgf_y_c, pgf_x_c)
+    # pgf_y_full: (6, n+2, n+3, nlev); pgf_x_full: (6, n+3, n+2, nlev).
+
+    # x-PGF: u-faces (n+1, n) → corners (n+1, n+1).  Average over j using
+    # the now-populated south/north halo rows (trim the i-halo first).
+    pgf_x_pad_j = pgf_x_full[:, 1:-1, :, :]            # (6, n+1, n+2, nlev)
     pgf_x_d = 0.5 * (pgf_x_pad_j[:, :, :-1, :] + pgf_x_pad_j[:, :, 1:, :])
 
-    # y-PGF: v-faces (n, n+1) → corners (n+1, n+1).  Average over i.
-    pgf_y_pad_i = jnp.pad(pgf_y_c, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge")
+    # y-PGF: v-faces (n, n+1) → corners (n+1, n+1).  Average over i using
+    # the now-populated west/east halo cols (trim the j-halo first).
+    pgf_y_pad_i = pgf_y_full[:, :, 1:-1, :]            # (6, n+2, n+1, nlev)
     pgf_y_d = 0.5 * (pgf_y_pad_i[:, :-1, :, :] + pgf_y_pad_i[:, 1:, :, :])
 
     return pgf_x_d, pgf_y_d
