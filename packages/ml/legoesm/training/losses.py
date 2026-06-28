@@ -113,6 +113,18 @@ class LossConfig(NamedTuple):
     wind_scale: float = 20.0       # m/s — typical wind anomaly
     q_scale: float = 5.0e-3        # kg/kg — typical q anomaly
     ps_scale: float = 1000.0       # Pa — typical ps anomaly
+    # ACE2-style RESIDUAL normalization: when True, normalize each MSE term by
+    # the std of the 6-hour FIELD CHANGE (the prognostic "residual scale" of
+    # Watt-Meyer et al. 2024 / ACE2) instead of the full-field std above. The
+    # loss then weights the predictable TENDENCY rather than the (large) mean
+    # state, the key conditioning trick behind ACE2's short-range skill. The
+    # defaults are ERA5 6-hourly global tendency stds (approximate ACE's
+    # data-computed scaling-residual; override per-run if needed).
+    residual_normalize: bool = False
+    T_resid_scale: float = 1.5     # K — ERA5 6 h |ΔT| std
+    wind_resid_scale: float = 3.0  # m/s — ERA5 6 h |Δu|,|Δv| std
+    q_resid_scale: float = 5.0e-4  # kg/kg — ERA5 6 h |Δq| std
+    ps_resid_scale: float = 200.0  # Pa — ERA5 6 h |Δps| std
     # Radiation-flux supervision (TOA + surface) — drives cross-climate
     # generalization by constraining the radiative response, not just the
     # instantaneous state.  Reads the SegmentCarry ``held_*`` flux fields
@@ -334,7 +346,14 @@ def carry_mse(
     # this, w_T·<dT²>, w_q·<dq²>, w_ps·<dps²> differ by ~9 orders of
     # magnitude (ps² ~ 1e10 dominates; q² ~ 1e-4 is invisible).  Set
     # to all-1 when normalization is off for backward compatibility.
-    if config.normalize_by_scale:
+    if getattr(config, "residual_normalize", False):
+        # ACE2-style residual normalization (scale by std of the 6h field
+        # change — see LossConfig). Matches _spectral_state_loss_components.
+        T_norm = config.T_resid_scale ** 2
+        wind_norm = config.wind_resid_scale ** 2
+        q_norm = config.q_resid_scale ** 2
+        ps_norm = config.ps_resid_scale ** 2
+    elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
         q_norm = config.q_scale ** 2

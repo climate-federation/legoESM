@@ -827,7 +827,15 @@ def _spectral_state_loss_components(
     # Per-variable scale denominators — same convention as carry_mse
     # (iter-69 fix carried over to the spectral path so identical
     # LossConfigs behave consistently across spectral and grid losses).
-    if config.normalize_by_scale:
+    if getattr(config, "residual_normalize", False):
+        # ACE2-style residual normalization: scale by the std of the 6 h
+        # field CHANGE (tendency), not the full-field std — weights the
+        # predictable tendency. Used by the ACE2-loss preset.
+        T_norm = config.T_resid_scale ** 2
+        wind_norm = config.wind_resid_scale ** 2
+        q_norm = config.q_resid_scale ** 2
+        ps_norm = config.ps_resid_scale ** 2
+    elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
         q_norm = config.q_scale ** 2
