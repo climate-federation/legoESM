@@ -79,21 +79,30 @@ def main(argv=None):
                             knull_coarsen_xy=max(nx // 4, 1),
                             knull_coarsen_z=max(nz // 4, 1))
 
+  # JIT the per-sample solve (geom/cfg/LUT closed over -> compiled ONCE; mu0 /
+  # azimuth passed as traced scalars so changing them does NOT retrigger a
+  # recompile). Without this the eager path recompiles the MC loop every sample.
+  @jax.jit
+  def _solve(k_ext, ssa, g, rayl, reff, mu0, azi, key):
+    return solve_sw_monochromatic(
+        k_ext, ssa, g, geom, mu0=mu0, azimuth=azi, albedo=0.1, config=cfg,
+        key=key, rayleigh_frac=rayl, mie_cdf=cdf_b[0], mie_ang=ang_b[0],
+        r_eff=reff).abs_frac
+
   inputs, targets = [], []
   key = jax.random.PRNGKey(0)
   for i in range(args.n):
     key, kf, ks = jax.random.split(key, 3)
     k_ext, ssa, g, rayl, reff, mu0, azi = _random_cloud_field(kf, nx, ny, nz)
-    res = solve_sw_monochromatic(
-        k_ext, ssa, g, geom, mu0=mu0, azimuth=azi, albedo=0.1, config=cfg,
-        key=ks, rayleigh_frac=rayl, mie_cdf=cdf_b[0], mie_ang=ang_b[0],
-        r_eff=reff)
+    abs_frac = _solve(k_ext, ssa, g, rayl, reff,
+                      jnp.asarray(mu0), jnp.asarray(azi), ks)
+    abs_frac.block_until_ready()
     inputs.append(dict(k_ext=np.asarray(k_ext), ssa=np.asarray(ssa),
                        g=np.asarray(g), rayleigh_frac=np.asarray(rayl),
                        r_eff=np.asarray(reff), mu0=mu0, azimuth=azi))
-    targets.append(np.asarray(res.abs_frac))
+    targets.append(np.asarray(abs_frac))
     if (i + 1) % 25 == 0:
-      print(f"  {i + 1}/{args.n}")
+      print(f"  {i + 1}/{args.n}", flush=True)
 
   np.savez_compressed(
       args.out,

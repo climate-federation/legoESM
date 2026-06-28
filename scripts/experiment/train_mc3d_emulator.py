@@ -20,7 +20,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+# NN training runs fine in fp32 (the default) and fp32 is required on backends
+# without x64 (e.g. Apple MPS / many GPUs). Honor JAX_ENABLE_X64 from the env
+# (set it to 1 for an fp64 CPU run); do NOT force x64 here.
 
 from legoesm.atmosphere.physics.radiation.mc3d.emulator import (
     EmulatorConfig,
@@ -46,8 +48,15 @@ def load_dataset(path):
   return inputs, targets
 
 
+def _batched_apply(model, x_batch):
+  """Apply the model over a batch WITHOUT vmap (the Apple MPS plugin lacks
+  batching rules for several ops, e.g. gelu). The batch is small and the size is
+  static under jit, so this Python loop simply unrolls."""
+  return jnp.stack([model(x_batch[i]) for i in range(x_batch.shape[0])])
+
+
 def _loss(model, x_batch, y_batch):
-  pred = jax.vmap(model)(x_batch)
+  pred = _batched_apply(model, x_batch)
   return jnp.mean((pred - y_batch) ** 2)
 
 
@@ -85,7 +94,7 @@ def train(inputs, targets, *, config: EmulatorConfig, epochs: int,
     return model, opt_state, loss
 
   def _rel_err(model, x, y):
-    pred = jax.vmap(model)(x)
+    pred = _batched_apply(model, x)
     return float(jnp.linalg.norm(pred - y) / (jnp.linalg.norm(y) + 1e-30))
 
   history = []
