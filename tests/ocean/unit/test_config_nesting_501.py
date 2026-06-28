@@ -12,6 +12,7 @@ from legoesm.ocean.state import (
     DynBottomDragConfig,
     LatLonCGridOceanConfig,
     RuntimeChecksConfig,
+    PolarFilterConfig,
 )
 
 _BD = ("bottom_drag_r", "bottom_drag_bbl_thickness", "bottom_drag_bg_velocity")
@@ -63,11 +64,13 @@ def test_flat_fields_is_one_to_one_with_pre_grouping_set():
     assert "bottom_drag" not in ff and "barotropic" not in ff
     assert "runtime_checks" not in ff
     assert "lateral_viscosity" not in ff
+    assert "polar_filter" not in ff
     for f in (*_BD, *_BT):
         assert f in ff
     # every other (non-grouped) top-level field is unchanged
     for f in set(LatLonCGridOceanConfig._fields) - {"bottom_drag", "barotropic",
-                                                     "runtime_checks", "lateral_viscosity"}:
+                                                     "runtime_checks", "lateral_viscosity",
+                                                     "polar_filter"}:
         assert f in ff
 
 
@@ -207,6 +210,7 @@ def test_runtime_checks_flat_fields_all_three_groups_coexist():
     ff = LatLonCGridOceanConfig.flat_fields()
     assert "runtime_checks" not in ff
     assert "lateral_viscosity" not in ff
+    assert "polar_filter" not in ff
     for f in (*_RC, *_BT, *_BD):
         assert f in ff
     assert "min_water_column_m" in ff  # ungrouped, stays a flat key
@@ -262,3 +266,39 @@ def test_replace_flat_distributes_grouped_overrides():
     assert c2.bottom_drag.bottom_drag_r == 1.0e-3
     assert c2.eos == "wright"  # ungrouped stays flat
     assert c.lateral_viscosity.A_h == 1.0e4  # original untouched
+
+
+# ------------------------------------------------------------- PolarFilterConfig
+
+_PF = ("use_polar_filter", "polar_filter_cutoff_lat_deg",
+       "polar_filter_max_wave_speed", "polar_filter_safety_factor")
+
+
+def test_polar_filter_is_nested_not_flat():
+    top = set(LatLonCGridOceanConfig._fields)
+    assert "polar_filter" in top
+    assert len(PolarFilterConfig._fields) == 4
+    for f in _PF:
+        assert f not in top and f in PolarFilterConfig._fields
+    assert isinstance(LatLonCGridOceanConfig().polar_filter, PolarFilterConfig)
+
+
+def test_polar_filter_from_flat_distributes_and_flat_get():
+    c = LatLonCGridOceanConfig.from_flat(use_polar_filter=True,
+                                         polar_filter_cutoff_lat_deg=55.0)
+    assert c.polar_filter.use_polar_filter is True
+    assert c.polar_filter.polar_filter_cutoff_lat_deg == 55.0
+    assert c.polar_filter.polar_filter_safety_factor == 0.85  # default
+    for f in _PF:
+        assert c.flat_get(f) == getattr(c.polar_filter, f)
+
+
+def test_polar_filter_yaml_and_old_checkpoint():
+    from legoesm.ocean.config import (OceanExperimentConfig,  # noqa: PLC0415
+                                      ocean_config_from_dict)
+    cfg = OceanExperimentConfig({"grid": {"type": "latlon_cgrid"},
+                                 "ocean": {"use_polar_filter": True}}).to_ocean_config()
+    assert cfg.polar_filter.use_polar_filter is True
+    tag = f"{LatLonCGridOceanConfig.__module__}:LatLonCGridOceanConfig"
+    back = ocean_config_from_dict({"__type__": tag, "polar_filter_cutoff_lat_deg": 50.0})
+    assert back.polar_filter.polar_filter_cutoff_lat_deg == 50.0
