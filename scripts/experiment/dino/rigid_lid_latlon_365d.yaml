@@ -8,11 +8,21 @@
 #
 # Selecting --barotropic-solver rigid_lid auto-applies the Veros-faithful
 # coordinated stack (ab2 outer + explicit_ab2 Coriolis + ab2_scope="advective" +
-# dt_mom_ratio=9). A BARE rigid_lid flip RUNS AWAY (568 Sv -> NaN): the
-# bottom-drag depth-mean reaches the streamfunction barotropic balance only via
-# the du_diss fold, which is gated on ab2_scope="advective". With the full stack
-# DINO rigid_lid spins up STABLY (7 -> 31 Sv over 180 d, still rising toward the
-# physical wind-driven transport; tightest barotropic streamfunction Psi 42-73).
+# dt_mom_ratio=9). A BARE rigid_lid flip RUNS AWAY immediately (568 Sv -> NaN by
+# day 60): the bottom-drag depth-mean reaches the streamfunction barotropic
+# balance only via the du_diss fold, gated on ab2_scope="advective".
+#
+# With the full stack DINO rigid_lid spins up CLEANLY for ~250 days: ACC
+# 0 -> 52 Sv, climbing PAST the free-surface solvers' premature ~44 Sv plateau
+# (whose eta-solve dissipation caps the ACC artificially low). This demonstrates
+# rigid_lid recovers the true (higher) wind-driven ACC the free surface masks.
+#
+# CAVEAT: at this 1deg (non-eddy-resolving) resolution the ACC is NOT eddy-
+# saturated, so beyond ~day 270 it runs away exponentially (106 -> 343 -> 1166 ->
+# NaN by day 360). Root: DINO's Visbeck kappa_GM clamp [200,2000] m^2/s defeats
+# the saturating eddy feedback. A stable, physical ~200 Sv ACC needs stronger GM
+# (raise visbeck_kappa_max / visbeck_alpha) or eddy-resolving resolution. Use
+# this config for the SPIN-UP demonstration (days<=~250); see the ACC figure.
 #
 # Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
 #                --config scripts/experiment/dino/rigid_lid_latlon_365d.yaml
@@ -20,7 +30,7 @@
 grid: latlon
 barotropic_solver: rigid_lid
 vmix: kpp
-days: 365
+days: 250                 # clean spin-up window (runs away ~day 270 at 1deg)
 snapshot_every_days: 5
 n_lon: 50                 # 1deg R1 (~9900 cells)
 output_dir: results/dino_latlon_rigid_lid
