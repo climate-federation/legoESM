@@ -43,12 +43,12 @@ def test_nemo_model_config_selects_canonical_blocks():
     assert cfg.adaptive_implicit_vertadv is True
     assert cfg.implicit_vertical_mixing is True
 
-    assert cfg.A_h_lat_scaling is True
-    assert cfg.A_h_cos_power == 1
-    assert cfg.A_h_merid == pytest.approx(0.0)
-    assert cfg.A_h_eq_boost == pytest.approx(1.0)
-    assert cfg.A_h_eq_sigma_deg == pytest.approx(5.0)
-    assert cfg.C_smag_lap == pytest.approx(0.33)
+    assert cfg.lateral_viscosity.A_h_lat_scaling is True
+    assert cfg.lateral_viscosity.A_h_cos_power == 1
+    assert cfg.lateral_viscosity.A_h_merid == pytest.approx(0.0)
+    assert cfg.lateral_viscosity.A_h_eq_boost == pytest.approx(1.0)
+    assert cfg.lateral_viscosity.A_h_eq_sigma_deg == pytest.approx(5.0)
+    assert cfg.lateral_viscosity.C_smag_lap == pytest.approx(0.33)
     assert cfg.bottom_drag.bottom_drag_r == pytest.approx(2.5e-4)
     assert cfg.bottom_drag.bottom_drag_bg_velocity == pytest.approx(0.1)
     assert cfg.bottom_drag.bottom_drag_bbl_thickness == pytest.approx(100.0)

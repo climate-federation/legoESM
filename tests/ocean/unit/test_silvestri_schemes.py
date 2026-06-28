@@ -43,7 +43,7 @@ def test_scheme_builds_and_validates(scheme):
     cfg = apply_silvestri_scheme(r.model_config, scheme)
     # No explicit viscosity left on (the schemes are self-dissipating / use a
     # dedicated closure) — so the double-friction guard cannot trip.
-    assert cfg.A_h == 0.0 and cfg.B_h == 0.0 and cfg.C_smag == 0.0 and cfg.C_leith == 0.0
+    assert cfg.lateral_viscosity.A_h == 0.0 and cfg.lateral_viscosity.B_h == 0.0 and cfg.lateral_viscosity.C_smag == 0.0 and cfg.C_leith == 0.0
     LatLonCGridOceanModel(r.grid, r.z_coord, cfg)   # constructs + validates
 
 

@@ -43,7 +43,7 @@ def test_from_flat_distributes_grouped_fields():
 def test_from_flat_passes_ungrouped_and_empty():
     # ungrouped flat fields still construct flat; empty -> all defaults.
     c = LatLonCGridOceanConfig.from_flat(A_h=3.0e4, eos="wright")
-    assert c.A_h == 3.0e4 and c.eos == "wright"
+    assert c.lateral_viscosity.A_h == 3.0e4 and c.eos == "wright"
     assert LatLonCGridOceanConfig.from_flat() == LatLonCGridOceanConfig()
 
 
@@ -62,11 +62,12 @@ def test_flat_fields_is_one_to_one_with_pre_grouping_set():
     # nested field names are NOT flat keys; their members ARE
     assert "bottom_drag" not in ff and "barotropic" not in ff
     assert "runtime_checks" not in ff
+    assert "lateral_viscosity" not in ff
     for f in (*_BD, *_BT):
         assert f in ff
     # every other (non-grouped) top-level field is unchanged
     for f in set(LatLonCGridOceanConfig._fields) - {"bottom_drag", "barotropic",
-                                                     "runtime_checks"}:
+                                                     "runtime_checks", "lateral_viscosity"}:
         assert f in ff
 
 
@@ -205,6 +206,7 @@ def test_runtime_checks_from_flat_distributes():
 def test_runtime_checks_flat_fields_all_three_groups_coexist():
     ff = LatLonCGridOceanConfig.flat_fields()
     assert "runtime_checks" not in ff
+    assert "lateral_viscosity" not in ff
     for f in (*_RC, *_BT, *_BD):
         assert f in ff
     assert "min_water_column_m" in ff  # ungrouped, stays a flat key
@@ -247,3 +249,16 @@ def test_flat_get_resolves_grouped_and_ungrouped_by_flat_name():
     assert c.flat_get("barotropic_solver") == "rigid_lid"          # other group
     assert c.flat_get("bottom_drag_r") == 1.0e-3                   # other group
     assert c.flat_get("min_water_column_m") == 0.7                 # ungrouped, flat
+
+
+def test_replace_flat_distributes_grouped_overrides():
+    """replace_flat is the _replace analog of from_flat (#501) — flat override
+    names (recipe scheme presets / CLI splat) distribute into their sub-configs."""
+    c = LatLonCGridOceanConfig.from_flat()
+    c2 = c.replace_flat(A_h=2.0e4, C_smag=0.1, barotropic_solver="rigid_lid",
+                        bottom_drag_r=1.0e-3, eos="wright")
+    assert c2.lateral_viscosity.A_h == 2.0e4 and c2.lateral_viscosity.C_smag == 0.1
+    assert c2.barotropic.barotropic_solver == "rigid_lid"
+    assert c2.bottom_drag.bottom_drag_r == 1.0e-3
+    assert c2.eos == "wright"  # ungrouped stays flat
+    assert c.lateral_viscosity.A_h == 1.0e4  # original untouched

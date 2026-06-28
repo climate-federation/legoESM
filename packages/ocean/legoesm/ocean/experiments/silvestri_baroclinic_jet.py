@@ -339,8 +339,9 @@ def build_silvestri_baroclinic_jet_setup(
     # closure. A_h=1000 + C_smag=0.1 + smag_cfl_safety=0.5 is the old Eady backstop;
     # it trips the double-friction guard against SM2/QG2 so is WENO/flux-only.
     if stabilize and model_config.lateral_friction_scheme == "none":
-        model_config = model_config._replace(
-            A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5)
+        model_config = model_config._replace(  # #501: nested LateralViscosityConfig
+            lateral_viscosity=model_config.lateral_viscosity._replace(
+                A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5))
 
     initial_state, wall_mask = _build_initial_state(grid, z_coord, config)
 
