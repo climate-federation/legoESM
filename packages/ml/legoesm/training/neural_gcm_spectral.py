@@ -831,10 +831,11 @@ def _spectral_state_loss_components(
         # ACE2-style residual normalization: scale by the std of the 6 h
         # field CHANGE (tendency), not the full-field std — weights the
         # predictable tendency. Used by the ACE2-loss preset.
-        T_norm = config.T_resid_scale ** 2
-        wind_norm = config.wind_resid_scale ** 2
-        q_norm = config.q_resid_scale ** 2
-        ps_norm = config.ps_resid_scale ** 2
+        # floor guards a misconfigured 0 residual scale (codex: no zero-div).
+        T_norm = max(config.T_resid_scale ** 2, 1e-30)
+        wind_norm = max(config.wind_resid_scale ** 2, 1e-30)
+        q_norm = max(config.q_resid_scale ** 2, 1e-30)
+        ps_norm = max(config.ps_resid_scale ** 2, 1e-30)
     elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
@@ -901,9 +902,19 @@ def _spectral_state_loss_components(
     # variance.  Weights ``w_crps_{T,u,v,ps}`` default to 0; setting
     # them non-zero combines an MAE + MSE objective in the NeuralGCM
     # style.
-    T_scale = config.T_scale if config.normalize_by_scale else 1.0
-    wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
-    ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
+    # CRPS scales honor residual_normalize too (codex: else the MAE terms
+    # would keep full-field scales while the MSE switched to residual —
+    # internally inconsistent if both are active).
+    if getattr(config, "residual_normalize", False):
+        T_scale = config.T_resid_scale
+        wind_scale = config.wind_resid_scale
+        ps_scale = config.ps_resid_scale
+    elif config.normalize_by_scale:
+        T_scale = config.T_scale
+        wind_scale = config.wind_scale
+        ps_scale = config.ps_scale
+    else:
+        T_scale = wind_scale = ps_scale = 1.0
     if config.w_crps_T > 0.0:
         crps_loss = crps_loss + config.w_crps_T * _area_weighted_mean_3d(jnp.abs(dT)) / T_scale
     if config.w_crps_u > 0.0:

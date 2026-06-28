@@ -349,10 +349,11 @@ def carry_mse(
     if getattr(config, "residual_normalize", False):
         # ACE2-style residual normalization (scale by std of the 6h field
         # change — see LossConfig). Matches _spectral_state_loss_components.
-        T_norm = config.T_resid_scale ** 2
-        wind_norm = config.wind_resid_scale ** 2
-        q_norm = config.q_resid_scale ** 2
-        ps_norm = config.ps_resid_scale ** 2
+        # floor guards a misconfigured 0 residual scale (codex: no zero-div).
+        T_norm = max(config.T_resid_scale ** 2, 1e-30)
+        wind_norm = max(config.wind_resid_scale ** 2, 1e-30)
+        q_norm = max(config.q_resid_scale ** 2, 1e-30)
+        ps_norm = max(config.ps_resid_scale ** 2, 1e-30)
     elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
