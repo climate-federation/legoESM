@@ -53,22 +53,31 @@ def _read_combo_rmse(scorecard_path: Path) -> dict | None:
     }
 
 
-def collect(sweep_dir: Path, manifest: dict) -> list[dict]:
+def collect(sweep_dir: Path, manifest: dict, min_mtime: float = 0.0) -> list[dict]:
     """One row per combo: name, schemes, metrics, score (T + |T_bias|).
 
-    Only combos in the CURRENT manifest are included — a prior sweep can
-    leave stale combo dirs (e.g. ``combo_*_none``, ``combo_baseline_smoke``)
-    with results from a different radiation/config; including them would
-    corrupt the ranking.  (Aggregate only AFTER all manifest tasks finish,
-    so every kept combo holds the fresh run, not a leftover.)
+    Two freshness guards — a sweep REUSES combo dirs by name, so a prior
+    sweep's results (e.g. an old gray-radiation run) can masquerade as
+    current:
+      * manifest filter — skip dirs not in THIS manifest (``combo_*_none``,
+        ``combo_baseline_smoke`` leftovers);
+      * ``min_mtime`` — skip any combo whose ``aimip_scorecard.json`` predates
+        the sweep config (default = the manifest's own mtime), so a combo
+        whose new run has not finished yet shows up as MISSING rather than
+        contributing a stale score.
     """
     schemes = _combo_schemes(manifest)
     manifest_names = {c["name"] for c in manifest.get("combos", [])}
     rows = []
+    n_stale = 0
     for combo_dir in sorted(sweep_dir.glob("combo_*")):
         if manifest_names and combo_dir.name not in manifest_names:
             continue  # stale dir from a prior sweep — not in this manifest
-        r = _read_combo_rmse(combo_dir / "aimip_scorecard.json")
+        sc = combo_dir / "aimip_scorecard.json"
+        if min_mtime and sc.exists() and sc.stat().st_mtime < min_mtime:
+            n_stale += 1
+            continue  # leftover from an earlier sweep; its new run hasn't finished
+        r = _read_combo_rmse(sc)
         if r is None:
             continue
         T = r["rmse"]["T"]
@@ -139,7 +148,15 @@ def main(argv=None):
     manifest_path = Path(argv[1]) if len(argv) > 1 else (
         sweep_dir.parent.parent / "config/aimip/sweep/stage1/manifest.json")
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    rows = collect(sweep_dir, manifest)
+    # Freshness threshold = the manifest's mtime: combos whose scorecard
+    # predates it are leftovers from an earlier sweep (their new run is
+    # unfinished) and are excluded.
+    min_mtime = manifest_path.stat().st_mtime if manifest_path.exists() else 0.0
+    rows = collect(sweep_dir, manifest, min_mtime=min_mtime)
+    n_expected = len(manifest.get("combos", []))
+    if n_expected and len(rows) < n_expected:
+        print(f"# WARNING: only {len(rows)}/{n_expected} combos are FRESH "
+              f"(rest still running or stale) — ranking is PRELIMINARY.\n")
     table = _text_table(rows)
     print(table)
     (sweep_dir / "sweep_scorecard.txt").write_text(table + "\n")
