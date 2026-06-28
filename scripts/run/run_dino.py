@@ -119,6 +119,13 @@ def _parse_args():
              "LAT-LON ONLY (MPAS supports implicit_cn / explicit_substep).",
     )
     p.add_argument(
+        "--rigid-lid-dt-mom-ratio", type=float, default=None,
+        help="dt_mom under-relaxation ratio for the rigid_lid faithful stack "
+             "(DINOConfig.rigid_lid_dt_mom_ratio, default 9.0 = Veros "
+             "dt_mom=4800/dt_tracer=43200). dt_mom = dt/ratio accelerates the "
+             "ACC spin-up; ignored unless --barotropic-solver rigid_lid.",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -316,6 +323,9 @@ def main():
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
     if args.barotropic_solver is not None:
         cfg = dataclasses.replace(cfg, barotropic_solver=args.barotropic_solver)
+    if args.rigid_lid_dt_mom_ratio is not None:
+        cfg = dataclasses.replace(
+            cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
     dt = cfg.dt
     grid_kind = args.grid
 
@@ -382,6 +392,14 @@ def main():
     print()
     print(f"{'step':>6} {'day':>7} {'|u|':>10} {'|v|':>10} {'|eta|':>10} "
           f"{'T_max':>7} {'T_min':>7} {'KE':>10}")
+
+    # The rigid_lid faithful stack uses the ab2 outer integrator + a
+    # streamfunction (ψ, dψ, dψ_prev, dpsin, dpsin_prev) carry; seed them (and
+    # the rigid-lid island cache + dtype reconciliation) once from the concrete
+    # initial state before the eager step loop, so the first step has a complete
+    # carry. lat-lon only (rigid_lid is rejected on MPAS upstream).
+    if grid_kind == "latlon" and cfg.barotropic_solver == "rigid_lid":
+        state = model.seed_scan_carry(state, dt)
 
     t_wall_start = time.time()
     snapshot_idx = 0

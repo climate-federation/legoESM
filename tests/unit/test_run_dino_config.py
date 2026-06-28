@@ -92,3 +92,17 @@ def test_barotropic_solver_rejects_bad_choice(monkeypatch):
                         ["run_dino", "--barotropic-solver", "bogus"])
     with pytest.raises(SystemExit):
         rd._parse_args()
+
+
+def test_rigid_lid_dt_mom_ratio_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "rigid_lid",
+                         "--rigid-lid-dt-mom-ratio", "6"])
+    args = rd._parse_args()
+    assert args.rigid_lid_dt_mom_ratio == 6.0
+
+
+def test_rigid_lid_dt_mom_ratio_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.rigid_lid_dt_mom_ratio is None

@@ -545,3 +545,42 @@ class TestDINORigidLidIslandTopology:
         south = labels[(lat < cfg.channel_lat_south_deg), 0]
         assert set(np.unique(north[north > 0])).isdisjoint(
             set(np.unique(south[south > 0]))), "N and S walls must be distinct islands"
+
+
+class TestDINORigidLidFaithfulStack:
+    """Selecting rigid_lid auto-applies the Veros-faithful coordinated stack.
+
+    A BARE barotropic_solver="rigid_lid" flip runs away (568 Sv → NaN): the
+    bottom-drag depth-mean reaches the streamfunction barotropic balance only via
+    the du_diss fold, which is gated on ab2_scope="advective".  So
+    dino_lat_lon_model_config pairs rigid_lid with ab2 + explicit_ab2 +
+    ab2_scope="advective" + dt_mom_ratio (veros_acc_recipe.py); other solvers keep
+    the forward_euler defaults.
+    """
+
+    def _model_cfg(self, solver):
+        cfg = DINOConfig(barotropic_solver=solver)
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        mcfg, _ = dino.dino_lat_lon_model_config(grid, cfg, physics=True)
+        return mcfg
+
+    def test_rigid_lid_applies_faithful_stack(self):
+        m = self._model_cfg("rigid_lid")
+        assert m.barotropic.barotropic_solver == "rigid_lid"
+        assert m.outer_integrator == "ab2"
+        assert m.coriolis_scheme == "explicit_ab2"
+        assert m.ab2_scope == "advective"
+        assert m.dt_mom_ratio == DINOConfig().rigid_lid_dt_mom_ratio == 9.0
+
+    def test_implicit_cn_keeps_forward_euler_defaults(self):
+        m = self._model_cfg("implicit_cn")
+        assert m.outer_integrator == "forward_euler"
+        assert m.coriolis_scheme == "matsuno_split"
+        assert m.ab2_scope == "total"
+        assert m.dt_mom_ratio == 1.0
+
+    def test_rigid_lid_dt_mom_ratio_is_tunable(self):
+        cfg = DINOConfig(barotropic_solver="rigid_lid", rigid_lid_dt_mom_ratio=5.0)
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        mcfg, _ = dino.dino_lat_lon_model_config(grid, cfg, physics=True)
+        assert mcfg.dt_mom_ratio == 5.0

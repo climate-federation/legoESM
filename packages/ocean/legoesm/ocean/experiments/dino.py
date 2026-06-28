@@ -256,6 +256,14 @@ class DINOConfig:
     pgf_scheme: str = "adcroft"
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
+    # When barotropic_solver="rigid_lid", DINO applies the FULL Veros-faithful
+    # ACC stack (ab2 outer + explicit_ab2 Coriolis + ab2_scope="advective" +
+    # this dt_mom ratio); a BARE rigid_lid flip runs away because the bottom-drag
+    # depth-mean only reaches the streamfunction barotropic balance via the
+    # du_diss fold, which is gated on ab2_scope="advective" (veros_acc_recipe.py).
+    # dt_mom = dt / ratio under-relaxes momentum to accelerate the ACC spin-up
+    # (Veros dt_mom=4800/dt_tracer=43200 ⇒ 9). Ignored unless rigid_lid.
+    rigid_lid_dt_mom_ratio: float = 9.0
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -1156,6 +1164,19 @@ def dino_lat_lon_model_config(
             bottom_drag=BottomDragConfig(scheme="none"),  # use model-level
         )
 
+    # rigid_lid is the Veros-faithful ACC streamfunction solver; a BARE flip of
+    # barotropic_solver runs away (568 Sv → NaN) because the bottom-drag
+    # depth-mean never reaches the streamfunction barotropic balance — that fold
+    # (ocean_model_latlon_cgrid.py, F_slow += du_diss depth-mean) is gated on
+    # tend.du_diss, which is produced ONLY under ab2_scope="advective". So when
+    # rigid_lid is selected, apply the FULL coordinated stack (veros_acc_recipe.py:
+    # ab2 outer + explicit_ab2 Coriolis + ab2_scope="advective" + dt_mom_ratio).
+    # Validated: DINO rigid_lid then spins up STABLY (7→31 Sv/180 d, still rising).
+    _rl_stack = (
+        dict(outer_integrator="ab2", coriolis_scheme="explicit_ab2",
+             ab2_scope="advective", dt_mom_ratio=cfg.rigid_lid_dt_mom_ratio)
+        if cfg.barotropic_solver == "rigid_lid" else {})
+
     model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
         A_h=A_h_base,
@@ -1169,6 +1190,7 @@ def dino_lat_lon_model_config(
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
+        **_rl_stack,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
         ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix
