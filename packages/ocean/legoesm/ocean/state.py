@@ -975,6 +975,42 @@ class LateralViscosityConfig(NamedTuple):
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
 
+class PolarFilterConfig(NamedTuple):
+    """Fourier polar-filter parameters (#501 config grouping).
+
+    The lat-lon pole CFL stabiliser (zonal Fourier-mode truncation poleward
+    of the cutoff).  Field names unchanged so the flat YAML / legacy-kwarg
+    interface maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+    """
+
+    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
+    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
+    # at the poles, so explicit advection/metric terms violate CFL near the pole
+    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
+    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
+    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
+    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
+    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
+    # before the FFT and restored afterward, so continental zeros are not smeared
+    # into adjacent ocean (a naive zonal FFT would couple basins across land).
+    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
+    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
+    # content exactly only where layer thickness is zonally uniform (approximately
+    # under partial cells / z*; a stability filter, not a flux operator).
+    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
+    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
+    # Arctic (basins still couple weakly across the pole) — that is why the
+    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
+    # own stability + a tropics/mid-lat/SH comparison.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_lat_deg: float = 60.0
+    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
+    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
+    polar_filter_max_wave_speed: float = 300.0
+    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
+    polar_filter_safety_factor: float = 0.85
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -1391,32 +1427,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Freezing point of seawater in degC (model T is in degC).  Defaults to
     # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
     freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C
-    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
-    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
-    # at the poles, so explicit advection/metric terms violate CFL near the pole
-    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
-    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
-    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
-    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
-    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
-    # before the FFT and restored afterward, so continental zeros are not smeared
-    # into adjacent ocean (a naive zonal FFT would couple basins across land).
-    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
-    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
-    # content exactly only where layer thickness is zonally uniform (approximately
-    # under partial cells / z*; a stability filter, not a flux operator).
-    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
-    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
-    # Arctic (basins still couple weakly across the pole) — that is why the
-    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
-    # own stability + a tropics/mid-lat/SH comparison.
-    use_polar_filter: bool = False
-    polar_filter_cutoff_lat_deg: float = 60.0
-    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
-    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
-    polar_filter_max_wave_speed: float = 300.0
-    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
-    polar_filter_safety_factor: float = 0.85
+    # --- Fourier polar filter (#501 grouped into PolarFilterConfig) ---
+    polar_filter: PolarFilterConfig = PolarFilterConfig()
 
     # --- Additive momentum vertical-friction placement (Veros) ---
     # Veros computes the implicit vertical-friction increment du_mix from the
@@ -1645,6 +1657,9 @@ class LatLonCGridOceanConfig(NamedTuple):
         _lv = {k: flat.pop(k) for k in LateralViscosityConfig._fields if k in flat}
         if _lv:
             nested["lateral_viscosity"] = LateralViscosityConfig(**_lv)
+        _pf = {k: flat.pop(k) for k in PolarFilterConfig._fields if k in flat}
+        if _pf:
+            nested["polar_filter"] = PolarFilterConfig(**_pf)
         return cls(**nested, **flat)
 
     @classmethod
@@ -1656,11 +1671,12 @@ class LatLonCGridOceanConfig(NamedTuple):
         field set even though the storage is nested.  Extend per nested group.
         """
         names = set(cls._fields) - {"bottom_drag", "barotropic", "runtime_checks",
-                                    "lateral_viscosity"}
+                                    "lateral_viscosity", "polar_filter"}
         names |= set(DynBottomDragConfig._fields)
         names |= set(BarotropicConfig._fields)
         names |= set(RuntimeChecksConfig._fields)
         names |= set(LateralViscosityConfig._fields)
+        names |= set(PolarFilterConfig._fields)
         return frozenset(names)
 
     def flat_get(self, name: str):
@@ -1678,6 +1694,8 @@ class LatLonCGridOceanConfig(NamedTuple):
             return getattr(self.runtime_checks, name)
         if name in LateralViscosityConfig._fields:
             return getattr(self.lateral_viscosity, name)
+        if name in PolarFilterConfig._fields:
+            return getattr(self.polar_filter, name)
         return getattr(self, name)
 
     def replace_flat(self, **overrides) -> "LatLonCGridOceanConfig":
@@ -1691,7 +1709,8 @@ class LatLonCGridOceanConfig(NamedTuple):
         for sub_name, sub_cls in (("bottom_drag", DynBottomDragConfig),
                                   ("barotropic", BarotropicConfig),
                                   ("runtime_checks", RuntimeChecksConfig),
-                                  ("lateral_viscosity", LateralViscosityConfig)):
+                                  ("lateral_viscosity", LateralViscosityConfig),
+                                  ("polar_filter", PolarFilterConfig)):
             members = {k: overrides.pop(k) for k in list(overrides)
                        if k in sub_cls._fields}
             if members:

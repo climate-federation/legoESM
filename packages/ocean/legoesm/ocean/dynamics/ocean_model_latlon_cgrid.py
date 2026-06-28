@@ -3944,7 +3944,7 @@ class LatLonCGridOceanModel:
         # After the prognostic update so it damps whatever the step produced, and
         # BEFORE the freeze floor so the surface temperature cap is the final word
         # (the zonal filter can otherwise pull a surface cell back below freezing).
-        if self.config.use_polar_filter:
+        if self.config.polar_filter.use_polar_filter:
             new_state = self._apply_polar_filter(new_state, dt, grid=grid)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
@@ -4036,9 +4036,9 @@ class LatLonCGridOceanModel:
             lat_v=lat_v, cos_lat_v=cos_lat_v)
         kw = dict(
             dt=dt,
-            max_wave_speed=cfg.polar_filter_max_wave_speed,
-            cutoff_lat_deg=cfg.polar_filter_cutoff_lat_deg,
-            safety_factor=cfg.polar_filter_safety_factor,
+            max_wave_speed=cfg.polar_filter.polar_filter_max_wave_speed,
+            cutoff_lat_deg=cfg.polar_filter.polar_filter_cutoff_lat_deg,
+            safety_factor=cfg.polar_filter.polar_filter_safety_factor,
         )
         mask_c = compute_polar_filter_mask(pf_grid, is_v_face=False, **kw)
         mask_v = compute_polar_filter_mask(pf_grid, is_v_face=True, **kw)
