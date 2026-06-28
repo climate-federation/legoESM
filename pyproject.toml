@@ -170,6 +170,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # these tests set jax_enable_x64 before importing the modules under test (a
 # standard JAX-testing idiom), so module-level imports follow that call.
 "tests/unit/test_clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# Same idiom: sets jax_enable_x64 before importing the module under test (real
+# fp64 needed for the #618 fp32-vs-fp64 saturation comparison) and uses the
+# physical symbol T for temperature.  I001: the config call sits between imports.
+"tests/unit/test_warm_rain_fp32_saturation.py" = ["E402", "I001", "N803"]
 # CLUBB validation/characterization scripts use the same physical symbol names
 # (T for temperature) and set jax_enable_x64 before importing (E402).
 "scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]
