@@ -60,6 +60,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
@@ -1321,6 +1322,26 @@ class BechtoldConfig(NamedTuple):
     mc_normalize_scale: float = 0.05
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
     buoyancy_death_memory: bool = False
+    # Vertical solve for the compensating subsidence + detrainment in the
+    # shared mass-flux kernel.  ``"advective"`` (default) is the legacy
+    # donor-cell advective form — BYTE-IDENTICAL to the historical scheme
+    # but conserves column dry-static-energy only to truncation order
+    # (the advective form leaves a non-telescoping ``(φ/ρ)dM/dz`` residual
+    # ⇒ a resolution-dependent MSE leak).  ``"implicit_flux"`` selects the
+    # IMPLICIT (backward-Euler / θ-blended) CONSERVATIVE flux-form solve
+    # (mass_flux.apply_mass_flux_kernel_implicit_flux): flux-form
+    # CONSERVATIVE unconditionally (transports s = c_pT+gz and q_v so the
+    # column MSE budget telescopes to machine precision for any M/θ/dt),
+    # and donor-cell backward-Euler STABLE in the production M/dt/Δp regime
+    # (diagonally dominant for θ·dt·g·M/Δp < 1; removes the 2Δz checkerboard
+    # the explicit flux form NaN'd on — decoupled from the M_b_max clip).
+    # The dispatch raises ValueError on any other value (fn-entry, static).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler, most damping, default); the kernel clamps to
+    # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
+    # when subsidence_solve == "advective".
+    theta_implicit: float = 1.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):
