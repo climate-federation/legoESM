@@ -54,10 +54,20 @@ def _read_combo_rmse(scorecard_path: Path) -> dict | None:
 
 
 def collect(sweep_dir: Path, manifest: dict) -> list[dict]:
-    """One row per combo: name, schemes, metrics, score (T + |T_bias|)."""
+    """One row per combo: name, schemes, metrics, score (T + |T_bias|).
+
+    Only combos in the CURRENT manifest are included — a prior sweep can
+    leave stale combo dirs (e.g. ``combo_*_none``, ``combo_baseline_smoke``)
+    with results from a different radiation/config; including them would
+    corrupt the ranking.  (Aggregate only AFTER all manifest tasks finish,
+    so every kept combo holds the fresh run, not a leftover.)
+    """
     schemes = _combo_schemes(manifest)
+    manifest_names = {c["name"] for c in manifest.get("combos", [])}
     rows = []
     for combo_dir in sorted(sweep_dir.glob("combo_*")):
+        if manifest_names and combo_dir.name not in manifest_names:
+            continue  # stale dir from a prior sweep — not in this manifest
         r = _read_combo_rmse(combo_dir / "aimip_scorecard.json")
         if r is None:
             continue

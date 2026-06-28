@@ -61,9 +61,23 @@ def test_failed_combo_skipped(tmp_path):
     assert [r["name"] for r in rows] == ["combo_ok"]
 
 
+def test_stale_combo_excluded_by_manifest(tmp_path):
+    """A combo dir not in the current manifest (e.g. a leftover *_none from a
+    prior sweep) is excluded so it can't corrupt the ranking."""
+    sweep = tmp_path / "sweep"
+    sweep.mkdir()
+    _write_combo(sweep, "combo_conv_x", 1.2, 1.8, 2.8, 2.8, 95.0, 0.0)
+    _write_combo(sweep, "combo_turb_none", 0.5, 0.5, 1.0, 1.0, 50.0, 0.0)  # stale, best-looking
+    manifest = {"combos": [{"name": "combo_conv_x",
+                            "overrides": {"aimip_convection": "x"}}]}
+    rows = mod.collect(sweep, manifest)
+    assert [r["name"] for r in rows] == ["combo_conv_x"]  # stale excluded despite lower score
+
+
 if __name__ == "__main__":
     import tempfile
-    for fn in (test_collect_ranks_by_score, test_failed_combo_skipped):
+    for fn in (test_collect_ranks_by_score, test_failed_combo_skipped,
+               test_stale_combo_excluded_by_manifest):
         with tempfile.TemporaryDirectory() as td:
             fn(Path(td))
         print(f"  ok  {fn.__name__}")
