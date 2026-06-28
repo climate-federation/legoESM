@@ -62,7 +62,7 @@ def pack_inputs(k_ext, ssa, g, rayleigh_frac, r_eff_um, mu0, azimuth):
       jnp.clip(ssa, 0.0, 1.0),
       jnp.clip(g, -1.0, 1.0),
       jnp.clip(rayleigh_frac, 0.0, 1.0),
-      jnp.clip((r_eff_um - 2.5) / 19.0, 0.0, 1.0),
+      jnp.clip((r_eff_um - 2.5) / 19.0, 0.0, 1.0),  # coeff-ok: microhh Mie LUT r_eff norm [um] (2.5..21.5 span 19)
   ])
   return jnp.concatenate([optical, solar], axis=0)   # (C_in, nx, ny, nz)
 
@@ -83,7 +83,8 @@ class _ConvBlock(eqx.Module):
 
 class UNet3D(eqx.Module):
   """Small 3D U-Net: encoder (conv + 2x avgpool) / decoder (trilinear up + skip)
-  with a softplus head (non-negative absorbed-flux fraction)."""
+  with a LINEAR head (clip >=0 via predict_nonneg; a squashing head collapsed to
+  zero on the sparse target)."""
 
   inc: _ConvBlock
   downs: list

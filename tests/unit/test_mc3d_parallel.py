@@ -16,7 +16,6 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.radiation.mc3d import (
-    average_results,
     pmean_result,
     solve_sw_monochromatic,
     solve_sw_sharded,
@@ -77,23 +76,6 @@ def test_sharded_variance_shrinks_with_shards():
   assert e8 < e1 + 1e-6   # more photons should not be worse (usually tighter)
 
 
-def test_average_results_is_ad_safe():
-  """The combine is linear (a scaled SUM) -> differentiable. grad of the mean
-  over K shards w.r.t. one shard's leaf is 1/K."""
-  geom = _geom(nx=4, ny=4, nz=4)
-  k_ext, ssa, g = _fields(geom, 2e-3, 0.5, 0.2)
-  r = [solve_sw_monochromatic(
-          k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.1,
-          config=MC3DRadiationConfig(photons_per_pixel=128),
-          key=jax.random.PRNGKey(i)) for i in range(3)]
-
-  def f(scale):
-    scaled = [r0._replace(vol_abs_total=r0.vol_abs_total * scale)
-              if i == 0 else r0 for i, r0 in enumerate(r)]
-    return average_results(scaled).vol_abs_total
-
-  grad = float(jax.grad(f)(1.0))
-  assert abs(grad - float(r[0].vol_abs_total) / 3.0) < 1e-9
 
 
 def test_solve_sw_sharded_guard():

@@ -73,8 +73,8 @@ def main(argv=None):
                          z_faces=jnp.linspace(0.0, args.height, nz + 1),
                          nx=nx, ny=ny, nz=nz)
   lut = mie.load_mie_sampling_lut()
-  cdf_b = lut.phase_cdf[args.band][None]              # (1,n_mie)
-  ang_b = lut.phase_cdf_angle[args.band][None]        # (1,n_r,n_mie)
+  cdf_b = lut.phase_cdf[args.band]                    # (n_mie,)
+  ang_b = lut.phase_cdf_angle[args.band]             # (n_r, n_mie)
   cfg = MC3DRadiationConfig(photons_per_pixel=args.photons,
                             knull_coarsen_xy=max(nx // 4, 1),
                             knull_coarsen_z=max(nz // 4, 1))
@@ -86,7 +86,7 @@ def main(argv=None):
   def _solve(k_ext, ssa, g, rayl, reff, mu0, azi, key):
     return solve_sw_monochromatic(
         k_ext, ssa, g, geom, mu0=mu0, azimuth=azi, albedo=0.1, config=cfg,
-        key=key, rayleigh_frac=rayl, mie_cdf=cdf_b[0], mie_ang=ang_b[0],
+        key=key, rayleigh_frac=rayl, mie_cdf=cdf_b, mie_ang=ang_b,
         r_eff=reff).abs_frac
 
   inputs, targets = [], []

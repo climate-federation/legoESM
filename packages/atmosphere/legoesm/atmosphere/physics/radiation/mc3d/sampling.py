@@ -35,8 +35,13 @@ def henyey_greenstein_mu(key: Array, g: Array) -> Array:
   ``mu = 1 - 2u`` in the ``|g| < eps`` limit.
   """
   u = jax.random.uniform(key, dtype=g.dtype)
-  s = (1.0 - g * g) / (1.0 - g + 2.0 * g * u)
-  mu_hg = (1.0 + g * g - s * s) / (2.0 * g)
+  # safe_g keeps the |g|<eps branch finite: jnp.where evaluates BOTH branches,
+  # so a raw 1/(2g) at g=0 would yield NaN and poison reverse-mode AD even though
+  # the isotropic branch is selected. Use 0.5 (NOT +-1: g=+-1 gives s=0/0 at
+  # u=0); any g with 0<|g|<1 keeps s and 1/(2g) finite for all u in [0,1).
+  safe_g = jnp.where(jnp.abs(g) < _G_ISOTROPIC_EPS, 0.5, g)
+  s = (1.0 - safe_g * safe_g) / (1.0 - safe_g + 2.0 * safe_g * u)
+  mu_hg = (1.0 + safe_g * safe_g - s * s) / (2.0 * safe_g)
   mu_iso = 1.0 - 2.0 * u
   return jnp.where(jnp.abs(g) < _G_ISOTROPIC_EPS, mu_iso, mu_hg)
 

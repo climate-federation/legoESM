@@ -213,7 +213,7 @@ Wired into `make_radiation_physics` via `scheme="mc3d"`, plane-only:
   Cell-center stays the default (faces None). Codex-clean (6/6 PASS). Also fixed
   an orientation bug in the OLR-scale test (now via the production adapter).
 - **Phase 4 [DONE]** — `parallel.py`: `solve_sw_sharded` (fold-accumulate photon
-  shards, real memory lever), `average_results`, `pmean_result` (pmap/shard_map,
+  shards, real memory lever), `pmean_result` (pmap/shard_map,
   AD-safe); `scripts/bench/bench_mc3d_raytracer.py`. Tests: sharded==single,
   variance, AD-safe combine, pmean-under-pmap, bench smoke. Codex-reviewed (no
   correctness bugs; 2 quality fixes: fold not stack, bench touches all leaves).

@@ -659,9 +659,12 @@ def compute_sw_optical_field(
     rayl_scat = optics_lib.rayleigh_scattering_fn(igpt)(
         molecules, temperature, pressure, vmr_fields)
     tot_scat = props['ssa'] * props['optical_depth']
-    rayleigh_frac = jnp.where(
-        tot_scat > 0.0, jnp.clip(rayl_scat / jnp.maximum(tot_scat, 1e-30),
-                                 0.0, 1.0), 0.0)
+    # safe_divide (not a floored raw divide) so the masked-branch VJP can't
+    # overflow as tot_scat -> 0, consistent with ssa/g above. fill=1.0: a cell
+    # with negligible total scattering is gas-only -> any scatter there is
+    # Rayleigh (matches the old clip-to-1 limit, not 0).
+    rayleigh_frac = jnp.clip(
+        safe_divide(rayl_scat, tot_scat, eps=1.0e-30, fill=1.0), 0.0, 1.0)
     return {**props, 'rayleigh_frac': rayleigh_frac}
 
   # Sequential map over g-points (memory-frugal, like the solve_sw scan):

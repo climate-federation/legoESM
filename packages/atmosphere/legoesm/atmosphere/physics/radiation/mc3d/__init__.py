@@ -16,7 +16,6 @@ from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
     trace_one,
 )
 from legoesm.atmosphere.physics.radiation.mc3d.parallel import (
-    average_results,
     pmean_result,
     shard_keys,
     solve_sw_sharded,
@@ -37,7 +36,6 @@ __all__ = [
     "MC3DResult",
     "MajorantGrid",
     "PlaneRTGeometry",
-    "average_results",
     "build_majorant_grid",
     "global_majorant",
     "pmean_result",
