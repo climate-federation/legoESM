@@ -12,7 +12,10 @@ SFNO+dycore training path); it learns the MC transport operator.
 I/O (channels-first for ``eqx.nn.Conv3d``):
   input  (C_in, nx, ny, nz): per-cell [k_ext_norm, ssa, g, rayleigh_frac,
           r_eff_norm] + broadcast solar [mu0, sin_zenith*cos_az, sin_zenith*sin_az]
-  output (nx, ny, nz): absorbed-flux fraction per cell (>= 0 via softplus).
+  output (nx, ny, nz): absorbed-flux fraction per cell. The head is LINEAR (a
+  squashing non-negativity like softplus drove a dead zone -> exact-zero
+  collapse on the sparse target); clip to >= 0 for physical use via
+  ``predict_nonneg``.
 """
 
 from __future__ import annotations
@@ -126,7 +129,11 @@ class UNet3D(eqx.Module):
     for d, blk in enumerate(self.ups):
       h = _upsample2(h, skips[-1 - d].shape[1:])
       h = blk(jnp.concatenate([h, skips[-1 - d]], axis=0))
-    return jax.nn.softplus(self.head(h))[0]   # (nx,ny,nz), >= 0
+    return self.head(h)[0]   # (nx,ny,nz) LINEAR (clip >=0 via predict_nonneg)
+
+  def predict_nonneg(self, x):
+    """Forward + clip to the physical non-negative absorbed-flux fraction."""
+    return jnp.maximum(self(x), 0.0)
 
 
 def _avgpool2(x):

@@ -55,14 +55,20 @@ def _batched_apply(model, x_batch):
   return jnp.stack([model(x_batch[i]) for i in range(x_batch.shape[0])])
 
 
-def _loss(model, x_batch, y_batch):
+def _loss(model, x_batch, y_batch, weight_alpha=0.0):
+  """Magnitude-weighted MSE. Absorbed-flux targets are very sparse (most cells
+  ~0, few cloud cells high), so plain MSE (weight_alpha=0) collapses to the
+  trivial zero predictor. weight = 1 + weight_alpha * y/mean(y) upweights
+  high-absorption cells (so clouds must be fit) while keeping background weight
+  1 (so false positives are still penalized)."""
   pred = _batched_apply(model, x_batch)
-  return jnp.mean((pred - y_batch) ** 2)
+  w = 1.0 + weight_alpha * y_batch / (jnp.mean(y_batch) + 1e-6)
+  return jnp.sum(w * (pred - y_batch) ** 2) / jnp.sum(w)
 
 
 def train(inputs, targets, *, config: EmulatorConfig, epochs: int,
           batch_size: int = 4, lr: float = 5e-4, val_frac: float = 0.2,
-          seed: int = 0):
+          seed: int = 0, weight_alpha: float = 0.0):
   """Train the emulator; return (model, history) with train/val MSE + rel err."""
   key = jax.random.PRNGKey(seed)
   n = inputs.shape[0]
@@ -88,7 +94,8 @@ def train(inputs, targets, *, config: EmulatorConfig, epochs: int,
 
   @eqx.filter_jit
   def step(model, opt_state, xb, yb):
-    loss, grads = eqx.filter_value_and_grad(_loss)(model, xb, yb)
+    loss, grads = eqx.filter_value_and_grad(
+        lambda m, a, b: _loss(m, a, b, weight_alpha))(model, xb, yb)
     updates, opt_state = opt.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     model = eqx.apply_updates(model, updates)
     return model, opt_state, loss
@@ -118,6 +125,9 @@ def main(argv=None):
   ap.add_argument("--base-features", type=int, default=16)
   ap.add_argument("--depth", type=int, default=2)
   ap.add_argument("--batch-size", type=int, default=4)
+  ap.add_argument("--weight-alpha", type=float, default=20.0,
+                  help="magnitude weighting for the sparse absorbed-flux target "
+                       "(0 = plain MSE)")
   ap.add_argument("--out", default="scripts/tmp/_mc3d_emu_model.eqx")
   args = ap.parse_args(argv)
 
@@ -125,7 +135,8 @@ def main(argv=None):
   print(f"dataset: inputs {inputs.shape}, targets {targets.shape}")
   cfg = EmulatorConfig(base_features=args.base_features, depth=args.depth)
   model, history, _ = train(inputs, targets, config=cfg, epochs=args.epochs,
-                            batch_size=args.batch_size)
+                            batch_size=args.batch_size,
+                            weight_alpha=args.weight_alpha)
   h0, hN = history[0], history[-1]
   print(f"epoch 0  : train {h0['train_mse']:.3e}  val {h0['val_mse']:.3e}  "
         f"rel {h0['val_rel']:.3f}")

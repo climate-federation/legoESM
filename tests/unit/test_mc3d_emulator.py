@@ -32,9 +32,10 @@ def test_pack_inputs_shape():
 def test_unet_forward_nonneg_and_shape():
   net = UNet3D(EmulatorConfig(base_features=8, depth=2), jax.random.PRNGKey(0))
   k_ext, ssa, g, rf, reff = _fields()
-  y = net(pack_inputs(k_ext, ssa, g, rf, reff, 0.7, 0.0))
-  assert y.shape == (16, 16, 16)
-  assert float(jnp.min(y)) >= 0.0          # softplus head
+  x = pack_inputs(k_ext, ssa, g, rf, reff, 0.7, 0.0)
+  y = net(x)
+  assert y.shape == (16, 16, 16)            # linear head
+  assert float(jnp.min(net.predict_nonneg(x))) >= 0.0   # clipped for physics
 
 
 def test_unet_differentiable():
