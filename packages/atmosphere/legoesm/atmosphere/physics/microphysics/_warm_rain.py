@@ -160,8 +160,28 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
     minimal fix that conserves total water in both clear and cloudy
     columns.
     """
-    q_sat = saturation_mixing_ratio(T, p_full)
-    excess = q_v - q_sat
+    # Issue #618: marginal warm-Cu condensate is the small residual q_v - q_sat.
+    # The loss is NOT the subtraction (q_v, q_sat are close ⇒ Sterbenz-exact in
+    # fp32) but q_sat's fp32 COMPUTATION: the exp / softplus / division chain in
+    # saturation_mixing_ratio carries ~1.7e-8 kg/kg absolute error at BOMEX
+    # conditions, so a marginal supersaturation residual ~1e-6 kg/kg is ~2% low
+    # per cell — which the sigmoid condensation threshold and the
+    # conserving-positive rescale amplify into the ~65% LWP deficit reported in
+    # fp32 LES.  When x64 is available, compute q_sat AND the residual in fp64
+    # then return to the input dtype (nothing fp64 leaks into the state/carry);
+    # the production LES runs fp32 arrays under jax_enable_x64=True.  The branch
+    # is a STATIC Python ``if`` on the compile-time x64 flag (not traced), so the
+    # x64-off path is byte-identical to the original fp32 code AND avoids the
+    # spurious "float64 truncated to float32" astype warning JAX emits otherwise.
+    if jax.config.jax_enable_x64:
+        _state_dtype = q_v.dtype
+        q_sat64 = saturation_mixing_ratio(T.astype(jnp.float64),
+                                          p_full.astype(jnp.float64))
+        excess = (q_v.astype(jnp.float64) - q_sat64).astype(_state_dtype)
+        q_sat = q_sat64.astype(_state_dtype)
+    else:
+        q_sat = saturation_mixing_ratio(T, p_full)
+        excess = q_v - q_sat
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
     psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
