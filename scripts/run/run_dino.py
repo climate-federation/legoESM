@@ -104,6 +104,21 @@ def _parse_args():
              "'constant' (background-only, identical across grids). Both grids.",
     )
     p.add_argument(
+        "--barotropic-solver",
+        choices=("implicit_cn", "explicit_substep", "rigid_lid",
+                 "implicit_unsplit"),
+        default=None,
+        help="Barotropic (free-surface / rigid-lid) solver "
+             "(DINOConfig.barotropic_solver, default 'implicit_cn'). "
+             "'rigid_lid' is the lat-lon-C-grid island-streamfunction solver — "
+             "the natural ACC solver for the re-entrant channel (the southern "
+             "continent below the channel is a topological island), so the "
+             "depth-integrated transport is solved directly as the island "
+             "circulation instead of riding the free-surface eta solve's null "
+             "mode (which under-/over-shoots + oscillates the ACC). "
+             "LAT-LON ONLY (MPAS supports implicit_cn / explicit_substep).",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -299,8 +314,23 @@ def main():
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
+    if args.barotropic_solver is not None:
+        cfg = dataclasses.replace(cfg, barotropic_solver=args.barotropic_solver)
     dt = cfg.dt
     grid_kind = args.grid
+
+    # The MPAS model validates ONLY {explicit_substep, implicit_cn}; rigid_lid
+    # (lat-lon island streamfunction) and implicit_unsplit have no Voronoi-mesh
+    # implementation.  Reject any unsupported solver up front with a clear
+    # message instead of letting MPASOceanModel raise after building the mesh
+    # (dispatch-hardening: a clearer error, earlier).
+    _MPAS_BAROTROPIC = ("implicit_cn", "explicit_substep")
+    if grid_kind == "mpas" and cfg.barotropic_solver not in _MPAS_BAROTROPIC:
+        raise SystemExit(
+            f"--barotropic-solver {cfg.barotropic_solver} is not supported on "
+            f"the MPAS Voronoi mesh (lat-lon-C-grid-only). On MPAS use one of "
+            f"{_MPAS_BAROTROPIC}; rigid_lid / implicit_unsplit require "
+            f"--grid latlon.")
 
     # Build grid, state, model — branch on grid type
     z = create_dino_z_star(cfg)

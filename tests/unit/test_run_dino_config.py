@@ -64,3 +64,31 @@ def test_committed_configs_parse_and_are_valid(monkeypatch):
         assert args.grid in ("latlon", "mpas")
         assert args.days > 0
         assert isinstance(args.output_dir, Path)
+
+
+def test_barotropic_solver_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "rigid_lid"])
+    args = rd._parse_args()
+    assert args.barotropic_solver == "rigid_lid"
+
+
+def test_barotropic_solver_default_none(monkeypatch):
+    """Default None → main() keeps DINOConfig.barotropic_solver (implicit_cn)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.barotropic_solver is None
+
+
+def test_barotropic_solver_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "barotropic_solver: rigid_lid\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.barotropic_solver == "rigid_lid"
+
+
+def test_barotropic_solver_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
