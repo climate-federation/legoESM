@@ -39,18 +39,6 @@ def shard_keys(base_key: Array, n_shards: int) -> Array:
   return jax.random.split(base_key, n_shards)
 
 
-def average_results(results: list[MC3DResult]) -> MC3DResult:
-  """Combine equal-size photon shards by averaging their fraction fields.
-
-  Each shard launches the same photons-per-column ``P``; a fraction field is
-  ``count_shard / P`` (or ``/N`` for domain scalars), so the mean over ``K``
-  shards equals ``total_count / (K*P)`` — the combined fraction. Linear in the
-  inputs, hence AD-safe (the reduction is a scaled SUM).
-  """
-  stacked = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *results)
-  return jax.tree.map(lambda x: jnp.mean(x, axis=0), stacked)
-
-
 def solve_sw_sharded(
     k_ext: Array,
     ssa: Array,

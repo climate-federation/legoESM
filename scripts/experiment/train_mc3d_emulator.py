@@ -49,9 +49,11 @@ def load_dataset(path):
 
 
 def _batched_apply(model, x_batch):
-  """Apply the model over a batch WITHOUT vmap (the Apple MPS plugin lacks
-  batching rules for several ops, e.g. gelu). The batch is small and the size is
-  static under jit, so this Python loop simply unrolls."""
+  """Apply the model over a batch WITHOUT vmap. The Apple MPS plugin (when
+  installed) monkeypatches several ops, e.g. jax.nn.gelu, with versions that have
+  no batching rule -- so vmap over the model raises NotImplementedError even on
+  CPU. The batch is small and its size is static under jit, so this loop unrolls
+  cheaply and is correct on every backend."""
   return jnp.stack([model(x_batch[i]) for i in range(x_batch.shape[0])])
 
 
@@ -112,7 +114,7 @@ def train(inputs, targets, *, config: EmulatorConfig, epochs: int,
       idx = order[b * batch_size:(b + 1) * batch_size]
       model, opt_state, loss = step(model, opt_state, x_tr[idx], y_tr[idx])
       ep_loss += float(loss)
-    val_mse = float(_loss(model, x_val, y_val))
+    val_mse = float(_loss(model, x_val, y_val, weight_alpha))  # same metric as train
     history.append({"epoch": ep, "train_mse": ep_loss / steps_per_epoch,
                     "val_mse": val_mse, "val_rel": _rel_err(model, x_val, y_val)})
   return model, history, (x_val, y_val)

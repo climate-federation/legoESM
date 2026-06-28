@@ -89,15 +89,14 @@ def test_mie_in_tracer_forward_scatters_and_conserves():
   rfrac = jnp.zeros((1, nx, ny, nz))                  # all scattering is cloud
   r_eff = jnp.full((nx, ny, nz), 10.5)
   b = 7
-  cdf_band = lut.phase_cdf[b][None]                   # (1, n_mie)
-  ang_band = lut.phase_cdf_angle[b][None]             # (1, n_r, n_mie)
+  band_of_gpt = jnp.array([b])                        # single g-point -> band b
   cfg = MC3DRadiationConfig(photons_per_pixel=4000)
   kw = dict(mu0=1.0, azimuth=0.0, albedo=0.0, config=cfg)
 
   mie = solve_sw_spectral(tau, ssa, g, jnp.array([1.0]), geom,
                           key=jax.random.PRNGKey(0), rayleigh_frac=rfrac,
-                          mie_cdf_band=cdf_band, mie_ang_band=ang_band,
-                          r_eff=r_eff, **kw)
+                          mie_lut_cdf=lut.phase_cdf, mie_lut_ang=lut.phase_cdf_angle,
+                          band_of_gpt=band_of_gpt, r_eff=r_eff, **kw)
   iso = solve_sw_spectral(tau, ssa, g, jnp.array([1.0]), geom,
                           key=jax.random.PRNGKey(1), rayleigh_frac=rfrac, **kw)
   # Forward Mie scattering -> less reflected to space than isotropic.

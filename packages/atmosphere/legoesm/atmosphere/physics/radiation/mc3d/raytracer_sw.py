@@ -212,18 +212,21 @@ def solve_sw_spectral(
     config: MC3DRadiationConfig,
     key: Array,
     rayleigh_frac: Array | None = None,
-    mie_cdf_band: Array | None = None,
-    mie_ang_band: Array | None = None,
+    mie_lut_cdf: Array | None = None,
+    mie_lut_ang: Array | None = None,
+    band_of_gpt: Array | None = None,
     r_eff: Array | None = None,
 ) -> SWFluxResult:
   """Spectrally-integrated shortwave MC transport over a stack of g-points.
 
   ``rayleigh_frac`` (optional ``(ngpt, nx, ny, nz)``): per-g-point gas Rayleigh
   fraction of total scattering, enabling the explicit Rayleigh + cloud phase
-  split. Default ``None`` -> pure HG(g). When ``mie_cdf_band``
-  ``(ngpt, n_mie)`` / ``mie_ang_band`` ``(ngpt, n_r, n_mie)`` (the per-g-point
-  Mie LUT band slices) and ``r_eff`` ``(nx,ny,nz)`` [um] are given, the cloud
-  phase is the microhh Mie LUT instead of HG.
+  split. Default ``None`` -> pure HG(g). When the small per-band Mie LUT
+  ``mie_lut_cdf`` ``(n_band, n_mie)`` / ``mie_lut_ang`` ``(n_band, n_r, n_mie)``,
+  the ``band_of_gpt`` ``(ngpt,)`` g-point->band map, and ``r_eff`` ``(nx,ny,nz)``
+  [um] are given, the cloud phase is the microhh Mie LUT instead of HG. The
+  band slice is gathered per g-point INSIDE the scan, so only the (n_band,...)
+  LUT is resident -- not a per-g-point ``(ngpt, n_r, n_mie)`` copy.
 
   Loops g-points serially (``lax.scan``) so only one g-point's optical field is
   resident at a time -- the key memory lever (see docs/specs). Each g-point's
@@ -249,23 +252,28 @@ def solve_sw_spectral(
   ngpt = tau.shape[0]
   gkeys = jax.random.split(key, ngpt)
   use_rayleigh = rayleigh_frac is not None
-  rfrac = rayleigh_frac if use_rayleigh else jnp.zeros_like(tau)
-  use_mie = (mie_cdf_band is not None and mie_ang_band is not None
-             and r_eff is not None)
-  cdf_in = mie_cdf_band if use_mie else jnp.zeros((ngpt, 1), dtype)
-  ang_in = mie_ang_band if use_mie else jnp.zeros((ngpt, 1, 1), dtype)
+  # Cheap broadcastable dummy (leading ngpt axis) when a field is absent, so the
+  # scan never carries a full (ngpt,nx,ny,nz) array it won't read.
+  rfrac = rayleigh_frac if use_rayleigh else jnp.zeros((ngpt, 1, 1, 1), dtype)
+  use_mie = (mie_lut_cdf is not None and mie_lut_ang is not None
+             and band_of_gpt is not None and r_eff is not None)
+  band_in = (band_of_gpt.astype(jnp.int32) if use_mie
+             else jnp.zeros((ngpt,), jnp.int32))
 
   def gpt_step(carry, inp):
     abs_acc, sfc_acc, tod_acc = carry
-    tau_g, ssa_g, g_g, f_in, rf_g, cdf_g, ang_g, gkey = inp
+    tau_g, ssa_g, g_g, f_in, rf_g, band_idx, gkey = inp
     # Extinction [1/m] from layer optical depth; broadcast dz over (nx,ny,nz).
     k_ext = tau_g / dz[None, None, :]
+    # Gather only THIS g-point's Mie band slice (n_mie / n_r,n_mie) from the
+    # small per-band LUT -- no per-g-point LUT copy is ever materialized.
+    cdf_g = mie_lut_cdf[band_idx] if use_mie else None
+    ang_g = mie_lut_ang[band_idx] if use_mie else None
     res = solve_sw_monochromatic(
         k_ext, ssa_g, g_g, geom, mu0=mu0, azimuth=azimuth, albedo=albedo,
         config=config, key=gkey,
         rayleigh_frac=rf_g if use_rayleigh else None,
-        mie_cdf=cdf_g if use_mie else None,
-        mie_ang=ang_g if use_mie else None,
+        mie_cdf=cdf_g, mie_ang=ang_g,
         r_eff=r_eff if use_mie else None)
     abs_acc = abs_acc + res.abs_frac * f_in
     sfc_acc = sfc_acc + res.sfc_abs_frac * f_in
@@ -279,7 +287,7 @@ def solve_sw_spectral(
   )
   (abs_acc, sfc_acc, tod_acc), _ = jax.lax.scan(
       gpt_step, init,
-      (tau, ssa, g, incident_flux.astype(dtype), rfrac, cdf_in, ang_in, gkeys)
+      (tau, ssa, g, incident_flux.astype(dtype), rfrac, band_in, gkeys)
   )
   return SWFluxResult(
       abs_flux=abs_acc, sfc_abs_flux=sfc_acc, tod_up_flux=tod_acc

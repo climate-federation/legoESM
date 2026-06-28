@@ -797,8 +797,11 @@ class RRTMGP:
           rayleigh_frac_gpt = _strip(sw_props['rayleigh_frac'])
           # Cloud liquid effective radius [um] per cell for Mie-LUT sampling
           # (microhh LUT spans 2.5..21.5 um). Clear-sky -> the LUT floor.
+          # crl_3d is 3D (ncol, 1, nlev+2) -- NOT per-g-point 4D -- so it needs a
+          # 3D strip (drop singleton, trim halo, z-reverse to TOA-first), not the
+          # 4D _strip used for the per-g-point optics.
           if crl_3d is not None:
-              r_eff_um = _strip(crl_3d) * 1.0e6
+              r_eff_um = crl_3d[:, 0, hw:-hw][:, ::-1] * 1.0e6   # (ncol, nlev)
           else:
               r_eff_um = jnp.full((ncol, nlev), 2.5, dtype=tau_gpt.dtype)  # coeff-ok: microhh Mie LUT lower r_eff bound [um]
           weights = solar_weights

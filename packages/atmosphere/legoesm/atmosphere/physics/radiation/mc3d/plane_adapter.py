@@ -96,8 +96,9 @@ def compute_plane_sw_heating(
     azimuth: float = 0.0,
     cp: float = constants.c_pd,
     rayleigh_frac_td: Array | None = None,
-    mie_cdf_band: Array | None = None,
-    mie_ang_band: Array | None = None,
+    mie_lut_cdf: Array | None = None,
+    mie_lut_ang: Array | None = None,
+    band_of_gpt: Array | None = None,
     r_eff_td: Array | None = None,
 ) -> tuple[Array, Array, Array]:
   """3D-MC shortwave heating-rate tendency for the plane dycore.
@@ -127,8 +128,8 @@ def compute_plane_sw_heating(
   res = raytracer_sw.solve_sw_spectral(
       tau_tr, ssa_tr, g_tr, incident_flux, geom,
       mu0=mu0, azimuth=azimuth, albedo=albedo, config=config, key=key,
-      rayleigh_frac=rf_tr, mie_cdf_band=mie_cdf_band,
-      mie_ang_band=mie_ang_band, r_eff=reff_tr)
+      rayleigh_frac=rf_tr, mie_lut_cdf=mie_lut_cdf,
+      mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff=reff_tr)
 
   dz_asc = jnp.diff(z_faces_asc)                        # (nz,) [m]
   rho_tr = _to_tracer(rho_td)                           # (nx,ny,nz) bottom-up

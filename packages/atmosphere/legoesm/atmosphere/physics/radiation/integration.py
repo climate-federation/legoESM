@@ -1350,28 +1350,30 @@ def _mc3d_plane_heating(
         incident_flux = solar_normal * mu0
         # Mie cloud phase (microhh LUT) when enabled: select each g-point's band
         # slice via the RRTMGP g-point->band map, thread cloud r_eff [um].
-        mie_cdf_band = mie_ang_band = r_eff_td = None
+        mie_lut_cdf = mie_lut_ang = band_of_gpt = r_eff_td = None
         if mc_cfg.use_mie:
             from legoesm.atmosphere.physics.radiation.mc3d import mie as _mie
             lut = _mie.load_mie_sampling_lut()
+            # Pass the SMALL per-band LUT + the g-point->band map; the band slice
+            # is gathered inside the g-point scan (no (ngpt, n_r, n_mie) copy).
+            mie_lut_cdf = lut.phase_cdf                        # (n_band, n_mie)
+            mie_lut_ang = lut.phase_cdf_angle                 # (n_band, n_r, n_mie)
             band_of_gpt = jnp.asarray(
                 rrtmgp_solver.optics_lib.gas_optics_sw.g_point_to_bnd)
-            mie_cdf_band = lut.phase_cdf[band_of_gpt]          # (ngpt, n_mie)
-            mie_ang_band = lut.phase_cdf_angle[band_of_gpt]    # (ngpt, n_r, n_mie)
             r_eff_td = r_eff_um.reshape(ny, nx, nlev)
     else:
         # Phase 2 fallback: single-band gray shortwave optics (pure absorption).
         tau_td, ssa_td, g_td = plane_adapter.gray_sw_optical_field(
             p_half_col, gray_cfg, ny, nx)
-        rayleigh_td = mie_cdf_band = mie_ang_band = r_eff_td = None
+        rayleigh_td = mie_lut_cdf = mie_lut_ang = band_of_gpt = r_eff_td = None
         incident_flux = jnp.mean(insol_col).reshape(1)
 
     key = jax.random.PRNGKey(int(mc_cfg.seed))
     dT_dt_sw, _sfc_sw, _tod = plane_adapter.compute_plane_sw_heating(
         tau_td, ssa_td, g_td, incident_flux, grid, z_half_td, rho_total,
         mu0=mu0, albedo=gray_cfg.sfc_albedo, config=mc_cfg, key=key,
-        rayleigh_frac_td=rayleigh_td, mie_cdf_band=mie_cdf_band,
-        mie_ang_band=mie_ang_band, r_eff_td=r_eff_td)
+        rayleigh_frac_td=rayleigh_td, mie_lut_cdf=mie_lut_cdf,
+        mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff_td=r_eff_td)
 
     # --- longwave: 3D-MC thermal emission ---
     key_lw = jax.random.PRNGKey(int(mc_cfg.seed) + 1)
