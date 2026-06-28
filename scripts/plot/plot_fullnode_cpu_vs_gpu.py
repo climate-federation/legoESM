@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU vs GPU strong scaling, per grid: throughput (top) + efficiency (bottom).
+"""CPU vs GPU strong scaling, per grid: SYPD (top) + Mcells/s throughput (bottom).
 
 The companion plot to the Derecho CPU-vs-A100 comparison
 (``scripts/cluster/scaling_derecho/submit_fullnode.sh``): each grid is swept on
@@ -9,13 +9,14 @@ the two backends get their own columns (never compare a CPU point to a GPU point
 at the same x); the cross-backend headline is the peak-SYPD table, not the axes.
 
 Per grid, one 2x2 figure:
-  - top-left   CPU: SYPD vs cores,  one line per resolution
-  - top-right  GPU: SYPD vs A100,   one line per resolution
-  - bottom-left  CPU parallel efficiency vs cores (ideal = 1)
-  - bottom-right GPU parallel efficiency vs A100 (ideal = 1)
-Efficiency(N) = SYPD(N) / (N/N0 * SYPD(N0)) relative to each curve's smallest
-device count N0 -- it divides out ideal linear speedup, so the droop shows where
-a backend goes comms-bound.  Also prints a peak (full-node) GPU/CPU table.
+  - top-left   CPU: SYPD vs cores,        one line per resolution
+  - top-right  GPU: SYPD vs A100,         one line per resolution
+  - bottom-left  CPU: Mcells/s vs cores,  one line per resolution
+  - bottom-right GPU: Mcells/s vs A100,   one line per resolution
+Mcells/s (cells x levels / step-time) is raw compute throughput; unlike SYPD it
+normalises out the per-resolution timestep, so a plateau in the bottom row is
+the bandwidth/comms wall (where adding parallel units stops buying throughput).
+Also prints a peak (full-node) GPU/CPU table.
 
     python scripts/bench/aggregate_bcw_scaling.py --root $OUT --out $OUT/all_tidy.csv
     python scripts/plot/plot_fullnode_cpu_vs_gpu.py --csv $OUT/all_tidy.csv --out $OUT/plots
@@ -83,19 +84,6 @@ def group(rows, metric: str = "sypd"):
     return clean
 
 
-def efficiency_curve(pts):
-    """``[(n, sypd)] -> [(n, efficiency)]`` vs the smallest device count N0.
-
-    efficiency(N) = (SYPD(N)/SYPD(N0)) / (N/N0); ideal linear scaling = 1.0.
-    """
-    if not pts:
-        return []
-    n0, v0 = pts[0]
-    if v0 <= 0 or n0 <= 0:
-        return []
-    return [(n, (v / v0) / (n / n0)) for n, v in pts if n > 0]
-
-
 def peak_table(rows):
     """``(grid, resolution) -> {cpu, gpu, gpu_over_cpu}`` peak (full-node) SYPD."""
     g = group(rows, "sypd")
@@ -110,14 +98,18 @@ def peak_table(rows):
 
 
 def make_figures(rows, out_dir: Path) -> list[Path]:
-    """One 2x2 figure per grid (SYPD top, efficiency bottom); returns the PNGs.
+    """One 2x2 figure per grid (SYPD top, Mcells/s throughput bottom); the PNGs.
 
     Fail LOUD (``SystemExit``) on an empty/typoed CSV instead of blank PNGs.
     """
     if rows and "sypd" not in rows[0]:
         raise SystemExit(
             f"CSV has no 'sypd' column (columns: {sorted(rows[0])})")
+    if rows and "mcells_per_s" not in rows[0]:
+        raise SystemExit(
+            f"CSV has no 'mcells_per_s' column (columns: {sorted(rows[0])})")
     by_grid = group(rows, "sypd")
+    by_grid_mc = group(rows, "mcells_per_s")
     if not by_grid:
         raise SystemExit(
             "no CPU/GPU rows with a positive SYPD found — check the CSV / "
@@ -126,6 +118,11 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cmap = plt.get_cmap("viridis")
+    # (row index, metric grouping, y-axis label) for the two stacked rows.
+    panels = (
+        (0, by_grid, "SYPD (sim-years/day)"),
+        (1, by_grid_mc, "throughput (Mcells/s)"),
+    )
     written = []
     for grid in sorted(by_grid):
         by_res = by_grid[grid]
@@ -135,37 +132,24 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
         color = {res: cmap((i + 0.5) / ncol) for i, res in enumerate(resolutions)}
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 9), squeeze=False)
-        max_eff = 1.0
         for col, (backend, xlabel) in enumerate(_BACKENDS):
-            ax_top, ax_bot = axes[0][col], axes[1][col]
-            for res in resolutions:
-                pts = by_res[res].get(backend, [])
-                if not pts:
-                    continue
-                ax_top.plot([n for n, _ in pts], [v for _, v in pts],
+            for row, src, ylabel in panels:
+                ax = axes[row][col]
+                src_res = src.get(grid, {})
+                for res in resolutions:
+                    pts = src_res.get(res, {}).get(backend, [])
+                    if not pts:
+                        continue
+                    ax.plot([n for n, _ in pts], [v for _, v in pts],
                             marker="o", color=color[res], label=f"res {res}")
-                eff = efficiency_curve(pts)
-                if eff:
-                    ax_bot.plot([n for n, _ in eff], [e for _, e in eff],
-                                marker="o", color=color[res])
-                    max_eff = max(max_eff, max(e for _, e in eff))
-            # top: absolute throughput
-            ax_top.set_xscale("log", base=2)
-            ax_top.set_yscale("log", base=2)
-            ax_top.set_xlabel(xlabel)
-            ax_top.set_ylabel("SYPD (sim-years/day)")
-            ax_top.set_title(f"{backend} — throughput")
-            ax_top.grid(True, which="both", alpha=0.3)
-            if any(by_res[res].get(backend) for res in resolutions):
-                ax_top.legend(fontsize=8, title="resolution")
-            # bottom: parallel efficiency vs ideal=1
-            ax_bot.axhline(1.0, ls="--", color="0.5", lw=1, label="ideal")
-            ax_bot.set_xscale("log", base=2)
-            ax_bot.set_xlabel(xlabel)
-            ax_bot.set_ylabel("parallel efficiency")
-            ax_bot.set_title(f"{backend} — efficiency (vs smallest count)")
-            ax_bot.set_ylim(0, max(1.1, max_eff * 1.05))
-            ax_bot.grid(True, which="both", alpha=0.3)
+                ax.set_xscale("log", base=2)      # device counts: powers of two
+                ax.set_yscale("log", base=10)
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(ylabel)
+                ax.set_title(f"{backend} — {ylabel.split(' (')[0]}")
+                ax.grid(True, which="both", alpha=0.3)
+                if any(src_res.get(res, {}).get(backend) for res in resolutions):
+                    ax.legend(fontsize=8, title="resolution")
         fig.suptitle(f"CPU vs GPU strong scaling — {grid}")
         fig.tight_layout()
         out_path = out_dir / f"fullnode_cpu_vs_gpu_{grid}.png"
