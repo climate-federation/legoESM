@@ -466,6 +466,8 @@ class RRTMGP:
       aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
+      sw_optical_field_only: bool = False,
+      lw_optical_field_only: bool = False,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -767,6 +769,74 @@ class RRTMGP:
               )
       else:
           solar_weights = None
+
+      # --- 3b. Optics-only short-circuit for the 3D MC ray tracer ---
+      # Reuses the EXACT state above (no duplicated numerics); returns the
+      # per-g-point shortwave optical field instead of solving transport. The
+      # default path (sw_optical_field_only=False) is byte-identical.
+      if sw_optical_field_only:
+          sw_props = two_stream.compute_sw_optical_field(
+              p_3d, T_3d, molecules, optics_lib, vmr_fields,
+              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_3d,
+              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_3d,
+              cloud_fraction=cf_3d,
+              aerosol_optical_depth=aerosol_od_3d,
+              aerosol_single_scattering_albedo=config.aerosol_ssa,
+              aerosol_asymmetry_factor=config.aerosol_g,
+          )
+          # Strip the singleton Y axis + vertical halos, flip back to the
+          # legoESM TOA-first convention -> (n_gpt, ncol, nlev).
+          hw = 1
+
+          def _strip(a):
+              return a[:, :, 0, hw:-hw][:, :, ::-1]
+
+          tau_gpt = _strip(sw_props['optical_depth'])
+          ssa_gpt = _strip(sw_props['ssa'])
+          g_gpt = _strip(sw_props['asymmetry_factor'])
+          rayleigh_frac_gpt = _strip(sw_props['rayleigh_frac'])
+          # Cloud liquid effective radius [um] per cell for Mie-LUT sampling
+          # (microhh LUT spans 2.5..21.5 um). Clear-sky -> the LUT floor.
+          if crl_3d is not None:
+              r_eff_um = _strip(crl_3d) * 1.0e6
+          else:
+              r_eff_um = jnp.full((ncol, nlev), 2.5, dtype=tau_gpt.dtype)  # coeff-ok: microhh Mie LUT lower r_eff bound [um]
+          weights = solar_weights
+          if weights is None:
+              weights = optics_lib.solar_fraction_by_gpt
+          # Beam-normal solar flux per g-point [W/m^2].
+          solar_flux_normal = config.S_0 * weights
+          return (tau_gpt, ssa_gpt, g_gpt, rayleigh_frac_gpt, r_eff_um,
+                  solar_flux_normal)
+
+      # --- 3c. Optics-only short-circuit for the 3D MC LW emission tracer ---
+      # Reuses the EXACT state above; returns per-g-point LW absorption optical
+      # depth + Planck sources instead of solving transport. Default path
+      # (lw_optical_field_only=False) is byte-identical.
+      if lw_optical_field_only:
+          lw_props = two_stream.compute_lw_optical_field(
+              p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
+              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_3d,
+              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_3d,
+              cloud_fraction=cf_3d,
+              aerosol_absorption_optical_depth=aerosol_od_lw_3d,
+          )
+          hw = 1
+
+          def _strip3d(a):  # (n_gpt, ncol, 1, nlev+2) -> (n_gpt, ncol, nlev) TOA-first
+              return a[:, :, 0, hw:-hw][:, :, ::-1]
+
+          abs_od_gpt = _strip3d(lw_props['abs_optical_depth'])
+          planck_gpt = _strip3d(lw_props['planck_src'])
+          # Cell-face Planck (lower/upper-z faces) for Phase-3c linear-in-tau
+          # in-cell emission. The strip+flip preserves each cell's lower-z /
+          # upper-z face labeling (see compute_plane_lw_heating_spectral).
+          planck_bot_gpt = _strip3d(lw_props['planck_src_bottom'])
+          planck_top_gpt = _strip3d(lw_props['planck_src_top'])
+          # Surface Planck is 2D per g-point (n_gpt, ncol, 1) -> (n_gpt, ncol).
+          planck_sfc_gpt = lw_props['planck_src_sfc'][:, :, 0]
+          return (abs_od_gpt, planck_gpt, planck_bot_gpt, planck_top_gpt,
+                  planck_sfc_gpt)
 
       # --- 4. Solve LW ---
       lw_fluxes = two_stream.solve_lw(

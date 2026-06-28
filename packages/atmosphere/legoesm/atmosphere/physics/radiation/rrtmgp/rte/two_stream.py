@@ -528,6 +528,202 @@ def solve_lw(
   return fluxes
 
 
+def compute_sw_optical_props_gpt(
+    igpt: Array,
+    optics_lib,
+    pressure: Array,
+    temperature: Array,
+    molecules: Array,
+    vmr_fields: dict | None,
+    cloud_r_eff_liq: Array | None,
+    cloud_path_liq: Array | None,
+    cloud_r_eff_ice: Array | None,
+    cloud_path_ice: Array | None,
+    cloud_fraction: Array | None,
+    aerosol_optical_depth: Array | None,
+    aerosol_single_scattering_albedo: float,
+    aerosol_asymmetry_factor: float,
+) -> dict[str, Array]:
+  """Per-g-point shortwave optical properties (optical_depth / ssa / asymmetry).
+
+  Shared by ``solve_sw`` (two-stream transport) and ``compute_sw_optical_field``
+  (3D Monte-Carlo ray tracer) so the gas+cloud optics lookup, aerosol mixing,
+  and physical-range clipping are defined exactly once (no duplicated numerics).
+  ``vmr_fields`` must already be reindexed to RRTM gas indices by the caller.
+  """
+  sw_optical_props = optics_lib.compute_sw_optical_properties(
+      pressure,
+      temperature,
+      molecules,
+      igpt,
+      vmr_fields,
+      cloud_r_eff_liq,
+      cloud_path_liq,
+      cloud_r_eff_ice,
+      cloud_path_ice,
+      cloud_fraction=cloud_fraction,
+  )
+  if aerosol_optical_depth is not None:
+    tau_bg = jnp.maximum(sw_optical_props['optical_depth'], 1.0e-12)
+    tau_aer = jnp.maximum(aerosol_optical_depth, 0.0)
+    tau_tot = tau_bg + tau_aer
+    w_bg = sw_optical_props['ssa']
+    g_bg = sw_optical_props['asymmetry_factor']
+    w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
+    # AD-safe SW optical-property mixing (restored from commit 59407953
+    # after AIMIP-#312 merge reverted it).  ``a / jnp.maximum(b, eps)``
+    # has a ``-a/b**2`` VJP that overflows when ``b`` is at the floor —
+    # for cloud-free, low-water-vapor stratospheric layers ``tau_tot``
+    # can reach the 1e-12 floor and the backward propagates NaN to every
+    # upstream traced parameter whose state path touches gas absorption.
+    # ``safe_divide`` masks the bad branch before the divide.  The outer
+    # ``jnp.clip`` preserves the original output range; with ``fill=0.0``
+    # the bad branch lands inside that range.
+    w_tot = jnp.clip(
+        safe_divide(w_num, tau_tot, eps=1.0e-12, fill=0.0),
+        0.0,
+        1.0,
+    )
+    g_num = (
+        tau_bg * w_bg * g_bg
+        + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
+    )
+    g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
+    g_tot = jnp.clip(
+        safe_divide(g_num, g_denom, eps=1.0e-12, fill=0.0),
+        -1.0,
+        1.0,
+    )
+    sw_optical_props = {
+        'optical_depth': tau_tot,
+        'ssa': w_tot,
+        'asymmetry_factor': g_tot,
+    }
+  # Bound the single-scattering albedo / asymmetry to their physical ranges
+  # before downstream use.  The aerosol-mixing branch above already clips
+  # ssa∈[0,1] / g∈[-1,1], but with no aerosol forcing the cloud optics feed
+  # through UNCLAMPED — and on a drifted coupled state the cloud
+  # parameterisation can emit ssa>1 / |g|>1, which drives the Meador-Weaver
+  # reflectance/transmittance above 1 so the two-stream AMPLIFIES the flux
+  # (super-physical TOA SW down; BUG-B, 2026-06-15).  Physical optics are
+  # already in range ⇒ a no-op for valid inputs.
+  sw_optical_props = {
+      **sw_optical_props,
+      'ssa': jnp.clip(sw_optical_props['ssa'], 0.0, 1.0),
+      'asymmetry_factor': jnp.clip(
+          sw_optical_props['asymmetry_factor'], -1.0, 1.0,
+      ),
+  }
+  return sw_optical_props
+
+
+def compute_sw_optical_field(
+    pressure: Array,
+    temperature: Array,
+    molecules: Array,
+    optics_lib: optics_base.OpticsScheme,
+    vmr_fields: dict[str, Array] | None = None,
+    cloud_r_eff_liq: Array | None = None,
+    cloud_path_liq: Array | None = None,
+    cloud_r_eff_ice: Array | None = None,
+    cloud_path_ice: Array | None = None,
+    cloud_fraction: Array | None = None,
+    aerosol_optical_depth: Array | None = None,
+    aerosol_single_scattering_albedo: float = _AEROSOL_SSA_DEFAULT,
+    aerosol_asymmetry_factor: float = _AEROSOL_ASYM_DEFAULT,
+) -> dict[str, Array]:
+  """Stack per-g-point shortwave optical fields for the 3D MC ray tracer.
+
+  Runs the SAME per-g-point optics path as ``solve_sw`` (via
+  ``compute_sw_optical_props_gpt``) but, instead of solving two-stream
+  transport, stacks the optical depth / ssa / asymmetry over all shortwave
+  g-points. Returns a dict with keys ``optical_depth`` / ``ssa`` /
+  ``asymmetry_factor``, each shaped ``(n_gpt_sw, X, Y, Z)`` (same X,Y,Z as the
+  input fields, including any vertical halo cells — the caller strips them).
+  """
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
+  if vmr_fields is not None:
+    vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_sw)
+  n_gpt = optics_lib.n_gpt_sw
+
+  def gpt_props(igpt):
+    props = compute_sw_optical_props_gpt(
+        igpt, optics_lib, pressure, temperature, molecules, vmr_fields,
+        cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
+        cloud_fraction, aerosol_optical_depth,
+        aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+    )
+    # Gas Rayleigh scattering optical depth (the gas scatter is ALL Rayleigh) as
+    # a fraction of TOTAL scattering (gas + cloud + aerosol) -> the per-cell
+    # probability that a scatter event is Rayleigh, for the explicit-phase split.
+    rayl_scat = optics_lib.rayleigh_scattering_fn(igpt)(
+        molecules, temperature, pressure, vmr_fields)
+    tot_scat = props['ssa'] * props['optical_depth']
+    rayleigh_frac = jnp.where(
+        tot_scat > 0.0, jnp.clip(rayl_scat / jnp.maximum(tot_scat, 1e-30),
+                                 0.0, 1.0), 0.0)
+    return {**props, 'rayleigh_frac': rayleigh_frac}
+
+  # Sequential map over g-points (memory-frugal, like the solve_sw scan):
+  # stacks leaves to (n_gpt, X, Y, Z) without materializing all g-points'
+  # table lookups concurrently.
+  return jax.lax.map(gpt_props, jnp.arange(n_gpt))
+
+
+def compute_lw_optical_field(
+    pressure: Array,
+    temperature: Array,
+    molecules: Array,
+    optics_lib: optics_base.OpticsScheme,
+    sfc_temperature: Array,
+    vmr_fields: dict[str, Array] | None = None,
+    cloud_r_eff_liq: Array | None = None,
+    cloud_path_liq: Array | None = None,
+    cloud_r_eff_ice: Array | None = None,
+    cloud_path_ice: Array | None = None,
+    cloud_fraction: Array | None = None,
+    aerosol_absorption_optical_depth: Array | None = None,
+) -> dict[str, Array]:
+  """Stack per-g-point longwave ABSORPTION optical depth + Planck sources for
+  the 3D Monte-Carlo emission tracer.
+
+  Returns a dict with leaves stacked over the longwave g-points:
+  ``abs_optical_depth`` ``(n_gpt, X, Y, Z)`` = ``optical_depth * (1 - ssa)``
+  (LW scattering neglected by the emission MC), ``planck_src`` ``(n_gpt, X,Y,Z)``
+  cell-center Planck IRRADIANCE [W/m^2] (= pi * radiance), and
+  ``planck_src_sfc`` ``(n_gpt, X, Y)`` surface Planck irradiance. Same per-g-point
+  optics path as ``solve_lw`` (no duplicated numerics).
+  """
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
+  if vmr_fields is not None:
+    vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
+  n_gpt = optics_lib.n_gpt_lw
+
+  def gpt_field(igpt):
+    props = optics_lib.compute_lw_optical_properties(
+        pressure, temperature, molecules, igpt, vmr_fields,
+        cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
+        cloud_fraction=cloud_fraction)
+    planck = optics_lib.compute_planck_sources(
+        pressure, temperature, igpt, vmr_fields,
+        sfc_temperature=sfc_temperature)
+    ssa = jnp.clip(props['ssa'], 0.0, 1.0)
+    abs_od = jnp.maximum(props['optical_depth'], 0.0) * (1.0 - ssa)
+    if aerosol_absorption_optical_depth is not None:
+      # LW aerosol is a pure absorber (ssa=0): add its absorption OD directly,
+      # matching the solve_lw aerosol treatment.
+      abs_od = abs_od + jnp.maximum(aerosol_absorption_optical_depth, 0.0)
+    return {
+        'abs_optical_depth': abs_od,
+        'planck_src': planck['planck_src'],
+        'planck_src_bottom': planck['planck_src_bottom'],
+        'planck_src_top': planck['planck_src_top'],
+        'planck_src_sfc': planck['planck_src_sfc'],
+    }
+
+  return jax.lax.map(gpt_field, jnp.arange(n_gpt))
+
+
 def solve_sw(
     pressure: Array,
     temperature: Array,
@@ -612,69 +808,13 @@ def solve_sw(
   any_day = jnp.any(is_day_col)
 
   def step_fn(igpt, partial_fluxes):
-    sw_optical_props = optics_lib.compute_sw_optical_properties(
-        pressure,
-        temperature,
-        molecules,
-        igpt,
-        vmr_fields,
-        cloud_r_eff_liq,
-        cloud_path_liq,
-        cloud_r_eff_ice,
-        cloud_path_ice,
-        cloud_fraction=cloud_fraction,
+    # Per-g-point gas+cloud+aerosol optics (shared with the MC ray tracer).
+    sw_optical_props = compute_sw_optical_props_gpt(
+        igpt, optics_lib, pressure, temperature, molecules, vmr_fields,
+        cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
+        cloud_fraction, aerosol_optical_depth,
+        aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
     )
-    if aerosol_optical_depth is not None:
-      tau_bg = jnp.maximum(sw_optical_props['optical_depth'], 1.0e-12)
-      tau_aer = jnp.maximum(aerosol_optical_depth, 0.0)
-      tau_tot = tau_bg + tau_aer
-      w_bg = sw_optical_props['ssa']
-      g_bg = sw_optical_props['asymmetry_factor']
-      w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
-      # AD-safe SW optical-property mixing (restored from commit 59407953
-      # after AIMIP-#312 merge reverted it).  ``a / jnp.maximum(b, eps)``
-      # has a ``-a/b**2`` VJP that overflows when ``b`` is at the floor —
-      # for cloud-free, low-water-vapor stratospheric layers ``tau_tot``
-      # can reach the 1e-12 floor and the backward propagates NaN to every
-      # upstream traced parameter whose state path touches gas absorption.
-      # ``safe_divide`` masks the bad branch before the divide.  The outer
-      # ``jnp.clip`` preserves the original output range; with ``fill=0.0``
-      # the bad branch lands inside that range.
-      w_tot = jnp.clip(
-          safe_divide(w_num, tau_tot, eps=1.0e-12, fill=0.0),
-          0.0,
-          1.0,
-      )
-      g_num = (
-          tau_bg * w_bg * g_bg
-          + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
-      )
-      g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
-      g_tot = jnp.clip(
-          safe_divide(g_num, g_denom, eps=1.0e-12, fill=0.0),
-          -1.0,
-          1.0,
-      )
-      sw_optical_props = {
-          'optical_depth': tau_tot,
-          'ssa': w_tot,
-          'asymmetry_factor': g_tot,
-      }
-    # Bound the single-scattering albedo / asymmetry to their physical ranges
-    # before the two-stream solve.  The aerosol-mixing branch above already
-    # clips ssa∈[0,1] / g∈[-1,1], but with no aerosol forcing the cloud optics
-    # feed through UNCLAMPED — and on a drifted coupled state the cloud
-    # parameterisation can emit ssa>1 / |g|>1, which drives the Meador-Weaver
-    # reflectance/transmittance above 1 so the two-stream AMPLIFIES the flux
-    # (super-physical TOA SW down; BUG-B, 2026-06-15).  Physical optics are
-    # already in range ⇒ a no-op for valid inputs.
-    sw_optical_props = {
-        **sw_optical_props,
-        'ssa': jnp.clip(sw_optical_props['ssa'], 0.0, 1.0),
-        'asymmetry_factor': jnp.clip(
-            sw_optical_props['asymmetry_factor'], -1.0, 1.0,
-        ),
-    }
     optical_props_2stream = monochromatic_two_stream.sw_cell_properties(
         safe_zenith,
         sw_optical_props['optical_depth'],
