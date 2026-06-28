@@ -98,10 +98,10 @@ def _parse_args():
              "away on the implicit-CN MPAS path; ignored on lat-lon.",
     )
     p.add_argument(
-        "--vmix", choices=("tke", "kpp"), default=None,
-        help="Vertical-mixing closure (DINOConfig.vmix_scheme, default 'tke' = "
-             "the NEMO TKE scheme the paper uses; 'kpp' = the prior KPP "
-             "fallback). Applies to both grids.",
+        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
+             "default), 'tke' (paper's NEMO scheme, unstable >~day40), or "
+             "'constant' (background-only, identical across grids). Both grids.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,

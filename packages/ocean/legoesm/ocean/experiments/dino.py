@@ -1059,6 +1059,12 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         return VerticalMixingConfig(
             scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
         )
+    if cfg.vmix_scheme == "constant":
+        # Constant background vertical mixing (no boundary-layer scheme): the
+        # model uses the config-level A_v_bg / K_v_bg directly. Used to UNIFY
+        # the vertical mixing across grids identically (isolating the pure
+        # discretization difference from any KPP-implementation difference).
+        return VerticalMixingConfig(scheme="constant")
     raise ValueError(
         f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; "
         "expected 'tke' or 'kpp'")

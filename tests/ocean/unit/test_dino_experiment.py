@@ -112,6 +112,10 @@ class TestDINOConfig:
         assert vm.tke.kappaH_min == pytest.approx(cfg.K_v_bg)
         assert vm.tke.kappaM_max == pytest.approx(cfg.K_conv)
         assert vm.tke.bg_diff_scale == pytest.approx(0.0)  # constant bg (no Bryan-Lewis)
+        # "constant" = background-only (used to unify vmix across grids).
+        vm_c = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="constant"))
+        assert vm_c.scheme == "constant"
         with pytest.raises(ValueError):
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
