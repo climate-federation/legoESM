@@ -67,7 +67,12 @@ aimip_optimizer: "adamw"
 # Gray Frierson two-stream radiation held fixed across all combos.
 # rad_update_interval=6 dycore steps = 2h of model time at dt=1200s,
 # matching the multistep_001 envelope.
-aimip_radiation: "gray"
+aimip_radiation: "rrtmgp"   # USER REQUIREMENT: keep RRTMGP for the sweep.
+                            # The earlier gray fallback was only because
+                            # RRTMGP + (24,48,72)h MULTI-STEP timed out; this
+                            # config now uses SINGLE-step (6h) rollout below
+                            # (matching the production T63 recipe), which is
+                            # ~12x cheaper and affordable with RRTMGP.
 aimip_rad_update_interval: 6
 
 # No spatial surface fields at T21 (basis is too coarse to resolve);
@@ -113,9 +118,11 @@ loss:
   w_spec_crps_u: 0.25
   w_spec_crps_v: 0.25
   w_spec_crps_q: 0.5
-  # Multi-day autoregressive supervision (1d / 2d / 3d leads).
-  multi_step_hours: [24, 48, 72]
-  multi_step_weights: [1.0, 0.7, 0.5]
+  # SINGLE-step (6h) supervision — matches the production T63 recipe
+  # (aimip_era5.yaml) and makes RRTMGP affordable for the OAT screen
+  # (RRTMGP + 72h multi-step is what timed out). Empty => 6h rollout.
+  multi_step_hours: []
+  multi_step_weights: []
   spectral_weight: 0.0
   level_weighting: "pressure"
   normalize_by_scale: true
