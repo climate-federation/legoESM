@@ -1336,6 +1336,14 @@ def dino_mpas_model_config(
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),  # using model-level drag
     )
+    # Wire the physics INTO the model config (MPASOceanConfig.physics) — the
+    # MPAS model gates KPP/GM-Redi/convection on ``config.physics is not None``
+    # (ocean_model_mpas.py). The lat-lon path does this via
+    # LatLonCGridOceanConfig.from_flat(physics=...); without it here the run_dino
+    # caller (``model_cfg, _ = dino_mpas_model_config(...)``) drops the returned
+    # physics_config and the MPAS ocean runs DYCORE-ONLY (no boundary-layer
+    # mixing, no eddy parameterization, no convection).
+    model_config = model_config._replace(physics=physics_config)
     return model_config, physics_config
 
 

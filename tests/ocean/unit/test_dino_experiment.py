@@ -90,6 +90,23 @@ class TestDINOConfig:
         mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
         assert mc2.equatorial_visc_boost == pytest.approx(12.0)
 
+    def test_mpas_physics_is_wired_into_model_config(self):
+        """The MPAS model gates KPP/GM-Redi/convection on
+        ``config.physics is not None``; dino_mpas_model_config MUST wire the
+        physics into the returned MPASOceanConfig (regression: it used to return
+        physics only as the 2nd value, which run_dino drops -> dycore-only MPAS).
+        """
+        from types import SimpleNamespace
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))
+        mc, phys = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=True)
+        assert phys is not None
+        assert mc.physics is not None, "MPAS physics not wired into the model config"
+        assert mc.physics is phys
+        assert mc.physics.vertical_mixing.scheme in ("kpp", "tke", "constant")
+        # physics=False stays dycore-only.
+        mc0, phys0 = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=False)
+        assert phys0 is None and mc0.physics is None
+
     def test_vmix_scheme_default_and_dispatch(self):
         """The shared vertical-mixing helper selects the paper's TKE closure by
         default (with the paper background visc/diff + convective ceiling) and
