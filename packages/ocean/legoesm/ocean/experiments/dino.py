@@ -1059,6 +1059,12 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         return VerticalMixingConfig(
             scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
         )
+    if cfg.vmix_scheme == "constant":
+        # Constant background vertical mixing (no boundary-layer scheme): the
+        # model uses the config-level A_v_bg / K_v_bg directly. Used to UNIFY
+        # the vertical mixing across grids identically (isolating the pure
+        # discretization difference from any KPP-implementation difference).
+        return VerticalMixingConfig(scheme="constant")
     raise ValueError(
         f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; "
         "expected 'tke' or 'kpp'")
@@ -1330,6 +1336,14 @@ def dino_mpas_model_config(
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),  # using model-level drag
     )
+    # Wire the physics INTO the model config (MPASOceanConfig.physics) — the
+    # MPAS model gates KPP/GM-Redi/convection on ``config.physics is not None``
+    # (ocean_model_mpas.py). The lat-lon path does this via
+    # LatLonCGridOceanConfig.from_flat(physics=...); without it here the run_dino
+    # caller (``model_cfg, _ = dino_mpas_model_config(...)``) drops the returned
+    # physics_config and the MPAS ocean runs DYCORE-ONLY (no boundary-layer
+    # mixing, no eddy parameterization, no convection).
+    model_config = model_config._replace(physics=physics_config)
     return model_config, physics_config
 
 
