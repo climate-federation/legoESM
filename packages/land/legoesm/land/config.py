@@ -89,6 +89,14 @@ class MultiLayerLandConfig(NamedTuple):
     Cd_land: float = 3.0e-3
     Ch_land: float = 3.0e-3
     beta_min: float = 0.1
+    # Surface soil resistance to BARE-SOIL evaporation.  The top soil layer dries
+    # into a high-resistance crust far faster than the root-zone mean, so bare-soil
+    # evaporation is throttled by the TOP-layer effective saturation S_top via a
+    # beta-method efficiency S_top**soil_evap_resistance_exp (Sellers 1992 / Lee &
+    # Pielke 1992 magnitude at exp=2).  exp=0 disables it (legacy: bare-soil evap
+    # limited only by the root-zone beta + whole-column water supply -> over-strong
+    # soil evaporation and a too-fast surface dry-down).
+    soil_evap_resistance_exp: float = 2.0
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
     bulk_n_iter: int = 5

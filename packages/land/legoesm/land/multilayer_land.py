@@ -301,6 +301,26 @@ def step_multilayer_land(
     precip_rain = forcing.precip_total - forcing.precip_snow
     melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
     soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    # Surface soil resistance: the bulk latent flux throttles by the ROOT-ZONE mean
+    # beta, but bare-soil evaporation is controlled by the TOP layer, which dries
+    # into a high-resistance crust far faster.  Throttle the (positive, evaporative)
+    # bare-soil demand by S_top**exp (beta-method soil-evaporation efficiency,
+    # Sellers 1992 / Lee & Pielke 1992); dew/condensation (demand < 0) is left
+    # un-throttled.  The suppressed latent energy is returned to the soil via
+    # ``evap_excess_energy`` below (energy-conserving), so a dry crust warms the
+    # surface instead of evaporating water that the deep column would have to supply.
+    _theta_top = theta[:, :1]
+    _S_top = jnp.clip((_theta_top - theta_r)
+                      / jnp.maximum(config.hydraulics.theta_sat - theta_r, 1e-6),
+                      0.0, 1.0)[:, 0]
+    # Cast to the evaporation working dtype: theta_r / theta_sat may be float64
+    # per-cell config arrays while the coupled state runs float32, and promoting
+    # the latent flux here would change the land-state output dtype (a lax.scan
+    # carry-type mismatch in the segment).
+    _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+        soil_evap_demand.dtype)
+    soil_evap_demand = jnp.where(soil_evap_demand > 0.0,
+                                 soil_evap_demand * _beta_surf, soil_evap_demand)
     max_soil_evap = jnp.maximum(extractable_water / dt + precip_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
