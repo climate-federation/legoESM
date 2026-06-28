@@ -866,8 +866,8 @@ class LateralViscosityConfig(NamedTuple):
     biharmonic ``B_h``, and the Smagorinsky eddy-viscosity coefficients —
     the lateral momentum dissipation closure for the lat-lon C-grid ocean.
     Field names are unchanged so the flat YAML / legacy-kwarg interface
-    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.  (``C_leith`` and
-    ``A_h_cap_*`` sit elsewhere in the flat config and group separately.)
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.  Includes the Leith
+    closure (``C_leith``) and the tripole polar-cap A_h boost (``A_h_cap_*``).
     """
 
     # --- Lateral (harmonic Laplacian) viscosity ---
@@ -947,6 +947,33 @@ class LateralViscosityConfig(NamedTuple):
                                     # the sharp jet (the WBC cold-start blowup).
                                     # ~0.125 (1/8) is a safe 2-D Laplacian cap.
 
+
+    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
+    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
+    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
+    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
+    # at the END of the NamedTuple so existing positional call sites
+    # keep working.
+    C_leith: float = 0.0
+    C_leith_modified: bool = False
+
+    # --- Polar-cap viscosity boost (tripolar fold support) ---
+    # Appended at the end of the NamedTuple to preserve positional
+    # construction semantics for legacy callers.  When > 1, multiplies
+    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
+    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
+    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
+    # drops to zero at the fold boundary but the deformed cap cells
+    # need stronger dissipation than ``A_h_floor`` alone provides.
+    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
+    # preserve bit-exact regression on legacy lat-lon configs.
+    A_h_cap_boost: float = 1.0
+    # Latitude (°N) at which the polar-cap boost ramp begins.  For
+    # tripolar grids, set close to the ``fold_lat`` of the
+    # FoldDescriptor.  Typical 70–80°.
+    A_h_cap_lat_deg: float = 75.0
+    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
+    A_h_cap_width_deg: float = 5.0
 
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
@@ -1056,14 +1083,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
-    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
-    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
-    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
-    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
-    # at the END of the NamedTuple so existing positional call sites
-    # keep working.
-    C_leith: float = 0.0
-    C_leith_modified: bool = False
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
@@ -1230,23 +1249,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
 
-    # --- Polar-cap viscosity boost (tripolar fold support) ---
-    # Appended at the end of the NamedTuple to preserve positional
-    # construction semantics for legacy callers.  When > 1, multiplies
-    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
-    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
-    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
-    # drops to zero at the fold boundary but the deformed cap cells
-    # need stronger dissipation than ``A_h_floor`` alone provides.
-    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
-    # preserve bit-exact regression on legacy lat-lon configs.
-    A_h_cap_boost: float = 1.0
-    # Latitude (°N) at which the polar-cap boost ramp begins.  For
-    # tripolar grids, set close to the ``fold_lat`` of the
-    # FoldDescriptor.  Typical 70–80°.
-    A_h_cap_lat_deg: float = 75.0
-    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
-    A_h_cap_width_deg: float = 5.0
     # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
     # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
     # pins these to a reference model (e.g. Veros) via the public config API.

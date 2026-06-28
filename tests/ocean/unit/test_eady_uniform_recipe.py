@@ -69,7 +69,7 @@ def test_dissipation_knobs_wired():
                                  c_smag=0.0, c_leith=2.0, smag_cfl_safety=0.5)
     c = r.model_config
     assert c.lateral_viscosity.A_h == 1500.0 and c.lateral_viscosity.B_h == 2.5e11
-    assert c.lateral_viscosity.C_smag == 0.0 and c.C_leith == 2.0
+    assert c.lateral_viscosity.C_smag == 0.0 and c.lateral_viscosity.C_leith == 2.0
 
 
 def test_forward_step_runs_and_is_finite():
@@ -105,7 +105,7 @@ def test_eddy_resolving_min_dissipation_recipe():
                                  smag_cfl_safety=0.5)
     c = r.model_config
     assert c.lateral_viscosity.A_h == 1000.0 and c.lateral_viscosity.C_smag == 0.1 and c.lateral_viscosity.smag_cfl_safety == 0.5
-    assert c.lateral_viscosity.B_h == 0.0 and c.C_leith == 0.0          # combination is A_h + C_smag only
+    assert c.lateral_viscosity.B_h == 0.0 and c.lateral_viscosity.C_leith == 0.0          # combination is A_h + C_smag only
     model = LatLonCGridOceanModel(r.grid, r.z_coord, c)
     s = r.initial_state
     def _z(d):

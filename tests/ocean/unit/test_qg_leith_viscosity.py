@@ -252,7 +252,7 @@ def test_config_dispatch_and_full_step():
                                  momentum_advection="vector_invariant")
     cfg = r.model_config._replace(
         lateral_friction_scheme="qg_leith", qg_leith_coeff=2.0,
-        lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=0.0, B_h=0.0, C_smag=0.0), C_leith=0.0)
+        lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=0.0, B_h=0.0, C_smag=0.0, C_leith=0.0))
     model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
     s = r.initial_state
 
@@ -278,7 +278,7 @@ def test_full_qg2_stretching_step_finite():
     cfg = r.model_config._replace(
         lateral_friction_scheme="qg_leith", qg_leith_coeff=2.0,
         qg_leith_stretching=True, qg_leith_deformation_radius_m=6.75e3,
-        lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=0.0, B_h=0.0, C_smag=0.0), C_leith=0.0)
+        lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=0.0, B_h=0.0, C_smag=0.0, C_leith=0.0))
     model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
     s = r.initial_state
 

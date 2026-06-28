@@ -2381,7 +2381,7 @@ def _bc_horizontal_viscosity(
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -2456,17 +2456,17 @@ def _bc_horizontal_viscosity(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
             if config.lateral_viscosity.A_h_eq_boost > 1.0:
@@ -2474,10 +2474,10 @@ def _bc_horizontal_viscosity(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * _vlap_u
@@ -2521,17 +2521,17 @@ def _bc_horizontal_viscosity(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
             if config.lateral_viscosity.A_h_eq_boost > 1.0:
@@ -2539,10 +2539,10 @@ def _bc_horizontal_viscosity(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * vlap_u
@@ -2641,10 +2641,10 @@ def _bc_horizontal_viscosity(
         diag_Cs_smag_u = diag_Cs_smag_u + _smag_lap_u
         diag_Cs_smag_v = diag_Cs_smag_v + _smag_lap_v
 
-    if getattr(config, "C_leith", 0.0) > 0:
+    if config.lateral_viscosity.C_leith > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
-            u, v, grid, config.C_leith,
-            modified=getattr(config, "C_leith_modified", False),
+            u, v, grid, config.lateral_viscosity.C_leith,
+            modified=config.lateral_viscosity.C_leith_modified,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cl_leith_u = -leith_u
         diag_Cl_leith_v = -leith_v
