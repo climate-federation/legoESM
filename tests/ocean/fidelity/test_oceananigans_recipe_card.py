@@ -46,7 +46,7 @@ def test_per_deck_axes_are_honoured():
         barotropic_solver="explicit_substep",
     )
     assert cfg.g == 0.1
-    assert cfg.A_h == 5.0e3
+    assert cfg.lateral_viscosity.A_h == 5.0e3
     assert cfg.momentum_advection == "weno9"
     assert cfg.barotropic.barotropic_solver == "explicit_substep"
     assert abs(cfg.bottom_drag.bottom_drag_r - 1.0 / (60 * 86400)) < 1e-30

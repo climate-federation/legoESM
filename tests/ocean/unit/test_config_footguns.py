@@ -124,7 +124,7 @@ def test_A_h_single_source_clean_config_passes():
         ),
     )
     LatLonCGridOceanModel._validate_config(clean)  # must not raise
-    assert clean.A_h == 2.0e4
+    assert clean.lateral_viscosity.A_h == 2.0e4
 
 
 # ---------------------------------------------------------------------------

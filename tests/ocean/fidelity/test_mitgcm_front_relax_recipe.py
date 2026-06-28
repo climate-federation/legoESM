@@ -59,7 +59,7 @@ def test_config_is_faithful_baroclinic():
     c = fr.build_front_relax_config()              # faithful biharmonic default
     assert c.eos == "linear"
     assert c.eos_linear.alpha_T == fr.T_ALPHA and c.eos_linear.beta_S == 0.0
-    assert c.B_h == fr.VISC_A4 and c.A_h == 0.0    # MITgcm viscA4 biharmonic
+    assert c.lateral_viscosity.B_h == fr.VISC_A4 and c.lateral_viscosity.A_h == 0.0    # MITgcm viscA4 biharmonic
     assert c.A_v == fr.VISC_AR and c.K_v == fr.DIFF_KR_T
     assert c.lateral_side_bc == "free_slip"
     assert c.barotropic.barotropic_solver == "implicit_cn"

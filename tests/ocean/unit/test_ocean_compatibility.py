@@ -456,7 +456,7 @@ class TestBarotropicEquivalence:
             hyperdiff_coeff=0.0,
             differentiable_barotropic=False,
         )
-        config_scan = config_fori._replace(barotropic=config_fori.barotropic._replace(differentiable_barotropic=True))
+        config_scan = config_fori._replace(differentiable_barotropic=True)  # cube OceanConfig: flat (not grouped)
 
         model_fori = OceanModel(grid, z_coord, config_fori)
         model_scan = OceanModel(grid, z_coord, config_scan)
