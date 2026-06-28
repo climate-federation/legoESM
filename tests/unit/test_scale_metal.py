@@ -1,9 +1,8 @@
-"""Category 9: Apple Metal compatibility tests.
+"""Category 9: Apple GPU (Metal / jax-mps) compatibility tests.
 
-Tests hardware detection, Metal float64 limitations, CPU fallback,
-and spectral routing on the Metal backend.  When jax-metal is
-installed but incompatible with the running JAX version the runtime
-automatically falls back to CPU — these tests verify that path too.
+Tests hardware detection, the Apple GPU (``mps``) float64 limitation,
+and spectral routing.  The ``mps`` backend (jax-mps / MLX) is float32-only,
+so spectral transforms must run on CPU — these tests verify that path.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from legoesm.core.hardware import (
     detect_devices,
     _UNSUPPORTED_F64_BACKENDS,
 )
-from legoesm.runtime.backend import metal_fell_back_to_cpu
 
 
 # ---------------------------------------------------------------------------
@@ -50,12 +48,12 @@ class TestMetalConfig:
     def test_is_metal_flag_matches_backend(self):
         config = get_metal_config()
         backend = get_backend()
-        if backend == "METAL":
-            # Functional Metal backend
+        if backend == "MPS":
+            # On the Apple GPU (mps) backend
             assert config.is_metal is True
             assert config.metal_device is not None
         else:
-            # Either not on Metal hardware, or Metal fell back to CPU
+            # Not on the Apple GPU (mps) backend
             assert config.is_metal is False
             assert config.metal_device is None
 
@@ -66,7 +64,7 @@ class TestMetalConfig:
 
 class TestDeviceTransfer:
     def test_to_cpu_moves_to_cpu(self):
-        # Explicit float32 so this works on all backends including Metal
+        # Explicit float32 so this works on all backends including mps
         x = jnp.ones(5, dtype=jnp.float32)
         x_cpu = to_cpu(x)
         # Should be on CPU device
@@ -83,10 +81,10 @@ class TestDeviceTransfer:
         assert x_cpu.dtype == jnp.float32
 
     def test_to_metal_on_non_metal_is_identity(self):
-        """On non-Metal backends, to_metal should return input unchanged."""
+        """On non-mps backends, to_metal should return input unchanged."""
         backend = get_backend()
-        if backend == "METAL":
-            pytest.skip("Running on Metal — to_metal is not identity")
+        if backend == "MPS":
+            pytest.skip("Running on mps — to_metal is not identity")
         x = jnp.ones(5, dtype=jnp.float32)
         x_out = to_metal(x)
         np.testing.assert_array_equal(x_out, x)
@@ -108,7 +106,7 @@ class TestRouteTransfer:
     def test_route_to_default_pytree(self):
         tree = {"a": jnp.ones(3, dtype=jnp.float32)}
         out = route_to_default(tree)
-        # When Metal fell back to CPU, default device is CPU
+        # Routes to the backend's default device
         for key in tree:
             assert out[key].shape == tree[key].shape
             np.testing.assert_array_equal(out[key], tree[key])
@@ -127,7 +125,7 @@ class TestIsMetalBackend:
         # Both use runtime.backend.get_backend() (lowercase) under the hood.
         # core.hardware.get_backend() returns uppercase for legacy callers.
         from legoesm.runtime.backend import get_backend as rt_get_backend
-        assert is_metal_backend() == (rt_get_backend() == "metal")
+        assert is_metal_backend() == (rt_get_backend() == "mps")
 
 
 # ---------------------------------------------------------------------------
@@ -136,15 +134,15 @@ class TestIsMetalBackend:
 
 class TestEnsureSpectralOnCpu:
     def test_non_metal_is_noop(self):
-        """On non-Metal (or Metal-fell-back), ensure_spectral_on_cpu is noop."""
+        """On non-mps backends, ensure_spectral_on_cpu is a no-op."""
         if is_metal_backend():
-            pytest.skip("Running on functional Metal")
+            pytest.skip("Running on the Apple GPU (mps) backend")
 
         def f(x):
             return x * 2.0
 
         wrapped = ensure_spectral_on_cpu(f)
-        # On non-Metal (inc. CPU fallback), should be the same function
+        # On non-mps backends, should be the same function
         assert wrapped is f
 
     def test_wrapped_fn_correct_result(self):
@@ -183,7 +181,7 @@ class TestHardwareDetection:
     def test_unsupported_f64_backends_is_frozenset(self):
         assert isinstance(_UNSUPPORTED_F64_BACKENDS, frozenset)
         # The canonical set uses lowercase names
-        assert "metal" in _UNSUPPORTED_F64_BACKENDS
+        assert "mps" in _UNSUPPORTED_F64_BACKENDS
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +194,7 @@ class TestMetalFloat64:
         if not jax.config.jax_enable_x64:
             pytest.skip("JAX_ENABLE_X64 not set")
         cpu = jax.devices("cpu")[0]
-        # Create via numpy to avoid the default device (may be broken Metal)
+        # Create via numpy to avoid the default device (may be mps, no f64)
         import numpy as _np
         x = jax.device_put(_np.float64(1.0), cpu)
         assert x.dtype == jnp.float64

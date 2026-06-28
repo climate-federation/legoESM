@@ -1685,7 +1685,7 @@ x0_optimal = optimize(cost_4dvar, grad_J, x0_initial)
 |----------|----------|---------|-------|
 | NVIDIA GPU (single) | P0 | CUDA via JAX | Development & testing |
 | NVIDIA GPU (multi, single node) | P0 | JAX sharding | Primary production target |
-| Apple M-series (Metal/MPS) | P1 | jax-metal | Development on M4 MacBook |
+| Apple M-series (Metal/MPS) | P1 | jax-mps (MLX) | Development on M-series MacBook |
 | CPU (multi-core) | P1 | JAX default | Fallback, CI/CD |
 | NVIDIA GPU (multi-node) | P2 | mpi4jax | Large-scale production |
 | Google TPU | P2 | JAX native | Cloud scaling |
@@ -1903,7 +1903,7 @@ Global field plotting with Cartopy (Mollweide projection) and conservation times
 | **Python** | >= 3.11 | Runtime |
 | **JAX** | >= 0.4.35 (tested 0.8–0.9) | Core compute framework |
 | **jaxlib** | matching JAX | XLA backends |
-| **jax-metal** | latest | Apple Silicon GPU support (FV solvers only, no float64) |
+| **jax-mps** | latest | Apple Silicon GPU support via MLX (FV solvers only, no float64) |
 | **Equinox** | >= 0.11 | Neural network modules (pytree-based) |
 | **Optax** | >= 0.2 | Optimizers for training/DA |
 | **xarray** | >= 2024.0 | Data structures for I/O |
@@ -1932,7 +1932,7 @@ requires-python = ">=3.11"
 
 [project.optional-dependencies]
 data = ["gcsfs", "fsspec"]
-metal = ["jax-metal"]
+mps = ["jax-mps"]
 mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.10"]
 dev = ["pytest>=8.0", "ruff", "mypy"]
 

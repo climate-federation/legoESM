@@ -65,7 +65,7 @@ class TestHardwareDetection:
 
     def test_backend_string(self):
         config = detect_devices()
-        assert config.backend.lower() in ("cpu", "gpu", "tpu", "metal")
+        assert config.backend.lower() in ("cpu", "gpu", "tpu", "mps")
 
     def test_memory_positive(self):
         config = detect_devices()

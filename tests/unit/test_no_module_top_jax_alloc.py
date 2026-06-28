@@ -3,29 +3,29 @@
 iter-93: ``grids/vertical.py`` had ``_A60 = jnp.asarray([...])`` and
 ``_B60 = jnp.asarray([...])`` at MODULE TOP. At import time these
 eagerly dispatch ``lax.convert_element_type`` to whatever JAX
-default platform is initialized — on macOS that is ``METAL``,
-which currently raises ``UNIMPLEMENTED: default_memory_space is
-not supported``.  Result: ``import legoesm`` bricks on Apple
-Silicon before ``conftest.py`` gets a chance to call
-``ensure_metal_or_fallback()`` (load order: legoesm-import
-THEN fallback). Pure-Python unit tests (regex parsers, log
-parsers, validators) all fail with the Metal stack-trace.
+default platform is initialized — on macOS Apple Silicon that is an
+Apple GPU backend.  Eager module-top dispatch on the default device
+at import time (before backend configuration / device routing) is
+fragile and platform-dependent; on an Apple GPU stack that lacks an
+op it can brick ``import legoesm`` outright with a low-level
+``UNIMPLEMENTED`` dispatch error.
 
 This test pins the structural invariant: hot module-top
 expressions that eagerly allocate on the JAX default device must
 live INSIDE a function body so they fire only when the function
-is called (after fallback is in place).
+is called (after backend configuration is in place).
 
 iter-93 Codex hardening (post-adversarial-review):
 * Constructor set widened to cover ``empty``, ``*_like``,
   ``meshgrid``, ``broadcast_to``, ``tile``, ``repeat``, ``logspace``,
   ``identity``, ``diag``, etc.  Any of these on module-top would
-  hit the same Metal dispatch crash.
+  hit the same eager-dispatch crash.
 * Alias-aware: parses ``import jax.numpy as <name>`` / ``from jax
   import numpy as <name>`` / ``from jax.numpy import asarray, ...``
   and tracks ALL bound names that resolve to ``jax.numpy`` or
   individual JAX numpy constructors.  No longer assumes the alias
   is literally ``jnp``.
+  (Any of these at module top would hit the same eager-dispatch crash.)
 * ``jax.device_put(...)`` detected (also triggers eager dispatch).
 * Protected-module list now scans the entire ``src/legoesm/grids/``
   subtree (per Codex MEDIUM — re-exports from ``__init__.py``
@@ -255,9 +255,9 @@ _PROTECTED_MODULES = _enumerate_protected_modules(_REPO_ROOT)
 def test_no_module_top_jax_array_alloc(rel_path: str) -> None:
     """No module-top ``jnp.asarray``/``jnp.array``/etc in protected modules.
 
-    Why: import-time eager dispatch races
-    ``ensure_metal_or_fallback()`` and crashes on Metal. See iter-93
-    docstring at the top of this file.
+    Why: import-time eager dispatch runs before backend configuration
+    and can crash on an Apple GPU backend. See iter-93 docstring at the
+    top of this file.
     """
     path = _REPO_ROOT / rel_path
     if not path.exists():
@@ -270,7 +270,7 @@ def test_no_module_top_jax_array_alloc(rel_path: str) -> None:
             f"{rel_path}: module-top JAX array allocation found:\n"
             f"{details}\n"
             f"Move the alloc INSIDE a function body so it only fires "
-            f"after `ensure_metal_or_fallback()` has run. Pattern: "
+            f"after backend configuration has run. Pattern: "
             f"`_TBL = np.asarray(...)` at module top, "
             f"`jnp.asarray(_TBL)` inside the caller."
         )
@@ -280,10 +280,10 @@ def test_legoesm_imports_without_jax_dispatch_crash() -> None:
     """``import legoesm`` succeeds on the current JAX platform.
 
     This is a smoke test — the in-process variant has limited value
-    because by the time pytest collects this test, ``conftest.py``
-    has already run ``ensure_metal_or_fallback()``. Failure here
-    means a NEW module-top JAX alloc has slipped in to a module
-    not yet covered by ``_PROTECTED_MODULES``.
+    because by the time pytest collects this test, the backend has
+    already been configured. Failure here means a NEW module-top JAX
+    alloc has slipped in to a module not yet covered by
+    ``_PROTECTED_MODULES``.
     """
     import importlib
 
@@ -331,7 +331,7 @@ def test_lazy_module_no_jax_array_globals(module_name: str) -> None:
     function return, decorator side effect, etc.
 
     Forces ``JAX_PLATFORMS=cpu`` so the test works on macOS where
-    the Metal default would crash before the assertion runs.
+    an Apple GPU default could crash before the assertion runs.
     """
     import os
     code = (
@@ -369,12 +369,11 @@ def test_legoesm_imports_cold_subprocess() -> None:
     Spawn a fresh Python interpreter with NO conftest preamble and
     verify ``import legoesm`` succeeds. This exercises the same
     code path that broke pre-iter-93 on Apple Silicon: legoesm
-    imports BEFORE any conftest fallback gets a chance to run.
+    imports BEFORE backend configuration gets a chance to run.
 
-    We don't force ``JAX_PLATFORMS=metal`` because that only works
-    on Apple Silicon with jax-metal installed; we let JAX pick its
-    default. On Linux/x86 the default is CPU (no-op). On macOS
-    with jax-metal it's METAL (the original bug scenario).
+    We let JAX pick its default platform. On Linux/x86 the default is
+    CPU (no-op). On macOS Apple Silicon it is an Apple GPU backend
+    (the original bug scenario).
     """
     code = "import legoesm; print('ok')"
     proc = subprocess.run(
@@ -408,7 +407,7 @@ def test_whole_legoesm_codebase_no_jax_array_globals() -> None:
     Marked ``slow`` because it imports the whole codebase (takes
     ~20s wall on M5 Pro). Runs in a subprocess with
     ``JAX_PLATFORMS=cpu`` so it works on macOS without crashing on
-    Metal.
+    an Apple GPU backend.
 
     Failure mode: lists every module that has module-top
     ``jax.Array`` globals, separating real failures from import

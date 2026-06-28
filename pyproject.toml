@@ -70,9 +70,8 @@ data = [
     "gcsfs>=2024.2",
     "fsspec>=2024.2",
 ]
-metal = ["jax-metal"]
-# Apple-Silicon local-GPU backend via MLX (PJRT plugin, distinct from the
-# experimental XLA ``metal`` plugin above). Select with ``JAX_PLATFORMS=mps``.
+# Apple-Silicon local-GPU backend via MLX (PJRT plugin). Select with
+# ``JAX_PLATFORMS=mps``.
 # float32 ONLY — MLX has no float64, so ``JAX_ENABLE_X64=1`` arrays raise and
 # complex128 downcasts to complex64; spectral/x64/conservation-grade and any
 # mpi4jax-collective run must stay on ``JAX_PLATFORMS=cpu``. Single MpsDevice:

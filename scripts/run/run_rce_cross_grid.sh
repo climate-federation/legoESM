@@ -64,8 +64,8 @@ for ENTRY in "${GRID_TABLE[@]}"; do
     # records ``ANY_FAILED=1``.
     # JAX_PLATFORMS=${JAX_PLATFORMS:-cpu}: pin CPU by default; the
     # spectral + voronoi paths trigger an MLIR legalisation error on
-    # Apple Metal ("func.func op ... data types not supported"). User
-    # can override with JAX_PLATFORMS=metal at their own risk.
+    # the Apple GPU ("func.func op ... data types not supported"). User
+    # can override with JAX_PLATFORMS=mps at their own risk.
     JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_rce.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" --days "$DAYS" --diag-days "$DIAG_DAYS" \
@@ -91,9 +91,9 @@ fi
 # See ``run_omip_cross_grid.sh`` for the rationale.
 #
 # iter-28: same JAX_PLATFORMS=cpu default as the per-grid runs.
-# iter-7 documented the Metal MLIR legalisation crash on the
+# iter-7 documented the Apple-GPU MLIR legalisation crash on the
 # spectral-grid plot path; without this pin a user with
-# JAX_PLATFORMS=metal exported in their shell would always see the
+# JAX_PLATFORMS=mps exported in their shell would always see the
 # comparison-plot step crash even though every per-grid run wrote
 # valid output.
 PLOT_FAILED=0
