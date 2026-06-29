@@ -70,7 +70,12 @@ fi
 # to the per-job -v var string).
 EXTRA_VARS=""
 if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; fi
-if [ -n "${PRECISION:-}" ]; then EXTRA_VARS="${EXTRA_VARS},PRECISION=${PRECISION}"; fi
+
+# Precision is FANNED OUT one value per job (so f32 and f64 run as separate queue
+# jobs -- parallelism, and a slow f64 case can't starve f32).  Default = the full
+# matrix; a legacy singular PRECISION still selects one.  NON-cube grids only;
+# the cube pair (Phase 2) keeps its current single-precision behaviour.
+PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 
 # Multi-node GPU sweep (icosahedral only).  NODES>1 overrides the GPU job's
 # `select=` to span N nodes (4 A100/node); fullnode_gpu.sh's default GPU_RANKS
@@ -105,27 +110,58 @@ echo "=== repo: ${REPO_ROOT} ==="
 echo "=== full-node CPU-vs-A100: grid=${GRID}  resolutions=[${RES[*]}] ==="
 echo "=== outdir: ${OUTDIR} ==="
 
-for R in "${RES[@]}"; do
-    CPU_CAMP="${OUTDIR}/${GRID}_cpu_res${R}"     # unique per (grid,backend,res)
-    GPU_CAMP="${OUTDIR}/${GRID}_a100_res${R}"
-    case "$GRID" in
-        cubed-sphere)
-            CPU_SCRIPT="$SD/cube_fullnode_cpu.sh"; CPU_VARS="STRONG_RES=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
-            GPU_SCRIPT="$SD/cube_strong_gpu.sh";   GPU_VARS="STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
-            ;;
-        *)  # latlon | icosahedral | spectral (validated above)
-            CPU_SCRIPT="$SD/fullnode_cpu.sh"; CPU_VARS="GRID=${GRID},RESOLUTIONS=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
-            GPU_SCRIPT="$SD/fullnode_gpu.sh"; GPU_VARS="GRID=${GRID},RESOLUTIONS=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
-            ;;
-    esac
-    if [ "${GPU_ONLY:-0}" != "1" ]; then
-        submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$CPU_SCRIPT"
-    fi
-    if [ "${CPU_ONLY:-0}" != "1" ]; then
-        # GPU_SELECT (set when NODES>1) overrides the script's #PBS select=
-        # directive at qsub time to span multiple nodes; empty on 1 node.
-        submit "gpu ${GRID} res=${R} (A100 sweep)" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$GPU_VARS" "$GPU_SCRIPT"
-    fi
-done
+# --- Non-cube fan-out: one WEAK job per precision (no res sweep -- weak derives
+#     its own per-rank resolution) + one STRONG job per (resolution, precision).
+#     Each job gets a UNIQUE CAMP so the per-job aggregate never races; the final
+#     finalize_fullnode.sh re-aggregates the whole $OUTDIR tree.  $2 = backend
+#     ("cpu"|"gpu"); GPU jobs carry the (possibly multi-node) GPU_SELECT. -------
+emit_noncube() {
+    local bk="$1" script tag
+    if [ "$bk" = gpu ]; then script="$SD/fullnode_gpu.sh"; tag="a100"
+    else                       script="$SD/fullnode_cpu.sh"; tag="cpu"; fi
+    local prec camp vars R
+    for prec in $PRECISIONS; do
+        # WEAK (spectral has no MPI -> no weak curve; skip it)
+        if [ "$GRID" != "spectral" ]; then
+            camp="${OUTDIR}/${GRID}_${tag}_weak_${prec}"
+            vars="GRID=${GRID},MODES=weak,PRECISIONS=${prec},CAMP=${camp}${EXTRA_VARS}"
+            if [ "$bk" = gpu ]; then
+                submit "gpu ${GRID} weak prec=${prec}" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$vars" "$script"
+            else
+                submit "cpu ${GRID} weak prec=${prec}" -v "$vars" "$script"
+            fi
+        fi
+        # STRONG: one job per (resolution, precision)
+        for R in "${RES[@]}"; do
+            camp="${OUTDIR}/${GRID}_${tag}_strong_res${R}_${prec}"
+            vars="GRID=${GRID},MODES=strong,RESOLUTIONS=${R},PRECISIONS=${prec},CAMP=${camp}${EXTRA_VARS}"
+            if [ "$bk" = gpu ]; then
+                submit "gpu ${GRID} strong res=${R} prec=${prec}" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$vars" "$script"
+            else
+                submit "cpu ${GRID} strong res=${R} prec=${prec}" -v "$vars" "$script"
+            fi
+        done
+    done
+}
+
+if [ "$GRID" = "cubed-sphere" ]; then
+    # Cube keeps its existing single-precision strong-only pair (Phase 2 will
+    # add precision/mode via the face-scatter driver).
+    for R in "${RES[@]}"; do
+        CPU_CAMP="${OUTDIR}/${GRID}_cpu_res${R}"     # unique per (grid,backend,res)
+        GPU_CAMP="${OUTDIR}/${GRID}_a100_res${R}"
+        CPU_VARS="STRONG_RES=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
+        GPU_VARS="STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
+        if [ "${GPU_ONLY:-0}" != "1" ]; then
+            submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$SD/cube_fullnode_cpu.sh"
+        fi
+        if [ "${CPU_ONLY:-0}" != "1" ]; then
+            submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$SD/cube_strong_gpu.sh"
+        fi
+    done
+else
+    [ "${GPU_ONLY:-0}" != "1" ] && emit_noncube cpu
+    [ "${CPU_ONLY:-0}" != "1" ] && emit_noncube gpu
+fi
 
 echo "=== done ===  watch the queue with: qstat -u \$USER"

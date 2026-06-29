@@ -42,7 +42,12 @@ module load gcc cray-mpich 2>/dev/null || true   # match the mpi4py/mpi4jax buil
 # --- Per-grid sweep (raise on cube / unknown: dispatch hardening) ------------
 GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
-PRECISION="${PRECISION:-float32}"
+# Sweep precision AND scaling mode.  Defaults cover the full matrix; the
+# submitter fans these out one value per job (PRECISIONS=<one>, MODES=<one>) so
+# f32/f64 and weak/strong run as separate queue jobs.  Back-compat: a legacy
+# singular PRECISION still selects one precision.
+PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
+MODES="${MODES:-strong weak}"
 # Rank cap = the MPI slots PBS granted (one line per slot in $PBS_NODEFILE).
 # Do NOT use $NCPUS: PBS EXPORTS its own $NCPUS = cores-PER-RANK (=1 for
 # mpiprocs=128), so reading it silently SKIPs the whole rank ladder.  Override
@@ -75,6 +80,9 @@ case "$GRID" in
     echo "ERROR: unknown GRID='$GRID' (latlon | icosahedral | spectral)" >&2
     exit 2 ;;
 esac
+# Spectral has no MPI path: weak == strong == a single 1-device point, and the
+# weak path ignores RESOLUTIONS (auto-derives), so restrict it to strong only.
+[ "$GRID" = spectral ] && MODES="strong"
 
 export OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" \
        OPENBLAS_NUM_THREADS="$THREADS" NUMEXPR_NUM_THREADS="$THREADS"
@@ -87,25 +95,32 @@ CAMP="${CAMP:-$SCRATCH/legoesm_scaling/${GRID}_cpu_${STAMP}}"
 mkdir -p "$CAMP"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
-echo "=== $GRID CPU strong scaling: ranks=[$RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
-echo "    physics=$PHYSICS prec=$PRECISION cores=$_CORES  outdir=$CAMP"
+echo "=== $GRID CPU scaling: modes=[$MODES] prec=[$PRECISIONS] ranks=[$RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
+echo "    physics=$PHYSICS cores=$_CORES  outdir=$CAMP"
 
 rc_all=0
-for R in $RESOLUTIONS; do
-  for N in $RANKS; do
-    if [ "$(( N * THREADS ))" -gt "$_CORES" ]; then
-      echo "--- $GRID res=$R N=$N: needs $(( N * THREADS )) > $_CORES cores -- SKIP ---"
-      continue
-    fi
-    echo "--- $GRID res=$R ranks=$N ---"
-    mpiexec -n "$N" \
-        "$PY" scripts/bench/run_cpu_mpi_scaling.py \
-        --grid "$GRID" --mode strong --resolution "$R" \
-        --physics "$PHYSICS" --precision "$PRECISION" \
-        --device cpu $EXTRA \
-        --output-dir "$CAMP" < /dev/null \
-      || { echo "  res=$R ranks=$N FAILED rc=$?"; rc_all=1; }
+for PREC in $PRECISIONS; do
+ for MODE in $MODES; do
+  # weak: resolution is auto-derived per rank count (--resolution 0 -> constant
+  # cells/rank), so there is NO resolution sweep.  strong: explicit fixed sizes.
+  if [ "$MODE" = weak ]; then RES_LIST="0"; else RES_LIST="$RESOLUTIONS"; fi
+  for R in $RES_LIST; do
+    for N in $RANKS; do
+      if [ "$(( N * THREADS ))" -gt "$_CORES" ]; then
+        echo "--- $GRID $MODE $PREC res=$R N=$N: needs $(( N * THREADS )) > $_CORES cores -- SKIP ---"
+        continue
+      fi
+      echo "--- $GRID $MODE $PREC res=$R ranks=$N ---"
+      mpiexec -n "$N" \
+          "$PY" scripts/bench/run_cpu_mpi_scaling.py \
+          --grid "$GRID" --mode "$MODE" --resolution "$R" \
+          --physics "$PHYSICS" --precision "$PREC" \
+          --device cpu $EXTRA \
+          --output-dir "$CAMP" < /dev/null \
+        || { echo "  $MODE $PREC res=$R ranks=$N FAILED rc=$?"; rc_all=1; }
+    done
   done
+ done
 done
 
 "$PY" scripts/bench/aggregate_bcw_scaling.py \

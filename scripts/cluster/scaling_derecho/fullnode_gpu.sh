@@ -52,7 +52,10 @@ export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 # --- Per-grid sweep (raise on cube / unknown: dispatch hardening) ------------
 GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
-PRECISION="${PRECISION:-float32}"
+# Sweep precision AND scaling mode (see fullnode_cpu.sh).  The submitter fans
+# these out one value per job; back-compat singular PRECISION still works.
+PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
+MODES="${MODES:-strong weak}"
 EXTRA=""
 # Total GPUs across ALL allocated nodes = the MPI slots PBS granted (one line
 # per slot in $PBS_NODEFILE; mpiprocs=4 -> 4 lines/node).  Do NOT use a per-node
@@ -88,6 +91,9 @@ case "$GRID" in
     echo "ERROR: unknown GRID='$GRID' (latlon | icosahedral | spectral)" >&2
     exit 2 ;;
 esac
+# Spectral has no MPI path: weak == strong == a single 1-device point (and weak
+# ignores RESOLUTIONS), so restrict it to strong only.
+[ "$GRID" = spectral ] && MODES="strong"
 
 # rank -> local GPU pin (Cray PALS; run_cpu_mpi_scaling auto-pin does not read
 # PALS, so without this every rank grabs GPU 0 -> the eff=0.5 self-blind bug).
@@ -98,25 +104,31 @@ CAMP="${CAMP:-$SCRATCH/legoesm_scaling/${GRID}_gpu_${STAMP}}"
 mkdir -p "$CAMP"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
-echo "=== $GRID GPU strong scaling: gpus=[$GPU_RANKS] (TOTAL_GPUS=$TOTAL_GPUS) res=[$RESOLUTIONS] ==="
-echo "    physics=$PHYSICS prec=$PRECISION  outdir=$CAMP"
+echo "=== $GRID GPU scaling: modes=[$MODES] prec=[$PRECISIONS] gpus=[$GPU_RANKS] (TOTAL_GPUS=$TOTAL_GPUS) res=[$RESOLUTIONS] ==="
+echo "    physics=$PHYSICS  outdir=$CAMP"
 
 rc_all=0
-for R in $RESOLUTIONS; do
-  for N in $GPU_RANKS; do
-    if [ "$N" -gt "$TOTAL_GPUS" ]; then
-      echo "--- $GRID res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP (not enough GPUs allocated) ---"
-      continue
-    fi
-    echo "--- $GRID res=$R gpus=$N ---"
-    mpiexec -n "$N" bash -c "$PIN" _ \
-        "$PY" scripts/bench/run_cpu_mpi_scaling.py \
-        --grid "$GRID" --mode strong --resolution "$R" \
-        --physics "$PHYSICS" --precision "$PRECISION" \
-        --device gpu $EXTRA \
-        --output-dir "$CAMP" < /dev/null \
-      || { echo "  res=$R gpus=$N FAILED rc=$?"; rc_all=1; }
+for PREC in $PRECISIONS; do
+ for MODE in $MODES; do
+  # weak: resolution auto-derived per rank count (--resolution 0); no res sweep.
+  if [ "$MODE" = weak ]; then RES_LIST="0"; else RES_LIST="$RESOLUTIONS"; fi
+  for R in $RES_LIST; do
+    for N in $GPU_RANKS; do
+      if [ "$N" -gt "$TOTAL_GPUS" ]; then
+        echo "--- $GRID $MODE $PREC res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP (not enough GPUs allocated) ---"
+        continue
+      fi
+      echo "--- $GRID $MODE $PREC res=$R gpus=$N ---"
+      mpiexec -n "$N" bash -c "$PIN" _ \
+          "$PY" scripts/bench/run_cpu_mpi_scaling.py \
+          --grid "$GRID" --mode "$MODE" --resolution "$R" \
+          --physics "$PHYSICS" --precision "$PREC" \
+          --device gpu $EXTRA \
+          --output-dir "$CAMP" < /dev/null \
+        || { echo "  $MODE $PREC res=$R gpus=$N FAILED rc=$?"; rc_all=1; }
+    done
   done
+ done
 done
 
 "$PY" scripts/bench/aggregate_bcw_scaling.py \
