@@ -53,21 +53,21 @@ def test_no_duplicate_case_names():
 
 
 def test_required_fields_present():
-    req = {"case", "tests", "grids", "oracle", "results"}
-    res_req = {"recipe", "status", "note"}
+    req = {"case", "tests", "oracle", "results"}
+    res_req = {"grid", "recipe", "status", "note"}
     for c in CASES:
         assert not (req - c.keys()), f"{c['case']}: missing fields {req - c.keys()}"
-        assert c["results"], f"{c['case']}: must have at least one recipe result"
+        assert c["results"], f"{c['case']}: must have at least one run result"
         for r in c["results"]:
-            assert not (res_req - r.keys()), f"{c['case']}: result missing {res_req - r.keys()}"
+            assert not (res_req - r.keys()), f"{c['case']}: run missing {res_req - r.keys()}"
 
 
-def test_no_duplicate_recipe_per_case():
-    """Within a case, each recipe appears at most once (the matrix cell is unique)."""
+def test_no_duplicate_grid_recipe_per_case():
+    """Within a case, each (grid, recipe) run appears at most once (unique matrix cell)."""
     for c in CASES:
-        recs = [r["recipe"] for r in c["results"]]
-        dupes = {x for x in recs if recs.count(x) > 1}
-        assert not dupes, f"{c['case']}: duplicate recipe result(s) {dupes}"
+        keys = [(r["grid"], r["recipe"]) for r in c["results"]]
+        dupes = {k for k in keys if keys.count(k) > 1}
+        assert not dupes, f"{c['case']}: duplicate (grid, recipe) run(s) {dupes}"
 
 
 def test_every_registered_experiment_has_a_row():

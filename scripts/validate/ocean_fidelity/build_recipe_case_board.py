@@ -64,40 +64,47 @@ def render() -> str:
         + ", ".join(f"{_BADGE[s]}: {by[s]}"
                     for s in (VERIFIED, BLOCKED, PARTIAL, WORKS, TODO, NA) if by[s]),
         "",
-        "## Detail (one row per case × recipe)",
+        "## Detail (one row per run = case × grid × recipe)",
         "",
-        "| case | tests | grids | oracle | recipe | status | note |",
+        "| case | tests | oracle | grid | recipe | status | note |",
         "|---|---|---|---|---|---|---|",
     ]
     for c in cases:
         oracle = c["oracle"] or "_(idealized — none)_"
-        grids = ", ".join(c["grids"]) if c["grids"] else "—"
         for i, r in enumerate(c["results"]):
-            # repeat case metadata only on the first result row (blank thereafter)
+            # repeat case metadata only on the first run row (blank thereafter);
+            # grid + recipe are per-run (intricately linked) and always shown.
             cse = f"`{c['case']}`" if i == 0 else ""
             tst = c["tests"] if i == 0 else ""
-            grd = grids if i == 0 else ""
             orc = oracle if i == 0 else ""
-            L.append(f"| {cse} | {tst} | {grd} | {orc} | `{r['recipe']}` | "
+            L.append(f"| {cse} | {tst} | {orc} | {r['grid']} | `{r['recipe']}` | "
                      f"{_BADGE[r['status']]} | {r['note']} |")
 
-    # --- pivot matrix: case × recipe ---
+    # --- pivot matrix: (case × grid) rows × recipe columns ---
     recipes = all_recipes()
     L += [
         "",
-        "## Matrix (case × recipe)",
+        "## Matrix (case × grid × recipe)",
         "",
+        "Rows are `case @ grid` (grid + recipe = the numerical setup of a run); "
+        "columns are recipes.",
         "Legend: " + " · ".join(f"{_GLYPH[s]} {s}" for s in
                                  (VERIFIED, WORKS, PARTIAL, BLOCKED, TODO)) + " · blank = not run",
         "",
-        "| case | " + " | ".join(recipes) + " |",
+        "| case @ grid | " + " | ".join(recipes) + " |",
         "|---|" + "|".join("---" for _ in recipes) + "|",
     ]
     for c in cases:
-        status_by_recipe = {r["recipe"]: r["status"] for r in c["results"]}
-        cells = [_GLYPH[status_by_recipe[rec]] if rec in status_by_recipe else ""
-                 for rec in recipes]
-        L.append(f"| `{c['case']}` | " + " | ".join(cells) + " |")
+        # one matrix row per (case, grid) the case has been run on
+        grids = []
+        for r in c["results"]:
+            if r["grid"] not in grids:
+                grids.append(r["grid"])
+        for g in grids:
+            status_by_recipe = {r["recipe"]: r["status"] for r in c["results"] if r["grid"] == g}
+            cells = [_GLYPH[status_by_recipe[rec]] if rec in status_by_recipe else ""
+                     for rec in recipes]
+            L.append(f"| `{c['case']}` @ {g} | " + " | ".join(cells) + " |")
     L.append("")
     return "\n".join(L)
 
