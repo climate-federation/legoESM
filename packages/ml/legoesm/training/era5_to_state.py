@@ -669,6 +669,7 @@ def era5_to_mpas_carry(
     era5: ERA5Slice,
     mesh,
     sigma,
+    smoothing_passes: int = 4,
 ):
     """Convert an ERA5 slice to an initial condition on an MPAS/Voronoi mesh.
 
@@ -696,8 +697,15 @@ def era5_to_mpas_carry(
     era5 : ERA5Slice
     mesh : VoronoiMesh
         Exposes ``latCell``/``lonCell``/``latEdge``/``lonEdge``/``angleEdge``
-        (radians) and ``nCells``/``nEdges``.
+        (radians), ``nCells``/``nEdges``, and the cell adjacency
+        ``cellsOnCell``/``nEdgesOnCell`` used for phis smoothing.
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+    smoothing_passes : int
+        Laplacian smoothing passes applied to the regridded ERA5 surface
+        geopotential before it is used as ``phis`` (default 4, matching the
+        cubed-sphere path).  ``0`` disables smoothing.  Raw ERA5 phis on a
+        coarse Voronoi mesh produces O(dx^-1) spurious pressure-gradient force
+        over steep terrain that drives a wind runaway / blowup within days.
 
     Returns
     -------
@@ -741,12 +749,33 @@ def era5_to_mpas_carry(
     # Surface pressure at edges (for placing the wind levels over terrain).
     p_s_edge = regrid_scalar(jnp.asarray(era5.p_s), edge_w)
 
+    # Smooth the raw regridded ERA5 surface geopotential on the mesh before
+    # using it as phis.  Raw ERA5 phis retains grid-scale roughness over steep
+    # terrain (Himalaya/Andes/Antarctica); the TRiSK pressure-gradient
+    # amplifies those cell-to-cell gradients to O(dx^-1) spurious force, which
+    # drives a localized wind runaway / blowup within days from the ERA5 IC.
+    # This mirrors the cubed-sphere path (era5_to_cubedsphere_carry), which was
+    # already hardened against the identical failure.  A barometric p_s
+    # correction keeps each column hydrostatically consistent with the (lowered)
+    # terrain gradients: smoothing lowers dB_dx, so without raising p_s where
+    # terrain was smoothed down, the split-PGF correction term would no longer
+    # cancel.  p_s_new = p_s · exp[(phis_raw − phis_smooth) / (R_d · T_sfc)],
+    # from hydrostatic Δln_p = −ΔΦ / (R_d · T); T_sfc proxy = ERA5 T at 1000 hPa
+    # (plev ascending -> last index).
+    if smoothing_passes > 0:
+        from legoesm.grids.topography import smooth_phis_voronoi
+        phis_cell_raw = phis_cell
+        phis_cell = smooth_phis_voronoi(
+            phis_cell, mesh.cellsOnCell, mesh.nEdgesOnCell,
+            smoothing_passes=smoothing_passes,
+        )
+        _T_sfc = T_cell[..., -1]
+        _delta_phis = phis_cell_raw - phis_cell  # > 0 where terrain was lowered
+        p_s_cell = p_s_cell * jnp.exp(_delta_phis / (constants.R_d * _T_sfc))
+
     # Hybrid p_s floor over high terrain: raise p_s where the hybrid layers
     # would become degenerate (dp < dp_floor), and lower phis by the
     # barometric equivalent so the split-PGF cancellation is preserved.
-    # No phis smoothing is applied (the coarse mesh is already smooth and
-    # there is no mesh-native cube-edge artefact to blend), so unlike the
-    # cubed-sphere path there is no smoothing-driven p_s correction.
     if _is_hybrid:
         p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
         _T_sfc = T_cell[..., -1]  # 1000 hPa (plev ascending -> last index)

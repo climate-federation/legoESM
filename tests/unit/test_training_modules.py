@@ -516,6 +516,77 @@ class TestERA5ToState:
             f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
         )
 
+    def test_era5_to_mpas_carry_phis_smoothing(self):
+        """The MPAS carry smooths raw ERA5 phis on the Voronoi mesh (default
+        passes=4), reducing cell-to-cell terrain gradients vs no smoothing,
+        applies the barometric p_s correction, and stays finite.  Regression
+        for the MPAS ERA5-IC wind-runaway blowup caused by unsmoothed phis."""
+        import jax.numpy as jnp
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_mpas_carry
+
+        mesh = create_voronoi_mesh(2)          # ~162 cells, cheap
+        sigma = standard_hybrid_levels(10)
+
+        n_lat, n_lon, n_plev = 24, 48, 5
+        rng = np.random.default_rng(11)
+        plev_Pa = np.array(
+            [5000.0, 15000.0, 30000.0, 55000.0, 100000.0], dtype=np.float64
+        )
+        T_ll = (250.0 + rng.random((n_lat, n_lon, n_plev)) * 40.0).astype(np.float32)
+        u_ll = (rng.random((n_lat, n_lon, n_plev)) * 20.0).astype(np.float32)
+        v_ll = (rng.random((n_lat, n_lon, n_plev)) * 20.0).astype(np.float32)
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+
+        # Steep, noisy Tibet-like massif in the northern third (grid-scale
+        # roughness is what the smoother must reduce).
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        massif = slice(n_lat // 6, n_lat // 3)
+        phis[massif, :] = (
+            45000.0 + rng.random((massif.stop - massif.start, n_lon)) * 15000.0
+        ).astype(np.float32)
+        p_s = np.where(phis > 0, 56000.0, 101325.0).astype(np.float32)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 285.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry_smooth = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=4)
+        carry_raw = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=0)
+
+        # Finite + physical
+        for name, arr in (("T", carry_smooth.T), ("u", carry_smooth.u),
+                          ("p_s", carry_smooth.p_s), ("phis", carry_smooth.phis)):
+            assert jnp.all(jnp.isfinite(arr)), f"{name} non-finite with smoothing"
+        assert jnp.all(carry_smooth.p_s > 0), "p_s non-positive after correction"
+
+        # Max cell-to-cell phis gradient must drop with smoothing.
+        def _max_neighbor_grad(field):
+            f = np.asarray(field)
+            coc = np.asarray(mesh.cellsOnCell)
+            valid = coc >= 0
+            idx = np.where(valid, coc, 0)
+            diff = np.where(valid, np.abs(f[idx] - f[None, :]), 0.0)
+            return float(diff.max())
+
+        g_raw = _max_neighbor_grad(carry_raw.phis)
+        g_smooth = _max_neighbor_grad(carry_smooth.phis)
+        assert g_smooth < g_raw, (
+            f"smoothing did not reduce phis gradient: raw={g_raw:.1f} "
+            f"smooth={g_smooth:.1f} m^2/s^2"
+        )
+
+        # Barometric p_s correction changed p_s relative to the unsmoothed carry.
+        assert not np.allclose(
+            np.asarray(carry_smooth.p_s), np.asarray(carry_raw.p_s)
+        ), "barometric p_s correction had no effect"
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver
