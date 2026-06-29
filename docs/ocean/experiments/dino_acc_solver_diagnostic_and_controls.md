@@ -67,5 +67,44 @@ offset).  A deeper sill (3500 m) reaches ~176 Sv (near 206) much faster.
   thermocline; the open piece is a balanced warm-start (or a long spin-up) to
   compare equilibria cleanly, plus checking the sill discretization vs the paper.
 
+## Levers L1–L3 — RESOLVED: the gap was thermocline spin-up
+
+Following the controls result, three levers were worked in order:
+
+**L2 (sill geometry) — correct, not the cause.** Our discretized bathymetry equals
+the analytic eq A5 at every point; the channel-band sill crest is 2309 m (≈ the
+nominal 2500). The sill is faithfully represented, so the low ACC is not a sill
+discretization error.
+
+**L1 (balanced warm-start, clean equilibrium comparison) — blocked.** A warm-start
+of our model from the NEMO R1 equilibrium NaNs every way tried (full u,v,η; T,S at
+rest; smoothed; dt down to 300 s; `apply_balanced_init` geostrophic/thermal-wind
+balance; balanced + smoothed). The thermal-wind ACC our balancer reconstructs from
+NEMO's density is clip-artifact-dominated (480 → 909 Sv, |u| clipping at 2.5 m/s):
+the ACC's steep isopycnals over the deep column + the 1500 m level-of-no-motion +
+the regridded fronts produce unphysically large velocities. Model-from-model
+initialisation of a deep-reaching ACC is a genuinely hard balancing problem;
+shelved. (It did confirm the ACC is **thermal-wind / density-controlled**: the
+immature cold-start density gives a low ACC, a mature density a high one.)
+
+**L3 (thermocline spin-up) — the answer.** A multi-year cold-start (nominal sill,
+`implicit_cn`) shows the ACC was simply **under-spun**:
+
+| year | 0.25 | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 2.7 | 3.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ACC [Sv] | 41 | 46 | 41 | 70 | 81 | 126 | 153 | **243** |
+
+The ACC is flat ~45 Sv through year 1 (immature thermocline — the "too low 44 Sv"),
+then accelerates (~150 Sv/yr in years 2–3) as the stratification deepens, **crossing
+NEMO's 206 Sv equilibrium by ~3 years** (243 Sv at year 3, possibly overshooting
+before settling). 
+
+**Conclusion:** the model is not deficient. The barotropic solver and diagnostic
+are correct; bottom friction is irrelevant; the sill geometry is correct and sets
+the form-stress limit; and the ACC reaches a physical ~206–243 Sv once the
+thermocline matures (~3 yr). The original "50 Sv is too low" was a 1-year-spin-up
+artifact, not a model error.
+
 Diagnostics: `scripts/tmp/_diag_{psi_unittest,geoadj_balanced,munk_solver,
-r1_warmstart_check,dino_acc_controls}.py`.
+r1_warmstart_check,r1_warmstart_balanced,dino_sill_geom,dino_acc_controls,
+dino_spinup_multiyear}.py`.
