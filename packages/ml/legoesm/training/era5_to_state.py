@@ -391,6 +391,7 @@ def era5_to_cubedsphere_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    target_phis=None,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -402,11 +403,23 @@ def era5_to_cubedsphere_carry(
     era5 : ERA5Slice
     grid : CubedSphereGrid
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+    target_phis : array-like, optional
+        Accepted for caller compatibility (the driver passes the model's
+        ETOPO surface geopotential here).  CURRENTLY NOT APPLIED: the IC
+        dynamics are initialised on the *smoothed ERA5* orography below
+        (the validated behaviour — job 25918469), while the CMOR ``orog``
+        field separately reports the ETOPO mountain mask
+        (``model_driver._setup_diagnostics``).  Wiring this through to place
+        the dynamics on ``target_phis`` (with a barometric p_s adjustment
+        from ERA5 orography to ETOPO) would change the IC and is a
+        deliberate, revalidation-gated change intentionally NOT made here.
 
     Returns
     -------
     SegmentCarry
     """
+    # ``target_phis`` is intentionally unused — see the parameter docstring.
+    del target_phis
     from legoesm.grids.regridding import regrid_scalar
     from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
