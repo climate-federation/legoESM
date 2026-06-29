@@ -80,12 +80,12 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
-import os as _os  # noqa: E402
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
-_GSAM_ROOT = _os.environ.get(
-    "LEGOESM_GSAM_ROOT", "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7"
-)
-_DEFAULT_CASE = f"{_GSAM_ROOT}/CASES/BOMEX"
+# Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
+# cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
+# resolve_sam_case_dir.
+_DEFAULT_CASE = resolve_sam_case_dir("BOMEX")
 _FCOR = 0.376e-4                       # CASES/BOMEX/prm fcor [1/s]
 _DEFAULT_LAGRANGIAN_SD_PER_CELL = 64
 _DEFAULT_LAGRANGIAN_INIT_SAMPLING = "cell_stratified"
@@ -269,14 +269,13 @@ def build(args, dtype):
         # path. Fail early with actionable guidance instead of a deep
         # FileNotFoundError on the first read_sam_* call.
         sys.exit(
-            f"[run_bomex_les] gSAM case directory not found: {case}\n"
-            f"  This case reads the gSAM CASES/BOMEX forcing deck, which is not "
-            f"bundled in the repo.\n"
-            f"  Point at your gSAM checkout via either:\n"
-            f"    LEGOESM_GSAM_ROOT=<root containing CASES/>   "
-            f"(current root: {_GSAM_ROOT})\n"
-            f"    --case-dir <path/to/CASES/BOMEX>\n"
-            f"  (Same applies to the sibling gate/lba/rico/dycoms LES drivers.)"
+            f"[run_bomex_les] BOMEX case directory not found: {case}\n"
+            f"  This case reads the gSAM CASES/BOMEX deck. Populate the "
+            f"repo-local cache from a gSAM checkout:\n"
+            f"    python scripts/data/fetch_les_forcing.py --only BOMEX\n"
+            f"  or point at a checkout directly: LEGOESM_GSAM_ROOT=<root "
+            f"containing CASES/>, or --case-dir <path/to/CASES/BOMEX>.\n"
+            f"  (Same applies to the sibling rico/dycoms/gate/lba LES drivers.)"
         )
     snd = read_sam_snd(case / "snd")
     lsf = read_sam_lsf(case / "lsf")

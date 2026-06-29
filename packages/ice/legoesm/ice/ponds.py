@@ -88,12 +88,15 @@ def step_ponds(
         Updated pond state.
     drain_to_ocean_m : array
         Pond water lost to drainage this step [m of liquid water
-        per unit grid-cell area] — caller routes to ocean
-        freshwater channel.
+        per unit ICE area] — pond state is stored relative to the
+        ice area (``V_pond = pond_area * pond_depth``), so this is
+        per-ice-area.  The caller multiplies by the ice concentration
+        ``conc`` before routing it to the ocean freshwater channel.
     refreeze_volume_m : array
         Pond water that refroze back into ice [m of liquid water
-        per unit grid-cell area] — caller adds to ice column as
-        white-ice gain (no FW exchange with ocean).
+        per unit ICE area] — caller converts it to an ice-thickness
+        gain on the per-ice-area column ``h`` (white-ice gain; no FW
+        exchange with the ocean).
     """
     # Input water this step.  Snow thicker than the configured
     # threshold blocks pond formation; thinner snow / deposition

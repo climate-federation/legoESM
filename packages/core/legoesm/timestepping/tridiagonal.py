@@ -72,21 +72,6 @@ def thomas_solve(
     c = jnp.asarray(c, work_dtype)
     d = jnp.asarray(d, work_dtype)
 
-    # Forward sweep: eliminate sub-diagonal
-    def forward_step(carry, k):
-        c_prev, d_prev = carry  # Modified c and d from previous row
-        ak = a[..., k]
-        bk = b[..., k]
-        ck = c[..., k]
-        dk = d[..., k]
-
-        # For k=0, a[0]=0 so m=0; c_star=c/b, d_star=d/b
-        jnp.where(k > 0, ak / (bk - ak * c_prev), 0.0)
-        c_star = ck / (bk - ak * c_prev + _TINY)
-        d_star = (dk - ak * d_prev) / (bk - ak * c_prev + _TINY)
-
-        return (c_star, d_star), (c_star, d_star)
-
     # Initialize: for k=0, c_star = c[0]/b[0], d_star = d[0]/b[0]
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
     d0_star = d[..., 0] / (b[..., 0] + _TINY)

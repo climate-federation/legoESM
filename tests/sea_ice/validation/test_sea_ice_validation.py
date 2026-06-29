@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ice.config import SeaIceConfig
@@ -126,6 +127,208 @@ class TestTransportConservation:
         assert jnp.allclose(h_new, h, atol=1e-12)
         assert jnp.allclose(a_new, a, atol=1e-12)
         assert jnp.allclose(T_new, T, atol=1e-12)
+
+    def test_energy_conserved_across_advection(self):
+        """Finding #2: the recovered temperature carries the flux-transported
+        enthalpy faithfully, instead of having a hard ``clip(T)`` delete it.
+
+        Convention: enth = T*vol with vol = h*conc (extensive, conserved by the
+        flux-form PPM transport); T (intensive) is recovered as enth/vol.  The
+        previous code clipped the recovered T to the melt point, silently
+        removing the enthalpy of any limiter-overshoot with no flux to credit
+        it.  Two checks: (1) at low CFL the column conserves enthalpy down to
+        the FV operator's own floor (cube-seam ~1e-6), far below the O(1)
+        errors a binding T-clip injects; (2) the returned state reconstructs
+        the transported enthalpy on ice cells to machine precision.
+        """
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Sharp ice slab on face 0 with an internal hot/cold contrast (forces
+        # the vol and enth limiters to disagree near the front).
+        h = jnp.zeros(shape).at[0].set(2.0)
+        a = jnp.zeros(shape).at[0].set(0.9)
+        T = jnp.full(shape, 271.0).at[0, 2:6, 2:4].set(272.5).at[0, 2:6, 4:6].set(258.0)
+        # Small velocity -> CFL << 1 so PPM is monotone; the safety clamp is
+        # non-binding and the only residual is the operator's seam error.
+        u = jnp.full(shape, 0.01)
+        v = jnp.full(shape, 0.005)
+        dt = 1800.0
+        enth0 = jnp.sum(T * h * a)
+        h_new, a_new, T_new = advect_ice_tracers(h, a, T, u, v, grid, dt)
+        enth1 = jnp.sum(T_new * h_new * a_new)
+        rel = float(jnp.abs(enth1 - enth0) / jnp.abs(enth0))
+        # Conserved to the FV operator's floor (a binding T-clip gave O(1e-3+)).
+        assert rel < 1e-5, f"enthalpy not conserved across advection: rel={rel:.2e}"
+        # Recovered T stays within the donor range at CFL<=1 (no gross overshoot
+        # to be clipped) and inside the non-binding safety clamp.
+        ice = (h_new * a_new) > 1e-12
+        T_ice_vals = jnp.where(ice, T_new, 271.0)
+        assert float(jnp.min(T_ice_vals)) >= 258.0 - 0.5
+        assert float(jnp.max(T_ice_vals)) <= 272.5 + 0.5
+
+    def test_energy_clip_no_longer_destroys_overshoot(self):
+        """Finding #2 (direct): build a CFL>1 step where the recovered T
+        overshoots the melt point, and confirm the NEW recovery preserves the
+        flux-transported enthalpy on ice cells while the OLD ``clip(T,180,
+        T_max)`` would have deleted the overshoot enthalpy."""
+        from legoesm.ice import transport as _T
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        h = jnp.zeros(shape).at[0].set(2.0)
+        a = jnp.zeros(shape).at[0].set(0.9)
+        T = jnp.full(shape, 271.0).at[0, :, :2].set(272.9).at[0, :, 2:].set(255.0)
+        u = jnp.full(shape, 8.0)   # CFL >> 1 -> limiter monotonicity not held
+        v = jnp.zeros(shape)
+        dt = 3600.0
+        # Reproduce the internal transported fields.
+        vol = h * a
+        enth = T * vol
+        vol_n = jnp.maximum(vol + dt * _T._ppm_tendency_2d(vol, u, v, grid), 0.0)
+        enth_n = enth + dt * _T._ppm_tendency_2d(enth, u, v, grid)
+        has_vol = vol_n > _T._VOL_FLOOR
+        T_raw = jnp.where(has_vol, enth_n / jnp.where(has_vol, vol_n, 1.0), 271.0)
+        overshoot = jnp.any(has_vol & (T_raw > constants.T_freeze))
+        assert bool(overshoot), "test precondition: need a melt-point overshoot"
+        # NEW recovery (via the public function).
+        h_new, a_new, T_new = advect_ice_tracers(
+            h, a, T, u, v, grid, dt, T_max=float(constants.T_freeze),
+        )
+        enth_new_state = jnp.sum(T_new * h_new * a_new)
+        enth_transported = jnp.sum(jnp.where(has_vol, enth_n, 0.0))
+        # The new state's enthalpy equals EXACTLY the transported enthalpy with
+        # T clamped only to the WIDE safety band [T_min-50, T_freeze+50]: the
+        # new clamp can only bite above that band, so the deleted energy is
+        # quantified, not just "less than the old".
+        T_lo = _T._T_ICE_MIN_DEFAULT - _T._T_SAFETY_MARGIN_K
+        T_hi = float(constants.T_freeze) + _T._T_SAFETY_MARGIN_K
+        enth_wide = jnp.sum(jnp.where(has_vol, jnp.clip(T_raw, T_lo, T_hi) * vol_n, 0.0))
+        assert jnp.allclose(enth_new_state, enth_wide, rtol=1e-12), (
+            "new state must equal the wide-safety-clamped transported enthalpy"
+        )
+        # And it deletes STRICTLY less energy than the old melt-point clip,
+        # which bound T at T_freeze (the bug this fix removes).
+        old_clip_T = jnp.clip(T_raw, _T._T_ICE_MIN_DEFAULT, constants.T_freeze)
+        enth_old_clip = jnp.sum(jnp.where(has_vol, old_clip_T * vol_n, 0.0))
+        new_err = float(jnp.abs(enth_new_state - enth_transported))
+        old_err = float(jnp.abs(enth_old_clip - enth_transported))
+        assert new_err < old_err, (
+            f"new recovery ({new_err:.3e}) should delete less enthalpy than the "
+            f"old melt-point clip ({old_err:.3e})"
+        )
+
+    def test_mass_conserved_on_margin_cell(self):
+        """Finding #3: the returned (h, conc) reconstruct the transported
+        VOLUME exactly (h*conc == max(vol_n, 0)) even where independent
+        vol/conc limiting drives concentration toward 0 while volume remains,
+        so a margin cell's volume is NOT vanished into a mass sink (the old
+        ``has_ice = conc_new > 0`` test returned h=0 there)."""
+        from legoesm.ice import transport as _T
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Thin ice tongue with a sharp concentration edge — the classic margin
+        # where conc limits toward 0 ahead of the volume front.
+        h = jnp.zeros(shape).at[0, :, 1:3].set(1.0)
+        a = jnp.zeros(shape).at[0, :, 1:3].set(0.6)
+        T = jnp.full(shape, 263.0)
+        u = jnp.full(shape, 0.06)
+        v = jnp.zeros(shape)
+        dt = 3600.0
+        vol = h * a
+        vol_n = jnp.maximum(vol + dt * _T._ppm_tendency_2d(vol, u, v, grid), 0.0)
+        h_new, a_new, T_new = advect_ice_tracers(h, a, T, u, v, grid, dt)
+        # Per-cell volume reconstruction is exact -> no per-cell mass sink.
+        recon_err = float(jnp.max(jnp.abs(h_new * a_new - vol_n)))
+        assert recon_err < 1e-12, (
+            f"h*conc must reconstruct transported volume exactly: {recon_err:.2e}"
+        )
+        # Where volume survived, h is finite and bounded by vol/_CONC_FLOOR (no
+        # spike to inf), and concentration is physical.
+        assert jnp.all(jnp.isfinite(h_new))
+        assert jnp.all(h_new >= 0.0)
+        assert jnp.all((a_new >= 0.0) & (a_new <= 1.0))
+
+    def test_volume_retained_when_conc_is_zero_but_vol_positive(self):
+        """Finding #3 (direct recovery contrast, no operator noise): on the
+        EXACT pathology ``conc_n == 0`` while ``vol_n > 0`` (independent
+        vol/conc limiters), the OLD recovery (``has_ice = conc_new > 0`` ->
+        ``h = 0``) VANISHES the volume (h*conc = 0 != vol_n), a mass sink.
+        The fix keys retention off ``vol_n`` and floors conc, so
+        ``h*conc == vol_n`` exactly.  We replicate both recovery formulas on a
+        synthetic transported pair to isolate the changed branch."""
+        from legoesm.ice import transport as _T
+        vol_floor = _T._VOL_FLOOR        # volume threshold [m]
+        conc_floor = _T._CONC_FLOOR      # division floor [area fraction]
+        # Synthetic post-transport fields: one margin cell with volume but
+        # zero concentration, one normal interior cell, one ice-free cell.
+        vol_n = jnp.array([0.4, 1.8, 0.0])      # m (per grid-cell area)
+        conc_n = jnp.array([0.0, 0.9, 0.0])     # zero conc where vol>0!
+
+        # --- OLD recovery (the bug) ---
+        has_ice_old = conc_n > 0.0
+        conc_safe_old = jnp.where(has_ice_old, conc_n, 1.0)
+        h_old = jnp.where(has_ice_old, vol_n / conc_safe_old, 0.0)
+        vol_recon_old = h_old * conc_n
+        # The margin cell's volume is destroyed by the old formula.
+        assert float(vol_recon_old[0]) == 0.0 and float(vol_n[0]) > 0.0
+
+        # --- NEW recovery (the fix, mirroring transport.py bare-floor) ---
+        has_vol = vol_n > vol_floor
+        conc_out = jnp.where(has_vol, jnp.maximum(conc_n, conc_floor), 0.0)
+        conc_safe = jnp.where(has_vol, conc_out, 1.0)
+        h_new = jnp.where(has_vol, vol_n / conc_safe, 0.0)
+        vol_recon_new = h_new * conc_out
+        # Volume reconstructed EXACTLY on every cell, including the margin
+        # (h_new*conc_out == vol_n), so no per-cell mass sink.
+        assert jnp.allclose(vol_recon_new, vol_n, atol=1e-15), (
+            "fix must reconstruct transported volume exactly"
+        )
+        # h is finite and bounded by vol/_CONC_FLOOR (no spike to inf).  We
+        # intentionally do NOT cap h / re-derive conc here: the shared helper
+        # also transports snow/pond (h-slot) whose callers pair the returned
+        # THICKNESS with the ICE concentration, so altering conc would break
+        # their inventory (codex R4-1).
+        assert jnp.all(jnp.isfinite(h_new))
+        assert float(h_new[0]) <= float(vol_n[0]) / conc_floor + 1.0
+        # The normal interior cell is UNCHANGED.
+        assert float(h_new[1]) == pytest.approx(2.0, rel=1e-9)
+        assert float(conc_out[1]) == pytest.approx(0.9, rel=1e-9)
+
+    def test_snow_inventory_conserved_through_transport(self):
+        """Codex R4-1: the SHARED transport helper carries snow (and pond) in
+        the h-slot and the caller pairs the returned snow THICKNESS with the
+        ICE concentration.  The ice-channel recovery must therefore NOT alter
+        the ice concentration (e.g. via an h-cap), or h_snow*conc_ice would no
+        longer equal the transported snow volume.  Replicate the production
+        two-call pattern (ice then snow against the SAME pre-transport conc) and
+        assert the snow inventory is conserved to the operator floor."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Sharp ice + snow margin so the conc limiter is stressed.
+        h = jnp.zeros(shape).at[0, :, 1:4].set(2.0)
+        a = jnp.zeros(shape).at[0, :, 1:4].set(0.7)
+        h_snow = jnp.zeros(shape).at[0, :, 1:4].set(0.3)
+        T = jnp.full(shape, 263.0)
+        u = jnp.full(shape, 0.06)
+        v = jnp.zeros(shape)
+        dt = 3600.0
+        conc0 = a
+        snow_vol_before = float(jnp.sum(h_snow * conc0))
+        # ICE call (returns the post-transport ice concentration).
+        _, conc_ice, _ = advect_ice_tracers(h, a, T, u, v, grid, dt)
+        # SNOW call against the SAME pre-transport conc (production pattern).
+        h_snow_new, _, _ = advect_ice_tracers(h_snow, conc0, T, u, v, grid, dt)
+        # The snow inventory the caller reconstructs is h_snow_new * conc_ice.
+        snow_vol_after = float(jnp.sum(h_snow_new * conc_ice))
+        rel = abs(snow_vol_after - snow_vol_before) / max(snow_vol_before, 1e-12)
+        # Conserved to the cubed-sphere FV operator floor (~1e-5; the same
+        # seam/positivity floor the ice-volume transport sees).  An ice-channel
+        # recovery that ALTERED conc (e.g. the reverted h-cap) firing on a margin
+        # cell would inject an O(1) error here.
+        assert rel < 5e-5, f"snow inventory not conserved through transport: rel={rel:.3e}"
 
 
 # ==============================================================================

@@ -126,9 +126,9 @@ class TestDetectDevices:
         assert config.supports_float64 is True
 
     def test_metal_detection_mock(self):
-        """Simulated Metal detection reports no float64."""
+        """Simulated Apple GPU (mps) detection reports no float64."""
         with patch("legoesm.parallel.device_config.jax.default_backend",
-                   return_value="metal"):
+                   return_value="mps"):
             with patch("legoesm.parallel.device_config.jax.devices",
                        return_value=[MagicMock(device_kind="Apple M2")]):
                 with patch("legoesm.parallel.device_config.jax.local_devices",
@@ -136,7 +136,7 @@ class TestDetectDevices:
                     with patch("legoesm.parallel.device_config.jax.process_count",
                                return_value=1):
                         config = detect_devices()
-        assert config.backend == "metal"
+        assert config.backend == "mps"
         assert config.supports_float64 is False
         assert config.supports_complex128 is False
 
@@ -214,8 +214,8 @@ class TestMemoryEstimation:
         assert mem == 128.0
 
     def test_metal_memory(self):
-        """Metal reports 8 GB."""
-        mem = _estimate_device_memory("metal", [])
+        """Apple GPU (mps) reports 8 GB."""
+        mem = _estimate_device_memory("mps", [])
         assert mem == 8.0
 
 
@@ -428,12 +428,12 @@ class TestGetOptimalDtype:
 
     def test_single_always_float32(self):
         """Single precision returns float32 on any backend."""
-        for backend in ("cpu", "gpu", "tpu", "metal"):
+        for backend in ("cpu", "gpu", "tpu", "mps"):
             config = HardwareConfig(
                 backend=backend,
                 device_count=1, devices_per_host=1, num_hosts=1,
-                supports_float64=backend not in ("metal",),
-                supports_complex128=backend not in ("metal",),
+                supports_float64=backend not in ("mps",),
+                supports_complex128=backend not in ("mps",),
                 memory_per_device_gb=16.0,
                 recommended_batch_size=2,
             )
@@ -467,9 +467,9 @@ class TestGetOptimalDtype:
         assert get_optimal_dtype(config, "half") == jnp.float32
 
     def test_half_on_metal_is_float32(self):
-        """Half precision on Metal falls back to float32."""
+        """Half precision on Apple GPU (mps) falls back to float32."""
         config = HardwareConfig(
-            backend="metal", device_count=1, devices_per_host=1, num_hosts=1,
+            backend="mps", device_count=1, devices_per_host=1, num_hosts=1,
             supports_float64=False, supports_complex128=False,
             memory_per_device_gb=8.0, recommended_batch_size=1,
         )
@@ -485,9 +485,9 @@ class TestGetOptimalDtype:
         assert get_optimal_dtype(config, "double") == jnp.float64
 
     def test_double_on_metal_falls_back(self):
-        """Double precision on Metal falls back to float32."""
+        """Double precision on Apple GPU (mps) falls back to float32."""
         config = HardwareConfig(
-            backend="metal", device_count=1, devices_per_host=1, num_hosts=1,
+            backend="mps", device_count=1, devices_per_host=1, num_hosts=1,
             supports_float64=False, supports_complex128=False,
             memory_per_device_gb=8.0, recommended_batch_size=1,
         )

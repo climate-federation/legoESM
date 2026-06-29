@@ -43,7 +43,6 @@ from legoesm.ocean.dynamics.barotropic_common import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     depth_average_to_faces,
-    implicit_bottom_drag_factor,
 )
 
 
@@ -199,12 +198,12 @@ def barotropic_substeps_latlon_cgrid(
     # The cell-center form nu_cell * laplacian(eta) is non-conservative
     # when nu_cell varies spatially (area varies as cos(lat) on latlon).
     baro_alpha = jnp.asarray(
-        config.barotropic_diffusion_alpha, dtype=eta.dtype,
-    ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+        config.barotropic.barotropic_diffusion_alpha, dtype=eta.dtype,
+    ) * (dt_s / jnp.asarray(config.barotropic.barotropic_diffusion_dt_ref, dtype=eta.dtype))
 
     # Precompute face-centered diffusion coefficients (grid geometry only,
     # constant across substeps).
-    if config.barotropic_diffusion_alpha > 0.0:
+    if config.barotropic.barotropic_diffusion_alpha > 0.0:
         area = _area  # already cast to _dt above
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
@@ -247,11 +246,11 @@ def barotropic_substeps_latlon_cgrid(
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
     # while leaving geostrophic (rotational) flow untouched (#205).
-    use_div_damp = config.barotropic_div_damp > 0.0
+    use_div_damp = config.barotropic.barotropic_div_damp > 0.0
     if use_div_damp:
         div_damp_coeff = jnp.asarray(
-            config.barotropic_div_damp, dtype=eta.dtype,
-        ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+            config.barotropic.barotropic_div_damp, dtype=eta.dtype,
+        ) * (dt_s / jnp.asarray(config.barotropic.barotropic_diffusion_dt_ref, dtype=eta.dtype))
         # u-face area: average of adjacent cells (_area already cast to _dt)
         div_damp_area_u = 0.5 * (jnp.roll(_area, 1, axis=1) + _area)
         div_damp_area_u = jnp.concatenate(
@@ -268,31 +267,30 @@ def barotropic_substeps_latlon_cgrid(
     # Cosine time filter for time-averaging (replaces box-average).
     # Cosine-bell (Hanning) window suppresses the side lobes of the box
     # filter that alias barotropic modes into the baroclinic coupling.
-    # Transport accumulators (Hu, Hv) MUST remain box-filtered for exact
-    # volume conservation with the discrete continuity equation.
     # Averaging filter for eta/U/V + the matching transport weights for Hu/Hv.
     # "power_law" = Shchepetkin-McWilliams (2005) extended-window filter (ROMS/
     # MOM6/Oceananigans), which damps the 2Δx barotropic Coriolis null mode the
     # first-order cosine filter excites (docs/issues/barotropic_mode_noise.md).
-    # The cosine/box path is bit-identical to before: w_transport = 1/n_substeps
-    # per substep, so Hu_avg = sum(w_transport*flux) == sum(flux)/n_substeps.
-    if config.barotropic_time_filter == "power_law":
+    # For box/cosine the transport weights are NO LONGER a flat 1/n: they are the
+    # continuity-consistent SM2005 tail-sum ``tail_j/(n·w_total)`` returned by
+    # compute_filter_weights, so the discrete continuity invariant
+    # ``div(Hu_avg) == (eta_old - eta_avg)/dt`` (which the flux-form tracer step
+    # needs to preserve a uniform tracer) holds for EVERY filter — the flat 1/n
+    # broke it for both box (~95%) and cosine (~99%).
+    if config.barotropic.barotropic_time_filter == "power_law":
         w_filter, w_total, w_transport, n_loop = compute_power_law_filter_weights(
             n_substeps, eta.dtype,
         )
     else:
-        use_cosine_filter = config.barotropic_time_filter == "cosine"
-        w_filter, w_total = compute_filter_weights(
+        use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
+        w_filter, w_total, w_transport = compute_filter_weights(
             n_substeps, eta.dtype, use_cosine=use_cosine_filter,
         )
         n_loop = n_substeps
-        w_transport = jnp.full(
-            (n_substeps,), 1.0 / n_substeps, dtype=eta.dtype,
-        )
 
     # BEBT semi-implicit parameter and MAXVEL clipping
-    bebt = config.bebt
-    _maxvel = config.maxvel_barotropic
+    bebt = config.barotropic.bebt
+    _maxvel = config.barotropic.maxvel_barotropic
     use_maxvel = _maxvel > 0.0
 
     # Accumulators for time-averaged barotropic transport (Phase 2a, issue #102).
@@ -356,7 +354,7 @@ def barotropic_substeps_latlon_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
         ).astype(eta.dtype)
         eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
-        if config.barotropic_local_subcycle_clamp:
+        if config.barotropic.barotropic_local_subcycle_clamp:
             # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
             # The global mass-conserving redistribute is deferred to ONCE per
             # outer step (post-loop, on the time-averaged eta).
@@ -414,14 +412,16 @@ def barotropic_substeps_latlon_cgrid(
                 V_bar_new + div_damp_coeff * div_damp_area_v * grad_div_y
             ) * v_mask
 
-        # Bottom drag: -r * U_bar / H_total
-        if config.bottom_drag_r > 0:
-            U_bar_new = U_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag_r, H_u,
-            )
-            V_bar_new = V_bar_new * implicit_bottom_drag_factor(
-                dt_s, config.bottom_drag_r, H_v,
-            )
+        # Bottom drag — SINGLE OWNER (finding #6 fix).
+        # The 3D PE tendency (``_bc_bottom_drag``) already applies the full
+        # bottom drag ``-r·u_bot/h_bot`` (with BBL / partial-cell handling) to
+        # ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the barotropic
+        # mode through ``F_slow_u``/``F_slow_v`` and applied at every substep
+        # above.  Re-applying ``implicit_bottom_drag_factor`` here would make the
+        # effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2 finding #1).
+        # The drag is therefore owned exclusively by the 3D tendency / F_slow;
+        # we do NOT re-apply it here.  (The implicit-CN solver already relied on
+        # F_slow alone, so the two barotropic paths are now consistent.)
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
@@ -429,7 +429,7 @@ def barotropic_substeps_latlon_cgrid(
             V_bar_new = maxvel_clip(V_bar_new, _maxvel)
 
         # Optional Laplacian damping on eta (flux-form: conservative)
-        if config.barotropic_diffusion_alpha > 0.0:
+        if config.barotropic.barotropic_diffusion_alpha > 0.0:
             grad_x = gradient_x_cgrid(eta_new * mask, grid)
             grad_y = gradient_y_cgrid(eta_new * mask, grid)
             flux_x = nu_face_u * grad_x * diff_u_mask
@@ -437,7 +437,7 @@ def barotropic_substeps_latlon_cgrid(
             eta_new = (
                 eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(eta.dtype)
             ) * mask
-            if config.barotropic_local_subcycle_clamp:
+            if config.barotropic.barotropic_local_subcycle_clamp:
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, _area)
@@ -452,7 +452,7 @@ def barotropic_substeps_latlon_cgrid(
 
     init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
 
-    if config.differentiable_barotropic:
+    if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
         def scan_body(carry, wts_i):
             new_carry = substep_body(wts_i, carry)
@@ -472,9 +472,11 @@ def barotropic_substeps_latlon_cgrid(
             0, n_loop, fori_body, init_carry,
         )
 
-    # Time-averaged barotropic transport: w_transport already carries the
-    # 1/n_substeps normalisation (box/cosine) or the SM2005 secondary weights
-    # (power_law), so the accumulator IS the time-averaged transport.
+    # Time-averaged barotropic transport: w_transport already carries the full
+    # continuity-consistent normalisation — the SM2005 tail-sum
+    # ``tail_j/(n·w_total)`` (box/cosine) or the SM2005 secondary weights
+    # (power_law) — so the accumulator IS the time-averaged transport ``Hu_avg``
+    # that closes ``div(Hu_avg) == (eta_old - eta_avg)/dt``.
     Hu_avg = Hu_sum_f
     Hv_avg = Hv_sum_f
 
@@ -489,7 +491,7 @@ def barotropic_substeps_latlon_cgrid(
     # per-substep path) when no cell hit eta_floor; this single call's 3 batched
     # allreduces replace the subcycle's ~3*n_substeps (the outer-step
     # fix_eta_drift fixer is separate, unaffected).
-    if config.barotropic_local_subcycle_clamp:
+    if config.barotropic.barotropic_local_subcycle_clamp:
         eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
     # Correct 3D velocities: preserve baroclinic structure.

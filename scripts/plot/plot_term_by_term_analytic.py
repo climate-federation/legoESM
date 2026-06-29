@@ -83,7 +83,7 @@ def _zero_dynamics_config(*, A_h=0.0, B_h=0.0, bottom_drag_r=0.0,
                           tracer_time_integrator="euler",
                           barotropic_solver="explicit_substep",
                           n_barotropic_substeps=10):
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=A_h, A_h_lat_scaling=False, A_h_eq_boost=1.0, A_h_merid=0.0,
         B_h=B_h, B_h_barotropic=0.0,
         C_smag=0.0, C_smag_lap=0.0, C_leith=0.0, slope_foot_alpha=0.0,

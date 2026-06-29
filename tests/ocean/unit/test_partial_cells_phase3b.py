@@ -226,7 +226,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
 
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, partial_coord, cfg,
         )
@@ -280,7 +280,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
             T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,   # ← legacy z* coord
         )
@@ -303,7 +303,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
             H_bathy_override=H_bathy,
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         tend_zstar = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )

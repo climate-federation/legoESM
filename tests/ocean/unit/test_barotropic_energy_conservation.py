@@ -74,7 +74,7 @@ def _closed_box_geom_state():
 
 
 def _inviscid_unforced_config():
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=9.81, rho_0=1000.0,
         eos="linear", eos_linear=LinearEOSConfig(rho_ref=1000.0, alpha_T=0.0, beta_S=0.0),
         A_h=0.0, A_h_lat_scaling=False, B_h=0.0, C_smag=0.0,

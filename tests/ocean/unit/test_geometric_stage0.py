@@ -82,13 +82,13 @@ def test_observation_target_perturbed_has_positive_misfit():
 def test_relative_param_error_zero_at_truth():
     from legoesm.ocean.physics.lateral_mixing.eke import GeometricConfig
     from legoesm.training.trainable_ocean_params import (
-        GEOMETRIC_TRAINABLE, TrainableOceanParams,
+        GEOMETRIC_TRAINABLE, TrainableOceanParams, constrain,
     )
     true_geom = GeometricConfig()
     # Ensemble all sitting exactly at the true (default) params.
     raw = TrainableOceanParams.from_defaults(GEOMETRIC_TRAINABLE).raw
     theta = np.broadcast_to(np.asarray(raw), (5, raw.shape[0]))
-    errs = g0.relative_param_error(theta, true_geom, GEOMETRIC_TRAINABLE)
+    errs = g0.relative_param_error(theta, true_geom, GEOMETRIC_TRAINABLE, constrain)
     for name, (val, true, rel) in errs.items():
         assert rel < 1e-6, f"{name}: rel={rel}"
 

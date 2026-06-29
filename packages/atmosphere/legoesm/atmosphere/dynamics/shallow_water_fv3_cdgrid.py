@@ -66,6 +66,74 @@ from legoesm.core.fv3_del6_vt_flux import fv3_del6_vorticity_damping
 from legoesm import constants
 
 
+# --- numerics floor (one-off; not a tunable scheme coefficient) ---
+# Physical lower bound on the shallow-water fluid depth ``h`` [m].  ``h`` is a
+# layer thickness and MUST stay >= 0; a uniform additive mass-conservation
+# correction can otherwise drive a thin layer negative (mass through a "hole").
+# Exactly zero is the physical floor; with mass_target > 0 the floor-then-
+# renormalize below is provably positive (see ``_apply_mass_conserving_floor``).
+_H_FLOOR_M: float = 0.0  # coeff-ok: physical non-negativity floor for depth h
+
+
+def _apply_mass_conserving_floor(
+    h, area, total_area, mass_target, mass_new, h_floor=_H_FLOOR_M,
+):
+    """Mass-conserving, positivity-preserving shallow-water depth fixer.
+
+    Sign / conservation convention (h is a fluid DEPTH, positive-up; mass =
+    ``∫ h dA`` is the conserved scalar):
+
+    1. Uniform additive correction ``c = (mass_target - mass_new)/total_area``
+       so ``∫ (h+c) dA == mass_target`` EXACTLY (the legacy behaviour; preserves
+       horizontal gradients of h, important for differentiability).
+    2. Floor at ``h_floor`` so ``h >= h_floor`` (no negative depth / no mass
+       leak through a thin layer).  Flooring INJECTS a non-negative mass
+       ``deficit = ∫ (h_floored - (h+c)) dA``.
+    3. Remove exactly ``deficit`` by proportionally shrinking the headroom
+       ``(h_floored - h_floor)`` of the cells ABOVE the floor, so the column
+       mass returns to ``mass_target`` while every cell stays >= ``h_floor``.
+
+    Conservation: ``∫ h_out dA == mass_target`` to accumulator precision (the
+    flooring-injected mass is removed term-for-term).  Positivity: with
+    ``h_floor == 0`` and ``mass_target > 0`` the renorm ``scale = mass_target /
+    excess_mass ∈ (0, 1]`` so ``h_out = scale * (h+c) >= 0`` is guaranteed.
+
+    Differentiability: gradients are FINITE everywhere (the divide uses a safe
+    denominator so the empty-headroom boundary cannot seed a NaN adjoint).  The
+    map has the usual finite-subgradient KINKS of ``maximum``/``where`` at floor
+    onset (``h_add == h_floor``) and at ``deficit == 0`` — it is sub-
+    differentiable, not C¹, like every other clip/floor in the dycore.  The
+    no-flooring fast path (``deficit == 0``) returns the legacy additive result
+    BIT-IDENTICALLY via ``jnp.where`` so existing W2/W5 regression baselines are
+    unchanged on the normal, never-negative path.
+    """
+    correction = (mass_target - mass_new) / total_area
+    h_add = h + correction
+    h_floored = jnp.maximum(h_add, h_floor)
+    # Mass injected by the floor (>= 0); must be removed to conserve.
+    deficit = jnp.sum((h_floored - h_add) * area)
+    # Headroom above the floor that can absorb the removal.
+    excess = jnp.maximum(h_floored - h_floor, 0.0)
+    excess_mass = jnp.sum(excess * area)
+    # Proportional shrink of the headroom; guard the empty-headroom case.
+    # Use a SAFE denominator BEFORE the divide so reverse-mode AD never sees a
+    # 0/0 (a bare ``deficit/excess_mass`` inside ``jnp.where`` still evaluates
+    # the divide on the dead branch and seeds NaN adjoints at ``excess_mass==0``
+    # — the feasible dry-column boundary h_add==0, mass_target==0).
+    # ``maximum(scale, 0)`` keeps h >= h_floor even in the (physically
+    # impossible for mass_target>0, h_floor=0) regime deficit > excess_mass.
+    has_headroom = excess_mass > 0.0
+    excess_mass_safe = jnp.where(has_headroom, excess_mass, 1.0)
+    scale = jnp.where(
+        has_headroom,
+        jnp.maximum(1.0 - deficit / excess_mass_safe, 0.0),
+        1.0,
+    )
+    h_renorm = h_floor + excess * scale
+    # Bit-identical to the legacy additive result when nothing was floored.
+    return jnp.where(deficit > 0.0, h_renorm, h_add)
+
+
 # ==============================================================================
 # State and Config
 # ==============================================================================
@@ -1139,10 +1207,13 @@ class CDGridShallowWaterModel(IntegrationMixin):
                     _h_pair, axis=tuple(range(area.ndim)),
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
-            correction = (mass_target - mass_new) / total_area
-            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
-            # correction promotes the add (matches ``fix_ps_mass``).
-            h_fixed = state_new.h + correction
+            # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
+            # renormalize keeps h >= 0 (no mass leak through a thin layer)
+            # while conserving column mass exactly; BIT-IDENTICAL to the
+            # legacy additive correction on the normal never-negative path.
+            h_fixed = _apply_mass_conserving_floor(
+                state_new.h, area, total_area, mass_target, mass_new,
+            )
             state_new = state_new._replace(h=h_fixed)
 
         # Cast back to storage precision.
@@ -1313,10 +1384,13 @@ class FV3FBShallowWaterModel:
                     _h_pair, axis=tuple(range(area.ndim)),
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
-            correction = (mass_target - mass_new) / total_area
-            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
-            # correction promotes the add (matches ``fix_ps_mass``).
-            h_fixed = state_new.h + correction
+            # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
+            # renormalize keeps h >= 0 (no mass leak through a thin layer)
+            # while conserving column mass exactly; BIT-IDENTICAL to the
+            # legacy additive correction on the normal never-negative path.
+            h_fixed = _apply_mass_conserving_floor(
+                state_new.h, area, total_area, mass_target, mass_new,
+            )
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")
@@ -1637,10 +1711,13 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     _h_pair, axis=tuple(range(area.ndim)),
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
-            correction = (mass_target - mass_new) / total_area
-            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
-            # correction promotes the add (matches ``fix_ps_mass``).
-            h_fixed = state_new.h + correction
+            # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
+            # renormalize keeps h >= 0 (no mass leak through a thin layer)
+            # while conserving column mass exactly; BIT-IDENTICAL to the
+            # legacy additive correction on the normal never-negative path.
+            h_fixed = _apply_mass_conserving_floor(
+                state_new.h, area, total_area, mass_target, mass_new,
+            )
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")

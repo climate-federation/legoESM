@@ -1393,8 +1393,8 @@ def barotropic_implicit_latlon_cgrid(
         ) * v_mask
 
     # ----- Step 5: build elliptic RHS and solve ------------------------
-    theta_eta = jnp.asarray(config.barotropic_implicit_theta_eta, dtype=eta_dtype)
-    theta_pgf = jnp.asarray(config.barotropic_implicit_theta_pgf, dtype=eta_dtype)
+    theta_eta = jnp.asarray(config.barotropic.barotropic_implicit_theta_eta, dtype=eta_dtype)
+    theta_pgf = jnp.asarray(config.barotropic.barotropic_implicit_theta_pgf, dtype=eta_dtype)
     coeff = theta_eta * theta_pgf * dt_t * dt_t * g
 
     # Time-averaged predicted transport for continuity
@@ -1452,7 +1452,7 @@ def barotropic_implicit_latlon_cgrid(
         from legoesm.grids.halo import get_mpi_topology as _get_topo
         _pc_layout = _get_topo()
     M_inv = _select_preconditioner(
-        str(getattr(config, "barotropic_implicit_preconditioner",
+        str(getattr(config.barotropic, "barotropic_implicit_preconditioner",
                     "jacobi")),
         inv_diag, H_u_old, H_v_old, coeff, grid, mask,
         A_op=A_op,
@@ -1491,12 +1491,12 @@ def barotropic_implicit_latlon_cgrid(
         solve_helmholtz_implicit,
     )
     _area_eta = grid.area.astype(eta_dtype)
-    _residual_tol = config.barotropic_implicit_pcg_residual_tol
+    _residual_tol = config.barotropic.barotropic_implicit_pcg_residual_tol
     # ``force_pcg`` selects the fixed-M PCG body even single-rank
     # (solver-matched parity references + the faster-single-rank
     # option, job 8458701); its global dots reduce locally when not
     # multi-process, so the flag is safe pre-arming.
-    _use_pcg = _is_distributed() or bool(config.barotropic_implicit_force_pcg)
+    _use_pcg = _is_distributed() or bool(config.barotropic.barotropic_implicit_force_pcg)
     if not _use_pcg:
         # The stock-CG branch solves with its INTERNAL Jacobi (the
         # custom-VJP solver owns inv_diag for its exact adjoint) — a
@@ -1505,7 +1505,7 @@ def barotropic_implicit_latlon_cgrid(
         # 2026-06-12): the fixed-M PCG honors it — set
         # barotropic_implicit_force_pcg=True for single-rank runs.
         _precond_req = str(getattr(
-            config, "barotropic_implicit_preconditioner", "jacobi"))
+            config.barotropic, "barotropic_implicit_preconditioner", "jacobi"))
         if _precond_req != "jacobi":
             raise ValueError(
                 "barotropic_implicit_latlon_cgrid: "
@@ -1518,12 +1518,12 @@ def barotropic_implicit_latlon_cgrid(
                 "preconditioner='jacobi'."
             )
         pcg_tol = jnp.asarray(
-            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+            config.barotropic.barotropic_implicit_pcg_tol, dtype=eta_dtype,
         )
         eta_new = solve_helmholtz_freesurface(
             rhs, eta_old, H_u_old, H_v_old, coeff, mask, u_mask, v_mask,
             inv_diag, grid, tol=pcg_tol,
-            maxiter=int(config.barotropic_implicit_pcg_maxiter),
+            maxiter=int(config.barotropic.barotropic_implicit_pcg_maxiter),
         )
         # Same diagnostic contract as the solve_helmholtz_implicit stock
         # branch (global rel-residual + converged flag), so the
@@ -1536,11 +1536,11 @@ def barotropic_implicit_latlon_cgrid(
         eta_new, _solve_diag = solve_helmholtz_implicit(
             A_op, rhs, M_inv, eta_old,
             distributed=True,
-            fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
+            fixed_iters=int(config.barotropic.barotropic_implicit_pcg_fixed_iters),
             residual_tol=_residual_tol,
-            stock_cg_tol=config.barotropic_implicit_pcg_tol,
-            stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
-            pcg_variant=str(config.barotropic_implicit_pcg_variant),
+            stock_cg_tol=config.barotropic.barotropic_implicit_pcg_tol,
+            stock_cg_maxiter=int(config.barotropic.barotropic_implicit_pcg_maxiter),
+            pcg_variant=str(config.barotropic.barotropic_implicit_pcg_variant),
             # W-inner-product weight for the single_reduce recurrences
             # (masked cell area — the dot in which this FV Helmholtz is
             # self-adjoint; ignored by the standard body).
@@ -1553,7 +1553,7 @@ def barotropic_implicit_latlon_cgrid(
     # production-default path (enable_runtime_checks=False) is
     # unchanged.  ``return_residual=True`` callers keep the loud
     # outside-JIT handling.
-    if bool(config.enable_runtime_checks):
+    if bool(config.runtime_checks.enable_runtime_checks):
         jax.lax.cond(
             _solve_diag.converged,
             lambda _r: None,

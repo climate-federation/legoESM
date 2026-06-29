@@ -245,8 +245,18 @@ def _plot_timeseries(snaps: list[dict], grid_kind: str, out_path: Path):
         T_oc = s["T"][mask, :] if mask.any() else np.array([np.nan])
         T_max.append(float(np.nanmax(T_oc)))
         T_min.append(float(np.nanmin(T_oc)))
-        # crude KE proxy: mean(u²) over all faces
-        ke_proxy.append(0.5 * float(np.nanmean(s["u"] ** 2)))
+        # Mean KE density [m²/s²] — must be GRID-CONSISTENT so the two grids'
+        # timeseries are comparable. lat-lon stores u,v on separate faces:
+        # using 0.5·mean(u²) alone DROPS v (which dominates here, |v|≈2|u|),
+        # making it look artificially different from MPAS. Use cell-centered
+        # 0.5·(u²+v²). MPAS stores edge-normal u only; for a quasi-isotropic
+        # hex field |u|²≈2⟨u_n²⟩, so ⟨u_n²⟩ ≈ 0.5|u|² is the matching density.
+        if "v" in s:  # lat-lon
+            u_cc = 0.5 * (s["u"][:, :-1, :] + s["u"][:, 1:, :])
+            v_cc = 0.5 * (s["v"][:-1, :, :] + s["v"][1:, :, :])
+            ke_proxy.append(0.5 * float(np.nanmean(u_cc ** 2 + v_cc ** 2)))
+        else:  # MPAS edge-normal
+            ke_proxy.append(float(np.nanmean(s["u"] ** 2)))
 
     t = np.array(times)
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
@@ -280,9 +290,9 @@ def _plot_timeseries(snaps: list[dict], grid_kind: str, out_path: Path):
 
     ax = axes[1, 1]
     ax.semilogy(t, ke_proxy, "o-", color="C4")
-    ax.set_ylabel("KE proxy = ½ ⟨u²⟩")
+    ax.set_ylabel("mean KE density ½⟨|u|²⟩ [m²/s²]")
     ax.set_xlabel("time (days)")
-    ax.set_title("Bulk KE proxy")
+    ax.set_title("Bulk KE density (grid-consistent)")
     ax.grid(alpha=0.3)
 
     plt.savefig(out_path, dpi=120)

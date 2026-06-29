@@ -678,8 +678,11 @@ def _validate_cloud_gate(radiation_config: RadiationConfig) -> None:
     direct ``RadiationConfig`` builders (AIMIP, ``combined.py``) must do the
     same.  Only RRTMGP has the gate; gray radiation is never inconsistent.
     """
+    # mc3d shares the RRTMGP optics path (Phase 2b: it calls solve_columns for
+    # the per-g-point shortwave optical field), so it has the SAME silent-cloud-
+    # drop hazard when include_clouds=False.
     if (
-        radiation_config.scheme == "rrtmgp"
+        radiation_config.scheme in ("rrtmgp", "mc3d")
         and radiation_config.cloud_scheme != "none"
         and not radiation_config.rrtmgp.include_clouds
     ):
@@ -747,12 +750,27 @@ def make_radiation_physics(
             "_make_*_radiation builder before passing surface overrides there."
         )
 
-    # Load heavy/static RRTMGP optics once outside model JIT traces.
+    # 3D Monte-Carlo ray tracing is plane-LES/CRM only (periodic horizontal BC).
+    if radiation_config.scheme == "mc3d" and model_type != "plane":
+        raise ValueError(
+            "scheme='mc3d' (3D Monte-Carlo ray tracing) is only wired for "
+            f"model_type='plane' (LES/CRM); got model_type={model_type!r}."
+        )
+
+    # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
+    # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
+    # per-g-point optics; falls back to gray optics if the tables are absent).
     rrtmgp_solver = None
-    if radiation_config.scheme == "rrtmgp":
+    if radiation_config.scheme in ("rrtmgp", "mc3d"):
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
-        RRTMGP.preload(radiation_config.rrtmgp)
-        rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
+        try:
+            RRTMGP.preload(radiation_config.rrtmgp)
+            rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
+        except Exception:
+            if radiation_config.scheme == "rrtmgp":
+                raise
+            # mc3d: gray-optics fallback when RRTMGP data is unavailable.
+            rrtmgp_solver = None
 
     # Load ML ozone ridge weights once (outside JIT).  Gray radiation
     # ignores ozone, so skip the (potentially large) NetCDF load when
@@ -1233,6 +1251,170 @@ def _make_nonhydrostatic_radiation(
 # Plane (doubly-periodic Cartesian CRM)
 # ===========================================================================
 
+def _mc3d_plane_heating(
+    radiation_config: RadiationConfig,
+    grid,
+    terrain_metric,
+    rrtmgp_solver,
+    p_full_col,
+    p_half_col,
+    T_col,
+    T_sfc_col,
+    lat_col,
+    q_v_col,
+    q_cloud_col,
+    q_ice_col,
+    n_cloud_col,
+    n_ice_col,
+    insol_col,
+    cos_sza_col,
+    rho_total,
+    ny: int,
+    nx: int,
+    nlev: int,
+):
+    """3D Monte-Carlo shortwave + gray longwave heating for the plane dycore.
+
+    Returns ``dT/dt`` ``(ny, nx, nlev)`` [K/s] (top-down). Shortwave uses the 3D
+    MC ray tracer fed by RRTMGP per-g-point optics (Phase 2b) when the solver is
+    available, else a gray-shortwave optical field (Phase 2 fallback). Longwave
+    reuses the gray two-stream column kernel so the scheme is physically complete
+    (Phase 3 replaces LW with MC). Assumes flat plane terrain (1D z interfaces)
+    and horizontally-uniform solar forcing, valid for idealized LES/CRM at
+    constant lat0.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.radiation import gray as _gray
+    from legoesm.atmosphere.physics.radiation.mc3d import plane_adapter
+
+    gray_cfg = radiation_config.gray
+    mc_cfg = radiation_config.mc3d
+
+    # 3D ray tracing needs an INSTANTANEOUS solar zenith for the beam slant.
+    # The daily-mean / perpetual-equinox path returns cos_sza=None (no single
+    # sun angle); defaulting to an overhead beam (mu0=1) would silently put SW
+    # absorption too deep. Require diurnal_cycle=True or rce_fixed_cos_zenith.
+    if cos_sza_col is None:
+        raise ValueError(
+            "scheme='mc3d' requires an instantaneous solar zenith angle: set "
+            "RadiationConfig.diurnal_cycle=True (with set_time) or "
+            "rce_fixed_cos_zenith. Daily-mean/perpetual-equinox insolation has "
+            "no single beam direction for the 3D ray tracer."
+        )
+    mu0 = jnp.mean(cos_sza_col)
+
+    z_half_td = terrain_metric.z_half_3d[0, 0, :]   # flat terrain -> 1D
+    q_v_safe = jnp.clip(q_v_col, 0.0, None)
+
+    # RRTMGP cloud kwargs (shared by SW + LW spectral optics; clear-sky when the
+    # cloud scheme is 'none'). Only built when the RRTMGP solver is present.
+    cloud_kwargs = {}
+    if rrtmgp_solver is not None and radiation_config.cloud_scheme != "none":
+        from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+            compute_cloud_properties,
+        )
+        from legoesm.atmosphere.physics.clouds.config import CloudConfig
+        cloud_config = (
+            radiation_config.cloud_config
+            if radiation_config.cloud_config is not None
+            else CloudConfig(scheme=radiation_config.cloud_scheme)
+        )
+        dp = p_half_col[:, 1:] - p_half_col[:, :-1]
+        cloud_kwargs = compute_cloud_properties(
+            T=T_col, p_full=p_full_col, q_v=q_v_safe, dp=dp,
+            config=cloud_config, q_cloud=q_cloud_col, q_ice=q_ice_col,
+            n_ice=n_ice_col, n_cloud=n_cloud_col,
+        ).to_rrtmg_kwargs()
+
+    # --- shortwave optical field ---
+    # NOTE: the plane mc3d path is AEROSOL-FREE (no aerosol_optical_depth is
+    # threaded into solve_columns here), targeting the LES/CRM regime. So the
+    # scatter split is exactly gas-Rayleigh + cloud-Mie (no aerosol), matching
+    # the oracle's 3-way reduced to 2-way. Aerosol-laden SW would need the
+    # aerosol optical depth threaded AND a 3rd (aerosol-HG) scatter branch.
+    if rrtmgp_solver is not None:
+        # Phase 2b: RRTMGP per-g-point spectral optics (gas + cloud + Rayleigh).
+        (tau, ssa, g, rayleigh_frac, r_eff_um,
+         solar_normal) = rrtmgp_solver.solve_columns(
+            T=T_col, p_full=p_full_col, p_half=p_half_col,
+            sfc_temperature=T_sfc_col, q_v=q_v_safe, cos_zenith=cos_sza_col,
+            sw_optical_field_only=True, **cloud_kwargs,
+        )
+        ngpt = tau.shape[0]
+        tau_td = tau.reshape(ngpt, ny, nx, nlev)
+        ssa_td = ssa.reshape(ngpt, ny, nx, nlev)
+        g_td = g.reshape(ngpt, ny, nx, nlev)
+        rayleigh_td = rayleigh_frac.reshape(ngpt, ny, nx, nlev)
+        # Per-band vertical TOA flux = beam-normal * mu0.
+        incident_flux = solar_normal * mu0
+        # Mie cloud phase (microhh LUT) when enabled: select each g-point's band
+        # slice via the RRTMGP g-point->band map, thread cloud r_eff [um].
+        mie_lut_cdf = mie_lut_ang = band_of_gpt = r_eff_td = None
+        if mc_cfg.use_mie:
+            from legoesm.atmosphere.physics.radiation.mc3d import mie as _mie
+            lut = _mie.load_mie_sampling_lut()
+            # Pass the SMALL per-band LUT + the g-point->band map; the band slice
+            # is gathered inside the g-point scan (no (ngpt, n_r, n_mie) copy).
+            mie_lut_cdf = lut.phase_cdf                        # (n_band, n_mie)
+            mie_lut_ang = lut.phase_cdf_angle                 # (n_band, n_r, n_mie)
+            band_of_gpt = jnp.asarray(
+                rrtmgp_solver.optics_lib.gas_optics_sw.g_point_to_bnd)
+            r_eff_td = r_eff_um.reshape(ny, nx, nlev)
+    else:
+        # Phase 2 fallback: single-band gray shortwave optics (pure absorption).
+        tau_td, ssa_td, g_td = plane_adapter.gray_sw_optical_field(
+            p_half_col, gray_cfg, ny, nx)
+        rayleigh_td = mie_lut_cdf = mie_lut_ang = band_of_gpt = r_eff_td = None
+        incident_flux = jnp.mean(insol_col).reshape(1)
+
+    key = jax.random.PRNGKey(int(mc_cfg.seed))
+    dT_dt_sw, _sfc_sw, _tod = plane_adapter.compute_plane_sw_heating(
+        tau_td, ssa_td, g_td, incident_flux, grid, z_half_td, rho_total,
+        mu0=mu0, albedo=gray_cfg.sfc_albedo, config=mc_cfg, key=key,
+        rayleigh_frac_td=rayleigh_td, mie_lut_cdf=mie_lut_cdf,
+        mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff_td=r_eff_td)
+
+    # --- longwave: 3D-MC thermal emission ---
+    key_lw = jax.random.PRNGKey(int(mc_cfg.seed) + 1)
+    if rrtmgp_solver is not None:
+        # Phase 3b: RRTMGP per-g-point spectral LW optics + Planck (cloud-aware).
+        abs_od, planck, planck_bot, planck_top, planck_sfc = (
+            rrtmgp_solver.solve_columns(
+                T=T_col, p_full=p_full_col, p_half=p_half_col,
+                sfc_temperature=T_sfc_col, q_v=q_v_safe, cos_zenith=cos_sza_col,
+                lw_optical_field_only=True, **cloud_kwargs,
+            ))
+        nglw = abs_od.shape[0]
+        dT_dt_lw, _sfc_lw, _olr = plane_adapter.compute_plane_lw_heating_spectral(
+            abs_od.reshape(nglw, ny, nx, nlev),
+            planck.reshape(nglw, ny, nx, nlev),
+            planck_sfc.reshape(nglw, ny, nx),
+            grid, z_half_td, rho_total,
+            emissivity=radiation_config.rrtmgp.sfc_emissivity,
+            config=mc_cfg, key=key_lw,
+            planck_bottom_td=planck_bot.reshape(nglw, ny, nx, nlev),
+            planck_top_td=planck_top.reshape(nglw, ny, nx, nlev))
+    else:
+        # Phase 2 fallback: gray broadband LW (k_abs=dtau_lw/dz, B=sigma T^4/pi,
+        # blackbody surface). Reduces to the column gray result for uniform
+        # columns; captures 3D emission/absorption for heterogeneous fields.
+        p_s_col = p_half_col[:, -1]
+        dtau_lw = _gray._compute_lw_optical_depth(
+            p_half_col, p_s_col, lat_col, q_v_col, gray_cfg)
+        dz_layer = z_half_td[:-1] - z_half_td[1:]              # top-down: >0
+        k_abs_col = dtau_lw / jnp.clip(dz_layer, 1.0, None)[None, :]
+        T_td = T_col.reshape(ny, nx, nlev)
+        dT_dt_lw, _sfc_lw, _olr = plane_adapter.compute_plane_lw_heating(
+            k_abs_col.reshape(ny, nx, nlev),
+            constants.sigma_sb * T_td ** 4 / jnp.pi,
+            (constants.sigma_sb * T_sfc_col ** 4 / jnp.pi).reshape(ny, nx),
+            grid, z_half_td, rho_total,
+            emissivity=1.0, config=mc_cfg, key=key_lw)
+
+    return dT_dt_sw + dT_dt_lw
+
+
 def _make_plane_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
@@ -1341,18 +1523,27 @@ def _make_plane_radiation(
                 state.tracers.data[..., 8], 0.0, None,
             ).reshape(ncol, nlev)
 
-        rad_out = _call_radiation_backend(
-            radiation_config=radiation_config,
-            T=T_col, p_full=p_full_col, p_half=p_half_col,
-            sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
-            insolation=insol_col, cos_sza=cos_sza_col,
-            q_cloud=q_cloud_col, q_ice=q_ice_col,
-            n_cloud=n_cloud_col, n_ice=n_ice_col, f_day=f_day_col,
-            rrtmgp_solver=rrtmgp_solver, lon=lon_col,
-            ml_ozone_coefs=ml_ozone_coefs,
-        )
+        if radiation_config.scheme == "mc3d":
+            # 3D Monte-Carlo shortwave + gray longwave (plane LES/CRM only).
+            dT_dt = _mc3d_plane_heating(
+                radiation_config, grid, terrain_metric, rrtmgp_solver,
+                p_full_col, p_half_col, T_col, T_sfc_col, lat_col, q_v_col,
+                q_cloud_col, q_ice_col, n_cloud_col, n_ice_col,
+                insol_col, cos_sza_col, rho_total, ny, nx, nlev,
+            )
+        else:
+            rad_out = _call_radiation_backend(
+                radiation_config=radiation_config,
+                T=T_col, p_full=p_full_col, p_half=p_half_col,
+                sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
+                insolation=insol_col, cos_sza=cos_sza_col,
+                q_cloud=q_cloud_col, q_ice=q_ice_col,
+                n_cloud=n_cloud_col, n_ice=n_ice_col, f_day=f_day_col,
+                rrtmgp_solver=rrtmgp_solver, lon=lon_col,
+                ml_ozone_coefs=ml_ozone_coefs,
+            )
+            dT_dt = rad_out.heating_rate.reshape(shape_3d)
 
-        dT_dt = rad_out.heating_rate.reshape(shape_3d)
         dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
 
         # Match the PlaneNonHydrostaticState field convention

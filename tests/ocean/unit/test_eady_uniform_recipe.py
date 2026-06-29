@@ -40,7 +40,7 @@ def test_recipe_shape_and_corrected_stack():
                          "wall_mask", "initial_state")
     c = r.model_config
     # Corrected eddy-resolving dycore parts (vs the stale April-2026 baseline).
-    assert c.barotropic_solver == "implicit_cn"
+    assert c.barotropic.barotropic_solver == "implicit_cn"
     assert c.tracer_advection == "weno5"
     assert c.momentum_advection == "weno5"
     assert c.tracer_time_integrator == "rk3"
@@ -68,8 +68,8 @@ def test_dissipation_knobs_wired():
     r = build_eady_uniform_setup(n_lat=24, n_lon=24, a_h=1500.0, b_h=2.5e11,
                                  c_smag=0.0, c_leith=2.0, smag_cfl_safety=0.5)
     c = r.model_config
-    assert c.A_h == 1500.0 and c.B_h == 2.5e11
-    assert c.C_smag == 0.0 and c.C_leith == 2.0
+    assert c.lateral_viscosity.A_h == 1500.0 and c.lateral_viscosity.B_h == 2.5e11
+    assert c.lateral_viscosity.C_smag == 0.0 and c.lateral_viscosity.C_leith == 2.0
 
 
 def test_forward_step_runs_and_is_finite():
@@ -104,8 +104,8 @@ def test_eddy_resolving_min_dissipation_recipe():
     r = build_eady_uniform_setup(n_lat=24, n_lon=24, a_h=1000.0, c_smag=0.1,
                                  smag_cfl_safety=0.5)
     c = r.model_config
-    assert c.A_h == 1000.0 and c.C_smag == 0.1 and c.smag_cfl_safety == 0.5
-    assert c.B_h == 0.0 and c.C_leith == 0.0          # combination is A_h + C_smag only
+    assert c.lateral_viscosity.A_h == 1000.0 and c.lateral_viscosity.C_smag == 0.1 and c.lateral_viscosity.smag_cfl_safety == 0.5
+    assert c.lateral_viscosity.B_h == 0.0 and c.lateral_viscosity.C_leith == 0.0          # combination is A_h + C_smag only
     model = LatLonCGridOceanModel(r.grid, r.z_coord, c)
     s = r.initial_state
     def _z(d):

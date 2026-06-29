@@ -37,7 +37,7 @@ from legoesm.driver.restart import (
 
 def _latlon_cfg() -> LatLonCGridOceanConfig:
     # Exercise a nested NamedTuple field (eos_linear) too.
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=3.0e4,
         bottom_drag_r=2.5e-3,
         eos="linear",
@@ -59,17 +59,17 @@ def test_codec_roundtrip_latlon():
 
 
 def test_codec_roundtrip_default_configs():
-    for cfg in (LatLonCGridOceanConfig(), OceanConfig(), SpectralOceanConfig()):
+    for cfg in (LatLonCGridOceanConfig.from_flat(), OceanConfig(), SpectralOceanConfig()):
         rebuilt = ocean_config_from_dict(ocean_config_to_dict(cfg))
         assert rebuilt == cfg
 
 
 def test_codec_drops_unknown_field_forward_compat():
-    cfg = LatLonCGridOceanConfig(A_h=1.234e4)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1.234e4)
     d = ocean_config_to_dict(cfg)
     d["a_since_removed_field"] = 99  # simulate an older manifest
     rebuilt = ocean_config_from_dict(d)
-    assert rebuilt.A_h == 1.234e4
+    assert rebuilt.lateral_viscosity.A_h == 1.234e4
 
 
 def test_codec_rejects_non_legoesm_type():
@@ -79,7 +79,7 @@ def test_codec_rejects_non_legoesm_type():
 
 
 def test_detect_config_kind():
-    assert detect_config_kind(LatLonCGridOceanConfig()) == "ocean"
+    assert detect_config_kind(LatLonCGridOceanConfig.from_flat()) == "ocean"
     assert detect_config_kind(OceanConfig()) == "ocean"
     assert detect_config_kind(SpectralOceanConfig()) == "ocean"
 
@@ -148,7 +148,7 @@ def test_manifest_from_run_record_validates():
 def test_manifest_tamper_detected_ocean():
     cfg = _latlon_cfg()
     m = build_run_manifest(cfg)
-    m["config"]["resolved_config"]["A_h"] = 1.0  # tamper without fixing the hash
+    m["config"]["resolved_config"]["lateral_viscosity"]["A_h"] = 1.0  # tamper (nested #501)
     with pytest.raises(ValueError, match="config_hash does not match"):
         validate_run_manifest(m)
 

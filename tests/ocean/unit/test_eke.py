@@ -333,7 +333,7 @@ def test_E6_step_integrates_eke_field():
         eke=Field(data=jnp.full((nlat, nlon), eke0), name="eke",
                   dims=("lat", "lon"), units="m^2/s^2"))
 
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=8, enable_runtime_checks=False,
         gm_redi=GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3, eke=EKEConfig()),
@@ -417,7 +417,7 @@ def _baroclinic_channel(eke_on, n_steps=30, dt=1800.0):
 
     gm = GMRediConfig(kappa_GM=1.0e3, kappa_Redi=1.0e3,
                       eke=eke_cfg if eke_on else None)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=8, enable_runtime_checks=False, gm_redi=gm)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)

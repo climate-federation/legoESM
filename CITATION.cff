@@ -15,8 +15,8 @@ authors:
     affiliation: Columbia University
     # orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO: add Pierre Gentine's ORCID
 license: MIT
-repository-code: "https://github.com/gentine/legoESM"
-url: "https://github.com/gentine/legoESM"
+repository-code: "https://github.com/climate-federation/legoESM"
+url: "https://github.com/climate-federation/legoESM"
 # NOTE: `version` is single-sourced from pyproject.toml; the test
 # tests/test_version_single_source.py asserts this string stays in sync.
 version: 0.1.0

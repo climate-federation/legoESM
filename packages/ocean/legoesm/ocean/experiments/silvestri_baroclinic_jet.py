@@ -276,7 +276,7 @@ def build_silvestri_baroclinic_jet_setup(
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max,
                                   dz_surface=_dz, dz_deep=_dz)
 
-    base_config = LatLonCGridOceanConfig(
+    base_config = LatLonCGridOceanConfig.from_flat(
         # FAITHFUL barotropic stack = the Oceananigans split-explicit oracle's,
         # with NO dissipation backstop (barotropic_diffusion_alpha=0). The
         # eddy-resolving turbulent blow-up was the C-grid barotropic Coriolis
@@ -305,6 +305,12 @@ def build_silvestri_baroclinic_jet_setup(
         coriolis_scheme="explicit_ab2",
         barotropic_slow_forcing_ab2=True,
         barotropic_diffusion_alpha=0.0,      # NO SSH-diffusion backstop (faithful)
+        # SM2005 power-law time filter over the first-order cosine bell: the cosine
+        # filter over-dissipates the deformation-scale eddies (128² baroclinic-
+        # adjustment twin: saturated EKE 0.40×→0.86× oracle, inverse cascade k_e
+        # 7.5→5.1≈oracle 5.2, when cosine→power_law), at no stability cost (both
+        # finite 40 d). docs/ocean/fidelity/oceananigans_recipe_wiring_plan.md §8.
+        barotropic_time_filter="power_law",
         tracer_advection="weno7",            # paper: 7th-order WENO tracer (all cases)
         tracer_time_integrator="rk3",
         outer_integrator="ab2",
@@ -339,8 +345,9 @@ def build_silvestri_baroclinic_jet_setup(
     # closure. A_h=1000 + C_smag=0.1 + smag_cfl_safety=0.5 is the old Eady backstop;
     # it trips the double-friction guard against SM2/QG2 so is WENO/flux-only.
     if stabilize and model_config.lateral_friction_scheme == "none":
-        model_config = model_config._replace(
-            A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5)
+        model_config = model_config._replace(  # #501: nested LateralViscosityConfig
+            lateral_viscosity=model_config.lateral_viscosity._replace(
+                A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5))
 
     initial_state, wall_mask = _build_initial_state(grid, z_coord, config)
 
@@ -352,7 +359,7 @@ def build_silvestri_baroclinic_jet_setup(
     # IC).  Required: any driver using barotropic_slow_forcing_ab2 under
     # lax.scan MUST seed these (else a step-1 None→Field transition breaks the
     # scan carry); build_silvestri does it here.  No-op for the default stack.
-    if getattr(model_config, "barotropic_slow_forcing_ab2", False):
+    if getattr(model_config.barotropic, "barotropic_slow_forcing_ab2", False):
         from legoesm.core.field import Field as _Field_fs0
         _z_u = jnp.zeros_like(initial_state.u.data[:, :, 0])
         _z_v = jnp.zeros_like(initial_state.v.data[:, :, 0])

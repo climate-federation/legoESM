@@ -105,7 +105,7 @@ def main():
             kappa_min=200.0, kappa_max=2000.0,
         ),
     )
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e5, A_h_lat_scaling=True,
         K_h=1e3, A_v=1e-3, K_v=1e-4,
         B_h=5.0e9,

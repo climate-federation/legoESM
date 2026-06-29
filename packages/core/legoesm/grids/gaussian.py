@@ -378,18 +378,19 @@ def create_gaussian_grid(
     from legoesm.runtime.backend import check_spectral_backend, get_backend
     backend = get_backend()
 
-    # On Metal we can still run spectral dynamics by hosting grid/transforms on
-    # CPU and routing the spectral model there. Keep strict x64 requirement.
-    if backend == "metal":
+    # On the Apple GPU (mps) backend we can still run spectral dynamics by
+    # hosting grid/transforms on CPU and routing the spectral model there.
+    # Keep strict x64 requirement.
+    if backend == "mps":
         if not jax.config.jax_enable_x64:
             raise ValueError(
-                "Gaussian spectral grid on Metal requires JAX_ENABLE_X64=True "
-                "for CPU spectral fallback."
+                "Gaussian spectral grid on Apple GPU (mps) requires "
+                "JAX_ENABLE_X64=True for CPU spectral fallback."
             )
         if not allow_unsupported_backend:
             warnings.warn(
-                "Metal backend detected. Creating Gaussian spectral grid on CPU "
-                "for spectral fallback.",
+                "Apple GPU (mps) backend detected. Creating Gaussian spectral "
+                "grid on CPU for spectral fallback.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -460,7 +461,7 @@ def create_gaussian_grid(
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * float(omega) * sin_lat_np[:, None] * np.ones((1, n_lon))
 
-    target_device = jax.devices("cpu")[0] if backend == "metal" else None
+    target_device = jax.devices("cpu")[0] if backend == "mps" else None
 
     def _to_jax(array, dtype):
         np_arr = np.asarray(array, dtype=dtype)
@@ -898,6 +899,55 @@ def spectral_hyperdiffusion(
     damping = -nu * eig ** order
     damping = jnp.where(jnp.isfinite(damping), damping, 0.0)
     return damping * coeffs
+
+
+def dealiasing_mask(grid: GaussianGrid, fraction: float = 0.667) -> jax.Array:
+    """Orszag 2/3-rule de-aliasing mask for spectral nonlinear products.
+
+    Returns a real ``(n_sh,)`` multiplier that is ``1.0`` for every
+    spherical-harmonic coefficient with total wavenumber
+    ``n <= floor(fraction * n_max)`` and ``0.0`` above it.  Multiplying a
+    spectral *tendency* (or a transformed nonlinear product) by this mask
+    discards the upper ``1 - fraction`` band of wavenumbers, which is
+    where the quadratic/cubic products fold spurious aliased power back
+    into the resolved spectrum on a triangular-truncation Gaussian grid.
+
+    The default ``fraction = 2/3`` is the Orszag (1971) rule: a quadratic
+    nonlinearity ``a*b`` of two fields truncated at ``n_max`` produces
+    content up to ``2*n_max``; retaining only ``n <= (2/3)*n_max`` of each
+    factor guarantees the aliased part (``n > n_max`` folded down) lands
+    above the retained band and is removed.
+
+    This is the single canonical de-aliasing mechanism shared by every
+    spectral dycore (``spectral_pe``, ``spectral_nh``, ``spectral_sw``);
+    do not re-derive the ``ls <= n_cut`` truncation inline.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Carries ``ls`` (total wavenumber ``n`` per SH index) and the
+        triangular truncation ``n_max``.
+    fraction : float
+        Retained fraction of the spectrum.  ``2/3`` (default) is the
+        standard Orszag rule for quadratic nonlinearities.  Values
+        ``<= 0`` return an all-ones mask (de-aliasing disabled), so a
+        caller can gate the feature on a single config float without a
+        Python ``if`` around the multiply.
+
+    Returns
+    -------
+    (n_sh,) float64 array of 1.0 / 0.0.
+
+    References
+    ----------
+    - Orszag, S. A. (1971): On the elimination of aliasing in
+      finite-difference schemes by filtering high-wavenumber components.
+      J. Atmos. Sci., 28, 1074.
+    """
+    if fraction <= 0.0:
+        return jnp.ones((grid.n_sh,), dtype=jnp.float64)
+    n_cut = int(fraction * grid.n_max)
+    return jnp.where(grid.ls <= n_cut, 1.0, 0.0).astype(jnp.float64)
 
 
 # =============================================================================

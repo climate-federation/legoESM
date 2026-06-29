@@ -30,7 +30,7 @@ class TestDefaults:
             S_ref=cfg.S_uniform,
         )
         actual = eady_uniform_model_config(cfg, physics=physics, eos_config=eos)
-        expected = LatLonCGridOceanConfig(
+        expected = LatLonCGridOceanConfig.from_flat(
             physics=physics,
             eos="linear",
             eos_linear=eos,
@@ -61,7 +61,7 @@ class TestDefaults:
         assert mc.pgf_scheme == "smc03"
         assert mc.tracer_time_integrator == "rk3"
         assert mc.outer_integrator == "ab2"
-        assert mc.barotropic_solver == "implicit_cn"
+        assert mc.barotropic.barotropic_solver == "implicit_cn"
         assert mc.momentum_advection == "weno5"
         assert mc.tracer_advection == "weno5"
 
@@ -78,7 +78,7 @@ class TestDefaults:
         mc = eady_uniform_model_config(cfg)
         assert mc.A_v == cfg.A_v
         assert mc.K_v == cfg.K_v
-        assert mc.bottom_drag_r == cfg.bottom_drag_coeff
+        assert mc.bottom_drag.bottom_drag_r == cfg.bottom_drag_coeff
 
     def test_none_config(self):
         assert eady_uniform_model_config(None).pgf_scheme == "smc03"
@@ -91,9 +91,9 @@ class TestOverrides:
             a_h=1000.0, c_smag=0.1, smag_cfl_safety=0.5,
             momentum_advection="vector_invariant",
             ke_gradient_scheme="hollingsworth")
-        assert mc.A_h == 1000.0
-        assert mc.C_smag == 0.1
-        assert mc.smag_cfl_safety == 0.5
+        assert mc.lateral_viscosity.A_h == 1000.0
+        assert mc.lateral_viscosity.C_smag == 0.1
+        assert mc.lateral_viscosity.smag_cfl_safety == 0.5
         assert mc.momentum_advection == "vector_invariant"
         assert mc.ke_gradient_scheme == "hollingsworth"
 
@@ -101,7 +101,7 @@ class TestOverrides:
         """c_smag=None falls back to config.C_smag (not 0)."""
         cfg = EadyUniformConfig()
         mc = eady_uniform_model_config(cfg)
-        assert mc.C_smag == cfg.C_smag
+        assert mc.lateral_viscosity.C_smag == cfg.C_smag
 
     def test_injected_eos_and_gm_redi(self):
         sentinel_eos, sentinel_gm = object(), object()
@@ -125,4 +125,4 @@ def test_setup_builder_uses_factory_stack():
     mc = rec.model_config
     assert mc.pgf_scheme == "smc03"
     assert mc.outer_integrator == "ab2"
-    assert mc.C_smag == 0.1 and mc.A_h == 1000.0 and mc.smag_cfl_safety == 0.5
+    assert mc.lateral_viscosity.C_smag == 0.1 and mc.lateral_viscosity.A_h == 1000.0 and mc.lateral_viscosity.smag_cfl_safety == 0.5

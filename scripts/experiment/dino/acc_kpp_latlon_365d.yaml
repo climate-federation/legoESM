@@ -1,0 +1,13 @@
+# DINO lat-lon, KPP, full year (365 d / 5 d) — the stable spin-up run used for
+# the barotropic-streamfunction + ACC-transport trajectory (vs the paper's
+# 206 Sv R1 equilibrium). KPP, not the paper's TKE, because TKE is unstable in
+# our 1deg DINO (blows up ~day 40 — see README "Fidelity").
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/acc_kpp_latlon_365d.yaml
+# Then: python scripts/plot/plot_dino_acc.py results/dino_latlon_kpp
+grid: latlon
+vmix: kpp
+days: 365
+snapshot_every_days: 5
+n_lon: 50                 # 1deg R1 (~9900 cells)
+output_dir: results/dino_latlon_kpp

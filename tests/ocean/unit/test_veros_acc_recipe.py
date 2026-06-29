@@ -108,8 +108,8 @@ def test_full_recipe_builds():
     Veros constants pinned via config (no monkey-patch)."""
     recipe = build_acc_recipe()
     assert recipe.model_config.eos == "veros_nonlin2"
-    assert recipe.model_config.A_h_lat_scaling is True
-    assert recipe.model_config.A_h_cos_power == 1
+    assert recipe.model_config.lateral_viscosity.A_h_lat_scaling is True
+    assert recipe.model_config.lateral_viscosity.A_h_cos_power == 1
     assert recipe.model_config.implicit_vertical_mixing is True
     assert recipe.physics_config.vertical_mixing.scheme == "tke"
     # GM/Redi on lat-lon is a top-level (dynamics) field, NOT physics-pathway
@@ -485,7 +485,7 @@ def test_latlon_model_rejects_physics_lateral_mixing():
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    bad = LatLonCGridOceanConfig(
+    bad = LatLonCGridOceanConfig.from_flat(
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(
                 scheme="gm_redi", gm_redi=ACC_GM_REDI_CONFIG,
@@ -582,7 +582,7 @@ def test_free_run_ships_faithful_stepping_composition():
     free = build_acc_model_config(with_surface_forcing=True)
     assert free.outer_integrator == "ab2"
     assert free.dt_mom_ratio == 9.0          # dt_tracer 43200 / dt_mom 4800
-    assert free.barotropic_solver == "rigid_lid"
+    assert free.barotropic.barotropic_solver == "rigid_lid"
     assert free.coriolis_scheme == "explicit_ab2"   # the energy lever
     assert free.ab2_scope == "advective"
     assert free.momentum_friction_additive is True
@@ -592,7 +592,7 @@ def test_free_run_ships_faithful_stepping_composition():
     probe = build_acc_model_config(with_surface_forcing=False)
     assert probe.outer_integrator == "forward_euler"
     assert probe.dt_mom_ratio == 1.0
-    assert probe.barotropic_solver == "explicit_substep"
+    assert probe.barotropic.barotropic_solver == "explicit_substep"
     assert probe.coriolis_scheme == "matsuno_split"
     assert probe.ab2_scope == "total"
     assert probe.momentum_friction_additive is False
@@ -639,7 +639,7 @@ def test_veros_block_mapping_fields_are_real_config_fields():
     are sub-config/documentation rows, skipped here."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     # documentation rows whose middle column names a sub-config / dotted path
     # rather than a bare top-level scheme field (skipped by the field check).
     doc_rows = {"ConstantsConfig"}
@@ -648,7 +648,7 @@ def test_veros_block_mapping_fields_are_real_config_fields():
         assert name and note                       # documented
         if "." in field or field in doc_rows:      # sub-config / documentation row
             continue
-        assert hasattr(cfg, field), field          # bare top-level field must be real
+        assert hasattr(cfg, field) or field in type(cfg).flat_fields(), field  # #501: grouped members          # bare top-level field must be real
 
 
 def test_veros_block_mapping_covers_the_full_dycore_identity():
@@ -674,4 +674,4 @@ def test_veros_block_mapping_matches_catalog_and_card():
     assert len(identity) >= 16
     mc = build_acc_model_config(with_surface_forcing=True)
     for key, catalog_value in identity.items():
-        assert getattr(mc, key) == catalog_value, key
+        assert mc.flat_get(key) == catalog_value, key  # #501: grouped names via flat_get

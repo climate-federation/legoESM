@@ -66,7 +66,7 @@ def _rigid_lid_basin(dt_mom_ratio=1.0, outer_integrator="ab2", **cfg_kw):
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver="rigid_lid",
         outer_integrator=outer_integrator, dt_mom_ratio=dt_mom_ratio, **cfg_kw)
@@ -95,14 +95,14 @@ def test_dt_mom_ratio_validation():
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
 
     with pytest.raises(ValueError, match="dt_mom_ratio must be >= 1.0"):
-        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(dt_mom_ratio=0.5))
+        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(dt_mom_ratio=0.5))
     # ratio != 1 with a free-surface solver is rejected.
     for solver in ("explicit_substep", "implicit_cn"):
         with pytest.raises(ValueError, match="requires barotropic_solver='rigid_lid'"):
-            LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(
+            LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
                 dt_mom_ratio=_RATIO, barotropic_solver=solver))
     # ratio != 1 with rigid_lid constructs fine.
-    LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(
+    LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
         dt_mom_ratio=_RATIO, barotropic_solver="rigid_lid"))
 
 

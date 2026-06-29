@@ -706,7 +706,7 @@ class LatLonCGridOceanModel:
         # geometry carries fold descriptor and rotation angles.
         self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig()
+        self.config = config or LatLonCGridOceanConfig.from_flat()
         self._validate_config(self.config)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
@@ -894,20 +894,20 @@ class LatLonCGridOceanModel:
     def _validate_config(config: LatLonCGridOceanConfig) -> None:
         """Validate configuration ranges."""
         nonnegative = {
-            "A_h": config.A_h,
-            "B_h": config.B_h,
+            "A_h": config.lateral_viscosity.A_h,
+            "B_h": config.lateral_viscosity.B_h,
             "K_h": config.K_h,
             "A_v": config.A_v,
             "K_v": config.K_v,
             "hyperdiff_coeff": config.hyperdiff_coeff,
-            "barotropic_diffusion_alpha": config.barotropic_diffusion_alpha,
+            "barotropic_diffusion_alpha": config.barotropic.barotropic_diffusion_alpha,
         }
         for name, value in nonnegative.items():
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
 
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
-        # horizontal viscosity via config.A_h/config.B_h, GM/Redi via the
+        # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the
         # top-level config.gm_redi field (applied in the model step). The
         # physics-pathway lateral-mixing factory (config.physics.lateral_mixing)
         # is cubed-sphere-only — harmonic/biharmonic crash on lat-lon array
@@ -920,7 +920,7 @@ class LatLonCGridOceanModel:
                 "On the lat-lon C-grid, config.physics.lateral_mixing.scheme="
                 f"{config.physics.lateral_mixing.scheme!r} is unsupported (the "
                 "physics lateral-mixing factory is cubed-sphere-only). Set "
-                "horizontal viscosity via config.A_h / config.B_h and GM/Redi "
+                "horizontal viscosity via config.lateral_viscosity.A_h / config.lateral_viscosity.B_h and GM/Redi "
                 "via the top-level config.gm_redi; keep "
                 "physics.lateral_mixing.scheme='none'."
             )
@@ -935,8 +935,8 @@ class LatLonCGridOceanModel:
         # some terms and 3-D for others (the 2-D x–z oracle has none of them).
         if getattr(config, "meridionally_flat", False):
             _ungated = []
-            _visc_on = (config.A_h > 0.0 or config.B_h > 0.0
-                        or getattr(config, "C_smag", 0.0) > 0.0)
+            _visc_on = (config.lateral_viscosity.A_h > 0.0 or config.lateral_viscosity.B_h > 0.0
+                        or getattr(config.lateral_viscosity, "C_smag", 0.0) > 0.0)
             if _visc_on and config.lateral_viscosity_operator == "flux_divergence":
                 _ungated.append(
                     'A_h/B_h/C_smag>0 with lateral_viscosity_operator='
@@ -954,15 +954,15 @@ class LatLonCGridOceanModel:
                     "the model neither the 2-D x–z oracle nor a consistent 3-D run. "
                     "Disable them or use a flat-aware alternative.")
 
-        if config.n_barotropic_substeps < 1:
+        if config.barotropic.n_barotropic_substeps < 1:
             raise ValueError(
                 f"n_barotropic_substeps must be >= 1, got "
-                f"{config.n_barotropic_substeps!r}",
+                f"{config.barotropic.n_barotropic_substeps!r}",
             )
-        if config.barotropic_diffusion_dt_ref <= 0.0:
+        if config.barotropic.barotropic_diffusion_dt_ref <= 0.0:
             raise ValueError(
                 f"barotropic_diffusion_dt_ref must be > 0, got "
-                f"{config.barotropic_diffusion_dt_ref!r}",
+                f"{config.barotropic.barotropic_diffusion_dt_ref!r}",
             )
         if config.min_water_column_m <= 0.0:
             raise ValueError(
@@ -1093,8 +1093,8 @@ class LatLonCGridOceanModel:
         # each is ADDITIVE to the A_h/B_h/C_smag/C_leith blocks, so combining them
         # double-applies friction. Fail loudly rather than silently over-damp.
         if config.lateral_friction_scheme in ("om4p25", "qg_leith") and any(
-            getattr(config, k, 0.0) > 0.0
-            for k in ("A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")
+            config.flat_get(k) > 0.0  # #501: A_h/B_h/C_smag/C_smag_lap nested in
+            for k in ("A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")  # lateral_viscosity
         ):
             raise ValueError(
                 f"lateral_friction_scheme={config.lateral_friction_scheme!r} is the "
@@ -1151,24 +1151,24 @@ class LatLonCGridOceanModel:
                 "double-apply the forcing. Pass surface_forcing= (and "
                 "freshwater=) to step() instead.",
             )
-        if config.max_abs_eta_m <= 0.0:
+        if config.runtime_checks.max_abs_eta_m <= 0.0:
             raise ValueError(
-                f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
-        if config.temperature_min_c >= config.temperature_max_c:
+                f"max_abs_eta_m must be > 0, got {config.runtime_checks.max_abs_eta_m!r}")
+        if config.runtime_checks.temperature_min_c >= config.runtime_checks.temperature_max_c:
             raise ValueError(
-                f"temperature_min_c ({config.temperature_min_c}) must be "
-                f"< temperature_max_c ({config.temperature_max_c})")
-        if config.salinity_min_psu >= config.salinity_max_psu:
+                f"temperature_min_c ({config.runtime_checks.temperature_min_c}) must be "
+                f"< temperature_max_c ({config.runtime_checks.temperature_max_c})")
+        if config.runtime_checks.salinity_min_psu >= config.runtime_checks.salinity_max_psu:
             raise ValueError(
-                f"salinity_min_psu ({config.salinity_min_psu}) must be "
-                f"< salinity_max_psu ({config.salinity_max_psu})")
+                f"salinity_min_psu ({config.runtime_checks.salinity_min_psu}) must be "
+                f"< salinity_max_psu ({config.runtime_checks.salinity_max_psu})")
         _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid",
                           "implicit_unsplit"}
-        if config.barotropic_solver not in _valid_solvers:
+        if config.barotropic.barotropic_solver not in _valid_solvers:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
-                f"got {config.barotropic_solver!r}")
-        if config.barotropic_solver == "implicit_unsplit":
+                f"got {config.barotropic.barotropic_solver!r}")
+        if config.barotropic.barotropic_solver == "implicit_unsplit":
             # The unsplit step (_unsplit_ab2_step) integrates self.tendencies()
             # (the baroclinic tendencies) + one implicit free-surface solve +
             # _apply_implicit_vertical_mixing.  It does NOT yet thread the extra
@@ -1204,10 +1204,27 @@ class LatLonCGridOceanModel:
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine", "power_law"}
-        if config.barotropic_time_filter not in _valid_time_filters:
+        if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
-                f"got {config.barotropic_time_filter!r}")
+                f"got {config.barotropic.barotropic_time_filter!r}")
+        # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
+        # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
+        # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
+        # and silently ignore it — so a non-default filter under an implicit solver
+        # reads as "applied" while doing nothing. Warn (not raise: harmless, just
+        # inert) so the silent no-op is visible.
+        if (config.barotropic.barotropic_time_filter != "cosine"
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            import warnings
+            warnings.warn(
+                f"barotropic_time_filter={config.barotropic.barotropic_time_filter!r} "
+                f"has NO effect under barotropic_solver="
+                f"{config.barotropic.barotropic_solver!r}: the time filter is consumed "
+                "only by the explicit_substep barotropic substep. Use "
+                'barotropic_solver="explicit_substep" to apply it, or leave the filter '
+                'at its "cosine" default to silence this warning.',
+                stacklevel=3)
         # Mirrors the flux-form tendency dispatch (its else-raise) plus the
         # SOM special case handled in step(); keep in sync if a scheme is added.
         _valid_tracer_adv = {
@@ -1225,22 +1242,22 @@ class LatLonCGridOceanModel:
                 f"outer_integrator must be one of {sorted(_valid_outer_int)}, "
                 f"got {_outer_int!r}")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
-        if config.barotropic_implicit_pcg_fixed_iters < 1:
+        if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
                 "barotropic_implicit_pcg_fixed_iters must be >= 1 "
                 "(the distributed PCG runs exactly this many iterations); "
-                f"got {config.barotropic_implicit_pcg_fixed_iters!r}")
-        if config.barotropic_implicit_pcg_residual_tol <= 0.0:
+                f"got {config.barotropic.barotropic_implicit_pcg_fixed_iters!r}")
+        if config.barotropic.barotropic_implicit_pcg_residual_tol <= 0.0:
             raise ValueError(
                 "barotropic_implicit_pcg_residual_tol must be > 0 "
                 f"(diagnostic acceptance tol); got "
-                f"{config.barotropic_implicit_pcg_residual_tol!r}")
+                f"{config.barotropic.barotropic_implicit_pcg_residual_tol!r}")
         # Asynchronous dt_mom≠dt_tracer stepping (dt_mom = dt / dt_mom_ratio).
         if config.dt_mom_ratio < 1.0:
             raise ValueError(
                 "dt_mom_ratio must be >= 1.0 (dt_mom <= dt_tracer), "
                 f"got {config.dt_mom_ratio!r}")
-        if config.dt_mom_ratio != 1.0 and config.barotropic_solver != "rigid_lid":
+        if config.dt_mom_ratio != 1.0 and config.barotropic.barotropic_solver != "rigid_lid":
             raise ValueError(
                 "dt_mom_ratio != 1.0 (asynchronous dt_mom≠dt_tracer stepping) "
                 "requires barotropic_solver='rigid_lid': under the rigid lid the "
@@ -1248,27 +1265,27 @@ class LatLonCGridOceanModel:
                 "dt-independent and tracer mass is conserved (matching Veros's "
                 "streamfunction rigid lid). A moving free surface would leak "
                 "O((dt_tracer-dt_mom)·∂h/∂t) tracer mass. Got barotropic_solver="
-                f"{config.barotropic_solver!r}.")
-        if config.rigid_lid_cg_tol <= 0.0:
+                f"{config.barotropic.barotropic_solver!r}.")
+        if config.barotropic.rigid_lid_cg_tol <= 0.0:
             raise ValueError(
-                f"rigid_lid_cg_tol must be > 0, got {config.rigid_lid_cg_tol!r}")
-        if config.rigid_lid_cg_maxiter < 1:
+                f"rigid_lid_cg_tol must be > 0, got {config.barotropic.rigid_lid_cg_tol!r}")
+        if config.barotropic.rigid_lid_cg_maxiter < 1:
             raise ValueError(
                 f"rigid_lid_cg_maxiter must be >= 1, "
-                f"got {config.rigid_lid_cg_maxiter!r}")
+                f"got {config.barotropic.rigid_lid_cg_maxiter!r}")
         for fld in ("barotropic_implicit_theta_eta",
                     "barotropic_implicit_theta_pgf"):
-            v = getattr(config, fld)
+            v = getattr(config.barotropic, fld)  # #501: nested BarotropicConfig
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"{fld} must be in [0, 1], got {v!r}")
-        if config.barotropic_implicit_pcg_tol <= 0.0:
+        if config.barotropic.barotropic_implicit_pcg_tol <= 0.0:
             raise ValueError(
                 f"barotropic_implicit_pcg_tol must be > 0, "
-                f"got {config.barotropic_implicit_pcg_tol!r}")
-        if config.barotropic_implicit_pcg_maxiter < 1:
+                f"got {config.barotropic.barotropic_implicit_pcg_tol!r}")
+        if config.barotropic.barotropic_implicit_pcg_maxiter < 1:
             raise ValueError(
                 f"barotropic_implicit_pcg_maxiter must be >= 1, "
-                f"got {config.barotropic_implicit_pcg_maxiter!r}")
+                f"got {config.barotropic.barotropic_implicit_pcg_maxiter!r}")
         _valid_pgf = {"adcroft", "smc03"}
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme not in _valid_pgf:
@@ -1382,7 +1399,7 @@ class LatLonCGridOceanModel:
                     "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
                     "integrator has a stable region covering the ACC's f·dt_mom. "
                     f"Got outer_integrator={config.outer_integrator!r}.")
-            if config.barotropic_solver not in (
+            if config.barotropic.barotropic_solver not in (
                     "rigid_lid", "implicit_cn", "implicit_unsplit",
                     "explicit_substep"):
                 raise ValueError(
@@ -1401,7 +1418,7 @@ class LatLonCGridOceanModel:
                     "off too (Oceananigans split-explicit convention: ∂_tU = "
                     "−gH∇η + G^U, no in-substep Coriolis), which removes the "
                     "C-grid 4-point Coriolis rotational null mode. Got "
-                    f"barotropic_solver={config.barotropic_solver!r}.")
+                    f"barotropic_solver={config.barotropic.barotropic_solver!r}.")
             if getattr(config, "coriolis_energy_conserving", False):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" is incompatible with '
@@ -1424,7 +1441,7 @@ class LatLonCGridOceanModel:
         # Validate on the static config at construction (dispatch-hardening):
         # reject the silent-misconfiguration combinations rather than producing
         # a Coriolis-free or time-inconsistent barotropic forcing.
-        if getattr(config, "barotropic_slow_forcing_ab2", False):
+        if getattr(config.barotropic, "barotropic_slow_forcing_ab2", False):
             if _cor_scheme != "explicit_ab2":
                 raise ValueError(
                     'barotropic_slow_forcing_ab2=True requires '
@@ -1487,7 +1504,7 @@ class LatLonCGridOceanModel:
 
         g = self.config.g
         H_max = self.z_coord.H_max
-        n_sub = self.config.n_barotropic_substeps
+        n_sub = self.config.barotropic.n_barotropic_substeps
         # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2.
         # grid.dy is (n_lat,) — take the global min (Mercator-safe).
         dx_min = min(
@@ -1820,7 +1837,7 @@ class LatLonCGridOceanModel:
         #   ∂U_bar/∂t |_diss = -ν₄ · ∇⁴ U_bar.
         # MOM6/HIM BIHARMONIC_BAROTROPIC analog.  No-op at default
         # ``B_h_barotropic = 0`` (bit-exact backward compat).
-        if getattr(self.config, "B_h_barotropic", 0.0) > 0.0:
+        if getattr(self.config.lateral_viscosity, "B_h_barotropic", 0.0) > 0.0:
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 vector_bilaplacian_cgrid, biharmonic_scaling_factor,
             )
@@ -1840,7 +1857,7 @@ class LatLonCGridOceanModel:
             # biharmonic CFL there.  Same convention as the layered B_h.
             scale_u, scale_v = biharmonic_scaling_factor(_grid)
             nu4 = jnp.asarray(
-                self.config.B_h_barotropic, dtype=F_slow_u.dtype,
+                self.config.lateral_viscosity.B_h_barotropic, dtype=F_slow_u.dtype,
             )
             scale_u_b = scale_u.astype(F_slow_u.dtype)[:, None]
             scale_v_b = scale_v.astype(F_slow_v.dtype)[:, None]
@@ -1863,7 +1880,7 @@ class LatLonCGridOceanModel:
         # Default off ⇒ bit-identical (the branch is not traced).
         _F_slow_u_cur = F_slow_u
         _F_slow_v_cur = F_slow_v
-        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+        if getattr(self.config.barotropic, "barotropic_slow_forcing_ab2", False):
             _fpu = state.F_slow_u_prev
             _fpv = state.F_slow_v_prev
             if _fpu is None or _fpv is None:
@@ -2012,7 +2029,7 @@ class LatLonCGridOceanModel:
                 tend.dv_diss.data * h_v_pre, axis=-1) / H_v_pre
                 ) * state.v_mask.data
 
-        if self.config.barotropic_solver == "rigid_lid":
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Rigid lid: no free surface — solve the barotropic streamfunction
             # from the (Coriolis-augmented) slow forcing.  eta is left unchanged.
             # Freshwater (F_slow_eta) cannot change a rigid lid's volume; it
@@ -2032,7 +2049,7 @@ class LatLonCGridOceanModel:
                 F_slow_u=F_slow_u, F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
             )
-        elif self.config.barotropic_solver == "implicit_cn":
+        elif self.config.barotropic.barotropic_solver == "implicit_cn":
             state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(
                 state_mid, dt_mom,
                 _grid, self.z_coord, self.config,
@@ -2041,7 +2058,7 @@ class LatLonCGridOceanModel:
                 F_slow_v=F_slow_v,
             )
         else:
-            dt_s = dt_mom / self.config.n_barotropic_substeps
+            dt_s = dt_mom / self.config.barotropic.n_barotropic_substeps
             # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
             # reaches the barotropic mode via F_slow (its depth-mean came through
             # du_dt), so the substep must NOT add its own f×U_bt — this is the
@@ -2052,7 +2069,7 @@ class LatLonCGridOceanModel:
                 getattr(self.config, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
             state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
-                state_mid, dt_s, self.config.n_barotropic_substeps,
+                state_mid, dt_s, self.config.barotropic.n_barotropic_substeps,
                 _grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
@@ -2652,7 +2669,7 @@ class LatLonCGridOceanModel:
         # du_diss depth-mean fold (ab2_scope="advective" is rejected upstream, so
         # under the supported ab2_scope="total" path du_diss is None and there is
         # nothing extra to fold).
-        if getattr(self.config, "barotropic_slow_forcing_ab2", False):
+        if getattr(self.config.barotropic, "barotropic_slow_forcing_ab2", False):
             from legoesm.core.field import Field as _Field_fs
             state_new = state_new._replace(
                 F_slow_u_prev=_Field_fs(
@@ -3901,7 +3918,7 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "config.outer_integrator must be 'forward_euler' or 'ab2', "
                 f"got {_oi!r}")
-        if self.config.barotropic_solver == "implicit_unsplit":
+        if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
             # elliptic eta solve + uniform surface-pressure correction. Removes the
@@ -3944,7 +3961,7 @@ class LatLonCGridOceanModel:
         # After the prognostic update so it damps whatever the step produced, and
         # BEFORE the freeze floor so the surface temperature cap is the final word
         # (the zonal filter can otherwise pull a surface cell back below freezing).
-        if self.config.use_polar_filter:
+        if self.config.polar_filter.use_polar_filter:
             new_state = self._apply_polar_filter(new_state, dt, grid=grid)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
@@ -4036,9 +4053,9 @@ class LatLonCGridOceanModel:
             lat_v=lat_v, cos_lat_v=cos_lat_v)
         kw = dict(
             dt=dt,
-            max_wave_speed=cfg.polar_filter_max_wave_speed,
-            cutoff_lat_deg=cfg.polar_filter_cutoff_lat_deg,
-            safety_factor=cfg.polar_filter_safety_factor,
+            max_wave_speed=cfg.polar_filter.polar_filter_max_wave_speed,
+            cutoff_lat_deg=cfg.polar_filter.polar_filter_cutoff_lat_deg,
+            safety_factor=cfg.polar_filter.polar_filter_safety_factor,
         )
         mask_c = compute_polar_filter_mask(pf_grid, is_v_face=False, **kw)
         mask_v = compute_polar_filter_mask(pf_grid, is_v_face=True, **kw)
@@ -4637,7 +4654,7 @@ class LatLonCGridOceanModel:
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
                               sponge=sponge)
-        if self.config.enable_runtime_checks:
+        if self.config.runtime_checks.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
 
@@ -4703,30 +4720,30 @@ class LatLonCGridOceanModel:
                 f"threshold={self.config.min_water_column_m:.6g} m",
             )
 
-        if eta_abs > self.config.max_abs_eta_m:
+        if eta_abs > self.config.runtime_checks.max_abs_eta_m:
             raise ValueError(
                 f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
-                f"threshold {self.config.max_abs_eta_m:.3g}",
+                f"threshold {self.config.runtime_checks.max_abs_eta_m:.3g}",
             )
 
         if any_wet_h and (
-            T_min < self.config.temperature_min_c
-            or T_max > self.config.temperature_max_c
+            T_min < self.config.runtime_checks.temperature_min_c
+            or T_max > self.config.runtime_checks.temperature_max_c
         ):
             raise ValueError(
                 f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
-                f"outside bounds [{self.config.temperature_min_c:.3f}, "
-                f"{self.config.temperature_max_c:.3f}]",
+                f"outside bounds [{self.config.runtime_checks.temperature_min_c:.3f}, "
+                f"{self.config.runtime_checks.temperature_max_c:.3f}]",
             )
 
         if any_wet_h and (
-            S_min < self.config.salinity_min_psu
-            or S_max > self.config.salinity_max_psu
+            S_min < self.config.runtime_checks.salinity_min_psu
+            or S_max > self.config.runtime_checks.salinity_max_psu
         ):
             raise ValueError(
                 f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
-                f"outside bounds [{self.config.salinity_min_psu:.3f}, "
-                f"{self.config.salinity_max_psu:.3f}]",
+                f"outside bounds [{self.config.runtime_checks.salinity_min_psu:.3f}, "
+                f"{self.config.runtime_checks.salinity_max_psu:.3f}]",
             )
 
     def integrate(
@@ -4767,7 +4784,7 @@ class LatLonCGridOceanModel:
             )
 
         trajectory = [state]
-        step_fn = self.step_checked if self.config.enable_runtime_checks else self.step
+        step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
         for i in range(n_steps):
             state = step_fn(state, dt)
             if (i + 1) % save_every == 0:
@@ -4940,7 +4957,7 @@ class LatLonCGridOceanModel:
         # seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
         # zero so the carry pytree is constant across iterations (None -> array
         # would crash lax.scan).  Cold-start ψ=0 (rest); the AB2 history is 0.
-        if self.config.barotropic_solver == "rigid_lid":
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
             rl = self._ensure_rigid_lid_data(state)
             if state.psi is None:
                 _dt_rl = state.u.data.dtype

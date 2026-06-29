@@ -365,7 +365,7 @@ def run(years: float, out_path: str | None, compare_path: str | None,
         config=dict(
             dt_tracer=DT_TRACER_S, dt_mom_ratio=cfg.dt_mom_ratio,
             outer_integrator=cfg.outer_integrator,
-            barotropic_solver=cfg.barotropic_solver,
+            barotropic_solver=cfg.barotropic.barotropic_solver,
             coriolis_scheme=cfg.coriolis_scheme, ab2_scope=cfg.ab2_scope,
             eos=cfg.eos, nisle=int(rl.nisle),
         ),

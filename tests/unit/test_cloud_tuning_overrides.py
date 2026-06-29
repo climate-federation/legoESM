@@ -11,6 +11,7 @@ CloudConfig defaults (byte-identical to the validated path).
 from __future__ import annotations
 
 import jax
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -24,11 +25,12 @@ NLEV = 10
 
 
 def _config(**over):
+    microphysics = over.pop("microphysics", "none")
     return ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
         radiation="none", convection="none", turbulence="none",
-        cloud_scheme="sundqvist", microphysics="none",
+        cloud_scheme="sundqvist", microphysics=microphysics,
         **over,
     )
 
@@ -61,3 +63,26 @@ def test_pipeline_default_overrides_none() -> None:
     assert pipe._cloud_rh_crit is None
     assert pipe._cloud_q_c_diagnostic is None
     assert pipe._cloud_conv_cloud_max is None
+
+
+def test_pipeline_threads_subgrid_autoconv() -> None:
+    # --subgrid-autoconv (#613) must reach the hot-loop MorrisonConfig.
+    grid = create_cubed_sphere(4)
+    sigma = make_hybrid_levels(NLEV)
+    pipe = build_physics_pipeline(
+        grid, sigma,
+        _config(microphysics="morrison", subgrid_autoconversion=True),
+    )
+    assert pipe.micro_config.subgrid_autoconversion is True
+
+
+def test_subgrid_autoconv_rejects_non_morrison() -> None:
+    # Fail loudly (not a silent no-op) when the flag is set on a scheme
+    # that has no sub-grid warm-rain closure.
+    grid = create_cubed_sphere(4)
+    sigma = make_hybrid_levels(NLEV)
+    with pytest.raises(ValueError, match="subgrid_autoconversion"):
+        build_physics_pipeline(
+            grid, sigma,
+            _config(microphysics="kessler", subgrid_autoconversion=True),
+        )

@@ -328,19 +328,50 @@ def step_carbon_differland(
     root_deficit_draw = jnp.minimum(remaining_after_fol, root_net_avail)
     remaining_after_root = remaining_after_fol - root_deficit_draw
     wood_deficit_draw = jnp.minimum(remaining_after_root, wood_net_avail)
+    # Unmet NPP deficit: the part of the maintenance-respiration demand that
+    # NO pool could supply (all biomass exhausted).  R_auto is charged to
+    # the atmosphere via NEE below, so the flux MUST be reduced by this
+    # undrawn remainder or NEE reports carbon that left no pool (atmosphere
+    # gain > biomass loss).  See finding #5.
+    unmet_npp_deficit_day = jnp.maximum(
+        remaining_after_root - wood_deficit_draw, 0.0,
+    )
 
     # --- Heterotrophic respiration & decomposition -------------------------
     tempmod = _temperate_modifier(T, precip, config)
 
-    R_het_lit = state.C_lit * _effective_rate(
+    # The litter pool is drained by TWO independent first-order sinks:
+    # heterotrophic respiration (-> atmosphere) and decomposition to SOM
+    # (-> C_som).  Each ``_effective_rate`` is the exact single-sink decay,
+    # but their SUM can exceed the litter net availability for large dt,
+    # which ``_soft_pos`` would clip while NEE still reported the full,
+    # uncapped R_het_lit -> atmosphere gain > litter loss.  Apply a joint
+    # net-availability cap (cf. the biomass deficit cascade): scale both
+    # demanded sinks by the same factor so their realised sum never exceeds
+    # ``C_lit + (leaf_litter + root_litter)*dt`` (the litter content after
+    # this step's litter inputs).  The atm/SOM partition ratio is preserved.
+    # See finding #4.
+    R_het_lit_demand = state.C_lit * _effective_rate(
         tempmod * config.tor_litter, dt_days,
+    )
+    lit_to_som_demand = state.C_lit * _effective_rate(
+        tempmod * config.decomp_rate, dt_days,
     )
     R_het_som = state.C_som * _effective_rate(
         tempmod * config.tor_som, dt_days,
     )
-    lit_to_som = state.C_lit * _effective_rate(
-        tempmod * config.decomp_rate, dt_days,
+    lit_total_demand = R_het_lit_demand + lit_to_som_demand  # gC/m2/day
+    lit_net_avail = jnp.maximum(
+        state.C_lit + (leaf_litter + root_litter) * dt_days, 0.0,
+    ) * _inv_dt_days  # gC/m2/day available to drain over the step
+    # scale in [0, 1]; == 1 (no-op) whenever demand <= availability.
+    lit_scale = jnp.where(
+        lit_total_demand > lit_net_avail,
+        lit_net_avail / jnp.maximum(lit_total_demand, 1e-30),
+        1.0,
     )
+    R_het_lit = lit_scale * R_het_lit_demand
+    lit_to_som = lit_scale * lit_to_som_demand
 
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
     # Hard non-negativity ``jnp.maximum(x, 0)``.  The iter-64 cap
@@ -378,7 +409,15 @@ def step_carbon_differland(
     )
 
     # --- NEE: positive = source to atmosphere ------------------------------
-    NEE_day = R_auto_day + R_het_lit + R_het_som - gpp_day
+    # R_het_lit is the litter-availability-CAPPED respiration (finding #4);
+    # ``unmet_npp_deficit_day`` removes the maintenance respiration that no
+    # biomass pool could supply (finding #5).  With both corrections the
+    # column closes exactly: sum(dC_pools) == -NEE_day*dt (verified by
+    # test_carbon_*_conservation, formerly xfail).
+    NEE_day = (
+        R_auto_day - unmet_npp_deficit_day
+        + R_het_lit + R_het_som - gpp_day
+    )
     co2_flux = NEE_day / _SPD * _GC_TO_KG_CO2
 
     return new_state, co2_flux

@@ -148,17 +148,17 @@ def test_dycore_and_stepping_mapping():
     # eq_of_state_type=5 → gsw.
     assert cfg.eos == "veros_gsw"
     # NO bottom friction (Veros r_bot default 0.0; setup never enables it).
-    assert cfg.bottom_drag_r == 0.0
+    assert cfg.bottom_drag.bottom_drag_r == 0.0
     # A_h = (4·degtom)³·2e-11 with cos¹(lat) scaling.
     degtom = VEROS_CONSTANTS_CONFIG.R_earth * np.pi / 180.0
-    assert np.isclose(cfg.A_h, (4.0 * degtom) ** 3 * 2.0e-11)
-    assert np.isclose(global_4deg_A_h(), cfg.A_h)
-    assert cfg.A_h_lat_scaling is True and cfg.A_h_cos_power == 1
+    assert np.isclose(cfg.lateral_viscosity.A_h, (4.0 * degtom) ** 3 * 2.0e-11)
+    assert np.isclose(global_4deg_A_h(), cfg.lateral_viscosity.A_h)
+    assert cfg.lateral_viscosity.A_h_lat_scaling is True and cfg.lateral_viscosity.A_h_cos_power == 1
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     # Veros-faithful stack (matched-ACC kwargs, baked in — see recipe doc).
     assert cfg.outer_integrator == "ab2"
     assert cfg.ab2_scope == "advective"
-    assert cfg.barotropic_solver == "rigid_lid"
+    assert cfg.barotropic.barotropic_solver == "rigid_lid"
     assert cfg.coriolis_scheme == "explicit_ab2"
     assert cfg.momentum_friction_additive is True
     assert cfg.vertical_momentum_scheme == "centered_full"

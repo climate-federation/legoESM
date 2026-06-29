@@ -121,7 +121,7 @@ def _build_config(args):
 
     use_bathymetry = args.bathymetry is not None
     if not use_bathymetry:
-        return LatLonCGridOceanConfig(
+        return LatLonCGridOceanConfig.from_flat(
             A_h=args.A_h, A_h_lat_scaling=True,
             A_h_floor=args.A_h_floor,
             A_h_eq_boost=args.A_h_eq_boost,
@@ -166,7 +166,7 @@ def _build_config(args):
             enabled=True, alpha=0.015, kappa_min=200.0, kappa_max=2000.0,
         ),
     )
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=args.A_h, A_h_lat_scaling=True,
         A_h_floor=args.A_h_floor,
         A_h_eq_boost=args.A_h_eq_boost,

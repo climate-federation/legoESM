@@ -49,7 +49,7 @@ def _channel():
     v_int = (lm[:-1] * lm[1:]) > 0.5
     v_mask = np.concatenate([np.zeros((1, N_LON)), v_int, np.zeros((1, N_LON))],
                             axis=0).astype(float)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     rl = build_rigid_lid_data(Hb, lm, u_mask, v_mask, cfg, grid, periodic_x=True)
     return grid, lm, Hb, u_mask, v_mask, cfg, rl
 
@@ -196,9 +196,9 @@ def test_rigid_lid_step_forced_response_and_grad():
 def test_dispatch_accepts_rigid_lid_rejects_bad():
     grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
     z = create_ocean_z_star(n_levels=4)
-    LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(barotropic_solver="rigid_lid"))
+    LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(barotropic_solver="rigid_lid"))
     with pytest.raises(ValueError, match="barotropic_solver"):
-        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(barotropic_solver="bogus"))
+        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(barotropic_solver="bogus"))
 
 
 def test_coupled_rigid_lid_runs_eta_unchanged_and_differentiable():
@@ -209,7 +209,7 @@ def test_coupled_rigid_lid_runs_eta_unchanged_and_differentiable():
     Hb = np.full((N_LAT, N_LON), 4000.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z, land_mask_override=jnp.asarray(lm), H_bathy_override=jnp.asarray(Hb))
-    cfg = LatLonCGridOceanConfig(barotropic_solver="rigid_lid")
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="rigid_lid")
     model = LatLonCGridOceanModel(grid, z, cfg)
     final, _ = model.integrate_scan(state, n_steps=5, dt=3600.0)
     assert bool(jnp.all(jnp.isfinite(final.psi)))

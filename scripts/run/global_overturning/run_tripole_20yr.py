@@ -80,7 +80,7 @@ def main():
         convection=OceanConvectionConfig(scheme="enhanced_diffusion",
             enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0)),
         shortwave_penetration=None)
-    oc = LatLonCGridOceanConfig(
+    oc = LatLonCGridOceanConfig.from_flat(
         A_h=1e5, C_smag_lap=0.33, A_h_floor=1000.0, A_v=1e-4, K_v=1e-5,
         bottom_drag_r=1e-3, bottom_drag_bbl_thickness=100.0, bottom_drag_bg_velocity=0.1,
         barotropic_solver="implicit_cn", pgf_scheme="adcroft",

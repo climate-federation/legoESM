@@ -55,6 +55,86 @@ def enable_diurnal_surface_land(land_cfg):
     return cfg
 
 
+def _flatten_pytree_to_npz(state, prefix: str) -> dict:
+    """Flatten a registered pytree (a NamedTuple of ``Field`` leaves) into a
+    flat ``{prefix+path: np.ndarray}`` dict for ``np.savez`` serialization.
+
+    Leaves are keyed by their stringified pytree path so a structural change
+    between save and restore is *detectable* rather than silently mis-mapped
+    (see ``_restore_pytree_from_npz``).  ``None`` leaves (an inactive optional
+    Field — e.g. ``T_som``/``eke``/``tke`` when the scheme is off) are simply
+    absent from JAX's pytree traversal, so they are neither saved nor restored;
+    a fresh init with the same config reproduces the identical None structure.
+    """
+    out = {}
+    for path_parts, leaf in jax.tree_util.tree_leaves_with_path(state):
+        out[prefix + ".".join(str(p) for p in path_parts)] = np.asarray(leaf)
+    return out
+
+
+def _restore_pytree_from_npz(state, data, prefix: str, ckpt_name: str,
+                             strict: bool = False):
+    """Restore a registered pytree from npz leaves written by
+    ``_flatten_pytree_to_npz``.
+
+    Every leaf is matched by its stringified path; each restored leaf's shape is
+    validated against the fresh-init leaf (and cast to its dtype) so a corrupted
+    or mismatched array fails LOUDLY instead of being placed by ``tree_unflatten``
+    (which does not check shapes).  Leaves are restored atomically in one
+    ``tree_unflatten`` — for the C-grid ocean this keeps the ``land_mask`` /
+    ``u_mask`` / ``v_mask`` triple mutually consistent (a partial mask restore
+    would leak mass through walls; CLAUDE.md "Land/face masks").
+
+    Structure drift (a leaf expected now but absent from the checkpoint, or an
+    unused checkpoint leaf) means the config changed since the save.  With
+    ``strict=True`` (the prognostic 3D ocean) this RAISES — silently reseeding a
+    toggled EKE/TKE/SOM/AB2 history leaf would corrupt the restart.  With
+    ``strict=False`` (the surface state) it warns and keeps the absent leaf's
+    fresh-init value.  Returns ``(new_state, restored)``; ``restored`` is False
+    when the checkpoint carried no ``prefix`` leaves (nothing to do).
+    """
+    keys = [k for k in data.files if k.startswith(prefix)]
+    if not keys:
+        return state, False
+    leaves_with_path = jax.tree_util.tree_leaves_with_path(state)
+    expected = {
+        prefix + ".".join(str(p) for p in pp) for pp, _ in leaves_with_path
+    }
+    saved = set(keys)
+    missing, extra = expected - saved, saved - expected
+    if missing or extra:
+        msg = (
+            f"Coupled checkpoint {ckpt_name}: '{prefix}' structure drift — "
+            f"{len(missing)} expected leaf(s) absent from the checkpoint, "
+            f"{len(extra)} unused checkpoint leaf(s).  The config likely "
+            f"changed since the checkpoint was written.")
+        if strict:
+            raise ValueError(
+                msg + "  Refusing to restore a structurally-mismatched "
+                "prognostic state.")
+        logger.warning(msg + "  Absent leaves keep their fresh-init value.")
+    new_leaves = []
+    for pp, leaf in leaves_with_path:
+        key = prefix + ".".join(str(p) for p in pp)
+        if key not in saved:
+            new_leaves.append(leaf)
+            continue
+        arr = data[key]
+        if tuple(arr.shape) != tuple(jnp.shape(leaf)):
+            raise ValueError(
+                f"Coupled checkpoint {ckpt_name}: leaf '{key}' shape "
+                f"{tuple(arr.shape)} != current {tuple(jnp.shape(leaf))}; "
+                f"refusing to restore a mismatched leaf.")
+        # Cast to the fresh-init leaf's dtype so a checkpoint saved under a
+        # different x64 setting does not drift the restored state's dtype.
+        new_leaves.append(jnp.asarray(arr, dtype=jnp.asarray(leaf).dtype))
+    return (
+        jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(state), new_leaves),
+        True,
+    )
+
+
 class CoupledESMDriver:
     """Coupled atmosphere + ocean + land + carbon driver.
 
@@ -129,6 +209,11 @@ class CoupledESMDriver:
         # 6. Optionally feed the coupler's dynamic surface albedo / skin
         #    temperature back to the atmosphere's radiation (opt-in).
         self._override_sfc()
+
+        # 7. Optionally feed the coupler's blended surface SH/LH fluxes back to
+        #    the atmosphere surface tendency (opt-in) so the air-sea budget
+        #    closes (single shared flux calc on both sides).
+        self._override_sfc_fluxes()
 
         logger.info("CoupledESM: all components initialized")
         logger.info(f"  ocean_mode={self.coupled_cfg.ocean_mode}, "
@@ -234,7 +319,7 @@ class CoupledESMDriver:
         # one if the caller passed a SimpleOceanConfig.
         _oc = cfg.ocean_config
         if not isinstance(_oc, LatLonCGridOceanConfig):
-            _oc = LatLonCGridOceanConfig()
+            _oc = LatLonCGridOceanConfig.from_flat()
         # Force the OMIP-validated cold-start stack (the defaults
         # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
         # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
@@ -246,7 +331,10 @@ class CoupledESMDriver:
         # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
         # 0.125; see omip_smag_cap_stabilizer).
         ocfg = _oc._replace(
-            barotropic_solver="implicit_cn",
+            # barotropic_solver was nested into BarotropicConfig (#640); a direct
+            # _replace can't route the flat kwarg the way from_flat does, so nest
+            # it explicitly.
+            barotropic=_oc.barotropic._replace(barotropic_solver="implicit_cn"),
             momentum_time_integrator="rk3",
             pgf_scheme="smc03",
             implicit_vertical_mixing=True,
@@ -381,7 +469,7 @@ class CoupledESMDriver:
             "  Ocean: mode=dynamic (3D LatLonCGridOceanModel), "
             f"ic={cfg.ocean_ic}, ocean_frac={_ocean_frac:.2f}, "
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
-            f"barotropic={ocfg.barotropic_solver}, "
+            f"barotropic={ocfg.barotropic.barotropic_solver}, "
             f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
 
     def _build_tripole_ocean_config(self):
@@ -422,7 +510,7 @@ class CoupledESMDriver:
             ),
             shortwave_penetration=None,
         )
-        return LatLonCGridOceanConfig(
+        return LatLonCGridOceanConfig.from_flat(
             A_h=1.0e5, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
             C_smag_lap=0.33,
             n_barotropic_substeps=30,
@@ -544,7 +632,7 @@ class CoupledESMDriver:
             "  Ocean: mode=dynamic (3D LatLonCGridOceanModel, TRIPOLE), "
             f"ic={cfg.ocean_ic}, ocean_frac={_ocean_frac:.2f}, "
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
-            f"barotropic={ocfg.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
+            f"barotropic={ocfg.barotropic.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
             f"mesh={cfg.tripole_mesh_path}")
 
     def _init_coupler(self):
@@ -923,6 +1011,118 @@ class CoupledESMDriver:
             "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
         )
 
+    def _override_sfc_fluxes(self):
+        """Feed the SHARED air-sea surface SH/LH fluxes back to the atmosphere
+        surface tendency each segment so the air-sea heat+water budget closes.
+
+        Gated on ``CoupledConfig.couple_surface_fluxes`` (default False => no-op,
+        existing coupled runs byte-identical).  When enabled, the atmosphere
+        consumes the coupler's TILE-BLENDED surface ``shflx``/``lhflx`` (its bulk
+        scheme, q_sfc = 0.98*q_sat mixing ratio, ocean-tile C_H/C_E) instead of
+        recomputing its OWN INDEPENDENT bulk fluxes.  This is the blended TOTAL
+        surface flux (f_ocean*ocean + f_ice*ice + f_land*land + f_lake*lake), the
+        correct forcing for the atmosphere bottom-level tendency over ALL tiles.
+
+        Air-sea budget closure: the blended flux fed to the atmosphere and the
+        ocean-tile ``tile.shflx``/``tile.lhflx`` that the dynamic ocean q_net
+        SINKS BOTH derive from the SAME coupler ``ocean_tile_response`` -- the
+        atmosphere no longer runs its own independent surface bulk calc, so over
+        the ocean fraction the two are the same partition (blended ocean
+        component = f_ocean*ocean_tile; the ocean column receives ocean_tile over
+        its wet area).  For an all-ocean cell blended == ocean_tile EXACTLY, so
+        heat/water leaving the ocean == heat/water entering the atmosphere
+        (proven in tests/unit/test_air_sea_flux_coupling_conservation.py).  Over
+        a MIXED cell the atmosphere is correctly forced by the blended flux while
+        the ocean gets the ocean component -- the air-sea (ocean) exchange still
+        closes; land/ice/lake heat goes to those reservoirs, not the ocean.
+
+        Sign convention: ``shflx``/``lhflx`` are [W/m2, positive UP =
+        surface->atmosphere], exactly the convention the atmosphere's bulk
+        ``shflx``/``lhflx`` use; the ocean ``q_net = ... - shflx - lhflx`` SINKS
+        the SAME positive-up fluxes, so a unit of heat leaving the ocean arrives
+        as a unit of heat into the atmosphere (and evap mass leaving the ocean
+        arrives as vapour into the atmosphere).
+
+        Returns ``(None, None)`` until the first coupler step populates
+        ``_last_sfc_response`` (segment 0 falls back to the atmosphere's own bulk
+        fluxes, as before).  The hook being installed (or not) is fixed for the
+        whole run; within a flux-coupled run ``model_driver`` packs ``None`` on
+        segment 0 and arrays thereafter -- a one-time recompile when the override
+        first appears, identical to the ``couple_surface_radiation`` lag.
+        """
+        if not self.coupled_cfg.couple_surface_fluxes:
+            return
+
+        # Air-sea closure precondition (codex HIGH): the blended flux fed to the
+        # atmosphere closes the air-sea exchange against the ocean q_net ONLY when
+        # the atmosphere's land/ocean partition (TileConfig.f_land) and the
+        # dynamic ocean's wet mask are the SAME partition.  For a dynamic ocean
+        # with CONTINENTS that holds only under f_land_mode='from_ocean' (both
+        # masks from one WOA source); the default 'analytical' land (crude lat
+        # bands) diverges from the WOA wet mask over coastal cells, so the
+        # atmosphere would be force-balanced against a flux the ocean never
+        # received there.  Refuse it LOUDLY rather than silently break the budget
+        # (CLAUDE.md: no silent degradation).  An aquaplanet dynamic ocean (no
+        # land tile) is fine: the partitions trivially agree (all ocean).
+        # Divergence can come from EITHER partition: the atmosphere having land
+        # (TileConfig.f_land > 0) OR the dynamic OCEAN masking dry cells
+        # (continents) while the atmosphere does not (e.g. f_land_mode='zero'
+        # with a WOA/tripole ocean -- the atm is all-ocean but the ocean masks
+        # land, so the atm gets shared flux over cells the ocean never wetted).
+        # Only f_land_mode='from_ocean' ties BOTH masks to one source.
+        _tc = getattr(self, "_tile_config", None)
+        _has_atm_land = (
+            _tc is not None
+            and float(jnp.max(jnp.abs(jnp.asarray(_tc.f_land)))) > 0.0
+        )
+        # Ocean wet mask is 1=ocean, 0=land (set by the dynamic-ocean init); any
+        # cell < 1 is a dry (continent) cell.  None / all-wet aquaplanet => no
+        # dry cells => the partitions trivially agree.
+        _omask = getattr(self, "_ocean_land_mask", None)
+        _ocean_has_dry = (
+            _omask is not None
+            and float(jnp.min(jnp.asarray(_omask))) < 1.0
+        )
+        if (getattr(self, "_is_dynamic_ocean", False)
+                and (_has_atm_land or _ocean_has_dry)
+                and self.coupled_cfg.f_land_mode != "from_ocean"):
+            raise ValueError(
+                "couple_surface_fluxes=True with a dynamic ocean that has land "
+                "(atmosphere f_land>0 and/or a masked-dry ocean wet mask) "
+                "requires f_land_mode='from_ocean' so the atmosphere land/ocean "
+                "partition matches the ocean wet mask (otherwise the shared-flux "
+                "air-sea budget does not close over coastal/continental cells); "
+                f"got f_land_mode={self.coupled_cfg.f_land_mode!r}. Set "
+                "f_land_mode='from_ocean' (dynamic+WOA/tripole), or use an "
+                "all-ocean aquaplanet (ocean_ic='rest', no land tile), or "
+                "disable couple_surface_fluxes."
+            )
+
+        def _coupled_get_sfc_flux_override(day):
+            # The atmosphere gets the coupler's TILE-BLENDED surface flux
+            # (f_ocean*ocean + f_ice*ice + f_land*land + f_lake*lake) -- the
+            # correct TOTAL surface flux for the atmosphere bottom-level tendency
+            # over ALL tiles, so a mixed (land/ice) cell is forced by its own
+            # tiles, not by the ocean-tile flux.  It is already on the ATMOSPHERE
+            # grid (step_surface runs on the atm-grid forcing), so no remap.  The
+            # AIR-SEA budget closes because this blended flux and the ocean
+            # q_net's ``tile.shflx``/``tile.lhflx`` BOTH derive from the SAME
+            # coupler ``ocean_tile_response`` (no longer the atmosphere's old
+            # INDEPENDENT bulk calc): over the ocean fraction the blended flux's
+            # ocean component is f_ocean*ocean_tile and the ocean column receives
+            # ocean_tile over its wet area -- the same partition.  For an
+            # all-ocean cell blended == ocean_tile exactly (proven in the
+            # conservation tests).
+            r = self._last_sfc_response
+            if r is None or getattr(r, "shflx", None) is None:
+                return None, None
+            return r.shflx, r.lhflx
+
+        self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
+        logger.info(
+            "  Shared air-sea fluxes: coupler blended SH/LH -> atmosphere surface"
+        )
+
     # ==================================================================
     # Coupling step
     # ==================================================================
@@ -941,7 +1141,14 @@ class CoupledESMDriver:
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
-        rho_low = p_low / (constants.R_d * T_low)
+        # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
+        # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
+        # tropics (q_v ~ 17 g/kg) and biases every downstream bulk-flux surface
+        # stress / turbulent flux that reads forcing.rho_lowest -- the SAME T_v
+        # correction the canonical extract_atm_to_surface uses (single
+        # convention across the coupling-field extractors).
+        T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
+        rho_low = p_low / (constants.R_d * T_v_low)
 
         # Radiation and precipitation from last atmosphere physics
         aux = getattr(self._atm, '_carry_aux', {})
@@ -1172,6 +1379,7 @@ class CoupledESMDriver:
         aquaplanet Phase-1 run has no ice tile."""
         from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.grid_remap import remap_field
         from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm import constants
@@ -1179,7 +1387,31 @@ class CoupledESMDriver:
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
         tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
-        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        # Net surface shortwave (positive INTO ocean).  Use the radiation's
+        # ACTUAL net surface SW -- the value the atmosphere SW solver removed
+        # from TOA using the blended surface albedo it was given -- NOT a
+        # second albedo round-trip.  ``_build_atm_forcing`` reconstructs
+        # ``sw_down = sw_net_sfc / (1 - albedo_eff)`` with the BLENDED albedo;
+        # re-netting that gross ``sw_down`` here with the OCEAN-tile albedo
+        # (a DIFFERENT albedo over sea-ice / zenith-dependent ocean) made the
+        # ocean absorb a non-physical amount of SW (energy non-conservation:
+        # the ocean got MORE SW than radiation took out of the column over a
+        # bright ice cell).  Reading the radiation net SW (remapped onto the
+        # ocean grid; identity for the shared-grid Phase-1 ocean) closes the
+        # SW budget: ocean-absorbed SW == radiation surface-net SW, and over an
+        # all-ocean cell albedo_eff == ocean albedo so this is byte-identical to
+        # the old round-trip.  Fall back to the round-trip only if radiation has
+        # not run yet (segment 0 before the first physics step).
+        _atm = getattr(self, "_atm", None)
+        _aux = getattr(_atm, "_carry_aux", {}) if _atm is not None else {}
+        _sw_net_atm = _aux.get("held_sw_net_sfc", None)
+        _remapper = getattr(self, "_grid_remapper", None)
+        if _sw_net_atm is not None and _remapper is not None:
+            sw_net = remap_field(_sw_net_atm, _remapper.a2o)
+        else:
+            # Radiation has not run yet (segment 0 before the first physics step)
+            # -- fall back to the single-albedo net of the gross sw_down.
+            sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
         q_net = (sw_net + atm_forcing.lw_down
                  - tile.lw_up - tile.shflx - tile.lhflx)
         evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
@@ -1210,14 +1442,36 @@ class CoupledESMDriver:
             river = z
             surface_extra = z
         else:
+            # The lagged blended surface response lives on the ATMOSPHERE grid;
+            # its river-runoff / ice-lake freshwater sub-channels must be REMAPPED
+            # onto the OCEAN grid before joining the ocean-grid precip/evap in
+            # FreshwaterForcing -- otherwise on a tripole (cross-grid) coupling
+            # these atm-grid arrays are placed beside ocean-grid fields (shape
+            # mismatch -> crash, or silent wrong-grid injection).  The
+            # conservative scalar remap is sign-preserving, so ``river`` stays
+            # +INTO ocean and ``ice_fw`` keeps its melt(+)/freeze(-) sign at both
+            # ends.  Identity (shared-grid Phase-1 ocean / no remapper) is an
+            # exact pass-through -> byte-identical to the single-grid path.
             river = prev.river_runoff_flux              # land, depth-spread
             surface_extra = prev.ice_lake_freshwater_flux  # ice melt + lake, surface
+            if _remapper is not None:
+                river = remap_field(river, _remapper.a2o)
+                surface_extra = remap_field(surface_extra, _remapper.a2o)
         fw = FreshwaterForcing(
             precip=atm_forcing.precip_total, evap=evap, runoff=river,
             ice_fw=surface_extra,
         )
+        # ``OceanSurfaceForcing.sw_down`` is the NET (post-albedo) surface SW the
+        # ocean PENETRATES (``shortwave_penetration``: "net shortwave INTO the
+        # ocean (post-albedo)"; the lat-lon core forms q_nonsolar = q_net -
+        # 0.94*sw_down).  Passing the GROSS downwelling here treated reflected SW
+        # as penetrating solar and compensated it with an artificially reduced
+        # non-solar surface flux -- the column total still telescoped to q_net but
+        # the vertical heating profile was wrong.  Use the SAME ``sw_net`` that
+        # built q_net so the solar/non-solar split is consistent (matches the
+        # canonical OMIP-2 applicator, which passes sw_net as sw_down).
         sf = OceanSurfaceForcing(
-            sw_down=atm_forcing.sw_down, q_net=q_net,
+            sw_down=sw_net, q_net=q_net,
             tau_x=tile.tau_x, tau_y=tile.tau_y, freshwater=None,
         )
         return sf, fw
@@ -1397,7 +1651,13 @@ class CoupledESMDriver:
 
     # Coupled-checkpoint format version.  Bump when the saved layout changes so
     # a stale restart is detected rather than silently mis-mapped.
-    _CKPT_VERSION = 1
+    #   v1: slab ocean (ocean_T_sfc/ocean_T_deep) + flattened surface state.
+    #   v2: + full dynamic 3D ocean (ocean3d_* = the LatLonCGridOceanState
+    #       pytree) so an ocean_mode='dynamic' run can checkpoint/restart.
+    #       The v1 slab keys are unchanged, so a v1 slab checkpoint still
+    #       restores under v2 (a stale-version restore only warns; it is the
+    #       additive dynamic-ocean keys that a v1 reader would lack).
+    _CKPT_VERSION = 2
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
@@ -1411,19 +1671,26 @@ class CoupledESMDriver:
         # checkpoint from a different ocean_grid / config is caught, not silently
         # restored into a mismatched state — see load_coupled_checkpoint).
         arrays["_ckpt_version"] = np.asarray(self._CKPT_VERSION, dtype=np.int64)
-        # NOTE: the prognostic 3D ocean (ocean_mode='dynamic') is NOT yet
-        # checkpointed — its full LatLonCGridOceanState pytree (T,S,u,v,eta +
-        # AB2 history) needs the checkpoint-v2 flatten path (deferred, see
-        # docs/ocean/coupled_3d_ocean_plan.md).  Skip the slab-only T_sfc/T_deep save
-        # for dynamic so a short Phase-1 run does not crash on the missing
-        # T_sfc field; a dynamic run must currently restart from the IC.
-        if self._ocean_state is not None and not getattr(
-                self, "_is_dynamic_ocean", False):
-            arrays["_ckpt_ocean_shape"] = np.asarray(
-                self._ocean_state.T_sfc.data.shape, dtype=np.int64)
-            # Ocean state (SlabOceanState is a NamedTuple of Fields)
-            arrays["ocean_T_sfc"] = np.asarray(self._ocean_state.T_sfc.data)
-            arrays["ocean_T_deep"] = np.asarray(self._ocean_state.T_deep.data)
+        if self._ocean_state is not None:
+            if getattr(self, "_is_dynamic_ocean", False):
+                # Dynamic 3D ocean (ckpt v2): flatten the full
+                # LatLonCGridOceanState pytree (T,S,u,v,eta,w + any active
+                # AB2 / SOM / EKE / TKE history) into ``ocean3d_*`` leaves.
+                # The whole pytree — including the static H_bathy and the
+                # land/u/v mask triple — is saved together so the restore is
+                # atomic and mask-consistent (a partial mask restore would
+                # leak mass through walls; CLAUDE.md "Land/face masks").
+                arrays["_ckpt_ocean3d_shape"] = np.asarray(
+                    self._ocean_state.T.data.shape, dtype=np.int64)
+                arrays.update(
+                    _flatten_pytree_to_npz(self._ocean_state, "ocean3d_"))
+            else:
+                arrays["_ckpt_ocean_shape"] = np.asarray(
+                    self._ocean_state.T_sfc.data.shape, dtype=np.int64)
+                # Ocean state (SlabOceanState is a NamedTuple of Fields)
+                arrays["ocean_T_sfc"] = np.asarray(self._ocean_state.T_sfc.data)
+                arrays["ocean_T_deep"] = np.asarray(
+                    self._ocean_state.T_deep.data)
 
         # CO2 tracer field
         if hasattr(self, '_co2_field') and self._co2_field is not None:
@@ -1432,12 +1699,7 @@ class CoupledESMDriver:
         # Surface state (land, ice, lake, accumulator, carbon) — flatten
         # the pytree into a dict of named arrays for serialization.
         if self._sfc_state is not None:
-            leaves_with_path = jax.tree_util.tree_leaves_with_path(
-                self._sfc_state,
-            )
-            for path_parts, leaf in leaves_with_path:
-                key = "sfc_" + ".".join(str(p) for p in path_parts)
-                arrays[key] = np.asarray(leaf)
+            arrays.update(_flatten_pytree_to_npz(self._sfc_state, "sfc_"))
 
         if arrays:
             np.savez(coupled_path, **arrays)
@@ -1465,28 +1727,65 @@ class CoupledESMDriver:
 
         data = np.load(coupled_path)
 
-        # The prognostic 3D ocean is NOT yet checkpointed (ckpt v2 deferred), so
-        # a restart would resume the atm/surface at day N with the ocean reset
-        # to its IC — a silent state inconsistency.  Refuse it loudly until full
-        # 3D-ocean checkpointing exists (codex MED); a dynamic run restarts from
-        # the IC.
-        if getattr(self, "_is_dynamic_ocean", False):
-            raise ValueError(
-                "Coupled checkpoint restart is not supported for "
-                "ocean_mode='dynamic' (the 3D ocean state is not checkpointed; "
-                "ckpt v2 is deferred — see docs/ocean/coupled_3d_ocean_plan.md). "
-                "Restart from the initial condition instead.")
-
-        # Validate provenance BEFORE restoring — a checkpoint from a different
-        # format version or a different ocean grid must NOT be silently mapped
-        # into a mismatched state (this is the failure mode the grid-coupling
-        # review flagged: ocean_grid != the run's ocean_grid).
+        # Validate provenance FIRST — a checkpoint from a different format
+        # version or a different ocean grid must NOT be mapped into a mismatched
+        # state (the failure mode the grid-coupling review flagged).  A v1 slab
+        # checkpoint loaded by v2 code still restores (the slab keys are
+        # unchanged); the warning only flags the additive dynamic-ocean keys a
+        # v1 reader would lack.
         saved_ver = int(data["_ckpt_version"]) if "_ckpt_version" in data.files else 0
         if saved_ver != self._CKPT_VERSION:
             logger.warning(
                 f"Coupled checkpoint {coupled_path.name}: format version "
                 f"{saved_ver} != current {self._CKPT_VERSION}; restore may be "
                 f"unreliable.")
+
+        # Dynamic 3D ocean (ckpt v2): restore the PROGNOSTIC LatLonCGridOceanState
+        # leaves (T,S,u,v,eta,w + any active AB2/SOM/EKE/TKE history) from the
+        # ``ocean3d_*`` keys.  A dynamic run whose checkpoint predates v2 (no
+        # ocean3d_* keys) cannot have its 3D ocean restored — refuse loudly
+        # rather than silently resume the ocean at its IC.
+        if getattr(self, "_is_dynamic_ocean", False):
+            if not any(k.startswith("ocean3d_") for k in data.files):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: ocean_mode="
+                    "'dynamic' but the checkpoint carries no 3D-ocean state "
+                    "('ocean3d_*'; a pre-ckpt-v2 file).  The 3D ocean cannot "
+                    "be restarted from it — restart from the initial condition "
+                    "instead.")
+            if "_ckpt_ocean3d_shape" not in data.files:
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: ocean3d_* leaves "
+                    "present but '_ckpt_ocean3d_shape' is missing (malformed v2 "
+                    "checkpoint); refusing to restore.")
+            if self._ocean_state is not None:
+                saved_shape = tuple(
+                    int(s) for s in data["_ckpt_ocean3d_shape"])
+                cur_shape = tuple(int(s) for s in self._ocean_state.T.data.shape)
+                if saved_shape != cur_shape:
+                    raise ValueError(
+                        f"Coupled checkpoint {coupled_path.name}: saved "
+                        f"3D-ocean shape {saved_shape} != current ocean shape "
+                        f"{cur_shape}.  The ocean grid / vertical levels "
+                        f"changed since the checkpoint; refusing to restore a "
+                        f"mismatched state.")
+                # Restore the prognostic state (per-leaf shape/dtype checked;
+                # strict on structure drift so a toggled EKE/TKE/SOM scheme is
+                # caught, not silently reseeded), then RESET the static geometry
+                # (H_bathy + the land/u/v mask triple) to the deterministic
+                # fresh-init values so it stays consistent with the caches the
+                # ocean model + coupler built from it (_ocean_model,
+                # _ocean_z_coord, _ocean_land_mask).  Geometry is config-derived
+                # and identical on a clean resume; sourcing it from the fresh
+                # init (not the npz) makes a same-shape config change a no-op on
+                # geometry rather than a silent cache desync.
+                fresh = self._ocean_state
+                restored, _ = _restore_pytree_from_npz(
+                    fresh, data, "ocean3d_", coupled_path.name, strict=True)
+                self._ocean_state = restored._replace(
+                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask,
+                    u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+
         if "ocean_T_sfc" in data.files and self._ocean_state is not None:
             saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)
             cur_shape = tuple(int(s) for s in self._ocean_state.T_sfc.data.shape)
@@ -1517,47 +1816,11 @@ class CoupledESMDriver:
         if "co2_field" in data:
             self._co2_field = jnp.asarray(data["co2_field"])
 
-        # Restore surface state from flattened pytree leaves.
-        sfc_keys = [k for k in data.files if k.startswith("sfc_")]
-        if sfc_keys and self._sfc_state is not None:
-            leaves_with_path = jax.tree_util.tree_leaves_with_path(
-                self._sfc_state,
-            )
-            # Build a lookup from stringified path -> saved array
-            saved = {}
-            for k in sfc_keys:
-                saved[k] = data[k]
-
-            # Detect surface-state structure drift: leaves expected now but
-            # absent from the checkpoint silently keep their fresh-init value
-            # (and vice-versa), which corrupts a restart if the CoupledConfig
-            # changed.  Warn loudly instead of failing silently.
-            expected_keys = {
-                "sfc_" + ".".join(str(p) for p in path_parts)
-                for path_parts, _ in leaves_with_path
-            }
-            missing = expected_keys - set(sfc_keys)
-            extra = set(sfc_keys) - expected_keys
-            if missing or extra:
-                logger.warning(
-                    f"Coupled checkpoint {coupled_path.name}: surface-state "
-                    f"structure drift — {len(missing)} expected leaf(s) absent "
-                    f"from the checkpoint (kept fresh-init), {len(extra)} "
-                    f"unused checkpoint leaf(s).  The CoupledConfig likely "
-                    f"changed since the checkpoint was written.")
-
-            # Replace leaves in-order (same traversal as save)
-            new_leaves = []
-            for path_parts, leaf in leaves_with_path:
-                key = "sfc_" + ".".join(str(p) for p in path_parts)
-                if key in saved:
-                    new_leaves.append(jnp.asarray(saved[key]))
-                else:
-                    new_leaves.append(leaf)
-
-            self._sfc_state = jax.tree_util.tree_unflatten(
-                jax.tree_util.tree_structure(self._sfc_state),
-                new_leaves,
-            )
+        # Restore surface state (land, ice, lake, accumulator, carbon) from its
+        # flattened pytree leaves — atomic + drift-warned via the same helper
+        # used to save it (and to save/restore the dynamic ocean above).
+        if self._sfc_state is not None:
+            self._sfc_state, _ = _restore_pytree_from_npz(
+                self._sfc_state, data, "sfc_", coupled_path.name)
 
         logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

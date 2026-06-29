@@ -40,6 +40,44 @@ _TEX_IDX = {name: i for i, name in enumerate(USDA_TEXTURES)}
 _PSI_WILTING_M = -150.0      # wilting point ~ -1.5 MPa (FAO/CLM)
 _PSI_FIELD_CAP_M = -3.36     # field capacity ~ -33 kPa
 
+# --- soil-SOLIDS thermal properties from texture (Oleson et al. 2013, CLM4.5/5
+# tech note).  Sand-rich (quartz) solids conduct ~3x better than clay; the heat
+# capacity varies little.  Drives the per-cell thermal diffusivity (= k/C) and hence
+# the seasonal-cycle amplitude, capturing WITHIN-PFT spatial variation a per-PFT
+# constant cannot (e.g. sandy Sahara vs clayey tundra under one bare-soil class).
+_K_SOLID_SAND = 8.80         # [W/m/K] conductivity of sand (quartz) solids
+_K_SOLID_CLAY = 2.92         # [W/m/K] conductivity of clay solids
+_C_SOLID_SAND = 2.128e6      # [J/m3/K] volumetric heat capacity of sand solids
+_C_SOLID_CLAY = 2.385e6      # [J/m3/K] volumetric heat capacity of clay solids
+
+
+# No-mineral-data fallback (ice/organic/regrid gaps): a generic loam, so the
+# texture-weighted solids never collapse to a zero conductivity.
+_NODATA_SAND, _NODATA_CLAY = 40.0, 30.0   # coeff-ok: loam fallback %sand/%clay
+
+
+def _texture_fractions(pct_sand, pct_clay):
+    s = jnp.asarray(pct_sand, dtype=jnp.float64)
+    c = jnp.asarray(pct_clay, dtype=jnp.float64)
+    nodata = (s + c) < 1.0                 # no mineral fraction reported -> loam
+    s = jnp.where(nodata, _NODATA_SAND, s)
+    c = jnp.where(nodata, _NODATA_CLAY, c)
+    return s, c, s + c
+
+
+def soil_solid_conductivity(pct_sand, pct_clay):
+    """Mineral-grain thermal conductivity k_solid [W/m/K] from %sand/%clay
+    (Oleson 2013): a sand/clay-weighted average of the end-member conductivities."""
+    s, c, denom = _texture_fractions(pct_sand, pct_clay)
+    return (_K_SOLID_SAND * s + _K_SOLID_CLAY * c) / denom
+
+
+def soil_solid_heat_capacity(pct_sand, pct_clay):
+    """Volumetric heat capacity of the soil solids [J/m3/K] from %sand/%clay
+    (Oleson 2013): a sand/clay-weighted average of the end-member capacities."""
+    s, c, denom = _texture_fractions(pct_sand, pct_clay)
+    return (_C_SOLID_SAND * s + _C_SOLID_CLAY * c) / denom
+
 
 def usda_texture_index(pct_sand, pct_clay):
     """USDA texture-triangle class index (into :data:`USDA_TEXTURES`) from

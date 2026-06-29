@@ -67,6 +67,76 @@ class TestDINOConfig:
         assert len(cfg.wind_tau_lats_deg) == 7
         assert len(cfg.wind_tau_values) == 7
 
+    def test_mpas_equatorial_visc_boost_propagates(self):
+        """The MPAS-only equatorial viscosity boost
+        (``mpas_equatorial_visc_boost``) must reach the ``MPASOceanConfig``.
+        Without it the forced f→0 equatorial jet runs away on the implicit-CN
+        MPAS path (|u| 1.8→7.6 m/s by day 20 → NaN by day 30; fastest edges
+        all at |lat|<3°). It mirrors the lat-lon ``A_h_eq_boost`` mechanism.
+        ``physics`` is left off so the stub mesh only needs ``areaCell``.
+        """
+        import dataclasses
+        from types import SimpleNamespace
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))  # ~100 km cells
+        cfg = DINOConfig()
+        assert cfg.mpas_equatorial_visc_boost == pytest.approx(8.0)
+        mc, phys = dino.dino_mpas_model_config(mesh, cfg, physics=False)
+        assert mc.equatorial_visc_boost == pytest.approx(
+            cfg.mpas_equatorial_visc_boost)
+        assert phys is None
+        # Override (the run_dino --mpas-eq-visc-boost flag) propagates. Use a
+        # value distinct from the 8.0 default so the assert is non-vacuous.
+        cfg2 = dataclasses.replace(cfg, mpas_equatorial_visc_boost=12.0)
+        mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
+        assert mc2.equatorial_visc_boost == pytest.approx(12.0)
+
+    def test_mpas_physics_is_wired_into_model_config(self):
+        """The MPAS model gates KPP/GM-Redi/convection on
+        ``config.physics is not None``; dino_mpas_model_config MUST wire the
+        physics into the returned MPASOceanConfig (regression: it used to return
+        physics only as the 2nd value, which run_dino drops -> dycore-only MPAS).
+        """
+        from types import SimpleNamespace
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))
+        mc, phys = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=True)
+        assert phys is not None
+        assert mc.physics is not None, "MPAS physics not wired into the model config"
+        assert mc.physics is phys
+        assert mc.physics.vertical_mixing.scheme in ("kpp", "tke", "constant")
+        # physics=False stays dycore-only.
+        mc0, phys0 = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=False)
+        assert phys0 is None and mc0.physics is None
+
+    def test_vmix_scheme_default_and_dispatch(self):
+        """The shared vertical-mixing helper selects the paper's TKE closure by
+        default (with the paper background visc/diff + convective ceiling) and
+        KPP on request, and raises on an unknown scheme (dispatch hardening)."""
+        import dataclasses
+        cfg = DINOConfig()
+        # Default is the stable KPP closure (TKE = paper's scheme but unstable
+        # in our 1deg DINO past ~day 40 — see DINOConfig.vmix_scheme).
+        assert cfg.vmix_scheme == "kpp"
+        vm_kpp = dino._dino_vertical_mixing_config(cfg)
+        assert vm_kpp.scheme == "kpp"
+        assert vm_kpp.kpp.K_bg == pytest.approx(cfg.K_v_bg)
+        # The paper-faithful TKE config maps the paper background + ceiling, and
+        # prandtl_mode="constant" is required or kappaH_min/kappaM_max are dead.
+        vm = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="tke"))
+        assert vm.scheme == "tke"
+        assert vm.tke.prandtl_mode == "constant"
+        assert vm.tke.kappaM_min == pytest.approx(cfg.A_v_bg)
+        assert vm.tke.kappaH_min == pytest.approx(cfg.K_v_bg)
+        assert vm.tke.kappaM_max == pytest.approx(cfg.K_conv)
+        assert vm.tke.bg_diff_scale == pytest.approx(0.0)  # constant bg (no Bryan-Lewis)
+        # "constant" = background-only (used to unify vmix across grids).
+        vm_c = dino._dino_vertical_mixing_config(
+            dataclasses.replace(cfg, vmix_scheme="constant"))
+        assert vm_c.scheme == "constant"
+        with pytest.raises(ValueError):
+            dino._dino_vertical_mixing_config(
+                dataclasses.replace(cfg, vmix_scheme="bogus"))
+
     def test_registry_entry(self):
         assert "dino" in AVAILABLE_EXPERIMENTS
         assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG

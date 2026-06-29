@@ -173,7 +173,7 @@ def main():
         "no_pgf": base_config._replace(pgf_scheme="zero"),
         "no_visc": base_config._replace(A_h=0.0),
         "no_Av": base_config._replace(A_v=0.0),
-        "no_drag": base_config._replace(bottom_drag_r=0.0),
+        "no_drag": base_config._replace(bottom_drag=base_config.bottom_drag._replace(bottom_drag_r=0.0)),
     }
 
     tendencies = {}

@@ -398,8 +398,8 @@ gates the matrix runners use.
 | Path | Hardware / Backend | MPI Runtime | Tested JAX | Tested mpi4jax | Status / Notes |
 |---|---|---|---|---|---|
 | Finite-volume dycores + ocean (single-process) | CPU (`jax` CPU backend) | N/A | `>=0.8,<0.10` | N/A | Regular unit/regression path |
-| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
-| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not Metal-compatible |
+| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-mps` / MLX, `JAX_PLATFORMS=mps`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
+| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not mps-compatible |
 | Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` |
 | Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/bench/run_levante_gpu_scaling.py` |
 

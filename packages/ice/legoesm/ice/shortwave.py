@@ -311,9 +311,20 @@ def compute_ice_sw(
         alpha, transmittance = delta_eddington_albedo(
             T_sfc, h_ice, h_snow, pond_area, pond_depth,
         )
+        # SW energy balance (positive into the column): the SW that is not
+        # reflected enters the column and is partitioned into a surface-absorbed
+        # part and a part that penetrates through to the ocean below.
+        #   reflected + absorbed + penetrated == sw_down  (exactly).
+        # ``transmittance`` and ``(1 - alpha)`` come from SEPARATE fits, so the
+        # raw ``transmittance * sw_down`` can exceed ``net_into_column``; the
+        # previous code clamped ``absorbed`` at 0 but left ``penetrated``
+        # unbounded, so reflected + absorbed + penetrated could EXCEED sw_down
+        # (energy created).  Bound the penetrated flux by the column input and
+        # take the surface-absorbed part as the remainder so the balance closes
+        # and both parts stay non-negative (finding #8).
         net_into_column = (1.0 - alpha) * sw_down
-        penetrated = transmittance * sw_down
-        absorbed = jnp.maximum(net_into_column - penetrated, 0.0)
+        penetrated = jnp.minimum(transmittance * sw_down, net_into_column)
+        absorbed = net_into_column - penetrated
     else:
         raise ValueError(
             f"compute_ice_sw: unknown scheme {scheme!r}.  Expected one of "

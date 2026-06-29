@@ -33,13 +33,13 @@ def test_mpas_factory_selects_canonical_blocks():
     assert mc.eos == "wright"
     assert mc.tracer_advection == "tvd"
     assert mc.pgf_scheme == "adcroft"
-    assert mc.barotropic_solver == "implicit_cn"
+    assert mc.barotropic_solver == "implicit_cn"  # MPAS: flat (not grouped)
     assert mc.pv_scheme == "enstrophy"
     assert mc.implicit_vertical_mixing is True
     assert mc.A_h == pytest.approx(1.0e5)
     assert mc.C_smag_lap == pytest.approx(0.33)
     assert mc.K_zeta_bih == pytest.approx(1.0e14)
-    assert mc.barotropic_implicit_pcg_maxiter == 300
+    assert mc.barotropic_implicit_pcg_maxiter == 300  # MPAS: flat (not grouped)
     assert mc.normalize_freshwater is True
     assert mc.gm_redi is not None
     assert mc.gm_redi.kappa_GM == pytest.approx(600.0)
@@ -56,11 +56,11 @@ def test_tripole_factory_selects_canonical_blocks():
     assert mc.pgf_scheme == "adcroft"
     # ke_gradient intentionally the centered default (NOT fold-aware hollingsworth).
     assert mc.ke_gradient_scheme == "centered"
-    assert mc.barotropic_solver == "implicit_cn"
+    assert mc.barotropic.barotropic_solver == "implicit_cn"
     assert mc.coriolis_scheme == "matsuno_split"
     assert mc.outer_integrator == "forward_euler"
     assert mc.tracer_time_integrator == "euler"
-    assert mc.n_barotropic_substeps == 30
+    assert mc.barotropic.n_barotropic_substeps == 30
     assert mc.freshwater_closure == "virtual_salt_flux"
     assert mc.gm_redi is not None
     assert mc.gm_redi.kappa_GM == pytest.approx(600.0)

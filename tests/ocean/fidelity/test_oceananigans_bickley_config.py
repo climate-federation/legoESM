@@ -51,13 +51,13 @@ def test_faithful_eddy_config_is_default(bickley_module):
         "MATCHED vertex-f Coriolis (matsuno_split). A revert to explicit_ab2 "
         "re-introduces the 2dx null mode -> ens_ratio 1.77 (FAIL)."
     )
-    assert cfg.barotropic_solver == "implicit_cn", (
-        f"barotropic_solver={cfg.barotropic_solver!r}; the faithful ImplicitFreeSurface "
+    assert cfg.barotropic.barotropic_solver == "implicit_cn", (
+        f"barotropic_solver={cfg.barotropic.barotropic_solver!r}; the faithful ImplicitFreeSurface "
         "analog is implicit_cn (explicit_substep under-dissipates the roll-up)."
     )
     # Backward-Euler (theta=1.0), the ImplicitFreeSurface time discretization.
-    assert float(cfg.barotropic_implicit_theta_eta) == 1.0
-    assert float(cfg.barotropic_implicit_theta_pgf) == 1.0
+    assert float(cfg.barotropic.barotropic_implicit_theta_eta) == 1.0
+    assert float(cfg.barotropic.barotropic_implicit_theta_pgf) == 1.0
     # weno9 vector-invariant momentum (the eddy-regime scheme under test).
     assert cfg.momentum_advection == "weno9"
 
@@ -83,4 +83,4 @@ def test_env_overrides_still_work(bickley_module, monkeypatch):
     importlib.reload(bickley_module)
     _g, _w, _z, _s, model = bickley_module.build_bickley()
     assert model.config.coriolis_scheme == "explicit_ab2"
-    assert model.config.barotropic_solver == "explicit_substep"
+    assert model.config.barotropic.barotropic_solver == "explicit_substep"

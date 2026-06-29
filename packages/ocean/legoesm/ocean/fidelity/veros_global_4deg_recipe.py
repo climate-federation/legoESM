@@ -513,7 +513,7 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
     (same Veros core ⇒ same options; see the module docstring 'DOCUMENTED
     CHOICE') with the global_4deg parameter deltas (A_h, GM/Redi, dt ratio,
     gsw EOS, zero bottom drag)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,

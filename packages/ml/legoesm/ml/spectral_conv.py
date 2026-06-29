@@ -61,11 +61,23 @@ class SpectralConv(eqx.Module):
         scale = 1.0 / math.sqrt(n_sh * in_channels)
         key_r, key_i = jax.random.split(key)
 
+        # The SHT spectral path is x64/complex128 (W = weight_real + 1j*weight_imag
+        # forms a complex128 operator only when its parts are float64).  Pin the
+        # weight dtype to float64 so it does not silently fall back to the
+        # jax.random.normal default (float32 -> complex64), which violates the
+        # spectral=x64 rule and degrades transform accuracy.  Fail LOUDLY if x64
+        # is disabled rather than letting JAX downcast the request to float32.
+        if not jax.config.read("jax_enable_x64"):
+            raise RuntimeError(
+                "SpectralConv requires JAX x64 (jax_enable_x64=True); the SHT "
+                "spectral weights must be float64/complex128. Enable x64 before "
+                "building the SFNO spectral path."
+            )
         self.weight_real = scale * jax.random.normal(
-            key_r, (n_sh, out_channels, in_channels)
+            key_r, (n_sh, out_channels, in_channels), dtype=jnp.float64
         )
         self.weight_imag = scale * jax.random.normal(
-            key_i, (n_sh, out_channels, in_channels)
+            key_i, (n_sh, out_channels, in_channels), dtype=jnp.float64
         )
 
     def __call__(self, coeffs: jnp.ndarray) -> jnp.ndarray:

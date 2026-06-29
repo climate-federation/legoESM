@@ -186,7 +186,12 @@ def init_surface_state(
                        name="Q_freeze", dims=dims_2d, units="W/m2"),
     )
 
-    acc = reset_accumulator(shape)
+    # Pin the accumulator leaves to the SAME storage precision as the rest of
+    # SurfaceState (``_sd`` above); without an explicit dtype the zeros follow
+    # the global x64 default, so under JAX_ENABLE_X64 the accumulator widens to
+    # f64 while land/ice/lake/carbon stay at the storage policy dtype -- a mixed
+    # pytree that triggers lax.scan carry-dtype warnings / promotion.
+    acc = reset_accumulator(shape, dtype=_sd)
 
     # Carbon pools (only for differland scheme)
     carbon = None

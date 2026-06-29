@@ -51,7 +51,7 @@ class TestBarotropicDivDampOverride:
         from ocean_test_matrix.cli import build_parser
         parser = build_parser()
         args = parser.parse_args(["--barotropic-div-damp", "0.123"])
-        assert args.barotropic_div_damp == pytest.approx(0.123)
+        assert args.barotropic.barotropic_div_damp == pytest.approx(0.123)
 
     def test_cli_help_lists_flag(self):
         from ocean_test_matrix.cli import build_parser
@@ -72,7 +72,7 @@ class TestBarotropicDivDampOverride:
         captured: list[EadyUniformConfig] = []
 
         def _capture(tc, **kwargs):  # pragma: no cover - bypass real setup
-            # The runner passes ``barotropic_div_damp=eu_config.barotropic_div_damp``
+            # The runner passes ``barotropic_div_damp=eu_config.barotropic.barotropic_div_damp``
             # explicitly — but we want to assert on the eu_config that
             # ``overrides`` produced.  Stop the call here.
             captured.append(kwargs)

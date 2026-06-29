@@ -87,23 +87,73 @@ class DiffusionB:
             0.0, 0.5,
         )
 
+    def _apply_per_field(self, field_flat: jax.Array, block_op) -> jax.Array:
+        """Apply ``block_op`` to EACH control field independently.
+
+        ``block_op`` maps a single ``(ncol, nlev)`` field block to a block of
+        the same shape (the smoother or its inverse).  When ``self.spec`` is set
+        we slice ``field_flat`` by the control-vector entries so a multi-field
+        control (u/v/T/q) is smoothed field-by-field — reshaping the WHOLE flat
+        vector as ``(ncol, total//ncol)`` instead smears unrelated fields
+        together (wrong J_b gradient) and crashes when ``total % ncol != 0``.
+        With no spec we keep the legacy single-field reshape.
+
+        The diffusion smoother is block-diagonal across fields, so applying the
+        SAME block operator to each slice independently preserves the exact
+        transpose-consistent inverse identity ``inv_multiply(B v) == v``.
+        """
+        ncol = self.grid.grid_n_columns
+
+        def _block(flat_slice):
+            # Each control field is stored as field.ravel(); its spatial dims
+            # flatten to ncol, leaving size // ncol vertical levels.
+            if flat_slice.size % ncol != 0:
+                raise ValueError(
+                    f"control field of size {flat_slice.size} is not a multiple "
+                    f"of grid_n_columns={ncol}; cannot reshape to (ncol, nlev)"
+                )
+            nlev = flat_slice.size // ncol
+            return block_op(flat_slice.reshape(ncol, nlev)).ravel()
+
+        if field_flat.ndim == 1 and self.spec is not None:
+            # Validate length BEFORE slicing: jax.lax.dynamic_slice CLAMPS an
+            # out-of-range offset, so a wrong-sized control would be silently
+            # corrupted (a short vector duplicates trailing values; a long one
+            # drops the tail) — mirror the control_to_state guard.
+            if field_flat.shape[0] != self.spec.total_size:
+                raise ValueError(
+                    f"control vector has size {field_flat.shape[0]}; expected "
+                    f"{self.spec.total_size} (sum of spec entry sizes). "
+                    f"dynamic_slice would silently clamp a wrong size."
+                )
+            # Slice by control-vector entries and smooth each field on its own.
+            parts = []
+            for entry in self.spec.entries:
+                flat_slice = jax.lax.dynamic_slice(
+                    field_flat, (entry.offset,), (entry.size,)
+                )
+                parts.append(_block(flat_slice))
+            return jnp.concatenate(parts)
+
+        if field_flat.ndim == 1:
+            # Legacy single-field path (no spec): treat the whole vector as one
+            # (ncol, nlev) field.
+            if field_flat.size > ncol:
+                nlev = field_flat.size // ncol
+                field_2d = field_flat.reshape(ncol, nlev)
+            else:
+                field_2d = field_flat.reshape(ncol, 1)
+            return block_op(field_2d).ravel()
+
+        # Already-2D input: a single (ncol, nlev) field block.
+        return block_op(field_flat)
+
     def _smooth_field(self, field_flat: jax.Array, n_iter: int) -> jax.Array:
         """Apply n_iter iterations of implicit diffusion smoothing.
 
         Uses iterative Jacobi smoothing as a proxy for (I - kappa*nabla^2)^{-1}.
-        Applied on the flattened column representation.
+        Applied per control field on the flattened column representation.
         """
-        ncol = self.grid.grid_n_columns
-
-        # Handle multi-level fields
-        if field_flat.ndim == 1 and field_flat.size > ncol:
-            nlev = field_flat.size // ncol
-            field_2d = field_flat.reshape(ncol, nlev)
-        elif field_flat.ndim == 1:
-            field_2d = field_flat.reshape(ncol, 1)
-        else:
-            field_2d = field_flat
-
         # Area weights for normalization
         area = self.grid.to_columns(self.grid.grid_area)
         area_norm = area / jnp.sum(area)
@@ -117,11 +167,11 @@ class DiffusionB:
             x_new = x + alpha * (mean_x - x)
             return x_new, None
 
-        result, _ = jax.lax.scan(smooth_step, field_2d, None, length=n_iter)
+        def block_op(field_2d):
+            result, _ = jax.lax.scan(smooth_step, field_2d, None, length=n_iter)
+            return result
 
-        if field_flat.ndim == 1:
-            return result.ravel()
-        return result
+        return self._apply_per_field(field_flat, block_op)
 
     def sqrt_multiply(self, x: jax.Array) -> jax.Array:
         """Apply B^{1/2} to control vector x. Differentiable."""
@@ -151,15 +201,6 @@ class DiffusionB:
         m = self.n_iter // 2 + 1
         x_scaled = x / self.sigma          # Σ^{-1}
 
-        ncol = self.grid.grid_n_columns
-        if x_scaled.ndim == 1 and x_scaled.size > ncol:
-            nlev = x_scaled.size // ncol
-            field_2d = x_scaled.reshape(ncol, nlev)
-        elif x_scaled.ndim == 1:
-            field_2d = x_scaled.reshape(ncol, 1)
-        else:
-            field_2d = x_scaled
-
         area = self.grid.to_columns(self.grid.grid_area)
         area_norm = area / jnp.sum(area)
         alpha = self.kappa
@@ -175,10 +216,15 @@ class DiffusionB:
             col_sum = jnp.sum(y, axis=0, keepdims=True)
             return inv_damp * (y - alpha * area_norm[:, None] * col_sum), None
 
-        field_2d, _ = jax.lax.scan(inv_step, field_2d, None, length=m)   # S^{-m}
-        field_2d, _ = jax.lax.scan(invT_step, field_2d, None, length=m)  # (Sᵀ)^{-m}
+        def block_op(field_2d):
+            field_2d, _ = jax.lax.scan(inv_step, field_2d, None, length=m)   # S^{-m}
+            field_2d, _ = jax.lax.scan(invT_step, field_2d, None, length=m)  # (Sᵀ)^{-m}
+            return field_2d
 
-        result = field_2d.ravel() if x_scaled.ndim == 1 else field_2d
+        # Apply the inverse smoother per control field (mirrors _smooth_field's
+        # spec-aware slicing) so a multi-field control is inverted field-by-field
+        # and the exact transpose-consistent identity inv_multiply(B v) == v holds.
+        result = self._apply_per_field(x_scaled, block_op)
         return result / self.sigma         # Σ^{-1}
 
 
@@ -303,6 +349,16 @@ class HybridB:
         self.localization_length = localization_length
         self.grid = grid
         self.n_members = ensemble_perts.shape[0]
+        # sqrt_multiply scales the ensemble term by 1/sqrt(n_members - 1); a
+        # single-member ensemble makes that 0/0 = NaN (and a 0-member ensemble
+        # has no perturbations at all). Require >= 2 members at construction so
+        # the divide-by-zero can never reach the AD tape.
+        if self.n_members < 2:
+            raise ValueError(
+                f"HybridB requires an ensemble with >= 2 members, got "
+                f"{self.n_members}; the ensemble covariance scaling "
+                f"1/sqrt(n_members - 1) is undefined otherwise."
+            )
 
     def sqrt_multiply(self, x: jax.Array) -> jax.Array:
         """Apply B^{1/2} x ≈ sqrt(beta_s)·B_static^{1/2} x + sqrt(beta_e)·ensemble.

@@ -47,8 +47,8 @@ def test_geometry_uses_beta_plane_with_mitgcm_params():
 
 def test_config_is_barotropic_constant_density():
     c = gyre.build_gyre_config()
-    assert c.A_h == gyre.VISC_AH
-    assert c.bottom_drag_r == 0.0
+    assert c.lateral_viscosity.A_h == gyre.VISC_AH
+    assert c.bottom_drag.bottom_drag_r == 0.0  # #501: nested DynBottomDragConfig
     assert c.gm_redi is None
     assert c.eos == "linear"
     assert c.eos_linear.alpha_T == 0.0 and c.eos_linear.beta_S == 0.0
@@ -67,9 +67,9 @@ def test_config_pins_mitgcm_faithful_unsplit_numerics():
     assert c.coriolis_energy_conserving is False        # MITgcm face-f, not Sadourny
     assert c.momentum_advection == "flux_form"
     assert c.momentum_flux_scheme == "centered"          # MITgcm 2nd-order centered
-    assert c.barotropic_solver == "implicit_cn"
-    assert c.barotropic_implicit_theta_eta == 1.0
-    assert c.barotropic_implicit_theta_pgf == 1.0
+    assert c.barotropic.barotropic_solver == "implicit_cn"
+    assert c.barotropic.barotropic_implicit_theta_eta == 1.0
+    assert c.barotropic.barotropic_implicit_theta_pgf == 1.0
 
 
 def test_geometry_uses_natural_pseudo_lat_with_stored_metric():

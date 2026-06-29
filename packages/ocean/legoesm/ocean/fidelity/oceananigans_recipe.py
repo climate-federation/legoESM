@@ -96,6 +96,14 @@ def oceananigans_canonical_ocean_config(
     momentum_advection: str = "vector_invariant",  # VectorInvariant() [APPROX]
     tracer_advection: str = "weno7",               # WENO(order=7)
     barotropic_solver: str = "implicit_cn",        # ImplicitFreeSurface
+    # Barotropic time filter. Consumed ONLY by the explicit_substep substep (the
+    # implicit_cn default has no substep to filter — _validate_config warns if it is
+    # set non-default there). Default PER SOLVER (None ⇒ resolved below): power_law
+    # (SM2005 extended window) for explicit_substep — the faithful choice that avoids
+    # the first-order cosine bell's over-dissipation of the eddy field
+    # (docs/ocean/fidelity/oceananigans_recipe_wiring_plan.md §8) — else the inert
+    # cosine default. Explicit value wins.
+    barotropic_time_filter: str | None = None,
     coriolis_scheme: str = "explicit_ab2",         # spherical Coriolis [APPROX]
     bottom_drag_r: float = 0.0,                    # linear bottom drag mu
     lateral_side_bc: str = "free_slip",            # Oceananigans default: free-slip
@@ -119,7 +127,14 @@ def oceananigans_canonical_ocean_config(
         vmix["A_v"] = A_v
     if K_v is not None:
         vmix["K_v"] = K_v
-    return LatLonCGridOceanConfig(
+    # Per-solver default: the faithful power_law filter only where it is consumed
+    # (explicit_substep); the inert cosine default otherwise (so the recipe's own
+    # implicit_cn default does not trip the no-op warning). from_flat routes this
+    # into the nested BarotropicConfig (#501).
+    if barotropic_time_filter is None:
+        barotropic_time_filter = (
+            "power_law" if barotropic_solver == "explicit_substep" else "cosine")
+    return LatLonCGridOceanConfig.from_flat(
         g=g,
         rho_0=rho_0,
         eos="linear",
@@ -133,6 +148,7 @@ def oceananigans_canonical_ocean_config(
         outer_integrator="ab2",
         ab2_epsilon=ab2_epsilon,
         barotropic_solver=barotropic_solver,
+        barotropic_time_filter=barotropic_time_filter,
         lateral_viscosity_operator="flux_divergence",
         A_h_lat_scaling=False,
         C_smag=0.0,

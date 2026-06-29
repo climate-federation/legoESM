@@ -88,7 +88,7 @@ def seed_freerun_carries(model, state, cfg, grid):
             T_incr_prev=_z(state.T), S_incr_prev=_z(state.S),
             u_incr_prev=_z(state.u), v_incr_prev=_z(state.v))
 
-    if cfg.barotropic_solver == "rigid_lid" and state.psi is None:
+    if cfg.barotropic.barotropic_solver == "rigid_lid" and state.psi is None:
         rl = model._ensure_rigid_lid_data(state)
         _zV = jnp.zeros((grid.n_lat + 1, grid.n_lon + 1), dtype=state.u.data.dtype)
         _zI = jnp.zeros((rl.nisle,), dtype=state.u.data.dtype)
@@ -347,20 +347,24 @@ def build_observation_target(truth_obs, land_mask, *, rel_floor=1e-3,
     return y, r_diag, packer
 
 
-def relative_param_error(theta_unconstrained, true_geom, specs):
+def relative_param_error(theta_unconstrained, true_geom, specs, constrain_fn):
     """L1 relative error of constrained ensemble-mean params vs the truth.
 
     ``theta_unconstrained`` is (n_e, n_p) in logit space; returns a dict
     {param_name: |mean(constrained) - true| / true} for the diagnostics table.
+
+    ``constrain_fn(raw_value, spec) -> constrained_value`` is INJECTED by the
+    caller (the orchestration layer that owns the trainable-param transform):
+    ocean.fidelity must not import legoesm.training (component-independence
+    import boundary — ocean may not depend on the layers above it).
     """
     import jax.numpy as jnp
-    from legoesm.training.trainable_ocean_params import constrain
 
     theta = jnp.asarray(theta_unconstrained)
     mean_raw = jnp.mean(theta, axis=0)
     out = {}
     for i, sp in enumerate(specs):
-        val = float(constrain(mean_raw[i], sp))
+        val = float(constrain_fn(mean_raw[i], sp))
         true = float(getattr(true_geom, sp.constraint.name))
         out[sp.constraint.name] = (val, true, abs(val - true) / abs(true))
     return out

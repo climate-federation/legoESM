@@ -79,7 +79,7 @@ def test_make_eos_fn_linear_defaults_eos_linear():
 def test_validate_config_rejects_unknown_eos_at_construction():
     """Fail-fast: an unknown eos must raise at config validation, not lazily at
     the first step. Uses the same VALID_EOS_SCHEMES source as make_eos_fn."""
-    bad = LatLonCGridOceanConfig(eos="wrihgt")  # typo
+    bad = LatLonCGridOceanConfig.from_flat(eos="wrihgt")  # typo
     with pytest.raises(ValueError, match="eos must be one of"):
         LatLonCGridOceanModel._validate_config(bad)
 
@@ -88,7 +88,7 @@ def test_validate_config_accepts_every_valid_eos():
     """Each valid eos literal must pass construction validation — locking the
     validator's set to make_eos_fn's set (no fail-fast/lazy disagreement)."""
     for scheme in VALID_EOS_SCHEMES:
-        cfg = LatLonCGridOceanConfig(eos=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(eos=scheme)
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 
@@ -102,7 +102,7 @@ def test_A_h_single_source_competing_physics_harmonic_rejected():
     LateralMixingConfig with scheme='harmonic' carries a competing
     HarmonicConfig.A_h; that path is cubed-sphere-only, so it must be rejected
     at construction — leaving config.A_h as the sole A_h source."""
-    competing = LatLonCGridOceanConfig(
+    competing = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4,
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(
@@ -117,14 +117,14 @@ def test_A_h_single_source_competing_physics_harmonic_rejected():
 def test_A_h_single_source_clean_config_passes():
     """With physics.lateral_mixing='none' there is no competing A_h source and
     construction validation passes; config.A_h is the single source."""
-    clean = LatLonCGridOceanConfig(
+    clean = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4,
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(scheme="none"),
         ),
     )
     LatLonCGridOceanModel._validate_config(clean)  # must not raise
-    assert clean.A_h == 2.0e4
+    assert clean.lateral_viscosity.A_h == 2.0e4
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ def test_A_h_single_source_clean_config_passes():
 def test_validate_config_rejects_unknown_momentum_advection():
     """An unknown momentum_advection literal must raise at construction, not
     silently fall through to vector-invariant (the prior behaviour)."""
-    bad = LatLonCGridOceanConfig(momentum_advection="flux-form")  # typo/not-yet
+    bad = LatLonCGridOceanConfig.from_flat(momentum_advection="flux-form")  # typo/not-yet
     with pytest.raises(ValueError, match="momentum_advection must be one of"):
         LatLonCGridOceanModel._validate_config(bad)
 
@@ -146,14 +146,14 @@ def test_validate_config_accepts_valid_momentum_advection():
         VALID_MOMENTUM_ADVECTION,
     )
     for scheme in VALID_MOMENTUM_ADVECTION:
-        cfg = LatLonCGridOceanConfig(momentum_advection=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection=scheme)
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 
 def test_validate_config_rejects_unknown_momentum_flux_scheme():
     """An unknown momentum_flux_scheme (used by momentum_advection='flux_form')
     must raise at construction."""
-    bad = LatLonCGridOceanConfig(
+    bad = LatLonCGridOceanConfig.from_flat(
         momentum_advection="flux_form", momentum_flux_scheme="quadratic",
     )
     with pytest.raises(ValueError, match="momentum_flux_scheme must be one of"):
@@ -170,7 +170,7 @@ def test_validate_config_rejects_unknown_tracer_advection():
     survive until the first step's runtime ValueError in
     _compute_advection_flux_div (the prior behaviour — inconsistent with every
     other scheme field, which validate on the static config at construction)."""
-    bad = LatLonCGridOceanConfig(tracer_advection="van-leer")  # typo
+    bad = LatLonCGridOceanConfig.from_flat(tracer_advection="van-leer")  # typo
     with pytest.raises(ValueError, match="tracer_advection must be one of"):
         LatLonCGridOceanModel._validate_config(bad)
 
@@ -184,7 +184,7 @@ def test_validate_config_accepts_valid_tracer_advection():
     )
     assert "som" in VALID_TRACER_ADVECTION  # guard the step-level special case
     for scheme in VALID_TRACER_ADVECTION:
-        cfg = LatLonCGridOceanConfig(tracer_advection=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(tracer_advection=scheme)
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 
@@ -242,7 +242,7 @@ def test_valid_tracer_advection_matches_dispatch_branches():
 def test_validate_config_accepts_flux_form_with_valid_scheme():
     """flux_form with a valid momentum_flux_scheme passes construction."""
     for scheme in ("upwind", "centered"):
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             momentum_advection="flux_form", momentum_flux_scheme=scheme,
         )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise

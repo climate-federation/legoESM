@@ -27,10 +27,26 @@ from legoesm.land.surface_params import (
     PARAM_NAMES,
     LandSurfaceParams,
     array_to_params,
-    bounds_arrays,
     clm5_pft_table,
     default_land_surface_params,
 )
+
+
+def _bounds_from_pairs(
+    param_bounds: list[tuple[float, float]],
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Split a list of ``(lo, hi)`` pairs into ``(lo_arr, hi_arr)``.
+
+    Built from the PROVIDER INSTANCE's ``param_bounds`` (in its
+    ``param_names`` order) so a provider constructed with custom bounds /
+    a custom parameter subset uses THOSE bounds when applying the sigmoid
+    constraint — the module-global ``bounds_arrays()`` (fixed 12-param
+    ``PARAM_NAMES`` order) would silently apply the wrong bounds or crash
+    on a shape mismatch (finding #10).
+    """
+    lo = jnp.array([b[0] for b in param_bounds])
+    hi = jnp.array([b[1] for b in param_bounds])
+    return lo, hi
 
 
 # =====================================================================
@@ -102,13 +118,20 @@ class PFTParamProvider(eqx.Module):
         The raw table is set to the inverse-sigmoid of the CLM5 defaults
         so that ``sigmoid(raw) ≈ physical values`` before any training.
         """
-        if param_bounds is None:
-            param_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
         if param_names is None:
             param_names = PARAM_NAMES
+        if param_bounds is None:
+            param_bounds = [PARAM_BOUNDS[n] for n in param_names]
 
-        table = clm5_pft_table()  # (17, 12)
-        lo, hi = bounds_arrays()
+        # Select the CLM5 default-table columns matching ``param_names`` (the
+        # table is in full PARAM_NAMES order) so a custom name subset/reorder
+        # initialises from the right defaults, and inverse-sigmoid with the
+        # SAME bounds the forward ``_constrained_table`` will use — otherwise
+        # the logit/sigmoid round-trip is broken for custom bounds (finding #10).
+        full_table = clm5_pft_table()  # (n_pft, len(PARAM_NAMES))
+        col_idx = jnp.array([PARAM_NAMES.index(n) for n in param_names])
+        table = full_table[:, col_idx]
+        lo, hi = _bounds_from_pairs(param_bounds)
         # Inverse sigmoid: raw = logit((table - lo) / (hi - lo))
         eps = 1e-6
         normalized = jnp.clip((table - lo) / (hi - lo), eps, 1.0 - eps)
@@ -122,8 +145,12 @@ class PFTParamProvider(eqx.Module):
         )
 
     def _constrained_table(self) -> jax.Array:
-        """Apply sigmoid bounds: raw -> (n_pft, n_params) physical values."""
-        lo, hi = bounds_arrays()
+        """Apply sigmoid bounds: raw -> (n_pft, n_params) physical values.
+
+        Uses THIS provider's ``param_bounds`` (finding #10), not the global
+        ``bounds_arrays()``, so custom bounds/parameter subsets are honored.
+        """
+        lo, hi = _bounds_from_pairs(self.param_bounds)
         return lo + (hi - lo) * jax.nn.sigmoid(self.raw_table)
 
     def __call__(self) -> LandSurfaceParams:
@@ -169,10 +196,14 @@ class NeuralParamProvider(eqx.Module):
         param_bounds: list[tuple[float, float]] | None = None,
         param_names: tuple[str, ...] | None = None,
     ):
-        if param_bounds is None:
-            param_bounds = [PARAM_BOUNDS[n] for n in PARAM_NAMES]
+        # Resolve ``param_names`` FIRST, then default ``param_bounds`` from
+        # THOSE names (not the full PARAM_NAMES) so a custom name subset/reorder
+        # gets length-consistent bounds — otherwise a 12-entry default-bounds
+        # list mismatches a shorter ``raw`` in ``_forward_single`` (finding #1).
         if param_names is None:
             param_names = PARAM_NAMES
+        if param_bounds is None:
+            param_bounds = [PARAM_BOUNDS[n] for n in param_names]
 
         n_output = len(param_names)
         keys = jax.random.split(key, n_hidden + 1)
@@ -187,11 +218,15 @@ class NeuralParamProvider(eqx.Module):
         self.n_output = n_output
 
     def _forward_single(self, x: jax.Array) -> jax.Array:
-        """Single grid cell: (n_input,) -> (n_output,) bounded params."""
+        """Single grid cell: (n_input,) -> (n_output,) bounded params.
+
+        Uses THIS provider's ``param_bounds`` (finding #10), not the global
+        ``bounds_arrays()``, so custom bounds/parameter subsets are honored.
+        """
         for layer in self.layers[:-1]:
             x = jax.nn.gelu(layer(x))
         raw = self.layers[-1](x)
-        lo, hi = bounds_arrays()
+        lo, hi = _bounds_from_pairs(self.param_bounds)
         return lo + (hi - lo) * jax.nn.sigmoid(raw)
 
     def __call__(self, features: jax.Array) -> LandSurfaceParams:

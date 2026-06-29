@@ -138,7 +138,7 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
         history = {"misfit": [], "n_valid": [], "params": [], "held_transport": []}
 
         def _callback(it, step):
-            errs = g0.relative_param_error(step.theta, true_geom, specs)
+            errs = g0.relative_param_error(step.theta, true_geom, specs, constrain)
             history["misfit"].append(step.misfit)
             history["n_valid"].append(step.n_valid)
             history["params"].append({k: v[0] for k, v in errs.items()})
@@ -155,7 +155,7 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
             r_diag=r_diag, callback=_callback)
 
         # --- Persist ---
-        final_errs = g0.relative_param_error(theta_final, true_geom, specs)
+        final_errs = g0.relative_param_error(theta_final, true_geom, specs, constrain)
         result = {
             "truth_dir": str(truth_dir),
             "true_params": true_meta["geometric_true_params"],

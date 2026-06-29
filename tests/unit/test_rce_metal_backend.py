@@ -56,17 +56,17 @@ from legoesm.grids.vertical import create_height_coordinate
 from legoesm.parallel.metal import is_metal_backend, to_cpu, to_metal
 
 
-_ACCELERATOR_PLATFORMS = ("gpu", "cuda", "rocm", "metal")
+_ACCELERATOR_PLATFORMS = ("gpu", "cuda", "rocm", "mps")
 
 
 def _accelerator_device():
     """Return the first functional accelerator device, or None."""
     if is_metal_backend():
-        # On Metal-as-default-and-functional, devices() returns the
-        # Metal device.
+        # On the Apple GPU (mps) backend, devices() returns the
+        # MpsDevice.
         try:
             for d in jax.devices():
-                if d.platform == "metal":
+                if d.platform == "mps":
                     return d
         except Exception:
             return None

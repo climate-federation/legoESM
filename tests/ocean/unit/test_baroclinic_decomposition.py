@@ -108,7 +108,7 @@ def _cases():
     state = _base_state(grid, z_coord)
 
     # Case 1: implicit vertical mixing + GM/Redi + sponge + diagnostics path.
-    cfg1 = LatLonCGridOceanConfig(
+    cfg1 = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e3, A_h_lat_scaling=True, A_h_cos_power=1, A_h_eq_boost=3.0,
         K_h=5.0e2, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         gm_redi=GMRediConfig(), eos="wright", n_barotropic_substeps=2,
@@ -121,7 +121,7 @@ def _cases():
 
     # Case 2: explicit vertical mixing + biharmonic + Smagorinsky + meridional
     # viscosity (a different set of stages / branches).
-    cfg2 = LatLonCGridOceanConfig(
+    cfg2 = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e3, A_h_merid=5.0e2, B_h=1.0e9, B_h_lat_scaling=True,
         C_smag=0.15, C_smag_lap=0.1, K_h=2.0e2, K_bih=1.0e8,
         A_v=1.0e-3, K_v=1.0e-4, bottom_drag_r=2.0e-3,
@@ -135,7 +135,7 @@ def _cases():
 
     # Case 3: Hollingsworth KE gradient (exercises the nkeg_HW branch that the
     # centered-default cases above skip).
-    cfg3 = LatLonCGridOceanConfig(
+    cfg3 = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e3, ke_gradient_scheme="hollingsworth", K_h=2.0e2,
         bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=2, enable_runtime_checks=False,
@@ -147,7 +147,7 @@ def _cases():
 
     # Case 4: WENO5 momentum + tracer advection (exercises the WENO KE/PV/tracer
     # branches that the centered/TVD cases skip).
-    cfg4 = LatLonCGridOceanConfig(
+    cfg4 = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e3, momentum_advection="weno5", tracer_advection="weno5",
         K_h=2.0e2, bottom_drag_r=1.0e-3, implicit_vertical_mixing=False,
         A_v=1.0e-3, K_v=1.0e-4, n_barotropic_substeps=2,
@@ -161,7 +161,7 @@ def _cases():
     # Case 5: flux-form horizontal momentum advection (regression-locks the
     # _bc_horizontal_momentum_advection_flux_form path + the KE-gradient-zeroing
     # dispatch). diagnose_momentum=True also locks the diagnostic slot.
-    cfg5 = LatLonCGridOceanConfig(
+    cfg5 = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e3, momentum_advection="flux_form", momentum_flux_scheme="upwind",
         K_h=2.0e2, bottom_drag_r=1.0e-3, implicit_vertical_mixing=False,
         A_v=1.0e-3, K_v=1.0e-4, n_barotropic_substeps=2,

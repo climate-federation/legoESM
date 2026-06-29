@@ -90,7 +90,7 @@ def compute_filter_weights(
     dtype: jnp.dtype,
     *,
     use_cosine: bool,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return per-substep accumulator weights for time-averaging.
 
     The cosine bell (Hanning window) suppresses the side lobes of the
@@ -100,6 +100,31 @@ def compute_filter_weights(
 
         w_i = 1 + cos(2π · (i - n/2) / n)         (cosine)
         w_i = 1                                   (box)
+
+    Transport (``Hu``) weights — continuity-consistent (SM2005)
+    ----------------------------------------------------------------
+    The time-averaged SSH is ``eta_avg = (1/w_total)·Σ_i w_i·eta_{i+1}``
+    with the substep continuity ``eta_{i+1} = eta_i − dt_s·div(flux_i)``.
+    Telescoping gives
+
+        eta_old − eta_avg = (dt_s/w_total)·Σ_j div(flux_j)·tail_j,
+        tail_j = Σ_{i≥j} w_i.
+
+    The flux-form tracer step requires the depth-integrated transport
+    ``Hu_avg`` to satisfy the discrete continuity invariant
+    ``div(Hu_avg) == (eta_old − eta_avg)/dt`` (``dt = n·dt_s``) so a
+    uniform tracer is preserved.  Matching the two expressions gives the
+    ONLY consistent per-substep transport weight
+
+        w_transport[j] = tail_j / (n_substeps · w_total).
+
+    This is exactly the Shchepetkin & McWilliams (2005) secondary
+    (transport) weight used by the ``power_law`` path; with a uniform
+    (box) ``w_i=1`` it is ``(n−j)/n²`` — NOT the flat ``1/n`` that the
+    earlier code used, which broke continuity for BOTH box and cosine
+    (the cosine inconsistency was the worse of the two, ~99 % residual;
+    box ~95 %).  Returning it here makes every non-``power_law`` filter
+    continuity-consistent through a single owner.
 
     Parameters
     ----------
@@ -113,12 +138,15 @@ def compute_filter_weights(
     Returns
     -------
     w_filter : jax.Array, shape (n_substeps,)
-        Per-substep weight passed as ``xs`` to ``lax.scan`` (or
-        indexed inside ``fori_loop``).
+        Per-substep averaging weight (eta / velocity) passed as ``xs``
+        to ``lax.scan`` (or indexed inside ``fori_loop``).
     w_total : jax.Array, scalar
-        ``sum(w_filter)`` — used to normalise the eta / velocity
-        accumulators.  Transport accumulators (``Hu``) keep using
-        ``n_substeps`` for exact volume conservation.
+        ``sum(w_filter)`` — normalises the eta / velocity accumulators.
+    w_transport : jax.Array, shape (n_substeps,)
+        Per-substep TRANSPORT weight (continuity-consistent, sums to
+        ``(n+1)/(2n)`` for box; the accumulator ``Σ_i w_transport_i·flux_i``
+        IS the time-averaged transport ``Hu_avg`` directly — no further
+        ``/n_substeps`` normalisation).
     """
     i = jnp.arange(n_substeps, dtype=dtype)
     if use_cosine:
@@ -137,7 +165,11 @@ def compute_filter_weights(
             )
     else:
         w_filter = jnp.ones(n_substeps, dtype=dtype)
-    return w_filter, jnp.sum(w_filter)
+    w_total = jnp.sum(w_filter)
+    # tail_j = sum_{i>=j} w_filter[i]  (reverse cumulative sum).
+    tail = jnp.cumsum(w_filter[::-1])[::-1]
+    w_transport = tail / (jnp.asarray(n_substeps, dtype=dtype) * w_total)
+    return w_filter, w_total, w_transport
 
 
 def bebt_blend(

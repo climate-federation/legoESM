@@ -148,7 +148,10 @@ BOUNDS_EXT = dict(
     pft_z0=(5e-3, 3.0),                                # roughness (MOST); forests saturated 2.0
     pft_vcmax=(0.0, 80.0), pft_lcma=(20.0, 90.0), pft_g1=(1.0, 12.0),
     pft_wp=(0.05, 0.30), pft_fcgap=(0.03, 0.30),       # theta_fc_plant = wp + gap
-    pft_csoil=(6.6e5, 6.0e6), pft_ksolid=(1.0, 3.5),   # per-PFT soil thermal inertia
+    # per-PFT SCALE on the per-cell texture-derived soil thermal k_solid / C_solid
+    # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
+    pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
+    th_glacier_cboost=(1.0, 15.0),                     # deep-ice inertia boost (glacier)
     glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85))
 
 
@@ -181,8 +184,11 @@ def init_ext_params() -> dict:
         pft_g1=_inv_ext(col("g1"), "pft_g1"),
         pft_wp=_inv_ext(wp0, "pft_wp"),
         pft_fcgap=_inv_ext(np.clip(fc0 - wp0, 0.04, 0.29), "pft_fcgap"),
-        pft_csoil=_inv_ext(np.clip(col("C_soil"), 7e5, 5.9e6), "pft_csoil"),
-        pft_ksolid=_inv_ext(full(2.0), "pft_ksolid"),
+        # init scales so texture*scale ~ the previous effective inertia (texture
+        # k_base~5 -> k_scale~0.35 gives k_solid~1.8; C_base~2.3e6 -> c_scale~0.9)
+        pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
+        pft_cscale=_inv_ext(full(0.9), "pft_cscale"),
+        th_glacier_cboost=jnp.asarray(_inv_ext(5.0, "th_glacier_cboost")),
         glac_alb=_inv_ext(0.55, "glac_alb"), snow_max=_inv_ext(0.80, "snow_max"),
     ).items()}
 
@@ -216,10 +222,14 @@ def build_multilayer_cfg(cp, data):
     col = lambda k: data["vg_" + k].reshape(-1, 1)
     hyd = SoilHydraulicsConfig(theta_r=col("theta_r"), theta_sat=col("theta_sat"),
                                alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
-    # per-PFT soil thermal inertia (PFT-weighted -> per-cell (ncol,1) so it broadcasts
-    # over soil layers, exactly like the per-column van-Genuchten hydraulics map)
-    pw1 = lambda k: (data["pft"] @ cp[k]).reshape(-1, 1)
-    thermal = SoilThermalConfig(C_soil=pw1("pft_csoil"), k_solid=pw1("pft_ksolid"))
+    # Soil thermal inertia: per-cell TEXTURE (sand/clay) x per-PFT scale, blended
+    # toward ICE on glacier cells (deep-ice inertia boost).  Reuse the SHARED
+    # definition so the calibrator and the bake never diverge.
+    from legoesm.land.clm_surface_map import multilayer_thermal_arrays
+    k_eff, c_eff = multilayer_thermal_arrays(
+        data["pft"], data["pct_sand"], data["pct_clay"], data["fg"],
+        cp["pft_kscale"], cp["pft_cscale"], cp["th_glacier_cboost"])
+    thermal = SoilThermalConfig(k_solid=k_eff.reshape(-1, 1), C_soil=c_eff.reshape(-1, 1))
     ch = data["pft"] @ cp["pft_ch"]              # per-PFT bulk exchange coefficient
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
@@ -422,6 +432,8 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
                 fg=jnp.asarray(np.asarray(cmap["glacier_frac"])[sub]),
                 wp=jnp.asarray(np.asarray(cmap["theta_wp"])[sub]),
                 fc=jnp.asarray(np.asarray(cmap["theta_fc"])[sub]),
+                pct_sand=jnp.asarray(np.asarray(cmap["pct_sand"])[sub]),
+                pct_clay=jnp.asarray(np.asarray(cmap["pct_clay"])[sub]),
                 skt=jnp.asarray(skt), alb=jnp.asarray(alb),
                 # init the whole soil column at the ERA5 annual-mean skin T
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),

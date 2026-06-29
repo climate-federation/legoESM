@@ -87,7 +87,7 @@ def state(grid, z_coord):
 
 @pytest.fixture
 def config():
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4, A_v=1.0e-3,
         bottom_drag_r=0.0,
         implicit_vertical_mixing=False,   # explicit so the diag captures Av_vert

@@ -105,13 +105,13 @@ def _stratified_partial_state(grid, z_coord, H_bathy, partial_coord):
 
 
 class TestDefaultUnchanged:
-    """``LatLonCGridOceanConfig()`` defaults to ``pgf_scheme="adcroft"``;
+    """``LatLonCGridOceanConfig.from_flat()`` defaults to ``pgf_scheme="adcroft"``;
     explicit ``pgf_scheme="adcroft"`` matches the implicit default
     bit-exactly.  A trivial smoke test — the contract is that any
     user not setting the new field sees no behaviour change."""
 
     def test_default_is_adcroft(self):
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         assert cfg.pgf_scheme == "adcroft"
 
     def test_explicit_adcroft_matches_default(self, grid, z_coord):
@@ -119,8 +119,8 @@ class TestDefaultUnchanged:
         partial = create_partial_cell_coordinate(z_coord, H_bathy)
         state = _stratified_partial_state(grid, z_coord, H_bathy, partial)
 
-        cfg_default = LatLonCGridOceanConfig()
-        cfg_explicit = LatLonCGridOceanConfig(pgf_scheme="adcroft")
+        cfg_default = LatLonCGridOceanConfig.from_flat()
+        cfg_explicit = LatLonCGridOceanConfig.from_flat(pgf_scheme="adcroft")
 
         tend_default = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, partial, cfg_default,
@@ -158,10 +158,10 @@ class TestZStarUnaffected:
         )
 
         tend_a = latlon_cgrid_ocean_baroclinic_tendencies(
-            state, grid, z_coord, LatLonCGridOceanConfig(pgf_scheme="adcroft"),
+            state, grid, z_coord, LatLonCGridOceanConfig.from_flat(pgf_scheme="adcroft"),
         )
         tend_s = latlon_cgrid_ocean_baroclinic_tendencies(
-            state, grid, z_coord, LatLonCGridOceanConfig(pgf_scheme="smc03"),
+            state, grid, z_coord, LatLonCGridOceanConfig.from_flat(pgf_scheme="smc03"),
         )
         np.testing.assert_array_equal(
             np.asarray(tend_a.du_dt.data), np.asarray(tend_s.du_dt.data),
@@ -189,10 +189,10 @@ class TestSMC03ActiveOnPartialCells:
         state = _stratified_partial_state(grid, z_coord, H_bathy, partial)
 
         tend_a = latlon_cgrid_ocean_baroclinic_tendencies(
-            state, grid, partial, LatLonCGridOceanConfig(pgf_scheme="adcroft"),
+            state, grid, partial, LatLonCGridOceanConfig.from_flat(pgf_scheme="adcroft"),
         )
         tend_s = latlon_cgrid_ocean_baroclinic_tendencies(
-            state, grid, partial, LatLonCGridOceanConfig(pgf_scheme="smc03"),
+            state, grid, partial, LatLonCGridOceanConfig.from_flat(pgf_scheme="smc03"),
         )
         # The bathymetry varies in latitude only (step at the equator),
         # so x-faces see identical conditions on either side and the
@@ -304,7 +304,7 @@ class TestHallbergAdcroftUnderSMC03:
         H_bathy = _step_bathy(grid)
         partial = create_partial_cell_coordinate(z_coord, H_bathy)
         state = _stratified_partial_state(grid, z_coord, H_bathy, partial)
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn", pgf_scheme="smc03",
         )
 
