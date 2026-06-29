@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
-from legoesm.ocean.fidelity.recipe_case_board import CASES, VALID_STATUSES
+from legoesm.ocean.fidelity.recipe_case_board import (
+    CASES, VALID_STATUSES, VALID_REF_KINDS, NO_REF)
 
 _REPO = Path(__file__).resolve().parents[3]
 
@@ -53,13 +54,23 @@ def test_no_duplicate_case_names():
 
 
 def test_required_fields_present():
-    req = {"case", "tests", "oracle", "results"}
+    req = {"case", "tests", "ref_kind", "ref", "results"}
     res_req = {"grid", "recipe", "status", "note"}
     for c in CASES:
         assert not (req - c.keys()), f"{c['case']}: missing fields {req - c.keys()}"
         assert c["results"], f"{c['case']}: must have at least one run result"
         for r in c["results"]:
             assert not (res_req - r.keys()), f"{c['case']}: run missing {res_req - r.keys()}"
+
+
+def test_reference_kind_valid():
+    """Every case declares a valid reference kind; non-'none' kinds name the truth.
+    (oracle vs analytic vs published is an editorial judgment — a runnable model is an
+    oracle, a paper with no runnable data is 'published', not oracle-level.)"""
+    for c in CASES:
+        assert c["ref_kind"] in VALID_REF_KINDS, f"{c['case']}: bad ref_kind {c['ref_kind']!r}"
+        if c["ref_kind"] != NO_REF:
+            assert c["ref"], f"{c['case']}: ref_kind {c['ref_kind']} must name the reference"
 
 
 def test_no_duplicate_grid_recipe_per_case():

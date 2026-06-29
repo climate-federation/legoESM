@@ -6,40 +6,44 @@ One unified inventory of every ocean case (idealized + oracle-comparison, no dis
 
 **27 cases, 30 case×recipe results** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 25
 
+**by reference kind** — 🔬 oracle: 10, 📐 analytic: 7, 📄 published: 8, —: 2
+
+Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 analytic (closed-form) · 📄 published (paper/figures, no runnable data) · — none. An oracle is the only kind that supports a tendency/field match.
+
 ## Detail (one row per run = case × grid × recipe)
 
-| case | tests | oracle | grid | recipe | status | note |
+| case | tests | reference | grid | recipe | status | note |
 |---|---|---|---|---|---|---|
-| `baroclinic_adjustment` | stratified baroclinic instability; eddy growth + inverse cascade (unforced) | Oceananigans WENOVectorInvariant(9)+ImplicitFreeSurface | latlon_cgrid (β-plane) | `oceananigans + power_law stack` | ✅ verified | EKE 0.86×, cascade k_e 5.11 vs 5.19, stable 40 d, no backstop — PR #672 |
-| `barotropic_gyre` | wind-driven barotropic gyre spin-up (steady, laminar window) | Oceananigans ImplicitFreeSurface gyre | latlon_cgrid | `oceananigans (implicit_cn)` | ✅ verified | surface-u pattern corr 0.93 days 1–20 (kinematic wind-stress unit fix) |
-| `internal_tide` | tidal flow over topography; internal-tide generation (Flat-y, free surface) | Oceananigans internal_tide | latlon_cgrid (meridionally_flat) | `oceananigans (meridionally_flat + upwind3)` | ✅ verified | corr ≥0.6 through ~2 days; dispersion cleared by upwind3 — #576 |
-| `silvestri_jet_forced` | forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5 | Oceananigans Silvestri 2024 §5 | latlon_cgrid (spherical channel) | `oceananigans + power_law stack` | ⛔ blocked | over-energizes ~7× under sustained restoring (eddy-mean equilibration) — issue #673 |
-| `bickley_jet` | single-layer Bickley-jet barotropic instability; vortex roll-up (eddy dissipation) | Oceananigans WENOVectorInvariant | latlon_cgrid (unit sphere) | `oceananigans (implicit_cn)` | 🟡 partial | tracks oracle to t6 (corr 0.97) then under-dissipates; enstrophy ~1.2–1.9× late |
-| `acc_channel` | ACC-like re-entrant channel with ridge; eddy saturation + transport | Veros ACC | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | extensive Veros ACC work exists — re-confirm via scorecard (also intended: mpas) |
-| `advection_gyre` | passive-tracer advection in a wind-driven gyre | MITgcm tutorial_advection_in_gyre | latlon_cgrid | `mitgcm` | ⬜ todo | comparison driver exists; not re-assessed |
-| `baroclinic_gyre` | wind-driven regional gyre with surface restoring + thermal wind | _(idealized — none)_ | latlon_regional | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas_regional) |
-| `barotropic_wave` | barotropic gravity-wave propagation (Gaussian SSH) | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | analytic dispersion; matrix-covered (also: cubed_sphere, mpas, spectral) |
-| `dino` | Double-gyre Idealized North Ocean (Kamm et al. 2025); diabatic basin | Kamm et al. 2025 / NEMO-DINO | latlon_cgrid | `nemo_dino_v1` | ⬜ todo | DINO reference (also: mpas_regional) |
-| `eady_instability` | Eady instability from a meridional temperature front | _(idealized — none)_ | latlon_channel | `eady_weno5_v1` | ⬜ todo | POSSIBLE DUPLICATE of eady_uniform — review for retire |
-| `eady_uniform` | classical Eady instability (uniform N², linear shear), re-entrant channel | analytic Eady growth rate | latlon_channel | `eady_weno5_v1` | ⬜ todo | analytic growth-rate benchmark (also: mpas_channel) |
-| `geostrophic_adjustment` | geostrophic adjustment from a temperature front; free-surface coupling | Oceananigans | latlon_cgrid | `oceananigans` | ⬜ todo | comparison driver exists; not re-assessed post-#501 (also intended: cubed_sphere, mpas) |
-| `global_barotropic_wind` | global 3-belt wind-stress barotropic circulation | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas) |
-| `global_omip` | global forced (OMIP) ocean climate; SST/MOC vs reference GCM | Veros / NEMO (OMIP) | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | Veros global transfer (1°/4°/flexible) — re-confirm via scorecard |
+| `baroclinic_adjustment` | stratified baroclinic instability; eddy growth + inverse cascade (unforced) | 🔬 oracle: Oceananigans WENOVectorInvariant(9)+ImplicitFreeSurface | latlon_cgrid (β-plane) | `oceananigans + power_law stack` | ✅ verified | EKE 0.86×, cascade k_e 5.11 vs 5.19, stable 40 d, no backstop — PR #672 |
+| `barotropic_gyre` | wind-driven barotropic gyre spin-up (steady, laminar window) | 🔬 oracle: Oceananigans ImplicitFreeSurface gyre | latlon_cgrid | `oceananigans (implicit_cn)` | ✅ verified | surface-u pattern corr 0.93 days 1–20 (kinematic wind-stress unit fix) |
+| `internal_tide` | tidal flow over topography; internal-tide generation (Flat-y, free surface) | 🔬 oracle: Oceananigans internal_tide | latlon_cgrid (meridionally_flat) | `oceananigans (meridionally_flat + upwind3)` | ✅ verified | corr ≥0.6 through ~2 days; dispersion cleared by upwind3 — #576 |
+| `silvestri_jet_forced` | forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5 | 🔬 oracle: Oceananigans Silvestri 2024 §5 | latlon_cgrid (spherical channel) | `oceananigans + power_law stack` | ⛔ blocked | over-energizes ~7× under sustained restoring (eddy-mean equilibration) — issue #673 |
+| `bickley_jet` | single-layer Bickley-jet barotropic instability; vortex roll-up (eddy dissipation) | 🔬 oracle: Oceananigans WENOVectorInvariant | latlon_cgrid (unit sphere) | `oceananigans (implicit_cn)` | 🟡 partial | tracks oracle to t6 (corr 0.97) then under-dissipates; enstrophy ~1.2–1.9× late |
+| `acc_channel` | ACC-like re-entrant channel with ridge; eddy saturation + transport | 🔬 oracle: Veros ACC | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | extensive Veros ACC work exists — re-confirm via scorecard (also intended: mpas) |
+| `advection_gyre` | passive-tracer advection in a wind-driven gyre | 🔬 oracle: MITgcm tutorial_advection_in_gyre | latlon_cgrid | `mitgcm` | ⬜ todo | comparison driver exists; not re-assessed |
+| `baroclinic_gyre` | wind-driven regional gyre with surface restoring + thermal wind | — _(idealized — none)_ | latlon_regional | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas_regional) |
+| `barotropic_wave` | barotropic gravity-wave propagation (Gaussian SSH) | 📐 analytic: gravity-wave dispersion relation | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere, mpas, spectral) |
+| `dino` | Double-gyre Idealized North Ocean; diabatic basin | 📄 published: Kamm et al. 2025 / NEMO-DINO (no runnable data yet) | latlon_cgrid | `nemo_dino_v1` | ⬜ todo | DINO reference (also: mpas_regional) |
+| `eady_instability` | Eady instability from a meridional temperature front | 📐 analytic: Eady growth rate | latlon_channel | `eady_weno5_v1` | ⬜ todo | POSSIBLE DUPLICATE of eady_uniform — review for retire |
+| `eady_uniform` | classical Eady instability (uniform N², linear shear), re-entrant channel | 📐 analytic: Eady growth rate | latlon_channel | `eady_weno5_v1` | ⬜ todo | analytic growth-rate benchmark (also: mpas_channel) |
+| `geostrophic_adjustment` | geostrophic adjustment from a temperature front; free-surface coupling | 🔬 oracle: Oceananigans | latlon_cgrid | `oceananigans` | ⬜ todo | comparison driver exists; not re-assessed post-#501 (also intended: cubed_sphere, mpas) |
+| `global_barotropic_wind` | global 3-belt wind-stress barotropic circulation | — _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas) |
+| `global_omip` | global forced (OMIP) ocean climate; SST/MOC vs reference GCM | 🔬 oracle: Veros / NEMO (OMIP) | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | Veros global transfer (1°/4°/flexible) — re-confirm via scorecard |
 |  |  |  | latlon_cgrid | `nemo_v1` | ⬜ todo | NEMO-faithful dycore — re-confirm via scorecard |
 |  |  |  | latlon_cgrid (tripole) | `omip_nemo_match_tripole_v1` | ⬜ todo | tripole eORCA025 NEMO-climate-match (SST RMSE ~1.15) |
 |  |  |  | mpas (ico6) | `omip_nemo_match_mpas_v1` | ⬜ todo | MPAS ico6 NEMO-climate-match (SST RMSE ~0.84, best grid) |
-| `global_overturning` | global baroclinic overturning (Wolfe & Cessi 2010 idealized THC) | Wolfe & Cessi 2010 (idealized) | latlon_cgrid | `legoesm_linear_v1` | ⬜ todo | idealized THC benchmark (also: mpas) |
-| `gridmode_decay` | 2Δx grid-mode decay rate (numerical dissipation probe) | Oceananigans | latlon_cgrid | `oceananigans` | ⬜ todo | diagnostic comparison; not re-assessed |
-| `held_larichev` | Held–Larichev eddying channel; APE→KE cascade saturation (k⁻³) | Held & Larichev (spectral law) | latlon_channel | `default_wright_v1` | ⬜ todo | spectral-slope benchmark (also: mpas_channel) |
-| `inertia_gravity_wave` | Poincaré (inertia-gravity) wave; Bishnu et al. 2024 | analytic / Bishnu 2024 | latlon_cgrid | `default_wright_v1` | ⬜ todo | analytic benchmark; matrix-covered (also: cubed_sphere, mpas) |
-| `isomip_plus` | ISOMIP+ ice-shelf cavity benchmark (Asay-Davis 2016) | ISOMIP+ intercomparison | latlon_regional | `legoesm_linear_v1` | ⬜ todo | ice-shelf-cavity benchmark |
-| `lock_exchange` | density-driven gravity current; RPE mixing (Petersen 2015) | Petersen et al. 2015 (RPE benchmark) | latlon_cgrid | `default_wright_v1` | ⬜ todo | RPE diagnostic benchmark; matrix-covered |
-| `munk_gyre` | Munk gyre; lateral-viscosity western boundary current | analytic Munk BL width | latlon_regional | `default_wright_v1` | ⬜ todo | WBC benchmark (also: mpas_regional) |
-| `neverworld2_lite` | idealized global basin + ACC band (NeverWorld2-lite) | NeverWorld2 (idealized) | latlon_cgrid | `legoesm_linear_v1` | ⬜ todo | idealized reference |
-| `overflow` | dense water descending a bathymetric slope | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere) |
-| `phillips_two_layer` | Phillips two-layer baroclinic instability | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere, mpas) |
-| `rest_state` | rest-state stability / PGF balance (η≈0); conservation control | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | analytic truth (η≈0); matrix-covered (also: cubed_sphere, mpas) — confirm status |
-| `stommel_gyre_tracer` | passive tracer in a wind-driven Stommel gyre (Hecht 2000) | _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas) |
+| `global_overturning` | global baroclinic overturning (idealized THC) | 📄 published: Wolfe & Cessi 2010 (idealized THC) | latlon_cgrid | `legoesm_linear_v1` | ⬜ todo | idealized THC benchmark (also: mpas) |
+| `gridmode_decay` | 2Δx grid-mode decay rate (numerical dissipation probe) | 🔬 oracle: Oceananigans | latlon_cgrid | `oceananigans` | ⬜ todo | diagnostic comparison; not re-assessed |
+| `held_larichev` | Held–Larichev eddying channel; APE→KE cascade saturation (k⁻³) | 📄 published: Held & Larichev 1996 (spectral scaling law) | latlon_channel | `default_wright_v1` | ⬜ todo | spectral-slope benchmark (also: mpas_channel) |
+| `inertia_gravity_wave` | Poincaré (inertia-gravity) wave | 📐 analytic: Poincaré dispersion (Bishnu 2024 cross-check) | latlon_cgrid | `default_wright_v1` | ⬜ todo | analytic benchmark; matrix-covered (also: cubed_sphere, mpas) |
+| `isomip_plus` | ISOMIP+ ice-shelf cavity benchmark | 📄 published: ISOMIP+ (Asay-Davis 2016) intercomparison | latlon_regional | `legoesm_linear_v1` | ⬜ todo | ice-shelf-cavity benchmark |
+| `lock_exchange` | density-driven gravity current; RPE mixing | 📄 published: Petersen et al. 2015 (RPE intercomparison) | latlon_cgrid | `default_wright_v1` | ⬜ todo | RPE diagnostic benchmark; matrix-covered |
+| `munk_gyre` | Munk gyre; lateral-viscosity western boundary current | 📐 analytic: Munk boundary-layer width | latlon_regional | `default_wright_v1` | ⬜ todo | WBC benchmark (also: mpas_regional) |
+| `neverworld2_lite` | idealized global basin + ACC band (NeverWorld2-lite) | 📄 published: NeverWorld2 intercomparison | latlon_cgrid | `legoesm_linear_v1` | ⬜ todo | idealized reference |
+| `overflow` | dense water descending a bathymetric slope | 📄 published: DOME / Petersen 2015 overflow benchmark | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere) |
+| `phillips_two_layer` | Phillips two-layer baroclinic instability | 📐 analytic: Phillips two-layer instability criterion | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere, mpas) |
+| `rest_state` | rest-state stability / PGF balance (η≈0); conservation control | 📐 analytic: exact rest state (η≈0) | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: cubed_sphere, mpas) — confirm status |
+| `stommel_gyre_tracer` | passive tracer in a wind-driven Stommel gyre | 📄 published: Hecht et al. 2000 | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas) |
 
 ## Matrix (case × grid × recipe)
 

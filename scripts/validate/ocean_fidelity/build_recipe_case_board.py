@@ -19,10 +19,20 @@ import sys
 from pathlib import Path
 
 from legoesm.ocean.fidelity.recipe_case_board import (
-    CASES, all_recipes, VERIFIED, WORKS, PARTIAL, BLOCKED, TODO, NA)
+    CASES, all_recipes, VERIFIED, WORKS, PARTIAL, BLOCKED, TODO, NA,
+    ORACLE, ANALYTIC, PUBLISHED, NO_REF)
 
 _BADGE = {VERIFIED: "✅ verified", WORKS: "🟩 works", PARTIAL: "🟡 partial",
           BLOCKED: "⛔ blocked", TODO: "⬜ todo", NA: "— n/a"}
+_REF_BADGE = {ORACLE: "🔬 oracle", ANALYTIC: "📐 analytic",
+              PUBLISHED: "📄 published", NO_REF: "—"}
+
+
+def _reference(c: dict) -> str:
+    kind = c["ref_kind"]
+    if kind == NO_REF:
+        return "— _(idealized — none)_"
+    return f"{_REF_BADGE[kind]}: {c['ref']}"
 _GLYPH = {VERIFIED: "✅", WORKS: "🟩", PARTIAL: "🟡", BLOCKED: "⛔", TODO: "⬜", NA: "—"}
 # Sort cases by their "best" result status, then name.
 _ORDER = {VERIFIED: 0, BLOCKED: 1, PARTIAL: 2, WORKS: 3, TODO: 4, NA: 5}
@@ -64,20 +74,28 @@ def render() -> str:
         + ", ".join(f"{_BADGE[s]}: {by[s]}"
                     for s in (VERIFIED, BLOCKED, PARTIAL, WORKS, TODO, NA) if by[s]),
         "",
+        "**by reference kind** — "
+        + ", ".join(f"{_REF_BADGE.get(k, k)}: {sum(1 for c in CASES if c['ref_kind'] == k)}"
+                    for k in (ORACLE, ANALYTIC, PUBLISHED, NO_REF)),
+        "",
+        "Reference kind = truth strength: 🔬 oracle (runnable model + data) · "
+        "📐 analytic (closed-form) · 📄 published (paper/figures, no runnable data) · "
+        "— none. An oracle is the only kind that supports a tendency/field match.",
+        "",
         "## Detail (one row per run = case × grid × recipe)",
         "",
-        "| case | tests | oracle | grid | recipe | status | note |",
+        "| case | tests | reference | grid | recipe | status | note |",
         "|---|---|---|---|---|---|---|",
     ]
     for c in cases:
-        oracle = c["oracle"] or "_(idealized — none)_"
+        reference = _reference(c)
         for i, r in enumerate(c["results"]):
             # repeat case metadata only on the first run row (blank thereafter);
             # grid + recipe are per-run (intricately linked) and always shown.
             cse = f"`{c['case']}`" if i == 0 else ""
             tst = c["tests"] if i == 0 else ""
-            orc = oracle if i == 0 else ""
-            L.append(f"| {cse} | {tst} | {orc} | {r['grid']} | `{r['recipe']}` | "
+            ref = reference if i == 0 else ""
+            L.append(f"| {cse} | {tst} | {ref} | {r['grid']} | `{r['recipe']}` | "
                      f"{_BADGE[r['status']]} | {r['note']} |")
 
     # --- pivot matrix: (case × grid) rows × recipe columns ---
