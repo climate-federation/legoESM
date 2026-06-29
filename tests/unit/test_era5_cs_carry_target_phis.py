@@ -1,8 +1,15 @@
-"""Unit test for era5_to_cubedsphere_carry target_phis parameter.
+"""Unit test for era5_to_cubedsphere_carry ``target_phis`` parameter.
 
-Verifies that when target_phis is provided the returned carry uses it
-(instead of the ERA5-smoothed phis) and that the barometric p_s correction
-and hybrid floor clamp are still applied.
+Locks the VALIDATED no-op contract: ``target_phis`` is accepted for caller
+compatibility (the driver passes the model's ETOPO surface geopotential here)
+but is **intentionally not applied** — the IC dynamics are initialised on the
+*smoothed ERA5* orography, while the CMOR ``orog`` field separately reports the
+ETOPO mountain mask (see ``era5_to_cubedsphere_carry`` docstring and
+``model_driver._setup_diagnostics``).  Therefore the returned carry must be
+*identical* whether ``target_phis`` is omitted, ``None``, or a non-zero ETOPO
+field.  Placing the dynamics on ``target_phis`` is a deliberate,
+revalidation-gated change that is NOT made here; if it is ever made, this test
+must be updated together with the IC physics so the contract change is explicit.
 """
 
 import numpy as np
@@ -41,36 +48,39 @@ def _sigma(nlev=5):
     return create_sigma_coordinate(nlev)
 
 
-def test_target_phis_replaces_smoothed():
-    """target_phis is used instead of smooth_phis_cubed_sphere output."""
+def test_target_phis_is_a_noop():
+    """A non-zero ``target_phis`` must NOT change the returned carry.
+
+    The validated IC uses smoothed-ERA5 phis for the dynamics; ``target_phis``
+    (the ETOPO field) is only carried for caller compatibility and reported via
+    CMOR ``orog`` elsewhere.  A non-zero ETOPO field passed here must leave the
+    carry bit-for-bit identical to the default.
+    """
     grid = _small_cs_grid(n=4)
     sigma = _sigma(nlev=5)
     era5 = _synthetic_era5()
 
     carry_default = era5_to_cubedsphere_carry(era5, grid, sigma)
 
-    # Flat terrain → target_phis=None and explicit zeros should give same phis
-    target = jnp.zeros((6, 4, 4))
-    carry_zero = era5_to_cubedsphere_carry(era5, grid, sigma, target_phis=target)
-    np.testing.assert_allclose(
-        np.asarray(carry_default.phis),
-        np.asarray(carry_zero.phis),
-        atol=1.0,  # smoothing of zeros is zeros
+    # A realistic ~500 m mountain mask (≈4900 m2/s2) must be ignored.
+    target_nonzero = jnp.full((6, 4, 4), 4900.0)
+    carry_etopo = era5_to_cubedsphere_carry(
+        era5, grid, sigma, target_phis=target_nonzero
     )
 
-    # Non-zero target_phis: phis in carry must equal target (no floor hit for
-    # modest terrain ~500 m = 4900 m2/s2).
-    target_nonzero = jnp.full((6, 4, 4), 4900.0)
-    carry_etopo = era5_to_cubedsphere_carry(era5, grid, sigma, target_phis=target_nonzero)
-    phis_out = np.asarray(carry_etopo.phis)
-    assert float(phis_out.mean()) > float(np.asarray(carry_default.phis).mean()), (
-        "target_phis should raise phis above the ERA5-smoothed value"
+    # phis is the field the ETOPO override would have touched — it must be
+    # unchanged (dynamics stay on the smoothed-ERA5 orography).
+    np.testing.assert_array_equal(
+        np.asarray(carry_default.phis),
+        np.asarray(carry_etopo.phis),
     )
-    np.testing.assert_allclose(phis_out, 4900.0, atol=1.0)
+    # And the smoothed-ERA5 phis (flat synthetic terrain) stays near zero,
+    # i.e. the 4900 m2/s2 target did not leak into the dynamics state.
+    assert float(np.abs(np.asarray(carry_etopo.phis)).max()) < 1.0
 
 
 def test_target_phis_none_unchanged():
-    """Passing target_phis=None is identical to omitting it."""
+    """Passing ``target_phis=None`` is identical to omitting it."""
     grid = _small_cs_grid(n=4)
     sigma = _sigma(nlev=5)
     era5 = _synthetic_era5()
