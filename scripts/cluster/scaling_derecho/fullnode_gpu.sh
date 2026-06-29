@@ -70,28 +70,29 @@ PHYSICS="${PHYSICS:-none}"
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 MODES="${MODES:-strong weak}"
 EXTRA=""
-# Total GPUs across ALL allocated nodes = (#nodes) x (GPUs per node).
-# Compute it ROBUSTLY: count the UNIQUE hosts in $PBS_NODEFILE (correct whether
-# the file lists one line per MPI rank -> 16 lines/4 unique, OR one line per node
-# -> 4 lines/4 unique -- Derecho's GPU queue uses the latter, which silently
-# undercounted the old `wc -l` to 4 and SKIPped every >4-GPU multi-node point).
-# GPUs-per-node comes from the LOCAL nvidia-smi (all Derecho A100 nodes = 4); we
-# only multiply by it, never use it as the total (per-node count is blind to the
-# other nodes).  Explicit NGPUS override still wins.  We log the derivation so a
-# wrong allocation is visible, not silent.
-TOTAL_GPUS="${NGPUS:-}"
-if [ -z "$TOTAL_GPUS" ]; then
-    _gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
-    [ "${_gpus_per_node:-0}" -ge 1 ] 2>/dev/null || _gpus_per_node=4
-    if [ -n "${PBS_NODEFILE:-}" ] && [ -r "${PBS_NODEFILE}" ]; then
-        _n_nodes="$(sort -u "$PBS_NODEFILE" 2>/dev/null | grep -c . )"
-    fi
-    [ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
-    TOTAL_GPUS=$(( _n_nodes * _gpus_per_node ))
-    echo "    GPU allocation: ${_n_nodes} node(s) x ${_gpus_per_node} GPU/node = ${TOTAL_GPUS} GPUs" \
-         "(PBS_NODEFILE=${PBS_NODEFILE:-unset})"
+# Total GPUs across ALL allocated nodes = (#unique hosts) x (GPUs per node).
+# Counting by UNIQUE hosts is correct regardless of $PBS_NODEFILE format -- one
+# line per MPI rank (16 lines / 4 unique) OR one line per node (4 lines / 4
+# unique) both give 4 nodes -> x4 = 16.  The OLD `wc -l` only worked for the
+# per-rank format; if Derecho's GPU queue writes one line per node it under-
+# counted to 4 and SKIPped every >4-GPU point.  We do NOT yet know which format
+# Derecho uses -- so we LOG both the raw line count and the unique-host count
+# below; the next multi-node run reveals it (lines==nodes -> per-node format).
+# GPUs/node from the LOCAL nvidia-smi (Derecho A100 nodes = 4); only ever a
+# multiplier, never the total (it is blind to the other nodes).  These vars are
+# also reused for rank placement (--ppn) further down, so compute them always.
+_gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+[ "${_gpus_per_node:-0}" -ge 1 ] 2>/dev/null || _gpus_per_node=4
+_raw_lines=0; _n_nodes=1
+if [ -n "${PBS_NODEFILE:-}" ] && [ -r "${PBS_NODEFILE}" ]; then
+    _raw_lines="$(grep -c . "$PBS_NODEFILE" 2>/dev/null || echo 0)"
+    _n_nodes="$(sort -u "$PBS_NODEFILE" 2>/dev/null | grep -c . )"
 fi
-if ! [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null; then TOTAL_GPUS=4; fi
+[ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
+# Explicit NGPUS override still wins (off-PBS / manual partial runs).
+TOTAL_GPUS="${NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
+[ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
+echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 case "$GRID" in
   cubed-sphere)
     echo "ERROR: cubed-sphere GPU uses cube_strong_gpu.sh (face-scatter)." >&2
@@ -132,6 +133,21 @@ mkdir -p "$CAMP"
 echo "=== $GRID GPU scaling: modes=[$MODES] prec=[$PRECISIONS] gpus=[$GPU_RANKS] (TOTAL_GPUS=$TOTAL_GPUS) res=[$RESOLUTIONS] ==="
 echo "    physics=$PHYSICS  outdir=$CAMP"
 
+# Multi-node rank placement: pin _gpus_per_node ranks/node so PALS_LOCAL_RANKID
+# resets 0..(gpus/node-1) ON EACH node and the CVD pin maps rank->local GPU.
+# Without it PALS may pack all N ranks onto the first node (CVD 0..N-1 -> ranks
+# >3 reference absent GPUs, or every rank shares GPU 0 = the eff=0.5 bug) -- the
+# multi-node analog of the self-blind pin.  Single-node sweeps (_n_nodes=1) add
+# NO flag, so the proven single-node path is byte-identical.  Override with
+# PPN=<n> (force a value) or PPN="" (disable, e.g. if PALS rejects --ppn).
+PPN_ARG=()
+if [ "${PPN:-auto}" = auto ]; then
+    [ "${_n_nodes:-1}" -gt 1 ] && PPN_ARG=(--ppn "${_gpus_per_node}")
+elif [ -n "${PPN:-}" ]; then
+    PPN_ARG=(--ppn "${PPN}")
+fi
+[ "${#PPN_ARG[@]}" -gt 0 ] && echo "    rank placement: mpiexec ${PPN_ARG[*]} (multi-node, ${_n_nodes} nodes)"
+
 rc_all=0
 skipped=""        # multi-node points dropped because the allocation was too small
 for PREC in $PRECISIONS; do
@@ -147,7 +163,7 @@ for PREC in $PRECISIONS; do
         continue
       fi
       echo "--- $GRID $MODE $PREC res=$R gpus=$N ---"
-      mpiexec -n "$N" bash -c "$PIN" _ \
+      mpiexec ${PPN_ARG[@]+"${PPN_ARG[@]}"} -n "$N" bash -c "$PIN" _ \
           "$PY" scripts/bench/run_cpu_mpi_scaling.py \
           --grid "$GRID" --mode "$MODE" --resolution "$R" \
           --physics "$PHYSICS" --precision "$PREC" \
