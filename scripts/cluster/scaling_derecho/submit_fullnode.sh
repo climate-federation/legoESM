@@ -77,22 +77,28 @@ if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; 
 # the cube pair (Phase 2) keeps its current single-precision behaviour.
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 
-# Multi-node GPU sweep (icosahedral only).  NODES>1 overrides the GPU job's
+# Multi-node GPU sweep (icosahedral + latlon).  NODES>1 overrides the GPU job's
 # `select=` to span N nodes (4 A100/node); fullnode_gpu.sh's default GPU_RANKS
 # (1 2 4 8 16 ...) then self-caps to the granted TOTAL_GPUS = NODES*4, so the
-# A100 curve runs past one node.  latlon route-A is only validated to 4 GPU and
-# spectral has no MPI path, so multi-node is rejected for them -- the other
-# grids' multi-GPU blockers are tracked in issue #641.  CPU side is unchanged
-# (already a full-node 1..128 rank sweep on one node).
+# A100 curve runs past one node.  Allowed for the two grids with a genuine
+# domain decomposition: icosahedral (MPAS cell partition) and latlon (lat-band /
+# 2-D pencil make_latlon_mpi_step, wired in #659).  cubed-sphere is a <=6-GPU
+# single-node face shard and spectral has no MPI path, so both stay rejected
+# (#641/#660).  CPU side is unchanged (full-node 1..128 rank sweep, one node).
+# NOTE: multi-node latlon (>4 GPU) is newly enabled and NOT yet validated on real
+# hardware (#660) -- confirm MPI==serial (cells/rank halves, matched SYPD) on the
+# first run before trusting the curve.
 NODES="${NODES:-1}"
 GPU_SELECT=()
 if [ "${NODES}" -gt 1 ]; then
-    if [ "$GRID" != "icosahedral" ]; then
-        echo "ERROR: NODES>1 (multi-node GPU) is only supported for icosahedral; got '$GRID' (see #641)." >&2
-        exit 2
-    fi
+    case "$GRID" in
+        icosahedral|latlon) ;;   # genuine domain decomposition -> multi-node OK
+        *)
+            echo "ERROR: NODES>1 (multi-node GPU) supported only for icosahedral|latlon; got '$GRID' (cubed-sphere=<=6-GPU single-node face shard, spectral=no MPI; see #641/#660)." >&2
+            exit 2 ;;
+    esac
     GPU_SELECT=(-l "select=${NODES}:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB")
-    echo "=== multi-node GPU: ${NODES} nodes x 4 A100 = $((NODES * 4)) GPUs (icosahedral) ==="
+    echo "=== multi-node GPU: ${NODES} nodes x 4 A100 = $((NODES * 4)) GPUs (${GRID}) ==="
 fi
 
 submit() {  # submit "<label>" <qsub args...>

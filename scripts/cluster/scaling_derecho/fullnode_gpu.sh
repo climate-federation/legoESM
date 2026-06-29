@@ -11,10 +11,13 @@
 # GPU STRONG-SCALING sweep for latlon / icosahedral / spectral -- the GPU half
 # of the CPU-vs-A100 comparison.  One rank per GPU (route-A mpi4jax) AT EACH
 # resolution, so the GPU side is a real scaling curve -- not a single A100.
-# latlon sweeps 1->2->4 (single node); icosahedral can go MULTI-NODE
-# (1->2->4->8->16 ...) -- its MPAS cell partition is a genuine domain
-# decomposition with no face/divisor cap (see issue #641 for why the other
-# grids cannot).  Spectral has no MPI path (1 GPU only).
+# icosahedral and latlon can both go MULTI-NODE (1->2->4->8->16 ...): icosahedral
+# via the MPAS cell partition, latlon via the lat-band / 2-D-pencil
+# make_latlon_mpi_step wired in #659 -- both genuine domain decompositions with
+# no face/divisor cap.  cubed-sphere is a <=6-GPU single-node face shard and
+# spectral has no MPI path (1 GPU only); see #641/#660.  NOTE: multi-node latlon
+# (>4 GPU) is newly enabled and NOT yet validated on real hardware (#660) --
+# verify MPI==serial (cells/rank halves, matched SYPD) on the first run.
 # Pair with fullnode_cpu.sh; SAME driver (run_cpu_mpi_scaling.py) + resolutions.
 #
 # REQUIRES the route-A overlay env (legoesm-gpu with a CUDA-built mpi4jax; see
@@ -86,7 +89,11 @@ case "$GRID" in
     echo "ERROR: cubed-sphere GPU uses cube_strong_gpu.sh (face-scatter)." >&2
     exit 2 ;;
   latlon)
-    GPU_RANKS="${GPU_RANKS:-1 2 4}"          # route-A, one rank per A100
+    # Multi-node ladder (powers of 2 -> 2-D pencil decomposition); self-caps to
+    # TOTAL_GPUS below, so default is 1 2 4 on one node, up to 1..16 on >=4 nodes.
+    # >4-GPU latlon is newly enabled (#659 wiring) and NOT yet validated on real
+    # hardware past 4 GPU (#660) -- verify MPI==serial before trusting the curve.
+    GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"     # route-A, one rank per A100
     EXTRA="--latlon-2d"
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
