@@ -71,16 +71,17 @@ PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 MODES="${MODES:-strong weak}"
 EXTRA=""
 # Total GPUs across ALL allocated nodes = (#unique hosts) x (GPUs per node).
-# Counting by UNIQUE hosts is correct regardless of $PBS_NODEFILE format -- one
-# line per MPI rank (16 lines / 4 unique) OR one line per node (4 lines / 4
-# unique) both give 4 nodes -> x4 = 16.  The OLD `wc -l` only worked for the
-# per-rank format; if Derecho's GPU queue writes one line per node it under-
-# counted to 4 and SKIPped every >4-GPU point.  We do NOT yet know which format
-# Derecho uses -- so we LOG both the raw line count and the unique-host count
-# below; the next multi-node run reveals it (lines==nodes -> per-node format).
-# GPUs/node from the LOCAL nvidia-smi (Derecho A100 nodes = 4); only ever a
-# multiplier, never the total (it is blind to the other nodes).  These vars are
-# also reused for rank placement (--ppn) further down, so compute them always.
+# $PBS_NODEFILE on Derecho is one line per MPI RANK (mpiprocs=4 -> 4 lines/node),
+# so 2 nodes = 8 lines / 2 unique; counting UNIQUE hosts x GPUs/node is correct
+# for that AND for a per-node file (both give the same node count).  GPUs/node
+# from the LOCAL nvidia-smi (Derecho A100 = 4); only ever a multiplier, never the
+# total (it is blind to the other nodes).  Reused for --ppn below -> compute always.
+#
+# !!! Do NOT use a bare `$NGPUS` as the override: PBS EXPORTS its own $NGPUS =
+# ngpus-PER-CHUNK (=4), exactly like the $NCPUS=cores-per-rank trap in
+# fullnode_cpu.sh.  Reading it pinned TOTAL_GPUS=4 on EVERY job regardless of
+# node count -- the real reason every grid in all_tidy.csv capped at 4 GPUs.
+# The manual override is $LEGOESM_NGPUS (namespaced, PBS can't clobber it).
 _gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
 [ "${_gpus_per_node:-0}" -ge 1 ] 2>/dev/null || _gpus_per_node=4
 _raw_lines=0; _n_nodes=1
@@ -89,8 +90,7 @@ if [ -n "${PBS_NODEFILE:-}" ] && [ -r "${PBS_NODEFILE}" ]; then
     _n_nodes="$(sort -u "$PBS_NODEFILE" 2>/dev/null | grep -c . )"
 fi
 [ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
-# Explicit NGPUS override still wins (off-PBS / manual partial runs).
-TOTAL_GPUS="${NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
+TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 case "$GRID" in
