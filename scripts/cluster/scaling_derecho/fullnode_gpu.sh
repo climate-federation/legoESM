@@ -55,11 +55,14 @@ cd "$REPO"
 # GPU-direct only needs the GTL findable (it is) + MPICH_GPU_SUPPORT_ENABLED=1.
 module load gcc cray-mpich cuda 2>/dev/null || true
 export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
-# mpi4jax side: WITHOUT this, mpi4jax stages every halo GPU->host->MPI->host->GPU
-# (it prints "Not using CUDA-enabled MPI" and the scaling curve measures the
-# host-staging path, not GPU-direct -- misleading multi-node numbers).  Override
-# with MPI4JAX_USE_CUDA_MPI=0 only if the overlay's mpi4jax is NOT a CUDA build.
-export MPI4JAX_USE_CUDA_MPI="${MPI4JAX_USE_CUDA_MPI:-1}"
+# mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs GPU->host->MPI->host->
+# GPU staging.  This is decided AFTER the node count is known (see the TOTAL_GPUS
+# block below): 1 node -> GPU-direct (NVLink/IPC, validated); >1 node ->
+# host-staged, because cross-node GPU-direct RDMA currently ABORTS on Derecho's
+# CXI/Slingshot fabric ("cxil_map: write error" / OFI injectdata invalid arg --
+# see docs/performance/multinode_gpu_direct_cxi.md).  An explicit user value
+# (set in the environment) always wins.  Remember whether the user pinned it:
+_user_cuda_mpi="${MPI4JAX_USE_CUDA_MPI+set}"
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 
 # --- Per-grid sweep (raise on cube / unknown: dispatch hardening) ------------
@@ -93,6 +96,25 @@ fi
 TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
+
+# Node-aware mpi4jax transport (see the MPICH block above).  Cross-node GPU-direct
+# RDMA currently ABORTS on Derecho's CXI fabric, so multi-node sweeps fall back to
+# host-staged halos (slower inter-node comm, BIT-IDENTICAL results) and the whole
+# multi-node curve runs on one consistent transport.  Single-node stays
+# GPU-direct.  An explicit MPI4JAX_USE_CUDA_MPI in the environment overrides this.
+if [ -z "${_user_cuda_mpi:-}" ]; then
+    if [ "${_n_nodes}" -gt 1 ]; then
+        export MPI4JAX_USE_CUDA_MPI=0
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged halos -- multi-node;" \
+             "cross-node GPU-direct broken on CXI, see docs/performance/multinode_gpu_direct_cxi.md)"
+    else
+        export MPI4JAX_USE_CUDA_MPI=1
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
+    fi
+else
+    export MPI4JAX_USE_CUDA_MPI
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override)"
+fi
 case "$GRID" in
   cubed-sphere)
     echo "ERROR: cubed-sphere GPU uses cube_strong_gpu.sh (face-scatter)." >&2
