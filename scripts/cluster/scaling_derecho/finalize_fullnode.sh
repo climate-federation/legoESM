@@ -36,6 +36,11 @@ echo "=== plotting per-grid CPU vs A100 across resolutions ==="
 "$PY" scripts/plot/plot_fullnode_cpu_vs_gpu.py \
     --csv "$OUTDIR/all_tidy.csv" --out "$OUTDIR/plots"
 
+echo "=== plotting speedup-vs-ideal family (per component x mode) ==="
+"$PY" scripts/plot/plot_scaling_family.py \
+    --csv "$OUTDIR/all_tidy.csv" --out "$OUTDIR/plots"
+
 echo "=== done ==="
 echo "CSV:   $OUTDIR/all_tidy.csv"
 echo "Plots: $OUTDIR/plots/fullnode_cpu_vs_gpu_<grid>.png"
+echo "       $OUTDIR/plots/scaling_<component>_<mode>.png"
