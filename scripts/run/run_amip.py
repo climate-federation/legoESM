@@ -197,6 +197,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Output
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
+    parser.add_argument("--aimip-classical-checkpoint", type=str, default=None,
+                        help="Path to an AIMIP-classical trained params .eqx "
+                             "(e.g. results/aimip_001/classical/epoch_0019.eqx). "
+                             "Forces the classical scheme set (tiedtke / louis / "
+                             "mcfarlane / xu_randall) and seeds them with the "
+                             "trained best-fit values as INITIAL parameters.")
     parser.add_argument("--restart-from", type=str, default=None)
     parser.add_argument("--restart-start-day", type=float, default=None,
                         help="Override start_day after loading checkpoint. "
@@ -963,6 +969,29 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
 
+    # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
+    # best-fit trained params used as INITIAL values.  Force the classical scheme
+    # set, load the params, and set the cloud (xu_randall) flat-field overrides
+    # from the trained values (q_c / rh_crit reach the inline CloudConfig); the
+    # per-knob tiedtke / louis / mcfarlane configs are injected onto the built
+    # pipeline post-setup (below).  Stash the loaded params on ``args``.
+    args._aimip_params = None
+    if getattr(args, "aimip_classical_checkpoint", None):
+        import equinox as eqx
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        _p = eqx.tree_deserialise_leaves(
+            args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
+        args.convection = "tiedtke"
+        args.turbulence = "louis"
+        args.gravity_wave_drag = "mcfarlane"
+        args.clouds = "xu_randall"
+        _cc = _p.to_cloud_config()
+        args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
+        args.cloud_rh_crit = float(_cc.rh_crit)
+        args._aimip_params = _p
+        print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
+              f"loaded trained params from {args.aimip_classical_checkpoint}")
+
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
     # ``auto_dt_rce`` the advisory below compares against, so a
@@ -1010,6 +1039,20 @@ def main(argv: list[str] | None = None):
     driver.setup()
 
     _is_root = (driver._mpi_rank is None or driver._mpi_rank == 0)
+
+    # AIMIP-classical trained params: override the built pipeline's settable
+    # scheme configs with the trained tiedtke / louis / mcfarlane values (the
+    # same post-setup, pre-run() mutation the driver does for f_land / albedo;
+    # captured at compile).  Cloud (xu_randall) was seeded via the flat fields
+    # above (it is built inline in the pipeline).
+    if getattr(args, "_aimip_params", None) is not None:
+        _p = args._aimip_params
+        driver.physics.convection_config = _p.to_tiedtke_config()
+        driver.physics.turbulence_config = _p.to_louis_config()
+        driver.physics.gwd_config = _p.to_mcfarlane_config()
+        if _is_root:
+            print("AIMIP-classical trained configs injected: tiedtke (convection), "
+                  "louis (turbulence), mcfarlane (GWD); cloud via flat fields.")
 
     start_step = 0
     start_day = None
