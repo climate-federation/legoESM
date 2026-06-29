@@ -1,19 +1,18 @@
 """Render a recipe wiring-comparison table: the dycore-identity config fields of
-every named recipe side by side, so the numerical differences between recipes are
-obvious at a glance.
+every recipe side by side, so the numerical differences between recipes are obvious.
 
-100% DERIVED from the recipe catalog (`legoesm.ocean.recipes.get_recipe`) — there is
-NO hand-authored data here; the table is computed from the actual recipe definitions,
-so it can never drift. Rows where recipes differ are flagged (✏) and sorted first —
-those are exactly "what is numerically different between these recipes".
+Latlon table: EFFECTIVE dycore values (read via ``flat_get`` from the assembled
+config) for the catalog recipes AND the oracle-recipe factories (oceananigans,
+mitgcm) — which are NOT in ``list_recipes()`` (they are factory functions, not
+catalog entries) but are exactly the dycores the case board validates against.
+MPAS table: the catalog MPAS recipes' declared scheme bundles.
+
+DERIVED from the recipe definitions (``get_recipe`` / the oracle factories) — no
+hand-authored data, so it can't drift. Rows where recipes differ are flagged (✏)
+and sorted first.
 
 Tier 0: committed at docs/ocean/fidelity/recipe_comparison.md, kept fresh by
 tests/ocean/fidelity/test_recipe_comparison.py (``--check``).
-
-Usage::
-
-    .venv/bin/python scripts/validate/ocean_fidelity/build_recipe_comparison.py            # write
-    .venv/bin/python scripts/validate/ocean_fidelity/build_recipe_comparison.py --check    # exit 1 if stale
 """
 
 from __future__ import annotations
@@ -22,37 +21,98 @@ import argparse
 import sys
 from pathlib import Path
 
+from legoesm.ocean.eos import LinearEOSConfig
 from legoesm.ocean.recipes import get_recipe, list_recipes
+from legoesm.ocean.state import LatLonCGridOceanConfig
 
 _DEFAULT_OUT = Path("docs/ocean/fidelity/recipe_comparison.md")
 
+# The dycore-identity fields (the numerics fingerprint). Read via flat_get from the
+# effective latlon config; these are flat names #501-from_flat routes correctly.
+_DYCORE_FIELDS = (
+    "eos", "momentum_advection", "tracer_advection", "coriolis_scheme",
+    "barotropic_solver", "barotropic_time_filter", "pgf_scheme",
+    "ke_gradient_scheme", "lateral_viscosity_operator", "outer_integrator",
+    "tracer_time_integrator", "vertical_momentum_scheme", "ab2_scope",
+    "momentum_flux_scheme",
+)
 
-def _table(kind: str) -> list[str]:
-    recipes = list_recipes(kind)
-    cfgs = {name: get_recipe(name, kind) for name in recipes}
-    fields = sorted({k for cfg in cfgs.values() for k in cfg})
+# Oracle recipes are factory functions, NOT catalog entries — include them explicitly.
+def _eos():
+    return LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0)
 
-    def cell(name: str, field: str) -> str:
-        return str(cfgs[name].get(field, "—"))
 
-    # split fields into "differs across recipes" vs "common" — differing first.
-    def differs(field: str) -> bool:
-        vals = {cell(n, field) for n in recipes}
-        return len(vals) > 1
-    diff_fields = [f for f in fields if differs(f)]
-    same_fields = [f for f in fields if not differs(f)]
+def _oracle_latlon_cfgs() -> dict:
+    from legoesm.ocean.fidelity.oceananigans_recipe import oceananigans_canonical_ocean_config
+    from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
+    return {
+        "oceananigans*": oceananigans_canonical_ocean_config(eos_linear=_eos()),
+        "mitgcm*": mitgcm_canonical_ocean_config(eos_linear=_eos()),
+    }
 
-    L = [f"## {kind} recipes",
+
+def _flat(cfg, field: str) -> str:
+    try:
+        v = cfg.flat_get(field)
+    except (KeyError, AttributeError):
+        return "—"
+    return "—" if v is None else str(v)
+
+
+def _latlon_table() -> list[str]:
+    # effective config per recipe: catalog via from_flat, oracle via factory.
+    cfgs: dict = {f"`{n}`": LatLonCGridOceanConfig.from_flat(**get_recipe(n, "latlon"))
+                  for n in list_recipes("latlon")}
+    cfgs.update({f"`{n}`": c for n, c in _oracle_latlon_cfgs().items()})
+    cols = list(cfgs)
+    fields = _DYCORE_FIELDS
+
+    def differs(f: str) -> bool:
+        return len({_flat(cfgs[c], f) for c in cols}) > 1
+    diff = [f for f in fields if differs(f)]
+    same = [f for f in fields if not differs(f)]
+
+    L = ["## latlon recipes (effective dycore values)",
          "",
-         f"{len(recipes)} recipes × {len(fields)} dycore-identity fields. "
-         f"**{len(diff_fields)} fields differ** (✏, listed first) — those are what "
-         "distinguishes these recipes; the rest are shared.",
+         f"{len(cols)} recipes × {len(fields)} dycore-identity fields. "
+         f"**{len(diff)} fields differ** (✏, first). `*` = oracle-recipe factory "
+         "(not a `list_recipes()` catalog entry). Values are EFFECTIVE (defaults "
+         "resolved), so two columns compared = the real numerical difference.",
+         "",
+         "| field | " + " | ".join(cols) + " |",
+         "|---|" + "|".join("---" for _ in cols) + "|"]
+    for f in diff:
+        L.append(f"| ✏ **{f}** | " + " | ".join(f"`{_flat(cfgs[c], f)}`" for c in cols) + " |")
+    for f in same:
+        L.append(f"| {f} _(shared)_ | " + " | ".join(f"`{_flat(cfgs[c], f)}`" for c in cols) + " |")
+    L.append("")
+    return L
+
+
+def _mpas_table() -> list[str]:
+    recipes = list_recipes("mpas")
+    cfgs = {n: get_recipe(n, "mpas") for n in recipes}
+    fields = sorted({k for c in cfgs.values() for k in c})
+
+    def cell(n, f):
+        return str(cfgs[n].get(f, "—"))
+
+    def differs(f):
+        return len({cell(n, f) for n in recipes}) > 1
+    diff = [f for f in fields if differs(f)]
+    same = [f for f in fields if not differs(f)]
+
+    L = ["## MPAS recipes (declared scheme bundle)",
+         "",
+         f"{len(recipes)} recipes × {len(fields)} fields. **{len(diff)} differ** (✏, "
+         "first). Declared overrides (`—` = inherits the MPAS model default); no "
+         "oracle-recipe factories exist for MPAS.",
          "",
          "| field | " + " | ".join(f"`{n}`" for n in recipes) + " |",
          "|---|" + "|".join("---" for _ in recipes) + "|"]
-    for f in diff_fields:
+    for f in diff:
         L.append(f"| ✏ **{f}** | " + " | ".join(f"`{cell(n, f)}`" for n in recipes) + " |")
-    for f in same_fields:
+    for f in same:
         L.append(f"| {f} _(shared)_ | " + " | ".join(f"`{cell(n, f)}`" for n in recipes) + " |")
     L.append("")
     return L
@@ -63,23 +123,21 @@ def render() -> str:
         "# Recipe wiring comparison",
         "",
         "**GENERATED — do not edit by hand.** Source: the recipe catalog "
-        "`legoesm.ocean.recipes` (`get_recipe`); regenerate with "
+        "`legoesm.ocean.recipes` + the oracle-recipe factories "
+        "(`oceananigans_recipe`, `mitgcm_recipe`); regenerate with "
         "`scripts/validate/ocean_fidelity/build_recipe_comparison.py`. Freshness "
         "enforced by `tests/ocean/fidelity/test_recipe_comparison.py`.",
         "",
-        "Each named recipe is a bundle of dycore-identity numerics choices (the "
-        "Veros / NEMO / Oceananigans / MITgcm / legoESM-default dycores). This table "
-        "puts them side by side: the **✏ rows differ** between recipes (what makes "
-        "each numerically distinct); the _(shared)_ rows are common to all. Compare "
-        "two columns to see exactly what changes in the numerics.",
-        "",
-        "`—` = the recipe does not set this field (uses the model default). A field "
-        "where some recipes set a value and others show `—` still **differs** (one "
-        "pins it, another inherits the default).",
+        "Each recipe is a bundle of dycore-identity numerics choices. This table puts "
+        "them side by side: the **✏ rows differ** between recipes (what makes each "
+        "numerically distinct); _(shared)_ rows are common. Compare two columns to see "
+        "exactly what changes in the numerics. `*` marks the oracle-recipe factories "
+        "(Oceananigans, MITgcm) — runnable-oracle dycores, not `list_recipes()` "
+        "catalog entries.",
         "",
     ]
-    L += _table("latlon")
-    L += _table("mpas")
+    L += _latlon_table()
+    L += _mpas_table()
     return "\n".join(L)
 
 

@@ -30,6 +30,14 @@ def test_every_recipe_is_a_column():
             assert f"`{name}`" in rendered, f"recipe {name!r} missing from comparison table"
 
 
+def test_oracle_recipe_factories_are_columns():
+    """The oracle-recipe factories (oceananigans, mitgcm) are not in list_recipes()
+    but MUST appear — they are the dycores the case board validates against."""
+    rendered = _gen().render()
+    for name in ("oceananigans*", "mitgcm*"):
+        assert f"`{name}`" in rendered, f"oracle recipe {name!r} missing from comparison table"
+
+
 def test_committed_markdown_is_fresh():
     assert _OUT.exists(), "render the comparison: build_recipe_comparison.py"
     assert _OUT.read_text() == _gen().render(), (
