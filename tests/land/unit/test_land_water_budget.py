@@ -349,7 +349,13 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
                         f"soil with rain well below Darcy capacity")
 
     def test_truly_saturated_still_produces_runoff(self):
-        """Genuinely saturated soil with heavy rain should still produce runoff."""
+        """Saturated soil + sustained heavy rain ponds, then spills to runoff.
+
+        The coupled overland cell (ParFlow-style) detains rejected infiltration as
+        surface water up to ``pond_max``, then overflows to runoff — water never
+        vanishes.  Heavy rain on saturated soil (Darcy capacity ~ K_sat) cannot
+        infiltrate, so the surface fills past pond_max within the step and runoff
+        fires; all rejected rain is conserved as pond + runoff."""
         from legoesm.land.richards import RichardsConfig, solve_richards
         from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
         from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
@@ -361,18 +367,33 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         # Near saturation — very little remaining capacity
         theta = jnp.full((ncol, nlayers), hconfig.theta_sat - 1e-3)
         psi = psi_from_theta(theta, hconfig)
-        rconfig = RichardsConfig()
+        # Iterate to convergence: this deliberately extreme forcing (saturated soil +
+        # 10x-K_sat rain into the stiff specific-storage cell) is a worst case for the
+        # fixed-iteration Picard — at the production default of 10 iters the soil rows
+        # leave ~3e-3 m of (convergence, NOT structural) residual; ~60 iters drives it
+        # to < 1e-4 m, demonstrating the scheme conserves exactly once converged.  The
+        # realistic-forcing gate (test_multilayer_water_balance) closes at 10 iters.
+        rconfig = RichardsConfig(max_iter=60)
 
-        # Very heavy rain — above K_sat
+        # Very heavy rain — above K_sat, sustained long enough to exceed pond_max
         flux_top = jnp.full(ncol, hconfig.K_sat * 10.0)
         sink = jnp.zeros((ncol, nlayers))
+        pond0 = jnp.zeros(ncol)
+        dt = 3600.0
 
         out = solve_richards(psi, theta, grid, hconfig, rconfig,
-                             flux_top, sink, dt=600.0)
+                             flux_top, sink, dt, surface_water=pond0)
 
-        # This should produce genuine runoff (Darcy capacity exceeded)
+        # Saturated soil + heavy rain overflows the pond -> genuine runoff
         self.assertTrue(jnp.all(out.runoff_surface > 0),
                         "Saturated soil + heavy rain should produce runoff")
+        # Pond holds at most pond_max
+        self.assertTrue(jnp.all(out.surface_water <= rconfig.pond_max + 1e-9))
+        # Conservation: rain = infiltrated + pond + runoff (no water created/lost).
+        infil = jnp.sum((out.theta_new - theta) * grid.dz[None, :], axis=-1)
+        runoff_m = (out.runoff_surface + out.runoff_subsurface) / constants.rho_water * dt
+        resid = flux_top * dt - (infil + out.surface_water + runoff_m)
+        self.assertTrue(jnp.all(jnp.abs(resid) < 1e-4), f"resid={resid}")
 
     def test_mass_conservation(self):
         """Total water in = change in storage + runoff_surface + runoff_sub."""
@@ -394,15 +415,16 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         sink = jnp.zeros((ncol, nlayers))
         dt = 1800.0
 
+        pond0 = jnp.zeros(ncol)
         out = solve_richards(psi, theta, grid, hconfig, rconfig,
-                             flux_top, sink, dt)
+                             flux_top, sink, dt, surface_water=pond0)
 
-        # Storage change: sum((theta_new - theta_old) * dz) [m of water]
-        storage_change = jnp.sum(
-            (out.theta_new - theta) * dz[None, :], axis=-1
-        )
-        # Input = flux_infiltrated * dt [m]
-        # Total input minus output = storage change
+        # Total storage = soil column + surface pond (the coupled overland cell):
+        # excess rain detains on the surface rather than vanishing, so the budget
+        # must track it.  sum((theta_new-theta)*dz) + (pond_new-pond0) [m of water]
+        storage_change = (jnp.sum((out.theta_new - theta) * dz[None, :], axis=-1)
+                          + (out.surface_water - pond0))
+        # Input = flux_top * dt [m]; output = surface + subsurface runoff
         runoff_sfc_m = out.runoff_surface / constants.rho_water  # m/s
         runoff_sub_m = out.runoff_subsurface / constants.rho_water  # m/s
 

@@ -59,6 +59,10 @@ class RichardsConfig(NamedTuple):
     max_iter: int = 10
     theta_tol: float = 1e-6       # reserved for future convergence check [m3/m3]
     bottom_bc: str = "free_drainage"  # "free_drainage" or "zero_flux"
+    # Surface ponding: max depth [m] held on the surface before it overflows to
+    # runoff (overland flow).  Excess precip ponds up to this depth (a coupled
+    # surface cell) and infiltrates on later steps; above it, overflows to runoff.
+    pond_max: float = 0.05
 
 
 class RichardsOutput(NamedTuple):
@@ -68,6 +72,7 @@ class RichardsOutput(NamedTuple):
     runoff_surface: jnp.ndarray   # (ncol,) surface runoff [kg/m2/s]
     runoff_subsurface: jnp.ndarray  # (ncol,) subsurface runoff [kg/m2/s]
     n_iter: jnp.ndarray        # (ncol,) always equals max_iter (fixed-iteration solver)
+    surface_water: jnp.ndarray  # (ncol,) updated surface ponding depth [m]
 
 
 def solve_richards(
@@ -79,6 +84,7 @@ def solve_richards(
     flux_top: jnp.ndarray,
     sink: jnp.ndarray,
     dt: float,
+    surface_water: jnp.ndarray | None = None,
 ) -> RichardsOutput:
     """Solve the Richards equation for one time step.
 
@@ -112,22 +118,64 @@ def solve_richards(
 
     theta_n = theta  # θ at time level n (saved for mass conservation)
 
-    # --- Infiltration capacity (Darcy at the surface) ---
-    # q_max = K_top · (1 − dpsi/dz) across the surface half-cell.  NOTE (follow-up):
-    # K_top is the dry top-NODE conductivity, which -> 0 as theta -> theta_r and
-    # nullifies the matric-suction term, so a parched soil under-infiltrates and
-    # sheds rain as infiltration-excess runoff.  The faithful ParFlow/CliMA fix is a
-    # surface ponding-head prognostic (storativity ~1) that buffers the over-
-    # infiltration and an upstream (~K_sat) surface conductivity; using K_sat alone
-    # here (without the pond buffer) over-saturates the soil and breaks the Picard,
-    # so it is deferred to that ponding-head change.  Bit-identical to the prior
-    # behaviour; the specific-storage variable switch (theta_from_psi) is the part
-    # that makes the saturated solve conservative without the theta clip.
-    K_top = hydraulic_conductivity(psi[:, :1], theta[:, :1], hydro_config)[:, 0]
-    head_grad = psi[:, 0] / (0.5 * dz[0])
-    infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
-    flux_infiltrated = jnp.minimum(flux_top, infil_capacity)
-    runoff_surface = jnp.maximum(flux_top - flux_infiltrated, 0.0)
+    # --- Coupled surface ponding cell (ParFlow/CliMA overland store) ---
+    # A surface water store h_s [m] is solved IMPLICITLY together with the soil
+    # column.  The surface<->soil flux is an internal Darcy face flux
+    #     q01 = K_sat * ((h_s - psi_0) / half0 + 1),
+    # so a DRY surface (psi_0 << h_s) infiltrates fast via its suction (recharge),
+    # and a SATURATED surface infiltrates at ~K_sat (the over-saturation drains DOWN,
+    # not back up).  Because q01 enters the surface-cell balance and the layer-0
+    # balance with OPPOSITE signs, the column water budget closes BY CONSTRUCTION at
+    # convergence, with no Hortonian infiltration cap, no theta clip, and no max()
+    # mass-creation (the codex-flagged failure modes of the decoupled Robin BC).
+    # h_s is eliminated by a Schur complement folded into layer-0's diagonal + rhs;
+    # the surface balance is  dh_s/dt = flux_top - q01.  Overland runoff is NOT in
+    # this balance: after Picard the converged h_s is split into pond (<= pond_max)
+    # and runoff (the excess), which keeps  pond_new + runoff*dt == h_s  exactly.
+    _half0 = 0.5 * dz[0]
+    # Top-layer saturated conductivity, per column.  Broadcast K_sat against the
+    # full (ncol, nlayers) state exactly as hydraulic_conductivity does, then take
+    # layer 0 — this handles scalar, (ncol,1), (ncol,nlayers) and (nlayers,) configs
+    # identically and never mis-maps layer variation onto columns (codex).
+    _Ksat = jnp.broadcast_to(hydro_config.K_sat, theta.shape)[:, 0]   # (ncol,)
+    _Kc = _Ksat / _half0                                    # surface conductance [1/s]
+    _pond_max = richards_config.pond_max
+    # Default zero pond carries flux_top's dtype so it never widens _work_dtype on its
+    # own in a mixed-precision run (codex dtype hygiene; matches the _work_dtype care).
+    h_s0 = (jnp.zeros_like(flux_top) if surface_water is None
+            else jnp.broadcast_to(surface_water, (ncol,)))   # pond at time n [m]
+
+    # Max infiltration the surface can supply this step [m/s] = existing pond drained
+    # in one step + net input.  When flux_top < -h_s0/dt (evaporative demand exceeds
+    # the pond), _avail_rate < 0 and the cap forces q01 < 0 — i.e. water flows soil ->
+    # surface -> atmosphere.  That is the intended BARE-SOIL EVAPORATION: with no pond
+    # the demand is met from the soil, and the cell reduces to the old Neumann flux_top
+    # top BC (q01 == flux_top).  flux_top is already supply-limited upstream by the
+    # top-layer evaporative-resistance throttle, so this does not over-extract.
+    _avail_rate = h_s0 / dt + flux_top
+
+    def _surface_terms(h_s, psi0):
+        """Return q01 (infiltration into layer 0 [m/s]), its conductance Kc_eff =
+        -dq01/dpsi0, the surface residual R_s, and D_s = dR_s/dh_s, at the iterate.
+
+        q01 is the Darcy flux K_sat*((h_s-psi0)/half0 + 1) CAPPED at the available
+        surface supply (existing pond + net input).  The cap is the nonnegative-depth
+        complementarity: with no pond and no input the supply is 0, so a dry surface
+        cannot drive phantom suction-infiltration into the soil (which would create
+        water).  Capped, q01 is constant in (h_s, psi0) so its conductance is 0."""
+        q01_robin = _Ksat * ((h_s - psi0) / _half0 + 1.0)
+        capped = q01_robin > _avail_rate
+        q01 = jnp.where(capped, _avail_rate, q01_robin)
+        Kc_eff = jnp.where(capped, 0.0, _Kc)                 # -dq01/dpsi0 = dq01/dh_s
+        # No overland-runoff sink in the surface balance: h_s accumulates the full
+        # (input - infiltration), and the post-Picard step splits the converged
+        # h_s into pond (<= pond_max) and runoff (the excess).  Putting the runoff
+        # in the balance HERE would drain water the reported runoff cannot see
+        # (h_s would converge to ~pond_max, so max(h_s-pond_max,0) reads ~0) — a
+        # silent leak.  Splitting post-hoc keeps pond_new + runoff*dt == h_s exactly.
+        R_s = (h_s - h_s0) / dt - flux_top + q01
+        D_s = 1.0 / dt + Kc_eff                              # dR_s/dh_s (>0)
+        return q01, Kc_eff, R_s, D_s
 
     if richards_config.bottom_bc not in ("free_drainage", "zero_flux"):
         raise ValueError(
@@ -139,7 +187,7 @@ def solve_richards(
     psi_m = psi  # iterate
 
     def picard_body(m, carry):
-        psi_m, theta_m = carry
+        h_s_m, psi_m, theta_m = carry
 
         # Recompute hydraulic properties at current iterate
         K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config)  # (ncol, nlayers)
@@ -201,8 +249,21 @@ def solve_richards(
         grav_flux_out = jnp.pad(K_half_out, ((0, 0), (0, 1)))
         rhs = rhs + (grav_flux_in - grav_flux_out)
 
-        # Top BC: flux = flux_infiltrated (Neumann)
-        rhs = rhs.at[:, 0].add(flux_infiltrated / dz[0])
+        # Top BC: coupled surface ponding cell, eliminated by a Schur complement.
+        # The surface unknown h_s satisfies  D_s*dh_s - Kc*dpsi_0 = -R_s ; eliminating
+        # dh_s = (-R_s + Kc*dpsi_0)/D_s folds into layer 0:
+        #   diag_0 += Kc/dz0 * (1 - Kc/D_s)      (implicit infiltration conductance,
+        #                                         damped by the surface storage)
+        #   rhs_0  += q01/dz0 - Kc*R_s/(dz0*D_s) (explicit infiltration + storage)
+        # q01 appears with opposite signs in the surface and layer-0 balances, so the
+        # eliminated system is mass-conservative by construction.
+        # Kc_eff is the LINEARIZED conductance -dq01/dpsi0 (= _Kc when the Darcy flux
+        # is below the surface supply, 0 when capped) — use it, not _Kc, so a capped
+        # (supply-limited) cell decouples from the soil and adds only an explicit
+        # source q01/dz0, conserving exactly.
+        q01_m, Kc_m, R_s_m, D_s_m = _surface_terms(h_s_m, psi_m[:, 0])
+        diag = diag.at[:, 0].add(Kc_m / dz[0] * (1.0 - Kc_m / D_s_m))
+        rhs = rhs.at[:, 0].add(q01_m / dz[0] - Kc_m * R_s_m / (dz[0] * D_s_m))
 
         # Bottom BC
         if richards_config.bottom_bc == "free_drainage":
@@ -219,6 +280,10 @@ def solve_richards(
 
         dpsi = thomas_solve_batch(a_full, diag, c_full, rhs)
 
+        # Recover the surface-cell increment from the Schur relation, then update.
+        dh_s = (-R_s_m + Kc_m * dpsi[:, 0]) / D_s_m
+        h_s_new = h_s_m + dh_s
+
         # Update psi and theta unconditionally.  Converged columns get
         # near-zero dpsi, so extra iterations are effectively no-ops.
         psi_new = psi_m + dpsi
@@ -229,7 +294,7 @@ def solve_richards(
         # storage variable switch makes the clip unnecessary.
         theta_new = theta_from_psi(psi_new, hydro_config)
 
-        return psi_new, theta_new
+        return h_s_new, psi_new, theta_new
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
 
@@ -246,24 +311,44 @@ def solve_richards(
     # whose hydraulics are wider than ``dz`` (codex).  Byte-identical for a
     # uniform float64 / true float32 run.
     _work_dtype = jnp.result_type(
-        psi_m, theta_n, theta_m_init, dz, dz_if, flux_infiltrated, sink)
-    psi_final, theta_final = jax.lax.fori_loop(
+        psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink)
+    h_s_final, psi_final, theta_final = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (psi_m.astype(_work_dtype), theta_m_init.astype(_work_dtype)),
+        (h_s0.astype(_work_dtype), psi_m.astype(_work_dtype),
+         theta_m_init.astype(_work_dtype)),
     )
     # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
-    # Subsurface runoff: gravitational drainage at bottom.  Keep the column axis
-    # (``[:, -1:]`` then squeeze) so a PER-COLUMN hydro_config (ncol,1) broadcasts —
-    # same fix as the K_top boundary call; bit-identical for a scalar config.
+    # Surface store + overland runoff, split from the converged surface cell.  The
+    # surface balance R_s = 0 gives dh_s/dt = flux_top - q01, so the soil's +q01 and
+    # the pond's -q01 cancel and d(soil + pond) = flux_top - sink - drainage exactly.
+    # The cap q01 <= h_s0/dt + flux_top guarantees h_s_final >= 0 AT convergence; with
+    # the fixed (non-converged) 10-iteration Picard, h_s_final can dip slightly
+    # negative on Picard slack.  Clamping that to 0 would CREATE water (codex), so the
+    # negative slack (the over-infiltration the pond could not actually supply) is
+    # returned to soil layer 0 below — pond_new + runoff*dt + soil_debit == h_s_final
+    # exactly, conserving regardless of Picard convergence.
+    h_pos = jnp.maximum(h_s_final, 0.0)
+    pond_deficit = h_pos - h_s_final                        # = max(-h_s_final, 0) >= 0
+    runoff_surface = jnp.maximum(h_pos - richards_config.pond_max, 0.0) / dt
+    surface_water_new = jnp.minimum(h_pos, richards_config.pond_max)
+    # Un-infiltrate the (Picard-slack) over-draw so the pond clamp creates no water.
+    # O(slack) for realistic forcing; psi_final is left as-is (the O(slack) psi/theta
+    # mismatch at layer 0 re-equilibrates on the next step's Picard solve).
+    theta_final = theta_final.at[:, 0].add(-pond_deficit / dz[0])
+
+    # Subsurface runoff: gravitational drainage at bottom.  Evaluate K on the FULL
+    # (ncol, nlayers) state, then slice the bottom layer — a layer-varying K_sat
+    # ((nlayers,) or (ncol,nlayers)) cannot broadcast against a sliced (ncol,1) input,
+    # and slicing first would pair the bottom psi with the WRONG layer's K_sat (codex).
+    # Bit-identical for scalar / (ncol,1) configs; correct for layer-varying ones.
     if richards_config.bottom_bc == "free_drainage":
-        K_bot = hydraulic_conductivity(psi_final[:, -1:], theta_final[:, -1:],
-                                       hydro_config)[:, 0]
+        K_bot = hydraulic_conductivity(psi_final, theta_final, hydro_config)[:, -1]
         runoff_subsurface = K_bot  # [m/s]
     else:
-        runoff_subsurface = jnp.zeros(ncol)
+        runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)
 
     # Convert runoff from m/s of water to kg/m2/s
     runoff_surface_kgm2s = runoff_surface * constants.rho_water
@@ -275,6 +360,7 @@ def solve_richards(
         runoff_surface=runoff_surface_kgm2s,
         runoff_subsurface=runoff_subsurface_kgm2s,
         n_iter=n_iter_final,
+        surface_water=surface_water_new,
     )
 
 

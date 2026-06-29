@@ -39,19 +39,23 @@ def _col(v):
 
 
 # ── isolated Richards conservation (the core invariant) ─────────────────────
-def _richards_residual(hyd, flux_top, sink_rate, max_iter=10):
+def _richards_residual(hyd, flux_top, sink_rate, max_iter=10, pond0_val=0.0,
+                       theta_init=0.30):
     grid = _grid()
     dz = jnp.asarray(grid.dz)
-    theta0 = jnp.full((1, 8), 0.30)
+    theta0 = jnp.full((1, 8), theta_init)
     psi0 = psi_from_theta(theta0, hyd)
     sink = jnp.full((1, 8), sink_rate) / dz[None, :]          # [1/s]
+    pond0 = jnp.full((1,), pond0_val)
     out = solve_richards(psi0, theta0, grid, hyd, RichardsConfig(max_iter=max_iter),
-                         jnp.array([flux_top]), sink, 3600.0)
-    dW = float(jnp.sum(dz * (out.theta_new[0] - theta0[0])) * _RHO)
-    infil = float(flux_top) * _RHO - float(out.runoff_surface[0])
+                         jnp.array([flux_top]), sink, 3600.0, surface_water=pond0)
+    # total storage = soil + surface pond
+    dW = float((jnp.sum(dz * (out.theta_new[0] - theta0[0]))
+                + (out.surface_water[0] - pond0[0])) * _RHO)
     sink_tot = float(jnp.sum(sink[0] * dz)) * _RHO
-    drain = float(out.runoff_subsurface[0])
-    return dW - (infil - sink_tot - drain) * 3600.0
+    src = (float(flux_top) * _RHO - sink_tot
+           - float(out.runoff_subsurface[0]) - float(out.runoff_surface[0]))
+    return dW - src * 3600.0
 
 
 def test_richards_step_conserves_loam():
@@ -62,6 +66,58 @@ def test_richards_step_conserves_loam():
     loam = SoilHydraulicsConfig()
     assert abs(_richards_residual(loam, 5.0e-6, 1.0e-7)) < 1.0e-3   # wetting
     assert abs(_richards_residual(loam, 0.0, 5.0e-7)) < 1.0e-3      # drying
+
+
+def test_surface_cell_handles_ksat_shapes():
+    """The surface cell's top-layer K_sat extraction must handle every config shape
+    (scalar, per-column (ncol,1), full (ncol,nlayers)) without mis-mapping layer
+    variation onto columns (codex) — and still conserve.  Uses ncol != nlayers so a
+    wrong reshape/broadcast would raise or leak."""
+    grid = _grid()                       # 8 layers
+    dz = jnp.asarray(grid.dz)
+    ncol, nlayers = 3, 8
+    base = SoilHydraulicsConfig()
+    theta0 = jnp.full((ncol, nlayers), 0.30)
+    shapes = {
+        "scalar": base,
+        "per_column": base._replace(K_sat=jnp.full((ncol, 1), float(base.K_sat))),
+        "full_field": base._replace(K_sat=jnp.full((ncol, nlayers), float(base.K_sat))),
+        # layer-varying (nlayers,): exercises BOTH the top cell and the bottom
+        # free-drainage K (codex's exact mis-broadcast scenario)
+        "per_layer": base._replace(K_sat=jnp.full((nlayers,), float(base.K_sat))),
+    }
+    for name, hyd in shapes.items():
+        psi0 = psi_from_theta(theta0, hyd)
+        pond0 = jnp.zeros(ncol)
+        out = solve_richards(psi0, theta0, grid, hyd, RichardsConfig(),
+                             jnp.full(ncol, 5.0e-6), jnp.zeros((ncol, nlayers)),
+                             3600.0, surface_water=pond0)
+        dW = (jnp.sum(dz[None, :] * (out.theta_new - theta0), axis=-1)
+              + (out.surface_water - pond0)) * _RHO
+        src = (5.0e-6 * _RHO - out.runoff_subsurface - out.runoff_surface) * 3600.0
+        assert jnp.max(jnp.abs(dW - src)) < 1.0e-3, (name, float(jnp.max(jnp.abs(dW - src))))
+
+
+def test_evaporation_conserves_with_and_without_pond():
+    """Net surface evaporation (flux_top < 0) conserves whether or not a pond exists.
+
+    With no pond the available-supply cap is negative, so the surface<->soil flux q01
+    goes negative: the soil supplies the bare-soil evaporative demand and the coupled
+    cell reduces to the old Neumann flux_top BC.  With a standing pond the pond drains
+    to the atmosphere first.  Both close the soil+pond budget to machine tolerance (the
+    codex check on the _avail_rate < 0 branch).
+
+    Precondition: flux_top must be physically realizable — an evaporative demand that
+    exceeds the top layer's available water would drive it to theta_r, where the van-
+    Genuchten asymptote floors theta and the (fixed Neumann) evap flux leaks O(0.03)
+    kg/m2 (a PRE-EXISTING solver property the old flux_infiltrated BC shared, not the
+    coupled cell).  Production never hits it: bare-soil evap is supply-limited by the
+    top-layer resistance (S_top**exp -> 0 as theta -> theta_r).  So this uses a demand
+    the column can supply."""
+    loam = SoilHydraulicsConfig()
+    evap = -5.0e-7  # net upward surface water flux [m/s], within column supply
+    assert abs(_richards_residual(loam, evap, 0.0)) < 1.0e-3                 # dry surface
+    assert abs(_richards_residual(loam, evap, 0.0, pond0_val=0.02)) < 1.0e-3  # standing pond
 
 
 def test_stiff_clay_conserves_after_specific_storage_switch():
@@ -97,11 +153,11 @@ def _full_step_budget(cfg, forcing, n_steps, dt, theta_init):
 
     def body(s, _):
         s2, r, _ = step_multilayer_land(s, forcing, cfg, 1.0, dt, lat=jnp.full(ncol, 0.3))
+        W = (jnp.sum(dz * s2.theta_soil[0]) + s2.surface_water[0]) * _RHO  # soil + pond
         return s2, (r.surface_mass_flux[0], s2.runoff_surface[0],
-                    s2.runoff_subsurface[0], jnp.sum(dz * s2.theta_soil[0]) * _RHO,
-                    jnp.min(s2.theta_soil))
+                    s2.runoff_subsurface[0], W, jnp.min(s2.theta_soil))
 
-    W0 = float(jnp.sum(dz * st.theta_soil[0]) * _RHO)
+    W0 = float((jnp.sum(dz * st.theta_soil[0]) + st.surface_water[0]) * _RHO)
     _, (ET, RS, RD, W, th_min) = jax.lax.scan(body, st, None, length=n_steps)
     P = float(forcing.precip_total[0]) * dt * n_steps
     dW = float(W[-1]) - W0

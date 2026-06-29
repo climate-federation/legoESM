@@ -381,22 +381,18 @@ def step_multilayer_land(
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
-    # --- Richards equation: update soil moisture ---
+    # --- Richards equation: update soil moisture (+ coupled surface ponding) ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
+        surface_water=state.surface_water,
     )
-
-    # --- Evaporation water budget closure ---
-    # Ensure top-layer theta reflects actual evaporative loss not captured
-    # by infiltration flux alone (e.g., when evap > precip and soil is dry).
-    theta_corrected = jnp.clip(
-        richards_out.theta_new,
-        config.hydraulics.theta_r,
-        config.hydraulics.theta_sat,
-    )
-    richards_out = richards_out._replace(theta_new=theta_corrected)
+    # NB: the former "evaporation water budget closure" — a clip of theta_new to
+    # [theta_r, theta_sat] — is removed.  It was a non-conservative band-aid for the
+    # old infiltration/evap mismatch; theta_from_psi is now bounded below at theta_r
+    # by construction, the coupled surface cell carries the ponded excess, and the
+    # mixed-form solve closes the water budget, so no clip is needed.
 
     # --- Soil thermal diffusion: update soil temperature ---
     # Excess energy from water-limited evaporation warms the soil
@@ -473,6 +469,7 @@ def step_multilayer_land(
         runoff_subsurface=richards_out.runoff_subsurface,
         snow_depth=snow_new,
         snow_age=snow_age_new,
+        surface_water=richards_out.surface_water,
     )
 
     # --- Build TileResponse ---
@@ -639,4 +636,5 @@ def init_multilayer_land_state(
         runoff_subsurface=jnp.zeros(ncol),
         snow_depth=jnp.zeros(ncol),
         snow_age=jnp.zeros(ncol),
+        surface_water=jnp.zeros(ncol),
     )
