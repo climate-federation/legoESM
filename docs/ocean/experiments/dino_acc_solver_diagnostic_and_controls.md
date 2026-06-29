@@ -87,23 +87,38 @@ initialisation of a deep-reaching ACC is a genuinely hard balancing problem;
 shelved. (It did confirm the ACC is **thermal-wind / density-controlled**: the
 immature cold-start density gives a low ACC, a mature density a high one.)
 
-**L3 (thermocline spin-up) — the answer.** A multi-year cold-start (nominal sill,
-`implicit_cn`) shows the ACC was simply **under-spun**:
+**L3 (thermocline spin-up) — the ACC OVERSHOOTS, it does not settle at 206.** A
+6-year cold-start (nominal sill, `implicit_cn`):
 
-| year | 0.25 | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 2.7 | 3.0 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ACC [Sv] | 41 | 46 | 41 | 70 | 81 | 126 | 153 | **243** |
+| year | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 | 3.5 | 4.0 | 4.5 | 5.0 | 5.5 | 6.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ACC [Sv] | 46 | 41 | 69 | 81 | 126 | 243 | 412 | 576 | 713 | 753 | 752 | 691 |
 
-The ACC is flat ~45 Sv through year 1 (immature thermocline — the "too low 44 Sv"),
-then accelerates (~150 Sv/yr in years 2–3) as the stratification deepens, **crossing
-NEMO's 206 Sv equilibrium by ~3 years** (243 Sv at year 3, possibly overshooting
-before settling). 
+The ACC is flat ~45 Sv through year 1 (immature thermocline — the "too low 44 Sv"
+WAS spin-up), then accelerates through 206 (~yr 2.7) and **keeps climbing to ~753 Sv
+by year 5** (3.7× NEMO) before slowly declining. So **our DINO equilibrium ACC is
+far too HIGH** (~700 Sv), not too low.
 
-**Conclusion:** the model is not deficient. The barotropic solver and diagnostic
-are correct; bottom friction is irrelevant; the sill geometry is correct and sets
-the form-stress limit; and the ACC reaches a physical ~206–243 Sv once the
-thermocline matures (~3 yr). The original "50 Sv is too low" was a 1-year-spin-up
-artifact, not a model error.
+**Cause — the thermocline over-deepens (not eddy saturation).** A GM sweep
+(`visbeck_kappa_max` 2000 → 6000 → 15000, α 0.015 → 0.06) has **no effect** — all
+overshoot to ~750 Sv. So the overshoot is GM-insensitive (the same GM-insensitivity
+as the rigid-lid barotropic runaway). With too-weak eddy flattening unable to be
+the lever, the thermocline keeps deepening and the thermal-wind ACC grows without
+saturation. NEMO's 206 Sv is set by a shallower equilibrium thermocline — a
+**vertical-mixing / buoyancy-forcing / EOS** difference vs NEMO, the real
+model-vs-NEMO discrepancy.
+
+**Warm-start (clean equilibrium comparison) is blocked** (6+ variants NaN,
+including convective-adjustment of the 6.3 % regrid density inversions — the
+in-place adjustment itself was unstable). Model-from-model ACC initialisation is a
+genuinely hard balancing problem.
+
+**Conclusion (corrected):** the barotropic solver and diagnostic are correct;
+bottom friction is irrelevant; the sill geometry is correct. The "50 Sv too low"
+was a 1-year spin-up artifact — but the model's *equilibrium* ACC is too HIGH
+(~700 Sv, thermocline over-deepening, GM-insensitive). Matching NEMO's 206 Sv is a
+**vertical-mixing / buoyancy-forcing / EOS** tuning problem (the thermocline depth),
+not a solver/friction/sill/GM/eddy issue.
 
 Diagnostics: `scripts/tmp/_diag_{psi_unittest,geoadj_balanced,munk_solver,
 r1_warmstart_check,r1_warmstart_balanced,dino_sill_geom,dino_acc_controls,
