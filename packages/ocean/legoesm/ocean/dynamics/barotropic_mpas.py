@@ -42,7 +42,6 @@ from legoesm.ocean.dynamics.barotropic_common import (
     compute_filter_weights,
     maxvel_clip,
 )
-from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
@@ -220,7 +219,11 @@ def barotropic_substeps_mpas(
     use_maxvel = _maxvel > 0.0
 
     use_cosine_filter = config.barotropic_time_filter == "cosine"
-    w_filter, w_total = compute_filter_weights(
+    # ``w_transport`` is the continuity-consistent SM2005 tail-sum transport
+    # weight ``tail_j/(n·w_total)`` (NOT a flat 1/n) so the discrete continuity
+    # invariant ``div(Hu_avg) == (eta_old - eta_avg)/dt`` holds for both box and
+    # cosine (the flat 1/n broke it — worst for cosine).
+    w_filter, w_total, w_transport = compute_filter_weights(
         n_substeps, eta.dtype, use_cosine=use_cosine_filter,
     )
 
@@ -233,7 +236,8 @@ def barotropic_substeps_mpas(
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
 
-    def _substep(carry, w_i):
+    def _substep(carry, wts_i):
+        w_i, w_tr_i = wts_i
         eta_c, u_bar_c, Hu_sum_c, eta_sum_c, ubar_sum_c = carry
 
         # Total depth at edges (updated with current eta).  On partial
@@ -258,8 +262,9 @@ def barotropic_substeps_mpas(
         # Forward: update eta (continuity + freshwater mass source)
         transport = H_e_c * u_bar_c * edge_mask
 
-        # Accumulate transport for time-averaged tracer advection
-        Hu_sum_new = Hu_sum_c + transport.astype(_eta_dtype)
+        # Accumulate transport for time-averaged tracer advection with the
+        # continuity-consistent SM2005 transport weight (NOT a flat 1/n).
+        Hu_sum_new = Hu_sum_c + w_tr_i * transport.astype(_eta_dtype)
 
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
         eta_next = _clamp_redistribute(
@@ -323,12 +328,15 @@ def barotropic_substeps_mpas(
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
 
-        # Bottom drag on barotropic velocity: -r * U_bar / H_total.
-        # r is in [m/s] — resolution-independent bottom stress.
-        if config.bottom_drag_r > 0:
-            u_bar_next = u_bar_next * implicit_bottom_drag_factor(
-                dt_baro, config.bottom_drag_r, H_e_c,
-            )
+        # Bottom drag — SINGLE OWNER (finding #6 fix).
+        # ``ocean_pe_mpas`` already applies the full bottom drag ``-r·u_bot/h``
+        # (with BBL / partial-cell handling) to ``du_dt_full``; its depth-mean
+        # is carried into the barotropic mode through ``F_slow_u`` and applied at
+        # every substep above.  Re-applying ``implicit_bottom_drag_factor`` here
+        # would make the effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2
+        # finding #1).  Drag is therefore owned exclusively by the 3D tendency /
+        # F_slow; we do NOT re-apply it here — consistent with the implicit-CN
+        # MPAS solver, which already relies on F_slow alone.
 
         # MAXVEL clipping
         if use_maxvel:
@@ -360,11 +368,14 @@ def barotropic_substeps_mpas(
 
     (eta_new, u_bar_new, Hu_sum_f, eta_sum_f, ubar_sum_f), _ = jax.lax.scan(
         _substep, (eta, u_bar, Hu_sum, eta_sum, ubar_sum),
-        w_filter, length=n_substeps,
+        (w_filter, w_transport), length=n_substeps,
     )
 
-    # Time-averaged barotropic fields
-    Hu_avg = Hu_sum_f / n_substeps  # transport: always box-filtered
+    # Time-averaged barotropic fields.  ``w_transport`` already carries the full
+    # continuity-consistent normalisation (SM2005 tail-sum), so the accumulator
+    # IS the time-averaged transport ``Hu_avg`` that closes
+    # ``div(Hu_avg) == (eta_old - eta_avg)/dt``.
+    Hu_avg = Hu_sum_f
     eta_avg = eta_sum_f / w_total   # eta/velocity: cosine or box filtered
     u_bar_avg = ubar_sum_f / w_total
 

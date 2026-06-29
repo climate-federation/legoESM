@@ -35,24 +35,24 @@ class TestComputeFilterWeights:
 
     def test_box_shape(self):
         """Box filter returns (n_substeps,) weight vector and scalar total."""
-        w, w_tot = compute_filter_weights(10, jnp.float64, use_cosine=False)
+        w, w_tot, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
         assert w.shape == (10,)
         assert w_tot.shape == ()
 
     def test_box_all_ones(self):
         """Box filter weights are all 1.0."""
-        w, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
+        w, _, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
         assert jnp.allclose(w, jnp.ones(10, dtype=jnp.float64))
 
     def test_box_total_equals_n(self):
         """Box filter total equals n_substeps exactly."""
         n = 15
-        _, w_tot = compute_filter_weights(n, jnp.float64, use_cosine=False)
+        _, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=False)
         assert jnp.allclose(w_tot, float(n))
 
     def test_box_n1(self):
         """Box filter at n=1 returns w=[1.0], total=1.0 (no degenerate case)."""
-        w, w_tot = compute_filter_weights(1, jnp.float64, use_cosine=False)
+        w, w_tot, _ = compute_filter_weights(1, jnp.float64, use_cosine=False)
         assert jnp.allclose(w, jnp.array([1.0]))
         assert jnp.allclose(w_tot, 1.0)
 
@@ -60,26 +60,26 @@ class TestComputeFilterWeights:
 
     def test_cosine_shape(self):
         """Cosine filter returns (n_substeps,) weight vector and scalar total."""
-        w, w_tot = compute_filter_weights(20, jnp.float64, use_cosine=True)
+        w, w_tot, _ = compute_filter_weights(20, jnp.float64, use_cosine=True)
         assert w.shape == (20,)
         assert w_tot.shape == ()
 
     def test_cosine_nonnegative(self):
         """Hanning weights are non-negative for any n >= 2."""
         for n in (2, 3, 5, 10, 20, 100):
-            w, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
             assert jnp.all(w >= 0.0), f"negative weight at n={n}: {w}"
 
     def test_cosine_total_positive(self):
         """Total cosine weight is strictly positive (no divide-by-zero downstream)."""
         for n in (2, 3, 10, 50):
-            _, w_tot = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            _, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
             assert float(w_tot) > 0.0, f"w_total non-positive at n={n}"
 
     def test_cosine_total_equals_sum(self):
         """Returned scalar total must equal sum of the weight array."""
         for n in (5, 12, 25):
-            w, w_tot = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            w, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
             assert jnp.allclose(w_tot, jnp.sum(w)), (
                 f"w_total mismatch at n={n}: {w_tot} vs {jnp.sum(w)}")
 
@@ -91,7 +91,7 @@ class TestComputeFilterWeights:
         """
         # i in {0,1}, n=2: 1 + cos(2pi*(i-1)/2) = 1 + cos(pi*(2i-2)/2)
         # i=0: 1 + cos(-pi) = 0  ; i=1: 1 + cos(0) = 2
-        w, w_tot = compute_filter_weights(2, jnp.float64, use_cosine=True)
+        w, w_tot, _ = compute_filter_weights(2, jnp.float64, use_cosine=True)
         expected = jnp.array([0.0, 2.0])
         assert jnp.allclose(w, expected, atol=1e-12), f"got {w}"
         assert jnp.allclose(w_tot, 2.0, atol=1e-12)
@@ -105,14 +105,14 @@ class TestComputeFilterWeights:
         i=3: 1+cos(2pi*(3-2)/4) = 1+cos(pi/2)  = 1
         total = 4
         """
-        w, w_tot = compute_filter_weights(4, jnp.float64, use_cosine=True)
+        w, w_tot, _ = compute_filter_weights(4, jnp.float64, use_cosine=True)
         expected = jnp.array([0.0, 1.0, 2.0, 1.0])
         assert jnp.allclose(w, expected, atol=1e-12), f"got {w}"
         assert jnp.allclose(w_tot, 4.0, atol=1e-12)
 
     def test_cosine_n1_fallback_to_box(self):
         """At n=1 the cosine would be 0 everywhere; the code falls back to box."""
-        w, w_tot = compute_filter_weights(1, jnp.float64, use_cosine=True)
+        w, w_tot, _ = compute_filter_weights(1, jnp.float64, use_cosine=True)
         assert jnp.allclose(w, jnp.array([1.0])), f"fallback failed: {w}"
         assert jnp.allclose(w_tot, 1.0)
 
@@ -126,7 +126,7 @@ class TestComputeFilterWeights:
         w[k] = w[n-k] for all interior indices.
         """
         for n in (5, 10, 20):
-            w, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
             k = jnp.arange(1, n, dtype=jnp.int32)
             assert jnp.allclose(w[k], w[n - k], atol=1e-12), (
                 f"circular symmetry broken at n={n}: {w}")
@@ -134,14 +134,14 @@ class TestComputeFilterWeights:
     def test_cosine_monotone_to_midpoint(self):
         """Hanning weights are non-decreasing from i=0 to the midpoint."""
         for n in (4, 6, 10, 20):
-            w, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
             mid = n // 2 + 1
             assert jnp.all(jnp.diff(w[:mid]) >= -1e-12), (
                 f"non-monotone ascent at n={n}: {w[:mid]}")
 
     def test_dtype_float32(self):
         """float32 dtype is propagated to the weight array."""
-        w, w_tot = compute_filter_weights(8, jnp.float32, use_cosine=False)
+        w, w_tot, _ = compute_filter_weights(8, jnp.float32, use_cosine=False)
         assert w.dtype == jnp.float32
         assert w_tot.dtype == jnp.float32
 
@@ -337,3 +337,51 @@ class TestMaxvelClip:
         out_f = maxvel_clip(field, maxvel_float)
         out_a = maxvel_clip(field, maxvel_arr)
         assert jnp.allclose(out_f, out_a)
+
+
+class TestTransportWeightsContinuityConsistent:
+    """Finding #8: ``compute_filter_weights`` now returns continuity-consistent
+    SM2005 transport weights ``w_transport[j] = tail_j/(n*w_total)`` (tail_j =
+    sum_{i>=j} w_filter[i]) — NOT a flat 1/n.  This is the ONLY weighting that
+    makes the discrete barotropic continuity invariant
+    ``div(Hu_avg) == (eta_old - eta_avg)/dt`` hold for box AND cosine."""
+
+    def _tail(self, w):
+        # tail_j = sum_{i>=j} w[i]
+        return jnp.cumsum(w[::-1])[::-1]
+
+    def test_box_transport_is_tail_sum_not_flat(self):
+        n = 12
+        w, w_tot, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=False)
+        expected = self._tail(w) / (n * w_tot)
+        assert jnp.allclose(w_tr, expected, atol=1e-14)
+        # Box: w_tr[j] = (n-j)/n^2 — NOT the flat 1/n.
+        j = jnp.arange(n, dtype=jnp.float64)
+        assert jnp.allclose(w_tr, (n - j) / (n * n), atol=1e-14)
+        assert not jnp.allclose(w_tr, 1.0 / n)
+
+    def test_cosine_transport_is_tail_sum(self):
+        n = 20
+        w, w_tot, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=True)
+        expected = self._tail(w) / (n * w_tot)
+        assert jnp.allclose(w_tr, expected, atol=1e-14)
+
+    def test_transport_weight_first_entry_is_one_over_n(self):
+        # tail_0 == w_total, so w_tr[0] == 1/n for every filter.
+        for use_cosine in (False, True):
+            n = 16
+            _, _, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=use_cosine)
+            assert jnp.isclose(w_tr[0], 1.0 / n, atol=1e-14)
+
+    def test_transport_weights_sum_box(self):
+        # Box sum_j w_tr[j] = sum_j (n-j)/n^2 = (n+1)/(2n).
+        n = 10
+        _, _, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=False)
+        assert jnp.isclose(jnp.sum(w_tr), (n + 1) / (2.0 * n), atol=1e-14)
+
+    def test_n1_degenerate_safe(self):
+        # n=1 falls back to box; w_tr = [1].
+        for use_cosine in (False, True):
+            _, w_tot, w_tr = compute_filter_weights(1, jnp.float64, use_cosine=use_cosine)
+            assert w_tr.shape == (1,)
+            assert jnp.isclose(w_tr[0], 1.0, atol=1e-14)

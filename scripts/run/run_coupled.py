@@ -59,83 +59,33 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
 
-def _read_yaml_with_includes(path, _seen=None) -> dict:
-    """Read a run_coupled YAML config, recursively merging an optional
-    ``include:`` base FIRST so the tuned physics can live in one shared file
-    (``config/cmip/cmip_tuned_physics.yaml``) and be reused across run configs.
-
-    Precedence: the including file's keys override the base it includes
-    (base < file).  An ``include:`` path is resolved relative to the including
-    file.  Cycles and missing/non-mapping files raise.  Returns the merged raw
-    dict; ``_load_yaml_config`` then validates + type-coerces it.
-    """
-    import yaml
-    p = Path(path).resolve()
-    _seen = set() if _seen is None else _seen
-    if p in _seen:
-        raise SystemExit(f"--config: 'include' cycle detected at {p}.")
-    _seen.add(p)
-    if not p.exists():
-        raise SystemExit(f"--config: file not found: {p}.")
-    doc = yaml.safe_load(p.read_text())
-    if doc is None:
-        return {}
-    if not isinstance(doc, dict):
-        raise SystemExit(
-            f"--config {path}: expected a YAML mapping of argument=value, "
-            f"got {type(doc).__name__}.")
-    base_ref = doc.pop("include", None)
-    merged = {}
-    if base_ref is not None:
-        if not isinstance(base_ref, str):
-            raise SystemExit(
-                f"--config {path}: 'include' must be a single path string, "
-                f"got {type(base_ref).__name__}.")
-        merged.update(_read_yaml_with_includes(p.parent / base_ref, _seen))
-    merged.update(doc)  # the including file overrides its base
-    return merged
+# The --config YAML loader is the shared single source of truth
+# (legoesm.driver.run_config_yaml) reused by run_amip.py — see main(), which
+# imports it deferred.  run_coupled-specific example dests for the unknown-key
+# error hint:
+_COUPLED_EXAMPLE_KEYS = (
+    "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
+    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+)
 
 
-def _load_yaml_config(path, parser) -> dict:
-    """Load a run_coupled YAML config file into a dict of argument defaults.
-
-    Used by ``--config`` to make a canonical coupled run (e.g. the tuned
-    ``config/cmip/cmip_ocean_{slab,3D}.yaml``) reproducible from one file.
-    Supports an optional ``include:`` base merged first (see
-    ``_read_yaml_with_includes``).  Every (merged) key MUST be a known
-    run_coupled argument dest; an unknown key raises (no silent typo'd / dropped
-    override — dispatch-hardening).
-
-    Each scalar is coerced through that argument's ``type=`` callable, because
-    ``parser.set_defaults`` (how the caller applies this) BYPASSES argparse's own
-    type conversion: a value written as a quoted string (e.g. ``dt: "300"``)
-    would otherwise reach the run as a str.  Returns the mapping so the caller
-    can feed it to ``parser.set_defaults`` (an explicit CLI flag still wins).
-    """
-    doc = _read_yaml_with_includes(path)
-    actions = {a.dest: a for a in parser._actions}
-    unknown = sorted(set(doc) - set(actions))
-    if unknown:
-        raise SystemExit(
-            f"--config {path}: unknown key(s) {unknown}. Keys must be "
-            f"run_coupled argument dests (e.g. 'surface_bulk_scheme', 'ocean', "
-            f"'surface_gustiness_zi', 'cloud_q_c_diagnostic', "
-            f"'ocean_restore_sst_tau_days').")
-    out = {}
-    for key, value in doc.items():
-        argtype = getattr(actions[key], "type", None)
-        # Coerce only string scalars through the arg's type (a YAML native
-        # float/int/bool is already the right Python type; type=None args are
-        # str/bool flags that need no conversion).
-        if argtype is not None and isinstance(value, str):
-            try:
-                value = argtype(value)
-            except (ValueError, TypeError) as exc:
-                raise SystemExit(
-                    f"--config {path}: key '{key}' value {value!r} is not a "
-                    f"valid {getattr(argtype, '__name__', argtype)}: {exc}")
-        out[key] = value
-    return out
+def _find_latest_checkpoint(output_dir):
+    """Return ``(atm_checkpoint_path, day_token)`` for the highest-day
+    ``checkpoint_day_NNNN.npz`` in ``output_dir``, or ``(None, None)`` if none
+    exists.  Used by ``--resume`` to chain multi-segment equilibration jobs.
+    Pure + side-effect-free so it is unit-testable."""
+    import glob
+    import os
+    import re
+    best, best_day = None, None
+    for p in glob.glob(os.path.join(str(output_dir), "checkpoint_day_*.npz")):
+        m = re.search(r"checkpoint_day_(\d+)\.npz$", os.path.basename(p))
+        if m is None:
+            continue
+        d = int(m.group(1))
+        if best_day is None or d > best_day:
+            best, best_day = p, d
+    return best, best_day
 
 
 def build_parser():
@@ -487,6 +437,24 @@ def build_parser():
                              "DEFAULTS, so any explicit CLI flag still overrides "
                              "it. Keys are run_coupled argument dests; an unknown "
                              "key is a hard error (no silent typo'd override).")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from the latest checkpoint in --output "
+                             "(atm checkpoint_day_NNNN.npz + coupled "
+                             "coupled_day_NNNN.npz), continuing the integration "
+                             "from that day instead of the initial condition. "
+                             "Enables job-chained multi-month equilibration of "
+                             "the dynamic 3D ocean (ckpt v2). No checkpoint "
+                             "present => starts fresh.")
+    parser.add_argument("--checkpoint-days", type=int, default=0,
+                        help="Write a full coupled checkpoint every N sim-days "
+                             "(0=off). Needed for --resume job-chaining; a "
+                             "small N bounds the work lost to an abrupt cancel.")
+    parser.add_argument("--max-wallclock-hours", type=float, default=0.0,
+                        help="Wallclock budget (hours): checkpoint and exit "
+                             "cleanly before this elapsed time so SLURM does "
+                             "not kill the job mid-step (0=off). Set it just "
+                             "under the SLURM --time so the next --resume link "
+                             "picks up the exact end state.")
 
     return parser
 
@@ -498,7 +466,9 @@ def main():
     # flags still override (precedence: CLI > config file > parser default).
     pre, _ = parser.parse_known_args()
     if pre.config is not None:
-        parser.set_defaults(**_load_yaml_config(pre.config, parser))
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        parser.set_defaults(**load_yaml_config(
+            pre.config, parser, example_keys=_COUPLED_EXAMPLE_KEYS))
 
     args = parser.parse_args()
 
@@ -600,6 +570,13 @@ def main():
             diag_days=args.diag_days,
             cmip_output=args.cmip_output,
             cmip_resolution_deg=args.cmip_resolution_deg,
+            # Periodic checkpoint cadence (days) + a wallclock budget that
+            # triggers a clean checkpoint+exit before SLURM kills the job — both
+            # needed so a long dynamic-3D-ocean equilibration survives an abrupt
+            # cancel / walltime and resumes via --resume (ckpt v2).
+            checkpoint_days=args.checkpoint_days,
+            max_wallclock_seconds=(args.max_wallclock_hours * 3600.0
+                                   if args.max_wallclock_hours else 0.0),
         ),
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
@@ -777,8 +754,29 @@ def main():
     t_setup = time.time() - t0
     logger.info(f"Setup completed in {t_setup:.1f}s")
 
+    # --resume: continue the integration from the latest checkpoint in --output
+    # (atm + coupled written together, same day token).  setup() has already
+    # rebuilt the IC + ocean geometry + WOA restoring targets deterministically;
+    # the load overwrites the prognostic state with the saved day-N values.
+    start_step, start_day = 0, None
+    if getattr(args, "resume", False):
+        import os
+        ckpt, _tok = _find_latest_checkpoint(args.output)
+        if ckpt is None:
+            logger.info("  --resume: no checkpoint in %s; starting fresh",
+                        args.output)
+        else:
+            step, day = driver._atm.load_checkpoint(ckpt)
+            elapsed = day - getattr(atm_config, "start_day", 0.0)
+            driver.load_coupled_checkpoint(float(elapsed),
+                                           checkpoint_dir=args.output)
+            start_step, start_day = step, day
+            logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
+                        "integrating to day %d", os.path.basename(ckpt),
+                        step, day, elapsed, args.days)
+
     t0 = time.time()
-    status = driver.run()
+    status = driver.run(start_step=start_step, start_day=start_day)
     t_run = time.time() - t0
 
     # Summary

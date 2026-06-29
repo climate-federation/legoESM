@@ -400,36 +400,22 @@ def test_half_space_cooling_front_qualitative() -> None:
 
 
 # =====================================================================
-# KNOWN BUGS (pre-existing, codex round-1 findings #1 and #2) — documented
+# CARBON CONSERVATION (formerly known bugs, codex round-1 findings #1, #2)
 # =====================================================================
 #
-# Both stem from the SAME accounting defect in step_carbon_differland: the
-# realised carbon DRAW from a pool is capped at its contents, but NEE_day
-# reports the UNCAPPED respiration flux.  When a pool clips to zero the
-# atmosphere gain exceeds the biomass loss => conservation break.  Two
-# independent reachable paths (biomass-exhaustion and litter/SOM-overdraw)
-# get one strict-xfail each so a fix to one path cannot silently XPASS while
-# leaving the other open (codex round-2 request).  Both are BENIGN at all
-# realistic timesteps (the per-step loss fraction is <<1 for dt <= 1 day)
-# and only manifest under multi-hundred-day dt + extreme forcing.  The fix
-# is a coupled loss-allocation restructure (jointly cap every loss term that
-# debits a pool at the pool's capacity, then derive NEE from the realised
-# losses), NOT a trivial single-file edit — flagged to owners.
+# Both stemmed from the SAME accounting defect in step_carbon_differland: the
+# realised carbon DRAW from a pool was capped at its contents, but NEE_day
+# reported the UNCAPPED respiration flux, so when a pool clipped to zero the
+# atmosphere gain exceeded the biomass loss (conservation break).  FIXED in
+# carbon_cycle.py: (a) a JOINT litter net-availability cap scales R_het_lit
+# and lit_to_som so their sum never overdraws the litter pool, and R_het_lit
+# in NEE uses the capped value (finding #4); (b) NEE is reduced by the unmet
+# NPP deficit that no biomass pool could supply (finding #5).  Each path keeps
+# its own conservation test so a regression on one cannot hide behind the
+# other.  The corrections are no-ops at realistic timesteps (the per-step loss
+# fraction is <<1 for dt <= 1 day) and only bite under multi-hundred-day dt +
+# extreme forcing.
 
-@pytest.mark.xfail(
-    reason="BUG: carbon_cycle litter/SOM decomposition can overdraw a near-"
-           "empty pool. R_het_lit, lit_to_som, R_het_som use INDEPENDENT "
-           "_effective_rate calls on the SAME original pool; their sum can "
-           "exceed the pool, _soft_pos clips it to 0 (loses less than "
-           "reported), but NEE_day reports the uncapped respiration -> "
-           "atmosphere gain > biomass loss. Benign at realistic dt "
-           "(loss fraction <<1 for dt<=1 day); only breaks under multi-"
-           "hundred-day dt + extreme heat+wet. Fix requires jointly capping "
-           "litter/SOM loss terms at pool capacity (cf. the biomass deficit "
-           "cascade). NOT fixed here: multi-term restructure, flagged to "
-           "owners. See carbon_cycle.py:335-377.",
-    strict=True,
-)
 def test_carbon_litter_pool_overdraw_conservation() -> None:
     """Litter pool clipped to zero must not break NEE conservation."""
     from legoesm.land.carbon.config import CarbonConfig, CarbonState
@@ -453,20 +439,6 @@ def test_carbon_litter_pool_overdraw_conservation() -> None:
     npt.assert_allclose(np.asarray(dC), np.asarray(expected), rtol=1e-6)
 
 
-@pytest.mark.xfail(
-    reason="BUG: carbon_cycle autotrophic respiration can overdraw the "
-           "biomass pools. The NPP-deficit cascade caps each pool DRAW at "
-           "available carbon (carbon_cycle.py:306-330), but NEE_day reports "
-           "the UNCAPPED R_auto_day (carbon_cycle.py:381). When R_auto*dt "
-           "exceeds total drawable biomass (lab+fol+root+wood), the pools "
-           "clip to 0 while NEE reports the full respiration -> atmosphere "
-           "gain > biomass loss. Distinct from the litter/SOM path: here the "
-           "litter pools may even GROW from leaf/root litter while the "
-           "biomass empties. Benign at realistic dt; only breaks under "
-           "multi-thousand-day dt + extreme heat. Same coupled "
-           "loss-allocation fix as the litter path. Flagged to owners.",
-    strict=True,
-)
 def test_carbon_biomass_exhaustion_conservation() -> None:
     """Biomass pools clipped to zero must not break NEE conservation."""
     from legoesm.land.carbon.config import CarbonConfig, CarbonState
@@ -486,10 +458,46 @@ def test_carbon_biomass_exhaustion_conservation() -> None:
     )
     dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
     expected = -flux / gc_to_kgco2 * dt
-    # All biomass pools drain to 0 but NEE reports the uncapped R_auto.
-    assert jnp.all(new.C_fol == 0.0) and jnp.all(new.C_wood == 0.0)
-    # This currently FAILS (rel err ~0.96) — documents the conservation hole.
+    # All biomass pools drain to ~0 (within FP roundoff of the exact deficit
+    # draw that empties them) under this multi-thousand-day deficit step.
+    npt.assert_allclose(np.asarray(new.C_fol), 0.0, atol=1e-9)
+    npt.assert_allclose(np.asarray(new.C_wood), 0.0, atol=1e-9)
+    # NEE is now reduced by the unmet deficit, so the column closes exactly:
+    # sum(dC_pools) == -NEE*dt (previously rel err ~0.96 — the conservation
+    # hole this test documents is now FIXED, findings #4/#5).
     npt.assert_allclose(np.asarray(dC), np.asarray(expected), rtol=1e-6)
+
+
+def test_carbon_nee_closure_realistic_dt() -> None:
+    """The litter/biomass caps are no-ops at realistic dt: the carbon column
+    must close (sum dC == -NEE*dt) in BOTH the growth and the mild-deficit
+    regimes at a 1-day step with well-stocked pools."""
+    from legoesm.land.carbon.config import CarbonConfig, CarbonState
+    from legoesm.land.carbon.carbon_cycle import step_carbon_differland
+
+    cfg = CarbonConfig(scheme="differland")
+    gc_to_kgco2 = (44.0 / 12.0) * 1e-3
+    dt = 86400.0  # 1 day — realistic
+
+    # Well-stocked pools; the joint litter cap and the unmet-deficit term must
+    # both be inactive (scale==1, unmet==0) so closure is exact regardless.
+    state = CarbonState(
+        C_lab=jnp.array([20.0]), C_fol=jnp.array([120.0]),
+        C_root=jnp.array([80.0]), C_wood=jnp.array([8000.0]),
+        C_lit=jnp.array([300.0]), C_som=jnp.array([12000.0]),
+    )
+    # Two cases: daytime growth (high SW) and night-time deficit (zero SW).
+    for sw in (jnp.full(1, 400.0), jnp.zeros(1)):
+        new, flux = step_carbon_differland(
+            state, sw, jnp.full(1, 290.0), jnp.full(1, 400.0),
+            jnp.ones(1), jnp.full(1, 0.0), 180.0, jnp.full(1, 3e-5), cfg, dt,
+        )
+        dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
+        expected = -flux / gc_to_kgco2 * dt
+        npt.assert_allclose(np.asarray(dC), np.asarray(expected), rtol=1e-9)
+        # All pools stay non-negative.
+        for f in state._fields:
+            assert jnp.all(getattr(new, f) >= 0.0), f"{f} went negative"
 
 
 if __name__ == "__main__":

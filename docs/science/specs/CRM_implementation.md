@@ -1433,11 +1433,11 @@ straight to 132×132 production.
 crash. `src/legoesm/grids/vertical.py` had two module-top
 `jnp.asarray([...])` calls (`_A60`, `_B60` FV3 L60 hybrid coord
 tables) that eagerly dispatched `lax.convert_element_type` to JAX's
-default platform — on macOS that's METAL which rejects the op.
-`ensure_metal_or_fallback()` in `tests/conftest.py` ran AFTER
-`import legoesm`, so the fallback never applied. `import legoesm`
-bricked on Apple Silicon, breaking every pure-Python unit test on
-Mac. Fix: module-top uses `np.asarray(...)`; `set_eta_L60()`
+default platform — on macOS that was the (now-removed) Apple-GPU
+METAL backend which rejected the op. The backend CPU-fallback that
+`tests/conftest.py` then applied ran AFTER `import legoesm`, so it
+never helped. `import legoesm` bricked on Apple Silicon, breaking
+every pure-Python unit test on Mac. Fix: module-top uses `np.asarray(...)`; `set_eta_L60()`
 converts to `jnp.asarray` on demand. Regression test
 (`tests/unit/test_no_module_top_jax_alloc.py`, 8 cases + Codex
 MEDIUM-1/2/3 hardening to 20 constructors + alias-aware AST walk +

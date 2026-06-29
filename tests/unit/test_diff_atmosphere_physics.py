@@ -579,7 +579,7 @@ class TestPhysicsPipelineUnifiedGrad:
         T0 = a["T"]
 
         def loss(T_data):
-            phys_out, _held, _T_land = step_fn(
+            phys_out, _held, _T_land, _land_ml = step_fn(
                 jnp.bool_(need_rad),
                 T_data, a["p_s"], a["q_v"], a["q_c"], a["q_r"],
                 a["conv_prog"], a["u"], a["v"], a["sst"], a["sic"],

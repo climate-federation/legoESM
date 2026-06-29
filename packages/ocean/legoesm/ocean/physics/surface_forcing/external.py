@@ -5,7 +5,7 @@ the top ocean layer through the PHYSICS-function path.  The cubed-sphere
 (``OceanModel``) dynamics route surface forcing through ``physics_fn`` (the
 lat-lon C-grid applies ``surface_forcing`` directly in its dynamics), so this
 scheme is how a prognostic cubed-sphere ocean closes two-way coupling (e.g. the
-sea-ice -> ocean exchange via ``coupler.ocean_forcing``).
+sea-ice -> ocean exchange via ``coupler._future.ocean_forcing``).
 
 Scope: the cubed-sphere ``OceanModel`` (``make_ocean_physics`` ->
 ``make_surface_forcing_physics``).  MPAS builds physics through

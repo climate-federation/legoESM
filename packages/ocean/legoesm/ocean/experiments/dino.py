@@ -161,6 +161,18 @@ class DINOConfig:
     A_v_bg: float = 1.2e-4         # background vertical viscosity [m²/s]
     K_v_bg: float = 1.2e-5         # background vertical diffusivity [m²/s]
     K_conv: float = 100.0          # enhanced-diffusion convective K [m²/s] (rn_evd)
+    # Vertical-mixing turbulence closure. The paper (Kamm et al. 2025) uses the
+    # NEMO TKE scheme (Blanke & Delecluse 1993); "tke" selects our TKE closure
+    # configured to the paper (background visc/diff = A_v_bg / K_v_bg, convective
+    # ceiling K_conv, constant background, prandtl_mode="constant"). HOWEVER our
+    # TKE is currently UNSTABLE in this 1deg DINO: the lower diffusivity makes the
+    # lat-lon run too energetic and it blows up near day ~40 (our TKE +
+    # lateral-viscosity tuning differs from NEMO's, where TKE is stable for 3000
+    # yr). So the DEFAULT is "kpp" (our stable closure, full-year stable); "tke"
+    # is the paper-faithful option for the short (<~40 day) window. This is a
+    # documented fidelity gap alongside the EOS (Wright vs Roquet) and the
+    # annual-mean-vs-seasonal restoring. Set per run via --vmix.
+    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper, unstable >~day 40)
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization (Visbeck 1997; decisions
@@ -191,6 +203,32 @@ class DINOConfig:
     # Table 2). At R1 our GM/Redi handles this — we keep U_T for
     # reference but do not apply a separate harmonic tracer diffusion.
     U_T: float = 0.027             # tracer diffusivity velocity scale [m/s] (rn_Ut)
+
+    # ------------------------------------------------------------------
+    # MPAS-only equatorial viscosity boost (grid-specific stabilizer).
+    # The lat-lon path protects the equatorial waveguide with A_h_eq_boost
+    # (above): where f→0 the Coriolis restoring vanishes and the forced
+    # equatorial jet is numerically unconstrained. The MPAS implicit-CN
+    # barotropic solver's Coriolis predictor-corrector has the SAME blind
+    # spot — without protection the wind-driven equatorial jet runs away
+    # (DIAGNOSED: |u| 1.8→7.6 m/s by day 20 → NaN by day 30; fastest edges
+    # all at |lat|<3°; dt-independent, forcing-required, viscosity-of-the-
+    # uniform-kind-insensitive → a dynamical f→0 mode, not grid noise).
+    # MPASOceanConfig.equatorial_visc_boost applies the SAME tight-Gaussian
+    # A_h·(1 + boost·exp(−½(lat/σ)²)) profile the lat-lon A_h_eq_boost uses
+    # (σ=5° matches A_h_eq_sigma_deg). IGNORED on the lat-lon path. Boost
+    # SWEEP: boost=3 NaNs day50; boost=5 stable but jet peaks 4.5 m/s; boost=8
+    # peaks ~2.1 m/s — chosen default (≈9× A_h at the equator, MPAS 3–10 range).
+    # SCOPE: this cures the EARLY equatorial mode (stable days 0–~90, was NaN
+    # day 30). A SEPARATE instability (#3) limits the full year: the regional
+    # Voronoi mesh has distorted (anisotropic dcEdge≪dvEdge) cells in the
+    # southern re-entrant-channel / buffer transition (lat≈−67°) — see
+    # _diag_dino_mpas_blowup.py — and as the ACC jet matures there (~day 100)
+    # those cells go unstable (|u| regrows → NaN ~day 130), viscosity-
+    # insensitive (boost 8/12, baro-u-visc 0/1e4/3e4 all NaN day 130). That is
+    # a mesh-quality issue (the generator skips Lloyd, voronoi.py:1701), not a
+    # config knob; full-year MPAS DINO needs a better southern-channel mesh.
+    mpas_equatorial_visc_boost: float = 8.0   # low-lat A_h boost factor [-]
 
     # ------------------------------------------------------------------
     # Bottom drag (paper Sect 2.1 "nonlinear friction term"; namelist
@@ -986,6 +1024,52 @@ def dino_lat_lon_state(
     return state
 
 
+def _dino_vertical_mixing_config(cfg: DINOConfig):
+    """Shared DINO vertical-mixing config (used by both grid model-configs so
+    the closure is identical across lat-lon and MPAS).
+
+    ``cfg.vmix_scheme == "tke"`` selects the NEMO-style TKE closure the paper
+    uses, configured with the paper's constant background visc/diff
+    (``A_v_bg`` / ``K_v_bg``) and the convective ceiling (``K_conv``), with the
+    depth-dependent Bryan-Lewis background switched OFF (``bg_diff_scale=0``) to
+    match the paper's constant background. ``"kpp"`` keeps the prior KPP closure.
+    Convective adjustment itself is handled by the enhanced-diffusion convection
+    scheme (``K_conv``) on top, as in the paper.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, TKEConfig, VerticalMixingConfig,
+    )
+    if cfg.vmix_scheme == "tke":
+        # prandtl_mode="constant" is REQUIRED for the paper background to take
+        # effect: with the default "unit" mode kappaH_min is dead (the tracer
+        # floor inherits kappaM_min) and kappaM_max is ignored. "constant" gives
+        # K_H = max(kappaH_min, K_M / Prandtl_tke0) and applies the kappaM_max
+        # ceiling, so K_v_bg (1.2e-5) and the convective ceiling (K_conv) are
+        # honored (Prandtl_tke0 default 10 = A_v_bg / K_v_bg). The TKE step is
+        # fed N2 + shear_sq by the vertical-mixing integration.
+        return VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(
+                prandtl_mode="constant",
+                kappaM_min=cfg.A_v_bg, kappaH_min=cfg.K_v_bg,
+                kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            ),
+        )
+    if cfg.vmix_scheme == "kpp":
+        return VerticalMixingConfig(
+            scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
+        )
+    if cfg.vmix_scheme == "constant":
+        # Constant background vertical mixing (no boundary-layer scheme): the
+        # model uses the config-level A_v_bg / K_v_bg directly. Used to UNIFY
+        # the vertical mixing across grids identically (isolating the pure
+        # discretization difference from any KPP-implementation difference).
+        return VerticalMixingConfig(scheme="constant")
+    raise ValueError(
+        f"unknown DINOConfig.vmix_scheme {cfg.vmix_scheme!r}; "
+        "expected 'tke' or 'kpp'")
+
+
 def dino_lat_lon_model_config(
     grid,
     cfg: DINOConfig | None = None,
@@ -1057,14 +1141,8 @@ def dino_lat_lon_model_config(
             SurfaceForcingConfig,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-        from legoesm.ocean.physics.vertical_mixing.config import (
-            KPPConfig, VerticalMixingConfig,
-        )
         physics_cfg = OceanPhysicsConfig(
-            vertical_mixing=VerticalMixingConfig(
-                scheme="kpp",
-                kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
-            ),
+            vertical_mixing=_dino_vertical_mixing_config(cfg),
             # GM/Redi goes on the model config directly, not here.
             lateral_mixing=LateralMixingConfig(scheme="none"),
             convection=OceanConvectionConfig(
@@ -1195,6 +1273,11 @@ def dino_mpas_model_config(
     model_config = MPASOceanConfig(
         rho_0=cfg.rho_0,
         A_h=A_h,
+        # Equatorial-waveguide stabilizer (f→0): boosts A_h near the equator
+        # with the same tight Gaussian the lat-lon A_h_eq_boost uses. Without
+        # it the forced equatorial jet runs away on the implicit-CN MPAS path
+        # — see the mpas_equatorial_visc_boost note in DINOConfig.
+        equatorial_visc_boost=cfg.mpas_equatorial_visc_boost,
         K_h=K_h,
         A_v=cfg.A_v_bg,
         K_v=cfg.K_v_bg,
@@ -1222,15 +1305,9 @@ def dino_mpas_model_config(
     )
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-    from legoesm.ocean.physics.vertical_mixing.config import (
-        KPPConfig, VerticalMixingConfig,
-    )
 
     physics_config = OceanPhysicsConfig(
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
-        ),
+        vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
             gm_redi=GMRediConfig(
@@ -1259,6 +1336,14 @@ def dino_mpas_model_config(
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),  # using model-level drag
     )
+    # Wire the physics INTO the model config (MPASOceanConfig.physics) — the
+    # MPAS model gates KPP/GM-Redi/convection on ``config.physics is not None``
+    # (ocean_model_mpas.py). The lat-lon path does this via
+    # LatLonCGridOceanConfig.from_flat(physics=...); without it here the run_dino
+    # caller (``model_cfg, _ = dino_mpas_model_config(...)``) drops the returned
+    # physics_config and the MPAS ocean runs DYCORE-ONLY (no boundary-layer
+    # mixing, no eddy parameterization, no convection).
+    model_config = model_config._replace(physics=physics_config)
     return model_config, physics_config
 
 

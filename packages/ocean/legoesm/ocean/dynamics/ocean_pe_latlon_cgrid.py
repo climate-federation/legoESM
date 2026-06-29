@@ -2374,14 +2374,14 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_flux_div and config.A_h > 0:
+    if _use_flux_div and config.lateral_viscosity.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0 or config.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -2389,7 +2389,7 @@ def _bc_horizontal_viscosity(
                 "operator). Set them to their defaults, or use "
                 "lateral_viscosity_operator='vector_laplacian'."
             )
-        _cos_p = config.A_h_cos_power if config.A_h_lat_scaling else 0
+        _cos_p = config.lateral_viscosity.A_h_cos_power if config.lateral_viscosity.A_h_lat_scaling else 0
         # PER-LEVEL face masks (variable bathymetry): with only the 2-D
         # u_mask/v_mask the operator computes a flux across faces that are
         # CLOSED at depth at topographic steps — a spurious no-slip wall
@@ -2411,7 +2411,7 @@ def _bc_horizontal_viscosity(
             _fd_u, _fd_v = u, v
         diag_Ah_lap_u, diag_Ah_lap_v, _kdiss_fluxdiv_cell = (
             flux_divergence_viscosity_cgrid(
-                _fd_u, _fd_v, grid, config.A_h, cos_power=_cos_p,
+                _fd_u, _fd_v, grid, config.lateral_viscosity.A_h, cos_power=_cos_p,
                 mask=mask, u_mask=_fd_um, v_mask=_fd_vm,
                 want_dissipation=_want_kdiss_flux,
             )
@@ -2419,22 +2419,22 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-        if config.B_h > 0:
+        if config.lateral_viscosity.B_h > 0:
             # Biharmonic matched to the operator family (component for
             # flux_divergence — MITgcm-faithful + stable; vector otherwise).
             bilap_u, bilap_v = _biharmonic_op(u, v)
-            if config.B_h_lat_scaling:
+            if config.lateral_viscosity.B_h_lat_scaling:
                 scale_u, scale_v = biharmonic_scaling_factor(grid)
-                diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-                diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+                diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+                diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
             else:
-                diag_Bh_bilap_u = -config.B_h * bilap_u
-                diag_Bh_bilap_v = -config.B_h * bilap_v
+                diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+                diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
             diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(
                 diag_Bh_bilap_u, diag_Bh_bilap_v)
             du_dt = du_dt + diag_Bh_bilap_u
             dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.A_h > 0 and config.B_h > 0:
+    elif config.lateral_viscosity.A_h > 0 and config.lateral_viscosity.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
         # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
@@ -2447,48 +2447,48 @@ def _bc_horizontal_viscosity(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.A_h_lat_scaling:
-            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+        if config.lateral_viscosity.A_h_lat_scaling:
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=config.A_h_cos_power, floor=_floor)
-            if config.A_h_eq_boost > 1.0:
+                grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
-            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * lap_scale_u
-        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+                _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * _vlap_u
-            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * scale_u
+                _ah_scale_center = config.lateral_viscosity.A_h * scale_u
         else:
-            diag_Ah_lap_u = config.A_h * _vlap_u
-            diag_Ah_lap_v = config.A_h * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * jnp.ones(
+                _ah_scale_center = config.lateral_viscosity.A_h * jnp.ones(
                     (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
@@ -2497,78 +2497,78 @@ def _bc_horizontal_viscosity(
             _vlap_u, _vlap_v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.B_h_lat_scaling:
+        if config.lateral_viscosity.B_h_lat_scaling:
             scale_u, scale_v = biharmonic_scaling_factor(grid)
-            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
-            diag_Bh_bilap_u = -config.B_h * bilap_u
-            diag_Bh_bilap_v = -config.B_h * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.A_h > 0:
+    elif config.lateral_viscosity.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.A_h_lat_scaling:
-            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+        if config.lateral_viscosity.A_h_lat_scaling:
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=config.A_h_cos_power, floor=_floor)
-            if config.A_h_eq_boost > 1.0:
+                grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
-            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * lap_scale_u
-        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+                _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * vlap_u
-            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * scale_u
+                _ah_scale_center = config.lateral_viscosity.A_h * scale_u
         else:
-            diag_Ah_lap_u = config.A_h * vlap_u
-            diag_Ah_lap_v = config.A_h * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * jnp.ones(
+                _ah_scale_center = config.lateral_viscosity.A_h * jnp.ones(
                     (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif config.B_h > 0:
+    elif config.lateral_viscosity.B_h > 0:
         bilap_u, bilap_v = _biharmonic_op(u, v)
-        if config.B_h_lat_scaling:
+        if config.lateral_viscosity.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
-            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
-            diag_Bh_bilap_u = -config.B_h * bilap_u
-            diag_Bh_bilap_v = -config.B_h * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
@@ -2582,16 +2582,16 @@ def _bc_horizontal_viscosity(
             f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
             f"got {_side_bc!r}"
         )
-    if _side_bc == "no_slip" and config.A_h > 0:
+    if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
         du_drag, dv_drag = no_slip_sidedrag_cgrid(
-            u, v, grid, config.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
+            u, v, grid, config.lateral_viscosity.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
         du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
         du_dt = du_dt + du_drag
         dv_dt = dv_dt + dv_drag
 
-    if config.C_smag > 0:
+    if config.lateral_viscosity.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
-            u, v, grid, config.C_smag,
+            u, v, grid, config.lateral_viscosity.C_smag,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cs_smag_u = -smag_u
         diag_Cs_smag_v = -smag_v
@@ -2599,7 +2599,7 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
 
-    if getattr(config, "C_smag_lap", 0.0) > 0:
+    if config.lateral_viscosity.C_smag_lap > 0:  # #501: nested LateralViscosityConfig
         # Laplacian Smagorinsky: flow-adaptive viscosity via the
         # energy-stable stress-tensor operator.  A_smag = (C·dx)²·|D|
         # at both h-points (cell centers) and q-points (vertices).
@@ -2609,10 +2609,10 @@ def _bc_horizontal_viscosity(
         D_T, D_S = strain_rate_cgrid(u, v, grid,
                                       mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_h = smagorinsky_viscosity_cgrid(
-            u, v, grid, config.C_smag_lap,
+            u, v, grid, config.lateral_viscosity.C_smag_lap,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_q = smagorinsky_viscosity_q_cgrid(
-            D_T, D_S, grid, config.C_smag_lap, mask=mask)
+            D_T, D_S, grid, config.lateral_viscosity.C_smag_lap, mask=mask)
         # Per-cell viscosity ceiling on the Laplacian-Smagorinsky coefficient.
         # A_smag = (C*dx)^2 * |D| grows without bound at sharp jets (|D| large)
         # and self-CFL-violates there -- the western-boundary-current cold-start
@@ -2624,9 +2624,9 @@ def _bc_horizontal_viscosity(
         # rectangular CFL bound safety/(dt*(1/dx^2+1/dy^2)) STARVES the WBC and
         # blew up the eORCA025 cold-start (job 8126978) -- the larger area*cos^2
         # ceiling is what the cold start needs (empirically validated).
-        if config.smag_cfl_safety > 0.0:
+        if config.lateral_viscosity.smag_cfl_safety > 0.0:
             _cap_h, _cap_q = laplacian_smag_cfl_cap(
-                grid, dt, config.smag_cfl_safety)
+                grid, dt, config.lateral_viscosity.smag_cfl_safety)
             A_smag_h = jnp.minimum(
                 A_smag_h, _cap_h[..., None] if A_smag_h.ndim == 3 else _cap_h)
             A_smag_q = jnp.minimum(
@@ -2641,10 +2641,10 @@ def _bc_horizontal_viscosity(
         diag_Cs_smag_u = diag_Cs_smag_u + _smag_lap_u
         diag_Cs_smag_v = diag_Cs_smag_v + _smag_lap_v
 
-    if getattr(config, "C_leith", 0.0) > 0:
+    if config.lateral_viscosity.C_leith > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
-            u, v, grid, config.C_leith,
-            modified=getattr(config, "C_leith_modified", False),
+            u, v, grid, config.lateral_viscosity.C_leith,
+            modified=config.lateral_viscosity.C_leith_modified,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cl_leith_u = -leith_u
         diag_Cl_leith_v = -leith_v
@@ -2697,7 +2697,7 @@ def _bc_horizontal_viscosity(
     # without damping zonal flow.  Useful on lat-lon grids with large
     # dx/dy anisotropy where isotropic A_h over-damps zonal structure.
     # Acts on total velocity (like the main viscosity block above).
-    _A_h_merid = config.A_h_merid
+    _A_h_merid = config.lateral_viscosity.A_h_merid
     if _A_h_merid > 0:
         _dy = grid.radius * (grid.lat[1] - grid.lat[0])  # constant
         _inv_dy2 = 1.0 / (_dy * _dy)

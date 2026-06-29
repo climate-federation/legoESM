@@ -298,7 +298,16 @@ def assemble_ocean_config(recipe_bundle, config_cls, *,
     # mismatch the validator below would otherwise reject).
     if params.get("eos") != "linear":
         params.pop("eos_linear", None)
-    cfg = config_cls(**params)
+    # #501: recipe bundles carry FLAT field names (e.g. ``barotropic_solver``)
+    # that are now nested sub-configs on grouped configs.  Route through
+    # ``from_flat`` when the target config exposes it (LatLonCGridOceanConfig)
+    # so flat bundle keys distribute into their sub-configs; configs without
+    # grouping (cube/MPAS/spectral) fall back to the plain constructor.  Matches
+    # the config.py to_ocean_config / _decode_config from_flat pattern; the PR2
+    # one-time codemod missed this call because it is on a *variable*, not the
+    # literal ``LatLonCGridOceanConfig(``.
+    _ctor = getattr(config_cls, "from_flat", config_cls)
+    cfg = _ctor(**params)
     if validate:
         assert_recipe_setup_compatible(cfg)
     return cfg

@@ -62,6 +62,8 @@ class TestSegmentCarryPytree:
             tke=jnp.zeros((6 * n * n, nlev)),
             qke=jnp.zeros((6 * n * n, nlev)),
             gwd_spectrum=jnp.zeros((6 * n * n, 1, 1)),
+            conv_precip_prev=jnp.zeros(shape2d),
+            w_land=jnp.zeros(shape2d),
         )
 
     def test_is_namedtuple(self):
@@ -84,12 +86,17 @@ class TestSegmentCarryPytree:
             assert isinstance(leaf, jax.Array), f"Non-array leaf: {type(leaf)}"
 
     def test_no_python_objects_in_carry(self):
-        """Carry should have only JAX arrays — no strings, lists, etc."""
+        """Carry should have only JAX arrays — no strings, lists, etc.  Optional
+        fields may be absent (None ⇒ empty pytree subtree); the optional multilayer
+        land state is a pytree whose leaves must themselves all be arrays."""
         carry = self._make_carry()
         for field_name in carry._fields:
             val = getattr(carry, field_name)
-            assert isinstance(val, jax.Array), (
-                f"Field '{field_name}' is {type(val)}, not jax.Array"
+            if val is None:                      # optional field absent
+                continue
+            leaves = jax.tree.leaves(val)
+            assert leaves and all(isinstance(leaf, jax.Array) for leaf in leaves), (
+                f"Field '{field_name}' has non-array leaves: {type(val)}"
             )
 
 

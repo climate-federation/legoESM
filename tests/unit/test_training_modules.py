@@ -137,6 +137,33 @@ class TestVerticalInterp:
         ))(jnp.float64(101325.0))
         assert jnp.isfinite(grad)
 
+    def test_hybrid_interp_shape_and_values(self):
+        from legoesm.training.vertical_interp import interp_pressure_to_hybrid
+        plev = jnp.linspace(5000.0, 100000.0, 13)
+        # linear-in-log(p) profile so log-p interpolation is exact
+        profile = 200.0 + 20.0 * jnp.log(plev / 100000.0)
+        T = jnp.broadcast_to(profile, (4, 6, 13))
+        p_s = jnp.full((4, 6), 95000.0)
+        A_full = jnp.linspace(0.04, 0.0, 8)
+        B_full = jnp.linspace(0.1, 0.95, 8)
+        p_ref = 100000.0
+        out = interp_pressure_to_hybrid(T, plev, p_s, A_full, B_full, p_ref)
+        assert out.shape == (4, 6, 8)
+        p_target = A_full * p_ref + 95000.0 * B_full
+        expected = 200.0 + 20.0 * jnp.log(p_target / 100000.0)
+        assert jnp.allclose(out[0, 0], expected, atol=1e-6)
+
+    def test_hybrid_interp_differentiable(self):
+        from legoesm.training.vertical_interp import interp_pressure_to_hybrid
+        plev = jnp.linspace(5000.0, 100000.0, 5)
+        T = jnp.linspace(220.0, 290.0, 5)
+        A_full = jnp.linspace(0.04, 0.0, 3)
+        B_full = jnp.linspace(0.1, 0.95, 3)
+        grad = jax.grad(lambda ps: jnp.mean(
+            interp_pressure_to_hybrid(T, plev, ps, A_full, B_full, 100000.0)
+        ))(jnp.float64(95000.0))
+        assert jnp.isfinite(grad)
+
 
 # ---------------------------------------------------------------------------
 # 2. losses

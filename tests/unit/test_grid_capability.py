@@ -203,7 +203,7 @@ from legoesm.grids.capability import (
 
 
 def test_runtime_axes_sets():
-    assert set(ARCHITECTURES) == {"cpu", "gpu", "tpu", "metal"}
+    assert set(ARCHITECTURES) == {"cpu", "gpu", "tpu", "mps"}
     assert {"fp32", "fp64", "mixed"} <= set(available_precision_modes())
     ints = available_integrators()
     assert "ssp_rk3" in ints and "rk4" in ints
@@ -212,7 +212,7 @@ def test_runtime_axes_sets():
 def test_validate_runtime_accepts_valid_combos():
     validate_runtime("cpu", "fp64", "ssp_rk3")
     validate_runtime("gpu", "mixed", "rk4")
-    validate_runtime(architecture="metal", precision="fp32")  # fp32 ok on metal
+    validate_runtime(architecture="mps", precision="fp32")  # fp32 ok on mps
     validate_runtime()  # all None — no-op
 
 
@@ -226,18 +226,18 @@ def test_unknown_architecture_precision_integrator_raise():
 
 
 def test_fp64_on_metal_is_rejected():
-    # fp64 storage needs an fp64-capable backend; Metal has none.
+    # fp64 storage needs an fp64-capable backend; the Apple GPU (mps) has none.
     with pytest.raises(ValueError, match="no float64 support"):
-        validate_runtime(architecture="metal", precision="fp64")
+        validate_runtime(architecture="mps", precision="fp64")
     with pytest.raises(ValueError, match="no float64 support"):
-        validate_runtime(architecture="metal", precision="mixed_fp64_storage")
+        validate_runtime(architecture="mps", precision="mixed_fp64_storage")
 
 
 def test_instantiate_validates_runtime_before_building():
     # A bad runtime axis is caught before any grid is built (validate-only).
     with pytest.raises(ValueError, match="no float64 support"):
         instantiate("latlon", extent="global", resolution=4,
-                    architecture="metal", precision="fp64")
+                    architecture="mps", precision="fp64")
     with pytest.raises(ValueError, match="Unknown time_integrator"):
         instantiate("cubed_sphere", extent="global", resolution=4,
                     time_integrator="leapfrog_3")

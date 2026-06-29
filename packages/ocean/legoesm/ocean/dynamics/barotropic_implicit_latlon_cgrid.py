@@ -1553,7 +1553,7 @@ def barotropic_implicit_latlon_cgrid(
     # production-default path (enable_runtime_checks=False) is
     # unchanged.  ``return_residual=True`` callers keep the loud
     # outside-JIT handling.
-    if bool(config.enable_runtime_checks):
+    if bool(config.runtime_checks.enable_runtime_checks):
         jax.lax.cond(
             _solve_diag.converged,
             lambda _r: None,

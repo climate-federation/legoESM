@@ -63,6 +63,13 @@ def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
+        "--config", type=Path, default=None,
+        help="YAML file of run parameters (keys = the long flag names with "
+             "dashes->underscores, e.g. grid, days, mpas_eq_visc_boost). Loaded "
+             "as DEFAULTS so any explicit CLI flag still overrides it. Use the "
+             "committed scripts/experiment/dino/*.yaml to reproduce a run.",
+    )
+    p.add_argument(
         "--grid", choices=("latlon", "mpas"), default="latlon",
         help="Horizontal grid: 'latlon' (Mercator) or 'mpas' (regional "
              "Voronoi with periodic_x=True + seam wall).",
@@ -81,6 +88,20 @@ def _parse_args():
              "(Theoretical area-equivalent is ~82 km but the regional "
              "Voronoi generator has quantization gaps below ~85 km; "
              "97 km is the closest working value to 9900-cell match.)",
+    )
+    p.add_argument(
+        "--mpas-eq-visc-boost", type=float, default=None,
+        help="MPAS-only equatorial A_h boost factor (DINOConfig."
+             "mpas_equatorial_visc_boost, default 8.0). Boosts lateral "
+             "viscosity near the equator (tight Gaussian, sigma=5deg) to "
+             "constrain the forced f->0 equatorial jet that otherwise runs "
+             "away on the implicit-CN MPAS path; ignored on lat-lon.",
+    )
+    p.add_argument(
+        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
+             "default), 'tke' (paper's NEMO scheme, unstable >~day40), or "
+             "'constant' (background-only, identical across grids). Both grids.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
@@ -110,6 +131,27 @@ def _parse_args():
         "--physics-off", action="store_true",
         help="Disable KPP / GM-Redi / convection — dycore only.",
     )
+    # Two-pass: if --config is given, load the YAML as argparse DEFAULTS, then
+    # re-parse so any explicit CLI flag overrides the file. Unknown YAML keys
+    # are rejected (typo guard) — only argparse dests are accepted.
+    args, _ = p.parse_known_args()
+    if args.config is not None:
+        import yaml
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        valid = {a.dest for a in p._actions} - {"help"}
+        unknown = set(cfg) - valid
+        if unknown:
+            raise SystemExit(
+                f"--config {args.config}: unknown key(s) {sorted(unknown)}; "
+                f"valid keys are {sorted(valid - {'config'})}")
+        # set_defaults bypasses each action's ``type=``, so coerce Path-typed
+        # keys (e.g. output_dir) from their YAML string form ourselves.
+        path_dests = {a.dest for a in p._actions if a.type is Path}
+        for k in list(cfg):
+            if k in path_dests and cfg[k] is not None:
+                cfg[k] = Path(cfg[k])
+        p.set_defaults(**cfg)
     return p.parse_args()
 
 
@@ -212,7 +254,12 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
     }
     metadata["config"]["wind_tau_lats_deg"] = list(cfg.wind_tau_lats_deg)
     metadata["config"]["wind_tau_values"] = list(cfg.wind_tau_values)
-    metadata["args"]["output_dir"] = str(metadata["args"]["output_dir"])
+    # JSON-serialize every Path-valued arg (output_dir, --config, ...), not just
+    # output_dir — a new Path flag must not break the metadata dump.
+    metadata["args"] = {
+        k: (str(v) if isinstance(v, Path) else v)
+        for k, v in metadata["args"].items()
+    }
     with open(output_dir / "run_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -247,6 +294,11 @@ def main():
     cfg = DINOConfig()
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
+    if args.vmix is not None:
+        cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
+    if args.mpas_eq_visc_boost is not None:
+        cfg = dataclasses.replace(
+            cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
     dt = cfg.dt
     grid_kind = args.grid
 

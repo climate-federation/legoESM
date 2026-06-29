@@ -1483,3 +1483,41 @@ class TestFreezeFloor:
         # Subsurface (k>=1) identical; only k=0 differs.
         np.testing.assert_allclose(T_on[..., 1:], T_off[..., 1:], rtol=0, atol=0)
         assert not np.allclose(T_on[..., 0], T_off[..., 0])
+
+
+class TestMPASMultiRankFreshwaterGuard:
+    """Codex round-2/round-3: a multi-rank MPAS run with normalize_freshwater=True
+    must FAIL-FAST (the eta + top-layer-salt freshwater means are rank-local with
+    no owned-cell mask -> silent halo-double-count + inconsistent volume vs salt
+    correction on MPI Voronoi).  The guard lives at the SINGLE reduction source
+    (mpas_ocean_baroclinic_tendencies), so it also covers a DIRECT tendency call.
+    Inert single-rank (asserted across the rest of this file)."""
+
+    def _fw(self, mesh):
+        from legoesm.ocean.freshwater import FreshwaterForcing
+        import jax.numpy as jnp
+        n = mesh.areaCell.shape[0]
+        # Nonzero, non-zero-mean P-E so normalization would actually act.
+        z = jnp.zeros(n)
+        return FreshwaterForcing(
+            precip=jnp.full(n, 1e-6), evap=z, runoff=z, ice_fw=z, restoring=z)
+
+    def test_multirank_normalize_freshwater_raises(self, mesh, z_coord, state,
+                                                   monkeypatch):
+        cfg = MPASOceanConfig(
+            normalize_freshwater=True, freshwater_closure="virtual_salt_flux")
+        import legoesm.parallel.reductions as R
+        # Simulate a multi-rank launch (the layout-less Voronoi MPI path keeps
+        # is_multi_process False, so the world-size check is what trips).
+        monkeypatch.setattr(R, "mpi_world_size", lambda: 2)
+        with pytest.raises(NotImplementedError, match="normalize_freshwater"):
+            mpas_ocean_baroclinic_tendencies(
+                state, mesh, z_coord, cfg, freshwater=self._fw(mesh))
+
+    def test_singlerank_normalize_freshwater_ok(self, mesh, z_coord, state):
+        """The same config single-rank must NOT raise (guard inert)."""
+        cfg = MPASOceanConfig(
+            normalize_freshwater=True, freshwater_closure="virtual_salt_flux")
+        tend = mpas_ocean_baroclinic_tendencies(
+            state, mesh, z_coord, cfg, freshwater=self._fw(mesh))
+        assert tend is not None

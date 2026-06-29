@@ -408,6 +408,10 @@ def bechtold_convection(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
         z, rho, dlt_profile, M_u_max=config.M_b_max,
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half,
+        dt=dt,
+        theta_implicit=config.theta_implicit,
     )
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     p_gate_qc = stratosphere_mass_flux_gate(p_full)

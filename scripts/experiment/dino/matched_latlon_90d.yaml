@@ -1,0 +1,11 @@
+# DINO lat-lon Mercator (structured) — matched cross-grid-consistency window.
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/matched_latlon_90d.yaml
+# Pairs with matched_mpas_90d.yaml (same 90 d / 5 d window) for the
+# plot_dino_cross_grid.py comparison (SST corr ~0.999 at every day).
+grid: latlon
+days: 90
+snapshot_every_days: 5
+n_lon: 50                 # 1deg R1 (~9900 cells)
+vmix: kpp                 # stable closure; TKE (paper's scheme) blows up ~day 40 here
+output_dir: results/dino_latlon

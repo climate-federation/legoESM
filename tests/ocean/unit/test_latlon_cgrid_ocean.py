@@ -531,7 +531,7 @@ class TestPR261ConfigDispatch:
 
     def test_A_h_merid_branch_active(self, grid, z_coord, state):
         cfg = LatLonCGridOceanConfig.from_flat(A_h_merid=5.0e4)
-        assert cfg.A_h_merid > 0.0
+        assert cfg.lateral_viscosity.A_h_merid > 0.0
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )
@@ -540,7 +540,7 @@ class TestPR261ConfigDispatch:
 
     def test_A_h_merid_default_inactive(self, grid, z_coord, state):
         cfg = LatLonCGridOceanConfig.from_flat()
-        assert cfg.A_h_merid == 0.0
+        assert cfg.lateral_viscosity.A_h_merid == 0.0
 
     def test_B_h_lat_scaling_on(self, grid, z_coord, state):
         cfg = LatLonCGridOceanConfig.from_flat(B_h=1.0e10, B_h_lat_scaling=True)
@@ -592,7 +592,7 @@ class TestSmagCFLCap:
         return st._replace(u=st.u.replace(data=u))
 
     def test_cap_off_by_default(self):
-        assert LatLonCGridOceanConfig.from_flat().smag_cfl_safety == 0.0
+        assert LatLonCGridOceanConfig.from_flat().lateral_viscosity.smag_cfl_safety == 0.0
 
     def test_cap_bounds_and_reduces_smag(self, grid, z_coord):
         dt = 75.0

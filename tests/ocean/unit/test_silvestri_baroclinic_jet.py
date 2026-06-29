@@ -107,18 +107,27 @@ def test_stabilize_backstop_applied_to_noclosure_only():
     # No-closure scheme → backstop applied.
     rw = SJ.build_silvestri_baroclinic_jet_setup(
         n_lat=16, n_lon=12, scheme="W9V", nlev=8, stabilize=True)
-    assert rw.model_config.A_h == 1000.0 and rw.model_config.C_smag == 0.1
-    assert rw.model_config.smag_cfl_safety == 0.5
+    assert rw.model_config.lateral_viscosity.A_h == 1000.0 and rw.model_config.lateral_viscosity.C_smag == 0.1
+    assert rw.model_config.lateral_viscosity.smag_cfl_safety == 0.5
     LatLonCGridOceanModel(rw.grid, rw.z_coord, rw.model_config)   # builds (no guard trip)
     # Explicit-closure scheme → backstop NOT applied (guard would otherwise trip).
     rq = SJ.build_silvestri_baroclinic_jet_setup(
         n_lat=16, n_lon=12, scheme="QG2", nlev=8, stabilize=True)
-    assert rq.model_config.A_h == 0.0 and rq.model_config.C_smag == 0.0
+    assert rq.model_config.lateral_viscosity.A_h == 0.0 and rq.model_config.lateral_viscosity.C_smag == 0.0
     assert rq.model_config.lateral_friction_scheme == "qg_leith"
     LatLonCGridOceanModel(rq.grid, rq.z_coord, rq.model_config)   # builds (no double friction)
     # Default (stabilize=False) leaves the no-closure scheme un-damped (faithful).
     r0 = SJ.build_silvestri_baroclinic_jet_setup(n_lat=16, n_lon=12, scheme="W9V", nlev=8)
-    assert r0.model_config.A_h == 0.0 and r0.model_config.C_smag == 0.0
+    assert r0.model_config.lateral_viscosity.A_h == 0.0 and r0.model_config.lateral_viscosity.C_smag == 0.0
+
+
+def test_faithful_barotropic_stack_uses_power_law_filter():
+    """The §5 split-explicit stack uses the SM2005 power-law time filter, not the
+    first-order cosine bell (which over-dissipates the deformation-scale eddies:
+    128² baroclinic-adjustment twin EKE 0.40×→0.86× oracle when cosine→power_law)."""
+    r = SJ.build_silvestri_baroclinic_jet_setup(n_lat=16, n_lon=12, scheme="W9V", nlev=8)
+    assert r.model_config.barotropic.barotropic_solver == "explicit_substep"
+    assert r.model_config.barotropic.barotropic_time_filter == "power_law"
 
 
 @pytest.mark.parametrize("scheme", SILVESTRI_JET_MAIN)

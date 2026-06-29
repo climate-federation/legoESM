@@ -836,63 +836,39 @@ class BarotropicConfig(NamedTuple):
     rigid_lid_cg_maxiter: int = 1000
 
 
-class LatLonCGridOceanConfig(NamedTuple):
-    """Configuration for the lat-lon C-grid FV ocean model.
+class RuntimeChecksConfig(NamedTuple):
+    """Runtime validity-bound parameters (#501 config grouping).
 
-    ~70 fields. This docstring is the *map* the flat field list lacks; the
-    fields group as:
+    The sanity bounds checked by ``_assert_runtime_invariants`` (gated by
+    ``enable_runtime_checks``): the maximum |eta| and the tracer (T, S) min/max
+    bounds.  Field names are unchanged so the flat YAML / legacy-kwarg interface
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
 
-    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
-    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
-      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
-      ``A_h_merid``, ``A_h_cap_*``.
-    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
-    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
-      ``C_leith_modified``, ``slope_foot_*``.
-    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
-      ``K_v``, ``implicit_vertical_mixing``.
-    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
-      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
-    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
-      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
-      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
-      ``differentiable_barotropic``.
-    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
-      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
-      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
-    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
-      ``physics`` (full OceanPhysicsConfig pipeline).
-    - **Conservation & freshwater**: ``use_conservation_fixer``,
-      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
-      ``freshwater_closure``, ``S_ref``.
-    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
-      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
-      ``salinity_min/max_psu``).
-
-    Minimal run (everything else defaults to sane Earth values)::
-
-        cfg = LatLonCGridOceanConfig.from_flat()       # constant A_v/K_v, no physics pipeline
-
-    Production-style::
-
-        cfg = LatLonCGridOceanConfig.from_flat(
-            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
-            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
-            barotropic_solver="implicit", eos="wright",
-            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
-        )
-
-    Section headers below mark the contiguous top run of fields. The trailing
-    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
-    append order to preserve positional construction for legacy callers, so
-    they span several topics — use the group-map above to locate them, not the
-    physical field order.
+    ``min_water_column_m`` is deliberately NOT grouped here: it is a physical
+    wet-cell thickness floor read by grid-agnostic shared code
+    (``ocean_conservation_fixer``, layer-thickness helpers) that also runs on the
+    cube ``OceanConfig`` path, so it stays a flat field to keep that read uniform
+    across config types.
     """
 
-    # --- Physical constants (defaults reference legoesm.constants; pin via
-    #     ConstantsConfig for a reference-model recipe) ---
-    g: float = constants.g
-    rho_0: float = constants.rho_ocean
+    enable_runtime_checks: bool = False
+    max_abs_eta_m: float = 1.0e4
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
+
+
+class LateralViscosityConfig(NamedTuple):
+    """Lateral momentum viscosity parameters (#501 config grouping).
+
+    Harmonic (Laplacian) ``A_h`` with latitude / equatorial shaping,
+    biharmonic ``B_h``, and the Smagorinsky eddy-viscosity coefficients —
+    the lateral momentum dissipation closure for the lat-lon C-grid ocean.
+    Field names are unchanged so the flat YAML / legacy-kwarg interface
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.  Includes the Leith
+    closure (``C_leith``) and the tripole polar-cap A_h boost (``A_h_cap_*``).
+    """
 
     # --- Lateral (harmonic Laplacian) viscosity ---
     A_h: float = 1.0e4
@@ -971,6 +947,131 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # the sharp jet (the WBC cold-start blowup).
                                     # ~0.125 (1/8) is a safe 2-D Laplacian cap.
 
+
+    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
+    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
+    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
+    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
+    # at the END of the NamedTuple so existing positional call sites
+    # keep working.
+    C_leith: float = 0.0
+    C_leith_modified: bool = False
+
+    # --- Polar-cap viscosity boost (tripolar fold support) ---
+    # Appended at the end of the NamedTuple to preserve positional
+    # construction semantics for legacy callers.  When > 1, multiplies
+    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
+    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
+    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
+    # drops to zero at the fold boundary but the deformed cap cells
+    # need stronger dissipation than ``A_h_floor`` alone provides.
+    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
+    # preserve bit-exact regression on legacy lat-lon configs.
+    A_h_cap_boost: float = 1.0
+    # Latitude (°N) at which the polar-cap boost ramp begins.  For
+    # tripolar grids, set close to the ``fold_lat`` of the
+    # FoldDescriptor.  Typical 70–80°.
+    A_h_cap_lat_deg: float = 75.0
+    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
+    A_h_cap_width_deg: float = 5.0
+
+class PolarFilterConfig(NamedTuple):
+    """Fourier polar-filter parameters (#501 config grouping).
+
+    The lat-lon pole CFL stabiliser (zonal Fourier-mode truncation poleward
+    of the cutoff).  Field names unchanged so the flat YAML / legacy-kwarg
+    interface maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+    """
+
+    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
+    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
+    # at the poles, so explicit advection/metric terms violate CFL near the pole
+    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
+    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
+    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
+    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
+    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
+    # before the FFT and restored afterward, so continental zeros are not smeared
+    # into adjacent ocean (a naive zonal FFT would couple basins across land).
+    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
+    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
+    # content exactly only where layer thickness is zonally uniform (approximately
+    # under partial cells / z*; a stability filter, not a flux operator).
+    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
+    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
+    # Arctic (basins still couple weakly across the pole) — that is why the
+    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
+    # own stability + a tropics/mid-lat/SH comparison.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_lat_deg: float = 60.0
+    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
+    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
+    polar_filter_max_wave_speed: float = 300.0
+    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
+    polar_filter_safety_factor: float = 0.85
+
+
+class LatLonCGridOceanConfig(NamedTuple):
+    """Configuration for the lat-lon C-grid FV ocean model.
+
+    ~70 fields. This docstring is the *map* the flat field list lacks; the
+    fields group as:
+
+    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
+      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
+      ``A_h_merid``, ``A_h_cap_*``.
+    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
+    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
+      ``C_leith_modified``, ``slope_foot_*``.
+    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
+      ``K_v``, ``implicit_vertical_mixing``.
+    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
+      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
+    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
+      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
+      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
+      ``differentiable_barotropic``.
+    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
+      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
+      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
+    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
+      ``physics`` (full OceanPhysicsConfig pipeline).
+    - **Conservation & freshwater**: ``use_conservation_fixer``,
+      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
+      ``freshwater_closure``, ``S_ref``.
+    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
+      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
+      ``salinity_min/max_psu``).
+
+    Minimal run (everything else defaults to sane Earth values)::
+
+        cfg = LatLonCGridOceanConfig.from_flat()       # constant A_v/K_v, no physics pipeline
+
+    Production-style::
+
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
+            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
+            barotropic_solver="implicit", eos="wright",
+            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
+        )
+
+    Section headers below mark the contiguous top run of fields. The trailing
+    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
+    append order to preserve positional construction for legacy callers, so
+    they span several topics — use the group-map above to locate them, not the
+    physical field order.
+    """
+
+    # --- Physical constants (defaults reference legoesm.constants; pin via
+    #     ConstantsConfig for a reference-model recipe) ---
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
+
+    # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
+    lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
+
     # --- Bottom drag (dynamics-level; #501 grouped into DynBottomDragConfig;
     #     the physics-pathway BottomDragConfig is deprecated — set drag here) ---
     bottom_drag: DynBottomDragConfig = DynBottomDragConfig()
@@ -1003,13 +1104,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # practice.  Default-on for lat-lon C-grid; MPAS already conserves
     # to machine precision.
     fix_eta_drift: bool = True
-    enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
-    max_abs_eta_m: float = 1.0e4
-    temperature_min_c: float = -5.0
-    temperature_max_c: float = 45.0
-    salinity_min_psu: float = 0.0
-    salinity_max_psu: float = 50.0
+    runtime_checks: RuntimeChecksConfig = RuntimeChecksConfig()
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     # When True, remove the area-mean of the net freshwater flux from the
@@ -1023,14 +1119,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
-    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
-    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
-    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
-    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
-    # at the END of the NamedTuple so existing positional call sites
-    # keep working.
-    C_leith: float = 0.0
-    C_leith_modified: bool = False
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
@@ -1197,23 +1285,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
 
-    # --- Polar-cap viscosity boost (tripolar fold support) ---
-    # Appended at the end of the NamedTuple to preserve positional
-    # construction semantics for legacy callers.  When > 1, multiplies
-    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
-    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
-    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
-    # drops to zero at the fold boundary but the deformed cap cells
-    # need stronger dissipation than ``A_h_floor`` alone provides.
-    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
-    # preserve bit-exact regression on legacy lat-lon configs.
-    A_h_cap_boost: float = 1.0
-    # Latitude (°N) at which the polar-cap boost ramp begins.  For
-    # tripolar grids, set close to the ``fold_lat`` of the
-    # FoldDescriptor.  Typical 70–80°.
-    A_h_cap_lat_deg: float = 75.0
-    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
-    A_h_cap_width_deg: float = 5.0
     # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
     # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
     # pins these to a reference model (e.g. Veros) via the public config API.
@@ -1356,32 +1427,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Freezing point of seawater in degC (model T is in degC).  Defaults to
     # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
     freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C
-    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
-    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
-    # at the poles, so explicit advection/metric terms violate CFL near the pole
-    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
-    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
-    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
-    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
-    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
-    # before the FFT and restored afterward, so continental zeros are not smeared
-    # into adjacent ocean (a naive zonal FFT would couple basins across land).
-    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
-    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
-    # content exactly only where layer thickness is zonally uniform (approximately
-    # under partial cells / z*; a stability filter, not a flux operator).
-    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
-    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
-    # Arctic (basins still couple weakly across the pole) — that is why the
-    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
-    # own stability + a tropics/mid-lat/SH comparison.
-    use_polar_filter: bool = False
-    polar_filter_cutoff_lat_deg: float = 60.0
-    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
-    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
-    polar_filter_max_wave_speed: float = 300.0
-    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
-    polar_filter_safety_factor: float = 0.85
+    # --- Fourier polar filter (#501 grouped into PolarFilterConfig) ---
+    polar_filter: PolarFilterConfig = PolarFilterConfig()
 
     # --- Additive momentum vertical-friction placement (Veros) ---
     # Veros computes the implicit vertical-friction increment du_mix from the
@@ -1604,6 +1651,15 @@ class LatLonCGridOceanConfig(NamedTuple):
         _bt = {k: flat.pop(k) for k in BarotropicConfig._fields if k in flat}
         if _bt:
             nested["barotropic"] = BarotropicConfig(**_bt)
+        _rc = {k: flat.pop(k) for k in RuntimeChecksConfig._fields if k in flat}
+        if _rc:
+            nested["runtime_checks"] = RuntimeChecksConfig(**_rc)
+        _lv = {k: flat.pop(k) for k in LateralViscosityConfig._fields if k in flat}
+        if _lv:
+            nested["lateral_viscosity"] = LateralViscosityConfig(**_lv)
+        _pf = {k: flat.pop(k) for k in PolarFilterConfig._fields if k in flat}
+        if _pf:
+            nested["polar_filter"] = PolarFilterConfig(**_pf)
         return cls(**nested, **flat)
 
     @classmethod
@@ -1614,9 +1670,13 @@ class LatLonCGridOceanConfig(NamedTuple):
         so the flat construction / YAML interface stays 1:1 with the pre-grouping
         field set even though the storage is nested.  Extend per nested group.
         """
-        names = set(cls._fields) - {"bottom_drag", "barotropic"}
+        names = set(cls._fields) - {"bottom_drag", "barotropic", "runtime_checks",
+                                    "lateral_viscosity", "polar_filter"}
         names |= set(DynBottomDragConfig._fields)
         names |= set(BarotropicConfig._fields)
+        names |= set(RuntimeChecksConfig._fields)
+        names |= set(LateralViscosityConfig._fields)
+        names |= set(PolarFilterConfig._fields)
         return frozenset(names)
 
     def flat_get(self, name: str):
@@ -1630,4 +1690,29 @@ class LatLonCGridOceanConfig(NamedTuple):
             return getattr(self.bottom_drag, name)
         if name in BarotropicConfig._fields:
             return getattr(self.barotropic, name)
+        if name in RuntimeChecksConfig._fields:
+            return getattr(self.runtime_checks, name)
+        if name in LateralViscosityConfig._fields:
+            return getattr(self.lateral_viscosity, name)
+        if name in PolarFilterConfig._fields:
+            return getattr(self.polar_filter, name)
         return getattr(self, name)
+
+    def replace_flat(self, **overrides) -> "LatLonCGridOceanConfig":
+        """``_replace`` by FLAT field names (#501) — the ``_replace`` analog of
+        :meth:`from_flat`.  Distributes grouped overrides into their nested
+        sub-configs, so dict-splat override sites (recipe scheme presets, CLI
+        overrides) that pass flat names keep working:
+        ``cfg.replace_flat(A_h=0.0, barotropic_solver="rigid_lid")``.
+        """
+        nested = {}
+        for sub_name, sub_cls in (("bottom_drag", DynBottomDragConfig),
+                                  ("barotropic", BarotropicConfig),
+                                  ("runtime_checks", RuntimeChecksConfig),
+                                  ("lateral_viscosity", LateralViscosityConfig),
+                                  ("polar_filter", PolarFilterConfig)):
+            members = {k: overrides.pop(k) for k in list(overrides)
+                       if k in sub_cls._fields}
+            if members:
+                nested[sub_name] = getattr(self, sub_name)._replace(**members)
+        return self._replace(**nested, **overrides)

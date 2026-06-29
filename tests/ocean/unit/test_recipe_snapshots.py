@@ -54,7 +54,11 @@ DINO_LATLON_IDENTITY = get_recipe("nemo_dino_v1")
 
 
 def _assert_identity(mc, expected, label):
-    actual = {f: getattr(mc, f) for f in expected}
+    # #501: recipe identities are FLAT field names; read grouped members through
+    # flat_get on configs that expose it (LatLonCGridOceanConfig). MPAS configs
+    # are not grouped, so fall back to a plain getattr.
+    actual = {f: (mc.flat_get(f) if hasattr(mc, "flat_get") else getattr(mc, f))
+              for f in expected}
     drift = {f: (expected[f], actual[f]) for f in expected
              if actual[f] != expected[f]}
     assert not drift, (

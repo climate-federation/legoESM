@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from scripts.concat_amip_output import _sorted_seg_dirs, _concat_npz
+from scripts.run.concat_amip_output import _sorted_seg_dirs, _concat_npz
 
 
 def test_sorted_seg_dirs_is_chronological(tmp_path):

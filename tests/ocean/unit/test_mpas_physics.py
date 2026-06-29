@@ -126,6 +126,63 @@ class TestUnsupportedScheme:
         with pytest.raises(NotImplementedError, match="bulk_formulas"):
             make_mpas_ocean_physics(cfg)
 
+    def test_unimplemented_vmix_scheme_raises_on_mpas(self):
+        """Finding #4: a vertical_mixing scheme MPAS does not wire in
+        (constant/richardson/tke) must RAISE NotImplementedError, not just warn
+        and silently drop the K-profile (which runs DIFFERENT physics than
+        requested).  'none'/'kpp' are supported; 'catke' is rejected separately."""
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        # 'richardson'/'tke' compute a scheme-specific K-profile MPAS would
+        # silently drop; a typo must also raise.  ('constant' is the DEFAULT and
+        # is handled by the MPASOceanConfig background -> accepted, tested below.)
+        for bad in ("richardson", "tke", "kpp_typo"):
+            cfg = OceanPhysicsConfig(
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                vertical_mixing=VerticalMixingConfig(scheme=bad),
+            )
+            with pytest.raises(NotImplementedError, match="vertical_mixing"):
+                make_mpas_ocean_physics(cfg)
+
+    def test_supported_vmix_schemes_do_not_raise_on_mpas(self):
+        """'none', 'kpp' and 'constant' (the default, via the MPAS background
+        A_v/K_v + implicit solver) must construct without raising — regression
+        guard so the finding-#4 raise does not over-reach onto the default path."""
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        for ok in ("none", "kpp", "constant"):
+            cfg = OceanPhysicsConfig(
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                vertical_mixing=VerticalMixingConfig(scheme=ok),
+            )
+            assert make_mpas_ocean_physics(cfg) is not None
+
+    def test_default_physics_config_constructs_on_mpas(self):
+        """The DEFAULT OceanPhysicsConfig (vertical_mixing.scheme='constant')
+        MUST construct — finding #4 must not break the production MPAS path."""
+        assert make_mpas_ocean_physics(OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="none"))) is not None
+
+    def test_nondefault_constant_vmix_raises_on_mpas(self):
+        """Codex review #3: a NON-DEFAULT VerticalMixingConfig.constant.A_v/K_v
+        would be SILENTLY ignored on MPAS (which reads MPASOceanConfig.A_v/K_v),
+        so it must RAISE.  The DEFAULT constant config (which matches the MPAS
+        background) still constructs (asserted in the supported-schemes test)."""
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, ConstantVerticalMixingConfig,
+        )
+        for over in (dict(A_v=5e-3), dict(K_v=9e-4), dict(A_v=2e-3, K_v=2e-4)):
+            cfg = OceanPhysicsConfig(
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                vertical_mixing=VerticalMixingConfig(
+                    scheme="constant",
+                    constant=ConstantVerticalMixingConfig(**over)),
+            )
+            with pytest.raises(NotImplementedError, match="MPASOceanConfig"):
+                make_mpas_ocean_physics(cfg)
+
     def test_convective_momentum_viscosity_rejected_on_mpas(self):
         """MPAS convective adjustment is tracer-only: nonzero nu_conv/nu_bg
         must raise rather than being silently dropped (the edge-normal

@@ -1606,7 +1606,16 @@ def _periodic_unroll_delaunay(cell_xyz, lon_range, resolution_km, radius):
     lon = np.arctan2(cell_xyz[:, 1], cell_xyz[:, 0])
     # Bring lon into [lon_min_rad, lon_min_rad + 2π)
     lon_wrapped = np.mod(lon - lon_min_rad, 2.0 * np.pi) + lon_min_rad
-    u = lon_wrapped - lon_min_rad  # in [0, L_rad) for cells that belong
+    u = lon_wrapped - lon_min_rad  # in [0, 2π); valid cells in [0, L_rad)
+    # Generators sitting exactly on the west meridian (u = 0) can round-trip
+    # through xyz → arctan2 to lon_min − ε (float error), so np.mod() wraps
+    # them to u ≈ 2π instead of 0. Fold any value within a hair of the full
+    # circle back onto the west seam so the sanity check below does not mistake
+    # a seam generator for an out-of-extent one. The tolerance is far below any
+    # real cell spacing, so a genuine out-of-extent seed (a true seeding bug),
+    # which would land in (L_rad, 2π − tol), is still caught and raised.
+    _seam_fold_tol = 1e-9
+    u = np.where(u > 2.0 * np.pi - _seam_fold_tol, u - 2.0 * np.pi, u)
 
     # Sanity check — cells must lie within the periodic extent.  Allow a
     # small tolerance for rounding near the seam.

@@ -1,0 +1,34 @@
+# Tuned parameterization parameters — the CALIBRATION layer.
+#
+# This is "File 2" of the experiment + parameters split: the experiment
+# *prototype* (grid, dates, forcing, output, scheme selection, ocean mode) lives
+# in config/cmip/cmip_ocean_{slab,3D}.yaml; the converged *parameter values* for
+# the parameterizations live here.
+#
+# FORMAT: param_collector qualified name "scheme_key.field": value — the SAME
+# keying the parameter registry (legoesm.training.param_collector.build_registry)
+# and the training output use (scripts/run/train_scm_rce_params.py writes
+# recommended_defaults.json / recommended_physics_config in this format). So:
+#   - a trained parameter set drops in here UNCHANGED, and
+#   - every key is bounds-validatable against that scheme's __param_spec__
+#     (units / bounds / tier / reference).
+#
+# SCOPE: only the parameterization params actually tuned away from defaults (the
+# delta). Most of the CMIP-realism tuning was recipe-level (scheme selection, the
+# air-sea gustiness convention, the 3D-ocean spin-up restoring) and correctly
+# lives in the experiment file — so today this is a single scheme parameter. As
+# SCM-RCE / AIMIP training emits more trained scheme params, they extend this
+# file (drop the trained recommended_defaults.json entries straight in).
+#
+# STATUS: format reference. run_coupled does NOT yet auto-load this — the
+# `--params` loader (validate each key via build_registry + apply into the run)
+# is a planned add. Until then the runnable configs carry the same value via
+# their tuned-physics base (config/cmip/cmip_tuned_physics.yaml). This file pins
+# the calibration format and gives training a target to write into.
+
+# --- atm cloud optics ---
+# Thinner in-cloud diagnostic condensate fed to radiation -> Earth-like albedo.
+# Spec: atm.clouds.CloudConfig.q_c_diagnostic, units kg/kg, bounds (5.0e-5, 1.0e-3),
+# tunable_tier 1, transform sigmoid (clouds/config.py __param_spec__).
+# Converged: planetary albedo 35.4 -> 31.3%, SST drift -3.2 -> -2.2 K/yr.
+atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4

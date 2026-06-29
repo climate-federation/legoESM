@@ -17,7 +17,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature, mixing_length
+from legoesm.atmosphere.physics._shared import (
+    virtual_temperature,
+    mixing_length,
+    buoyancy_coefficient,
+)
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -144,7 +148,8 @@ def ysu_turbulence(
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    # N² = (g/θ_v)·∂θ_v/∂z (Brunt-Väisälä) via the shared buoyancy coefficient.
+    N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
     Ri = N2 / S2  # (ncol, nlev-1)
 
     # ----- Surface fluxes -----
@@ -178,7 +183,7 @@ def ysu_turbulence(
     # passes and the convective velocity scale below).
     wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic (ncol,)
     theta_bar = jnp.mean(theta_v, axis=1)  # (ncol,)
-    g_over_thbar = constants.g / jnp.clip(theta_bar, 1.0, None)
+    g_over_thbar = buoyancy_coefficient(jnp.clip(theta_bar, 1.0, None))
 
     def _bulk_pbl_height(excess_theta):
         # excess_theta : (ncol,) surface-parcel virtual-θ excess [K], >=0.
@@ -205,8 +210,10 @@ def ysu_turbulence(
     # Mixed-layer velocity scale w_s evaluated at the surface layer (z=0.1·h),
     # the standard Troen-Mahrt level for the excess parcel.  w* from the
     # first-guess depth; w_s = (u*³ + c·κ·w*³·0.1)^{1/3}.
-    buoy_guess = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl_guess / jnp.clip(
-        theta_bar, 1.0, None
+    # (g/θ_bar)·(w'θ')_0·h via the shared buoyancy coefficient.
+    buoy_guess = (
+        buoyancy_coefficient(jnp.clip(theta_bar, 1.0, None))
+        * jnp.maximum(wtheta_sfc, 0.0) * h_pbl_guess
     )
     w_star_guess = jnp.cbrt(jnp.maximum(buoy_guess, 1e-20))
     w_s_sfc = jnp.cbrt(
@@ -226,8 +233,10 @@ def ysu_turbulence(
     # (positive surface buoyancy flux).  Used by the mixed-layer velocity
     # scale w_s (below), the PBL-top entrainment flux, and the nonlocal
     # countergradient.  Recomputed with the refined (deeper) h_pbl.
-    buoyancy_flux = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl / jnp.clip(
-        theta_bar, 1.0, None
+    # w* = ((g/θ_bar)·h·(w'θ')_sfc)^{1/3} via the shared buoyancy coefficient.
+    buoyancy_flux = (
+        buoyancy_coefficient(jnp.clip(theta_bar, 1.0, None))
+        * jnp.maximum(wtheta_sfc, 0.0) * h_pbl
     )
     w_star = jnp.cbrt(jnp.maximum(buoyancy_flux, 1e-20))  # (ncol,)
 

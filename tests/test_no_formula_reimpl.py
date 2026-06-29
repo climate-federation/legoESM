@@ -254,7 +254,9 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py": 3,
+            # ysu.py: 4 inline g/θ buoyancy/N² re-derivations migrated to
+            # physics._shared.buoyancy_coefficient (audit item 7) → budget 0
+            # (entry removed; was 3, which had already gone stale at 4 actual).
         },
     },
     "monin_obukhov_stability_fn": {

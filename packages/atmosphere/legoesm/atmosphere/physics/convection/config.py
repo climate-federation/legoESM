@@ -60,6 +60,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
@@ -122,6 +123,7 @@ __param_spec__ = {
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
+            "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
             "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
@@ -252,6 +254,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
             "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
         },
         "params": {
@@ -270,7 +273,6 @@ __param_spec__ = {
             "midlevel_M_b_fraction": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) mid-level mass-flux fraction", "shape": None},
             "moisture_convergence_threshold": {"units": "kg/kg/s", "bounds": (3.3e-09, 3e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) MC-proxy threshold", "shape": None},
             "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) sub-cloud perturbation", "shape": None},
-            "precip_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "bulk in-updraft CPE, cf. SBMConfig.sbm_precip_efficiency / EmanuelConfig.precip_efficiency_max (obs deep-convective CPE ~0.5-0.9)", "shape": None},
             "tau_MC_proxy": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) MC-proxy timescale", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_shallow_M_b": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Tiedtke (1989) shallow cloud-base mass-flux timescale", "shape": None},
@@ -976,6 +978,11 @@ class EmanuelConfig(NamedTuple):
     # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
     # transition, matching the shared LCL crossing sharpness.
     lcl_pressure_sharpness: float = 1.0e-3
+    # Sharpness [1/level] of the below-LCL smooth index indicator used by the
+    # optional unsaturated-downdraft re-evaporation (surface-last: level index
+    # > k_lcl_smooth ⇒ below LCL).  Default 2.0 gives an ~1-level transition,
+    # matching the historical inline value.  Numerics (not a tunable closure).
+    below_lcl_index_sharpness: float = 2.0
     # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
     # relaxed CBMF so it is ~0 when the relaxation target goes negative
     # (stable column) without a hard ``max`` that would kill the gradient.
@@ -1315,6 +1322,26 @@ class BechtoldConfig(NamedTuple):
     mc_normalize_scale: float = 0.05
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
     buoyancy_death_memory: bool = False
+    # Vertical solve for the compensating subsidence + detrainment in the
+    # shared mass-flux kernel.  ``"advective"`` (default) is the legacy
+    # donor-cell advective form — BYTE-IDENTICAL to the historical scheme
+    # but conserves column dry-static-energy only to truncation order
+    # (the advective form leaves a non-telescoping ``(φ/ρ)dM/dz`` residual
+    # ⇒ a resolution-dependent MSE leak).  ``"implicit_flux"`` selects the
+    # IMPLICIT (backward-Euler / θ-blended) CONSERVATIVE flux-form solve
+    # (mass_flux.apply_mass_flux_kernel_implicit_flux): flux-form
+    # CONSERVATIVE unconditionally (transports s = c_pT+gz and q_v so the
+    # column MSE budget telescopes to machine precision for any M/θ/dt),
+    # and donor-cell backward-Euler STABLE in the production M/dt/Δp regime
+    # (diagonally dominant for θ·dt·g·M/Δp < 1; removes the 2Δz checkerboard
+    # the explicit flux form NaN'd on — decoupled from the M_b_max clip).
+    # The dispatch raises ValueError on any other value (fn-entry, static).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler, most damping, default); the kernel clamps to
+    # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
+    # when subsidence_solve == "advective".
+    theta_implicit: float = 1.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):

@@ -52,7 +52,7 @@ def test_probe_branch_matches_model_defaults():
     default = LatLonCGridOceanConfig.from_flat()
     probe = veros_faithful_stepping(with_surface_forcing=False, dt_mom_ratio=9.0)
     for f in _FIELDS:
-        assert probe[f] == getattr(default, f), f
+        assert probe[f] == default.flat_get(f), f  # #501: flat name -> nested via flat_get
 
 
 def test_dt_mom_ratio_passthrough():

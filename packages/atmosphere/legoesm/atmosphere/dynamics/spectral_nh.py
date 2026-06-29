@@ -47,6 +47,7 @@ from legoesm.grids.gaussian import (
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
     sh_synthesis_H_3d,
+    dealiasing_mask,
 )
 from legoesm.grids.vertical import (
     HeightCoordinate,
@@ -101,6 +102,19 @@ class SpectralNHConfig(NamedTuple):
     n_acoustic_substeps: int = 6
     small_earth_factor: float = 1.0
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustics
+    # Orszag 2/3-rule de-aliasing of the quadratic/cubic nonlinear slow
+    # tendencies (vorticity/divergence advection, theta & rho flux form,
+    # tracer transport).  These products spread aliased power across the
+    # whole SH spectrum; without truncation the upper band folds back and
+    # drives grid-scale instability.  This is the PRIMARY stabiliser for
+    # the spectral NH core, which is why ``hyperdiff_coeff`` defaults to
+    # 0.0 (a fixed nonzero hyperdiffusion would be resolution-dependent
+    # and belongs in the experiment config; the matrix runner sets a
+    # resolution-correct nu explicitly).  Default 2/3 (Orszag 1971);
+    # 0.0 disables (exact rest-state tendency tests).  Only the upper
+    # 1 - fraction of wavenumbers is removed, so resolved fields are
+    # unchanged.  See ``grids.gaussian.dealiasing_mask``.
+    dealiasing_fraction: float = 0.667
     # iter-9: opt-in anchored dry-mass fixer.  Mirrors the spectral PE
     # iter-3 mechanism (rescale the (n=0,m=0) coefficient of the
     # prognostic variable so the global integral returns to the
@@ -512,6 +526,34 @@ def spectral_nh_slow_tendencies(
         drho_p_hat = drho_p_hat + physics_tendency.rho_prime_hat.data
         dtracers_hat = dtracers_hat + physics_tendency.tracers_hat.data
 
+    # --- 19. Orszag 2/3-rule de-aliasing of the nonlinear slow tendencies ---
+    # The horizontal slow tendencies above are quadratic/cubic products
+    # ((zeta+f)*v, |v|^2, theta*v, rho*v*J, q*v) transformed back to SH
+    # space, which folds aliased power across the whole spectrum.  Zero
+    # every coefficient with total wavenumber n above
+    # floor(dealiasing_fraction * n_max) so the spurious upper band cannot
+    # destabilise the run.  The mask is (n_sh,); broadcast over the
+    # trailing level / tracer axes.  ``dw_hat`` (slow part = sponge only;
+    # acoustic dynamics handled in grid space) is masked for uniformity.
+    # n=0 modes (n << n_cut) are always retained, so global integrals are
+    # untouched.  Applied LAST so masked modes are held identically at
+    # zero — matching spectral_pe.
+    _dealias = dealiasing_mask(grid, config.dealiasing_fraction)
+    _dealias_2d = _dealias[:, None]            # (n_sh, 1) for (n_sh, nlev[+1])
+    dvor_hat = dvor_hat * _dealias_2d
+    ddiv_hat = ddiv_hat * _dealias_2d
+    dw_hat = dw_hat * _dealias_2d
+    dtheta_p_hat = dtheta_p_hat * _dealias_2d
+    drho_p_hat = drho_p_hat * _dealias_2d
+    # Tracers carry an extra trailing axis (n_sh, nlev, n_tracers); match
+    # the mask rank to whatever the tracer tendency rank is (3D in every
+    # constructor since tracers_hat = zeros((n_sh, nlev, max(n_tr, 1))),
+    # but stay robust to a 2D tracer tendency).
+    _dealias_tr = _dealias.reshape(
+        (-1,) + (1,) * (dtracers_hat.ndim - 1)
+    )
+    dtracers_hat = dtracers_hat * _dealias_tr
+
     return SpectralNHState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
         div_hat=state.div_hat.replace(data=ddiv_hat),
@@ -756,6 +798,19 @@ class SpectralCompressibleEulerModel:
         self._default_device = placement.default_device
         # iter-9: lazy fp64 dry-mass snapshot for anchor-to-initial.
         self._target_mass = None
+
+        # Warn if de-aliasing is off — the NH slow tendencies are
+        # quadratic/cubic and alias without the Orszag 2/3 truncation.
+        # This is the PRIMARY stabiliser (hyperdiff_coeff defaults to 0).
+        if self.config.dealiasing_fraction == 0.0:
+            import warnings
+            warnings.warn(
+                "dealiasing_fraction=0.0: spectral aliasing from the "
+                "nonlinear NH tendencies is not suppressed (and "
+                "hyperdiff_coeff defaults to 0.0). Set "
+                "dealiasing_fraction=0.667 for production runs.",
+                stacklevel=2,
+            )
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
@@ -1007,10 +1062,10 @@ def dcmip25_tc1_init_spectral(
     terrain_metric : TerrainMetric
         Terrain metric on Gaussian grid.
     """
-    from tests.test_cases.dcmip2025.common import (
+    from legoesm.atmosphere.dynamics.dcmip2025_ic import (
         piecewise_lapse_theta_ref,
+        TC1_PARAMS,
     )
-    from tests.test_cases.dcmip2025.test_case_1 import TC1_PARAMS
 
     p = {**TC1_PARAMS, **(params or {})}
 
@@ -1178,10 +1233,8 @@ def dcmip25_tc2_init_spectral(
     params : dict, optional
         Override default parameters.
     """
-    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.common import (
+    from legoesm.atmosphere.dynamics.dcmip2025_ic import (
         isothermal_theta_ref,
-    )
-    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2 import (
         TC2_PARAMS,
     )
 
@@ -1278,8 +1331,10 @@ def dcmip25_tc3_init_spectral(
     params : dict, optional
         Override default parameters.
     """
-    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
-        TC3_PARAMS, _squall_line_sounding, _squall_line_theta_fn,
+    from legoesm.atmosphere.dynamics.dcmip2025_ic import (
+        TC3_PARAMS,
+        squall_line_sounding as _squall_line_sounding,
+        squall_line_theta_fn as _squall_line_theta_fn,
     )
 
     p = {**TC3_PARAMS, **(params or {})}

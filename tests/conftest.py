@@ -6,12 +6,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-# Ensure broken Metal backend (jax-metal / JAX version mismatch) falls back
-# to CPU *before* any JAX arrays are created.  Without this, the session-scoped
-# grid fixtures fail on Metal with StableHLO errors.
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 from legoesm.grids.cubed_sphere import create_cubed_sphere, CubedSphereGrid
 from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState
