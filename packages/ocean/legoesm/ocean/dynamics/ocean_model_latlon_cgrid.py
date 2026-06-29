@@ -1208,6 +1208,23 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
+        # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
+        # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
+        # and silently ignore it — so a non-default filter under an implicit solver
+        # reads as "applied" while doing nothing. Warn (not raise: harmless, just
+        # inert) so the silent no-op is visible.
+        if (config.barotropic.barotropic_time_filter != "cosine"
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            import warnings
+            warnings.warn(
+                f"barotropic_time_filter={config.barotropic.barotropic_time_filter!r} "
+                f"has NO effect under barotropic_solver="
+                f"{config.barotropic.barotropic_solver!r}: the time filter is consumed "
+                "only by the explicit_substep barotropic substep. Use "
+                'barotropic_solver="explicit_substep" to apply it, or leave the filter '
+                'at its "cosine" default to silence this warning.',
+                stacklevel=3)
         # Mirrors the flux-form tendency dispatch (its else-raise) plus the
         # SOM special case handled in step(); keep in sync if a scheme is added.
         _valid_tracer_adv = {
