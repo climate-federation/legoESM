@@ -121,6 +121,15 @@ def test_stabilize_backstop_applied_to_noclosure_only():
     assert r0.model_config.A_h == 0.0 and r0.model_config.C_smag == 0.0
 
 
+def test_faithful_barotropic_stack_uses_power_law_filter():
+    """The §5 split-explicit stack uses the SM2005 power-law time filter, not the
+    first-order cosine bell (which over-dissipates the deformation-scale eddies:
+    128² baroclinic-adjustment twin EKE 0.40×→0.86× oracle when cosine→power_law)."""
+    r = SJ.build_silvestri_baroclinic_jet_setup(n_lat=16, n_lon=12, scheme="W9V", nlev=8)
+    assert r.model_config.barotropic.barotropic_solver == "explicit_substep"
+    assert r.model_config.barotropic.barotropic_time_filter == "power_law"
+
+
 @pytest.mark.parametrize("scheme", SILVESTRI_JET_MAIN)
 def test_builds_and_steps_each_scheme(scheme):
     """The recipe builds for each scheme, validates, and a full step + restoring

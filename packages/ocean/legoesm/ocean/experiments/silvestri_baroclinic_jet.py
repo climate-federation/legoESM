@@ -305,6 +305,12 @@ def build_silvestri_baroclinic_jet_setup(
         coriolis_scheme="explicit_ab2",
         barotropic_slow_forcing_ab2=True,
         barotropic_diffusion_alpha=0.0,      # NO SSH-diffusion backstop (faithful)
+        # SM2005 power-law time filter over the first-order cosine bell: the cosine
+        # filter over-dissipates the deformation-scale eddies (128² baroclinic-
+        # adjustment twin: saturated EKE 0.40×→0.86× oracle, inverse cascade k_e
+        # 7.5→5.1≈oracle 5.2, when cosine→power_law), at no stability cost (both
+        # finite 40 d). docs/ocean/fidelity/oceananigans_recipe_wiring_plan.md §8.
+        barotropic_time_filter="power_law",
         tracer_advection="weno7",            # paper: 7th-order WENO tracer (all cases)
         tracer_time_integrator="rk3",
         outer_integrator="ab2",
