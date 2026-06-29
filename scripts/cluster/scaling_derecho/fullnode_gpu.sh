@@ -70,18 +70,26 @@ PHYSICS="${PHYSICS:-none}"
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 MODES="${MODES:-strong weak}"
 EXTRA=""
-# Total GPUs across ALL allocated nodes = the MPI slots PBS granted (one line
-# per slot in $PBS_NODEFILE; mpiprocs=4 -> 4 lines/node).  Do NOT use a per-node
-# `nvidia-smi -L` count: on a multi-node `select=` it sees only one node's 4
-# GPUs and silently SKIPs every >4-GPU (multi-node) point -- the GPU analog of
-# the $NCPUS/_CORES single-node-undercount trap fixed on the CPU side.  An
-# explicit NGPUS override still wins; nvidia-smi is the off-PBS fallback.
+# Total GPUs across ALL allocated nodes = (#nodes) x (GPUs per node).
+# Compute it ROBUSTLY: count the UNIQUE hosts in $PBS_NODEFILE (correct whether
+# the file lists one line per MPI rank -> 16 lines/4 unique, OR one line per node
+# -> 4 lines/4 unique -- Derecho's GPU queue uses the latter, which silently
+# undercounted the old `wc -l` to 4 and SKIPped every >4-GPU multi-node point).
+# GPUs-per-node comes from the LOCAL nvidia-smi (all Derecho A100 nodes = 4); we
+# only multiply by it, never use it as the total (per-node count is blind to the
+# other nodes).  Explicit NGPUS override still wins.  We log the derivation so a
+# wrong allocation is visible, not silent.
 TOTAL_GPUS="${NGPUS:-}"
 if [ -z "$TOTAL_GPUS" ]; then
-    TOTAL_GPUS="$( { [ -n "${PBS_NODEFILE:-}" ] && wc -l < "$PBS_NODEFILE"; } 2>/dev/null | tr -d '[:space:]' )"
-fi
-if [ -z "$TOTAL_GPUS" ]; then
-    TOTAL_GPUS="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+    _gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+    [ "${_gpus_per_node:-0}" -ge 1 ] 2>/dev/null || _gpus_per_node=4
+    if [ -n "${PBS_NODEFILE:-}" ] && [ -r "${PBS_NODEFILE}" ]; then
+        _n_nodes="$(sort -u "$PBS_NODEFILE" 2>/dev/null | grep -c . )"
+    fi
+    [ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
+    TOTAL_GPUS=$(( _n_nodes * _gpus_per_node ))
+    echo "    GPU allocation: ${_n_nodes} node(s) x ${_gpus_per_node} GPU/node = ${TOTAL_GPUS} GPUs" \
+         "(PBS_NODEFILE=${PBS_NODEFILE:-unset})"
 fi
 if ! [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null; then TOTAL_GPUS=4; fi
 case "$GRID" in
