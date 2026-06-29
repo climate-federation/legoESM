@@ -1,7 +1,7 @@
-"""Tests for backend compatibility guards (Metal / float64).
+"""Tests for backend compatibility guards (Apple GPU mps / float64).
 
 Mock-based tests patch ``legoesm.runtime.backend.get_backend`` directly
-so the Metal health-check / CPU-fallback machinery is bypassed.
+to simulate the float32-only Apple GPU (``mps``) backend.
 """
 
 import warnings
@@ -51,20 +51,20 @@ class TestCheckSpectralBackend:
 
     def test_metal_backend_raises(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="spectral solver requires float64"):
                 rt_check_spectral()
 
     def test_metal_case_insensitive(self):
         _require_x64()
         # get_backend always returns lowercase; simulate it
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="spectral solver requires float64"):
                 rt_check_spectral()
 
     def test_metal_allow_unsupported_warns(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 rt_check_spectral(allow_unsupported=True)
@@ -77,19 +77,19 @@ class TestCheckSpectralBackend:
 
     def test_error_message_has_remediation(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="JAX_PLATFORMS=cpu"):
                 rt_check_spectral()
 
     def test_error_message_suggests_alternative(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="finite-volume"):
                 rt_check_spectral()
 
     def test_error_message_mentions_config_override(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="allow_unsupported"):
                 rt_check_spectral()
 
@@ -101,36 +101,36 @@ class TestGetBackend:
         with patch(_RT_GET_BACKEND, return_value="cpu"):
             assert get_backend() == "CPU"
 
-    def test_returns_uppercase_metal(self):
-        with patch(_RT_GET_BACKEND, return_value="metal"):
-            assert get_backend() == "METAL"
+    def test_returns_uppercase_mps(self):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
+            assert get_backend() == "MPS"
 
 
 class TestGaussianGridGuard:
-    """Test that create_gaussian_grid handles Metal guard/fallback paths."""
+    """Test that create_gaussian_grid handles the Apple GPU (mps) guard path."""
 
     def test_metal_without_x64_raises(self):
         _require_x32()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             from legoesm.grids.gaussian import create_gaussian_grid
             with pytest.raises(ValueError, match="requires JAX_ENABLE_X64"):
                 create_gaussian_grid(n_max=21)
 
     def test_metal_auto_fallback_creates_cpu_grid(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             from legoesm.grids.gaussian import create_gaussian_grid
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 grid = create_gaussian_grid(n_max=21)
             assert "CPU" in str(grid.lat.device).upper()
             warn_text = "\n".join(str(x.message) for x in w)
-            assert "fallback" in warn_text.lower() or "metal" in warn_text.lower()
+            assert "fallback" in warn_text.lower() or "mps" in warn_text.lower()
             assert "unsupported backend" in warn_text.lower() or "spectral" in warn_text.lower()
 
     def test_metal_grid_creation_with_override_warns(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        with patch(_RT_GET_BACKEND, return_value="mps"):
             from legoesm.grids.gaussian import create_gaussian_grid
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
@@ -146,12 +146,8 @@ class TestGaussianGridGuard:
 class TestSpectralSWModelGuard:
     """Test that SpectralShallowWaterModel.__init__ applies backend guard."""
 
-    def test_metal_auto_routes_to_cpu(self):
+    def test_mps_auto_routes_spectral_to_cpu(self):
         _require_x64()
-        # Ensure CPU fallback is active so float64 array creation works
-        from legoesm.runtime.backend import ensure_metal_or_fallback
-        ensure_metal_or_fallback()
-
         # Build dummy grid on CPU (float64 required for spectral grids)
         cpu = jax.devices("cpu")[0]
         with jax.default_device(cpu):
@@ -182,7 +178,12 @@ class TestSpectralSWModelGuard:
                 ilap=jnp.zeros(n_sh, dtype=jnp.float64),
             )
 
-        with patch(_RT_GET_BACKEND, return_value="metal"):
+        # ``place_spectral_grid`` binds ``get_backend`` at import time, so the
+        # mps route only triggers when the name in ``parallel.metal`` is also
+        # patched (patching ``runtime.backend.get_backend`` alone leaves the
+        # bound reference pointing at the real CPU backend).
+        with patch(_RT_GET_BACKEND, return_value="mps"), \
+                patch("legoesm.parallel.metal.get_backend", return_value="mps"):
             from legoesm.atmosphere.dynamics.spectral_sw import (
                 SpectralShallowWaterModel,
             )

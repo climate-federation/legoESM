@@ -98,6 +98,12 @@ def _parse_args():
              "away on the implicit-CN MPAS path; ignored on lat-lon.",
     )
     p.add_argument(
+        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
+             "default), 'tke' (paper's NEMO scheme, unstable >~day40), or "
+             "'constant' (background-only, identical across grids). Both grids.",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -288,6 +294,8 @@ def main():
     cfg = DINOConfig()
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
+    if args.vmix is not None:
+        cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)

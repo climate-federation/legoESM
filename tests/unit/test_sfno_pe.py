@@ -13,9 +13,9 @@ together the encoder, spectral blocks, decoder, channel packing, the
 vorticity/divergence <-> u,v transforms and the conservation path.
 
 Backend note: the Gaussian/spectral transforms need float64, so x64 is
-enabled below.  On Apple-Silicon (Metal) the repo's ``tests/conftest.py``
-calls ``ensure_metal_or_fallback()`` before any array is created, so the
-spectral transforms run on CPU automatically.
+enabled below.  On the Apple GPU (mps) backend, which lacks float64, the
+spectral grid/transforms are routed to CPU automatically by
+``place_spectral_grid``.
 """
 
 import jax

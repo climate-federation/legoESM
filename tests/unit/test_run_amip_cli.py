@@ -16,6 +16,25 @@ from scripts.run.run_amip import (
 )
 
 
+def test_multilayer_land_flags_flow_to_config():
+    parser = build_arg_parser()
+    # default: slab land (multilayer off)
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.use_multilayer_land is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc",
+        "--use-multilayer-land",
+        "--multilayer-n-layers", "8",
+        "--multilayer-soil-depth", "4.5",
+    ]), parser))
+    assert cfg_on.use_multilayer_land is True
+    assert cfg_on.multilayer_n_layers == 8
+    assert cfg_on.multilayer_soil_depth == 4.5
+
+
 def test_build_config_includes_joint_physics_parameterization_flags():
     parser = build_arg_parser()
     args = parser.parse_args([

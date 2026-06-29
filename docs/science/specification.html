@@ -2563,7 +2563,7 @@ x0_optimal = optimize(cost_4dvar, grad_J, x0_initial)
 <tr>
 <td>Apple M-series (Metal/MPS)</td>
 <td>P1</td>
-<td>jax-metal</td>
+<td>jax-mps</td>
 <td>Development on M4 MacBook</td>
 </tr>
 <tr>
@@ -2794,7 +2794,7 @@ writer.close()
 <td>XLA backends</td>
 </tr>
 <tr>
-<td><strong>jax-metal</strong></td>
+<td><strong>jax-mps</strong></td>
 <td>latest</td>
 <td>Apple Silicon GPU support (FV solvers only, no float64)</td>
 </tr>
@@ -2868,7 +2868,7 @@ requires-python = &quot;&gt;=3.11&quot;
 
 [project.optional-dependencies]
 data = [&quot;gcsfs&quot;, &quot;fsspec&quot;]
-metal = [&quot;jax-metal&quot;]
+mps = [&quot;jax-mps&quot;]
 mpi = [&quot;mpi4py&gt;=4.1,&lt;5&quot;, &quot;mpi4jax&gt;=0.8,&lt;0.9&quot;]
 dev = [&quot;pytest&gt;=8.0&quot;, &quot;ruff&quot;, &quot;mypy&quot;]
 

@@ -63,7 +63,7 @@ def apply_silvestri_scheme(config, scheme: str):
         raise ValueError(
             f"unknown Silvestri jet scheme {scheme!r}; "
             f"choose from {sorted(SILVESTRI_JET_SCHEMES)}")
-    return config._replace(**SILVESTRI_JET_SCHEMES[scheme])
+    return config.replace_flat(**SILVESTRI_JET_SCHEMES[scheme])  # #501: distributes grouped keys
 
 
 def scheme_label(scheme: str) -> str:

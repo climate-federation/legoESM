@@ -112,12 +112,12 @@ def test_ah_scaling_off_is_identity():
 
     config_off = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=False)
     config_on = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=True)
-    assert config_off.A_h_lat_scaling is False
-    assert config_on.A_h_lat_scaling is True
+    assert config_off.lateral_viscosity.A_h_lat_scaling is False
+    assert config_on.lateral_viscosity.A_h_lat_scaling is True
     # NamedTuple default: pre-existing call sites that don't pass the flag
     # default to False.
     config_legacy = LatLonCGridOceanConfig.from_flat(A_h=1e5)
-    assert config_legacy.A_h_lat_scaling is False
+    assert config_legacy.lateral_viscosity.A_h_lat_scaling is False
 
 
 def test_ah_scaling_on_reduces_high_lat_tendency():
@@ -208,7 +208,7 @@ def test_ah_cos_power_default_is_one():
     change behavior for any legacy config."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
     cfg = LatLonCGridOceanConfig.from_flat(A_h=1e5, A_h_lat_scaling=True)
-    assert cfg.A_h_cos_power == 1
+    assert cfg.lateral_viscosity.A_h_cos_power == 1
 
 
 def test_ah_cos_power_one_matches_legacy_power_one():

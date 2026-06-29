@@ -298,7 +298,7 @@ class TestReuse:
         assert mc.momentum_advection == "weno5"      # recipe's scheme identity
         assert mc.pgf_scheme == "smc03"
         assert mc.outer_integrator == "ab2"
-        assert mc.A_h == cfg.A_h                      # ...but GO's setup params
+        assert mc.lateral_viscosity.A_h == cfg.A_h                      # ...but GO's setup params
 
     def test_override_beats_recipe(self):
         cfg = GlobalOverturningConfig()
@@ -340,7 +340,7 @@ class TestAssembler:
         assert cfg.eos == "linear"
         assert cfg.eos_linear is sentinel_eos
         assert cfg.pgf_scheme == "smc03"
-        assert cfg.A_h == 42.0
+        assert cfg.lateral_viscosity.A_h == 42.0
 
 
 class TestEosMatching:
@@ -371,7 +371,7 @@ class TestEosMatching:
         assert mc.eos == "veros_nonlin2"
         assert mc.eos_linear is None
         assert mc.outer_integrator == "ab2"
-        assert mc.A_h == cfg.A_h          # GO's setup params kept
+        assert mc.lateral_viscosity.A_h == cfg.A_h          # GO's setup params kept
 
 
 class TestCompatibility:

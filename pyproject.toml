@@ -70,7 +70,13 @@ data = [
     "gcsfs>=2024.2",
     "fsspec>=2024.2",
 ]
-metal = ["jax-metal"]
+# Apple-Silicon local-GPU backend via MLX (PJRT plugin). Select with
+# ``JAX_PLATFORMS=mps``.
+# float32 ONLY — MLX has no float64, so ``JAX_ENABLE_X64=1`` arrays raise and
+# complex128 downcasts to complex64; spectral/x64/conservation-grade and any
+# mpi4jax-collective run must stay on ``JAX_PLATFORMS=cpu``. Single MpsDevice:
+# no SPMD/MPI multi-device. Good for single-device float32 FV dycore / ML work.
+mps = ["jax-mps"]
 # Interactive configuration wizard (scripts/experiment/wizard.py, `legoesm wizard`).
 wizard = ["questionary>=2.0"]
 # Tested jax envelope for MPI is >=0.8,<0.10 (runtime-guarded in
@@ -163,6 +169,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # these tests set jax_enable_x64 before importing the modules under test (a
 # standard JAX-testing idiom), so module-level imports follow that call.
 "tests/unit/test_clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# Same idiom: sets jax_enable_x64 before importing the module under test (real
+# fp64 needed for the #618 fp32-vs-fp64 saturation comparison) and uses the
+# physical symbol T for temperature.  I001: the config call sits between imports.
+"tests/unit/test_warm_rain_fp32_saturation.py" = ["E402", "I001", "N803"]
 # CLUBB validation/characterization scripts use the same physical symbol names
 # (T for temperature) and set jax_enable_x64 before importing (E402).
 "scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]

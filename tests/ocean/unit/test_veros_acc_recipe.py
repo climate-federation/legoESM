@@ -108,8 +108,8 @@ def test_full_recipe_builds():
     Veros constants pinned via config (no monkey-patch)."""
     recipe = build_acc_recipe()
     assert recipe.model_config.eos == "veros_nonlin2"
-    assert recipe.model_config.A_h_lat_scaling is True
-    assert recipe.model_config.A_h_cos_power == 1
+    assert recipe.model_config.lateral_viscosity.A_h_lat_scaling is True
+    assert recipe.model_config.lateral_viscosity.A_h_cos_power == 1
     assert recipe.model_config.implicit_vertical_mixing is True
     assert recipe.physics_config.vertical_mixing.scheme == "tke"
     # GM/Redi on lat-lon is a top-level (dynamics) field, NOT physics-pathway
@@ -648,7 +648,7 @@ def test_veros_block_mapping_fields_are_real_config_fields():
         assert name and note                       # documented
         if "." in field or field in doc_rows:      # sub-config / documentation row
             continue
-        assert hasattr(cfg, field), field          # bare top-level field must be real
+        assert hasattr(cfg, field) or field in type(cfg).flat_fields(), field  # #501: grouped members          # bare top-level field must be real
 
 
 def test_veros_block_mapping_covers_the_full_dycore_identity():
@@ -674,4 +674,4 @@ def test_veros_block_mapping_matches_catalog_and_card():
     assert len(identity) >= 16
     mc = build_acc_model_config(with_surface_forcing=True)
     for key, catalog_value in identity.items():
-        assert getattr(mc, key) == catalog_value, key
+        assert mc.flat_get(key) == catalog_value, key  # #501: grouped names via flat_get

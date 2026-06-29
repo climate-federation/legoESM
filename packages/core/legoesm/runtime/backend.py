@@ -20,76 +20,13 @@ import warnings
 
 logger = logging.getLogger(__name__)
 
-# Backends that lack float64/complex128 hardware support.
-_NO_F64_BACKENDS = frozenset({"metal"})
-
-# Cached result of the Metal health check (None = not yet tested).
-_metal_healthy: bool | None = None
-# Whether we have already applied the CPU fallback.
-_cpu_fallback_applied: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Metal health check and CPU fallback
-# ---------------------------------------------------------------------------
-
-def _metal_is_functional() -> bool:
-    """Test whether the Metal backend can execute a trivial operation.
-
-    Returns ``False`` when an incompatible ``jax-metal`` plugin is installed
-    (e.g. jax-metal 0.1.x with JAX 0.9.x).  The result is cached so the
-    probe runs at most once per process.
-    """
-    global _metal_healthy
-    if _metal_healthy is not None:
-        return _metal_healthy
-
-    try:
-        import jax
-        x = jax.device_put(1.0, jax.devices()[0])
-        _ = float(x + x)
-        _metal_healthy = True
-    except Exception:
-        _metal_healthy = False
-    return _metal_healthy
-
-
-def ensure_metal_or_fallback() -> None:
-    """If Metal is the default backend but non-functional, fall back to CPU.
-
-    This sets ``jax.default_device`` to the CPU device so all subsequent
-    array creation and computation runs on CPU transparently.  Call this
-    once at startup (e.g. from ``configure_backend``).
-    """
-    global _cpu_fallback_applied
-    if _cpu_fallback_applied:
-        return
-
-    import jax
-    if jax.default_backend().lower() != "metal":
-        return
-
-    if _metal_is_functional():
-        return
-
-    cpu = jax.devices("cpu")[0]
-    jax.config.update("jax_default_device", cpu)
-    _cpu_fallback_applied = True
-    warnings.warn(
-        "Metal backend detected but non-functional (likely jax-metal / JAX "
-        "version mismatch). All computation will run on CPU.  To silence "
-        "this warning, either upgrade jax-metal or set JAX_PLATFORMS=cpu.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
-    logger.warning(
-        "Metal backend broken — forced CPU fallback via jax.default_device"
-    )
-
-
-def metal_fell_back_to_cpu() -> bool:
-    """Return ``True`` if Metal was detected but we fell back to CPU."""
-    return _cpu_fallback_applied
+# Backends that lack float64/complex128 hardware support.  The Apple GPU
+# backend ``mps`` (jax-mps / MLX) is float32-only — MLX has no float64.
+# ``metal`` is the legacy Apple-GPU platform string, kept here so the no-f64
+# guard never silently passes if a stale config/caller hands it to
+# ``supports_float64``/``check_spectral_backend`` (that backend is no longer
+# wired in; its Metal GPUs also lacked float64).
+_NO_F64_BACKENDS = frozenset({"mps", "metal"})
 
 
 # ---------------------------------------------------------------------------
@@ -99,19 +36,11 @@ def metal_fell_back_to_cpu() -> bool:
 def get_backend() -> str:
     """Return the current JAX default backend name (lowercase).
 
-    Common values: ``"cpu"``, ``"gpu"``, ``"tpu"``, ``"metal"``.
-
-    If the Metal backend was detected but is non-functional and we fell
-    back to CPU, this returns ``"cpu"``.
+    Common values: ``"cpu"``, ``"gpu"``, ``"tpu"``, ``"mps"`` (Apple GPU
+    via jax-mps / MLX).
     """
     import jax
-    backend = jax.default_backend().lower()
-    if backend == "metal":
-        # Lazy health check — triggers at most once.
-        ensure_metal_or_fallback()
-        if _cpu_fallback_applied:
-            return "cpu"
-    return backend
+    return jax.default_backend().lower()
 
 
 def supports_float64(backend: str | None = None) -> bool:
@@ -360,7 +289,7 @@ def _detect_backend_pre_init() -> str | None:
     initialise the PJRT client (via ``jax.default_backend()`` or
     ``jax.devices()``) before the GPU-specific XLA scheduler flags are
     set, otherwise ``XLA_FLAGS`` mutations no-op.  Returns one of
-    ``"tpu"``, ``"gpu"``, ``"metal"``, ``"cpu"``, or ``None`` when no
+    ``"tpu"``, ``"gpu"``, ``"mps"``, ``"cpu"``, or ``None`` when no
     hint is available (caller must fall back to ``get_backend()``).
     """
     platforms = os.environ.get("JAX_PLATFORMS", "").lower()
@@ -369,8 +298,8 @@ def _detect_backend_pre_init() -> str | None:
             return "tpu"
         if platforms.startswith(("cuda", "rocm", "gpu")):
             return "gpu"
-        if platforms.startswith("metal"):
-            return "metal"
+        if platforms.startswith("mps"):
+            return "mps"
         if platforms.startswith("cpu"):
             return "cpu"
     if detect_gpu_vendor_pre_init() is not None:
@@ -482,10 +411,9 @@ def configure_backend(backend: str | None = None) -> str:
                         ">= 8.0)")
         logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
 
-    elif backend == "metal":
-        ensure_metal_or_fallback()
-        if _cpu_fallback_applied:
-            backend = "cpu"
+    elif backend == "mps":
+        # MLX manages its own device; no XLA flags or persistent JIT cache.
+        pass
 
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:
@@ -517,7 +445,7 @@ def configure_backend(backend: str | None = None) -> str:
     # warm) is the dominant per-job overhead for AMIP / OMIP runs.
     # Re-using the XLA cache across runs cuts subsequent jobs to a
     # few seconds of cache-lookup.  Turn it on whenever the backend
-    # is GPU/CPU; Metal/TPU paths often have their own compile
+    # is GPU/CPU; MPS/TPU paths often have their own compile
     # caches and we leave them alone.
     if backend in ("gpu", "cpu"):
         _configure_persistent_jit_cache()
@@ -622,8 +550,8 @@ def _configure_persistent_jit_cache() -> None:
 def check_spectral_backend(*, allow_unsupported: bool = False) -> None:
     """Verify the current backend supports float64/complex128.
 
-    The spectral solver requires these types.  Backends like Metal
-    do not provide them and will produce incorrect results.
+    The spectral solver requires these types.  Backends like Apple MPS
+    (MLX) do not provide them and will produce incorrect results.
 
     Raises ``ValueError`` unless *allow_unsupported* is ``True``
     (in which case a warning is emitted instead).

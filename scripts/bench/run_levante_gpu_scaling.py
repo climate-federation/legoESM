@@ -11,10 +11,11 @@ Supported grids:
   latlon        -- Lat-lon finite-volume grid + FV PE dycore
 
 Multi-rank MPI scaling support (iter-13/14 honest-sweep guards):
-  icosahedral   -- domain-decomposed (validated multi-rank path)
-  cubed-sphere  -- single-rank only (replicated dynamics under MPI;
-                   refused at runtime with a clear error)
-  latlon        -- single-rank only (NotImplementedError, see #115)
+  icosahedral   -- mesh graph-partition decomposition (any rank count)
+  latlon        -- latitude-band decomposition, pole_bc='wall' +
+                   diagnostic physics (make_latlon_mpi_step, #641 Grid 3)
+  cubed-sphere  -- genuine <=6-face decomposition via --cs-mpi-scatter;
+                   default (no flag) is replicated dynamics, refused
   spectral      -- single-rank only (no MPI path)
 
 Two modes:
@@ -32,7 +33,8 @@ Single-node SPMD (1-6 face-sharded devices on a single process,
     python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere \\
         --mode strong --precision both
 
-Multi-node via MPI -- icosahedral only (validated path)::
+Multi-rank via MPI -- icosahedral / latlon (validated domain decomposition;
+cubed-sphere needs --cs-mpi-scatter; see the support matrix above)::
 
     mpirun -np 4 python scripts/bench/run_levante_gpu_scaling.py \\
         --grid icosahedral --mode strong --n-gpus 4
@@ -239,38 +241,37 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez", "moist"},
 }
 
-# MPI distributed benchmark support.  Only finite-volume grids with
-# validated local-domain operators are listed here.  Iter 13 honest-
-# sweep update: cubed-sphere MPI is excluded because the dycore still
-# keeps full (6, n, n, ...) state on every rank — multi-rank
-# wall-clock measurements would not be true weak/strong scaling but
-# replicated-dynamics noise.
+# MPI distributed benchmark support.  Only grids with a validated
+# local-domain (true-decomposition) MPI step are listed here — a grid
+# absent from this set is refused under ``mpirun`` so replicated-dynamics
+# wall-clock noise is never reported as scaling.
 #
-# IMPORTANT (2026-06-23 scatter-feasibility probe): the remaining work
-# is LARGER than the original "scatter state in model_driver.py" note
-# implied.  Halo-side scattered face indexing landed in iter 3
-# (``halo_exchange._pad_halo_mpi_face_only`` keys off ``data.shape[0]``
-# and supports ``shape[0] == len(local_face_ids)``), and ``scatter_pytree``
-# slices state to owned faces fine.  BUT the C/D-grid operators multiply
-# the scattered state against the cubed-sphere METRIC arrays
-# (``cdgrid.cosa_u``/``sina_u``/areas/edge lengths/rotation), which are
-# still full ``(6, ...)``.  A scattered ``(n_local, ...)`` state therefore
-# fails to broadcast (e.g. ``dgrid_to_cgrid``: ``mul (2,9,8,5) vs
-# (6,9,8,1)``).  Real cube-MPI scatter requires: (1) scatter the entire
-# ``cdgrid`` metric set to owned faces, (2) rebuild the model per rank on
-# the scattered grid, (3) re-validate every operator (PGF, vorticity,
-# divergence, hyperdiff, div-damp, D<->C transforms) under scattered
-# metrics + cross-rank face-edge halo, then (4) the mandatory visual W2
-# v-wind cube-imprint regression + a real GPU run.  Until that lands,
-# cubed-sphere multi-device scaling is the single-node SPMD/GSPMD
-# face-shard path (<= 6 GPUs, 1 node); use the icosahedral grid for
-# many-GPU / multi-node scaling (real domain decomposition, any rank
-# count — see Path B 'moist' tier above).
+#   icosahedral -- full mesh graph-partition decomposition, any rank
+#       count (``make_voronoi_mpi_step``).
+#   latlon -- latitude-band decomposition with pole_bc='wall' +
+#       diagnostic physics (``make_latlon_mpi_step``, issue #641 Grid 3).
+#       Each rank owns a contiguous lat band; band-cut halos exchange via
+#       sendrecv, the mass fixer allreduces the global sphere area.
+#       Validated MPI == serial after gather in
+#       ``tests/distributed/test_latlon_mpi_step.py`` (np=2/4).  Still
+#       band-only: pole_bc='fold'/'tripole' and the PhysicsState carry
+#       for prognostic physics (#405/#413) are NOT wired, and there is no
+#       single-process multi-GPU (route-B SPMD) latlon step.
 #
-# Lat-lon MPI is also intentionally excluded — its C-grid operators
-# have not been ported to latitude sub-domains
-# (``make_latlon_mpi_step`` raises NotImplementedError, see #115).
-_MPI_SUPPORTED_GRIDS = {"icosahedral"}
+# Cubed-sphere is NOT in this set: the DEFAULT cube MPI path keeps full
+# (6, n, n, ...) state on every rank (replicated dynamics, not scaling).
+# The genuine face decomposition is the opt-in ``--cs-mpi-scatter`` path
+# (``make_rank_local_cube_model`` slices the entire cdgrid metric set to
+# owned faces; validated bit-for-bit incl. AD vs the single-process
+# reference in ``tests/distributed/test_cube_face_scatter_mpi.py``,
+# np=1/2/3/6).  It is allowed past the MPI guards via the ``_cube_scatter_ok``
+# carve-out, capped at 6 faces (1 node); the sub-face TILED SPMD path for
+# >6 GPUs (``LEGOESM_TILED_SPMD``) and the mandatory visual W2 v-wind
+# cube-imprint regression + multi-node GPU run remain to be validated.
+#
+# Spectral has no MPI step (the level mesh shards state for memory only and
+# falls through to ``model.step`` — single-process replication).
+_MPI_SUPPORTED_GRIDS = {"icosahedral", "latlon"}
 
 
 @dataclass
@@ -390,13 +391,19 @@ def _weak_resolution_ll(
     """Compute lat-lon resolution for weak scaling at a given GPU count.
 
     When ``n_ranks > 1`` (MPI), the result is rounded up to be divisible
-    by ``n_ranks`` so that latitude bands divide evenly.
+    by ``n_ranks`` so that latitude bands divide evenly, and floored so
+    every band carries at least the dycore halo (``_LATLON_MPI_HALO``):
+    at very large rank counts ``base_n * sqrt(ng) / ng`` shrinks below the
+    halo, which would make ``exchange_halo_latlon`` raise mid-sweep.
     """
     n_raw = base_n * math.sqrt(n_gpus)
     n_rounded = max(8, 2 * round(n_raw / 2))  # even number, min 8
     if n_ranks > 1:
         while n_rounded % n_ranks != 0:
             n_rounded += 2
+        # Floor at halo rows per band (n_ranks * _LATLON_MPI_HALO is even and
+        # divisible by n_ranks, so it preserves both invariants above).
+        n_rounded = max(n_rounded, n_ranks * _LATLON_MPI_HALO)
     return n_rounded
 
 # Strong scaling: fixed resolutions, sweep GPU counts.
@@ -404,6 +411,13 @@ STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
+# Lat-lon MPI halo width: the C-grid PPM / biharmonic operators pad
+# ``halo=2`` rows (primitive_eq_latlon_cgrid: pad_halo_latlon_3d(halo=2);
+# make_latlon_mpi_step default).  exchange_halo_latlon RAISES when a rank's
+# band has fewer than ``halo`` rows (``halo > n_lat_local``), so the MPI
+# band sweep skips a resolution whose smallest band would drop below it
+# instead of crashing before timing.
+_LATLON_MPI_HALO = 2
 
 # Minimum total timing duration target (seconds).  When step times are
 # sub-millisecond (e.g., I4 at ~0.5 ms/step), 100 steps yield only
@@ -456,12 +470,16 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
     Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
     Icosahedral supports any GPU count — its single-process multi-GPU path
     routes through ``make_voronoi_sharded_step``, a real domain-decomposed
-    ``shard_map`` step.  Lat-lon and spectral are single-GPU only: neither
-    has a validated single-process multi-GPU sharded step.  Lat-lon raises
-    NotImplementedError for n_gpus > 1; spectral creates a level mesh and
-    shards the state but then falls through to plain ``model.step``, so a
-    "multi-GPU" spectral point would just re-time the single-device program
-    (the 1->2 GPU exactly-0.500-efficiency replication failure mode).
+    ``shard_map`` step.  Lat-lon and spectral are single-GPU only HERE
+    (single-process): neither has a validated single-process multi-GPU
+    sharded step.  Lat-lon's *multi-rank* scaling instead goes through MPI
+    (``make_latlon_mpi_step``), where the count is pinned to world_size by
+    ``fixed_gpu_count`` and bypasses this function entirely; single-process
+    lat-lon raises NotImplementedError for n_gpus > 1.  Spectral creates a
+    level mesh and shards the state but then falls through to plain
+    ``model.step``, so a "multi-GPU" spectral point would just re-time the
+    single-device program (the 1->2 GPU exactly-0.500-efficiency
+    replication failure mode).
     """
     if grid_type in ("latlon", "spectral"):
         # Reason: no validated single-process multi-GPU sharded step.
@@ -1433,6 +1451,7 @@ def run_benchmark(
 
     # Grid-specific MPI layouts (populated in grid branches below).
     _voronoi_layout = None
+    _latlon_layout = None
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -1526,15 +1545,6 @@ def run_benchmark(
         # lat-lon dycore referenced by #115 was removed; this is the current
         # C-grid FV core, the same solver the driver resolves for
         # grid=latlon/discretization=finite_volume.)
-        if n_gpus > 1:
-            raise NotImplementedError(
-                "Multi-device SPMD is not yet wired for the lat-lon grid in "
-                "this harness (there is no make_latlon_sharded_step; the lat-lon "
-                "MPI domain-decomposition path lives in "
-                "legoesm.parallel.latlon_mpi). Single-device lat-lon "
-                "benchmarking is supported; multi-GPU lat-lon scaling needs a "
-                "sharded step + real-hardware validation."
-            )
         from legoesm import constants  # lazy: see top-of-file note on JAX init order
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
@@ -1562,9 +1572,44 @@ def run_benchmark(
             use_polar_filter=True,
             time_integrator="ssp_rk3",
         )
-        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        # The baroclinic-wave IC is always built on the GLOBAL grid; the MPI
+        # path scatters it to the rank-local band below (--- MPI scatter ---).
         state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True, moist=_moist)
-        dev_config = create_latlon_mesh(n_devices=n_gpus)
+        if _is_mpi:
+            # Latitude-band domain decomposition (issue #641 Grid 3): each rank
+            # owns a contiguous lat band with pole_bc='wall' + diagnostic
+            # physics — the validated make_latlon_mpi_step path
+            # (tests/distributed/test_latlon_mpi_step.py: MPI == serial after
+            # gather, np=2/4).  The full-sphere model is rebuilt per rank on the
+            # band grid; slice_latlon_grid_to_band allreduces band areas so the
+            # mass fixer divides by the global sphere area, not the band area.
+            from legoesm.parallel.latlon_mpi import (
+                make_latlon_band_layout,
+                slice_latlon_grid_to_band,
+            )
+            _latlon_layout = make_latlon_band_layout(
+                rank=_rank, n_ranks=_n_ranks,
+                n_lat=grid.n_lat, n_lon=grid.n_lon,
+            )
+            band_grid = slice_latlon_grid_to_band(grid, _latlon_layout)
+            model = CGridLatLonPrimitiveEquationModel(
+                band_grid, sigma, config, dt=dt,
+            )
+            # One device per MPI rank (affinity set by
+            # _configure_mpi_gpu_affinity), as for the icosahedral MPI path.
+            dev_config = create_latlon_mesh(n_devices=1)
+        else:
+            if n_gpus > 1:
+                raise NotImplementedError(
+                    "Single-process multi-device SPMD (route-B) is not yet "
+                    "wired for the lat-lon grid in this harness (there is no "
+                    "make_latlon_sharded_step). For multi-GPU lat-lon scaling "
+                    "use MPI domain decomposition (mpirun -np N ... --grid "
+                    "latlon), which routes through "
+                    "legoesm.parallel.latlon_mpi.make_latlon_mpi_step."
+                )
+            model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+            dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -1654,6 +1699,20 @@ def run_benchmark(
     if _voronoi_layout is not None:
         from legoesm.parallel.voronoi_mpi import scatter_state_voronoi
         state = scatter_state_voronoi(state, _voronoi_layout.partition)
+    elif _latlon_layout is not None:
+        # Lat-lon MPI: slice the global baroclinic-wave IC to this rank's band.
+        # baroclinic_wave_init_latlon yields a cell-centered, Field-wrapped
+        # HydrostaticState (what model.step accepts and converts internally);
+        # make_latlon_mpi_step delegates straight to _step_cgrid, which wants a
+        # raw-array C-grid CGridLatLonHydrostaticState.  Convert on the GLOBAL
+        # grid first — the cell->face v-wind interpolation needs the full
+        # latitude column — then slice to the band.
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            hydrostatic_to_cgrid,
+        )
+        from legoesm.parallel.latlon_mpi import scatter_state_latlon
+        state = hydrostatic_to_cgrid(state, grid)
+        state = scatter_state_latlon(state, _latlon_layout)
 
     # Cubed-sphere MPI: keep full (6, n, n, ...) state on every rank
     # to match the production driver.  pad_halo_mpi requires the full
@@ -1724,6 +1783,16 @@ def run_benchmark(
         step_fn = make_voronoi_mpi_step(
             model, _voronoi_layout, sigma, config, physics_fn=physics_fn,
         )
+    elif _latlon_layout is not None:
+        # Lat-lon MPI: the backend-dispatched pad_halo_latlon* operators inside
+        # _step_cgrid fetch band-cut halos via sendrecv and apply the wall pole
+        # BC at boundary ranks; physics_fn is forwarded per RK stage to
+        # _step_cgrid (it REFUSES a stateful PhysicsState-carry scheme loudly —
+        # only diagnostic physics is supported, issue #405/#413).
+        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
+        step_fn = make_latlon_mpi_step(
+            model, _latlon_layout, physics_fn=physics_fn,
+        )
     # SPMD sharded step functions (single-node multi-GPU).
     elif grid_type == "icosahedral" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
@@ -1758,7 +1827,7 @@ def run_benchmark(
     #   double application.
     # For cubed-sphere and icosahedral SPMD, physics_fn is passed to __call__.
     # For single-GPU all grids, physics_fn is passed to model.step.
-    if physics_fn is not None and _voronoi_layout is None:
+    if physics_fn is not None and _voronoi_layout is None and _latlon_layout is None:
         if dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
             # CompiledShardedStep / VoronoiShardedStep accept physics_fn
             _sharded_step = step_fn
@@ -2074,11 +2143,21 @@ def run_strong_scaling(
                         )
                         continue
                 elif grid_type == "latlon":
-                    # Lat-lon sharding requires n_lat divisible by n_gpus
-                    if n_grid % ng != 0:
+                    # Lat-lon MPI uses make_latlon_band_layout, which supports
+                    # UNEVEN bands (the first n_lat % n_ranks ranks get one
+                    # extra row) — n_lat need NOT be divisible by the rank
+                    # count.  The binding constraint is per-rank: every band
+                    # must carry at least the halo width, else
+                    # exchange_halo_latlon raises (halo > n_lat_local) before
+                    # timing.  The smallest band is floor(n_lat / n_ranks), so
+                    # skip when that drops below the halo.  (Single-process
+                    # latlon runs at ng=1: band = n_lat >> halo.)
+                    _min_band = n_grid // ng
+                    if _min_band < _LATLON_MPI_HALO:
                         print(
                             f"\n--- {ng} GPU(s), {res_prefix}{n_grid} --- SKIPPED "
-                            f"(n_lat={n_grid} not divisible by {ng})",
+                            f"(n_lat={n_grid}/{ng} -> band {_min_band} < halo "
+                            f"{_LATLON_MPI_HALO})",
                             flush=True,
                         )
                         continue
@@ -2627,11 +2706,10 @@ def main() -> int:
     fixed = max_gpus if world_size > 1 else None
 
     # Iter 13/17 honest-sweep guard: refuse multi-rank MPI for any
-    # grid that is *not* in the validated MPI-supported set.  The set
-    # is currently ``{icosahedral}`` — cubed-sphere keeps full state
-    # per rank (replicated dynamics, not real scaling), lat-lon raises
-    # NotImplementedError, spectral has no MPI path.  This catches all
-    # three with one branch and one consistent error message.
+    # grid that is *not* in the validated MPI-supported set
+    # (``icosahedral`` + ``latlon``).  A DEFAULT cubed-sphere MPI run keeps
+    # full state per rank (replicated dynamics, not real scaling); spectral
+    # has no MPI step.  This catches both with one branch and one message.
     #
     # EXCEPTION: ``--cs-mpi-scatter`` on cubed-sphere IS genuine face
     # decomposition (each rank owns a subset of the 6 faces; cross-face
@@ -2646,11 +2724,12 @@ def main() -> int:
             print(
                 f"ERROR: {grid_type} MPI multi-rank scaling is not "
                 f"validated in this script. Supported MPI grids are "
-                f"{sorted(_MPI_SUPPORTED_GRIDS)}.  cubed-sphere is "
-                "replicated-dynamics-only (driver scatter pending); "
-                "lat-lon raises NotImplementedError (#115); spectral "
-                "has no MPI path.  Run with a single MPI rank or use "
-                "``--grid icosahedral`` for genuine multi-rank scaling.",
+                f"{sorted(_MPI_SUPPORTED_GRIDS)}.  Default cubed-sphere MPI "
+                "is replicated-dynamics-only (pass ``--cs-mpi-scatter`` for "
+                "genuine <=6-face decomposition); spectral has no MPI path. "
+                "Run with a single MPI rank, add ``--cs-mpi-scatter``, or use "
+                "``--grid icosahedral``/``--grid latlon`` for genuine "
+                "multi-rank scaling.",
                 flush=True,
             )
         raise SystemExit(2)

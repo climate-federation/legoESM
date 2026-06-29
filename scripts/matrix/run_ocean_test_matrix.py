@@ -90,9 +90,6 @@ if _MATRIX_DIR not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd  # iter-19 fix: pd was used (lines 4617, 6106) but

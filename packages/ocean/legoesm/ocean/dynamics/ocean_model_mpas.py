@@ -169,6 +169,19 @@ class MPASOceanModel:
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {self.config.barotropic_time_filter!r}"
             )
+        # Loud no-op guard (mirrors the latlon C-grid model): the time filter is
+        # consumed only by the explicit_substep substep (barotropic_substeps_mpas);
+        # under implicit_cn it is silently inert. Warn so the no-op is visible.
+        if (self.config.barotropic_time_filter != "cosine"
+                and self.config.barotropic_solver != "explicit_substep"):
+            import warnings
+            warnings.warn(
+                f"barotropic_time_filter={self.config.barotropic_time_filter!r} has "
+                f"NO effect under barotropic_solver={self.config.barotropic_solver!r}"
+                ": the time filter is consumed only by the explicit_substep "
+                'barotropic substep. Use barotropic_solver="explicit_substep" to '
+                'apply it, or leave the filter at its "cosine" default.',
+                stacklevel=2)
         _valid_fw = ("none", "virtual_salt_flux")
         if self.config.freshwater_closure not in _valid_fw:
             raise ValueError(
