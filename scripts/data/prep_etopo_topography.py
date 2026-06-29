@@ -30,7 +30,7 @@ import argparse
 
 # Elevation/lat/lon variable names load_real_topography._detect_variables accepts
 # (write the output with names from these so it round-trips without --elev-var).
-_ELEV_CANDIDATES = ("elevation", "z", "topo", "Band1", "ROSE",
+_ELEV_CANDIDATES = ("elevation", "altitude", "z", "topo", "Band1", "ROSE",
                     "bedrock_topography", "surface_elevation")
 _LAT_CANDIDATES = ("lat", "latitude", "y", "Y")
 _LON_CANDIDATES = ("lon", "longitude", "x", "X")
@@ -74,9 +74,13 @@ def regrid_elevation_to_latlon(ds, *, var_name: str = "", target_res_deg: float 
         da = da.isel({d: 0 for d in drop})
     da = da.rename({la: "lat", lo: "lon"}).transpose("lat", "lon")
 
-    # Normalise source coords: lon in [0, 360) ascending, lat ascending.
+    # Normalise source coords: lon in [0, 360) ascending, lat ascending.  A global
+    # grid that includes BOTH 0 and 360 (e.g. the 361-lon ETOPO) collides to a
+    # duplicate 0 after the mod, which breaks interp's unique-index requirement —
+    # drop the duplicate endpoint(s) on each axis.
     lon = np.asarray(da["lon"].values, dtype=np.float64) % 360.0
     da = da.assign_coords(lon=lon).sortby("lon").sortby("lat")
+    da = da.drop_duplicates("lon", keep="first").drop_duplicates("lat", keep="first")
 
     res = float(target_res_deg)
     tgt_lat = np.arange(-90.0 + res / 2.0, 90.0, res)

@@ -48,6 +48,20 @@ def test_land_fraction_is_preserved_roughly():
     assert 0.03 < land_frac < 0.15
 
 
+def test_handles_altitude_var_and_duplicate_lon_endpoint():
+    # a global grid with BOTH lon 0 and 360 (the 361-lon ETOPO layout) and the
+    # CF name 'altitude' — must auto-detect + dedup the wrapped endpoint, not raise.
+    lat = np.linspace(-90.0, 90.0, 181)
+    lon = np.linspace(0.0, 360.0, 361)                 # inclusive endpoints -> 0==360 mod
+    band = np.where((lat[:, None] >= 20) & (lat[:, None] <= 60), 1000.0, -3000.0)
+    elev = np.broadcast_to(band, (181, 361)).copy()
+    ds = xr.Dataset({"altitude": (("latitude", "longitude"), elev)},
+                    coords={"latitude": lat, "longitude": lon})
+    out = prep.regrid_elevation_to_latlon(ds, target_res_deg=2.0)
+    assert out["elevation"].dims == ("lat", "lon")
+    assert float(np.asarray(out["lon"].values).max()) < 360.0   # endpoint deduped
+
+
 def test_squeezes_extra_dims_and_explicit_var():
     out = prep.regrid_elevation_to_latlon(
         _synthetic_elevation(var="z", with_time=True), var_name="z", target_res_deg=4.0)

@@ -31,15 +31,20 @@ $PY scripts/data/prep_era5_ic_from_zarr.py --year 1979 --month 1 --day 1 --hour 
 $PY scripts/data/generate_amip_forcing.py --out data/amip/forcing_amip \
     --start-year 1979 --end-year 2014                                       # [DONE]
 
-# (c) Topography → land. Download a NOAA ETOPO (or GEBCO/ETOPO5) elevation NetCDF, then regrid:
-#     NOAA ETOPO 2022 (public, no account): https://www.ncei.noaa.gov/products/etopo-global-relief-model
-$PY scripts/data/prep_etopo_topography.py --input <etopo_source.nc> \
-    --out data/amip/etopo_0p25deg.nc --resolution-deg 0.25                  # <-- TODO: get the source file
+# (c) Topography → land. NO download needed — a 1deg ETOPO is already on Ginsburg
+#     (pg2328); regrid it to a clean grid (its 0/360 lon endpoint breaks the loader raw):
+$PY scripts/data/prep_etopo_topography.py \
+    --input /burg/glab/users/pg2328/legoESM_moistwt/data/bathymetry/etopo_1deg.nc \
+    --out data/amip/etopo_0p25deg.nc --resolution-deg 0.25                  # [DONE]
 ```
 
-Status: (a) and (b) are staged. (c) needs the one real download — the NOAA ETOPO source
-file — then the helper regrids it; the helper + its round-trip through `load_real_topography`
-are tested (`tests/unit/test_prep_etopo_topography.py`).
+Status: (a), (b), (c) all staged. The ETOPO was sourced from pg2328's
+`etopo_1deg.nc` (var `altitude`, -8658..5708 m) — the prep helper auto-detects it,
+dedups the wrapped 0/360 lon, and regrids to a clean 0.25deg file.  Verified
+end-to-end: on C48 the result gives **f_land mean 0.289** (Earth ~0.29), real
+continents, finite phis (max ~49830 m2/s2). Helpers tested in
+`tests/unit/test_prep_etopo_topography.py` (14 tests with load_real_topography
+round-trips).
 
 ## 2. Machine paths
 
@@ -78,7 +83,7 @@ above, set `JAX_COMPILATION_CACHE_DIR=$OUTDIR/jax_cache`, re-`sbatch` until `TAR
 
 ## Open items (yours)
 
-- **ETOPO source file** (§1c) — the one real download; then the helper regrids it.
-- **ESGF account** — observed SST/SIC for Stage 2 (`stage_amip_realdata.py --print-esgf`).
-  Stages 0–1 need none.
+- **ESGF account** — the only remaining input gap: observed SST/SIC for the faithful
+  Stage 2 (`stage_amip_realdata.py --print-esgf`). Stages 0–1 (synthetic SST) need none.
+  (ETOPO + ERA5 IC + the forcing deck are all staged locally.)
 </content>
