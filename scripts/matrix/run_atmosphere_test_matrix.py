@@ -288,7 +288,7 @@ def _build_test_matrix() -> list[TestCase]:
         # but the non-rotating run path is not yet wired (follow-up).
         if g == "cubed_sphere":
             matrix.append(TestCase(
-                "shallow_water", "colliding_modons", g, res[g], "none", 100, 2,
+                "shallow_water", "colliding_modons", g, res[g], "none", 100, 1,
                 {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
