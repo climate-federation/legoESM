@@ -116,15 +116,6 @@ def solve_sw_monochromatic(
   beam = _beam_direction(mu0, azimuth, dtype)
   z_tod = geom.z_faces[-1]
 
-  # Per-photon column assignment (cheap int arrays; float state is per-batch).
-  col = jnp.arange(ncols, dtype=jnp.int32)
-  col_ix, col_iy = col // ny, col % ny
-  photon_col = jnp.repeat(jnp.arange(ncols, dtype=jnp.int32), p)
-  ix_all = col_ix[photon_col].reshape(nb, batch_size)
-  iy_all = col_iy[photon_col].reshape(nb, batch_size)
-  # Photon-within-column index + column index (for the quasi-random launch).
-  pwc_all = (jnp.arange(n_total, dtype=jnp.int32) % p).reshape(nb, batch_size)
-  col_all = photon_col.reshape(nb, batch_size)
   use_qrng = bool(config.use_qrng)
   # Per-column Cranley-Patterson rotation (decorrelates the columns' Halton
   # sets). Only consume a key when QRNG is on, so the default (pseudo-random)
@@ -142,7 +133,16 @@ def solve_sw_monochromatic(
 
   def batch_step(carry, batch):
     vol_c, sfc_c, tod_c, max_c = carry
-    ix_b, iy_b, pwc_b, col_b, bkey = batch
+    b, bkey = batch
+    # Derive this batch's photon -> (column, within-column, ix, iy) from the
+    # global photon index instead of carrying four n_total int arrays as scan xs
+    # (memory): photon i is in column i//p, so col=pid//p, ix=col//ny, iy=col%ny.
+    # (Name it pid, NOT g -- g is the asymmetry-field argument.)
+    pid = b * batch_size + jnp.arange(batch_size, dtype=jnp.int32)
+    col_b = pid // p
+    pwc_b = (pid % p).astype(jnp.int32)
+    ix_b = col_b // ny
+    iy_b = col_b % ny
     k_pos, k_walk = jax.random.split(bkey)
     if use_qrng:
       # Low-discrepancy launch position (Halton + per-column rotation).
@@ -180,7 +180,7 @@ def solve_sw_monochromatic(
       jnp.zeros((), count_dt),
   )
   (vol_c, sfc_c, tod_c, max_c), _ = jax.lax.scan(
-      batch_step, init, (ix_all, iy_all, pwc_all, col_all, bkeys)
+      batch_step, init, (jnp.arange(nb, dtype=jnp.int32), bkeys)
   )
 
   inv_p = 1.0 / p

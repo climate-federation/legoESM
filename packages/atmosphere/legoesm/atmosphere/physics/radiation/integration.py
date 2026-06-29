@@ -1272,6 +1272,8 @@ def _mc3d_plane_heating(
     ny: int,
     nx: int,
     nlev: int,
+    day_of_year,
+    seconds_of_day,
 ):
     """3D Monte-Carlo shortwave + gray longwave heating for the plane dycore.
 
@@ -1368,7 +1370,19 @@ def _mc3d_plane_heating(
         rayleigh_td = mie_lut_cdf = mie_lut_ang = band_of_gpt = r_eff_td = None
         incident_flux = jnp.mean(insol_col).reshape(1)
 
-    key = jax.random.PRNGKey(int(mc_cfg.seed))
+    # Fold the time (day-of-year + integer second-of-day) into the MC seed so
+    # each timestep draws an INDEPENDENT photon realization. With a fixed seed
+    # the same per-column speckle pattern repeats every step, so its Monte-Carlo
+    # error never averages out over a time integration (it is identical, not
+    # independent, each step). Folding day then second decorrelates across both
+    # days and within a day (assumes dt >= 1 s; finer steps in the same integer
+    # second share a realization).
+    _doy_key = jnp.asarray(day_of_year).astype(jnp.int32)
+    _sod_key = jnp.asarray(seconds_of_day).astype(jnp.int32)
+    _t_base = jax.random.fold_in(
+        jax.random.fold_in(jax.random.PRNGKey(int(mc_cfg.seed)), _doy_key),
+        _sod_key)
+    key = _t_base
     dT_dt_sw, _sfc_sw, _tod = plane_adapter.compute_plane_sw_heating(
         tau_td, ssa_td, g_td, incident_flux, grid, z_half_td, rho_total,
         mu0=mu0, albedo=gray_cfg.sfc_albedo, config=mc_cfg, key=key,
@@ -1376,7 +1390,9 @@ def _mc3d_plane_heating(
         mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff_td=r_eff_td)
 
     # --- longwave: 3D-MC thermal emission ---
-    key_lw = jax.random.PRNGKey(int(mc_cfg.seed) + 1)
+    key_lw = jax.random.fold_in(
+        jax.random.fold_in(
+            jax.random.PRNGKey(int(mc_cfg.seed) + 1), _doy_key), _sod_key)
     if rrtmgp_solver is not None:
         # Phase 3b: RRTMGP per-g-point spectral LW optics + Planck (cloud-aware).
         abs_od, planck, planck_bot, planck_top, planck_sfc = (
@@ -1530,6 +1546,7 @@ def _make_plane_radiation(
                 p_full_col, p_half_col, T_col, T_sfc_col, lat_col, q_v_col,
                 q_cloud_col, q_ice_col, n_cloud_col, n_ice_col,
                 insol_col, cos_sza_col, rho_total, ny, nx, nlev,
+                _time["day_of_year"], _time["seconds_of_day"],
             )
         else:
             rad_out = _call_radiation_backend(
