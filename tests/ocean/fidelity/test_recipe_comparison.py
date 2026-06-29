@@ -30,12 +30,28 @@ def test_every_recipe_is_a_column():
             assert f"`{name}`" in rendered, f"recipe {name!r} missing from comparison table"
 
 
-def test_oracle_recipe_factories_are_columns():
-    """The oracle-recipe factories (oceananigans, mitgcm) are not in list_recipes()
-    but MUST appear — they are the dycores the case board validates against."""
+def test_oracle_dycores_are_catalog_recipes():
+    """The oracle dycores are now ordinary catalog recipes (single source) — they
+    appear in list_recipes() and as columns, no factory special-casing."""
+    assert "oceananigans_v1" in list_recipes("latlon")
+    assert "mitgcm_v1" in list_recipes("latlon")
     rendered = _gen().render()
-    for name in ("oceananigans*", "mitgcm*"):
-        assert f"`{name}`" in rendered, f"oracle recipe {name!r} missing from comparison table"
+    assert "`oceananigans_v1`" in rendered and "`mitgcm_v1`" in rendered
+
+
+def test_factory_defaults_match_catalog_single_source():
+    """The factory's effective dycore values equal the catalog recipe it sources
+    from — proves there is ONE source (no drift between factory + catalog)."""
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.recipes import get_recipe
+    from legoesm.ocean.fidelity.oceananigans_recipe import oceananigans_canonical_ocean_config
+    from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
+    eos = LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0)
+    for name, cfg in (("oceananigans_v1", oceananigans_canonical_ocean_config(eos_linear=eos)),
+                      ("mitgcm_v1", mitgcm_canonical_ocean_config(eos_linear=eos))):
+        for field, val in get_recipe(name, "latlon").items():
+            assert cfg.flat_get(field) == val, (
+                f"{name}: factory {field}={cfg.flat_get(field)!r} != catalog {val!r} (drift!)")
 
 
 def test_committed_markdown_is_fresh():

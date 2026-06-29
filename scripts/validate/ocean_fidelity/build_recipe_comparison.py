@@ -1,15 +1,15 @@
 """Render a recipe wiring-comparison table: the dycore-identity config fields of
 every recipe side by side, so the numerical differences between recipes are obvious.
 
-Latlon table: EFFECTIVE dycore values (read via ``flat_get`` from the assembled
-config) for the catalog recipes AND the oracle-recipe factories (oceananigans,
-mitgcm) — which are NOT in ``list_recipes()`` (they are factory functions, not
-catalog entries) but are exactly the dycores the case board validates against.
-MPAS table: the catalog MPAS recipes' declared scheme bundles.
+Latlon table: EFFECTIVE dycore values (read via ``flat_get`` from each config built
+by ``from_flat(**get_recipe(name))``) for every ``list_recipes('latlon')`` catalog
+recipe — which now INCLUDES the oracle dycores ``oceananigans_v1`` / ``mitgcm_v1``
+(their ``*_canonical_ocean_config`` factories source their defaults from these
+catalog entries, so they are ordinary recipes here, no special-casing). MPAS table:
+the catalog MPAS recipes' declared scheme bundles.
 
-DERIVED from the recipe definitions (``get_recipe`` / the oracle factories) — no
-hand-authored data, so it can't drift. Rows where recipes differ are flagged (✏)
-and sorted first.
+DERIVED from the recipe catalog (``get_recipe``) — no hand-authored data, so it
+can't drift. Rows where recipes differ are flagged (✏) and sorted first.
 
 Tier 0: committed at docs/ocean/fidelity/recipe_comparison.md, kept fresh by
 tests/ocean/fidelity/test_recipe_comparison.py (``--check``).
@@ -21,7 +21,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from legoesm.ocean.eos import LinearEOSConfig
 from legoesm.ocean.recipes import get_recipe, list_recipes
 from legoesm.ocean.state import LatLonCGridOceanConfig
 
@@ -37,20 +36,6 @@ _DYCORE_FIELDS = (
     "momentum_flux_scheme",
 )
 
-# Oracle recipes are factory functions, NOT catalog entries — include them explicitly.
-def _eos():
-    return LinearEOSConfig(alpha_T=2.0e-4, beta_S=0.0)
-
-
-def _oracle_latlon_cfgs() -> dict:
-    from legoesm.ocean.fidelity.oceananigans_recipe import oceananigans_canonical_ocean_config
-    from legoesm.ocean.fidelity.mitgcm_recipe import mitgcm_canonical_ocean_config
-    return {
-        "oceananigans*": oceananigans_canonical_ocean_config(eos_linear=_eos()),
-        "mitgcm*": mitgcm_canonical_ocean_config(eos_linear=_eos()),
-    }
-
-
 def _flat(cfg, field: str) -> str:
     try:
         v = cfg.flat_get(field)
@@ -60,10 +45,10 @@ def _flat(cfg, field: str) -> str:
 
 
 def _latlon_table() -> list[str]:
-    # effective config per recipe: catalog via from_flat, oracle via factory.
+    # effective config per recipe: every latlon catalog recipe (now incl. the oracle
+    # dycores oceananigans_v1 / mitgcm_v1) built via from_flat → read via flat_get.
     cfgs: dict = {f"`{n}`": LatLonCGridOceanConfig.from_flat(**get_recipe(n, "latlon"))
                   for n in list_recipes("latlon")}
-    cfgs.update({f"`{n}`": c for n, c in _oracle_latlon_cfgs().items()})
     cols = list(cfgs)
     fields = _DYCORE_FIELDS
 
@@ -75,9 +60,10 @@ def _latlon_table() -> list[str]:
     L = ["## latlon recipes (effective dycore values)",
          "",
          f"{len(cols)} recipes × {len(fields)} dycore-identity fields. "
-         f"**{len(diff)} fields differ** (✏, first). `*` = oracle-recipe factory "
-         "(not a `list_recipes()` catalog entry). Values are EFFECTIVE (defaults "
-         "resolved), so two columns compared = the real numerical difference.",
+         f"**{len(diff)} fields differ** (✏, first). Values are EFFECTIVE (defaults "
+         "resolved), so two columns compared = the real numerical difference. The "
+         "oracle dycores `oceananigans_v1` / `mitgcm_v1` are now ordinary catalog "
+         "recipes (their factories source defaults from them).",
          "",
          "| field | " + " | ".join(cols) + " |",
          "|---|" + "|".join("---" for _ in cols) + "|"]
@@ -131,9 +117,10 @@ def render() -> str:
         "Each recipe is a bundle of dycore-identity numerics choices. This table puts "
         "them side by side: the **✏ rows differ** between recipes (what makes each "
         "numerically distinct); _(shared)_ rows are common. Compare two columns to see "
-        "exactly what changes in the numerics. `*` marks the oracle-recipe factories "
-        "(Oceananigans, MITgcm) — runnable-oracle dycores, not `list_recipes()` "
-        "catalog entries.",
+        "exactly what changes in the numerics. The oracle dycores `oceananigans_v1` / "
+        "`mitgcm_v1` are ordinary catalog recipes here — their "
+        "`*_canonical_ocean_config` factories now source their defaults from the "
+        "catalog (single source).",
         "",
     ]
     L += _latlon_table()

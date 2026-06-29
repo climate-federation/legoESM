@@ -77,7 +77,7 @@ def test_config_is_faithful_baroclinic():
     r = bg.build_baroclinic_gyre_recipe()
     c = r.config
     assert c.eos == "linear" and c.eos_linear.alpha_T == bg.T_ALPHA
-    assert c.A_h == bg.VISC_AH and c.lateral_viscosity_operator == "flux_divergence"
+    assert c.flat_get("A_h") == bg.VISC_AH and c.lateral_viscosity_operator == "flux_divergence"  # #501: A_h nested
     assert c.lateral_side_bc == "no_slip" and c.K_h == bg.DIFF_KH_T
     assert c.barotropic.barotropic_solver == "implicit_unsplit"   # MITgcm-faithful unsplit FS
     assert c.physics.convection.scheme == "enhanced_diffusion"
