@@ -64,24 +64,18 @@ def test_richards_step_conserves_loam():
     assert abs(_richards_residual(loam, 0.0, 5.0e-7)) < 1.0e-3      # drying
 
 
-def test_stiff_clay_drying_is_a_known_convergence_limitation():
-    """KNOWN LIMITATION (documented, not silently hidden): the mixed-form Richards
-    is mass-conservative only AT Picard convergence.  A very stiff clay (n_vg~1.09)
-    converges sub-linearly, so the DRYING step leaks at the fixed default iteration
-    count — this is the residual the Brazil-cerrado realization saw, NOT a flux
-    bug (loam closes exactly; ``solve_richards`` with the GIVEN sink is exact).
-    Follow-up: a convergence-aware / mass-corrected update for n_vg -> 1 soils.
-
-    The gate: the leak must SHRINK with more iterations (proving it IS convergence,
-    not a structural sink/flux error), and stay bounded."""
+def test_stiff_clay_conserves_after_specific_storage_switch():
+    """A very stiff clay (n_vg~1.09) — whose drying step formerly leaked ~0.7 kg/m2
+    at the default iteration count — now CONSERVES at the same max_iter=10, wetting
+    and draining.  Fix: the ParFlow/CliMA specific-storage variable switch makes
+    theta(psi) consistent with the capacity above saturation, so the mixed form
+    conserves without the (non-conservative) theta clip that previously masked the
+    inconsistency.  (Originally misdiagnosed as Picard non-convergence — it was the
+    theta/capacity mismatch.)"""
     clay = SoilHydraulicsConfig(theta_r=_col(0.068), theta_sat=_col(0.38),
                                 alpha_vg=_col(1.0), n_vg=_col(1.09), K_sat=_col(5.56e-8))
-    r10 = abs(_richards_residual(clay, 0.0, 5.0e-7, max_iter=10))
-    r300 = abs(_richards_residual(clay, 0.0, 5.0e-7, max_iter=300))
-    assert r300 < r10, (r10, r300)        # convergence, not a structural leak
-    assert r10 < 5.0                       # bounded (kg/m2/step)
-    # wetting (infiltration-dominated) converges fine even for stiff clay
-    assert abs(_richards_residual(clay, 5.0e-6, 1.0e-7)) < 1.0e-3
+    assert abs(_richards_residual(clay, 0.0, 5.0e-7)) < 1.0e-3      # drying
+    assert abs(_richards_residual(clay, 5.0e-6, 1.0e-7)) < 1.0e-3   # wetting
 
 
 # ── full multilayer step conservation ───────────────────────────────────────

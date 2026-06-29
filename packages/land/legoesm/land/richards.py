@@ -112,29 +112,20 @@ def solve_richards(
 
     theta_n = theta  # θ at time level n (saved for mass conservation)
 
-    # --- Infiltration capacity ---
-    # Darcy: q_max = K_top · (1 − dpsi/dz), with the head gradient
-    # taken across the half-distance from the surface (assumed psi=0)
-    # to the first node at depth ``z_node[0] = 0.5 · dz[0]``:
-    #     grad = (psi[0] − 0) / (0.5 · dz[0]) = psi[0] / (0.5 · dz[0]).
-    # For unsaturated soil (psi[0] < 0) the gradient is negative and
-    # capacity > K_top (suction draws water down).  For ponded /
-    # saturated surfaces (psi[0] ≥ 0) the gradient is positive and the
-    # capacity is reduced — clamping to 0 prevents a positive head from
-    # producing artificially-enhanced infiltration.  Using ``abs(psi)``
-    # would always increase the capacity, which is wrong for ponded
-    # cells (Codex GPT-5 review caught the sign).
-    # Keep the column axis (``[:, :1]`` not ``[:, 0]``) so a PER-COLUMN
-    # ``hydro_config`` (van-Genuchten fields shaped ``(ncol, 1)`` for spatial soil)
-    # broadcasts; squeeze back to ``(ncol,)``.  Bit-identical for a scalar config.
+    # --- Infiltration capacity (Darcy at the surface) ---
+    # q_max = K_top · (1 − dpsi/dz) across the surface half-cell.  NOTE (follow-up):
+    # K_top is the dry top-NODE conductivity, which -> 0 as theta -> theta_r and
+    # nullifies the matric-suction term, so a parched soil under-infiltrates and
+    # sheds rain as infiltration-excess runoff.  The faithful ParFlow/CliMA fix is a
+    # surface ponding-head prognostic (storativity ~1) that buffers the over-
+    # infiltration and an upstream (~K_sat) surface conductivity; using K_sat alone
+    # here (without the pond buffer) over-saturates the soil and breaks the Picard,
+    # so it is deferred to that ponding-head change.  Bit-identical to the prior
+    # behaviour; the specific-storage variable switch (theta_from_psi) is the part
+    # that makes the saturated solve conservative without the theta clip.
     K_top = hydraulic_conductivity(psi[:, :1], theta[:, :1], hydro_config)[:, 0]
     head_grad = psi[:, 0] / (0.5 * dz[0])
     infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
-
-    # Surface runoff: excess over Darcy infiltration capacity.
-    # Do NOT additionally cap by top-layer saturation — the implicit Picard
-    # solve redistributes water downward, so capping here creates spurious
-    # runoff before deeper layers can absorb the infiltrating water.
     flux_infiltrated = jnp.minimum(flux_top, infil_capacity)
     runoff_surface = jnp.maximum(flux_top - flux_infiltrated, 0.0)
 
@@ -231,13 +222,16 @@ def solve_richards(
         # Update psi and theta unconditionally.  Converged columns get
         # near-zero dpsi, so extra iterations are effectively no-ops.
         psi_new = psi_m + dpsi
+        # No theta clip: theta_from_psi is bounded below at theta_r by the van-
+        # Genuchten asymptote, and ABOVE theta_sat it is the physical elastic /
+        # ponding storage (theta_sat + S_s*theta_sat*psi).  Clipping to theta_sat
+        # silently destroyed that ponded water (non-conservative); the specific-
+        # storage variable switch makes the clip unnecessary.
         theta_new = theta_from_psi(psi_new, hydro_config)
-        theta_new = jnp.clip(theta_new, hydro_config.theta_r, hydro_config.theta_sat)
 
         return psi_new, theta_new
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
-    theta_m_init = jnp.clip(theta_m_init, hydro_config.theta_r, hydro_config.theta_sat)
 
     # The Picard body upcasts ``psi_m + dpsi`` to the working precision implied
     # by EVERY float that feeds the Thomas solve (the grid spacings, the
