@@ -81,9 +81,17 @@ Adapt `scripts/cluster/amip/submit_amip_1979_etopo_chain.sh` to a glab/`burst` s
 sbatch: `cd $REPO; source config/amip/amip_production.ginsburg.sh`, call `run_amip.py` as
 above, set `JAX_COMPILATION_CACHE_DIR=$OUTDIR/jax_cache`, re-`sbatch` until `TARGET_DAYS`.
 
-## Open items (yours)
+## Inputs — all staged ✅
 
-- **ESGF account** — the only remaining input gap: observed SST/SIC for the faithful
-  Stage 2 (`stage_amip_realdata.py --print-esgf`). Stages 0–1 (synthetic SST) need none.
-  (ETOPO + ERA5 IC + the forcing deck are all staged locally.)
+Every input is now local under `data/amip/` (gitignored):
+- **ERA5 IC** — `era5_ic_1979-01-01.zarr` (from WB2 ARCO).
+- **ETOPO land** — `etopo_0p25deg.nc` (regridded from pg2328's `etopo_1deg.nc`).
+- **External forcing deck** — `forcing_amip/` (synthetic, units-correct).
+- **Observed SST/SIC** — `tosbcs_…_187001-202212.nc` (degC) + `siconcbcs_…_187001-202212.nc` (%),
+  the real input4MIPs PCMDI-AMIP-1-1-9 bcs, **Globus-staged** from the ALCF ESGF data node
+  (collection `8896f38e…`, `/user_pub_work/input4MIPs/…/PCMDI-AMIP-1-1-9/…/v20230512/`) to a
+  Globus Connect Personal endpoint on this node. No ESGF account was needed (input4MIPs is open);
+  the LLNL/ORNL/ALCF "Directories" endpoints were down, but the ALCF *Data Node* served it.
+
+So **Stage 2 (faithful) is fully runnable** — real IC + real ETOPO land + real observed SST.
 </content>

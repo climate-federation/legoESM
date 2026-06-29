@@ -29,16 +29,16 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${FORCING_DIR:=${DATA}/forcing_amip}"            # generate_amip_forcing.py deck
 
 # --- SST/SIC source -----------------------------------------------------------
-# DEFAULT = the synthetic deck (vars 'sst'/'sic') so Stages 0-1 run with no ESGF.
-# Stage 3 (faithful): set SST_FILE to the input4MIPs PCMDI AMIP II bcs file and
-# SST_VAR/SIC_VAR to the YAML's tosbcs/siconcbcs convention, e.g.
-#   SST_FILE=$DATA/tosbcs_input4MIPs_*_PCMDI-AMIP-1-1-9_gn_*.nc \
-#   SIC_FILE=$DATA/siconcbcs_input4MIPs_*_PCMDI-AMIP-1-1-9_gn_*.nc \
-#   SST_VAR=tosbcs SIC_VAR=siconcbcs source config/amip/amip_production.ginsburg.sh
-: "${SST_FILE:=${FORCING_DIR}/sst_sic_amip_1979-2014.nc}"
-: "${SIC_FILE:=${FORCING_DIR}/sst_sic_amip_1979-2014.nc}"
-: "${SST_VAR:=sst}"
-: "${SIC_VAR:=sic}"
+# DEFAULT = the REAL observed input4MIPs PCMDI AMIP II bcs (tosbcs [degC] / siconcbcs [%],
+# 1870-2022 monthly, 1deg), Globus-staged from the ALCF ESGF data node into $DATA.
+# The loader's units guard converts degC->K and the YAML sic_scale=0.01 does %->fraction.
+# For a quick no-real-SST smoke instead, override with the synthetic deck:
+#   SST_FILE=$DATA/forcing_amip/sst_sic_amip_1979-2014.nc SIC_FILE=$DATA/forcing_amip/sst_sic_amip_1979-2014.nc \
+#   SST_VAR=sst SIC_VAR=sic source config/amip/amip_production.ginsburg.sh
+: "${SST_FILE:=${DATA}/tosbcs_input4MIPs_PCMDI-AMIP-1-1-9_gn_187001-202212.nc}"
+: "${SIC_FILE:=${DATA}/siconcbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc}"
+: "${SST_VAR:=tosbcs}"
+: "${SIC_VAR:=siconcbcs}"
 
 # --- external CMIP6 forcing (synthetic deck by default; drop real input4MIPs in) -
 : "${SOLAR:=${FORCING_DIR}/solar_amip_1979-2014.nc}"
