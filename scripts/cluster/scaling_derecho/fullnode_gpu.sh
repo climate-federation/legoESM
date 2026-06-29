@@ -44,9 +44,19 @@ source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
 # Route-A runtime stack (README Step 1b): GNU cray-mpich the bindings were built
-# against, the CUDA GTL, GPU-aware MPI, and the Cray libmpi loader bridge.
-module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
-export MPICH_GPU_SUPPORT_ENABLED=1
+# against (default 8.1.32) + cuda.  We deliberately do NOT load
+# craype-accel-nvidia80: that module matters only at BUILD time to put the GTL
+# on the link line, and mpi4py already has libmpi_gtl_cuda linked in (verified
+# with `ldd` -> /opt/cray/pe/mpich/8.1.32/gtl/lib/libmpi_gtl_cuda.so.0).  Loading
+# it was an unnecessary env delta vs the validated interactive stack; at runtime
+# GPU-direct only needs the GTL findable (it is) + MPICH_GPU_SUPPORT_ENABLED=1.
+module load gcc cray-mpich cuda 2>/dev/null || true
+export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
+# mpi4jax side: WITHOUT this, mpi4jax stages every halo GPU->host->MPI->host->GPU
+# (it prints "Not using CUDA-enabled MPI" and the scaling curve measures the
+# host-staging path, not GPU-direct -- misleading multi-node numbers).  Override
+# with MPI4JAX_USE_CUDA_MPI=0 only if the overlay's mpi4jax is NOT a CUDA build.
+export MPI4JAX_USE_CUDA_MPI="${MPI4JAX_USE_CUDA_MPI:-1}"
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 
 # --- Per-grid sweep (raise on cube / unknown: dispatch hardening) ------------
@@ -108,6 +118,7 @@ echo "=== $GRID GPU scaling: modes=[$MODES] prec=[$PRECISIONS] gpus=[$GPU_RANKS]
 echo "    physics=$PHYSICS  outdir=$CAMP"
 
 rc_all=0
+skipped=""        # multi-node points dropped because the allocation was too small
 for PREC in $PRECISIONS; do
  for MODE in $MODES; do
   # weak: resolution auto-derived per rank count (--resolution 0); no res sweep.
@@ -115,7 +126,9 @@ for PREC in $PRECISIONS; do
   for R in $RES_LIST; do
     for N in $GPU_RANKS; do
       if [ "$N" -gt "$TOTAL_GPUS" ]; then
-        echo "--- $GRID $MODE $PREC res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP (not enough GPUs allocated) ---"
+        echo "!!! WARNING: $GRID $MODE $PREC res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP" >&2
+        echo "    (this point needs a larger allocation: NODES=$(( (N + 3) / 4 )) -> select spanning $(( (N + 3) / 4 )) node(s); see submit_fullnode.sh)" >&2
+        skipped="${skipped} ${MODE}/${PREC}/res${R}/N${N}"
         continue
       fi
       echo "--- $GRID $MODE $PREC res=$R gpus=$N ---"
@@ -133,6 +146,12 @@ done
 
 "$PY" scripts/bench/aggregate_bcw_scaling.py \
     --root "$CAMP" --out "$CAMP/${GRID}_gpu_tidy.csv"
+
+if [ -n "$skipped" ]; then
+    echo "=== INCOMPLETE SWEEP: TOTAL_GPUS=$TOTAL_GPUS capped these points ===" >&2
+    for s in $skipped; do echo "    SKIPPED $s" >&2; done
+    echo "    Resubmit with more nodes (NODES>=2 in submit_fullnode.sh) to fill them." >&2
+fi
 
 echo "=== DONE rc=$rc_all ===   CSV: $CAMP/${GRID}_gpu_tidy.csv"
 exit $rc_all
