@@ -28,11 +28,17 @@
 #     snow-albedo feedback (snow tracked thermodynamically but radiatively
 #     invisible); snow_albedo_feedback lives in the full land model, so it
 #     comes bundled with the land-model choice, NOT a standalone flag.
-#   * convective_cloud: OFF in the YAML. A 30-day C48 A/B (jobs 25929869 ON vs
-#     25929870 OFF) showed ON warms the tropics only +0.55 K while pushing albedo
-#     0.295->0.370 and OLR 234.7->213.3 (~25 W/m^2 off CERES); SBM-alone is
-#     CMIP6-class (albedo 0.295 vs 0.290). The tropical cold bias is a convective-
-#     heating / surface-flux issue, not cloud-radiative.
+#   * convective_cloud: the tracked YAML now ships TRUE (mirror the canonical
+#     tuned base config/cmip/cmip_tuned_physics.yaml for parameter-identity with
+#     the coupled CMIP slab). Prescribed-SST AMIP SCIENCE runs OVERRIDE it to
+#     FALSE (best TOA): a 30-day C48 A/B (jobs 25929869 ON vs 25929870 OFF) showed
+#     ON warms the tropics only +0.55 K while pushing albedo 0.295->0.370 and OLR
+#     234.7->213.3 (~25 W/m^2 off CERES); SBM-alone is CMIP6-class (albedo 0.295
+#     vs 0.290). `--convective-cloud` is a one-directional store_true and cannot
+#     flip the YAML's true back off, so the OFF runner (amip_cmip6_chain.sbatch)
+#     uses a tiny `include: amip_production.yaml` + `convective_cloud: false`
+#     override. The residual tropical cold bias is a convective-heating /
+#     surface-flux issue, not cloud-radiative.
 # =============================================================================
 
 # --- Machine-specific paths (Levante defaults; override via the environment) ---
