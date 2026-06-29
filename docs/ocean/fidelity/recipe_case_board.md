@@ -1,10 +1,12 @@
 # Ocean case board
 
-**GENERATED — do not edit by hand.** Source: `packages/ocean/legoesm/ocean/fidelity/recipe_case_board.py`; regenerate with `scripts/validate/ocean_fidelity/build_recipe_case_board.py`. Completeness + freshness are enforced by `tests/ocean/fidelity/test_recipe_case_board.py`.
+**GENERATED — do not edit by hand.** Source: `packages/ocean/legoesm/ocean/fidelity/recipe_case_board.py`; regenerate with `scripts/validate/ocean_fidelity/build_recipe_case_board.py`. Completeness + freshness enforced by `tests/ocean/fidelity/test_recipe_case_board.py`.
 
-One unified inventory of every ocean case (idealized + oracle-comparison, no distinction): what it tests, whether a true oracle exists in another model, and whether legoESM reproduces it. Holes (`⬜ todo`) are the roadmap; `⛔ blocked` links the issue explaining the limitation. The **tests** column is a physics summary so duplicate/overlapping cases are visible (use it to retire repeats).
+One unified inventory of every ocean case (idealized + oracle-comparison, no distinction): what it tests, whether a true oracle exists in another model, and — per recipe — whether legoESM reproduces it. One experiment run under many recipes = many result rows (below) / many filled cells (matrix), NOT many cases. Holes (`⬜ todo`) are the roadmap; `⛔ blocked` cites the issue. The **tests** column is a physics summary so duplicate/overlapping cases are visible (use it to retire repeats).
 
-**27 cases** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 22
+**27 cases, 30 case×recipe results** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 25
+
+## Detail (one row per case × recipe)
 
 | case | tests | grids | oracle | recipe | status | note |
 |---|---|---|---|---|---|---|
@@ -22,7 +24,10 @@ One unified inventory of every ocean case (idealized + oracle-comparison, no dis
 | `eady_uniform` | classical Eady instability (uniform N², linear shear), re-entrant channel | latlon_channel, mpas_channel | analytic Eady growth rate | `eady_weno5_v1` | ⬜ todo | analytic growth-rate benchmark |
 | `geostrophic_adjustment` | geostrophic adjustment from a temperature front; free-surface coupling | latlon_cgrid, cubed_sphere, mpas | Oceananigans | `oceananigans` | ⬜ todo | comparison driver exists; not re-assessed post-#501 |
 | `global_barotropic_wind` | global 3-belt wind-stress barotropic circulation | latlon_cgrid, mpas | _(idealized — none)_ | `default_wright_v1` | ⬜ todo | matrix-covered |
-| `global_omip` | global forced (OMIP) ocean climate; SST/MOC vs reference GCM | latlon_cgrid (tripole), mpas | Veros / NEMO (OMIP) | `veros_faithful_v1 / nemo_v1 / omip_nemo_match_*` | ⬜ todo | OMIP NEMO-match recipes exist (SST RMSE ~0.8–1.2) — re-confirm via scorecard |
+| `global_omip` | global forced (OMIP) ocean climate; SST/MOC vs reference GCM | latlon_cgrid (tripole), mpas | Veros / NEMO (OMIP) | `veros_faithful_v1` | ⬜ todo | Veros global transfer (1°/4°/flexible) — re-confirm via scorecard |
+|  |  |  |  | `nemo_v1` | ⬜ todo | NEMO-faithful dycore — re-confirm via scorecard |
+|  |  |  |  | `omip_nemo_match_tripole_v1` | ⬜ todo | tripole eORCA025 NEMO-climate-match (SST RMSE ~1.15) |
+|  |  |  |  | `omip_nemo_match_mpas_v1` | ⬜ todo | MPAS ico6 NEMO-climate-match (SST RMSE ~0.84, best grid) |
 | `global_overturning` | global baroclinic overturning (Wolfe & Cessi 2010 idealized THC) | latlon_cgrid, mpas | Wolfe & Cessi 2010 (idealized) | `legoesm_linear_v1` | ⬜ todo | idealized THC benchmark |
 | `gridmode_decay` | 2Δx grid-mode decay rate (numerical dissipation probe) | latlon_cgrid | Oceananigans | `oceananigans` | ⬜ todo | diagnostic comparison; not re-assessed |
 | `held_larichev` | Held–Larichev eddying channel; APE→KE cascade saturation (k⁻³) | latlon_channel, mpas_channel | Held & Larichev (spectral law) | `default_wright_v1` | ⬜ todo | spectral-slope benchmark |
@@ -35,3 +40,37 @@ One unified inventory of every ocean case (idealized + oracle-comparison, no dis
 | `phillips_two_layer` | Phillips two-layer baroclinic instability | latlon_cgrid, cubed_sphere, mpas | _(idealized — none)_ | `default_wright_v1` | ⬜ todo | matrix-covered |
 | `rest_state` | rest-state stability / PGF balance (η≈0); conservation control | latlon_cgrid, cubed_sphere, mpas | _(idealized — none)_ | `default_wright_v1` | ⬜ todo | analytic truth (η≈0); covered by matrix — confirm status |
 | `stommel_gyre_tracer` | passive tracer in a wind-driven Stommel gyre (Hecht 2000) | latlon_cgrid, mpas | _(idealized — none)_ | `default_wright_v1` | ⬜ todo | matrix-covered |
+
+## Matrix (case × recipe)
+
+Legend: ✅ verified · 🟩 works · 🟡 partial · ⛔ blocked · ⬜ todo · blank = not run
+
+| case | oceananigans + power_law stack | oceananigans (implicit_cn) | oceananigans (meridionally_flat + upwind3) | oceananigans | veros_faithful_v1 | mitgcm | nemo_v1 | omip_nemo_match_tripole_v1 | omip_nemo_match_mpas_v1 | default_wright_v1 | eady_weno5_v1 | legoesm_linear_v1 | nemo_dino_v1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `baroclinic_adjustment` | ✅ |  |  |  |  |  |  |  |  |  |  |  |  |
+| `barotropic_gyre` |  | ✅ |  |  |  |  |  |  |  |  |  |  |  |
+| `internal_tide` |  |  | ✅ |  |  |  |  |  |  |  |  |  |  |
+| `silvestri_jet_forced` | ⛔ |  |  |  |  |  |  |  |  |  |  |  |  |
+| `bickley_jet` |  | 🟡 |  |  |  |  |  |  |  |  |  |  |  |
+| `acc_channel` |  |  |  |  | ⬜ |  |  |  |  |  |  |  |  |
+| `advection_gyre` |  |  |  |  |  | ⬜ |  |  |  |  |  |  |  |
+| `baroclinic_gyre` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `barotropic_wave` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `dino` |  |  |  |  |  |  |  |  |  |  |  |  | ⬜ |
+| `eady_instability` |  |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
+| `eady_uniform` |  |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
+| `geostrophic_adjustment` |  |  |  | ⬜ |  |  |  |  |  |  |  |  |  |
+| `global_barotropic_wind` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `global_omip` |  |  |  |  | ⬜ |  | ⬜ | ⬜ | ⬜ |  |  |  |  |
+| `global_overturning` |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `gridmode_decay` |  |  |  | ⬜ |  |  |  |  |  |  |  |  |  |
+| `held_larichev` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `inertia_gravity_wave` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `isomip_plus` |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `lock_exchange` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `munk_gyre` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `neverworld2_lite` |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `overflow` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `phillips_two_layer` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `rest_state` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `stommel_gyre_tracer` |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |

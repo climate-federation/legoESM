@@ -1,10 +1,10 @@
 """Render the unified ocean case board (legoesm.ocean.fidelity.recipe_case_board)
-to a Markdown table.
+to Markdown: a detailed flat table (one row per case×recipe) + a pivot matrix
+(case rows × recipe columns — the experiments-×-recipes view).
 
 Source of truth = the ``CASES`` registry in the package module; this only renders.
-Tier 0: the rendered table is committed at docs/ocean/fidelity/recipe_case_board.md
-and kept fresh by tests/ocean/fidelity/test_recipe_case_board.py (which calls
-``--check``).
+Tier 0: the render is committed at docs/ocean/fidelity/recipe_case_board.md and kept
+fresh by tests/ocean/fidelity/test_recipe_case_board.py (which calls ``--check``).
 
 Usage::
 
@@ -18,49 +18,88 @@ import argparse
 import sys
 from pathlib import Path
 
-from legoesm.ocean.fidelity.recipe_case_board import CASES, VERIFIED, WORKS, PARTIAL, BLOCKED, TODO, NA
+from legoesm.ocean.fidelity.recipe_case_board import (
+    CASES, all_recipes, VERIFIED, WORKS, PARTIAL, BLOCKED, TODO, NA)
 
 _BADGE = {VERIFIED: "✅ verified", WORKS: "🟩 works", PARTIAL: "🟡 partial",
           BLOCKED: "⛔ blocked", TODO: "⬜ todo", NA: "— n/a"}
-# Sort: assessed-and-interesting first (verified, blocked, partial), then works, todo, n/a; then by name.
+_GLYPH = {VERIFIED: "✅", WORKS: "🟩", PARTIAL: "🟡", BLOCKED: "⛔", TODO: "⬜", NA: "—"}
+# Sort cases by their "best" result status, then name.
 _ORDER = {VERIFIED: 0, BLOCKED: 1, PARTIAL: 2, WORKS: 3, TODO: 4, NA: 5}
 
 _DEFAULT_OUT = Path("docs/ocean/fidelity/recipe_case_board.md")
 
 
+def _case_rank(c: dict) -> int:
+    return min((_ORDER.get(r["status"], 9) for r in c["results"]), default=9)
+
+
 def render() -> str:
-    rows = sorted(CASES, key=lambda c: (_ORDER.get(c["status"], 9), c["case"]))
-    n = len(rows)
-    by = {s: sum(1 for c in CASES if c["status"] == s) for s in _BADGE}
-    lines = [
+    cases = sorted(CASES, key=lambda c: (_case_rank(c), c["case"]))
+    n_cases = len(cases)
+    n_results = sum(len(c["results"]) for c in cases)
+    by: dict[str, int] = {s: 0 for s in _BADGE}
+    for c in cases:
+        for r in c["results"]:
+            by[r["status"]] = by.get(r["status"], 0) + 1
+
+    L = [
         "# Ocean case board",
         "",
         "**GENERATED — do not edit by hand.** Source: "
         "`packages/ocean/legoesm/ocean/fidelity/recipe_case_board.py`; "
         "regenerate with `scripts/validate/ocean_fidelity/build_recipe_case_board.py`. "
-        "Completeness + freshness are enforced by "
+        "Completeness + freshness enforced by "
         "`tests/ocean/fidelity/test_recipe_case_board.py`.",
         "",
         "One unified inventory of every ocean case (idealized + oracle-comparison, no "
         "distinction): what it tests, whether a true oracle exists in another model, and "
-        "whether legoESM reproduces it. Holes (`⬜ todo`) are the roadmap; `⛔ blocked` "
-        "links the issue explaining the limitation. The **tests** column is a physics "
-        "summary so duplicate/overlapping cases are visible (use it to retire repeats).",
+        "— per recipe — whether legoESM reproduces it. One experiment run under many "
+        "recipes = many result rows (below) / many filled cells (matrix), NOT many cases. "
+        "Holes (`⬜ todo`) are the roadmap; `⛔ blocked` cites the issue. The **tests** "
+        "column is a physics summary so duplicate/overlapping cases are visible (use it "
+        "to retire repeats).",
         "",
-        f"**{n} cases** — "
-        + ", ".join(f"{_BADGE[s]}: {by[s]}" for s in (VERIFIED, BLOCKED, PARTIAL, WORKS, TODO, NA) if by[s]),
+        f"**{n_cases} cases, {n_results} case×recipe results** — "
+        + ", ".join(f"{_BADGE[s]}: {by[s]}"
+                    for s in (VERIFIED, BLOCKED, PARTIAL, WORKS, TODO, NA) if by[s]),
+        "",
+        "## Detail (one row per case × recipe)",
         "",
         "| case | tests | grids | oracle | recipe | status | note |",
         "|---|---|---|---|---|---|---|",
     ]
-    for c in rows:
+    for c in cases:
         oracle = c["oracle"] or "_(idealized — none)_"
         grids = ", ".join(c["grids"]) if c["grids"] else "—"
-        lines.append(
-            f"| `{c['case']}` | {c['tests']} | {grids} | {oracle} | "
-            f"`{c['recipe']}` | {_BADGE[c['status']]} | {c['note']} |")
-    lines.append("")
-    return "\n".join(lines)
+        for i, r in enumerate(c["results"]):
+            # repeat case metadata only on the first result row (blank thereafter)
+            cse = f"`{c['case']}`" if i == 0 else ""
+            tst = c["tests"] if i == 0 else ""
+            grd = grids if i == 0 else ""
+            orc = oracle if i == 0 else ""
+            L.append(f"| {cse} | {tst} | {grd} | {orc} | `{r['recipe']}` | "
+                     f"{_BADGE[r['status']]} | {r['note']} |")
+
+    # --- pivot matrix: case × recipe ---
+    recipes = all_recipes()
+    L += [
+        "",
+        "## Matrix (case × recipe)",
+        "",
+        "Legend: " + " · ".join(f"{_GLYPH[s]} {s}" for s in
+                                 (VERIFIED, WORKS, PARTIAL, BLOCKED, TODO)) + " · blank = not run",
+        "",
+        "| case | " + " | ".join(recipes) + " |",
+        "|---|" + "|".join("---" for _ in recipes) + "|",
+    ]
+    for c in cases:
+        status_by_recipe = {r["recipe"]: r["status"] for r in c["results"]}
+        cells = [_GLYPH[status_by_recipe[rec]] if rec in status_by_recipe else ""
+                 for rec in recipes]
+        L.append(f"| `{c['case']}` | " + " | ".join(cells) + " |")
+    L.append("")
+    return "\n".join(L)
 
 
 def main() -> int:
@@ -74,13 +113,14 @@ def main() -> int:
         existing = args.output.read_text() if args.output.exists() else None
         if existing != content:
             print(f"STALE: {args.output} is out of date — run "
-                  "`build_recipe_case_board.py` and commit.", file=sys.stderr)
+                  "build_recipe_case_board.py and commit.", file=sys.stderr)
             return 1
         print(f"OK: {args.output} is up to date.")
         return 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(content)
-    print(f"wrote {args.output} ({len(CASES)} cases)")
+    print(f"wrote {args.output} ({len(CASES)} cases, "
+          f"{sum(len(c['results']) for c in CASES)} results)")
     return 0
 
 

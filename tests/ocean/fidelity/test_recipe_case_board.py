@@ -41,7 +41,9 @@ def _all_board_names() -> set[str]:
 
 def test_status_vocabulary_valid():
     for c in CASES:
-        assert c["status"] in VALID_STATUSES, f"{c['case']}: bad status {c['status']!r}"
+        for r in c["results"]:
+            assert r["status"] in VALID_STATUSES, (
+                f"{c['case']}/{r['recipe']}: bad status {r['status']!r}")
 
 
 def test_no_duplicate_case_names():
@@ -51,10 +53,21 @@ def test_no_duplicate_case_names():
 
 
 def test_required_fields_present():
-    req = {"case", "tests", "grids", "oracle", "recipe", "status", "note"}
+    req = {"case", "tests", "grids", "oracle", "results"}
+    res_req = {"recipe", "status", "note"}
     for c in CASES:
-        missing = req - c.keys()
-        assert not missing, f"{c['case']}: missing fields {missing}"
+        assert not (req - c.keys()), f"{c['case']}: missing fields {req - c.keys()}"
+        assert c["results"], f"{c['case']}: must have at least one recipe result"
+        for r in c["results"]:
+            assert not (res_req - r.keys()), f"{c['case']}: result missing {res_req - r.keys()}"
+
+
+def test_no_duplicate_recipe_per_case():
+    """Within a case, each recipe appears at most once (the matrix cell is unique)."""
+    for c in CASES:
+        recs = [r["recipe"] for r in c["results"]]
+        dupes = {x for x in recs if recs.count(x) > 1}
+        assert not dupes, f"{c['case']}: duplicate recipe result(s) {dupes}"
 
 
 def test_every_registered_experiment_has_a_row():
@@ -78,10 +91,12 @@ def test_every_oracle_comparison_has_a_row():
 
 
 def test_blocked_cells_cite_a_reference():
-    """A `blocked` cell must point at an issue/PR explaining the limitation."""
+    """A `blocked` result must point at an issue/PR explaining the limitation."""
     for c in CASES:
-        if c["status"] == "blocked":
-            assert "#" in c["note"], f"{c['case']}: blocked cell must cite an issue (#NNN)"
+        for r in c["results"]:
+            if r["status"] == "blocked":
+                assert "#" in r["note"], (
+                    f"{c['case']}/{r['recipe']}: blocked cell must cite an issue (#NNN)")
 
 
 def test_committed_markdown_is_fresh():
