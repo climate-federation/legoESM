@@ -176,7 +176,11 @@ def main():
     dt = spec_cfg.dt
     n_steps_seg = args.days_per_month * int(_SECONDS_PER_DAY / dt)
 
-    era5_cfg = TrainingERA5Config(zarr_store=cfg.get("zarr_store", TrainingERA5Config.zarr_store))
+    # NOTE: ``TrainingERA5Config.zarr_store`` on the CLASS is a NamedTuple field
+    # descriptor (_tuplegetter), not the default string — read the default from
+    # an INSTANCE instead.
+    _zarr = cfg.get("zarr_store")
+    era5_cfg = TrainingERA5Config(zarr_store=_zarr) if _zarr else TrainingERA5Config()
     ds = open_era5_zarr(era5_cfg.zarr_store)
 
     # --- IC: start-year January ---
