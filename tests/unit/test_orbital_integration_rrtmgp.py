@@ -16,6 +16,8 @@ Run with JAX_ENABLE_X64=1.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -25,13 +27,16 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+import legoesm.atmosphere.physics.radiation.integration as rad_int
 from legoesm.atmosphere.physics.radiation.config import (
+    GrayRadiationConfig,
     RadiationConfig,
     RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.integration import (
     _call_radiation_backend,
     _compute_insolation,
+    make_radiation_physics,
 )
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -155,3 +160,71 @@ def test_compute_insolation_returns_eccf_per_branch():
                               orbit=orbit)
     *_, eccf_rce = _compute_insolation(lat, cfg_rce, day_of_year=day)
     assert float(eccf_rce) == 1.0
+
+
+class _StopAfterBackend(Exception):
+    """Sentinel: stop the radiation_fn right after the backend call so we test
+    the eccf wiring without needing a real SH transform / spectral state."""
+
+
+def _spectral_pe_ducks(n_lat=4, n_lon=6, nlev=3):
+    grid = SimpleNamespace(lat=jnp.linspace(-1.2, 1.2, n_lat),
+                           lon=jnp.linspace(0.0, 6.0, n_lon))
+    p_s = jnp.full((n_lat, n_lon), 1.0e5)
+
+    class _Sigma:
+        n_levels = nlev
+
+        def pressure_at_full(self, ps):
+            return jnp.broadcast_to(jnp.linspace(3e4, 9e4, nlev),
+                                    (n_lat, n_lon, nlev))
+
+        def pressure_at_half(self, ps):
+            return jnp.broadcast_to(jnp.linspace(1e4, 1e5, nlev + 1),
+                                    (n_lat, n_lon, nlev + 1))
+
+    grid_fields = {"T": jnp.full((n_lat, n_lon, nlev), 260.0), "p_s": p_s}
+    ncol = n_lat * n_lon
+    state = SimpleNamespace(
+        tracers={"q_v": jnp.full((ncol, nlev), 0.01)},
+        T=SimpleNamespace(data=jnp.zeros((ncol, nlev))),
+    )
+    return state, grid, _Sigma(), grid_fields
+
+
+@pytest.mark.parametrize("orbital,expect_factor", [(True, None), (False, 1.0)])
+def test_spectral_pe_nondiurnal_forwards_eccf(monkeypatch, orbital, expect_factor):
+    """Regression for the codex round-4 HIGH: the spectral-PE NON-diurnal
+    radiation branch must bind eccf (it shares the ``eccf=eccf`` backend
+    kwarg with the diurnal branch).  Before the fix this raised
+    UnboundLocalError on every non-diurnal spectral run."""
+    from legoesm.atmosphere.physics.radiation.solar import (
+        earth_orbit, earth_sun_distance_factor,
+    )
+
+    captured: dict = {}
+
+    def _spy(**kw):
+        captured["eccf"] = kw.get("eccf")
+        raise _StopAfterBackend
+
+    monkeypatch.setattr(rad_int, "_call_radiation_backend", _spy)
+
+    orbit = earth_orbit() if orbital else None
+    cfg = RadiationConfig(
+        scheme="gray", diurnal_cycle=False, orbit=orbit,
+        # perpetual_equinox=False forces the daily-mean (orbital) branch.
+        gray=GrayRadiationConfig(perpetual_equinox=False),
+    )
+    fn = make_radiation_physics(cfg, model_type="spectral_pe")
+    state, grid, sigma, grid_fields = _spectral_pe_ducks()
+
+    day = 3.0  # perihelion
+    with pytest.raises(_StopAfterBackend):
+        fn(state, grid, sigma, grid_fields=grid_fields,
+           forcing={"day_of_year": day})
+
+    eccf = float(captured["eccf"])
+    ref = (float(earth_sun_distance_factor(day, earth_orbit()))
+           if orbital else expect_factor)
+    assert eccf == pytest.approx(ref, rel=1e-9)

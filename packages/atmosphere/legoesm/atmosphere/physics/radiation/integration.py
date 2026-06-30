@@ -1961,7 +1961,7 @@ def _make_spectral_pe_radiation(
                 seconds_of_day=secs_eff,
             )
         else:
-            insol_1d, _, f_day_1d, _ = _compute_insolation(
+            insol_1d, _, f_day_1d, eccf = _compute_insolation(
                 lat, radiation_config,
                 day_of_year=day_eff,
                 seconds_of_day=secs_eff,
