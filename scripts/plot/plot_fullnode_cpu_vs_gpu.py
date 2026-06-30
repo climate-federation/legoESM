@@ -62,6 +62,13 @@ def group(rows, metric: str = "sypd"):
         backend = str(r.get("backend", "")).upper()
         if not grid or backend not in known:
             continue
+        # Strong-scaling only: weak-scaling rows (mode='weak') share the same
+        # grid/backend/resolution columns and would otherwise pollute the strong
+        # curves (each weak point is a different problem size at a different
+        # rank count).  A missing/blank mode is treated as strong so older CSVs
+        # that predate the column still plot.
+        if str(r.get("mode") or "strong").strip().lower() != "strong":
+            continue
         try:
             res = int(float(r.get("resolution")))
             n = int(float(r.get("n_resource") or r.get("n_devices")))

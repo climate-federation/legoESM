@@ -15,14 +15,14 @@ plot = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(plot)
 
 _FIELDS = ["grid", "backend", "precision", "resolution", "n_resource",
-           "n_devices", "sypd", "mcells_per_s"]
+           "n_devices", "sypd", "mcells_per_s", "mode"]
 
 
-def _row(grid, backend, res, n, sypd, mc="100.0"):
+def _row(grid, backend, res, n, sypd, mc="100.0", mode="strong"):
     return {f: "" for f in _FIELDS} | {
         "grid": grid, "backend": backend, "precision": "float32",
         "resolution": res, "n_resource": n, "n_devices": n,
-        "sypd": sypd, "mcells_per_s": mc}
+        "sypd": sypd, "mcells_per_s": mc, "mode": mode}
 
 
 def _write_csv(path, rows):
@@ -53,6 +53,22 @@ def test_group_builds_curves_and_normalises_alias():
     assert g["latlon"][128]["CPU"] == [(1, 2.0), (2, 3.6), (4, 6.0)]
     assert g["latlon"][128]["GPU"] == [(1, 20.0), (2, 36.0)]
     assert g["cubed-sphere"][48]["CPU"] == [(1, 5.0), (2, 9.0)]
+
+
+def test_group_excludes_weak_scaling_rows():
+    # weak-scaling rows share grid/backend/resolution but must NOT pollute the
+    # strong curves; a blank mode is treated as strong (legacy CSVs).
+    rows = _sample_rows() + [
+        _row("latlon", "CPU", "128", "8", "9.0", "80", mode="weak"),
+        _row("latlon", "GPU", "128", "4", "70.0", "400", mode="weak"),
+        _row("latlon", "CPU", "128", "16", "12.0", "120", mode=""),  # blank -> strong
+    ]
+    g = plot.group(rows, "sypd")
+    cpu_ns = [n for n, _ in g["latlon"][128]["CPU"]]
+    gpu_ns = [n for n, _ in g["latlon"][128]["GPU"]]
+    assert 8 not in cpu_ns          # weak CPU point dropped
+    assert gpu_ns == [1, 2]         # weak GPU n=4 point dropped
+    assert 16 in cpu_ns             # blank-mode strong point kept
 
 
 def test_group_drops_nonpositive_and_unknown_backend():
