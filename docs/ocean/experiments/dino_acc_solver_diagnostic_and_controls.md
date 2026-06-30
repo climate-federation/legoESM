@@ -162,3 +162,48 @@ extract `scripts/tmp/_diag_nemo_acc_extract.py`.
 Diagnostics: `scripts/tmp/_diag_{psi_unittest,geoadj_balanced,munk_solver,
 r1_warmstart_check,r1_warmstart_balanced,dino_sill_geom,dino_acc_controls,
 dino_spinup_multiyear,dino_vmix_ablation}.py`.
+
+## Matching NEMO's thermocline physics (M1 S-EOS + M2 TKE stability)
+
+Following the N3 conclusion (the discrepancy is the diabatic thermocline-spin-up
+rate = vertical mixing + EOS), two pieces were addressed.
+
+**M1 — NEMO's simplified S-EOS (Roquet 2015) added.** `eos="nemo_seos"`
+(`NemoSEOSConfig`/`nemo_seos_eos` in `ocean/eos.py`) reproduces NEMO `eosbn2.F90`
+`np_seos` with the Kamm 2025 DINO coefficients (a0=0.165, b0=0.76554, λ1=0.06,
+μ1=1.4970e-4 thermobaric; λ2=μ2=ν=0). Selected via `DINOConfig.eos` / `run_dino
+--eos`. The same PR closed a latent footgun: the KPP/CATKE/convection density —
+interior **and** surface buoyancy α/β — used Wright regardless of `config.eos`;
+the model EOS is now threaded through both grids' mixing (None ⇒ Wright,
+bit-identical). See the commit; codex-reviewed (3 iterations, 3 HIGH fixed).
+
+**M2 — the TKE NaN is a SW channel-corner surface-momentum instability, not the
+low background.** Correcting the N3 note ("tke and constant both NaN"): a 90-day
+NaN-localisation + A_v sweep (`_diag_dino_tke_blowup.py`) shows
+
+| config (A_v_bg) | result |
+| --- | --- |
+| **constant** @1.2e-4 (paper) | **stable ≥90 d** |
+| tke @1.2e-4 (paper) | NaN **day 39** — surface `u` runaway at lat −69.7/lon −49.5 (SW channel∩wall corner) |
+| tke, dt halved (1350 s) | NaN day 40 — **not a CFL** |
+| tke @2e-4 / 3e-4 | NaN day 47 / 57 |
+| tke @**5e-4** | **stable ≥90 d** |
+
+So the instability is **TKE-closure-specific** (constant is stable at the same
+background), **not** a CFL (halving dt doesn't help), and a slow (~6-day e-fold)
+surface-momentum runaway at the wind-shadowed SW corner (channel wind τ→0 at
+−70°). Raising the vertical-viscosity background to ~5e-4 (4× the paper's 1.2e-4)
+**suppresses** it — the NaN-day grows smoothly with viscosity then crosses to
+stable. The tracer background `K_v_bg` (the thermocline-relevant mixing) is left
+at the paper value, so the thermocline comparison stays valid. (NB: TKE's K_M
+floor ≥ kappaM_min = A_v_bg, so its momentum viscosity is already ≥ constant's;
+the destabiliser is the closure's spatially-varying convective K transient at the
+corner, masked by a higher uniform floor.)
+
+**M3 — side-by-side (running).** `_diag_dino_thermocline_sidebyside.py` runs
+kpp/constant/tke × wright/nemo_seos for 4 yr (tke at A_v_bg=5e-4) and reports
+yearly ACC + a thermocline-core-depth proxy vs NEMO (62,66,74,90,101,110), to see
+which of {EOS, closure} reduces the over-deepening.
+
+M1/M2 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_tke_{blowup,avsweep}.sbatch`.
