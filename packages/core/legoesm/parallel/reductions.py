@@ -208,6 +208,99 @@ def mpi_stack_outside_tested_range() -> bool:
     return not (in_jax and in_mpi4jax)
 
 
+# --- mpi4jax GPU transport (device-direct vs host-staged) -------------------
+# mpi4jax decides, once per process, whether a halo ``sendrecv`` hands the
+# on-device buffer straight to (GPU-aware) MPI or first copies
+# device->host->device.  The switch is the env var ``MPI4JAX_USE_CUDA_MPI``
+# (read in mpi4jax's decorators): unset/falsy -> HOST-STAGED (always safe, but
+# the per-exchange host round-trip caps multi-GPU scaling); truthy ->
+# GPU-DIRECT (fast, but segfaults if mpi4jax has no CUDA extension or the MPI is
+# not GPU-aware).  legoESM hands device arrays to ``sendrecv`` unconditionally,
+# so on a GPU backend this choice is otherwise INVISIBLE -- a silent host-stage
+# looks like "the halo works but doesn't scale".  ``mpi4jax.has_cuda_support()``
+# reports whether the CUDA extension was built in; a missing or raising
+# predicate is treated as UNPROVEN (we fail closed when GPU-direct is requested).
+_GPU_TRANSPORT_BACKENDS = ("gpu", "cuda", "rocm")
+_mpi4jax_transport_warned = False
+
+_MPI4JAX_NO_CUDA_EXT_MSG = (
+    "MPI4JAX_USE_CUDA_MPI is set (GPU-direct halo exchange requested) on a GPU "
+    "backend, but this mpi4jax does not report usable CUDA support "
+    "(mpi4jax.has_cuda_support() returned False or could not be called): handing "
+    "an on-device sendrecv buffer to MPI would error or segfault. Rebuild "
+    "mpi4jax with CUDA against the GPU-aware Cray MPICH "
+    "(scripts/cluster/scaling_derecho/README.md), or unset MPI4JAX_USE_CUDA_MPI "
+    "to use the (slower) host-staged path."
+)
+_MPI4JAX_HOST_STAGED_MSG = (
+    "GPU backend with a CUDA-capable mpi4jax, but MPI4JAX_USE_CUDA_MPI is unset: "
+    "every halo sendrecv copies device->host->device, which caps multi-GPU "
+    "scaling. Export MPI4JAX_USE_CUDA_MPI=1 for GPU-direct halo exchange (also "
+    "needs MPICH_GPU_SUPPORT_ENABLED=1 and the craype-accel-nvidia80 GTL on "
+    "Cray/Slingshot)."
+)
+
+
+def _mpi4jax_transport_action(
+    backend: str, use_cuda_mpi: bool, cuda_built: bool | None
+) -> str:
+    """Decide the halo-transport diagnostic: ``"ok"`` | ``"warn"`` | ``"raise"``.
+
+    Pure (no I/O, no globals) so the policy is unit-testable in isolation.
+
+    * ``"raise"`` -- GPU backend with GPU-direct REQUESTED (``use_cuda_mpi``) but
+      CUDA support not POSITIVELY proven (``cuda_built`` is ``False`` *or*
+      ``None``/unintrospectable): handing an on-device ``sendrecv`` buffer to MPI
+      would error or segfault, so fail CLOSED before the first halo exchange.
+    * ``"warn"``  -- GPU backend, the toggle UNSET, and a CUDA-capable mpi4jax:
+      the halo silently host-stages (device<->host copy), capping GPU scaling.
+    * ``"ok"``    -- CPU/TPU (toggle irrelevant); a proven GPU-direct run; or a
+      host-staged run whose build offers no usable CUDA path anyway (nothing
+      actionable to say).
+    """
+    if backend not in _GPU_TRANSPORT_BACKENDS:
+        return "ok"
+    if use_cuda_mpi:
+        # GPU-direct demanded: only a positive proof of CUDA support is safe.
+        # ``None`` (predicate missing/raising) is NOT proof -> fail closed.
+        return "ok" if cuda_built is True else "raise"
+    # Toggle unset -> host-staged (safe). Nudge only when GPU-direct is actually
+    # available; stay quiet when it is unavailable or cannot be proven.
+    return "warn" if cuda_built is True else "ok"
+
+
+def check_mpi4jax_transport(mpi4jax) -> None:
+    """Surface the mpi4jax GPU halo transport mode.
+
+    Called from every checked entry point that can issue a device-array MPI op:
+    :func:`require_mpi_stack` (collectives) and the halo sendrecv choke point
+    :func:`legoesm.parallel.halo_exchange.get_sendrecv_vjp`.  Trace-safe: pure
+    Python, no JAX ops.
+    The hard-error condition is RECOMPUTED on every call (never latched) so a
+    later ``MPI4JAX_USE_CUDA_MPI`` / backend / build change cannot slip a
+    GPU-direct misconfiguration past the preflight; only the advisory
+    host-staging warning is rate-limited to once per process.
+    """
+    global _mpi4jax_transport_warned
+    backend = jax.default_backend()
+    if backend not in _GPU_TRANSPORT_BACKENDS:
+        return  # CPU/TPU: the device-direct toggle is moot; never poke mpi4jax.
+    try:
+        cuda_built: bool | None = bool(mpi4jax.has_cuda_support())
+    except Exception:
+        cuda_built = None  # predicate missing/raising -> CUDA support UNPROVEN
+    action = _mpi4jax_transport_action(
+        backend,
+        _env_flag_true("MPI4JAX_USE_CUDA_MPI"),
+        cuda_built,
+    )
+    if action == "raise":
+        raise ImportError(_MPI4JAX_NO_CUDA_EXT_MSG)
+    if action == "warn" and not _mpi4jax_transport_warned:
+        _mpi4jax_transport_warned = True
+        warnings.warn(_MPI4JAX_HOST_STAGED_MSG, RuntimeWarning, stacklevel=2)
+
+
 def require_mpi_stack():
     """Return (mpi4jax, MPI) or raise a clear ImportError."""
     missing = []
@@ -228,6 +321,7 @@ def require_mpi_stack():
         mpi4jax.__version__,
         strict=_env_flag_true("LEGOESM_MPI_STRICT_COMPAT"),
     )
+    check_mpi4jax_transport(mpi4jax)
     return mpi4jax, MPI
 
 
