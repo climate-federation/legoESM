@@ -47,7 +47,7 @@ def test_insolation_bounded_diurnal():
     lat = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, 19)
     lon = jnp.linspace(0.0, 2.0 * jnp.pi, 19)
     for sec in (0.0, 21600.0, 43200.0, 64800.0):
-        insol, _, _ = _compute_insolation(
+        insol, _, _, _ = _compute_insolation(
             lat, cfg, lon=lon, day_of_year=172.0, seconds_of_day=sec,
         )
         a = np.asarray(insol)
@@ -63,7 +63,7 @@ def test_subsolar_column_equals_S0():
     delta = float(solar_declination(day, cfg.gray.obliquity))  # radians
     lat = jnp.array([delta])
     lon = jnp.array([0.0])  # with hour = 12, h = 2*pi*(12/24) + 0 - pi = 0
-    insol, cos_sza, f_day = _compute_insolation(
+    insol, cos_sza, f_day, _ = _compute_insolation(
         lat, cfg, lon=lon, day_of_year=day, seconds_of_day=_NOON_SECONDS,
     )
     assert cos_sza is not None
@@ -78,7 +78,7 @@ def test_night_column_is_zero():
     cfg = RadiationConfig(scheme="gray", diurnal_cycle=True)
     lat = jnp.array([0.0])
     lon = jnp.array([0.0])  # with hour = 0, h = -pi -> cos(zenith) = -cos(delta) < 0
-    insol, cos_sza, _ = _compute_insolation(
+    insol, cos_sza, _, _ = _compute_insolation(
         lat, cfg, lon=lon, day_of_year=172.0, seconds_of_day=_MIDNIGHT_SECONDS,
     )
     assert cos_sza is not None
@@ -92,7 +92,7 @@ def test_daily_mean_bounded():
     cfg = RadiationConfig(scheme="gray", diurnal_cycle=False)
     lat = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, 37)
     for day in (1.0, 80.0, 172.0, 264.0, 355.0):  # solstices + equinoxes
-        insol, cos_sza, f_day = _compute_insolation(lat, cfg, day_of_year=day)
+        insol, cos_sza, f_day, _ = _compute_insolation(lat, cfg, day_of_year=day)
         a = np.asarray(insol)
         assert cos_sza is None       # daily-mean path: no per-step cos_sza
         assert f_day is not None     # daylight fraction returned
