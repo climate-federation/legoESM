@@ -351,7 +351,12 @@ class TestPhysicalBalance:
         grid = grid_t10
         sigma_coord = sigma_5lev
 
-        state0 = isothermal_rest_state_spectral(grid, sigma_coord)
+        # perturbation_amplitude=0.0: a TRUE rest state.  The default (1.0 K) seeds
+        # a Held-Suarez baroclinic-instability perturbation whose (correct) ~0.2
+        # m/s baroclinic response would otherwise be misread as a rest-state
+        # imbalance.  The dycore preserves this exact rest state to ~1e-12.
+        state0 = isothermal_rest_state_spectral(
+            grid, sigma_coord, perturbation_amplitude=0.0)
         config = SpectralPEConfig(
             hyperdiff_coeff=0.0,
             time_integrator="ssp_rk3",
@@ -514,7 +519,11 @@ class TestConservation:
         grid = grid_t10
         sigma_coord = sigma_5lev
 
-        state0 = isothermal_rest_state_spectral(grid, sigma_coord)
+        # perturbation_amplitude=0.0: a TRUE rest state (the default 1.0 K seeds a
+        # baroclinic perturbation; its dynamics inject the 8.7e-8 mass drift this
+        # test was flagging — the inviscid PE itself conserves p_s mass to ~1e-15).
+        state0 = isothermal_rest_state_spectral(
+            grid, sigma_coord, perturbation_amplitude=0.0)
         config = SpectralPEConfig(
             hyperdiff_coeff=0.0,
             time_integrator="ssp_rk3",
