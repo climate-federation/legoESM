@@ -120,10 +120,14 @@ def run(args) -> int:
         args.surfdata, grid, base_cfg, args.start_doy)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
-    synthetic = not (args.forcing_dir and
-                     Path(args.forcing_dir).exists())
-    if synthetic and args.forcing_dir:
-        print(f"(forcing-dir {args.forcing_dir!r} not found; using synthetic forcing)")
+    # Detect real data by the actual Solr stream file (prefix + year), not just
+    # the directory, so a prefix/year mismatch warns loudly instead of silently
+    # falling back to synthetic.
+    solr_file = (Path(args.forcing_dir) / f"{args.prefix}.Solr.{args.year}.nc"
+                 if args.forcing_dir else None)
+    synthetic = not (solr_file and solr_file.exists())
+    if args.forcing_dir and synthetic:
+        print(f"(CRU-JRA Solr file not found: {solr_file}; using synthetic forcing)")
     if synthetic and args.start_doy != 0.0:
         print("(synthetic forcing starts at day 0; --start-doy ignored)")
     dt = float(args.dt)
@@ -134,7 +138,7 @@ def run(args) -> int:
     forcing_xs = stage_forcing(
         lat_rad, lon_rad, model_times_s,
         year=args.year, data_dir=(None if synthetic else args.forcing_dir),
-        k_neighbors=args.k_neighbors, allow_synthetic=True)
+        prefix=args.prefix, k_neighbors=args.k_neighbors, allow_synthetic=True)
     doy_xs = jnp.asarray(model_times_s / _SEC_PER_DAY)
 
     # --- initial state (soil/skin T seeded from the first forcing step). ---
@@ -248,6 +252,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="grid size N (latlon -> N x 2N; ~2deg at N=90)")
     ap.add_argument("--forcing-dir", default="",
                     help="directory with CRU-JRA CLM streams; empty -> synthetic forcing")
+    ap.add_argument("--prefix", default="clmforc.CRUJRAv2.5_0.5x0.5",
+                    help="CRU-JRA CLM filename prefix (<prefix>.{Solr,Prec,TPQWL}.<year>.nc)")
     ap.add_argument("--year", type=int, default=2023, help="CRU-JRA forcing year")
     ap.add_argument("--start-doy", type=float, default=0.0,
                     help="start day-of-year (real forcing); ignored for synthetic")
