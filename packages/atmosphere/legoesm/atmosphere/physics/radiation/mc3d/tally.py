@@ -18,7 +18,7 @@ from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
     STATUS_SFC_ABS,
     STATUS_TOD_UP,
     STATUS_VOL_ABS,
-    _PhotonState,
+    PhotonState,
 )
 
 Array: TypeAlias = jax.Array
@@ -59,7 +59,7 @@ class MC3DResult(NamedTuple):
 
 
 def tally_batch(
-    states: _PhotonState,
+    states: PhotonState,
     geom: PlaneRTGeometry,
     photons_per_column: int,
 ) -> MC3DResult:

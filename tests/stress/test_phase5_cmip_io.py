@@ -151,13 +151,33 @@ class TestCFWriterOmonAday:
         lat = np.linspace(-87.5, 87.5, 8)
         lon = np.linspace(0, 348.75, 16)
         data = np.random.randn(8, 16).astype(np.float32) + 290
+        # Ocean depth levels (metres below sea surface) for the 3-D
+        # Omon variables (thetao/so/uo/vo/wo/rhopoto and the basin
+        # stream functions).  The writer fail-fasts if a depth-
+        # dimensioned variable is written without a depth coordinate,
+        # so dispatch on the declared dimensions exactly as the Lmon
+        # test does for soil-depth fields.
+        ocean_depth = np.array(
+            [5.0, 15.0, 30.0, 60.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0]
+        )
 
-        for var_name in CMOR_TABLES["Omon"]:
-            path = writer.write_field(
-                var_name=var_name, data=data,
-                time=15.0, time_bounds=(0.0, 30.0),
-                lat=lat, lon=lon, table="Omon",
-            )
+        for var_name, entry in CMOR_TABLES["Omon"].items():
+            if "depth" in entry["dimensions"]:
+                depth_data = (
+                    np.random.randn(len(ocean_depth), 8, 16).astype(np.float32)
+                    + 5.0
+                )
+                path = writer.write_field(
+                    var_name=var_name, data=depth_data,
+                    time=15.0, time_bounds=(0.0, 30.0),
+                    lat=lat, lon=lon, depth=ocean_depth, table="Omon",
+                )
+            else:
+                path = writer.write_field(
+                    var_name=var_name, data=data,
+                    time=15.0, time_bounds=(0.0, 30.0),
+                    lat=lat, lon=lon, table="Omon",
+                )
             assert path.exists(), f"Omon {var_name} not written"
 
     def test_aday_variables(self, tmp_path):
