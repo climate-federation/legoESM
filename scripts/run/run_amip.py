@@ -1110,6 +1110,79 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
     return True, None
 
 
+def _apply_aimip_classical_overrides(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Force the AIMIP-classical scheme set + seed it with the trained params.
+
+    When ``--aimip-classical-checkpoint`` is given, force the classical physics
+    scheme set the params were trained against — tiedtke convection, louis
+    turbulence, mcfarlane GWD, xu_randall cloud, and **sundqvist microphysics**
+    — and stash the trained values on ``args._aimip_params`` for the post-setup
+    pipeline injection.  The cloud (xu_randall) flat fields are seeded here
+    because that config is built inline in the pipeline.
+
+    The Sundqvist microphysics is the crux of the column water budget: Tiedtke
+    detrains condensate into ``q_c`` with no precipitation sink of its own, so
+    ``microphysics='none'`` (the CLI default) traps column water — CWV runaway —
+    and feeds unbounded ``q_c`` to the cloud optics.  Forcing the trained
+    Sundqvist scheme closes the budget.  An explicit prognostic-microphysics
+    override (e.g. ``--microphysics morrison``) is respected: its config is left
+    untouched and the trained Sundqvist leaves are not injected (the post-setup
+    block gates injection on ``args.microphysics == 'sundqvist'``).
+
+    No-op (sets ``args._aimip_params=None``) when the flag is unset.
+    """
+    args._aimip_params = None
+    if not getattr(args, "aimip_classical_checkpoint", None):
+        return args
+    import equinox as eqx
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    _p = eqx.tree_deserialise_leaves(
+        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
+    args.convection = "tiedtke"
+    args.turbulence = "louis"
+    args.gravity_wave_drag = "mcfarlane"
+    args.clouds = "xu_randall"
+    if args.microphysics == "none":
+        args.microphysics = "sundqvist"
+    _cc = _p.to_cloud_config()
+    args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
+    args.cloud_rh_crit = float(_cc.rh_crit)
+    args._aimip_params = _p
+    print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
+          f"microphysics={args.microphysics} + "
+          f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # AIMIP-classical was trained on lat-lon C-grid PE; the trained per-scheme
+    # leaves inject onto the finite-volume PhysicsPipeline (cubed_sphere /
+    # latlon).  The MPAS and spectral backends are off-design and differ:
+    #   * spectral REFUSES tiedtke outright — the spectral run loop does not
+    #     thread the physics carry yet (issue #405) and tiedtke is
+    #     profile-prognostic, so _refuse_stateful_physics_unthreaded raises deep
+    #     in setup BEFORE any microphysics sink runs.  Fail early + clear.
+    #   * MPAS rebuilds its PhysicsConfig from config.microphysics at run(), so
+    #     the schemes are forced ON (the water sink DOES close) but with DEFAULT
+    #     leaves — the trained values apply only on the FV path.  Warn loudly.
+    # Gate on the resolved discretization (the supported-backend signal), not the
+    # grid name: an MPAS grid without --discretization mpas is rejected by the
+    # driver support matrix anyway, so warning on it would be over-broad.
+    _disc = getattr(args, "discretization", "centered")
+    if _disc == "spectral":
+        raise SystemExit(
+            "AIMIP-classical forces tiedtke convection, which the spectral run "
+            "loop refuses (issue #405: profile-prognostic physics carry is not "
+            "threaded on spectral) — it would raise deep in setup before the "
+            "microphysics sink runs. Use --grid-type cubed_sphere or latlon for "
+            "the trained AIMIP-classical physics.")
+    if _disc == "mpas":
+        print("AIMIP-classical: WARNING — the MPAS backend rebuilds its "
+              "PhysicsConfig at run() from config.microphysics; the classical "
+              "schemes are forced ON (the water sink closes) but the TRAINED "
+              "leaves apply ONLY on the finite-volume cubed_sphere/latlon path. "
+              "Use --grid-type cubed_sphere or latlon for the trained physics.")
+    return args
+
+
 def main(argv: list[str] | None = None):
     parser = build_arg_parser()
 
@@ -1128,27 +1201,10 @@ def main(argv: list[str] | None = None):
     args = _postprocess_args(args, parser)
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
-    # best-fit trained params used as INITIAL values.  Force the classical scheme
-    # set, load the params, and set the cloud (xu_randall) flat-field overrides
-    # from the trained values (q_c / rh_crit reach the inline CloudConfig); the
-    # per-knob tiedtke / louis / mcfarlane configs are injected onto the built
-    # pipeline post-setup (below).  Stash the loaded params on ``args``.
-    args._aimip_params = None
-    if getattr(args, "aimip_classical_checkpoint", None):
-        import equinox as eqx
-        from legoesm.training.aimip_params import AIMIPClassicalParams
-        _p = eqx.tree_deserialise_leaves(
-            args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
-        args.convection = "tiedtke"
-        args.turbulence = "louis"
-        args.gravity_wave_drag = "mcfarlane"
-        args.clouds = "xu_randall"
-        _cc = _p.to_cloud_config()
-        args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
-        args.cloud_rh_crit = float(_cc.rh_crit)
-        args._aimip_params = _p
-        print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
-              f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # best-fit trained params used as INITIAL values (forces the trained scheme
+    # set incl. sundqvist microphysics; stashes args._aimip_params for the
+    # post-setup pipeline injection below).
+    args = _apply_aimip_classical_overrides(args)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
@@ -1208,9 +1264,22 @@ def main(argv: list[str] | None = None):
         driver.physics.convection_config = _p.to_tiedtke_config()
         driver.physics.turbulence_config = _p.to_louis_config()
         driver.physics.gwd_config = _p.to_mcfarlane_config()
+        # Inject the trained Sundqvist microphysics leaves ONLY when the
+        # resolved scheme is sundqvist (it was forced on above unless the user
+        # passed a different prognostic microphysics, whose config we must not
+        # clobber with sundqvist fields).  The micro_fn was wired at setup from
+        # args.microphysics, so this just swaps the default leaves for trained.
+        _micro_injected = False
+        if args.microphysics == "sundqvist" and \
+                getattr(driver.physics, "micro_config", None) is not None:
+            driver.physics.micro_config = _p.to_sundqvist_config()
+            _micro_injected = True
         if _is_root:
+            _micro_msg = ("sundqvist (microphysics), " if _micro_injected
+                          else "")
             print("AIMIP-classical trained configs injected: tiedtke (convection), "
-                  "louis (turbulence), mcfarlane (GWD); cloud via flat fields.")
+                  "louis (turbulence), mcfarlane (GWD), " + _micro_msg +
+                  "cloud via flat fields.")
 
     if _is_root:
         _print_forcing_activity(args)
