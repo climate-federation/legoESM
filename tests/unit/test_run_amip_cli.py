@@ -502,6 +502,18 @@ def test_tuned_slab_knobs_flow_to_config():
     assert c.cloud_q_c_diagnostic == pytest.approx(3e-4)
     assert c.cloud_rh_crit == 0.8
     assert c.convective_cloud is True
+
+
+def test_aimip_classical_checkpoint_flag():
+    """--aimip-classical-checkpoint round-trips (default None); the trained-param
+    injection itself is validated end-to-end by the AMIP run."""
+    parser = build_arg_parser()
+    assert parser.parse_args(["--dataset", "analytical"]).aimip_classical_checkpoint is None
+    a = parser.parse_args(["--dataset", "analytical",
+                           "--aimip-classical-checkpoint", "x/epoch_0019.eqx"])
+    assert a.aimip_classical_checkpoint == "x/epoch_0019.eqx"
+
+
 def test_max_wallclock_seconds_threads_to_config():
     """--max-wallclock-seconds must wire into OutputConfig.max_wallclock_seconds."""
     parser = build_arg_parser()

@@ -193,6 +193,37 @@ the `craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge themselves
 at runtime, so once the overlay env is built the jobs carry the right
 environment without the manual exports above.
 
+### Slingshot fabric + GPU-direct halo (why a job "runs but doesn't scale")
+
+Two settings the halo exchange needs on Derecho's Slingshot 11 fabric, both
+now wired into the job scripts (#681):
+
+1. **`MPI4JAX_USE_CUDA_MPI=1`** (`fullnode_gpu.sh`). mpi4jax's *default*
+   is to copy each `sendrecv` buffer device→host→device. On the GPU route-A
+   path that host round-trip per exchange **erases multi-GPU scaling** even
+   though the run is numerically correct — the classic "halo works but doesn't
+   speed up" symptom. Setting this hands the on-device buffer straight to
+   GPU-aware cray-mpich. It requires an mpi4jax built **with** CUDA support
+   (Step 1b); if that's missing, `require_mpi_stack()` now raises a clear
+   `ImportError` at startup instead of segfaulting on the first exchange. With
+   a CUDA-capable mpi4jax but the var unset, you get a one-time `RuntimeWarning`
+   telling you the halo is silently host-staging.
+
+2. **`FI_CXI_RX_MATCH_MODE=hybrid`** + `FI_CXI_DEFAULT_CQ_SIZE=131072` +
+   `FI_CXI_DISABLE_HOST_REGISTER=1` (`_env.sh`, so CPU and GPU jobs alike). The
+   nearest-neighbour halo posts many small messages; Slingshot's Cassini NIC
+   offloads tag matching to hardware and, at scale, **aborts** when the match
+   (LE) pool fills — `"LE resources not recovered during flow control.
+   FI_CXI_RX_MATCH_MODE=[hybrid|software] is required"`. `hybrid` falls back to
+   software matching instead of killing the job; the larger CQ absorbs the
+   many concurrent completions; `FI_CXI_DISABLE_HOST_REGISTER=1` keeps the
+   CUDA-aware path from deadlocking on the libfabric MR cache. This is the
+   intended fix for the cross-node `cxil_map: write error` / OFI `injectdata`
+   abort previously documented in `docs/performance/multinode_gpu_direct_cxi.md`.
+   All are `${VAR:-default}` so you can override at `qsub -v`.
+
+---
+
 ## Step 2 — CPU + MPI env (`legoesm-mpi`) for the `main` queue
 
 `mpi4py`/`mpi4jax` **must be built from source against Cray MPICH**, and **with
