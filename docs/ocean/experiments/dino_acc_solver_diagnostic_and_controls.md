@@ -309,6 +309,28 @@ GM actually flattening the channel isopycnals, or is the Visbeck κ / slope-tape
 thermodynamic sweep — the canonical coarse-resolution ACC problem and the explicit
 subject of the Kamm 2025 paper.
 
-M1/M2/M3 + lever diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers}.py`;
-sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers}.sbatch`.
+**GM-effectiveness diagnostic — THE LEVER FOUND: the Visbeck κ_GM is too weak.**
+`_diag_dino_gm_effectiveness.py` (kpp+wright, 2 yr, channel lat −65→−45):
+
+| GM setting | ACC yr1 | ACC yr2 | channel ‖S‖ p95 / max | capped @S_max |
+| --- | --- | --- | --- | --- |
+| OFF | 43 | 92 | — | — |
+| Visbeck base (κ 200–2000) | 45 | 84 | 1.3e-3 / 4.0e-3 | 0 % |
+| κ = 5000 (const) | 37 | **66** | 1.3e-3 / 4.0e-3 | 0 % |
+| κ = 15000 (const) | 35 | **66** | — | 0 % |
+
+GM **does** saturate the ACC — raising κ off→base→5000 drops yr-2 ACC 92→84→**66 =
+NEMO's yr-2 66**, saturating by κ≈5000. The channel isopycnal slopes are NOT capped
+(0 % at `S_max`, max 4e-3 < 5e-3), so it is **not** slope-limiting — just an
+insufficient κ. This RESOLVES the apparent N3 "GM-insensitive" contradiction: N3
+raised the κ **cap** (`kappa_max`), but the Visbeck-computed κ sits *below* the cap,
+so the effective lever is the **floor** (`kappa_min`), forced to 5000 here. So the
+DINO ACC over-deepening is an **eddy-saturation closure** problem: the Visbeck κ_GM
+(α=0.015, 200–2000 m²/s) under-predicts the eddy diffusivity the 1° channel needs
+(~5000 m²/s). FIX = raise `visbeck_kappa_min` to ~5000 (yr-4 hold confirmation
+running, `GM_CONFIRM=1`, job 8653177 — must check it suppresses the yr-3/4 overshoot,
+not just delay it).
+
+M1/M2/M3 + lever + GM diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers,gm_effectiveness}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers,gm_effectiveness,gm_confirm}.sbatch`.
 NEMO T(z) oracle: `DINO_R1/EXP00/DINO_1m_grid_T.nc` (`toce`).
