@@ -405,8 +405,9 @@ def build_parser():
     parser.add_argument(
         "--experiment", default="",
         help="CMIP6 experiment id (e.g. historical, ssp585, piControl, "
-             "1pctCO2). Selects the transient external-forcing trajectory "
-             "(GHG/ozone/aerosol/solar). Empty = idealized/constant (default).",
+             "1pctCO2, abrupt-4xCO2). Selects the transient external-forcing "
+             "trajectory (GHG/ozone/aerosol/solar). Empty = idealized/constant "
+             "(default).",
     )
     parser.add_argument(
         "--start-year", type=int, default=1979,
