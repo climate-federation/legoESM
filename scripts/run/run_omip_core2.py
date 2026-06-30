@@ -2045,7 +2045,11 @@ def main() -> int:
                    help="Short 10-day benchmark run (reports steps/s).")
     p.add_argument("--dt", type=float, default=3600.0,
                    help="Timestep [s] (default 3600 = NEMO ORCA1).")
-    p.add_argument("--nlev", type=int, default=20)
+    p.add_argument("--nlev", type=int, default=40,
+                   help="Ocean vertical levels for the tanh z* default grid "
+                        "(default 40, climate-usable minimum). For full NEMO "
+                        "ORCA1 fidelity use --nemo-vertical (L75, overrides "
+                        "--nlev).")
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--nemo-vertical", action="store_true",
                    help="Match NEMO ORCA1's vertical grid: build z_coord from "

@@ -159,7 +159,11 @@ def parse_args(argv: list[str] | None = None):
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
                    help="Grid resolution (e.g. C24, 36x72, ico3, T21)")
-    p.add_argument("--nlev", type=int, default=20)
+    p.add_argument("--nlev", type=int, default=40,
+                   help="Ocean vertical levels (default 40). SOTA OMIP ocean "
+                        "models use ~60-75 levels (NEMO ORCA1 L75, MOM6, POP2); "
+                        "40 is the climate-usable minimum. Pass --nlev 20 for a "
+                        "faster dev/matrix run.")
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--dt", type=float, default=None,
                    help="Timestep [s] (default: grid-specific)")
@@ -3590,6 +3594,16 @@ def run_omip_single(grid_type: str, args) -> dict:
             restoring_tau_days = args.restoring_timescale
         restoring_tau_s = restoring_tau_days * 86400.0
         print(f"  Restoring: tau={restoring_tau_days:.0f} days")
+        print(
+            "  WARNING: SST/SSS restoring toward WOA is NOT the OMIP "
+            "bulk-forced protocol (Griffies et al. 2016). It is a "
+            "robustness/spin-up mode whose surface relaxation overrides the "
+            "air-sea flux SST adjustment OMIP is designed to evaluate. For "
+            "OMIP-faithful runs use --forcing-mode jra55_do_tropical "
+            "(OMIP-2 / JRA55-do) or scripts/run/run_omip_core2.py "
+            "(OMIP-1 / CORE-II NCAR bulk).",
+            flush=True,
+        )
     elif grid_type == "spectral":
         print(f"  Restoring: disabled (spectral stability)")
 
