@@ -2339,7 +2339,7 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
-def _save_restart(state, day, step, output_dir):
+def _save_restart(state, day, step, output_dir, ice_state=None):
     """Save a state restart in the global-overturning npz format.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
@@ -2354,6 +2354,11 @@ def _save_restart(state, day, step, output_dir):
     step : int
         Step index (stored in npz for provenance only).
     output_dir : Path
+    ice_state : SeaIceState | DynamicSeaIceState | None
+        Prognostic sea-ice state (``--jra55-sea-ice``).  When supplied its
+        fields are persisted under ``ice_<field>`` keys so a checkpoint/resume
+        does NOT silently reset the ice pack to the zero cold start.  ``None``
+        (default, no sea ice) writes the legacy ocean-only restart unchanged.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -2366,9 +2371,40 @@ def _save_restart(state, day, step, output_dir):
         if obj is None or not hasattr(obj, "data"):
             continue
         payload[f] = np.asarray(obj.data)
+    if ice_state is not None:
+        for f in ice_state._fields:
+            obj = getattr(ice_state, f)
+            if obj is None or not hasattr(obj, "data"):
+                continue
+            payload[f"ice_{f}"] = np.asarray(obj.data)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
     np.savez_compressed(fname, **payload)
     return fname
+
+
+def _load_ice_restart(restart_path, ice_template):
+    """Restore the prognostic sea-ice state from a restart npz (``ice_*`` keys).
+
+    ``ice_template`` (the zero cold-start ``SeaIceState`` from the JRA55 setup)
+    supplies the pytree structure + Field metadata; only the data arrays are
+    overwritten.  Returns ``None`` if the restart predates sea-ice persistence
+    (no ``ice_*`` keys), so an old ocean-only checkpoint resumes on the
+    cold-start ice without error.
+    """
+    data = np.load(restart_path)
+    replacements = {}
+    for f in ice_template._fields:
+        key = f"ice_{f}"
+        if key not in data:
+            continue
+        obj = getattr(ice_template, f)
+        if obj is None or not hasattr(obj, "data"):
+            continue
+        replacements[f] = obj.replace(
+            data=jnp.asarray(data[key], dtype=obj.data.dtype))
+    if not replacements:
+        return None
+    return ice_template._replace(**replacements)
 
 
 def _load_restart(restart_path, template_state):
@@ -2499,6 +2535,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     t0 = time.time()
     last_print = t0
     blown_up = False
+    # Prognostic sea-ice carry (--jra55-sea-ice); None when ice is off.  Set in
+    # the scan-blocks branch below and threaded across blocks.  Declared here so
+    # the restart helpers (incl. the wallclock-exit closure) persist it — a
+    # checkpoint/resume must not reset the ice pack to the cold start.
+    ice_state = None
 
     def _maybe_wallclock_exit(state, step: int, day: float) -> None:
         if not _wallclock_exhausted(
@@ -2507,7 +2548,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             restart_buffer_seconds,
         ):
             return
-        fname = _save_restart(state, day, step, checkpoint_dir)
+        fname = _save_restart(state, day, step, checkpoint_dir,
+                              ice_state=ice_state)
         if _snapshot_fn is not None:
             try:
                 _snapshot_fn(fname)
@@ -2722,7 +2764,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir)
+                fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
                 if _snapshot_fn is not None:
                     try:
                         _snapshot_fn(fname)
@@ -2775,7 +2817,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir)
+                    fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
                     if _snapshot_fn is not None:
                         try:
                             _snapshot_fn(fname)
@@ -2898,7 +2940,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             day_now = step * dt / 86400.0
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
-                fname = _save_restart(state, day_now, step, checkpoint_dir)
+                fname = _save_restart(state, day_now, step, checkpoint_dir,
+                                      ice_state=ice_state)
                 # Auto-generate snapshot plot alongside the restart.
                 if _snapshot_fn is not None:
                     try:
@@ -3659,6 +3702,17 @@ def run_omip_single(grid_type: str, args) -> dict:
         # GPU-interp path: use lax.scan block for all grids (MPAS
         # regridding is handled in _preload_jra55_raw_records).
         jra55_state["_gpu_interp"] = True
+        # Restart: restore the prognostic sea-ice state so a checkpointed
+        # --jra55-sea-ice run does NOT resume on the zero cold-start ice.  An
+        # old ocean-only restart (no ice_* keys) returns None -> cold start
+        # kept (no error).
+        if (args.restart is not None
+                and jra55_state.get("enable_sea_ice", False)):
+            _ice_restored = _load_ice_restart(
+                args.restart, jra55_state["ice_state_init"])
+            if _ice_restored is not None:
+                jra55_state["ice_state_init"] = _ice_restored
+                print("  Restart: restored prognostic sea-ice state.")
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")

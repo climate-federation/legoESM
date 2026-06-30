@@ -107,6 +107,52 @@ def test_scan_block_carries_and_evolves_ice(tmp_path):
     assert np.all(np.asarray(new_ice.h_ice.data) >= 0.0)
 
 
+def test_sea_ice_restart_round_trip_is_continuous(tmp_path):
+    """Checkpoint persistence: the ice state survives _save_restart ->
+    _load_ice_restart exactly, and resuming a block from the restored ocean +
+    ice reproduces the uninterrupted run (no silent ice-pack reset)."""
+    model, state, js = _setup(tmp_path, sea_ice=True)
+    dt = 600.0
+    block_fn = run_omip._build_jra55_block_fn(model, js, dt)
+    atmA, runA = run_omip._preload_jra55_forcing_block(0, 3, dt, js)
+    atmB, runB = run_omip._preload_jra55_forcing_block(3, 3, dt, js)
+    ice0 = js["ice_state_init"]
+
+    # Uninterrupted: block A then block B.
+    s1, ice1 = block_fn(state, atmA, runA, jnp.int32(0), ice0)
+    s2u, ice2u = block_fn(s1, atmB, runB, jnp.int32(3), ice1)
+
+    # Checkpoint after block A, reload ocean + ice, resume block B.
+    ckpt = tmp_path / "ckpt"
+    fname = run_omip._save_restart(s1, 1.0, 3, ckpt, ice_state=ice1)
+    s1r, _, _ = run_omip._load_restart(str(fname), state)
+    ice1r = run_omip._load_ice_restart(str(fname), ice0)
+    assert ice1r is not None, "ice must be persisted in the restart"
+    # Ice persisted round-trip exactly (lossless npz).
+    for f in ("concentration", "h_ice", "T_ice"):
+        assert np.allclose(np.asarray(getattr(ice1r, f).data),
+                           np.asarray(getattr(ice1, f).data), atol=0, rtol=0)
+
+    s2b, ice2b = block_fn(s1r, atmB, runB, jnp.int32(3), ice1r)
+    # Resume reproduces the uninterrupted run (ocean + ice).
+    assert np.allclose(np.asarray(ice2b.concentration.data),
+                       np.asarray(ice2u.concentration.data), atol=1e-10)
+    assert np.allclose(np.asarray(ice2b.h_ice.data),
+                       np.asarray(ice2u.h_ice.data), atol=1e-10)
+    assert np.allclose(np.asarray(s2b.T.data), np.asarray(s2u.T.data),
+                       atol=1e-9)
+
+
+def test_load_ice_restart_none_for_legacy_ocean_only_checkpoint(tmp_path):
+    """An old ocean-only restart (no ice_* keys) -> _load_ice_restart returns
+    None, so resume keeps the cold-start ice instead of erroring."""
+    model, state, js = _setup(tmp_path, sea_ice=True)
+    ckpt = tmp_path / "ckpt"
+    fname = run_omip._save_restart(state, 0.0, 0, ckpt)   # NO ice_state
+    assert run_omip._load_ice_restart(str(fname),
+                                      js["ice_state_init"]) is None
+
+
 def test_scan_block_off_returns_ocean_state_only(tmp_path):
     """Ice OFF: the block returns the ocean state alone (carry unchanged)."""
     model, state, js = _setup(tmp_path, sea_ice=False)
