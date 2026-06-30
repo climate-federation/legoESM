@@ -1292,6 +1292,39 @@ def _apply_sundqvist_overrides(micro_config, args):
     return micro_config._replace(**overrides)
 
 
+def _validate_sundqvist_flags(args, parser) -> None:
+    """Bound-check the --sundqvist-* tunables + refuse them on backends that
+    ignore the post-setup micro_config override.
+
+    The override mutates ``driver.physics.micro_config`` (the finite-volume
+    PhysicsPipeline).  MPAS and spectral rebuild ``MicrophysicsConfig`` from
+    ``cfg.microphysics`` at ``run()`` and never read it, so the flags would be
+    silently ignored there — refuse loudly instead.  Out-of-range values would
+    silently enter the scheme (a typo like ``--sundqvist-qc-crit 1`` makes the
+    tuning meaningless/unstable), so bound-check against the __param_spec__ ranges.
+    """
+    bounds = {"sundqvist_qc_crit": (1.0e-4, 1.5e-3),
+              "sundqvist_rh_crit": (0.5, 1.0),
+              "sundqvist_auto_rate": (1.0e-4, 1.0e-2)}
+    set_flags = [k for k in bounds if getattr(args, k, None) is not None]
+    if not set_flags:
+        return
+    for k in set_flags:
+        lo, hi = bounds[k]
+        v = getattr(args, k)
+        if not (lo <= v <= hi):
+            parser.error(
+                f"--{k.replace('_', '-')} must be in [{lo}, {hi}], got {v}")
+    disc = getattr(args, "discretization", "centered")
+    grid = getattr(args, "grid_type", "")
+    if disc in ("mpas", "spectral") or grid in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        parser.error(
+            "--sundqvist-* overrides apply only on the finite-volume "
+            "PhysicsPipeline (cubed_sphere / latlon); the MPAS and spectral "
+            "backends rebuild MicrophysicsConfig at run() and would ignore them.")
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1359,6 +1392,8 @@ def main(argv: list[str] | None = None):
     # Enforce the full-physics policy on the FINAL resolved schemes (after the
     # AIMIP override may have promoted microphysics none -> sundqvist).
     _require_full_physics_for_amip(args, parser)
+    # Bound-check the --sundqvist-* tunables + refuse them on MPAS/spectral.
+    _validate_sundqvist_flags(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
