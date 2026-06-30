@@ -104,6 +104,13 @@ def _parse_args():
              "'constant' (background-only, identical across grids). Both grids.",
     )
     p.add_argument(
+        "--eos", choices=("wright", "nemo_seos"), default=None,
+        help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
+             "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
+             "simplified S-EOS, Roquet et al. 2015, with the DINO coefficients "
+             "— the oracle EOS for the thermocline comparison). Both grids.",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -296,6 +303,8 @@ def main():
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
+    if args.eos is not None:
+        cfg = dataclasses.replace(cfg, eos=args.eos)
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)

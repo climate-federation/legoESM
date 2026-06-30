@@ -175,6 +175,20 @@ class DINOConfig:
     vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper, unstable >~day 40)
 
     # ------------------------------------------------------------------
+    # Equation of state. The paper (Kamm et al. 2025) uses NEMO's
+    # "simplified" S-EOS (Roquet et al. 2015, np_seos) with the DINO
+    # coefficients (a0=0.165, b0=0.76554, λ1=0.06, μ1=1.4970e-4
+    # thermobaric; λ2=μ2=ν=0, T0=10°C, S0=35). "nemo_seos" selects exactly
+    # that oracle EOS — NemoSEOSConfig's defaults ARE the DINO coefficients
+    # (mirroring how "veros_gsw" carries the global_4deg oracle coefficients
+    # in its default config), so no per-experiment EOS-config threading is
+    # needed. The legoESM default is "wright" (Wright 1997 full nonlinear
+    # EOS) — a documented fidelity gap vs NEMO alongside the vmix closure.
+    # Set per run via --eos.
+    # ------------------------------------------------------------------
+    eos: str = "wright"            # "wright" (legoESM default) | "nemo_seos" (paper/oracle)
+
+    # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization (Visbeck 1997; decisions
     # log: stay with Visbeck, do not implement Tréguier 1997).
     # ------------------------------------------------------------------
@@ -1178,7 +1192,7 @@ def dino_lat_lon_model_config(
         A_h_eq_sigma_deg=cfg.A_h_eq_sigma_deg,
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
-        eos="wright",
+        eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )
     return model_cfg, physics_cfg
 
@@ -1288,6 +1302,7 @@ def dino_mpas_model_config(
         barotropic_solver=cfg.barotropic_solver,
         tracer_advection=cfg.tracer_advection,
         implicit_vertical_mixing=True,
+        eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )
 
     if not physics:

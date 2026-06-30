@@ -64,3 +64,37 @@ def test_committed_configs_parse_and_are_valid(monkeypatch):
         assert args.grid in ("latlon", "mpas")
         assert args.days > 0
         assert isinstance(args.output_dir, Path)
+def test_eos_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--eos", "nemo_seos"])
+    args = rd._parse_args()
+    assert args.eos == "nemo_seos"
+
+
+def test_eos_default_none(monkeypatch):
+    """Default None → main() keeps DINOConfig.eos (wright)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.eos is None
+
+
+def test_eos_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "eos: nemo_seos\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.eos == "nemo_seos"
+
+
+def test_eos_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--eos", "wrightt"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_eos_replaces_dino_config(monkeypatch):
+    """The --eos flag must reach DINOConfig.eos (the cfg-replace round-trip)."""
+    import dataclasses
+    from legoesm.ocean.experiments.dino import DINOConfig
+    cfg = DINOConfig()
+    assert cfg.eos == "wright"          # default
+    cfg = dataclasses.replace(cfg, eos="nemo_seos")
+    assert cfg.eos == "nemo_seos"
