@@ -271,6 +271,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restart-buffer-seconds", type=float,
                         default=_OUTPUT_DEFAULTS.restart_buffer_seconds,
                         help="Wallclock buffer [s] reserved for restart writes")
+    parser.add_argument("--per-step", action="store_true",
+                        help="DEBUG: use the per-step Python reference loop "
+                             "(driver.run(compiled=False)) instead of the fused "
+                             "lax.scan segment. Slower, but JIT-compiles ONE step "
+                             "so JAX_DEBUG_NANS=1 raises at the exact step + op "
+                             "(used to localize the day-195 blow-up).")
 
     # Initial atmospheric state
     parser.add_argument("--t-init", type=float, default=None,
@@ -1241,7 +1247,8 @@ def main(argv: list[str] | None = None):
         n_profile_days = args.profile * args.dt / 86400.0
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
-            driver.run(start_step=start_step, start_day=start_day)
+            driver.run(start_step=start_step, start_day=start_day,
+                       compiled=not args.per_step)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
@@ -1249,7 +1256,11 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-    driver.run(start_step=start_step, start_day=start_day)
+        if args.per_step:
+            print("  [--per-step] using the per-step Python reference loop "
+                  "(compiled=False) for NaN localization")
+    driver.run(start_step=start_step, start_day=start_day,
+               compiled=not args.per_step)
 
     # iter-100: post-run finiteness check.  Pre-iter-100,
     # ``run_amip.py`` had ZERO blowup detection (``grep -c
