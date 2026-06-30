@@ -13,6 +13,7 @@ Provides the **canonical runtime configuration** for legoESM:
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import NamedTuple
 
@@ -411,6 +412,11 @@ class ExperimentConfig(NamedTuple):
     land_bucket_w_max: float = 150.0      # soil-water bucket capacity [kg/m^2]
     land_beta_min: float = 0.1            # min moisture availability (dry soil)
     land_bucket_w_init_frac: float = 0.5  # initial soil water as fraction of W_max
+    # Bucket runoff partition: Green-Ampt infiltration excess (Hortonian) +
+    # saturation excess (Dunne).  Shared with legoesm.land.slab_land.
+    land_K_infiltration: float = 1.0e-5     # saturated infiltration capacity K_s [m/s]
+    land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
+    land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
     # Route the soil-water availability through the SHARED land Jarvis (1976)
     # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
     # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
@@ -903,6 +909,20 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_bucket=True requires an active land tile "
                 "(--slab-land-active or a land-mask file); there is no land "
                 "surface to carry soil water otherwise."
+            )
+        # NaN-safe guards: ``NaN > 0`` / ``NaN < 0`` are both False, so a bare
+        # comparison would let a NaN slip through and poison the infiltration cap.
+        if not (math.isfinite(self.land_K_infiltration)
+                and self.land_K_infiltration > 0.0):
+            errors.append(
+                f"land_K_infiltration must be a positive, finite saturated "
+                f"infiltration capacity [m/s]; got {self.land_K_infiltration!r}."
+            )
+        if not (math.isfinite(self.land_infil_suction_boost)
+                and self.land_infil_suction_boost >= 0.0):
+            errors.append(
+                f"land_infil_suction_boost (Green-Ampt psi_f/L_f) must be finite "
+                f"and >= 0; got {self.land_infil_suction_boost!r}."
             )
         if not (self.land_bucket_w_max > 0.0):
             errors.append(

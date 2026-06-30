@@ -491,20 +491,35 @@ def lu_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 # ==========================================================================
 
 def theta_from_psi(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Compute theta from psi using the configured retention curve."""
+    """Compute theta from psi using the configured retention curve.
+
+    Above saturation (psi >= 0) the column stores additional water ELASTICALLY
+    (specific storage): theta = theta_sat + S_s*theta_sat*psi.  This is the
+    ParFlow / CliMA-Land "change of variable near saturation": psi is the primary
+    variable everywhere and the capacity dtheta/dpsi = S_s*theta_sat stays > 0 at
+    and above saturation, where the van-Genuchten capacity is 0.  It keeps the
+    Richards matrix non-singular and theta CONSISTENT with ``moisture_capacity``,
+    so the mass-conservative mixed form needs no non-physical theta clip (a clip
+    at theta_sat silently destroyed the ponded/elastic storage) — ponding emerges
+    as a positive head."""
     curve = config.retention_curve
     if curve == "van_genuchten":
-        return van_genuchten_theta(psi, config)
+        theta = van_genuchten_theta(psi, config)
     elif curve == "clapp_hornberger" or curve == "campbell":
-        return clapp_hornberger_theta(psi, config)
+        theta = clapp_hornberger_theta(psi, config)
     elif curve == "brooks_corey":
-        return brooks_corey_theta(psi, config)
+        theta = brooks_corey_theta(psi, config)
     elif curve == "pdi":
-        return pdi_theta(psi, config)
+        theta = pdi_theta(psi, config)
     elif curve == "lu":
-        return lu_theta(psi, config)
+        theta = lu_theta(psi, config)
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
+    # Specific-storage branch (psi >= 0): the integral of the elastic capacity
+    # S_s*theta_sat added in ``moisture_capacity``.  Zero below saturation so a
+    # very dry psi never drives theta below theta_r.
+    return theta + jnp.where(psi >= 0.0,
+                             config.S_s * config.theta_sat * psi, 0.0)
 
 
 def psi_from_theta(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
@@ -566,8 +581,14 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
 
-    # Add elastic storage near saturation
-    C = C + config.S_s * config.theta_sat
+    # Elastic specific storage ABOVE saturation (psi >= 0) — the derivative of the
+    # theta_from_psi specific-storage branch.  Conditional (not unconditional) so it
+    # stays CONSISTENT with theta: d/dpsi[theta_sat + S_s*theta_sat*psi] = S_s*
+    # theta_sat for psi>=0, and 0 below (where the van-Genuchten capacity governs).
+    # This is what keeps C > 0 at saturation (van_genuchten_C -> 0 there) without
+    # making theta inconsistent with C in the unsaturated zone (the mass-balance
+    # error the mixed-form Picard would otherwise carry).
+    C = C + jnp.where(psi >= 0.0, config.S_s * config.theta_sat, 0.0)
     return C
 
 

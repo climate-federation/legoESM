@@ -1228,6 +1228,16 @@ class ModelDriver:
                 self.physics.land_bucket_w_init_frac = float(
                     getattr(self.config, "land_bucket_w_init_frac", 0.5)
                 )
+                # Bucket runoff partition (Green-Ampt infiltration + saturation excess)
+                self.physics.land_K_infiltration = float(
+                    getattr(self.config, "land_K_infiltration", 1.0e-5)
+                )
+                self.physics.land_infil_suction_boost = float(
+                    getattr(self.config, "land_infil_suction_boost", 2.0)
+                )
+                self.physics.land_infiltration_excess = bool(
+                    getattr(self.config, "land_infiltration_excess", True)
+                )
                 # Stomatal soil-water limitation: route beta_soil through the
                 # shared land Jarvis model (legoesm.land.carbon.stomata).
                 _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))

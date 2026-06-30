@@ -298,6 +298,9 @@ def test_soil_bucket_flags_flow_to_config():
         "--land-bucket-w-max", "120.0",
         "--land-beta-min", "0.2",
         "--land-bucket-w-init-frac", "0.4",
+        "--land-k-infiltration", "3.3e-6",
+        "--land-infil-suction-boost", "1.5",
+        "--no-land-infiltration-excess",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -306,7 +309,27 @@ def test_soil_bucket_flags_flow_to_config():
     assert cfg.land_bucket_w_max == 120.0
     assert cfg.land_beta_min == 0.2
     assert cfg.land_bucket_w_init_frac == 0.4
+    assert cfg.land_K_infiltration == 3.3e-6
+    assert cfg.land_infil_suction_boost == 1.5
+    assert cfg.land_infiltration_excess is False
     assert cfg.validate_strict() is None
+
+
+def test_infiltration_params_reject_nan_and_negative():
+    """NaN/negative infiltration params fail strict validation (NaN-safe guards:
+    a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        parser)
+    base = build_config_from_args(args)
+    assert base.validate_strict() is None          # baseline is valid
+    for bad in (float("nan"), -1.0, 0.0):
+        with pytest.raises(ValueError, match="land_K_infiltration"):
+            base._replace(land_K_infiltration=bad).validate_strict()
+    for bad in (float("nan"), -0.5):
+        with pytest.raises(ValueError, match="land_infil_suction_boost"):
+            base._replace(land_infil_suction_boost=bad).validate_strict()
 
 
 def test_soil_bucket_defaults_off():
