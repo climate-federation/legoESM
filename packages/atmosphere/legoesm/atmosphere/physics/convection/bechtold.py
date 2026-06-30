@@ -175,8 +175,31 @@ def bechtold_convection(
     T_parcel = T_parcel_source + config.parcel_dT
     q_parcel = q_parcel_source + config.parcel_dq
 
-    T_moist = compute_moist_adiabat(T_parcel, p_full)
-    cape_pbl = compute_cape(T, T_moist, p_full, p_half)
+    # Launch the moist adiabat HUMIDITY-AWARE and from the correct pressure
+    # origin (the over-firing fix; mirrors the Kain-Fritsch / Zhang-McFarlane
+    # treatment).  Bechtold was the only convection scheme still using the
+    # legacy saturated-from-base, dry-temperature CAPE that "spuriously
+    # inflates CAPE and fires deep convection in dry columns".
+    # ``compute_moist_adiabat`` starts its dry leg from the surface full-level
+    # pressure ``p_base``, but the parcel lives at ``p_parcel_source``
+    # (PBL-mean or base); translate the parcel temperature to its
+    # surface-pressure dry-adiabatic equivalent (preserving theta, so the LCL
+    # and the moist leg above it are unchanged) and pass ``q_v_base=q_parcel``
+    # so the sub-LCL leg is DRY adiabatic, not saturated.  A SINGLE adiabat is
+    # used for CAPE, LFC and LNB (a second separate scan tripped an XLA CPU
+    # compile abort); consistency is the physically correct choice anyway.
+    T_parcel_at_sfc = (
+        T_parcel * (p_base / jnp.maximum(p_parcel_source, 1.0)) ** constants.kappa
+    )
+    T_moist = compute_moist_adiabat(T_parcel_at_sfc, p_full, q_v_base=q_parcel)
+    # Virtual-temperature CAPE: parcel vapour (capped at saturation along the
+    # ascent) and environment vapour, so buoyancy uses virtual T, not dry T.
+    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_v_parcel = jnp.minimum(q_parcel[:, None], q_sat_parcel)
+    cape_pbl = compute_cape(
+        T, T_moist, p_full, p_half,
+        q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
 
     cape_weight = cape_trigger(
         cape_pbl, config.cape_threshold, config.cape_sharpness,
@@ -222,8 +245,12 @@ def bechtold_convection(
     # gracefully reduces to pure PBL-CAPE when MC is unavailable
     # (zero-filled by the bridge for spectral PE and other dycores
     # without an MC diagnostic).
-    # Dimensionally-correct PBL-CAPE closure (Kain 2004 §3 form):
+    # Generic CAPE-relaxation closure SURROGATE (dimensionally consistent):
     #     M_b = rho_BL * (CAPE_pbl - threshold)+ / (g * tau_bl)   [kg/m^2/s]
+    # NOTE: this is NOT the Bechtold (2014) PCAPE/tau buoyancy-sorting closure,
+    # nor a closed-form Kain (2004) expression (KF removes CAPE by *iterating*
+    # M_b over TIMEC).  It is a first-order CAPE-consumption surrogate; the
+    # ``g/rho_BL`` factor stands in for the ZM cloud-work-function sensitivity.
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
     rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))

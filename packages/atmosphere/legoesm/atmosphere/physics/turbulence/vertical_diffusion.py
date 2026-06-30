@@ -175,6 +175,16 @@ def implicit_vertical_diffusion_theta(
     The correct conserved variable for dry mixing is potential temperature
     θ = T (p_ref/p)^κ — its gradient vanishes on a dry adiabat.
 
+    Conservation caveat (not an energy-conserving scheme).  Diffusing θ in
+    flux form conserves the mass-weighted column θ, ``Σ ρ dz θ``, but NOT
+    the column enthalpy ``Σ ρ dz c_p T``, because the Exner function
+    π = (p/p_ref)^κ relating T = π θ varies with height, so redistributing θ
+    redistributes enthalpy unequally between layers.  This is an accepted
+    approximation here.  A strictly energy-conserving variant would instead
+    diffuse the dry static energy s = c_p T + g z (whose flux-form mixing
+    conserves ``Σ ρ dz s`` exactly); switching the diffused variable to DSE
+    is a validated follow-up, not done in this helper.
+
     This helper:
 
     1. Converts T → θ using the column pressure.
@@ -215,6 +225,11 @@ def implicit_vertical_diffusion_theta(
     exner = (p_safe / constants.p_ref) ** constants.kappa
     exner_safe = jnp.clip(exner, 1.0e-6, None)
     theta = T / exner_safe
+    # Surface-Exner proxy: use the lowest FULL-level Exner (exner[:, -1]) as
+    # a stand-in for the surface Exner.  Because p_low < p_surface, this proxy
+    # is biased low, so F_θ_sfc = F_T_sfc / exner_sfc is biased slightly HIGH
+    # (the injected surface θ-flux is a touch too large).  Threading a true
+    # p_surface through and using (p_sfc/p_ref)^κ would remove this bias.
     exner_sfc = exner_safe[:, -1]
     # F_T_sfc has units [K · kg/m²/s] = ρ K dT/dz.  Diffusing θ requires
     # the surface θ flux F_θ_sfc = F_T_sfc / exner_sfc.

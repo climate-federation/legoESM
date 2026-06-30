@@ -225,6 +225,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
         rho, eta, z_coord, J, cfg,
         tau_x=tau_x, tau_y=tau_y, B_f=B_f,
         Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+        eos_fn=eos_fn,
     )
     return kpp_out, J
 

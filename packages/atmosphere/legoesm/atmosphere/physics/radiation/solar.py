@@ -36,7 +36,7 @@ def solar_declination(day_of_year: float, obliquity: float = _EARTH_OBLIQUITY_DE
 
     delta = obliquity * sin(2*pi * (day_of_year - 80) / 365)
 
-    This is the simplified "Spencer" formula approximation.
+    This is the Cooper (1969) single-harmonic declination approximation.
 
     Parameters
     ----------
