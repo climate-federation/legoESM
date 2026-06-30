@@ -286,6 +286,29 @@ K MAGNITUDE (boundary-layer mixing, not its depth), or insufficient surface-heat
 RETENTION. Round 2 (`DINO_LEVER_ROUND` unset) tests superbee advection (less
 numerical diffusion), A_θ ×2/×4 (heat input), and K_conv≈0.
 
+**Round 2 — ALSO fully refuted; the cause is DYNAMICAL, not thermodynamic.**
+
+| lever | superbee | A_θ ×2 | A_θ ×4 | K_conv≈0 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 | 232 | 227 | 241 | 225 |
+| T@100 m | 12.4 | 12.6 | **12.7** | 12.3 |
+
+`superbee` leaves T(z) BIT-IDENTICAL → not numerical advection diffusion;
+`K_conv≈0` unchanged → not convection; and **4× the surface restoring (~2400 W/m²)
+warms the surface only 0.3 °C** — the heat is exported as fast as it is added.
+**Verdict: the DINO ACC over-deepening is a DYNAMICAL (circulation / eddy-
+saturation) problem, NOT a thermodynamic one.** Every thermodynamic lever is
+refuted (EOS, K_v, K_conv, Ri_crit, A_θ ×0.5–4, superbee). The ACC overshoot and
+the diffuse thermocline are two symptoms of too-strong circulation that exports
+subtropical surface heat faster than any local mixing/forcing can set it. The
+ACC's strength was already shown GM-insensitive (N3: κ_GM-cap ×7.5 + α ×4) — so
+the open question is the **eddy-saturation / GM application** in the channel: is
+GM actually flattening the channel isopycnals, or is the Visbeck κ / slope-taper
+(`redi_S_max`) leaving the slopes too steep? That is a GM-effectiveness DIAGNOSTIC
+(is GM applied; what are the channel isopycnal slopes vs `S_max`), not another
+thermodynamic sweep — the canonical coarse-resolution ACC problem and the explicit
+subject of the Kamm 2025 paper.
+
 M1/M2/M3 + lever diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers}.py`;
 sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers}.sbatch`.
 NEMO T(z) oracle: `DINO_R1/EXP00/DINO_1m_grid_T.nc` (`toce`).
