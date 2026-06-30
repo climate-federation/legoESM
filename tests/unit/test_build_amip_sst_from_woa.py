@@ -26,13 +26,12 @@ def test_sst_to_sic_freezing_ramp_monotone_and_bounded():
     assert np.all(np.diff(s) <= 0.0)   # non-increasing with SST
 
 
-def test_sst_to_sic_rejects_nonpositive_ramp():
-    """A non-positive ramp would divide by zero (NaN at freezing) and break the
-    monotone ramp — reject it loudly rather than emit garbage SIC."""
-    with pytest.raises(ValueError):
-        sst_to_sic(np.array([_FREEZE_C]), ramp_C=0.0)
-    with pytest.raises(ValueError):
-        sst_to_sic(np.array([_FREEZE_C]), ramp_C=-0.5)
+def test_sst_to_sic_rejects_nonpositive_or_nonfinite_ramp():
+    """A non-positive OR non-finite ramp (argparse(type=float) accepts nan/inf)
+    would divide by zero / emit NaN SIC — reject it loudly, not silently."""
+    for bad in (0.0, -0.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            sst_to_sic(np.array([_FREEZE_C]), ramp_C=bad)
 
 
 def test_regrid_constant_field_no_pole_blowup():
