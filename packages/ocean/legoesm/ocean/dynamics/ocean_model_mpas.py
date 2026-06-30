@@ -206,10 +206,25 @@ class MPASOceanModel:
                 f"upwind, tvd, superbee."
             )
 
+        # Model-selected EOS callable, built ONCE and threaded into every
+        # density-consuming mixing path (KPP Ri/buoyancy, convective-adjustment
+        # static stability) so a non-Wright EOS (e.g. nemo_seos for DINO) drives
+        # the mixing decision consistently with the baroclinic dycore — matching
+        # the lat-lon model's ``_vmix_eos_fn``.  ``eos_linear`` is read defensively
+        # (None ⇒ make_eos_fn supplies LinearEOSConfig() defaults for eos="linear").
+        # NOTE: only ``eos`` + ``eos_linear`` are model-config fields; the
+        # nemo_seos / veros_* oracle coefficients use their NamedTuple DEFAULTS
+        # here (DINO uses the default S-EOS set). A future custom-coefficient
+        # field would need threading the matching ``eos_<scheme>`` config too.
+        from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
+        self._eos_fn = _make_eos_fn(
+            self.config.eos, getattr(self.config, "eos_linear", None))
+
         if self.config.physics is not None:
             self._physics_fn = make_mpas_ocean_physics(
                 self.config.physics,
                 implicit_vertical_mixing=self.config.implicit_vertical_mixing,
+                eos_fn=self._eos_fn,
             )
         else:
             self._physics_fn = None
@@ -224,7 +239,8 @@ class MPASOceanModel:
                 from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
                     make_kpp_profiles_mpas,
                 )
-                self._kpp_profiles_fn = make_kpp_profiles_mpas(_vm_cfg)
+                self._kpp_profiles_fn = make_kpp_profiles_mpas(
+                    _vm_cfg, eos_fn=self._eos_fn)
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
@@ -423,7 +439,8 @@ class MPASOceanModel:
                     state.eta.data, state.H_bathy.data, z_coord,
                 )
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
-                _rho_conv = compute_ocean_rho(state, z_coord, _J_conv)
+                _rho_conv = compute_ocean_rho(
+                    state, z_coord, _J_conv, eos_fn=self._eos_fn)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)
