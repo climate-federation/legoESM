@@ -369,14 +369,16 @@ Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
 icosahedral `6 7 8` (L8 = 655,362 cells, ~25 km; needs several A100s — pair with
 `NODES>1`), spectral `85 170`.
 
-**Multi-node GPU** (latlon / icosahedral) spans nodes via `NODES`. Cross-node
-GPU-direct requires `craype-accel-nvidia80` (loaded by `scaling_gpu.sh`) +
-`MPI4JAX_USE_CUDA_MPI=1` (default) — see the Slingshot section above. **Run a
-2-node canary first** so a fabric problem surfaces on one cheap job, not the
-whole sweep:
+**Multi-node GPU** (latlon / icosahedral) spans nodes via `NODES`. Inter-node
+halos are **host-staged**: cross-node GPU-direct currently aborts on Derecho's
+CXI fabric (`cxil_map` / OFI `injectdata`; `scaling_gpu.sh` auto-selects
+`MPI4JAX_USE_CUDA_MPI=0` for `NODES>1`), so multi-node points are correct but a
+**lower bound** on inter-node scaling — footnote them. See
+`docs/performance/multinode_gpu_direct_cxi.md`. **Run a 2-node canary first** so
+any problem surfaces on one cheap job, not the whole sweep:
 
 ```bash
-# canary: confirm n=8 completes and SYPD(8) > SYPD(4)
+# canary: confirm n=8 completes (host-staged) before launching the suite
 NODES=2 GPU_ONLY=1 STRONG_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT/canary latlon 256
 
 # then the real multi-node sweeps (4 nodes = 16 A100):

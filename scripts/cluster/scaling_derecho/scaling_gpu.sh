@@ -95,18 +95,27 @@ TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 
-# mpi4jax transport: GPU-direct for ALL node counts.  Cross-node GPU-direct now
-# works -- the missing piece was craype-accel-nvidia80 (loaded above) engaging the
-# GPU-aware NIC, together with #681's Slingshot CXI tuning in _env.sh
-# (FI_CXI_RX_MATCH_MODE=hybrid for the many-message halo).  Verified 2026-06-29
-# (8-rank/2-node sendrecv passes).  Set MPI4JAX_USE_CUDA_MPI=0 to fall back to
-# host-staged halos if a run ever aborts.  Explicit value always wins.
+# mpi4jax transport, by node count.  Cross-node GPU-direct STILL aborts for the
+# real model on this fabric (`cxil_map` / OFI `injectdata`), even with
+# craype-accel-nvidia80 loaded (it swaps in the GPU-aware MPICH variant but does
+# not fix the abort) and #681's CXI tuning -- verified 2026-06-29 on a 2-node
+# latlon canary, n=8.  (A trivial eager mpi4jax sendrecv probe "passed" earlier
+# only because it host-staged, not exercising GPU-direct cross-node.)  So:
+#   single node -> GPU-direct (works); multi-node -> host-staged (completes,
+#   bit-identical, slower inter-node comm).  See
+#   docs/performance/multinode_gpu_direct_cxi.md.  Explicit value always wins.
 if [ -z "${_user_cuda_mpi:-}" ]; then
-    export MPI4JAX_USE_CUDA_MPI=1
-    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct; craype-accel-nvidia80 + #681 CXI tuning, ${_n_nodes} node(s))"
+    if [ "${_n_nodes}" -gt 1 ]; then
+        export MPI4JAX_USE_CUDA_MPI=0
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged -- multi-node;" \
+             "cross-node GPU-direct still aborts on CXI, accel_target=${CRAY_ACCEL_TARGET:-unset})"
+    else
+        export MPI4JAX_USE_CUDA_MPI=1
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
+    fi
 else
     export MPI4JAX_USE_CUDA_MPI
-    echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override)"
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override, accel_target=${CRAY_ACCEL_TARGET:-unset})"
 fi
 case "$GRID" in
   cubed-sphere)

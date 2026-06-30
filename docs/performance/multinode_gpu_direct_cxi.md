@@ -1,21 +1,38 @@
-# Cross-node GPU-direct MPI on Derecho (CXI/Slingshot) — RESOLVED postmortem
+# Cross-node GPU-direct MPI on Derecho (CXI/Slingshot) — OPEN
 
-**Status:** RESOLVED (2026-06-29). Multi-node GPU-direct halo exchange works.
+**Status:** OPEN. Multi-node GPU scaling uses **host-staged** halos (completes,
+correct); single-node GPU is GPU-direct and unaffected. Cross-node GPU-direct
+still aborts for the real model.
 
-## Resolution
-Root cause: `scaling_gpu.sh` had stopped loading **`craype-accel-nvidia80`** at
-runtime (dropped in an "env delta" cleanup). That module sets
-`CRAY_ACCEL_TARGET=nvidia80` and engages cray-mpich's **GPU-aware NIC path**.
-Without it, a cross-node send hands a GPU device pointer to a NIC path that
-treats it as host memory → `cxil_map: write error` / OFI `injectdata Invalid
-argument`. Intra-node GPU-direct worked anyway (CUDA IPC, no NIC), which masked
-the regression.
+## Current state (2026-06-29)
+A 2-node latlon canary (res256/f32) **still aborts at n=8** with `cxil_map: write
+error` / `MPIDI_OFI_send_normal … injectdata Invalid argument`, even with
+`craype-accel-nvidia80` loaded **and** #681's CXI knobs active. So neither is the
+fix.
 
-**Fix:** re-added `craype-accel-nvidia80` to the `scaling_gpu.sh` module load and
-defaulted `MPI4JAX_USE_CUDA_MPI=1` for all node counts. **Confirmed:** an
-8-rank / 2-node mpi4jax `sendrecv` passes GPU-direct with the module loaded
-(`CRAY_ACCEL_TARGET=nvidia80`, correct ring values, `rc=0`, no abort); the
-identical run *without* the module aborts.
+What we know:
+- `craype-accel-nvidia80` **does** load (the MPICH stack line numbers change —
+  `internal_Sendrecv` / `ofi_send.h:306` vs the non-accel `PMPI_Sendrecv` /
+  `:356` — i.e. it swaps in the GPU-aware MPICH variant) but does **not** stop
+  the abort.
+- A trivial **eager `mpi4jax.sendrecv` probe "passed"** 8-rank/2-node — but that
+  was misleading: eager mpi4jax appears to have **host-staged**, so it never
+  exercised GPU-direct cross-node. The real model's halo (forced GPU-direct via
+  `MPI4JAX_USE_CUDA_MPI=1`) is the true test, and it fails.
+- The failing send is `scount=1 MPI_FLOAT` (4 bytes) through the OFI **inject**
+  path, which rejects the GPU device pointer.
+
+So `scaling_gpu.sh` is node-aware again: single node → GPU-direct (works),
+multi-node → host-staged. Impact: multi-node GPU performance is a **lower bound**
+on inter-node scaling (footnote it); correctness is unaffected.
+
+## Still untried / next
+- A **scount=1 GPU `sendrecv`** probe (match the model's exact message) to see if
+  the 4-byte inject is the specific trigger.
+- A **raw-mpi4py GPU sendrecv** cross-node (needs cupy/numba in the env — neither
+  is currently installed) to localize: mpi4jax buffer handling vs CXI fabric.
+- This is now **CISL-ticket** territory (CUDA-aware MPI over CXI inject) rather
+  than more env-knob guessing.
 
 ## Symptom (historical)
 A multi-node GPU sweep launched and decomposed correctly (ranks placed 4/node,
