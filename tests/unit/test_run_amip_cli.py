@@ -570,10 +570,10 @@ def test_aimip_classical_overrides_explicit_sundqvist_keeps_trained(tmp_path):
     assert out._aimip_params is not None
 
 
-def test_aimip_classical_overrides_warn_offdesign_backend(tmp_path, capsys):
-    """On an off-design backend (voronoi/MPAS) the schemes are still forced on
-    (water sink closes via config) but a loud warning fires that the trained
-    leaves only apply on the finite-volume path."""
+def test_aimip_classical_overrides_warn_mpas_backend(tmp_path, capsys):
+    """On MPAS (voronoi) the schemes are still forced on (water sink closes via
+    config.microphysics) but a loud warning fires that the trained leaves only
+    apply on the finite-volume path."""
     ckpt = _serialise_aimip_defaults(tmp_path)
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
@@ -582,6 +582,19 @@ def test_aimip_classical_overrides_warn_offdesign_backend(tmp_path, capsys):
     assert out.microphysics == "sundqvist"   # water sink still closes
     assert out.convection == "tiedtke"
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_aimip_classical_overrides_spectral_refused(tmp_path):
+    """Spectral refuses tiedtke (profile-prognostic carry not threaded, #405) so
+    it would crash deep in setup before the microphysics sink runs — the override
+    fails early with a clear SystemExit instead of an honest-looking warning."""
+    ckpt = _serialise_aimip_defaults(tmp_path)
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--discretization", "spectral",
+                              "--aimip-classical-checkpoint", ckpt])
+    with pytest.raises(SystemExit, match="spectral"):
+        _apply_aimip_classical_overrides(args)
 
 
 def test_aimip_classical_overrides_respect_explicit_microphysics(tmp_path):

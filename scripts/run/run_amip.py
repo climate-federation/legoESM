@@ -1153,22 +1153,29 @@ def _apply_aimip_classical_overrides(
     print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
           f"microphysics={args.microphysics} + "
           f"loaded trained params from {args.aimip_classical_checkpoint}")
-    # The post-setup injection of the trained per-scheme LEAVES (tiedtke /
-    # louis / mcfarlane / sundqvist) only reaches the finite-volume
-    # PhysicsPipeline (cubed_sphere / latlon).  The MPAS (voronoi) and spectral
-    # backends rebuild their PhysicsConfig from config.microphysics at run()
-    # with DEFAULT leaves, so the classical schemes are still forced ON (the
-    # water sink closes) but the trained values are NOT applied there.
-    # AIMIP-classical was trained on lat-lon C-grid PE, so MPAS/spectral is
-    # off-design — warn loudly rather than silently dropping the trained leaves.
-    _spectral = getattr(args, "discretization", "centered") == "spectral"
-    _mpas = getattr(args, "grid_type", "") in (
-        "voronoi", "icosahedral", "mpas_voronoi", "mpas")
-    if _spectral or _mpas:
+    # AIMIP-classical was trained on lat-lon C-grid PE; the trained per-scheme
+    # leaves inject onto the finite-volume PhysicsPipeline (cubed_sphere /
+    # latlon).  The MPAS and spectral backends are off-design and differ:
+    #   * spectral REFUSES tiedtke outright — the spectral run loop does not
+    #     thread the physics carry yet (issue #405) and tiedtke is
+    #     profile-prognostic, so _refuse_stateful_physics_unthreaded raises deep
+    #     in setup BEFORE any microphysics sink runs.  Fail early + clear.
+    #   * MPAS rebuilds its PhysicsConfig from config.microphysics at run(), so
+    #     the schemes are forced ON (the water sink DOES close) but with DEFAULT
+    #     leaves — the trained values apply only on the FV path.  Warn loudly.
+    if getattr(args, "discretization", "centered") == "spectral":
+        raise SystemExit(
+            "AIMIP-classical forces tiedtke convection, which the spectral run "
+            "loop refuses (issue #405: profile-prognostic physics carry is not "
+            "threaded on spectral) — it would raise deep in setup before the "
+            "microphysics sink runs. Use --grid-type cubed_sphere or latlon for "
+            "the trained AIMIP-classical physics.")
+    if getattr(args, "grid_type", "") in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
         print("AIMIP-classical: WARNING — grid_type="
-              f"{getattr(args, 'grid_type', '?')} / discretization="
-              f"{getattr(args, 'discretization', '?')} rebuilds its PhysicsConfig "
-              "at run(); the classical schemes are forced ON but the TRAINED "
+              f"{getattr(args, 'grid_type', '?')} (MPAS) rebuilds its "
+              "PhysicsConfig at run() from config.microphysics; the classical "
+              "schemes are forced ON (the water sink closes) but the TRAINED "
               "leaves apply ONLY on the finite-volume cubed_sphere/latlon path. "
               "Use --grid-type cubed_sphere or latlon for the trained physics.")
     return args
