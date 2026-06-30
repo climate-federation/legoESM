@@ -443,12 +443,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "zhang_mcfarlane", "kain_fritsch", "emanuel",
                             "tiedtke", "bechtold",
                         ])
-    parser.add_argument("--turbulence", type=str, default="none",
+    # Full-physics policy: an AMIP run is a real atmosphere, so every
+    # parameterization defaults to an ACTIVE scheme — never "none".  A slot is
+    # disabled only for an idealized / dry-dynamics run, which must opt in via
+    # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
+    # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    parser.add_argument("--turbulence", type=str, default="louis",
                         choices=[
                             "none", "smagorinsky", "louis", "tke",
                             "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
-    parser.add_argument("--gravity-wave-drag", type=str, default="none",
+    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite of the diagnostic sources "
@@ -476,6 +481,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Add the convective (thin-cirrus) cloud-fraction "
                              "source (the tuned slab value is ON).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
+    parser.add_argument("--allow-disabled-physics", action="store_true",
+                        default=False,
+                        help="Permit a parameterization slot set to 'none' (an "
+                             "idealized / dry-dynamics run).  Without this flag an "
+                             "AMIP run requires every physics slot active — see "
+                             "_require_full_physics_for_amip.")
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
     parser.add_argument("--sbm-cape-threshold", type=float, default=70.0)
@@ -496,8 +507,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--physics-parameterization-layers", type=int, default=3)
     parser.add_argument("--physics-parameterization-seed", type=int, default=0)
 
-    # Clouds & microphysics
-    parser.add_argument("--clouds", type=str, default="none",
+    # Clouds & microphysics (full-physics defaults — see the policy note above)
+    parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall"])
     parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.7,
                         help="Critical RH for BL cloud onset (Sundqvist). "
@@ -506,7 +517,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cloud-sigma-bl", type=float, default=1.0,
                         help="Sigma level (p/p_s) above which rh_crit_bl applies. "
                              "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")
-    parser.add_argument("--microphysics", type=str, default="none",
+    parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
                                  "p3", "sdm", "fast_sbm"])
@@ -1183,6 +1194,42 @@ def _apply_aimip_classical_overrides(
     return args
 
 
+# Parameterization slots that an AMIP run must keep ACTIVE (never "none").
+# Radiation is excluded: its choices (gray/rrtmg/rrtmgp) are all active — "none"
+# is not even a legal value — so it can never be disabled.
+_AMIP_REQUIRED_PHYSICS = (
+    "convection", "microphysics", "turbulence", "gravity_wave_drag", "clouds",
+)
+
+
+def _require_full_physics_for_amip(args, parser) -> None:
+    """Refuse an AMIP run with any parameterization slot set to ``none``.
+
+    Policy (CLAUDE directive): an AMIP simulation is a real atmosphere, so every
+    parameterization must be active.  A silently-disabled slot is a defect — e.g.
+    ``microphysics='none'`` left Tiedtke's detrained condensate with no
+    precipitation sink, trapping column water (CWV runaway) — so we fail LOUDLY
+    rather than run an incomplete physics stack.
+
+    Escape hatch (idealized / dry-dynamics runs): ``--allow-disabled-physics``,
+    or the intrinsically-dry modes ``--held-suarez-forcing`` (Newtonian
+    relaxation, no parameterizations) and ``--enable-latlon-spmd`` (requires
+    dynamics-only physics; not SPMD-routed for stateful schemes yet).
+    """
+    if (getattr(args, "allow_disabled_physics", False)
+            or getattr(args, "held_suarez_forcing", False)
+            or getattr(args, "enable_latlon_spmd", False)):
+        return
+    disabled = [name for name in _AMIP_REQUIRED_PHYSICS
+                if getattr(args, name, "none") == "none"]
+    if disabled:
+        parser.error(
+            "AMIP requires every parameterization active, but these are "
+            f"'none': {', '.join(disabled)}. Set them to a real scheme (the "
+            "defaults already do), or pass --allow-disabled-physics for an "
+            "idealized / dry-dynamics run (see also --held-suarez-forcing).")
+
+
 def main(argv: list[str] | None = None):
     parser = build_arg_parser()
 
@@ -1205,6 +1252,10 @@ def main(argv: list[str] | None = None):
     # set incl. sundqvist microphysics; stashes args._aimip_params for the
     # post-setup pipeline injection below).
     args = _apply_aimip_classical_overrides(args)
+
+    # Enforce the full-physics policy on the FINAL resolved schemes (after the
+    # AIMIP override may have promoted microphysics none -> sundqvist).
+    _require_full_physics_for_amip(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
