@@ -789,8 +789,12 @@ def main():
             "eval_metrics_train_period": eval_metrics_train,
             "checkpoint": str(ckpt_path),
         }
+        # ``loss_history`` is empty on an eval-only resume (all epochs already
+        # done, start_epoch == n_epochs -> zero training iterations); guard the
+        # [-1] so the scorecard write below still runs (e.g. scorecard regen).
+        last_train_loss = loss_history[-1] if loss_history else float("nan")
         logger.info(
-            f"{variant}: train_loss[-1]={loss_history[-1]:.6f}, "
+            f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
             f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
             f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
             f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "

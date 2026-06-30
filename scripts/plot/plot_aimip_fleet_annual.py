@@ -60,8 +60,11 @@ S3_BUCKET = "ai-mip"
 MODELS = {
     "ACE2.1-ERA5": dict(
         path="Ai2/ACE2-1-ERA5",
-        template="aimip/r{i_r}i1p1f1/Amon/tas/gr/v20251130/"
-                 "tas_Amon_ACE2-ERA5_aimip_r{i_r}i1p1f1_gr_197810-202412.nc",
+        # tas is published on the NATIVE grid (gn), NOT gr — the gr path 404s
+        # despite the submissions manifest listing gr (2026-06-30 bucket probe:
+        # only .../Amon/tas/gn/v20251130/...gn_197810-202412.nc exists).
+        template="aimip/r{i_r}i1p1f1/Amon/tas/gn/v20251130/"
+                 "tas_Amon_ACE2-ERA5_aimip_r{i_r}i1p1f1_gn_197810-202412.nc",
     ),
     "ArchesWeather": dict(
         path="ArchesWeather/ArchesWeather-V2",
@@ -139,6 +142,20 @@ def _global_annual(ds: xr.Dataset, varname: str = "tas") -> xr.DataArray:
     return annual
 
 
+def _subtract_baseline(arr: xr.DataArray, b0: int, b1: int) -> xr.DataArray:
+    """Return ``arr`` as an anomaly from its mean over calendar years [b0, b1].
+
+    ``arr`` carries a ``year`` coordinate (fleet arrays are (member, year);
+    ERA5 is (year,)).  The baseline mean is reduced over ALL dims, so a single
+    scalar offset is removed and the inter-member envelope is preserved -- the
+    paper Fig-3 convention (anomalies from the 1979-2014 training-period mean).
+    Falls back to the full-series mean if the baseline window is empty.
+    """
+    sub = arr.sel(year=slice(b0, b1))
+    base = float(sub.mean()) if sub.size else float(arr.mean())
+    return arr - base
+
+
 def _load_model(fs, name: str, info: dict) -> xr.DataArray | None:
     """Return (n_ens, n_years) DataArray of annual global-mean tas."""
     series = []
@@ -178,6 +195,20 @@ def main():
         "--csv", type=Path,
         default=Path("results/aimip_001/aimip_fleet_tas_annual.csv"),
     )
+    parser.add_argument(
+        "--anomaly", action="store_true",
+        help="Plot anomalies from the baseline-period mean (paper Fig-3 "
+             "style) rather than absolute tas.",
+    )
+    parser.add_argument(
+        "--anomaly-base-start", type=int, default=1979,
+        help="First calendar year of the anomaly baseline (paper: 1979).",
+    )
+    parser.add_argument(
+        "--anomaly-base-end", type=int, default=2014,
+        help="Last calendar year of the anomaly baseline (paper training "
+             "period ends 2014).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -210,6 +241,18 @@ def main():
         cb = _load_model(fs, CBOTTLE["name"], CBOTTLE)
         if cb is not None:
             fleet[CBOTTLE["name"]] = cb
+
+    # Paper Fig 3 plots ANOMALIES from the 1979-2014 (training-period) mean:
+    # subtract each series' own baseline-window mean so absolute offsets drop
+    # out and the test-period trend/variability divergence is what shows.
+    # Done before metrics so bias/RMSE are computed on the plotted quantity.
+    if args.anomaly:
+        b0, b1 = args.anomaly_base_start, args.anomaly_base_end
+        if era5_annual is not None:
+            era5_annual = _subtract_baseline(era5_annual, b0, b1)
+        for _name in list(fleet):
+            fleet[_name] = _subtract_baseline(fleet[_name], b0, b1)
+        logger.info(f"Anomaly mode: removed {b0}-{b1} baseline mean per series")
 
     # Compute per-model mean bias + RMSE vs ERA5 reference.
     # ``bias`` = time-mean(ensmedian - era5).
@@ -274,9 +317,18 @@ def main():
             rows.append(("ERA5", int(y), float("nan"), float(v), float("nan")))
 
     ax.set_xlabel("year")
-    ax.set_ylabel("global-mean tas [K]")
+    ax.set_ylabel(
+        "global-mean tas anomaly [K]" if args.anomaly
+        else "global-mean tas [K]"
+    )
+    _kind = (
+        f"annual global-mean 2-m air temperature anomaly "
+        f"(rel. {args.anomaly_base_start}-{args.anomaly_base_end})"
+        if args.anomaly else
+        "annual global-mean surface air temperature"
+    )
     ax.set_title(
-        f"AIMIP-1 fleet — annual global-mean surface air temperature "
+        f"AIMIP-1 fleet — {_kind}\n"
         f"(shaded = ensemble envelope, {YEAR_MIN}-{YEAR_MAX})"
     )
     ax.grid(alpha=0.3)
