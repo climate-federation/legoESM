@@ -374,6 +374,14 @@ def parse_args(argv: list[str] | None = None):
                    help="Disable global SSS restoring.")
     p.add_argument("--jra55-no-freeze-cap", action="store_true",
                    help="Disable the T_freeze cap inside the sponge zone.")
+    p.add_argument("--jra55-sea-ice", action="store_true", default=False,
+                   dest="jra55_sea_ice",
+                   help="Prognostic slab (thermodynamic) sea-ice tile coupled "
+                        "to the ocean, replacing the freeze-cap SST stand-in: "
+                        "open-ocean bulk fluxes scale by f_ocean=(1-A) and the "
+                        "ice tile feeds basal heat / melt-freeze freshwater / "
+                        "brine salt / ice-ocean stress to the ocean. Forces the "
+                        "freeze cap OFF (no double-capping).")
     p.add_argument("--restart", type=str, default=None,
                    help=(
                        "Path to a restart_dayXXXXXX.npz file from a previous "
@@ -1276,6 +1284,38 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     # T_freeze (273.15 K) = -1.8 °C, the seawater freezing point.
     state["T_freeze_ocean_C"] = float(_consts.T_freeze_ocean - _consts.T_freeze)
 
+    # Prognostic slab sea ice (opt-in --jra55-sea-ice): build the slab config +
+    # a zero initial ice state on the forcing grid, and force the freeze-cap
+    # stand-in OFF so SST is not double-capped (the ice tile now provides the
+    # freezing-point physics).  Off (default) ⇒ the freeze cap above is kept and
+    # the block scan is byte-identical.
+    if getattr(args, "jra55_sea_ice", False):
+        from legoesm.core.field import Field
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.ice.state import SeaIceState
+        state["enable_sea_ice"] = True
+        state["enable_freeze_cap"] = False
+        state["ice_config"] = SeaIceConfig()  # slab: dynamics="none", n_cat=1
+        # Ice state lives on the full ocean-surface 2-D grid: lat_2d/lon_2d are
+        # broadcast factors ((n_lat,1) x (1,n_lon) for lat-lon; (nCells,) for
+        # MPAS), so the surface shape is their broadcast — matching SST
+        # (state.T.data[..., 0]) that step_sea_ice broadcasts against.
+        _ice_shape = tuple(np.broadcast_shapes(
+            np.asarray(state["lat_2d"]).shape,
+            np.asarray(state["lon_2d"]).shape,
+        ))
+        _ice_dims = tuple(f"dim{i}" for i in range(len(_ice_shape)))
+        _zeros = jnp.zeros(_ice_shape)
+        state["ice_state_init"] = SeaIceState(
+            h_ice=Field(_zeros, name="h_ice", dims=_ice_dims, units="m"),
+            T_ice=Field(jnp.full(_ice_shape, float(_consts.T_freeze_ocean)),
+                        name="T_ice", dims=_ice_dims, units="K"),
+            concentration=Field(_zeros, name="concentration",
+                                 dims=_ice_dims, units="1"),
+        )
+    else:
+        state["enable_sea_ice"] = False
+
     return state
 
 
@@ -1750,6 +1790,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     """
     from legoesm import constants as _const
     from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
@@ -1761,6 +1802,11 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
+    # Prognostic slab sea ice (opt-in --jra55-sea-ice): replaces the freeze-cap
+    # SST stand-in.  Static gate ⇒ ice-off blocks are bit-identical.  Setup
+    # forces enable_freeze_cap=False when ice is on (no double-capping).
+    enable_sea_ice = bool(jra55_state.get("enable_sea_ice", False))
+    ice_cfg = jra55_state.get("ice_config")
 
     sponge = _build_sponge_forcing(jra55_state) if enable_sponge else None
 
@@ -1793,8 +1839,13 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     enable_maxvel = _maxvel_3d > 0.0
 
     @jax.jit
-    def block_fn(state, atm_stack, runoff_stack, block_start_step):
-        def step_body(state_in, idx):
+    def block_fn(state, atm_stack, runoff_stack, block_start_step,
+                 ice_state=None):
+        def step_body(carry, idx):
+            if enable_sea_ice:
+                state_in, ice_in = carry
+            else:
+                state_in = carry
             atm = AtmToSurface(
                 sw_down=atm_stack["sw_down"][idx],
                 lw_down=atm_stack["lw_down"][idx],
@@ -1847,6 +1898,15 @@ def _build_jra55_block_fn(model, jra55_state, dt):
                 tau_y=tau_y,
                 freshwater=None,
             )
+            # Prognostic slab sea ice: advance the ice tile and partition the
+            # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
+            # tile's basal heat / melt-freeze freshwater / brine salt / stress).
+            if enable_sea_ice:
+                new_ice, fw, sf = omip_sea_ice_surface_forcing(
+                    ice_state=ice_in, ice_config=ice_cfg, atm=atm,
+                    ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
+                    dt=dt, grid=None,
+                )
             # Ramp sponge strength alongside wind stress.
             if enable_ramp and enable_sponge:
                 sponge_step = sponge._replace(gamma=sponge.gamma * ramp)
@@ -1894,13 +1954,16 @@ def _build_jra55_block_fn(model, jra55_state, dt):
                     v=new_state.v.replace(data=v_clipped),
                 )
 
+            if enable_sea_ice:
+                return (new_state, new_ice), None
             return new_state, None
 
         n = atm_stack["sw_down"].shape[0]
-        final_state, _ = jax.lax.scan(
-            step_body, state, jnp.arange(n, dtype=jnp.int32),
+        init = (state, ice_state) if enable_sea_ice else state
+        final, _ = jax.lax.scan(
+            step_body, init, jnp.arange(n, dtype=jnp.int32),
         )
-        return final_state
+        return final  # (state, ice_state) when sea-ice on, else state
 
     return block_fn
 
@@ -1917,6 +1980,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
     """
     from legoesm import constants as _const
     from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
@@ -1955,6 +2019,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         freeze_mask_static = None
         T_freeze_C_static = -1.8
 
+    # Prognostic slab sea ice (opt-in) — see _build_jra55_block_fn.
+    enable_sea_ice = bool(jra55_state.get("enable_sea_ice", False))
+    ice_cfg = jra55_state.get("ice_config")
+
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
@@ -1966,10 +2034,14 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         """Create a JIT-compiled block function for a fixed block size."""
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
-                     block_start_day):
+                     block_start_day, ice_state=None):
             dt_days = dt / 86400.0
 
-            def step_body(state_in, idx):
+            def step_body(carry, idx):
+                if enable_sea_ice:
+                    state_in, ice_in = carry
+                else:
+                    state_in = carry
                 # Current fractional day
                 day = block_start_day + idx * dt_days
 
@@ -2053,6 +2125,15 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     freshwater=None,
                 )
 
+                # Prognostic slab sea ice: partition surface forcing between
+                # open ocean (f_ocean=1-A) and the ice tile.
+                if enable_sea_ice:
+                    new_ice, fw, sf = omip_sea_ice_surface_forcing(
+                        ice_state=ice_in, ice_config=ice_cfg, atm=atm,
+                        ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
+                        dt=dt, grid=None,
+                    )
+
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
                             if enable_sponge else None)
                 new_state = model._step_impl(
@@ -2087,13 +2168,16 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                             data=jnp.clip(new_state.v.data,
                                           -_maxvel_3d, _maxvel_3d)))
 
+                if enable_sea_ice:
+                    return (new_state, new_ice), None
                 return new_state, None
 
-            final_state, _ = jax.lax.scan(
-                step_body, state,
+            init = (state, ice_state) if enable_sea_ice else state
+            final, _ = jax.lax.scan(
+                step_body, init,
                 jnp.arange(n_steps_block, dtype=jnp.int32),
             )
-            return final_state
+            return final  # (state, ice_state) when sea-ice on, else state
 
         return block_fn
 
@@ -2460,6 +2544,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # initial state so the traced body captures the vertex mask as
         # a constant (codex review MAJOR; census 8474554).
         model.prime_step_caches(state)
+        # Prognostic slab sea ice (--jra55-sea-ice): the block scan carries
+        # (ocean_state, ice_state); thread the ice state across blocks.
+        _ice_on = bool(jra55_state.get("enable_sea_ice", False))
+        ice_state = jra55_state.get("ice_state_init") if _ice_on else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt)
@@ -2503,16 +2591,30 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             t_compute_start = time.time()
             if use_gpu_interp:
                 bfn = _get_block_fn_interp(actual)
-                state = bfn(
-                    state, raw_stack, runoff_records,
-                    record_meta["record_days"],
-                    jnp.float64(record_meta["block_start_day"]),
-                )
+                if _ice_on:
+                    state, ice_state = bfn(
+                        state, raw_stack, runoff_records,
+                        record_meta["record_days"],
+                        jnp.float64(record_meta["block_start_day"]),
+                        ice_state,
+                    )
+                else:
+                    state = bfn(
+                        state, raw_stack, runoff_records,
+                        record_meta["record_days"],
+                        jnp.float64(record_meta["block_start_day"]),
+                    )
             else:
-                state = block_fn(
-                    state, atm_stack, runoff_stack,
-                    jnp.int32(block_start),
-                )
+                if _ice_on:
+                    state, ice_state = block_fn(
+                        state, atm_stack, runoff_stack,
+                        jnp.int32(block_start), ice_state,
+                    )
+                else:
+                    state = block_fn(
+                        state, atm_stack, runoff_stack,
+                        jnp.int32(block_start),
+                    )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
 

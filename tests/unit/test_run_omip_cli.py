@@ -40,6 +40,13 @@ def test_default_nlev_is_40_for_climate_fidelity():
     assert parse_args(["--grid", "latlon", "--nlev", "20"]).nlev == 20
 
 
+def test_jra55_sea_ice_flag_parses():
+    """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
+    wired into the JRA55 scan block loop."""
+    assert parse_args(["--grid", "latlon"]).jra55_sea_ice is False
+    assert parse_args(["--grid", "latlon", "--jra55-sea-ice"]).jra55_sea_ice is True
+
+
 def test_precision_default_is_fp64_backward_compatible():
     """OMIP ran unconditional fp64 before the flag; the default MUST stay
     fp64 so existing runs are numerically unchanged."""
