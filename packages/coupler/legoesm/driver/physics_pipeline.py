@@ -194,6 +194,12 @@ class PhysicsPipeline:
         self.land_bucket_w_max = 150.0     # bucket capacity [kg/m^2]
         self.land_beta_min = 0.1           # min moisture availability (dry soil)
         self.land_bucket_w_init_frac = 0.5  # initial fill fraction of W_max
+        # Bucket runoff partition (Green-Ampt infiltration excess + saturation
+        # excess), shared with legoesm.land.slab_land via partition_bucket_runoff.
+        # Set post-construction by the driver from ExperimentConfig.
+        self.land_K_infiltration = 1.0e-5    # saturated infiltration capacity [m/s]
+        self.land_infil_suction_boost = 2.0  # Green-Ampt suction enhancement [-]
+        self.land_infiltration_excess = True  # enable Hortonian infiltration excess
         # ``land_stomatal_beta``: route the soil-water availability through the
         # SHARED land stomatal model (Jarvis 1976) instead of the bare bucket
         # ramp — the soil beta becomes ``min(beta_soil, beta_canopy)`` where
@@ -318,28 +324,44 @@ class PhysicsPipeline:
 
     def _bucket_update(self, w_land, precip_total, beta_land,
                        T_land, T_low, q_air, u_low, v_low, p_s, dt):
-        """Advance the Manabe (1969) soil-water bucket one physics step.
+        """Advance the Manabe (1969) soil-water bucket one physics step, adding the
+        Green-Ampt-style infiltration-excess + saturation-excess runoff partition.
 
-            dW/dt = P - E,   W clipped to [0, W_max]   (overflow -> runoff).
+            infiltration = min(P, K_s*rho*(1 + B*(1 - W/W_max)))   (Hortonian cap)
+            dW/dt = infiltration - E,   W in [0, W_max]
+            runoff = (P - infiltration)  +  max(W - W_max, 0)/dt   (Hortonian + Dunne)
 
-        ``P`` (``precip_total``) is total surface precip over land
-        [kg/m^2/s]; ``E`` is the ``beta``-limited land evaporation
-        [kg/m^2/s] = the SAME ``beta``-scaled bulk latent flux (/L_v) that
-        cools ``T_land`` in :meth:`_step_slab_land`.  Capacity ``W_max`` and
-        the clip-to-``[0, W_max]`` (overflow = surface runoff, leaves the
-        column) mirror ``legoesm.land.slab_land``.  Returns ``w_land``
-        unchanged when the bucket is inactive.
+        ``P`` (``precip_total``) is total surface precip over land [kg/m^2/s]; ``E``
+        is the ``beta``-limited land evaporation — the SAME ``beta``-scaled bulk
+        latent flux /L_v that cools ``T_land`` in :meth:`_step_slab_land` and
+        moistens the BL upstream.  The bucket consumes that SAME ``E``
+        (``limit_evaporation=False``) so it stays consistent with the already-
+        applied energy/moisture flux rather than re-limiting in isolation (which
+        would desync the bucket water from the BL — only the standalone
+        ``slab_land.step_land`` tile, which recomputes its own latent flux from the
+        water-limited evaporation, may water-limit).  This adds the runoff
+        diagnostic (previously the overflow was silently clipped away and lost); the
+        bucket can still clip at 0 under the beta-floor over-evaporation exactly as
+        the prior code did.  Partition shared with ``legoesm.land.slab_land`` via
+        ``partition_bucket_runoff`` (no re-derived bucket numerics).  Returns
+        ``(w_land, None)`` unchanged when the bucket is inactive.
         """
         if not self.land_soil_bucket or w_land is None:
-            return w_land
+            return w_land, None
         beta = 1.0 if beta_land is None else beta_land
         rho_low, wind_speed = self._land_surface_bulk(T_low, u_low, v_low, p_s)
         q_sat_land = saturation_specific_humidity(T_land, p_s)
         # beta-limited land evaporation mass flux [kg/m^2/s] (negative = dew
-        # onto soil, a source); consistent with the SEB latent flux.
+        # onto soil, a source); the SAME flux applied to the SEB / BL upstream.
         evap = beta * rho_low * self.C_E * wind_speed * (q_sat_land - q_air)
-        w_unclamped = w_land + dt * (precip_total - evap)
-        return jnp.clip(w_unclamped, 0.0, self.land_bucket_w_max)
+        from legoesm.land.bucket_hydrology import partition_bucket_runoff
+        w_new, _evap_act, runoff, _ri, _rs = partition_bucket_runoff(
+            w_land, precip_total, evap, dt, self.land_bucket_w_max,
+            self.land_K_infiltration, self.land_infil_suction_boost,
+            infiltration_excess=self.land_infiltration_excess,
+            limit_evaporation=False,
+        )
+        return w_new, runoff
 
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
                         T, p_s, q_v, u, v, dt, beta_land=None):
@@ -1241,8 +1263,9 @@ class PhysicsPipeline:
 
         # Advance the prognostic soil-water bucket (no-op / w_land unchanged
         # when the bucket is inactive).  Total surface precip is the source;
-        # the beta-limited land evaporation is the sink.
-        w_land_new = self._bucket_update(
+        # the beta-limited land evaporation is the sink.  ``land_runoff`` is the
+        # diagnosed Hortonian + saturation-excess runoff leaving the column.
+        w_land_new, land_runoff = self._bucket_update(
             w_land, precip + precip_micro, beta_land,
             T_land, T[..., -1], q_v[..., -1],
             u[..., -1], v[..., -1], p_s, dt,
@@ -1281,6 +1304,7 @@ class PhysicsPipeline:
             qke=_pin_carry_dtype(qke_out, qke),
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
             w_land=_pin_carry_dtype(w_land_new, w_land),
+            land_runoff=land_runoff,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
