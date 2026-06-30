@@ -1014,3 +1014,34 @@ def test_config_yaml_explicit_cli_flag_overrides_file():
         parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"
+
+
+def test_aimip_louis_preserves_resolved_surface_scheme():
+    """The AIMIP Louis injection must KEEP the run-resolved surface bulk_scheme +
+    gustiness (coare3/300) rather than reverting to to_louis_config's default
+    constant surface — the clobber that silently made --surface-bulk-scheme a
+    no-op on every AIMIP run (anemic evaporation, hfls ~6 vs ~88)."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, SurfaceLayerConfig)
+    from scripts.run.run_amip import _louis_with_preserved_surface
+    # trained Louis carries a DEFAULT (constant) surface, exactly as
+    # to_louis_config() builds it from the trained Cd/Ch/z0:
+    trained = LouisConfig(surface=SurfaceLayerConfig(Cd_neutral=1.5e-3))
+    assert trained.surface.bulk_scheme == "constant"
+    # _resolve_turbulence had already applied coare3 + gustiness 300:
+    resolved = LouisConfig(surface=SurfaceLayerConfig(
+        bulk_scheme="coare3", gustiness_w_zi=300.0))
+    out = _louis_with_preserved_surface(trained, resolved)
+    assert out.surface.bulk_scheme == "coare3"        # preserved, not clobbered
+    assert out.surface.gustiness_w_zi == 300.0
+    assert out.surface.Cd_neutral == 1.5e-3           # trained Cd/Ch/z0 kept
+
+
+def test_aimip_louis_preserve_surface_noop_without_prev():
+    """No prior turbulence config (e.g. turbulence was none) -> trained Louis
+    returned unchanged."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, SurfaceLayerConfig)
+    from scripts.run.run_amip import _louis_with_preserved_surface
+    trained = LouisConfig(surface=SurfaceLayerConfig())
+    assert _louis_with_preserved_surface(trained, None) is trained

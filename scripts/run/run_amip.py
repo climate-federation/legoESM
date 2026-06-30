@@ -1202,6 +1202,32 @@ _AMIP_REQUIRED_PHYSICS = (
 )
 
 
+def _louis_with_preserved_surface(louis_config, prev_turb_config):
+    """Re-apply the run-resolved surface bulk-flux scheme onto a trained Louis.
+
+    The AIMIP-classical ``to_louis_config()`` rebuilds its ``SurfaceLayerConfig``
+    from the trained Cd/Ch/z0 at the field DEFAULTS for everything else —
+    including ``bulk_scheme="constant"`` and ``gustiness_w_zi=0``.  Assigning it
+    straight onto ``driver.physics.turbulence_config`` therefore CLOBBERS the
+    ``--surface-bulk-scheme`` (e.g. coare3) + ``--gustiness-zi`` that
+    ``_resolve_turbulence`` had already propagated into the built pipeline,
+    silently reverting every AIMIP run to the constant neutral-coefficient
+    surface (anemic evaporation over a calm warm ocean).
+
+    This re-applies the previously-resolved surface ``bulk_scheme`` +
+    ``gustiness_w_zi`` onto the trained Louis config, keeping the trained
+    Cd/Ch/z0 (which the MOST schemes ignore anyway).  No-op when there is no
+    prior turbulence config / surface to preserve.
+    """
+    prev_surf = getattr(prev_turb_config, "surface", None)
+    if prev_surf is None or getattr(louis_config, "surface", None) is None:
+        return louis_config
+    return louis_config._replace(
+        surface=louis_config.surface._replace(
+            bulk_scheme=prev_surf.bulk_scheme,
+            gustiness_w_zi=prev_surf.gustiness_w_zi))
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1326,7 +1352,14 @@ def main(argv: list[str] | None = None):
     if getattr(args, "_aimip_params", None) is not None:
         _p = args._aimip_params
         driver.physics.convection_config = _p.to_tiedtke_config()
-        driver.physics.turbulence_config = _p.to_louis_config()
+        # to_louis_config() rebuilds SurfaceLayerConfig at the DEFAULTS
+        # (bulk_scheme="constant", gustiness_w_zi=0), so a naive assignment
+        # clobbers the run-resolved --surface-bulk-scheme (e.g. coare3) +
+        # --gustiness-zi that _resolve_turbulence applied to the built pipeline.
+        # Preserve them so an AIMIP run honours --surface-bulk-scheme.
+        driver.physics.turbulence_config = _louis_with_preserved_surface(
+            _p.to_louis_config(),
+            getattr(driver.physics, "turbulence_config", None))
         driver.physics.gwd_config = _p.to_mcfarlane_config()
         # Inject the trained Sundqvist microphysics leaves ONLY when the
         # resolved scheme is sundqvist (it was forced on above unless the user
