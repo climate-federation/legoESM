@@ -317,7 +317,9 @@ def step_multilayer_land(
     # per-cell config arrays while the coupled state runs float32, and promoting
     # the latent flux here would change the land-state output dtype (a lax.scan
     # carry-type mismatch in the segment).
-    _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+    _S_top_pow = jnp.where(_S_top > 0.0, _S_top, 1.0)
+    _beta_surf_raw = _S_top_pow ** config.soil_evap_resistance_exp
+    _beta_surf = jnp.where(_S_top > 0.0, _beta_surf_raw, 0.0).astype(
         soil_evap_demand.dtype)
     soil_evap_demand = jnp.where(soil_evap_demand > 0.0,
                                  soil_evap_demand * _beta_surf, soil_evap_demand)
@@ -377,8 +379,17 @@ def step_multilayer_land(
     # the total — the surface flux already embedded moisture stress via f_veg.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
     weight_sum = _weight_sum_raw[..., None]  # (ncol, 1)
-    # Safe normalization: when all layers are dry, E_pot_transp ≈ 0 anyway
-    weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
+    # AD-safe normalization.  ``weight / max(weight_sum, 1e-20)`` is finite in the
+    # FORWARD when the root zone is all dry (weight_sum -> 0, weight -> 0), but its
+    # reverse-mode VJP carries a 1/weight_sum**2 term that overflows to NaN as
+    # weight_sum -> 0 (a finite-forward / NaN-backward singularity that breaks
+    # gradient-based land calibration).  Branch on a non-tiny weight_sum and sanitise
+    # the denominator in BOTH branches so no near-zero division ever enters the graph;
+    # fall back to the root-density profile (E_pot_transp ~ 0 there, so the sink is
+    # unchanged) when the zone is dry.  Forward-identical for weight_sum > 1e-12.
+    _wok = weight_sum > 1e-12
+    _denom = jnp.where(_wok, weight_sum, 1.0)
+    weight_norm = jnp.where(_wok, weight / _denom, root_frac)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
     # --- Richards equation: update soil moisture (+ coupled surface ponding) ---
@@ -443,9 +454,14 @@ def step_multilayer_land(
     # Realised-evaporation fraction in [0, 1]: the latent flux entering the soil
     # is supply-limited, so its T_sfc slope shrinks toward 0 as the limiter
     # binds.  ``lhflx <= 0`` is dew/condensation (never supply-limited) -> 1.
+    # The denominator must be floored before the division, not only masked by the
+    # outer ``where``.  At a dry top layer ``lhflx_actual`` can be exactly zero
+    # while ``lhflx`` is a tiny positive number; the forward ratio is finite, but
+    # the division VJP forms 0 / lhflx**2 and can produce 0/0 -> NaN.
+    _lhflx_frac_denom = jnp.where(lhflx > 0.0, jnp.maximum(lhflx, 1e-12), 1.0)
     latent_realised_frac = jnp.where(
         lhflx > 0.0,
-        jnp.clip(lhflx_actual / jnp.where(lhflx > 0.0, lhflx, 1.0), 0.0, 1.0),
+        jnp.clip(lhflx_actual / _lhflx_frac_denom, 0.0, 1.0),
         1.0,
     )
     lambda_lh = jnp.maximum(
