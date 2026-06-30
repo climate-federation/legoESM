@@ -188,22 +188,20 @@ def _exchange_mpi(
     mpi4jax, MPI = require_mpi_stack()
     sendrecv = get_sendrecv_vjp(mpi4jax)
 
-    # Use a type-based tag offset to avoid collisions between
-    # cell / edge / vertex exchanges in the same JIT trace.  The
-    # ``rank * 1000 + nbr`` pair offset is unique only for ranks < 1000;
-    # fail EARLY instead of silently colliding across entity types.
-    TAG_BASE = entity_type * 1_000_000
+    # Tag = the entity type ALONE (cell=0 / edge=1 / vertex=2).  mpi4jax
+    # ``sendrecv`` already matches on (source, dest), so the rank PAIR is never
+    # encoded in the tag -- the only thing source/dest does NOT separate is two
+    # messages of DIFFERENT entity type between the same pair (a cell vs an edge
+    # buffer, different sizes).  Same-entity multi-field exchanges between a pair
+    # are paired by mpi4jax's token + MPI's non-overtaking guarantee.  Dropping
+    # the old ``rank * 1000 + nbr`` pair offset removes the < 1000-rank ceiling
+    # (and the MPI_TAG_UB pressure): the tag is now rank-INDEPENDENT, so the halo
+    # scales to ANY rank count.  (``rank`` stays in the signature for API
+    # stability with the message-count siblings; the rank-free tag no longer
+    # uses it.)
+    tag = _entity_tag(entity_type)
     if comm.neighbor_ranks:
-        max_peer = max((rank, *comm.neighbor_ranks))
-        if max_peer >= 1000:
-            raise ValueError(
-                f"_exchange_mpi: per-entity tag scheme addresses ranks "
-                f"< 1000 (got rank id {max_peer}); use "
-                f"batched_halo_exchange (rank-count-aware tags) or widen "
-                f"the entity tag strides."
-            )
-        _check_tag_bound(TAG_BASE + max_peer * 1000 + max_peer, MPI,
-                         "_exchange_mpi")
+        _check_tag_bound(tag, MPI, "_exchange_mpi")
 
     s_offset = 0
     recv_chunks = []
@@ -228,8 +226,8 @@ def _exchange_mpi(
         recv_data = sendrecv(
             send_buf, recv_buf,
             nbr_rank, nbr_rank,
-            TAG_BASE + rank * 1000 + nbr_rank,
-            TAG_BASE + nbr_rank * 1000 + rank,
+            tag,
+            tag,
             MPI.COMM_WORLD,
         )
 
@@ -259,13 +257,48 @@ def _exchange_mpi(
 # path, and the VJP (split/scatter-add duals of the pack, gather duals of
 # the unpack) is exact.
 
-# Entity exchanges use tag bases 0 / 1_000_000 / 2_000_000 (cell/edge/
-# vertex, with rank*1000+nbr pair offsets valid for n_ranks <= 1000 —
-# checked in ``_exchange_mpi``).  The batched path starts above them and
-# uses RANK-COUNT-AWARE strides (pair stride = n_ranks, group stride =
-# n_ranks**2) so group/pair tags can never collide at any rank count;
-# every tag is validated against the implementation's MPI_TAG_UB.
-_BATCH_TAG_BASE = 3_000_000
+# MPI tags here are RANK-INDEPENDENT: mpi4jax ``sendrecv`` matches on
+# (source, dest), so the rank pair is never encoded in the tag and the scheme
+# scales to ANY rank count (no < 1000-rank ceiling).  A tag only separates
+# concurrent messages between the SAME (source, dest) pair: per-entity
+# exchanges by entity type (cell=0 / edge=1 / vertex=2), the batched path by
+# dtype-group index (``_BATCH_TAG_BASE + g``, offset above the entity tags so
+# the two schemes stay disjoint).  Group tags grow with the NUMBER OF DTYPE
+# GROUPS (tiny in practice -- one per distinct prognostic dtype, not per field);
+# a pathological group count is caught by ``_check_tag_bound`` (raises, never
+# silently exceeds MPI_TAG_UB) -- it is NOT bounded for unlimited groups.
+#
+# ORDERING INVARIANT (required -- the SAME one the cube / lat-lon / plane halos
+# rely on, which likewise reuse a fixed tag across every exchange call): two
+# messages that share (comm, source, dest, tag) -- e.g. the production MPAS
+# step's two cell exchanges (T+p_s, then tracers) between one pair -- are
+# disambiguated NOT by the tag but by ORDER.  Every rank runs the same SPMD
+# program order; mpi4jax's ordered effect keeps the sendrecvs from being
+# reordered/parallelised; MPI's non-overtaking guarantee then pairs them 1:1.
+# A NEW halo path that issues same-(source,dest,tag) messages MUST preserve that
+# program-order property (regression: test_voronoi_mpi
+# ::TestHaloExchange::test_repeated_same_entity_exchange_no_cross_match).
+_BATCH_TAG_BASE = 8  # > the entity tags {0, 1, 2}; leaves headroom
+
+
+def _entity_tag(entity_type: int) -> int:
+    """MPI tag for a per-entity halo message: the entity type ALONE.
+
+    Rank-independent: mpi4jax ``sendrecv`` matches on (source, dest), so the
+    pair is never encoded in the tag.  The entity type is the only thing
+    source/dest does not separate (cell vs edge vs vertex between one pair).
+    """
+    return entity_type
+
+
+def _batch_group_tag(group: int) -> int:
+    """MPI tag for a batched dtype-group message: ``_BATCH_TAG_BASE + group``.
+
+    Rank-independent like :func:`_entity_tag`; the group index separates the
+    concurrent dtype-group messages between a pair, and the base sits above the
+    per-entity tags so the two schemes never collide.
+    """
+    return _BATCH_TAG_BASE + group
 
 
 def _mpi_tag_ub(MPI) -> int | None:
@@ -526,20 +559,18 @@ def batched_halo_exchange(edge_fields, cell_fields,
     groups, plan = _message_schedule(edge_fields, cell_fields, sched)
     send_buffers = pack_batched_sends(edge_fields, cell_fields, sched)
 
-    # Rank-count-aware tag strides: pair offset ``rank * n_ranks + nbr``
-    # is unique for ANY rank count, and the group stride sits strictly
-    # above it — no group/pair collisions by construction.  Validate the
-    # largest tag this exchange can produce against MPI_TAG_UB up front.
-    n_ranks = MPI.COMM_WORLD.Get_size()
-    pair_stride = n_ranks
-    group_stride = n_ranks * n_ranks
-    max_tag = (_BATCH_TAG_BASE + (len(groups) - 1) * group_stride
-               + (n_ranks - 1) * pair_stride + (n_ranks - 1))
+    # Rank-INDEPENDENT tags: one per dtype group (``_BATCH_TAG_BASE + g``).
+    # mpi4jax matches on (source, dest), so a tag must only separate the
+    # concurrent dtype-group messages between the SAME pair -- the group index
+    # does that.  No rank in the tag => no rank ceiling.  Validate the largest
+    # tag up front (defensive; it is tiny).  (``rank`` stays in the signature
+    # for API stability; the rank-free tag no longer uses it.)
+    max_tag = _batch_group_tag(len(groups) - 1)
     _check_tag_bound(max_tag, MPI, "batched_halo_exchange")
 
     recv_buffers = []
     for g, (dtype, _members) in enumerate(groups):
-        tag_base = _BATCH_TAG_BASE + g * group_stride
+        tag = _batch_group_tag(g)
         g_recv = []
         for i, nbr_rank in enumerate(sched.neighbor_ranks):
             post, _s_sz, r_sz = plan[g][i]
@@ -551,8 +582,8 @@ def batched_halo_exchange(edge_fields, cell_fields,
                 send_buffers[g][i],
                 jnp.zeros(r_sz, dtype=dtype),
                 nbr_rank, nbr_rank,
-                tag_base + rank * pair_stride + nbr_rank,
-                tag_base + nbr_rank * pair_stride + rank,
+                tag,
+                tag,
                 MPI.COMM_WORLD,
             ))
         recv_buffers.append(g_recv)

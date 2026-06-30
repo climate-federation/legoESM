@@ -449,12 +449,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "zhang_mcfarlane", "kain_fritsch", "emanuel",
                             "tiedtke", "bechtold",
                         ])
-    parser.add_argument("--turbulence", type=str, default="none",
+    # Full-physics policy: an AMIP run is a real atmosphere, so every
+    # parameterization defaults to an ACTIVE scheme — never "none".  A slot is
+    # disabled only for an idealized / dry-dynamics run, which must opt in via
+    # --allow-disabled-physics (or --held-suarez-forcing / --enable-latlon-spmd).
+    # Enforced by _require_full_physics_for_amip; see the directive in CLAUDE.
+    parser.add_argument("--turbulence", type=str, default="louis",
                         choices=[
                             "none", "smagorinsky", "louis", "tke",
                             "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
-    parser.add_argument("--gravity-wave-drag", type=str, default="none",
+    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
                              "'+'-joined composite of the diagnostic sources "
@@ -482,6 +487,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Add the convective (thin-cirrus) cloud-fraction "
                              "source (the tuned slab value is ON).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
+    parser.add_argument("--allow-disabled-physics", action="store_true",
+                        default=False,
+                        help="Permit a parameterization slot set to 'none' (an "
+                             "idealized / dry-dynamics run).  Without this flag an "
+                             "AMIP run requires every physics slot active — see "
+                             "_require_full_physics_for_amip.")
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
     parser.add_argument("--sbm-cape-threshold", type=float, default=70.0)
@@ -502,8 +513,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--physics-parameterization-layers", type=int, default=3)
     parser.add_argument("--physics-parameterization-seed", type=int, default=0)
 
-    # Clouds & microphysics
-    parser.add_argument("--clouds", type=str, default="none",
+    # Clouds & microphysics (full-physics defaults — see the policy note above)
+    parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall"])
     parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.7,
                         help="Critical RH for BL cloud onset (Sundqvist). "
@@ -512,7 +523,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cloud-sigma-bl", type=float, default=1.0,
                         help="Sigma level (p/p_s) above which rh_crit_bl applies. "
                              "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")
-    parser.add_argument("--microphysics", type=str, default="none",
+    parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
                                  "p3", "sdm", "fast_sbm"])
@@ -1116,6 +1127,128 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
     return True, None
 
 
+def _apply_aimip_classical_overrides(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Force the AIMIP-classical scheme set + seed it with the trained params.
+
+    When ``--aimip-classical-checkpoint`` is given, force the classical physics
+    scheme set the params were trained against — tiedtke convection, louis
+    turbulence, mcfarlane GWD, xu_randall cloud, and **sundqvist microphysics**
+    — and stash the trained values on ``args._aimip_params`` for the post-setup
+    pipeline injection.  The cloud (xu_randall) flat fields are seeded here
+    because that config is built inline in the pipeline.
+
+    The Sundqvist microphysics is the crux of the column water budget: Tiedtke
+    detrains condensate into ``q_c`` with no precipitation sink of its own, so
+    ``microphysics='none'`` (the CLI default) traps column water — CWV runaway —
+    and feeds unbounded ``q_c`` to the cloud optics.  Forcing the trained
+    Sundqvist scheme closes the budget.  An explicit prognostic-microphysics
+    override (e.g. ``--microphysics morrison``) is respected: its config is left
+    untouched and the trained Sundqvist leaves are not injected (the post-setup
+    block gates injection on ``args.microphysics == 'sundqvist'``).
+
+    No-op (sets ``args._aimip_params=None``) when the flag is unset.
+    """
+    args._aimip_params = None
+    if not getattr(args, "aimip_classical_checkpoint", None):
+        return args
+    import equinox as eqx
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    _p = eqx.tree_deserialise_leaves(
+        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
+    args.convection = "tiedtke"
+    args.turbulence = "louis"
+    args.gravity_wave_drag = "mcfarlane"
+    args.clouds = "xu_randall"
+    if args.microphysics == "none":
+        args.microphysics = "sundqvist"
+    _cc = _p.to_cloud_config()
+    args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
+    args.cloud_rh_crit = float(_cc.rh_crit)
+    args._aimip_params = _p
+    print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
+          f"microphysics={args.microphysics} + "
+          f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # AIMIP-classical was trained on lat-lon C-grid PE; the trained per-scheme
+    # leaves inject onto the finite-volume PhysicsPipeline (cubed_sphere /
+    # latlon).  The MPAS and spectral backends are off-design and differ:
+    #   * spectral REFUSES tiedtke outright — the spectral run loop does not
+    #     thread the physics carry yet (issue #405) and tiedtke is
+    #     profile-prognostic, so _refuse_stateful_physics_unthreaded raises deep
+    #     in setup BEFORE any microphysics sink runs.  Fail early + clear.
+    #   * MPAS rebuilds its PhysicsConfig from config.microphysics at run(), so
+    #     the schemes are forced ON (the water sink DOES close) but with DEFAULT
+    #     leaves — the trained values apply only on the FV path.  Warn loudly.
+    # Gate on the resolved discretization (the supported-backend signal), not the
+    # grid name: an MPAS grid without --discretization mpas is rejected by the
+    # driver support matrix anyway, so warning on it would be over-broad.
+    _disc = getattr(args, "discretization", "centered")
+    if _disc == "spectral":
+        raise SystemExit(
+            "AIMIP-classical forces tiedtke convection, which the spectral run "
+            "loop refuses (issue #405: profile-prognostic physics carry is not "
+            "threaded on spectral) — it would raise deep in setup before the "
+            "microphysics sink runs. Use --grid-type cubed_sphere or latlon for "
+            "the trained AIMIP-classical physics.")
+    if _disc == "mpas":
+        print("AIMIP-classical: WARNING — the MPAS backend rebuilds its "
+              "PhysicsConfig at run() from config.microphysics; the classical "
+              "schemes are forced ON (the water sink closes) but the TRAINED "
+              "leaves apply ONLY on the finite-volume cubed_sphere/latlon path. "
+              "Use --grid-type cubed_sphere or latlon for the trained physics.")
+    return args
+
+
+# Parameterization slots that an AMIP run must keep ACTIVE (never "none").
+# Radiation is excluded: its choices (gray/rrtmg/rrtmgp) are all active — "none"
+# is not even a legal value — so it can never be disabled.
+_AMIP_REQUIRED_PHYSICS = (
+    "convection", "microphysics", "turbulence", "gravity_wave_drag", "clouds",
+)
+
+
+def _require_full_physics_for_amip(args, parser) -> None:
+    """Refuse an AMIP run with any parameterization slot set to ``none``.
+
+    Policy (CLAUDE directive): an AMIP simulation is a real atmosphere, so every
+    parameterization must be active.  A silently-disabled slot is a defect — e.g.
+    ``microphysics='none'`` left Tiedtke's detrained condensate with no
+    precipitation sink, trapping column water (CWV runaway) — so we fail LOUDLY
+    rather than run an incomplete physics stack.
+
+    Escape hatch: ``--allow-disabled-physics`` (explicit, user-owned).  The
+    intrinsically-dry mode ``--held-suarez-forcing`` (Newtonian relaxation
+    replaces ALL physics, radiation included) is exempt ONLY when the entire
+    parameterization stack is disabled.  A MIXED run — Held-Suarez with some
+    schemes active and some ``none`` (e.g. tiedtke convection with
+    ``microphysics='none'`` has no precip sink) — must still pass
+    ``--allow-disabled-physics``.
+
+    ``--enable-latlon-spmd`` is NOT exempt on its own: an all-parameterization
+    'none' SPMD run still leaves ``radiation`` active (AMIP cannot set radiation
+    to 'none'), which the SPMD driver does not route and rejects.  A genuinely
+    dry SPMD run is therefore a Held-Suarez SPMD run (``--held-suarez-forcing
+    --enable-latlon-spmd``); any other disabled-slot SPMD run must opt in via
+    ``--allow-disabled-physics``.
+    """
+    if getattr(args, "allow_disabled_physics", False):
+        return
+    disabled = [name for name in _AMIP_REQUIRED_PHYSICS
+                if getattr(args, name, "none") == "none"]
+    if not disabled:
+        return
+    fully_dry = len(disabled) == len(_AMIP_REQUIRED_PHYSICS)
+    if fully_dry and getattr(args, "held_suarez_forcing", False):
+        return
+    parser.error(
+        "AMIP requires every parameterization active, but these are "
+        f"'none': {', '.join(disabled)}. Set them to a real scheme (the "
+        "defaults already do), or pass --allow-disabled-physics for an "
+        "idealized / dry-dynamics run. (Held-Suarez is exempt only when the "
+        "ENTIRE stack is dry; latlon-SPMD dry runs go through Held-Suarez.)")
+
+
 def main(argv: list[str] | None = None):
     parser = build_arg_parser()
 
@@ -1134,27 +1267,14 @@ def main(argv: list[str] | None = None):
     args = _postprocess_args(args, parser)
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
-    # best-fit trained params used as INITIAL values.  Force the classical scheme
-    # set, load the params, and set the cloud (xu_randall) flat-field overrides
-    # from the trained values (q_c / rh_crit reach the inline CloudConfig); the
-    # per-knob tiedtke / louis / mcfarlane configs are injected onto the built
-    # pipeline post-setup (below).  Stash the loaded params on ``args``.
-    args._aimip_params = None
-    if getattr(args, "aimip_classical_checkpoint", None):
-        import equinox as eqx
-        from legoesm.training.aimip_params import AIMIPClassicalParams
-        _p = eqx.tree_deserialise_leaves(
-            args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
-        args.convection = "tiedtke"
-        args.turbulence = "louis"
-        args.gravity_wave_drag = "mcfarlane"
-        args.clouds = "xu_randall"
-        _cc = _p.to_cloud_config()
-        args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
-        args.cloud_rh_crit = float(_cc.rh_crit)
-        args._aimip_params = _p
-        print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
-              f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # best-fit trained params used as INITIAL values (forces the trained scheme
+    # set incl. sundqvist microphysics; stashes args._aimip_params for the
+    # post-setup pipeline injection below).
+    args = _apply_aimip_classical_overrides(args)
+
+    # Enforce the full-physics policy on the FINAL resolved schemes (after the
+    # AIMIP override may have promoted microphysics none -> sundqvist).
+    _require_full_physics_for_amip(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
@@ -1214,9 +1334,22 @@ def main(argv: list[str] | None = None):
         driver.physics.convection_config = _p.to_tiedtke_config()
         driver.physics.turbulence_config = _p.to_louis_config()
         driver.physics.gwd_config = _p.to_mcfarlane_config()
+        # Inject the trained Sundqvist microphysics leaves ONLY when the
+        # resolved scheme is sundqvist (it was forced on above unless the user
+        # passed a different prognostic microphysics, whose config we must not
+        # clobber with sundqvist fields).  The micro_fn was wired at setup from
+        # args.microphysics, so this just swaps the default leaves for trained.
+        _micro_injected = False
+        if args.microphysics == "sundqvist" and \
+                getattr(driver.physics, "micro_config", None) is not None:
+            driver.physics.micro_config = _p.to_sundqvist_config()
+            _micro_injected = True
         if _is_root:
+            _micro_msg = ("sundqvist (microphysics), " if _micro_injected
+                          else "")
             print("AIMIP-classical trained configs injected: tiedtke (convection), "
-                  "louis (turbulence), mcfarlane (GWD); cloud via flat fields.")
+                  "louis (turbulence), mcfarlane (GWD), " + _micro_msg +
+                  "cloud via flat fields.")
 
     if _is_root:
         _print_forcing_activity(args)
