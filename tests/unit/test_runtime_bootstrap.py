@@ -264,8 +264,13 @@ class TestDistributedGuardrails:
             "legoesm.parallel.distributed.jax.process_index",
             return_value=0,
         ), patch(
+            # ``initialize_distributed`` now skips ``jax.distributed.initialize``
+            # when JAX is already federated (``process_count() != 1``), i.e. when
+            # ``maybe_init_jax_distributed`` ran in early_init.  Model the
+            # not-yet-federated precondition (count==1) so legoESM performs the
+            # federation itself and the coordinator call fires.
             "legoesm.parallel.distributed.jax.process_count",
-            return_value=2,
+            return_value=1,
         ):
             import legoesm.parallel.distributed as dist_mod
             dist_mod._active_topology = None

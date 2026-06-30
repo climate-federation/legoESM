@@ -433,17 +433,34 @@ class TestBarotropicBottomDragDiff:
         )
 
     def test_bottom_drag_changes_barotropic_gradient(self, baro_setup):
-        """Bottom drag in barotropic solver contributes to the gradient."""
+        """Bottom drag reaches the differentiable barotropic mode through its
+        slow forcing.
+
+        Single-owner design (``barotropic_latlon_cgrid`` finding #6): the 3D
+        baroclinic tendency owns the bottom drag ``-r·u_bot/h_bot`` and carries
+        its depth-mean into the barotropic substeps via ``F_slow_u``/``F_slow_v``
+        — the substep itself NEVER re-applies ``config.bottom_drag_r`` (doing so
+        would double-count drag to ``≈2·r/H``).  So the drag's effect on the
+        barotropic gradient flows through that depth-mean velocity-dependent
+        forcing.  Reconstruct it here (``F_slow ∝ −r·u``) and confirm a nonzero
+        drag rate genuinely changes the barotropic Jacobian d(u_out)/d(u_in)."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
         dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
-        config_no_drag = config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
+        config_no_drag = config._replace(
+            bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
+            # Depth-mean bottom-drag slow forcing the baroclinic tendency carries
+            # into the barotropic mode (velocity-dependent, single-owner path).
+            r = cfg.bottom_drag.bottom_drag_r
+            F_u = -r * jnp.mean(u_data, axis=-1) * s.u_mask.data
+            F_v = -r * jnp.mean(s.v.data, axis=-1) * s.v_mask.data
             s_out, _ = baro_fn(
                 s, dt_s, cfg.barotropic.n_barotropic_substeps, grid, z_coord, cfg,
+                F_slow_u=F_u, F_slow_v=F_v,
             )
             return jnp.sum(s_out.u.data ** 2)
 
@@ -451,8 +468,8 @@ class TestBarotropicBottomDragDiff:
         grad_no_drag = jax.grad(loss)(state.u.data, config_no_drag)
         diff = float(jnp.max(jnp.abs(grad_drag - grad_no_drag)))
         assert diff > 1e-15, (
-            f"Bottom drag in barotropic solver has no effect on gradient. "
-            f"Max diff = {diff:.2e}"
+            f"Bottom-drag slow forcing has no effect on the barotropic "
+            f"gradient. Max diff = {diff:.2e}"
         )
 
     def test_fori_loop_barotropic_no_drag(self, baro_setup):

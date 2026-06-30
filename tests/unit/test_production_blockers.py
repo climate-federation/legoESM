@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy, clear_module_overrides
+from legoesm.core.precision import set_policy, get_policy, clear_module_overrides
 from legoesm.driver.config import ExperimentConfig, GridConfig
 
 
@@ -106,7 +106,13 @@ class TestDistributedGridTypeGuard:
             initialize_distributed(grid_type="spectral")
 
     def test_setup_devices_passes_grid_type_to_distributed(self):
-        """setup_devices must forward grid_type to initialize_distributed."""
+        """setup_devices must forward grid_type to initialize_distributed.
+
+        Distributed lat-lon / mpas now route to their own initialisers
+        (``initialize_distributed_latlon`` / deferred Voronoi partition),
+        so the cubed-sphere fall-through is the path that forwards
+        ``grid_type`` into :func:`initialize_distributed`.
+        """
         from legoesm.runtime.devices import setup_devices
 
         with patch(
@@ -114,8 +120,8 @@ class TestDistributedGridTypeGuard:
             side_effect=ValueError("expected"),
         ) as mock_init:
             with pytest.raises(ValueError):
-                setup_devices(distributed=True, grid_type="latlon")
-            mock_init.assert_called_once_with(grid_type="latlon")
+                setup_devices(distributed=True, grid_type="cubed_sphere")
+            mock_init.assert_called_once_with(grid_type="cubed_sphere")
 
     def test_setup_devices_non_distributed_honors_grid_type(self):
         """Non-distributed path must dispatch to correct mesh creator."""
@@ -232,10 +238,14 @@ class TestRRTMGPUseScanRouting:
     (use_scan=False) without editing driver code.
     """
 
-    def test_rrtmgp_use_scan_field_exists_and_defaults_false(self):
+    def test_rrtmgp_use_scan_field_exists_and_defaults_none(self):
+        # Issue #273 GPU tuning: the default is ``None`` (auto-pick
+        # ``lax.scan`` on GPU/TPU, the unrolled Python loop on CPU);
+        # explicit ``True``/``False`` override.  An earlier revision
+        # hard-defaulted ``False`` — this default deliberately drifted.
         ec = ExperimentConfig()
         assert hasattr(ec, "rrtmgp_use_scan")
-        assert ec.rrtmgp_use_scan is False
+        assert ec.rrtmgp_use_scan is None
 
     def _capture_rrtmg_config(self, ec):
         """Build wrapper with RRTMGPConfig captured for inspection.
@@ -289,10 +299,11 @@ class TestRRTMGPUseScanRouting:
         restored = experiment_config_from_dict(d)
         assert restored.rrtmgp_use_scan is True
 
-        # Older checkpoints without the field must still load (default False).
+        # Older checkpoints without the field must still load (default
+        # None = auto-detect scan-vs-unroll per backend, issue #273).
         d.pop("rrtmgp_use_scan")
         restored_default = experiment_config_from_dict(d)
-        assert restored_default.rrtmgp_use_scan is False
+        assert restored_default.rrtmgp_use_scan is None
 
 
 # =========================================================================
@@ -317,8 +328,12 @@ class TestPpermuteTilingGuard:
         mock_grid = MagicMock()
         data = jnp.ones((6, 4, 4))
 
-        with patch("legoesm.parallel.mesh.get_active_config", return_value=tiled_config), \
-             patch("legoesm.grids.halo.pad_halo", return_value=data) as mock_pad:
+        # ``async_halo`` imports ``get_active_config`` and ``pad_halo``
+        # directly (``from ... import``), so the patches must target the
+        # names as bound in the ``async_halo`` namespace, not their
+        # definition modules.
+        with patch("legoesm.parallel.async_halo.get_active_config", return_value=tiled_config), \
+             patch("legoesm.parallel.async_halo.pad_halo", return_value=data) as mock_pad:
             with pytest.warns(RuntimeWarning, match="sub-face tiling"):
                 result = jax_native_halo_exchange(data, mock_grid, mesh=mock_mesh)
             mock_pad.assert_called_once()
@@ -338,7 +353,9 @@ class TestPpermuteTilingGuard:
         mock_grid = MagicMock()
         data = jnp.ones((6, 4, 4))
 
-        with patch("legoesm.parallel.mesh.get_active_config", return_value=face_config), \
+        # ``get_active_config`` is imported into ``async_halo`` directly, so
+        # patch it there for the guard read to see the face-only config.
+        with patch("legoesm.parallel.async_halo.get_active_config", return_value=face_config), \
              patch("legoesm.parallel.async_halo._ppermute_halo_exchange", return_value=data) as mock_pp:
             with pytest.warns(RuntimeWarning, match="experimental"):
                 jax_native_halo_exchange(data, mock_grid, mesh=mock_mesh)
@@ -351,7 +368,9 @@ class TestPpermuteTilingGuard:
         data = jnp.ones((6, 4, 4))
         mock_grid = MagicMock()
 
-        with patch("legoesm.grids.halo.pad_halo", return_value=data) as mock_pad:
+        # ``pad_halo`` is imported into ``async_halo`` directly; patch it
+        # there so the ``mesh=None`` local-pad fallback is observed.
+        with patch("legoesm.parallel.async_halo.pad_halo", return_value=data) as mock_pad:
             jax_native_halo_exchange(data, mock_grid, mesh=None)
             mock_pad.assert_called_once()
 
@@ -384,9 +403,30 @@ class TestCoupledConfigValidation:
 class TestMixedPrecisionSemantics:
     """Mixed precision matrix: fp32/fp64/mixed must bootstrap correctly."""
 
-    def teardown_method(self):
-        set_policy(PrecisionPolicy.fp32())
-        clear_module_overrides()
+    @pytest.fixture(autouse=True)
+    def _restore_precision_state(self):
+        """Snapshot and restore the global precision state around each test.
+
+        These tests mutate the process-global precision policy / module
+        overrides / ``jax_enable_x64`` flag.  A plain ``teardown`` that reset
+        to fp32 left x64 ON when a test enabled it, leaking to sibling tests
+        in the same xdist worker.  Snapshot everything at setup and restore it
+        verbatim at teardown so each test is hermetic regardless of the order
+        it runs in.
+        """
+        x64_before = jax.config.jax_enable_x64
+        policy_before = get_policy()
+        from legoesm.core.precision import get_module_overrides, set_module_override
+        overrides_before = get_module_overrides()
+        try:
+            yield
+        finally:
+            clear_module_overrides()
+            for module, roles in overrides_before.items():
+                if roles:
+                    set_module_override(module, **roles)
+            set_policy(policy_before)
+            jax.config.update("jax_enable_x64", x64_before)
 
     @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])
     def test_bootstrap_precision_mode(self, mode):
@@ -461,10 +501,16 @@ class TestMixedPrecisionSemantics:
 
     @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])
     def test_precision_policy_matches_mode(self, mode):
-        """PrecisionPolicy must match the requested mode."""
-        from legoesm.core.precision import set_recommended_overrides
+        """PrecisionPolicy must match the requested mode.
 
-        set_recommended_overrides(mode)
+        ``apply_precision`` is the API that actually installs the global
+        policy for a mode; ``set_recommended_overrides`` only manages the
+        per-module override table and leaves ``get_policy()`` untouched, so
+        the policy must be driven via ``apply_precision`` here.
+        """
+        from legoesm.runtime.precision import apply_precision
+
+        apply_precision(mode)
         policy = get_policy()
         if mode == "fp64":
             assert policy.compute == jnp.float64

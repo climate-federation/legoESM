@@ -20,6 +20,15 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+# Ocean fp64 policy: production ocean runs use it, which makes ``create_latlon_grid``
+# store float64 metrics.  Without it the grid keeps float32 metrics and the two
+# v-face-metric paths drift at the float32 level (``vface_zonal_cos_lat`` upcasts
+# to float64, the inline coupling-pieces ``jnp.cos`` stays float32 → ~1e-8), making
+# the bit-consistency check below spuriously fail.  Under fp64 they agree to ~5e-16.
+from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
+
+set_policy(PrecisionPolicy.fp64())
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
