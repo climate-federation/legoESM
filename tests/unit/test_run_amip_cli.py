@@ -548,6 +548,40 @@ def test_aimip_classical_overrides_force_sundqvist_microphysics(tmp_path):
     # the trained sundqvist leaves build a real config
     sq = out._aimip_params.to_sundqvist_config()
     assert float(sq.auto_rate) > 0.0
+    # the forcing reaches the BUILT ExperimentConfig — this is the field every
+    # physics builder (incl. the MPAS/spectral run()-time rebuild) reads, so the
+    # water sink closes on every backend even if the trained leaves only inject
+    # onto the finite-volume PhysicsPipeline.
+    parser2 = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(out, parser2))
+    assert cfg.microphysics == "sundqvist"
+
+
+def test_aimip_classical_overrides_explicit_sundqvist_keeps_trained(tmp_path):
+    """Passing --microphysics sundqvist explicitly keeps sundqvist and still
+    carries the trained params (the injection gate fires on resolved scheme)."""
+    ckpt = _serialise_aimip_defaults(tmp_path)
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--microphysics", "sundqvist",
+                              "--aimip-classical-checkpoint", ckpt])
+    out = _apply_aimip_classical_overrides(args)
+    assert out.microphysics == "sundqvist"
+    assert out._aimip_params is not None
+
+
+def test_aimip_classical_overrides_warn_offdesign_backend(tmp_path, capsys):
+    """On an off-design backend (voronoi/MPAS) the schemes are still forced on
+    (water sink closes via config) but a loud warning fires that the trained
+    leaves only apply on the finite-volume path."""
+    ckpt = _serialise_aimip_defaults(tmp_path)
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+                              "--aimip-classical-checkpoint", ckpt])
+    out = _apply_aimip_classical_overrides(args)
+    assert out.microphysics == "sundqvist"   # water sink still closes
+    assert out.convection == "tiedtke"
+    assert "WARNING" in capsys.readouterr().out
 
 
 def test_aimip_classical_overrides_respect_explicit_microphysics(tmp_path):
@@ -565,13 +599,17 @@ def test_aimip_classical_overrides_respect_explicit_microphysics(tmp_path):
 
 
 def test_aimip_classical_overrides_noop_without_flag():
-    """No checkpoint -> no scheme forcing, microphysics stays as given."""
+    """No checkpoint -> no scheme forcing; scheme fields are left untouched."""
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical"])
+    # snapshot the VALUES before the call (out is args, so comparing references
+    # post-call would be vacuous): immutable-string snapshots prove no mutation.
+    before = (args.convection, args.turbulence, args.gravity_wave_drag,
+              args.clouds, args.microphysics)
     out = _apply_aimip_classical_overrides(args)
     assert out._aimip_params is None
-    assert out.microphysics == "none"
-    assert out.convection != "tiedtke" or out.convection == args.convection
+    assert (out.convection, out.turbulence, out.gravity_wave_drag,
+            out.clouds, out.microphysics) == before
 
 
 def test_max_wallclock_seconds_threads_to_config():
