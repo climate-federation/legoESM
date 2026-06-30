@@ -259,5 +259,33 @@ higher-information next step is a DIAGNOSTIC — compare our subtropical T(z)
 thermocline structure vs the NEMO oracle at yr 1-3 to localise *where* the
 deepening diverges — rather than more blind ~3-h lever sweeps.
 
-M1/M2/M3 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit}.py`;
-sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit}.sbatch`.
+**The diagnostic (`_diag_dino_thermocline_levers.py`) — the over-deepening is a
+TOO-DIFFUSE thermocline, insensitive to ALL diabatic levers.** Subtropical
+(|lat|<40) mean T(z) at yr 3, ours vs the NEMO oracle (`grid_T.nc`):
+
+| depth | NEMO | ours |
+| --- | --- | --- |
+| 100 m | **20.4** | 12.4 |
+| 500 m | 10.8 | 8.3 |
+| 1000 m | 6.2 | **7.1** |
+
+NEMO holds a SHARP, SHALLOW thermocline (warm 20 °C confined above ~500 m); ours
+is **too cold at the surface (−8 °C) and too warm at depth (+0.9 °C)** — the warm
+water is smeared DOWN instead of confined to a shallow layer. A lever sweep
+(kpp+wright, 3 yr; yr-3 ACC / T@1000m) leaves both flat:
+
+| lever | K_v ×0.25 | K_v ×4 | K_conv ×0.3 | A_θ ×0.5 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 | 233 | 242 | 232 | 233 |
+| T@1000m | 7.1 | 7.3 | 7.1 | 7.0 |
+
+So the excess vertical heat redistribution is **NOT** physical
+diffusivity/convection/restoring (all ruled out, ACC stuck at ~232). The remaining
+mechanisms are NUMERICAL vertical diffusion (the tracer-advection scheme), the KPP
+K MAGNITUDE (boundary-layer mixing, not its depth), or insufficient surface-heat
+RETENTION. Round 2 (`DINO_LEVER_ROUND` unset) tests superbee advection (less
+numerical diffusion), A_θ ×2/×4 (heat input), and K_conv≈0.
+
+M1/M2/M3 + lever diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers}.sbatch`.
+NEMO T(z) oracle: `DINO_R1/EXP00/DINO_1m_grid_T.nc` (`toce`).
