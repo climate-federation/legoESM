@@ -4544,7 +4544,15 @@ class ModelDriver:
         )
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-        from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+        from legoesm.atmosphere.physics.radiation.solar import (
+            daily_mean_insolation, earth_orbit,
+        )
+        # Realistic orbit (Berger 1978) for this legacy spectral dry-gray path;
+        # None ⇒ circular orbit (idealized runs unchanged).  gray daily-mean
+        # folds the (a/r)^2 factor into the returned insolation directly.
+        _orbit_params = (earth_orbit()
+                         if getattr(self.config, "orbital_insolation", False)
+                         else None)
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
         cfg = self.config
@@ -4652,7 +4660,8 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0)
+                insol = daily_mean_insolation(lat_col, current_day, S_0,
+                                              orbit=_orbit_params)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4877,7 +4886,9 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+                insol_step = daily_mean_insolation(_lat_col_loop,
+                                                   self._current_day, S_0,
+                                                   orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
