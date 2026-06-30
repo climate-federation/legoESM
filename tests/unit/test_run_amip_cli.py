@@ -607,19 +607,35 @@ def test_amip_allow_disabled_physics_escape():
     _require_full_physics_for_amip(args, parser)   # no raise
 
 
-def test_amip_held_suarez_and_spmd_exempt_from_full_physics():
-    """The intrinsically-dry modes bypass the guard without the escape flag."""
+def _all_none_args(parser, *extra):
+    return parser.parse_args(
+        ["--dataset", "analytical", "--convection", "none", "--microphysics",
+         "none", "--turbulence", "none", "--gravity-wave-drag", "none",
+         "--clouds", "none", *extra])
+
+
+def test_amip_held_suarez_fully_dry_exempt():
+    """A fully-dry Held-Suarez run bypasses the guard without the escape flag."""
     parser = build_arg_parser()
-    hs = parser.parse_args(["--dataset", "analytical", "--convection", "none",
-                            "--microphysics", "none", "--turbulence", "none",
-                            "--gravity-wave-drag", "none", "--clouds", "none",
-                            "--held-suarez-forcing"])
-    _require_full_physics_for_amip(hs, parser)     # no raise (Held-Suarez dry)
-    spmd = parser.parse_args(["--dataset", "analytical", "--grid-type", "latlon",
-                              "--convection", "none", "--microphysics", "none",
-                              "--turbulence", "none", "--gravity-wave-drag", "none",
-                              "--clouds", "none", "--enable-latlon-spmd"])
-    _require_full_physics_for_amip(spmd, parser)   # no raise (dynamics-only SPMD)
+    _require_full_physics_for_amip(_all_none_args(parser, "--held-suarez-forcing"),
+                                   parser)         # no raise
+
+
+def test_amip_spmd_alone_not_exempt():
+    """--enable-latlon-spmd is NOT exempt on its own: an all-param-'none' SPMD run
+    still leaves radiation active (the SPMD driver rejects it), so it must go
+    through Held-Suarez or --allow-disabled-physics.  Bare SPMD -> SystemExit;
+    Held-Suarez SPMD and --allow-disabled-physics SPMD both pass."""
+    parser = build_arg_parser()
+    bare = _all_none_args(parser, "--grid-type", "latlon", "--enable-latlon-spmd")
+    with pytest.raises(SystemExit):
+        _require_full_physics_for_amip(bare, parser)
+    hs_spmd = _all_none_args(parser, "--grid-type", "latlon",
+                             "--enable-latlon-spmd", "--held-suarez-forcing")
+    _require_full_physics_for_amip(hs_spmd, parser)        # no raise
+    allowed = _all_none_args(parser, "--grid-type", "latlon",
+                             "--enable-latlon-spmd", "--allow-disabled-physics")
+    _require_full_physics_for_amip(allowed, parser)        # no raise
 
 
 def test_amip_mixed_held_suarez_partial_none_still_rejected():
