@@ -1114,9 +1114,10 @@ def test_sundqvist_flags_reject_out_of_bounds():
     """Out-of-range tunables fail LOUDLY (argparse accepts any float)."""
     from scripts.run.run_amip import _validate_sundqvist_flags
     parser = build_arg_parser()
+    # (positive values only — argparse parses a leading '-' as a flag)
     for flag, bad in [("--sundqvist-qc-crit", "1.0"),      # >> 1.5e-3
                       ("--sundqvist-rh-crit", "0.2"),       # < 0.5
-                      ("--sundqvist-auto-rate", "-1e-3")]:  # < 1e-4
+                      ("--sundqvist-auto-rate", "1e-5")]:   # < 1e-4 floor
         args = parser.parse_args(["--dataset", "analytical", flag, bad])
         with pytest.raises(SystemExit):
             _validate_sundqvist_flags(args, parser)
