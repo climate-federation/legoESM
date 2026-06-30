@@ -12,6 +12,7 @@ from scripts.run.run_amip import (
     _apply_aimip_classical_overrides,
     _postprocess_args,
     _print_forcing_activity,
+    _require_full_physics_for_amip,
     build_arg_parser,
     build_config_from_args,
 )
@@ -532,8 +533,9 @@ def test_aimip_classical_overrides_force_sundqvist_microphysics(tmp_path):
     tiedtke detrains condensate into q_c with no removal (CWV water trap)."""
     ckpt = _serialise_aimip_defaults(tmp_path)
     parser = build_arg_parser()
-    # default --microphysics is "none" (the water-trap case)
-    args = parser.parse_args(["--dataset", "analytical",
+    # explicit --microphysics none is the water-trap case the override repairs
+    # (the CLI default is now sundqvist under the full-physics policy)
+    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none",
                               "--aimip-classical-checkpoint", ckpt])
     assert args.microphysics == "none"
     out = _apply_aimip_classical_overrides(args)
@@ -555,6 +557,97 @@ def test_aimip_classical_overrides_force_sundqvist_microphysics(tmp_path):
     parser2 = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(out, parser2))
     assert cfg.microphysics == "sundqvist"
+
+
+# --- full-physics policy: AMIP must never run a parameterization slot 'none' ---
+
+def test_amip_default_physics_all_active():
+    """The DEFAULT AMIP config has every parameterization active (no 'none') —
+    convection/microphysics/turbulence/gravity_wave_drag/clouds + radiation."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    for slot in ("convection", "microphysics", "turbulence",
+                 "gravity_wave_drag"):
+        assert getattr(cfg, slot) != "none", f"{slot} defaulted to none"
+    assert cfg.cloud_scheme != "none"   # config field for the --clouds arg
+    assert cfg.radiation in ("gray", "rrtmg", "rrtmgp")  # never none
+
+
+def test_amip_default_passes_full_physics_guard():
+    """The default args satisfy the guard (no SystemExit)."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    _require_full_physics_for_amip(args, parser)   # no raise
+
+
+def test_amip_rejects_disabled_physics_slot():
+    """A 'none' slot without an escape flag fails LOUDLY (SystemExit), and the
+    message names the offending slot."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none"])
+    with pytest.raises(SystemExit):
+        _require_full_physics_for_amip(args, parser)
+    # also catches turbulence / gwd / clouds / convection
+    for slot, flag in [("turbulence", "--turbulence"),
+                       ("gravity_wave_drag", "--gravity-wave-drag"),
+                       ("clouds", "--clouds"), ("convection", "--convection")]:
+        a = parser.parse_args(["--dataset", "analytical", flag, "none"])
+        with pytest.raises(SystemExit):
+            _require_full_physics_for_amip(a, parser)
+
+
+def test_amip_allow_disabled_physics_escape():
+    """--allow-disabled-physics permits a 'none' slot (idealized/dry run)."""
+    parser = build_arg_parser()
+    assert parser.parse_args(
+        ["--dataset", "analytical"]).allow_disabled_physics is False
+    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none",
+                              "--allow-disabled-physics"])
+    _require_full_physics_for_amip(args, parser)   # no raise
+
+
+def _all_none_args(parser, *extra):
+    return parser.parse_args(
+        ["--dataset", "analytical", "--convection", "none", "--microphysics",
+         "none", "--turbulence", "none", "--gravity-wave-drag", "none",
+         "--clouds", "none", *extra])
+
+
+def test_amip_held_suarez_fully_dry_exempt():
+    """A fully-dry Held-Suarez run bypasses the guard without the escape flag."""
+    parser = build_arg_parser()
+    _require_full_physics_for_amip(_all_none_args(parser, "--held-suarez-forcing"),
+                                   parser)         # no raise
+
+
+def test_amip_spmd_alone_not_exempt():
+    """--enable-latlon-spmd is NOT exempt on its own: an all-param-'none' SPMD run
+    still leaves radiation active (the SPMD driver rejects it), so it must go
+    through Held-Suarez or --allow-disabled-physics.  Bare SPMD -> SystemExit;
+    Held-Suarez SPMD and --allow-disabled-physics SPMD both pass."""
+    parser = build_arg_parser()
+    bare = _all_none_args(parser, "--grid-type", "latlon", "--enable-latlon-spmd")
+    with pytest.raises(SystemExit):
+        _require_full_physics_for_amip(bare, parser)
+    hs_spmd = _all_none_args(parser, "--grid-type", "latlon",
+                             "--enable-latlon-spmd", "--held-suarez-forcing")
+    _require_full_physics_for_amip(hs_spmd, parser)        # no raise
+    allowed = _all_none_args(parser, "--grid-type", "latlon",
+                             "--enable-latlon-spmd", "--allow-disabled-physics")
+    _require_full_physics_for_amip(allowed, parser)        # no raise
+
+
+def test_amip_mixed_held_suarez_partial_none_still_rejected():
+    """Held-Suarez exempts only a FULLY-dry stack — HS with microphysics='none'
+    but default tiedtke convection / xu_randall clouds is the dangerous mixed
+    case (tiedtke condensate with no precip sink) and must still fail."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none",
+                              "--held-suarez-forcing"])
+    # convection/turbulence/gwd/clouds stay at their active defaults -> mixed
+    with pytest.raises(SystemExit):
+        _require_full_physics_for_amip(args, parser)
 
 
 def test_aimip_classical_overrides_explicit_sundqvist_keeps_trained(tmp_path):
