@@ -91,6 +91,32 @@ def group(rows, metric: str = "sypd"):
     return clean
 
 
+def res_km(rows) -> dict:
+    """``(canon grid, resolution_int) -> resolution_km`` for legend labels.
+
+    Pulled straight from the tidy CSV's ``resolution_km`` column so the curves
+    are labelled by physical grid spacing (km) rather than the grid-native
+    resolution index (cube face cells / ico level / lat count).
+    """
+    out: dict = {}
+    for r in rows:
+        grid = _canon_grid(r.get("grid", ""))
+        try:
+            res = int(float(r.get("resolution")))
+            km = float(r.get("resolution_km"))
+        except (TypeError, ValueError):
+            continue
+        if grid and res > 0 and km > 0:
+            out[(grid, res)] = km
+    return out
+
+
+def _res_label(km_map: dict, grid: str, res: int) -> str:
+    """Legend label: grid spacing in km, falling back to the raw index."""
+    km = km_map.get((grid, res))
+    return f"{km:.0f} km" if km else f"res {res}"
+
+
 def peak_table(rows):
     """``(grid, resolution) -> {cpu, gpu, gpu_over_cpu}`` peak (full-node) SYPD."""
     g = group(rows, "sypd")
@@ -117,6 +143,7 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
             f"CSV has no 'mcells_per_s' column (columns: {sorted(rows[0])})")
     by_grid = group(rows, "sypd")
     by_grid_mc = group(rows, "mcells_per_s")
+    km_map = res_km(rows)
     if not by_grid:
         raise SystemExit(
             "no CPU/GPU rows with a positive SYPD found — check the CSV / "
@@ -148,7 +175,8 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
                     if not pts:
                         continue
                     ax.plot([n for n, _ in pts], [v for _, v in pts],
-                            marker="o", color=color[res], label=f"res {res}")
+                            marker="o", color=color[res],
+                            label=_res_label(km_map, grid, res))
                 ax.set_xscale("log", base=2)      # device counts: powers of two
                 ax.set_yscale("log", base=10)
                 ax.set_xlabel(xlabel)
@@ -156,7 +184,7 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
                 ax.set_title(f"{backend} — {ylabel.split(' (')[0]}")
                 ax.grid(True, which="both", alpha=0.3)
                 if any(src_res.get(res, {}).get(backend) for res in resolutions):
-                    ax.legend(fontsize=8, title="resolution")
+                    ax.legend(fontsize=8, title="grid spacing")
         fig.suptitle(f"CPU vs GPU strong scaling — {grid}")
         fig.tight_layout()
         out_path = out_dir / f"fullnode_cpu_vs_gpu_{grid}.png"

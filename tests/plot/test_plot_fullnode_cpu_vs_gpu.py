@@ -14,15 +14,15 @@ _spec = importlib.util.spec_from_file_location("plot_fullnode_cpu_vs_gpu", _PLT)
 plot = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(plot)
 
-_FIELDS = ["grid", "backend", "precision", "resolution", "n_resource",
-           "n_devices", "sypd", "mcells_per_s", "mode"]
+_FIELDS = ["grid", "backend", "precision", "resolution", "resolution_km",
+           "n_resource", "n_devices", "sypd", "mcells_per_s", "mode"]
 
 
-def _row(grid, backend, res, n, sypd, mc="100.0", mode="strong"):
+def _row(grid, backend, res, n, sypd, mc="100.0", mode="strong", km=""):
     return {f: "" for f in _FIELDS} | {
         "grid": grid, "backend": backend, "precision": "float32",
-        "resolution": res, "n_resource": n, "n_devices": n,
-        "sypd": sypd, "mcells_per_s": mc, "mode": mode}
+        "resolution": res, "resolution_km": km, "n_resource": n,
+        "n_devices": n, "sypd": sypd, "mcells_per_s": mc, "mode": mode}
 
 
 def _write_csv(path, rows):
@@ -79,6 +79,20 @@ def test_group_drops_nonpositive_and_unknown_backend():
     g = plot.group(rows, "sypd")
     assert all(n != 8 for n, _ in g["latlon"][128]["CPU"])
     assert set(g["latlon"][128]) == {"CPU", "GPU"}
+
+
+def test_res_km_maps_resolution_to_km_and_labels():
+    rows = [
+        _row("cubed_sphere", "GPU", "48", "1", "30.0", km="208.498"),
+        _row("latlon", "CPU", "128", "1", "2.0", km="156.373"),
+        _row("latlon", "CPU", "256", "1", "0.3", km=""),   # missing km
+    ]
+    m = plot.res_km(rows)
+    assert m[("cubed-sphere", 48)] == pytest.approx(208.498)   # alias canonicalised
+    assert m[("latlon", 128)] == pytest.approx(156.373)
+    assert ("latlon", 256) not in m                            # blank km not mapped
+    assert plot._res_label(m, "latlon", 128) == "156 km"       # rounded km label
+    assert plot._res_label(m, "latlon", 256) == "res 256"      # fallback when no km
 
 
 def test_peak_table_uses_curve_max():
