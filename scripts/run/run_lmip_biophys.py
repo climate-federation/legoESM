@@ -242,7 +242,8 @@ def run(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--surfdata", default="data/legoesm_surfdata_v1.nc")
+    ap.add_argument("--surfdata", default="data/legoesm_surfdata_c250617.nc",
+                    help="harmonized surfdata NetCDF (staged by download_lmip_data.sh)")
     ap.add_argument("--land-mode", default="multilayer", choices=["multilayer", "slab"])
     ap.add_argument("--surface-scheme", default="two_leaf_canopy",
                     choices=["two_leaf_canopy", "simple_seb"])
@@ -250,8 +251,9 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["latlon", "gaussian", "cubed_sphere"])
     ap.add_argument("--resolution", type=int, default=90,
                     help="grid size N (latlon -> N x 2N; ~2deg at N=90)")
-    ap.add_argument("--forcing-dir", default="",
-                    help="directory with CRU-JRA CLM streams; empty -> synthetic forcing")
+    ap.add_argument("--forcing-dir", default="data/crujra",
+                    help="directory with CRU-JRA CLM streams (staged by "
+                         "download_lmip_data.sh); missing files -> synthetic forcing")
     ap.add_argument("--prefix", default="clmforc.CRUJRAv2.5_0.5x0.5",
                     help="CRU-JRA CLM filename prefix (<prefix>.{Solr,Prec,TPQWL}.<year>.nc)")
     ap.add_argument("--year", type=int, default=2023, help="CRU-JRA forcing year")

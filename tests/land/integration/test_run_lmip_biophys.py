@@ -54,6 +54,7 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
         "--grid-type", "latlon", "--resolution", "4",
         "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
         "--dt", "3600", "--n-steps", "4",
+        "--forcing-dir", "",                # force synthetic (hermetic, ignore any staged data/crujra)
         "--output", str(out),
     ])
     rc = mod.run(args)

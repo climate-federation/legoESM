@@ -251,6 +251,20 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
 
 ---
 
+## 7b. Data staging
+
+Inputs live under the gitignored `data/` and are staged by
+`scripts/data/download_lmip_data.sh` (modelled on `download_omip_data.sh`):
+
+- **CRU-JRA forcing** → `data/crujra/` — **symlinked** from an existing glade
+  copy (`--crujra-src` / `$LEGOESM_CRUJRA_SRC`); large, no copy/download.
+- **Surfdata** (`legoesm_surfdata_c250617.nc`) → `data/` — **downloaded** from a
+  hosted URL (`--surfdata-url` / `$LEGOESM_SURFDATA_URL`); a 31 MB build product,
+  not in git (full regen needs HWSD2 + CLM5 via `build_legoesm_surfdata.py`).
+
+`run_lmip_biophys.py` defaults point at this layout (`--surfdata
+data/legoesm_surfdata_c250617.nc`, `--forcing-dir data/crujra`).
+
 ## 8. Open items / inputs needed
 
 - [ ] **Example CRU-JRA met-forcing NetCDF** (user to provide) — for local reader
