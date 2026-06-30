@@ -139,6 +139,14 @@ def build_parser():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    parser.add_argument(
+        "--orbital-insolation", action="store_true", default=False,
+        dest="orbital_insolation",
+        help="Use realistic (Berger 1978) orbital insolation: present-day "
+             "orbital declination + Earth-Sun distance factor (a/r)^2 "
+             "eccentricity asymmetry (~+/-3.4%%). Default off = circular "
+             "orbit. Recommended for CMIP historical/abrupt-4xCO2/1pctCO2.",
+    )
     # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
     # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
     # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
@@ -582,6 +590,7 @@ def main():
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
+        orbital_insolation=args.orbital_insolation,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         ic=args.ic,
