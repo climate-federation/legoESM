@@ -1211,23 +1211,30 @@ def _require_full_physics_for_amip(args, parser) -> None:
     precipitation sink, trapping column water (CWV runaway) — so we fail LOUDLY
     rather than run an incomplete physics stack.
 
-    Escape hatch (idealized / dry-dynamics runs): ``--allow-disabled-physics``,
-    or the intrinsically-dry modes ``--held-suarez-forcing`` (Newtonian
-    relaxation, no parameterizations) and ``--enable-latlon-spmd`` (requires
-    dynamics-only physics; not SPMD-routed for stateful schemes yet).
+    Escape hatch: ``--allow-disabled-physics`` (explicit, user-owned).  The
+    intrinsically-dry modes ``--held-suarez-forcing`` (Newtonian relaxation) and
+    ``--enable-latlon-spmd`` (dynamics-only; not SPMD-routed for stateful schemes
+    yet) are exempt ONLY when the ENTIRE parameterization stack is disabled.  A
+    MIXED run — Held-Suarez (or SPMD) with some schemes active and some ``none``
+    — is the dangerous case (e.g. tiedtke convection with ``microphysics='none'``
+    has no precip sink) and must still pass ``--allow-disabled-physics``.
     """
-    if (getattr(args, "allow_disabled_physics", False)
-            or getattr(args, "held_suarez_forcing", False)
-            or getattr(args, "enable_latlon_spmd", False)):
+    if getattr(args, "allow_disabled_physics", False):
         return
     disabled = [name for name in _AMIP_REQUIRED_PHYSICS
                 if getattr(args, name, "none") == "none"]
-    if disabled:
-        parser.error(
-            "AMIP requires every parameterization active, but these are "
-            f"'none': {', '.join(disabled)}. Set them to a real scheme (the "
-            "defaults already do), or pass --allow-disabled-physics for an "
-            "idealized / dry-dynamics run (see also --held-suarez-forcing).")
+    if not disabled:
+        return
+    fully_dry = len(disabled) == len(_AMIP_REQUIRED_PHYSICS)
+    if fully_dry and (getattr(args, "held_suarez_forcing", False)
+                      or getattr(args, "enable_latlon_spmd", False)):
+        return
+    parser.error(
+        "AMIP requires every parameterization active, but these are "
+        f"'none': {', '.join(disabled)}. Set them to a real scheme (the "
+        "defaults already do), or pass --allow-disabled-physics for an "
+        "idealized / dry-dynamics run. (Held-Suarez / latlon-SPMD are exempt "
+        "only when the ENTIRE stack is dry, not a mix of active + 'none'.)")
 
 
 def main(argv: list[str] | None = None):

@@ -568,8 +568,9 @@ def test_amip_default_physics_all_active():
     cfg = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     for slot in ("convection", "microphysics", "turbulence",
-                 "gravity_wave_drag", "clouds"):
+                 "gravity_wave_drag"):
         assert getattr(cfg, slot) != "none", f"{slot} defaulted to none"
+    assert cfg.cloud_scheme != "none"   # config field for the --clouds arg
     assert cfg.radiation in ("gray", "rrtmg", "rrtmgp")  # never none
 
 
@@ -619,6 +620,18 @@ def test_amip_held_suarez_and_spmd_exempt_from_full_physics():
                               "--turbulence", "none", "--gravity-wave-drag", "none",
                               "--clouds", "none", "--enable-latlon-spmd"])
     _require_full_physics_for_amip(spmd, parser)   # no raise (dynamics-only SPMD)
+
+
+def test_amip_mixed_held_suarez_partial_none_still_rejected():
+    """Held-Suarez exempts only a FULLY-dry stack — HS with microphysics='none'
+    but default tiedtke convection / xu_randall clouds is the dangerous mixed
+    case (tiedtke condensate with no precip sink) and must still fail."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none",
+                              "--held-suarez-forcing"])
+    # convection/turbulence/gwd/clouds stay at their active defaults -> mixed
+    with pytest.raises(SystemExit):
+        _require_full_physics_for_amip(args, parser)
 
 
 def test_aimip_classical_overrides_explicit_sundqvist_keeps_trained(tmp_path):
