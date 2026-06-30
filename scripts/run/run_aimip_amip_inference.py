@@ -263,12 +263,20 @@ def main():
                 # "ocean" would be silently prescribed. Require finite, physical
                 # ocean SST.
                 ocean_sst = sst_g[ocean]
-                if (not np.all(np.isfinite(ocean_sst))) or float(
-                    ocean_sst.mean()
-                ) < 200.0:
+                # Per-cell + mean validation (codex review): a few 0 K cells
+                # from an absent skin_temperature would pass a mean-only check.
+                # >150 K per cell catches 0 K-fill without rejecting the coldest
+                # real ocean / sea-ice / coastline-mismatch cells (~180-271 K);
+                # the >270 K mean keeps the global ocean physically plausible.
+                if (
+                    (not np.all(np.isfinite(ocean_sst)))
+                    or (not np.all(ocean_sst > 150.0))
+                    or float(ocean_sst.mean()) < 270.0
+                ):
                     raise ValueError(
                         f"implausible ERA5 ocean SST (mean "
-                        f"{float(np.nanmean(ocean_sst)):.1f} K) — missing "
+                        f"{float(np.nanmean(ocean_sst)):.1f} K, min "
+                        f"{float(np.nanmin(ocean_sst)):.1f} K) — missing "
                         f"skin_temperature?"
                     )
             except Exception as exc:  # out-of-range / missing SST -> stop cleanly
