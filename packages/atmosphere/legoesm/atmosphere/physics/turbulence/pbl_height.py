@@ -60,7 +60,10 @@ class PBLHeightConfig(NamedTuple):
     sharpness : float
         Sigmoid sharpness for smooth method (default 20.0).
     method : str
-        "smooth" (sigmoid-weighted) or "interp" (linear interpolation).
+        CURRENTLY ADVISORY / not read internally — callers select
+        ``diagnose_pbl_height`` vs ``diagnose_pbl_height_interp`` directly;
+        setting this field has no effect. "smooth" (sigmoid-weighted) or
+        "interp" (linear interpolation).
     """
     Ri_crit: float = 0.25
     h_min: float = 100.0

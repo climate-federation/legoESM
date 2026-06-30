@@ -126,7 +126,13 @@ def bulk_formula_surface_forcing(
     dT_dt = jnp.pad(
         (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
     )
-    # No freshwater forcing in basic bulk formulation
+    # Salinity forcing is intentionally delegated to the model's dedicated
+    # freshwater channel (P - E + runoff via ``model.step(freshwater=...)``),
+    # NOT emitted here.  Adding a virtual-salt flux from this scheme's
+    # evaporation (E = Q_lh / L_v) would DOUBLE-COUNT the evaporative salt
+    # concentration already carried by the freshwater channel.  This "basic"
+    # bulk scheme therefore reports dS_dt = 0 by design; a run that needs
+    # salinity forcing must route E - P - R through the freshwater channel.
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 
     return SurfaceForcingOutput(

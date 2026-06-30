@@ -215,6 +215,7 @@ def _compute_relative_abundance_interpolant(
   # entry that would otherwise produce ``inf/NaN`` in this ratio and
   # propagate through the reverse-mode AD path.  See iter-5 commit for the
   # analogous fix on ``combined_vmr``.
+  # coeff-ok: floor never hit — shipped tables have vmr_ref >= 1e-10 >> eps.
   vmr_ref_ratio = vmr_ref[0] / jnp.maximum(vmr_ref[1], _VMR_SAFE_DIV_EPS)
   combined_vmr = vmr_for_interp[0] + vmr_ref_ratio * vmr_for_interp[1]
   # Consistent with how the RRTM absorption coefficient tables are designed, the

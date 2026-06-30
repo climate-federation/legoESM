@@ -411,7 +411,6 @@ def emanuel_convection(
     if config.enable_unsaturated_downdraft:
         # Smooth indicator of "below LCL" (surface-last: index larger
         # than k_lcl_smooth ⇒ below).
-        nlev_idx = jnp.arange(nlev, dtype=T.dtype)
         below_lcl = jax.nn.sigmoid(
             config.below_lcl_index_sharpness
             * (nlev_idx[None, :] - k_lcl_smooth[:, None])
@@ -419,7 +418,6 @@ def emanuel_convection(
         # Column-integrated condensate source [kg/m^2/s] and below-LCL
         # mass [kg/m^2] both reduce ``* dp / g`` over the level axis —
         # fuse them into one stacked reduction.
-        dp = p_half[:, 1:] - p_half[:, :-1]
         _col_pair = jnp.sum(
             jnp.stack([dq_c_conv_dt_raw, below_lcl], axis=-1) * dp[..., None],
             axis=-2,
@@ -505,7 +503,6 @@ def emanuel_convection(
     # (net drying, or more water created than condensate exists); in the
     # normal CAPE-positive case ``qc_scale ∈ (0, 1)`` and the clip is
     # inactive, so gradients flow.
-    dp = p_half[:, 1:] - p_half[:, :-1]                 # (ncol, nlev) > 0
     col_mass = jnp.sum(dp, axis=-1)                      # ∝ ∫dp
     L_v = constants.L_v
     c_pd = constants.c_pd
