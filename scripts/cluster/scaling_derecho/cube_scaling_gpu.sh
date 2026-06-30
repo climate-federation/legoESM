@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N cube_strong_gpu
+#PBS -N cube_scaling_gpu
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=regular
@@ -14,18 +14,18 @@
 # Runs scripts/bench/run_levante_gpu_scaling.py with TRUE face decomposition
 # (--cs-mpi-scatter: each rank owns 6/nranks faces, cross-face halos over
 # mpi4jax) over 1->2->3 A100 (4 doesn't divide 6, 6 needs 2 nodes) -> the cube
-# GPU strong-scaling curve.  cube_fullnode_cpu.sh is the CPU twin (identical
+# GPU strong-scaling curve.  cube_scaling_cpu.sh is the CPU twin (identical
 # driver/flags; only JAX_PLATFORMS + the conda env + thread layout differ).
 # Multi-GPU here uses route-A mpi4jax, so it needs the README Step 1b overlay.
 #
 # SUBMIT as a batch job (qsub from the repo root so $PBS_O_WORKDIR finds it):
 #   cd /glade/work/$USER/legoESM
-#   qsub scripts/cluster/scaling_derecho/cube_strong_gpu.sh
+#   qsub scripts/cluster/scaling_derecho/cube_scaling_gpu.sh
 #   # override knobs at submit time (no file edits):
 #   qsub -v PHYSICS=moist,PRECISION=both,STRONG_RES=48,96 \
-#        scripts/cluster/scaling_derecho/cube_strong_gpu.sh
+#        scripts/cluster/scaling_derecho/cube_scaling_gpu.sh
 #
-# Or RUN interactively (qsub -I ... then ./cube_strong_gpu.sh).
+# Or RUN interactively (qsub -I ... then ./cube_scaling_gpu.sh).
 #
 # NOTE: a single Derecho GPU node = 4 A100; cube face-scatter ranks must DIVIDE
 #   6, so one node tops out at RANKS="1 2 3" (4 is invalid, 6 needs 2 nodes:
@@ -44,7 +44,7 @@ fi
 
 # Force CUDA + the GPU conda env BEFORE sourcing _env.sh so a stale
 # JAX_PLATFORMS=cpu from a reused interactive shell can never silently run this
-# GPU sweep on the CPU (symmetric with cube_fullnode_cpu.sh).
+# GPU sweep on the CPU (symmetric with cube_scaling_cpu.sh).
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 # shellcheck source=_env.sh

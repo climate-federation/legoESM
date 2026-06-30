@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N cube_fullnode_cpu
+#PBS -N cube_scaling_cpu
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=regular
@@ -19,8 +19,8 @@
 # node-level strong-scaling curve, not a 1-6-core toy.  Driver:
 # run_levante_gpu_scaling.py --cs-mpi-scatter (mpi4jax face scatter, PALS-safe).
 #
-# Driven by submit_fullnode.sh (one job per resolution).  Direct:
-#   STRONG_RES=96 ./cube_fullnode_cpu.sh
+# Driven by submit_scaling.sh (one job per resolution).  Direct:
+#   STRONG_RES=96 ./cube_scaling_cpu.sh
 # ===========================================================================
 set -uo pipefail
 

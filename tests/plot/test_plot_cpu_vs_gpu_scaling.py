@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 _PLT = (Path(__file__).resolve().parents[2] / "scripts" / "plot"
-        / "plot_fullnode_cpu_vs_gpu.py")
-_spec = importlib.util.spec_from_file_location("plot_fullnode_cpu_vs_gpu", _PLT)
+        / "plot_cpu_vs_gpu_scaling.py")
+_spec = importlib.util.spec_from_file_location("plot_cpu_vs_gpu_scaling", _PLT)
 plot = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(plot)
 
@@ -113,8 +113,8 @@ def test_make_figures_one_png_per_grid(tmp_path):
     _write_csv(csvp, _sample_rows())
     written = plot.make_figures(plot._read(csvp), tmp_path / "plots")
     names = sorted(p.name for p in written)
-    assert names == ["fullnode_cpu_vs_gpu_cubed-sphere.png",
-                     "fullnode_cpu_vs_gpu_latlon.png"]
+    assert names == ["cpu_vs_gpu_scaling_cubed-sphere.png",
+                     "cpu_vs_gpu_scaling_latlon.png"]
     assert all(p.exists() for p in written)
 
 

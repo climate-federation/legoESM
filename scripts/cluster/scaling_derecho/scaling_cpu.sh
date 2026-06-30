@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N fullnode_cpu
+#PBS -N scaling_cpu
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=premium
@@ -10,18 +10,18 @@
 # ===========================================================================
 # CPU STRONG-SCALING sweep for latlon / icosahedral / spectral -- the CPU half
 # of the CPU-vs-A100 comparison.  Runs as a BATCH job or interactively.  Pair
-# with fullnode_gpu.sh (the GPU strong-scaling sweep).
+# with scaling_gpu.sh (the GPU strong-scaling sweep).
 #
 # latlon and icosahedral are genuinely domain-decomposed, so we sweep the MPI
 # rank ladder 1,2,4,...,128 (one rank per core, true decomposition) AT EACH
 # resolution -> a real strong-scaling curve up to the full node.  Spectral has
 # no MPI path (rank-1 only); it fills the node with XLA threads as a single
 # point.  Driver: run_cpu_mpi_scaling.py (mpi4jax, PALS-safe).  Cubed-sphere is
-# handled by cube_fullnode_cpu.sh (face-scatter).
+# handled by cube_scaling_cpu.sh (face-scatter).
 #
-# Driven by submit_fullnode.sh (one job per resolution).  Direct:
-#   GRID=latlon RESOLUTIONS=256 ./fullnode_cpu.sh
-#   qsub -v GRID=icosahedral,RESOLUTIONS=7 fullnode_cpu.sh
+# Driven by submit_scaling.sh (one job per resolution).  Direct:
+#   GRID=latlon RESOLUTIONS=256 ./scaling_cpu.sh
+#   qsub -v GRID=icosahedral,RESOLUTIONS=7 scaling_cpu.sh
 # ===========================================================================
 set -uo pipefail
 
@@ -56,14 +56,14 @@ _CORES="$( { [ -n "${PBS_NODEFILE:-}" ] && wc -l < "$PBS_NODEFILE"; } 2>/dev/nul
 _CORES="${LEGOESM_NCPUS:-${_CORES:-128}}"   # off-PBS fallback: a full Derecho node
 if [ "${_CORES:-0}" -lt 2 ] 2>/dev/null; then
     echo "WARNING: core count=${_CORES:-?} (<2) -- only the 1-rank case will run." >&2
-    echo "         Submit via submit_fullnode.sh (qsub), or set LEGOESM_NCPUS." >&2
+    echo "         Submit via submit_scaling.sh (qsub), or set LEGOESM_NCPUS." >&2
     _CORES=128
 fi
 EXTRA=""
 THREADS=1                              # pure-MPI default: one thread per rank
 case "$GRID" in
   cubed-sphere)
-    echo "ERROR: cubed-sphere uses cube_fullnode_cpu.sh (6-face scatter)." >&2
+    echo "ERROR: cubed-sphere uses cube_scaling_cpu.sh (6-face scatter)." >&2
     exit 2 ;;
   latlon)
     RANKS="${RANKS:-1 2 4 8 16 32 64 128}"   # rank ladder up to the full node

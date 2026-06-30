@@ -2,22 +2,23 @@
 
 **The single supported way to test legoESM scaling on NCAR Derecho.** It runs a
 strong-scaling sweep on BOTH backends — CPU MPI ranks 1→128 (128-core EPYC,
-`main` queue) and GPU 1→4 A100 (`deg*` node) — at each resolution, one grid at a
-time, then compares the curves (headline = the full-node point on each side).
+`main` queue) and GPU A100 — single node (1→4) or multi-node via `NODES`
+(latlon/icosahedral, up to 1→2→4→8→16…) — at each resolution, one grid at a
+time, then compares the curves.
 
-`submit_fullnode.sh` is the only entry point. It fans each resolution out into
+`submit_scaling.sh` is the only entry point. It fans each resolution out into
 its own CPU job + GPU job and dispatches to the right backend scripts; you never
 call the building blocks directly.
 
 ```
 scaling_derecho/
 ├── _env.sh              # shared env, sourced by every job (edit 2 values, Step 0)
-├── submit_fullnode.sh   # ►ENTRY POINT◄  submit_fullnode.sh <outdir> <grid> [res...]
-├── fullnode_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
-├── fullnode_gpu.sh      # GPU scaling sweep (latlon = 1->2->4 A100; ico = 1->2->4->… multi-node via NODES; spectral = 1)
-├── cube_fullnode_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
-├── cube_strong_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
-└── finalize_fullnode.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
+├── submit_scaling.sh   # ►ENTRY POINT◄  submit_scaling.sh <outdir> <grid> [res...]
+├── scaling_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
+├── scaling_gpu.sh      # GPU scaling sweep (latlon + ico = 1->2->4 A100 single node, ->8->16… multi-node via NODES; spectral = 1)
+├── cube_scaling_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
+├── cube_scaling_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
+└── finalize_scaling.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```
 
 **Why cubed-sphere has its own pair.** Cube has only 6 faces, so MPI caps at 6
@@ -26,7 +27,7 @@ each rank multithreaded to fill the node) via the mpi4jax face-scatter path
 (`run_levante_gpu_scaling.py --cs-mpi-scatter`). latlon and icosahedral are
 genuinely domain-decomposed, so they sweep the full rank/GPU ladder via
 `run_cpu_mpi_scaling.py` (`--device cpu`/`--device gpu`); spectral has no MPI
-path (single device). `submit_fullnode.sh` hides all of this.
+path (single device). `submit_scaling.sh` hides all of this.
 
 ---
 
@@ -40,26 +41,26 @@ cd /glade/work/$USER/legoESM                       # the repo root (qsub from he
 OUT=$SCRATCH/legoesm_scaling/cmp01                 # pick a results dir
 
 # 1. preview what would be submitted (no jobs created):
-DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+DRYRUN=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT latlon
 
 # 2. submit the CPU-sweep + GPU-sweep jobs (one pair per resolution):
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT latlon
 
 # 3. wait for the queue to drain:
 watch -n 60 qstat -u $USER
 
 # 4. aggregate every job under $OUT and plot the CPU-vs-GPU curves:
-scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT
-#    -> $OUT/all_tidy.csv  +  $OUT/plots/fullnode_cpu_vs_gpu_latlon.png
+scripts/cluster/scaling_derecho/finalize_scaling.sh $OUT
+#    -> $OUT/all_tidy.csv  +  $OUT/plots/cpu_vs_gpu_scaling_latlon.png
 ```
 
 Repeat step 2 for the other grids into the SAME `$OUT` (then one `finalize`
 covers them all):
 
 ```bash
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT cubed-sphere
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT icosahedral
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT spectral
 ```
 
 First time on this machine? Do the **one-time setup** below before the Quick
@@ -121,8 +122,8 @@ python -c "import jax; print(jax.devices()[0].device_kind)"   # -> 'NVIDIA A100-
 > **Why JAX 0.9.2?** Keeps both envs in the tested `jax 0.8–0.9` envelope and
 > aligned with the MPI env (see the mpi4jax constraint below).
 
-> **The GPU sweeps need Step 1b.** `fullnode_gpu.sh` (1→2→4 A100) and
-> `cube_strong_gpu.sh` (1→2→3 A100) exchange halos over mpi4jax across GPUs, so
+> **The GPU sweeps need Step 1b.** `scaling_gpu.sh` (1→2→4 A100) and
+> `cube_scaling_gpu.sh` (1→2→3 A100) exchange halos over mpi4jax across GPUs, so
 > the `legoesm-gpu` env MUST carry the route-A overlay (a CUDA-built mpi4jax).
 > Build it before submitting any GPU job. (A 1-rank run would not need it, but
 > the sweeps always go past 1 GPU.)
@@ -188,7 +189,7 @@ mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
 #   want: two lines, size 2, backend gpu  ==  route-A overlay fully working
 ```
 
-`fullnode_gpu.sh` and `cube_strong_gpu.sh` set `MPICH_GPU_SUPPORT_ENABLED=1`,
+`scaling_gpu.sh` and `cube_scaling_gpu.sh` set `MPICH_GPU_SUPPORT_ENABLED=1`,
 the `craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge themselves
 at runtime, so once the overlay env is built the jobs carry the right
 environment without the manual exports above.
@@ -198,7 +199,7 @@ environment without the manual exports above.
 Two settings the halo exchange needs on Derecho's Slingshot 11 fabric, both
 now wired into the job scripts (#681):
 
-1. **`MPI4JAX_USE_CUDA_MPI=1`** (`fullnode_gpu.sh`). mpi4jax's *default*
+1. **`MPI4JAX_USE_CUDA_MPI=1`** (`scaling_gpu.sh`). mpi4jax's *default*
    is to copy each `sendrecv` buffer device→host→device. On the GPU route-A
    path that host round-trip per exchange **erases multi-GPU scaling** even
    though the run is numerically correct — the classic "halo works but doesn't
@@ -315,12 +316,12 @@ mpiexec -n 2 python scripts/bench/run_cpu_mpi_scaling.py \
 
 ## Step 4 — Submit a campaign (one grid at a time)
 
-`submit_fullnode.sh` is the entry point. Run it from the repo root (so each
+`submit_scaling.sh` is the entry point. Run it from the repo root (so each
 job's `PBS_O_WORKDIR` resolves). The **outdir is required**; every job writes a
 unique subdir under it, so multiple grids can share one `$OUT`.
 
 ```bash
-submit_fullnode.sh <outdir> <grid> [res ...]
+submit_scaling.sh <outdir> <grid> [res ...]
 #   <outdir>  REQUIRED scratch dir for all results (created if missing)
 #   <grid>    cubed-sphere | latlon | icosahedral | spectral
 #   [res]     resolutions to cover (default per-grid list if omitted)
@@ -332,8 +333,8 @@ Always preview first, then submit:
 cd /glade/work/$USER/legoESM
 OUT=$SCRATCH/legoesm_scaling/cmp01
 
-DRYRUN=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon   # prints the qsub lines
-scripts/cluster/scaling_derecho/submit_fullnode.sh        $OUT latlon   # actually submits
+DRYRUN=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT latlon   # prints the qsub lines
+scripts/cluster/scaling_derecho/submit_scaling.sh        $OUT latlon   # actually submits
 ```
 
 For each resolution this submits **one CPU-sweep job + one GPU-sweep job** (each
@@ -341,17 +342,17 @@ sweeps its device ladder internally). latlon's default `128 256` → 4 jobs.
 
 Cover the other grids into the SAME `$OUT`:
 ```bash
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT spectral
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT cubed-sphere
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT icosahedral
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT spectral
 ```
 
 Override resolutions by listing them; pass knobs as environment variables:
 
 ```bash
-scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT cubed-sphere 96 192   # only C96, C192
-PHYSICS=moist PRECISION=float64 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT latlon
-GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral # one tier only
+scripts/cluster/scaling_derecho/submit_scaling.sh $OUT cubed-sphere 96 192   # only C96, C192
+PHYSICS=moist PRECISION=float64 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT latlon
+GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT icosahedral # one tier only
 ```
 
 | Var | Default | Notes |
@@ -360,15 +361,29 @@ GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral #
 | `PRECISION` | `float32` | `float32` \| `float64` |
 | `DRYRUN` | `0` | `1` = print the `qsub` lines without submitting |
 | `CPU_ONLY` / `GPU_ONLY` | `0` | submit just one side |
-| `NODES` | `1` | **icosahedral GPU only**: `>1` overrides the GPU job's `select=` to span N nodes (4 A100/node), so the A100 curve goes multi-node (1→2→4→8→16… GPUs, self-capped to `NODES*4`). Rejected for latlon/spectral (see issue #641). |
+| `STRONG_ONLY` | `0` | `1` = skip the weak-scaling jobs (the CPU-vs-GPU plot uses strong only) |
+| `NODES` | `1` | **icosahedral + latlon GPU**: `>1` overrides the GPU job's `select=` to span N nodes (4 A100/node), so the A100 curve goes multi-node (1→2→4→8→16… GPUs, self-capped to `NODES*4`). Rejected for cubed-sphere (≤6-GPU face shard) and spectral (no MPI); see #641/#660. |
+| `PBS_ACCOUNT` | `P08010000` | charge account, passed to every `qsub` via `-A` (set once instead of editing each `#PBS -A` header). |
 
 Per-grid default resolutions: cubed-sphere `48 96 192`, latlon `128 256`,
 icosahedral `6 7 8` (L8 = 655,362 cells, ~25 km; needs several A100s — pair with
 `NODES>1`), spectral `85 170`.
 
+**Multi-node GPU** (latlon / icosahedral) spans nodes via `NODES`. Cross-node
+GPU-direct requires `craype-accel-nvidia80` (loaded by `scaling_gpu.sh`) +
+`MPI4JAX_USE_CUDA_MPI=1` (default) — see the Slingshot section above. **Run a
+2-node canary first** so a fabric problem surfaces on one cheap job, not the
+whole sweep:
+
 ```bash
-# Multi-node icosahedral A100 sweep: 4 nodes = 16 A100, up through level 8.
-NODES=4 GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_fullnode.sh $OUT icosahedral
+# canary: confirm n=8 completes and SYPD(8) > SYPD(4)
+NODES=2 GPU_ONLY=1 STRONG_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT/canary latlon 256
+
+# then the real multi-node sweeps (4 nodes = 16 A100):
+NODES=4 GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT latlon      128 256 512 720
+NODES=4 GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT icosahedral 6 7 8
+# cubed-sphere + spectral are single-node only (no NODES):
+GPU_ONLY=1 scripts/cluster/scaling_derecho/submit_scaling.sh $OUT cubed-sphere 48 96 192 384
 ```
 
 ## Step 5 — Monitor the jobs
@@ -391,14 +406,14 @@ the rest of the curve is still valid).
 Once `qstat -u $USER` is empty:
 
 ```bash
-scripts/cluster/scaling_derecho/finalize_fullnode.sh $OUT
+scripts/cluster/scaling_derecho/finalize_scaling.sh $OUT
 ```
 
 This runs `aggregate_bcw_scaling.py` over the whole `$OUT` into
-`$OUT/all_tidy.csv`, then `plot_fullnode_cpu_vs_gpu.py` to render, **for each
+`$OUT/all_tidy.csv`, then `plot_cpu_vs_gpu_scaling.py` to render, **for each
 grid**, the CPU and GPU strong-scaling curves (SYPD and Mcells/s vs device
-count, one panel per resolution) → `$OUT/plots/fullnode_cpu_vs_gpu_<grid>.png`,
-and prints a peak (full-node) GPU/CPU speedup table:
+count, one panel per resolution) → `$OUT/plots/cpu_vs_gpu_scaling_<grid>.png`,
+and prints a peak GPU/CPU speedup table:
 
 ```
 grid              res   CPU peak   GPU peak  GPU/CPU   (peak SYPD across the scaling curve)
@@ -425,7 +440,7 @@ column -s, -t < $OUT/all_tidy.csv | less -S    # grid, backend, n_resource, reso
   error — that resolution is too small for that rank count. Expected; that point
   drops out and the rest of the curve stands. Raise the resolution or cap ranks
   (`RANKS="1 2 4 8 16 32"`).
-- **`cube_fullnode_cpu.sh` rejects `--cpu-bind depth --depth N`** — a PALS
+- **`cube_scaling_cpu.sh` rejects `--cpu-bind depth --depth N`** — a PALS
   version quirk; the fallback is `--cpu-bind depth -d N` (edit the `mpiexec`
   line).
 - **Empty plot / `no CPU/GPU rows ...`** — `finalize` ran before any job
@@ -438,5 +453,5 @@ column -s, -t < $OUT/all_tidy.csv | less -S    # grid, backend, n_resource, reso
 - [ ] MPI env: `import mpi4jax` succeeds (built under **gcc**, against cray-mpich).
 - [ ] GPU header tokens (`gpu_type=a100`, `job_priority`) schedule on your
       allocation — confirm with the interactive `qsub -I` in Step 1; adjust the
-      `select=`/`gpu_type` line in `fullnode_gpu.sh` / `cube_strong_gpu.sh` if not.
+      `select=`/`gpu_type` line in `scaling_gpu.sh` / `cube_scaling_gpu.sh` if not.
 - [ ] `DRYRUN=1` preview looks right before the real submit.

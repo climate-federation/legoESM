@@ -7,26 +7,26 @@
 #
 # Dispatch (the two cube scripts differ from the rest -- cube needs the mpi4jax
 # face-scatter path, the others use the native MPI driver):
-#   cubed-sphere -> cube_fullnode_cpu.sh   + cube_strong_gpu.sh (RANKS=1)
-#   latlon/ico/spectral -> fullnode_cpu.sh + fullnode_gpu.sh
+#   cubed-sphere -> cube_scaling_cpu.sh   + cube_scaling_gpu.sh (RANKS=1)
+#   latlon/ico/spectral -> scaling_cpu.sh + scaling_gpu.sh
 #
 # THE single supported way to run scaling on Derecho.  Everything else in this
 # directory is a building block this script drives.
 #
 # Usage:
-#   scripts/cluster/scaling_derecho/submit_fullnode.sh <outdir> <grid> [res ...]
+#   scripts/cluster/scaling_derecho/submit_scaling.sh <outdir> <grid> [res ...]
 #     <outdir> : REQUIRED scratch dir for all results, e.g.
 #                $SCRATCH/legoesm_scaling/cmp01 (each job writes a unique subdir)
 #     <grid>   : cubed-sphere | latlon | icosahedral | spectral
 #     [res]    : resolutions to cover (default per-grid list if omitted)
 #
 #   # default resolutions for the grid:
-#   submit_fullnode.sh $SCRATCH/legoesm_scaling/run1 latlon
+#   submit_scaling.sh $SCRATCH/legoesm_scaling/run1 latlon
 #   # explicit resolutions:
-#   submit_fullnode.sh $SCRATCH/legoesm_scaling/run1 cubed-sphere 48 96 192
+#   submit_scaling.sh $SCRATCH/legoesm_scaling/run1 cubed-sphere 48 96 192
 #   # knobs (pass through to the jobs) + dry run / one tier:
-#   PHYSICS=moist PRECISION=float32 DRYRUN=1 submit_fullnode.sh $SCRATCH/x icosahedral
-#   CPU_ONLY=1 submit_fullnode.sh $SCRATCH/x spectral
+#   PHYSICS=moist PRECISION=float32 DRYRUN=1 submit_scaling.sh $SCRATCH/x icosahedral
+#   CPU_ONLY=1 submit_scaling.sh $SCRATCH/x spectral
 # ===========================================================================
 set -euo pipefail
 
@@ -37,6 +37,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${REPO_ROOT}"
 SD="scripts/cluster/scaling_derecho"
 QSUB="${QSUB:-qsub}"
+# PBS account: passed to every qsub via -A so a new user sets it ONCE (here or in
+# _env.sh / their shell) instead of editing the #PBS -A header in every job
+# script.  Default matches _env.sh's PBS_ACCOUNT.
+PBS_ACCOUNT="${PBS_ACCOUNT:-P08010000}"
 
 OUTDIR="${1:-}"
 GRID="${2:-}"
@@ -78,7 +82,7 @@ if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; 
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 
 # Multi-node GPU sweep (icosahedral + latlon).  NODES>1 overrides the GPU job's
-# `select=` to span N nodes (4 A100/node); fullnode_gpu.sh's default GPU_RANKS
+# `select=` to span N nodes (4 A100/node); scaling_gpu.sh's default GPU_RANKS
 # (1 2 4 8 16 ...) then self-caps to the granted TOTAL_GPUS = NODES*4, so the
 # A100 curve runs past one node.  Allowed for the two grids with a genuine
 # domain decomposition: icosahedral (MPAS cell partition) and latlon (lat-band /
@@ -104,31 +108,32 @@ fi
 submit() {  # submit "<label>" <qsub args...>
     local label="$1"; shift
     if [ "${DRYRUN:-0}" = "1" ]; then
-        echo "[DRYRUN] ${label}: ${QSUB} $*"
+        echo "[DRYRUN] ${label}: ${QSUB} -A ${PBS_ACCOUNT} $*"
         return 0
     fi
     local jobid
-    jobid="$(${QSUB} "$@")"
+    jobid="$(${QSUB} -A "${PBS_ACCOUNT}" "$@")"
     echo "  submitted ${label}: ${jobid}"
 }
 
 echo "=== repo: ${REPO_ROOT} ==="
-echo "=== full-node CPU-vs-A100: grid=${GRID}  resolutions=[${RES[*]}] ==="
+echo "=== CPU-vs-A100 scaling: grid=${GRID}  resolutions=[${RES[*]}] ==="
 echo "=== outdir: ${OUTDIR} ==="
 
 # --- Non-cube fan-out: one WEAK job per precision (no res sweep -- weak derives
 #     its own per-rank resolution) + one STRONG job per (resolution, precision).
 #     Each job gets a UNIQUE CAMP so the per-job aggregate never races; the final
-#     finalize_fullnode.sh re-aggregates the whole $OUTDIR tree.  $2 = backend
+#     finalize_scaling.sh re-aggregates the whole $OUTDIR tree.  $2 = backend
 #     ("cpu"|"gpu"); GPU jobs carry the (possibly multi-node) GPU_SELECT. -------
 emit_noncube() {
     local bk="$1" script tag
-    if [ "$bk" = gpu ]; then script="$SD/fullnode_gpu.sh"; tag="a100"
-    else                       script="$SD/fullnode_cpu.sh"; tag="cpu"; fi
+    if [ "$bk" = gpu ]; then script="$SD/scaling_gpu.sh"; tag="a100"
+    else                       script="$SD/scaling_cpu.sh"; tag="cpu"; fi
     local prec camp vars R
     for prec in $PRECISIONS; do
-        # WEAK (spectral has no MPI -> no weak curve; skip it)
-        if [ "$GRID" != "spectral" ]; then
+        # WEAK (spectral has no MPI -> no weak curve; skip it).  STRONG_ONLY=1
+        # skips the weak jobs entirely (the cpu-vs-gpu plot uses strong only).
+        if [ "$GRID" != "spectral" ] && [ "${STRONG_ONLY:-0}" != "1" ]; then
             camp="${OUTDIR}/${GRID}_${tag}_weak_${prec}"
             vars="GRID=${GRID},MODES=weak,PRECISIONS=${prec},CAMP=${camp}${EXTRA_VARS}"
             if [ "$bk" = gpu ]; then
@@ -159,10 +164,10 @@ if [ "$GRID" = "cubed-sphere" ]; then
         CPU_VARS="STRONG_RES=${R},CAMP=${CPU_CAMP}${EXTRA_VARS}"
         GPU_VARS="STRONG_RES=${R},CAMP=${GPU_CAMP}${EXTRA_VARS}"
         if [ "${GPU_ONLY:-0}" != "1" ]; then
-            submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$SD/cube_fullnode_cpu.sh"
+            submit "cpu ${GRID} res=${R} (rank sweep)" -v "$CPU_VARS" "$SD/cube_scaling_cpu.sh"
         fi
         if [ "${CPU_ONLY:-0}" != "1" ]; then
-            submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$SD/cube_strong_gpu.sh"
+            submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$SD/cube_scaling_gpu.sh"
         fi
     done
 else

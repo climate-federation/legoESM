@@ -2,7 +2,7 @@
 """CPU vs GPU strong scaling, per grid: SYPD (top) + Mcells/s throughput (bottom).
 
 The companion plot to the Derecho CPU-vs-A100 comparison
-(``scripts/cluster/scaling_derecho/submit_fullnode.sh``): each grid is swept on
+(``scripts/cluster/scaling_derecho/submit_scaling.sh``): each grid is swept on
 BOTH backends across their parallel units -- CPU MPI ranks 1..128 (cores) and
 GPU 1..4 A100 -- at each resolution.  CPU cores and GPUs are DIFFERENT units, so
 the two backends get their own columns (never compare a CPU point to a GPU point
@@ -16,10 +16,10 @@ Per grid, one 2x2 figure:
 Mcells/s (cells x levels / step-time) is raw compute throughput; unlike SYPD it
 normalises out the per-resolution timestep, so a plateau in the bottom row is
 the bandwidth/comms wall (where adding parallel units stops buying throughput).
-Also prints a peak (full-node) GPU/CPU table.
+Also prints a peak GPU/CPU table.
 
     python scripts/bench/aggregate_bcw_scaling.py --root $OUT --out $OUT/all_tidy.csv
-    python scripts/plot/plot_fullnode_cpu_vs_gpu.py --csv $OUT/all_tidy.csv --out $OUT/plots
+    python scripts/plot/plot_cpu_vs_gpu_scaling.py --csv $OUT/all_tidy.csv --out $OUT/plots
 """
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ def _res_label(km_map: dict, grid: str, res: int) -> str:
 
 
 def peak_table(rows):
-    """``(grid, resolution) -> {cpu, gpu, gpu_over_cpu}`` peak (full-node) SYPD."""
+    """``(grid, resolution) -> {cpu, gpu, gpu_over_cpu}`` peak SYPD."""
     g = group(rows, "sypd")
     out = {}
     for grid, by_res in g.items():
@@ -187,7 +187,7 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
                     ax.legend(fontsize=8, title="grid spacing")
         fig.suptitle(f"CPU vs GPU strong scaling — {grid}")
         fig.tight_layout()
-        out_path = out_dir / f"fullnode_cpu_vs_gpu_{grid}.png"
+        out_path = out_dir / f"cpu_vs_gpu_scaling_{grid}.png"
         fig.savefig(out_path, dpi=130)
         plt.close(fig)
         written.append(out_path)
@@ -213,7 +213,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--csv", required=True, type=Path,
                    help="Tidy CSV from aggregate_bcw_scaling.py (over the "
-                        "submit_fullnode outdir).")
+                        "submit_scaling outdir).")
     p.add_argument("--out", required=True, type=Path,
                    help="Output directory for the per-grid PNGs.")
     args = p.parse_args()

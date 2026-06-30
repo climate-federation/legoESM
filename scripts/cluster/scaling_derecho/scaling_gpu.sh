@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N fullnode_gpu
+#PBS -N scaling_gpu
 #PBS -A P08010000
 #PBS -q main
 #PBS -l job_priority=regular
@@ -18,18 +18,18 @@
 # spectral has no MPI path (1 GPU only); see #641/#660.  NOTE: multi-node latlon
 # (>4 GPU) is newly enabled and NOT yet validated on real hardware (#660) --
 # verify MPI==serial (cells/rank halves, matched SYPD) on the first run.
-# Pair with fullnode_cpu.sh; SAME driver (run_cpu_mpi_scaling.py) + resolutions.
+# Pair with scaling_cpu.sh; SAME driver (run_cpu_mpi_scaling.py) + resolutions.
 #
 # REQUIRES the route-A overlay env (legoesm-gpu with a CUDA-built mpi4jax; see
 # README Step 1b) -- multi-GPU mpi4jax halos.  Cubed-sphere is handled by
-# cube_strong_gpu.sh (face-scatter, RANKS=1 2 3).
+# cube_scaling_gpu.sh (face-scatter, RANKS=1 2 3).
 #
-# Multi-node: submit_fullnode.sh sets NODES>1 and overrides the qsub `select=`
+# Multi-node: submit_scaling.sh sets NODES>1 and overrides the qsub `select=`
 # to span nodes; this script then sweeps GPU_RANKS up to NODES*4.  Direct:
-#   GRID=icosahedral RESOLUTIONS="7 8" GPU_RANKS="1 2 4 8" ./fullnode_gpu.sh
+#   GRID=icosahedral RESOLUTIONS="7 8" GPU_RANKS="1 2 4 8" ./scaling_gpu.sh
 #
-# Driven by submit_fullnode.sh (one job per resolution).  Direct:
-#   GRID=latlon RESOLUTIONS=256 ./fullnode_gpu.sh
+# Driven by submit_scaling.sh (one job per resolution).  Direct:
+#   GRID=latlon RESOLUTIONS=256 ./scaling_gpu.sh
 # ===========================================================================
 set -uo pipefail
 
@@ -66,7 +66,7 @@ export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 # --- Per-grid sweep (raise on cube / unknown: dispatch hardening) ------------
 GRID="${GRID:-${1:-latlon}}"
 PHYSICS="${PHYSICS:-none}"
-# Sweep precision AND scaling mode (see fullnode_cpu.sh).  The submitter fans
+# Sweep precision AND scaling mode (see scaling_cpu.sh).  The submitter fans
 # these out one value per job; back-compat singular PRECISION still works.
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 MODES="${MODES:-strong weak}"
@@ -80,7 +80,7 @@ EXTRA=""
 #
 # !!! Do NOT use a bare `$NGPUS` as the override: PBS EXPORTS its own $NGPUS =
 # ngpus-PER-CHUNK (=4), exactly like the $NCPUS=cores-per-rank trap in
-# fullnode_cpu.sh.  Reading it pinned TOTAL_GPUS=4 on EVERY job regardless of
+# scaling_cpu.sh.  Reading it pinned TOTAL_GPUS=4 on EVERY job regardless of
 # node count -- the real reason every grid in all_tidy.csv capped at 4 GPUs.
 # The manual override is $LEGOESM_NGPUS (namespaced, PBS can't clobber it).
 _gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
@@ -110,7 +110,7 @@ else
 fi
 case "$GRID" in
   cubed-sphere)
-    echo "ERROR: cubed-sphere GPU uses cube_strong_gpu.sh (face-scatter)." >&2
+    echo "ERROR: cubed-sphere GPU uses cube_scaling_gpu.sh (face-scatter)." >&2
     exit 2 ;;
   latlon)
     # Multi-node ladder (powers of 2 -> 2-D pencil decomposition); self-caps to
@@ -173,7 +173,7 @@ for PREC in $PRECISIONS; do
     for N in $GPU_RANKS; do
       if [ "$N" -gt "$TOTAL_GPUS" ]; then
         echo "!!! WARNING: $GRID $MODE $PREC res=$R N=$N > TOTAL_GPUS=$TOTAL_GPUS -- SKIP" >&2
-        echo "    (this point needs a larger allocation: NODES=$(( (N + 3) / 4 )) -> select spanning $(( (N + 3) / 4 )) node(s); see submit_fullnode.sh)" >&2
+        echo "    (this point needs a larger allocation: NODES=$(( (N + 3) / 4 )) -> select spanning $(( (N + 3) / 4 )) node(s); see submit_scaling.sh)" >&2
         skipped="${skipped} ${MODE}/${PREC}/res${R}/N${N}"
         continue
       fi
@@ -196,7 +196,7 @@ done
 if [ -n "$skipped" ]; then
     echo "=== INCOMPLETE SWEEP: TOTAL_GPUS=$TOTAL_GPUS capped these points ===" >&2
     for s in $skipped; do echo "    SKIPPED $s" >&2; done
-    echo "    Resubmit with more nodes (NODES>=2 in submit_fullnode.sh) to fill them." >&2
+    echo "    Resubmit with more nodes (NODES>=2 in submit_scaling.sh) to fill them." >&2
 fi
 
 echo "=== DONE rc=$rc_all ===   CSV: $CAMP/${GRID}_gpu_tidy.csv"
