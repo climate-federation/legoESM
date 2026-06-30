@@ -1068,3 +1068,80 @@ def test_aimip_louis_preserve_surface_noop_without_prev():
     from scripts.run.run_amip import _louis_with_preserved_surface
     trained = LouisConfig(surface=SurfaceLayerConfig())
     assert _louis_with_preserved_surface(trained, None) is trained
+
+
+def test_sundqvist_tuning_flags_round_trip_and_override():
+    """--sundqvist-{qc-crit,rh-crit,auto-rate} parse and override a
+    SundqvistConfig with final precedence; unset knobs stay at the base."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert (d.sundqvist_qc_crit, d.sundqvist_rh_crit, d.sundqvist_auto_rate) == (
+        None, None, None)
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--sundqvist-qc-crit", "1e-4",
+                              "--sundqvist-rh-crit", "0.6"])
+    base = SundqvistConfig()                       # qc_crit 5e-4, rh_crit 0.8
+    out = _apply_sundqvist_overrides(base, args)
+    assert out.qc_crit == 1e-4 and out.rh_crit == 0.6
+    assert out.auto_rate == base.auto_rate         # untouched knob unchanged
+
+
+def test_sundqvist_overrides_noop_without_flags():
+    """No override flags -> the SAME config object (identity)."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    base = SundqvistConfig()
+    assert _apply_sundqvist_overrides(base, args) is base
+
+
+def test_sundqvist_overrides_noop_for_non_sundqvist_micro():
+    """A sundqvist override is ignored when microphysics != sundqvist."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--microphysics", "morrison",
+                              "--sundqvist-qc-crit", "1e-4"])
+    base = SundqvistConfig()
+    assert _apply_sundqvist_overrides(base, args) is base
+
+
+def test_sundqvist_flags_reject_out_of_bounds():
+    """Out-of-range tunables fail LOUDLY (argparse accepts any float)."""
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    # (positive values only — argparse parses a leading '-' as a flag)
+    for flag, bad in [("--sundqvist-qc-crit", "1.0"),      # >> 1.5e-3
+                      ("--sundqvist-rh-crit", "0.2"),       # < 0.5
+                      ("--sundqvist-auto-rate", "1e-5")]:   # < 1e-4 floor
+        args = parser.parse_args(["--dataset", "analytical", flag, bad])
+        with pytest.raises(SystemExit):
+            _validate_sundqvist_flags(args, parser)
+
+
+def test_sundqvist_flags_in_bounds_ok():
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--sundqvist-qc-crit", "1e-4",
+                              "--sundqvist-rh-crit", "0.6",
+                              "--sundqvist-auto-rate", "5e-3"])
+    _validate_sundqvist_flags(args, parser)   # no raise
+
+
+def test_sundqvist_flags_rejected_on_mpas_spectral():
+    """The overrides are refused on backends that rebuild MicrophysicsConfig at
+    run() (MPAS/spectral) and would silently ignore them."""
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+                              "--sundqvist-qc-crit", "1e-4"])
+    with pytest.raises(SystemExit):
+        _validate_sundqvist_flags(mpas, parser)
+    # but no override flags -> no raise even on MPAS
+    bare = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"])
+    _validate_sundqvist_flags(bare, parser)
