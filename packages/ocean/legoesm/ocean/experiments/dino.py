@@ -164,15 +164,23 @@ class DINOConfig:
     # Vertical-mixing turbulence closure. The paper (Kamm et al. 2025) uses the
     # NEMO TKE scheme (Blanke & Delecluse 1993); "tke" selects our TKE closure
     # configured to the paper (background visc/diff = A_v_bg / K_v_bg, convective
-    # ceiling K_conv, constant background, prandtl_mode="constant"). HOWEVER our
-    # TKE is currently UNSTABLE in this 1deg DINO: the lower diffusivity makes the
-    # lat-lon run too energetic and it blows up near day ~40 (our TKE +
-    # lateral-viscosity tuning differs from NEMO's, where TKE is stable for 3000
-    # yr). So the DEFAULT is "kpp" (our stable closure, full-year stable); "tke"
-    # is the paper-faithful option for the short (<~40 day) window. This is a
-    # documented fidelity gap alongside the EOS (Wright vs Roquet) and the
-    # annual-mean-vs-seasonal restoring. Set per run via --vmix.
-    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper, unstable >~day 40)
+    # ceiling K_conv, constant background, prandtl_mode="constant"). At the
+    # paper's A_v_bg=1.2e-4 our TKE NaNs ~day 39 — DIAGNOSED (2026-06-30,
+    # _diag_dino_tke_blowup.py) as a TKE-closure-specific surface-momentum
+    # runaway at the SW channel∩wall corner (lat −69.7/lon −49.5, wind τ→0), NOT
+    # a CFL (halving dt → same day-40 NaN) and NOT the low background per se
+    # (the "constant" scheme is stable at 1.2e-4). It is suppressed by a higher
+    # vertical-VISCOSITY background (``tke_momentum_visc_bg`` below); the tracer
+    # background K_v_bg stays at the paper value, so the thermocline comparison
+    # is unaffected. Default is still "kpp" (our production closure); "tke" is the
+    # paper-faithful closure, now runnable. Set per run via --vmix.
+    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper closure)
+    # TKE-only momentum-viscosity background [m²/s], a FLOOR applied (max with
+    # A_v_bg) ONLY when vmix_scheme="tke" — see ``A_v_bg_effective``. 5e-4 (4×
+    # the paper's 1.2e-4) is the minimum that damps the SW-corner instability
+    # over the 90-day window (sweep: 1.2e-4→NaN d39, 2e-4→d47, 3e-4→d57,
+    # 5e-4→stable). kpp/constant are unaffected (stable at the paper A_v_bg).
+    tke_momentum_visc_bg: float = 5.0e-4
 
     # ------------------------------------------------------------------
     # Equation of state. The paper (Kamm et al. 2025) uses NEMO's
@@ -285,6 +293,22 @@ class DINOConfig:
     sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
     rho_ref_z0: float = 1026.0            # ρ_ref(z=0) [kg/m³]
     rho_ref_z2000: float = 1035.0         # ρ_ref(z=2000) [kg/m³]
+
+    @property
+    def A_v_bg_effective(self) -> float:
+        """Effective background vertical VISCOSITY [m²/s] for the momentum
+        solve (the model ``A_v`` and the TKE ``kappaM_min``).
+
+        For ``vmix_scheme="tke"`` this is ``max(A_v_bg, tke_momentum_visc_bg)``
+        — a FLOOR that damps the diagnosed SW channel-corner surface-momentum
+        instability (a higher A_v_bg override still wins).  ``kpp``/``constant``
+        keep ``A_v_bg`` (they are stable at the paper 1.2e-4).  The tracer
+        background ``K_v_bg`` is NOT raised here, so the thermocline mixing
+        stays at the paper value.
+        """
+        if self.vmix_scheme == "tke":
+            return max(self.A_v_bg, self.tke_momentum_visc_bg)
+        return self.A_v_bg
 
 
 # ---------------------------------------------------------------------
@@ -1059,13 +1083,18 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         # floor inherits kappaM_min) and kappaM_max is ignored. "constant" gives
         # K_H = max(kappaH_min, K_M / Prandtl_tke0) and applies the kappaM_max
         # ceiling, so K_v_bg (1.2e-5) and the convective ceiling (K_conv) are
-        # honored (Prandtl_tke0 default 10 = A_v_bg / K_v_bg). The TKE step is
-        # fed N2 + shear_sq by the vertical-mixing integration.
+        # honored. kappaM_min is the EFFECTIVE momentum-viscosity floor
+        # (A_v_bg_effective = max(A_v_bg, tke_momentum_visc_bg) = 5e-4 by default
+        # — the SW-corner stabilizer); the TRACER floor kappaH_min stays at the
+        # paper K_v_bg (1.2e-5), and Prandtl_tke0 is a FIXED field (default 10,
+        # the paper's 1.2e-4/1.2e-5 ratio) — NOT recomputed from the raised
+        # momentum floor — so the thermocline mixing is unchanged. The TKE step
+        # is fed N2 + shear_sq by the vertical-mixing integration.
         return VerticalMixingConfig(
             scheme="tke",
             tke=TKEConfig(
                 prandtl_mode="constant",
-                kappaM_min=cfg.A_v_bg, kappaH_min=cfg.K_v_bg,
+                kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
                 kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
             ),
         )
@@ -1175,7 +1204,7 @@ def dino_lat_lon_model_config(
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         K_h=K_h_base,
-        A_v=cfg.A_v_bg,
+        A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
@@ -1293,7 +1322,7 @@ def dino_mpas_model_config(
         # — see the mpas_equatorial_visc_boost note in DINOConfig.
         equatorial_visc_boost=cfg.mpas_equatorial_visc_boost,
         K_h=K_h,
-        A_v=cfg.A_v_bg,
+        A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
