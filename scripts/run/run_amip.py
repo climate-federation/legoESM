@@ -335,6 +335,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument(
+        "--orbital-insolation", action="store_true", default=False,
+        dest="orbital_insolation",
+        help="Use realistic (Berger 1978) orbital insolation for AMIP-II: "
+             "present-day orbital declination + Earth-Sun distance factor "
+             "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
+             "circular orbit (idealized).",
+    )
     parser.add_argument("--dynamic-albedo", action="store_true", default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
@@ -806,6 +814,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         diurnal_cycle=args.diurnal_cycle,
+        orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,

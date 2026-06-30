@@ -3814,6 +3814,8 @@ class ModelDriver:
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
                 )
             })
+        from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+        _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -3830,6 +3832,7 @@ class ModelDriver:
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
+                orbit=_orbit_params,
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
                 # external CMIP6 ozone FILE arrives per-step via the traced
@@ -4741,6 +4744,8 @@ class ModelDriver:
             # silently re-initialize their carry every step — refuse
             # loudly instead of degrading.
             self._refuse_stateful_physics_unthreaded(cfg)
+            from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+            _orbit_params = earth_orbit() if cfg.orbital_insolation else None
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
@@ -4756,6 +4761,7 @@ class ModelDriver:
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,
+                    orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),

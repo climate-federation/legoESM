@@ -53,6 +53,7 @@ from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
     daylight_fraction,
+    earth_sun_distance_factor,
     perpetual_equinox_insolation,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
@@ -179,28 +180,40 @@ def _compute_insolation(
     """
     S_0 = config.rrtmgp.S_0 if config.scheme == "rrtmgp" else config.gray.S_0
     obliquity = config.gray.obliquity
+    # Realistic orbit (Berger 1978) when enabled — None ⇒ circular orbit, so
+    # the idealized/aquaplanet paths below are bit-for-bit unchanged.
+    orbit = getattr(config, "orbit", None)
 
     # SAM perpetual fixed-zenith RCE (doperpetual): uniform TOA insolation
     # S_0·cosθ with cosθ used directly as the SW optical-path cosine — no
     # latitude / daily-mean / daytime-effective rescaling. (RAD-2.)
+    # Perpetual RCE is a fixed-geometry idealization → orbit does not apply.
     if config.rce_fixed_cos_zenith is not None:
         cos_zen = jnp.full_like(lat, config.rce_fixed_cos_zenith)
         return S_0 * cos_zen, cos_zen, None
 
     if config.diurnal_cycle and lon is not None:
         hour = seconds_of_day / 3600.0
-        cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity)
+        cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity,
+                                   orbit=orbit)
         cos_sza_pos = jnp.maximum(cos_sza, 0.0)
-        return S_0 * cos_sza_pos, cos_sza_pos, None
+        # Eccentricity scales the incoming flux by (a/r)^2 (the cosine carries
+        # geometry only); 1.0 on the circular-orbit path.
+        eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                if orbit is not None else 1.0)
+        return S_0 * eccf * cos_sza_pos, cos_sza_pos, None
 
     # No diurnal cycle — daily-mean or perpetual-equinox insolation.
     gray_config = config.gray
     if gray_config.perpetual_equinox:
-        # Equinox: f_day = 0.5 everywhere
+        # Equinox: f_day = 0.5 everywhere (idealized — orbit not applied).
         f_day = jnp.full_like(lat, 0.5)
         return perpetual_equinox_insolation(lat, S_0), None, f_day
-    f_day = daylight_fraction(lat, day_of_year, obliquity)
-    return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None, f_day
+    f_day = daylight_fraction(lat, day_of_year, obliquity, orbit=orbit)
+    # daily_mean_insolation applies the (a/r)^2 eccentricity factor internally
+    # when ``orbit`` is set.
+    return (daily_mean_insolation(lat, day_of_year, S_0, obliquity,
+                                  orbit=orbit), None, f_day)
 
 
 def sam_ocean_albedo(

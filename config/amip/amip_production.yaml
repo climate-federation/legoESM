@@ -39,6 +39,8 @@ convection: sbm             # confirmed fixes albedo+precip (job 25918469)
 turbulence: louis           # Louis required by the tiled surface
 gravity_wave_drag: hines
 diurnal_cycle: true
+orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
+                            # declination + (a/r)^2 eccentricity asymmetry
 
 # --- Cloud tuning -------------------------------------------------------------
 # rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)

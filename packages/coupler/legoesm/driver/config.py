@@ -250,6 +250,12 @@ class ExperimentConfig(NamedTuple):
     # compile unit — only a host-level jit is its own executable).
     unfused_radiation: bool = False
     diurnal_cycle: bool = False
+    # Realistic (Berger 1978) orbital insolation for AMIP-II / CMIP.  When
+    # True the radiation uses the present-day orbital declination and scales
+    # TOA insolation by the Earth-Sun distance factor (a/r)^2 (eccentricity
+    # perihelion/aphelion asymmetry, ~+/-3.4%).  Default False keeps the
+    # circular-orbit approximation for idealized/aquaplanet runs.
+    orbital_insolation: bool = False
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but

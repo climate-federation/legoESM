@@ -35,6 +35,18 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_orbital_insolation_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.orbital_insolation is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation",
+    ]), parser))
+    assert cfg_on.orbital_insolation is True
+
+
 def test_build_config_includes_joint_physics_parameterization_flags():
     parser = build_arg_parser()
     args = parser.parse_args([
