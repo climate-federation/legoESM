@@ -112,6 +112,53 @@ def _month_day_of_year(month: int) -> float:
     return (month - 1) * 30.0 + 15.0
 
 
+# WB2's skin_temperature is zero-filled in the store we use, so the prescribed
+# SST comes from ARCO-ERA5 sea_surface_temperature (full 1940-2024, the same
+# clean source ACE2-ERA5 is forced with). Anon public GCS.
+_ARCO_ERA5_STORE = (
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
+
+
+def _open_arco_sst():
+    import xarray as xr
+    return xr.open_zarr(
+        _ARCO_ERA5_STORE, chunks=None, storage_options={"token": "anon"},
+    )
+
+
+def _arco_sst_gaussian(ds_sst, year, month, grid, regrid_fn, day: int = 15):
+    """Monthly ARCO-ERA5 ``sea_surface_temperature`` regridded to the Gaussian
+    grid, flattened to ``(ncol,)``.
+
+    ARCO SST is NaN over land; filled with the ocean mean BEFORE the linear
+    regrid so coastal ocean cells stay finite (true land is masked out later by
+    the caller's model ocean mask). ``regrid_2d_to_gaussian`` expects ascending
+    latitude in RADIANS, so ARCO's (degrees, N->S) axes are converted + flipped.
+    Raises if (year, month) is outside the ARCO time range.
+    """
+    import pandas as pd
+    times = pd.DatetimeIndex(ds_sst.time.values)
+    target = pd.Timestamp(year=year, month=month, day=day)
+    if target < times[0] or target > times[-1]:
+        raise ValueError(
+            f"{year}-{month:02d} outside ARCO range "
+            f"[{times[0].date()} .. {times[-1].date()}]"
+        )
+    da = ds_sst["sea_surface_temperature"].sel(time=target, method="nearest")
+    sst = np.asarray(da.values, dtype=np.float64)
+    lat = np.asarray(ds_sst.latitude.values, dtype=np.float64)
+    lon = np.asarray(ds_sst.longitude.values, dtype=np.float64)
+    ocean_mean = float(np.nanmean(sst))
+    sst = np.where(np.isfinite(sst), sst, ocean_mean)
+    if lat[0] > lat[-1]:  # RegularGridInterpolator requires ascending axes
+        lat = lat[::-1]
+        sst = sst[::-1, :]
+    return np.asarray(
+        regrid_fn(sst, np.deg2rad(lat), np.deg2rad(lon), grid)
+    ).reshape(-1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ckpt", type=Path,
@@ -181,7 +228,8 @@ def main():
     # an INSTANCE instead.
     _zarr = cfg.get("zarr_store")
     era5_cfg = TrainingERA5Config(zarr_store=_zarr) if _zarr else TrainingERA5Config()
-    ds = open_era5_zarr(era5_cfg.zarr_store)
+    ds = open_era5_zarr(era5_cfg.zarr_store)  # WB2: IC state (T/u/v/q/p_s)
+    ds_sst = _open_arco_sst()                 # ARCO: prescribed SST 1940-2024
 
     # --- IC: start-year January ---
     ic_idx = _time_index(ds, args.start_year, 1, 1)
@@ -257,15 +305,12 @@ def main():
             break
         for month in range(1, 13):
             try:
-                idx = _time_index(ds, year, month)
-                sl = load_era5_slice(era5_cfg, idx)
-                sst_g = np.asarray(
-                    regrid_2d_to_gaussian(sl.sst, sl.lat, sl.lon, grid)
-                ).reshape(-1)
-                # Guard against a zero-filled SST (load_era5_slice returns zeros
-                # when skin_temperature is absent — codex review #2): a 0 K
-                # "ocean" would be silently prescribed. Require finite, physical
-                # ocean SST.
+                sst_g = _arco_sst_gaussian(
+                    ds_sst, year, month, grid, regrid_2d_to_gaussian,
+                )
+                # Defence-in-depth (codex review): a 0 K cell from a bad SST
+                # read must never be silently prescribed. Require finite,
+                # physical ocean SST per cell + a plausible global-ocean mean.
                 ocean_sst = sst_g[ocean]
                 # Per-cell + mean validation (codex review): a few 0 K cells
                 # from an absent skin_temperature would pass a mean-only check.
