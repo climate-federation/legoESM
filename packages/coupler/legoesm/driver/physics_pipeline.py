@@ -214,6 +214,11 @@ class PhysicsPipeline:
         # the daytime-effective daily-mean cosine — matching the zenith
         # convention the radiation solver itself uses.
         self.dynamic_albedo = dynamic_albedo
+        # Realistic Earth orbit (Berger 1978) for AMIP-II/CMIP insolation;
+        # None ⇒ circular orbit.  Set by ``build_physics_pipeline`` from
+        # ``ExperimentConfig.orbital_insolation``; used by the radiation
+        # builders (closed over ``config``) and the diagnostics below.
+        self.orbit = None
         self.diurnal_cycle = diurnal_cycle
         self.turbulence_fn = turbulence_fn
         self.turbulence_config = turbulence_config
@@ -1307,12 +1312,16 @@ class PhysicsPipeline:
         from legoesm.atmosphere.physics.radiation.solar import (
             cos_zenith_angle,
             daily_mean_insolation,
+            earth_sun_distance_factor,
         )
+        orbit = getattr(self, "orbit", None)
+        eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                if orbit is not None else 1.0)
         if self.diurnal_cycle:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour)
-            return s_0 * jnp.maximum(cos_sza, 0.0)
-        return daily_mean_insolation(lat, day_of_year, s_0)
+            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, orbit=orbit)
+            return s_0 * eccf * jnp.maximum(cos_sza, 0.0)
+        return daily_mean_insolation(lat, day_of_year, s_0, orbit=orbit)
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
@@ -1365,15 +1374,23 @@ class PhysicsPipeline:
             )
             from legoesm.atmosphere.physics.radiation.solar import (
                 cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+                earth_sun_distance_factor,
             )
+            _orbit = getattr(self, "orbit", None)
             if self.diurnal_cycle:
                 _hour = seconds_of_day / 3600.0
                 _mu = jnp.maximum(
-                    cos_zenith_angle(lat, lon, day_of_year, _hour), 0.0,
+                    cos_zenith_angle(lat, lon, day_of_year, _hour,
+                                     orbit=_orbit), 0.0,
                 )
             else:
-                _q_day = daily_mean_insolation(lat, day_of_year, s_0)
-                _f_day = daylight_fraction(lat, day_of_year)
+                # mu is the optical-path cosine (geometry): use the orbital
+                # declination but NOT the (a/r)^2 flux factor (divide it out).
+                _eccf = (earth_sun_distance_factor(day_of_year, _orbit)
+                         if _orbit is not None else 1.0)
+                _q_day = daily_mean_insolation(lat, day_of_year, s_0,
+                                               orbit=_orbit) / _eccf
+                _f_day = daylight_fraction(lat, day_of_year, orbit=_orbit)
                 _mu = jnp.clip(
                     _q_day / (s_0 * jnp.maximum(_f_day, 1.0e-6)), 0.0, 1.0,
                 )
@@ -1881,6 +1898,7 @@ def _build_gray_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
+        earth_orbit, earth_sun_distance_factor,
     )
     from legoesm.driver.kernel_registry import (
         RADIATION_REGISTRY, resolve_kernel,
@@ -1889,6 +1907,9 @@ def _build_gray_radiation_fn(config):
     gray_radiation = resolve_kernel(RADIATION_REGISTRY, "gray")
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
+    # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
+    # so idealized runs are bit-for-bit unchanged.
+    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
 
     gray_config = GrayRadiationConfig(
         tau_equator=config.tau_equator,
@@ -1921,10 +1942,16 @@ def _build_gray_radiation_fn(config):
 
         if diurnal:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
-            insol = s_0 * jnp.maximum(cos_sza, 0.0)
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour,
+                                       orbit=orbit)
+            # Eccentricity scales the incident flux by (a/r)^2 (1.0 when
+            # circular); the cosine carries geometry only.
+            eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                    if orbit is not None else 1.0)
+            insol = s_0 * eccf * jnp.maximum(cos_sza, 0.0)
         else:
-            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0,
+                                          orbit=orbit)
         # Thread the pipeline's blended (ice/ocean/land, plus coupler
         # overrides) surface albedo into the gray SW reflection so the
         # solver sees the same surface as the energy budget — previously
@@ -1946,11 +1973,15 @@ def _build_rrtmgp_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+        earth_orbit, earth_sun_distance_factor,
     )
     from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
+    # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
+    # so idealized runs are bit-for-bit unchanged.
+    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
 
     # Issue #273 GPU tuning: defer the scan-vs-unroll choice to
     # ``rte_utils.recurrent_op_with_halos`` when the experiment
@@ -1988,24 +2019,38 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
+        # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
+        # declination enters the geometry (cos_zenith).  1.0 ⇒ circular orbit.
+        eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                if orbit is not None else 1.0)
         if diurnal:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour,
+                                       orbit=orbit)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
-            # Prescribed TOA incident SW = S_0·max(cosθ,0) for the rsdt
+            # Prescribed TOA incident SW = S_0·(a/r)^2·max(cosθ,0) for the rsdt
             # diagnostic (#620); matches _compute_insolation's diurnal return.
-            insol = s_0 * cos_zenith
+            insol = s_0 * eccf * cos_zenith
+            if orbit is not None:
+                # The solver runs with S_0 (not S_0·eccf), so fold the distance
+                # factor into the SW-flux rescale; cos_zenith stays geometry.
+                _sw_scale = jnp.full((cos_zenith.shape[0],), eccf,
+                                     dtype=cos_zenith.dtype)
         else:
             # Daytime-effective cos(SZA): use daylight fraction so the solver
             # sees the correct optical path during sunlit hours.  SW fluxes
             # are then rescaled by f_day to recover daily-mean energy.
-            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
-            f_day = daylight_fraction(lat_col, day_of_year)
+            # daily_mean_insolation already includes the (a/r)^2 factor when
+            # ``orbit`` is set; divide it out for the geometric cosine.
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0,
+                                          orbit=orbit)
+            f_day = daylight_fraction(lat_col, day_of_year, orbit=orbit)
             f_day_safe = jnp.maximum(f_day, 1.0e-6)
+            insol_geom = insol / eccf
             cos_zenith = jnp.clip(
-                insol / (s_0 * f_day_safe), 0.0, 1.0,
+                insol_geom / (s_0 * f_day_safe), 0.0, 1.0,
             )
-            _sw_scale = f_day
+            _sw_scale = f_day * eccf
 
         # Water-vapor unit convention: the upstream pipeline passes
         # ``q_v`` as **mixing ratio** r = m_v / m_d.  RRTMGP's internal
@@ -2559,6 +2604,9 @@ def build_physics_pipeline(grid, sigma, config):
         physics_parameterization=physics_parameterization,
         column_mesh=column_mesh,
     )
+    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+    pipeline.orbit = (earth_orbit()
+                      if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
