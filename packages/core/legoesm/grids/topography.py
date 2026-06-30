@@ -621,6 +621,36 @@ def smooth_phis_cubed_sphere(
     return blend_scalar_cube_edges_2d(jnp.asarray(phis_np), strength=edge_blend_strength)
 
 
+def smooth_phis_gaussian(
+    phis: jnp.ndarray,
+    smoothing_passes: int = 4,
+) -> jnp.ndarray:
+    """Apply lat-lon (Gaussian-grid) topography smoothing to a phis field.
+
+    Lat-lon analogue of :func:`smooth_phis_cubed_sphere`: applies the same
+    Laplacian smoothing used by :func:`load_real_topography` on a regular
+    lat-lon grid (periodic in longitude, clamped at the poles) so that
+    ERA5-derived or other externally regridded ``phis`` fields receive
+    equivalent gradient reduction before being used as model initial
+    conditions.  Without it, the raw regridded ERA5 orography (peaks
+    ~5.6e4 m^2/s^2) drives an unbalanced pressure-gradient force that blows
+    up the coarse lat-lon dycore at step ~0.
+
+    Parameters
+    ----------
+    phis : (n_lat, n_lon) surface geopotential [m^2/s^2]
+    smoothing_passes : int
+        Number of Laplacian smoothing passes.  Default matches
+        ``TopographyConfig.smoothing_passes = 4`` (== the cube default).
+
+    Returns
+    -------
+    (n_lat, n_lon) smoothed surface geopotential [m^2/s^2]
+    """
+    phis_np = np.asarray(phis)
+    return _laplacian_smooth_gaussian(phis_np, passes=smoothing_passes)
+
+
 def _target_grid_degrees(grid):
     """Return target grid centers in degrees and grid metadata.
 
