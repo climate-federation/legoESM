@@ -327,9 +327,30 @@ raised the κ **cap** (`kappa_max`), but the Visbeck-computed κ sits *below* th
 so the effective lever is the **floor** (`kappa_min`), forced to 5000 here. So the
 DINO ACC over-deepening is an **eddy-saturation closure** problem: the Visbeck κ_GM
 (α=0.015, 200–2000 m²/s) under-predicts the eddy diffusivity the 1° channel needs
-(~5000 m²/s). FIX = raise `visbeck_kappa_min` to ~5000 (yr-4 hold confirmation
-running, `GM_CONFIRM=1`, job 8653177 — must check it suppresses the yr-3/4 overshoot,
-not just delay it).
+(~5000 m²/s). FIX candidate = raise `visbeck_kappa_min` to ~5000.
+
+**…but the yr-4 confirmation FALSIFIES even this (the "smoke past the turnover"
+lesson, again).** `GM_CONFIRM=1` (kpp+wright, 4 yr):
+
+| config | yr1 | yr2 | yr3 | yr4 |
+| --- | --- | --- | --- | --- |
+| Visbeck base | 45 | 84 | 232 | 604 |
+| κ_min 5000 (floor or const) | 37 | **66** | **238** | **601** |
+
+κ=5000 matches NEMO at yr 2 (66) but then overshoots to 238/601 — IDENTICAL to
+baseline (232/604) — and the channel slopes converge to the same 2.4e-4. So GM
+saturates the EARLY ACC but NOT the late overshoot: the deep over-deepening drives
+the thermal-wind ACC up regardless of κ_GM. **Final verdict: the late ACC overshoot
+is a robust spin-up TRANSIENT, insensitive to EVERY physical lever — vertical
+mixing (K_v/K_conv/KPP/TKE), EOS, restoring, advection scheme, AND GM eddy
+saturation.** GM gives only a transient early-spin-up improvement (yr1-2). The
+6-yr cold-start overshoots to ~753 (yr5) then DECLINES (691, yr6) — a damped
+overshoot, vs NEMO's monotonic slow rise (62→110); both may approach a similar
+multi-century equilibrium by different transient paths. The residual is a deep
+baroclinic-adjustment / spin-up-dynamics difference vs NEMO, NOT a single tunable
+closure — a research-level open question, not a config fix. The durable
+deliverables are M1 (S-EOS + EOS-consistent mixing, shipped) and this exhaustive
+diagnostic infrastructure.
 
 M1/M2/M3 + lever + GM diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers,gm_effectiveness}.py`;
 sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers,gm_effectiveness,gm_confirm}.sbatch`.
