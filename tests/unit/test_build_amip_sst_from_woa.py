@@ -1,6 +1,7 @@
 """Unit coverage for the WOA18 -> AMIP SST/SIC forcing builder."""
 
 import numpy as np
+import pytest
 
 from legoesm import constants
 from scripts.data.build_amip_sst_from_woa import (
@@ -23,6 +24,15 @@ def test_sst_to_sic_freezing_ramp_monotone_and_bounded():
     assert s[4] == 0.0          # warm -> open water
     assert np.all((s >= 0.0) & (s <= 1.0))
     assert np.all(np.diff(s) <= 0.0)   # non-increasing with SST
+
+
+def test_sst_to_sic_rejects_nonpositive_ramp():
+    """A non-positive ramp would divide by zero (NaN at freezing) and break the
+    monotone ramp — reject it loudly rather than emit garbage SIC."""
+    with pytest.raises(ValueError):
+        sst_to_sic(np.array([_FREEZE_C]), ramp_C=0.0)
+    with pytest.raises(ValueError):
+        sst_to_sic(np.array([_FREEZE_C]), ramp_C=-0.5)
 
 
 def test_regrid_constant_field_no_pole_blowup():

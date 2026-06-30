@@ -98,6 +98,8 @@ def sst_to_sic(sst_C: np.ndarray, freeze_C: float | None = None,
     to ``freeze_C + ramp_C``.  ``freeze_C`` defaults to the seawater freezing
     point ``constants.T_freeze_ocean`` (in degC).
     """
+    if ramp_C <= 0.0:
+        raise ValueError(f"ramp_C must be positive, got {ramp_C}")
     if freeze_C is None:
         freeze_C = float(constants.T_freeze_ocean - constants.T_freeze)
     return np.clip((freeze_C + ramp_C - sst_C) / ramp_C, 0.0, 1.0)
