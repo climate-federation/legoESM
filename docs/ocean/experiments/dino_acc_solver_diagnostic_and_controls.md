@@ -120,6 +120,45 @@ was a 1-year spin-up artifact — but the model's *equilibrium* ACC is too HIGH
 **vertical-mixing / buoyancy-forcing / EOS** tuning problem (the thermocline depth),
 not a solver/friction/sill/GM/eddy issue.
 
+## NEMO side-by-side (the oracle, running)
+
+Built NEMO 5.0.1 + the DINO config (`vopikamm/DINO`, branch `wip/DINO_5.0.1`) and
+ran the actual oracle cold-start beside ours.  Build notes: register `DINO OCE` in
+`tests/demo_cfgs.txt` (else OCE isn't linked); `makenemo -n DINO_R1 -a DINO -m
+ORCA1_GCC` inside the morays Singularity container.  Run notes: singularity module
+only on `short`; MPI needs `--oversubscribe`; **attached XIOS** (`using_server=false`)
+— the detached XIOS server deadlocks (0.13 → 20 steps/s).  ACC extracted from `uoce`
+with the same barotropic-streamfunction diagnostic.
+
+**Cold-start ACC, year by year:**
+
+| year | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **NEMO** | 62 | 66 | 74 | 90 | 101 | 110 |
+| **ours** | 41 | 81 | 243 | 576 | 753 | 691 |
+
+- **Laminar years 1–2 AGREE** (~50–80 Sv) — the dynamics match early.
+- **NEMO marches slowly + stably** toward its 206 Sv equilibrium (a 50-yr spin-up).
+- **Ours over-spins the thermocline ~10× too fast** → overshoots to ~750 Sv.
+
+**Ablations (N3) — clears GM:**
+- Our `vmix`: kpp overshoots; **tke and constant both NaN** (unstable in our 1°
+  DINO), so the alternatives can't be run our side.
+- Our GM is **active** (wired + applied) but **insensitive** (κ_GM ×7.5 no effect).
+- **NEMO with GM OFF** (`ln_ldfeiv=.false.`, verified in `ocean.output`) gives an
+  **identical** early spin-up (62,66,74,90) to GM-on.  So **GM has no effect on the
+  laminar spin-up in either model** — it only saturates the ACC near equilibrium
+  (isopycnal slopes are small early).
+
+**So the discrepancy is the diabatic thermocline spin-up RATE** — set by vertical
+mixing (our KPP vs NEMO TKE), the EOS (our Wright vs NEMO's cabbeling/thermobaric
+S-EOS), convection, and the surface buoyancy forcing — **not** the barotropic
+solver, diagnostic, sill, friction, or GM (all cleared).  The next lever is the
+thermocline physics (a KPP/TKE-mixing or EOS ablation; our TKE NaNs and we lack
+NEMO's exact S-EOS, so both need work first).
+
+NEMO build/run: `scripts/cluster/omip_nemo/{_build_dino,_run_dino_nemo}.sbatch`,
+extract `scripts/tmp/_diag_nemo_acc_extract.py`.
 Diagnostics: `scripts/tmp/_diag_{psi_unittest,geoadj_balanced,munk_solver,
 r1_warmstart_check,r1_warmstart_balanced,dino_sill_geom,dino_acc_controls,
-dino_spinup_multiyear}.py`.
+dino_spinup_multiyear,dino_vmix_ablation}.py`.
