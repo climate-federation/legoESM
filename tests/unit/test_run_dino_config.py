@@ -142,3 +142,39 @@ def test_eos_replaces_dino_config(monkeypatch):
     assert cfg.eos == "wright"          # default
     cfg = dataclasses.replace(cfg, eos="nemo_seos")
     assert cfg.eos == "nemo_seos"
+
+
+def test_tke_momentum_visc_bg_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--tke-momentum-visc-bg", "1.2e-4"])
+    args = rd._parse_args()
+    assert args.tke_momentum_visc_bg == 1.2e-4
+
+
+def test_tke_momentum_visc_bg_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.tke_momentum_visc_bg is None
+
+
+def test_A_v_bg_effective_floors_only_tke():
+    """The TKE momentum-viscosity floor must apply ONLY to vmix='tke', leaving
+    kpp/constant at the paper A_v_bg (they are stable there)."""
+    import dataclasses
+    from legoesm.ocean.experiments.dino import DINOConfig
+    base = DINOConfig()
+    assert base.A_v_bg == 1.2e-4 and base.tke_momentum_visc_bg == 5.0e-4
+    # kpp/constant: paper A_v_bg, no floor.
+    assert dataclasses.replace(base, vmix_scheme="kpp").A_v_bg_effective == 1.2e-4
+    assert dataclasses.replace(
+        base, vmix_scheme="constant").A_v_bg_effective == 1.2e-4
+    # tke: floored to the stabilizer (max with A_v_bg).
+    assert dataclasses.replace(
+        base, vmix_scheme="tke").A_v_bg_effective == 5.0e-4
+    # A higher A_v_bg override still wins (it's a floor, not an override).
+    assert dataclasses.replace(
+        base, vmix_scheme="tke", A_v_bg=2.0e-3).A_v_bg_effective == 2.0e-3
+    # And the floor can be lowered to run TKE at the unstable paper viscosity.
+    assert dataclasses.replace(
+        base, vmix_scheme="tke",
+        tke_momentum_visc_bg=1.2e-4).A_v_bg_effective == 1.2e-4
