@@ -97,6 +97,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.kpp",
         "excluded": {
             "Cv": "Large 1994 fixed nondim constant",
+            "neg_beta_T": "Large 1994 fixed nondim constant (-beta_T, App. B; V_t^2 prefactor)",
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
@@ -429,6 +430,10 @@ class KPPConfig(NamedTuple):
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
     c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
+    # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
+    # Cv keeps its standard standalone value 1.6 (it does NOT absorb sqrt(0.2)).
+    neg_beta_T: float = 0.2   # = -beta_T (LMD94 App. B; V_t^2 prefactor)
     # LMD94 Appendix B separate momentum/scalar velocity scales w_m, w_s.
     # In the code's sign convention zeta = d/L_MO ≥ 0 for unstable, so the
     # weakly-unstable→convective transition is at |zeta| = zeta_{m,s}_abs
