@@ -56,10 +56,10 @@ cd "$REPO"
 module load gcc cray-mpich cuda 2>/dev/null || true
 export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
 # mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs GPU->host->MPI->host->
-# GPU staging.  Defaulted to GPU-direct for all node counts below (see the
-# TOTAL_GPUS block); #681's Slingshot CXI tuning in _env.sh fixed the cross-node
-# abort that previously forced multi-node to host-stage.  An explicit user value
-# (set in the environment) always wins.  Remember whether the user pinned it:
+# GPU staging.  Decided by node count below (see the TOTAL_GPUS block): single
+# node -> GPU-direct (works); multi-node -> host-staged, because cross-node
+# GPU-direct still aborts on Derecho's CXI fabric even after #681.  An explicit
+# user value (set in the environment) always wins.  Remember if the user pinned it:
 _user_cuda_mpi="${MPI4JAX_USE_CUDA_MPI+set}"
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 
@@ -95,16 +95,24 @@ TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 
-# mpi4jax transport: GPU-direct halos for ALL node counts.  #681 wired the
-# Slingshot CXI fabric tuning (FI_CXI_RX_MATCH_MODE=hybrid + FI_CXI_DEFAULT_CQ_SIZE
-# + FI_CXI_DISABLE_HOST_REGISTER, in _env.sh) that fixes the cross-node
-# cxil_map/OFI-injectdata abort, so multi-node no longer needs the prior
-# host-staging fallback.  If a multi-node GPU-direct run still aborts on the
-# fabric, set MPI4JAX_USE_CUDA_MPI=0 to fall back to host-staged halos (slower
-# inter-node comm, bit-identical results).  An explicit value always wins.
+# mpi4jax transport.  #681's Slingshot CXI tuning (_env.sh: FI_CXI_RX_MATCH_MODE=
+# hybrid + CQ size + DISABLE_HOST_REGISTER) did NOT clear the cross-node abort on
+# this system -- verified 2026-06-29 on a 2-node latlon run: n=8 still dies with
+# "cxil_map: write error" / OFI "injectdata ... Invalid argument" (a device-buffer
+# inject rejection, a DIFFERENT failure mode than the LE-pool overflow #681
+# targeted).  So multi-node keeps host-staging (completes, bit-identical, slower
+# inter-node comm) until cross-node GPU-direct is actually confirmed working.
+# Single node stays GPU-direct (works).  Explicit MPI4JAX_USE_CUDA_MPI overrides
+# (set =1 to retry GPU-direct multi-node once the fabric issue is fixed).
 if [ -z "${_user_cuda_mpi:-}" ]; then
-    export MPI4JAX_USE_CUDA_MPI=1
-    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct; #681 CXI tuning in _env.sh, ${_n_nodes} node(s))"
+    if [ "${_n_nodes}" -gt 1 ]; then
+        export MPI4JAX_USE_CUDA_MPI=0
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged -- multi-node; cross-node" \
+             "GPU-direct still aborts on CXI even with #681, see docs/performance/multinode_gpu_direct_cxi.md)"
+    else
+        export MPI4JAX_USE_CUDA_MPI=1
+        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
+    fi
 else
     export MPI4JAX_USE_CUDA_MPI
     echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override)"
