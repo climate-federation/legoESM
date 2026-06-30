@@ -42,6 +42,7 @@ __param_spec__ = {
         "scheme_key": "land.richards",
         "excluded": {
             "theta_tol": "numerics: Newton convergence tolerance",
+            "pond_max": "numerics: surface ponding cap before overland runoff [m]",
         },
         "params": {
         },

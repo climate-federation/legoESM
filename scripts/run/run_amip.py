@@ -615,6 +615,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Initial soil water as a fraction of W_max (only with "
                              "--land-soil-bucket). Default "
                              f"{_EXPERIMENT_DEFAULTS.land_bucket_w_init_frac}.")
+    parser.add_argument("--land-k-infiltration", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_K_infiltration,
+                        dest="land_K_infiltration",
+                        help="Saturated infiltration capacity K_s [m/s] for the "
+                             "Green-Ampt infiltration-excess (Hortonian) runoff on "
+                             "the soil-water bucket (only with --land-soil-bucket). "
+                             f"Default {_EXPERIMENT_DEFAULTS.land_K_infiltration}.")
+    parser.add_argument("--land-infil-suction-boost", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_infil_suction_boost,
+                        dest="land_infil_suction_boost",
+                        help="Green-Ampt suction enhancement psi_f/L_f [-]: dry-soil "
+                             "infiltration capacity = K_s*(1+boost) (only with "
+                             "--land-soil-bucket). Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_infil_suction_boost}.")
+    parser.add_argument("--no-land-infiltration-excess", action="store_false",
+                        default=_EXPERIMENT_DEFAULTS.land_infiltration_excess,
+                        dest="land_infiltration_excess",
+                        help="Disable Hortonian infiltration-excess runoff on the "
+                             "bucket (keep saturation excess only; all rain "
+                             "infiltrates up to capacity). Default: enabled.")
     parser.add_argument("--land-stomatal-beta", action="store_true", default=False,
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
@@ -858,6 +878,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_bucket_w_max=args.land_bucket_w_max,
         land_beta_min=args.land_beta_min,
         land_bucket_w_init_frac=args.land_bucket_w_init_frac,
+        land_K_infiltration=args.land_K_infiltration,
+        land_infil_suction_boost=args.land_infil_suction_boost,
+        land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
