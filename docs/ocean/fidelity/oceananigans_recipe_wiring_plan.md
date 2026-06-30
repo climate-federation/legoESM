@@ -296,3 +296,40 @@ Out of scope: nonhydrostatic / LES / Lagrangian-particle / lid-driven-cavity cas
 - The `oceananigans` recipe selects the matched canonical options; production defaults
   unchanged (each option default OFF / bit-identical).
 - §5 at α=0 survives as long as the oracle, max|u| within 2× (the capstone).
+
+## 8. Barotropic-solver × Coriolis-scheme stability matrix (eddy-resolving)
+
+A named scheme's behaviour is **compositional** — a block can be faithful, inert,
+or destabilising depending on the rest of the stack. Pinned here so the
+combinations are on record. All rows: 128² Cartesian β-plane(−45)
+`baroclinic_adjustment` twin, W9V momentum, weno7 tracer,
+`barotropic_diffusion_alpha=0` (NO backstop), fixed `dt=450 s`, vs the
+Oceananigans `WENOVectorInvariant(9)` + `ImplicitFreeSurface` oracle (GPU).
+Metrics: peak EKE growth, day-40 EKE (oracle 0.388), cascade centroid k_e (oracle 5.19).
+
+| barotropic_solver | coriolis_scheme | filter | outcome |
+|---|---|---|---|
+| `explicit_substep` + `barotropic_slow_forcing_ab2` | `explicit_ab2` (face-f) | `cosine` | **stable 40 d**, eddies OVER-dissipated — EKE 0.157 (0.40×), k_e 7.5 |
+| `explicit_substep` + `barotropic_slow_forcing_ab2` | `explicit_ab2` (face-f) | **`power_law`** | **stable 40 d, BEST match** — EKE 0.335 (0.86×), k_e 5.11 ✓ — **the faithful recipe default** |
+| `implicit_cn` (split) | `matsuno_split` (vertex-f) | n/a | **BLOWS day 26** — C-grid vertex-f Coriolis 2Δx rotational null mode |
+| `implicit_unsplit` (ImplicitFreeSurface analog) | `matsuno_split` (vertex-f) | n/a | **BLOWS day 26** — same vertex-f null mode (no substep ⇒ NOT a barotropic-substep issue) |
+| `implicit_unsplit` (ImplicitFreeSurface analog) | `explicit_ab2` (face-f) | n/a (ignored) | **stable 40 d** but grid-noise/adjustment artifact — EKE jumps to 0.07 by day 2 (no clean growth), k_e 6.3; implicit path has **no time filter** to damp the 2Δx barotropic noise |
+
+Reading:
+- **The closest *algorithm* to the oracle (`implicit_unsplit` = single-step
+  ImplicitFreeSurface) is stable with face-f Coriolis but matches the oracle
+  *statistics* WORSE** than the split-explicit `power_law` stack — the implicit
+  path cannot run the barotropic time filter that suppresses the 2Δx grid-noise.
+  Matching the architecture ≠ matching the answer.
+- **`coriolis_scheme` stability is a property of the *pair*, not the scheme**:
+  `matsuno_split` (vertex-f) detonates under both implicit solvers at eddy
+  amplitude; `explicit_ab2` (face-f) is stable under all.
+- **`barotropic_time_filter` is split-explicit-only** — silently inert under
+  `implicit_cn`/`implicit_unsplit`/`rigid_lid` (no substep to filter).
+  `_validate_config` WARNS on a non-default filter under an implicit solver, and
+  `oceananigans_canonical_ocean_config` defaults it PER SOLVER (power_law for
+  explicit_substep, cosine otherwise) so the recipe never self-warns.
+- **Still open (separate research item):** the FORCED §5 jet over-energizes ~7×
+  under sustained restoring — an eddy-equilibration imbalance, NOT the barotropic
+  dissipation (the same stack UNDER-energizes the unforced case at 0.86×). The
+  faithful unforced eddy recipe above does NOT claim to close §5.

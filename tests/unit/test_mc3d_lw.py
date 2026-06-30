@@ -53,6 +53,35 @@ def test_lw_energy_conservation():
   assert float(res.maxiter_frac) < 1e-3
 
 
+def test_lw_sub_batching_conserves_and_matches_single_batch():
+  """Memory sub-batching (n_batches>1) over the emission photons conserves
+  energy AND matches the single-batch OLR within MC error (same total photons;
+  emitter origins are i.i.d. draws so the estimator is unchanged)."""
+  geom = _geom()
+  nx, ny, nz = geom.nx, geom.ny, geom.nz
+  area = geom.dx * geom.dy
+  T = jnp.linspace(300.0, 230.0, nz)[None, None, :] * jnp.ones((nx, ny, nz))
+  k_abs = jnp.full((nx, ny, nz), 3e-3)
+  pl, plsfc = _planck(T), _planck(jnp.full((nx, ny), 300.0))
+  p_photons = 8000                       # ncols*P = 288000, divisible by 4
+  out = {}
+  for nbatch in (1, 4):
+    out[nbatch] = solve_lw_monochromatic(
+        k_abs, pl, plsfc, geom, emissivity=1.0,
+        config=MC3DRadiationConfig(photons_per_pixel=p_photons,
+                                   n_batches=nbatch),
+        key=jax.random.PRNGKey(0))
+    r = out[nbatch]
+    total = float(jnp.sum(r.net_flux) * area + jnp.sum(r.sfc_net) * area
+                  + r.olr * geom.Lx * geom.Ly)
+    scale = float(jnp.sum(jnp.abs(r.net_flux)) * area
+                  + abs(float(r.olr)) * geom.Lx * geom.Ly) + 1e-30
+    assert abs(total) / scale < 0.02     # conserves for every n_batches
+  # Same total photons -> same OLR to MC error.
+  o1, o4 = float(out[1].olr), float(out[4].olr)
+  assert abs(o1 - o4) / (abs(o1) + 1e-30) < 0.05
+
+
 def test_lw_optically_thin_isothermal_cooling():
   """Optically-thin isothermal atmosphere over a cold (non-emitting) surface:
   each cell emits ~4 k sigma T^4 dz and almost nothing is reabsorbed, so the
