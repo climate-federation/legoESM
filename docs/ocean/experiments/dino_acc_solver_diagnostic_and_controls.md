@@ -237,5 +237,27 @@ or convection — a vertical-mixing-TUNING problem (KPP entrainment / `Ri_crit` 
 + EOS-consistent-mixing fix is correct and shipped regardless; it is just not the
 thermocline lever.
 
-M1/M2/M3 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside}.py`;
-sweeps `scripts/cluster/omip_nemo/_diag_tke_{blowup,avsweep,multiyear}.sbatch`.
+**KPP boundary-layer depth (Ri_crit) — also NOT the lever.** A Ri_crit sweep on
+the stable kpp+wright run (`_diag_dino_kpp_ricrit.py`, 3 yr; Ri_crit patched in
+the model config — confirmed applied, 0.10 NaNs):
+
+| Ri_crit | 0.30 (default) | 0.20 | 0.15 | 0.10 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 [Sv] | 232 | 233 | 231 | NaN |
+
+The yr-3 ACC is **~232 regardless** of the KPP critical bulk Richardson number, so
+the over-deepening is not set by the KPP boundary-layer DEPTH.
+
+**Where the lever stands (running tally of what's RULED OUT):** barotropic solver,
+diagnostic, sill form-stress, bottom friction, GM eddy, EOS (Wright vs S-EOS), and
+now KPP Ri_crit — none control the over-deepening. The ACC over-spins the
+thermocline ~10× too fast (45→84→232→604 vs NEMO 62→66→74→90) and KPP is the only
+multi-year-stable closure. Remaining untested candidates: the KPP/background
+DIFFUSIVITY MAGNITUDE (not BL depth), the enhanced-diffusion CONVECTION
+(K_conv/depth), and the surface buoyancy RESTORING strength/profile. The
+higher-information next step is a DIAGNOSTIC — compare our subtropical T(z)
+thermocline structure vs the NEMO oracle at yr 1-3 to localise *where* the
+deepening diverges — rather than more blind ~3-h lever sweeps.
+
+M1/M2/M3 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit}.sbatch`.
