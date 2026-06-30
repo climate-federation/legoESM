@@ -398,10 +398,18 @@ def _params_dict(p):
     return {k: np.asarray(v).tolist() for k, v in constrain_ext(p).items()}
 
 
-def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50):
+def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0):
     p = init_ext_params()
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
-    opt = optax.adam(lr); state = opt.init(p)
+    # Gradient clipping: the initial loss is large (extreme high-latitude / desert /
+    # ice cells contribute a huge skin-T error + seasonal-amplitude term), so unclipped
+    # Adam at lr~3e-2 overshoots into a Richards/MOST-unstable parameter region and NaNs
+    # within ~20 iters (independent of the soil-moisture target — the SM term is masked).
+    # clip_by_global_norm bounds the step so the optimiser stays stable from the large-
+    # loss start; clip<=0 disables it (the legacy bare-Adam path).
+    tx = optax.adam(lr) if clip <= 0.0 else optax.chain(
+        optax.clip_by_global_norm(clip), optax.adam(lr))
+    opt = tx; state = opt.init(p)
     for it in range(n_iter):
         (l, (tm, am, pp, sa, sm)), g = vg(p, data)
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
@@ -525,6 +533,9 @@ def main():
                     help="representative days/month (use fewer with 24-h forcing)")
     ap.add_argument("--iters", type=int, default=250)
     ap.add_argument("--lr", type=float, default=3e-2)
+    ap.add_argument("--clip", type=float, default=1.0,
+                    help="gradient global-norm clip (stabilises the large-loss start; "
+                         "<=0 disables = legacy bare-Adam)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--bulk", choices=["constant", "most"], default=_BULK_SCHEME,
                     help="surface exchange: 'most' (default, matches the coupled "
@@ -539,7 +550,7 @@ def main():
     _LAM_SM = args.lam_sm
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out)
+    tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)
