@@ -1163,17 +1163,19 @@ def _apply_aimip_classical_overrides(
     #   * MPAS rebuilds its PhysicsConfig from config.microphysics at run(), so
     #     the schemes are forced ON (the water sink DOES close) but with DEFAULT
     #     leaves — the trained values apply only on the FV path.  Warn loudly.
-    if getattr(args, "discretization", "centered") == "spectral":
+    # Gate on the resolved discretization (the supported-backend signal), not the
+    # grid name: an MPAS grid without --discretization mpas is rejected by the
+    # driver support matrix anyway, so warning on it would be over-broad.
+    _disc = getattr(args, "discretization", "centered")
+    if _disc == "spectral":
         raise SystemExit(
             "AIMIP-classical forces tiedtke convection, which the spectral run "
             "loop refuses (issue #405: profile-prognostic physics carry is not "
             "threaded on spectral) — it would raise deep in setup before the "
             "microphysics sink runs. Use --grid-type cubed_sphere or latlon for "
             "the trained AIMIP-classical physics.")
-    if getattr(args, "grid_type", "") in (
-            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
-        print("AIMIP-classical: WARNING — grid_type="
-              f"{getattr(args, 'grid_type', '?')} (MPAS) rebuilds its "
+    if _disc == "mpas":
+        print("AIMIP-classical: WARNING — the MPAS backend rebuilds its "
               "PhysicsConfig at run() from config.microphysics; the classical "
               "schemes are forced ON (the water sink closes) but the TRAINED "
               "leaves apply ONLY on the finite-volume cubed_sphere/latlon path. "

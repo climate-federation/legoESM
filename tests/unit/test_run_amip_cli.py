@@ -571,12 +571,13 @@ def test_aimip_classical_overrides_explicit_sundqvist_keeps_trained(tmp_path):
 
 
 def test_aimip_classical_overrides_warn_mpas_backend(tmp_path, capsys):
-    """On MPAS (voronoi) the schemes are still forced on (water sink closes via
-    config.microphysics) but a loud warning fires that the trained leaves only
-    apply on the finite-volume path."""
+    """On the SUPPORTED MPAS backend (voronoi grid + --discretization mpas) the
+    schemes are still forced on (water sink closes via config.microphysics) but
+    a loud warning fires that the trained leaves only apply on the FV path."""
     ckpt = _serialise_aimip_defaults(tmp_path)
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+                              "--discretization", "mpas",
                               "--aimip-classical-checkpoint", ckpt])
     out = _apply_aimip_classical_overrides(args)
     assert out.microphysics == "sundqvist"   # water sink still closes
