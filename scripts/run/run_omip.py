@@ -2580,6 +2580,21 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                        and not jra55_state.get("_use_single_step", False))
     use_gpu_interp = (jra55_state is not None
                       and jra55_state.get("_gpu_interp", False))
+    # Prognostic sea ice is wired ONLY into the block-scan path.  The
+    # single-step fallback (_jra55_step) does not advance the ice tile, and
+    # setup has already disabled the freeze-cap SST stand-in for --jra55-sea-ice
+    # — so a fallback run would get NEITHER ice NOR the freezing-point floor.
+    # Fail loudly rather than silently run a degraded polar surface closure.
+    if (jra55_state is not None
+            and jra55_state.get("enable_sea_ice", False)
+            and not use_scan_blocks):
+        raise SystemExit(
+            "--jra55-sea-ice requires the block-scan path, but this run set "
+            "_use_single_step (single-step fallback). The single-step path "
+            "does not advance prognostic sea ice and the freeze-cap stand-in "
+            "is disabled under sea ice, so polar SST would be unconstrained. "
+            "Use the block-scan path (default) or drop --jra55-sea-ice."
+        )
     if use_scan_blocks:
         # Scan blocks trace _step_impl directly (bypassing the public
         # step shim) — prime the build-once caches from the CONCRETE

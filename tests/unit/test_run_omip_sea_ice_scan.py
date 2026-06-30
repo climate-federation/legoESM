@@ -153,6 +153,20 @@ def test_load_ice_restart_none_for_legacy_ocean_only_checkpoint(tmp_path):
                                       js["ice_state_init"]) is None
 
 
+def test_sea_ice_rejects_single_step_fallback(tmp_path):
+    """--jra55-sea-ice + the single-step fallback (_use_single_step) must fail
+    loudly: that path advances no ice and the freeze cap is disabled under sea
+    ice, so polar SST would be unconstrained (dispatch hardening)."""
+    model, state, js = _setup(tmp_path, sea_ice=True)
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=8, n_lon=16)
+    js["_use_single_step"] = True
+    with pytest.raises(SystemExit, match="block-scan"):
+        run_omip._run_omip_loop(
+            model, state, "latlon", grid, z_coord, 600.0, 2, 1,
+            jra55_state=js,
+        )
+
+
 def test_scan_block_off_returns_ocean_state_only(tmp_path):
     """Ice OFF: the block returns the ocean state alone (carry unchanged)."""
     model, state, js = _setup(tmp_path, sea_ice=False)
