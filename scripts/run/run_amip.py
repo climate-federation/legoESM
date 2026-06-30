@@ -521,6 +521,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
                                  "p3", "sdm", "fast_sbm"])
+    # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
+    # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
+    # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
+    # for q_c >~ qc_crit; the default 5e-4 suppresses drizzle from thin clouds),
+    # auto_rate the autoconversion rate, rh_crit the condensation onset RH.
+    parser.add_argument("--sundqvist-qc-crit", dest="sundqvist_qc_crit",
+                        type=float, default=None,
+                        help="Sundqvist autoconversion cloud-water threshold "
+                             "[kg/kg] (None=scheme/trained default 5e-4; bounds "
+                             "1e-4..1.5e-3). Lower it to rain out thin clouds.")
+    parser.add_argument("--sundqvist-rh-crit", dest="sundqvist_rh_crit",
+                        type=float, default=None,
+                        help="Sundqvist condensation-onset critical RH [0-1] "
+                             "(None=default 0.8; bounds 0.5..1.0).")
+    parser.add_argument("--sundqvist-auto-rate", dest="sundqvist_auto_rate",
+                        type=float, default=None,
+                        help="Sundqvist autoconversion rate c_0 [1/s] (None="
+                             "default 1e-3; bounds 1e-4..1e-2).")
     parser.add_argument("--aerosol-ccn", action="store_true", default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "
@@ -1252,6 +1270,28 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
             gustiness_w_zi=prev_surf.gustiness_w_zi))
 
 
+def _apply_sundqvist_overrides(micro_config, args):
+    """Apply explicit --sundqvist-{qc-crit,rh-crit,auto-rate} overrides.
+
+    Final precedence over both the SundqvistConfig default AND the AIMIP-trained
+    leaves (so a tuning run can force the precipitation knobs).  No-op for a
+    non-sundqvist microphysics, a missing config, or when no override flag is
+    set — returns the SAME object so callers can detect a change by identity.
+    """
+    if micro_config is None or getattr(args, "microphysics", None) != "sundqvist":
+        return micro_config
+    overrides = {}
+    if getattr(args, "sundqvist_qc_crit", None) is not None:
+        overrides["qc_crit"] = args.sundqvist_qc_crit
+    if getattr(args, "sundqvist_rh_crit", None) is not None:
+        overrides["rh_crit"] = args.sundqvist_rh_crit
+    if getattr(args, "sundqvist_auto_rate", None) is not None:
+        overrides["auto_rate"] = args.sundqvist_auto_rate
+    if not overrides:
+        return micro_config
+    return micro_config._replace(**overrides)
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1401,6 +1441,17 @@ def main(argv: list[str] | None = None):
             print("AIMIP-classical trained configs injected: tiedtke (convection), "
                   "louis (turbulence), mcfarlane (GWD), " + _micro_msg +
                   "cloud via flat fields.")
+
+    # Explicit Sundqvist precip-tunable overrides — applied LAST so they win over
+    # both the scheme default and any AIMIP-trained leaves.
+    if getattr(driver.physics, "micro_config", None) is not None:
+        _new_micro = _apply_sundqvist_overrides(driver.physics.micro_config, args)
+        if _new_micro is not driver.physics.micro_config:
+            driver.physics.micro_config = _new_micro
+            if _is_root:
+                print(f"Sundqvist overrides: qc_crit={args.sundqvist_qc_crit} "
+                      f"rh_crit={args.sundqvist_rh_crit} "
+                      f"auto_rate={args.sundqvist_auto_rate}")
 
     if _is_root:
         _print_forcing_activity(args)
