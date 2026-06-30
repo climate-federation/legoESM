@@ -34,7 +34,7 @@ from legoesm.land.soil_hydraulics import (
     moisture_capacity,
     interblock_K,
 )
-from legoesm.land.tridiag import thomas_solve_batch
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 
 __param_spec__ = {
@@ -279,7 +279,7 @@ def solve_richards(
         a_full = jnp.pad(sub, ((0, 0), (1, 0)))
         c_full = jnp.pad(sup, ((0, 0), (0, 1)))
 
-        dpsi = thomas_solve_batch(a_full, diag, c_full, rhs)
+        dpsi = thomas_solve(a_full, diag, c_full, rhs)
 
         # Recover the surface-cell increment from the Schur relation, then update.
         dh_s = (-R_s_m + Kc_m * dpsi[:, 0]) / D_s_m

@@ -66,8 +66,11 @@ def partition_bucket_runoff(W, P_input, evap_demand, dt, W_max,
         cannot be revised here), the bucket consumes ``evap_demand`` verbatim so it
         stays CONSISTENT with that already-applied flux; the bucket may then clip
         at 0 under the beta-floor over-evaporation (the standard Manabe behaviour,
-        identical to the prior bucket) — water/energy consistency for that path
-        rests on the beta ramp, not on re-limiting the bucket in isolation.
+        identical to the prior bucket).  IN ISOLATION the False path is NOT water-
+        conserving when evap_demand exceeds W/dt + infiltration (the clamp absorbs
+        the deficit) — column conservation for that path rests on the caller
+        keeping the demand reachable via the beta ramp (beta -> beta_min as W->0),
+        NOT on re-limiting the bucket here.
 
     Returns
     -------
