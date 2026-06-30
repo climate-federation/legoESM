@@ -1,25 +1,27 @@
 # Known issue: cross-node GPU-direct MPI aborts on Derecho (CXI/Slingshot)
 
-**Status:** OPEN — #681 did NOT fix it. Multi-node GPU scaling uses **host-staged**
-halos (works); single-node GPU is GPU-direct and unaffected.
+**Status:** RESOLVED (2026-06-29). Root cause: `fullnode_gpu.sh` was not loading
+**`craype-accel-nvidia80`** at runtime. That module sets `CRAY_ACCEL_TARGET=nvidia80`
+and engages cray-mpich's GPU-aware NIC path; without it, cross-node sends hand a
+device pointer to a NIC path that treats it as host memory → `cxil_map: write
+error` / OFI `injectdata Invalid argument`. Intra-node GPU-direct worked anyway
+(CUDA IPC, no NIC), which masked the regression — the module had been dropped in
+an "env delta" cleanup.
 
-#681 wired the Slingshot CXI knobs into `_env.sh` (`FI_CXI_RX_MATCH_MODE=hybrid`,
-`FI_CXI_DEFAULT_CQ_SIZE=131072`, `FI_CXI_DISABLE_HOST_REGISTER=1`), but a 2-node
-latlon test (2026-06-29, res256/f32, with all three set) **still aborts at n=8**
-with the identical `cxil_map: write error` / `MPIDI_OFI_send_normal injectdata
-Invalid argument`. Root cause is a **different failure mode** than #681 targeted:
-the failing send is `scount=1 MPI_FLOAT` (4 bytes) → Cray MPICH routes it through
-the OFI **inject** path → CXI rejects a **device pointer** in inject. `hybrid`
-match mode + larger CQ address LE-pool/match-queue overflow, not device-buffer
-inject; `FI_CXI_DISABLE_HOST_REGISTER=1` did not help either. So `fullnode_gpu.sh`
-reverted to host-staging multi-node (single-node stays GPU-direct).
+**Fix:** re-added `craype-accel-nvidia80` to the `fullnode_gpu.sh` module load and
+defaulted `MPI4JAX_USE_CUDA_MPI=1` for all node counts. #681's CXI knobs in
+`_env.sh` (`FI_CXI_RX_MATCH_MODE=hybrid` etc.) stay — useful for the many-message
+halo at scale. **Confirmed:** an 8-rank / 2-node mpi4jax `sendrecv` passes
+GPU-direct with the module loaded (`CRAY_ACCEL_TARGET=nvidia80`, correct ring
+values, `rc=0`, no abort); the identical run *without* the module aborts.
 
-**Untried, targeted at the actual error:** prevent MPICH from injecting device
-buffers — `MPIR_CVAR_CH4_OFI_ENABLE_INJECT=0` (disable OFI inject so the 4-byte
-send uses a registered send), or raise the rendezvous/eager threshold. And run
-the **raw-mpi4py GPU sendrecv** discriminator (no JAX/mpi4jax) cross-node: if it
-*works*, the bug is in mpi4jax's buffer handling (report to mpi4jax, cf. issue
-#309); if it *also aborts*, it's a CISL/CXI fabric matter (ticket).
+Neither #681's knobs alone nor `MPIR_CVAR_CH4_OFI_ENABLE_INJECT=0` fixed it — the
+missing piece was purely the accel module. The `injectdata` error was a symptom of
+the NIC not knowing the buffer was on-device, not a true inject-path limitation.
+
+(Historical detail for reference: the abort was on a `scount=1 MPI_FLOAT` send
+routed through the OFI inject path; that path rejected the unrecognised device
+pointer.)
 **Affected:** `scripts/cluster/scaling_derecho/fullnode_gpu.sh` multi-node
 (`NODES>1`) GPU sweeps for icosahedral / latlon. Single-node (≤4 GPU) GPU-direct
 is fine.

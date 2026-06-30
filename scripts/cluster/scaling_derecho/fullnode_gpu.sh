@@ -46,20 +46,20 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
-# Route-A runtime stack (README Step 1b): GNU cray-mpich the bindings were built
-# against (default 8.1.32) + cuda.  We deliberately do NOT load
-# craype-accel-nvidia80: that module matters only at BUILD time to put the GTL
-# on the link line, and mpi4py already has libmpi_gtl_cuda linked in (verified
-# with `ldd` -> /opt/cray/pe/mpich/8.1.32/gtl/lib/libmpi_gtl_cuda.so.0).  Loading
-# it was an unnecessary env delta vs the validated interactive stack; at runtime
-# GPU-direct only needs the GTL findable (it is) + MPICH_GPU_SUPPORT_ENABLED=1.
-module load gcc cray-mpich cuda 2>/dev/null || true
+# Route-A runtime stack (README Step 1b): GNU cray-mpich (default 8.1.32) + cuda +
+# craype-accel-nvidia80.  The accel module sets CRAY_ACCEL_TARGET=nvidia80 and
+# engages cray-mpich's GPU-aware NIC path -- REQUIRED for CROSS-NODE GPU-direct.
+# Intra-node GPU-direct works without it (CUDA IPC, no NIC), which is why an
+# earlier "env delta" cleanup wrongly dropped it; but multi-node sendrecv aborts
+# with "cxil_map: write error" / OFI injectdata unless it is loaded (verified
+# 2026-06-29: 8-rank/2-node mpi4jax sendrecv PASSES with it, ABORTS without).
+# Do NOT drop it again.
+module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
 export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
-# mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs GPU->host->MPI->host->
-# GPU staging.  Decided by node count below (see the TOTAL_GPUS block): single
-# node -> GPU-direct (works); multi-node -> host-staged, because cross-node
-# GPU-direct still aborts on Derecho's CXI fabric even after #681.  An explicit
-# user value (set in the environment) always wins.  Remember if the user pinned it:
+# mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs host staging.  Defaulted
+# to GPU-direct for ALL node counts below; cross-node now works with the accel
+# module (above) + #681's Slingshot CXI tuning in _env.sh.  An explicit user value
+# (set in the environment) always wins.  Remember if the user pinned it:
 _user_cuda_mpi="${MPI4JAX_USE_CUDA_MPI+set}"
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 
@@ -95,24 +95,15 @@ TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 
-# mpi4jax transport.  #681's Slingshot CXI tuning (_env.sh: FI_CXI_RX_MATCH_MODE=
-# hybrid + CQ size + DISABLE_HOST_REGISTER) did NOT clear the cross-node abort on
-# this system -- verified 2026-06-29 on a 2-node latlon run: n=8 still dies with
-# "cxil_map: write error" / OFI "injectdata ... Invalid argument" (a device-buffer
-# inject rejection, a DIFFERENT failure mode than the LE-pool overflow #681
-# targeted).  So multi-node keeps host-staging (completes, bit-identical, slower
-# inter-node comm) until cross-node GPU-direct is actually confirmed working.
-# Single node stays GPU-direct (works).  Explicit MPI4JAX_USE_CUDA_MPI overrides
-# (set =1 to retry GPU-direct multi-node once the fabric issue is fixed).
+# mpi4jax transport: GPU-direct for ALL node counts.  Cross-node GPU-direct now
+# works -- the missing piece was craype-accel-nvidia80 (loaded above) engaging the
+# GPU-aware NIC, together with #681's Slingshot CXI tuning in _env.sh
+# (FI_CXI_RX_MATCH_MODE=hybrid for the many-message halo).  Verified 2026-06-29
+# (8-rank/2-node sendrecv passes).  Set MPI4JAX_USE_CUDA_MPI=0 to fall back to
+# host-staged halos if a run ever aborts.  Explicit value always wins.
 if [ -z "${_user_cuda_mpi:-}" ]; then
-    if [ "${_n_nodes}" -gt 1 ]; then
-        export MPI4JAX_USE_CUDA_MPI=0
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged -- multi-node; cross-node" \
-             "GPU-direct still aborts on CXI even with #681, see docs/performance/multinode_gpu_direct_cxi.md)"
-    else
-        export MPI4JAX_USE_CUDA_MPI=1
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
-    fi
+    export MPI4JAX_USE_CUDA_MPI=1
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct; craype-accel-nvidia80 + #681 CXI tuning, ${_n_nodes} node(s))"
 else
     export MPI4JAX_USE_CUDA_MPI
     echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override)"
