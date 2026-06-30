@@ -193,7 +193,10 @@ def test_all_lhs_builders_match_golden():
                      ("wp3_term_ta", "wp3_term_ta"), ("wp3_term_tp", "wp3_term_tp"),
                      ("wp3_ac_pr2", "wp3_ac_pr2"), ("wp2_ac_pr2", "wp2_ac_pr2"),
                      ("wp2_dp1", "wp2_dp1"), ("wp2_pr1", "wp2_pr1"), ("wp3_pr1", "wp3_pr1")]:
-        np.testing.assert_array_equal(np.asarray(out[key]), g[ref])
+        # FP-reassociation tolerance: the C1-C8 "condense" refactor fused/re-
+        # associated the algebra (~1e-14 rel), so an exact match is no longer the
+        # right invariant — pin to round-off, not bit-identity.
+        np.testing.assert_allclose(np.asarray(out[key]), g[ref], rtol=1e-13, atol=1e-16)
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
@@ -276,7 +279,8 @@ def test_rhs_builders_match_golden():
     g = np.load(_FIX / "clubb_wp23_rhs_golden.npz")
     out = _all_rhs_outputs(gr, p)
     for key in out:
-        np.testing.assert_array_equal(np.asarray(out[key]), g[key])
+        # FP-reassociation tolerance (C1-C8 condense refactor; ~1e-14 rel).
+        np.testing.assert_allclose(np.asarray(out[key]), g[key], rtol=1e-13, atol=1e-16)
 
 
 def test_wp2_term_dp1_rhs_cam_branch_formula():

@@ -78,10 +78,12 @@ def test_matches_golden():
     g = np.load(_FIX / "clubb_mfl_golden.npz")
     mwd, mwu = M.mean_vert_vel_up_down(p["w_1"], p["w_2"], p["varnce_w_1"],
                                        p["varnce_w_2"], p["mixt_frac"], p["wm"])
-    np.testing.assert_array_equal(np.asarray(mwd), g["mean_w_down"])
-    np.testing.assert_array_equal(np.asarray(mwu), g["mean_w_up"])
+    # FP-reassociation tolerance: the C1-C8 "condense" refactor fused/re-
+    # associated the algebra (~1e-14 rel) -> round-off, not bit-identity.
+    np.testing.assert_allclose(np.asarray(mwd), g["mean_w_down"], rtol=1e-13, atol=1e-16)
+    np.testing.assert_allclose(np.asarray(mwu), g["mean_w_up"], rtol=1e-13, atol=1e-16)
     lhs = M.mfl_xm_lhs(jnp.asarray(g["wm_zt"]), 1.0 / 300.0, gr)
-    np.testing.assert_array_equal(np.asarray(lhs), g["mfl_xm_lhs"])
+    np.testing.assert_allclose(np.asarray(lhs), g["mfl_xm_lhs"], rtol=1e-13, atol=1e-16)
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),

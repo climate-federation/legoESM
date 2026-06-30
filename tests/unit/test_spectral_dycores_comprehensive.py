@@ -882,9 +882,10 @@ class TestCrossDiscretization:
 
         from legoesm.grids import gaussian
 
-        # SW uses: uv_from_vordiv, spectral_hyperdiffusion
+        # SW uses: uv_from_vordiv, spectral_hyperdiffusion_3d
+        # (SW unified onto the 3D hyperdiffusion variant)
         assert spectral_sw.uv_from_vordiv is gaussian.uv_from_vordiv
-        assert spectral_sw.spectral_hyperdiffusion is gaussian.spectral_hyperdiffusion
+        assert spectral_sw.spectral_hyperdiffusion_3d is gaussian.spectral_hyperdiffusion_3d
 
         # PE uses: uv_from_vordiv_3d, spectral_hyperdiffusion_3d
         assert spectral_pe.uv_from_vordiv_3d is gaussian.uv_from_vordiv_3d

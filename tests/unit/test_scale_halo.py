@@ -1390,6 +1390,12 @@ class TestPadHaloH3Guardrails:
            of the neighbouring faces' values — NOT be garbage or
            left as zeros / NaN.
         """
+        # Sci test: the float64 rotation+pad+inverse-rotation round-trip is
+        # only accurate to the 1e-10 interior tolerance under x64.  Skip (rather
+        # than false-fail) when a sibling test left the global jax_enable_x64
+        # flag off in this xdist worker — CLAUDE.md runs sci tests with x64.
+        if not jax.config.read("jax_enable_x64"):
+            pytest.skip("requires JAX_ENABLE_X64=1 (float64 rotation round-trip)")
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo_vector
         n = N
@@ -2015,6 +2021,14 @@ class TestPadHaloH3Guardrails:
         from unittest import mock
         import legoesm.grids.halo as halo_mod
 
+        # Post #659/#660: MPI *face-only* (tiling == (1, 1)) now
+        # supports `interp_offsets` (threaded through to `interp_strip`),
+        # so the silent-drop guard moved into `pad_halo_mpi`, which
+        # refuses offsets only under sub-face tiling.  Drive a sub-face
+        # topology so the surviving NotImplementedError guard fires.
+        class _SubFaceTopology:
+            tiling = (2, 2)
+
         for halo in (1, 2, 3):
             n = N
             data = jnp.ones((6, n, n), dtype=jnp.float64)
@@ -2024,7 +2038,9 @@ class TestPadHaloH3Guardrails:
             if halo != 3:
                 offsets = jnp.zeros((6, 4, n), dtype=jnp.float64)
 
-            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                    mock.patch.object(halo_mod, "_mpi_topology",
+                                      _SubFaceTopology()):
                 with pytest.raises(NotImplementedError,
                                    match="interp_offsets"):
                     halo_mod.pad_halo(
@@ -2046,11 +2062,20 @@ class TestPadHaloH3Guardrails:
         from unittest import mock
         import legoesm.grids.halo as halo_mod
 
+        # Post #659/#660: the interp_offsets-under-MPI refusal now
+        # lives in `pad_halo_mpi_4d` and fires only for sub-face
+        # tiling (face-only honors the offsets).  Drive a sub-face
+        # topology so the surviving guard raises.
+        class _SubFaceTopology:
+            tiling = (2, 2)
+
         nlev = 2
         for halo in (1, 2):
             data = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
             offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
-            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                    mock.patch.object(halo_mod, "_mpi_topology",
+                                      _SubFaceTopology()):
                 with pytest.raises(NotImplementedError,
                                    match="interp_offsets"):
                     halo_mod.pad_halo_4d(
@@ -2065,6 +2090,12 @@ class TestPadHaloH3Guardrails:
         from unittest import mock
         import legoesm.grids.halo as halo_mod
 
+        # Post #659/#660: refusal moved into `pad_halo_mpi_4d` (the
+        # packed exchange `pad_halo_vector_4d` dispatches to) and fires
+        # only for sub-face tiling.  Drive a sub-face topology.
+        class _SubFaceTopology:
+            tiling = (2, 2)
+
         nlev = 2
         u = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
         v = jnp.zeros((6, N, N, nlev), dtype=jnp.float64)
@@ -2074,7 +2105,9 @@ class TestPadHaloH3Guardrails:
         sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
         offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
 
-        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch.object(halo_mod, "_mpi_topology",
+                                  _SubFaceTopology()):
             with pytest.raises(NotImplementedError,
                                match="interp_offsets"):
                 halo_mod.pad_halo_vector_4d(
@@ -2090,6 +2123,13 @@ class TestPadHaloH3Guardrails:
         from unittest import mock
         import legoesm.grids.halo as halo_mod
 
+        # Post #659/#660: scalar `pad_halo_vector` packs into a 4D
+        # exchange and dispatches to `pad_halo_mpi_4d`, where the
+        # interp_offsets refusal now lives and fires only for sub-face
+        # tiling.  Drive a sub-face topology so the guard raises.
+        class _SubFaceTopology:
+            tiling = (2, 2)
+
         u = jnp.ones((6, N, N), dtype=jnp.float64)
         v = jnp.zeros((6, N, N), dtype=jnp.float64)
         ca = jnp.ones((6, N, N), dtype=jnp.float64)
@@ -2098,7 +2138,9 @@ class TestPadHaloH3Guardrails:
         sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
         offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
 
-        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch.object(halo_mod, "_mpi_topology",
+                                  _SubFaceTopology()):
             with pytest.raises(NotImplementedError,
                                match="interp_offsets"):
                 halo_mod.pad_halo_vector(
@@ -2129,7 +2171,7 @@ class TestPadHaloH3Guardrails:
         # topology).  For halo=1/2 the local path is the SAME as what
         # a single-rank MPI run would produce before duogrid
         # post-processing.
-        def _stub_pad_halo_mpi(data, topology, halo):
+        def _stub_pad_halo_mpi(data, topology, halo, interp_offsets=None):
             if halo == 1:
                 return pad_halo_local(data, None)
             return _pad_halo_local_h2(data, None)
@@ -2179,7 +2221,7 @@ class TestPadHaloH3Guardrails:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
 
         # Stub `pad_halo_mpi_4d` to call the local h=1 4D helper.
-        def _stub_pad_halo_mpi_4d(data, topology, halo):
+        def _stub_pad_halo_mpi_4d(data, topology, halo, interp_offsets=None):
             assert halo == 1
             return pad_halo_local_4d(data, None)
 
@@ -2231,7 +2273,7 @@ class TestPadHaloH3Guardrails:
         # Stub `pad_halo_mpi_4d` so we do not require a live MPI
         # runtime; we only want to confirm the removed guard no longer
         # intercepts the call.
-        def _stub_pad_halo_mpi_4d(data, topology, halo):
+        def _stub_pad_halo_mpi_4d(data, topology, halo, interp_offsets=None):
             n = data.shape[1]
             h2 = 2 * halo
             shape = (data.shape[0], n + h2, n + h2) + data.shape[3:]

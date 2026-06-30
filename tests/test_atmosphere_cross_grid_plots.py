@@ -1222,7 +1222,7 @@ class TestAmipToMatrixFormat:
 
     def _import_converter(self):
         import importlib.util
-        path = _SCRIPT_DIR / "_amip_to_matrix_format.py"
+        path = _SCRIPT_DIR.parent / "run" / "_amip_to_matrix_format.py"
         spec = importlib.util.spec_from_file_location(
             "_amip_to_matrix_format", path,
         )

@@ -198,7 +198,20 @@ class TestCDGridConstruction(unittest.TestCase):
 
         Combined: (a-prime) + (b) preserves iter-505's bug-detection
         power while accommodating the iter-878+ era drift.
+
+        Requires JAX_ENABLE_X64=1: the machine-precision-zero polar
+        mass-rate invariant only holds in float64.  In float32 the
+        polar faces carry round-off at the equatorial scale and the
+        guard false-fails.  The module enables x64 at import, but a
+        full-suite run can toggle the global flag off before this
+        test executes, so re-check the runtime config here.
         """
+        if not jax.config.read("jax_enable_x64"):
+            self.skipTest(
+                "polar mass-rate machine-precision-zero invariant "
+                "requires JAX_ENABLE_X64=1; in float32 the polar faces "
+                "carry round-off at the equatorial scale."
+            )
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
