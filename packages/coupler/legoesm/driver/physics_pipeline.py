@@ -2023,19 +2023,28 @@ def _build_rrtmgp_radiation_fn(config):
         # declination enters the geometry (cos_zenith).  1.0 ⇒ circular orbit.
         eccf = (earth_sun_distance_factor(day_of_year, orbit)
                 if orbit is not None else 1.0)
+        # Per-step incident irradiance relative to the solver's baked-in S_0.
+        # The RRTMGP solver is built ONCE with the static config S_0, so the
+        # actual irradiance reaching the SW fluxes must be applied as an output
+        # scale: this captures BOTH time-varying TSI (solar_source=file passes
+        # s_0 = TSI(t)) AND the (a/r)^2 distance factor.  Without it, the rsdt
+        # diagnostic (built from s_0 below) would move while the solved SW
+        # fluxes/heating silently stayed at the static S_0 — a hidden TOA
+        # energy-budget inconsistency.  s_0 == S_0 and a circular orbit ⇒ 1.0
+        # (bit-identical output to the legacy path).
+        _irr_scale = (s_0 / S_0) * eccf
         if diurnal:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour,
                                        orbit=orbit)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
-            # Prescribed TOA incident SW = S_0·(a/r)^2·max(cosθ,0) for the rsdt
+            # Prescribed TOA incident SW = s_0·(a/r)^2·max(cosθ,0) for the rsdt
             # diagnostic (#620); matches _compute_insolation's diurnal return.
             insol = s_0 * eccf * cos_zenith
-            if orbit is not None:
-                # The solver runs with S_0 (not S_0·eccf), so fold the distance
-                # factor into the SW-flux rescale; cos_zenith stays geometry.
-                _sw_scale = jnp.full((cos_zenith.shape[0],), eccf,
-                                     dtype=cos_zenith.dtype)
+            # cos_zenith stays geometric; the irradiance (TSI x distance vs the
+            # solver's S_0) scales the SW flux.
+            _sw_scale = jnp.full((cos_zenith.shape[0],), _irr_scale,
+                                 dtype=cos_zenith.dtype)
         else:
             # Daytime-effective cos(SZA): use daylight fraction so the solver
             # sees the correct optical path during sunlit hours.  SW fluxes
@@ -2046,11 +2055,14 @@ def _build_rrtmgp_radiation_fn(config):
                                           orbit=orbit)
             f_day = daylight_fraction(lat_col, day_of_year, orbit=orbit)
             f_day_safe = jnp.maximum(f_day, 1.0e-6)
+            # insol ∝ s_0·eccf; dividing by (s_0·f_day) leaves a geometric
+            # cos_zenith (both s_0 and eccf cancel) — the optical path stays
+            # <= 1 and irradiance-independent.
             insol_geom = insol / eccf
             cos_zenith = jnp.clip(
                 insol_geom / (s_0 * f_day_safe), 0.0, 1.0,
             )
-            _sw_scale = f_day * eccf
+            _sw_scale = f_day * _irr_scale
 
         # Water-vapor unit convention: the upstream pipeline passes
         # ``q_v`` as **mixing ratio** r = m_v / m_d.  RRTMGP's internal
