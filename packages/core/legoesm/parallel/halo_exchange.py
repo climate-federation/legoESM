@@ -82,7 +82,10 @@ from legoesm.grids.halo import (
 )
 from legoesm.parallel.comm import CommTopology
 from legoesm.parallel.profiling import mpi_timer
-from legoesm.parallel.reductions import mpi4jax_array_result
+from legoesm.parallel.reductions import (
+    check_mpi4jax_transport,
+    mpi4jax_array_result,
+)
 
 
 _EDGES = (WEST, EAST, SOUTH, NORTH)
@@ -223,7 +226,17 @@ _sendrecv_vjp_fn = None
 
 
 def get_sendrecv_vjp(mpi4jax_mod):
-    """Return the cached AD-safe sendrecv wrapper."""
+    """Return the cached AD-safe sendrecv wrapper.
+
+    This is the single choke point every halo ``sendrecv`` routes through, so
+    it is where the mpi4jax GPU-transport preflight runs — on EVERY call, BEFORE
+    the (memoised) wrapper is returned. Halo entry points reach mpi4jax by a
+    direct ``import mpi4jax`` rather than :func:`require_mpi_stack`, so without
+    this call a GPU-direct misconfiguration (``MPI4JAX_USE_CUDA_MPI=1`` against a
+    non-CUDA mpi4jax) would slip past the preflight and segfault at the first
+    device-buffer exchange.
+    """
+    check_mpi4jax_transport(mpi4jax_mod)
     global _sendrecv_vjp_fn
     if _sendrecv_vjp_fn is None:
         _sendrecv_vjp_fn = _make_sendrecv_vjp(mpi4jax_mod)

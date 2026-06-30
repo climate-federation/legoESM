@@ -45,8 +45,12 @@ def _raw_alltoall(x, comm):
     Block ``i`` of the result on this rank is the block this rank's index
     selected out of rank ``i``'s input — the standard MPI all-to-all.
     """
-    import mpi4jax
+    from legoesm.parallel.reductions import require_mpi_stack
 
+    # Checked accessor (not a bare ``import mpi4jax``): runs the GPU-transport
+    # preflight so this device-array all-to-all fails closed on a GPU-direct
+    # misconfiguration instead of segfaulting.
+    mpi4jax, _ = require_mpi_stack()
     return mpi4jax.alltoall(x, comm=comm)
 
 
