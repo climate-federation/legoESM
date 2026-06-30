@@ -1216,8 +1216,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
     ``gustiness_w_zi`` onto the trained Louis config, keeping the trained
-    Cd/Ch/z0 (which the MOST schemes ignore anyway).  No-op when there is no
-    prior turbulence config / surface to preserve.
+    ``Cd_neutral``/``Ch_neutral``/``z0`` (the MOST/COARE schemes ignore the
+    neutral ``Cd``/``Ch`` but DO use ``z0``, so preserving all three is
+    correct).  No-op when there is no prior turbulence config / surface.
     """
     prev_surf = getattr(prev_turb_config, "surface", None)
     if prev_surf is None or getattr(louis_config, "surface", None) is None:
