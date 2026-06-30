@@ -1,7 +1,14 @@
 # Known issue: cross-node GPU-direct MPI aborts on Derecho (CXI/Slingshot)
 
-**Status:** open — multi-node GPU scaling uses **host-staged** halos as a
-workaround; single-node GPU runs are unaffected.
+**Status:** FIX MERGED (#681), pending empirical confirmation on a multi-node
+run. #681 wired the Slingshot CXI fabric knobs into `_env.sh`
+(`FI_CXI_RX_MATCH_MODE=hybrid`, `FI_CXI_DEFAULT_CQ_SIZE=131072`,
+`FI_CXI_DISABLE_HOST_REGISTER=1`) that target the match-queue (LE pool) overflow
+and the CUDA-aware MR-cache deadlock behind the abort, and `fullnode_gpu.sh` now
+defaults to GPU-direct for all node counts. **Verify** a 2-node run completes
+GPU-direct (no `cxil_map` abort, no `Not using CUDA-enabled MPI` warning) before
+trusting multi-node performance; if it still aborts, set `MPI4JAX_USE_CUDA_MPI=0`
+to fall back to host-staging and reopen this.
 **Affected:** `scripts/cluster/scaling_derecho/fullnode_gpu.sh` multi-node
 (`NODES>1`) GPU sweeps for icosahedral / latlon. Single-node (≤4 GPU) GPU-direct
 is fine.

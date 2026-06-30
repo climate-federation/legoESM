@@ -56,11 +56,9 @@ cd "$REPO"
 module load gcc cray-mpich cuda 2>/dev/null || true
 export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
 # mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs GPU->host->MPI->host->
-# GPU staging.  This is decided AFTER the node count is known (see the TOTAL_GPUS
-# block below): 1 node -> GPU-direct (NVLink/IPC, validated); >1 node ->
-# host-staged, because cross-node GPU-direct RDMA currently ABORTS on Derecho's
-# CXI/Slingshot fabric ("cxil_map: write error" / OFI injectdata invalid arg --
-# see docs/performance/multinode_gpu_direct_cxi.md).  An explicit user value
+# GPU staging.  Defaulted to GPU-direct for all node counts below (see the
+# TOTAL_GPUS block); #681's Slingshot CXI tuning in _env.sh fixed the cross-node
+# abort that previously forced multi-node to host-stage.  An explicit user value
 # (set in the environment) always wins.  Remember whether the user pinned it:
 _user_cuda_mpi="${MPI4JAX_USE_CUDA_MPI+set}"
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
@@ -97,20 +95,16 @@ TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 
-# Node-aware mpi4jax transport (see the MPICH block above).  Cross-node GPU-direct
-# RDMA currently ABORTS on Derecho's CXI fabric, so multi-node sweeps fall back to
-# host-staged halos (slower inter-node comm, BIT-IDENTICAL results) and the whole
-# multi-node curve runs on one consistent transport.  Single-node stays
-# GPU-direct.  An explicit MPI4JAX_USE_CUDA_MPI in the environment overrides this.
+# mpi4jax transport: GPU-direct halos for ALL node counts.  #681 wired the
+# Slingshot CXI fabric tuning (FI_CXI_RX_MATCH_MODE=hybrid + FI_CXI_DEFAULT_CQ_SIZE
+# + FI_CXI_DISABLE_HOST_REGISTER, in _env.sh) that fixes the cross-node
+# cxil_map/OFI-injectdata abort, so multi-node no longer needs the prior
+# host-staging fallback.  If a multi-node GPU-direct run still aborts on the
+# fabric, set MPI4JAX_USE_CUDA_MPI=0 to fall back to host-staged halos (slower
+# inter-node comm, bit-identical results).  An explicit value always wins.
 if [ -z "${_user_cuda_mpi:-}" ]; then
-    if [ "${_n_nodes}" -gt 1 ]; then
-        export MPI4JAX_USE_CUDA_MPI=0
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged halos -- multi-node;" \
-             "cross-node GPU-direct broken on CXI, see docs/performance/multinode_gpu_direct_cxi.md)"
-    else
-        export MPI4JAX_USE_CUDA_MPI=1
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
-    fi
+    export MPI4JAX_USE_CUDA_MPI=1
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct; #681 CXI tuning in _env.sh, ${_n_nodes} node(s))"
 else
     export MPI4JAX_USE_CUDA_MPI
     echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override)"
