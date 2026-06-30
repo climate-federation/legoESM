@@ -11,7 +11,8 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from scripts.run.train_land_params_era5 import _N_PFT
 from scripts.run.train_multilayer_land_era5 import (
-    forward_ml, loss_ml, constrain_ext, init_ext_params, BOUNDS_EXT)
+    forward_ml, loss_ml, constrain_ext, init_ext_params, BOUNDS_EXT,
+    build_multilayer_cfg)
 
 
 def _synthetic_data(ncol=12):
@@ -39,6 +40,14 @@ def _synthetic_data(ncol=12):
     for k, v in dict(theta_r=0.05, theta_sat=0.43, alpha_vg=3.6, n_vg=1.56,
                      K_sat=2.9e-6).items():
         data["vg_" + k] = c(v)
+    # soil-moisture target (annual-mean 0-28cm) + the model root-zone depth weights
+    import scripts.run.train_multilayer_land_era5 as _M
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+    _gr = make_soil_grid(SoilGridConfig(n_layers=_M._N_LAYERS, total_depth=_M._SOIL_DEPTH_M,
+                                        growth_factor=_M._SOIL_GROWTH))
+    _dz = np.asarray(_gr.dz); _bot = np.cumsum(_dz); _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)
+    data["sm"] = c(0.25)
+    data["rz_w"] = jnp.asarray(_ov[_ov > 1e-9])
     return data
 
 
@@ -51,11 +60,14 @@ def test_constrain_bounds():
 
 def test_forward_finite_and_physical():
     data = _synthetic_data()
-    T, A = forward_ml(constrain_ext(init_ext_params()), data)
+    T, A, W = forward_ml(constrain_ext(init_ext_params()), data)
     assert T.shape == (12, 12) and A.shape == (12, 12)
     assert jnp.all(jnp.isfinite(T)) and jnp.all(jnp.isfinite(A))
     assert 230.0 < float(T.mean()) < 330.0       # no runaway / freeze-out
     assert jnp.all((A > 0.0) & (A < 1.0))
+    # root-zone soil moisture is physical (within [theta_r, theta_sat]) and finite
+    assert W.shape == (12,) and jnp.all(jnp.isfinite(W))
+    assert jnp.all((W > 0.0) & (W < 0.6))
 
 
 def test_loss_is_differentiable():
@@ -69,6 +81,59 @@ def test_loss_is_differentiable():
     # unless --stomata (test_bulk_stomata_toggle_params).
     for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
+    # the soil-moisture target makes the porosity scale (theta_sat) trainable
+    assert float(jnp.max(jnp.abs(g["pft_smscale"]))) > 0.0, "pft_smscale has zero gradient"
+
+
+def test_lam_sm_zero_is_true_noop():
+    """lam_sm=0 must SKIP the soil-moisture term entirely (no 0*NaN poisoning): the
+    aux smse is exactly 0 and the total loss equals the sum of the other terms."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    l, (tm, am, pp, sa, sm) = loss_ml(p, data, lam_sm=0.0)
+    assert float(sm) == 0.0
+    # the SM term contributes nothing: loss == tmse + lam_alb*amse + lam_pft*pp + lam_amp*sa
+    import scripts.run.train_multilayer_land_era5 as _M
+    expect = float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp) + _M._LAM_AMP * float(sa)
+    assert abs(float(l) - expect) < 1e-6
+
+
+def test_soil_moisture_loss_is_nan_safe():
+    """A non-finite soil-moisture target (or model) must NOT poison the loss/gradient —
+    finite-masking drops those cells (codex: a diverged forward must not NaN the run)."""
+    data = _synthetic_data()
+    sm = np.asarray(data["sm"]).copy(); sm[0] = np.nan       # one missing target cell
+    data = dict(data); data["sm"] = jnp.asarray(sm)
+    g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values()), "NaN SM target poisoned the gradient"
+
+
+def test_all_nan_soil_moisture_target_is_fully_masked():
+    """Backward-compat: an OLD npz without soil moisture yields an all-NaN SM target
+    (_pack KeyError fallback).  The finite-mask drops every cell -> smse is exactly 0
+    and the loss/gradient stay finite, so legacy inputs still train."""
+    data = dict(_synthetic_data())
+    data["sm"] = jnp.full_like(data["sm"], jnp.nan)
+    l, aux = loss_ml(init_ext_params(), data)
+    assert float(aux[-1]) == 0.0 and jnp.isfinite(l)         # smse masked to 0
+    g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
+
+
+def test_porosity_scale_keeps_theta_sat_above_field_capacity():
+    """The pft_smscale clamp must keep the scaled porosity above theta_r AND the plant
+    field capacity for ANY in-bounds scale (incl. the 0.7 minimum) so van-Genuchten +
+    btran stay well-posed (codex)."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    # force the porosity scale to its 0.7 minimum (raw -> -inf-ish sigmoid)
+    p = dict(p); p["pft_smscale"] = jnp.full_like(p["pft_smscale"], -20.0)
+    cp = constrain_ext(p)
+    assert float(jnp.max(cp["pft_smscale"])) < 0.72            # at the 0.7 floor
+    cfg, lp, hyd, _ = build_multilayer_cfg(cp, data)
+    plant_fc = lp.theta_fc                                      # (ncol,) plant field capacity
+    assert jnp.all(hyd.theta_sat[:, 0] >= hyd.theta_r[:, 0]), "theta_sat below theta_r"
+    assert jnp.all(hyd.theta_sat[:, 0] >= plant_fc + 0.0199), "theta_sat below plant FC -> btran breaks"
 
 
 def test_bulk_stomata_toggle_params():

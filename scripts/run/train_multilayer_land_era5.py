@@ -69,7 +69,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
-from legoesm.land.soil_grid import SoilGridConfig
+from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -120,6 +120,12 @@ _STOMATA_ON = False
 _LAM_ALB = 300.0
 _LAM_PFT = 2.0
 _LAM_AMP = 1.5
+# Soil-moisture loss weight.  theta is O(0.1-0.5) m3/m3 vs T's O(10-50) K, so a unit
+# MSE on theta is ~1e4x smaller; the weight lifts the (annual-mean, 0-28cm root-zone)
+# soil-moisture term to a non-negligible fraction of the temperature term (smse~1e-2 *
+# 3e3 ~ 30 vs tmse~O(100-1000)) so it actually constrains the porosity scale + plant
+# water-stress thresholds without swamping the skin-T fit.  Tune via --lam-sm.
+_LAM_SM = 3.0e3
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +154,11 @@ BOUNDS_EXT = dict(
     pft_z0=(5e-3, 3.0),                                # roughness (MOST); forests saturated 2.0
     pft_vcmax=(0.0, 80.0), pft_lcma=(20.0, 90.0), pft_g1=(1.0, 12.0),
     pft_wp=(0.05, 0.30), pft_fcgap=(0.03, 0.30),       # theta_fc_plant = wp + gap
+    # per-PFT SCALE on the per-cell texture-derived van-Genuchten POROSITY (theta_sat):
+    # texture sets the spatial pattern, the scale sets the per-PFT magnitude so the
+    # equilibrium root-zone soil moisture can be pulled toward ERA5 (the soil-moisture
+    # target is what makes the retention trainable — skin T alone could not constrain it).
+    pft_smscale=(0.7, 1.3),
     # per-PFT SCALE on the per-cell texture-derived soil thermal k_solid / C_solid
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
@@ -184,6 +195,7 @@ def init_ext_params() -> dict:
         pft_g1=_inv_ext(col("g1"), "pft_g1"),
         pft_wp=_inv_ext(wp0, "pft_wp"),
         pft_fcgap=_inv_ext(np.clip(fc0 - wp0, 0.04, 0.29), "pft_fcgap"),
+        pft_smscale=_inv_ext(full(1.0), "pft_smscale"),    # start at texture porosity
         # init scales so texture*scale ~ the previous effective inertia (texture
         # k_base~5 -> k_scale~0.35 gives k_solid~1.8; C_base~2.3e6 -> c_scale~0.9)
         pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
@@ -220,7 +232,17 @@ def build_multilayer_cfg(cp, data):
     is a constant per-PFT Ch with soil-only beta; --bulk most / --stomata switch on the
     MOST (z0) and Farquhar (Vc_max25/g1/LCMA) paths.  Soil thermal inertia is per-PFT."""
     col = lambda k: data["vg_" + k].reshape(-1, 1)
-    hyd = SoilHydraulicsConfig(theta_r=col("theta_r"), theta_sat=col("theta_sat"),
+    # Per-PFT POROSITY scale on the texture theta_sat (trainable via the soil-moisture
+    # target).  Clamp theta_sat above BOTH theta_r and the PLANT field capacity (wp+gap):
+    # the van-Genuchten retention needs theta_sat > theta_r, and btran (theta-wp)/(fc-wp)
+    # needs the column able to saturate above field capacity — without the fc floor a
+    # scale-down (smscale<1, sandy cells) could push porosity below fc and break btran /
+    # drive an inconsistent hydraulic state -> Richards NaN (codex).
+    sm_scale = (data["pft"] @ cp["pft_smscale"]).reshape(-1, 1)
+    plant_fc = (data["pft"] @ (cp["pft_wp"] + cp["pft_fcgap"])).reshape(-1, 1)
+    theta_sat_s = jnp.maximum(col("theta_sat") * sm_scale,
+                              jnp.maximum(col("theta_r") + 0.05, plant_fc + 0.02))
+    hyd = SoilHydraulicsConfig(theta_r=col("theta_r"), theta_sat=theta_sat_s,
                                alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
     # Soil thermal inertia: per-cell TEXTURE (sand/clay) x per-PFT scale, blended
     # toward ICE on glacier cells (deep-ice inertia boost).  Reuse the SHARED
@@ -305,6 +327,11 @@ def forward_ml(cp, data):
     # cycle (a dry season warms the surface).
     deep = st.theta_soil[:, _FREEZE_FROM:]
     deep_psi = st.psi_soil[:, _FREEZE_FROM:]
+    # Root-zone (0-28cm = ERA5 swvl1+2) soil moisture from the Stage-A EQUILIBRIUM,
+    # saved BEFORE Stage B so it is the documented frozen-equilibrium value regardless
+    # of the freeze span (moisture is pinned, so it does not drift in Stage B anyway).
+    rz_w = data["rz_w"]
+    W_sm = (st.theta_soil[:, :rz_w.shape[0]] * rz_w).sum(1) / rz_w.sum()
 
     # --- STAGE B: seasonal years with subdaily forcing -> monthly means ----------
     @jax.checkpoint     # remat per step -> bounded backward memory
@@ -324,20 +351,37 @@ def forward_ml(cp, data):
     z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
     (st, _, _), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
     (st, Tsum, Asum), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
-    return Tsum / spm, Asum / spm
+    return Tsum / spm, Asum / spm, W_sm
 
 
-def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None):
+def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
     # weights default to the module globals (CLI-tunable) so the jitted
     # value_and_grad picks up an updated lam_amp without re-partialling.
     lam_alb = _LAM_ALB if lam_alb is None else lam_alb
     lam_pft = _LAM_PFT if lam_pft is None else lam_pft
     lam_amp = _LAM_AMP if lam_amp is None else lam_amp
+    lam_sm = _LAM_SM if lam_sm is None else lam_sm
     cp = constrain_ext(p)
-    T, A = forward_ml(cp, data)
+    T, A, W = forward_ml(cp, data)
     w = data["w"][None, :]
     tmse = jnp.sum(w * (T - data["skt"]) ** 2) / jnp.sum(w) / 12
     amse = jnp.sum(w * (A - data["alb"]) ** 2) / jnp.sum(w) / 12
+    # soil moisture: model root-zone equilibrium vs ERA5 annual-mean swvl (0-28cm).
+    # FINITE-MASKED: a diverged forward (NaN W) or a missing target must not poison the
+    # loss/gradient via a NaN that survives the lam_sm weight (codex: 0*NaN == NaN).
+    # lam_sm == 0 is a STATIC (Python) flag, so the SM path is skipped entirely when off.
+    if lam_sm > 0.0:
+        sm_ok = jnp.isfinite(W) & jnp.isfinite(data["sm"])
+        # Sanitise the INPUTS before the squared difference (not the output): a NaN that
+        # reaches (W - sm)**2 poisons the reverse-mode VJP even inside a where() that
+        # discards it (the standard JAX where-NaN-gradient gotcha) — replace masked
+        # cells with 0 BEFORE the diff so no NaN ever enters the graph.
+        W_s = jnp.where(sm_ok, W, 0.0)
+        sm_s = jnp.where(sm_ok, data["sm"], 0.0)
+        wsm = data["w"] * sm_ok
+        smse = jnp.sum(wsm * (W_s - sm_s) ** 2) / (jnp.sum(wsm) + 1e-9)
+    else:
+        smse = jnp.zeros((), tmse.dtype)
     ann = (T - data["skt"]).mean(0)
     oh = data["dom_onehot"] * data["w"][:, None]
     pb = (oh * ann[:, None]).sum(0) / (oh.sum(0) + 1e-9)
@@ -346,7 +390,8 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None):
     # seasonal-amplitude term: penalise model monthly amplitude away from ERA5
     amp = (T.max(0) - T.min(0)) - (data["skt"].max(0) - data["skt"].min(0))
     samp = jnp.sum(data["w"] * amp ** 2) / jnp.sum(data["w"])
-    return tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp, (tmse, amse, ppft, samp)
+    loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse)
+    return loss, (tmse, amse, ppft, samp, smse)
 
 
 def _params_dict(p):
@@ -358,12 +403,13 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50):
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
     opt = optax.adam(lr); state = opt.init(p)
     for it in range(n_iter):
-        (l, (tm, am, pp, sa)), g = vg(p, data)
+        (l, (tm, am, pp, sa, sm)), g = vg(p, data)
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if it % 20 == 0 or it == n_iter - 1:
             print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
-                  f"alb-RMSE {float(jnp.sqrt(am)):.4f} perPFT {float(jnp.sqrt(pp)):.3f} "
-                  f"seas-amp {float(jnp.sqrt(sa)):.3f}", flush=True)
+                  f"alb-RMSE {float(jnp.sqrt(am)):.4f} sm-RMSE {float(jnp.sqrt(sm)):.4f} "
+                  f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
+                  flush=True)
         # periodic checkpoint so a long (slow per-iter) run is interruptible and the
         # converged params are captured before the final iteration.
         if ckpt_path and it > 0 and it % ckpt_every == 0:
@@ -428,7 +474,25 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
     dom = pft.argmax(1); oh = np.zeros((latc.size, 17)); oh[np.arange(latc.size), dom] = 1.0
     skt = g("skin_temperature").mean(1)                       # (12, ncol)
     alb = np.clip(g("forecast_albedo").mean(1), 0.05, 0.85)
+    # soil-moisture target: ERA5 swvl1 (0-7cm) + swvl2 (7-28cm), depth-weighted to a
+    # single 0-28cm root-zone value, then the ANNUAL mean (the frozen column's signal).
+    # Backward-compat: an OLD npz without soil moisture yields an all-NaN target, which
+    # the loss finite-mask drops (the SM term then contributes nothing) so legacy inputs
+    # still run (with --lam-sm 0 to silence, or simply ignored cell-by-cell).
+    try:
+        sm1 = g("swvl1").mean(1); sm2 = g("swvl2").mean(1)   # (12, ncol)
+        sm = ((7.0 * sm1 + 21.0 * sm2) / 28.0).mean(0)       # (ncol,)
+    except KeyError:
+        sm = np.full(latc.shape[0], np.nan)
+    # model root-zone weights: each soil layer's overlap with the top 0.28 m, so the
+    # model's depth-weighted theta matches the ERA5 0-28cm target on the same grid.
+    _grid = make_soil_grid(SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
+                                          growth_factor=_SOIL_GROWTH))
+    _dz = np.asarray(_grid.dz); _bot = np.cumsum(_dz)
+    _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)              # layer∩[0,0.28m]
+    _K = int((_ov > 1e-9).sum())
     data = dict(forc=forc, lat=jnp.asarray(latc), pft=jnp.asarray(pft),
+                sm=jnp.asarray(sm), rz_w=jnp.asarray(_ov[:_K]),
                 fg=jnp.asarray(np.asarray(cmap["glacier_frac"])[sub]),
                 wp=jnp.asarray(np.asarray(cmap["theta_wp"])[sub]),
                 fc=jnp.asarray(np.asarray(cmap["theta_fc"])[sub]),
@@ -444,12 +508,15 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
 
 
 def main():
-    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP
+    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP, _LAM_SM
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lam-amp", type=float, default=_LAM_AMP,
                     help="seasonal-amplitude loss weight (raise to tighten the "
                          "seasonal cycle at some cost to the annual-mean fit)")
+    ap.add_argument("--lam-sm", type=float, default=_LAM_SM,
+                    help="soil-moisture loss weight (ERA5 annual-mean 0-28cm swvl vs "
+                         "the model root-zone equilibrium; trains the porosity scale)")
     ap.add_argument("--diurnal-npz", default="/tmp/era5_diurnal.npz",
                     help="ERA5 monthly-diurnal climatology (4-synoptic-hour "
                          "fetch_era5_diurnal.py, or 24-h fetch_era5_hourly_climatology.py)")
@@ -469,6 +536,7 @@ def main():
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     _LAM_AMP = args.lam_amp
+    _LAM_SM = args.lam_sm
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out)
