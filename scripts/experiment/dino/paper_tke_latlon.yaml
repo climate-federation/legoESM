@@ -1,18 +1,21 @@
 # DINO lat-lon with the paper's NEMO TKE vertical-mixing scheme (Kamm et al.
-# 2025), now RUNNABLE. At the paper's A_v_bg=1.2e-4 our TKE NaNs ~day 39 — a
-# TKE-closure-specific surface-momentum instability at the SW channel-wall
-# corner (NOT a CFL; the "constant" scheme is stable at 1.2e-4). The DINOConfig
-# default tke_momentum_visc_bg=5e-4 (4× the paper, a documented fidelity
-# compromise) raises ONLY the momentum-viscosity floor under --vmix tke, which
-# damps it; the tracer background K_v_bg stays at the paper value, so the
-# thermocline mixing is unchanged.
-#   To reproduce the UNSTABLE paper-viscosity attempt (blows up ~day 40, ACC
-#   ~44 Sv by day 35), add:  tke_momentum_visc_bg: 1.2e-4
+# 2025). DINO lat-lon has TWO SW channel-wall-corner surface-momentum
+# instabilities (diagnosed 2026-06-30):
+#   (A) day ~39, TKE-specific, viscosity-SENSITIVE — damped by the DINOConfig
+#       default tke_momentum_visc_bg=5e-4 floor (4× the paper, raises ONLY the
+#       momentum viscosity; tracer K_v_bg untouched).
+#   (B) day ~230, scheme-GENERAL (NaNs tke AND constant), viscosity-INSENSITIVE
+#       (5e-4/1e-3/2e-3 all NaN ~d226-236) — NOT fixable by viscosity.
+# So with the floor TKE runs to ~day 226 (a clean laminar sub-annual window for
+# the spin-up comparison) but is NOT multi-year-stable — for a multi-year run use
+# acc_kpp_latlon_365d.yaml (KPP is the only multi-year-stable closure).
+#   To reproduce the unstable paper-viscosity attempt (blows up ~day 39),
+#   add:  tke_momentum_visc_bg: 1.2e-4
 # Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
 #                --config scripts/experiment/dino/paper_tke_latlon.yaml
 grid: latlon
 vmix: tke
-days: 365                 # runnable: the 5e-4 momentum-viscosity floor is stable
+days: 180                 # well before the viscosity-insensitive ~day-226 NaN
 snapshot_every_days: 5
 n_lon: 50
 output_dir: results/dino_latlon_tke

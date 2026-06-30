@@ -193,17 +193,49 @@ So the instability is **TKE-closure-specific** (constant is stable at the same
 background), **not** a CFL (halving dt doesn't help), and a slow (~6-day e-fold)
 surface-momentum runaway at the wind-shadowed SW corner (channel wind τ→0 at
 −70°). Raising the vertical-viscosity background to ~5e-4 (4× the paper's 1.2e-4)
-**suppresses** it — the NaN-day grows smoothly with viscosity then crosses to
-stable. The tracer background `K_v_bg` (the thermocline-relevant mixing) is left
-at the paper value, so the thermocline comparison stays valid. (NB: TKE's K_M
-floor ≥ kappaM_min = A_v_bg, so its momentum viscosity is already ≥ constant's;
-the destabiliser is the closure's spatially-varying convective K transient at the
-corner, masked by a higher uniform floor.)
+**suppresses** it over the 90-day window. The tracer background `K_v_bg` (the
+thermocline-relevant mixing) is left at the paper value.
 
-**M3 — side-by-side (running).** `_diag_dino_thermocline_sidebyside.py` runs
-kpp/constant/tke × wright/nemo_seos for 4 yr (tke at A_v_bg=5e-4) and reports
-yearly ACC + a thermocline-core-depth proxy vs NEMO (62,66,74,90,101,110), to see
-which of {EOS, closure} reduces the over-deepening.
+**M2 corrected — there are TWO corner instabilities; only KPP is multi-year-
+stable.** A multi-year re-diagnosis (`_diag_tke_multiyear.sbatch`, to 800 d) shows
+the 90-day window masked a SECOND blow-up (the recurring "smoke past the turnover"
+lesson):
 
-M1/M2 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside}.py`;
-sweeps `scripts/cluster/omip_nemo/_diag_tke_{blowup,avsweep}.sbatch`.
+| config | first NaN | |
+| --- | --- | --- |
+| `constant` @1.2e-4 | **day 231** | scheme-general |
+| `tke` @5e-4 | **day 226** | viscosity- |
+| `tke` @1e-3 | **day 230** | INSENSITIVE |
+| `tke` @2e-3 | **day 236** | (16× → +10 d) |
+
+All at the SAME SW corner. So: instability **(A)** day ~39 is TKE-specific +
+viscosity-sensitive (the 5e-4 floor extends `tke` to ~day 226 — a real 6× gain,
+good for the laminar sub-annual comparison); instability **(B)** day ~230 is
+scheme-general (NaNs `tke` AND `constant`) and **viscosity-insensitive** (a deep
+corner numerical mode, analogous to the MPAS southern-channel one). Only **KPP**
+(strong surface mixing) suppresses both → the only multi-year-stable closure.
+
+**M3 — side-by-side DONE: S-EOS does NOT fix the over-deepening.** 4-yr ACC/yr
+(Sv); only KPP survives 4 yr:
+
+| config | yr1 | yr2 | yr3 | yr4 |
+| --- | --- | --- | --- | --- |
+| **NEMO** | 62 | 66 | 74 | 90 |
+| kpp + wright | 45 | 84 | 232 | **604** |
+| kpp + nemo_seos | 45 | 91 | 221 | **589** |
+| constant / tke ×(wright,nemo_seos) | — | — | — | NaN (instability B) |
+
+Wright vs NEMO S-EOS changes the ACC by ~2.5 % at yr 4 (604→589) — negligible
+against the 604-vs-90 overshoot. So the **ACC over-deepening is NOT an EOS
+effect**; the "match NEMO thermocline via S-EOS" hypothesis is refuted for the
+EOS lever. (The thermocline-core-depth proxy read flat ~36 m — it located the
+SURFACE T-gradient, not the thermocline core; uninformative, the ACC is the
+reliable signal.) The remaining lever is most likely the **KPP closure itself
+over-mixing** (deep boundary layer → deep thermocline → strong thermal-wind ACC)
+or convection — a vertical-mixing-TUNING problem (KPP entrainment / `Ri_crit` /
+`Cv`), not the EOS, and not cleanly testable via TKE (instability B). M1's S-EOS
++ EOS-consistent-mixing fix is correct and shipped regardless; it is just not the
+thermocline lever.
+
+M1/M2/M3 diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_tke_{blowup,avsweep,multiyear}.sbatch`.
