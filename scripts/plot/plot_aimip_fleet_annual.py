@@ -209,6 +209,15 @@ def main():
         help="Last calendar year of the anomaly baseline (paper training "
              "period ends 2014).",
     )
+    parser.add_argument(
+        "--legoesm-csv", type=Path, default=None,
+        help="Optional annual CSV (year,annual_global_mean_surfT_K) from "
+             "scripts/run/run_aimip_amip_inference.py -> overlays our trained "
+             "classical model's prescribed-SST AMIP run on the fleet figure. "
+             "Plotted as an anomaly from its OWN baseline window (so the "
+             "near-surface-vs-2m absolute offset drops out, leaving a "
+             "like-for-like trend/variability comparison).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -315,6 +324,38 @@ def main():
         )
         for y, v in zip(years, vals):
             rows.append(("ERA5", int(y), float("nan"), float(v), float("nan")))
+
+    # legoESM (our trained classical model, prescribed-SST AMIP inference)
+    # overlay. Plotted as an anomaly from the model's OWN baseline-window mean:
+    # the near-surface sigma-level T carries a constant offset vs ERA5 2-m tas,
+    # so removing each series' own baseline leaves a like-for-like trend +
+    # variability comparison (the honest way to place a free-of-absolute-bias
+    # model on the fleet figure).
+    if args.legoesm_csv is not None and args.legoesm_csv.exists():
+        _d = np.genfromtxt(args.legoesm_csv, delimiter=",", names=True)
+        ly = np.atleast_1d(_d["year"]).astype(int)
+        lt = np.atleast_1d(_d["annual_global_mean_surfT_K"]).astype(float)
+        if ly.size:
+            if args.anomaly:
+                _m = (ly >= args.anomaly_base_start) & (ly <= args.anomaly_base_end)
+                _base = float(lt[_m].mean()) if _m.any() else float(lt.mean())
+                lt = lt - _base
+            ax.plot(
+                ly, lt, color="#AA3377", linewidth=2.5, marker="o",
+                markersize=3,
+                label="legoESM classical (AMIP, prescribed ERA5 SST)",
+            )
+            for y, v in zip(ly, lt):
+                rows.append(
+                    ("legoESM-classical", int(y), float("nan"), float(v),
+                     float("nan"))
+                )
+            logger.info(
+                f"Overlaid legoESM classical: {ly.size} years "
+                f"from {args.legoesm_csv}"
+            )
+    elif args.legoesm_csv is not None:
+        logger.warning(f"--legoesm-csv not found: {args.legoesm_csv}")
 
     ax.set_xlabel("year")
     ax.set_ylabel(

@@ -851,11 +851,20 @@ def make_aimip_classical_spectral_physics(
         sfc_emissivity_override=_sfc_emissivity_override,
     )
 
-    def non_rad_fn(state, grid_, sigma_coord):
-        result = non_rad_raw(state, grid_, sigma_coord)
+    def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):
+        # ``phys_state`` carries the prescribed-SST anchor for the
+        # surface-flux / turbulence scheme via ``surface_T_sfc_override``
+        # (the AMIP-inference path threads a per-month ERA5 SST here);
+        # ``forcing`` is forwarded for any non-rad scheme that consumes it.
+        # Both default ``None`` -> the free-running training/eval path
+        # (``spectral_rollout`` calls ``non_rad_fn(state, grid, sigma)``),
+        # which is byte-for-byte unchanged.
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
         return result[0] if isinstance(result, tuple) else result
 
-    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0):
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
         # with signature
         # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
@@ -867,9 +876,17 @@ def make_aimip_classical_spectral_physics(
         # synthesise a zero-tendency tracer dict here when the input
         # state carries tracers, keeping the rad and non-rad
         # tendency pytrees structurally identical.
-        rad_out = rad_only_raw(
-            state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
-        )
+        if forcing is not None:
+            # AMIP-inference path: prescribed SST + calendar arrive via the
+            # per-step TRACED forcing dict (forcing['T_sfc'/'day_of_year'/
+            # 'seconds_of_day']) so the JIT'd dycore step never retraces when
+            # the monthly SST / day-of-year changes (radiation/integration.py
+            # documents this as "the AMIP path").
+            rad_out = rad_only_raw(state, grid_, sigma_coord, forcing=forcing)
+        else:
+            rad_out = rad_only_raw(
+                state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
+            )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}
             for k, f in state.tracers.items():

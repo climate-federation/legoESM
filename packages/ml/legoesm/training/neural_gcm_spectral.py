@@ -772,6 +772,112 @@ def spectral_rollout(
     return final_state
 
 
+def spectral_amip_rollout(
+    initial_state: SpectralHydrostaticState,
+    non_rad_fn,
+    rad_fn,
+    grid: GaussianGrid,
+    sigma_coord: SigmaCoordinate,
+    pe_config: SpectralPEConfig,
+    dt: float,
+    n_steps: int,
+    *,
+    sst_col: jnp.ndarray,
+    sizing_phys_state,
+    day_of_year_base: jnp.ndarray | float = 0.0,
+    seconds_offset: jnp.ndarray | float = 0.0,
+    rad_update_interval: int = 36,
+    sponge_factor: jnp.ndarray | None = None,
+    spectral_filter: jnp.ndarray | None = None,
+) -> SpectralHydrostaticState:
+    """Prescribed-SST AMIP **inference** rollout (no autodiff).
+
+    Mirrors :func:`spectral_rollout`'s rad-gated path but injects a prescribed
+    sea-surface temperature ``sst_col`` (shape ``(ncol,)``) into BOTH surface
+    processes:
+
+    * surface-flux / turbulence — via ``phys_state.surface_T_sfc_override``
+      (``non_rad_fn`` reads it; this is what anchors near-surface air T to the
+      prescribed SST, the essence of the AMIP protocol); and
+    * radiation — via the per-step ``forcing['T_sfc']`` dict (``rad_fn``),
+      together with the seasonal + diurnal calendar
+      (``forcing['day_of_year'/'seconds_of_day']``) advanced from
+      ``day_of_year_base`` + ``seconds_offset`` by the scan step index.
+
+    ``sst_col``, ``day_of_year_base`` and ``seconds_offset`` are TRACED args, so
+    a single JIT'd segment is reused across every month of a multi-decade run
+    (SegmentForcing doctrine — no retrace when the monthly SST / calendar
+    changes). ``sizing_phys_state`` is a template :class:`PhysicsState` (correct
+    per-scheme carry shapes, zero-valued) built once by the caller with
+    ``init_physics_state``; the traced ``sst_col`` is injected as its
+    ``surface_T_sfc_override`` here. No gradient checkpointing (inference only),
+    so this is markedly cheaper per step than the training rollout.
+
+    ``non_rad_fn`` / ``rad_fn`` are the split-radiation pair returned by
+    ``make_aimip_classical_spectral_physics(..., split_rad=True)``; both forward
+    the optional ``phys_state`` / ``forcing`` kwargs used here.
+    """
+    integrator_name = pe_config.time_integrator
+    ms = grid.ms  # for sponge filter
+    tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
+
+    # Inject the (traced) prescribed SST as the surface-temperature anchor.
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
+    _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
+
+    def _forcing_at(step_idx):
+        # Elapsed simulated time -> advancing day-of-year (seasonal insolation)
+        # + wrapped seconds-of-day (diurnal cycle).
+        t = step_idx.astype(jnp.float64) * dt + _off
+        return {
+            "T_sfc": sst_col,
+            "day_of_year": _doy0 + t / 86400.0,
+            "seconds_of_day": jnp.mod(t, 86400.0),
+        }
+
+    def step_fn(carry, step_idx):
+        state, cached_rad = carry
+        fc = _forcing_at(step_idx)
+        should_refresh = (step_idx % rad_update_interval) == 0
+        new_rad = jax.lax.cond(
+            should_refresh,
+            lambda _: rad_fn(state, grid, sigma_coord, forcing=fc),
+            lambda _: cached_rad,
+            operand=None,
+        )
+
+        def tendency_fn(s):
+            non_rad = non_rad_fn(
+                s, grid, sigma_coord, phys_state=phys_state, forcing=fc,
+            )
+            combined = _add_phys_tendencies(non_rad, new_rad)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined,
+            )
+
+        new_state = dispatch_integrator(state, tendency_fn, dt, integrator_name)
+        if sponge_factor is not None:
+            new_state = apply_sponge_filter(new_state, sponge_factor, ms)
+        if spectral_filter is not None:
+            new_state = apply_spectral_filter_to_state(new_state, spectral_filter)
+        if tracer_filter is not None and new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=apply_filter_to_tracers(
+                    new_state.tracers, tracer_filter, grid,
+                )
+            )
+        return (new_state, new_rad), None
+
+    init_rad = rad_fn(
+        initial_state, grid, sigma_coord, forcing=_forcing_at(jnp.asarray(0)),
+    )
+    (final_state, _), _ = jax.lax.scan(
+        step_fn, (initial_state, init_rad), jnp.arange(n_steps),
+    )
+    return final_state
+
+
 # =============================================================================
 # Loss function
 # =============================================================================
