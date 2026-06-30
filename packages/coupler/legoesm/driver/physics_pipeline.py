@@ -1639,13 +1639,18 @@ class PhysicsPipeline:
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
-        solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
-        (PhysicsOutput, held tuple, T_land_new)``.
+        solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land, land_ml) ->
+        (PhysicsOutput, held tuple, T_land_new, land_ml_new)``.
 
         ``T_land`` is the slab-land skin temperature carried through the
         radiation sub-cycle; it is advanced on radiation steps and held
         constant otherwise.  Pass ``None`` (the default) for ocean-only
-        runs — the land tile is then inert.
+        runs — the land tile is then inert.  ``land_ml`` is the prognostic
+        multilayer (Richards) land state pytree carried alongside the slab
+        ``T_land`` (``None`` for the slab/ocean-only path) and returned as
+        the 4th value ``land_ml_new``.  Every consumer MUST unpack all four
+        returns — see ``compiled_segments`` (length-aware) and the per-step
+        loop in ``model_driver``.
 
         Parameters
         ----------
