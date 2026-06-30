@@ -103,7 +103,7 @@ def test_run_omip_loop_writes_restarts_at_cadence(tmp_path):
     # 6-hour runs at dt=10800 s = 3 h: 2 steps = 6 hours = 0.25 day.
     # checkpoint every 0.125 day → expect restarts at step 1 and step 2,
     # i.e. days 0, 0.125, 0.25.
-    state, diag, wall, ok = run_omip._run_omip_loop(
+    state, diag, wall, ok, _ = run_omip._run_omip_loop(  # +blowup_info (5-tuple)
         model, state, "latlon", grid, z_coord,
         dt=10800.0, n_steps=2, diag_every=1,
         jra55_state=js,

@@ -342,7 +342,7 @@ class TestCompiledStepIntegration:
 
         pipe = _bucket_step_pipeline()
         w0 = jnp.full(SHAPE_2D, 30.0)   # fairly dry bucket
-        phys_out, _, _ = _run(pipe, w0)
+        phys_out, _, _, _ = _run(pipe, w0)  # step_unified returns 4 (PR #650 land_ml)
 
         assert phys_out.w_land is not None
         assert phys_out.w_land.shape == w0.shape
@@ -354,6 +354,6 @@ class TestCompiledStepIntegration:
         # saturated surface (bucket off): proves beta is wired into the step.
         pipe_off = _bucket_step_pipeline()
         pipe_off.land_soil_bucket = False
-        out_off, _, _ = _run(pipe_off, None)
+        out_off, _, _, _ = _run(pipe_off, None)  # step_unified returns 4 (PR #650 land_ml)
         assert out_off.w_land is None
         assert not jnp.allclose(phys_out.dq_v_dt, out_off.dq_v_dt)
