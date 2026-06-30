@@ -99,11 +99,12 @@ def _parse_args():
     )
     p.add_argument(
         "--vmix", choices=("kpp", "tke", "constant"), default=None,
-        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
-             "default), 'tke' (paper's NEMO scheme — runnable via the default "
-             "5e-4 momentum-viscosity floor; --tke-momentum-visc-bg 1.2e-4 "
-             "opts down to the unstable paper viscosity), or 'constant' "
-             "(background-only, identical across grids). Both grids.",
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
+             "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
+             "default 5e-4 momentum floor fixes the day-39 instability so it "
+             "runs to ~day 226, but a 2nd viscosity-insensitive SW-corner mode "
+             "NaNs it ~day 230; multi-year needs kpp), or 'constant' "
+             "(background-only; also NaNs ~day 230). Both grids.",
     )
     p.add_argument(
         "--eos", choices=("wright", "nemo_seos"), default=None,

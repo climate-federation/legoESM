@@ -164,22 +164,25 @@ class DINOConfig:
     # Vertical-mixing turbulence closure. The paper (Kamm et al. 2025) uses the
     # NEMO TKE scheme (Blanke & Delecluse 1993); "tke" selects our TKE closure
     # configured to the paper (background visc/diff = A_v_bg / K_v_bg, convective
-    # ceiling K_conv, constant background, prandtl_mode="constant"). At the
-    # paper's A_v_bg=1.2e-4 our TKE NaNs ~day 39 — DIAGNOSED (2026-06-30,
-    # _diag_dino_tke_blowup.py) as a TKE-closure-specific surface-momentum
-    # runaway at the SW channel∩wall corner (lat −69.7/lon −49.5, wind τ→0), NOT
-    # a CFL (halving dt → same day-40 NaN) and NOT the low background per se
-    # (the "constant" scheme is stable at 1.2e-4). It is suppressed by a higher
-    # vertical-VISCOSITY background (``tke_momentum_visc_bg`` below); the tracer
-    # background K_v_bg stays at the paper value, so the thermocline comparison
-    # is unaffected. Default is still "kpp" (our production closure); "tke" is the
-    # paper-faithful closure, now runnable. Set per run via --vmix.
-    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper closure)
+    # ceiling K_conv, constant background, prandtl_mode="constant"). DINO lat-lon
+    # has TWO SW channel∩wall-corner (lat −69.7/lon −49.5, wind τ→0) surface-u
+    # instabilities (DIAGNOSED 2026-06-30, _diag_dino_tke_blowup.py):
+    #   (A) day ~39, TKE-specific, VISCOSITY-SENSITIVE — the ``tke_momentum_visc_bg``
+    #       floor (below) damps it (sweep 1.2e-4→d39, 5e-4→>90d).
+    #   (B) day ~230, scheme-GENERAL (NaNs tke AND "constant"), VISCOSITY-INSENSITIVE
+    #       (5e-4/1e-3/2e-3 all NaN ~d226-236) — a deep corner numerical mode,
+    #       analogous to the MPAS southern-channel one. NOT fixable by viscosity.
+    # So with the floor, "tke" runs to ~day 226 (good for the laminar sub-annual
+    # spin-up comparison) but is NOT multi-year-stable; only "kpp" (strong surface
+    # mixing suppresses BOTH) is multi-year-stable, and stays the DEFAULT. The
+    # tracer background K_v_bg is untouched, so the thermocline comparison is
+    # unaffected. Set per run via --vmix.
+    vmix_scheme: str = "kpp"       # "kpp" (multi-year-stable default) | "tke" (paper, ~226d)
     # TKE-only momentum-viscosity background [m²/s], a FLOOR applied (max with
     # A_v_bg) ONLY when vmix_scheme="tke" — see ``A_v_bg_effective``. 5e-4 (4×
-    # the paper's 1.2e-4) is the minimum that damps the SW-corner instability
-    # over the 90-day window (sweep: 1.2e-4→NaN d39, 2e-4→d47, 3e-4→d57,
-    # 5e-4→stable). kpp/constant are unaffected (stable at the paper A_v_bg).
+    # the paper's 1.2e-4) damps the day-39 instability (A); raising it further
+    # does NOT help instability (B) (2e-3 still NaNs ~d236), so 5e-4 is the
+    # chosen floor. kpp/constant are unaffected (they keep the paper A_v_bg).
     tke_momentum_visc_bg: float = 5.0e-4
 
     # ------------------------------------------------------------------
