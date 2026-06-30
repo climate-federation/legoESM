@@ -61,7 +61,7 @@ def test_config_selects_passive_dst3_advection():
     assert c.K_h == 0.0                                      # PTRACERS_diffKh=0
     assert c.eos == "linear"
     assert c.eos_linear.alpha_T == 0.0 and c.eos_linear.beta_S == 0.0
-    assert c.A_h == adv.VISC_AH
+    assert c.lateral_viscosity.A_h == adv.VISC_AH
 
 
 def test_recipe_carries_dye_in_salinity_slot():

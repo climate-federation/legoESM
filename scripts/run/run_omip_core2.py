@@ -3302,13 +3302,13 @@ def main() -> int:
         if visc_schedule and visc_seg_idx < len(visc_schedule):
             _day0, _ah, _cs = visc_schedule[visc_seg_idx]
             if (step - 1) * dt >= _day0 * 86400.0:
-                if (_ah, _cs) != (float(model.config.A_h),
-                                  float(model.config.C_smag_lap)):
+                if (_ah, _cs) != (float(model.config.lateral_viscosity.A_h),
+                                  float(model.config.lateral_viscosity.C_smag_lap)):
                     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid \
                         import LatLonCGridOceanModel
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
-                        model.config._replace(A_h=_ah, C_smag_lap=_cs))
+                        model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)))
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
                       f"A_h={_ah:g} C_smag_lap={_cs:g} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",

@@ -252,6 +252,61 @@ class TestWallclockExhausted(unittest.TestCase):
         self.assertTrue(_wallclock_exhausted(3100.0, 3600.0, 600.0))  # within buffer
         self.assertTrue(_wallclock_exhausted(3600.0, 3600.0, 600.0))  # at budget
 
+    def test_no_double_write_on_checkpoint_boundary(self):
+        """Wallclock exit must not re-write a checkpoint already written this step.
+
+        When the wallclock budget expires exactly at a periodic checkpoint
+        boundary, _maybe_wallclock_exit is called immediately after
+        save_checkpoint for the same step.  The second write can corrupt the
+        .npz (partial flush before sys.exit) causing SHA-256 mismatch on
+        reload.  Guard: skip ckpt_fn if _last_checkpoint_step == step.
+        """
+        import unittest.mock as mock
+        from legoesm.driver.model_driver import _wallclock_exhausted, ModelDriver
+
+        drv = _make_driver("slab_simple")
+        atm = drv._atm
+
+        call_count = []
+        def fake_ckpt(step, day):
+            call_count.append(step)
+
+        # Simulate: regular checkpoint already ran for step 42.
+        atm._last_checkpoint_step = 42
+        atm._run_wallclock_start = 0.0
+        atm.diagnostics = mock.MagicMock()
+
+        with mock.patch(
+            "legoesm.driver.model_driver._wallclock_exhausted", return_value=True
+        ):
+            with self.assertRaises(SystemExit):
+                atm._maybe_wallclock_exit(fake_ckpt, 42, 5.0)
+
+        self.assertEqual(call_count, [], "ckpt_fn must not be called again for same step")
+
+    def test_wallclock_writes_checkpoint_when_no_prior_save(self):
+        """Wallclock exit must write the checkpoint when no prior save ran this step."""
+        import unittest.mock as mock
+
+        drv = _make_driver("slab_simple")
+        atm = drv._atm
+
+        call_count = []
+        def fake_ckpt(step, day):
+            call_count.append(step)
+
+        atm._last_checkpoint_step = None  # no checkpoint written yet
+        atm._run_wallclock_start = 0.0
+        atm.diagnostics = mock.MagicMock()
+
+        with mock.patch(
+            "legoesm.driver.model_driver._wallclock_exhausted", return_value=True
+        ):
+            with self.assertRaises(SystemExit):
+                atm._maybe_wallclock_exit(fake_ckpt, 42, 5.0)
+
+        self.assertEqual(call_count, [42], "ckpt_fn must be called when step is new")
+
 
 class TestCarbonRadiationCoupling(unittest.TestCase):
     """Prognostic CO2 tracer feeds the atmosphere radiation GHG (#3 / C4MIP)."""

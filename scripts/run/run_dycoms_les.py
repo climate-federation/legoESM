@@ -65,12 +65,12 @@ from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
-import os as _os  # noqa: E402
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
-_GSAM_ROOT = _os.environ.get(
-    "LEGOESM_GSAM_ROOT", "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7"
-)
-_DEFAULT_CASE = f"{_GSAM_ROOT}/CASES/DYCOMS_RF01"
+# Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
+# cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
+# resolve_sam_case_dir.
+_DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
 _FCOR = 0.376e-4
 # Stevens et al. 2005 RF01 radiation + subsidence parameters.
 _KAPPA_RAD = 85.0          # LW absorption [m²/kg]
@@ -155,6 +155,14 @@ def build(args, dtype):
         theta_hyperdiff_coeff=args.theta_hyperdiff)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
+    if not case.is_dir():
+        sys.exit(
+            f"[run_dycoms_les] DYCOMS case directory not found: {case}\n"
+            f"  This case reads the gSAM CASES/DYCOMS_RF01 deck. Populate the "
+            f"repo-local cache:\n"
+            f"    python scripts/data/fetch_les_forcing.py --only DYCOMSII\n"
+            f"  or point at a checkout: LEGOESM_GSAM_ROOT=<root containing "
+            f"CASES/>, or --case-dir <path/to/CASES/DYCOMS_RF01>.")
     snd = read_sam_snd(case / "snd")
     lsf = read_sam_lsf(case / "lsf")
     sfc0 = surface_at_day(read_sam_sfc(case / "sfc"), day=0.0)

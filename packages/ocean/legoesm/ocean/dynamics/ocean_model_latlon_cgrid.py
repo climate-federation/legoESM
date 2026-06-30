@@ -894,8 +894,8 @@ class LatLonCGridOceanModel:
     def _validate_config(config: LatLonCGridOceanConfig) -> None:
         """Validate configuration ranges."""
         nonnegative = {
-            "A_h": config.A_h,
-            "B_h": config.B_h,
+            "A_h": config.lateral_viscosity.A_h,
+            "B_h": config.lateral_viscosity.B_h,
             "K_h": config.K_h,
             "A_v": config.A_v,
             "K_v": config.K_v,
@@ -907,7 +907,7 @@ class LatLonCGridOceanModel:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
 
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
-        # horizontal viscosity via config.A_h/config.B_h, GM/Redi via the
+        # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the
         # top-level config.gm_redi field (applied in the model step). The
         # physics-pathway lateral-mixing factory (config.physics.lateral_mixing)
         # is cubed-sphere-only — harmonic/biharmonic crash on lat-lon array
@@ -920,7 +920,7 @@ class LatLonCGridOceanModel:
                 "On the lat-lon C-grid, config.physics.lateral_mixing.scheme="
                 f"{config.physics.lateral_mixing.scheme!r} is unsupported (the "
                 "physics lateral-mixing factory is cubed-sphere-only). Set "
-                "horizontal viscosity via config.A_h / config.B_h and GM/Redi "
+                "horizontal viscosity via config.lateral_viscosity.A_h / config.lateral_viscosity.B_h and GM/Redi "
                 "via the top-level config.gm_redi; keep "
                 "physics.lateral_mixing.scheme='none'."
             )
@@ -935,8 +935,8 @@ class LatLonCGridOceanModel:
         # some terms and 3-D for others (the 2-D x–z oracle has none of them).
         if getattr(config, "meridionally_flat", False):
             _ungated = []
-            _visc_on = (config.A_h > 0.0 or config.B_h > 0.0
-                        or getattr(config, "C_smag", 0.0) > 0.0)
+            _visc_on = (config.lateral_viscosity.A_h > 0.0 or config.lateral_viscosity.B_h > 0.0
+                        or getattr(config.lateral_viscosity, "C_smag", 0.0) > 0.0)
             if _visc_on and config.lateral_viscosity_operator == "flux_divergence":
                 _ungated.append(
                     'A_h/B_h/C_smag>0 with lateral_viscosity_operator='
@@ -1093,8 +1093,8 @@ class LatLonCGridOceanModel:
         # each is ADDITIVE to the A_h/B_h/C_smag/C_leith blocks, so combining them
         # double-applies friction. Fail loudly rather than silently over-damp.
         if config.lateral_friction_scheme in ("om4p25", "qg_leith") and any(
-            getattr(config, k, 0.0) > 0.0
-            for k in ("A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")
+            config.flat_get(k) > 0.0  # #501: A_h/B_h/C_smag/C_smag_lap nested in
+            for k in ("A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")  # lateral_viscosity
         ):
             raise ValueError(
                 f"lateral_friction_scheme={config.lateral_friction_scheme!r} is the "
@@ -1208,6 +1208,23 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
+        # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
+        # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
+        # and silently ignore it — so a non-default filter under an implicit solver
+        # reads as "applied" while doing nothing. Warn (not raise: harmless, just
+        # inert) so the silent no-op is visible.
+        if (config.barotropic.barotropic_time_filter != "cosine"
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            import warnings
+            warnings.warn(
+                f"barotropic_time_filter={config.barotropic.barotropic_time_filter!r} "
+                f"has NO effect under barotropic_solver="
+                f"{config.barotropic.barotropic_solver!r}: the time filter is consumed "
+                "only by the explicit_substep barotropic substep. Use "
+                'barotropic_solver="explicit_substep" to apply it, or leave the filter '
+                'at its "cosine" default to silence this warning.',
+                stacklevel=3)
         # Mirrors the flux-form tendency dispatch (its else-raise) plus the
         # SOM special case handled in step(); keep in sync if a scheme is added.
         _valid_tracer_adv = {
@@ -1820,7 +1837,7 @@ class LatLonCGridOceanModel:
         #   ∂U_bar/∂t |_diss = -ν₄ · ∇⁴ U_bar.
         # MOM6/HIM BIHARMONIC_BAROTROPIC analog.  No-op at default
         # ``B_h_barotropic = 0`` (bit-exact backward compat).
-        if getattr(self.config, "B_h_barotropic", 0.0) > 0.0:
+        if getattr(self.config.lateral_viscosity, "B_h_barotropic", 0.0) > 0.0:
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 vector_bilaplacian_cgrid, biharmonic_scaling_factor,
             )
@@ -1840,7 +1857,7 @@ class LatLonCGridOceanModel:
             # biharmonic CFL there.  Same convention as the layered B_h.
             scale_u, scale_v = biharmonic_scaling_factor(_grid)
             nu4 = jnp.asarray(
-                self.config.B_h_barotropic, dtype=F_slow_u.dtype,
+                self.config.lateral_viscosity.B_h_barotropic, dtype=F_slow_u.dtype,
             )
             scale_u_b = scale_u.astype(F_slow_u.dtype)[:, None]
             scale_v_b = scale_v.astype(F_slow_v.dtype)[:, None]
@@ -3944,7 +3961,7 @@ class LatLonCGridOceanModel:
         # After the prognostic update so it damps whatever the step produced, and
         # BEFORE the freeze floor so the surface temperature cap is the final word
         # (the zonal filter can otherwise pull a surface cell back below freezing).
-        if self.config.use_polar_filter:
+        if self.config.polar_filter.use_polar_filter:
             new_state = self._apply_polar_filter(new_state, dt, grid=grid)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
@@ -4036,9 +4053,9 @@ class LatLonCGridOceanModel:
             lat_v=lat_v, cos_lat_v=cos_lat_v)
         kw = dict(
             dt=dt,
-            max_wave_speed=cfg.polar_filter_max_wave_speed,
-            cutoff_lat_deg=cfg.polar_filter_cutoff_lat_deg,
-            safety_factor=cfg.polar_filter_safety_factor,
+            max_wave_speed=cfg.polar_filter.polar_filter_max_wave_speed,
+            cutoff_lat_deg=cfg.polar_filter.polar_filter_cutoff_lat_deg,
+            safety_factor=cfg.polar_filter.polar_filter_safety_factor,
         )
         mask_c = compute_polar_filter_mask(pf_grid, is_v_face=False, **kw)
         mask_v = compute_polar_filter_mask(pf_grid, is_v_face=True, **kw)

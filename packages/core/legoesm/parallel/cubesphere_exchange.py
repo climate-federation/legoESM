@@ -539,8 +539,8 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
     # cubed-sphere SPMD tests vs. pre-iter-93b baseline). The
     # outer-scope construction runs ONCE per factory call (when
     # `_make_exchange_ppermute` is called from
-    # `activate_spmd_halo_backend`), which is after
-    # `ensure_metal_or_fallback()` has run — so no Metal crash.
+    # `activate_spmd_halo_backend`), which is after backend
+    # configuration has run.
     ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
     ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
     ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)

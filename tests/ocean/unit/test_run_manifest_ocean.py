@@ -69,7 +69,7 @@ def test_codec_drops_unknown_field_forward_compat():
     d = ocean_config_to_dict(cfg)
     d["a_since_removed_field"] = 99  # simulate an older manifest
     rebuilt = ocean_config_from_dict(d)
-    assert rebuilt.A_h == 1.234e4
+    assert rebuilt.lateral_viscosity.A_h == 1.234e4
 
 
 def test_codec_rejects_non_legoesm_type():
@@ -148,7 +148,7 @@ def test_manifest_from_run_record_validates():
 def test_manifest_tamper_detected_ocean():
     cfg = _latlon_cfg()
     m = build_run_manifest(cfg)
-    m["config"]["resolved_config"]["A_h"] = 1.0  # tamper without fixing the hash
+    m["config"]["resolved_config"]["lateral_viscosity"]["A_h"] = 1.0  # tamper (nested #501)
     with pytest.raises(ValueError, match="config_hash does not match"):
         validate_run_manifest(m)
 

@@ -150,7 +150,7 @@ def test_config_dispatch_and_full_step():
                                  momentum_advection="vector_invariant")
     cfg = r.model_config._replace(
         lateral_friction_scheme="om4p25", omp25=OMp25Config(),
-        A_h=0.0, B_h=0.0, C_smag=0.0, C_leith=0.0)
+        lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=0.0, B_h=0.0, C_smag=0.0, C_leith=0.0))
     model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
     s = r.initial_state
 
@@ -180,6 +180,6 @@ def test_om4p25_with_nonzero_other_friction_rejected():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     r = build_eady_uniform_setup(n_lat=12, n_lon=12,
                                  momentum_advection="vector_invariant")
-    bad = r.model_config._replace(lateral_friction_scheme="om4p25", A_h=1.0e4)
+    bad = r.model_config._replace(lateral_friction_scheme="om4p25", lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=1.0e4))
     with pytest.raises(ValueError, match="sole lateral friction"):
         LatLonCGridOceanModel(r.grid, r.z_coord, bad)

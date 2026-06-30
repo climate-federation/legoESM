@@ -10,4 +10,5 @@ days: 90
 snapshot_every_days: 5
 mpas_resolution_km: 97.0  # ~9686 cells, area-matched to the 50-col Mercator
 mpas_eq_visc_boost: 8.0
+vmix: kpp                 # MPAS vmix is implicit constant-coeff (scheme inert here)
 output_dir: results/dino_mpas

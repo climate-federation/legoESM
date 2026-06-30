@@ -7,4 +7,5 @@ days: 90
 snapshot_every_days: 10
 mpas_resolution_km: 97.0
 mpas_eq_visc_boost: 8.0
+vmix: kpp                 # original deliverable used KPP (pre-TKE-switch)
 output_dir: results/dino_mpas_90d_boost8

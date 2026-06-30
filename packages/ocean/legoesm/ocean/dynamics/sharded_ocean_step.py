@@ -144,7 +144,7 @@ def _step_body(model, state, dt, *, grid, vertex_mask):
     else:
         new_state = model._step_impl(
             state, dt, grid=grid, vertex_mask=vertex_mask)
-    if model.config.use_polar_filter:
+    if model.config.polar_filter.use_polar_filter:
         new_state = model._apply_polar_filter(new_state, dt, grid=grid)
     if model.config.freeze_floor:
         new_state = model._apply_freeze_floor(new_state)

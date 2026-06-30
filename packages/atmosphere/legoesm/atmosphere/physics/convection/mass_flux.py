@@ -50,6 +50,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz,
     compute_rho,
@@ -214,8 +215,37 @@ def apply_mass_flux_kernel(
     M_u_max: float,
     p_min_convection: float = _P_MIN_CONVECTION_PA,
     p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
+    *,
+    subsidence_solve: str = "advective",
+    p_half: jax.Array | None = None,
+    dt: float | None = None,
+    theta_implicit: float = 1.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Mass-flux core kernel: compensating subsidence + detrainment.
+
+    Selectable vertical solve via ``subsidence_solve`` (validated at fn
+    entry on the static Python value; CLAUDE.md dispatch-hardening):
+
+    * ``"advective"`` (default) — the legacy donor-cell advective
+      compensating-subsidence ``(M/ρ)·∂φ/∂z`` plus local detrainment.
+      BYTE-IDENTICAL to the historical kernel; conserves only to
+      truncation order because the advective form leaves a
+      non-telescoping ``(φ/ρ)·dM/dz`` residual (column total-static-
+      energy leak that shrinks with resolution).
+    * ``"implicit_flux"`` — an IMPLICIT (backward-Euler, θ-blended)
+      CONSERVATIVE flux-form solve of the compensating subsidence +
+      detrainment as a tridiagonal system per column (see
+      :func:`apply_mass_flux_kernel_implicit_flux`).  CONSERVATION is
+      unconditional (the flux divergence telescopes for any M / θ / dt);
+      STABILITY is the donor-cell backward-Euler kind (damps the 2Δz
+      checkerboard the EXPLICIT flux form NaN'd on; diagonally dominant
+      for ``θ·dt·g·M/Δp < 1``, comfortably met in the production regime —
+      see the implicit kernel docstring) AND flux-form
+      conservative: it transports dry static energy ``s = c_p T + g z``
+      and vapor ``q_v`` so that the column integrals ``∫ c_p dT dp/g``
+      and ``∫ L_v dq_v dp/g`` telescope to the (vanishing) top/base
+      boundary flux — i.e. MSE ``h = s + L_v q_v`` is conserved by the
+      transport to machine precision.  Requires ``p_half`` and ``dt``.
 
     Given the vertical mass-flux profile ``M_profile`` and the
     entraining updraft thermodynamics ``(T_u, q_v_u, q_c_u)``,
@@ -249,6 +279,31 @@ def apply_mass_flux_kernel(
     instantly.
     Unit check: (1/m) * (kg/m²/s) * (kg/kg) / (kg/m³) = 1/s × kg/kg.
     """
+    # Dispatch-hardening (CLAUDE.md): validate the static scheme value at
+    # fn entry; a bare ``else`` would silently run different physics on a
+    # typo.  ``subsidence_solve`` is a Python str (static), so this raises
+    # at trace time, never inside a traced branch.
+    if subsidence_solve not in ("advective", "implicit_flux"):
+        raise ValueError(
+            f"apply_mass_flux_kernel: unknown subsidence_solve "
+            f"{subsidence_solve!r}; expected 'advective' or 'implicit_flux'"
+        )
+    if subsidence_solve == "implicit_flux":
+        if p_half is None or dt is None:
+            raise ValueError(
+                "apply_mass_flux_kernel(subsidence_solve='implicit_flux') "
+                "requires p_half and dt (the conservative flux solve is a "
+                "backward-Euler step)."
+            )
+        return apply_mass_flux_kernel_implicit_flux(
+            T, q_v, p_full, p_half,
+            T_u, q_v_u, q_c_u, M_profile,
+            z, rho, delta_0, M_u_max, dt,
+            p_min_convection=p_min_convection,
+            p_gate_sharpness=p_gate_sharpness,
+            theta_implicit=theta_implicit,
+        )
+
     dT_dz, dq_dz = _compute_subsidence_gradients(T, q_v, z)
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
 
@@ -280,6 +335,215 @@ def apply_mass_flux_kernel(
     dq_v_dt = dq_subsidence + dq_detrain
 
     dq_c_conv_dt = delta_0 * M_profile * jnp.clip(q_c_u, 0.0, None) / rho_safe
+    return dT_dt, dq_v_dt, dq_c_conv_dt
+
+
+def apply_mass_flux_kernel_implicit_flux(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    T_u: jax.Array,
+    q_v_u: jax.Array,
+    q_c_u: jax.Array,
+    M_profile: jax.Array,
+    z: jax.Array,
+    rho: jax.Array,
+    delta_0: float,
+    M_u_max: float,
+    dt: float,
+    p_min_convection: float = _P_MIN_CONVECTION_PA,
+    p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
+    theta_implicit: float = 1.0,
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    r"""IMPLICIT (backward-Euler / θ-blended) CONSERVATIVE flux-form solve
+    of the compensating subsidence + detrainment, per column.
+
+    Coordinate / sign convention (stated AT the term per CLAUDE.md):
+    ``z`` increases UPWARD; arrays are surface-LAST (index 0 = model
+    top, index ``nlev-1`` = surface), so the cell ABOVE an interface has
+    the LOWER index.  ``M_profile ≥ 0`` is the UPDRAFT mass flux
+    [kg/m²/s] (upward); the compensating environmental subsidence has
+    mass flux ``-M`` (downward, ``w_env = -M/ρ < 0``).
+
+    Continuous flux form (z up).  The conservative form CONSISTENT with the
+    legacy advective compensating-subsidence ``+(M/ρ)∂φ/∂z`` is::
+
+        ρ ∂φ/∂t = ∂/∂z [ M (φ − φ_u) ]                              (1)
+
+    NOTE the sign: it is ``M(φ − φ_u)``, NOT ``M(φ_u − φ)``.  The latter
+    flips the compensating-subsidence sign (anti-diffusive ⇒ a 2Δz
+    checkerboard GROWS — verified numerically) — see the ``_solve``
+    docstring for the derivation from ``∂s_u/∂z = −ε(s_u − s)``.  The
+    single divergence bundles compensating subsidence AND detrainment; its
+    column integral telescopes::
+
+        ∫ ρ ∂φ/∂t dz = [M(φ−φ_u)]_top − [M(φ−φ_u)]_base = 0
+
+    because ``M = 0`` below cloud base and above the level of neutral
+    buoyancy.  So ``∫ ∂φ/∂t dp/g`` is conserved by the TRANSPORT — unlike
+    the advective ``(M/ρ)∂φ/∂z + δM(φ_u−φ)`` form, which leaves a
+    non-telescoping ``(φ/ρ)dM/dz`` residual.
+
+    Finite-volume discretisation (conservative, machine-precision
+    telescoping).  Layer ``k`` (mass per area ``Δp_k/g``, ``Δp_k =
+    p_half[k+1] − p_half[k] > 0``)::
+
+        (Δp_k/g) dφ_k/dt = G_k − G_{k+1}                            (2)
+
+    where the interface flux ``G_i = M_i (φ_env[i-1] − φ_u[i])`` uses
+    UPSTREAM donors — the subsiding environment (downward) donates from the
+    cell ABOVE (level ``i-1``, the IMPLICIT term); the updraft (upward)
+    donates from the cell BELOW (level ``i``, EXPLICIT).  Interface mass
+    flux ``M_i =
+    ½(M[i-1]+M[i])`` for interior faces, ``M_0 = M_nlev = 0`` (top and
+    surface).  The SAME ``M_i`` appears in ``G_k`` (bottom of layer
+    ``k-1``) and ``G_{k+1}`` (top of layer ``k``), so the column sum is
+    ``Σ_k (G_k − G_{k+1}) = G_0 − G_nlev = 0`` for ANY M-profile —
+    conservation is unconditional (independent of θ, dt, or the M
+    shape/clip).
+
+    Backward-Euler (θ-implicit) for the IMPLICIT environment ``φ`` with
+    the EXPLICIT updraft property ``φ_u``::
+
+        φ^{n+1}_k − φ^n_k = (dt g/Δp_k)·θ·(G_k − G_{k+1})^{n+1}
+                          + (dt g/Δp_k)·(1−θ)·(G_k − G_{k+1})^{n}
+
+    Writing ``r_k = θ·dt·g/Δp_k`` and using the env-donor upstream (cell
+    above only ⇒ the implicit coupling is to ``φ^{n+1}[k-1]`` ONLY, a
+    LOWER-bidiagonal special tridiagonal with zero super-diagonal)::
+
+        -r_k M_k φ^{n+1}[k-1] + (1 + r_k M_{k+1}) φ^{n+1}[k]
+            = φ^n_k + r_k (M_{k+1} φ_u[k+1] − M_k φ_u[k])     (+ (1−θ) expl.)
+
+    Stability.  The per-row amplification is ``r_k M_k / (1 + r_k
+    M_{k+1})``.  Strict diagonal dominance ``1 + r_k M_{k+1} > r_k M_k``
+    holds wherever ``M`` increases downward (entraining lower branch) and,
+    crucially, ALWAYS in the limit ``r → 0``; on the DESCENDING side of a
+    bell-shaped ``M`` (``M_k > M_{k+1}``, e.g. the layer just above the
+    cloud base where ``M_{k+1} → 0``) the row is dominant only when
+    ``r_k M_k < 1`` — i.e. a donor-cell CFL-like bound ``θ·dt·g·M_k/Δp_k
+    < 1``.  For the production regime (``M ≤ M_u_max ≈ 0.05 kg/m²/s``,
+    ``dt ≈ 1800 s``, ``Δp ≳ 2–3 kPa``) ``r_k M_k ≈ 0.3 ≪ 1``, so the
+    backward-Euler solve is unconditionally damping in practice — and far
+    more robust than the EXPLICIT flux form (which NaN'd on the same
+    M-profile): the implicit operator removes the 2Δz checkerboard rather
+    than amplifying it.  The claim is "stable for the production M/dt/Δp
+    regime", NOT literally unconditional for arbitrary ``M``.  Solved with
+    the shared AD-safe
+    :func:`legoesm.timestepping.tridiagonal.thomas_solve_batched`
+    (reverse-mode differentiable, vmap-able).  ``θ = 1`` is fully implicit
+    (default, maximally damping); ``θ ∈ [0.5, 1]`` allowed.
+
+    Conserved quantity & two-test reconciliation.  We transport DRY
+    STATIC ENERGY ``s = c_p T + g z`` (plume ``s_u = c_p T_u + g z``;
+    ``z`` is Eulerian so ``dT = ds/c_p``) and VAPOR ``q_v`` (plume
+    ``q_v_u``) — both via (2), so ``∫ c_p dT dp/g`` and ``∫ L_v dq_v dp/g``
+    telescope to the vanishing boundary flux ⇒ column MSE ``h = s + L_v
+    q_v`` is conserved by the TRANSPORT to machine precision.  The
+    DETRAINED condensate ``dq_c = δ·M·q_c_u/ρ`` (≥ 0, identical to the
+    advective kernel) is the genuine cloud-water SOURCE handed to
+    microphysics; it is matched by a vapor sink ``−dq_c`` so the column
+    TOTAL water ``∫(dq_v + dq_c) dp/g`` closes and the column MSE budget
+    ``c_p∫dT + L_v∫dq_v + L_v∫dq_c = −L_v∫dq_c (cloud latent exported) +
+    L_v∫dq_c = 0`` closes to machine precision (the detrained cloud
+    carries its latent heat forward, released downstream by
+    microphysics).  Returns ``(dT_dt, dq_v_dt, dq_c_conv_dt)``.
+    """
+    g = constants.g
+    c_pd = constants.c_pd
+    ncol, nlev = T.shape
+    rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
+
+    # Same per-level cap + stratospheric gate as the advective kernel so
+    # the transported mass flux is identical at the source.
+    M_profile = jnp.clip(M_profile, 0.0, M_u_max)
+    M_profile = M_profile * stratosphere_mass_flux_gate(
+        p_full, p_min_convection, p_gate_sharpness,
+    )
+
+    dp = p_half[:, 1:] - p_half[:, :-1]              # (ncol, nlev) > 0
+    dp = jnp.clip(dp, 1.0, None)                     # coeff-ok: Δp floor (safe denom)
+
+    # Interface (face) mass flux, faces i = 0..nlev (nlev+1 of them).
+    # Interior faces i=1..nlev-1 sit between level i-1 (above) and i
+    # (below); top face (i=0) and surface face (i=nlev) carry M = 0.
+    M_int = jnp.zeros((ncol, nlev + 1), dtype=M_profile.dtype)
+    M_int = M_int.at[:, 1:nlev].set(0.5 * (M_profile[:, :-1] + M_profile[:, 1:]))
+    Mk = M_int[:, 0:nlev]        # face k = TOP face of layer k
+    Mk1 = M_int[:, 1:nlev + 1]   # face k+1 = BOTTOM face of layer k
+
+    # θ-implicit blend factor (clamp to [0.5, 1]; θ ≥ 0.5 removes the
+    # explicit-side amplification, default 1.0 is fully implicit and most
+    # damping).  coeff-ok: stability bound.
+    theta = jnp.clip(theta_implicit, 0.5, 1.0)  # coeff-ok: θ-implicit stable range
+    r = theta * dt * g / dp                          # (ncol, nlev)
+
+    def _solve(phi_n: jax.Array, phi_u: jax.Array) -> jax.Array:
+        """Backward-Euler conservative flux solve for one tracer.
+
+        The conservative env tendency consistent with the legacy advective
+        compensating-subsidence ``+(M/ρ)∂φ/∂z`` is ``ρ ∂φ/∂t =
+        ∂_z[M(φ − φ_u)]`` (NOT ``∂_z[M(φ_u − φ)]`` — that flips the
+        subsidence sign and is anti-diffusive ⇒ a 2Δz checkerboard GROWS,
+        verified numerically).  Finite-volume per layer ``k``:
+
+            (Δp_k/g) dφ_k/dt = G_k − G_{k+1},  G_i = M_i(φ[i-1] − φ_u[i])
+
+        with env donor = cell ABOVE (i-1; downward subsidence is upstream
+        from above ⇒ implicit sub-diagonal) and updraft donor = cell BELOW
+        (i; upward ⇒ explicit).  Backward-Euler:
+
+            -r_k M_k φ^{n+1}[k-1] + (1 + r_k M_{k+1}) φ^{n+1}[k]
+                = φ^n_k + r_k (M_{k+1} φ_u[k+1] − M_k φ_u[k])
+
+        Diagonally dominant (b = 1 + r M_{k+1} > |a| = r M_k) wherever M
+        increases downward and, in the limit r -> 0, always; on the
+        descending side of the bell (M_k > M_{k+1}, M_{k+1} -> 0 near
+        cloud base) dominance needs the donor-cell CFL-like bound
+        r M_k < 1 (theta*dt*g*M_k/dp < 1), comfortably met in the
+        production regime (r M ~ 0.3 at M<=0.05, dt=1800, dp>=2-3 kPa).
+        Where dominant the homogeneous solve damps; the explicit updraft
+        source is bounded.  See the header docstring for the full bound.
+        """
+        # Tridiagonal (lower-bidiagonal): a couples k-1, b diag, c=0.
+        a = (-r * Mk)
+        a = a.at[:, 0].set(0.0)                       # top face M_0 = 0
+        b = 1.0 + r * Mk1
+        c = jnp.zeros_like(b)
+        # Explicit updraft source: r_k (M_{k+1} φ_u[k+1] − M_k φ_u[k]) =
+        # −r_k·S_impl.  φ_u[k+1] beyond surface = 0.  The MINUS sign is the
+        # upward-updraft flux divergence ``−∂_z[M φ_u]`` (codex/derivation:
+        # a ``+`` here flips the updraft transport and destabilises).
+        phi_u_kp1 = jnp.pad(phi_u[:, 1:], ((0, 0), (0, 1)))
+        S_impl = Mk * phi_u - Mk1 * phi_u_kp1
+        d = phi_n - r * S_impl
+        if theta_implicit < 1.0:
+            # θ-blend: add the (1−θ) EXPLICIT transport of the OLD field,
+            # SAME flux convention as the implicit part: G_i^n =
+            # M_i(φ_n[i-1] − φ_u[i]); explicit divergence G_k − G_{k+1}.
+            phi_n_above = jnp.pad(phi_n[:, :-1], ((0, 0), (1, 0)))   # φ_n[k-1]
+            G_k = Mk * (phi_n_above - phi_u)
+            G_kp1 = Mk1 * (phi_n - phi_u_kp1)
+            div_expl = G_k - G_kp1
+            d = d + (1.0 - theta) * dt * g / dp * div_expl
+        return thomas_solve_batched(a, b, c, d)
+
+    # --- Transport dry static energy s = c_p T + g z (conserves MSE) ---
+    s = c_pd * T + g * z
+    s_u = c_pd * T_u + g * z
+    s_new = _solve(s, s_u)
+    dT_dt = (s_new - s) / (c_pd * dt)                # z Eulerian ⇒ dT = ds/c_p
+
+    # --- Transport vapor q_v (plume q_v_u) -----------------------------
+    q_v_new = _solve(q_v, q_v_u)
+    dq_v_transport = (q_v_new - q_v) / dt
+
+    # --- Detrained condensate: genuine cloud source (≥ 0), identical to
+    #     the advective kernel.  Matched by a vapor sink so column total
+    #     water closes; the cloud carries its latent heat forward. ------
+    dq_c_conv_dt = delta_0 * M_profile * jnp.clip(q_c_u, 0.0, None) / rho_safe
+    dq_v_dt = dq_v_transport - dq_c_conv_dt
     return dT_dt, dq_v_dt, dq_c_conv_dt
 
 

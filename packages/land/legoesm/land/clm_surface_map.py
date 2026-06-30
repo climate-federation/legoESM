@@ -30,6 +30,7 @@ import numpy as np
 
 import equinox as eqx
 
+from legoesm import constants
 from legoesm.land.surface_params import (
     LandSurfaceParams, clm5_pft_table, CLM5_PFT_NAMES, PARAM_NAMES)
 from legoesm.land import soil_texture
@@ -69,19 +70,19 @@ TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 # the PLANT btran water-stress thresholds theta_wp/theta_fc (distinct from the soil
 # van-Genuchten retention).  Full-grid: RMSE 3.13 K, bias +0.44, seasonal-amp RMS 4.05.
 # Selected via CLMSurfaceParamProvider(variant="multilayer"); slab unchanged.  (17 PFTs.)
-_TUNED_PFT_ALBEDO_MULTILAYER = (0.3007, 0.1136, 0.1318, 0.1474, 0.1404, 0.1521, 0.1602,
-                                0.1700, 0.1700, 0.1476, 0.2004, 0.2124, 0.2206, 0.2068,
-                                0.2006, 0.1805, 0.1800)
-_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9601, 0.9547, 0.9578, 0.9635, 0.9601, 0.9634,
-                                    0.9601, 0.9624, 0.9594, 0.9530, 0.9601, 0.9675,
-                                    0.9576, 0.9634, 0.9601, 0.9601, 0.9600)
-_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.10, 2.25, 1.41, 1.49, 1.49, 1.81, 1.49, 1.33, 1.08,
-                                    1.25, 0.79, 0.54, 0.37, 0.50, 0.50, 0.50, 0.50)
+_TUNED_PFT_ALBEDO_MULTILAYER = (0.2993, 0.1146, 0.1308, 0.1478, 0.1397, 0.1492, 0.1598,
+                                0.1700, 0.1700, 0.1430, 0.1997, 0.2114, 0.2098, 0.1978,
+                                0.1995, 0.1794, 0.1800)
+_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9597, 0.9556, 0.9559, 0.9640, 0.9597, 0.9589,
+                                    0.9597, 0.9642, 0.9583, 0.9510, 0.9597, 0.9631,
+                                    0.9597, 0.9589, 0.9597, 0.9597, 0.9600)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.10, 2.23, 1.32, 1.50, 1.45, 1.85, 1.44, 1.45, 1.09,
+                                    0.63, 0.76, 0.57, 0.42, 0.52, 0.48, 0.48, 0.50)
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
-# rough ~1-2 m, grass/crop/bare smooth ~0.02-0.22 m).  Calibrated under MOST (the
+# rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.
-_TUNED_PFT_Z0_MULTILAYER = (0.0051, 1.1125, 1.0971, 1.0151, 1.6512, 1.2969, 1.6512, 0.9646,
-                            1.0455, 0.0328, 0.0640, 0.2190, 0.0995, 0.0241, 0.0204, 0.0390, 0.0600)
+_TUNED_PFT_Z0_MULTILAYER = (0.0051, 1.2662, 0.9216, 0.7534, 2.0903, 1.5671, 2.0903, 0.8359,
+                            1.1281, 0.0296, 0.1138, 0.2255, 0.0561, 0.0323, 0.0337, 0.0681, 0.0600)
 # per-PFT bulk heat/moisture exchange coefficient [-] (constant-bulk fallback only;
 # inert under the MOST default -> retained from the constant-Ch calibration).
 _TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.005629,
@@ -91,19 +92,24 @@ _TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.
 # (k_solid / C_solid from sand/clay, Oleson 2013): the per-cell texture sets the
 # spatial pattern, the per-PFT scale sets the magnitude.  k_scale ~0.2-0.5 brings the
 # physical mineral k (3-9 W/m/K) down to the effective seasonal-cycle value.
-_TUNED_PFT_KSCALE_MULTILAYER = (0.3109, 0.3059, 0.2988, 0.2520, 0.3109, 0.4111, 0.3109,
-                                0.3684, 0.2973, 0.4816, 0.3109, 0.1734, 0.2137, 0.4111,
-                                0.3109, 0.3109, 0.3500)
-_TUNED_PFT_CSCALE_MULTILAYER = (0.8571, 0.7561, 0.9153, 0.8585, 0.8571, 1.0102, 0.8571,
-                                0.9199, 0.9345, 0.9085, 0.8571, 1.1634, 1.2826, 1.0102,
-                                0.8571, 0.8571, 0.9000)
+_TUNED_PFT_KSCALE_MULTILAYER = (0.3396, 0.3052, 0.3507, 0.3678, 0.3396, 0.3321, 0.3396,
+                                0.3999, 0.2854, 0.2789, 0.3396, 0.2692, 0.2983, 0.3321,
+                                0.3396, 0.3396, 0.3500)
+_TUNED_PFT_CSCALE_MULTILAYER = (0.8916, 0.7625, 0.9174, 0.9087, 0.8916, 0.8656, 0.8916,
+                                0.9877, 0.8414, 0.6982, 0.8916, 1.0472, 1.0335, 0.8656,
+                                0.8916, 0.8916, 0.9000)
 # per-PFT PLANT btran water-stress thresholds (wilting / field capacity) [m3/m3]
-_TUNED_PFT_WP_MULTILAYER = (0.1069, 0.1215, 0.0921, 0.0894, 0.1285, 0.1015, 0.1285, 0.1080,
-                            0.1054, 0.1891, 0.1069, 0.0672, 0.0687, 0.0858, 0.1069, 0.1069, 0.1000)
-_TUNED_PFT_FC_MULTILAYER = (0.2156, 0.3027, 0.2302, 0.2222, 0.3191, 0.2543, 0.3191, 0.2720,
-                            0.2713, 0.4280, 0.2676, 0.1455, 0.1555, 0.2097, 0.2676, 0.2676, 0.2500)
-TUNED_GLACIER_ALBEDO_MULTILAYER = 0.6535
-TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.8284
+_TUNED_PFT_WP_MULTILAYER = (0.0896, 0.1195, 0.0852, 0.0961, 0.1066, 0.1094, 0.1066, 0.1092,
+                            0.1057, 0.1932, 0.0896, 0.0709, 0.0804, 0.0917, 0.0896, 0.0896, 0.1000)
+_TUNED_PFT_FC_MULTILAYER = (0.1759, 0.2981, 0.2093, 0.2405, 0.2675, 0.2746, 0.2675, 0.2744,
+                            0.2696, 0.4390, 0.2211, 0.1638, 0.1932, 0.2272, 0.2211, 0.2211, 0.2500)
+TUNED_GLACIER_ALBEDO_MULTILAYER = 0.6458
+TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.7985
+# deep-ice thermal-inertia boost on glacier cells (on top of pure-ice C=rho_ice*c_pi):
+# parameterises the large thermal mass of a deep ice sheet that the finite 3 m soil
+# column under-represents -> damps the polar seasonal over-amplitude.  Calibrated:
+# fixes the Antarctica seasonal-amplitude bias +2.62 -> -0.02 K.
+TUNED_GLACIER_CBOOST_MULTILAYER = 7.474
 # scalar fallback Ch (PFT mean) for the rare no-grid path where the per-cell map
 # (clm_multilayer_ch) cannot be built; the per-cell value is used when a grid exists.
 TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
@@ -290,23 +296,39 @@ def clm_hydraulics_config(surface_map: dict):
         alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
 
 
-def clm_multilayer_thermal_config(surface_map: dict):
-    """Per-column :class:`SoilThermalConfig` (shaped ``(ncol, 1)``) with the soil
-    thermal inertia from the per-cell SAND/CLAY TEXTURE (Oleson 2013 solid k/C) times
-    a per-PFT calibration scale.  The texture supplies the WITHIN-PFT spatial variation
-    (sandy vs clayey under one PFT) that a per-PFT-constant inertia cannot — breaking
-    the per-PFT seasonal-amplitude ceiling.  Drop into ``MultiLayerLandConfig(thermal=)``."""
-    from legoesm.land.soil_thermal import SoilThermalConfig
+def multilayer_thermal_arrays(pft_fractions, pct_sand, pct_clay, glacier_frac,
+                              kscale, cscale, glacier_cboost):
+    """Per-cell soil thermal (k_solid, C_soil) as the texture base x per-PFT scale,
+    blended toward ICE on glacier-fraction cells.  Pure (arrays in -> arrays out) so
+    the offline calibrator and the bake share ONE definition (no re-derivation).
+
+    The glacier blend fixes the polar over-amplitude: an ice sheet is a deep, large
+    thermal mass, but the finite 3 m column under-damps the seasonal wave, so the
+    glacier heat capacity carries a calibrated deep-ice boost (>1) on top of the pure-
+    ice C = rho_ice * c_pi; conductivity blends toward k_ice."""
     from legoesm.land.soil_texture import (
         soil_solid_conductivity, soil_solid_heat_capacity)
-    pft = jnp.asarray(surface_map["pft_fractions"])              # (ncol, 17)
-    sand, clay = surface_map["pct_sand"], surface_map["pct_clay"]
-    k_base = soil_solid_conductivity(sand, clay)                 # (ncol,) texture k_solid
-    c_base = soil_solid_heat_capacity(sand, clay)               # (ncol,) texture C_solid
-    k_scale = pft @ jnp.asarray(_TUNED_PFT_KSCALE_MULTILAYER)    # per-PFT calibration
-    c_scale = pft @ jnp.asarray(_TUNED_PFT_CSCALE_MULTILAYER)
-    return SoilThermalConfig(C_soil=(c_base * c_scale).reshape(-1, 1),
-                             k_solid=(k_base * k_scale).reshape(-1, 1))
+    pft = jnp.asarray(pft_fractions)
+    k_soil = soil_solid_conductivity(pct_sand, pct_clay) * (pft @ jnp.asarray(kscale))
+    c_soil = soil_solid_heat_capacity(pct_sand, pct_clay) * (pft @ jnp.asarray(cscale))
+    fg = jnp.clip(jnp.asarray(glacier_frac), 0.0, 1.0)   # guard regrid boundary values
+    k_ice = constants.k_ice_default
+    c_ice = constants.rho_ice * constants.c_pi * glacier_cboost
+    k_eff = (1.0 - fg) * k_soil + fg * k_ice
+    c_eff = (1.0 - fg) * c_soil + fg * c_ice
+    return k_eff, c_eff
+
+
+def clm_multilayer_thermal_config(surface_map: dict):
+    """Per-column :class:`SoilThermalConfig` (shaped ``(ncol, 1)``): per-cell texture
+    soil thermal inertia x per-PFT scale, blended toward ICE on glacier cells (see
+    :func:`multilayer_thermal_arrays`).  Drop into ``MultiLayerLandConfig(thermal=)``."""
+    from legoesm.land.soil_thermal import SoilThermalConfig
+    k_eff, c_eff = multilayer_thermal_arrays(
+        surface_map["pft_fractions"], surface_map["pct_sand"], surface_map["pct_clay"],
+        surface_map["glacier_frac"], _TUNED_PFT_KSCALE_MULTILAYER,
+        _TUNED_PFT_CSCALE_MULTILAYER, TUNED_GLACIER_CBOOST_MULTILAYER)
+    return SoilThermalConfig(C_soil=c_eff.reshape(-1, 1), k_solid=k_eff.reshape(-1, 1))
 
 
 def clm_multilayer_ch(surface_map: dict):
@@ -326,3 +348,26 @@ def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = N
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
                                    m["glacier_frac"], variant=variant)
+
+
+def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "multilayer"):
+    """The faithful CLM-default MULTILAYER land setup from a :func:`load_clm_surface`
+    map: per-column ``(LandSurfaceParams, MultiLayerLandConfig)``.
+
+    Composes the already-factored pieces (no re-derivation): PFT-weighted veg params
+    (:class:`CLMSurfaceParamProvider`), reference-soil van-Genuchten hydraulics
+    (:func:`clm_hydraulics_config`), and per-cell texture x per-PFT-scale soil thermal
+    inertia blended toward ice on glacier cells (:func:`clm_multilayer_thermal_config`).
+    ``base_config`` (a ``MultiLayerLandConfig``) supplies the non-spatial defaults
+    (soil grid, Richards, carbon, stomata); only ``hydraulics``/``thermal`` are
+    overwritten with the spatial maps.  Pure — the model driver and any calibrator
+    share ONE definition."""
+    from legoesm.land import MultiLayerLandConfig
+    base = base_config if base_config is not None else MultiLayerLandConfig()
+    provider = CLMSurfaceParamProvider(
+        surface_map["pft_fractions"], surface_map["theta_wp"], surface_map["theta_fc"],
+        surface_map["glacier_frac"], variant=variant)
+    cfg = base._replace(
+        hydraulics=clm_hydraulics_config(surface_map),
+        thermal=clm_multilayer_thermal_config(surface_map))
+    return provider(), cfg

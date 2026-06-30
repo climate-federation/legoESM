@@ -144,7 +144,7 @@ def run(resolution: str, days: float, dt: float, out: str, no_sponge: bool = Fal
         print(f"== REBUILT Eady: {n_lat}x{n_lon}, dt={dt:.0f}s, {days:.0f}d, fp64 | "
               f"{cfg.barotropic.barotropic_solver}/trac={cfg.tracer_advection}/mom={_mom}/"
               f"rk3+ab2/smc03 | U={cfg_e.U_surface} sponge={not no_sponge} | "
-              f"Csmag={cfg.C_smag} Cleith={cfg.C_leith} cap={smag_cfl_safety} "
+              f"Csmag={cfg.lateral_viscosity.C_smag} Cleith={cfg.lateral_viscosity.C_leith} cap={smag_cfl_safety} "
               f"B_h={cfg.B_h} ==")
         print(f"   sigma_Eady={sigma:.3e}/s, tau={1/sigma/_SPD:.2f}d, "
               f"EKE rate 2sigma={2*sigma:.3e}/s; Ld={cfg_e.Ld_km:.0f}km, "

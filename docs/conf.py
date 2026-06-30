@@ -56,7 +56,7 @@ suppress_warnings = ["myst.header", "myst.xref_missing", "toc.not_readable"]
 html_theme = "furo"
 html_title = "legoESM"
 html_theme_options = {
-    "source_repository": "https://github.com/gentine/legoESM",
+    "source_repository": "https://github.com/climate-federation/legoESM",
     "source_branch": "main",
     "source_directory": "docs/",
 }

@@ -22,9 +22,9 @@ regression on the next full-matrix run.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
-
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
@@ -474,7 +474,7 @@ def test_w6_latlon_init_uses_w6_winds_geo():
 def test_sw_cube_propagating_tests_have_hyperdiff_override():
     """iter-31/33/42/44 sentinel: cube SW config overrides the iter1009
     baseline with ``hyperdiff_coeff=2.0 * _hyperdiff_cube(n)`` for the
-    propagating-wave test gate ``test_num in (2, 5, 6)``.
+    propagating/strongly-nonlinear test gate ``test_num in (2, 5, 6, 8)``.
 
     Without the override:
       - cube W5 BLOWS UP at day 14.58 (15-day; iter-33).
@@ -486,14 +486,31 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     iter-44 raised the coefficient from 1x to 2x after probing
     (further 38% W2 gain, W5/W6 stable, 4x cube has diminishing
     returns).
+
+    #521/#529 (colliding modons, FV3 case 8, merged in commit
+    750b157ac) joined the gate: the two-soliton collision is strongly
+    nonlinear over a 100-day run and needs the SAME div-damp +
+    biharmonic hyperdiff backstop as the long-duration propagating-wave
+    cases.  test_num 8 is therefore a LEGITIMATE member of the override
+    gate, not a regression — but the override must still cover W2
+    (test_num 2) so the cube W2 5-day v_ll_Linf protection is intact.
     """
     src = _runner_source()
     # fv3_faithful iter-2: the literal ``2.0`` became an env-overridable
     # factor ``LEGOESM_SW_HYPERDIFF_FACTOR`` that DEFAULTS to 2.0, so the
     # override is preserved.  Accept either the original literal or the
     # factor form; if the factor form is used, the default must stay 2.0.
+    # This test verifies the override EXPRESSION (``hyperdiff_coeff =
+    # <factor> * _hyperdiff_cube(n)``) sits immediately under the gate.
+    # It anchors on the exact tuple spelling ``(2, 5, 6, 8)`` (matching
+    # the current matrix-runner source) to keep the two co-located; the
+    # canonical, order-independent SET-equality check on the gate lives
+    # in ``test_sw_cube_hyperdiff_gate_matches_propagating_tests`` (which
+    # parses the tuple into a set).  If the matrix runner reorders the
+    # tuple or moves it to a named constant, update this anchor AND that
+    # set check together.
     pat = re.search(
-        r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*\)\s*:[^}]*?"
+        r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*,\s*8\s*\)\s*:[^}]*?"
         r"hyperdiff_coeff\s*=\s*(?:2\.0|_sw_hd_fac)\s*\*\s*"
         r"_hyperdiff_cube\(\s*n\s*\)",
         src,
@@ -502,7 +519,7 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     assert pat is not None, (
         "iter-31/33/42/44 regression: cube SW propagating-test "
         "branch no longer overrides ``hyperdiff_coeff=2.0 * "
-        "_hyperdiff_cube(n)`` for (W2, W5, W6) — cube W5/W6 "
+        "_hyperdiff_cube(n)`` for (W2, W5, W6, modons) — cube W5/W6 "
         "full-duration will re-BLOWUP and cube W2 5-day v_ll_Linf "
         "will regress (latlon stable; cube parity gap reopens)."
     )
@@ -517,19 +534,29 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
 
 def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
     """iter-37/42/45 sentinel: the SW cube hyperdiff gate matches all
-    propagating tests (W2, W5, W6) — exactly ``test_num in (2, 5, 6)``.
+    propagating / strongly-nonlinear cases (W2, W5, W6, colliding
+    modons) — exactly ``test_num in (2, 5, 6, 8)``.
 
     iter-37 originally restricted the gate to ``{5, 6}`` under the
     assumption that hyperdiff would break the iter-1002 W2 1-day
     sentinel.  iter-42 measurement disproved this: matrix runner W2
     with hyperdiff actually IMPROVES cube W2 5-day v_ll_Linf from
-    3.65 to 0.82 m/s (4.5x parity gain), and the iter-1002 sentinel
-    is unaffected because it uses its own ``hyperdiff_coeff=0`` config
-    (independent of matrix runner).
+    3.65 to 0.82 m/s (4.5x parity gain), and the W2 calibration
+    sentinel is unaffected because it uses its own
+    ``hyperdiff_coeff=0`` config (independent of matrix runner).
 
-    This sentinel now pins the wider gate ``{2, 5, 6}``.  iter-45
-    review-driven fix: anchor the regex to the iter1009-helper call
-    immediately following the gate so a future unrelated
+    iter-42 widened the gate to ``{2, 5, 6}``.  #521/#529 (colliding
+    modons, FV3 case 8) then ADDED ``8`` in merged commit 750b157ac:
+    the two-soliton collision is strongly nonlinear over a 100-day run
+    and the matrix-runner branch documents that it needs the SAME
+    div-damp + biharmonic hyperdiff backstop as the long-duration
+    propagating-wave cases.  This sentinel therefore pins the current
+    gate ``{2, 5, 6, 8}``.  The protection it guards is unchanged: the
+    gate MUST still contain ``2`` (W2) and ``5``/``6`` (W5/W6) so the
+    cube W2 5-day v_ll_Linf gap stays closed and W5/W6 don't re-blow-up.
+
+    iter-45 review-driven fix: anchor the regex to the iter1009-helper
+    call immediately following the gate so a future unrelated
     ``if test_num in (...):`` elsewhere in the file (e.g., line 2318
     spectral filter at ``(5, 6)``, line 4068 NH ``(11, 12)``) can't
     silently pin the wrong gate.
@@ -554,70 +581,392 @@ def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
     gate_values = {
         int(v.strip()) for v in gate_pat.group(1).split(",") if v.strip()
     }
-    assert gate_values == {2, 5, 6}, (
-        f"iter-42 regression: SW cube hyperdiff gate now matches "
+    assert gate_values == {2, 5, 6, 8}, (
+        f"iter-42/#529 regression: SW cube hyperdiff gate now matches "
         f"test_num in {sorted(gate_values)} — must be exactly "
-        "{{2, 5, 6}}.  Shrinking to {{5, 6}} would re-open the cube "
-        "W2 5-day v_ll_Linf gap (0.51 -> 3.65 m/s)."
+        "{{2, 5, 6, 8}} (W2, W5, W6, colliding modons).  Dropping "
+        "``2`` re-opens the cube W2 5-day v_ll_Linf gap "
+        "(0.51 -> 3.65 m/s); dropping ``5``/``6`` re-blows-up cube "
+        "W5/W6; dropping ``8`` removes the modons hyperdiff backstop "
+        "(#521/#529).  If a new SW cube case is added that legitimately "
+        "needs the override, extend this set AND the override regex in "
+        "``test_sw_cube_propagating_tests_have_hyperdiff_override``."
     )
 
 
-def test_iter1002_w2_sentinel_independent_from_matrix_hyperdiff():
-    """iter-45 review-driven sentinel: pin the independence of the
-    ``test_iter1002_w2_v_ll_linf_meets_target`` unit test from the
-    matrix-runner SW cube hyperdiff gate.
+def _parse_module(path: Path) -> ast.Module:
+    """Parse a Python source file into an AST module (helper for the
+    AST-based source tripwires below).  Keeps the guards robust against
+    comment/docstring text that merely *mentions* the pattern being
+    pinned (a pure ``str in src`` check is vacuous against that)."""
+    return ast.parse(path.read_text(), filename=str(path))
 
-    iter-42 widened the matrix-runner hyperdiff gate from ``{5, 6}``
-    to ``{2, 5, 6}`` (adding W2), relying on the claim that the
-    iter-1002 sentinel uses ITS OWN ``hyperdiff_coeff=0`` config via
-    ``_make_iter1009_config(N)`` — independent of the matrix runner.
 
-    If a future refactor either (a) deletes ``_make_iter1009_config``
-    and routes iter-1002 through the matrix-runner config, or (b)
-    changes ``_make_iter1009_config`` to set hyperdiff_coeff > 0,
-    the iter-1002 sentinel would no longer faithfully test the
-    iter-1030 calibration that codex iter-1009/1021/1030 measured.
+def _find_function_def(
+    module: ast.Module, name: str
+) -> ast.FunctionDef | None:
+    """Return the first top-level ``def <name>`` in ``module`` (or None).
 
-    This sentinel pattern-matches the iter-1002 file for those two
-    properties.
+    Recurses into class bodies too, so a method of the same name is also
+    found; the iter1009 helper is module-level and the W2 fixture is
+    module-level, so the top-level walk suffices, but recursion makes
+    the helper reusable.
     """
-    sentinel_path = (
-        Path(__file__).resolve().parents[1]
+    for node in ast.walk(module):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def _arg_default(
+    func: ast.FunctionDef, arg_name: str
+) -> ast.expr | None:
+    """Return the AST default expression for keyword/positional argument
+    ``arg_name`` of ``func``, or None if the arg has no default."""
+    args = func.args
+    # Positional-or-keyword args: defaults align to the TAIL of the list.
+    posargs = args.posonlyargs + args.args
+    n_def = len(args.defaults)
+    defaulted = posargs[len(posargs) - n_def:] if n_def else []
+    for a, d in zip(defaulted, args.defaults):
+        if a.arg == arg_name:
+            return d
+    # Keyword-only args have their own (possibly-None) defaults list.
+    for a, d in zip(args.kwonlyargs, args.kw_defaults):
+        if a.arg == arg_name:
+            return d
+    return None
+
+
+def _is_zero_constant(node: ast.expr | None) -> bool:
+    """True iff ``node`` is a numeric literal equal to 0 — accepts the
+    bare constants ``0`` / ``0.0`` / ``0e0`` AND the unary-signed forms
+    ``-0.0`` / ``+0.0`` (which Python parses as ``UnaryOp(USub|UAdd,
+    Constant(0.0))``, not a single ``Constant``).  Rejects booleans
+    (``True``/``False`` are ``int`` subclasses == 1/0)."""
+    # Unwrap a single unary +/- in front of a zero literal.
+    if isinstance(node, ast.UnaryOp) and isinstance(
+        node.op, (ast.UAdd, ast.USub)
+    ):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+        and float(node.value) == 0.0
+    )
+
+
+def _call_target_name(call: ast.Call) -> str | None:
+    """Return the *called name* of an ``ast.Call`` for both bare-name
+    (``f(...)`` -> ``"f"``) and attribute (``mod.f(...)`` /
+    ``pkg.mod.f(...)`` -> ``"f"``) call forms.
+
+    Matching on the trailing attribute (not the full dotted path) keeps
+    these source tripwires robust to benign import-style refactors —
+    ``from m import f; f()`` vs ``import m; m.f()`` vs
+    ``import m as a; a.f()`` all resolve to ``"f"`` — which the
+    round-2 review flagged as a false-positive risk when only
+    ``ast.Name`` was matched.
+    """
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _call_has_kwargs_unpack(call: ast.Call) -> bool:
+    """True iff ``call`` uses ``**kwargs`` unpacking (a keyword whose
+    ``arg`` is None).  Such a call can smuggle a nonzero
+    ``hyperdiff_coeff`` past a per-keyword inspection
+    (``iter1009_dual_target_config(**{"hyperdiff_coeff": 2.0})``), so
+    the W2-test guard treats it as un-verifiable and fails loudly."""
+    return any(kw.arg is None for kw in call.keywords)
+
+
+def test_w2_calibration_baseline_independent_from_matrix_hyperdiff():
+    """iter-45 review-driven sentinel (retargeted): pin the independence
+    of the W2 calibration baseline from the matrix-runner SW cube
+    hyperdiff override gate.
+
+    iter-42 widened the matrix-runner hyperdiff gate (adding W2),
+    relying on the invariant that the cube W2 calibration reference
+    uses its OWN ``hyperdiff_coeff=0`` config — independent of the
+    matrix-runner propagating-wave override (``2.0 * _hyperdiff_cube(n)``
+    on ``test_num in (2, 5, 6, 8)``).  Without that independence, the
+    iter-1030 dual-target calibration measured by codex
+    iter-1009/1021/1030 (cube W2 1-day v_ll_Linf <= 0.119 m/s — the
+    cube-imprint / W2 parity protection) would silently shift with the
+    matrix-runner damping knobs.
+
+    ORIGINAL form anchored ``tests/test_iter1002_w2_target_met.py`` and
+    its private ``_make_iter1009_config(N)`` helper.  That file was
+    curated out of the live suite by commit 096349afd ("curate 476
+    ralph-loop iter tests -> 57 survivors") and archived (untracked)
+    under ``scripts/tmp/dycore_iter_archive/``.  The invariant DID NOT
+    go away — it moved to two LIVE, tracked locations, which this
+    retargeted sentinel now pins instead of the deleted file.
+
+    Codex-review hardening (round 1): the earlier retarget used
+    ``str in src`` / signature-only regex, which can pass on stale
+    docstring text or while the helper body ignores the zero default.
+    This version parses both files with ``ast`` and asserts EXECUTABLE
+    structure, so a docstring/comment that merely mentions the pattern
+    cannot satisfy the guard:
+
+      1. ``shallow_water_fv3_cdgrid.iter1009_dual_target_config`` — the
+         single source of truth for the iter-1030 calibration — must
+         (a) DEFAULT its ``hyperdiff_coeff`` parameter to a zero literal,
+         AND (b) actually PASS that parameter (by name, not a recomputed
+         nonzero literal) into the ``CDGridShallowWaterConfig(...)`` it
+         returns.  (b) closes the "default stays 0.0 but the body hard-
+         codes ``hyperdiff_coeff=_hyperdiff_cube(n)``" hole.
+
+      2. The curation-survivor W2 regression test
+         ``tests/atmosphere/dycore/regression/test_iter1032_dual_target_full_matrix.py``
+         — successor to the deleted iter-1002 sentinel — must (a) call
+         ``iter1009_dual_target_config`` with NO nonzero
+         ``hyperdiff_coeff`` keyword (so it consumes the zero default; a
+         nonzero override would decouple it from the measured
+         calibration), AND (b) contain an executable
+         ``assert <v_ll_Linf…> <= 0.119`` (the actual cube-imprint / W2
+         parity threshold, anchored to an ``assert`` that references a
+         ``v_ll``-named operand), not merely the string ``0.119`` in a
+         docstring or a ``<= 0.119`` on some unrelated quantity.
+
+    A static guard cannot prove the hyperdiff=0 config flows into that
+    assertion (data-flow); that end-to-end guarantee is owned by the
+    LIVE regression test, which runs the real dycore and FAILS if W2
+    v_ll_Linf actually exceeds 0.119.  This sentinel pins the structural
+    preconditions so the live test cannot be silently neutered.
+
+    If a future refactor flips the helper default to nonzero, routes a
+    nonzero hyperdiff into either consumer, or weakens the 0.119
+    comparison, the cube W2 calibration is no longer measured at
+    hyperdiff=0 and these structural assertions FIRE.
+    """
+    repo = Path(__file__).resolve().parents[1]
+
+    # --- (1) Canonical preset: zero hyperdiff default AND pass-through ---
+    pkg_path = (
+        repo
+        / "packages"
+        / "atmosphere"
+        / "legoesm"
+        / "atmosphere"
+        / "dynamics"
+        / "shallow_water_fv3_cdgrid.py"
+    )
+    pkg_mod = _parse_module(pkg_path)
+    helper = _find_function_def(pkg_mod, "iter1009_dual_target_config")
+    assert helper is not None, (
+        "iter-45 regression: ``iter1009_dual_target_config`` def not "
+        "found in shallow_water_fv3_cdgrid.py — the canonical W2 "
+        "calibration preset is the source of truth for the cube W2 "
+        "hyperdiff=0 baseline; relocate this sentinel if the helper "
+        "moved/renamed."
+    )
+    # (1a) default of hyperdiff_coeff is a zero literal.
+    hd_default = _arg_default(helper, "hyperdiff_coeff")
+    assert _is_zero_constant(hd_default), (
+        "iter-45/#529 regression: ``iter1009_dual_target_config`` no "
+        "longer DEFAULTS ``hyperdiff_coeff`` to a zero literal (parsed "
+        f"default AST = {ast.dump(hd_default) if hd_default else None}). "
+        "The cube W2 1-day calibration (v_ll_Linf <= 0.119 m/s) was "
+        "measured at hyperdiff=0; a nonzero default would silently fold "
+        "the matrix-runner propagating-wave override into the W2 baseline."
+    )
+    # (1b) the body must construct ``CDGridShallowWaterConfig`` passing
+    # ``hyperdiff_coeff=hyperdiff_coeff`` (the PARAMETER, by name) — not
+    # a recomputed nonzero expression that ignores the zero default.
+    #
+    # Round-2 review hardening: the existential check ("SOME call passes
+    # through") was insufficient — a dead ``if False: CDGrid...(
+    # hyperdiff_coeff=hyperdiff_coeff)`` branch alongside a live
+    # ``return CDGrid...(hyperdiff_coeff=_hyperdiff_cube(n))`` would have
+    # passed.  We now require BOTH:
+    #   (i)  at least one ``CDGridShallowWaterConfig(...)`` call passes
+    #        ``hyperdiff_coeff=hyperdiff_coeff`` through by name; AND
+    #   (ii) NO ``CDGridShallowWaterConfig(...)`` call anywhere in the
+    #        helper supplies a NONZERO ``hyperdiff_coeff`` (literal or
+    #        otherwise non-pass-through) — so a hardcoded-nonzero return
+    #        fails even if a dead pass-through branch also exists.
+    # Attribute-form constructors (``mod.CDGridShallowWaterConfig(...)``)
+    # are matched via ``_call_target_name`` so an import-style refactor
+    # does not false-positive.
+    cfg_calls = [
+        node
+        for node in ast.walk(helper)
+        if isinstance(node, ast.Call)
+        and _call_target_name(node) == "CDGridShallowWaterConfig"
+    ]
+    assert cfg_calls, (
+        "iter-45 regression: ``iter1009_dual_target_config`` body no "
+        "longer constructs ``CDGridShallowWaterConfig(...)`` — cannot "
+        "verify the hyperdiff pass-through."
+    )
+    passes_param_through = False
+    for call in cfg_calls:
+        # A ``**kwargs`` unpack could smuggle a nonzero hyperdiff past
+        # the per-keyword scan; treat it as un-verifiable -> fail.
+        assert not _call_has_kwargs_unpack(call), (
+            "iter-45 regression: ``iter1009_dual_target_config`` "
+            "constructs ``CDGridShallowWaterConfig(**kwargs)`` with "
+            "dictionary unpacking, which can hide a nonzero "
+            "``hyperdiff_coeff``.  Pass ``hyperdiff_coeff=hyperdiff_coeff`` "
+            "explicitly so this structural guard can verify the cube W2 "
+            "hyperdiff=0 baseline."
+        )
+        for kw in call.keywords:
+            if kw.arg != "hyperdiff_coeff":
+                continue
+            is_passthrough = (
+                isinstance(kw.value, ast.Name)
+                and kw.value.id == "hyperdiff_coeff"
+            )
+            if is_passthrough:
+                passes_param_through = True
+            else:
+                # Any non-pass-through hyperdiff_coeff value (a literal,
+                # a recomputed expression, etc.) in ANY constructor call
+                # breaks the baseline unless it is an explicit zero.
+                assert _is_zero_constant(kw.value), (
+                    "iter-45 regression: ``iter1009_dual_target_config`` "
+                    "passes a non-pass-through, nonzero ``hyperdiff_coeff`` "
+                    f"into ``CDGridShallowWaterConfig`` (AST = "
+                    f"{ast.dump(kw.value)}).  A hardcoded/recomputed "
+                    "nonzero hyperdiff (e.g. ``_hyperdiff_cube(n)``) keeps "
+                    "the 0.0 default yet breaks the cube W2 hyperdiff=0 "
+                    "baseline — exactly the case this structural check "
+                    "guards (even if a dead pass-through branch also "
+                    "exists)."
+                )
+    assert passes_param_through, (
+        "iter-45 regression: ``iter1009_dual_target_config`` no longer "
+        "passes ``hyperdiff_coeff=hyperdiff_coeff`` (the parameter) into "
+        "``CDGridShallowWaterConfig(...)``.  The returned config must "
+        "thread the zero-default parameter through so the cube W2 "
+        "hyperdiff=0 baseline holds."
+    )
+
+    # --- (2) Live W2 regression test: zero-default call + 0.119 target ---
+    w2_test_path = (
+        repo
         / "tests"
-        / "test_iter1002_w2_target_met.py"
+        / "atmosphere"
+        / "dycore"
+        / "regression"
+        / "test_iter1032_dual_target_full_matrix.py"
     )
-    src = sentinel_path.read_text()
-    # (a) ``_make_iter1009_config`` is defined and used.
-    assert "def _make_iter1009_config(" in src, (
-        "iter-45 regression: ``_make_iter1009_config`` helper "
-        "deleted from iter-1002 sentinel — its W2 1-day test no "
-        "longer independent of the matrix runner."
+    assert w2_test_path.exists(), (
+        "iter-45 regression: the live W2 calibration regression test "
+        "``tests/atmosphere/dycore/regression/"
+        "test_iter1032_dual_target_full_matrix.py`` (curation-survivor "
+        "successor to the deleted iter-1002 sentinel) is missing.  It is "
+        "the live owner of the cube W2 ``v_ll_Linf <= 0.119`` invariant; "
+        "restore it or relocate this sentinel to its replacement."
     )
-    # (b) That helper sets ``hyperdiff_coeff=0.0`` (or omits it,
-    # in which case the dataclass default 0.0 applies).
-    helper_pat = re.search(
-        r"def _make_iter1009_config[^}]*?return\s+CDGridShallowWaterConfig\("
-        r"[^)]*?\)",
-        src,
-        re.DOTALL,
+    w2_mod = _parse_module(w2_test_path)
+    # (2a) at least one EXECUTABLE call to iter1009_dual_target_config,
+    # and EVERY such call must omit a nonzero hyperdiff_coeff override
+    # (it may omit the kwarg entirely -> zero default, or pass a zero
+    # literal explicitly).  A nonzero override decouples the test from
+    # the measured hyperdiff=0 calibration.  ``_call_target_name`` matches
+    # both bare-name and ``module.helper`` attribute call forms so an
+    # import-style refactor does not false-positive (round-2 review).
+    helper_calls = [
+        node
+        for node in ast.walk(w2_mod)
+        if isinstance(node, ast.Call)
+        and _call_target_name(node) == "iter1009_dual_target_config"
+    ]
+    assert helper_calls, (
+        "iter-45 regression: the live W2 regression test no longer "
+        "CALLS ``iter1009_dual_target_config(...)`` (the canonical "
+        "hyperdiff=0 preset) in executable code.  The cube W2 "
+        "calibration is no longer measured at the iter-1030 baseline.  "
+        "(A docstring mention does not count — this is an AST check.)"
     )
-    assert helper_pat is not None, (
-        "iter-45 regression: ``_make_iter1009_config`` body did not "
-        "match the expected ``return CDGridShallowWaterConfig(...)``."
-    )
-    helper_body = helper_pat.group(0)
-    # If hyperdiff_coeff appears in the helper body, it must be set
-    # to 0 / 0.0 — not a nonzero value that would silently shift the
-    # iter-1002 calibration target.
-    bad_pat = re.search(
-        r"hyperdiff_coeff\s*=\s*(?!0\.0\b|0\b)\S",
-        helper_body,
-    )
-    assert bad_pat is None, (
-        "iter-45 regression: ``_make_iter1009_config`` now sets "
-        f"``hyperdiff_coeff={bad_pat.group(0).split('=')[1]!r}``.  The "
-        "iter-1002 W2 1-day sentinel was calibrated at hyperdiff=0; "
-        "any nonzero value silently shifts the v_ll_Linf target."
+    for call in helper_calls:
+        # ``**kwargs`` unpacking could smuggle a nonzero hyperdiff past
+        # the per-keyword scan -> treat as un-verifiable and fail.
+        assert not _call_has_kwargs_unpack(call), (
+            "iter-45 regression: the live W2 regression test calls "
+            "``iter1009_dual_target_config(**kwargs)`` with dictionary "
+            "unpacking, which can hide a nonzero ``hyperdiff_coeff`` "
+            "override.  Pass arguments explicitly so this guard can "
+            "verify the cube W2 hyperdiff=0 baseline."
+        )
+        for kw in call.keywords:
+            if kw.arg == "hyperdiff_coeff":
+                assert _is_zero_constant(kw.value), (
+                    "iter-45 regression: the live W2 regression test now "
+                    "passes a nonzero ``hyperdiff_coeff`` override to "
+                    "``iter1009_dual_target_config`` (AST = "
+                    f"{ast.dump(kw.value)}).  The W2 1-day calibration "
+                    "was measured at hyperdiff=0; any nonzero value "
+                    "silently shifts the v_ll_Linf target away from the "
+                    "cube W2 parity baseline."
+                )
+    # (2b) an EXECUTABLE ``assert <name…v_ll_Linf…> <= 0.119`` must exist
+    # — the actual cube-imprint / W2 parity threshold.  Round-2 review
+    # hardening: requiring the ``<= 0.119`` compare to live INSIDE an
+    # ``assert`` AND reference a ``v_ll_Linf``-named operand rules out
+    # (i) a stale docstring ``0.119``, (ii) a dead/unrelated ``<= 0.119``
+    # compare that never gates the test, and (iii) a ``0.119`` threshold
+    # applied to some unrelated quantity.  We scan only ``ast.Assert``
+    # test expressions, and require a ``Name``/``Attribute`` whose
+    # identifier contains ``v_ll`` on either side of the ``<=``.
+    #
+    # NOTE (inherent tripwire limit, surfaced in round-2 review): a
+    # static guard cannot fully prove the config returned by the
+    # hyperdiff=0 helper call is the SAME object fed into this assertion
+    # (data-flow).  That end-to-end guarantee is owned by the LIVE
+    # regression test itself — ``test_iter1032_dual_target_full_matrix``
+    # runs the real dycore and FAILS if W2 v_ll_Linf actually exceeds
+    # 0.119.  This sentinel pins the structural preconditions so the live
+    # test cannot be silently neutered (helper deleted/renamed, default
+    # flipped nonzero, override injected, threshold loosened).
+    def _refs_v_ll(expr: ast.expr) -> bool:
+        for sub in ast.walk(expr):
+            if isinstance(sub, ast.Name) and "v_ll" in sub.id:
+                return True
+            if isinstance(sub, ast.Attribute) and "v_ll" in sub.attr:
+                return True
+        return False
+
+    has_target_assert = False
+    for node in ast.walk(w2_mod):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if not isinstance(test, ast.Compare):
+            continue
+        if not any(isinstance(op, ast.LtE) for op in test.ops):
+            continue
+        # Operands of a Compare: left + comparators.
+        operands = [test.left, *test.comparators]
+        has_threshold = any(
+            isinstance(o, ast.Constant)
+            and isinstance(o.value, (int, float))
+            and not isinstance(o.value, bool)
+            and abs(float(o.value) - 0.119) < 1e-12
+            for o in operands
+        )
+        has_v_ll = any(_refs_v_ll(o) for o in operands)
+        if has_threshold and has_v_ll:
+            has_target_assert = True
+    assert has_target_assert, (
+        "iter-45 regression: the live W2 regression test no longer "
+        "contains an executable ``assert <v_ll_Linf…> <= 0.119`` "
+        "comparison.  That threshold IS the cube-imprint / W2 parity "
+        "protection (iter-1030 measured ~0.1138); do not weaken, raise, "
+        "rename the operand away from ``v_ll``, or remove it.  (A "
+        "docstring mention of 0.119, or a ``<= 0.119`` on some unrelated "
+        "quantity, does not count — this is an AST check on the assert's "
+        "comparison node.)"
     )
 
 

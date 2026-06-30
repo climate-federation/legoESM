@@ -39,6 +39,7 @@ from legoesm.core.field import Field
 from legoesm.parallel.metal import place_spectral_grid
 from legoesm.grids.gaussian import (
     GaussianGrid,
+    dealiasing_mask,
     sh_analysis,
     sh_synthesis,
     sh_analysis_3d,
@@ -369,10 +370,10 @@ def spectral_pe_tendencies(
     kappa = constants.kappa
 
     # Dealiasing mask: zero wavenumbers above dealiasing_fraction * n_max
-    # to prevent spectral aliasing from cubic nonlinearities.
+    # to prevent spectral aliasing from cubic nonlinearities.  Shared Orszag
+    # 2/3-rule helper (canonical for spectral_pe/nh/sw — no inline re-derivation).
     if config.dealiasing_fraction > 0:
-        n_cut = int(config.dealiasing_fraction * grid.n_max)
-        _dealias = jnp.where(grid.ls <= n_cut, 1.0, 0.0)
+        _dealias = dealiasing_mask(grid, config.dealiasing_fraction)
         _dealias_3d = _dealias[:, None]  # (n_sh, 1) for 3D fields
     else:
         _dealias = None

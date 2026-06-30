@@ -18,13 +18,17 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 # Legacy constants — kept so that ``from legoesm.core.hardware import
 # _UNSUPPORTED_F64_BACKENDS`` in conservation.py et al. keeps working.
-# Iter 32: include both lowercase and uppercase spellings.  Older
-# callers (and ``test_runtime_bootstrap``) match against ``"METAL"``;
-# newer callers normalise to lowercase.  Carrying both keys avoids
-# subtle cross-version mismatches without changing the lookup
-# semantics elsewhere (every existing call lowercases its query).
+# The Apple GPU backend ``mps`` (jax-mps / MLX) is float32-only.  Include
+# both lowercase and uppercase spellings: some callers (and
+# ``test_runtime_bootstrap``) match against ``"MPS"``; newer callers
+# normalise to lowercase.  Carrying both keys avoids subtle cross-version
+# mismatches without changing the lookup semantics elsewhere (every
+# existing call lowercases its query).  ``metal``/``METAL`` are kept as the
+# legacy Apple-GPU platform aliases (that backend is no longer wired in) so a
+# stale backend string can never silently bypass the no-f64 guard — those
+# Metal GPUs also lacked f64.
 # ---------------------------------------------------------------------------
-_UNSUPPORTED_F64_BACKENDS = frozenset({"metal", "METAL"})
+_UNSUPPORTED_F64_BACKENDS = frozenset({"mps", "MPS", "metal", "METAL"})
 
 _PRECISION_NAME_TO_DTYPE = {
     "float16": jnp.float16,

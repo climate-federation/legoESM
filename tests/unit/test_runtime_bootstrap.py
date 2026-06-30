@@ -32,16 +32,16 @@ class TestBackendDetection:
         from legoesm.runtime.backend import get_backend
         backend = get_backend()
         assert backend == backend.lower()
-        assert backend in ("cpu", "gpu", "tpu", "metal")
+        assert backend in ("cpu", "gpu", "tpu", "mps")
 
     def test_supports_float64_cpu(self):
         from legoesm.runtime.backend import supports_float64
         # CPU always supports f64.
         assert supports_float64("cpu") is True
 
-    def test_supports_float64_metal(self):
+    def test_supports_float64_mps(self):
         from legoesm.runtime.backend import supports_float64
-        assert supports_float64("metal") is False
+        assert supports_float64("mps") is False
 
     def test_supports_float64_gpu(self):
         from legoesm.runtime.backend import supports_float64
@@ -403,9 +403,9 @@ class TestLegacyCompat:
         # The canonical constant stores backend names in lowercase
         # (matching `runtime.backend._NO_F64_BACKENDS`).  Call sites
         # always compare with `backend.lower()` before membership
-        # (see hardware.py line 86).  Earlier version of this test
-        # asserted `"METAL"` (uppercase), which is stale.
-        assert "metal" in _UNSUPPORTED_F64_BACKENDS
+        # (see hardware.py detect_devices).  The Apple GPU backend
+        # (jax-mps / MLX) is the float32-only entry.
+        assert "mps" in _UNSUPPORTED_F64_BACKENDS
 
     def test_legacy_parse_precision_dtype(self):
         from legoesm.core.hardware import _parse_precision_dtype

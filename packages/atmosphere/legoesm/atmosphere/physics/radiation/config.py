@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
@@ -353,6 +354,9 @@ class RadiationConfig(NamedTuple):
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
+    # "mc3d": 3D Monte-Carlo ray-traced shortwave (plane LES/CRM only) + gray
+    # longwave. See docs/specs/mc3d_raytracer.md. mc3d holds MC numerics.
+    mc3d: MC3DRadiationConfig = MC3DRadiationConfig()
     update_interval_steps: int = 1
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()

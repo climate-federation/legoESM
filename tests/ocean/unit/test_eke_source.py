@@ -171,12 +171,12 @@ def _kdiss_cell_flux_form(recipe, model, state):
     grid = recipe.grid
     cfg = recipe.model_config
     mask = state.land_mask.data
-    if cfg.A_h_lat_scaling:
-        _floor = cfg.A_h_floor / cfg.A_h if cfg.A_h_floor > 0 else 0.0
-        sc_u, _ = laplacian_scaling_factor(grid, power=cfg.A_h_cos_power, floor=_floor)
+    if cfg.lateral_viscosity.A_h_lat_scaling:
+        _floor = cfg.lateral_viscosity.A_h_floor / cfg.lateral_viscosity.A_h if cfg.lateral_viscosity.A_h_floor > 0 else 0.0
+        sc_u, _ = laplacian_scaling_factor(grid, power=cfg.lateral_viscosity.A_h_cos_power, floor=_floor)
     else:
         sc_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
-    A_h_center = cfg.A_h * sc_u
+    A_h_center = cfg.lateral_viscosity.A_h * sc_u
     return vector_laplacian_dissipation_cgrid(
         state.u.data, state.v.data, grid, A_h_center,
         mask=mask, u_mask=state.u_mask.data, v_mask=state.v_mask.data)
@@ -494,10 +494,10 @@ def test_kdiss_h_flux_form_matches_veros_and_beats_dynamical_overcredit():
     visc_v = diag.Ah_lap_v.data * v_mask[:, :, None]
 
     # Flux-form density via the canonical operator (same A_h×scale as the tendency).
-    _floor = mcfg.A_h_floor / mcfg.A_h if mcfg.A_h_floor > 0 else 0.0
-    sc_u, _ = laplacian_scaling_factor(grid, power=mcfg.A_h_cos_power, floor=_floor)
+    _floor = mcfg.lateral_viscosity.A_h_floor / mcfg.lateral_viscosity.A_h if mcfg.lateral_viscosity.A_h_floor > 0 else 0.0
+    sc_u, _ = laplacian_scaling_factor(grid, power=mcfg.lateral_viscosity.A_h_cos_power, floor=_floor)
     kdiss_cell = vector_laplacian_dissipation_cgrid(
-        u, v, grid, mcfg.A_h * sc_u, mask=jnp.asarray(mask),
+        u, v, grid, mcfg.lateral_viscosity.A_h * sc_u, mask=jnp.asarray(mask),
         u_mask=u_mask, v_mask=v_mask)
     K_flux = np.asarray(harmonic_lateral_kediss_eke_source(
         visc_u, visc_v, u, v, grid, jnp.asarray(mask), kdiss_h_cell=kdiss_cell))

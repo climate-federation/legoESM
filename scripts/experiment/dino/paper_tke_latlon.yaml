@@ -1,0 +1,14 @@
+# DINO lat-lon with the paper's NEMO TKE vertical-mixing scheme (Kamm et al.
+# 2025). NOTE: TKE is UNSTABLE in our 1deg DINO — the lat-lon run blows up near
+# day ~40 (a documented fidelity gap; our TKE / lateral-viscosity tuning differs
+# from NEMO's). Kept to reproduce the paper-faithful-scheme attempt; the ACC
+# rises to ~44 Sv by day 35 before the blow-up. For a stable long run use
+# acc_kpp_latlon_365d.yaml (KPP).
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/paper_tke_latlon.yaml
+grid: latlon
+vmix: tke
+days: 90                  # blows up ~day 40; snapshots before that are usable
+snapshot_every_days: 5
+n_lon: 50
+output_dir: results/dino_latlon_tke

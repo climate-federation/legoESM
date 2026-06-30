@@ -2,7 +2,7 @@
 
 Verifies that:
 - FV operators work in float32, float64, and float16
-- Spectral operators work in float64 (and route to CPU on Metal)
+- Spectral operators work in float64 (and route to CPU on Apple mps)
 - Multi-device sharding produces correct results
 - MPI halo exchange is compatible with FV operators
 
@@ -76,9 +76,9 @@ def _requires_x64():
 
 
 def _requires_metal():
-    """Skip if not running on Metal backend."""
-    if get_backend() != "METAL":
-        pytest.skip("Metal backend not available")
+    """Skip if not running on the Apple GPU (mps) backend."""
+    if get_backend() != "MPS":
+        pytest.skip("Apple GPU (mps) backend not available")
 
 
 # =====================================================================
@@ -86,7 +86,7 @@ def _requires_metal():
 # =====================================================================
 
 class TestFVFloat32:
-    """FV operators in float32 (default, works on all backends inc. Metal)."""
+    """FV operators in float32 (default, works on all backends inc. mps)."""
 
     @pytest.fixture(scope="class")
     def grid(self):
@@ -387,21 +387,20 @@ class TestSpectralFloat32Guard:
 # =====================================================================
 
 class TestMetalBackend:
-    """Tests for Metal GPU compatibility."""
+    """Tests for Apple GPU (mps) compatibility."""
 
     def test_metal_config_detection(self):
-        """MetalConfig should detect whether Metal is available."""
+        """MetalConfig should detect whether the Apple GPU (mps) is available."""
         from legoesm.parallel.metal import get_metal_config
         config = get_metal_config()
         assert hasattr(config, 'is_metal')
         assert hasattr(config, 'cpu_device')
-        # When Metal is non-functional (fell back to CPU), is_metal is False
-        from legoesm.runtime.backend import metal_fell_back_to_cpu
-        if get_backend() != "METAL" or metal_fell_back_to_cpu():
+        # Off the Apple GPU (mps) backend, is_metal is False.
+        if get_backend() != "MPS":
             assert config.is_metal is False
 
     def test_fv_would_work_on_metal(self):
-        """FV operators use float32 by default, compatible with Metal."""
+        """FV operators use float32 by default, compatible with mps."""
         grid = create_cubed_sphere(8)
         q, u, v = _make_fields(grid, jnp.float32)
         # Verify inputs are float32
@@ -412,7 +411,7 @@ class TestMetalBackend:
         assert jnp.all(jnp.isfinite(dq))
 
     def test_spectral_metal_cpu_routing(self):
-        """Spectral model should detect functional Metal and route to CPU."""
+        """Spectral model should detect the Apple GPU (mps) and route to CPU."""
         _requires_metal()
         from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
         from legoesm.grids.gaussian import create_gaussian_grid
