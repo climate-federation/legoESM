@@ -121,7 +121,9 @@ def test_latlon_ocean_spmd_tripole_matches_single_device(
     grid = create_synthetic_tripole(n_lat, n_lon)
     assert grid.fold.is_active, "synthetic tripole must carry an active fold"
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(
+    # from_flat: barotropic_solver / n_barotropic_substeps moved into the
+    # nested barotropic group (#501); the flat-name shim routes them.
+    cfg = LatLonCGridOceanConfig.from_flat(
         barotropic_solver=barotropic_solver,
         A_h=1000.0, K_h=500.0, A_v=1e-3, K_v=1e-5,
         n_barotropic_substeps=10,
