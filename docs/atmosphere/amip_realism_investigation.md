@@ -1,9 +1,29 @@
 # AMIP full-physics realism investigation
 
-Status: **root cause identified; not yet resolved.** This note consolidates a
-long diagnostic campaign on why a full-physics, prescribed-SST (AMIP) run with
-`scripts/run/run_amip.py` produces an unrealistic climate, and what is (and is
-not) the fix.
+Status: **root cause identified; a validated realistic config already exists.**
+This note consolidates a long diagnostic campaign on why a full-physics,
+prescribed-SST (AMIP) run with `scripts/run/run_amip.py` produces an unrealistic
+climate, and what is (and is not) the fix.
+
+## TL;DR — the fix is SBM convection (already validated)
+
+The diagnostic campaign below used **`--convection tiedtke`** and hit a
+non-precipitating overcast trap. **`config/amip/amip_production.yaml` already
+ships the realistic config** — the key difference is **`convection: sbm`**,
+validated at C48/L40 (job 25918469): **planetary albedo 0.292** (target 0.29),
+**precip 3.2 mm/day** (target 2.8). Its provenance note states SBM "fixes the
+structural over-bright (~2×) and too-dry (~4×) biases" — i.e. **exactly the
+symptoms this campaign chased under tiedtke**. So the weak, imbalanced
+hydrological cycle diagnosed below is a **tiedtke** deficiency; SBM resolves it.
+
+**To restart / reproduce a realistic AMIP:**
+- Production: `run_amip.py --config config/amip/amip_production.yaml ...` (C48/L40).
+- Cheap iteration: `run_amip.py --config config/amip/amip_realism_c12.yaml
+  --forcing-path forcing_amip_woa/sst_sic_amip_1979-2014.nc --days 45 ...`
+  (C12/L20, SBM, WOA observed SST, realistic dry IC).
+
+The rest of this note documents the tiedtke-path diagnosis (still useful — it
+localises WHY tiedtke fails and rules out the non-convection levers).
 
 ## Symptom
 
@@ -54,16 +74,18 @@ it re-moistens back to overcast because E > P.
   only moderate RH; as the column moistens toward saturation `cf → 1` regardless.
 - **Initial moisture** (`--rh-init`): starts realistic but re-moistens (E > P).
 
-## What IS the fix (remaining work)
+## What IS the fix
 
-**Strengthen and balance the hydrological cycle** so precipitation removes the
-evaporated moisture at moderate RH, before the column saturates:
-- raise precipitation efficiency (convective + large-scale) so P ≈ E;
-- raise evaporation toward ~2.7 mm/day (hfls 32 vs 88 — likely throttled by low
-  surface winds, max_v ≈ 4 vs Earth ~7 m/s).
+**Use SBM convection** (`convection: sbm`) instead of tiedtke. SBM produces the
+strong, balanced hydrological cycle the tiedtke path lacks and is validated
+realistic in `config/amip/amip_production.yaml` (albedo 0.292, precip 3.2). The
+per-knob analysis above explains *why* the tiedtke path fails (weak/imbalanced
+P<E → moistening → overcast) and confirms the failure is the **convective
+closure**, not the surface / cloud / IC levers — all of which were ruled out.
 
-This is **convection/precipitation scheme development**, not a parameter sweep —
-every accessible tuning knob above has been ruled out.
+Open follow-up: confirm SBM also lands realistic at coarse C12/L20 (the cheap
+iteration grid) with the WOA observed SST — `config/amip/amip_realism_c12.yaml`
+is the config for that check.
 
 ## Bugs fixed along the way (merged)
 
