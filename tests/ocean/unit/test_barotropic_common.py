@@ -21,6 +21,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
     maxvel_clip,
+    precision_aware_rel_tol,
 )
 
 
@@ -385,3 +386,70 @@ class TestTransportWeightsContinuityConsistent:
             _, w_tot, w_tr = compute_filter_weights(1, jnp.float64, use_cosine=use_cosine)
             assert w_tr.shape == (1,)
             assert jnp.isclose(w_tr[0], 1.0, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# precision_aware_rel_tol
+# ---------------------------------------------------------------------------
+
+class TestPrecisionAwareRelTol:
+    """The PCG/CG relative-residual tolerance floor must pass f64 through
+    unchanged but raise an unreachable tolerance to a f32-reachable value."""
+
+    def test_f64_passthrough_default(self):
+        """In float64 the 1e-10 default is above the eps floor -> unchanged."""
+        out = precision_aware_rel_tol(1.0e-10, jnp.float64)
+        assert out.dtype == jnp.float64
+        # f64 floor = 1e3 * eps64 ~= 2.2e-13 < 1e-10, so the request passes.
+        assert float(out) == 1.0e-10
+
+    def test_f64_passthrough_tighter(self):
+        """A still-reasonable f64 tol (1e-12) also passes (above ~2.2e-13)."""
+        out = precision_aware_rel_tol(1.0e-12, jnp.float64)
+        assert float(out) == 1.0e-12
+
+    def test_f64_passthrough_below_eps_floor(self):
+        """f64 is a PURE pass-through: even a tol BELOW 1e3*eps64 (~2.2e-13),
+        e.g. a custom 1e-14, is returned unchanged — the f64 reference path is
+        byte-identical for ANY tolerance, not just the 1e-10 default (codex
+        MAJOR: the floor must never loosen an f64 tolerance)."""
+        out = precision_aware_rel_tol(1.0e-14, jnp.float64)
+        assert float(out) == 1.0e-14
+
+    def test_traced_tol_is_jax_safe(self):
+        """requested_tol may be a TRACED scalar (no float() on a tracer, no
+        host sync): the helper must trace cleanly under jax.jit."""
+        @jax.jit
+        def _floored(t):
+            return precision_aware_rel_tol(t, jnp.float32)
+        out = _floored(jnp.asarray(1.0e-10, dtype=jnp.float32))
+        floor = 1.0e3 * float(jnp.finfo(jnp.float32).eps)
+        assert float(out) == pytest.approx(floor, rel=1e-5)
+
+    def test_f32_floors_unreachable_tol(self):
+        """In float32 the 1e-10 default is BELOW the eps floor -> raised."""
+        out = precision_aware_rel_tol(1.0e-10, jnp.float32)
+        assert out.dtype == jnp.float32
+        floor = 1.0e3 * float(jnp.finfo(jnp.float32).eps)  # ~1.19e-4
+        assert float(out) == pytest.approx(floor, rel=1e-5)
+        # f32 machine eps ~1.19e-7; the floor must be ABOVE it (reachable)
+        # and the original 1e-10 must have been BELOW it (unreachable).
+        assert float(out) > float(jnp.finfo(jnp.float32).eps)
+        assert 1.0e-10 < float(jnp.finfo(jnp.float32).eps)
+
+    def test_f32_keeps_loose_tol(self):
+        """A loose f32 tol already above the floor passes through unchanged."""
+        out = precision_aware_rel_tol(1.0e-3, jnp.float32)
+        assert float(out) == pytest.approx(1.0e-3, rel=1e-6)
+
+    def test_f32_floor_is_dtype_eps_scaled(self):
+        """The f32 floor scales with f32's own machine epsilon (no magic
+        absolute literal). f64 is pure pass-through, so a 0.0 request floors
+        only in f32 (f64 returns 0.0 unchanged)."""
+        f32 = precision_aware_rel_tol(0.0, jnp.float32)
+        f64 = precision_aware_rel_tol(0.0, jnp.float64)
+        assert float(f32) == pytest.approx(
+            1.0e3 * float(jnp.finfo(jnp.float32).eps), rel=1e-5)
+        # f64 is a pure pass-through: 0.0 stays 0.0 (never loosened/raised).
+        assert float(f64) == 0.0
+        assert float(f32) > float(f64)

@@ -37,7 +37,17 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import jax
-jax.config.update("jax_enable_x64", True)
+
+# Precision: the OMIP run is float64 (x64) by DEFAULT — the scientific
+# reference.  ``--fp32`` (single-precision, GPU-memory mode: eORCA025 ¼° fits
+# the lat-band SPMD step on a 48 GB GPU in fp32 where f64 OOMs) must leave JAX
+# x64 OFF so device arrays default to float32; the matching all-fp32
+# ``PrecisionPolicy`` is set from ``args`` in ``main`` (after argparse).  x64
+# has to be decided BEFORE any JAX op runs, so the flag is sniffed from argv
+# here (a cheap pre-parse; argparse still owns the real flag + validation).
+_FP32 = "--fp32" in sys.argv[1:]
+if not _FP32:
+    jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
@@ -55,6 +65,41 @@ from legoesm.ocean.init_tripole import (  # noqa: E402
     compute_woa_3d,
     squeeze_nemo_field_2d as _squeeze2d,
 )
+
+
+def _south_pad_rows(n_lat: int, n_gpus: int) -> int:
+    """Number of LAND rows to append at the SOUTH so ``n_lat`` is a multiple of
+    ``n_gpus`` (the lat-band SPMD step needs one uniform band per device).
+
+    eORCA025 ``n_lat=1207`` is odd: for ``n_gpus=2`` this returns 1 (-> 1208).
+    Returns 0 when already divisible (or ``n_gpus <= 1``).
+    """
+    if n_gpus <= 1:
+        return 0
+    rem = n_lat % n_gpus
+    return 0 if rem == 0 else (n_gpus - rem)
+
+
+def _pad_mask_bathy_south(land_mask: np.ndarray, H_bathy: np.ndarray,
+                          n_pad: int):
+    """Prepend ``n_pad`` LAND rows (mask=0, bathy=0) to the SOUTH of the cell
+    ``(n_lat, n_lon)`` land-mask + bathymetry arrays.
+
+    Pairs with :func:`legoesm.grids.tripole.pad_tripole_grid_south` (which pads
+    the GRID geometry the same way + keeps the north fold): the padded mask/bathy
+    + grid are fed to the SAME ``_init_rest_state`` / WOA-fill path, so the state
+    is built on the padded grid with the added rows masked LAND (inert dynamics).
+    The wet rows are preserved bit-exact, shifted ``+n_pad`` in the lat index.
+    """
+    if n_pad <= 0:
+        return land_mask, H_bathy
+    lm = np.asarray(land_mask)
+    hb = np.asarray(H_bathy)
+    n_lon = lm.shape[1]
+    zeros_lm = np.zeros((n_pad, n_lon), dtype=lm.dtype)
+    zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
+    return (np.concatenate([zeros_lm, lm], axis=0),
+            np.concatenate([zeros_hb, hb], axis=0))
 
 
 def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
@@ -312,14 +357,20 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     if min_levels and int(min_levels) > 1:
         msg += f" ({n_masked_shallow} masked for <{int(min_levels)} active levels)"
     print(msg)
+    # Storage dtype follows the active precision policy (f64 by default;
+    # float32 under --fp32, where an explicit dtype=float64 would warn-and-
+    # truncate). resolve_dtype clamps f64->f32 when x64 is off, so this is the
+    # one device array the partial-cell coord builds in the run-wide dtype.
+    from legoesm.core.precision import resolve_dtype as _resolve_dtype
+    _coord_dtype = _resolve_dtype(None, "storage")
     zc = create_partial_cell_coordinate(
-        z_coord, jnp.asarray(H_snapped, dtype=jnp.float64),
+        z_coord, jnp.asarray(H_snapped, dtype=_coord_dtype),
     )
     return zc, H_snapped, lm_out
 
 
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
-                  woa_init: bool = False, woa_t=None, woa_s=None,
+                  woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
@@ -476,6 +527,22 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
+    n_pad = _south_pad_rows(n_lat, n_gpus)
+    if n_pad > 0:
+        # Multi-GPU lat-band SPMD divisibility: append n_pad LAND rows at the
+        # SOUTH (grid geometry + mask + bathy together) BEFORE the state /
+        # partial-cell build so everything downstream is consistent.  The bipolar
+        # fold stays at the north (pad_tripole_grid_south shifts fold_j/cap_j +n_pad).
+        from legoesm.grids.tripole import pad_tripole_grid_south
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        grid = pad_tripole_grid_south(grid, n_pad)
+        land_mask, H_bathy = _pad_mask_bathy_south(land_mask, H_bathy, n_pad)
+        model = LatLonCGridOceanModel(grid, z_coord, config)  # rebuild on padded grid
+        n_lat = int(grid.n_lat)
+        print(f"[setup] SPMD south-pad: +{n_pad} LAND rows -> n_lat={n_lat} "
+              f"(n_gpus={n_gpus}, fold still north at j={int(grid.fold.fold_j)})")
     if ew_cyclic_overlap:
         # ORCA 2-pt cyclic-overlap fill of the static geometry, applied BEFORE
         # make_partial_cell (codex HIGH): the partial-cell coordinate
@@ -1820,12 +1887,16 @@ def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
             f"icy_cells={int(icy.sum())}")
 
 
-def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
+def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
     """AMOC@26N [Sv] from the LIVE state (h reconstructed in-run via
     compute_layer_thickness — the snapshot lacks eta/z_coord).  Reuses the
     tested compute_amoc_from_state{,_mpas} (Atlantic-masked moc_streamfunction
     -> max).  Pure NumPy at run-end (no AD/JIT/shared-kernel touch).  Prints +
-    writes a scalar file; NaN/skip is non-fatal.  RAPID obs ~17 Sv."""
+    writes a scalar file; NaN/skip is non-fatal.  RAPID obs ~17 Sv.
+
+    io_proc=False (non-process-0 under --distributed): compute on every rank (the
+    gathered state is replicated; collective-consume identically) but only process
+    0 writes transports.txt.  Default True = single-process unchanged."""
     try:
         from legoesm.ocean.vertical import compute_layer_thickness
         h = np.asarray(compute_layer_thickness(
@@ -1841,6 +1912,8 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
                 np.asarray(state.land_mask.data), grid))
         else:
             return
+        if not io_proc:
+            return
         print(f"[transports] AMOC@26N = {amoc:.2f} Sv  (RAPID obs ~17; "
               f"NEMO via scripts/validate/nemo_transports.py)")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -1850,7 +1923,8 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
 
 
-def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
+def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir,
+                        io_proc: bool = True):
     """Barotropic streamfunction (gyres) + AMOC overturning streamfunction
     (Atlantic, lat-depth) + global MOC, at run-end for ALL simulations. Reuses
     the tested ``diagnostics_streamfunction.{barotropic_streamfunction,
@@ -1912,6 +1986,8 @@ def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
         z_cen = (np.abs(np.asarray(z_coord.z_full_ref))
                  if getattr(z_coord, "z_full_ref", None) is not None
                  else np.arange(amoc.shape[1], dtype=float))
+        if not io_proc:
+            return
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             Path(out_dir) / "bsf_amoc.npz", bsf=bsf, amoc=amoc, gmoc=gmoc,
@@ -1957,7 +2033,8 @@ def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] BSF/AMOC diag skipped: {type(e).__name__}: {e}")
 
 
-def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
+def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir,
+                    io_proc: bool = True):
     """ACC@Drake [Sv] from the LIVE state (h reconstructed in-run).  Reuses the
     tested compute_acc_from_state{,_mpas}: lat-lon/tripole via barotropic_stream
     function+acc_transport (ψ_bt max−min in the Drake band), MPAS via the
@@ -1980,6 +2057,8 @@ def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
                 np.asarray(state.land_mask.data), grid))
         else:
             return
+        if not io_proc:
+            return
         print(f"[transports] ACC@Drake = {acc:.2f} Sv  (obs ~137; NEMO ORCA1 "
               f"~159 via scripts/validate/nemo_transports.py --grid-u)")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -1989,7 +2068,7 @@ def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] ACC@Drake diag skipped: {type(e).__name__}: {e}")
 
 
-def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
+def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
     """Global meridional ocean heat transport (NH peak / SH min) [PW] from the
     LIVE state.  Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h
     per latitude).  Pure NumPy at run-end; APPENDS to transports.txt; non-fatal.
@@ -2009,6 +2088,8 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
                 np.asarray(state.land_mask.data), grid)
         else:
             return
+        if not io_proc:
+            return
         print(f"[transports] MHT NH peak = {mh['nh_peak_PW']:.2f} PW @ "
               f"{mh['nh_peak_lat']:.0f}N, SH min = {mh['sh_min_PW']:.2f} PW "
               f"(NH obs ~1.8 PW; NEMO via nemo_transports.py --grid-t)")
@@ -2020,8 +2101,13 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
 
 
-def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
+                   io_proc: bool = True):
+    # io_proc=False (non-process-0 under --distributed): the state is replicated
+    # and the host pull below is pure NumPy (no collective), but only process 0
+    # writes the file — N processes would otherwise clobber the same .npz.  Still
+    # materialize on every rank so the gathered (collective) state is consumed
+    # identically.  Default True = single-process byte-identical.
     save_kw = dict(
         T=np.asarray(state.T.data), S=np.asarray(state.S.data),
         u=np.asarray(state.u.data),
@@ -2045,6 +2131,9 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
     if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
         zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
         save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
+    if not io_proc:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
@@ -2121,13 +2210,34 @@ def _record_final_state_digest(manifest_path, state) -> None:
 
 
 def main() -> int:
+    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
+    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
+    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
+    # while x64 was already enabled, tripping the consistency guard below.
+    # All sbatch wrappers already use full flag names, so this is behaviour-
+    # preserving for existing callers.
     p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                allow_abbrev=False)
     p.add_argument("--years", type=float, default=5.0)
     p.add_argument("--smoke", action="store_true",
                    help="Short 10-day benchmark run (reports steps/s).")
     p.add_argument("--dt", type=float, default=3600.0,
                    help="Timestep [s] (default 3600 = NEMO ORCA1).")
+    p.add_argument("--fp32", action="store_true",
+                   help="Single-precision (float32) ocean run: leave JAX x64 OFF "
+                        "(device arrays default float32) and set the all-fp32 "
+                        "PrecisionPolicy. Halves GPU memory (~37 GB/GPU vs ~75 GB "
+                        "in f64 for eORCA025 ¼°), so the lat-band SPMD step fits a "
+                        "48 GB GPU at N=2 where f64 OOMs. Default (flag absent) = "
+                        "f64 reference, byte-unchanged. Validated for the "
+                        "tripole / latlon_bathy C-grid path (the SPMD fixed-iter "
+                        "barotropic PCG + wright EOS + adcroft/smc03 PGF are "
+                        "fp32-safe); mpas / cubed_sphere are NOT fp32-validated "
+                        "(carry f64-only / fp32-unvalidated numerics) and are "
+                        "rejected. NOTE: do "
+                        "NOT also export JAX_ENABLE_X64=1 — that would re-enable "
+                        "x64 and silently defeat the fp32 memory saving.")
     p.add_argument("--nlev", type=int, default=40,
                    help="Ocean vertical levels for the tanh z* default grid "
                         "(default 40, climate-usable minimum). For full NEMO "
@@ -2156,6 +2266,29 @@ def main() -> int:
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
                    help="cubed-sphere face resolution n (C-n) for --grid cubed_sphere.")
+    p.add_argument("--n-gpus", type=int, default=1,
+                   help="Multi-GPU lat-band SPMD ocean step (latlon_bathy / tripole "
+                        "only): partition the ocean state by latitude band across N "
+                        "local devices via make_sharded_ocean_step_global. n_lat is "
+                        "padded with LAND rows at the SOUTH to a multiple of N (the "
+                        "tripole north fold stays at the north). The host post-step "
+                        "BCs (SSS restore / prognostic ice / geothermal / BBL / nudge) "
+                        "run on the gathered GLOBAL state, unchanged. Default 1 = the "
+                        "single-device path (byte-identical). Single-process: N must be "
+                        "<= jax.local_device_count(). MULTI-NODE: add --distributed and "
+                        "launch one process per GPU (mpirun/srun); then N must be <= "
+                        "jax.device_count() (the GLOBAL device set across processes).")
+    p.add_argument("--distributed", action="store_true",
+                   help="Multi-PROCESS jax.distributed bootstrap for the --n-gpus "
+                        "lat-band SPMD step: launch ONE process per GPU (mpirun/srun, "
+                        "ntasks = total GPUs across nodes) and pass --distributed so "
+                        "the GLOBAL jax.devices() spans every node. The lat-band mesh "
+                        "is then built over all global devices and the --n-gpus guard "
+                        "is relaxed to jax.device_count() (global). The OMIP host loop "
+                        "runs identically on every process over the all-gathered "
+                        "(replicated) state; I/O (manifest, CSV, snapshots, transports) "
+                        "is written ONLY by process 0. Single-process (default, no "
+                        "--distributed) is byte-unchanged.")
     p.add_argument("--mpas-level", type=int, default=6,
                    help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
                         "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
@@ -2630,6 +2763,47 @@ def main() -> int:
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
 
+    # ------------------------------------------------------------------
+    # Multi-PROCESS jax.distributed bootstrap (--distributed): MUST run BEFORE any
+    # jax array op / device query so jax.devices() spans every process' GPUs.  A
+    # no-op for a single process (default).  Reuses the proven coordinator
+    # discovery (rank-0 hostname = coordinator) from parallel.distributed; the
+    # lat-band SPMD halo is pure-JAX ppermute/psum (no mpi4jax), so the bootstrap
+    # requires only mpi4py.  ``_proc_index`` gates process-0-only I/O below.
+    _proc_index = 0
+    _proc_count = 1
+    if args.distributed:
+        from legoesm.parallel.distributed import (
+            initialize_jax_distributed_multiprocess,
+        )
+        _rank, _proc_count = initialize_jax_distributed_multiprocess()
+        _proc_index = int(jax.process_index())
+        if _proc_count <= 1:
+            print("[distributed] --distributed given but launched single-process "
+                  "(MPI size 1): running the single-controller path.", flush=True)
+        else:
+            print(f"[distributed] process {_proc_index}/{_proc_count}: "
+                  f"global jax.device_count()={jax.device_count()}, "
+                  f"local={jax.local_device_count()}", flush=True)
+
+    def _is_io_proc() -> bool:
+        """Only process 0 writes to the shared output dir (manifest / CSV /
+        snapshots / transports / digest) — under --distributed every process runs
+        the same host loop on the all-gathered replicated state, so N processes
+        would otherwise clobber the same files."""
+        return _proc_index == 0
+
+    # Process-0-only I/O under --distributed is handled by passing ``io_proc=`` to
+    # the file-writing helpers (_save_snapshot / the four transport diags /
+    # _record_final_state_digest), NOT by shadowing them with local wrappers.  A
+    # local ``def _save_snapshot`` would make the name local to main() and the
+    # ``_impl = _save_snapshot`` capture raise UnboundLocalError (codex HIGH).  More
+    # importantly, those diags run JAX ops (compute_layer_thickness on the gathered,
+    # P()-replicated state) — under multi-controller JAX EVERY rank must dispatch
+    # the SAME program in the SAME order, so a process-0-ONLY call would desync the
+    # collective program.  Passing io_proc lets every rank run the (identical,
+    # replicated) JAX + host pull, and gates ONLY the filesystem write to process 0.
+
     if args.ice_thermo:   # codex LOW: reject unphysical prescribed-ice params early
         if not (0.0 <= float(args.ice_thermo_sw_trans) <= 1.0):
             raise ValueError("--ice-thermo-sw-trans must be in [0,1] (SW fraction "
@@ -2671,8 +2845,46 @@ def main() -> int:
                 "pulls ocean SST to the host each step (like SSS restoring / "
                 "ice-thermo), so it is host-loop only. Set --scan-block 0.")
 
+    # Precision policy. The all-fp32 policy is set when --fp32 is given; the
+    # module-level argv sniff (``_FP32``) already kept JAX x64 OFF so device
+    # arrays default to float32. Defend against a stale/mismatched argv sniff
+    # (e.g. --fp32 passed via an args namespace that argv didn't see): the
+    # parsed flag is authoritative for the policy, and x64 MUST agree with it.
+    if bool(args.fp32) != _FP32:
+        raise SystemExit(
+            "internal: --fp32 argparse flag disagrees with the module-level "
+            f"argv sniff (_FP32={_FP32}, args.fp32={args.fp32}). The x64 toggle "
+            "is decided from argv at import; pass --fp32 on the command line.")
+    if args.fp32:
+        # fp32 is only VALIDATED for the C-grid latlon/tripole SPMD path
+        # (the audited dtype-safe OMIP path).  The MPAS / cube backends carry
+        # f64-only or fp32-unvalidated numerics internally (e.g. the
+        # density-Jacobian analytic-pressure PGF hardcodes float64 to protect
+        # an O(5.8e8) cancellation with no x64 fallback) and were not validated
+        # in single precision — fail loud rather than silently mis-run them.
+        if args.grid not in ("tripole", "latlon_bathy"):
+            raise SystemExit(
+                f"--fp32 is only validated for --grid tripole / latlon_bathy "
+                f"(the SPMD C-grid OMIP path: fixed-iteration barotropic PCG + "
+                f"wright EOS + adcroft/smc03 PGF are all fp32-safe). --grid "
+                f"{args.grid!r} carries f64-only / fp32-unvalidated numerics "
+                f"(density-Jacobian PGF islands, etc.) and is NOT fp32-"
+                f"validated. Drop --fp32 or use --grid tripole / latlon_bathy.")
+        if jax.config.jax_enable_x64:
+            # Belt-and-suspenders: something (e.g. JAX_ENABLE_X64=1 in the env,
+            # or an earlier import) re-enabled x64, which would silently keep
+            # arrays in float64 and defeat the whole point of --fp32.
+            raise SystemExit(
+                "--fp32 requires JAX x64 DISABLED, but jax_enable_x64 is True "
+                "(likely JAX_ENABLE_X64=1 is exported, or x64 was enabled "
+                "before this run). Unset JAX_ENABLE_X64 so float32 is the "
+                "default device dtype.")
+
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp32() if args.fp32 else PrecisionPolicy.fp64())
+    if args.fp32:
+        print("[setup] PRECISION: float32 (JAX x64 OFF, PrecisionPolicy.fp32) "
+              "— GPU-memory mode; the f64 reference is the default (no --fp32).")
     from legoesm.ocean.forcing import load_core2_nyf
     from legoesm.ocean.coupler import (
         compute_omip2_surface_forcing,
@@ -2761,6 +2973,7 @@ def main() -> int:
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
+            n_gpus=args.n_gpus,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
@@ -2829,6 +3042,17 @@ def main() -> int:
         app_grid_type = "mpas"
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
+        if args.n_gpus > 1 and _nlat % args.n_gpus != 0:
+            # The regular lat-lon grid has a SOUTH POLE WALL, not a bipolar fold:
+            # padding rows would add unphysical sub-pole latitudes (cos(lat)->
+            # negative / tiny metrics), so the fold-preserving south-pad does NOT
+            # apply here.  Require a divisible --latlon-res instead (180x360 is
+            # divisible by 2/3/4/5/6...; pick e.g. 180/360 for n_gpus|180).
+            raise SystemExit(
+                f"--n-gpus {args.n_gpus} with --grid latlon_bathy needs "
+                f"n_lat ({_nlat}) divisible by n_gpus (the regular grid is "
+                f"south-pole-walled, not folded, so it is NOT land-padded). "
+                f"Choose --latlon-res with n_lat % {args.n_gpus} == 0.")
         grid, z_coord, model, state, H_bathy = build_latlon_bathy(
             args.nlev, args.H_max, args.mesh, n_lat=_nlat, n_lon=_nlon,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
@@ -2936,13 +3160,15 @@ def main() -> int:
         # Provenance (codex HIGH): the manifest's runtime_config snapshots
         # only the INITIAL A_h/C_smag_lap; the full schedule is recorded in
         # the manifest command_line AND in this explicit sidecar.
-        try:
-            import json as _json
-            with open(Path(args.output) / "visc_schedule.json", "w") as _f:
-                _json.dump({"segments_day_Ah_Csmaglap": visc_schedule}, _f,
-                           indent=1)
-        except Exception as _e:  # noqa: BLE001 — provenance best-effort
-            print(f"[warn] visc_schedule sidecar not written: {_e}")
+        if _is_io_proc():
+            try:
+                import json as _json
+                Path(args.output).mkdir(parents=True, exist_ok=True)
+                with open(Path(args.output) / "visc_schedule.json", "w") as _f:
+                    _json.dump({"segments_day_Ah_Csmaglap": visc_schedule}, _f,
+                               indent=1)
+            except Exception as _e:  # noqa: BLE001 — provenance best-effort
+                print(f"[warn] visc_schedule sidecar not written: {_e}")
 
     bbl_geom = None
     bbl_face_widths = None
@@ -3219,7 +3445,11 @@ def main() -> int:
     print(f"[diag] step 0: {d0}", flush=True)
 
     # Progress time-series CSV, flushed each diag -> observable mid-run even when
-    # stdout is pipe-buffered, and a record for post-hoc analysis.
+    # stdout is pipe-buffered, and a record for post-hoc analysis.  mkdir on EVERY
+    # rank (idempotent, exist_ok=True -> no clobber): if only process 0 made the
+    # dir and that raised, the other ranks would run on into the distributed step
+    # and hang (codex MED).  Making the dir everywhere removes that single point of
+    # failure; the actual writes (CSV / manifest / snapshots) stay process-0 only.
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Run manifest (#376 Phase 4): capture the FULL ocean experiment identity at
@@ -3229,59 +3459,148 @@ def main() -> int:
     # OUTSIDE model.config — so two runs that differ only in dt/grid/output get
     # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
     # failure never aborts a long integration.
+    # Process-0 only under --distributed (every process shares one output dir).
     manifest_path = None
-    try:
-        from legoesm.driver.restart import (
-            dataset_provenance_entry,
-            write_run_manifest,
-        )
-        from legoesm.ocean.config import OceanRunRecord
-        run_record = OceanRunRecord(
-            runtime_config=model.config,
-            grid=str(args.grid),
-            mesh=str(args.mesh),
-            nlev=int(args.nlev),
-            dt_seconds=float(dt),
-            total_days=float(total_days),
-            output_path=str(args.output),
-            forcing="core2_nyf",
-            forcing_path=str(args.forcing_path or ""),
-            woa_init=bool(args.woa_init),
-            woa_t=str(args.woa_t or ""),
-            woa_s=str(args.woa_s or ""),
-            latlon_res=str(args.latlon_res),
-            smoke=bool(args.smoke),
-        )
-        manifest_path = write_run_manifest(
-            out_dir, run_record, config_kind="ocean",
-            runner_tag="run_omip_core2",
-            dataset_provenance=[
-                dataset_provenance_entry(pth, dataset_id=did)
-                for did, pth in (
-                    ("core2_forcing", args.forcing_path),
-                    ("woa_t", args.woa_t),
-                    ("woa_s", args.woa_s),
-                )
-                if pth
-            ],
-        )
-        print(f"[setup] wrote run manifest {manifest_path}")
-    except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
-        print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
+    if _is_io_proc():
+        try:
+            from legoesm.driver.restart import (
+                dataset_provenance_entry,
+                write_run_manifest,
+            )
+            from legoesm.ocean.config import OceanRunRecord
+            run_record = OceanRunRecord(
+                runtime_config=model.config,
+                grid=str(args.grid),
+                mesh=str(args.mesh),
+                nlev=int(args.nlev),
+                dt_seconds=float(dt),
+                total_days=float(total_days),
+                output_path=str(args.output),
+                forcing="core2_nyf",
+                forcing_path=str(args.forcing_path or ""),
+                woa_init=bool(args.woa_init),
+                woa_t=str(args.woa_t or ""),
+                woa_s=str(args.woa_s or ""),
+                latlon_res=str(args.latlon_res),
+                smoke=bool(args.smoke),
+            )
+            manifest_path = write_run_manifest(
+                out_dir, run_record, config_kind="ocean",
+                runner_tag="run_omip_core2",
+                dataset_provenance=[
+                    dataset_provenance_entry(pth, dataset_id=did)
+                    for did, pth in (
+                        ("core2_forcing", args.forcing_path),
+                        ("woa_t", args.woa_t),
+                        ("woa_s", args.woa_s),
+                    )
+                    if pth
+                ],
+            )
+            print(f"[setup] wrote run manifest {manifest_path}")
+        except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
+            print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
-    _csv = open(out_dir / "diag_timeseries.csv", "w")
-    _csv.write(",".join(_csv_cols) + "\n")
+    # Process-0-only CSV under --distributed: every process runs the same host
+    # loop on the all-gathered replicated state, so a single writer suffices and
+    # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
+    # and the writer/closer below are no-ops.
+    _csv = None
+    if _is_io_proc():
+        _csv = open(out_dir / "diag_timeseries.csv", "w")
+        _csv.write(",".join(_csv_cols) + "\n")
 
     def _log_diag_csv(step, day, d, rate):
+        if _csv is None:
+            return
         _csv.write(
             f"{step},{day:.3f},{d['mean_sst_C']:.4f},{d['mean_sss']:.4f},"
             f"{d['max_abs_u']:.6e},{d['max_abs_v']:.6e},{d['umax_lat']},"
             f"{d['umax_lon']},{d['umax_lev']},{rate:.3f}\n")
         _csv.flush()
 
+    def _close_csv():
+        if _csv is not None:
+            _csv.close()
+
     _log_diag_csv(0, 0.0, d0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Multi-GPU lat-band SPMD step (--n-gpus N): partition the GLOBAL ocean state
+    # by latitude band across N local devices.  ``_ocean_step(state, sf, fw)`` is
+    # the single per-step entry the host loop calls; default (N=1) is the plain
+    # single-device model.step (byte-identical).  The global-in/global-out wrapper
+    # scatters/gathers each step, so the host post-step BCs (SSS restore /
+    # prognostic ice / geothermal / BBL / nudge / drag) operate on the gathered
+    # GLOBAL state UNCHANGED.  n_lat is already SPMD-divisible (build_tripole
+    # south-padded it; the latlon branch errored on a non-divisible --latlon-res).
+    # ------------------------------------------------------------------
+    _ocean_step = (lambda st, sf, fw:
+                   model.step(st, dt, surface_forcing=sf, freshwater=fw))
+    if args.n_gpus > 1:
+        if app_grid_type not in ("tripole", "latlon"):
+            raise SystemExit(
+                f"--n-gpus {args.n_gpus} is only wired for the lat-lon C-grid "
+                f"(grid=tripole|latlon_bathy); got grid={args.grid!r}. The cube / "
+                f"MPAS SPMD paths are separate.")
+        if args.visc_schedule:
+            raise SystemExit(
+                "--n-gpus > 1 with --visc-schedule is unsupported: the schedule "
+                "rebuilds the model mid-loop, which would leave the sharded step "
+                "holding a stale model. Run the viscosity schedule single-device, "
+                "or drop it for the multi-GPU run.")
+        import jax as _jax
+        if args.distributed:
+            # Multi-process: jax.devices() spans EVERY process' GPUs (the global
+            # set), and create_latlon_mesh builds the "lat" mesh over them, so the
+            # band axis is sharded ACROSS nodes.  Guard against the global count.
+            _global = _jax.device_count()
+            if args.n_gpus > _global:
+                raise SystemExit(
+                    f"--n-gpus {args.n_gpus} > global device count {_global} "
+                    f"(jax.device_count() across all --distributed processes). "
+                    f"Launch ntasks = N processes, one GPU each (e.g. --nodes=2 "
+                    f"--ntasks-per-node=2 --gres=gpu:2 for N=4).")
+            if args.n_gpus != _global:
+                # The lat-band mesh takes the FIRST n_gpus global devices; a
+                # mismatch with the launched device count silently idles ranks and
+                # (worse) can place two bands on one node while another idles.
+                raise SystemExit(
+                    f"--distributed expects --n-gpus ({args.n_gpus}) == global "
+                    f"device count ({_global}): one process per GPU, every device "
+                    f"in the band mesh. Launch exactly {args.n_gpus} single-GPU "
+                    f"processes (ntasks={args.n_gpus}).")
+        else:
+            _local = _jax.local_device_count()
+            if args.n_gpus > _local:
+                raise SystemExit(
+                    f"--n-gpus {args.n_gpus} > local device count {_local}. This "
+                    f"single-controller path uses ONE process' local devices (e.g. "
+                    f"a 2-GPU node sees 2). For N spanning multiple nodes, add "
+                    f"--distributed and launch one process per GPU (mpirun/srun, "
+                    f"ntasks=N).")
+        n_lat_final = int(grid.n_lat)
+        if n_lat_final % args.n_gpus != 0:
+            raise SystemExit(
+                f"internal: padded n_lat ({n_lat_final}) not divisible by "
+                f"n_gpus ({args.n_gpus}) — the south-pad failed.")
+        from legoesm.parallel.mesh import create_latlon_mesh
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            make_sharded_ocean_step_global,
+        )
+        # Prime the build-once vertex-mask cache from the concrete state BEFORE
+        # building the sharded step (the wrapper slices the primed global vmask
+        # per band; an unprimed cache raises in _build_band_vertex_masks).
+        model.prime_step_caches(state)
+        _spmd_mesh = create_latlon_mesh(n_devices=args.n_gpus).mesh
+        _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
+        _ocean_step = (lambda st, sf, fw:
+                       _spmd_step(st, dt, surface_forcing=sf, freshwater=fw))
+        print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
+              f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} rows/band); "
+              f"global-in/global-out wrapper (host BCs on gathered state).")
 
     t_wall = time.time()
 
@@ -3294,6 +3613,12 @@ def main() -> int:
     # ------------------------------------------------------------------
     _tti = getattr(getattr(model, "config", None),
                    "tracer_time_integrator", "euler")
+    if args.n_gpus > 1 and int(args.scan_block) > 0:
+        raise SystemExit(
+            "--n-gpus > 1 and --scan-block are mutually exclusive: the lax.scan "
+            "block path fuses single-device on-device steps (it does not use the "
+            "lat-band sharded step). Pick one — multi-GPU SPMD (the host Python "
+            "loop, --scan-block 0) OR single-device scan fusion.")
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
                 and nudge_tau_s == 0.0 and drag_tau_s == 0.0
                 and not args.sss_restore
@@ -3366,25 +3691,29 @@ def main() -> int:
                 if not d["finite"]:
                     print("[ABORT] non-finite state", flush=True)
                     _save_snapshot(out_dir, f"blowup_step{step}",
-                                   state, lat2d, lon2d)
-                    _csv.close()
+                                   state, lat2d, lon2d, io_proc=_is_io_proc())
+                    _close_csv()
                     return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
                 _save_snapshot(out_dir, f"day{int(round(day)):04d}",
-                               state, lat2d, lon2d, z_coord=z_coord)
+                               state, lat2d, lon2d, z_coord=z_coord,
+                               io_proc=_is_io_proc())
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
-                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
+                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
+                               z_coord=z_coord, io_proc=_is_io_proc())
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
-        _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
-        _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
-        _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
-        _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
-        _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
+        _io = _is_io_proc()
+        _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
+                       io_proc=_io)
+        _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+        _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+        _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+        _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _record_final_state_digest(manifest_path, state)
-        _csv.close()
+        _close_csv()
         rate = n_steps / (time.time() - t_wall)
         print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
               f"final: {_diag(state, lat2d, lon2d)}")
@@ -3541,7 +3870,11 @@ def main() -> int:
                       f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
                       f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
                       f"area-wtd over wet)", flush=True)
-            state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
+            # _ocean_step = single-device model.step (default) OR the lat-band
+            # SPMD global-in/global-out step (--n-gpus > 1); both apply the
+            # in-core wind-stress / heat / freshwater forcing.  Returns a GLOBAL
+            # state, so the host post-step BCs below are unchanged.
+            state = _ocean_step(state, sf, fw)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
@@ -3664,26 +3997,31 @@ def main() -> int:
                 print(f"[ice]  step {step}: {_ice_diag}", flush=True)
             if not d["finite"]:
                 print("[ABORT] non-finite state", flush=True)
-                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
-                _csv.close()
+                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
+                               io_proc=_is_io_proc())
+                _close_csv()
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
-            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d, z_coord=z_coord)
+            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
+                           lon2d, z_coord=z_coord, io_proc=_is_io_proc())
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
-            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
+            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
+                           z_coord=z_coord, io_proc=_is_io_proc())
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
-    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
-    _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
-    _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
-    _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
-    _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
+    _io = _is_io_proc()
+    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
+                   io_proc=_io)
+    _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
-    _csv.close()
+    _close_csv()
     rate = n_steps / (time.time() - t_wall)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:

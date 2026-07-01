@@ -109,7 +109,8 @@ def _lat_spec(x):
     return P("lat", *((None,) * (nd - 1)))
 
 
-def _step_body(model, state, dt, *, grid, vertex_mask):
+def _step_body(model, state, dt, *, grid, vertex_mask,
+               surface_forcing=None, freshwater=None):
     """Run ONE ocean step via the model's NON-jitted body (``_step_impl`` /
     ``_ab2_step`` + the static-gated post-steps), the un-jitted twin of
     ``LatLonCGridOceanModel._step_jitted``.
@@ -123,6 +124,13 @@ def _step_body(model, state, dt, *, grid, vertex_mask):
     so running the un-jitted body keeps ``grid`` a concrete Python-scalar-carrying
     pytree inside the single trace — the model docstring's own "call ``_step_impl``
     directly inside an outer JIT context" guidance.
+
+    ``surface_forcing`` / ``freshwater`` are the BAND-LOCAL (already
+    ``P("lat")``-sliced) external-forcing pytrees (``OceanSurfaceForcing`` /
+    ``FreshwaterForcing``); they are forwarded verbatim into ``_step_impl`` /
+    ``_ab2_step`` (which apply the wind-stress / heat / virtual-salt / eta terms
+    in-core).  ``None`` ⇒ the un-forced step (byte-identical to the original
+    no-forcing body).
 
     Mirrors ``_step_jitted``'s dispatch verbatim (outer_integrator branch +
     polar-filter / freeze-floor / ew-cyclic static gates) so a config that
@@ -140,10 +148,12 @@ def _step_body(model, state, dt, *, grid, vertex_mask):
                 "outer_integrator='ab2' double-counts with "
                 "tracer_time_integrator='ab2'; set the inner one to 'euler'.")
         new_state = model._ab2_step(
-            state, dt, grid=grid, vertex_mask=vertex_mask)
+            state, dt, freshwater=freshwater, surface_forcing=surface_forcing,
+            grid=grid, vertex_mask=vertex_mask)
     else:
         new_state = model._step_impl(
-            state, dt, grid=grid, vertex_mask=vertex_mask)
+            state, dt, freshwater=freshwater, surface_forcing=surface_forcing,
+            grid=grid, vertex_mask=vertex_mask)
     if model.config.polar_filter.use_polar_filter:
         new_state = model._apply_polar_filter(new_state, dt, grid=grid)
     if model.config.freeze_floor:
@@ -325,8 +335,37 @@ def gather_state_latlon(state, mesh):
     return state._replace(**updates)
 
 
+def _shard_forcing(forcing, mesh):
+    """Lay out an external-forcing pytree (``OceanSurfaceForcing`` /
+    ``FreshwaterForcing`` / ``SurfaceTracerForcing`` …) for the lat-band SPMD step.
+
+    Every populated leaf of these NamedTuples is a CELL-CENTRED array of leading
+    dim ``n_lat`` (``OceanSurfaceForcing`` carries the seven channels as
+    ``(n_lat, n_lon)`` T-point arrays — ``omip2_applicator`` interpolates
+    ``tau_x``/``tau_y`` to the u/v faces INSIDE the model dynamics, NOT before, so
+    the forcing is never v-staggered).  They therefore shard ``P("lat")`` exactly
+    like a cell state field; ``None`` leaves pass through untouched.
+
+    ``forcing is None`` ⇒ ``None`` (the un-forced step, byte-identical).  The
+    inverse is unnecessary — the forcing is a per-step INPUT, never gathered back.
+    """
+    if forcing is None:
+        return None
+    rep_or_lat = []
+    for val in forcing:
+        if val is None:
+            rep_or_lat.append(None)
+            continue
+        arr = jnp.asarray(val)
+        spec = _lat_spec(arr) if arr.ndim >= 1 else P()
+        rep_or_lat.append(jax.device_put(arr, NamedSharding(mesh, spec)))
+    # Rebuild the SAME NamedTuple subclass (preserves field names / pytree def).
+    return type(forcing)(*rep_or_lat)
+
+
 def make_sharded_ocean_step(model, mesh):
-    """Return ``step(state, dt) -> state`` running ``model.step`` lat-band-SPMD.
+    """Return ``step(state, dt, surface_forcing=None, freshwater=None) -> state``
+    running ``model.step`` lat-band-SPMD.
 
     Parameters
     ----------
@@ -352,18 +391,29 @@ def make_sharded_ocean_step(model, mesh):
     ``v_mask`` carried as the ``n_lat``-row ``v_lower``).  The body reconstructs
     each band's ``nl+1`` v-faces, runs the step on the band geometry, and
     converts the result back to the ``v_lower`` representation.
+
+    ``surface_forcing`` / ``freshwater`` (per-step, optional): cell-shaped
+    ``OceanSurfaceForcing`` / ``FreshwaterForcing`` pytrees, sharded ``P("lat")``
+    by :func:`_shard_forcing` and forwarded into ``model._step_impl`` /
+    ``_ab2_step`` (the in-core wind-stress / heat / virtual-salt terms).  ``None``
+    (the default) is byte-identical to the original no-forcing step.
     """
     if mesh is None:                   # single-device: plain step
-        return lambda state, dt: model.step(state, dt)
+        return lambda state, dt, surface_forcing=None, freshwater=None: (
+            model.step(state, dt, freshwater=freshwater,
+                       surface_forcing=surface_forcing))
 
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
 
-    # Tripole north-fold is a separate follow-up: the regular grid has the fold
-    # INACTIVE.  Fail loud rather than silently mis-folding the north band.
-    fold = getattr(model.grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
-        raise NotImplementedError("tripole north-fold: follow-up")
+    # Tripole north fold: the lat-lon C-grid operators select the fold on the
+    # north band data-dependently (``north_fold_mask`` / ``apply_north_fold`` +
+    # the ``where(north_mask)`` neumann-fill / TVD-clamp branches) under the
+    # armed SPMD backend, since the single shard_map trace cannot use the serial
+    # ``if fold_is_local`` (fold_j=-1 on every band).  The build_band_grids
+    # slicer keeps the active fold + perms on each band.  Correctness is gated by
+    # the full-step SPMD-vs-serial equivalence test on a synthetic tripole
+    # (tests/parallel/test_latlon_ocean_spmd_tripole.py).
 
     # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
     band_grids = build_band_grids(model.grid, n_dev)
@@ -393,7 +443,8 @@ def make_sharded_ocean_step(model, mesh):
     # stale dt if the returned step is reused with a different dt).
     dt_closure = [None]
 
-    def _body(state_local, geom_stacks_local, vmask_stack_local):
+    def _body(state_local, geom_stacks_local, vmask_stack_local,
+              surface_forcing_local, freshwater_local):
         r = jax.lax.axis_index(axis)
 
         # Rebuild this band's geometry: index the stacked arrays at r, keep the
@@ -427,25 +478,42 @@ def make_sharded_ocean_step(model, mesh):
                      for name in _V_STAGGERED_STATE_FIELDS}
         state_band = state_local._replace(**v_updates)
 
+        # The forcing pytrees are CELL-shaped (P("lat")), already band-sliced by
+        # shard_map's in_specs to this band's n_lat rows — forwarded verbatim to
+        # the in-core wind-stress / heat / virtual-salt application (no halo / v
+        # reconstruction needed; tau is interp_cell_to_{u,v}face INSIDE the step,
+        # which routes through the armed SPMD band halo).
         result = _step_body(model, state_band, dt_closure[0],
-                            grid=band_geom, vertex_mask=band_vmask)
+                            grid=band_geom, vertex_mask=band_vmask,
+                            surface_forcing=surface_forcing_local,
+                            freshwater=freshwater_local)
 
         out_updates = {name: _to_v_lower(getattr(result, name))
                        for name in _V_STAGGERED_STATE_FIELDS}
         return result._replace(**out_updates)
 
-    def sharded_step(state, dt):
+    def sharded_step(state, dt, surface_forcing=None, freshwater=None):
         dt_closure[0] = dt
+        # Lay out the forcing pytrees the same way the state cell fields are laid
+        # out (P("lat")); None passes through as None (the un-forced step).
+        sf_sharded = _shard_forcing(surface_forcing, mesh)
+        fw_sharded = _shard_forcing(freshwater, mesh)
         in_spec = jax.tree.map(_lat_spec, state)
         geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
         vmask_spec = P()
+        # Cell-shaped forcing leaves shard P("lat"); a None forcing is a None
+        # operand with a None spec (tree.map over None yields None — shard_map
+        # accepts a None operand/spec pair).  Build the specs FROM the (already
+        # device_put) sharded pytrees so the leaf structure matches per call.
+        sf_spec = jax.tree.map(_lat_spec, sf_sharded)
+        fw_spec = jax.tree.map(_lat_spec, fw_sharded)
         # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the replication
         # check); the band halo reads neighbour-rank data so disable it (same as
         # the validated PCG / halo-parity shard_maps).
         fn = shard_map(
             _body,
             mesh=mesh,
-            in_specs=(in_spec, geom_spec, vmask_spec),
+            in_specs=(in_spec, geom_spec, vmask_spec, sf_spec, fw_spec),
             out_specs=in_spec,
             check_vma=False,
         )
@@ -468,9 +536,43 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, geom_stacks, vmask_stack)
+            return fn(state, geom_stacks, vmask_stack, sf_sharded, fw_sharded)
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_step
+
+
+def make_sharded_ocean_step_global(model, mesh):
+    """Return ``step(state_global, dt, surface_forcing=None, freshwater=None)``
+    that takes a GLOBAL (single-device-layout) state + forcing and returns a
+    GLOBAL state — the minimal-diff driver entry point.
+
+    Wraps :func:`make_sharded_ocean_step`: shards the global state + forcing IN
+    (:func:`shard_state_latlon` + :func:`_shard_forcing`), runs the lat-band SPMD
+    step, then gathers the state OUT (:func:`gather_state_latlon`).  This lets the
+    OMIP host loop keep operating on a normal full-domain state — the per-step
+    host BCs (SSS restore, prognostic ice, geothermal, BBL, nudge) see the
+    gathered global state UNCHANGED — at the cost of a per-step gather/scatter
+    (acceptable for the host-coupled OMIP driver; the pure-dynamics inner loop
+    should use :func:`make_sharded_ocean_step` directly to stay sharded).
+
+    ``mesh is None`` ⇒ the plain single-device ``model.step`` (no scatter/gather).
+    """
+    if mesh is None:                   # single-device: plain step
+        return lambda state, dt, surface_forcing=None, freshwater=None: (
+            model.step(state, dt, freshwater=freshwater,
+                       surface_forcing=surface_forcing))
+
+    inner = make_sharded_ocean_step(model, mesh)
+
+    def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
+        # Scatter the global state to the band layout; the forcing is sharded
+        # INSIDE ``inner`` (it calls _shard_forcing), so pass it through global.
+        ss = shard_state_latlon(state, mesh)
+        ss = inner(ss, dt, surface_forcing=surface_forcing,
+                   freshwater=freshwater)
+        return gather_state_latlon(ss, mesh)
+
+    return sharded_step_global

@@ -601,6 +601,7 @@ def barotropic_implicit_mpas(
             VoronoiHaloExchange,
         )
         from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol,
             solve_helmholtz_implicit,
         )
         _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
@@ -617,7 +618,12 @@ def barotropic_implicit_mpas(
             A_op_dist, rhs, _M_inv_dist, eta_old,
             distributed=True,
             fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
-            residual_tol=config.barotropic_implicit_pcg_residual_tol,
+            # f32-safe acceptance tolerance (f64 unchanged); the fixed-iter
+            # PCG runs a static count, so this only floors the converged
+            # diagnostic.
+            residual_tol=precision_aware_rel_tol(
+                config.barotropic_implicit_pcg_residual_tol, eta_dtype,
+            ),
             stock_cg_tol=config.barotropic_implicit_pcg_tol,
             stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
             pcg_variant=str(config.barotropic_implicit_pcg_variant),
@@ -627,8 +633,13 @@ def barotropic_implicit_mpas(
         # stencils consume it.
         eta_new = _exchanger.exchange_cell_field(eta_new) * mask
     else:
-        pcg_tol = jnp.asarray(
-            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        # f32: floor the 1e-10 rel-tol to the f32-reachable value so stock CG
+        # stops at convergence rather than maxiter (f64 unchanged).
+        from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol as _precision_aware_rel_tol,
+        )
+        pcg_tol = _precision_aware_rel_tol(
+            config.barotropic_implicit_pcg_tol, eta_dtype,
         )
         pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
         # Forward = stock preconditioned CG, bit-identical; reverse mode
