@@ -175,9 +175,19 @@ def snow_cover_fraction(
     snow_depth: jnp.ndarray,
     config: LandAlbedoConfig = LandAlbedoConfig(),
 ) -> jnp.ndarray:
-    """Compute snow cover fraction from snow depth.
+    """Compute snow cover fraction from snow water equivalent.
 
-    f_snow = min(1, snow_depth / snow_depth_crit)
+    Niu & Yang (2007) / CLM-family SATURATING form::
+
+        f_snow = tanh(SWE / snow_depth_crit)
+
+    A thin snowpack already masks most of the surface, so ``f_snow`` rises steeply and
+    reaches ~1 by ~3x ``snow_depth_crit`` while still giving light transient snow a
+    partial cover.  The previous linear ``min(1, SWE/crit)`` was too gradual: a
+    perennial-snow cell (Antarctica, high latitudes, Tibet) with a modest offline SWE
+    sat at ``f_snow ~ 0.5`` and blended in too much dark snow-free surface, leaving a
+    large negative albedo bias vs ERA5.  tanh is monotonic, differentiable, and bounded
+    in [0, 1) with no clip.
 
     Parameters
     ----------
@@ -190,7 +200,7 @@ def snow_cover_fraction(
     f_snow : jnp.ndarray
         Snow cover fraction [0-1].
     """
-    return jnp.clip(snow_depth / config.snow_depth_crit, 0.0, 1.0)
+    return jnp.tanh(snow_depth / jnp.maximum(config.snow_depth_crit, 1e-6))
 
 
 def land_albedo(

@@ -156,8 +156,16 @@ _GRAD_NORM_CAP = 1.0e6
 # response is seasonal.  The slab lp.C_soil/d_soil are unused by the multilayer thermal
 # solver (the per-layer SoilThermalConfig replaces them); W_max and a constant Ch are
 # likewise dropped — none carries a gradient in the MOST/Richards/Farquhar forward.
+# Widen the per-PFT snow-free albedo ceiling for the BRIGHT surfaces the first tune
+# could not reach: bare soil / deserts (ERA5 Sahara ~0.37 vs the old 0.40 HI) and the
+# sparse/short PFTs.  Index 0 is bare_soil; 10-16 are the grass/crop/shrub columns.
+_ML_PFT_ALB_HI = np.asarray(S._PFT_ALB_HI, dtype=float).copy()
+_ML_PFT_ALB_HI[0] = 0.50                       # bare soil / desert
+_ML_PFT_ALB_HI[[10, 11, 12, 13, 14, 15]] = np.maximum(
+    _ML_PFT_ALB_HI[[10, 11, 12, 13, 14, 15]], 0.35)   # grass/crop/shrub headroom
+
 BOUNDS_EXT = dict(
-    pft_alb=(S._PFT_ALB_LO, S._PFT_ALB_HI), pft_emis=(0.94, 0.99),
+    pft_alb=(S._PFT_ALB_LO, _ML_PFT_ALB_HI), pft_emis=(0.94, 0.99),
     pft_root=(S._PFT_ROOT_LO, S._PFT_ROOT_HI),
     pft_ch=(2.0e-3, 6.0e-3),                           # per-PFT bulk exch (constant bulk)
     pft_z0=(5e-3, 3.0),                                # roughness (MOST); forests saturated 2.0
@@ -172,16 +180,16 @@ BOUNDS_EXT = dict(
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
     th_glacier_cboost=(1.0, 15.0),                     # deep-ice inertia boost (glacier)
-    glac_alb=(0.45, 0.75),
+    glac_alb=(0.55, 0.90),          # snow-free ice-sheet base (raised: ERA5 Antarctica ~0.85)
     # Snow albedo (global scalars, blended over the snow-cover fraction f_snow =
-    # min(1, snow_depth/snow_depth_crit)).  The offline model is too DARK over the
-    # snowy high-latitude cells (negative albedo bias) -> expose the snow-cover and
-    # snow-brightness knobs, not just fresh-snow albedo: a LOWER snow_dcrit makes a
-    # given snow water equivalent cover more of the cell (raising f_snow toward 1),
-    # snow_min lifts the aged-snow floor, snow_tau_days slows the age decay.
-    snow_max=(0.60, 0.90),          # fresh-snow albedo (widened HI: fresh snow ~0.85-0.9)
-    snow_min=(0.35, 0.70),          # aged/melting-snow albedo floor
-    snow_dcrit=(5.0, 60.0),         # snow water equiv [kg/m2] for full cover (LOWER=brighter)
+    # tanh(snow_depth/snow_depth_crit), Niu-Yang 2007).  The offline model was too DARK
+    # over snowy high-lat / Tibet / Antarctica cells (large negative albedo bias): the
+    # OLD linear cover form sat perennial-snow cells at f_snow~0.5.  With the saturating
+    # tanh form a SMALL snow_dcrit (SWE half-cover scale) makes a thin pack cover the
+    # cell; snow_min lifts the aged-snow floor, snow_tau_days slows the age decay.
+    snow_max=(0.60, 0.92),          # fresh-snow albedo (fresh snow ~0.85-0.9)
+    snow_min=(0.45, 0.75),          # aged/melting-snow albedo floor (raised: was too dark)
+    snow_dcrit=(3.0, 40.0),         # SWE [kg/m2] half-cover scale (tanh; LOWER=brighter)
     snow_tau_days=(1.0, 20.0))      # snow-albedo age e-folding [days]
 
 
@@ -220,10 +228,10 @@ def init_ext_params() -> dict:
         pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
         pft_cscale=_inv_ext(full(0.9), "pft_cscale"),
         th_glacier_cboost=jnp.asarray(_inv_ext(5.0, "th_glacier_cboost")),
-        glac_alb=_inv_ext(0.55, "glac_alb"), snow_max=_inv_ext(0.80, "snow_max"),
-        snow_min=_inv_ext(0.50, "snow_min"),          # LandAlbedoConfig defaults:
-        snow_dcrit=_inv_ext(50.0, "snow_dcrit"),      # alpha_snow_min=0.50, crit=50 kg/m2,
-        snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # tau_snow_decay=5 days
+        glac_alb=_inv_ext(0.70, "glac_alb"), snow_max=_inv_ext(0.82, "snow_max"),
+        snow_min=_inv_ext(0.55, "snow_min"),          # aged-snow floor
+        snow_dcrit=_inv_ext(15.0, "snow_dcrit"),      # tanh SWE half-cover scale [kg/m2]
+        snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # snow-albedo age e-folding [days]
     ).items()}
 
 

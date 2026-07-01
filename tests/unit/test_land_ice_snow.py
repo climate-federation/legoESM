@@ -145,13 +145,20 @@ class Test5f_SnowAlbedoFeedback:
 
 
 class Test5g_SnowCoverFraction:
+    # Niu & Yang (2007) saturating form f_snow = tanh(SWE / crit).
     def test_partial_cover(self):
-        frac = snow_cover_fraction(jnp.array([25.0]), CFG)  # half of 50
-        assert jnp.allclose(frac, 0.5, atol=1e-10)
+        frac = snow_cover_fraction(jnp.array([CFG.snow_depth_crit]), CFG)  # SWE = crit
+        assert jnp.allclose(frac, jnp.tanh(1.0), atol=1e-10)   # ~0.762, partial
 
-    def test_full_cover(self):
-        frac = snow_cover_fraction(jnp.array([100.0]), CFG)
-        assert jnp.allclose(frac, 1.0, atol=1e-10)
+    def test_saturates_high(self):
+        # a thin snowpack already masks most of the surface -> ~1 by ~3x crit
+        frac = snow_cover_fraction(jnp.array([3.0 * CFG.snow_depth_crit]), CFG)
+        assert float(frac[0]) > 0.99
+
+    def test_steep_near_zero(self):
+        # rises steeply: a small SWE already gives substantial cover
+        f_small = snow_cover_fraction(jnp.array([0.3 * CFG.snow_depth_crit]), CFG)
+        assert float(f_small[0]) > 0.25
 
     def test_no_cover(self):
         frac = snow_cover_fraction(jnp.array([0.0]), CFG)
