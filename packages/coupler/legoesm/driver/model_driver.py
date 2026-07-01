@@ -1228,6 +1228,16 @@ class ModelDriver:
                 self.physics.land_bucket_w_init_frac = float(
                     getattr(self.config, "land_bucket_w_init_frac", 0.5)
                 )
+                # Bucket runoff partition (Green-Ampt infiltration + saturation excess)
+                self.physics.land_K_infiltration = float(
+                    getattr(self.config, "land_K_infiltration", 1.0e-5)
+                )
+                self.physics.land_infil_suction_boost = float(
+                    getattr(self.config, "land_infil_suction_boost", 2.0)
+                )
+                self.physics.land_infiltration_excess = bool(
+                    getattr(self.config, "land_infiltration_excess", True)
+                )
                 # Stomatal soil-water limitation: route beta_soil through the
                 # shared land Jarvis model (legoesm.land.carbon.stomata).
                 _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))
@@ -6452,8 +6462,15 @@ class ModelDriver:
         # Double-moment hydrometeor inputs (None unless the registry carries
         # them) so coupled radiation/microphysics see ice + droplet number.
         _dm_step_in = self._double_moment_step_inputs()
+        # step_unified returns a 4-tuple (issue: PR #650 added the 4th
+        # ``land_ml`` multilayer-land state). Thread it exactly as the
+        # compiled-segment path does (single-member only; ensemble carries
+        # an extra axis the tile doesn't expect) so the per-step driver
+        # advances the prognostic soil column instead of crashing on the
+        # arity mismatch.
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+            T_land, land_ml = \
             _warmup_step_fn(
                 jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
@@ -6467,6 +6484,8 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                land_ml=(self._land_ml_state
+                         if self._ensemble_size == 1 else None),
                 T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
@@ -6495,6 +6514,10 @@ class ModelDriver:
             self._carry_aux["w_land"] = w_land
         if snow is not None:
             self._carry_aux["snow"] = snow
+        # Persist the evolved multilayer land state across the run (matches
+        # the compiled-segment writeback; no-op for slab/None or ensemble).
+        if self._ensemble_size == 1 and self._land_ml_state is not None:
+            self._land_ml_state = land_ml
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -6588,8 +6611,11 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             _dm_step_in = self._double_moment_step_inputs()
+            # 4-tuple return (PR #650 land_ml); thread the multilayer-land
+            # state like the compiled-segment path (single-member only).
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+                T_land, land_ml = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -6603,6 +6629,8 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                    land_ml=(self._land_ml_state
+                             if self._ensemble_size == 1 else None),
                     T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )
@@ -6630,6 +6658,10 @@ class ModelDriver:
                 self._carry_aux["w_land"] = w_land
             if snow is not None:
                 self._carry_aux["snow"] = snow
+            # Advance the prognostic multilayer land state per step (matches
+            # the compiled-segment writeback; no-op for slab/None or ensemble).
+            if self._ensemble_size == 1 and self._land_ml_state is not None:
+                self._land_ml_state = land_ml
             # Stateful-physics carries (issue #413): feed the updated
             # values back next step + persist for checkpoints.
             if phys_out.tke is not None:

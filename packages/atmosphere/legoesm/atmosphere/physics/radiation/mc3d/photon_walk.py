@@ -47,7 +47,7 @@ class PlaneRTGeometry(NamedTuple):
   nz: int
 
 
-class _PhotonState(NamedTuple):
+class PhotonState(NamedTuple):
   key: Array
   pos: Array       # (3,) [m]
   dir: Array       # (3,) unit
@@ -87,9 +87,9 @@ def trace_one(
     mie_cdf: Array | None = None,
     mie_ang: Array | None = None,
     r_eff: Array | None = None,
-) -> _PhotonState:
+) -> PhotonState:
   """Walk one photon to termination via coarse-grid (decomposition) Woodcock
-  tracking; return its terminal ``_PhotonState``.
+  tracking; return its terminal ``PhotonState``.
 
   The free path is sampled with the LOCAL coarse-cell majorant. The flight stops
   at the first of: a real/null collision, a coarse-cell face (resample majorant),
@@ -115,7 +115,7 @@ def trace_one(
       (jnp.searchsorted(maj.zc_faces, pos0[2], side="right") - 1).astype(
           jnp.int32), 0, ncz - 1)
 
-  init = _PhotonState(
+  init = PhotonState(
       key=key,
       pos=pos0.astype(dtype),
       dir=dir0.astype(dtype),
@@ -127,10 +127,10 @@ def trace_one(
       n_iter=jnp.array(0, jnp.int32),
   )
 
-  def cond(s: _PhotonState) -> Array:
+  def cond(s: PhotonState) -> Array:
     return s.alive
 
-  def body(s: _PhotonState) -> _PhotonState:
+  def body(s: PhotonState) -> PhotonState:
     key, k_path, k_real, k_abs, k_scat, k_sfc, k_refl = jax.random.split(s.key, 7)
     x, y, z = s.pos[0], s.pos[1], s.pos[2]
     ux, uy, uz = s.dir[0], s.dir[1], s.dir[2]
@@ -280,7 +280,7 @@ def trace_one(
     vol_idx = jnp.where(vol_abs, cell_flat, s.vol_idx)
     sfc_idx = jnp.where(sfc_abs, col_flat, s.sfc_idx)
 
-    return _PhotonState(
+    return PhotonState(
         key=key,
         pos=pos,
         dir=new_dir,
@@ -312,7 +312,7 @@ def trace_batch(
     mie_cdf: Array | None = None,
     mie_ang: Array | None = None,
     r_eff: Array | None = None,
-) -> _PhotonState:
+) -> PhotonState:
   """``vmap`` ``trace_one`` over a photon batch (leading axis on
   ``keys``/``pos0``/``dir0``). ``maj``/fields/geom are CLOSED OVER (not mapped)
   so the majorant block sizes stay static Python ints inside ``trace_one``."""

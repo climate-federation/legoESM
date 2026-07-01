@@ -118,10 +118,11 @@ def solar_declination(
     With ``orbit=None`` (default) uses the simplified "Spencer" formula
     ``delta = obliquity * sin(2*pi * (day_of_year - 80) / 365)``.
 
-    With an ``OrbitalParameters`` the realistic Berger (1978) declination
-    ``sin(delta) = sin(obliquity) * sin(lambda)`` is used, where ``lambda``
-    is the true solar longitude (the obliquity is then taken from the orbit,
-    not the ``obliquity`` argument).
+    The circular-orbit form above is the Cooper (1969) single-harmonic
+    declination approximation.  With an ``OrbitalParameters`` the realistic
+    Berger (1978) declination ``sin(delta) = sin(obliquity) * sin(lambda)`` is
+    used instead, where ``lambda`` is the true solar longitude (the obliquity
+    is then taken from the orbit, not the ``obliquity`` argument).
 
     Parameters
     ----------

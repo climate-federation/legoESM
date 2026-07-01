@@ -50,3 +50,4 @@ class PhysicsOutput(NamedTuple):
     gwd_spectrum: jax.Array | None = None  # updated GWD wave-action spectrum
     w_land: jax.Array | None = None  # updated slab-land soil water [kg/m2]
     snow: jax.Array | None = None    # updated slab-land snow water equiv. [kg/m2]
+    land_runoff: jax.Array | None = None  # diagnosed land runoff (Hortonian + Dunne) [kg/m2/s]

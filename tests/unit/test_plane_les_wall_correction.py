@@ -173,15 +173,27 @@ def test_crm_run_scripts_set_dosmagor_no_wall_cap():
     A regression that drops the setting (reverting to the von-Kármán cap) would
     silently make the near-surface SGS mixing un-SAM-faithful — fail loudly
     here instead."""
+    import re
     from pathlib import Path
     # namespace-safe repo root (legoesm is a PEP-420 namespace pkg, no __file__)
     repo = Path(__file__).resolve().parents[2]
     for script in ("run_gate_plane.py", "run_lba_plane.py",
                    "run_rcemip_plane.py"):
-        src = (repo / "scripts" / script).read_text()
-        assert "smagorinsky_wall_damping=False" in src, (
-            f"{script} must pass smagorinsky_wall_damping=False "
-            f"(SAM dosmagor has no wall cap)")
+        src = (repo / "scripts" / "run" / script).read_text()
+        # gate/lba hardcode the no-cap setting; run_rcemip_plane.py exposes it
+        # through ``--smag-wall-damping`` whose default is the SAM-faithful
+        # no-cap value (wired via ``smagorinsky_wall_damping=args.smag_wall_damping``).
+        hardcoded = "smagorinsky_wall_damping=False" in src
+        arg_block = re.search(
+            r'add_argument\(\s*"--smag-wall-damping".*?\)', src, re.DOTALL)
+        arg_default_off = (
+            "smagorinsky_wall_damping=args.smag_wall_damping" in src
+            and arg_block is not None
+            and "default=False" in arg_block.group(0))
+        assert hardcoded or arg_default_off, (
+            f"{script} must reach the kernel with the SAM dosmagor no-wall-cap "
+            f"setting (smagorinsky_wall_damping=False directly, or via "
+            f"--smag-wall-damping default=False)")
 
 
 def test_rest_state_K_m_zero_with_wall_correction():

@@ -887,25 +887,15 @@ class DiagnosticCollector:
                 if r_lwp is not None and r_iwp is not None:
                     fields_2d['clivi'] = r_iwp
                     fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
-                # Layer cloud fraction: soft threshold sigmoid on TOTAL
-                # condensate (liquid + frozen) so high cirrus counts toward clt.
-                # 1 mg/kg threshold with steep slope gives a near-binary
-                # mask that matches the calibration's metric convention.
-                q_cond_np = np.asarray(q_c)
-                if q_frozen is not None:
-                    q_cond_np = q_cond_np + np.asarray(q_frozen)
-                q_thresh = 1e-6
-                sharpness = 1.0e6
-                cf_layer = 1.0 / (1.0 + np.exp(-(q_cond_np - q_thresh) * sharpness))
-                # Random overlap: clt = 1 - prod(1 - cf_layer) along vertical.
-                log_clear = np.sum(
-                    np.log(np.clip(1.0 - cf_layer, 1e-7, 1.0)),
-                    axis=-1,
-                )
-                clt_field = 1.0 - np.exp(log_clear)
-                r_clt = self._regrid_to_latlon_2d(clt_field)
-                if r_clt is not None:
-                    fields_2d['clt'] = r_clt * 100.0  # CMIP units: %
+                # NOTE: ``clt`` (total cloud AREA fraction, CMIP %) is intentionally
+                # NOT published here.  The previous implementation derived it from a
+                # near-binary condensate mask (sigmoid sharpness 1e6 on a 1 mg/kg
+                # threshold), i.e. each layer is forced to ~0 or ~1 — that is a
+                # cloud *presence* mask, not the fractional cloud cover CMIP ``clt``
+                # requires, so it overstates total cloudiness and is physically
+                # incorrect (guarded by test_no_rsds_rlds_clt_in_output).  Re-enable
+                # only when a genuine fractional cloud-fraction diagnostic (e.g. the
+                # Sundqvist/Tompkins scheme output) is wired through to CMIP output.
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
