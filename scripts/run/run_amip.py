@@ -1354,6 +1354,25 @@ def _validate_sundqvist_flags(args, parser) -> None:
             "backends rebuild MicrophysicsConfig at run() and would ignore them.")
 
 
+def _validate_cloud_sensitivity_flags(args, parser) -> None:
+    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
+    at run() and ignore the pipeline override (MPAS / spectral) — the same
+    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
+    are enforced by ExperimentConfig.validate_strict.
+    """
+    if (getattr(args, "cloud_p_xr", None) is None
+            and getattr(args, "cloud_alpha_xr", None) is None):
+        return
+    disc = getattr(args, "discretization", "centered")
+    grid = getattr(args, "grid_type", "")
+    if disc in ("mpas", "spectral") or grid in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        parser.error(
+            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
+            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
+            "CloudConfig at run() and would ignore them.")
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1423,6 +1442,7 @@ def main(argv: list[str] | None = None):
     _require_full_physics_for_amip(args, parser)
     # Bound-check the --sundqvist-* tunables + refuse them on MPAS/spectral.
     _validate_sundqvist_flags(args, parser)
+    _validate_cloud_sensitivity_flags(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
