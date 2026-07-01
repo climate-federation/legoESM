@@ -112,11 +112,15 @@ from legoesm.land.soil_texture import SOIL_TEXTURE_VG as _SOIL_TEXTURE_PRESETS
 # PFT parameter extraction
 # ===========================================================================
 
-def _get_pft_row(veg_type: str) -> dict:
+def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
     """Look up CLM5 PFT parameters by name.
 
-    Returns a dict with albedo_veg, emissivity, z0, root_depth,
-    theta_wp, theta_fc from the CLM5 PFT table.
+    Returns a dict with albedo_veg, emissivity, z0, root_depth, theta_wp, theta_fc.
+    ``calibrated`` (the DEFAULT) overrides the raw CLM5 values with the 2026-07
+    ERA5-calibrated per-PFT MULTILAYER parameters baked in ``clm_surface_map`` — the
+    SAME land-parameter defaults the AMIP / CMIP multilayer land uses (via
+    ``clm_multilayer_setup``), so an offline LMIP point runs the production land.
+    ``calibrated=False`` returns the untuned CLM5 table (reproduces the old default).
     """
     if veg_type not in CLM5_PFT_NAMES:
         valid = ", ".join(CLM5_PFT_NAMES)
@@ -124,17 +128,42 @@ def _get_pft_row(veg_type: str) -> dict:
             f"Unknown veg_type {veg_type!r}. Valid choices: {valid}"
         )
     idx = CLM5_PFT_NAMES.index(veg_type)
-    row = _CLM5_PFT_TABLE_RAW[idx]
-    return {name: val for name, val in zip(PARAM_NAMES, row)}
+    row = {name: val for name, val in zip(PARAM_NAMES, _CLM5_PFT_TABLE_RAW[idx])}
+    if calibrated:
+        # CLM5_PFT_NAMES is the same 17-PFT order as the baked _MULTILAYER tuples.
+        from legoesm.land import clm_surface_map as _csm
+        row["albedo_veg"] = _csm._TUNED_PFT_ALBEDO_MULTILAYER[idx]
+        row["emissivity"] = _csm._TUNED_PFT_EMISSIVITY_MULTILAYER[idx]
+        row["z0"] = _csm._TUNED_PFT_Z0_MULTILAYER[idx]
+        row["root_depth"] = _csm._TUNED_PFT_ROOT_DEPTH_MULTILAYER[idx]
+        row["theta_wp"] = _csm._TUNED_PFT_WP_MULTILAYER[idx]
+        row["theta_fc"] = _csm._TUNED_PFT_FC_MULTILAYER[idx]
+    return row
 
 
 def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
     """Resolve LMIP CLI arguments into the land config and run controls."""
     texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
-    pft_row = _get_pft_row(args.veg_type)
+    _calibrated = getattr(args, "pft_params", "calibrated") == "calibrated"
+    pft_row = _get_pft_row(args.veg_type, calibrated=_calibrated)
+    # Snow albedo: the calibrated feedback (cover threshold + fresh/aged brightness +
+    # age decay) baked in clm_surface_map, matching the AMIP/CMIP multilayer default;
+    # raw uses the LandAlbedoConfig defaults.
+    if _calibrated:
+        from legoesm.land import clm_surface_map as _csm
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig(
+            alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+            alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+            snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+            tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0)
+    else:
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig()
     land = MultiLayerLandConfig(
         albedo_land=pft_row["albedo_veg"],
         emissivity_land=pft_row["emissivity"],
+        land_albedo=_land_albedo,
         z0_land=(
             args.z0_land
             if args.z0_land is not None
@@ -519,6 +548,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--veg-type", default="c3_grass",
                    choices=list(CLM5_PFT_NAMES),
                    help="CLM5 plant functional type")
+    p.add_argument("--pft-params", choices=("calibrated", "raw"), default="calibrated",
+                   help="per-PFT land parameters: 'calibrated' (default) = the 2026-07 "
+                        "ERA5-tuned MULTILAYER defaults shared with AMIP/CMIP (albedo, "
+                        "z0, root, water-stress + snow albedo); 'raw' = untuned CLM5 table")
     p.add_argument("--t-init", type=float, default=278.0,
                    help="Initial uniform soil temperature [K]. "
                         "Should be close to the local annual-mean atmospheric "

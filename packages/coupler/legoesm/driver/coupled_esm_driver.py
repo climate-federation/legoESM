@@ -683,12 +683,19 @@ class CoupledESMDriver:
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
             import legoesm.land.clm_surface_map as _csm
             if cfg.land_mode == "multilayer":
-                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+                # Multilayer carries the full trainable snow feedback (cover threshold +
+                # fresh/aged brightness + age decay) from the 2026-07 full-grid recalibration.
+                ch = _csm.TUNED_CH_MULTILAYER
+                alb = land_cfg.land_albedo._replace(
+                    alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+                    alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+                    snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+                    tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0)  # days -> s
             else:
-                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
+                ch = _csm.TUNED_CH
+                alb = land_cfg.land_albedo._replace(alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX)
             land_cfg = land_cfg._replace(
-                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
-                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True, land_albedo=alb)
             logger.info(f"  Land: ERA5-calibrated Ch/snow params "
                         f"({cfg.land_mode} CLM default path)")
 
