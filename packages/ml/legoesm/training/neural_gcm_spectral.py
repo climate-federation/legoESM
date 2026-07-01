@@ -789,8 +789,15 @@ def spectral_amip_rollout(
     rad_update_interval: int = 36,
     sponge_factor: jnp.ndarray | None = None,
     spectral_filter: jnp.ndarray | None = None,
+    use_checkpoint: bool = False,
 ) -> SpectralHydrostaticState:
-    """Prescribed-SST AMIP **inference** rollout (no autodiff).
+    """Prescribed-SST AMIP rollout.
+
+    ``use_checkpoint=False`` (default) is inference (no autodiff). Set
+    ``use_checkpoint=True`` for the **stability fine-tune**: each step is
+    ``jax.checkpoint``-wrapped (nothing-saveable) so reverse-mode AD through a
+    multi-day prescribed-SST rollout fits in memory (the trained physics params
+    flow via ``non_rad_fn`` / ``rad_fn``).
 
     Mirrors :func:`spectral_rollout`'s rad-gated path but injects a prescribed
     sea-surface temperature ``sst_col`` (shape ``(ncol,)``) into BOTH surface
@@ -872,8 +879,15 @@ def spectral_amip_rollout(
     init_rad = rad_fn(
         initial_state, grid, sigma_coord, forcing=_forcing_at(jnp.asarray(0)),
     )
+    _step = (
+        jax.checkpoint(
+            step_fn, prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        if use_checkpoint else step_fn
+    )
     (final_state, _), _ = jax.lax.scan(
-        step_fn, (initial_state, init_rad), jnp.arange(n_steps),
+        _step, (initial_state, init_rad), jnp.arange(n_steps),
     )
     return final_state
 
