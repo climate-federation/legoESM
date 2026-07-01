@@ -233,6 +233,26 @@ def main():
             total = total + state_loss + args.w_drift * drift
         return total / len(samples)
 
+    # Pre-warm the RRTMGP optics-table cache OUTSIDE filter_jit with CONCRETE
+    # params: the NetCDF gas-optics load is module-cached by static file paths,
+    # but the first (inside-trace) call would hit the tracer state and crash with
+    # TracerArrayConversionError. Mirrors _train_spectral_loop's warm-up.
+    try:
+        _warm = make_aimip_classical_spectral_physics(
+            params0, grid, dt,
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
+            rad_update_interval_steps=args.rad_update_interval,
+            convection_scheme=str(cfg["aimip_convection"]),
+            turbulence_scheme=str(cfg["aimip_turbulence"]),
+            gwd_scheme=str(cfg["aimip_gwd"]),
+            microphysics_scheme=str(cfg["aimip_microphysics"]),
+            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            land_mask=land_mask, split_rad=True,
+        )
+        del _warm
+    except Exception as exc:  # noqa: BLE001 - warm-up is best-effort
+        logger.warning(f"RRTMGP optics warm-up raised {exc!r}; continuing")
+
     opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(args.lr))
     opt_state = opt.init(eqx.filter(params0, eqx.is_inexact_array))
 
