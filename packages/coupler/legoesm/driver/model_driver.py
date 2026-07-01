@@ -1202,20 +1202,28 @@ class ModelDriver:
                 self.physics.albedo_land = (
                     land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
                 )
+            # Tiled (mosaic) surface fluxes + the radiation cadence apply to ANY
+            # active land tile — slab OR multilayer (Richards).  Thread them at the
+            # _has_land level so use_multilayer_land (topography-derived f_land, no
+            # slab, no mask) actually runs the tiled turbulent-flux path: the flux
+            # injection in physics_pipeline is gated on physics.surface_tiled, which
+            # was previously only set inside the slab/mask branch below -> multilayer
+            # validated but silently no-op'd the tiled surface.  Slab-specific bucket/
+            # stomata/snow stay in the slab-activation branch.
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            # ocean bulk scheme on the ocean tile, land Monin-Obukhov on the land
+            # tile (validate_strict requires louis + an active land tile).
+            self.physics.surface_tiled = bool(
+                getattr(self.config, "surface_tiled", False)
+            )
+            self.physics.surface_z0_land = float(
+                getattr(self.config, "surface_z0_land", 0.1)
+            )
             _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
                 getattr(self.config, "slab_land_active", False)
             )
             if _activate:
                 self.physics.slab_land_active = True
-                self.physics.rad_update_steps = self.config.rad_update_steps
-                # Tiled (mosaic) surface fluxes: ocean bulk scheme on the
-                # ocean tile, land Monin-Obukhov on the land tile (validated
-                # to require louis + an active land tile in validate_strict).
-                _tiled = bool(getattr(self.config, "surface_tiled", False))
-                self.physics.surface_tiled = _tiled
-                self.physics.surface_z0_land = float(
-                    getattr(self.config, "surface_z0_land", 0.1)
-                )
                 # Prognostic soil-water bucket: soil-moisture-limited land
                 # evaporation (beta) instead of a saturated wet surface.
                 _bucket = bool(getattr(self.config, "land_soil_bucket", False))
@@ -1253,8 +1261,9 @@ class ModelDriver:
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
                     f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
-                    f"tiled_surface={_tiled}"
-                    + (f", z0_land={self.physics.surface_z0_land:g}m" if _tiled else "")
+                    f"tiled_surface={self.physics.surface_tiled}"
+                    + (f", z0_land={self.physics.surface_z0_land:g}m"
+                       if self.physics.surface_tiled else "")
                     + (f", soil_bucket(W_max={self.physics.land_bucket_w_max:g}"
                        f" kg/m2, beta_min={self.physics.land_beta_min:g})"
                        if _bucket else "")

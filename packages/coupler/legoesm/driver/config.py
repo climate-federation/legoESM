@@ -956,11 +956,27 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence='louis' (the kernel that consumes the injected "
                 f"tiled surface flux); got turbulence={self.turbulence!r}."
             )
-        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+        if self.surface_tiled and not (self.slab_land_active
+                                       or self.land_mask_path
+                                       or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
-                "(--slab-land-active or a land-mask file); otherwise there is no "
-                "land tile to give its own surface scheme."
+                "(--slab-land-active, --use-multilayer-land, or a land-mask file); "
+                "otherwise there is no land tile to give its own surface scheme. "
+                "use_multilayer_land is an active tile whose land fraction comes "
+                "from --topography (elevation-derived f_land) when no mask is given."
+            )
+        # ...but the multilayer tile can only get f_land from topography — a FLAT
+        # topography gives f_land==0 everywhere (no land), which would silently
+        # no-op the requested land tile.  Require real topography OR an explicit
+        # mask when multilayer is the sole land-tile signal.
+        if (self.surface_tiled and self.use_multilayer_land
+                and not self.slab_land_active and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "use_multilayer_land + surface_tiled with topography='flat' and no "
+                "land-mask file has NO land (elevation-derived f_land is 0 "
+                "everywhere) — pass a real --topography or a --land-mask-file."
             )
         if not (self.surface_z0_land > 0.0):
             errors.append(
