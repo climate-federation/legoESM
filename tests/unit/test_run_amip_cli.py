@@ -1056,16 +1056,45 @@ _AMIP_DUMMY_PATHS = [
 ]
 
 
-def test_config_yaml_loads_all_keys_are_valid_dests():
-    """Every key in the authoritative AMIP config is a real run_amip dest — a
-    typo'd / dropped override is a hard error (dispatch-hardening)."""
+def _amip_config_yamls():
+    """Every shipped config/amip/*.yaml — so a typo'd key in ANY of them (not just
+    amip_production) is caught, incl. amip_sota.yaml and future configs."""
+    return sorted((_repo_root() / "config" / "amip").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("cfg_file", _amip_config_yamls(),
+                         ids=lambda p: p.name)
+def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
+    """Every key in each shipped AMIP config is a real run_amip dest — a typo'd /
+    dropped override is a hard error (dispatch-hardening)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
-    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     defaults = load_yaml_config(str(cfg_file), parser)  # raises on unknown key
     assert defaults  # non-empty
     valid_dests = {a.dest for a in parser._actions}
     assert set(defaults).issubset(valid_dests)
+
+
+def test_amip_sota_config_builds_valid_experiment_config():
+    """config/amip/amip_sota.yaml (SOTA: multilayer land + aerosol_ccn +
+    conv-cloud-off) builds a valid ExperimentConfig — the SOTA knobs are consistent
+    (e.g. multilayer land waives the slab-bucket requirement for stomata; aerosol_ccn
+    has morrison + external aerosol)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sota.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
+                             "--land-mask-file", "/dummy/lsm.nc"]), parser)
+    cfg = build_config_from_args(args)
+    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
+    assert cfg.use_multilayer_land is True
+    # --aerosol-ccn threads into ExperimentConfig.nc_from_aerosol (specified-Nc from
+    # the Andreae AOT->CCN inversion), enabling the 1st+2nd aerosol indirect effect.
+    assert cfg.nc_from_aerosol is True
+    assert cfg.convective_cloud is False
+    assert cfg.convection == "sbm"
 
 
 def test_config_yaml_round_trips_authoritative_values():
