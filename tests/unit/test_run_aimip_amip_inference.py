@@ -24,15 +24,13 @@ def _load_driver():
     return mod
 
 
-def test_month_day_of_year_midmonth_360day():
+def test_date_parses_iso_and_protocol_anchors():
+    # Gregorian protocol anchors: start 1978-10-01, end 2025-01-01.
     mod = _load_driver()
-    # 30-day-month calendar: month m mid-point = (m-1)*30 + 15.
-    assert mod._month_day_of_year(1) == pytest.approx(15.0)
-    assert mod._month_day_of_year(7) == pytest.approx(195.0)
-    assert mod._month_day_of_year(12) == pytest.approx(345.0)
-    # strictly increasing across the year
-    vals = [mod._month_day_of_year(m) for m in range(1, 13)]
-    assert vals == sorted(vals)
+    import datetime as dt
+    assert mod._date("1978-10-01") == dt.date(1978, 10, 1)
+    assert mod._date("2025-01-01") == dt.date(2025, 1, 1)
+    assert (mod._date("1979-01-01") - mod._date("1978-10-01")).days == 92  # 3-mo spin-up
 
 
 def test_merged_cfg_applies_classical_overlay(tmp_path):

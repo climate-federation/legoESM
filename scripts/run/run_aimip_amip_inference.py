@@ -30,7 +30,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import logging
+import os
+import time
 from pathlib import Path
 
 import jax
@@ -96,6 +99,17 @@ def main():
     ap.add_argument("--member", type=int, default=0,
                     help="Ensemble member 0..4 = IC on the N-th successive ERA5 day.")
     ap.add_argument("--rad-update-interval", type=int, default=36)
+    ap.add_argument("--wall-limit-hours", type=float, default=0.0,
+                    help="Stop cleanly after this many wall hours, write a "
+                         "restart + .RESUME marker (0 = no limit). The 46-yr "
+                         "run (~135 h) exceeds the 72 h SLURM ceiling, so the "
+                         "sbatch self-chains on the marker.")
+    ap.add_argument("--checkpoint-every-days", type=int, default=30,
+                    help="Write the restart every N simulated days.")
+    ap.add_argument("--restart-path", type=Path, default=None,
+                    help="Base path for restart files (default: "
+                         "<out-dir>/amip_restart_r<member>). If present at "
+                         "startup, the run RESUMES from it.")
     ap.add_argument("--out", type=Path,
                     default=Path("results/aimip_fleet_paper/legoesm_classical_amip.csv"))
     args = ap.parse_args()
@@ -215,13 +229,69 @@ def main():
         T = np.asarray(spectral_pe_to_grid(s, grid, sigma)["T"])[..., -1]
         return float(np.sum(np.mean(T, axis=-1) * lat_w) / np.sum(lat_w))
 
-    # --- Gregorian daily loop with linearly-interpolated prescribed SST ---
+    # --- restart / chaining support (46-yr run ~135 h > 72 h SLURM ceiling) ---
+    import equinox as eqx
     end = _date(args.end)
     record_from = _date(args.record_from)
     monthly: dict[tuple[int, int], list[float]] = {}
     _o3_cache: dict[tuple[int, int], jnp.ndarray] = {}  # current-month ozone
     day = start
+
+    restart_base = args.restart_path or args.out.with_name(
+        f"amip_restart_r{args.member}"
+    )
+    restart_eqx = Path(f"{restart_base}.eqx")
+    restart_json = Path(f"{restart_base}.json")
+    resume_marker = Path(f"{restart_base}.RESUME")
+
+    def _write_csvs():
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with args.out.open("w") as fh:
+            fh.write("year,month,global_mean_surfT_K\n")
+            for (y, m) in sorted(monthly):
+                fh.write(f"{y},{m},{float(np.mean(monthly[(y, m)])):.5f}\n")
+        annual: dict[int, list[float]] = {}
+        for (y, m), vals in monthly.items():
+            annual.setdefault(y, []).append(float(np.mean(vals)))
+        annual_out = args.out.with_name(args.out.stem + "_annual.csv")
+        with annual_out.open("w") as fh:
+            fh.write("year,annual_global_mean_surfT_K\n")
+            for y in sorted(annual):
+                if len(annual[y]) == 12:  # full years only
+                    fh.write(f"{y},{float(np.mean(annual[y])):.5f}\n")
+        return annual_out
+
+    def _save_restart(next_day):
+        # Atomic: write tmp then os.replace so a mid-write kill never leaves a
+        # truncated restart. State leaves serialise against the IC template.
+        restart_eqx.parent.mkdir(parents=True, exist_ok=True)
+        tmp_e = restart_eqx.with_suffix(".eqx.tmp")
+        eqx.tree_serialise_leaves(tmp_e, state)
+        os.replace(tmp_e, restart_eqx)
+        meta = {
+            "next_day": next_day.isoformat(),
+            "monthly": [[y, m, vals] for (y, m), vals in sorted(monthly.items())],
+        }
+        tmp_j = restart_json.with_suffix(".json.tmp")
+        tmp_j.write_text(json.dumps(meta))
+        os.replace(tmp_j, restart_json)
+        _write_csvs()  # partial results visible mid-chain
+        logger.info(f"Restart written at {next_day} -> {restart_eqx}")
+
+    if restart_eqx.exists() and restart_json.exists():
+        meta = json.loads(restart_json.read_text())
+        # ``state`` currently holds the IC -> identical pytree structure, so it
+        # is the deserialisation template.
+        state = eqx.tree_deserialise_leaves(restart_eqx, state)
+        day = _date(meta["next_day"])
+        monthly = {(int(y), int(m)): list(vals) for y, m, vals in meta["monthly"]}
+        logger.info(f"RESUMED from {restart_eqx}: continuing at {day} "
+                    f"({len(monthly)} months recorded)")
+
+    t0_wall = time.time()
+    wall_stopped = False
     stop = False
+    # --- Gregorian daily loop with linearly-interpolated prescribed SST ---
     while day < end and not stop:
         # Prescribed SST/sea-ice = the monthly forcing LINEARLY interpolated to
         # this day, held across the day's 144 dycore steps. SST varies ~0.1 K/day,
@@ -260,24 +330,29 @@ def main():
             logger.info(f"{day}: running (member r{args.member + 1})")
         day += _dt.timedelta(days=1)
 
-    # --- write monthly + annual means ---
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w") as fh:
-        fh.write("year,month,global_mean_surfT_K\n")
-        for (y, m) in sorted(monthly):
-            fh.write(f"{y},{m},{float(np.mean(monthly[(y, m)])):.5f}\n")
-    logger.info(f"Wrote {args.out} ({len(monthly)} months)")
+        # Periodic restart (every N simulated days) + wall-limit clean exit.
+        if (day - start).days % max(args.checkpoint_every_days, 1) == 0:
+            _save_restart(day)
+        if (args.wall_limit_hours > 0
+                and (time.time() - t0_wall) > args.wall_limit_hours * 3600.0):
+            _save_restart(day)
+            wall_stopped = True
+            logger.info(
+                f"Wall limit {args.wall_limit_hours}h reached at {day}; "
+                f"restart saved — resubmit to continue."
+            )
+            break
 
-    annual: dict[int, list[float]] = {}
-    for (y, m), vals in monthly.items():
-        annual.setdefault(y, []).append(float(np.mean(vals)))
-    annual_out = args.out.with_name(args.out.stem + "_annual.csv")
-    with annual_out.open("w") as fh:
-        fh.write("year,annual_global_mean_surfT_K\n")
-        for y in sorted(annual):
-            if len(annual[y]) == 12:  # full years only
-                fh.write(f"{y},{float(np.mean(annual[y])):.5f}\n")
-    logger.info(f"Wrote {annual_out}")
+    # --- write monthly + annual means + chaining marker ---
+    annual_out = _write_csvs()
+    logger.info(f"Wrote {args.out} ({len(monthly)} months) + {annual_out}")
+    if wall_stopped and day < end:
+        resume_marker.write_text(day.isoformat())  # sbatch self-chains on this
+        logger.info(f"RESTART_NEEDED -> {resume_marker}")
+    else:
+        resume_marker.unlink(missing_ok=True)
+        if day >= end:
+            logger.info("Run reached --end; chain complete.")
 
 
 if __name__ == "__main__":

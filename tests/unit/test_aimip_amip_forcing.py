@@ -39,6 +39,20 @@ def test_interp_forcing_at_clamps_outside_range():
     assert m.interp_forcing_at(times, field, 20)[0] == pytest.approx(20.0)   # exact node
 
 
+def test_ghg_vmr_at_year_historical_trend():
+    m = _mod()
+    g79 = m.ghg_vmr_at_year(1979)
+    g14 = m.ghg_vmr_at_year(2014)
+    # 1979 anchor (NOAA Mauna Loa): 336.78 ppm -> VMR 336.78e-6.
+    assert g79["co2"] == pytest.approx(336.78e-6, rel=1e-6)
+    # transient forcing: every well-mixed GHG increases 1979 -> 2014
+    for k in ("co2", "ch4", "n2o"):
+        assert g14[k] > g79[k], k
+    # RRTMGP VMR keys + plausible magnitudes (mole fractions)
+    for k in ("co2", "ch4", "n2o", "cfc11", "cfc12"):
+        assert k in g79 and 0.0 < g79[k] < 1.0e-3
+
+
 def test_regrid_field_2d_flips_descending_lat():
     m = _mod()
     pytest.importorskip("scipy")
