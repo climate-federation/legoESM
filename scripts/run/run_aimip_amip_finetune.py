@@ -142,8 +142,7 @@ def main():
     ncol = len(grid.lat) * len(grid.lon)
     nlev = spec_cfg.n_levels
     dt = spec_cfg.dt
-    n_steps = args.rollout_days * int(_SPD / dt)
-    pe = spec_cfg.pe_config
+    pe = spec_cfg.pe_config  # n_steps is per-curriculum-phase (n_steps_phase)
 
     times_ns, sst_m, sic_m, land = regrid_monthly_forcing_to_gaussian(
         args.forcing_path or DEFAULT_AIMIP_FORCING, grid, cache_path=args.cache_path,
