@@ -93,18 +93,17 @@ def oceananigans_canonical_ocean_config(
     A_v: float | None = None,                      # noqa: N803
     K_v: float | None = None,                      # noqa: N803
     physics=None,
-    momentum_advection: str = "vector_invariant",  # VectorInvariant() [APPROX]
-    tracer_advection: str = "weno7",               # WENO(order=7)
-    barotropic_solver: str = "implicit_cn",        # ImplicitFreeSurface
-    # Barotropic time filter. Consumed ONLY by the explicit_substep substep (the
-    # implicit_cn default has no substep to filter — _validate_config warns if it is
-    # set non-default there). Default PER SOLVER (None ⇒ resolved below): power_law
-    # (SM2005 extended window) for explicit_substep — the faithful choice that avoids
-    # the first-order cosine bell's over-dissipation of the eddy field
-    # (docs/ocean/fidelity/oceananigans_recipe_wiring_plan.md §8) — else the inert
-    # cosine default. Explicit value wins.
+    # Dycore scheme choices default to the `oceananigans_v1` catalog recipe (the
+    # SINGLE SOURCE — see legoesm.ocean.recipes); pass a value to override per deck.
+    momentum_advection: str | None = None,         # default vector_invariant [APPROX]
+    tracer_advection: str | None = None,           # default WENO(order=7)
+    barotropic_solver: str | None = None,          # default ImplicitFreeSurface (implicit_cn)
+    # Barotropic time filter — consumed ONLY by explicit_substep (implicit_cn has no
+    # substep; _validate_config warns if set non-default there). None ⇒ PER SOLVER:
+    # power_law (SM2005) for explicit_substep (avoids the cosine bell's eddy
+    # over-dissipation, see oceananigans_recipe_wiring_plan.md §8), else cosine.
     barotropic_time_filter: str | None = None,
-    coriolis_scheme: str = "explicit_ab2",         # spherical Coriolis [APPROX]
+    coriolis_scheme: str | None = None,            # default explicit_ab2 [APPROX]
     bottom_drag_r: float = 0.0,                    # linear bottom drag mu
     lateral_side_bc: str = "free_slip",            # Oceananigans default: free-slip
     ab2_epsilon: float = 0.1,
@@ -122,49 +121,39 @@ def oceananigans_canonical_ocean_config(
     ``overrides`` patches any remaining field (e.g. the §5 faithful split stack:
     ``barotropic_slow_forcing_ab2=True``, ``weno_smoothness``, ``A_v``/``K_v``).
     """
+    from legoesm.ocean.recipes import get_recipe
     vmix: dict[str, float] = {}
     if A_v is not None:
         vmix["A_v"] = A_v
     if K_v is not None:
         vmix["K_v"] = K_v
-    # Per-solver default: the faithful power_law filter only where it is consumed
-    # (explicit_substep); the inert cosine default otherwise (so the recipe's own
-    # implicit_cn default does not trip the no-op warning). from_flat routes this
-    # into the nested BarotropicConfig (#501).
+    # SINGLE SOURCE: the canonical dycore identity is the `oceananigans_v1` catalog
+    # recipe (schemes + pinned runtime flags incl. weno_vertadv_full_velocity, the
+    # §5/CASE-3 interior-eddy closure). Caller scheme args override per deck.
+    bundle = get_recipe("oceananigans_v1")
+    for key, val in (("momentum_advection", momentum_advection),
+                     ("tracer_advection", tracer_advection),
+                     ("barotropic_solver", barotropic_solver),
+                     ("coriolis_scheme", coriolis_scheme)):
+        if val is not None:
+            bundle[key] = val
+    # Per-solver default: power_law where it is consumed (explicit_substep), else the
+    # inert cosine default (so the implicit_cn default does not trip the no-op warning).
     if barotropic_time_filter is None:
         barotropic_time_filter = (
-            "power_law" if barotropic_solver == "explicit_substep" else "cosine")
+            "power_law" if bundle["barotropic_solver"] == "explicit_substep" else "cosine")
     return LatLonCGridOceanConfig.from_flat(
+        **bundle,
+        barotropic_time_filter=barotropic_time_filter,
+        eos_linear=eos_linear,
         g=g,
         rho_0=rho_0,
-        eos="linear",
-        eos_linear=eos_linear,
         A_h=A_h,
         K_h=K_h,
         physics=physics,
-        momentum_advection=momentum_advection,
-        tracer_advection=tracer_advection,
-        coriolis_scheme=coriolis_scheme,
-        outer_integrator="ab2",
         ab2_epsilon=ab2_epsilon,
-        barotropic_solver=barotropic_solver,
-        barotropic_time_filter=barotropic_time_filter,
-        lateral_viscosity_operator="flux_divergence",
-        A_h_lat_scaling=False,
-        C_smag=0.0,
         lateral_side_bc=lateral_side_bc,
         bottom_drag_r=bottom_drag_r,
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
-        # Oceananigans advects the FULL horizontal momentum vertically (w·∂u/∂z over the
-        # full u); legoESM's production default advects only the baroclinic perturbation
-        # u' (omitting −∂(w·U_bar)/∂z). The perturbation form makes a 3D baroclinic-eddy
-        # front go UNSTABLE at the interior (the §5/baroclinic_adjustment runaway: NaN
-        # day 18) while the full-velocity form saturates like the oracle (within 2× to
-        # 30 d). No effect on single-layer cases (gyre/bickley). This is the faithful
-        # Oceananigans choice — the §5/CASE-3 interior-eddy closure.
-        weno_vertadv_full_velocity=True,
         **vmix,
         **overrides,
     )

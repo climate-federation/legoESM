@@ -31,6 +31,7 @@ maybe_init_jax_distributed()
 from legoesm import constants
 from legoesm.driver.config import (
     DycoreConfig,
+    EvaluationConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
@@ -39,6 +40,7 @@ from legoesm.driver.config import (
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
 _EXPERIMENT_DEFAULTS = ExperimentConfig()
+_EVALUATION_DEFAULTS = EvaluationConfig()
 
 
 def _print_forcing_activity(args) -> None:
@@ -484,10 +486,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
+                        help="Xu-Randall cloud-fraction RH exponent p_xr (None="
+                             "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
+                             "fraction less saturating at moderate RH (flattens "
+                             "the moisture-driven overcast runaway).")
+    parser.add_argument("--cloud-alpha-xr", dest="cloud_alpha_xr", type=float,
+                        default=None,
+                        help="Xu-Randall condensate sensitivity alpha_xr (None="
+                             "default 100; bounds 10..1000). LOWER => cloud "
+                             "fraction grows more slowly with condensate.")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
-                        action="store_true", default=False,
+                        action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
-                             "source (the tuned slab value is ON).")
+                             "source (the tuned slab value is ON). Use "
+                             "--no-convective-cloud to DISABLE a config-file "
+                             "default: recommended for prescribed-SST AMIP, where "
+                             "conv-cloud is an inert SST-drift compensator that "
+                             "only adds planetary albedo (amip_production.yaml A/B: "
+                             "OFF 0.295 vs ON 0.370).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
@@ -739,6 +756,66 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Master RNG seed for reproducibility")
     parser.add_argument("--cmip-output", action="store_true", default=False)
     parser.add_argument("--clear-sky-diag", action="store_true", default=False)
+    parser.add_argument(
+        "--evaluate", action="store_true", default=False,
+        help="Run ClimateEval after a successful AMIP run to compare "
+             "CMOR outputs against ERA5/observational reference data. "
+             "Requires --cmip-output.")
+    parser.add_argument(
+        "--evaluation-suite", dest="evaluation_suites", nargs="+",
+        default=list(_EVALUATION_DEFAULTS.suites),
+        help="One or more ClimateEval suite names, rendered into a single "
+             f"combined report (default: {' '.join(_EVALUATION_DEFAULTS.suites)}). "
+             "Available suites: Tier1_sanity_checks, Tier1_consistency_checks, "
+             "Tier1_ecs, Tier2_atmosphere_monthly, Tier2_atmosphere_subdaily, "
+             "Tier2_ocean_monthly.")
+    parser.add_argument(
+        "--evaluation-model-id", dest="evaluation_model_id", type=str,
+        default=_EVALUATION_DEFAULTS.model_id,
+        help="Model identifier for ClimateEval DataSourceInformation "
+             f"(default: {_EVALUATION_DEFAULTS.model_id!r}).")
+    parser.add_argument(
+        "--evaluation-experiment-id", dest="evaluation_experiment_id", type=str,
+        default=_EVALUATION_DEFAULTS.experiment_id,
+        help="Experiment identifier for ClimateEval "
+             f"(default: {_EVALUATION_DEFAULTS.experiment_id!r}).")
+    parser.add_argument(
+        "--evaluation-variant-id", dest="evaluation_variant_id", type=str,
+        default=_EVALUATION_DEFAULTS.variant_id,
+        help="Variant identifier for ClimateEval "
+             f"(default: {_EVALUATION_DEFAULTS.variant_id!r}).")
+    parser.add_argument(
+        "--evaluation-data-root-dir", dest="evaluation_data_root_dir", type=str,
+        default=os.environ.get(
+            "LEGOESM_CLIMATEEVAL_DATA_ROOT", _EVALUATION_DEFAULTS.data_root_dir),
+        help="Root directory for ClimateEval reference data (source_id/"
+             "frequency/var layout). No shared canonical location — defaults "
+             "from the LEGOESM_CLIMATEEVAL_DATA_ROOT env var.")
+    parser.add_argument(
+        "--evaluation-timerange", dest="evaluation_timerange", type=str,
+        default=_EVALUATION_DEFAULTS.timerange,
+        help="ClimateEval variable timerange override "
+             "(e.g. '19790101/19791231'). If empty, uses the model's "
+             "actual output time span.")
+    parser.add_argument(
+        "--evaluation-fail-missing", dest="evaluation_fail_missing",
+        action="store_true",
+        default=_EVALUATION_DEFAULTS.fail_on_missing_data,
+        help="Fail the run if ClimateEval reference data is missing.")
+    parser.add_argument(
+        "--evaluation-download", dest="evaluation_download",
+        action="store_true",
+        default=_EVALUATION_DEFAULTS.download_missing_data,
+        help="Download missing ClimateEval reference data on the fly.")
+    parser.add_argument(
+        "--evaluation-climateeval-python", dest="evaluation_climateeval_python", type=str,
+        default=os.environ.get(
+            "LEGOESM_CLIMATEEVAL_PYTHON", _EVALUATION_DEFAULTS.climateeval_python),
+        help="Python interpreter of the separate, externally-installed "
+             "ClimateEval environment (iris/ESMValTool; never a legoESM "
+             "dependency). No hardcoded default — defaults from the "
+             "LEGOESM_CLIMATEEVAL_PYTHON env var. Required (and validated "
+             "to exist + be executable) when --evaluate is set.")
 
     # Performance
     parser.add_argument("--precision", type=str, default="fp32",
@@ -845,6 +922,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clear_sky_diag=args.clear_sky_diag,
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
+        evaluation=EvaluationConfig(
+            enabled=args.evaluate,
+            suites=tuple(args.evaluation_suites),
+            model_id=args.evaluation_model_id,
+            experiment_id=args.evaluation_experiment_id,
+            variant_id=args.evaluation_variant_id,
+            data_root_dir=args.evaluation_data_root_dir,
+            fail_on_missing_data=args.evaluation_fail_missing,
+            download_missing_data=args.evaluation_download,
+            timerange=args.evaluation_timerange,
+            climateeval_python=args.evaluation_climateeval_python,
+        ),
     )
 
     return ExperimentConfig(
@@ -909,6 +998,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_gustiness_zi=args.surface_gustiness_zi,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_p_xr=args.cloud_p_xr,
+        cloud_alpha_xr=args.cloud_alpha_xr,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
@@ -1042,6 +1133,9 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 "--physics-parameterization ml currently requires "
                 "--convection mass_flux and --turbulence louis"
             )
+    if args.evaluate and not args.cmip_output:
+        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
+                     "the CMOR Amon/ output tree)")
         if not args.physics_parameterization_checkpoint or not args.physics_parameterization_stats:
             parser.error(
                 "--physics-parameterization ml requires both "
@@ -1342,6 +1436,25 @@ def _validate_sundqvist_flags(args, parser) -> None:
             "backends rebuild MicrophysicsConfig at run() and would ignore them.")
 
 
+def _validate_cloud_sensitivity_flags(args, parser) -> None:
+    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
+    at run() and ignore the pipeline override (MPAS / spectral) — the same
+    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
+    are enforced by ExperimentConfig.validate_strict.
+    """
+    if (getattr(args, "cloud_p_xr", None) is None
+            and getattr(args, "cloud_alpha_xr", None) is None):
+        return
+    disc = getattr(args, "discretization", "centered")
+    grid = getattr(args, "grid_type", "")
+    if disc in ("mpas", "spectral") or grid in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        parser.error(
+            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
+            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
+            "CloudConfig at run() and would ignore them.")
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1417,6 +1530,7 @@ def main(argv: list[str] | None = None):
     _require_full_physics_for_amip(args, parser)
     # Bound-check the --sundqvist-* tunables + refuse them on MPAS/spectral.
     _validate_sundqvist_flags(args, parser)
+    _validate_cloud_sensitivity_flags(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
@@ -1583,6 +1697,11 @@ def main(argv: list[str] | None = None):
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)
+
+    if _is_root:
+        from legoesm.driver.climateeval_hook import maybe_run_climateeval
+
+        maybe_run_climateeval(config, driver.output_dir)
 
 
 if __name__ == "__main__":

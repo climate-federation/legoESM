@@ -117,5 +117,47 @@ def test_slab_path_leaves_multilayer_inactive(monkeypatch, tmp_path):
     assert driver.physics.land_ml_lat is None
 
 
+def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
+    """build_training_segment yields a DIFFERENTIABLE coupled segment whose land
+    surface temperature carries a finite, non-zero gradient w.r.t. the land params
+    fed through the pipeline attribute — the coupled-calibration mechanism
+    (scripts/run/train_coupled_land_era5.py).  Synthetic loam soil keeps the
+    van-Genuchten backward inside float32 (real stiff-clay soils need fp64)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    pipe = driver.physics
+    # Trainable surface exchange: MOST (z0 active) + Farquhar stomata (Vc_max25/
+    # g1/LCMA active via a prescribed carbon state).
+    pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
+        bulk_scheme="most", stomata=StomataConfig(enabled=True),
+        carbon=CarbonConfig(scheme="differland"))
+    ncol = int(driver.grid.lat.size)
+    pipe.land_ml_carbon = init_carbon_state((ncol,), pipe.land_ml_cfg.carbon)
+    base_lp = pipe.land_ml_params
+
+    run_seg, carry0, forcing = driver.build_training_segment(4)
+    # forward is finite (real coupled atmosphere + land)
+    fin0 = run_seg(carry0, 4, forcing)
+    assert jnp.all(jnp.isfinite(fin0.land_ml.T_soil))
+
+    def loss(scale):
+        # feed a TRACED scaling of the land roughness through the pipeline attribute
+        pipe.land_ml_params = base_lp._replace(z0=base_lp.z0 * scale)
+        fin = run_seg(carry0, 4, forcing)
+        return jnp.sum(fin.land_ml.T_soil[:, 0] ** 2)
+
+    g = float(jax.grad(loss)(1.0))
+    pipe.land_ml_params = base_lp           # drop the escaped tracer
+    assert np.isfinite(g), "coupled land gradient is non-finite"
+    assert g != 0.0, "coupled land gradient is zero (params not reaching the flux)"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

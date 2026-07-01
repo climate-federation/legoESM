@@ -417,7 +417,7 @@ def _weak_resolution_ll(
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
-STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
+STRONG_RESOLUTIONS_ICO = [4, 5, 6, 7, 8]  # icosahedral: levels 4-8 (L8 = 655,362 cells, ~25 km; high levels need multi-GPU/multi-node)
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
 # Lat-lon MPI halo width: the C-grid PPM / biharmonic operators pad
 # ``halo=2`` rows (primitive_eq_latlon_cgrid: pad_halo_latlon_3d(halo=2);

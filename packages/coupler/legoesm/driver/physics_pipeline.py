@@ -165,6 +165,13 @@ class PhysicsPipeline:
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
+        # Optional PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI) for the
+        # multilayer tile.  None (default) ⇒ no carbon coupling (Jarvis stomata /
+        # byte-identical).  When set (+ land_ml_cfg.stomata.enabled +
+        # carbon="differland") the Farquhar photosynthesis-stomata path activates,
+        # making Vc_max25 / g1 / LCMA affect the surface flux — i.e. TRAINABLE in the
+        # coupled calibration — without paying a multi-decade carbon-pool spin-up.
+        self.land_ml_carbon = None     # CarbonState (prescribed) or None
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -258,6 +265,8 @@ class PhysicsPipeline:
         self._cloud_rh_crit = None
         self._cloud_q_c_diagnostic = None
         self._cloud_conv_cloud_max = None
+        self._cloud_p_xr = None
+        self._cloud_alpha_xr = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -472,10 +481,13 @@ class PhysicsPipeline:
             cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
+        # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
+        # carbon pools are discarded so the prescribed leaf carbon is reused every
+        # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=self.land_ml_params)
+            land_params=self.land_ml_params, carbon_state=self.land_ml_carbon)
         return land_new, resp.T_sfc, resp.albedo
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
@@ -1541,7 +1553,6 @@ class PhysicsPipeline:
         # Compute cloud properties for cloud-radiation coupling
         cloud_kwargs = {}
         if cloud_scheme != "none":
-            from legoesm.atmosphere.physics.clouds.config import CloudConfig
             from legoesm.atmosphere.physics.clouds.cloud_fraction import (
                 compute_cloud_properties,
             )
@@ -1560,18 +1571,20 @@ class PhysicsPipeline:
             # Optional cloud-tuning overrides (None => CloudConfig default =>
             # byte-identical).  The SW/LW knob for e.g. the coare3 moisture-
             # driven albedo overshoot (raise rh_crit / lower q_c_diagnostic).
-            _cc_over = {}
-            if getattr(self, "_cloud_rh_crit", None) is not None:
-                _cc_over["rh_crit"] = self._cloud_rh_crit
-            if getattr(self, "_cloud_q_c_diagnostic", None) is not None:
-                _cc_over["q_c_diagnostic"] = self._cloud_q_c_diagnostic
-            if getattr(self, "_cloud_conv_cloud_max", None) is not None:
-                _cc_over["conv_cloud_max"] = self._cloud_conv_cloud_max
-            cloud_config = CloudConfig(
-                scheme=cloud_scheme,
+            # Built via the shared ``build_cloud_config`` so the clt diagnostic
+            # (DiagnosticCollector) selects the SAME cloud fraction (#689).
+            from legoesm.atmosphere.physics.clouds.config import (
+                build_cloud_config,
+            )
+            cloud_config = build_cloud_config(
+                cloud_scheme,
                 convective_cloud=(getattr(self, "_cloud_convective", False)
                                   and conv_precip is not None),
-                **_cc_over,
+                rh_crit=getattr(self, "_cloud_rh_crit", None),
+                q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
+                conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
+                p_xr=getattr(self, "_cloud_p_xr", None),
+                alpha_xr=getattr(self, "_cloud_alpha_xr", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -1740,7 +1753,8 @@ class PhysicsPipeline:
                 sw_down_toa, T_land_new, land_ml_new)
 
     def build_step_unified(self, static_need_rad: bool | None = None,
-                           rad_stop_gradient: bool = False):
+                           rad_stop_gradient: bool = False,
+                           jit: bool = True):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
 
         ``rad_stop_gradient`` (radiation-as-forcing): wrap the radiation core's
@@ -1762,6 +1776,15 @@ class PhysicsPipeline:
         radiation-driven land skin update is forcing too); moot for ocean-only
         AIMIP (``T_land`` inert).  A land run needing differentiable skin-T
         must use the full adjoint (False).
+
+        ``jit`` (default True) wraps the step in ``jax.jit`` — the production path.
+        Pass ``jit=False`` for differentiable parameter calibration that feeds a
+        TRACED value into the pipeline via an attribute the step reads (e.g.
+        ``land_ml_params`` in the coupled land calibrator): a jitted step would
+        capture that tracer as a closure constant and leak it across
+        ``value_and_grad`` calls (``UnexpectedTracerError``).  The un-jitted step
+        is inlined into the caller's ``lax.scan`` trace, so there is no separate
+        compiled artefact to capture the tracer.
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
@@ -1797,7 +1820,6 @@ class PhysicsPipeline:
         """
         pipeline = self
 
-        @jax.jit
         def step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                          sst, sic, lat, lon,
                          day_of_year, seconds_of_day, dt,
@@ -1985,7 +2007,7 @@ class PhysicsPipeline:
                 return _no_rad_branch(args)
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
-        return step_unified
+        return jax.jit(step_unified) if jit else step_unified
 
 
 # ---------------------------------------------------------------------------
@@ -2760,6 +2782,8 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
+    pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
+    pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma

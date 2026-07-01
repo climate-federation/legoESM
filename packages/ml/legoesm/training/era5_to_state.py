@@ -69,6 +69,53 @@ def _hybrid_p_s_floor(sigma, dp_floor: float = 100.0) -> float:
     return float(_np.max(p_s_per_level))
 
 
+def _apply_phis_hydrostatic_adjustment(
+    phis_raw,
+    phis_smooth,
+    p_s,
+    T_sfc,
+    sigma,
+    is_hybrid: bool,
+    dp_floor: float = 100.0,
+):
+    """Reconcile ``p_s`` with a SMOOTHED ``phis`` (+ optional hybrid floor).
+
+    Grid-AGNOSTIC: operates elementwise over arbitrary leading spatial dims
+    (cube ``(6, n, n)`` or lat-lon ``(n_lat, n_lon)``), so the cube and lat-lon
+    ERA5 carries share ONE copy of the barometric/floor numerics.  The grid
+    smoothing itself (cube vs Gaussian) is done by the caller; this only does
+    the hydrostatic reconciliation that must follow it.
+
+    Sign convention (z UP; ``phis = g*z`` surface geopotential [m^2/s^2];
+    pressure increases downward):
+
+    * Smoothing lowers terrain peaks, so ``delta = phis_raw - phis_smooth >= 0``
+      where a peak was cut.  Descending from the higher RAW surface to the lower
+      SMOOTHED surface is ``dPhi = -delta < 0``; the hydrostatic relation
+      ``dln_p = -dPhi / (R_d T)`` then gives ``dln_p = +delta/(R_d T) > 0`` — so
+      ``p_s`` INCREASES: ``p_s_corrected = p_s * exp(+delta/(R_d T))``.
+      (Lowering terrain raises surface pressure. ✓)
+    * Hybrid floor: where layers would become degenerate, raise ``p_s`` to
+      ``p_s_floor`` and LOWER ``phis`` by the barometric equivalent
+      ``R_d*T*ln(p_s_floor/p_s_corrected)`` so the split-PGF cancellation stays
+      consistent with the raised ``p_s``.
+
+    Returns ``(phis_adjusted, p_s_adjusted)`` with the same shapes as inputs.
+    """
+    delta_phis = phis_raw - phis_smooth  # >= 0 where smoothing lowered terrain
+    p_s_corrected = p_s * jnp.exp(delta_phis / (constants.R_d * T_sfc))
+    if is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=dp_floor)
+        # Only ever RAISE p_s toward the floor (ln_ratio >= 0); lower phis to match.
+        ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
+        phis_adjusted = phis_smooth - constants.R_d * T_sfc * ln_ratio
+        p_s_adjusted = jnp.maximum(p_s_corrected, p_s_floor)
+    else:
+        phis_adjusted = phis_smooth
+        p_s_adjusted = p_s_corrected
+    return phis_adjusted, p_s_adjusted
+
+
 # Module-level cache for regridding weights (expensive to recompute)
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
 
@@ -468,37 +515,18 @@ def era5_to_cubedsphere_carry(
     # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
     # even from rest.
     from legoesm.grids.topography import smooth_phis_cubed_sphere
-    phis_cs = smooth_phis_cubed_sphere(phis_cs_raw)
+    phis_cs_smooth = smooth_phis_cubed_sphere(phis_cs_raw)
 
-    # Barometric p_s correction for hydrostatic consistency with smoothed phis.
-    # Smoothing phis lowers terrain gradients (dB_dx ↓), but without this
-    # adjustment ln_ps is unchanged, so the split-PGF correction term
-    # pg_corr_x = R_d × T × B × p_s/p × dln_ps/dx stays the same while
-    # dB_dx decreases — WORSENING the cancellation residual over Tibet.
-    # Barometric formula: p_s_new = p_s × exp[(phis_raw − phis_smooth) / (R_d × T_sfc)]
-    # Derivation: hydrostatic dln_p = −dΦ / (R_d × T) → Δln_p = −ΔΦ / (R_d × T)
-    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = 1000 hPa).
+    # Hydrostatically reconcile p_s with the smoothed phis (barometric p_s
+    # correction + hybrid p_s floor).  Shared with the lat-lon carry via
+    # ``_apply_phis_hydrostatic_adjustment`` — see that helper for the full
+    # sign-convention + barometric derivation and the degenerate-hybrid-layer
+    # rationale (Tibet: 19/40 levels underground, dp = −1 Pa at the arch peak).
+    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).
     _T_sfc_cs = T_cs[..., -1]  # (6, n, n) — 1000 hPa, nearest to surface
-    _delta_phis = phis_cs_raw - phis_cs  # > 0 where terrain was lowered by smoothing
-    p_s_corrected = p_s_cs * jnp.exp(_delta_phis / (constants.R_d * _T_sfc_cs))
-
-    # Enforce a minimum surface pressure to prevent degenerate hybrid levels.
-    # The L40 hybrid coordinate has p(k) = A(k)*p_ref + B(k)*p_s.  Near the
-    # surface the A coefficients decrease toward 0 while B → 1; when p_s << p_ref
-    # the A*p_ref term dominates and adjacent levels can have |dp| < 1 Pa or
-    # even dp < 0 (inverted).  At p_s = 56703 Pa (Tibet, 4751 m), 19 of 40
-    # levels are underground and the arch-peak at level 28–29 has dp = −1 Pa,
-    # causing catastrophic vertical-velocity amplification in the continuity eq.
-    # Fix: raise p_s to p_s_floor wherever needed; simultaneously lower phis
-    # by the barometric-formula equivalent so the split-PGF cancellation is
-    # maintained (phis consistent with raised p_s).
-    if _is_hybrid:
-        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
-        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
-        phis_cs = phis_cs - constants.R_d * _T_sfc_cs * _ln_ratio
-        p_s_cs = jnp.maximum(p_s_corrected, p_s_floor)
-    else:
-        p_s_cs = p_s_corrected
+    phis_cs, p_s_cs = _apply_phis_hydrostatic_adjustment(
+        phis_cs_raw, phis_cs_smooth, p_s_cs, _T_sfc_cs, sigma, _is_hybrid,
+    )
 
     # Vertical interpolation.
     # CRITICAL: for hybrid sigma-pressure coordinates, use the TRUE level
@@ -616,26 +644,53 @@ def era5_to_latlon_carry(
     # grid.lat/grid.lon interpolator shared with the Gaussian path).
     T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
 
-    p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
 
-    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
-    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
-    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
+    # Smooth the regridded ERA5 orography — Gaussian-grid analogue of the cube
+    # carry's smooth_phis_cubed_sphere.  Raw ERA5 phis (peaks ~5.6e4 m^2/s^2)
+    # regridded to a coarse 2° lat-lon grid drives an unbalanced
+    # pressure-gradient force that blows up the dycore at step ~0; smoothing +
+    # the hydrostatic p_s reconciliation below is the SAME treatment the cube
+    # carry already applies (factored into _apply_phis_hydrostatic_adjustment).
+    from legoesm.grids.topography import smooth_phis_gaussian
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_ll_smooth = smooth_phis_gaussian(phis_ll_raw)
+
+    # Hydrostatically reconcile p_s with the smoothed phis (+ hybrid p_s floor).
+    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).
+    _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
+    phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
+        jnp.asarray(phis_ll_raw), jnp.asarray(phis_ll_smooth),
+        jnp.asarray(p_s_ll), _T_sfc_ll, sigma, _is_hybrid,
+    )
+
+    # Vertical interpolation (hybrid-aware, mirroring the cube/Gaussian paths).
+    # CRITICAL for HybridSigmaPressureCoordinate: use the TRUE level pressure
+    # p(k) = A(k)*p_ref + B(k)*p_s, NOT the (A+B)*p_s sigma approximation, which
+    # over steep terrain misplaces upper levels by 100-180 hPa.
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+
+        def _vinterp(f):
+            return interp_pressure_to_hybrid(
+                jnp.asarray(f), plev, p_s_jax, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+
+        def _vinterp(f):
+            return interp_pressure_to_sigma(jnp.asarray(f), plev, p_s_jax, sigma_f)
+
+    T_model = _vinterp(T_ll)
+    u_model = _vinterp(u_ll)
+    v_model = _vinterp(v_ll)
     # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
     # RATIO r = q / (1 − q) (see the spectral path for the rationale).
-    q_specific = jnp.clip(
-        jnp.maximum(
-            interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
-            0.0,
-        ),
-        0.0, 0.99,
-    )
+    q_specific = jnp.clip(jnp.maximum(_vinterp(q_ll), 0.0), 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
-
-    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_jax = jnp.asarray(phis_ll)
 
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
@@ -682,6 +737,7 @@ def era5_to_mpas_carry(
     era5: ERA5Slice,
     mesh,
     sigma,
+    smoothing_passes: int = 4,
 ):
     """Convert an ERA5 slice to an initial condition on an MPAS/Voronoi mesh.
 
@@ -709,8 +765,15 @@ def era5_to_mpas_carry(
     era5 : ERA5Slice
     mesh : VoronoiMesh
         Exposes ``latCell``/``lonCell``/``latEdge``/``lonEdge``/``angleEdge``
-        (radians) and ``nCells``/``nEdges``.
+        (radians), ``nCells``/``nEdges``, and the cell adjacency
+        ``cellsOnCell``/``nEdgesOnCell`` used for phis smoothing.
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+    smoothing_passes : int
+        Laplacian smoothing passes applied to the regridded ERA5 surface
+        geopotential before it is used as ``phis`` (default 4, matching the
+        cubed-sphere path).  ``0`` disables smoothing.  Raw ERA5 phis on a
+        coarse Voronoi mesh produces O(dx^-1) spurious pressure-gradient force
+        over steep terrain that drives a wind runaway / blowup within days.
 
     Returns
     -------
@@ -754,12 +817,33 @@ def era5_to_mpas_carry(
     # Surface pressure at edges (for placing the wind levels over terrain).
     p_s_edge = regrid_scalar(jnp.asarray(era5.p_s), edge_w)
 
+    # Smooth the raw regridded ERA5 surface geopotential on the mesh before
+    # using it as phis.  Raw ERA5 phis retains grid-scale roughness over steep
+    # terrain (Himalaya/Andes/Antarctica); the TRiSK pressure-gradient
+    # amplifies those cell-to-cell gradients to O(dx^-1) spurious force, which
+    # drives a localized wind runaway / blowup within days from the ERA5 IC.
+    # This mirrors the cubed-sphere path (era5_to_cubedsphere_carry), which was
+    # already hardened against the identical failure.  A barometric p_s
+    # correction keeps each column hydrostatically consistent with the (lowered)
+    # terrain gradients: smoothing lowers dB_dx, so without raising p_s where
+    # terrain was smoothed down, the split-PGF correction term would no longer
+    # cancel.  p_s_new = p_s · exp[(phis_raw − phis_smooth) / (R_d · T_sfc)],
+    # from hydrostatic Δln_p = −ΔΦ / (R_d · T); T_sfc proxy = ERA5 T at 1000 hPa
+    # (plev ascending -> last index).
+    if smoothing_passes > 0:
+        from legoesm.grids.topography import smooth_phis_voronoi
+        phis_cell_raw = phis_cell
+        phis_cell = smooth_phis_voronoi(
+            phis_cell, mesh.cellsOnCell, mesh.nEdgesOnCell,
+            smoothing_passes=smoothing_passes,
+        )
+        _T_sfc = T_cell[..., -1]
+        _delta_phis = phis_cell_raw - phis_cell  # > 0 where terrain was lowered
+        p_s_cell = p_s_cell * jnp.exp(_delta_phis / (constants.R_d * _T_sfc))
+
     # Hybrid p_s floor over high terrain: raise p_s where the hybrid layers
     # would become degenerate (dp < dp_floor), and lower phis by the
     # barometric equivalent so the split-PGF cancellation is preserved.
-    # No phis smoothing is applied (the coarse mesh is already smooth and
-    # there is no mesh-native cube-edge artefact to blend), so unlike the
-    # cubed-sphere path there is no smoothing-driven p_s correction.
     if _is_hybrid:
         p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
         _T_sfc = T_cell[..., -1]  # 1000 hPa (plev ascending -> last index)

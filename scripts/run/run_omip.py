@@ -155,6 +155,14 @@ def parse_args(argv: list[str] | None = None):
         description="Reference OMIP simulation on all ocean grids",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--config", type=str, default=None,
+                   help="YAML config file supplying argument defaults (keys are "
+                        "argument dests; explicit CLI flags still override). "
+                        "See config/omip/*.yaml. (issue #691)")
+    p.add_argument("--require-config", action="store_true",
+                   help="Strict mode: fail unless a --config file is given, so "
+                        "the run is fully specified by a committed config (no "
+                        "hidden parser defaults). (issue #691)")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -409,7 +417,22 @@ def parse_args(argv: list[str] | None = None):
                          "K_conv=1 m²/s convection fires with surface dz<30 m "
                          "or when vertical resolution is increased.  KPP non-"
                          "local fluxes remain explicit."))
-    return p.parse_args(argv)
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    # Shared loader (single source of truth) — same mechanism as run_amip /
+    # run_coupled (issue #691).
+    pre, _ = p.parse_known_args(argv)
+    if pre.config is not None:
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        p.set_defaults(**load_yaml_config(
+            pre.config, p,
+            example_keys="'grid', 'nlev', 'dt', 'days', "
+                         "'vertical_mixing_scheme', 'kpp_ri_crit'"))
+    args = p.parse_args(argv)
+    if getattr(args, "require_config", False):
+        from legoesm.driver.run_config_yaml import require_config
+        require_config(args.config, driver="run_omip")
+    return args
 
 
 # ===========================================================================

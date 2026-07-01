@@ -6,16 +6,43 @@ Solves the 1D heat equation:
 Thermal properties depend on soil moisture via the Johansen (1975) method.
 Discretized with backward Euler and solved via Thomas algorithm.
 
+Soil water FREEZE/THAW is modelled (opt-in, ``SoilThermalConfig.
+enable_freeze_thaw``) via the APPARENT-HEAT-CAPACITY method: the soil water is
+partitioned into an unfrozen liquid fraction ``theta_liq(T)`` (a smooth
+freezing curve, ``freeze_curve_width_K``, with a residual film-water fraction
+``theta_liq_residual_frac``) and ice ``theta_ice = theta - theta_liq``.  The
+latent heat of fusion enters the effective heat capacity as
+``C_latent = rho_water * L_f * d(theta_liq)/dT >= 0``, so a column cooling /
+warming through ``constants.T_freeze`` releases / absorbs the fusion enthalpy
+``rho_water * L_f * (theta - theta_min)`` instead of changing temperature
+freely — the zero-curtain plateau.  The apparent heat capacity is evaluated at
+the current temperature (linearised); the stored-enthalpy change matches the
+sensible + latent enthalpy change to first order in dT, so column energy closes
+to O(dt) per step (exact in the linearised metric — see
+``tests/land/test_soil_freeze_thaw.py``).  When disabled (default) the module
+reduces EXACTLY to sensible-heat diffusion (bit-identical to prior behaviour).
+
+Scope of this first implementation: THERMAL freeze/thaw only (the dominant
+zero-curtain physics).  Two coupled refinements are deliberately NOT included
+and are tracked follow-ups: (a) ice-aware thermal CONDUCTIVITY (frozen soil
+conducts better, k_ice ~ 2.0 vs k_water ~ 0.57) — the conductivity still uses
+total ``theta``; (b) hydraulic IMMOBILISATION of the ice fraction in Richards
+(frozen water should not drain) — the hydraulics still see total ``theta``.
+Both are secondary to the latent zero-curtain and are noted at their sites.
+
 References
 ----------
 - Johansen (1975): Thermal conductivity of soils. PhD thesis.
 - de Vries (1963): Thermal properties of soils.
+- Cox et al. (1999); Niu & Yang (2006): soil freezing curve / supercooled
+  liquid water and the apparent-heat-capacity treatment of soil freeze/thaw.
 """
 
 from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -36,8 +63,17 @@ __param_spec__ = {
             "kersten_sr_floor_coarse": "numerics: log10 argument floor (sand)",
             "kersten_sr_floor_fine": "numerics: log10 argument floor (loam)",
             "sr_clip_min": "numerics: saturation-ratio floor",
+            "C_ice_vol": "material: ice volumetric heat capacity (= rho_ice·c_pi)",
+            "freeze_curve_width_K": "numerics: freezing-curve smoothing half-width [K]",
         },
         "params": {
+            "theta_liq_residual_frac": {
+                "units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "residual unfrozen (supercooled film) liquid-water "
+                             "fraction below freezing (Niu & Yang 2006)",
+                "shape": None,
+            },
             "Q_geothermal": {
                 "units": "W/m^2", "bounds": (0.0, 0.15), "tunable_tier": 1,
                 "transform": "sigmoid", "category": "boundary",
@@ -99,6 +135,11 @@ class SoilThermalConfig(NamedTuple):
     kersten_sr_floor_coarse: float = 0.05  # [-] log10 argument floor, sand
     kersten_sr_floor_fine: float = 0.1     # [-] log10 argument floor, loam
     sr_clip_min: float = 0.01              # [-] saturation-ratio floor
+    # --- soil-water freeze/thaw (apparent heat capacity) -------------------
+    enable_freeze_thaw: bool = False       # opt-in; default off = sensible-only
+    C_ice_vol: float = constants.rho_ice * constants.c_pi  # ice heat cap [J/m3/K]
+    freeze_curve_width_K: float = 0.5      # [K] smooth freezing-curve half-width
+    theta_liq_residual_frac: float = 0.05  # [-] residual unfrozen liquid fraction
 
 
 def compute_heat_capacity(
@@ -114,6 +155,86 @@ def compute_heat_capacity(
     return ((1.0 - theta_sat) * thermal_config.C_soil
             + theta * thermal_config.C_water_vol
             + (theta_sat - theta) * thermal_config.C_air)
+
+
+def liquid_water_content(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    thermal_config: SoilThermalConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Unfrozen liquid water content ``theta_liq(T)`` and ``d(theta_liq)/dT``.
+
+    Smooth (C-infinity) sigmoid freezing characteristic centred at
+    ``constants.T_freeze`` with half-width ``freeze_curve_width_K`` [K]::
+
+        frozen_frac(T) = sigmoid(-(T - T_freeze) / w)          in [0, 1]
+        theta_min      = theta_liq_residual_frac * theta       (residual film)
+        theta_liq      = theta - (theta - theta_min) * frozen_frac
+
+    ``theta_liq`` -> ``theta`` (all liquid) for T >> T_freeze and -> ``theta_min``
+    (residual supercooled film water) for T << T_freeze, monotonically
+    INCREASING in T, so ``d(theta_liq)/dT >= 0``.  The total fusion enthalpy
+    released between fully-thawed and fully-frozen is
+    ``rho_water * L_f * (theta - theta_min)`` [J/m^3] regardless of ``w`` (which
+    only sets the temperature width of the zero-curtain plateau), so energy is
+    conserved by construction.
+
+    Returns ``(theta_liq, dtheta_liq_dT)``, both the shape of ``theta``.
+    """
+    w = thermal_config.freeze_curve_width_K
+    # ``freeze_curve_width_K`` is a fixed numerics field (never trained -> always
+    # a static Python float), so validate it here: w <= 0 would divide by zero
+    # and flip the sign of dtheta_liq/dT (making C_latent negative -> unstable).
+    if not w > 0.0:
+        raise ValueError(
+            f"freeze_curve_width_K must be > 0, got {w!r}."
+        )
+    # ``theta_liq_residual_frac`` may be traced (tunable, tier 2) so it is not
+    # Python-branched here; instead clamp the residual liquid to ``[0, theta]``
+    # (traced-safe safety floor: the residual film cannot exceed the total
+    # water, nor be negative).  This GUARANTEES ``theta - theta_min >= 0`` and
+    # hence ``dtheta_liq/dT >= 0`` and ``C_latent >= 0`` for ANY config value.
+    # It is a no-op for the spec-bounded range ``[0, 0.2]`` (r*theta < theta).
+    theta_min = jnp.clip(thermal_config.theta_liq_residual_frac * theta, 0.0, theta)
+    frozen = jax.nn.sigmoid(-(T_soil - constants.T_freeze) / w)  # ->1 cold, ->0 warm
+    theta_liq = theta - (theta - theta_min) * frozen
+    # d(frozen)/dT = sigmoid'*dx/dT = frozen*(1-frozen)*(-1/w); the minus sign
+    # cancels with the -(theta - theta_min) prefactor => derivative >= 0.
+    dtheta_liq_dT = (theta - theta_min) * frozen * (1.0 - frozen) / w
+    return theta_liq, dtheta_liq_dT
+
+
+def compute_apparent_heat_capacity(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig,
+) -> jnp.ndarray:
+    """Effective volumetric heat capacity [J/m3/K] INCLUDING soil freeze/thaw.
+
+    Apparent-heat-capacity method::
+
+        C_app = C_sensible + C_latent
+        C_sensible = (1 - theta_sat)*C_soil + theta_liq*C_water_vol
+                     + theta_ice*C_ice_vol + (theta_sat - theta)*C_air
+        C_latent   = rho_water * L_f * d(theta_liq)/dT              (>= 0)
+
+    ``C_latent`` is the zero-curtain: near ``T_freeze`` it inflates the heat
+    capacity so the fusion enthalpy is released / absorbed instead of the
+    temperature moving freely.  Evaluated at the CURRENT temperature (the
+    linearised apparent heat capacity used by ``solve_soil_thermal`` when
+    ``enable_freeze_thaw`` is set); the sensible split uses ``C_ice_vol`` for
+    the frozen fraction.
+    """
+    theta_sat = hydro_config.theta_sat
+    theta_liq, dtheta_liq_dT = liquid_water_content(T_soil, theta, thermal_config)
+    theta_ice = jnp.maximum(theta - theta_liq, 0.0)
+    C_sensible = ((1.0 - theta_sat) * thermal_config.C_soil
+                  + theta_liq * thermal_config.C_water_vol
+                  + theta_ice * thermal_config.C_ice_vol
+                  + (theta_sat - theta) * thermal_config.C_air)
+    C_latent = constants.rho_water * constants.L_f * dtheta_liq_dT
+    return C_sensible + C_latent
 
 
 def compute_thermal_conductivity(
@@ -148,12 +269,20 @@ def compute_thermal_conductivity(
     k_sat = (thermal_config.k_solid ** (1.0 - theta_sat)
              * thermal_config.k_water ** theta_sat)
 
-    # Kersten number (Johansen 1975)
+    # Kersten number (Johansen 1975).  Validate the texture selector on the
+    # static config value (dispatch-hardening: a typo like "Sand"/"silt" must
+    # raise, not silently run the fine-soil branch).
+    _valid_textures = ("sand", "loam")
+    if thermal_config.soil_texture not in _valid_textures:
+        raise ValueError(
+            f"Unknown soil_texture {thermal_config.soil_texture!r}; "
+            f"expected one of {_valid_textures}."
+        )
     if thermal_config.soil_texture == "sand":
         K_e = thermal_config.kersten_slope_coarse * jnp.log10(
             jnp.clip(Sr, thermal_config.kersten_sr_floor_coarse, None)
         ) + 1.0
-    else:
+    else:  # "loam" (fine)
         K_e = jnp.log10(jnp.clip(Sr, thermal_config.kersten_sr_floor_fine, None)) + 1.0
     K_e = jnp.clip(K_e, 0.0, 1.0)
 
@@ -208,8 +337,15 @@ def solve_soil_thermal(
     dz = grid.dz                  # (nlayers,)
     dz_if = grid.dz_interface     # (nlayers-1,)
 
-    # Compute thermal properties
-    C_eff = compute_heat_capacity(theta, hydro_config, thermal_config)    # (ncol, nlayers)
+    # Compute thermal properties.  With freeze/thaw enabled the effective heat
+    # capacity is the apparent heat capacity (sensible split + latent
+    # zero-curtain), evaluated at the current T_soil; disabled (default) reduces
+    # EXACTLY to the sensible-only C_eff (bit-identical for every prior caller).
+    if thermal_config.enable_freeze_thaw:
+        C_eff = compute_apparent_heat_capacity(
+            T_soil, theta, hydro_config, thermal_config)      # (ncol, nlayers)
+    else:
+        C_eff = compute_heat_capacity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
     k_eff = compute_thermal_conductivity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
 
     # Interface conductivity (harmonic mean for heat diffusion)

@@ -1,0 +1,19 @@
+# Example OMIP run config (issue #691).
+#
+#   .venv/bin/python scripts/run/run_omip.py --config config/omip/omip_example.yaml
+#
+# Keys are argument dests of run_omip.py (dashes -> underscores); every key must
+# be a valid dest or the loader raises.  Explicit CLI flags still override these
+# (precedence: CLI > config file > parser default).  Add --require-config to
+# force a run to be fully config-driven.
+grid: latlon
+resolution: 36x72
+nlev: 40
+dt: 3600.0
+days: 365.0
+checkpoint_days: 30.0
+precision: fp64
+# vertical mixing (KPP) closure knobs
+vertical_mixing_scheme: kpp
+kpp_ri_crit: 0.3
+kpp_k_bg: 1.0e-5

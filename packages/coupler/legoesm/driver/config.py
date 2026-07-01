@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -180,6 +181,47 @@ class DycoreConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"
 
 
+class EvaluationConfig(NamedTuple):
+    """Post-run ClimateEval configuration.
+
+    When ``enabled=True`` and ``cmip_output=True``, the driver invokes
+    ClimateEval (via ``climateeval_hook.maybe_run_climateeval``) after a
+    successful AMIP run, comparing CMOR outputs against ERA5 /
+    observational reference data. ClimateEval is a separate, externally
+    installed tool (github.com/climate-federation/ClimateEval) — NEVER a
+    legoESM dependency (its iris/ESMValTool stack is heavy/conda-only and
+    conflicts with the JAX environment). The hook shells out to
+    ``climateeval_python`` rather than importing ``climateeval`` into this
+    process. ``suites`` are pass-through names consumed by that external
+    tool (not legoESM scheme dispatch), so they are intentionally not
+    membership-validated here; an unknown suite fails loudly inside
+    ClimateEval's own ``Suite()`` constructor. All listed suites are
+    rendered into ONE combined HTML report (default: a Tier1 global-mean
+    range check + a Tier2 ERA5 spatial-skill comparison).
+
+    ``climateeval_python`` and ``data_root_dir`` have no hardcoded
+    personal defaults — the CLI (``run_amip.py --evaluation-climateeval-
+    python`` / ``--evaluation-data-root-dir``) defaults them from the
+    ``LEGOESM_CLIMATEEVAL_PYTHON`` / ``LEGOESM_CLIMATEEVAL_DATA_ROOT``
+    environment variables instead, since both paths are inherently
+    per-user/per-machine (there is no shared, canonical install or
+    reference-data location). If either is left unset while
+    ``enabled=True``, ``ExperimentConfig.validate_strict`` raises LOUDLY
+    before the run starts (see setup instructions in
+    ``docs/user-guide/climateeval_evaluation.md``).
+    """
+    enabled: bool = False
+    suites: tuple[str, ...] = ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
+    model_id: str = "legoESM-1-0"
+    experiment_id: str = "amip"
+    variant_id: str = "r1i1p1f1"
+    data_root_dir: str = ""
+    fail_on_missing_data: bool = False
+    download_missing_data: bool = False
+    timerange: str = ""
+    climateeval_python: str = ""
+
+
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
@@ -197,6 +239,7 @@ class OutputConfig(NamedTuple):
     # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
     max_wallclock_seconds: float = 0.0
     restart_buffer_seconds: float = 600.0
+    evaluation: EvaluationConfig = EvaluationConfig()
 
 
 # Single source of truth for the valid microphysics scheme literals — consumed
@@ -335,6 +378,11 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
+    #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
+    #   moisture rises (flattens the overcast runaway).
+    cloud_p_xr: float | None = None
+    cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
@@ -964,6 +1012,8 @@ class ExperimentConfig(NamedTuple):
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_p_xr", 0.05, 1.0),
+            ("cloud_alpha_xr", 10.0, 1000.0),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
@@ -1083,6 +1133,32 @@ class ExperimentConfig(NamedTuple):
                     "aimip_variant='classical' requires "
                     "cloud_scheme='xu_randall', "
                     f"got {self.cloud_scheme!r}"
+                )
+
+        if self.output.evaluation.enabled:
+            ceval_py = self.output.evaluation.climateeval_python
+            if not ceval_py or not (
+                Path(ceval_py).is_file() and os.access(ceval_py, os.X_OK)
+            ):
+                errors.append(
+                    "output.evaluation.enabled=True requires "
+                    "climateeval_python to point at a real, executable "
+                    f"ClimateEval Python interpreter (got {ceval_py!r}). "
+                    "ClimateEval is a separate, externally-installed tool "
+                    "(never a legoESM dependency) — set "
+                    "--evaluation-climateeval-python or the "
+                    "LEGOESM_CLIMATEEVAL_PYTHON environment variable. See "
+                    "docs/user-guide/climateeval_evaluation.md for setup."
+                )
+            data_root = self.output.evaluation.data_root_dir
+            if not data_root or not Path(data_root).is_dir():
+                errors.append(
+                    "output.evaluation.enabled=True requires data_root_dir "
+                    f"to point at a real ClimateEval reference-data "
+                    f"directory (got {data_root!r}). Set "
+                    "--evaluation-data-root-dir or the "
+                    "LEGOESM_CLIMATEEVAL_DATA_ROOT environment variable. "
+                    "See docs/user-guide/climateeval_evaluation.md."
                 )
 
         if errors:
@@ -1467,14 +1543,20 @@ _SUB_CONFIGS = {
 def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     """Serialize ExperimentConfig to a JSON-safe dict.
 
-    Sub-configs (grid, dycore, output) are inlined as nested dicts.
-    This is the canonical serialization format.
+    Sub-configs (grid, dycore, output) are inlined as nested dicts. This
+    is the canonical serialization format. ``output.evaluation`` is
+    itself a nested ``EvaluationConfig`` NamedTuple one level deeper —
+    without this it round-trips through ``json.dumps`` as a bare
+    positional list (NamedTuple is a tuple), losing field names.
     """
     d = config._asdict()
     for key in _SUB_CONFIGS:
         sub = d[key]
         if hasattr(sub, '_asdict'):
-            d[key] = sub._asdict()
+            sub_d = sub._asdict()
+            if hasattr(sub_d.get('evaluation'), '_asdict'):
+                sub_d['evaluation'] = sub_d['evaluation']._asdict()
+            d[key] = sub_d
     return d
 
 
@@ -1488,8 +1570,19 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     sub_values = {}
     for key, cls in _SUB_CONFIGS.items():
         if key in d and isinstance(d[key], dict):
+            sub_d = dict(d[key])
+            if isinstance(sub_d.get('evaluation'), dict):
+                known_eval = set(EvaluationConfig._fields)
+                filtered_eval = {
+                    k: v for k, v in sub_d['evaluation'].items() if k in known_eval
+                }
+                # ``suites`` is a tuple field; JSON round-trips it as a list, so
+                # coerce back so the reconstructed config == the original.
+                if isinstance(filtered_eval.get('suites'), list):
+                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
+                sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
             known_sub = set(cls._fields)
-            filtered = {k: v for k, v in d[key].items() if k in known_sub}
+            filtered = {k: v for k, v in sub_d.items() if k in known_sub}
             sub_values[key] = cls(**filtered)
 
     # Filter top-level fields
