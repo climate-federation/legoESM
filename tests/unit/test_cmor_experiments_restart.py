@@ -340,7 +340,8 @@ class TestExperimentTemplates(unittest.TestCase):
         """All expected experiments are defined."""
         from legoesm.forcing.experiments import EXPERIMENT_TEMPLATES
 
-        expected = {"piControl", "historical", "ssp245", "ssp585", "amip", "1pctCO2"}
+        expected = {"piControl", "historical", "ssp245", "ssp585", "amip",
+                    "1pctCO2", "abrupt-4xCO2"}
         self.assertEqual(expected, set(EXPERIMENT_TEMPLATES.keys()))
 
     def test_template_fields(self):
@@ -361,6 +362,36 @@ class TestExperimentTemplates(unittest.TestCase):
         pi = EXPERIMENT_TEMPLATES["piControl"]
         self.assertEqual(pi.forcing_type, "fixed")
         self.assertAlmostEqual(pi.base_co2_ppmv, 284.3)
+
+    def test_abrupt4xco2_quadruples_co2(self):
+        """abrupt-4xCO2 (CMIP6 DECK) instantaneously quadruples
+        pre-industrial CO2 and holds it fixed; CH4/N2O stay pre-industrial."""
+        from legoesm.forcing.experiments import (
+            EXPERIMENT_TEMPLATES, ghg_at_year,
+        )
+
+        a4 = EXPERIMENT_TEMPLATES["abrupt-4xCO2"]
+        pi = EXPERIMENT_TEMPLATES["piControl"]
+        self.assertEqual(a4.forcing_type, "fixed")
+        self.assertEqual(a4.parent_experiment, "piControl")
+        # 4 x pre-industrial CO2; only CO2 is perturbed.
+        self.assertAlmostEqual(a4.base_co2_ppmv, 4.0 * pi.base_co2_ppmv)
+        self.assertAlmostEqual(a4.base_ch4_ppbv, pi.base_ch4_ppbv)
+        self.assertAlmostEqual(a4.base_n2o_ppbv, pi.base_n2o_ppbv)
+        # Fixed forcing: CO2 constant at 4x for every year of the run.
+        co2_y0, _, _ = ghg_at_year("abrupt-4xCO2", a4.start_year)
+        co2_yend, _, _ = ghg_at_year("abrupt-4xCO2", a4.end_year)
+        self.assertAlmostEqual(co2_y0, 4.0 * pi.base_co2_ppmv)
+        self.assertAlmostEqual(co2_yend, 4.0 * pi.base_co2_ppmv)
+
+    def test_abrupt4xco2_defaults_to_rrtmgp(self):
+        """The CO2 perturbation is radiatively inert under gray radiation,
+        so the factory must default abrupt-4xCO2 to rrtmgp."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        cfg = create_experiment_config("abrupt-4xCO2")
+        self.assertEqual(cfg.radiation, "rrtmgp")
+        self.assertAlmostEqual(cfg.co2_ppmv, 4.0 * 284.3)
 
     def test_historical_transient(self):
         """historical uses transient forcing 1850-2014."""

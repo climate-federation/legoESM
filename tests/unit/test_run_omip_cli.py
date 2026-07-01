@@ -33,6 +33,20 @@ def test_issue484_new_omip_flags_flow_to_config():
     assert cfg.vertical_mixing.kpp.A_bg == 2e-4
 
 
+def test_default_nlev_is_40_for_climate_fidelity():
+    """The default ocean vertical resolution is L40 (climate-usable minimum;
+    SOTA OMIP models use ~60-75).  Pass --nlev to override."""
+    assert parse_args(["--grid", "latlon"]).nlev == 40
+    assert parse_args(["--grid", "latlon", "--nlev", "20"]).nlev == 20
+
+
+def test_jra55_sea_ice_flag_parses():
+    """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
+    wired into the JRA55 scan block loop."""
+    assert parse_args(["--grid", "latlon"]).jra55_sea_ice is False
+    assert parse_args(["--grid", "latlon", "--jra55-sea-ice"]).jra55_sea_ice is True
+
+
 def test_precision_default_is_fp64_backward_compatible():
     """OMIP ran unconditional fp64 before the flag; the default MUST stay
     fp64 so existing runs are numerically unchanged."""

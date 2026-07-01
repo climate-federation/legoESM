@@ -335,6 +335,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument(
+        "--orbital-insolation", action="store_true", default=False,
+        dest="orbital_insolation",
+        help="Use realistic (Berger 1978) orbital insolation for AMIP-II: "
+             "present-day orbital declination + Earth-Sun distance factor "
+             "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
+             "circular orbit (idealized).",
+    )
     parser.add_argument("--dynamic-albedo", action="store_true", default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
@@ -678,6 +686,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--snow-albedo-feedback", action="store_true",
+                        default=False, dest="snow_albedo_feedback",
+                        help="Prognostic snow + snow-albedo feedback on the "
+                             "slab-land tile: snow water (SWE) accumulates from "
+                             "snowfall and melts (degree-day), brightening the "
+                             "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
+                             "Requires an active land tile (--slab-land-active).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -855,6 +870,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         diurnal_cycle=args.diurnal_cycle,
+        orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,
@@ -917,6 +933,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infil_suction_boost=args.land_infil_suction_boost,
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
+        snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,

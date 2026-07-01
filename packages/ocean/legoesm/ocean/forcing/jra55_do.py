@@ -33,6 +33,7 @@ synthetic climatology so the matrix smoke runs need no external data.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -41,6 +42,8 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure
+
+logger = logging.getLogger(__name__)
 
 
 # JRA55-do native grid: 0.5625 deg ~ 640 lon x 320 lat.
@@ -186,6 +189,15 @@ def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
             f"``scripts/download_jra55_do.py`` (see "
             f"https://climate.mri-jma.go.jp/pub/ocean/JRA55-do/)."
         )
+    # Loud (not silent) fallback: synthetic analytic forcing is NOT the
+    # OMIP-2 protocol — it must never be mistaken for a real JRA55-do run.
+    logger.warning(
+        "JRA55-do cache missing at %s — falling back to SYNTHETIC analytic "
+        "forcing. This is NOT the OMIP-2 protocol; results are not "
+        "OMIP-comparable. Pass allow_synthetic=False to fail loudly, or "
+        "populate the cache (scripts/data/prepare_omip_forcing.py).",
+        zarr_path,
+    )
     return synthetic_ocean_forcing(year)
 
 
