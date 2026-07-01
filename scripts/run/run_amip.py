@@ -473,9 +473,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
     parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
-                        choices=["constant", "most", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager"],
                         help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
-                             "MOST with convective gustiness; the tuned slab value).")
+                             "MOST with convective gustiness; the tuned slab value). "
+                             "Matches ExperimentConfig.validate_strict — 'most' is "
+                             "not an accepted AMIP surface scheme (coare3 is the "
+                             "MOST-with-gustiness variant).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=0.0,
                         help="COARE convective-gustiness BL depth z_i [m] (0=off; "
@@ -622,6 +625,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multilayer-soil-depth", type=float,
                         default=_EXPERIMENT_DEFAULTS.multilayer_soil_depth,
                         help="Total soil-column depth [m] for --use-multilayer-land.")
+    parser.add_argument("--clm-surfdata-path", type=str,
+                        default=_EXPERIMENT_DEFAULTS.clm_surfdata_path,
+                        help="Pre-staged CLM surfdata NetCDF (PFT/texture/glacier) "
+                             "for --use-multilayer-land. Required on compute nodes "
+                             "with no outbound internet (empty => download from UCAR "
+                             "to /tmp, which fails there).")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -1009,6 +1018,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_multilayer_land=args.use_multilayer_land,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
+        clm_surfdata_path=args.clm_surfdata_path,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,

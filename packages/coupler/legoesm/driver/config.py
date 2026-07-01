@@ -543,6 +543,11 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
+    # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
+    # outbound internet, so stage the file and set this).  Ignored unless
+    # use_multilayer_land is True.
+    clm_surfdata_path: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
