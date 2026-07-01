@@ -39,7 +39,7 @@ def _clm_default_params():
     cp["snow_min"] = jnp.asarray(d.alpha_snow_min)         # 0.50
     cp["snow_dcrit"] = jnp.asarray(d.snow_depth_crit)      # 50 kg/m2
     cp["snow_tau_days"] = jnp.asarray(d.tau_snow_decay / 86400.0)   # 5 days
-    cp["soil_dry_boost"] = jnp.asarray(d.soil_dry_albedo_boost)     # 0.11 (CLM)
+    cp["soil_dry_boost"] = jnp.asarray(0.0)     # dry-soil brightening is OUR addition -> off
     return cp
 
 
@@ -75,9 +75,32 @@ def main():
 
     cp_def = _clm_default_params()                               # standard CLM5, untuned
     cp_tun = {k: jnp.asarray(v) for k, v in json.load(open(args.tuned)).items()}
-    T_def, A_def = _annual(cp_def, data)
-    T_tun, A_tun = _annual(cp_tun, data)
-    T_era = np.asarray(data["skt"].mean(0)); A_era = np.asarray(data["alb"].mean(0))
+
+    def _full(cp):
+        T, A, _ = M.forward_ml(cp, data)
+        return np.asarray(T), np.asarray(A)                      # (12, ncol) monthly
+
+    # The untuned-CLM baseline runs the ORIGINAL albedo physics too — the crude LINEAR
+    # snow cover min(1, SWE/crit) and no dry-soil brightening (cp_def sets boost=0) — so
+    # the middle column is the genuine 'before' (our tanh snow cover + dry soil are part
+    # of the contribution, not the baseline).  Monkeypatch the shared snow-cover fn for
+    # the default forward, then restore for the tuned (our model) forward.
+    import legoesm.surface_albedo as _SA
+    _orig_scf = _SA.snow_cover_fraction
+    _SA.snow_cover_fraction = lambda sd, cfg: jnp.clip(
+        sd / jnp.maximum(cfg.snow_depth_crit, 1e-6), 0.0, 1.0)
+    Tf_def, Af_def = _full(cp_def)                               # original CLM physics
+    _SA.snow_cover_fraction = _orig_scf
+    Tf_tun, Af_tun = _full(cp_tun)                               # our model (tanh + dry soil)
+    Tf_era = np.asarray(data["skt"]); Af_era = np.asarray(data["alb"])
+    T_def, A_def = Tf_def.mean(0), Af_def.mean(0)                # annual-mean for the maps
+    T_tun, A_tun = Tf_tun.mean(0), Af_tun.mean(0)
+    T_era, A_era = Tf_era.mean(0), Af_era.mean(0)
+    # SPACE-TIME (all 12 months) area-weighted RMSE for the annotation — the standard
+    # metric; the annual-mean-field RMSE is smaller because monthly errors partly cancel.
+    st = lambda f, ref: float(np.sqrt(np.sum(w[None] * (f - ref) ** 2) / np.sum(w) / 12))
+    rmse = {("T", 1): st(Tf_def, Tf_era), ("T", 2): st(Tf_tun, Tf_era),
+            ("A", 1): st(Af_def, Af_era), ("A", 2): st(Af_tun, Af_era)}
 
     D = np.load(args.npz); lat1, lon1 = D["lat"], D["lon"]; nlat, nlon = lat1.size, lon1.size
     lidx = np.where((D["lsm"].reshape(nlat, nlon) > 0.5).ravel())[0]
@@ -97,10 +120,10 @@ def main():
     proj = ccrs.Robinson(central_longitude=0)
     fig, axes = plt.subplots(2, 3, figsize=(15, 6.6), subplot_kw={"projection": proj})
     labels = "abcdefghi"
+    var_of = {0: "T", 1: "A"}
     for r, (name, unit, cmap, (vmn, vmx), era, dflt, tun) in enumerate(rows):
-        panels = [("ERA5", era, None), ("CLM5 default", dflt, T_era if r == 0 else A_era),
-                  ("tuned (this work)", tun, T_era if r == 0 else A_era)]
-        for c, (title, field, ref) in enumerate(panels):
+        panels = [("ERA5", era), ("CLM5 default", dflt), ("tuned (this work)", tun)]
+        for c, (title, field) in enumerate(panels):
             ax = axes[r, c]
             fld = g(field)
             m = ax.pcolormesh(lon2, lat2, np.ma.masked_invalid(fld), cmap=cmap,
@@ -110,8 +133,8 @@ def main():
             ax.set_global()
             u = f" [{unit}]" if unit else ""
             ttl = f"({labels[r * 3 + c]}) {title}"
-            if ref is not None:
-                ttl += f"   RMSE {_wrmse(field, ref, w):.2f}{(' K' if r == 0 else '')}"
+            if c > 0:                        # space-time RMSE vs ERA5 for the two models
+                ttl += f"   RMSE {rmse[(var_of[r], c)]:.2f}{(' K' if r == 0 else '')}"
             ax.set_title(ttl, fontsize=10)
             if c == 2:
                 cb = fig.colorbar(m, ax=axes[r, :], fraction=0.018, pad=0.02,
@@ -122,8 +145,10 @@ def main():
     for ext in ("png", "pdf"):
         fig.savefig(f"{args.out}.{ext}", dpi=300, bbox_inches="tight")
     print(f"# maps -> {args.out}.png / .pdf")
-    print(f"# skin-T  RMSE  default {_wrmse(T_def, T_era, w):.3f} -> tuned {_wrmse(T_tun, T_era, w):.3f} K")
-    print(f"# albedo  RMSE  default {_wrmse(A_def, A_era, w):.4f} -> tuned {_wrmse(A_tun, A_era, w):.4f}")
+    print(f"# space-time RMSE  skin-T default {rmse[('T',1)]:.3f} -> tuned {rmse[('T',2)]:.3f} K "
+          f"| albedo default {rmse[('A',1)]:.4f} -> tuned {rmse[('A',2)]:.4f}")
+    print(f"# (annual-mean-field RMSE, smaller: skin-T {_wrmse(T_def,T_era,w):.3f} -> "
+          f"{_wrmse(T_tun,T_era,w):.3f} K)")
 
 
 if __name__ == "__main__":
