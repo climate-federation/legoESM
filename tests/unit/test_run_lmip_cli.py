@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts.run.run_lmip import _parse_args, build_config_from_args
 
 
@@ -29,3 +31,47 @@ def test_issue484_new_lmip_flags_flow_to_config():
     assert cfg.land.beta_min == 0.2
     assert cfg.land.carbon.scheme == "differland"
     assert cfg.land.snow_albedo_feedback is False
+
+
+# --- issue #691: --config / --require-config -------------------------------
+
+def _lmip_example_config():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[2]
+            / "config" / "lmip" / "lmip_example.yaml")
+
+
+def test_config_yaml_round_trips_to_args():
+    """The committed example config loads; keys reach args (incl. lat from the
+    file, which is otherwise required)."""
+    args = _parse_args(["--config", str(_lmip_example_config())])
+    assert args.lat == 40.0
+    assert args.lon == -105.0
+    assert args.soil_texture == "loam"
+    assert args.veg_type == "c3_grass"
+    cfg = build_config_from_args(args)
+    assert cfg.land is not None
+
+
+def test_config_yaml_explicit_cli_flag_overrides_file():
+    args = _parse_args([
+        "--config", str(_lmip_example_config()), "--lat", "12.5"])
+    assert args.lat == 12.5
+
+
+def test_lat_required_from_cli_or_config():
+    """--lat is mandatory but may come from either source; missing both errors."""
+    with pytest.raises(SystemExit):
+        _parse_args(["--lon", "0.0"])  # no --lat, no --config
+    # supplied via CLI is fine
+    assert _parse_args(["--lat", "0.0"]).lat == 0.0
+
+
+def test_require_config_without_config_errors():
+    with pytest.raises(SystemExit):
+        _parse_args(["--require-config", "--lat", "0.0"])
+
+
+def test_require_config_with_config_ok():
+    args = _parse_args(["--require-config", "--config", str(_lmip_example_config())])
+    assert args.config is not None

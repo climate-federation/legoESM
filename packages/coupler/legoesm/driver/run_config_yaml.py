@@ -98,5 +98,35 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
                 raise SystemExit(
                     f"--config {path}: key '{key}' value {value!r} is not a "
                     f"valid {getattr(argtype, '__name__', argtype)}: {exc}")
+        # ``parser.set_defaults`` BYPASSES argparse's own ``choices`` check, so
+        # a scheme literal (e.g. ``vertical_mixing_scheme: garbage``) supplied
+        # via --config would otherwise reach the factory unvalidated.  Enforce
+        # it here so a typo'd scheme fails loudly at load (dispatch-hardening),
+        # exactly as an explicit CLI flag would.
+        choices = getattr(actions[key], "choices", None)
+        if choices is not None and value not in choices:
+            try:
+                allowed = sorted(choices)
+            except TypeError:
+                allowed = list(choices)
+            raise SystemExit(
+                f"--config {path}: key '{key}' value {value!r} is not one of "
+                f"the allowed choices {allowed}.")
         out[key] = value
     return out
+
+
+def require_config(config_value, *, driver: str = "run") -> None:
+    """Enforce ``--require-config``: a run must be driven by a committed config.
+
+    Raises ``SystemExit`` when ``--require-config`` is set but no ``--config``
+    file was supplied, so a production/test run cannot silently fall back to
+    parser defaults (issue #691).  A no-op when strict mode is off.
+    """
+    if config_value is None:
+        raise SystemExit(
+            f"{driver}: --require-config was set but no --config file was "
+            "given.  Pass --config <yaml> so the run is fully specified by a "
+            "committed configuration (no hidden parser defaults)."
+        )
+
