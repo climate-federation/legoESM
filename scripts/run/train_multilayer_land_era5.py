@@ -613,7 +613,7 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
 
 
 def main():
-    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP, _LAM_SM
+    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lam-amp", type=float, default=_LAM_AMP,
@@ -622,6 +622,14 @@ def main():
     ap.add_argument("--lam-sm", type=float, default=_LAM_SM,
                     help="soil-moisture loss weight (ERA5 annual-mean 0-28cm swvl vs "
                          "the model root-zone equilibrium; trains the porosity scale)")
+    ap.add_argument("--lam-pft", type=float, default=_LAM_PFT,
+                    help="per-PFT CLM5-prior regularisation weight (LOWER it to let the "
+                         "params leave the prior and cut skin-T/albedo RMSE; the default "
+                         "2.0 keeps the prior term ~equal to the skin-T term)")
+    ap.add_argument("--lam-alb", type=float, default=_LAM_ALB,
+                    help="albedo loss weight (RAISE it to force the albedo fit; the "
+                         "default makes the albedo term small vs skin-T so albedo barely "
+                         "moves)")
     ap.add_argument("--diurnal-npz", default="/tmp/era5_diurnal.npz",
                     help="ERA5 monthly-diurnal climatology (4-synoptic-hour "
                          "fetch_era5_diurnal.py, or 24-h fetch_era5_hourly_climatology.py)")
@@ -645,6 +653,8 @@ def main():
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     _LAM_AMP = args.lam_amp
     _LAM_SM = args.lam_sm
+    _LAM_PFT = args.lam_pft
+    _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip)
