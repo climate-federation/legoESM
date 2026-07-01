@@ -33,12 +33,15 @@ git pull origin land-dev-followup      # sync branch (add cf remote if origin is
 # 1. Stage inputs (symlink CRU-JRA from glade + curl Zenodo surfdata)
 ./scripts/data/download_lmip_data.sh --year 1920
 
-# 2. Submit the batch job
+# 2. Submit the batch job (the script activates the env itself; override the
+#    env name via LEGOESM_CONDA_ENV if yours is not named 'legoesm-lmip').
 qsub -A <YOUR_ACCOUNT> scripts/cluster/derecho_lmip/lmip_biophys.pbs
+qsub -A <YOUR_ACCOUNT> -v LEGOESM_CONDA_ENV=my-env scripts/cluster/derecho_lmip/lmip_biophys.pbs
 
 # 3. Watch:
 qstat -u $USER
-tail -f results/derecho_lmip/lmip_biophys.<jobid>.log
+ls -lt lmip_biophys.o*                 # PBS log lands in the submit dir
+tail -f lmip_biophys.o<jobid>
 ```
 
 Expected: ~10-15 min wall clock at 2° for 10 model days; console line ending

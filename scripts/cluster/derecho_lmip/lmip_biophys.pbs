@@ -10,14 +10,15 @@
 #   qsub -A <ACCOUNT> scripts/cluster/derecho_lmip/lmip_biophys.pbs
 #
 # Requirements before submitting:
-#   1) Env activated in the shell that submits (the batch inherits nothing):
-#        module load conda
-#        conda activate <your legoesm-lmip env>
+#   1) The batch script activates the conda env itself (PBS shells inherit NOTHING
+#      from the submitting login shell).  Default env name is 'legoesm-lmip';
+#      override with 'qsub -v LEGOESM_CONDA_ENV=<name>' or the environment.
 #   2) Data staged under repo-relative data/:
 #        ./scripts/data/download_lmip_data.sh --year 1920
 #   3) Working directory = repo root (PBS_O_WORKDIR is the repo root).
 #
 # Override knobs via qsub -v (all optional):
+#   LEGOESM_CONDA_ENV=legoesm-lmip  — conda env with jax + xarray + legoesm
 #   YEAR=1920                       — CRU-JRA year to force with
 #   RESOLUTION=90                   — latlon N (N x 2N = 90 x 180 ~ 2 deg)
 #   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
@@ -47,6 +48,24 @@ OUT_TAG="${OUT_TAG:-}"
 cd "${PBS_O_WORKDIR:-$PWD}"
 mkdir -p results/derecho_lmip
 
+# --- activate the legoesm conda env (PBS shells inherit NOTHING from login;
+#     `conda activate` in the submitting shell does NOT reach the compute node).
+LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-lmip}"
+module purge
+module load conda
+# `conda activate` references unbound vars internally — briefly disable -u.
+set +u
+conda activate "$LEGOESM_CONDA_ENV"
+set -u
+
+# Sanity: refuse to spend queue time when the env is wrong.
+python -c "import jax, xarray, netCDF4, legoesm" 2>/dev/null || {
+    echo "ERROR: legoesm/jax/xarray/netCDF4 not importable in env '$LEGOESM_CONDA_ENV'." >&2
+    echo "       activate the right env, or set LEGOESM_CONDA_ENV via 'qsub -v'." >&2
+    which python; python --version
+    exit 3
+}
+
 OUT_DIR="${SCRATCH:-$PWD/results/derecho_lmip}/lmip_biophys_${YEAR}${OUT_TAG}"
 mkdir -p "$OUT_DIR"
 
@@ -54,6 +73,7 @@ echo "=================================================================="
 echo "LMIP biophysics run"
 echo "  repo:        $PWD"
 echo "  branch:      $(git rev-parse --abbrev-ref HEAD)  ($(git rev-parse --short HEAD))"
+echo "  conda env:   $LEGOESM_CONDA_ENV"
 echo "  python:      $(which python)  ($(python --version 2>&1))"
 echo "  year:        $YEAR"
 echo "  grid:        latlon ${RESOLUTION} x $((RESOLUTION * 2))"
