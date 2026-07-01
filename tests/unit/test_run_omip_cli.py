@@ -92,3 +92,62 @@ def test_apply_run_precision_applies_global_policy():
     finally:
         clear_module_overrides()
         set_policy(PrecisionPolicy.fp64())
+
+
+# --- issue #691: --config / --require-config -------------------------------
+
+def _omip_example_config():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[2]
+            / "config" / "omip" / "omip_example.yaml")
+
+
+def test_config_yaml_round_trips_to_args():
+    """The committed example config loads and every key reaches args (a key
+    that were not a valid dest would raise in load_yaml_config)."""
+    args = parse_args(["--config", str(_omip_example_config())])
+    assert args.grid == "latlon"
+    assert args.nlev == 40
+    assert args.dt == 3600.0
+    assert args.vertical_mixing_scheme == "kpp"
+    assert args.kpp_ri_crit == 0.3
+    cfg = build_config_from_args(args)
+    assert cfg.vertical_mixing.scheme == "kpp"
+    assert cfg.vertical_mixing.kpp.Ri_crit == 0.3
+
+
+def test_config_yaml_explicit_cli_flag_overrides_file():
+    """Precedence: an explicit CLI flag beats the config file value."""
+    args = parse_args(["--config", str(_omip_example_config()), "--nlev", "20"])
+    assert args.nlev == 20
+
+
+def test_config_unknown_key_raises():
+    """A config key that is not a valid argument dest is a hard error."""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        f.write("not_a_real_dest: 5\n")
+        bad = f.name
+    with pytest.raises(SystemExit):
+        parse_args(["--config", bad])
+
+
+def test_config_invalid_choice_raises():
+    """A scheme literal supplied via --config is choices-validated at load
+    (set_defaults bypasses argparse's own choices check) — dispatch-hardening."""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        f.write("vertical_mixing_scheme: garbage\n")
+        bad = f.name
+    with pytest.raises(SystemExit):
+        parse_args(["--config", bad])
+
+
+def test_require_config_without_config_errors():
+    with pytest.raises(SystemExit):
+        parse_args(["--require-config", "--grid", "latlon"])
+
+
+def test_require_config_with_config_ok():
+    args = parse_args(["--require-config", "--config", str(_omip_example_config())])
+    assert args.config is not None

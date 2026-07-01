@@ -505,8 +505,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Offline single-point multilayer land spin-up (LMIP)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--lat", type=float, required=True,
-                   help="Latitude [deg]")
+    p.add_argument("--config", type=str, default=None,
+                   help="YAML config file supplying argument defaults (keys are "
+                        "argument dests; explicit CLI flags still override). "
+                        "See config/lmip/*.yaml. (issue #691)")
+    p.add_argument("--require-config", action="store_true",
+                   help="Strict mode: fail unless a --config file is given, so "
+                        "the run is fully specified by a committed config (no "
+                        "hidden parser defaults). (issue #691)")
+    p.add_argument("--lat", type=float, default=None,
+                   help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
                    help="Longitude [deg] (used for local solar hour angle)")
     p.add_argument("--days", type=int, default=3650,
@@ -564,7 +572,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Enable/disable snow albedo feedback")
-    return p.parse_args(argv)
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    # Shared loader (single source of truth) — same mechanism as run_amip /
+    # run_coupled (issue #691).
+    pre, _ = p.parse_known_args(argv)
+    if pre.config is not None:
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        p.set_defaults(**load_yaml_config(
+            pre.config, p,
+            example_keys="'lat', 'lon', 'days', 'dt', 'soil_texture', "
+                         "'veg_type', 'carbon_scheme'"))
+    args = p.parse_args(argv)
+    if getattr(args, "require_config", False):
+        from legoesm.driver.run_config_yaml import require_config
+        require_config(args.config, driver="run_lmip")
+    # --lat is mandatory but may come from CLI or the config file (so it can be
+    # config-driven); enforce it after both sources are merged.
+    if args.lat is None:
+        raise SystemExit(
+            "run_lmip: --lat is required (pass --lat or set 'lat:' in --config)."
+        )
+    return args
 
 
 def main() -> None:
