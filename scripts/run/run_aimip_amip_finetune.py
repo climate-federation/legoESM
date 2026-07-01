@@ -207,7 +207,10 @@ def main():
         T = jnp.asarray(c.T)[..., -1]
         return jnp.sum(jnp.mean(T, axis=-1) * lat_w) / jnp.sum(lat_w)
 
-    def loss_fn(params, samples, n_steps):
+    def _sample_loss(params, sample, n_steps):
+        # ONE sample per graph -> memory = a single checkpointed rollout (the
+        # multi-sample sum OOM'd at the 3-day phase); the epoch loop accumulates
+        # gradients across samples instead.
         non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
             params, grid, dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
@@ -219,23 +222,21 @@ def main():
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
             land_mask=land_mask, split_rad=True,
         )
-        total = 0.0
-        for ic_state, tgt_carry, sst_col, doy in samples:
-            pred = spectral_amip_rollout(
-                ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
-                sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
-                rad_update_interval=args.rad_update_interval,
-                sponge_factor=sponge, spectral_filter=sfilt, use_checkpoint=True,
-            )
-            state_loss = spectral_state_vs_carry_loss(
-                pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,
-            )
-            # global-mean near-surface-T drift = energy-imbalance proxy (the
-            # ACE2-style stability signal; grows with rollout length so the
-            # curriculum's longer phases penalise the radiative runaway harder).
-            drift = (_gm_surf_T_state(pred) - _gm_surf_T_carry(tgt_carry)) ** 2
-            total = total + state_loss + args.w_drift * drift
-        return total / len(samples)
+        ic_state, tgt_carry, sst_col, doy = sample
+        pred = spectral_amip_rollout(
+            ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
+            sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
+            rad_update_interval=args.rad_update_interval,
+            sponge_factor=sponge, spectral_filter=sfilt, use_checkpoint=True,
+        )
+        state_loss = spectral_state_vs_carry_loss(
+            pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,
+        )
+        # global-mean near-surface-T drift = energy-imbalance proxy (the
+        # ACE2-style stability signal; grows with rollout length so the
+        # curriculum's longer phases penalise the radiative runaway harder).
+        drift = (_gm_surf_T_state(pred) - _gm_surf_T_carry(tgt_carry)) ** 2
+        return state_loss + args.w_drift * drift
 
     # Pre-warm the RRTMGP optics-table cache OUTSIDE filter_jit with CONCRETE
     # params: the NetCDF gas-optics load is module-cached by static file paths,
@@ -273,37 +274,46 @@ def main():
     ema_arrays = eqx.filter(params0, eqx.is_inexact_array)
     _, static = eqx.partition(params0, eqx.is_inexact_array)
 
+    broke = False
     for rd, ep in phases:
+        if broke:
+            break
         samples, _ = _build_samples(rd)
         n_steps_phase = rd * int(_SPD / dt)
         logger.info(f"phase rollout={rd}d epochs={ep} ({len(samples)} samples, {n_steps_phase} steps)")
 
+        # Per-sample value+grad (one checkpointed rollout in memory at a time).
         @eqx.filter_jit
-        def step(params, opt_state, _samples=samples, _n=n_steps_phase):
-            loss, grads = eqx.filter_value_and_grad(
-                lambda p: loss_fn(p, _samples, _n)
+        def sample_vg(params, sample, _n=n_steps_phase):
+            return eqx.filter_value_and_grad(
+                lambda p: _sample_loss(p, sample, _n)
             )(params)
+
+        for epoch in range(ep):
+            tot_loss, acc = 0.0, None
+            for sample in samples:
+                loss_s, g = sample_vg(params, sample)  # memory = 1 sample
+                tot_loss += float(loss_s)
+                acc = g if acc is None else jax.tree_util.tree_map(
+                    lambda a, b: a + b, acc, g,
+                )
+            n = len(samples)
+            acc = jax.tree_util.tree_map(lambda a: a / n, acc)  # mean grad
             updates, opt_state = opt.update(
-                grads, opt_state, eqx.filter(params, eqx.is_inexact_array),
+                acc, opt_state, eqx.filter(params, eqx.is_inexact_array),
             )
             params = eqx.apply_updates(params, updates)
-            return params, opt_state, loss
-
-        broke = False
-        for epoch in range(ep):
-            params, opt_state, loss = step(params, opt_state)
             cur = eqx.filter(params, eqx.is_inexact_array)
             ema_arrays = jax.tree_util.tree_map(
                 lambda e, c: args.ema_decay * e + (1.0 - args.ema_decay) * c,
                 ema_arrays, cur,
             )
-            logger.info(f"  [rd={rd}d] epoch {epoch:3d}: loss={float(loss):.6f}")
-            if not np.isfinite(float(loss)):
+            avg_loss = tot_loss / n
+            logger.info(f"  [rd={rd}d] epoch {epoch:3d}: loss={avg_loss:.6f}")
+            if not np.isfinite(avg_loss):
                 logger.error("non-finite loss; stopping")
                 broke = True
                 break
-        if broke:
-            break
 
     args.out_ckpt.parent.mkdir(parents=True, exist_ok=True)
     ema_params = eqx.combine(ema_arrays, static)  # EMA weights = more stable
