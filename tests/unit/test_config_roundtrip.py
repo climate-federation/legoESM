@@ -55,13 +55,15 @@ class TestExperimentConfigJSON:
         """OutputConfig.evaluation is a NamedTuple nested one level deeper
         than grid/dycore/output — without explicit handling it survives
         json.dumps as a bare positional list (NamedTuple is a tuple),
-        losing field names on reload."""
+        losing field names on reload. ``suites`` is additionally a tuple
+        field that JSON round-trips as a list, so it must be coerced back
+        to a tuple or the reconstructed config != the original."""
         cfg = ExperimentConfig(
             output=OutputConfig(
                 cmip_output=True,
                 evaluation=EvaluationConfig(
                     enabled=True,
-                    suite="Tier2_atmosphere_monthly",
+                    suites=("Tier1_sanity_checks", "Tier2_atmosphere_monthly"),
                     climateeval_python="/opt/climateeval/bin/python",
                     data_root_dir="/data/climateeval",
                     timerange="19790101/19791231",
@@ -71,7 +73,8 @@ class TestExperimentConfigJSON:
         restored = experiment_config_from_dict(experiment_config_to_dict(cfg))
         assert cfg == restored
         assert isinstance(restored.output.evaluation, EvaluationConfig)
-        assert restored.output.evaluation.suite == "Tier2_atmosphere_monthly"
+        assert restored.output.evaluation.suites == (
+            "Tier1_sanity_checks", "Tier2_atmosphere_monthly")
 
     def test_file_save_load_roundtrip(self):
         cfg = ExperimentConfig(

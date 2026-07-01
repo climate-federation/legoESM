@@ -1177,7 +1177,7 @@ def test_evaluate_flags_flow_to_config():
         "--dataset", "analytical",
         "--cmip-output",
         "--evaluate",
-        "--evaluation-suite", "Tier2_atmosphere_monthly",
+        "--evaluation-suite", "Tier1_sanity_checks", "Tier2_atmosphere_monthly",
         "--evaluation-model-id", "legoESM-1-0-test",
         "--evaluation-experiment-id", "amip",
         "--evaluation-variant-id", "r1i1p1f1",
@@ -1192,7 +1192,7 @@ def test_evaluate_flags_flow_to_config():
 
     ev = cfg.output.evaluation
     assert ev.enabled is True
-    assert ev.suite == "Tier2_atmosphere_monthly"
+    assert ev.suites == ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
     assert ev.model_id == "legoESM-1-0-test"
     assert ev.data_root_dir == "/tmp/climateeval_data"
     assert ev.timerange == "19790101/19791231"
@@ -1207,6 +1207,21 @@ def test_evaluate_defaults_off():
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.output.evaluation.enabled is False
+
+
+def test_evaluate_default_suites_are_combined_tier1_tier2():
+    """With --evaluate but no --evaluation-suite, the default is the combined
+    Tier1 (range checks) + Tier2 (ERA5 spatial skill) suite list -> one report."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.suites == (
+        "Tier1_sanity_checks", "Tier2_atmosphere_monthly")
 
 
 def test_evaluate_requires_cmip_output_rejected():

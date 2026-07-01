@@ -192,10 +192,12 @@ class EvaluationConfig(NamedTuple):
     legoESM dependency (its iris/ESMValTool stack is heavy/conda-only and
     conflicts with the JAX environment). The hook shells out to
     ``climateeval_python`` rather than importing ``climateeval`` into this
-    process. ``suite`` is a pass-through name consumed by that external
-    tool (not a legoESM scheme dispatch), so it is intentionally not
+    process. ``suites`` are pass-through names consumed by that external
+    tool (not legoESM scheme dispatch), so they are intentionally not
     membership-validated here; an unknown suite fails loudly inside
-    ClimateEval's own ``Suite()`` constructor.
+    ClimateEval's own ``Suite()`` constructor. All listed suites are
+    rendered into ONE combined HTML report (default: a Tier1 global-mean
+    range check + a Tier2 ERA5 spatial-skill comparison).
 
     ``climateeval_python`` and ``data_root_dir`` have no hardcoded
     personal defaults — the CLI (``run_amip.py --evaluation-climateeval-
@@ -209,7 +211,7 @@ class EvaluationConfig(NamedTuple):
     ``docs/user-guide/climateeval_evaluation.md``).
     """
     enabled: bool = False
-    suite: str = "Tier1_sanity_checks"
+    suites: tuple[str, ...] = ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
     model_id: str = "legoESM-1-0"
     experiment_id: str = "amip"
     variant_id: str = "r1i1p1f1"
@@ -1567,6 +1569,10 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
                 filtered_eval = {
                     k: v for k, v in sub_d['evaluation'].items() if k in known_eval
                 }
+                # ``suites`` is a tuple field; JSON round-trips it as a list, so
+                # coerce back so the reconstructed config == the original.
+                if isinstance(filtered_eval.get('suites'), list):
+                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
                 sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
             known_sub = set(cls._fields)
             filtered = {k: v for k, v in sub_d.items() if k in known_sub}

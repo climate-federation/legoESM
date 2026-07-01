@@ -65,7 +65,6 @@ env vars are just the default source for those flags.
 JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --config config/amip/amip_production.yaml \
     --cmip-output --evaluate \
-    --evaluation-suite Tier2_atmosphere_monthly \
     --days 365 --output /scratch/you/amip_run
 ```
 
@@ -75,35 +74,44 @@ if either points nowhere, `ExperimentConfig.validate_strict()` raises
 **before the model starts**, not after an 11-hour run silently produces
 no report.
 
-On successful completion, the driver writes
-`<output_dir>/climateeval_<suite>.ddb` (the metrics database) and
-`<output_dir>/climateeval_<suite>_report.html` (a portable report). A
-failure *during* the ClimateEval subprocess itself (e.g. missing
-reference-data files for a specific variable) is logged as a warning and
-does **not** fail the AMIP run — only the upfront path validation is
-fail-fast.
+On successful completion, the driver writes one
+`<output_dir>/climateeval_<suite>.ddb` per suite and a single combined
+`<output_dir>/climateeval_report.html` report over all of them. A failure
+*during* the ClimateEval subprocess itself (e.g. missing reference-data
+files for a specific variable) is logged as a warning and does **not**
+fail the AMIP run — only the upfront path validation is fail-fast.
 
 ## Suites
 
-`--evaluation-suite` names one of ClimateEval's own bundled suites (e.g.
-`Tier1_sanity_checks`, `Tier2_atmosphere_monthly`) rather than a
-free-form variable/reference pick-list — this reuses ClimateEval's
-existing suite abstraction instead of re-deriving a second one. The
-runner script forces every variable in the chosen suite to reference
-ERA5 specifically (stripping any other-model/other-reference entries),
-since the point of `--evaluate` here is "how far off is legoESM from
-ERA5," not a multi-model intercomparison.
+`--evaluation-suite` takes one or more of ClimateEval's own bundled
+suites (reusing its existing suite abstraction rather than re-deriving a
+variable/reference pick-list), all rendered into a **single combined
+report**. The default is two complementary suites:
+
+- **`Tier1_sanity_checks`** — global-mean values range-checked against
+  literature "reasonable" bounds (needs no reference data).
+- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill diagnostics (Map,
+  ZonalLine, ZonalProfile + a metrics leaderboard).
+
+The runner forces every variable in each suite to reference ERA5
+specifically (stripping any other-model/other-reference entries), since
+the point of `--evaluate` here is "how far off is legoESM from ERA5," not
+a multi-model intercomparison. Override with e.g.
+`--evaluation-suite Tier2_atmosphere_monthly` for a single suite, or add
+more (`Tier1_consistency_checks` etc.) — note the consistency/ECS suites
+need multi-year output, so they are not in the default.
 
 ## Standalone use
 
 The runner script doubles as a standalone CLI for scoring an *existing*
-CMOR output tree without re-running the model:
+CMOR output tree without re-running the model. It takes one or more
+`--suite` names and writes the per-suite `.ddb`s plus one combined
+`climateeval_report.html` into `--output-dir`:
 
 ```bash
 $LEGOESM_CLIMATEEVAL_PYTHON scripts/validate/run_amip_climateeval.py \
     --cmor-dir /scratch/you/amip_run/cmor/Amon \
-    --suite Tier2_atmosphere_monthly \
+    --suite Tier1_sanity_checks Tier2_atmosphere_monthly \
     --data-root-dir "$LEGOESM_CLIMATEEVAL_DATA_ROOT" \
-    --output-db /scratch/you/amip_run/climateeval_Tier2_atmosphere_monthly.ddb \
-    --output-html /scratch/you/amip_run/climateeval_Tier2_atmosphere_monthly_report.html
+    --output-dir /scratch/you/amip_run
 ```

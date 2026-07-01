@@ -42,13 +42,12 @@ def maybe_run_climateeval(config: ExperimentConfig, output_dir: str) -> int | No
         evaluation.climateeval_python,
         str(RUNNER_SCRIPT),
         "--cmor-dir", str(cmor_amon_dir),
-        "--suite", evaluation.suite,
+        "--suite", *evaluation.suites,
         "--model-id", evaluation.model_id,
         "--experiment-id", evaluation.experiment_id,
         "--variant-id", evaluation.variant_id,
         "--data-root-dir", evaluation.data_root_dir,
-        "--output-db", str(Path(output_dir) / f"climateeval_{evaluation.suite}.ddb"),
-        "--output-html", str(Path(output_dir) / f"climateeval_{evaluation.suite}_report.html"),
+        "--output-dir", str(output_dir),
     ]
     if evaluation.timerange:
         cmd += ["--timerange", evaluation.timerange]

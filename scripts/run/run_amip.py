@@ -747,9 +747,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "CMOR outputs against ERA5/observational reference data. "
              "Requires --cmip-output.")
     parser.add_argument(
-        "--evaluation-suite", dest="evaluation_suite", type=str,
-        default=_EVALUATION_DEFAULTS.suite,
-        help=f"ClimateEval suite name (default: {_EVALUATION_DEFAULTS.suite!r}). "
+        "--evaluation-suite", dest="evaluation_suites", nargs="+",
+        default=list(_EVALUATION_DEFAULTS.suites),
+        help="One or more ClimateEval suite names, rendered into a single "
+             f"combined report (default: {' '.join(_EVALUATION_DEFAULTS.suites)}). "
              "Available suites: Tier1_sanity_checks, Tier1_consistency_checks, "
              "Tier1_ecs, Tier2_atmosphere_monthly, Tier2_atmosphere_subdaily, "
              "Tier2_ocean_monthly.")
@@ -908,7 +909,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         restart_buffer_seconds=args.restart_buffer_seconds,
         evaluation=EvaluationConfig(
             enabled=args.evaluate,
-            suite=args.evaluation_suite,
+            suites=tuple(args.evaluation_suites),
             model_id=args.evaluation_model_id,
             experiment_id=args.evaluation_experiment_id,
             variant_id=args.evaluation_variant_id,

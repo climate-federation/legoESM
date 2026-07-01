@@ -27,7 +27,7 @@ def test_disabled_is_a_noop():
 def test_enabled_invokes_expected_subprocess_command():
     evaluation = EvaluationConfig(
         enabled=True,
-        suite="Tier2_atmosphere_monthly",
+        suites=("Tier1_sanity_checks", "Tier2_atmosphere_monthly"),
         model_id="legoESM-1-0",
         experiment_id="amip",
         variant_id="r1i1p1f1",
@@ -48,7 +48,10 @@ def test_enabled_invokes_expected_subprocess_command():
     assert cmd[1].endswith("scripts/validate/run_amip_climateeval.py")
     assert "--cmor-dir" in cmd
     assert cmd[cmd.index("--cmor-dir") + 1] == "/scratch/b/b309178/amip_run/cmor/Amon"
-    assert cmd[cmd.index("--suite") + 1] == "Tier2_atmosphere_monthly"
+    # both suites passed after --suite (nargs="+"); one combined report via --output-dir
+    suite_i = cmd.index("--suite")
+    assert cmd[suite_i + 1:suite_i + 3] == ["Tier1_sanity_checks", "Tier2_atmosphere_monthly"]
+    assert cmd[cmd.index("--output-dir") + 1] == "/scratch/b/b309178/amip_run"
     assert cmd[cmd.index("--timerange") + 1] == "19790101/19791231"
     assert "--fail-on-missing-data" in cmd
     assert "--download-missing-data" in cmd
