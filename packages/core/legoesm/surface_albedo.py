@@ -63,6 +63,13 @@ class LandAlbedoConfig(NamedTuple):
     alpha_snow_min: float = 0.50
     tau_snow_decay: float = 432000.0  # 5 days in seconds
     snow_depth_crit: float = 50.0     # kg/m2
+    # Dry-soil brightening (Oleson et al. 2013, CLM): exposed soil brightens as the
+    # top layer dries, so a DESERT (low soil moisture) is far brighter than moist bare
+    # soil / tundra — a contrast a single per-PFT albedo cannot represent.  The
+    # snow-free base albedo gains up to ``soil_dry_albedo_boost`` linearly as the
+    # top-layer volumetric water falls below ``soil_dry_albedo_ref``.
+    soil_dry_albedo_boost: float = 0.11   # max dry-soil albedo increment
+    soil_dry_albedo_ref: float = 0.275    # theta [m3/m3] above which no brightening
 
 
 class IceAlbedoConfig(NamedTuple):
@@ -201,6 +208,33 @@ def snow_cover_fraction(
         Snow cover fraction [0-1].
     """
     return jnp.tanh(snow_depth / jnp.maximum(config.snow_depth_crit, 1e-6))
+
+
+def dry_soil_brightening(
+    theta_top: jnp.ndarray,
+    config: LandAlbedoConfig = LandAlbedoConfig(),
+) -> jnp.ndarray:
+    """Dry-soil albedo increment (Oleson et al. 2013, CLM).
+
+    ``delta = boost * clip(1 - theta_top / theta_ref, 0, 1)`` — the snow-free soil
+    albedo rises by up to ``soil_dry_albedo_boost`` as the top-layer volumetric water
+    ``theta_top`` falls to zero, and vanishes once ``theta_top >= soil_dry_albedo_ref``.
+    This is what makes a dry desert (theta ~ 0.05) bright while moist bare soil / tundra
+    (theta ~ 0.3) stays dark.
+
+    Parameters
+    ----------
+    theta_top : jnp.ndarray
+        Top soil-layer volumetric water content [m3/m3].
+    config : LandAlbedoConfig
+
+    Returns
+    -------
+    delta : jnp.ndarray
+        Additive albedo increment in [0, soil_dry_albedo_boost].
+    """
+    ref = jnp.maximum(config.soil_dry_albedo_ref, 1e-6)
+    return config.soil_dry_albedo_boost * jnp.clip(1.0 - theta_top / ref, 0.0, 1.0)
 
 
 def land_albedo(

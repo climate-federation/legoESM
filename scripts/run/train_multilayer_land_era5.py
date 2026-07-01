@@ -190,7 +190,8 @@ BOUNDS_EXT = dict(
     snow_max=(0.60, 0.92),          # fresh-snow albedo (fresh snow ~0.85-0.9)
     snow_min=(0.45, 0.75),          # aged/melting-snow albedo floor (raised: was too dark)
     snow_dcrit=(3.0, 40.0),         # SWE [kg/m2] half-cover scale (tanh; LOWER=brighter)
-    snow_tau_days=(1.0, 20.0))      # snow-albedo age e-folding [days]
+    snow_tau_days=(1.0, 20.0),      # snow-albedo age e-folding [days]
+    soil_dry_boost=(0.0, 0.16))     # CLM dry-soil albedo brightening (deserts); 0=off
 
 
 def constrain_ext(p: dict) -> dict:
@@ -232,6 +233,7 @@ def init_ext_params() -> dict:
         snow_min=_inv_ext(0.55, "snow_min"),          # aged-snow floor
         snow_dcrit=_inv_ext(15.0, "snow_dcrit"),      # tanh SWE half-cover scale [kg/m2]
         snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # snow-albedo age e-folding [days]
+        soil_dry_boost=_inv_ext(0.11, "soil_dry_boost"),  # CLM dry-soil brightening
     ).items()}
 
 
@@ -294,7 +296,8 @@ def build_multilayer_cfg(cp, data):
         land_albedo=LandAlbedoConfig(
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
-            tau_snow_decay=cp["snow_tau_days"] * 86400.0))   # days -> seconds
+            tau_snow_decay=cp["snow_tau_days"] * 86400.0,    # days -> seconds
+            soil_dry_albedo_boost=cp["soil_dry_boost"]))     # CLM dry-soil brightening
     # Carbon state is PRESCRIBED (fixed climatological leaf carbon -> fixed LAI), the
     # same decoupling as the soil-moisture trick: it activates the photosynthesis /
     # stomatal-conductance parameters (Vc_max25, g1, LCMA via LAI = C_fol/LCMA) so they

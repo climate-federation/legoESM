@@ -48,6 +48,7 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
+from legoesm.surface_albedo import dry_soil_brightening
 
 # Perturbation [K] for the one-sided finite-difference linearisation of the
 # turbulent surface fluxes when building the semi-implicit surface conductance
@@ -102,6 +103,11 @@ def step_multilayer_land(
 
     # Spatially-varying surface parameters (or config scalar fallbacks)
     albedo_land = _get(lp, "albedo_veg", config.albedo_land)
+    # CLM dry-soil brightening (Oleson 2013): the snow-free base albedo rises as the
+    # top layer dries, so a dry DESERT is bright while moist bare soil / tundra stays
+    # dark — the desert contrast a single per-PFT albedo cannot capture.  Applied to the
+    # base BEFORE the snow blend so both the flux and the returned albedo use it.
+    albedo_land = albedo_land + dry_soil_brightening(theta[:, 0], config.land_albedo)
     emissivity = _get(lp, "emissivity", config.emissivity_land)
     z0 = _get(lp, "z0", config.z0_land)
 
