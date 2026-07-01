@@ -62,6 +62,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Shared, self-describing scaling metadata (roadmap item 9): merged into every
+# result JSON so a host-staged / f32 / replicated run is falsifiable from the
+# record.  ``metadata.py`` imports JAX only lazily, so importing it here does
+# NOT trigger early JAX init before ``_configure_jax_cpu``.
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax_cpu``
 # has a chance to set ``JAX_ENABLE_X64`` / ``JAX_PLATFORMS`` / thread flags.
@@ -1151,8 +1160,18 @@ def generate_sweep_cases(
 # Output
 # ===========================================================================
 
-def write_result_json(result: TimingResult, output_dir: Path) -> None:
-    """Write a single result as a JSON file."""
+def write_result_json(
+    result: TimingResult, output_dir: Path, *, cs_spmd: bool = False
+) -> None:
+    """Write a single result as a JSON file.
+
+    ``cs_spmd`` marks the single-controller cubed-sphere SPMD path, where
+    ``result.n_ranks`` was rewritten to ``jax.device_count()`` for the
+    filename / plot axis.  The metadata ``n_ranks`` (= process count) must NOT
+    use that rewritten value, so it is left to ``scaling_metadata`` to default
+    to ``jax.process_count()`` (1 for single-controller, N for multi-controller
+    SPMD) while the device count lives in ``n_gpus`` / ``device_count``.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     # Tag a non-default (2-D) decomposition into the filename so a 2-D-pencil
     # run never overwrites the band run at the same grid/res/np (the payload
@@ -1180,6 +1199,33 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
     # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
     # with / is mislabeled as a production (mass-conserving) run (codex audit).
     payload["fix_mass"] = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
+    # Self-describing metadata block (roadmap item 9): backend / precision knobs
+    # / GPU-direct mode / decomposition / cells-per-rank so this row is
+    # comparable and a host-staged or f32 run is falsifiable from the record.
+    # cs-spmd: result.n_ranks is the DEVICE count (rewritten upstream); leave
+    # metadata n_ranks to auto process-count.  Non-cs-spmd (mpi4jax): jax is
+    # unaware of the MPI world, so the real MPI rank count must be passed.
+    _md_n_ranks = None if cs_spmd else result.n_ranks
+    payload["metadata"] = annotate_incomplete(scaling_metadata(
+        grid=result.grid_type,
+        component="atmosphere",
+        resolution=result.resolution,
+        n_levels=result.n_levels,
+        precision=result.precision,
+        n_ranks=_md_n_ranks,
+        n_gpus=(result.n_ranks
+                if payload["backend"] in ("gpu", "cuda", "rocm") else 0),
+        decomposition=result.decomposition,
+        cells_per_rank=result.cells_per_rank,
+        scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
+        extra={
+            "physics_level": result.physics_level,
+            "mode": result.mode,
+            "cpus_per_task": payload["cpus_per_task"],
+            "n_cores": payload["n_cores"],
+            "fix_mass": payload["fix_mass"],
+        },
+    ))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
@@ -1506,7 +1552,7 @@ def main() -> int:
     if is_rank0:
         print_summary(result)
         output_dir = Path(args.output_dir) / f"{grid_type}_{physics_level}_{mode}"
-        write_result_json(result, output_dir)
+        write_result_json(result, output_dir, cs_spmd=bool(args.cs_spmd))
 
     return 0
 
