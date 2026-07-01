@@ -126,6 +126,15 @@ _LAM_AMP = 1.5
 # 3e3 ~ 30 vs tmse~O(100-1000)) so it actually constrains the porosity scale + plant
 # water-stress thresholds without swamping the skin-T fit.  Tune via --lam-sm.
 _LAM_SM = 3.0e3
+# Per-cell gradient-norm cap for the pre-train pathological-cell filter.  Healthy land
+# cells have a per-cell |grad| ~ 1e1-1e3 (logged p90 ~ 3e3); a near-singular stiff-clay/
+# saturated cell whose MOST flux backward is approaching the overflow reads 1e5-1e41.
+# 1e6 sits in the empty gap between the two populations (see the logged distribution) —
+# dropping the whole near-singular tail (not just the outright-NaN cells) keeps the
+# CLIPPED gradient DIRECTION clean, so Adam does not overshoot on the few cells whose
+# huge-but-finite gradient would otherwise dominate the global-norm clip.  See
+# _drop_nan_grad_cells.
+_GRAD_NORM_CAP = 1.0e6
 
 
 # --------------------------------------------------------------------------- #
@@ -398,8 +407,66 @@ def _params_dict(p):
     return {k: np.asarray(v).tolist() for k, v in constrain_ext(p).items()}
 
 
+def _select_cells(data: dict, idx) -> dict:
+    """Slice the training dict to a subset of land cells (``idx`` into the cell axis):
+    forc/skt/alb carry the cell axis last, ``rz_w`` is soil-layer weights (no cell
+    axis), everything else is ``(ncol, ...)`` on axis 0."""
+    idx = np.asarray(idx)
+    out = {}
+    for k, v in data.items():
+        if k == "forc":
+            out[k] = [jax.tree.map(lambda x: x[:, idx], f) for f in v]
+        elif k in ("skt", "alb"):
+            out[k] = v[:, idx]
+        elif k == "rz_w":
+            out[k] = v
+        else:
+            out[k] = v[idx]
+    return out
+
+
+def _drop_nan_grad_cells(data: dict, p: dict) -> np.ndarray:
+    """One-time: keep only land cells whose PER-CELL loss gradient is finite.
+
+    A few stiff-clay, near-saturated cells evolve over the seasonal Stage-B run into a
+    regime where the implicit MOST surface-flux fixed-point iteration's reverse mode
+    overflows f64 — a finite FORWARD but a NaN BACKWARD — and a single such cell poisons
+    the whole batch gradient.  They are <1% of land and their per-PFT parameters are
+    pinned by the many other cells sharing the PFT, so excluding them (LOGGED, not
+    silently) leaves the calibration well-posed and faithful (the Richards+MOST scheme
+    is unchanged; only pathological training samples are dropped).  The shared
+    ``thomas_solve`` adjoint is already stable (custom_vjp); this covers the residual
+    MOST-iteration cells without altering any production surface-flux gradient."""
+    n = int(data["lat"].shape[0])
+    gfn = jax.jit(lambda q, d: jax.grad(lambda qq: loss_ml(qq, d)[0])(q))
+    norms = np.empty(n)
+    for c in range(n):
+        g = gfn(p, _select_cells(data, [c]))
+        norms[c] = float(jnp.sqrt(sum(jnp.sum(v ** 2) for v in g.values())))
+    # A cell is "pathological" if its per-cell gradient is non-finite OR astronomically
+    # large: both are the SAME near-singular MOST-iteration backward (a barely-finite
+    # 1e17 norm is the same overflow one rounding step away from NaN).  Healthy cells
+    # sit at ~1e2-1e5, so _GRAD_NORM_CAP cleanly separates them; the cap is logged with
+    # the norm distribution so the cut is auditable, not a silent heuristic.
+    bad = np.where(~np.isfinite(norms) | (norms > _GRAD_NORM_CAP))[0]
+    keep = np.setdiff1d(np.arange(n), bad)
+    if bad.size:
+        fin = norms[np.isfinite(norms)]
+        dom = np.asarray(data["dom_onehot"])[bad].argmax(1)
+        nv = np.asarray(data["vg_n_vg"])[bad]
+        print(f"# pre-filter: dropped {bad.size}/{n} pathological cells (NaN/overflow "
+              f"MOST-iteration backward at stiff-clay/saturated state); dom-PFTs "
+              f"{sorted(set(int(d) for d in dom))}, n_vg in [{nv.min():.3f},{nv.max():.3f}]; "
+              f"per-cell |grad| p50={np.percentile(fin,50):.1e} p90={np.percentile(fin,90):.1e} "
+              f"max={fin.max():.1e}, cap={_GRAD_NORM_CAP:.0e}", flush=True)
+    return np.asarray(keep, dtype=int)
+
+
 def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0):
     p = init_ext_params()
+    keep = _drop_nan_grad_cells(data, p)        # exclude NaN-backward cells (logged)
+    if keep.size < int(data["lat"].shape[0]):
+        data = _select_cells(data, keep)
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
     # Gradient clipping: the initial loss is large (extreme high-latitude / desert /
     # ice cells contribute a huge skin-T error + seasonal-amplitude term), so unclipped
@@ -410,8 +477,25 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0):
     tx = optax.adam(lr) if clip <= 0.0 else optax.chain(
         optax.clip_by_global_norm(clip), optax.adam(lr))
     opt = tx; state = opt.init(p)
+    n_san = 0
+    best_p, best_l = p, float("inf")     # keep the LOWEST-loss params, not the latest
     for it in range(n_iter):
         (l, (tm, am, pp, sa, sm)), g = vg(p, data)
+        lv = float(l)
+        if np.isfinite(lv) and lv < best_l:
+            best_l, best_p = lv, p        # p (pre-update) is the iterate that scored lv
+        # Dynamic safety net.  The static pre-filter only removes cells pathological at
+        # the INIT params; a parameter step can push a previously-healthy cell into the
+        # stiff-clay/saturated regime whose MOST-iteration backward overflows to NaN/inf.
+        # Zero any non-finite gradient COMPONENT before the optimiser sees it — otherwise
+        # one NaN flows through Adam's moments and poisons EVERY parameter permanently.
+        # The huge-but-finite case is handled by clip_by_global_norm; this only catches
+        # NaN/inf.  Per-PFT parameter structure means a transient singular cell at worst
+        # freezes its own PFT's update for that step, not the whole optimisation.
+        if not all(bool(jnp.all(jnp.isfinite(v))) for v in g.values()):
+            g = jax.tree.map(
+                lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), g)
+            n_san += 1
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if it % 20 == 0 or it == n_iter - 1:
             print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
@@ -419,12 +503,25 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0):
                   f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
                   flush=True)
         # periodic checkpoint so a long (slow per-iter) run is interruptible and the
-        # converged params are captured before the final iteration.
+        # BEST-so-far params (not a late, possibly-diverged iterate) are captured.
         if ckpt_path and it > 0 and it % ckpt_every == 0:
             with open(ckpt_path, "w") as f:
-                json.dump(_params_dict(p), f, indent=2)
-            print(f"# checkpoint -> {ckpt_path} (it {it})", flush=True)
-    return _params_dict(p)
+                json.dump(_params_dict(best_p), f, indent=2)
+            print(f"# checkpoint -> {ckpt_path} (best loss {best_l:.3f} @ it {it})",
+                  flush=True)
+        # Early stop: the MOST/thermal cliff makes a too-large step blow the seasonal-
+        # amplitude term up ~10x; once the loss runs away there is no recovery (the
+        # sanitised gradient is biased near the cliff), so cut the run and keep best_p.
+        if np.isfinite(lv) and lv > 5.0 * best_l and it > 10:
+            print(f"# early stop @ it {it}: loss {lv:.1f} ran away from best {best_l:.3f} "
+                  f"(MOST/thermal cliff); keeping best params", flush=True)
+            break
+    if n_san:
+        print(f"# {n_san}/{n_iter} steps had a non-finite gradient component sanitised "
+              f"(transient MOST-iteration singular cells); clip handled the rest",
+              flush=True)
+    print(f"# returning BEST params (loss {best_l:.3f})", flush=True)
+    return _params_dict(best_p)
 
 
 # --------------------------------------------------------------------------- #
