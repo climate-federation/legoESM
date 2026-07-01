@@ -1551,7 +1551,6 @@ class PhysicsPipeline:
         # Compute cloud properties for cloud-radiation coupling
         cloud_kwargs = {}
         if cloud_scheme != "none":
-            from legoesm.atmosphere.physics.clouds.config import CloudConfig
             from legoesm.atmosphere.physics.clouds.cloud_fraction import (
                 compute_cloud_properties,
             )
@@ -1570,18 +1569,18 @@ class PhysicsPipeline:
             # Optional cloud-tuning overrides (None => CloudConfig default =>
             # byte-identical).  The SW/LW knob for e.g. the coare3 moisture-
             # driven albedo overshoot (raise rh_crit / lower q_c_diagnostic).
-            _cc_over = {}
-            if getattr(self, "_cloud_rh_crit", None) is not None:
-                _cc_over["rh_crit"] = self._cloud_rh_crit
-            if getattr(self, "_cloud_q_c_diagnostic", None) is not None:
-                _cc_over["q_c_diagnostic"] = self._cloud_q_c_diagnostic
-            if getattr(self, "_cloud_conv_cloud_max", None) is not None:
-                _cc_over["conv_cloud_max"] = self._cloud_conv_cloud_max
-            cloud_config = CloudConfig(
-                scheme=cloud_scheme,
+            # Built via the shared ``build_cloud_config`` so the clt diagnostic
+            # (DiagnosticCollector) selects the SAME cloud fraction (#689).
+            from legoesm.atmosphere.physics.clouds.config import (
+                build_cloud_config,
+            )
+            cloud_config = build_cloud_config(
+                cloud_scheme,
                 convective_cloud=(getattr(self, "_cloud_convective", False)
                                   and conv_precip is not None),
-                **_cc_over,
+                rh_crit=getattr(self, "_cloud_rh_crit", None),
+                q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
+                conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.

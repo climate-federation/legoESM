@@ -185,3 +185,33 @@ class CloudConfig(NamedTuple):
     # q_c_diagnostic=1e-3) so the high cloud traps LW without over-reflecting SW
     # (the v3 albedo~42% overshoot; high cold tops keep the LW benefit).
     conv_cloud_condensate: float = 1.5e-4
+
+
+def build_cloud_config(
+    scheme: str,
+    *,
+    convective_cloud: bool = False,
+    rh_crit: float | None = None,
+    q_c_diagnostic: float | None = None,
+    conv_cloud_max: float | None = None,
+) -> "CloudConfig":
+    """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
+    fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
+    ``cloud_q_c_diagnostic`` / ``cloud_conv_cloud_max`` overrides).
+
+    Single source of truth so the radiation path (physics pipeline) and the
+    ``clt`` diagnostic (diagnostics collector) build the SAME cloud fraction
+    and can never drift as override knobs are added (issue #689 codex review).
+    A ``None`` override falls back to the ``CloudConfig`` default (so an
+    all-``None`` call is byte-identical to the defaults).
+    """
+    overrides: dict[str, float] = {}
+    if rh_crit is not None:
+        overrides["rh_crit"] = rh_crit
+    if q_c_diagnostic is not None:
+        overrides["q_c_diagnostic"] = q_c_diagnostic
+    if conv_cloud_max is not None:
+        overrides["conv_cloud_max"] = conv_cloud_max
+    return CloudConfig(
+        scheme=scheme, convective_cloud=convective_cloud, **overrides
+    )
