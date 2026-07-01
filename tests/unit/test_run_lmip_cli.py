@@ -75,3 +75,33 @@ def test_require_config_without_config_errors():
 def test_require_config_with_config_ok():
     args = _parse_args(["--require-config", "--config", str(_lmip_example_config())])
     assert args.config is not None
+
+
+def test_params_flag_parses():
+    assert _parse_args(["--lat", "0.0", "--params", "x.yaml"]).params == "x.yaml"
+
+
+def test_params_routes_land_override_into_config():
+    """A calibration --params entry routes into the built LMIPRunConfig's nested
+    land *Config (the qualified-name loader, #691)."""
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+    from legoesm.training.param_collector import build_registry
+    m = next(m for m in build_registry() if m.config_class == "MultiLayerLandConfig")
+    lo, hi = m.bounds
+    val = (lo + hi) / 2.0
+    cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
+    out = apply_params_to_config(cfg, {m.qualified_name: val}, driver="run_lmip")
+    assert getattr(out.land, m.field) == val
+
+
+def test_example_params_file_loads_and_applies():
+    """The committed config/lmip/params_example.yaml is a valid calibration
+    file (every key in the registry, in bounds, routable)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        load_params_config,
+    )
+    p = _lmip_example_config().parent / "params_example.yaml"
+    cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
+    out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_lmip")
+    assert out.land.Cd_land == 3.0e-3

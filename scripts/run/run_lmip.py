@@ -513,6 +513,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Strict mode: fail unless a --config file is given, so "
                         "the run is fully specified by a committed config (no "
                         "hidden parser defaults). (issue #691)")
+    p.add_argument("--params", type=str, default=None,
+                   help="YAML calibration file of tuned parameters keyed by "
+                        "param_collector qualified name 'scheme_key.field', "
+                        "validated against each scheme's __param_spec__ bounds "
+                        "and spliced into the nested land *Config NamedTuples "
+                        "(soil thermal/hydraulics, carbon, stomata...). (#691)")
     p.add_argument("--lat", type=float, default=None,
                    help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
@@ -608,6 +614,15 @@ def main() -> None:
     lat_jnp = jnp.asarray([lat_rad])   # shape (1,) for snow_albedo_feedback
 
     run_config = build_config_from_args(args)
+    # Apply the --params calibration layer (tuned scheme parameters) into the
+    # built config's nested land *Config NamedTuples (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            load_params_config,
+        )
+        run_config = apply_params_to_config(
+            run_config, load_params_config(args.params), driver="run_lmip")
     config = run_config.land
 
     dt = args.dt
