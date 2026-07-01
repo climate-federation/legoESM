@@ -167,7 +167,6 @@ def main():
     ic_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
     state = carry_to_spectral_state(ic_carry, grid)
     land_mask = land_mask_from_phis(jnp.asarray(ic_carry.phis), smooth=True)
-    ic_p_s = np.asarray(ic_carry.p_s)  # for the ozone plev->sigma interp
     ds_o3 = open_arco_era5()           # historical ERA5 ozone (ARCO)
     sigma_full_np = np.asarray(sigma.sigma_full)
 
@@ -242,8 +241,11 @@ def main():
         key = (day.year, day.month)
         if key not in _o3_cache:
             _o3_cache.clear()  # keep only the current month
+            # plev->sigma interp uses the CURRENT surface pressure (p_s evolves
+            # over the multi-decade run; codex) — not the fixed IC p_s.
+            p_s_now = np.asarray(spectral_pe_to_grid(state, grid, sigma)["p_s"]).reshape(-1)
             _o3_cache[key] = jnp.asarray(
-                ozone_vmr_at_date(ds_o3, day, grid, sigma_full_np, ic_p_s)
+                ozone_vmr_at_date(ds_o3, day, grid, sigma_full_np, p_s_now)
             )
         state = seg(state, jnp.asarray(override),
                     jnp.asarray(float(day.timetuple().tm_yday)), ghg,
