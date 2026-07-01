@@ -19,11 +19,10 @@ Exempt paths: the constants/thermo definition sites, the guard tests, this
 Fail-open: ANY error or unexpected input → exit 0 (allow). It must never wedge a
 session. Block protocol: exit 2 with a message on stderr (fed back to the model).
 """
-from __future__ import annotations
-
 import json
 import re
 import sys
+from typing import List
 
 _BANNED_LITERALS = [
     "6.371229e6", "6.371e6", "9.80616", "7.292e-5", "1004.64", "2.501e6",
@@ -63,8 +62,8 @@ def _proposed_text(tool: str, ti: dict) -> str:
     return ""
 
 
-def _hits(text: str) -> list[str]:
-    out: list[str] = []
+def _hits(text: str) -> List[str]:
+    out = []
     for line in text.splitlines():
         if any(tag in line for tag in _EXEMPT_COMMENT):
             continue

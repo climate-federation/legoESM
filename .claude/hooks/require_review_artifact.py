@@ -17,8 +17,6 @@ Safety (it must never trap a session):
     successfully recorded the one-shot sentinel.
   * Advisory: a single ``decision: block`` with a reason; the next Stop is allowed.
 """
-from __future__ import annotations
-
 import hashlib
 import json
 import os
@@ -78,7 +76,7 @@ def main() -> None:
 
         # Only a change to a numerics/physics path is review-worthy here — a large
         # edit to CLI/docs/test/build Python must NOT trigger a *physics* reminder.
-        touched: set[str] = set()
+        touched = set()
         for line in _git(cwd, "diff", "--numstat", "HEAD").splitlines():
             parts = line.split("\t")
             if len(parts) == 3 and _is_significant_py(parts[2]):
