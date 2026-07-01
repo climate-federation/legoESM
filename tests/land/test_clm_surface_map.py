@@ -184,5 +184,38 @@ def test_clm_multilayer_setup_builds_params_and_config(tmp_path):
     assert np.asarray(cfg.hydraulics.theta_sat).shape == (ncol, 1)
 
 
+def test_clm_multilayer_setup_preserves_surface_snow_stomata(tmp_path):
+    """clm_multilayer_setup must PRESERVE the base's surface/snow/stomata features
+    (it may overwrite ONLY hydraulics/thermal).  This is the contract the AMIP
+    driver's _setup_multilayer_land relies on to thread surface_bulk_scheme +
+    snow_albedo_feedback + land_stomatal_beta through, so use_multilayer_land is a
+    strict upgrade of the slab rather than a constant-bulk/no-snow/no-stomata
+    partial regression.  A silent reset here would re-introduce that regression."""
+    from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    f = str(tmp_path / "s.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(70, -70, 4); lon = np.linspace(20, 300, 5)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+
+    # exactly what _setup_multilayer_land builds: land MOST for the soil SEB
+    # (matching the atmospheric land tile) + snow-albedo feedback + Jarvis stomata.
+    base = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        bulk_scheme="most",
+        snow_albedo_feedback=True,
+        stomata=StomataConfig(enabled=True),
+    )
+    _params, cfg = clm_multilayer_setup(m, base_config=base)
+
+    assert cfg.bulk_scheme == "most", "surface bulk scheme was reset (regression)"
+    assert cfg.snow_albedo_feedback is True, "snow-albedo feedback was reset"
+    assert cfg.stomata.enabled is True, "stomata was reset (regression)"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

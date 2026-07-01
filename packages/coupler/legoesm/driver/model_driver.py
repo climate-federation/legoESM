@@ -1296,6 +1296,7 @@ class ModelDriver:
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
+        from legoesm.land.carbon.stomata import StomataConfig
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.soil_grid import SoilGridConfig
 
@@ -1308,16 +1309,43 @@ class ModelDriver:
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
-        # the CLM reference surfdata onto the model columns.
-        surface_map = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+        # the CLM reference surfdata onto the model columns.  A pre-staged path
+        # (``clm_surfdata_path``) is required on compute nodes with no outbound
+        # internet (the default fetches from UCAR, which fails on such nodes).
+        surfdata_path = self.config.clm_surfdata_path
+        if surfdata_path:
+            # A staged path is set: use it, and FAIL LOUDLY if absent rather than
+            # attempting a (compute-node-blocked) network fetch to that exact path.
+            if not os.path.exists(surfdata_path):
+                raise FileNotFoundError(
+                    f"clm_surfdata_path={surfdata_path!r} does not exist; stage the "
+                    "CLM surfdata NetCDF there (compute nodes have no outbound "
+                    "internet to download it).")
+            surfdata_file = surfdata_path
+        else:
+            surfdata_file = download_clm_surfdata()
+        surface_map = load_clm_surface(surfdata_file, lat_deg, lon_deg)
 
-        # Non-spatial defaults (soil grid depth/layers, Richards, carbon, stomata)
-        # from the config; clm_multilayer_setup overwrites only hydraulics/thermal.
+        # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
+        # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
+        # slab land already uses (snow_albedo_feedback, land_stomatal_beta) so
+        # ``use_multilayer_land`` is a strict UPGRADE (adds Richards multilayer soil
+        # + CLM texture/PFT maps) rather than a partial regression to a
+        # no-snow-albedo / no-stomata surface.  The soil SEB uses land MOST (with
+        # the CLM per-cell z0) to MATCH the atmospheric tiled LAND tile, which
+        # hard-codes land "most"; surface_bulk_scheme (coare3/large_yeager) is the
+        # OCEAN surface-layer scheme and must NOT drive the land skin-T (it would
+        # evolve T_sfc with ocean-roughness logic, inconsistent with the atmosphere
+        # land-flux exchange law — the T_sfc now feeds T_land, so consistency here
+        # matters).
         base = MultiLayerLandConfig(
             soil_grid=SoilGridConfig(
                 n_layers=self.config.multilayer_n_layers,
                 total_depth=self.config.multilayer_soil_depth,
             ),
+            bulk_scheme="most",
+            snow_albedo_feedback=self.config.snow_albedo_feedback,
+            stomata=StomataConfig(enabled=self.config.land_stomatal_beta),
         )
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 

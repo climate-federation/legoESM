@@ -37,6 +37,22 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_clm_surfdata_path_flows_to_config():
+    """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
+    UCAR download; a set path lets a compute node with no internet use a staged
+    surfdata NetCDF for the multilayer land)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.clm_surfdata_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--clm-surfdata-path", "/data/clm_surfdata.nc",
+    ]), parser))
+    assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
