@@ -637,6 +637,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--snow-albedo-feedback", action="store_true",
+                        default=False, dest="snow_albedo_feedback",
+                        help="Prognostic snow + snow-albedo feedback on the "
+                             "slab-land tile: snow water (SWE) accumulates from "
+                             "snowfall and melts (degree-day), brightening the "
+                             "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
+                             "Requires an active land tile (--slab-land-active).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -874,6 +881,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_beta_min=args.land_beta_min,
         land_bucket_w_init_frac=args.land_bucket_w_init_frac,
         land_stomatal_beta=args.land_stomatal_beta,
+        snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,

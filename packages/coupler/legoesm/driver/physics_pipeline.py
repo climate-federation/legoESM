@@ -205,6 +205,15 @@ class PhysicsPipeline:
         # bucket supplies ``beta_soil``).
         self.land_stomatal_beta = False
         self.stomata_config = None
+        # Prognostic snow + snow-albedo feedback on the slab-land tile.  ``snow``
+        # (SWE [kg/m^2]) + ``snow_age`` [s] are prognostic carries threaded like
+        # ``w_land``; when ``snow_albedo_feedback`` is on the land albedo is
+        # brightened by the snow cover (``legoesm.surface_albedo.land_albedo``).
+        # Set by the driver from ExperimentConfig.  Off → static vegetation
+        # albedo (byte-identical).
+        self.snow_albedo_feedback = False
+        from legoesm.surface_albedo import LandAlbedoConfig
+        self.land_albedo_config = LandAlbedoConfig()
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         # ``dynamic_albedo``: zenith-angle-dependent ocean albedo
@@ -346,8 +355,26 @@ class PhysicsPipeline:
         w_unclamped = w_land + dt * (precip_total - evap)
         return jnp.clip(w_unclamped, 0.0, self.land_bucket_w_max)
 
+    def _land_albedo_eff(self, lat, snow):
+        """Snow-brightened land albedo via ``legoesm.surface_albedo.land_albedo``
+        when snow-albedo feedback is active; else the static vegetation albedo.
+
+        ``snow_age`` is fixed at 0 (fresh-snow albedo) — SWE-only snow.  The
+        gate is a compile-time Python ``if`` (off ⇒ returns ``self.albedo_land``
+        unchanged, byte-identical); the snow-cover blend inside ``land_albedo``
+        is ``jnp.where`` (traced, per cell).
+        """
+        if not self.snow_albedo_feedback or snow is None or lat is None:
+            return self.albedo_land
+        from legoesm.surface_albedo import land_albedo
+        base = (jnp.broadcast_to(self.albedo_land, snow.shape)
+                if self.albedo_land is not None else None)
+        return land_albedo(lat, snow, jnp.zeros_like(snow),
+                           self.land_albedo_config, base_albedo=base)
+
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
-                        T, p_s, q_v, u, v, dt, beta_land=None):
+                        T, p_s, q_v, u, v, dt, beta_land=None,
+                        albedo_land=None):
         """Advance the slab-land skin temperature by one radiation step.
 
         Semi-implicit surface energy balance::
@@ -376,8 +403,11 @@ class PhysicsPipeline:
         eps = self.emissivity_land
         sb = constants.sigma_sb
 
+        # Snow-brightened albedo when supplied by the caller (snow-albedo
+        # feedback); else the static vegetation albedo (byte-identical).
+        _alb = self.albedo_land if albedo_land is None else albedo_land
         q_sat_land = saturation_specific_humidity(T_land, p_s)
-        sw_net = sw_down_sfc * (1.0 - self.albedo_land)
+        sw_net = sw_down_sfc * (1.0 - _alb)
         lw_net = eps * lw_down_sfc - eps * sb * T_land ** 4
         shflx = sh_coef * (T_land - T_air)
         lhflx = beta * lh_coef * (q_sat_land - q_air)
@@ -511,7 +541,7 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
-                            w_land=None):
+                            w_land=None, snow=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -560,7 +590,12 @@ class PhysicsPipeline:
         # subtraction, NOT dead-code-eliminated), so guard it; beta stays None
         # (=1, wet surface) with no land albedo.
         if self.albedo_land is not None:
-            _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - self.albedo_land, 1e-3)
+            # Snow brightens the land albedo when the feedback is active (else
+            # the static vegetation albedo, byte-identical).
+            _alb_par = (self._land_albedo_eff(lat, snow)
+                        if (self.snow_albedo_feedback and snow is not None)
+                        else self.albedo_land)
+            _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - _alb_par, 1e-3)
             beta_land = self._land_beta(
                 w_land, T_land=T_land, sw_down_sfc=_sw_down_sfc,
                 q_air=q_v[..., -1], p_s=p_s,
@@ -1253,6 +1288,21 @@ class PhysicsPipeline:
             u[..., -1], v[..., -1], p_s, dt,
         )
 
+        # Advance the prognostic snow water equivalent (snow-albedo feedback):
+        # snowfall (precip when the lowest-level air is below freezing) minus
+        # degree-day melt.  No-op / snow unchanged when the feedback is off.
+        if self.snow_albedo_feedback and snow is not None:
+            from legoesm.land.snow_budget import update_snow
+            precip_snow_diag = jnp.where(
+                T[..., -1] < constants.T_freeze, precip + precip_micro, 0.0,
+            )
+            snow_new, _, _ = update_snow(
+                snow, jnp.zeros_like(snow), T_land, precip_snow_diag, dt,
+                Q_net=None,
+            )
+        else:
+            snow_new = snow
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -1286,6 +1336,7 @@ class PhysicsPipeline:
             qke=_pin_carry_dtype(qke_out, qke),
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
             w_land=_pin_carry_dtype(w_land_new, w_land),
+            snow=_pin_carry_dtype(snow_new, snow),
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -1337,7 +1388,8 @@ class PhysicsPipeline:
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
                                sfc_T_override=None,
-                               conv_precip=None, land_ml=None, w_land=None):
+                               conv_precip=None, land_ml=None, w_land=None,
+                               snow=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1414,8 +1466,14 @@ class PhysicsPipeline:
                 alb_land = ad.unflatten_2d(self.land_ml_params.albedo_veg)
                 emis_land = ad.unflatten_2d(self.land_ml_params.emissivity)
             else:
+                # Snow-brightened land albedo (snow-albedo feedback); the
+                # static vegetation albedo when off (byte-identical).
+                _alb_land_eff = (
+                    self._land_albedo_eff(lat, snow)
+                    if (self.snow_albedo_feedback and snow is not None)
+                    else self.albedo_land)
                 T_land_grid, alb_land, emis_land = (
-                    T_land, self.albedo_land, self.emissivity_land)
+                    T_land, _alb_land_eff, self.emissivity_land)
             T_sfc = self._blend_land(T_sfc, T_land_grid)
             albedo = self._blend_land(albedo, alb_land)
             emissivity = self._blend_land(emissivity, emis_land)
@@ -1636,12 +1694,18 @@ class PhysicsPipeline:
         # physics_step_no_rad (where total precip is available).
         elif _land_active and self.slab_land_active:
             lw_down_sfc = ad.unflatten_2d(rad_out.lw_flux_down[:, -1])
+            # Snow-brightened land albedo for the SEB net SW (feedback on);
+            # static vegetation albedo when off (byte-identical).
+            _alb_seb = (self._land_albedo_eff(lat, snow)
+                        if (self.snow_albedo_feedback and snow is not None)
+                        else None)
             T_land_new = self._step_slab_land(
                 T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
                 beta_land=self._land_beta(
                     w_land, T_land=T_land, sw_down_sfc=sw_down_sfc,
                     q_air=q_v[..., -1], p_s=p_s,
                 ),
+                albedo_land=_alb_seb,
             )
             land_ml_new = land_ml
         else:
@@ -1706,7 +1770,8 @@ class PhysicsPipeline:
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
-                         conv_precip=None, land_ml=None, w_land=None):
+                         conv_precip=None, land_ml=None, w_land=None,
+                         snow=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1720,7 +1785,8 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                 snow) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -1738,6 +1804,7 @@ class PhysicsPipeline:
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
+                        snow=snow,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1751,7 +1818,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land,
+                    w_land=w_land, snow=snow,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -1767,11 +1834,13 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum, physics_out.w_land)
+                            physics_out.gwd_spectrum, physics_out.w_land,
+                            physics_out.snow)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
+                    snow=_carries[4],
                 )
                 return physics_out, new_held, _cast(T_land_new), land_ml_new
 
@@ -1787,7 +1856,8 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                 snow) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1801,7 +1871,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land,
+                    w_land=w_land, snow=snow,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -1814,11 +1884,13 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum, physics_out.w_land)
+                            physics_out.gwd_spectrum, physics_out.w_land,
+                            physics_out.snow)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
+                    snow=_carries[4],
                 )
                 # multilayer land state (if any) rides through the no-rad sub-steps
                 # unchanged — it advances only on radiation steps (like the slab).
@@ -1835,7 +1907,8 @@ class PhysicsPipeline:
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
                     sfc_shflx_override, sfc_lhflx_override,
-                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land)
+                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                    snow)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch

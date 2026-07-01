@@ -49,3 +49,4 @@ class PhysicsOutput(NamedTuple):
     qke: jax.Array | None = None     # updated MYNN-2.5 qke=2*TKE (ncol, nlev)
     gwd_spectrum: jax.Array | None = None  # updated GWD wave-action spectrum
     w_land: jax.Array | None = None  # updated slab-land soil water [kg/m2]
+    snow: jax.Array | None = None    # updated slab-land snow water equiv. [kg/m2]

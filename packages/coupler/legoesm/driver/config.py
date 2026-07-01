@@ -423,6 +423,12 @@ class ExperimentConfig(NamedTuple):
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
     land_stomatal_beta: bool = False
+    # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
+    # water (SWE) accumulates from snowfall and melts (degree-day), brightening
+    # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
+    # snow-albedo feedback SOTA AMIP land has.  Requires an active land tile.
+    # Off (default) ⇒ static vegetation albedo (byte-identical legacy path).
+    snow_albedo_feedback: bool = False
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation

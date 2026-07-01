@@ -35,6 +35,18 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_snow_albedo_feedback_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.snow_albedo_feedback is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--snow-albedo-feedback",
+    ]), parser))
+    assert cfg_on.snow_albedo_feedback is True
+
+
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(

@@ -71,6 +71,8 @@ surface_tiled: true
 surface_z0_land: 0.1
 land_soil_bucket: true
 land_stomatal_beta: true
+snow_albedo_feedback: true  # prognostic SWE snow brightens land albedo (SOTA
+                            # AMIP snow-albedo feedback; needs the active tile)
 land_bucket_w_max: 150.0    # bucket field capacity [kg/m^2]
 land_beta_min: 0.1          # minimum evaporative efficiency
 land_bucket_w_init_frac: 0.5

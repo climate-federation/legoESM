@@ -1235,6 +1235,9 @@ class ModelDriver:
                 if _stomatal:
                     from legoesm.land.carbon.stomata import StomataConfig
                     self.physics.stomata_config = StomataConfig()
+                # Prognostic snow + snow-albedo feedback on the slab tile.
+                self.physics.snow_albedo_feedback = bool(
+                    getattr(self.config, "snow_albedo_feedback", False))
                 logger.info(
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
@@ -5442,6 +5445,18 @@ class ModelDriver:
         else:
             w_land = None
 
+        # Prognostic snow water equivalent [kg/m^2] (snow-albedo feedback) —
+        # restored from the checkpoint when available, else a zero cold start.
+        # ``None`` (byte-identical legacy path) unless the feedback is active.
+        if (self.physics is not None and self.physics.f_land is not None
+                and getattr(self.physics, "snow_albedo_feedback", False)):
+            snow = _aux.get(
+                "snow",
+                jnp.zeros_like(self.state.p_s.data.astype(_sd)),
+            )
+        else:
+            snow = None
+
         # Stateful-physics carries (issue #413): prognostic turbulent
         # energy (tke / qke) and the prognostic-spectral GWD wave-action
         # spectrum, seeded via the canonical ``init_physics_state`` and
@@ -5552,6 +5567,7 @@ class ModelDriver:
             "conv_prog": conv_prog,
             "T_land": T_land,
             "w_land": w_land,
+            "snow": snow,
             "tke": tke,
             "qke": qke,
             "gwd_spectrum": gwd_spectrum,
@@ -5631,6 +5647,7 @@ class ModelDriver:
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
         w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
@@ -5925,6 +5942,7 @@ class ModelDriver:
                 land_ml=(self._land_ml_state
                          if self._ensemble_size == 1 else None),
                 w_land=w_land,
+                snow=snow,
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
@@ -6092,6 +6110,9 @@ class ModelDriver:
             if carry.w_land is not None:
                 w_land = carry.w_land
                 self._carry_aux["w_land"] = w_land
+            if carry.snow is not None:
+                snow = carry.snow
+                self._carry_aux["snow"] = snow
             # Stateful-physics carries (issue #413): thread the FULL
             # (per-member under ensembles) fields to the next segment
             # and persist them via carry_aux (mirrors T_land).
@@ -6351,6 +6372,7 @@ class ModelDriver:
         T_land = ctx["T_land"]
         # Soil-water bucket (None unless active): threaded like T_land.
         w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         # Stateful-physics carries (issue #413), mirroring the compiled
         # path: None for diagnostic schemes (zero overhead).
         phys_tke = ctx["tke"]
@@ -6445,12 +6467,14 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                T_land=T_land, w_land=w_land, **_dm_step_in,
+                T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
         if phys_out.w_land is not None:
             w_land = phys_out.w_land
+        if phys_out.snow is not None:
+            snow = phys_out.snow
         # Stash the FULL restart-relevant carry set at the warmup step
         # (codex rounds 4/6/8): a one-step run never enters the main
         # loop, and _finalize_run would otherwise checkpoint stale or
@@ -6469,6 +6493,8 @@ class ModelDriver:
             self._carry_aux["T_land"] = T_land
         if w_land is not None:
             self._carry_aux["w_land"] = w_land
+        if snow is not None:
+            self._carry_aux["snow"] = snow
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -6577,12 +6603,14 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                    T_land=T_land, w_land=w_land, **_dm_step_in,
+                    T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
             if phys_out.w_land is not None:
                 w_land = phys_out.w_land
+            if phys_out.snow is not None:
+                snow = phys_out.snow
             # Persist the full restart-relevant set per step (codex
             # rounds 6/8): checkpoints can fire on any step, so the
             # held-radiation fields and every carry must be current —
@@ -6600,6 +6628,8 @@ class ModelDriver:
                 self._carry_aux["T_land"] = T_land
             if w_land is not None:
                 self._carry_aux["w_land"] = w_land
+            if snow is not None:
+                self._carry_aux["snow"] = snow
             # Stateful-physics carries (issue #413): feed the updated
             # values back next step + persist for checkpoints.
             if phys_out.tke is not None:
