@@ -770,11 +770,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evaluation-suite", dest="evaluation_suites", nargs="+",
         default=list(_EVALUATION_DEFAULTS.suites),
-        help="One or more ClimateEval suite names, rendered into a single "
-             f"combined report (default: {' '.join(_EVALUATION_DEFAULTS.suites)}). "
-             "Available suites: Tier1_sanity_checks, Tier1_consistency_checks, "
-             "Tier1_ecs, Tier2_atmosphere_monthly, Tier2_atmosphere_subdaily, "
-             "Tier2_ocean_monthly.")
+        help="ClimateEval suite names to render into a single combined report. "
+             "Default (unset) = ALL bundled suites (every tier); a suite whose "
+             "data is missing/inapplicable is skipped + reported, not fatal. "
+             "Restrict with e.g. --evaluation-suite Tier2_atmosphere_monthly.")
     parser.add_argument(
         "--evaluation-model-id", dest="evaluation_model_id", type=str,
         default=_EVALUATION_DEFAULTS.model_id,

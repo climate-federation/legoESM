@@ -47,8 +47,9 @@ def test_enabled_invokes_expected_subprocess_command():
     assert cmd[0] == "/opt/climateeval_env/bin/python"
     assert cmd[1].endswith("scripts/validate/run_amip_climateeval.py")
     assert "--cmor-dir" in cmd
-    assert cmd[cmd.index("--cmor-dir") + 1] == "/scratch/b/b309178/amip_run/cmor/Amon"
-    # both suites passed after --suite (nargs="+"); one combined report via --output-dir
+    # cmor ROOT (so ocean/sea-ice tables load), not just Amon
+    assert cmd[cmd.index("--cmor-dir") + 1] == "/scratch/b/b309178/amip_run/cmor"
+    # explicit suites passed after --suite (nargs="+"); one report via --output-dir
     suite_i = cmd.index("--suite")
     assert cmd[suite_i + 1:suite_i + 3] == ["Tier1_sanity_checks", "Tier2_atmosphere_monthly"]
     assert cmd[cmd.index("--output-dir") + 1] == "/scratch/b/b309178/amip_run"
@@ -56,6 +57,18 @@ def test_enabled_invokes_expected_subprocess_command():
     assert "--fail-on-missing-data" in cmd
     assert "--download-missing-data" in cmd
     assert result == 0
+
+
+def test_empty_suites_omits_suite_flag():
+    # default (empty) suites -> no --suite -> runner discovers + runs ALL tiers
+    evaluation = EvaluationConfig(enabled=True, climateeval_python="/x/py")
+    config = _config(evaluation)
+    mock_result = MagicMock(returncode=0)
+    with patch("legoesm.driver.climateeval_hook.subprocess.run", return_value=mock_result) as run:
+        maybe_run_climateeval(config, "/tmp/run")
+    cmd = run.call_args.args[0]
+    assert "--suite" not in cmd
+    assert cmd[cmd.index("--cmor-dir") + 1] == "/tmp/run/cmor"
 
 
 def test_empty_timerange_omits_flag():

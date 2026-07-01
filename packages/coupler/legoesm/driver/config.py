@@ -196,8 +196,9 @@ class EvaluationConfig(NamedTuple):
     tool (not legoESM scheme dispatch), so they are intentionally not
     membership-validated here; an unknown suite fails loudly inside
     ClimateEval's own ``Suite()`` constructor. All listed suites are
-    rendered into ONE combined HTML report (default: a Tier1 global-mean
-    range check + a Tier2 ERA5 spatial-skill comparison).
+    rendered into ONE combined HTML report. **Empty (the default) = run
+    ALL bundled suites (every tier)**; a suite whose data is missing /
+    inapplicable is skipped and reported by the runner, not fatal.
 
     ``climateeval_python`` and ``data_root_dir`` have no hardcoded
     personal defaults — the CLI (``run_amip.py --evaluation-climateeval-
@@ -211,7 +212,7 @@ class EvaluationConfig(NamedTuple):
     ``docs/user-guide/climateeval_evaluation.md``).
     """
     enabled: bool = False
-    suites: tuple[str, ...] = ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
+    suites: tuple[str, ...] = ()  # empty = ALL bundled suites (every tier)
     model_id: str = "legoESM-1-0"
     experiment_id: str = "amip"
     variant_id: str = "r1i1p1f1"

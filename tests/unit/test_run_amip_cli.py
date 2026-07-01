@@ -1242,9 +1242,9 @@ def test_evaluate_defaults_off():
     assert cfg.output.evaluation.enabled is False
 
 
-def test_evaluate_default_suites_are_combined_tier1_tier2():
-    """With --evaluate but no --evaluation-suite, the default is the combined
-    Tier1 (range checks) + Tier2 (ERA5 spatial skill) suite list -> one report."""
+def test_evaluate_default_suites_empty_means_all_tiers():
+    """With --evaluate but no --evaluation-suite, suites is empty — the runner
+    then discovers + runs ALL bundled suites (every tier)."""
     parser = build_arg_parser()
     args = parser.parse_args([
         "--dataset", "analytical", "--cmip-output", "--evaluate",
@@ -1253,8 +1253,7 @@ def test_evaluate_default_suites_are_combined_tier1_tier2():
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
-    assert cfg.output.evaluation.suites == (
-        "Tier1_sanity_checks", "Tier2_atmosphere_monthly")
+    assert cfg.output.evaluation.suites == ()
 
 
 def test_evaluate_requires_cmip_output_rejected():
