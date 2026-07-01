@@ -503,9 +503,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
-                        action="store_true", default=False,
+                        action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
-                             "source (the tuned slab value is ON).")
+                             "source (the tuned slab value is ON). Use "
+                             "--no-convective-cloud to DISABLE a config-file "
+                             "default: recommended for prescribed-SST AMIP, where "
+                             "conv-cloud is an inert SST-drift compensator that "
+                             "only adds planetary albedo (amip_production.yaml A/B: "
+                             "OFF 0.295 vs ON 0.370).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,

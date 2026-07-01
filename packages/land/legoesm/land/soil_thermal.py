@@ -6,6 +6,20 @@ Solves the 1D heat equation:
 Thermal properties depend on soil moisture via the Johansen (1975) method.
 Discretized with backward Euler and solved via Thomas algorithm.
 
+KNOWN GAP — soil water FREEZE/THAW latent heat is NOT modelled here: the
+module solves sensible-heat diffusion only (no ``L_f`` term, no
+apparent-heat-capacity / enthalpy freeze curve, no ``T_freeze`` reference).
+Any column crossing ``constants.T_freeze`` (seasonal frost, permafrost,
+high-latitude winter) therefore skips the zero-curtain latent plateau and
+warms/cools too fast. Adding it is a scoped feature, not a one-line fix: it
+requires (1) a soil liquid/ice partition ``theta_liq(T)`` freezing-curve
+(config-width) with a frozen liquid residual, (2) an apparent heat capacity
+``C_app = C_eff + rho_w * L_f * d(theta_liq)/dT`` (or an enthalpy method) so
+energy closes across the phase change, (3) coupling to Richards so frozen
+water is immobile, and (4) a manufactured zero-curtain / Stefan validation.
+Tracked as a follow-up. The existing sensible-heat terms are sign- and
+energy-consistent as-is.
+
 References
 ----------
 - Johansen (1975): Thermal conductivity of soils. PhD thesis.
@@ -148,12 +162,20 @@ def compute_thermal_conductivity(
     k_sat = (thermal_config.k_solid ** (1.0 - theta_sat)
              * thermal_config.k_water ** theta_sat)
 
-    # Kersten number (Johansen 1975)
+    # Kersten number (Johansen 1975).  Validate the texture selector on the
+    # static config value (dispatch-hardening: a typo like "Sand"/"silt" must
+    # raise, not silently run the fine-soil branch).
+    _valid_textures = ("sand", "loam")
+    if thermal_config.soil_texture not in _valid_textures:
+        raise ValueError(
+            f"Unknown soil_texture {thermal_config.soil_texture!r}; "
+            f"expected one of {_valid_textures}."
+        )
     if thermal_config.soil_texture == "sand":
         K_e = thermal_config.kersten_slope_coarse * jnp.log10(
             jnp.clip(Sr, thermal_config.kersten_sr_floor_coarse, None)
         ) + 1.0
-    else:
+    else:  # "loam" (fine)
         K_e = jnp.log10(jnp.clip(Sr, thermal_config.kersten_sr_floor_fine, None)) + 1.0
     K_e = jnp.clip(K_e, 0.0, 1.0)
 
