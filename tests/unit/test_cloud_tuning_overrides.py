@@ -15,7 +15,10 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.clouds.config import (
+    CloudConfig,
+    build_cloud_config,
+)
 from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 from legoesm.driver.physics_pipeline import build_physics_pipeline
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -40,6 +43,42 @@ def test_cloudconfig_accepts_all_overrides() -> None:
     cc = CloudConfig(scheme="sundqvist", rh_crit=0.82,
                      q_c_diagnostic=3.0e-4, conv_cloud_max=0.18)
     assert (cc.rh_crit, cc.q_c_diagnostic, cc.conv_cloud_max) == (0.82, 3.0e-4, 0.18)
+
+
+def test_build_cloud_config_defaults_are_byte_identical() -> None:
+    # All-None overrides => exactly the CloudConfig defaults (the shared
+    # helper the pipeline + clt diagnostic both use must not drift, #689).
+    assert build_cloud_config("sundqvist") == CloudConfig(scheme="sundqvist")
+
+
+def test_build_cloud_config_applies_overrides() -> None:
+    cc = build_cloud_config(
+        "xu_randall", convective_cloud=True, rh_crit=0.82,
+        q_c_diagnostic=3.0e-4, conv_cloud_max=0.18,
+    )
+    assert cc.scheme == "xu_randall"
+    assert cc.convective_cloud is True
+    assert (cc.rh_crit, cc.q_c_diagnostic, cc.conv_cloud_max) == (0.82, 3.0e-4, 0.18)
+
+
+def test_build_cloud_config_matches_pipeline_wiring() -> None:
+    # The diagnostic path (build_cloud_config from ExperimentConfig fields)
+    # must reproduce what build_physics_pipeline feeds compute_cloud_properties.
+    grid = create_cubed_sphere(4)
+    sigma = make_hybrid_levels(NLEV)
+    cfg = _config(cloud_rh_crit=0.82, cloud_q_c_diagnostic=3.0e-4,
+                  cloud_conv_cloud_max=0.18)
+    pipe = build_physics_pipeline(grid, sigma, cfg)
+    diag = build_cloud_config(
+        cfg.cloud_scheme,
+        convective_cloud=False,  # conv_precip unavailable in the diagnostic
+        rh_crit=pipe._cloud_rh_crit,
+        q_c_diagnostic=pipe._cloud_q_c_diagnostic,
+        conv_cloud_max=pipe._cloud_conv_cloud_max,
+    )
+    assert diag.scheme == "sundqvist"
+    assert (diag.rh_crit, diag.q_c_diagnostic, diag.conv_cloud_max) == (
+        0.82, 3.0e-4, 0.18)
 
 
 def test_pipeline_threads_cloud_overrides() -> None:
