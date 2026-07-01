@@ -71,13 +71,15 @@ def main():
     ap.add_argument("--forcing-path", type=str, default=None)
     ap.add_argument("--cache-path", type=str,
                     default="results/aimip_forcing/gaussian_forcing.npz")
-    ap.add_argument("--epochs", type=int, default=8)
-    ap.add_argument("--rollout-days", type=int, default=3)
+    ap.add_argument("--curriculum", type=str, default="1:4,3:6,5:8",
+                    help="rollout_days:epochs phases, short->long (NeuralGCM-style).")
+    ap.add_argument("--ema-decay", type=float, default=0.999,
+                    help="EMA of the params (ACE2 uses 0.999); EMA weights saved.")
     ap.add_argument("--n-samples", type=int, default=6)
     ap.add_argument("--first-year", type=int, default=1979)
     ap.add_argument("--last-year", type=int, default=2014)  # training period only
-    ap.add_argument("--lr", type=float, default=1.0e-4)
-    ap.add_argument("--w-drift", type=float, default=1.0)
+    ap.add_argument("--lr", type=float, default=3.0e-4)
+    ap.add_argument("--w-drift", type=float, default=3.0)
     ap.add_argument("--rad-update-interval", type=int, default=36)
     args = ap.parse_args()
 
@@ -157,26 +159,26 @@ def main():
         tsfc = np.asarray(blend_surface_temperature(sst, sic, T_ice))
         return np.where(ocean, tsfc, np.nan).astype(np.float64)
 
-    # --- build training samples: (IC state, target carry, prescribed SST, doy) ---
-    years = np.linspace(args.first_year, args.last_year, args.n_samples).astype(int)
-    samples = []
-    phis0 = None
-    for k, yr in enumerate(years):
-        d0 = _dt.date(int(yr), 1 + (k % 12), 15)  # spread across seasons
-        d1 = d0 + _dt.timedelta(days=args.rollout_days)
-        ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
-        tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
-        ic_state = carry_to_spectral_state(ic_carry, grid)
-        mid = d0 + _dt.timedelta(days=args.rollout_days // 2)
-        samples.append((
-            ic_state, tgt_carry,
-            jnp.asarray(_override_at(mid)),
-            jnp.asarray(float(d0.timetuple().tm_yday)),
-        ))
-        if phis0 is None:
-            phis0 = jnp.asarray(ic_carry.phis)
-    logger.info(f"Built {len(samples)} fine-tune samples, rollout={args.rollout_days}d")
+    # --- sample builder (rollout length varies across the curriculum) ---
+    def _build_samples(rollout_days):
+        years = np.linspace(args.first_year, args.last_year, args.n_samples).astype(int)
+        out, phis = [], None
+        for k, yr in enumerate(years):
+            d0 = _dt.date(int(yr), 1 + (k % 12), 15)  # spread across seasons
+            d1 = d0 + _dt.timedelta(days=rollout_days)
+            ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
+            tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
+            mid = d0 + _dt.timedelta(days=rollout_days // 2)
+            out.append((
+                carry_to_spectral_state(ic_carry, grid), tgt_carry,
+                jnp.asarray(_override_at(mid)),
+                jnp.asarray(float(d0.timetuple().tm_yday)),
+            ))
+            if phis is None:
+                phis = jnp.asarray(ic_carry.phis)
+        return out, phis
 
+    _, phis0 = _build_samples(1)  # phis is rollout-agnostic -> land mask once
     land_mask = land_mask_from_phis(phis0, smooth=True)
     sizing_ps = init_physics_state(
         ncol, nlev,
@@ -206,7 +208,7 @@ def main():
         T = jnp.asarray(c.T)[..., -1]
         return jnp.sum(jnp.mean(T, axis=-1) * lat_w) / jnp.sum(lat_w)
 
-    def loss_fn(params):
+    def loss_fn(params, samples, n_steps):
         non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
             params, grid, dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
@@ -229,6 +231,9 @@ def main():
             state_loss = spectral_state_vs_carry_loss(
                 pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,
             )
+            # global-mean near-surface-T drift = energy-imbalance proxy (the
+            # ACE2-style stability signal; grows with rollout length so the
+            # curriculum's longer phases penalise the radiative runaway harder).
             drift = (_gm_surf_T_state(pred) - _gm_surf_T_carry(tgt_carry)) ** 2
             total = total + state_loss + args.w_drift * drift
         return total / len(samples)
@@ -253,29 +258,59 @@ def main():
     except Exception as exc:  # noqa: BLE001 - warm-up is best-effort
         logger.warning(f"RRTMGP optics warm-up raised {exc!r}; continuing")
 
+    # Curriculum "rollout_days:epochs,..." (NeuralGCM-style: short rollouts
+    # first, gradually extended so the radiative drift is exposed + penalised
+    # progressively). One JIT compile per phase (samples + n_steps change).
+    phases = []
+    for tok in str(args.curriculum).split(","):
+        rd, ep = tok.split(":")
+        phases.append((int(rd), int(ep)))
+    logger.info(f"curriculum: {phases}  lr={args.lr} w_drift={args.w_drift} ema={args.ema_decay}")
+
     opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(args.lr))
     opt_state = opt.init(eqx.filter(params0, eqx.is_inexact_array))
-
-    @eqx.filter_jit
-    def step(params, opt_state):
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
-        updates, opt_state = opt.update(
-            grads, opt_state, eqx.filter(params, eqx.is_inexact_array),
-        )
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
-
     params = params0
-    for epoch in range(args.epochs):
-        params, opt_state, loss = step(params, opt_state)
-        logger.info(f"epoch {epoch:3d}: loss={float(loss):.6f}")
-        if not np.isfinite(float(loss)):
-            logger.error("non-finite loss; stopping")
+    # EMA on the inexact-array leaves only (static leaves recombined at save).
+    ema_arrays = eqx.filter(params0, eqx.is_inexact_array)
+    _, static = eqx.partition(params0, eqx.is_inexact_array)
+
+    for rd, ep in phases:
+        samples, _ = _build_samples(rd)
+        n_steps_phase = rd * int(_SPD / dt)
+        logger.info(f"phase rollout={rd}d epochs={ep} ({len(samples)} samples, {n_steps_phase} steps)")
+
+        @eqx.filter_jit
+        def step(params, opt_state, _samples=samples, _n=n_steps_phase):
+            loss, grads = eqx.filter_value_and_grad(
+                lambda p: loss_fn(p, _samples, _n)
+            )(params)
+            updates, opt_state = opt.update(
+                grads, opt_state, eqx.filter(params, eqx.is_inexact_array),
+            )
+            params = eqx.apply_updates(params, updates)
+            return params, opt_state, loss
+
+        broke = False
+        for epoch in range(ep):
+            params, opt_state, loss = step(params, opt_state)
+            cur = eqx.filter(params, eqx.is_inexact_array)
+            ema_arrays = jax.tree_util.tree_map(
+                lambda e, c: args.ema_decay * e + (1.0 - args.ema_decay) * c,
+                ema_arrays, cur,
+            )
+            logger.info(f"  [rd={rd}d] epoch {epoch:3d}: loss={float(loss):.6f}")
+            if not np.isfinite(float(loss)):
+                logger.error("non-finite loss; stopping")
+                broke = True
+                break
+        if broke:
             break
 
     args.out_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    save_checkpoint(params, args.out_ckpt)
-    logger.info(f"Wrote fine-tuned params: {args.out_ckpt}")
+    ema_params = eqx.combine(ema_arrays, static)  # EMA weights = more stable
+    save_checkpoint(ema_params, args.out_ckpt)
+    save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"))
+    logger.info(f"Wrote fine-tuned params (EMA): {args.out_ckpt}")
 
 
 if __name__ == "__main__":
