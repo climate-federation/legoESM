@@ -194,6 +194,8 @@ def build_cloud_config(
     rh_crit: float | None = None,
     q_c_diagnostic: float | None = None,
     conv_cloud_max: float | None = None,
+    p_xr: float | None = None,
+    alpha_xr: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -212,6 +214,10 @@ def build_cloud_config(
         overrides["q_c_diagnostic"] = q_c_diagnostic
     if conv_cloud_max is not None:
         overrides["conv_cloud_max"] = conv_cloud_max
+    if p_xr is not None:
+        overrides["p_xr"] = p_xr
+    if alpha_xr is not None:
+        overrides["alpha_xr"] = alpha_xr
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

@@ -55,6 +55,9 @@ class LandAlbedoConfig(NamedTuple):
         Snow albedo e-folding decay time [s].
     snow_depth_crit : float
         Critical snow depth for full snow cover [kg/m2].
+    veg_transition_sharpness_per_deg : float
+        Sharpness [deg^-1] of the smooth tropics->midlat->highlat
+        vegetation-albedo latitude blend (transition width = 1/sharpness).
     """
     alpha_veg_tropics: float = 0.15
     alpha_veg_midlat: float = 0.20
@@ -63,6 +66,7 @@ class LandAlbedoConfig(NamedTuple):
     alpha_snow_min: float = 0.50
     tau_snow_decay: float = 432000.0  # 5 days in seconds
     snow_depth_crit: float = 50.0     # kg/m2
+    veg_transition_sharpness_per_deg: float = 0.3  # deg^-1 latitude blend
 
 
 class IceAlbedoConfig(NamedTuple):
@@ -128,9 +132,11 @@ def land_vegetation_albedo(
     """
     abs_lat_deg = jnp.abs(lat) * 180.0 / jnp.pi
 
-    # Smooth blending between regimes using sigmoid transitions
-    # Tropics->midlat around 23.5 deg, midlat->highlat around 60 deg
-    sharpness = 0.3  # degrees^-1 for smooth transition
+    # Smooth blending between regimes using sigmoid-like ramps.
+    # Band EDGES 23.5 deg (tropics->midlat) and 60 deg (midlat->highlat)
+    # are physical latitude boundaries; the transition SHARPNESS (a width,
+    # forbidden as a body magic number per CLAUDE.md) is a config field.
+    sharpness = config.veg_transition_sharpness_per_deg  # deg^-1
     w_midlat = jnp.clip(
         (abs_lat_deg - 23.5) * sharpness, 0.0, 1.0
     )
@@ -288,6 +294,12 @@ def ocean_albedo(
     alpha : jnp.ndarray or float
         Ocean surface albedo.
     """
+    _valid_methods = ("constant", "zenith")
+    if config.method not in _valid_methods:
+        raise ValueError(
+            f"Unknown ocean albedo method {config.method!r}; "
+            f"expected one of {_valid_methods}."
+        )
     if config.method == "constant" or cos_zenith is None:
         if cos_zenith is not None:
             return jnp.broadcast_to(
@@ -295,7 +307,7 @@ def ocean_albedo(
             )
         return config.alpha_ocean_const
 
-    # Briegleb (1992) zenith-angle dependent albedo
+    # method == "zenith": Briegleb (1992) zenith-angle dependent albedo
     mu = jnp.clip(cos_zenith, 0.01, 1.0)
     alpha = (
         0.026 / (mu ** 1.7 + 0.065)

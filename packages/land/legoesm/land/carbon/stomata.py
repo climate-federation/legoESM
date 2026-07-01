@@ -11,6 +11,12 @@ light-use-efficiency GPP and is coupled to Ball-Berry or Medlyn stomatal
 conductance.  When the carbon cycle is off, the Jarvis model provides
 stomatal control on evapotranspiration without requiring CO2 information.
 
+Limitation: C3 biochemistry only (Farquhar 1980).  The C4 PFTs in the
+CLM5 table (``c4_grass``, ``crop_c4``) are approximated with C3 kinetics --
+no Collatz (1992) C4 biochemical path is implemented.  Consequently the
+distinctive C4 CO2 sensitivity and near-zero CO2 compensation point are
+not represented for those PFTs.
+
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
 References
@@ -217,6 +223,11 @@ def farquhar_photosynthesis(
     beta_soil: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Farquhar et al. (1980) C3 photosynthesis model.
+
+    C3 biochemistry only.  C4 PFTs (``c4_grass``, ``crop_c4``) are run
+    through this same C3 kinetics as a documented approximation -- there is
+    no Collatz C4 path, so their CO2 sensitivity / compensation point are
+    not represented.
 
     Parameters
     ----------
