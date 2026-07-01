@@ -248,7 +248,7 @@ class TestSoilThermalX64(unittest.TestCase):
 
     def test_tridiag_solver_dtype_consistency(self):
         """Shared Thomas solver handles mixed-dtype inputs gracefully."""
-        from legoesm.land.tridiag import thomas_solve_batch
+        from legoesm.timestepping.tridiagonal import thomas_solve
 
         n = 5
         ncol = 3
@@ -259,76 +259,44 @@ class TestSoilThermalX64(unittest.TestCase):
         d = jnp.ones((ncol, n), dtype=jnp.float64)
 
         # Should not crash with mixed dtypes
-        x = thomas_solve_batch(a, b, c, d)
+        x = thomas_solve(a, b, c, d)
         npt.assert_allclose(x, 0.5, atol=1e-12)
         self.assertEqual(x.dtype, jnp.float64)
 
-    def test_tridiag_denom_floor_is_never_zero(self):
-        """Iter-85 math regression for the Thomas-solver denom safety floor.
+    def test_tridiag_solver_finite_on_near_zero_pivot(self):
+        """The soil column now reuses the SHARED ``thomas_solve`` (land's duplicate
+        land/tridiag.py was removed — bit-identical on diagonally-dominant systems;
+        verified max|x_land-x_shared|=0 and grad diff 5.5e-17).
 
-        The previous formulation
-
-            denom_safe = jnp.where(|denom| < _tiny,
-                                   jnp.sign(denom)*_tiny + _tiny, denom)
-
-        can evaluate to *exactly zero* whenever ``denom`` is a tiny
-        negative number under full IEEE subnormal arithmetic
-        (``sign(-_subnormal) = -1`` ⇒ ``-_tiny + _tiny = 0``).  The next
-        line ``c_col[k] / denom`` then divides by zero.
-
-        Under XLA's default subnormal flush-to-zero (FTZ) ``sign`` on a
-        negative subnormal returns ``-0.0``, so the old formula
-        already produces ``+_tiny`` and is safe in practice — but the
-        masking is platform-dependent and the code is fragile.
-
-        The fix replaces ``sign(denom)`` with an explicit
-        ``where(denom >= 0.0, 1.0, -1.0)`` branch.  **Note that this does
-        *not* preserve sign on a backend that flushes subnormals**: under
-        FTZ a negative subnormal becomes ``-0.0``, ``-0.0 >= 0.0`` is
-        ``True``, and the new formula returns ``+_tiny`` (same as the old
-        masked behavior).  The point of the fix is *non-zero floor* on
-        every platform — without FTZ the old formula produces 0 while
-        the new one produces ``-_tiny``.
-
-        This test verifies the bug existed (old math) and that the new
-        formula never produces 0, both checked at the math level so the
-        result is independent of XLA's subnormal handling.
-        """
-        _tiny = float(jnp.finfo(jnp.float32).tiny)
-
-        # Old formula with the IEEE-correct sign = -1 (no FTZ): exactly 0.
-        old_floored = (-1.0) * _tiny + _tiny
-        self.assertEqual(old_floored, 0.0,
-                         "old denom-floor must reproduce divide-by-zero")
-
-        def new_floor(denom_val: float) -> float:
-            sign = 1.0 if denom_val >= 0.0 else -1.0
-            return sign * _tiny if abs(denom_val) < _tiny else denom_val
-
-        # The defining property of the fix: floored value is never zero.
-        for denom_val in (-1e-40, -1.4e-45, 0.0, +1e-40, +1.4e-45):
-            self.assertNotEqual(new_floor(denom_val), 0.0,
-                                f"new floor returned 0 for denom={denom_val!r}")
-
-        # Without FTZ the new formula additionally maps negative inputs
-        # to ``-_tiny`` (sign preserved).
-        self.assertEqual(new_floor(-1e-40), -_tiny)
-        self.assertEqual(new_floor(+1e-40), +_tiny)
-        # Exactly zero treated as the positive branch.
-        self.assertEqual(new_floor(0.0), +_tiny)
-        # Normal values pass through unchanged.
-        self.assertEqual(new_floor(-2.5), -2.5)
-        self.assertEqual(new_floor(+1.7), +1.7)
-
-        # Smoke check that the live solver remains finite on a system that
-        # would land in the floor branch under default XLA FTZ.
-        from legoesm.land.tridiag import thomas_solve_batch
-        a = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
-        b = jnp.array([[1.0, -1e-40]], dtype=jnp.float32)
-        c = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
-        d = jnp.array([[0.0, 1.0]], dtype=jnp.float32)
-        x = thomas_solve_batch(a, b, c, d)
-        assert jnp.all(jnp.isfinite(x)), f"tridiag produced non-finite x: {x}"
+        The invariant land needs is only FINITENESS on its (diagonally dominant)
+        systems, where the denom floor is in fact unreachable.  This guards the
+        floor on both the FIRST and an INTERIOR near-zero pivot.  NOTE: the shared
+        solver's floor is positive-only (maps |denom|<tiny -> +tiny), NOT the
+        sign-preserving floor the deleted land solver used; land does not require
+        sign preservation because a diagonally-dominant matrix never produces a
+        subnormal pivot, so the floor branch never fires in practice."""
+        from legoesm.timestepping.tridiagonal import thomas_solve
+        # interior near-zero pivot
+        x = thomas_solve(jnp.array([[0.0, 0.0]], dtype=jnp.float32),
+                         jnp.array([[1.0, -1e-40]], dtype=jnp.float32),
+                         jnp.array([[0.0, 0.0]], dtype=jnp.float32),
+                         jnp.array([[0.0, 1.0]], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(x)), f"interior pivot -> non-finite: {x}"
+        # near-zero FIRST pivot
+        x0 = thomas_solve(jnp.array([[0.0, 0.0]], dtype=jnp.float32),
+                          jnp.array([[1e-40, 1.0]], dtype=jnp.float32),
+                          jnp.array([[0.0, 0.0]], dtype=jnp.float32),
+                          jnp.array([[1.0, 0.0]], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(x0)), f"first pivot -> non-finite: {x0}"
+        # the real land regime: a diagonally-dominant system solves correctly
+        a = jnp.array([[0.0, -1.0, -1.0]]); c = jnp.array([[-1.0, -1.0, 0.0]])
+        b = jnp.array([[3.0, 4.0, 3.0]]); d = jnp.array([[1.0, 2.0, 1.0]])
+        xs = thomas_solve(a, b, c, d)
+        # residual A x = d (a sub, b diag, c super)
+        Ax = b[:, :] * xs
+        Ax = Ax.at[:, 1:].add(a[:, 1:] * xs[:, :-1])
+        Ax = Ax.at[:, :-1].add(c[:, :-1] * xs[:, 1:])
+        npt.assert_allclose(Ax, d, atol=1e-6)
 
 
 # =========================================================================

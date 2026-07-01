@@ -485,3 +485,66 @@ class TestADRoutingStatic:
             "    return sendrecv(a, b, c, c, 0, 0, None)\n"
         )
         assert _raw_sendrecv_call_lines(good) == []
+
+
+class TestRankIndependentTags:
+    """Halo MPI tags must be rank-INDEPENDENT and tiny at ANY rank count.
+
+    The old per-entity scheme encoded ``rank * 1000 + nbr`` and hard-raised at
+    >= 1000 ranks (and the batched path's ``rank * n_ranks`` + 3e6 base pushed
+    tags past MPI_TAG_UB).  mpi4jax ``sendrecv`` already matches on (source,
+    dest), so the rank pair is redundant in the tag; dropping it removes the
+    ceiling.  These tests lock that the scheme can never reintroduce a
+    rank-dependent tag.
+    """
+
+    # MPI only guarantees tags up to MPI_TAG_UB >= 32767 (the standard minimum).
+    _MPI_GUARANTEED_TAG_UB = 32767
+
+    def test_entity_tag_is_the_entity_type(self):
+        assert hev._entity_tag(0) == 0  # cell
+        assert hev._entity_tag(1) == 1  # edge
+        assert hev._entity_tag(2) == 2  # vertex
+
+    def test_batch_group_tags_disjoint_from_entity_tags(self):
+        entity_tags = {hev._entity_tag(e) for e in (0, 1, 2)}
+        group_tags = {hev._batch_group_tag(g) for g in range(16)}
+        assert entity_tags.isdisjoint(group_tags)
+        assert hev._batch_group_tag(0) == hev._BATCH_TAG_BASE
+
+    def test_tags_fit_guaranteed_tag_ub_for_realistic_group_counts(self):
+        # Group tags grow with the dtype-group count (NOT unbounded for any
+        # count): realistic states have a handful of groups.  256 is already far
+        # more than any real model state, and all still fit the guaranteed UB.
+        for g in range(256):
+            assert hev._batch_group_tag(g) <= self._MPI_GUARANTEED_TAG_UB
+        for e in (0, 1, 2):
+            assert hev._entity_tag(e) <= self._MPI_GUARANTEED_TAG_UB
+
+    def test_check_tag_bound_raises_on_overflow(self):
+        # A pathological group count (tag > MPI_TAG_UB) must FAIL LOUD via the
+        # runtime guard, never silently overflow / mis-pair.
+        class _FakeComm:
+            @staticmethod
+            def Get_attr(_key):  # noqa: N802 - mirrors mpi4py's MPI API name
+                return 32767
+
+        class _FakeMPI:
+            TAG_UB = "tag_ub"
+            COMM_WORLD = _FakeComm
+
+        hev._check_tag_bound(32767, _FakeMPI, "test")  # at the bound: ok
+        with pytest.raises(ValueError, match="MPI_TAG_UB"):
+            hev._check_tag_bound(32768, _FakeMPI, "test")  # over: raise
+
+    def test_tag_helpers_take_no_rank_argument(self):
+        # Structural guarantee: a tag is a function of (entity type / group)
+        # ONLY, never the rank -> no rank ceiling can be reintroduced.
+        import inspect
+
+        assert list(inspect.signature(hev._entity_tag).parameters) == [
+            "entity_type"
+        ]
+        assert list(inspect.signature(hev._batch_group_tag).parameters) == [
+            "group"
+        ]

@@ -223,8 +223,11 @@ def test_cloud_frac_matches_committed_golden():
     """Bit-exact vs the committed golden (CI, no reference checkout needed)."""
     golden = np.load(_CF_GOLDEN_NPZ)
     rcm, cf = calc_pdf_liquid_cloud_frac(**_cloud_inputs())
-    np.testing.assert_array_equal(np.asarray(rcm), golden["rcm"])
-    np.testing.assert_array_equal(np.asarray(cf), golden["cloud_frac"])
+    # FP-reassociation tolerance: the C1-C8 "condense" refactor fused/re-
+    # associated the algebra (~1e-14 rel), so round-off (not bit-identity) is
+    # the right invariant.
+    np.testing.assert_allclose(np.asarray(rcm), golden["rcm"], rtol=1e-13, atol=1e-16)
+    np.testing.assert_allclose(np.asarray(cf), golden["cloud_frac"], rtol=1e-13, atol=1e-16)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

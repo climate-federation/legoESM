@@ -34,10 +34,42 @@ outside the sounding range clamp to the nearest endpoint.  Time interpolation
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+
+# Repo-local forcing cache populated by ``scripts/data/fetch_les_forcing.py``.
+# This module lives at packages/atmosphere/legoesm/atmosphere/; the repo root is
+# four parents up (…/legoESM/).
+_LOCAL_FORCING_CACHE = Path(__file__).resolve().parents[4] / "data" / "les_cases"
+
+
+def resolve_sam_case_dir(case_name: str) -> str:
+    """Resolve the ``CASES/<case_name>`` deck directory for a gSAM-backed case.
+
+    Priority:
+
+    1. ``$LEGOESM_GSAM_ROOT/CASES/<case_name>`` — an explicit external gSAM
+       checkout (set by the user) wins, if the deck is present there.
+    2. The repo-local cache ``data/les_cases/<case_name>`` (override the root
+       with ``$LEGOESM_LES_FORCING``), populated by
+       ``scripts/data/fetch_les_forcing.py``.
+
+    The cache path is returned even when absent, so a caller's existence check
+    raises an actionable error (run the fetch script, pass ``--case-dir``, or set
+    ``LEGOESM_GSAM_ROOT``).  ``case_name`` is the gSAM directory name, e.g.
+    ``"BOMEX"`` / ``"DYCOMS_RF01"`` / ``"GATE_IDEAL"``.
+    """
+    env_root = os.environ.get("LEGOESM_GSAM_ROOT")
+    if env_root:
+        cand = Path(env_root).expanduser() / "CASES" / case_name
+        if cand.is_dir():
+            return str(cand)
+    cache_root = os.environ.get("LEGOESM_LES_FORCING")
+    cache = Path(cache_root).expanduser() if cache_root else _LOCAL_FORCING_CACHE
+    return str(cache / case_name)
 
 
 class SAMSounding(NamedTuple):

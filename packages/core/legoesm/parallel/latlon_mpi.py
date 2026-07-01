@@ -388,9 +388,12 @@ def make_lon_row_comm(layout: LatLon2DLayout):
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
 def _lon_gather_full_p(local_block, lon_start, lon_end, n_lon_global,
                        proc_lon, row_comm):
-    import mpi4jax
+    from legoesm.parallel.reductions import mpi4jax_array_result, require_mpi_stack
 
-    from legoesm.parallel.reductions import mpi4jax_array_result
+    # Checked accessor (not a bare ``import mpi4jax``): runs the GPU-transport
+    # preflight so this device-array allgather can't slip a GPU-direct
+    # misconfiguration past the fail-closed check.
+    mpi4jax, _ = require_mpi_stack()
 
     if n_lon_global % proc_lon != 0:
         raise ValueError(
@@ -425,10 +428,11 @@ def _lon_gather_full_p_bwd(lon_start, lon_end, n_lon_global, proc_lon,
     adjoint is a reduce-scatter; ``allreduce(SUM)`` + slice computes the
     same value without a reduce-scatter primitive.)
     """
-    import mpi4jax
-    from mpi4py import MPI
+    from legoesm.parallel.reductions import mpi4jax_array_result, require_mpi_stack
 
-    from legoesm.parallel.reductions import mpi4jax_array_result
+    # Checked accessor (see the forward primal): GPU-transport preflight before
+    # this device-array allreduce.
+    mpi4jax, MPI = require_mpi_stack()
 
     summed = mpi4jax_array_result(
         mpi4jax.allreduce(g_full, op=MPI.SUM, comm=row_comm))

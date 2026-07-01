@@ -120,6 +120,27 @@ def test_mc3d_runs_in_bomex_les():
   assert float(jnp.max(jnp.abs(tend.dtheta_prime_dt.data))) > 0.0
 
 
+def test_mc3d_realization_decorrelates_with_time():
+  """B2: the MC seed folds in time, so different timesteps draw INDEPENDENT
+  photon realizations (the speckle is NOT frozen across the integration), while
+  a repeated time stays deterministic. Low photon count makes the per-key MC
+  noise large enough to distinguish realizations."""
+  state, grid, hc, tm = _bomex_state(cloud=False)
+  if not _rrtmgp_available():
+    pytest.skip("RRTMGP optics data unavailable")
+  fn = make_radiation_physics(_mc3d_cfg(False), model_type="plane")
+
+  fn.set_time(80.0, 43200.0)
+  a = fn(state, grid, hc, tm).dtheta_prime_dt.data
+  fn.set_time(80.0, 43200.0)            # same time -> identical realization
+  a_again = fn(state, grid, hc, tm).dtheta_prime_dt.data
+  fn.set_time(80.0, 43800.0)            # +10 min -> independent realization
+  b = fn(state, grid, hc, tm).dtheta_prime_dt.data
+
+  assert bool(jnp.allclose(a, a_again))             # deterministic per time
+  assert not bool(jnp.allclose(a, b))               # not frozen across time
+
+
 def test_bomex_broken_cloud_concentrates_sw_heating():
   """3D ray-tracing signature on a BOMEX-geometry broken shallow-cumulus field:
   shortwave absorption concentrates in the CLOUDY columns at cloud levels.

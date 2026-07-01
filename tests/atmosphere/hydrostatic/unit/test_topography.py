@@ -218,74 +218,49 @@ class TestSmoothing(unittest.TestCase):
         npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
 
 
-class TestVoronoiSmoothing(unittest.TestCase):
-    """Test Laplacian smoothing on an SCVT/Voronoi cell mesh."""
+class TestSmoothPhisGaussian(unittest.TestCase):
+    """Public lat-lon phis smoother used by the ERA5 lat-lon IC carry."""
 
     @staticmethod
-    def _ring(n: int):
-        """Adjacency for a ring of ``n`` cells (each has 2 neighbours).
+    def _max_abs_grad(arr):
+        # Longitude-periodic, pole-clamped finite differences.
+        di = np.abs(np.diff(arr, axis=0)).max()
+        dj = np.abs(arr - np.roll(arr, 1, axis=1)).max()
+        return max(di, dj)
 
-        Returns ``(cells_on_cell (2, n), n_edges_on_cell (n,))`` matching the
-        ``VoronoiMesh.cellsOnCell`` layout (maxEdges, nCells) with 0-based
-        neighbour indices.
-        """
-        cells_on_cell = np.stack([
-            np.array([(c - 1) % n for c in range(n)], dtype=np.int32),
-            np.array([(c + 1) % n for c in range(n)], dtype=np.int32),
-        ])  # (2, n)
-        n_edges_on_cell = np.full(n, 2, dtype=np.int32)
-        return cells_on_cell, n_edges_on_cell
+    def test_reduces_max_gradient_on_steep_peak(self):
+        """A steep single-peak phis must have its max gradient reduced."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        n_lat, n_lon = 24, 48
+        phis = np.zeros((n_lat, n_lon))
+        phis[12, 24] = 5.6e4  # ~5600 m ERA5-like spike (m^2/s^2)
+        smoothed = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=4))
+        self.assertEqual(smoothed.shape, phis.shape)
+        self.assertLess(self._max_abs_grad(smoothed), self._max_abs_grad(phis))
 
-    def test_constant_field_preserved(self):
-        """A spatially constant field is invariant under smoothing."""
-        coc, nedge = self._ring(8)
-        arr = np.full(8, 5.0)
-        smoothed = _laplacian_smooth_voronoi(arr, coc, nedge, passes=4)
-        npt.assert_allclose(smoothed, arr, rtol=1e-12, atol=1e-12)
+    def test_flat_field_is_invariant(self):
+        """Flat orography (AMIP flat-topo path) is unchanged by smoothing."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        phis = np.full((16, 32), 0.0)
+        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(phis)), phis)
+        const = np.full((16, 32), 1234.0)
+        npt.assert_allclose(np.asarray(smooth_phis_gaussian(const)), const, rtol=1e-6)
 
-    def test_zero_passes_no_op(self):
-        """Zero passes returns the input unchanged."""
-        coc, nedge = self._ring(6)
-        arr = np.random.default_rng(0).normal(0, 100, 6)
-        result = _laplacian_smooth_voronoi(arr, coc, nedge, passes=0)
-        npt.assert_array_equal(result, arr)
+    def test_zero_passes_is_noop(self):
+        """passes<=0 returns the input untouched."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        arr = np.random.default_rng(0).normal(0, 100, (8, 16))
+        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(arr, 0)), arr)
 
-    def test_reduces_spike_variance(self):
-        """Smoothing a single spike reduces field variance and the peak."""
-        coc, nedge = self._ring(12)
-        arr = np.zeros(12)
-        arr[5] = 100.0
-        smoothed = _laplacian_smooth_voronoi(arr, coc, nedge, passes=4)
-        self.assertLess(np.var(smoothed), np.var(arr))
-        self.assertLess(smoothed.max(), arr.max())
-        # No new extrema introduced (monotone-ish smoother stays in range).
-        self.assertGreaterEqual(smoothed.min(), arr.min() - 1e-9)
-
-    def test_padding_minus_one_ignored(self):
-        """``-1`` neighbour slots (cells with fewer edges) are masked out."""
-        # Line graph: cell 0 has a single neighbour (cell 1); slot 1 is -1.
-        coc = np.array([[1, 0, 1], [-1, 2, -1]], dtype=np.int32)  # (maxEdges=2, n=3)
-        nedge = np.array([1, 2, 1], dtype=np.int32)
-        arr = np.array([0.0, 9.0, 0.0])
-        smoothed = _laplacian_smooth_voronoi(arr, coc, nedge, passes=1)
-        # Cell 0: mean(self=0, neighbour=9)=4.5; blended 0.5*0 + 0.5*4.5 = 2.25.
-        self.assertAlmostEqual(float(smoothed[0]), 2.25, places=9)
-        self.assertTrue(np.all(np.isfinite(smoothed)))
-
-    def test_shape_mismatch_raises(self):
-        """Disagreeing nCells across inputs is a hard error."""
-        coc, nedge = self._ring(6)
-        with self.assertRaises(ValueError):
-            _laplacian_smooth_voronoi(np.zeros(5), coc, nedge, passes=1)
-
-    def test_smooth_phis_voronoi_wrapper(self):
-        """Public wrapper returns a JAX array equal to the numpy smoother."""
-        coc, nedge = self._ring(10)
-        phis = np.linspace(0.0, 5e4, 10)
-        out = smooth_phis_voronoi(phis, coc, nedge, smoothing_passes=3)
-        self.assertIsInstance(out, jnp.ndarray)
-        ref = _laplacian_smooth_voronoi(phis, coc, nedge, passes=3)
-        npt.assert_allclose(np.asarray(out), ref, rtol=1e-6, atol=1e-6)
+    def test_longitude_periodic(self):
+        """A peak on the lon seam smooths into BOTH wrap neighbours."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        n_lat, n_lon = 12, 24
+        phis = np.zeros((n_lat, n_lon))
+        phis[6, 0] = 1.0e4
+        sm = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=1))
+        # Mass leaked across the periodic seam to lon index n_lon-1.
+        self.assertGreater(sm[6, n_lon - 1], 0.0)
 
 
 class TestLoadRealTopography(unittest.TestCase):

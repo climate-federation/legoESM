@@ -90,8 +90,15 @@ def basal_melt_rate_m_per_s(T_w_C, S_w_psu, p_b_dbar,
         cfg = IceShelfMeltConfig()
     T_f = freezing_point_C(S_w_psu, p_b_dbar)
     thermal_driving = jnp.asarray(T_w_C) - T_f
-    # Mass-flux form: rho_fw * m = rho_sw * c_p * gamma_T * dT_drive / L_f
-    # Returning meters/s of freshwater equivalent.
+    # Small-thermal-driving linearised Jenkins heat balance.  The EXACT
+    # freshwater mass flux is ``rho_sw * c_p_sw * gamma_T * dT_drive / L_f``
+    # [kg/m^2/s]; here we return a freshwater-equivalent melt rate
+    # ``m = gamma_T * c_p_sw * dT_drive / L_f`` [m/s] which
+    # ``basal_freshwater_flux_*`` multiplies by ``rho_fw``.  That drops the
+    # ``rho_sw/rho_fw`` (~1.025) factor, which is ABSORBED into the
+    # hand-calibrated effective ``gamma_T`` (tuned so the linearised rate
+    # lands in the ISOMIP+ 0.1-10 m/yr range) — do NOT re-add ``rho_sw``
+    # without re-tuning ``gamma_T``.
     return cfg.gamma_T * cfg.c_p_sw * thermal_driving / cfg.L_f
 
 

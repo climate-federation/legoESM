@@ -153,6 +153,33 @@ mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
 runtime, so once the env is built the submitted job carries the right
 environment without any of the manual exports above.
 
+### Slingshot fabric + GPU-direct halo (why a job "runs but doesn't scale")
+
+Two settings the halo exchange needs on Derecho's Slingshot 11 fabric, both
+now wired into the job scripts:
+
+1. **`MPI4JAX_USE_CUDA_MPI=1`** (`gpu_moist_scaling.pbs`). mpi4jax's *default*
+   is to copy each `sendrecv` buffer device→host→device. On the GPU route-A
+   path that host round-trip per exchange **erases multi-GPU scaling** even
+   though the run is numerically correct — the classic "halo works but doesn't
+   speed up" symptom. Setting this hands the on-device buffer straight to
+   GPU-aware cray-mpich. It requires an mpi4jax built **with** CUDA support
+   (Step 1b); if that's missing, `require_mpi_stack()` now raises a clear
+   `ImportError` at startup instead of segfaulting on the first exchange. With
+   a CUDA-capable mpi4jax but the var unset, you get a one-time `RuntimeWarning`
+   telling you the halo is silently host-staging.
+
+2. **`FI_CXI_RX_MATCH_MODE=hybrid`** + `FI_CXI_DEFAULT_CQ_SIZE=131072` +
+   `FI_CXI_DISABLE_HOST_REGISTER=1` (`_env.sh`, so CPU and GPU jobs alike). The
+   nearest-neighbour halo posts many small messages; Slingshot's Cassini NIC
+   offloads tag matching to hardware and, at scale, **aborts** when the match
+   (LE) pool fills — `"LE resources not recovered during flow control.
+   FI_CXI_RX_MATCH_MODE=[hybrid|software] is required"`. `hybrid` falls back to
+   software matching instead of killing the job; the larger CQ absorbs the
+   many concurrent completions; `FI_CXI_DISABLE_HOST_REGISTER=1` keeps the
+   CUDA-aware path from deadlocking on the libfabric MR cache. All are
+   `${VAR:-default}` so you can override at `qsub -v`.
+
 ---
 
 ## Step 2 — CPU + MPI env (`legoesm-mpi`) for the `main` queue

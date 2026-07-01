@@ -93,6 +93,18 @@ module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
 # MPI errors at the first halo exchange.
 export MPICH_GPU_SUPPORT_ENABLED=1
 
+# GPU-DIRECT halo: tell mpi4jax to hand the on-device sendrecv buffer straight
+# to GPU-aware cray-mpich instead of its DEFAULT device->host->device copy.
+# Without this the route-A halo silently HOST-STAGES every sendrecv -- the
+# per-exchange host round-trip erases multi-GPU scaling (the whole point of
+# route-A is GPU-direct).  Requires (all satisfied above / in _env.sh):
+# MPICH_GPU_SUPPORT_ENABLED=1, the craype-accel-nvidia80 GTL, an mpi4jax built
+# WITH CUDA support (README Step 1b), and FI_CXI_DISABLE_HOST_REGISTER=1 so the
+# CUDA-aware path does not deadlock on the MR cache.  If mpi4jax lacks the CUDA
+# extension this would segfault on GPU-buffer access -- the require_mpi_stack()
+# preflight turns that into a clear ImportError instead.
+export MPI4JAX_USE_CUDA_MPI="${MPI4JAX_USE_CUDA_MPI:-1}"
+
 # The rebuilt Cray-MPICH mpi4py needs Cray's libmpi on the loader path. The
 # module exports CRAY_LD_LIBRARY_PATH but NOT LD_LIBRARY_PATH, so the dynamic
 # linker can't find libmpi.so.12 without this bridge -> "ImportError:

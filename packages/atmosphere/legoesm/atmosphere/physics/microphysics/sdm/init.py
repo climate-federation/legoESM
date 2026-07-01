@@ -26,6 +26,8 @@ multiplicity renormalization lives in the particle-injection path.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -66,7 +68,11 @@ __physics_contract__ = {
 
 # (4/3)π — sphere volume prefactor (pure geometry).
 _FOUR_THIRDS_PI = 4.0 / 3.0 * jnp.pi
-_SQRT2 = jnp.sqrt(2.0)
+# Python float (not a device array): a module-top ``jnp.sqrt`` would allocate a
+# JAX array at import time (forbidden by test_no_module_top_jax_alloc — crashes
+# the import chain on the experimental Metal backend).  Used only as a scalar
+# multiplier inside jnp expressions, where a Python float is exact + free.
+_SQRT2 = math.sqrt(2.0)
 
 
 def sample_exponential_mass(

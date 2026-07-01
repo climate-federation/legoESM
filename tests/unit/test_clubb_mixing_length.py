@@ -176,9 +176,11 @@ def test_matches_committed_golden():
     """
     golden = np.load(_GOLDEN_NPZ)
     Lscale, Lscale_up, Lscale_down = compute_mixing_length(**_golden_inputs())
-    np.testing.assert_array_equal(np.asarray(Lscale), golden["Lscale"])
-    np.testing.assert_array_equal(np.asarray(Lscale_up), golden["Lscale_up"])
-    np.testing.assert_array_equal(np.asarray(Lscale_down), golden["Lscale_down"])
+    # FP-reassociation tolerance: the C1-C8 "condense" refactor fused/re-
+    # associated the algebra (~1e-14 rel) -> round-off, not bit-identity.
+    np.testing.assert_allclose(np.asarray(Lscale), golden["Lscale"], rtol=1e-13, atol=1e-16)
+    np.testing.assert_allclose(np.asarray(Lscale_up), golden["Lscale_up"], rtol=1e-13, atol=1e-16)
+    np.testing.assert_allclose(np.asarray(Lscale_down), golden["Lscale_down"], rtol=1e-13, atol=1e-16)
 
 
 @pytest.mark.skipif(

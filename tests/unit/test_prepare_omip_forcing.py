@@ -194,6 +194,9 @@ def _make_synthetic_jra55_zarr(out_path: Path, year_start: int, year_end: int):
 
 
 def test_main_end_to_end_creates_cache(tmp_path, capsys):
+    # The cache builder writes via ``.chunk(...).to_zarr``, requiring the
+    # optional dask chunk manager. Skip (don't error) when dask is absent.
+    pytest.importorskip("dask")
     src = tmp_path / "synthetic.zarr"
     _make_synthetic_jra55_zarr(src, year_start=1958, year_end=1958)
 
@@ -218,6 +221,7 @@ def test_main_end_to_end_creates_cache(tmp_path, capsys):
 
 
 def test_main_skips_when_cache_exists_without_overwrite(tmp_path, capsys):
+    pytest.importorskip("dask")  # cache write requires the dask chunk manager
     src = tmp_path / "synthetic.zarr"
     _make_synthetic_jra55_zarr(src, year_start=1958, year_end=1958)
 
