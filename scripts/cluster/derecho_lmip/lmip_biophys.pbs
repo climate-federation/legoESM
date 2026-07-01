@@ -24,7 +24,10 @@
 #   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
 #   N_STEPS=240                     — number of land steps (240 * 1 h = 10 model days)
 #   START_DOY=196                   — starting day-of-year (mid-July)
-#   SURFACE_SCHEME=two_leaf_canopy  — surface scheme (or simple_seb)
+#   SURFACE_SCHEME=two_leaf_canopy  — surface scheme (or simple_seb).  NOTE:
+#                                     'simple_seb' + BULK='most' is numerically
+#                                     unstable — pair simple_seb with BULK=constant.
+#   BULK=most                       — 'most' (Monin-Obukhov, default) or 'constant'
 #   OUT_TAG=""                      — appended to $SCRATCH/lmip_biophys_${YEAR}${OUT_TAG}
 #
 #PBS -N lmip_biophys
@@ -42,7 +45,17 @@ DT="${DT:-3600}"
 N_STEPS="${N_STEPS:-240}"
 START_DOY="${START_DOY:-196}"
 SURFACE_SCHEME="${SURFACE_SCHEME:-two_leaf_canopy}"
+BULK="${BULK:-most}"
 OUT_TAG="${OUT_TAG:-}"
+
+# Guardrail: 'simple_seb' + MOST is numerically unstable (T_sfc -> +/-inf), so
+# refuse to enter the queue in that combination.  Cheap sanity, saves debug time.
+if [[ "$SURFACE_SCHEME" == "simple_seb" && "$BULK" == "most" ]]; then
+    echo "ERROR: SURFACE_SCHEME=simple_seb requires BULK=constant." >&2
+    echo "       MOST + simple_seb is unstable under low-wind / near-neutral" >&2
+    echo "       stratification.  Use BULK=constant, or use two_leaf_canopy." >&2
+    exit 4
+fi
 
 # PBS_O_WORKDIR = the directory qsub was called from = the repo root.
 cd "${PBS_O_WORKDIR:-$PWD}"
@@ -103,6 +116,7 @@ python scripts/run/run_lmip_biophys.py \
     --year "$YEAR" --start-doy "$START_DOY" \
     --grid-type latlon --resolution "$RESOLUTION" \
     --surface-scheme "$SURFACE_SCHEME" \
+    --bulk "$BULK" \
     --dt "$DT" --n-steps "$N_STEPS" \
     --output "$OUT_DIR"
 
