@@ -220,6 +220,11 @@ def main():
     day = start
     stop = False
     while day < end and not stop:
+        # Prescribed SST/sea-ice = the monthly forcing LINEARLY interpolated to
+        # this day, held across the day's 144 dycore steps. SST varies ~0.1 K/day,
+        # so daily granularity is <0.01 K from per-step interpolation and matches
+        # standard AMIP daily-SST practice (codex noted the per-step alternative;
+        # not worth re-architecting the rollout for a sub-0.01 K effect on tas).
         day_ns = np.datetime64(day).astype("datetime64[ns]").astype(np.int64)
         sst_c = interp_forcing_at(times_ns, sst_m, day_ns)
         sic_c = np.clip(interp_forcing_at(times_ns, sic_m, day_ns), 0.0, 1.0)

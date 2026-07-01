@@ -36,15 +36,21 @@ def _regrid_field_2d(field_2d, era5_lat_deg, era5_lon_deg, grid):
 
     ``regrid_2d_to_gaussian`` needs ascending latitude in RADIANS; ERA5 is
     (degrees, N->S) so convert + flip. NaN (SST over land) is filled with the
-    field's finite mean first so the linear interpolation stays finite at
-    coastal ocean cells (true land is masked out downstream by land_sea_mask).
+    NEAREST finite ocean value first so the linear interpolation stays finite AND
+    uncontaminated at coastal ocean cells (true land is masked out downstream by
+    land_sea_mask).
     """
     f = np.asarray(field_2d, dtype=np.float64)
     lat = np.asarray(era5_lat_deg, dtype=np.float64)
     lon = np.asarray(era5_lon_deg, dtype=np.float64)
     if np.any(~np.isfinite(f)):
-        fill = float(np.nanmean(f))
-        f = np.where(np.isfinite(f), f, fill)
+        # Nearest finite ocean SST (codex review): a global-mean fill would bleed
+        # into coastal ocean target cells through the linear regrid.
+        from scipy.ndimage import distance_transform_edt
+        idx = distance_transform_edt(
+            ~np.isfinite(f), return_distances=False, return_indices=True,
+        )
+        f = f[tuple(idx)]
     if lat[0] > lat[-1]:  # RegularGridInterpolator requires ascending axes
         lat = lat[::-1]
         f = f[::-1, :]
