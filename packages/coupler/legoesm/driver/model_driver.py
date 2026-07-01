@@ -1020,7 +1020,8 @@ class ModelDriver:
                 # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
                 # to cells/edges and projects the winds via angleEdge.
                 carry = era5_to_mpas_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    smoothing_passes=cfg.topo_smoothing,
                 )
             else:
                 raise NotImplementedError(
@@ -1570,6 +1571,33 @@ class ModelDriver:
 
     def _create_diagnostics(self) -> None:
         """Set up diagnostic collection."""
+        # Cloud config for the total-cloud-cover (clt) diagnostic.  Built via
+        # the SAME shared ``build_cloud_config`` the physics pipeline uses, from
+        # the same ``ExperimentConfig`` fields (``cloud_scheme`` +
+        # ``cloud_rh_crit`` / ``cloud_q_c_diagnostic``), so clt derives from the
+        # model's OWN large-scale/stratiform cloud fraction (issue #689).
+        #
+        # The opt-in ``convective_cloud`` add-on is deliberately NOT counted in
+        # clt: it is a bounded (cap 0.15) radiative-TUNING term combined by
+        # maximum overlap, not a physical cloud-AREA fraction, and matching it
+        # faithfully would require radiation's lagged, per-rank ``conv_precip``
+        # carry (not worth threading for a diagnostic — codex review).  Where a
+        # column actually convects the RH-based stratiform fraction is already
+        # high, so excluding the add-on changes clt little.  clt is therefore
+        # the model's stratiform cloud cover with maximum-random overlap.
+        # ``cloud_scheme == 'none'`` => ``None`` => clt not published.
+        _cloud_scheme = getattr(self.config, "cloud_scheme", "none")
+        diag_cloud_config = None
+        if _cloud_scheme != "none":
+            from legoesm.atmosphere.physics.clouds.config import (
+                build_cloud_config,
+            )
+            diag_cloud_config = build_cloud_config(
+                _cloud_scheme,
+                convective_cloud=False,  # stratiform-only clt (see above)
+                rh_crit=getattr(self.config, "cloud_rh_crit", None),
+                q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
+            )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
@@ -1582,6 +1610,7 @@ class ModelDriver:
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
+            cloud_config=diag_cloud_config,
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
@@ -5608,6 +5637,133 @@ class ModelDriver:
         self._restore_halo_backend()
 
         return run_status
+
+    # ==================================================================
+    # Differentiable training entry (parameter calibration)
+    # ==================================================================
+
+    def build_training_segment(self, n_steps: int, day: float = 0.0):
+        """Build a DIFFERENTIABLE single-segment forward for parameter calibration.
+
+        Returns ``(run_segment_raw, carry0, forcing)``:
+          * ``run_segment_raw`` — the NON-JIT, non-donating ``.raw`` segment
+            (buffer donation conflicts with reverse-mode AD), composable inside
+            ``eqx.filter_value_and_grad`` / ``jax.grad``.
+          * ``carry0`` — the initial ``SegmentCarry`` (multilayer land seeded in
+            ``setup`` when ``use_multilayer_land``; rides ``carry0.land_ml``).
+          * ``forcing`` — the ``SegmentForcing`` for ``day`` (prescribed SST/SIC,
+            solar, ozone, aerosol).
+
+        The caller runs ``final = run_segment_raw(carry0, n_steps, forcing)``.
+        Trainable LAND params reach the tile by assigning a *traced*
+        ``LandSurfaceParams`` to ``self.physics.land_ml_params`` BEFORE the call
+        inside the loss closure — the segment reads that attribute at call time,
+        so gradients flow back to the params (no hot-loop refactor needed; see
+        ``scripts/run/train_coupled_land_era5.py``).  ``gradient_checkpoint`` is
+        forced on to bound the reverse-mode memory of the unrolled scan.
+
+        Reuses ``_prepare_run_context`` (the same step_unified / forcing / carry
+        seeds as ``_run_compiled``) so the training forward is byte-faithful to a
+        production segment.  Single-rank / single-device only (the carry has no
+        SPMD/MPI partition spec)."""
+        from legoesm.driver.compiled_segments import (
+            pack_carry, build_segment_fn, pack_forcing,
+        )
+        if (self._device_config is not None
+                and getattr(self._device_config, "is_distributed", False)):
+            raise NotImplementedError(
+                "build_training_segment is single-rank / single-device only "
+                "(the SegmentCarry has no partition spec for SPMD/MPI sharding)."
+            )
+
+        ctx = self._prepare_run_context(0, day, restore_carry=False)
+        cfg = self.config
+        DT = ctx["DT"]
+        _sd = ctx["_sd"]
+        _seg_lat = (self._physics_lat if self._physics_lat is not None
+                    else self._grid_lat)
+        _seg_lon = (self._physics_lon if self._physics_lon is not None
+                    else self._grid_lon)
+
+        # Un-jitted step (jit=False): a calibrator feeds a TRACED value into the
+        # pipeline via an attribute the step reads (e.g. land_ml_params); a jitted
+        # step would capture that tracer as a closure constant and leak it across
+        # value_and_grad calls.  The step is inlined into run_segment's lax.scan.
+        step_unified = self.physics.build_step_unified(
+            static_need_rad=True, jit=False)
+
+        run_segment = build_segment_fn(
+            model=self.model,
+            step_unified=step_unified,
+            step_unified_no_rad=None,
+            grid=self.grid,
+            sigma_full=ctx["sigma_full"], dsigma=ctx["dsigma"], dt=DT,
+            rad_update_steps=ctx["RAD_UPDATE_STEPS"],
+            microphysics=cfg.microphysics,
+            fix_moisture=cfg.fix_moisture, fix_mass=cfg.dycore.fix_mass,
+            fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
+            lat=_seg_lat, lon=_seg_lon, start_day=ctx["START_DAY"],
+            gradient_checkpoint=True,   # remat the scan -> bounded backward memory
+            hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+            tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
+            sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
+            C_H=cfg.C_H, C_E=cfg.C_E,
+            albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
+            ghg_vmr_override=ctx["ghg_vmr"],
+            hs_newtonian_relax=self._hs_newtonian_relax,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            pipeline=self.physics,
+        )
+
+        # Conservation-fixer targets MUST come from the IC, not zero: fix_mass is on
+        # by default, so a zero dry-mass target would drain the atmosphere to NaN
+        # (mirrors the targets _run_compiled computes before the segment loop).
+        from legoesm.core.conservation import (
+            compute_global_moisture, global_area_sum,
+        )
+        target_mass = (global_area_sum(self.state.p_s.data, self.grid)
+                       if cfg.dycore.fix_mass else jnp.asarray(0.0))
+        target_moisture = (
+            compute_global_moisture(self.q_v, self.state.p_s.data,
+                                    ctx["dsigma"], self.grid)
+            if cfg.fix_moisture else jnp.asarray(0.0))
+
+        day_of_year, seconds_of_day = day_to_calendar(ctx["START_DAY"])
+        carry0 = pack_carry(
+            self.state, self.q_v, self.q_c, self.q_r,
+            conv_prog=ctx["conv_prog"],
+            held_dT_rad=ctx["held_dT_rad"],
+            held_sw_net_sfc=ctx["held_sw_net_sfc"],
+            held_lw_net_sfc=ctx["held_lw_net_sfc"],
+            held_sw_up_toa=ctx["held_sw_up_toa"],
+            held_lw_up_toa=ctx["held_lw_up_toa"],
+            held_sw_down_toa=ctx["held_sw_down_toa"],
+            step_index=0,
+            target_moisture=target_moisture, target_mass=target_mass,
+            precip_accum=jnp.zeros(ctx["shape_2d"], dtype=_sd),
+            T_land=ctx["T_land"], w_land=ctx["w_land"],
+            land_ml=self._land_ml_state,
+            tke=ctx["tke"], qke=ctx["qke"], gwd_spectrum=ctx["gwd_spectrum"],
+            **(
+                {k: self.tracers.get(k)
+                 for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
+                if isinstance(self.tracers, dict) else {}
+            ),
+        )
+
+        if self.get_sst_sic is not None:
+            sst, sic = self.get_sst_sic(day)
+        else:
+            sst = jnp.full(ctx["shape_2d"], 290.0, dtype=_sd)
+            sic = jnp.zeros(ctx["shape_2d"], dtype=_sd)
+        forcing = pack_forcing(
+            sst=jnp.asarray(sst), sic=jnp.asarray(sic),
+            day_of_year=day_of_year, seconds_of_day=seconds_of_day,
+            solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
+            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            ghg_vmr=ctx["ghg_vmr"],
+        )
+        return run_segment.raw, carry0, forcing
 
     # ==================================================================
     # Compiled segment execution path

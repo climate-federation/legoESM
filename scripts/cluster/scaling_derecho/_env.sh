@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # EDIT the three marked values for your account/paths before first submit.
 # Everything here can also be overridden from the qsub environment, e.g.
-#   qsub -v LEGOESM_CONDA_ENV=my-jax-env scaling_derecho/gpu_scaling.pbs
+#   qsub -v LEGOESM_CONDA_ENV=my-jax-env scaling_derecho/scaling_gpu.sh
 # ---------------------------------------------------------------------------
 
 # --- (1) Project allocation (matches the PBS -A directive in the job scripts) -

@@ -68,6 +68,7 @@ from legoesm.grids.topography import (
     land_mask_from_topography,
     phis_from_topography,
     smooth_phis_cubed_sphere,
+    smooth_phis_gaussian,
     TopographyConfig,
     load_real_topography,
 )

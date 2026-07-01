@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
     EnergyBudgetTracker,
@@ -171,11 +172,18 @@ class DiagnosticCollector:
         output_dir: str | Path = "",
         cmip_resolution_deg: float = 5.0,
         start_year: int = 1979,
+        cloud_config=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
         self.dsigma = dsigma
         self.clear_sky_diag = clear_sky_diag
+        # Cloud config (``atmosphere.physics.clouds.CloudConfig`` or ``None``)
+        # for the total-cloud-cover ``clt`` diagnostic — the SAME scheme
+        # selection radiation uses, so ``clt`` reflects the model's actual
+        # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
+        # 'none') => ``clt`` is not published.
+        self._cloud_config = cloud_config
 
         # Per-cell horizontal area weights for global-mean diagnostics.
         # ``None`` => unweighted ``jnp.mean`` (legacy behaviour); the driver
@@ -887,15 +895,64 @@ class DiagnosticCollector:
                 if r_lwp is not None and r_iwp is not None:
                     fields_2d['clivi'] = r_iwp
                     fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
-                # NOTE: ``clt`` (total cloud AREA fraction, CMIP %) is intentionally
-                # NOT published here.  The previous implementation derived it from a
-                # near-binary condensate mask (sigmoid sharpness 1e6 on a 1 mg/kg
-                # threshold), i.e. each layer is forced to ~0 or ~1 — that is a
-                # cloud *presence* mask, not the fractional cloud cover CMIP ``clt``
-                # requires, so it overstates total cloudiness and is physically
-                # incorrect (guarded by test_no_rsds_rlds_clt_in_output).  Re-enable
-                # only when a genuine fractional cloud-fraction diagnostic (e.g. the
-                # Sundqvist/Tompkins scheme output) is wired through to CMIP output.
+
+                # Total cloud cover (clt, CMIP %) from the MODEL's fractional
+                # layer cloud fraction — the SAME sundqvist/xu_randall/resolved
+                # scheme radiation uses, via the shared ``compute_cloud_properties``
+                # — reduced by MAXIMUM-RANDOM vertical overlap.  This replaces the
+                # retired near-binary condensate mask (sigmoid sharpness 1e6 on a
+                # 1 mg/kg threshold + pure random overlap) that saturated clt to
+                # ~100% wherever a column held any trace of condensate (issue #689).
+                # Diagnostics-only; no cloud-fraction numerics are re-derived (the
+                # shared function is called).  The ``_cloud_config`` is built with
+                # ``convective_cloud=False`` (see ModelDriver._create_diagnostics),
+                # so this is the model's STRATIFORM cloud cover — the opt-in
+                # convective radiative-tuning add-on is intentionally not counted.
+                if self._cloud_config is not None:
+                    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+                        compute_cloud_properties,
+                    )
+                    # Flatten the horizontal dims to the (ncol, nlev) column
+                    # layout compute_cloud_properties documents, then reshape the
+                    # scalar overlap result back — C-order round-trips exactly, so
+                    # cells map back for the downstream regridder.  Works for
+                    # cubed-sphere (6,n,n,nlev) and lat-lon (nlat,nlon,nlev).
+                    T_data = state.T.data
+                    horiz_shape = T_data.shape[:-1]
+                    nlev = T_data.shape[-1]
+                    ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
+                    # p_full = sigma_full * p_s, dp = dsigma * p_s (the sigma
+                    # pressures the collector's other column diagnostics assume).
+                    p_s_col = jnp.reshape(state.p_s.data, (ncol, 1))
+                    p_full = p_s_col * self.sigma_full
+                    dp = p_s_col * self.dsigma
+                    # Cloud fraction takes CLOUD ice q_i only (matching the
+                    # radiation call, physics_pipeline ``q_ice=q_i_col``) — NOT
+                    # the precipitating q_i+q_s+q_g used for the clivi ice PATH
+                    # above, which would over-count condensate for the
+                    # condensate-dependent schemes (xu_randall/resolved).
+                    q_ice_col = (
+                        None if q_i is None
+                        else jnp.reshape(q_i, (ncol, nlev))
+                    )
+                    cloud_props = compute_cloud_properties(
+                        jnp.reshape(T_data, (ncol, nlev)),
+                        p_full,
+                        jnp.reshape(q_v, (ncol, nlev)),
+                        dp,
+                        self._cloud_config,
+                        q_cloud=jnp.reshape(q_c, (ncol, nlev)),
+                        q_ice=q_ice_col,
+                    )
+                    clt_field = np.asarray(
+                        jnp.reshape(
+                            maximum_random_overlap(cloud_props.cloud_fraction),
+                            horiz_shape,
+                        )
+                    ) * 100.0  # CMIP units: %
+                    r_clt = self._regrid_to_latlon_2d(clt_field)
+                    if r_clt is not None:
+                        fields_2d['clt'] = r_clt
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
