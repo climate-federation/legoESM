@@ -167,7 +167,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             growth_factor=1.5,
         ),
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
-        thermal=SoilThermalConfig(),
+        thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
         richards=RichardsConfig(),
         carbon=CarbonConfig(scheme=args.carbon_scheme),
     )
@@ -536,6 +536,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Number of soil layers")
     p.add_argument("--soil-depth", type=float, default=3.0,
                    help="Total soil depth [m]")
+    p.add_argument("--freeze-thaw", action="store_true",
+                   help="Enable soil-water freeze/thaw (apparent-heat-capacity "
+                        "zero-curtain) in the soil thermal solver.")
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")

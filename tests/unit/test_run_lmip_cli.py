@@ -7,6 +7,14 @@ import pytest
 from scripts.run.run_lmip import _parse_args, build_config_from_args
 
 
+def test_freeze_thaw_flag_flows_to_config():
+    """--freeze-thaw toggles SoilThermalConfig.enable_freeze_thaw (default off)."""
+    cfg_off = build_config_from_args(_parse_args(["--lat", "45.0"]))
+    assert cfg_off.land.thermal.enable_freeze_thaw is False
+    cfg_on = build_config_from_args(_parse_args(["--lat", "45.0", "--freeze-thaw"]))
+    assert cfg_on.land.thermal.enable_freeze_thaw is True
+
+
 def test_issue484_new_lmip_flags_flow_to_config():
     args = _parse_args([
         "--lat", "45.5",
