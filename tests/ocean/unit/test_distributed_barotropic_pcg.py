@@ -785,6 +785,8 @@ class TestSingleReducePCG:
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_maxiter == 200
         # Default mirrors the lat-lon contract (same variant literal set,
-        # validated at solver entry by solve_helmholtz_implicit).
+        # validated at solver entry by solve_helmholtz_implicit).  The lat-lon
+        # side is NESTED post-#501 (config.barotropic.*); MPAS stays flat.
         assert (cfg.barotropic_implicit_pcg_variant
-                == LatLonCGridOceanConfig().barotropic_implicit_pcg_variant)
+                == LatLonCGridOceanConfig()
+                .barotropic.barotropic_implicit_pcg_variant)
