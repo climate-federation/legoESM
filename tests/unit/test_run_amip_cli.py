@@ -1278,3 +1278,45 @@ def test_evaluate_climateeval_python_env_var_default(monkeypatch):
     cfg = build_config_from_args(args)
     assert cfg.output.evaluation.climateeval_python == "/env/climateeval/bin/python"
     assert cfg.output.evaluation.data_root_dir == "/env/climateeval_data"
+
+
+def test_cloud_sensitivity_flags_round_trip_and_validate():
+    """--cloud-p-xr / --cloud-alpha-xr thread into ExperimentConfig; out-of-range
+    values fail validate_strict (the xu_randall cloud-fraction sensitivity knobs
+    for flattening the moisture-driven overcast runaway)."""
+    parser = build_arg_parser()
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert d.cloud_p_xr is None and d.cloud_alpha_xr is None
+    args = _postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cloud-p-xr", "0.7",
+         "--cloud-alpha-xr", "20"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_p_xr == 0.7 and cfg.cloud_alpha_xr == 20.0
+    # unset -> None (byte-identical: CloudConfig default preserved)
+    base = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert base.cloud_p_xr is None and base.cloud_alpha_xr is None
+    # both bounds enforced by validate_strict
+    for flag, val in [("--cloud-p-xr", "5.0"), ("--cloud-alpha-xr", "5000")]:
+        bad = build_config_from_args(_postprocess_args(parser.parse_args(
+            ["--dataset", "analytical", flag, val]), parser))
+        with pytest.raises(Exception):
+            bad.validate_strict()
+
+
+def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
+    """--cloud-p-xr/--cloud-alpha-xr are refused on MPAS/spectral (they rebuild
+    CloudConfig at run() and would silently ignore the pipeline override)."""
+    from scripts.run.run_amip import _validate_cloud_sensitivity_flags
+    parser = build_arg_parser()
+    mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+                              "--cloud-p-xr", "0.7"])
+    with pytest.raises(SystemExit):
+        _validate_cloud_sensitivity_flags(mpas, parser)
+    # FV path + no flags: no raise
+    _validate_cloud_sensitivity_flags(
+        parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"]),
+        parser)
+    _validate_cloud_sensitivity_flags(
+        parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
+        parser)

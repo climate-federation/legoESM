@@ -376,6 +376,11 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
+    #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
+    #   moisture rises (flattens the overcast runaway).
+    cloud_p_xr: float | None = None
+    cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
@@ -1005,6 +1010,8 @@ class ExperimentConfig(NamedTuple):
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_p_xr", 0.05, 1.0),
+            ("cloud_alpha_xr", 10.0, 1000.0),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
