@@ -1571,6 +1571,33 @@ class ModelDriver:
 
     def _create_diagnostics(self) -> None:
         """Set up diagnostic collection."""
+        # Cloud config for the total-cloud-cover (clt) diagnostic.  Built via
+        # the SAME shared ``build_cloud_config`` the physics pipeline uses, from
+        # the same ``ExperimentConfig`` fields (``cloud_scheme`` +
+        # ``cloud_rh_crit`` / ``cloud_q_c_diagnostic``), so clt derives from the
+        # model's OWN large-scale/stratiform cloud fraction (issue #689).
+        #
+        # The opt-in ``convective_cloud`` add-on is deliberately NOT counted in
+        # clt: it is a bounded (cap 0.15) radiative-TUNING term combined by
+        # maximum overlap, not a physical cloud-AREA fraction, and matching it
+        # faithfully would require radiation's lagged, per-rank ``conv_precip``
+        # carry (not worth threading for a diagnostic — codex review).  Where a
+        # column actually convects the RH-based stratiform fraction is already
+        # high, so excluding the add-on changes clt little.  clt is therefore
+        # the model's stratiform cloud cover with maximum-random overlap.
+        # ``cloud_scheme == 'none'`` => ``None`` => clt not published.
+        _cloud_scheme = getattr(self.config, "cloud_scheme", "none")
+        diag_cloud_config = None
+        if _cloud_scheme != "none":
+            from legoesm.atmosphere.physics.clouds.config import (
+                build_cloud_config,
+            )
+            diag_cloud_config = build_cloud_config(
+                _cloud_scheme,
+                convective_cloud=False,  # stratiform-only clt (see above)
+                rh_crit=getattr(self.config, "cloud_rh_crit", None),
+                q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
+            )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
@@ -1583,6 +1610,7 @@ class ModelDriver:
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
+            cloud_config=diag_cloud_config,
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
