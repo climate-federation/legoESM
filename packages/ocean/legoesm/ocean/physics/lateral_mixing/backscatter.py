@@ -10,28 +10,38 @@ evolves under
           - E / τ_relax                (linear damping of the reservoir)
 
 with ``E`` clamped to ``[E_min, E_max]`` each step.  The backscatter
-momentum tendency is the *negative* (sign-flipped) biharmonic Laplacian
+momentum tendency is a NEGATIVE (anti-diffusive) Laplacian viscosity
 
-    ∂u/∂t|_bs = + ∇²(ν_bs ∇² u)
+    ∂u/∂t|_bs = -∇·(ν_bs ∇u) = -ν_bs ∇²u ,   ν_bs = c_bs · Δ · √E ≥ 0
 
-where the coefficient is driven by the local eddy-energy level.  The exact
-power of Δ is PER-PATH because the two grids use different discrete
-operators, so ``c_bs`` is NOT interchangeable between them:
+i.e. an ordinary Laplacian viscosity applied with the *opposite* sign to
+diffusion, so it INJECTS kinetic energy into the resolved flow (growth
+rate ∝ +ν_bs k²).  This is the Jansen & Held (2014) / Bachman (2019)
+negative-Laplacian ("negative viscosity") backscatter — NOT a biharmonic.
+The coefficient is a HARMONIC viscosity ``ν_bs = c_bs · Δ · √E`` [m²/s] on
+BOTH grids (``Δ = √area`` the local grid length [m], ``√E`` [m/s]), so —
+unlike the earlier per-path ``Δ¹``/``Δ³`` split — ``c_bs`` carries the same
+meaning on the C-grid and MPAS paths.
 
-    lat-lon C-grid (``_A_bs_h_cgrid``):  ν_bs = c_bs · Δ¹ · √E   [m²/s]
-        — the strain-based two-pass stress divergence absorbs the extra
-          Δ², yielding biharmonic-scaling tendencies from a Δ¹ coefficient.
-    MPAS Voronoi (``_A_bs_h_mpas``):     ν₄  = c_bs · Δ³ · √E   [m⁴/s]
-        — a clean double vector-Laplacian ∇²(A·∇²u) needs an explicit
-          biharmonic viscosity (see the per-path note ~L248).
+STABILITY (read before enabling).  A negative Laplacian on its own is
+unconditionally unstable — its growth ∝ +k² is largest at the grid scale.
+Per Jansen & Held (2014) it is stabilised ONLY when paired with a
+scale-SELECTIVE dissipation (a biharmonic ∇⁴ or Leith closure, whose
+grid-scale damping ∝ k⁴ overwhelms the k² injection at high k) AND when the
+reservoir ``E`` — hence ν_bs — is bounded (the ``E_max`` clamp).  Do NOT
+enable backscatter against a purely harmonic (∇²) dissipation: the two
+operators are the same order, so the flow noises up at the grid scale.
 
-    ν_bs ≥ 0,   Δ = √area (length [m]),   √E [m/s].
+    A PRIOR implementation returned ``+∇²(ν_bs ∇²u)`` — an *anti-biharmonic*
+    (growth ∝ +k⁴).  That is the WRONG scale selectivity: +k⁴ amplifies the
+    GRID scale MOST (not the large scales), the opposite of a backscatter's
+    purpose and worse at the grid scale than the negative Laplacian it was
+    meant to tame.  Corrected here to the faithful negative-Laplacian form.
 
-The "+" sign (as opposed to the "-" used by the Smagorinsky biharmonic)
-makes this an *anti*-biharmonic that injects energy into the resolved
-flow.  The biharmonic form is scale-selective — it amplifies large
-wavelengths much more than the grid scale, avoiding the unconditional
-instability of plain anti-Laplacian backscatter.
+STATUS: opt-in (``BackscatterConfig.enabled=False`` by default) and NOT yet
+wired into the production momentum update — the operators here are exercised
+by the unit tests only, pending an eddy-permitting stability validation
+before coupling into the ocean dynamics.
 
 References
 ----------
@@ -83,9 +93,10 @@ class BackscatterConfig(NamedTuple):
         If ``False`` (default) the closure is a no-op and neither the
         momentum tendency nor the reservoir are modified.
     c_bs : float
-        Dimensionless backscatter coefficient applied to the
-        biharmonic coefficient ``ν_bs = c_bs · Δ² · √E``.  Typical
-        values: 0.001 – 0.05.  Must be non-negative.
+        Dimensionless backscatter coefficient setting the HARMONIC
+        (negative-Laplacian) viscosity ``ν_bs = c_bs · Δ · √E`` [m²/s]
+        (``Δ = √area`` the grid length; same meaning on the C-grid and
+        MPAS paths).  Typical values: 0.001 – 0.05.  Must be non-negative.
     tau_relax_days : float
         e-folding timescale for the linear damping of ``E`` [days].
     E_min : float
@@ -116,8 +127,8 @@ def _A_bs_h_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
     """Backscatter coefficient ``ν_bs = c_bs · Δ · √E`` at h-points.
 
     Units: ``Δ = √area`` is in m, ``√E`` is in m/s, so ``ν_bs`` has
-    harmonic-viscosity units m²/s.  The two-pass stress-divergence that
-    consumes it then produces biharmonic-scaling tendencies.
+    harmonic-viscosity units m²/s — consumed by the SINGLE (negated)
+    stress-divergence to give the negative-Laplacian ``-ν_bs ∇²u``.
     """
     Delta = jnp.sqrt(grid.area)                         # Δ = length [m]
     return c_bs * Delta * jnp.sqrt(jnp.maximum(E, 0.0) + 1e-30)
@@ -160,13 +171,14 @@ def backscatter_tendency_cgrid(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Energy-backscatter momentum tendency on the lat-lon C-grid.
 
-    Returns the tendency that the caller should ADD to ``du/dt`` (note
-    the sign convention differs from the Smagorinsky-biharmonic helper,
-    which is subtracted).  Implementation mirrors the MOM6 two-pass
-    stress formulation used by
-    ``smagorinsky_biharmonic_tendency_cgrid`` so the operator is the
-    exact discrete adjoint of ``strain_rate_cgrid`` and therefore
-    energy-consistent with the resolved-scale viscous closures.
+    Negative-Laplacian (anti-diffusive) backscatter: returns the tendency
+    the caller should ADD to ``du/dt`` (``du/dt += tend`` realises
+    ``-ν_bs ∇²u``, an energy INJECTION ∝ +ν_bs k²).  A SINGLE
+    ``viscous_tendency_cgrid`` harmonic stress-divergence — the exact
+    discrete adjoint of ``strain_rate_cgrid`` — is negated, so the
+    injection is energy-consistent with the resolved-scale viscous
+    closures to machine precision.  (This replaced a two-pass
+    ``+∇²(A∇²u)`` anti-biharmonic; see the module docstring.)
 
     Parameters
     ----------
@@ -197,24 +209,22 @@ def backscatter_tendency_cgrid(
         A_q = jnp.broadcast_to(A_q[..., jnp.newaxis],
                                 A_q.shape + (nlev,))
 
-    # First pass: unit-coefficient, UNNORMALISED stress-divergence.
-    u_star, v_star = viscous_tendency_cgrid(
-        u, v, grid, 1.0, 1.0,
-        mask=mask, u_mask=u_mask, v_mask=v_mask,
-        normalize=False)
-
-    # Second pass: A_bs-weighted NORMALISED stress-divergence.  The
-    # returned ``(tend_u, tend_v)`` has the SAME sign as the
-    # Smagorinsky-biharmonic tendency — which the Smag caller
-    # *subtracts* (``du/dt -= tend``) to dissipate.  Our caller instead
-    # *adds* (``du/dt += tend``), which gives ``du/dt = +∇²(A ∇²u)``
-    # and injects kinetic energy into the resolved flow.
-    tend_u, tend_v = viscous_tendency_cgrid(
-        u_star, v_star, grid, A_h, A_q,
+    # Negative-Laplacian backscatter: a SINGLE A_bs-weighted harmonic
+    # stress-divergence.  ``viscous_tendency_cgrid`` returns the harmonic
+    # viscous tendency that is DISSIPATIVE when added
+    # (``sum u·tend·area = -sum A_h·D_T²·area - sum A_q·D_S²·A_vert ≤ 0``);
+    # NEGATING it and letting the caller ADD (``du/dt += tend``) flips the
+    # sign to an anti-diffusion ``du/dt = -∇·(A_bs ∇u) = -A_bs ∇²u`` that
+    # INJECTS energy (``sum u·(-tend)·area ≥ 0``, growth ∝ +A_bs k²).  This
+    # is the Jansen & Held (2014) negative-viscosity backscatter — a
+    # harmonic (∇²) operator, NOT the earlier anti-biharmonic two-pass
+    # ``+∇²(A∇²u)`` (∝ +k⁴) which amplified the grid scale most.
+    diss_u, diss_v = viscous_tendency_cgrid(
+        u, v, grid, A_h, A_q,
         mask=mask, u_mask=u_mask, v_mask=v_mask,
         normalize=True)
 
-    return tend_u, tend_v
+    return -diss_u, -diss_v
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +240,9 @@ def backscatter_tendency_mpas(
 ) -> jnp.ndarray:
     """Energy-backscatter edge-normal velocity tendency on an MPAS mesh.
 
-    ``+∇²(ν_bs · ∇²u)`` with ``ν_bs = c_bs · Δ_e² · √E`` at edges.
-    ``E_cell`` is interpolated to edges by a two-cell average.
+    ``-ν_bs ∇²u`` (negative-Laplacian backscatter) with the HARMONIC
+    coefficient ``ν_bs = c_bs · Δ_e · √E`` [m²/s] at edges.  ``E_cell`` is
+    interpolated to edges by a two-cell average.
 
     Parameters
     ----------
@@ -254,29 +265,36 @@ def backscatter_tendency_mpas(
     else:
         E_edge = 0.5 * (E_cell[c1] + E_cell[c2])         # (nEdges, nlev)
 
-    # This MPAS path applies a CLEAN double vector-Laplacian ∇²(A·∇²u)
-    # (vector_laplacian_del2_3d twice).  Since ∇² carries units [1/m²], the
-    # biharmonic operator ∇²(A·∇²u) is dimensionally a momentum tendency
-    # [u/s] only when A is a BIHARMONIC viscosity [m⁴/s].  The previous form
-    # used a harmonic-viscosity coefficient (Δ·√E = [m²/s]), leaving the
-    # tendency short by one grid-area factor (1/m²).  Use the standard
-    # Jansen et al. (2015) biharmonic backscatter viscosity
-    #   ν₄ = c_bs · Δ³ · √E ,  Δ = √(dcEdge·dvEdge) [m]  ⇒  [m³]·[m/s] = [m⁴/s].
-    # (The lat-lon C-grid path uses a strain-based two-pass whose discrete
-    # operators absorb the extra Δ², so it remains consistent with a Δ¹
-    # coefficient — the two grids need different coefficient powers because
-    # they use different discrete operators.  ``c_bs`` is therefore NOT
-    # interchangeable between the two paths and must be recalibrated for MPAS.)
+    # Negative-Laplacian backscatter: -ν_bs ∇²u, a SINGLE vector Laplacian
+    # (vector_laplacian_del2_3d ONCE) with the anti-diffusive sign.  ∇²
+    # carries units [1/m²], so the HARMONIC coefficient ν_bs = c_bs·Δ·√E
+    # [m²/s] gives a momentum tendency [u/s].  ``c_bs`` now has the SAME
+    # meaning as the C-grid path.  Added by the caller (``du/dt += tend``)
+    # the minus sign injects energy (growth ∝ +ν_bs k²) — Jansen & Held
+    # (2014).  (The prior form ``+∇²(A∇²u)`` with A = c_bs·Δ³·√E [m⁴/s] was
+    # an anti-biharmonic ∝ +k⁴ that amplified the grid scale most; see the
+    # module docstring.)
+    #
+    # COEFFICIENT PLACEMENT (ν_bs OUTSIDE the Laplacian, at edges): this is
+    # deliberately the exact NEGATION of the codebase's wired MPAS harmonic
+    # viscosity ``smagorinsky_laplacian_3d`` (``A_e·∇²u``,
+    # operators_voronoi.py; used in ocean_pe_mpas.py), so backscatter returns
+    # energy in the SAME discretization the paired MPAS dissipation removed it
+    # — the energetically-consistent (Jansen & Held) requirement.  Using the
+    # strict exact-adjoint ``-∇·(ν∇u)`` here instead would make injection and
+    # dissipation use DIFFERENT operators and break that consistency.  The
+    # cost: for spatially varying ν_bs the edge-coefficient form is
+    # sign-definite only to O(∇ν_bs·∇u) (the strict pointwise stress-tensor
+    # identity holds on the C-grid path via ``viscous_tendency_cgrid``, whose
+    # cgrid dissipation IS exact-adjoint); on MPAS, as for every
+    # edge-coefficient viscosity here, the net injection is bounded globally
+    # by the ``E_max`` reservoir cap rather than guaranteed pointwise.
     delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)     # Δ [m]
-    Delta3 = (delta_edge ** 3)[:, jnp.newaxis]           # Δ³ [m³]
-    A_bs = cfg.c_bs * Delta3 * jnp.sqrt(
-        jnp.maximum(E_edge, 0.0) + 1e-30)                # (nEdges, nlev) [m⁴/s]
+    nu_bs = cfg.c_bs * delta_edge[:, jnp.newaxis] * jnp.sqrt(
+        jnp.maximum(E_edge, 0.0) + 1e-30)                # (nEdges, nlev) [m²/s]
 
-    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
-    intermediate = A_bs * del2_u
-    # Smag-biharm returns -∇²(A ∇²u); we want +∇²(A ∇²u), hence the
-    # explicit positive sign.
-    return vector_laplacian_del2_3d(intermediate, mesh)
+    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)   # ∇²u  [u/m²]
+    return -nu_bs * del2_u                                # -ν_bs ∇²u  [u/s]
 
 
 # ---------------------------------------------------------------------------

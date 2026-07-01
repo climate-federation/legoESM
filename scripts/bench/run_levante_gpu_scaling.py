@@ -56,6 +56,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Shared, self-describing scaling metadata (roadmap item 9): merged per-result
+# into the JSON so a host-staged / f32 / replicated GPU row is falsifiable from
+# the record.  ``metadata.py`` imports JAX only lazily (safe before JAX init).
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
 # ``_configure_mpi_gpu_affinity`` have a chance to set ``JAX_ENABLE_X64``,
@@ -2274,16 +2282,66 @@ def write_csv(results: list[TimingResult], path: Path) -> None:
     print(f"  CSV: {path}")
 
 
-def write_json(report: ScalingReport, path: Path) -> None:
-    """Write full report to JSON."""
+def write_json(
+    report: ScalingReport, path: Path, *, n_ranks_true: int | None = None
+) -> None:
+    """Write full report to JSON.
+
+    ``n_ranks_true`` is the real MPI world size from ``_maybe_init_distributed``
+    (1 for single-process SPMD, N for the route-A MPI path).  It MUST be passed
+    for the MPI route-A latlon/icosahedral path, where ``jax.distributed`` is
+    NOT initialized on a single node, so ``jax.process_count()`` would report 1
+    and the auto default would falsely record ``n_ranks=1`` for an
+    ``mpirun -np N`` run.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _decomp(grid: str) -> str:
+        # MPI route-A (world size > 1): grid-specific domain decomposition;
+        # single-process runs shard via SPMD.
+        if n_ranks_true and n_ranks_true > 1:
+            if grid == "latlon":
+                return "band"
+            if grid == "icosahedral":
+                return "cell_partition"
+            return "mpi"
+        return "spmd"
+
+    def _row(r: TimingResult) -> dict:
+        d = asdict(r)
+        # Self-describing metadata (roadmap item 9): backend / precision knobs /
+        # GPU-direct mode / decomposition / cells-per-GPU so this row is
+        # comparable and a host-staged or f32 GPU row is falsifiable.  n_gpus is
+        # the row's device count (scaling axis); n_ranks is the true MPI world
+        # size (SPMD -> 1; route-A -> N), NOT jax.process_count() which is 1 on
+        # single-node MPI where jax.distributed is not initialized.
+        d["metadata"] = annotate_incomplete(scaling_metadata(
+            grid=r.grid_type,
+            component="atmosphere",
+            resolution=r.resolution,
+            n_levels=r.n_levels,
+            precision=r.precision,
+            n_ranks=n_ranks_true,
+            n_gpus=r.n_gpus,
+            decomposition=os.environ.get("LEGOESM_DECOMPOSITION")
+            or _decomp(r.grid_type),
+            cells_per_rank=r.cells_per_gpu,
+            scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
+            extra={
+                "physics_level": r.physics_level,
+                "mode": r.mode,
+                "hlo_collective_permute": r.hlo_collective_permute,
+            },
+        ))
+        return d
+
     payload = {
         "mode": report.mode,
         "precisions": report.precisions,
         "timestamp_utc": report.timestamp_utc,
         "backend": report.backend,
         "hostname": report.hostname,
-        "results": [asdict(r) for r in report.results],
+        "results": [_row(r) for r in report.results],
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -2765,7 +2823,8 @@ def main() -> int:
                 hostname=hostname,
             )
             write_csv(weak_results, output_dir / "weak_scaling.csv")
-            write_json(weak_report, output_dir / "weak_scaling.json")
+            write_json(weak_report, output_dir / "weak_scaling.json",
+                       n_ranks_true=world_size)
 
             if not args.no_plot:
                 plot_weak_scaling(weak_results, output_dir)
@@ -2799,7 +2858,8 @@ def main() -> int:
                 hostname=hostname,
             )
             write_csv(strong_results, output_dir / "strong_scaling.csv")
-            write_json(strong_report, output_dir / "strong_scaling.json")
+            write_json(strong_report, output_dir / "strong_scaling.json",
+                       n_ranks_true=world_size)
 
             if not args.no_plot:
                 plot_strong_scaling(strong_results, output_dir)

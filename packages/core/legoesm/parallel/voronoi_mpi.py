@@ -69,6 +69,9 @@ from legoesm.parallel.halo_exchange_voronoi import (
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
+    global_min_mpi,
+    global_max_mpi,
+    global_sum_mpi,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 
@@ -128,6 +131,80 @@ class VoronoiPartitionLayout(NamedTuple):
     # layout time; ``None`` only for layouts constructed by hand —
     # ``make_voronoi_mpi_step`` rebuilds it on demand then.
     batched_comm: BatchedHaloSchedule | None = None
+
+
+def voronoi_partition_metrics(
+    layout: VoronoiPartitionLayout, *, n_dtype_groups: int = 1
+) -> dict:
+    """Per-rank partition-quality metrics for benchmark telemetry (roadmap #6).
+
+    PURE (reads ownership masks + the batched-halo schedule constants); issues
+    NO collectives, so it is unit-testable without an MPI stack.  Cross-rank
+    aggregates (cells-per-rank min/max, total edge-cut) are added by
+    :func:`reduce_partition_metrics`.  Call OUTSIDE the timed loop — the mask
+    ``sum`` forces one device->host transfer.
+
+    Keys
+    ----
+    n_owned_cells, n_halo_cells
+        Exact owned / ghost cell counts from ``owned_mask_cells``.
+    owned_halo_ratio
+        ``n_halo / n_owned`` — the halo (communication) overhead of this
+        rank's tile (``inf`` if a rank owns nothing).
+    n_neighbor_ranks
+        Number of MPI neighbours (0 without a batched schedule).
+    messages_per_exchange
+        Messages one batched state exchange posts (``BatchedHaloSchedule``).
+    halo_recv_cells
+        Ghost cells pulled per exchange = this rank's edge-cut contribution
+        (a proxy for the METIS graph edge-cut).
+    owned_send_cells
+        Owned cells shipped to neighbours per exchange.
+    """
+    owned = layout.owned_mask_cells
+    n_owned = int(jnp.sum(owned))
+    n_halo = int(owned.shape[0]) - n_owned
+    bc = layout.batched_comm
+    if bc is not None:
+        n_neighbors = len(bc.neighbor_ranks)
+        halo_recv = int(sum(bc.cell_recv_counts))
+        owned_send = int(sum(bc.cell_send_counts))
+        msgs = int(bc.messages_per_exchange(n_dtype_groups))
+    else:
+        # No schedule (hand-built layout): fall back to the ghost-cell count.
+        n_neighbors = 0
+        halo_recv = n_halo
+        owned_send = 0
+        msgs = 0
+    return {
+        "n_owned_cells": n_owned,
+        "n_halo_cells": n_halo,
+        "owned_halo_ratio": (n_halo / n_owned) if n_owned else float("inf"),
+        "n_neighbor_ranks": n_neighbors,
+        "messages_per_exchange": msgs,
+        "halo_recv_cells": halo_recv,
+        "owned_send_cells": owned_send,
+    }
+
+
+def reduce_partition_metrics(local: dict) -> dict:
+    """Add cross-rank aggregates to a per-rank :func:`voronoi_partition_metrics`
+    dict via MPI reductions (``global_min/max/sum_mpi`` — diagnostics-only, NOT
+    differentiable).  Degrades to the per-rank values on a single rank.  Call
+    OUTSIDE the timed loop (each reduction is a collective).
+
+    Adds: ``cells_per_rank_min`` / ``cells_per_rank_max`` (load balance),
+    ``edge_cut_total`` (sum of ghost cells over ranks), ``max_neighbor_ranks``.
+    """
+    n_owned = jnp.asarray(float(local["n_owned_cells"]))
+    halo_recv = jnp.asarray(float(local["halo_recv_cells"]))
+    neighbors = jnp.asarray(float(local["n_neighbor_ranks"]))
+    out = dict(local)
+    out["cells_per_rank_min"] = int(global_min_mpi(n_owned))
+    out["cells_per_rank_max"] = int(global_max_mpi(n_owned))
+    out["edge_cut_total"] = int(global_sum_mpi(halo_recv))
+    out["max_neighbor_ranks"] = int(global_max_mpi(neighbors))
+    return out
 
 
 def make_voronoi_partition_layout(

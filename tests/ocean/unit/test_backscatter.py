@@ -21,8 +21,9 @@ from legoesm.grids.latlon import create_regional_latlon_grid
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
-    smagorinsky_biharmonic_tendency_cgrid,
+    viscous_tendency_cgrid,
 )
+from legoesm.core.operators_voronoi import vector_laplacian_del2_3d
 from legoesm.ocean.physics.lateral_mixing import (
     BackscatterConfig,
     backscatter_tendency_cgrid,
@@ -118,7 +119,7 @@ class TestBackscatterLatLon:
         cfg = BackscatterConfig(enabled=True, c_bs=0.1)
         tu, tv = backscatter_tendency_cgrid(
             u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask)
-        # E = 0 ⇒ ν_bs ≈ Δ² · √ε with ε = 1e-30 ⇒ O(1e-15·Δ²·|∇⁴u|); tiny.
+        # E = 0 ⇒ ν_bs ≈ Δ · √ε with ε = 1e-30 ⇒ O(1e-15·ν_bs·|∇²u|); tiny.
         assert float(jnp.max(jnp.abs(tu))) < 1e-6
         assert float(jnp.max(jnp.abs(tv))) < 1e-6
 
@@ -138,31 +139,37 @@ class TestBackscatterLatLon:
         assert jnp.allclose(
             jnp.where(active, ratio_u, 2.0), 2.0, rtol=1e-8)
 
-    def test_opposite_sign_of_smagorinsky(self, latlon_grid):
-        """Backscatter must inject energy ⇒ its tendency has the
-        *opposite sign* of the Smagorinsky-biharmonic dissipation.
+    def test_is_negated_harmonic_viscosity(self, latlon_grid):
+        """Backscatter is a NEGATIVE-Laplacian (∇², harmonic), NOT the old
+        two-pass ``+∇²(A∇²u)`` anti-biharmonic (∇⁴).
 
-        We compare the two on the same velocity field.  Since the
-        coefficient driving each is different (|D| vs √E) we only check
-        element-wise sign agreement — not magnitudes.  Non-zero tendency
-        cells must either both be zero or have opposite signs.
+        Its returned tendency must equal EXACTLY the negation of the
+        single-pass harmonic viscous stress-divergence driven by the same
+        ``ν_bs = c_bs·Δ·√E`` coefficient.  The caller then ADDs it
+        (``du/dt += tend``) to realise ``-ν_bs∇²u``, injecting energy.
+        This equality FAILS for the biharmonic two-pass form (different
+        values), so it is a genuine regression lock on the fix.
         """
+        from legoesm.ocean.physics.lateral_mixing.backscatter import (
+            _A_bs_h_cgrid, _A_bs_q_cgrid,
+        )
         grid, mask, u_mask, v_mask = latlon_grid
         u, v = _random_velocity_latlon(grid, mask, u_mask, v_mask)
         cfg = BackscatterConfig(enabled=True, c_bs=0.1)
         E = jnp.full(grid.grid_shape_2d, 1e-2)
         bs_u, bs_v = backscatter_tendency_cgrid(
             u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask)
-        sm_u, sm_v = smagorinsky_biharmonic_tendency_cgrid(
-            u, v, grid, 0.1, mask=mask, u_mask=u_mask, v_mask=v_mask)
-        # Smag caller subtracts: du/dt -= sm_u  (i.e. sm_u itself has
-        # the same sign as the energy-removing tendency applied).
-        # Backscatter caller adds: du/dt += bs_u.  Hence bs_u and sm_u
-        # must have the *same* sign as mathematical objects (both are
-        # +∇²(A∇²u)-like); it is only the caller's sign convention that
-        # differs.  Here we just verify both are non-trivial.
+        # Reference: SINGLE-pass harmonic viscous tendency (dissipative when
+        # ADDED), negated ⇒ the backscatter injection.
+        A_h = _A_bs_h_cgrid(E, grid, cfg.c_bs)
+        A_q = _A_bs_q_cgrid(E, grid, cfg.c_bs)
+        diss_u, diss_v = viscous_tendency_cgrid(
+            u, v, grid, A_h, A_q, mask=mask, u_mask=u_mask, v_mask=v_mask,
+            normalize=True)
+        assert jnp.allclose(bs_u, -diss_u, rtol=1e-10, atol=1e-14)
+        assert jnp.allclose(bs_v, -diss_v, rtol=1e-10, atol=1e-14)
+        # And the injection must be non-trivial (not a degenerate all-zero).
         assert jnp.any(jnp.abs(bs_u) > 0)
-        assert jnp.any(jnp.abs(sm_u) > 0)
 
     def test_injects_energy_on_average(self, latlon_grid):
         """⟨u · tend_bs⟩ area-weighted is ≥ 0 — the backscatter never
@@ -207,7 +214,7 @@ class TestBackscatterLatLon:
 
     def test_coefficient_dimensions_are_m2_per_s(self, latlon_grid):
         """Regression: the backscatter coefficient driving the
-        biharmonic stress-divergence must have harmonic-viscosity
+        negative-Laplacian stress-divergence must have harmonic-viscosity
         units ``m²/s`` = (length) · (velocity).  Doubling the cell
         size at fixed E should double ν_bs (not quadruple it, which
         would indicate cell-AREA scaling).
@@ -331,6 +338,40 @@ class TestBackscatterMPAS:
                 uu, E, mpas_mesh, cfg) ** 2)
         du = jax.grad(loss)(u)
         assert jnp.all(jnp.isfinite(du))
+
+    def test_is_negated_single_laplacian(self, mpas_mesh):
+        """MPAS backscatter is ``-ν_bs ∇²u`` — a SINGLE (negated) vector
+        Laplacian with the HARMONIC ``ν_bs = c_bs·Δ·√E`` [m²/s], NOT the
+        old double-∇² anti-biharmonic ``+∇²(A∇²u)`` with A = c_bs·Δ³·√E.
+
+        Uses a SPATIALLY-VARYING E (per-cell) so the lock also pins the
+        coefficient PLACEMENT under spatial variation: ν_bs is the negated
+        edge-coefficient form ``-ν_bs·∇²u`` — the exact anti-dissipation of
+        the wired MPAS harmonic viscosity ``smagorinsky_laplacian_3d``
+        (``A_e·∇²u``), for energetic consistency with the paired MPAS
+        dissipation — NOT the strict exact-adjoint ``-∇·(ν∇u)``.  (Uniform E
+        would not distinguish coefficient placement.)
+        """
+        rng = np.random.RandomState(7)
+        n_edges = mpas_mesh.dcEdge.shape[0]
+        n_cells = mpas_mesh.areaCell.shape[0]
+        u = jnp.array(rng.randn(n_edges, 1) * 0.1)
+        # Spatially-varying per-cell reservoir (positive, O(1e-3–1e-1)).
+        E = jnp.array(np.abs(rng.randn(n_cells)) * 1e-2 + 1e-3)
+        cfg = BackscatterConfig(enabled=True, c_bs=0.05)
+        tend = backscatter_tendency_mpas(u, E, mpas_mesh, cfg)
+        # Reference: ν_bs = c_bs·Δ·√E at edges (Δ¹, harmonic), single ∇².
+        delta_edge = jnp.sqrt(mpas_mesh.dcEdge * mpas_mesh.dvEdge)
+        c1, c2 = mpas_mesh.cellsOnEdge[0], mpas_mesh.cellsOnEdge[1]
+        E_edge = (0.5 * (E[c1] + E[c2]))[:, jnp.newaxis]
+        nu_bs = cfg.c_bs * delta_edge[:, jnp.newaxis] * jnp.sqrt(
+            jnp.maximum(E_edge, 0.0) + 1e-30)
+        ref = -nu_bs * vector_laplacian_del2_3d(u, mpas_mesh)
+        assert jnp.allclose(tend, ref, rtol=1e-10, atol=1e-14)
+        assert jnp.any(jnp.abs(tend) > 0)
+        # ν_bs genuinely varies across edges (guards against a uniform-E
+        # regression silently passing this as a constant-coefficient check).
+        assert float(jnp.std(nu_bs)) > 0.0
 
 
 # ---------------------------------------------------------------------------
