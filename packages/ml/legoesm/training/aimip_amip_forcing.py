@@ -111,3 +111,31 @@ def interp_forcing_at(times_ns, field, target_ns):
     j = int(np.searchsorted(t, tt))  # t[j-1] < tt <= t[j]
     w = (tt - t[j - 1]) / (t[j] - t[j - 1])
     return (1.0 - w) * np.asarray(field[j - 1]) + w * np.asarray(field[j])
+
+
+def ghg_vmr_at_year(year, experiment: str = "amip") -> dict:
+    """Well-mixed GHG volume mixing ratios for a calendar year.
+
+    RRTMGP is a PHYSICAL radiation scheme: unlike a pure-ML emulator it cannot
+    learn the anthropogenic radiative-forcing trend from data — it must be given
+    the actual time-varying concentrations, or a multi-decade run produces no
+    warming. The CMIP6 AMIP protocol mandates the same transient CO2/CH4/N2O as
+    the historical run, so we read the built-in ``experiments`` GHG table
+    (co2/ch4/n2o, 1900-2021) and convert to RRTMGP VMRs. CFC-11/12 (not in the
+    table) use the ``GHGConfig`` defaults (roughly the post-Montreal plateau).
+
+    Returns a dict ``{co2, ch4, n2o, cfc11, cfc12}`` of dimensionless VMRs, ready
+    for ``forcing['ghg_vmr']`` / ``ghg_vmr_override``.
+    """
+    from legoesm.forcing.experiments import ghg_at_year
+    from legoesm.forcing.external import GHGConfig, ghg_concentrations_to_vmr
+
+    co2_ppmv, ch4_ppbv, n2o_ppbv = ghg_at_year(experiment, float(year))
+    _c = GHGConfig()  # CFC defaults (table carries only co2/ch4/n2o)
+    return ghg_concentrations_to_vmr({
+        "co2_ppmv": float(co2_ppmv),
+        "ch4_ppbv": float(ch4_ppbv),
+        "n2o_ppbv": float(n2o_ppbv),
+        "cfc11_pptv": _c.cfc11_pptv,
+        "cfc12_pptv": _c.cfc12_pptv,
+    })

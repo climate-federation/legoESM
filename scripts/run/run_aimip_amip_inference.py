@@ -124,7 +124,7 @@ def main():
     from legoesm.ml.training import load_checkpoint
     from legoesm.forcing.surface_utils import blend_surface_temperature
     from legoesm.training.aimip_amip_forcing import (
-        DEFAULT_AIMIP_FORCING, interp_forcing_at,
+        DEFAULT_AIMIP_FORCING, ghg_vmr_at_year, interp_forcing_at,
         regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
@@ -200,12 +200,12 @@ def main():
                                      cutoff_fraction=pe.spectral_filter_strength)
              if pe.spectral_filter_strength > 0 else None)
 
-    seg = jax.jit(lambda st, sst_col, doy: spectral_amip_rollout(
+    seg = jax.jit(lambda st, sst_col, doy, ghg: spectral_amip_rollout(
         st, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps_day,
         sst_col=sst_col, sizing_phys_state=sizing_ps,
         day_of_year_base=doy, seconds_offset=0.0,
         rad_update_interval=args.rad_update_interval,
-        sponge_factor=sponge, spectral_filter=sfilt,
+        sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg,
     ))
     T_ice = float(constants.T_freeze_ocean)
 
@@ -230,8 +230,11 @@ def main():
         sic_c = np.clip(interp_forcing_at(times_ns, sic_m, day_ns), 0.0, 1.0)
         t_sfc = np.asarray(blend_surface_temperature(sst_c, sic_c, T_ice))
         override = np.where(ocean, t_sfc, np.nan).astype(np.float64)
+        # Transient historical GHG for this year (physical RRTMGP needs it to
+        # produce the warming trend; traced scalars -> no retrace).
+        ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(day.year).items()}
         state = seg(state, jnp.asarray(override),
-                    jnp.asarray(float(day.timetuple().tm_yday)))
+                    jnp.asarray(float(day.timetuple().tm_yday)), ghg)
         if day >= record_from:
             st = _surf_T(state)
             monthly.setdefault((day.year, day.month), []).append(st)

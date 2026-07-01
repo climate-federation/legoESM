@@ -789,6 +789,8 @@ def spectral_amip_rollout(
     rad_update_interval: int = 36,
     sponge_factor: jnp.ndarray | None = None,
     spectral_filter: jnp.ndarray | None = None,
+    ghg_vmr: dict | None = None,
+    o3_vmr: jnp.ndarray | None = None,
     use_checkpoint: bool = False,
 ) -> SpectralHydrostaticState:
     """Prescribed-SST AMIP rollout.
@@ -837,11 +839,20 @@ def spectral_amip_rollout(
         # Elapsed simulated time -> advancing day-of-year (seasonal insolation)
         # + wrapped seconds-of-day (diurnal cycle).
         t = step_idx.astype(jnp.float64) * dt + _off
-        return {
+        fc = {
             "T_sfc": sst_col,
             "day_of_year": _doy0 + t / 86400.0,
             "seconds_of_day": jnp.mod(t, 86400.0),
         }
+        # Prescribed transient GHG + ozone (RRTMGP is a physical scheme: it needs
+        # the actual historical concentrations to produce the radiative-forcing
+        # trend; constant across the segment). Read by the radiation factory as
+        # ghg_vmr_override / o3_vmr_override.
+        if ghg_vmr is not None:
+            fc["ghg_vmr"] = ghg_vmr
+        if o3_vmr is not None:
+            fc["o3_vmr"] = o3_vmr
+        return fc
 
     def step_fn(carry, step_idx):
         state, cached_rad = carry

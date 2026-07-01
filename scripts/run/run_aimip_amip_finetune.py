@@ -107,7 +107,7 @@ def main():
     from legoesm.forcing.surface_utils import blend_surface_temperature
     from legoesm import constants
     from legoesm.training.aimip_amip_forcing import (
-        DEFAULT_AIMIP_FORCING, interp_forcing_at,
+        DEFAULT_AIMIP_FORCING, ghg_vmr_at_year, interp_forcing_at,
         regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
@@ -168,10 +168,14 @@ def main():
             ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
             tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
             mid = d0 + _dt.timedelta(days=rollout_days // 2)
+            # Transient historical GHG for this sample's year (traced scalars ->
+            # no retrace across samples/years). Physical RRTMGP needs it.
+            ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(d0.year).items()}
             out.append((
                 carry_to_spectral_state(ic_carry, grid), tgt_carry,
                 jnp.asarray(_override_at(mid)),
                 jnp.asarray(float(d0.timetuple().tm_yday)),
+                ghg,
             ))
             if phis is None:
                 phis = jnp.asarray(ic_carry.phis)
@@ -222,12 +226,13 @@ def main():
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
             land_mask=land_mask, split_rad=True,
         )
-        ic_state, tgt_carry, sst_col, doy = sample
+        ic_state, tgt_carry, sst_col, doy, ghg = sample
         pred = spectral_amip_rollout(
             ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
             sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
             rad_update_interval=args.rad_update_interval,
-            sponge_factor=sponge, spectral_filter=sfilt, use_checkpoint=True,
+            sponge_factor=sponge, spectral_filter=sfilt,
+            ghg_vmr=ghg, use_checkpoint=True,
         )
         state_loss = spectral_state_vs_carry_loss(
             pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,
