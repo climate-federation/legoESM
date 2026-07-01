@@ -31,6 +31,7 @@ maybe_init_jax_distributed()
 from legoesm import constants
 from legoesm.driver.config import (
     DycoreConfig,
+    EvaluationConfig,
     ExperimentConfig,
     GridConfig,
     OutputConfig,
@@ -39,6 +40,7 @@ from legoesm.driver.config import (
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
 _EXPERIMENT_DEFAULTS = ExperimentConfig()
+_EVALUATION_DEFAULTS = EvaluationConfig()
 
 
 def _print_forcing_activity(args) -> None:
@@ -745,6 +747,65 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Master RNG seed for reproducibility")
     parser.add_argument("--cmip-output", action="store_true", default=False)
     parser.add_argument("--clear-sky-diag", action="store_true", default=False)
+    parser.add_argument(
+        "--evaluate", action="store_true", default=False,
+        help="Run ClimateEval after a successful AMIP run to compare "
+             "CMOR outputs against ERA5/observational reference data. "
+             "Requires --cmip-output.")
+    parser.add_argument(
+        "--evaluation-suite", dest="evaluation_suite", type=str,
+        default=_EVALUATION_DEFAULTS.suite,
+        help=f"ClimateEval suite name (default: {_EVALUATION_DEFAULTS.suite!r}). "
+             "Available suites: Tier1_sanity_checks, Tier1_consistency_checks, "
+             "Tier1_ecs, Tier2_atmosphere_monthly, Tier2_atmosphere_subdaily, "
+             "Tier2_ocean_monthly.")
+    parser.add_argument(
+        "--evaluation-model-id", dest="evaluation_model_id", type=str,
+        default=_EVALUATION_DEFAULTS.model_id,
+        help="Model identifier for ClimateEval DataSourceInformation "
+             f"(default: {_EVALUATION_DEFAULTS.model_id!r}).")
+    parser.add_argument(
+        "--evaluation-experiment-id", dest="evaluation_experiment_id", type=str,
+        default=_EVALUATION_DEFAULTS.experiment_id,
+        help="Experiment identifier for ClimateEval "
+             f"(default: {_EVALUATION_DEFAULTS.experiment_id!r}).")
+    parser.add_argument(
+        "--evaluation-variant-id", dest="evaluation_variant_id", type=str,
+        default=_EVALUATION_DEFAULTS.variant_id,
+        help="Variant identifier for ClimateEval "
+             f"(default: {_EVALUATION_DEFAULTS.variant_id!r}).")
+    parser.add_argument(
+        "--evaluation-data-root-dir", dest="evaluation_data_root_dir", type=str,
+        default=os.environ.get(
+            "LEGOESM_CLIMATEEVAL_DATA_ROOT", _EVALUATION_DEFAULTS.data_root_dir),
+        help="Root directory for ClimateEval reference data (source_id/"
+             "frequency/var layout). No shared canonical location — defaults "
+             "from the LEGOESM_CLIMATEEVAL_DATA_ROOT env var.")
+    parser.add_argument(
+        "--evaluation-timerange", dest="evaluation_timerange", type=str,
+        default=_EVALUATION_DEFAULTS.timerange,
+        help="ClimateEval variable timerange override "
+             "(e.g. '19790101/19791231'). If empty, uses the model's "
+             "actual output time span.")
+    parser.add_argument(
+        "--evaluation-fail-missing", dest="evaluation_fail_missing",
+        action="store_true",
+        default=_EVALUATION_DEFAULTS.fail_on_missing_data,
+        help="Fail the run if ClimateEval reference data is missing.")
+    parser.add_argument(
+        "--evaluation-download", dest="evaluation_download",
+        action="store_true",
+        default=_EVALUATION_DEFAULTS.download_missing_data,
+        help="Download missing ClimateEval reference data on the fly.")
+    parser.add_argument(
+        "--evaluation-climateeval-python", dest="evaluation_climateeval_python", type=str,
+        default=os.environ.get(
+            "LEGOESM_CLIMATEEVAL_PYTHON", _EVALUATION_DEFAULTS.climateeval_python),
+        help="Python interpreter of the separate, externally-installed "
+             "ClimateEval environment (iris/ESMValTool; never a legoESM "
+             "dependency). No hardcoded default — defaults from the "
+             "LEGOESM_CLIMATEEVAL_PYTHON env var. Required (and validated "
+             "to exist + be executable) when --evaluate is set.")
 
     # Performance
     parser.add_argument("--precision", type=str, default="fp32",
@@ -851,6 +912,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clear_sky_diag=args.clear_sky_diag,
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
+        evaluation=EvaluationConfig(
+            enabled=args.evaluate,
+            suite=args.evaluation_suite,
+            model_id=args.evaluation_model_id,
+            experiment_id=args.evaluation_experiment_id,
+            variant_id=args.evaluation_variant_id,
+            data_root_dir=args.evaluation_data_root_dir,
+            fail_on_missing_data=args.evaluation_fail_missing,
+            download_missing_data=args.evaluation_download,
+            timerange=args.evaluation_timerange,
+            climateeval_python=args.evaluation_climateeval_python,
+        ),
     )
 
     return ExperimentConfig(
@@ -1048,6 +1121,9 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 "--physics-parameterization ml currently requires "
                 "--convection mass_flux and --turbulence louis"
             )
+    if args.evaluate and not args.cmip_output:
+        parser.error("--evaluate requires --cmip-output (ClimateEval reads "
+                     "the CMOR Amon/ output tree)")
         if not args.physics_parameterization_checkpoint or not args.physics_parameterization_stats:
             parser.error(
                 "--physics-parameterization ml requires both "
@@ -1588,6 +1664,11 @@ def main(argv: list[str] | None = None):
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)
+
+    if _is_root:
+        from legoesm.driver.climateeval_hook import maybe_run_climateeval
+
+        maybe_run_climateeval(config, driver.output_dir)
 
 
 if __name__ == "__main__":
