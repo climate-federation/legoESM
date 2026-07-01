@@ -510,7 +510,7 @@ def _report_test(tuned: dict, test_data: dict):
 
 
 def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
-          prefilter=True):
+          prefilter=True, batch=0):
     p = init_ext_params()
     # The per-cell pre-filter is O(ncol) single-cell gradients — cheap at n_sub~200 but
     # the bottleneck at full-grid (~5.5k cells).  On the AD-stable 24-h forcing almost
@@ -520,7 +520,18 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         keep = _drop_nan_grad_cells(data, p)    # exclude NaN-backward cells (logged)
         if keep.size < int(data["lat"].shape[0]):
             data = _select_cells(data, keep)
+    # Mini-batch SGD: a single full-grid (~5k-cell) gradient is dominated by the global
+    # snow/soil scalars aggregated over every snowy cell AND is biased whenever the
+    # per-step sanitiser zeros a transiently-singular cell, so it wanders instead of
+    # descending.  Stepping on a small RANDOM cell batch each iter keeps every step in
+    # the stable small-sample regime while still visiting EVERY cell across the run.
+    ncol_tr = int(data["lat"].shape[0])
+    use_batch = 0 < batch < ncol_tr
+    _brng = np.random.default_rng(20260701)          # mini-batch sampler (fixed seed)
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
+    # Full-training-set score for best-checkpoint + logging (a mini-batch loss varies
+    # cell-to-cell and cannot rank iterates).  Evaluated only at the log cadence.
+    fscore = jax.jit(lambda q: loss_ml(q, data)) if use_batch else None
     # Gradient clipping: the initial loss is large (extreme high-latitude / desert /
     # ice cells contribute a huge skin-T error + seasonal-amplitude term), so unclipped
     # Adam at lr~3e-2 overshoots into a Richards/MOST-unstable parameter region and NaNs
@@ -533,10 +544,9 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
     n_san = 0
     best_p, best_l = p, float("inf")     # keep the LOWEST-loss params, not the latest
     for it in range(n_iter):
-        (l, (tm, am, pp, sa, sm)), g = vg(p, data)
-        lv = float(l)
-        if np.isfinite(lv) and lv < best_l:
-            best_l, best_p = lv, p        # p (pre-update) is the iterate that scored lv
+        bdata = _select_cells(data, _brng.choice(ncol_tr, batch, replace=False)) \
+            if use_batch else data
+        (l, aux), g = vg(p, bdata)                    # step on the (mini-)batch gradient
         # Dynamic safety net.  The static pre-filter only removes cells pathological at
         # the INIT params; a parameter step can push a previously-healthy cell into the
         # stiff-clay/saturated regime whose MOST-iteration backward overflows to NaN/inf.
@@ -549,9 +559,20 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
             g = jax.tree.map(
                 lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), g)
             n_san += 1
+        log = (it % 20 == 0 or it == n_iter - 1)
+        # Score + rank on the FULL training set at the log/checkpoint cadence (the batch
+        # loss is too noisy to rank iterates); p here is the PRE-update iterate.
+        if not use_batch:
+            score, (tm, am, pp, sa, sm) = float(l), aux
+        elif log or (ckpt_path and it > 0 and it % ckpt_every == 0):
+            fl, (tm, am, pp, sa, sm) = fscore(p); score = float(fl)
+        else:
+            score = None
+        if score is not None and np.isfinite(score) and score < best_l:
+            best_l, best_p = score, p
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
-        if it % 20 == 0 or it == n_iter - 1:
-            print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
+        if log:
+            print(f"# it {it:3d} loss {score:.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} sm-RMSE {float(jnp.sqrt(sm)):.4f} "
                   f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
                   flush=True)
@@ -565,9 +586,9 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         # Early stop: the MOST/thermal cliff makes a too-large step blow the seasonal-
         # amplitude term up ~10x; once the loss runs away there is no recovery (the
         # sanitised gradient is biased near the cliff), so cut the run and keep best_p.
-        if np.isfinite(lv) and lv > 5.0 * best_l and it > 10:
-            print(f"# early stop @ it {it}: loss {lv:.1f} ran away from best {best_l:.3f} "
-                  f"(MOST/thermal cliff); keeping best params", flush=True)
+        if score is not None and np.isfinite(score) and score > 5.0 * best_l and it > 10:
+            print(f"# early stop @ it {it}: loss {score:.1f} ran away from best "
+                  f"{best_l:.3f} (MOST/thermal cliff); keeping best params", flush=True)
             break
     if n_san:
         print(f"# {n_san}/{n_iter} steps had a non-finite gradient component sanitised "
@@ -709,6 +730,11 @@ def main():
                     help="skip the O(ncol) per-cell NaN-gradient pre-filter (the "
                          "bottleneck at full-grid; safe on the AD-stable 24-h forcing "
                          "where the per-step sanitisation catches the rare bad cell)")
+    ap.add_argument("--batch", type=int, default=0,
+                    help="mini-batch SGD cell count per step (0 = full batch).  Use for "
+                         "full-grid training: a single ~5k-cell gradient wanders (global "
+                         "scalars + sanitiser bias), a random ~300-cell batch each step "
+                         "stays in the stable regime yet visits every cell across the run")
     ap.add_argument("--keep-file", default=None,
                     help="cache the pre-filter keep-indices (.npy): computed+saved on the "
                          "first run (do it on CPU — the per-cell filter is slow on GPU), "
@@ -744,7 +770,7 @@ def main():
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
-                  prefilter=prefilter)
+                  prefilter=prefilter, batch=args.batch)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)
     print(f"# recommended tuned params -> {args.out} (does NOT mutate production defaults)")
