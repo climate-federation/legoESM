@@ -45,6 +45,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import os
 
 import jax
 
@@ -137,6 +138,73 @@ def validate_device_count(
         f"{suggestion_str}.  Pass allow_level_fallback=True to accept "
         f"any positive integer via the level-parallel fallback mesh "
         f"(issue #273)."
+    )
+
+
+#: Env override to permit a deliberate non-MPI multi-process launch (e.g.
+#: embarrassingly-parallel independent single-rank runs) without the fail-fast
+#: below.  Default off: a multi-rank launch is assumed to WANT MPI.
+_ALLOW_SINGLE_PROCESS_UNDER_MPI = "LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI"
+
+
+def launcher_declared_world_size(env: dict | None = None) -> int:
+    """Rank count the job launcher advertises via its env vars (0 = none).
+
+    ``mpirun``/``srun`` export the world size before the process starts; this is
+    how we tell a *multi-rank launch* apart from a genuine single process, to
+    catch a silent single-process fallback (below).  ``OMPI_COMM_WORLD_SIZE``
+    (OpenMPI) / ``PMI_SIZE`` (MPICH/Intel/Cray PMI) / ``MV2_COMM_WORLD_SIZE``
+    (MVAPICH2) are set ONLY under an MPI launcher; ``SLURM_NTASKS`` is the
+    srun fallback.
+    """
+    env = os.environ if env is None else env
+    for var in (
+        "OMPI_COMM_WORLD_SIZE",
+        "PMI_SIZE",
+        "MV2_COMM_WORLD_SIZE",
+        "SLURM_NTASKS",
+    ):
+        v = env.get(var)
+        if v:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def check_no_silent_mpi_fallback(
+    declared_world_size: int,
+    detected_world_size: int,
+    *,
+    allow: bool = False,
+    reason: str | None = None,
+) -> None:
+    """Fail LOUD when a multi-rank launch silently became a single process.
+
+    ``declared_world_size`` is what the launcher advertised
+    (:func:`launcher_declared_world_size`); ``detected_world_size`` is what the
+    MPI stack actually initialized (``jax.process_count()`` or
+    ``mpi4py`` COMM size).  When the launcher says ``> 1`` but only one process
+    initialized, EVERY rank would run the full global domain independently —
+    a silent single-process fallback that produces "fake scaling" numbers (or,
+    for a real model run, N redundant copies) with NO error.  Raise unless
+    ``allow`` (the rare deliberate non-MPI multi-launch).
+
+    Pure + side-effect-free so it is unit-testable without an MPI stack.
+    """
+    if allow or declared_world_size <= 1 or detected_world_size > 1:
+        return
+    extra = f" (mpi4py init error: {reason})" if reason else ""
+    raise RuntimeError(
+        f"Launched under a {declared_world_size}-rank MPI launcher, but the MPI "
+        f"stack initialized only {detected_world_size} process{extra}. Every "
+        f"rank would run the FULL global domain independently — a silent "
+        f"single-process fallback = fake scaling / redundant compute with no "
+        f"error. Fix the MPI stack (a working CUDA-aware mpi4py / mpi4jax, and "
+        f"jax.distributed for SPMD), or set "
+        f"{_ALLOW_SINGLE_PROCESS_UNDER_MPI}=1 for a deliberate non-MPI "
+        f"multi-launch."
     )
 
 
@@ -260,6 +328,7 @@ class ParallelRuntime:
             pass
 
         # If not detected via JAX, check mpi4py directly
+        _mpi4py_err = None
         if not is_mpi:
             try:
                 import importlib.util
@@ -270,8 +339,21 @@ class ParallelRuntime:
                         is_mpi = True
                         rank = comm.Get_rank()
                         world_size = comm.Get_size()
-            except Exception:
-                pass
+            except Exception as e:  # record WHY for the fail-fast message
+                _mpi4py_err = repr(e)
+
+        # Fail-fast (roadmap item 10): a multi-rank LAUNCH that neither JAX nor
+        # mpi4py picked up means the MPI stack silently fell back to a single
+        # process -- every rank would run the full global domain independently
+        # ("fake scaling" / redundant compute, no error).  Refuse loudly.
+        check_no_silent_mpi_fallback(
+            launcher_declared_world_size(),
+            world_size,
+            allow=os.environ.get(
+                _ALLOW_SINGLE_PROCESS_UNDER_MPI, "0"
+            ).strip().lower() in ("1", "true", "yes", "on"),
+            reason=_mpi4py_err,
+        )
 
         # Resolve local devices
         local_devices = jax.local_devices() if is_mpi else jax.devices()
