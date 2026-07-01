@@ -17,6 +17,12 @@ from __future__ import annotations
 import os
 import socket
 
+# Idempotency flag — must NOT be a jax.process_count() probe: that call
+# initialises the XLA backend, after which jax.distributed.initialize() raises
+# "must be called before any JAX calls that might initialise the XLA backend"
+# (issue #693: every multi-node run died here).
+_INITIALIZED = False
+
 
 def maybe_init_jax_distributed(coordinator_port: int = 1234) -> bool:
     """Initialize ``jax.distributed`` if running under multi-node MPI.
@@ -28,9 +34,14 @@ def maybe_init_jax_distributed(coordinator_port: int = 1234) -> bool:
     does nothing.
 
     Returns True if ``jax.distributed.initialize()`` was called, False
-    otherwise.  Safe to call multiple times — skips if JAX already reports
-    more than one process (i.e. a previous call succeeded).
+    otherwise.  Safe to call multiple times — idempotency is tracked via a
+    module-level flag (NOT a ``jax.process_count()`` probe, which would
+    initialise the XLA backend and then make ``initialize()`` raise; #693).
     """
+    global _INITIALIZED
+    if _INITIALIZED:
+        return False
+
     ntasks = int(
         os.environ.get(
             "SLURM_NTASKS",
@@ -51,14 +62,19 @@ def maybe_init_jax_distributed(coordinator_port: int = 1234) -> bool:
         return False
 
     import jax
-    if jax.process_count() > 1:
-        # Already initialized by a previous call.
-        return False
-
     coordinator = f"{hosts[0]}:{coordinator_port}"
+    # local_device_ids=[0]: the repo's multi-node launch standard pins 1 GPU per
+    # task via SLURM `--gpu-bind=single:1`, so every process sees exactly one GPU
+    # as local index 0. Without this, jax auto-assigns device index by process
+    # rank (0,1,2,...) and the >1-task-per-node ranks fail with "no supported
+    # devices found for platform CUDA" (issue #693, confirmed C48 6-GPU/2-node).
+    # ponytail: assumes 1 GPU/task; a launch that exposes all GPUs to each task
+    # would instead need local_device_ids=[SLURM_LOCALID].
     jax.distributed.initialize(
         coordinator_address=coordinator,
         num_processes=size,
         process_id=rank,
+        local_device_ids=[0],
     )
+    _INITIALIZED = True
     return True
