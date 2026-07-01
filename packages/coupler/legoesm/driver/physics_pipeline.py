@@ -258,6 +258,8 @@ class PhysicsPipeline:
         self._cloud_rh_crit = None
         self._cloud_q_c_diagnostic = None
         self._cloud_conv_cloud_max = None
+        self._cloud_p_xr = None
+        self._cloud_alpha_xr = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -1567,6 +1569,10 @@ class PhysicsPipeline:
                 _cc_over["q_c_diagnostic"] = self._cloud_q_c_diagnostic
             if getattr(self, "_cloud_conv_cloud_max", None) is not None:
                 _cc_over["conv_cloud_max"] = self._cloud_conv_cloud_max
+            if getattr(self, "_cloud_p_xr", None) is not None:
+                _cc_over["p_xr"] = self._cloud_p_xr
+            if getattr(self, "_cloud_alpha_xr", None) is not None:
+                _cc_over["alpha_xr"] = self._cloud_alpha_xr
             cloud_config = CloudConfig(
                 scheme=cloud_scheme,
                 convective_cloud=(getattr(self, "_cloud_convective", False)
@@ -2726,6 +2732,8 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
+    pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
+    pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma
