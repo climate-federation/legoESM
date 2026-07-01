@@ -484,6 +484,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
+                        help="Xu-Randall cloud-fraction RH exponent p_xr (None="
+                             "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
+                             "fraction less saturating at moderate RH (flattens "
+                             "the moisture-driven overcast runaway).")
+    parser.add_argument("--cloud-alpha-xr", dest="cloud_alpha_xr", type=float,
+                        default=None,
+                        help="Xu-Randall condensate sensitivity alpha_xr (None="
+                             "default 100; bounds 10..1000). LOWER => cloud "
+                             "fraction grows more slowly with condensate.")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action="store_true", default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
@@ -909,6 +919,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_gustiness_zi=args.surface_gustiness_zi,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_p_xr=args.cloud_p_xr,
+        cloud_alpha_xr=args.cloud_alpha_xr,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
@@ -1342,6 +1354,25 @@ def _validate_sundqvist_flags(args, parser) -> None:
             "backends rebuild MicrophysicsConfig at run() and would ignore them.")
 
 
+def _validate_cloud_sensitivity_flags(args, parser) -> None:
+    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
+    at run() and ignore the pipeline override (MPAS / spectral) — the same
+    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
+    are enforced by ExperimentConfig.validate_strict.
+    """
+    if (getattr(args, "cloud_p_xr", None) is None
+            and getattr(args, "cloud_alpha_xr", None) is None):
+        return
+    disc = getattr(args, "discretization", "centered")
+    grid = getattr(args, "grid_type", "")
+    if disc in ("mpas", "spectral") or grid in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        parser.error(
+            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
+            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
+            "CloudConfig at run() and would ignore them.")
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1411,6 +1442,7 @@ def main(argv: list[str] | None = None):
     _require_full_physics_for_amip(args, parser)
     # Bound-check the --sundqvist-* tunables + refuse them on MPAS/spectral.
     _validate_sundqvist_flags(args, parser)
+    _validate_cloud_sensitivity_flags(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
