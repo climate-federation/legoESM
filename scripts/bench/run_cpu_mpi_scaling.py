@@ -184,6 +184,10 @@ class TimingResult:
     # 2-D-pencil curve from the 1-D band laggard.  N/A for other grids ("band"
     # is a harmless default they never key on).
     decomposition: str = "band"
+    # MPAS/Voronoi partition-quality telemetry (roadmap #6): edge-cut /
+    # owned-halo-ratio / cells-per-rank min-max / message count.  Populated only
+    # for the multi-rank icosahedral path; None otherwise.
+    partition_metrics: dict | None = None
 
 
 @dataclass
@@ -430,21 +434,26 @@ def _build_amip_step(
 
     if grid_type == "cubed-sphere":
         if cs_spmd:
-            return _build_cubed_sphere_spmd(
+            out = _build_cubed_sphere_spmd(
                 resolution, nlev, dt, dtype, physics_level, _cast)
-        return _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                                  physics_level, _cast)
+        else:
+            out = _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank,
+                                     n_ranks, physics_level, _cast)
     elif grid_type == "latlon":
-        return _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                             physics_level, _cast, latlon_2d=latlon_2d)
+        out = _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
+                            physics_level, _cast, latlon_2d=latlon_2d)
     elif grid_type == "icosahedral":
-        return _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                                  physics_level, _cast)
+        out = _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank,
+                                 n_ranks, physics_level, _cast)
     elif grid_type == "spectral":
-        return _build_spectral(resolution, nlev, sigma, dt, dtype,
-                               physics_level, _cast)
+        out = _build_spectral(resolution, nlev, sigma, dt, dtype,
+                              physics_level, _cast)
     else:
         raise ValueError(f"Unsupported grid: {grid_type!r}")
+    # Normalize to (step_fn, state, dt, total_cells, cells_per_rank,
+    # partition_metrics): only _build_icosahedral (MPAS) carries partition
+    # metrics; the other builders return a 5-tuple, padded with None here.
+    return out if len(out) == 6 else (*out, None)
 
 
 def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
@@ -841,6 +850,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     else:
         physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
+    part_metrics = None
     if n_ranks > 1:
         # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
         # operator-split path (iter: HS MPI scaling), so multi-rank
@@ -852,12 +862,21 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             make_voronoi_partition_layout,
             scatter_state_voronoi,
             make_voronoi_mpi_step,
+            voronoi_partition_metrics,
+            reduce_partition_metrics,
         )
         # Partition method A/B (audit #3): LEGOESM_VORONOI_PARTITION =
         # "geometric" (RCB, default) | "metis" (pymetis k-way edge-cut min).
         _pmethod = os.environ.get("LEGOESM_VORONOI_PARTITION", "geometric")
         layout = make_voronoi_partition_layout(mesh, rank, n_ranks,
                                                method=_pmethod)
+        # Partition-quality telemetry (roadmap #6): edge-cut / owned-halo /
+        # cells-per-rank / message count into the result metadata.
+        # ``reduce_partition_metrics`` issues collectives, so EVERY rank runs
+        # it (uniform, deadlock-free); done here outside the timed loop.
+        part_metrics = reduce_partition_metrics(
+            voronoi_partition_metrics(layout))
+        part_metrics["partition_method"] = _pmethod
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(
             model, layout, sigma, config, physics_fn=physics_fn,
@@ -870,7 +889,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             step_fn = model.step
 
     cells_per_rank = total_cells // max(1, n_ranks)
-    return step_fn, state, dt, total_cells, cells_per_rank
+    return step_fn, state, dt, total_cells, cells_per_rank, part_metrics
 
 
 def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
@@ -941,7 +960,8 @@ def run_single_benchmark(
     import jax
     import jax.numpy as jnp
 
-    step_fn, state, dt_used, total_cells, cells_per_rank = _build_amip_step(
+    (step_fn, state, dt_used, total_cells, cells_per_rank,
+     part_metrics) = _build_amip_step(
         grid_type=grid_type,
         resolution=resolution,
         nlev=nlev,
@@ -1088,6 +1108,7 @@ def run_single_benchmark(
         cells_per_rank=cells_per_rank,
         mcells_per_s=mcells_per_s,
         decomposition=decomposition,
+        partition_metrics=part_metrics,
     )
 
 
@@ -1183,6 +1204,8 @@ def write_result_json(
     )
     path = output_dir / fname
     payload = asdict(result)
+    # Move partition metrics into the metadata block (not a top-level dup).
+    _part_metrics = payload.pop("partition_metrics", None)
     # Record the actual JAX backend so downstream aggregation does not have to
     # infer CPU-vs-GPU from the output-dir name (codex review): cpu/gpu/tpu.
     try:
@@ -1218,6 +1241,7 @@ def write_result_json(
         decomposition=result.decomposition,
         cells_per_rank=result.cells_per_rank,
         scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
+        partition_metrics=_part_metrics,
         extra={
             "physics_level": result.physics_level,
             "mode": result.mode,
