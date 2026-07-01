@@ -12,7 +12,7 @@ output/
 .DS_Store
 Icon?
 .ipynb_checkpoints/
-
+tasks/
 # LaTeX build artifacts
 *.aux
 *.log
