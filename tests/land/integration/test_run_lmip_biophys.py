@@ -53,6 +53,8 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
         "--surfdata", str(sd),
         "--grid-type", "latlon", "--resolution", "4",
         "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
+        "--bulk", "constant",               # constant Cd/Ch — hermetic pipeline smoke,
+                                            # not a MOST-vs-constant comparison
         "--dt", "3600", "--n-steps", "4",
         "--forcing-dir", "",                # force synthetic (hermetic, ignore any staged data/crujra)
         "--output", str(out),

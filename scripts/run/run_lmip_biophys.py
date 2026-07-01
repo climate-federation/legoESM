@@ -108,7 +108,9 @@ def run(args) -> int:
     surf = (CanopyConfig(max_iters=50, tol=1e-2)
             if args.surface_scheme == "two_leaf_canopy" else SimpleSEBConfig())
     if args.land_mode == "multilayer":
-        base_cfg = MultiLayerLandConfig(surface_scheme=surf, soil_grid=SoilGridConfig())
+        base_cfg = MultiLayerLandConfig(
+            surface_scheme=surf, soil_grid=SoilGridConfig(),
+            bulk_scheme=args.bulk, snow_albedo_feedback=True)
         step_fn = step_multilayer_land
     else:
         base_cfg = LandConfig(surface_scheme=surf)
@@ -249,6 +251,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--land-mode", default="multilayer", choices=["multilayer", "slab"])
     ap.add_argument("--surface-scheme", default="two_leaf_canopy",
                     choices=["two_leaf_canopy", "simple_seb"])
+    ap.add_argument("--bulk", default="most", choices=["constant", "most"],
+                    help="surface bulk-flux scheme (default MOST — stability-dependent "
+                         "exchange; 'constant' uses fixed Cd/Ch as in earlier smoke runs)")
     ap.add_argument("--grid-type", default="latlon",
                     choices=["latlon", "gaussian", "cubed_sphere"])
     ap.add_argument("--resolution", type=int, default=90,
