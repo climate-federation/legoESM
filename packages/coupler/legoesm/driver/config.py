@@ -1006,11 +1006,15 @@ class ExperimentConfig(NamedTuple):
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
             )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
-        if self.land_stomatal_beta and not self.land_soil_bucket:
+        if (self.land_stomatal_beta and not self.land_soil_bucket
+                and not self.use_multilayer_land):
             errors.append(
                 "land_stomatal_beta=True requires land_soil_bucket=True "
                 "(the bucket supplies the soil availability beta_soil that the "
-                "Jarvis stomatal model down-regulates)."
+                "Jarvis stomatal model down-regulates) — UNLESS use_multilayer_land "
+                "is set, in which case the Richards multilayer soil supplies the "
+                "root-zone moisture availability instead (the stomata are threaded "
+                "into MultiLayerLandConfig.stomata, PR #715)."
             )
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).

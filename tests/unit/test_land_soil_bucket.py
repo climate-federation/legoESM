@@ -374,3 +374,30 @@ class TestCompiledStepIntegration:
         out_off, _, _, _ = _run(pipe_off, None)
         assert out_off.w_land is None
         assert not jnp.allclose(phys_out.dq_v_dt, out_off.dq_v_dt)
+
+
+def test_land_stomatal_beta_allowed_with_multilayer_land():
+    """land_stomatal_beta needs the slab bucket ONLY when the slab land is active.
+    use_multilayer_land supplies the root-zone moisture availability from the
+    Richards column instead (#715 threads the stomata into MultiLayerLandConfig),
+    so validate_strict must WAIVE the bucket requirement — else the SOTA multilayer
+    + stomata AMIP config (config/amip/amip_sota.yaml) fails validation."""
+    # multilayer + stomata, no slab bucket => the bucket rule must NOT fire
+    ml = ExperimentConfig(use_multilayer_land=True, land_stomatal_beta=True,
+                          land_soil_bucket=False)
+    try:
+        ml.validate_strict()
+        waived = True
+    except ValueError as exc:
+        waived = "land_stomatal_beta=True requires land_soil_bucket" not in str(exc)
+    assert waived, "multilayer land must waive the slab-bucket requirement for stomata"
+
+    # slab land + stomata + no bucket => the rule STILL fires (guard not weakened)
+    slab = ExperimentConfig(use_multilayer_land=False, land_stomatal_beta=True,
+                            land_soil_bucket=False)
+    try:
+        slab.validate_strict()
+        fired = False
+    except ValueError as exc:
+        fired = "land_stomatal_beta=True requires land_soil_bucket" in str(exc)
+    assert fired, "slab land must still require the bucket for stomata"
