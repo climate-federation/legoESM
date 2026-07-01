@@ -1169,3 +1169,112 @@ def test_sundqvist_flags_rejected_on_mpas_spectral():
     # but no override flags -> no raise even on MPAS
     bare = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"])
     _validate_sundqvist_flags(bare, parser)
+
+
+def test_evaluate_flags_flow_to_config():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--cmip-output",
+        "--evaluate",
+        "--evaluation-suite", "Tier2_atmosphere_monthly",
+        "--evaluation-model-id", "legoESM-1-0-test",
+        "--evaluation-experiment-id", "amip",
+        "--evaluation-variant-id", "r1i1p1f1",
+        "--evaluation-data-root-dir", "/tmp/climateeval_data",
+        "--evaluation-timerange", "19790101/19791231",
+        "--evaluation-fail-missing",
+        "--evaluation-download",
+        "--evaluation-climateeval-python", "/tmp/climateeval_env/bin/python",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    ev = cfg.output.evaluation
+    assert ev.enabled is True
+    assert ev.suite == "Tier2_atmosphere_monthly"
+    assert ev.model_id == "legoESM-1-0-test"
+    assert ev.data_root_dir == "/tmp/climateeval_data"
+    assert ev.timerange == "19790101/19791231"
+    assert ev.fail_on_missing_data is True
+    assert ev.download_missing_data is True
+    assert ev.climateeval_python == "/tmp/climateeval_env/bin/python"
+
+
+def test_evaluate_defaults_off():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.enabled is False
+
+
+def test_evaluate_requires_cmip_output_rejected():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--evaluate"])
+    with pytest.raises(SystemExit):
+        _postprocess_args(args, parser)
+
+
+def test_evaluate_climateeval_python_unset_rejected():
+    """--evaluate with no climateeval_python configured fails LOUDLY at
+    validate_strict, before the (multi-hour) run ever starts."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.climateeval_python == ""
+    with pytest.raises(ValueError, match="climateeval_python"):
+        cfg.validate_strict()
+
+
+def test_evaluate_climateeval_python_nonexistent_rejected():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", "/no/such/interpreter",
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="climateeval_python"):
+        cfg.validate_strict()
+
+
+def test_evaluate_data_root_dir_unset_rejected(tmp_path):
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="data_root_dir"):
+        cfg.validate_strict()
+
+
+def test_evaluate_valid_climateeval_config_passes(tmp_path):
+    """A real, executable interpreter + a real directory clears validate_strict."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+        "--evaluation-data-root-dir", str(tmp_path),
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.validate_strict() is None
+
+
+def test_evaluate_climateeval_python_env_var_default(monkeypatch):
+    monkeypatch.setenv("LEGOESM_CLIMATEEVAL_PYTHON", "/env/climateeval/bin/python")
+    monkeypatch.setenv("LEGOESM_CLIMATEEVAL_DATA_ROOT", "/env/climateeval_data")
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--cmip-output", "--evaluate"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.climateeval_python == "/env/climateeval/bin/python"
+    assert cfg.output.evaluation.data_root_dir == "/env/climateeval_data"
