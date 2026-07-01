@@ -248,8 +248,14 @@ def build_multilayer_cfg(cp, data):
     return cfg, _ml_land_params(cp, data), hyd, cs0
 
 
-def forward_ml(cp, data):
-    """Monthly-mean T_sfc + surface albedo (12, ncol) under constrained params."""
+def forward_ml(cp, data, return_diag: bool = False):
+    """Monthly-mean T_sfc + surface albedo (12, ncol) under constrained params.
+
+    With ``return_diag=True`` also returns monthly-mean sensible + latent heat
+    fluxes and the final (last-scored-month) soil state — the extra land
+    diagnostics a forward LMIP run wants (the calibration loss ignores them, so
+    the default 2-tuple return is unchanged).  See ``scripts/run/run_lmip_era5.py``.
+    """
     n = data["lat"].shape[0]
     cfg, lp, hyd, cs0 = build_multilayer_cfg(cp, data)
     st0 = init_multilayer_land_state(n, cfg, T_init=280.0)
@@ -309,7 +315,7 @@ def forward_ml(cp, data):
     # --- STAGE B: seasonal years with subdaily forcing -> monthly means ----------
     @jax.checkpoint     # remat per step -> bounded backward memory
     def body(carry, k):
-        s, Tsum, Asum = carry
+        s, Tsum, Asum, SHsum, LHsum = carry
         month = k // spm; hour = k % nh
         f = jax.tree.map(lambda x: x[month, hour], fstack)
         s2, r = step(s, f)
@@ -317,13 +323,17 @@ def forward_ml(cp, data):
             theta_soil=s2.theta_soil.at[:, _FREEZE_FROM:].set(deep),
             psi_soil=s2.psi_soil.at[:, _FREEZE_FROM:].set(deep_psi))  # pin deep reservoir
         Tsum = Tsum.at[month].add(r.T_sfc); Asum = Asum.at[month].add(r.albedo)
-        return (s2, Tsum, Asum), None
+        SHsum = SHsum.at[month].add(r.shflx); LHsum = LHsum.at[month].add(r.lhflx)
+        return (s2, Tsum, Asum, SHsum, LHsum), None
 
     # First seasonal pass is an unscored spin; only the second year is scored so the
     # monthly means are free of first-cycle thermal/snow transients.
     z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
-    (st, _, _), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
-    (st, Tsum, Asum), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
+    (st, *_), _ = jax.lax.scan(body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    (st, Tsum, Asum, SHsum, LHsum), _ = jax.lax.scan(
+        body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    if return_diag:
+        return Tsum / spm, Asum / spm, SHsum / spm, LHsum / spm, st
     return Tsum / spm, Asum / spm
 
 
@@ -400,10 +410,10 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0,
     sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
                                              replace=False)
     g = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx][:, :, sub]       # (12, nh, ncol)
-    return _pack(g, latc[sub], cmap, sub, nh)
+    return _pack(g, latc[sub], lonc[sub], cmap, sub, nh)
 
 
-def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
+def _pack(g, latc, lonc, cmap, sub, nh=_NH) -> dict:
     """Assemble the training dict from a per-key getter ``g(key) -> (12, nh, ncol)``."""
     T2, D2, SP = g("2m_temperature"), g("2m_dewpoint_temperature"), g("surface_pressure")
     PR = np.maximum(g("precip_kgms"), 0)
@@ -437,6 +447,7 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
                 skt=jnp.asarray(skt), alb=jnp.asarray(alb),
                 # init the whole soil column at the ERA5 annual-mean skin T
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),
+                lat_deg=jnp.rad2deg(jnp.asarray(latc)), lon_deg=jnp.asarray(lonc),
                 w=jnp.cos(jnp.asarray(latc)))
     for k in ("theta_r", "theta_sat", "alpha_vg", "n_vg", "K_sat"):
         data["vg_" + k] = jnp.asarray(np.asarray(cmap[k])[sub])
