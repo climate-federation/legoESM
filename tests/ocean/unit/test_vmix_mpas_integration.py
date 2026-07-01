@@ -95,6 +95,47 @@ class TestKPPPhysicsMPAS:
         assert callable(make_kpp_physics_mpas(kpp_cfg))
 
 
+def _constant_rho_eos(T, S, p):
+    """Stability-FLIPPING EOS: uniform density ⇒ N²=0 everywhere, so the KPP
+    Richardson / boundary-layer decision is unambiguously different from the
+    stratified Wright profile (warm surface / cold deep ⇒ N²>0).  If a KPP
+    builder silently fell back to Wright, the K_v / tendency would be identical
+    — so a measurable difference proves ``eos_fn`` actually reaches the density.
+    """
+    return jnp.full_like(T, 1026.0)
+
+
+class TestKPPEosThreading:
+    """#M1 codex-HIGH regression: the MPAS KPP/convection density must use the
+    model-selected EOS (``eos_fn``), not silently fall back to Wright."""
+
+    def test_profiles_eos_fn_reaches_density(self, mesh, z_coord, state, kpp_cfg):
+        pf_default = make_kpp_profiles_mpas(kpp_cfg)            # None ⇒ Wright
+        pf_const = make_kpp_profiles_mpas(kpp_cfg, eos_fn=_constant_rho_eos)
+        _, Kv_w = pf_default(state, mesh, z_coord, None)
+        _, Kv_c = pf_const(state, mesh, z_coord, None)
+        assert not bool(jnp.allclose(Kv_w, Kv_c)), (
+            "make_kpp_profiles_mpas ignored eos_fn (Wright fallback): a "
+            "stability-flipping EOS left K_v unchanged.")
+
+    def test_profiles_default_is_wright(self, mesh, z_coord, state, kpp_cfg):
+        """eos_fn=None must be BIT-IDENTICAL to explicitly passing Wright."""
+        from legoesm.ocean.eos import wright_eos
+        pf_default = make_kpp_profiles_mpas(kpp_cfg)
+        pf_wright = make_kpp_profiles_mpas(kpp_cfg, eos_fn=wright_eos)
+        Av_d, Kv_d = pf_default(state, mesh, z_coord, None)
+        Av_w, Kv_w = pf_wright(state, mesh, z_coord, None)
+        assert jnp.allclose(Kv_d, Kv_w) and jnp.allclose(Av_d, Av_w)
+
+    def test_physics_eos_fn_reaches_density(self, mesh, z_coord, state, kpp_cfg):
+        pf_default = make_kpp_physics_mpas(kpp_cfg)
+        pf_const = make_kpp_physics_mpas(kpp_cfg, eos_fn=_constant_rho_eos)
+        _, dT_w, _ = pf_default(state, mesh, z_coord, None)
+        _, dT_c, _ = pf_const(state, mesh, z_coord, None)
+        assert not bool(jnp.allclose(dT_w, dT_c)), (
+            "make_kpp_physics_mpas ignored eos_fn (Wright fallback).")
+
+
 class TestKPPProfilesMPAS:
     def test_shapes_nonneg_finite(self, mesh, z_coord, state, kpp_cfg):
         pf = make_kpp_profiles_mpas(kpp_cfg)

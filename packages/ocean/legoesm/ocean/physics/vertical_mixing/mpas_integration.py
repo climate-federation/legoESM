@@ -49,9 +49,12 @@ from legoesm.ocean.vertical import (
 _EOS_SAFE_SALINITY_PSU = 35.0
 
 
-def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d):
+def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None):
     """MPAS surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) plus the
     kinematic surface heat/salt fluxes for the KPP boundary-layer closure.
+
+    ``eos_fn`` (``None`` ⇒ Wright) sets the surface α/β: a non-Wright EOS
+    (e.g. ``nemo_seos``) is used consistently with the interior ρ/N²/Ri.
 
     Single source for the MPAS-KPP surface forcing block (#518 item 1): both
     ``make_kpp_physics_mpas`` and ``make_kpp_profiles_mpas`` computed this from
@@ -83,6 +86,7 @@ def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d):
         T_3d[..., 0], S_3d[..., 0],
         g=constants.g, rho_0=_RHO_0, c_sw=_C_SW,
         real_salt_in_qs=False,
+        eos_fn=eos_fn,
     )
 
 
@@ -154,8 +158,14 @@ def _vertical_diffusion_edge_partial(
     return flux_divergence_zero_flux(flux, h_safe)
 
 
-def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
+def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
+                  eos_fn=None):
     """Prepare MPAS-KPP inputs and run ``kpp_vertical_mixing`` (#518 item 2).
+
+    ``eos_fn`` (``None`` ⇒ Wright default) is the model-selected EOS callable
+    used for the KPP density / Richardson / buoyancy diagnostics — threaded so
+    a non-Wright EOS (e.g. ``nemo_seos`` for DINO) drives the mixing decision
+    consistently with the baroclinic dycore, not silently via Wright.
 
     ``make_kpp_physics_mpas`` and ``make_kpp_profiles_mpas`` shared this entire
     input-preparation block verbatim (the two copies differed only in comment
@@ -185,7 +195,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
     # (those cells are masked out downstream).
     J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
     J = jnp.where(mask > 0.5, J_real, 1.0)
-    rho_real = compute_ocean_rho(state, z_coord, J_real)
+    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
 
     # Surface forcing channels (None → KPP uses interior proxies).
@@ -197,7 +207,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
 
     # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
     B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
-        q_net, fw, salt, T_3d, S_3d)
+        q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn)
 
     # Land-zero KPP inputs; on partial cells fill sub-seafloor levels with the
     # deepest active value so KPP sees no spurious T=0/u=0 discontinuity.
@@ -230,7 +240,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg):
     return kpp_out, J
 
 
-def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
+def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
     """Build KPP physics_fn for MPAS Voronoi mesh.
 
     Parameters
@@ -254,7 +264,8 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
         surface_forcing=None,
     ):
         # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
-        kpp_out, J = _run_mpas_kpp(state, mesh, z_coord, surface_forcing, cfg)
+        kpp_out, J = _run_mpas_kpp(
+            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn)
         # State accessors reused by the post-KPP edge-diffusion code below.
         T_3d = state.T.data
         eta = state.eta.data
@@ -382,7 +393,7 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
     return physics_fn
 
 
-def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
+def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
     """Build KPP profile-only function for MPAS implicit vertical mixing.
 
     Returns ``(A_v_cells, K_v_cells)`` at half-levels (nCells, nlev-1)
@@ -415,7 +426,8 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
     ):
         # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
         # ``J`` is unused on the profiles path (only A_v/K_v are returned).
-        kpp_out, _ = _run_mpas_kpp(state, mesh, z_coord, surface_forcing, cfg)
+        kpp_out, _ = _run_mpas_kpp(
+            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn)
         T_3d = state.T.data
         mask = state.land_mask.data
 

@@ -99,9 +99,28 @@ def _parse_args():
     )
     p.add_argument(
         "--vmix", choices=("kpp", "tke", "constant"), default=None,
-        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
-             "default), 'tke' (paper's NEMO scheme, unstable >~day40), or "
-             "'constant' (background-only, identical across grids). Both grids.",
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
+             "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
+             "default 5e-4 momentum floor fixes the day-39 instability so it "
+             "runs to ~day 226, but a 2nd viscosity-insensitive SW-corner mode "
+             "NaNs it ~day 230; multi-year needs kpp), or 'constant' "
+             "(background-only; also NaNs ~day 230). Both grids.",
+    )
+    p.add_argument(
+        "--eos", choices=("wright", "nemo_seos"), default=None,
+        help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
+             "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
+             "simplified S-EOS, Roquet et al. 2015, with the DINO coefficients "
+             "— the oracle EOS for the thermocline comparison). Both grids.",
+    )
+    p.add_argument(
+        "--tke-momentum-visc-bg", type=float, default=None,
+        help="TKE-only background vertical viscosity FLOOR [m²/s] "
+             "(DINOConfig.tke_momentum_visc_bg, default 5e-4 = 4× the paper "
+             "1.2e-4). Damps the SW channel-corner surface-momentum instability "
+             "that NaNs our TKE at the paper value; applied (max with A_v_bg) "
+             "only when --vmix tke. kpp/constant ignore it. Lower it (e.g. "
+             "1.2e-4) to run TKE at the unstable paper viscosity.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
@@ -296,6 +315,11 @@ def main():
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
+    if args.eos is not None:
+        cfg = dataclasses.replace(cfg, eos=args.eos)
+    if args.tke_momentum_visc_bg is not None:
+        cfg = dataclasses.replace(
+            cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
