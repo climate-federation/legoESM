@@ -300,6 +300,10 @@ def strain_rates(
         return _strain_rates_voronoi(u_ice, v_ice, grid)
     if _is_latlon_grid(grid):
         return _strain_rates_latlon(u_ice, v_ice, grid)
+    if not isinstance(grid, CubedSphereGrid):
+        raise TypeError(
+            f"unsupported grid {type(grid).__name__} for strain_rates"
+        )
     return _strain_rates_cubed_sphere(u_ice, v_ice, grid)
 
 

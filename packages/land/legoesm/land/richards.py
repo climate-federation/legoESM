@@ -6,6 +6,11 @@ Solves the 1D vertical unsaturated flow equation:
 Uses the Celia et al. (1990) mass-conservative mixed-form discretization
 with Picard iteration for nonlinearity.
 
+The PDE above is written in z-up notation, but the discretization uses an
+index-increasing-downward soil grid (layer ``k`` sits above layer ``k+1``).
+Both the gravity and capillary terms use this same index direction, so the
+signs are internally consistent and the result is correct.
+
 All operations are JAX-differentiable. The Picard loop uses
 ``jax.lax.fori_loop`` with a **fixed iteration count** (default 10).
 No early-termination convergence check is performed: converged columns
@@ -229,8 +234,10 @@ def solve_richards(
         # L^m psi^m as a flux divergence using the same coefficients
         # as the LHS matrix.  Express as
         #     (L psi)_k = (F_in_k − F_out_k) / dz_k
-        # with F_{k+1/2} = coeff_k · (psi_k − psi_{k+1}) the upward
-        # Darcy flux at interface k+1/2.  Boundary cells (k=0 and
+        # with F_{k+1/2} = coeff_k · (psi_k − psi_{k+1}) the downward
+        # Darcy flux (index-increasing-downward grid) at interface
+        # k+1/2: positive F drains layer k into deeper layer k+1.
+        # Boundary cells (k=0 and
         # k=N-1) naturally pick up only one flux contribution (the
         # missing interface flux is replaced by the explicit Neumann
         # BCs added below).  Two pads + one subtraction keeps the
