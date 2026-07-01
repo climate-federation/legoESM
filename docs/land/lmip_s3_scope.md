@@ -257,26 +257,16 @@ Inputs live under the gitignored `data/` and are staged by
 `scripts/data/download_lmip_data.sh` (modelled on `download_omip_data.sh`):
 
 - **CRU-JRA forcing** → `data/crujra/` — **symlinked** from the glade copy
-  `/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c2023/TRENDY_cdf5`.
-  Files are named `clmforc.TRENDY.c2023_0.5x0.5.<stream>.<year>_cdf5.nc` — note
-  the **`TRENDY` prefix** and the **`_cdf5` suffix** after the year (the reader
-  takes `prefix=`/`suffix=`; driver flags `--prefix`/`--suffix`, defaults set to
-  these). Available year: 2022.
-- **Soil intermediate** (`legoesm_surfdata_soil_0p25.nc`, 0.25°, soil-only) →
-  `data/` — **downloaded from Zenodo** (record 21087689). This is NOT the full
-  surfdata; it lacks PFT/LAI/cover.
+  `/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream`.
+  Files: `clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5.<stream>.<year>.nc`
+  (no suffix; year 1920 available). The reader takes `prefix=`/`suffix=`; driver
+  flags `--prefix`/`--suffix`/`--year` default to these.
+- **Surfdata** (`legoesm_surfdata_c250617.nc`, full: soil + CLM5 PFT/LAI/cover) →
+  `data/` — **downloaded from Zenodo** (record 21087964). Regridded to the model
+  grid at run time by the driver; no build step.
 
-**"Regrid" step (build the full surfdata):** combine the 0.25° soil with a CLM5
-surfdata (PFT/LAI/cover) — no HWSD raster needed:
-```
-python scripts/data/build_legoesm_surfdata.py --skip-hwsd \
-    --intermediate data/legoesm_surfdata_soil_0p25.nc \
-    --clm-surfdata /glade/.../surfdata_*.nc \
-    --out data/legoesm_surfdata.nc
-```
-`run_lmip_biophys.py` defaults point at the result (`--surfdata
-data/legoesm_surfdata.nc`, `--forcing-dir data/crujra`, `--prefix
-clmforc.TRENDY.c2023_0.5x0.5 --suffix _cdf5 --year 2022`).
+`run_lmip_biophys.py` defaults point at this layout (`--surfdata
+data/legoesm_surfdata_c250617.nc`, `--forcing-dir data/crujra`, `--year 1920`).
 
 ## 8. Open items / inputs needed
 

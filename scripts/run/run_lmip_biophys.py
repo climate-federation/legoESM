@@ -243,9 +243,9 @@ def run(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--surfdata", default="data/legoesm_surfdata.nc",
-                    help="harmonized surfdata NetCDF (built by build_legoesm_surfdata.py "
-                         "--skip-hwsd from the Zenodo 0.25deg soil + a CLM5 surfdata)")
+    ap.add_argument("--surfdata", default="data/legoesm_surfdata_c250617.nc",
+                    help="harmonized surfdata NetCDF (staged from Zenodo by "
+                         "download_lmip_data.sh)")
     ap.add_argument("--land-mode", default="multilayer", choices=["multilayer", "slab"])
     ap.add_argument("--surface-scheme", default="two_leaf_canopy",
                     choices=["two_leaf_canopy", "simple_seb"])
@@ -256,13 +256,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--forcing-dir", default="data/crujra",
                     help="directory with CRU-JRA CLM streams (staged by "
                          "download_lmip_data.sh); missing files -> synthetic forcing")
-    ap.add_argument("--prefix", default="clmforc.TRENDY.c2023_0.5x0.5",
+    ap.add_argument("--prefix", default="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5",
                     help="CRU-JRA CLM filename prefix "
                          "(<prefix>.{Solr,Prec,TPQWL}.<year><suffix>.nc)")
-    ap.add_argument("--suffix", default="_cdf5",
-                    help="filename suffix after the year (glade TRENDY files use _cdf5; "
-                         "set '' for UEA-style names)")
-    ap.add_argument("--year", type=int, default=2022, help="CRU-JRA forcing year")
+    ap.add_argument("--suffix", default="",
+                    help="optional filename suffix after the year (CLM naming variants)")
+    ap.add_argument("--year", type=int, default=1920, help="CRU-JRA forcing year")
     ap.add_argument("--start-doy", type=float, default=0.0,
                     help="start day-of-year (real forcing); ignored for synthetic")
     ap.add_argument("--dt", type=float, default=3600.0, help="timestep [s] (1h default; 1800 for 30min)")
