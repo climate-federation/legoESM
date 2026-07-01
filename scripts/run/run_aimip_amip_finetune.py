@@ -102,7 +102,7 @@ def main():
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.ml.training import load_checkpoint, save_checkpoint
-    from legoesm.tools.forcing.surface_utils import blend_surface_temperature
+    from legoesm.forcing.surface_utils import blend_surface_temperature
     from legoesm import constants
     from legoesm.training.aimip_amip_forcing import (
         DEFAULT_AIMIP_FORCING, interp_forcing_at,
