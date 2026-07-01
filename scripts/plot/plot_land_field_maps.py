@@ -25,6 +25,24 @@ import cartopy.feature as cfeature
 import scripts.run.train_multilayer_land_era5 as M
 
 
+def _clm_default_params():
+    """STANDARD CLM5 default parameters — nothing tuned to ERA5.  The per-PFT albedo /
+    emissivity / z0 / root / water-stress come from the CLM5 table (init_ext_params);
+    the snow / glacier / dry-soil scalars are the model's out-of-the-box defaults
+    (LandAlbedoConfig defaults + a standard bare-ice albedo), NOT the calibrator's init
+    guesses.  This is the honest 'before' baseline for the map comparison."""
+    from legoesm.surface_albedo import LandAlbedoConfig
+    cp = dict(M.constrain_ext(M.init_ext_params()))
+    d = LandAlbedoConfig()
+    cp["glac_alb"] = jnp.asarray(0.60)                     # standard bare ice-sheet albedo
+    cp["snow_max"] = jnp.asarray(d.alpha_snow_max)         # 0.80
+    cp["snow_min"] = jnp.asarray(d.alpha_snow_min)         # 0.50
+    cp["snow_dcrit"] = jnp.asarray(d.snow_depth_crit)      # 50 kg/m2
+    cp["snow_tau_days"] = jnp.asarray(d.tau_snow_decay / 86400.0)   # 5 days
+    cp["soil_dry_boost"] = jnp.asarray(d.soil_dry_albedo_boost)     # 0.11 (CLM)
+    return cp
+
+
 def _annual(cp, data):
     T, A, _ = M.forward_ml(cp, data)
     return np.asarray(T.mean(0)), np.asarray(A.mean(0))   # (ncol,) mean-annual
@@ -55,7 +73,7 @@ def main():
     data = M.load_training_data(args.npz, 100000, 0, args.days)   # all land cells
     w = np.asarray(data["w"])
 
-    cp_def = M.constrain_ext(M.init_ext_params())                # standard CLM5 default
+    cp_def = _clm_default_params()                               # standard CLM5, untuned
     cp_tun = {k: jnp.asarray(v) for k, v in json.load(open(args.tuned)).items()}
     T_def, A_def = _annual(cp_def, data)
     T_tun, A_tun = _annual(cp_tun, data)

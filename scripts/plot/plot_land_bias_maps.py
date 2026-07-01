@@ -47,7 +47,17 @@ def main():
     data = M.load_training_data(args.npz, 100000, 0, args.days)   # all land cells
     ncol = int(data["lat"].shape[0])
 
-    cp_init = M.constrain_ext(M.init_ext_params())
+    # STANDARD CLM5 default (untuned): CLM5-table per-PFT + out-of-the-box snow/glacier/
+    # dry-soil scalars (LandAlbedoConfig defaults + standard bare-ice albedo), NOT the
+    # calibrator's init guesses.
+    from legoesm.surface_albedo import LandAlbedoConfig as _LAC
+    _d = _LAC()
+    cp_init = dict(M.constrain_ext(M.init_ext_params()))
+    cp_init.update(glac_alb=jnp.asarray(0.60), snow_max=jnp.asarray(_d.alpha_snow_max),
+                   snow_min=jnp.asarray(_d.alpha_snow_min),
+                   snow_dcrit=jnp.asarray(_d.snow_depth_crit),
+                   snow_tau_days=jnp.asarray(_d.tau_snow_decay / 86400.0),
+                   soil_dry_boost=jnp.asarray(_d.soil_dry_albedo_boost))
     cal = json.load(open(args.calibrated))
     cp_cal = {k: jnp.asarray(v) for k, v in cal.items()}
 
