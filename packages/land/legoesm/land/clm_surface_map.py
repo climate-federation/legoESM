@@ -211,11 +211,20 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     tex = soil_texture.usda_texture_index(jnp.asarray(sand_c), jnp.asarray(clay_c))
     vg = soil_texture.vg_params_from_index(tex)
     wp, fc = soil_texture.wilting_field_capacity(vg)
-    return dict(pft_fractions=jnp.asarray(fr), texture_index=np.asarray(tex),
-                glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
-                # per-cell %sand/%clay (root-zone mean) -> per-cell soil thermal props
-                pct_sand=jnp.asarray(sand_c), pct_clay=jnp.asarray(clay_c),
-                theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
+    # Optional: per-column MONTHLY_LAI (12, lsmpft=17, ncol).  Wires the CLM
+    # surfdata's seasonal LAI climatology into the forward run — a forward LMIP
+    # wants prescribed seasonal LAI, not a fixed per-PFT table value.  Older CLM
+    # surfdata files without MONTHLY_LAI simply omit the key (backward-compat).
+    out = dict(pft_fractions=jnp.asarray(fr), texture_index=np.asarray(tex),
+               glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
+               # per-cell %sand/%clay (root-zone mean) -> per-cell soil thermal props
+               pct_sand=jnp.asarray(sand_c), pct_clay=jnp.asarray(clay_c),
+               theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
+    if "MONTHLY_LAI" in ds.variables:
+        mlai = ds["MONTHLY_LAI"].values                # (12, 17, nlat, nlon)
+        out["monthly_lai_pft"] = jnp.asarray(
+            _nearest_regrid(slat, slon, mlai, tgt_lat_deg, tgt_lon_deg))  # (12, 17, ncol)
+    return out
 
 
 class CLMSurfaceParamProvider(eqx.Module):

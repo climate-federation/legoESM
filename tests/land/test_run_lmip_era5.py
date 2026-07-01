@@ -59,17 +59,28 @@ def test_forward_ml_return_diag_shapes(monkeypatch):
     cp = TML.constrain_ext(TML.init_ext_params())
 
     out = TML.forward_ml(cp, data, return_diag=True)
-    assert len(out) == 5
-    T, A, SH, LH, st = out
-    for arr in (T, A, SH, LH):
+    assert len(out) == 7
+    T, A, SH, LH, R, P, st = out
+    for arr in (T, A, SH, LH, R, P):
         assert np.asarray(arr).shape == (12, _NCOL)
         assert np.all(np.isfinite(np.asarray(arr)))
     assert np.asarray(st.T_soil).shape[0] == _NCOL          # (ncol, n_layers)
     assert np.asarray(st.theta_soil).shape[0] == _NCOL
+    # runoff is non-negative; precip is what we fed in (>= 0)
+    assert np.all(np.asarray(R) >= -1e-12)
+    assert np.all(np.asarray(P) >= 0.0)
 
     # backward-compat: default call still returns just (T, A)
     T2, A2 = TML.forward_ml(cp, data)
     assert np.allclose(np.asarray(T2), np.asarray(T))
+
+    # unfrozen moisture: still finite, and theta_soil actually differs from the
+    # frozen-moisture run (evidence the freeze gate is active).
+    T3, A3, SH3, LH3, R3, P3, st3 = TML.forward_ml(
+        cp, data, return_diag=True, freeze_deep_moisture=False)
+    assert np.all(np.isfinite(np.asarray(T3)))
+    assert not np.allclose(np.asarray(st3.theta_soil),
+                           np.asarray(st.theta_soil), rtol=1e-6, atol=1e-8)
 
 
 def test_driver_writes_netcdf(monkeypatch, tmp_path):
@@ -82,9 +93,11 @@ def test_driver_writes_netcdf(monkeypatch, tmp_path):
     monkeypatch.setattr(TML, "load_training_data", lambda *a, **k: data)
     monkeypatch.setattr(TML, "_NH", _NH); monkeypatch.setattr(TML, "_SPM", _NH)
     z = jnp.full((12, _NCOL), 285.0)
-    monkeypatch.setattr(TML, "forward_ml",
-                        lambda cp, d, return_diag=False: (z, z * 0 + 0.2, z * 0 + 30.0,
-                                                          z * 0 + 40.0, _St()))
+    monkeypatch.setattr(
+        TML, "forward_ml",
+        lambda cp, d, return_diag=False, freeze_deep_moisture=True: (
+            z, z * 0 + 0.2, z * 0 + 30.0, z * 0 + 40.0,
+            z * 0 + 1e-6, z * 0 + 2e-5, _St()))
     npz = tmp_path / "era5.npz"; npz.write_bytes(b"stub")     # existence check only
     out = tmp_path / "lmip.nc"
     args = D.build_parser().parse_args(
@@ -94,7 +107,10 @@ def test_driver_writes_netcdf(monkeypatch, tmp_path):
     import xarray as xr
     ds = xr.open_dataset(out)
     assert ds["T_sfc"].shape == (12, _NCOL)
-    assert "shflx" in ds and "lhflx" in ds and "theta_soil_final" in ds
+    for v in ("shflx", "lhflx", "theta_soil_final", "precip", "runoff", "evap"):
+        assert v in ds
+    for attr in ("wb_P_mm_yr", "wb_E_mm_yr", "wb_R_mm_yr", "wb_residual_mm_yr"):
+        assert attr in ds.attrs
     assert ds.attrs["forcing"].startswith("ERA5")
 
 

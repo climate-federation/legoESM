@@ -248,13 +248,21 @@ def build_multilayer_cfg(cp, data):
     return cfg, _ml_land_params(cp, data), hyd, cs0
 
 
-def forward_ml(cp, data, return_diag: bool = False):
+def forward_ml(cp, data, return_diag: bool = False,
+               freeze_deep_moisture: bool = True):
     """Monthly-mean T_sfc + surface albedo (12, ncol) under constrained params.
 
-    With ``return_diag=True`` also returns monthly-mean sensible + latent heat
-    fluxes and the final (last-scored-month) soil state — the extra land
-    diagnostics a forward LMIP run wants (the calibration loss ignores them, so
-    the default 2-tuple return is unchanged).  See ``scripts/run/run_lmip_era5.py``.
+    With ``return_diag=True`` returns
+    ``(T_sfc, albedo, shflx, lhflx, runoff, precip, final_state)`` — all monthly
+    means ``(12, ncol)`` except the final soil state.  Extra diagnostics a forward
+    LMIP run wants (the calibration loss ignores them, so the default 2-tuple
+    return is unchanged).  See ``scripts/run/run_lmip_era5.py``.
+
+    With ``freeze_deep_moisture=False`` the STAGE-B moisture-freeze is skipped and
+    soil moisture evolves freely (a real hydrologic cycle).  The calibrator keeps
+    ``True`` — the offline forcing under-resolves the tropical wet-season balance
+    and drives thin sandy cells to wilting; a forward LMIP run wants moisture
+    evolving even at the cost of some regional realism.
     """
     n = data["lat"].shape[0]
     cfg, lp, hyd, cs0 = build_multilayer_cfg(cp, data)
@@ -283,21 +291,31 @@ def forward_ml(cp, data, return_diag: bool = False):
         lambda x: x.astype(jnp.float64)
         if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x, t)
 
-    def step(s, f):
-        # carbon_state is held FIXED at cs0 (prescribed LAI) — the returned, evolved
-        # carbon pools are discarded so no carbon spin-up is needed.  Force float64 on
-        # the returned state: the MOST/Farquhar path can emit a float32 field, which
-        # would break the lax.scan carry (input float64 != output float32).
+    def step(s, f, cs):
+        # carbon_state is either the fixed cs0 (static LAI) or a per-month cs whose
+        # C_fol is pinned so C_fol/LCMA equals the prescribed monthly LAI.  The
+        # returned, evolved carbon pools are discarded so no carbon spin-up is
+        # needed.  Force float64 on the returned state: the MOST/Farquhar path can
+        # emit a float32 field, which would break the lax.scan carry.
         s2, r, _ = step_multilayer_land(s, f, cfg, 1.0, dt, lat=data["lat"], doy=15.0,
-                                        land_params=lp, carbon_state=cs0)
+                                        land_params=lp, carbon_state=cs)
         return f64(s2), r
+
+    # --- Prescribed seasonal LAI (opt-in via data["lai_monthly_col"]) -------------
+    has_monthly_lai = "lai_monthly_col" in data                     # Python-static
+    if has_monthly_lai:
+        C_fol_monthly = data["lai_monthly_col"] * cfg.carbon.LCMA   # (12, ncol)
+        cs_ann = cs0._replace(C_fol=C_fol_monthly.mean(0))
+    else:
+        C_fol_monthly = None
+        cs_ann = cs0
 
     # --- STAGE A: equilibrate the column under CONSTANT annual-mean forcing -------
     f_ann = jax.tree.map(lambda x: x.mean((0, 1)), fstack)   # (ncol,) per field
 
     @jax.checkpoint
     def eq_body(s, _):
-        s2, _ = step(s, f_ann)
+        s2, _ = step(s, f_ann, cs_ann)
         return s2, None
     st, _ = jax.lax.scan(eq_body, st0, None, length=_EQ_STEPS)
 
@@ -315,25 +333,36 @@ def forward_ml(cp, data, return_diag: bool = False):
     # --- STAGE B: seasonal years with subdaily forcing -> monthly means ----------
     @jax.checkpoint     # remat per step -> bounded backward memory
     def body(carry, k):
-        s, Tsum, Asum, SHsum, LHsum = carry
+        s, Tsum, Asum, SHsum, LHsum, Rsum, Psum = carry
         month = k // spm; hour = k % nh
         f = jax.tree.map(lambda x: x[month, hour], fstack)
-        s2, r = step(s, f)
-        s2 = s2._replace(
-            theta_soil=s2.theta_soil.at[:, _FREEZE_FROM:].set(deep),
-            psi_soil=s2.psi_soil.at[:, _FREEZE_FROM:].set(deep_psi))  # pin deep reservoir
+        if has_monthly_lai:                                       # Python-static gate
+            cs_m = cs0._replace(C_fol=C_fol_monthly[month])
+        else:
+            cs_m = cs0
+        s2, r = step(s, f, cs_m)
+        if freeze_deep_moisture:                                  # Python-static gate
+            s2 = s2._replace(
+                theta_soil=s2.theta_soil.at[:, _FREEZE_FROM:].set(deep),
+                psi_soil=s2.psi_soil.at[:, _FREEZE_FROM:].set(deep_psi))
         Tsum = Tsum.at[month].add(r.T_sfc); Asum = Asum.at[month].add(r.albedo)
         SHsum = SHsum.at[month].add(r.shflx); LHsum = LHsum.at[month].add(r.lhflx)
-        return (s2, Tsum, Asum, SHsum, LHsum), None
+        # Runoff (surface + subsurface, positive out) via TileResponse.freshwater_flux
+        # and precip (both kg/m^2/s) — accumulated for the water-balance diagnostic.
+        Rsum = Rsum.at[month].add(r.freshwater_flux)
+        Psum = Psum.at[month].add(f.precip_total)
+        return (s2, Tsum, Asum, SHsum, LHsum, Rsum, Psum), None
 
     # First seasonal pass is an unscored spin; only the second year is scored so the
     # monthly means are free of first-cycle thermal/snow transients.
     z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
-    (st, *_), _ = jax.lax.scan(body, (st, z(), z(), z(), z()), jnp.arange(nstep))
-    (st, Tsum, Asum, SHsum, LHsum), _ = jax.lax.scan(
-        body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    (st, *_), _ = jax.lax.scan(body, (st, z(), z(), z(), z(), z(), z()),
+                                jnp.arange(nstep))
+    (st, Tsum, Asum, SHsum, LHsum, Rsum, Psum), _ = jax.lax.scan(
+        body, (st, z(), z(), z(), z(), z(), z()), jnp.arange(nstep))
     if return_diag:
-        return Tsum / spm, Asum / spm, SHsum / spm, LHsum / spm, st
+        return (Tsum / spm, Asum / spm, SHsum / spm, LHsum / spm,
+                Rsum / spm, Psum / spm, st)
     return Tsum / spm, Asum / spm
 
 
@@ -410,14 +439,28 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0,
     sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
                                              replace=False)
     g = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx][:, :, sub]       # (12, nh, ncol)
-    return _pack(g, latc[sub], lonc[sub], cmap, sub, nh)
+    hours_utc = np.asarray(D["hours"]) if "hours" in D else np.array([0, 6, 12, 18])
+    return _pack(g, latc[sub], lonc[sub], cmap, sub, hours_utc, nh)
 
 
-def _pack(g, latc, lonc, cmap, sub, nh=_NH) -> dict:
+def _pack(g, latc, lonc, cmap, sub, hours_utc, nh=_NH) -> dict:
     """Assemble the training dict from a per-key getter ``g(key) -> (12, nh, ncol)``."""
     T2, D2, SP = g("2m_temperature"), g("2m_dewpoint_temperature"), g("surface_pressure")
     PR = np.maximum(g("precip_kgms"), 0)
     zc = lambda v: jnp.full((nh, latc.size), v)
+    # Real cos(solar zenith): per (month, hour, column) from lat/lon/doy/hour
+    # (replaces the previous constant 0.5 placeholder — required for the direct/
+    # diffuse SW partitioning and any canopy radiative transfer with stomata on).
+    _MONTH_DOY = np.array([15, 45, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349])
+    lat_r = np.asarray(latc); lon_d = np.asarray(lonc)
+    decl = np.deg2rad(23.45) * np.sin(2 * np.pi * (_MONTH_DOY - 80) / 365.0)  # (12,)
+    local_h = np.asarray(hours_utc)[None, :, None] + lon_d[None, None, :] / 15.0
+    ha = np.deg2rad((local_h - 12) * 15.0)                                   # (1, nh, ncol)
+    cos_z_np = np.maximum(
+        np.sin(lat_r)[None, None, :] * np.sin(decl)[:, None, None] +
+        np.cos(lat_r)[None, None, :] * np.cos(decl)[:, None, None] * np.cos(ha),
+        0.0,
+    )                                                                        # (12, nh, ncol)
     forc = [AtmToSurface(
         sw_down=jnp.asarray(g("ssrd_wm2")[m]), lw_down=jnp.asarray(g("strd_wm2")[m]),
         precip_total=jnp.asarray(PR[m]),
@@ -428,7 +471,8 @@ def _pack(g, latc, lonc, cmap, sub, nh=_NH) -> dict:
         v_lowest=jnp.asarray(g("10m_v_component_of_wind")[m]),
         p_lowest=0.99 * jnp.asarray(SP[m]), p_surface=jnp.asarray(SP[m]),
         rho_lowest=jnp.asarray(SP[m]) / (constants.R_d * jnp.asarray(T2[m])),
-        cos_zenith=zc(0.5), co2_ppmv=zc(412.0), has_radiation=zc(1.0),
+        cos_zenith=jnp.asarray(cos_z_np[m], jnp.float64),
+        co2_ppmv=zc(412.0), has_radiation=zc(1.0),
         has_precipitation=zc(1.0)) for m in range(12)]
     # ERA5/ARCO fields load as float32; cast forcing to float64 so the float64 soil
     # state and the MOST flux loop share one dtype (the fori_loop carry rejects a
@@ -449,6 +493,13 @@ def _pack(g, latc, lonc, cmap, sub, nh=_NH) -> dict:
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),
                 lat_deg=jnp.rad2deg(jnp.asarray(latc)), lon_deg=jnp.asarray(lonc),
                 w=jnp.cos(jnp.asarray(latc)))
+    # OPTIONAL prescribed seasonal LAI: PFT-weighted per-column monthly LAI from
+    # the CLM MONTHLY_LAI climatology.  ``forward_ml`` gates on this key, so the
+    # calibrator (which does not expose it) keeps the static-LAI behaviour.
+    if "monthly_lai_pft" in cmap:
+        mlai = np.asarray(cmap["monthly_lai_pft"])[:, :, sub]         # (12, 17, ncol)
+        data["lai_monthly_col"] = jnp.asarray(
+            np.einsum("mpc,cp->mc", mlai, pft))                       # (12, ncol)
     for k in ("theta_r", "theta_sat", "alpha_vg", "n_vg", "K_sat"):
         data["vg_" + k] = jnp.asarray(np.asarray(cmap[k])[sub])
     return data
