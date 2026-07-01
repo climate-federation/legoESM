@@ -83,35 +83,42 @@ fail the AMIP run — only the upfront path validation is fail-fast.
 
 ## Suites
 
-`--evaluation-suite` takes one or more of ClimateEval's own bundled
-suites (reusing its existing suite abstraction rather than re-deriving a
-variable/reference pick-list), all rendered into a **single combined
-report**. The default is two complementary suites:
+**By default `--evaluate` runs ALL of ClimateEval's bundled suites** —
+every tier — and renders them into a **single combined report**. A suite
+whose reference or model data is missing/inapplicable (e.g. the ECS suite
+needs abrupt-4xCO2 + piControl, the sub-daily suite needs sub-daily
+output) is **skipped and reported**, not fatal, so the report always
+contains whatever could actually be scored. Which suites score depends on
+what the run emits:
 
-- **`Tier1_sanity_checks`** — global-mean values range-checked against
-  literature "reasonable" bounds (needs no reference data).
-- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill diagnostics (Map,
-  ZonalLine, ZonalProfile + a metrics leaderboard).
+- **`Tier1_sanity_checks`** — global-mean values vs literature ranges
+  (no reference data needed).
+- **`Tier1_consistency_checks`** — mass/water conservation (annual; needs
+  a multi-year run to be meaningful).
+- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill (Map, ZonalLine,
+  ZonalProfile + leaderboard).
+- **`Tier2_ocean_monthly` / `Tier2_sea_ice_monthly`** — need `Omon` /
+  `SImon` output (the runner loads the full `cmor/` tree so these score).
+- **`Tier3_*`** (subdaily / dynamics / ecs) — usually skipped for a short
+  AMIP run (need sub-daily output, long integrations, or extra experiments).
 
 The runner forces every variable in each suite to reference ERA5
 specifically (stripping any other-model/other-reference entries), since
-the point of `--evaluate` here is "how far off is legoESM from ERA5," not
-a multi-model intercomparison. Override with e.g.
-`--evaluation-suite Tier2_atmosphere_monthly` for a single suite, or add
-more (`Tier1_consistency_checks` etc.) — note the consistency/ECS suites
-need multi-year output, so they are not in the default.
+the point of `--evaluate` is "how far off is legoESM from ERA5," not a
+multi-model intercomparison. Restrict with e.g.
+`--evaluation-suite Tier2_atmosphere_monthly` for a single suite.
 
 ## Standalone use
 
 The runner script doubles as a standalone CLI for scoring an *existing*
-CMOR output tree without re-running the model. It takes one or more
-`--suite` names and writes the per-suite `.ddb`s plus one combined
+CMOR output tree without re-running the model. Point `--cmor-dir` at the
+`cmor/` root (so ocean/sea-ice tables load); with no `--suite` it runs all
+bundled suites and writes the per-suite `.ddb`s plus one combined
 `climateeval_report.html` into `--output-dir`:
 
 ```bash
 $LEGOESM_CLIMATEEVAL_PYTHON scripts/validate/run_amip_climateeval.py \
-    --cmor-dir /scratch/you/amip_run/cmor/Amon \
-    --suite Tier1_sanity_checks Tier2_atmosphere_monthly \
+    --cmor-dir /scratch/you/amip_run/cmor \
     --data-root-dir "$LEGOESM_CLIMATEEVAL_DATA_ROOT" \
     --output-dir /scratch/you/amip_run
 ```

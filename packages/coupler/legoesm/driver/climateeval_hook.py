@@ -37,18 +37,20 @@ def maybe_run_climateeval(config: ExperimentConfig, output_dir: str) -> int | No
     if not evaluation.enabled:
         return None
 
-    cmor_amon_dir = Path(output_dir) / "cmor" / "Amon"
+    cmor_dir = Path(output_dir) / "cmor"
     cmd = [
         evaluation.climateeval_python,
         str(RUNNER_SCRIPT),
-        "--cmor-dir", str(cmor_amon_dir),
-        "--suite", *evaluation.suites,
+        "--cmor-dir", str(cmor_dir),
         "--model-id", evaluation.model_id,
         "--experiment-id", evaluation.experiment_id,
         "--variant-id", evaluation.variant_id,
         "--data-root-dir", evaluation.data_root_dir,
         "--output-dir", str(output_dir),
     ]
+    # Empty suites -> let the runner discover + run ALL bundled suites.
+    if evaluation.suites:
+        cmd += ["--suite", *evaluation.suites]
     if evaluation.timerange:
         cmd += ["--timerange", evaluation.timerange]
     if evaluation.fail_on_missing_data:
