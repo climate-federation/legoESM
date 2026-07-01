@@ -191,7 +191,19 @@ CRU-JRA is 6-hourly (21600 s); at land `dt`=1 h → 6 sub-steps (30 min → 12).
   (b) **diurnal shape** — zero SW at night, peak near local noon;
   (c) precip mass conservation over an interval; (d) linear-interp correctness.
 
-### M3 — Wire into the biophysics-only driver + validate  ✅ DONE (Derecho run pending)
+### M3 — Wire into the biophysics-only driver + validate  ✅ DONE (Derecho batch ready)
+Local end-to-end synthetic-forcing smoke against the REAL 31 MB CLM5 surfdata
+(`data/legoesm_surfdata_c250617.nc`) at 24×48 latlon PASSED (470 land cells,
+T_sfc 266–349 K, sensible/latent fluxes finite, NetCDF written).  Derecho
+turnkey artifacts under `scripts/cluster/derecho_lmip/`:
+
+- `lmip_biophys.pbs` — PBS batch (single node, 8 CPU, 32 GB, 30 min wall).
+  Overridable via `qsub -v` (YEAR, RESOLUTION, DT, N_STEPS, SURFACE_SCHEME…).
+  Fails fast with a clear message if data isn't staged.
+- `README.md` — one-time env setup + each-run recipe (`download_lmip_data.sh` →
+  `qsub`).
+
+Submit from a Derecho login node after `download_lmip_data.sh --year 1920`.
 **New driver:** `scripts/run/run_lmip_biophys.py` (copied from `run_lmip_smoke.py`,
 which is kept untouched as the synthetic-forcing test).  Same config (carbon
 `none`, prescribed 1-yr-cycle LAI); default `dt`=1 h (`--dt 1800` for 30 min),
