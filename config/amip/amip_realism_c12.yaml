@@ -39,7 +39,14 @@ gravity_wave_drag: hines
 
 # --- Cloud tuning (== cmip_tuned_physics.yaml / amip_production.yaml) ---------
 cloud_q_c_diagnostic: 3.0e-4
-convective_cloud: true
+# convective_cloud OFF for prescribed-SST AMIP (differs from amip_production.yaml,
+# which ships it ON only for coupled-parameter-identity). MEASURED: with SST pinned
+# conv-cloud is an inert SST-drift compensator that only ADDS planetary albedo —
+# a fresh C48/L40 current-code run with it ON gave albedo 0.391 / OLR 210 (job
+# 8676675), vs the amip_production A/B OFF 0.295 / ON 0.370 (jobs 25929869/70). So
+# for a standalone AMIP the realistic choice is OFF. Override on the CLI either way
+# with --convective-cloud / --no-convective-cloud (BooleanOptionalAction).
+convective_cloud: false
 
 # --- Surface: COARE3 bulk fluxes + convective gustiness ----------------------
 surface_bulk_scheme: coare3

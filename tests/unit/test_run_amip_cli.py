@@ -61,6 +61,39 @@ def test_orbital_insolation_flag_flows_to_config():
     assert cfg_on.orbital_insolation is True
 
 
+def test_convective_cloud_boolean_optional_action_can_disable_config_default():
+    """--no-convective-cloud must override a config-file-enabled default.
+
+    convective_cloud is BooleanOptionalAction (not store_true): a YAML
+    ``--config`` (e.g. amip_production.yaml) sets convective_cloud=True via
+    parser.set_defaults, and a store_true flag could never turn that back OFF
+    from the CLI. This guards the paired --convective-cloud / --no-convective-cloud
+    behaviour AND the set_defaults(True) + --no-... override that the AMIP-optimal
+    (prescribed-SST) run relies on.
+    """
+    parser = build_arg_parser()
+    # default (no flag): OFF, and flows to the config
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.convective_cloud is False
+
+    # explicit --convective-cloud: ON (backward-compatible with the old store_true)
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convective-cloud",
+    ]), parser))
+    assert cfg_on.convective_cloud is True
+
+    # the NEW capability: a config default of True (as amip_production.yaml sets)
+    # can be turned OFF with --no-convective-cloud (impossible under store_true).
+    parser2 = build_arg_parser()
+    parser2.set_defaults(convective_cloud=True)          # simulates the YAML default
+    assert parser2.parse_args(["--dataset", "analytical"]).convective_cloud is True
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-convective-cloud",
+    ]), parser2))
+    assert cfg_off.convective_cloud is False
+
+
 def test_build_config_includes_joint_physics_parameterization_flags():
     parser = build_arg_parser()
     args = parser.parse_args([

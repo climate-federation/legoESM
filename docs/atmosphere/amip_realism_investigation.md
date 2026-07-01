@@ -85,7 +85,41 @@ closure**, not the surface / cloud / IC levers — all of which were ruled out.
 
 Open follow-up: confirm SBM also lands realistic at coarse C12/L20 (the cheap
 iteration grid) with the WOA observed SST — `config/amip/amip_realism_c12.yaml`
-is the config for that check.
+is the config for that check. (C12/L20 SBM smoke, job 8676505: CWV **37.9** — NOT
+the 85 overcast trap — so SBM changes the moisture regime at C12 too, but C12/L20
+is too coarse for full radiative balance; publication realism needs C48/L40.)
+
+## Refinement: convective_cloud OFF for prescribed-SST AMIP
+
+A fresh **current-code** re-run of `amip_production.yaml` (C48/L40, 10-day, this
+repo's HEAD after PRs #685–707; job 8676675) confirms SBM still lands in the
+realistic regime — R_TOA **+5.1 W/m²**, precip **2.73 mm/day**, hfls **90.3**
+(Earth ~88), CWV **28** (Earth ~25), T_low 283 K — *not* the tiedtke overcast
+trap. But its planetary **albedo was 0.391** (OLR 210), higher than the 0.292
+quoted for the original validation.
+
+The cause is documented in `amip_production.yaml` itself: it ships
+`convective_cloud: true`, and its matched A/B shows conv-cloud ON degrades the
+prescribed-SST TOA budget —
+
+| convective_cloud | planetary albedo | OLR (W/m²) | job |
+|---|---|---|---|
+| **OFF** | 0.295 | 234.7 | 25929870 |
+| **ON**  | 0.370 | 213.3 | 25929869 |
+| **ON** (fresh, current code) | 0.391 | 210 | 8676675 |
+
+Under **prescribed** SST the convective-cloud OLR-trapping is an inert
+**SST-drift compensator** (its benefit is warming a *free* surface in the coupled
+base); with SST pinned only its radiative cost — extra albedo — remains. Our fresh
+run (0.391 / 210) reproduces that ON-degraded state.
+
+**So the AMIP-optimal choice is `convective_cloud: false`.** The restart config
+`amip_realism_c12.yaml` now sets it OFF, and `--convective-cloud` /
+`--no-convective-cloud` (argparse `BooleanOptionalAction`) lets a run override a
+config-file default either way — previously a `store_true` flag could not turn OFF
+what a `--config` YAML turned ON. `amip_production.yaml` keeps it ON for
+coupled-parameter-identity with the tuned slab base (its stated purpose); a
+standalone AMIP should pass `--no-convective-cloud`.
 
 ## Bugs fixed along the way (merged)
 
