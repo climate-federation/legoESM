@@ -1020,7 +1020,8 @@ class ModelDriver:
                 # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
                 # to cells/edges and projects the winds via angleEdge.
                 carry = era5_to_mpas_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    smoothing_passes=cfg.topo_smoothing,
                 )
             else:
                 raise NotImplementedError(
@@ -1228,6 +1229,16 @@ class ModelDriver:
                 self.physics.land_bucket_w_init_frac = float(
                     getattr(self.config, "land_bucket_w_init_frac", 0.5)
                 )
+                # Bucket runoff partition (Green-Ampt infiltration + saturation excess)
+                self.physics.land_K_infiltration = float(
+                    getattr(self.config, "land_K_infiltration", 1.0e-5)
+                )
+                self.physics.land_infil_suction_boost = float(
+                    getattr(self.config, "land_infil_suction_boost", 2.0)
+                )
+                self.physics.land_infiltration_excess = bool(
+                    getattr(self.config, "land_infiltration_excess", True)
+                )
                 # Stomatal soil-water limitation: route beta_soil through the
                 # shared land Jarvis model (legoesm.land.carbon.stomata).
                 _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))
@@ -1235,6 +1246,9 @@ class ModelDriver:
                 if _stomatal:
                     from legoesm.land.carbon.stomata import StomataConfig
                     self.physics.stomata_config = StomataConfig()
+                # Prognostic snow + snow-albedo feedback on the slab tile.
+                self.physics.snow_albedo_feedback = bool(
+                    getattr(self.config, "snow_albedo_feedback", False))
                 logger.info(
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
@@ -3814,6 +3828,8 @@ class ModelDriver:
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
                 )
             })
+        from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+        _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -3830,6 +3846,7 @@ class ModelDriver:
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
+                orbit=_orbit_params,
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
                 # external CMIP6 ozone FILE arrives per-step via the traced
@@ -4541,7 +4558,15 @@ class ModelDriver:
         )
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-        from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+        from legoesm.atmosphere.physics.radiation.solar import (
+            daily_mean_insolation, earth_orbit,
+        )
+        # Realistic orbit (Berger 1978) for this legacy spectral dry-gray path;
+        # None ⇒ circular orbit (idealized runs unchanged).  gray daily-mean
+        # folds the (a/r)^2 factor into the returned insolation directly.
+        _orbit_params = (earth_orbit()
+                         if getattr(self.config, "orbital_insolation", False)
+                         else None)
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
         cfg = self.config
@@ -4649,7 +4674,8 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0)
+                insol = daily_mean_insolation(lat_col, current_day, S_0,
+                                              orbit=_orbit_params)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4741,6 +4767,8 @@ class ModelDriver:
             # silently re-initialize their carry every step — refuse
             # loudly instead of degrading.
             self._refuse_stateful_physics_unthreaded(cfg)
+            from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+            _orbit_params = earth_orbit() if cfg.orbital_insolation else None
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
@@ -4756,6 +4784,7 @@ class ModelDriver:
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,
+                    orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
@@ -4871,7 +4900,9 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+                insol_step = daily_mean_insolation(_lat_col_loop,
+                                                   self._current_day, S_0,
+                                                   orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
@@ -5425,6 +5456,18 @@ class ModelDriver:
         else:
             w_land = None
 
+        # Prognostic snow water equivalent [kg/m^2] (snow-albedo feedback) —
+        # restored from the checkpoint when available, else a zero cold start.
+        # ``None`` (byte-identical legacy path) unless the feedback is active.
+        if (self.physics is not None and self.physics.f_land is not None
+                and getattr(self.physics, "snow_albedo_feedback", False)):
+            snow = _aux.get(
+                "snow",
+                jnp.zeros_like(self.state.p_s.data.astype(_sd)),
+            )
+        else:
+            snow = None
+
         # Stateful-physics carries (issue #413): prognostic turbulent
         # energy (tke / qke) and the prognostic-spectral GWD wave-action
         # spectrum, seeded via the canonical ``init_physics_state`` and
@@ -5535,6 +5578,7 @@ class ModelDriver:
             "conv_prog": conv_prog,
             "T_land": T_land,
             "w_land": w_land,
+            "snow": snow,
             "tke": tke,
             "qke": qke,
             "gwd_spectrum": gwd_spectrum,
@@ -5614,6 +5658,7 @@ class ModelDriver:
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
         w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
@@ -5908,6 +5953,7 @@ class ModelDriver:
                 land_ml=(self._land_ml_state
                          if self._ensemble_size == 1 else None),
                 w_land=w_land,
+                snow=snow,
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
@@ -6075,6 +6121,9 @@ class ModelDriver:
             if carry.w_land is not None:
                 w_land = carry.w_land
                 self._carry_aux["w_land"] = w_land
+            if carry.snow is not None:
+                snow = carry.snow
+                self._carry_aux["snow"] = snow
             # Stateful-physics carries (issue #413): thread the FULL
             # (per-member under ensembles) fields to the next segment
             # and persist them via carry_aux (mirrors T_land).
@@ -6334,6 +6383,7 @@ class ModelDriver:
         T_land = ctx["T_land"]
         # Soil-water bucket (None unless active): threaded like T_land.
         w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         # Stateful-physics carries (issue #413), mirroring the compiled
         # path: None for diagnostic schemes (zero overhead).
         phys_tke = ctx["tke"]
@@ -6413,8 +6463,15 @@ class ModelDriver:
         # Double-moment hydrometeor inputs (None unless the registry carries
         # them) so coupled radiation/microphysics see ice + droplet number.
         _dm_step_in = self._double_moment_step_inputs()
+        # step_unified returns a 4-tuple (issue: PR #650 added the 4th
+        # ``land_ml`` multilayer-land state). Thread it exactly as the
+        # compiled-segment path does (single-member only; ensemble carries
+        # an extra axis the tile doesn't expect) so the per-step driver
+        # advances the prognostic soil column instead of crashing on the
+        # arity mismatch.
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+            T_land, land_ml = \
             _warmup_step_fn(
                 jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
@@ -6428,12 +6485,16 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                T_land=T_land, w_land=w_land, **_dm_step_in,
+                land_ml=(self._land_ml_state
+                         if self._ensemble_size == 1 else None),
+                T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
         if phys_out.w_land is not None:
             w_land = phys_out.w_land
+        if phys_out.snow is not None:
+            snow = phys_out.snow
         # Stash the FULL restart-relevant carry set at the warmup step
         # (codex rounds 4/6/8): a one-step run never enters the main
         # loop, and _finalize_run would otherwise checkpoint stale or
@@ -6452,6 +6513,12 @@ class ModelDriver:
             self._carry_aux["T_land"] = T_land
         if w_land is not None:
             self._carry_aux["w_land"] = w_land
+        if snow is not None:
+            self._carry_aux["snow"] = snow
+        # Persist the evolved multilayer land state across the run (matches
+        # the compiled-segment writeback; no-op for slab/None or ensemble).
+        if self._ensemble_size == 1 and self._land_ml_state is not None:
+            self._land_ml_state = land_ml
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -6545,8 +6612,11 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             _dm_step_in = self._double_moment_step_inputs()
+            # 4-tuple return (PR #650 land_ml); thread the multilayer-land
+            # state like the compiled-segment path (single-member only).
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+                T_land, land_ml = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -6560,12 +6630,16 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
-                    T_land=T_land, w_land=w_land, **_dm_step_in,
+                    land_ml=(self._land_ml_state
+                             if self._ensemble_size == 1 else None),
+                    T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
             if phys_out.w_land is not None:
                 w_land = phys_out.w_land
+            if phys_out.snow is not None:
+                snow = phys_out.snow
             # Persist the full restart-relevant set per step (codex
             # rounds 6/8): checkpoints can fire on any step, so the
             # held-radiation fields and every carry must be current —
@@ -6583,6 +6657,12 @@ class ModelDriver:
                 self._carry_aux["T_land"] = T_land
             if w_land is not None:
                 self._carry_aux["w_land"] = w_land
+            if snow is not None:
+                self._carry_aux["snow"] = snow
+            # Advance the prognostic multilayer land state per step (matches
+            # the compiled-segment writeback; no-op for slab/None or ensemble).
+            if self._ensemble_size == 1 and self._land_ml_state is not None:
+                self._land_ml_state = land_ml
             # Stateful-physics carries (issue #413): feed the updated
             # values back next step + persist for checkpoints.
             if phys_out.tke is not None:

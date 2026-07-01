@@ -488,13 +488,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 zt = _zero_tendencies(state, has_v)
                 dT = zt.dT_dt.data
                 if cached_rad is not None:
-                    dT = dT + cached_rad
+                    # cached_rad is column-shaped (ncol, nlev); restore the
+                    # native layout to add to the native tendency data.
+                    dT = dT + cached_rad.reshape(dT.shape)
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
             if cached_rad is not None:
-                dT_dt = dT_dt + cached_rad
+                # cached_rad is column-shaped (ncol, nlev); restore native layout.
+                dT_dt = dT_dt + cached_rad.reshape(dT_dt.shape)
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
@@ -512,7 +515,17 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
         # its contribution before any other module is summed.
         if _has_rad and phys_state is not None:
-            phys_updates["rad_heating"] = first.dT_dt.data
+            # PhysicsState carries are COLUMN-shaped (ncol, nlev) — that is how
+            # init_physics_state seeds rad_heating (and every other carry).  The
+            # radiation tendency Field data is in the model's NATIVE layout: 2D
+            # (ncol, nlev) for MPAS but 4D (face, x, y, nlev) for hydrostatic/SCM.
+            # Storing the native array would flip the lax.scan carry shape
+            # 2D->4D after step 0 (the SCM/hydrostatic radiation-substep bug);
+            # flatten the horizontal axes to the canonical column shape so the
+            # carry type is stable for ALL models (no-op for MPAS).  The held
+            # consumers below reshape it back to native before adding.
+            _rad = first.dT_dt.data
+            phys_updates["rad_heating"] = _rad.reshape(-1, _rad.shape[-1])
         combined = _build_combined(
             first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
             combined_tracer_tends)

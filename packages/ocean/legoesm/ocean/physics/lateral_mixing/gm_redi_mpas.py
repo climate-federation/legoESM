@@ -1,9 +1,10 @@
-"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh — API skeleton.
+"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh.
 
-**Status (2026-04-28):** This module defines the public API for the
-MPAS port of GM/Redi but does not yet implement it.  Calling any
-function below raises ``NotImplementedError`` with a pointer to the
-implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
+**Status:** The centered GM/Redi scheme is implemented —
+``compute_isopycnal_slopes_mpas``, ``gm_redi_tracer_tendency_centered_mpas``
+and ``gm_redi_tracer_tendency_mpas`` are live.  Only the TRIAD slope-limited
+path is still pending and raises ``NotImplementedError`` with a pointer to
+the implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
 
 The signatures mirror ``gm_redi_tracer_tendency_latlon`` in
 ``gm_redi_latlon_cgrid.py`` so the dycore hook in

@@ -65,8 +65,8 @@ def _modon_winds_geo(
     r1 = great_circle_distance(lon, lat, _MODON_LON1, _MODON_LAT0, radius)
     r2 = great_circle_distance(lon, lat, _MODON_LON2, _MODON_LAT0, radius)
     u_east = (
-        u_max * jnp.exp(-(r1 / r0) ** 2)
-        - u_max * jnp.exp(-(r2 / r0) ** 2)
+        u_max * jnp.exp(-(r2 / r0) ** 2)
+        - u_max * jnp.exp(-(r1 / r0) ** 2)
     )
     v_north = jnp.zeros_like(u_east)
     return u_east, v_north

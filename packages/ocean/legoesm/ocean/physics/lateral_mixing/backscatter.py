@@ -14,9 +14,18 @@ momentum tendency is the *negative* (sign-flipped) biharmonic Laplacian
 
     ∂u/∂t|_bs = + ∇²(ν_bs ∇² u)
 
-where the coefficient is driven by the local eddy-energy level:
+where the coefficient is driven by the local eddy-energy level.  The exact
+power of Δ is PER-PATH because the two grids use different discrete
+operators, so ``c_bs`` is NOT interchangeable between them:
 
-    ν_bs(x, y) = c_bs · Δ² · √E(x, y),   ν_bs ≥ 0.
+    lat-lon C-grid (``_A_bs_h_cgrid``):  ν_bs = c_bs · Δ¹ · √E   [m²/s]
+        — the strain-based two-pass stress divergence absorbs the extra
+          Δ², yielding biharmonic-scaling tendencies from a Δ¹ coefficient.
+    MPAS Voronoi (``_A_bs_h_mpas``):     ν₄  = c_bs · Δ³ · √E   [m⁴/s]
+        — a clean double vector-Laplacian ∇²(A·∇²u) needs an explicit
+          biharmonic viscosity (see the per-path note ~L248).
+
+    ν_bs ≥ 0,   Δ = √area (length [m]),   √E [m/s].
 
 The "+" sign (as opposed to the "-" used by the Smagorinsky biharmonic)
 makes this an *anti*-biharmonic that injects energy into the resolved

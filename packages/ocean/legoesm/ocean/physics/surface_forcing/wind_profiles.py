@@ -208,11 +208,9 @@ def compute_wind_stress(
     # Tropical wind reduction: scale wind stress near the equator.
     # Blends from tropical_wind_scale at lat=0 to 1.0 outside the band
     # using a Gaussian taper for smooth transition.
-    _tw_scale = getattr(cfg, "tropical_wind_scale", 1.0)
+    _tw_scale = cfg.tropical_wind_scale
     if _tw_scale != 1.0:
-        _tw_sigma = jnp.radians(
-            getattr(cfg, "tropical_wind_lat_deg", _TROPICAL_LAT_DEG)
-        )
+        _tw_sigma = jnp.radians(cfg.tropical_wind_lat_deg)
         # Gaussian: 1 at equator → 0 at ±sigma.
         # scale_factor = 1 + (tropical_wind_scale - 1) * exp(-lat²/sigma²)
         # At lat=0: scale_factor = tropical_wind_scale

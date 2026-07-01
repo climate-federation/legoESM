@@ -186,7 +186,9 @@ def test_xpthvp_matches_golden():
     out = calc_xpthvp_terms(**_xpthvp_inputs())
     names = ("wpthvp_zm", "wp2thvp_zt", "rtpthvp_zm", "thlpthvp_zm", "rc_coef_zt", "rc_coef_zm")
     for name, arr in zip(names, out):
-        np.testing.assert_array_equal(np.asarray(arr), g[name], err_msg=name)
+        # FP-reassociation tolerance (C1-C8 condense refactor; ~1e-14 rel).
+        np.testing.assert_allclose(np.asarray(arr), g[name], rtol=1e-13, atol=1e-16,
+                                   err_msg=name)
 
 
 def test_xpthvp_jit_grad():
@@ -208,7 +210,9 @@ def test_xprcp_fluxes_matches_golden():
     g = np.load(_FIX / "clubb_xprcp_golden.npz")
     out = calc_pdf_xprcp_fluxes(**_xprcp_inputs())
     for key in g.files:
-        np.testing.assert_array_equal(np.asarray(out[key]), g[key], err_msg=key)
+        # FP-reassociation tolerance (C1-C8 condense refactor; ~1e-14 rel).
+        np.testing.assert_allclose(np.asarray(out[key]), g[key], rtol=1e-13, atol=1e-16,
+                                   err_msg=key)
 
 
 def test_xprcp_fluxes_zm_top_zeroed():

@@ -351,6 +351,26 @@ EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
         base_ch4_ppbv=808.2,
         base_n2o_ppbv=273.0,
     ),
+    "abrupt-4xCO2": ExperimentTemplate(
+        name="abrupt-4xCO2",
+        description=(
+            "CO2 quadrupled instantaneously from pre-industrial and held "
+            "fixed (CMIP6 DECK; Eyring et al. 2016).  Used to diagnose "
+            "equilibrium climate sensitivity via Gregory regression."
+        ),
+        start_year=1850,
+        end_year=2000,  # 150-yr DECK standard length
+        parent_experiment="piControl",
+        # CO2 is constant *after* the abrupt jump, so the forcing is
+        # time-invariant ("fixed"): ghg_at_year returns the base values
+        # unchanged for every year.  CH4/N2O/ozone/aerosol/solar stay at
+        # pre-industrial (piControl) levels — only CO2 is perturbed.
+        forcing_type="fixed",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=4.0 * 284.3,  # 4 x pre-industrial (piControl) = 1137.2 ppmv
+        base_ch4_ppbv=808.2,
+        base_n2o_ppbv=273.0,
+    ),
 }
 
 
@@ -509,7 +529,9 @@ def create_experiment_config(
         # AMIP should use prescribed SST; analytical is a fallback.
         # Set radiation to rrtmgp when available for production.
         radiation = "rrtmgp"
-    elif name in ("historical", "ssp245", "ssp585", "1pctCO2"):
+    elif name in ("historical", "ssp245", "ssp585", "1pctCO2", "abrupt-4xCO2"):
+        # abrupt-4xCO2 exists *only* to expose the CO2 radiative forcing —
+        # it is inert under gray radiation, so default to rrtmgp.
         radiation = "rrtmgp"
     # piControl keeps gray as default — it's an idealized control run.
 

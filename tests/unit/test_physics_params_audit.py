@@ -196,16 +196,19 @@ class TestConvectionAudit:
         assert_grad_ok(loss, 0.1, "edmf_convection.a_u_init")
 
     def test_bechtold_tiedtke_no_dead_precip_efficiency(self):
-        """``precip_efficiency`` was a dead tunable (declared, never used) and
-        an inert AIMIP training knob — removed in the 2026-06 audit.  Guard
-        against re-introduction."""
+        """``precip_efficiency`` must never be an inert AIMIP sigmoid-training
+        knob.  Bechtold never declares it.  Tiedtke now exposes it as a working
+        CONFIG-ONLY feature (``tiedtke.py`` splits convective condensate into
+        rain when ``> 0``; default ``0.0`` = legacy no-split), so it is gated by
+        config, not sigmoid-trained from the off state."""
         from legoesm.atmosphere.physics.convection.config import (
             BechtoldConfig, TiedtkeConfig)
         assert not hasattr(BechtoldConfig(), "precip_efficiency")
-        assert not hasattr(TiedtkeConfig(), "precip_efficiency")
-        # Also guard the AIMIP trainable set against re-introduction of the
-        # inert knob (codex review: defaults-preservation test alone would
-        # not catch a re-add).
+        # Tiedtke's precip_efficiency is a live, used config field (rain/cloud
+        # split) — default 0.0 preserves legacy behaviour.
+        assert TiedtkeConfig().precip_efficiency == 0.0
+        # Guard the AIMIP trainable set: precip_efficiency stays a config knob,
+        # never a sigmoid-trained AIMIP parameter re-introduced from off.
         from legoesm.training.aimip_params import AIMIPClassicalParams
         names = set(AIMIPClassicalParams.from_defaults().as_dict())
         assert "tiedtke_precip_efficiency" not in names

@@ -111,55 +111,18 @@ def solve_lw_monochromatic(
                    jnp.full((n_emit,), 1.0 / n_emit, dtype=e_flat.dtype))
   eps = e_tot / n_total                                # energy per photon [W]
 
-  k_choose, k_pos, k_dir, k_walk, k_lin = jax.random.split(key, 5)
-  origin = jax.random.choice(
-      k_choose, ncells + ncols, shape=(n_total,), p=prob)
-  is_vol = origin < ncells
-
-  # Decode volume origin -> (ix,iy,iz); surface origin -> (ix,iy).
-  v = jnp.clip(origin, 0, ncells - 1)
-  vix = v // (ny * nz)
-  vrem = v % (ny * nz)
-  viy = vrem // nz
-  viz = vrem % nz
-  s = jnp.clip(origin - ncells, 0, ncols - 1)
-  six = s // ny
-  siy = s % ny
-
-  ix = jnp.where(is_vol, vix, six)
-  iy = jnp.where(is_vol, viy, siy)
-
-  u = jax.random.uniform(k_pos, (n_total, 3), dtype=dtype)
-  x = (ix.astype(dtype) + u[:, 0]) * geom.dx
-  y = (iy.astype(dtype) + u[:, 1]) * geom.dy
-  zlo = geom.z_faces[viz]
-  zhi = geom.z_faces[jnp.minimum(viz + 1, nz)]
-  if linear_emission:
-    # Sample in-cell emission depth ~ linear Planck profile (lower->upper face)
-    # via the inverse CDF of p(f) ∝ (1-f) B_lo + f B_hi on f in [0,1]:
-    #   (B_hi-B_lo)/2 f^2 + B_lo f - uf*mean = 0.
-    b_lo = planck_lower[vix, viy, viz]
-    b_hi = planck_upper[vix, viy, viz]
-    uf = jax.random.uniform(k_lin, (n_total,), dtype=dtype)
-    mean_b = 0.5 * (b_lo + b_hi)
-    diff = b_hi - b_lo
-    disc = jnp.maximum(b_lo * b_lo + 2.0 * diff * uf * mean_b, 0.0)
-    safe_diff = jnp.where(jnp.abs(diff) > 1e-30, diff, 1.0)
-    f_lin = jnp.where(jnp.abs(diff) > 1e-30,
-                      (jnp.sqrt(disc) - b_lo) / safe_diff, uf)
-    f_lin = jnp.clip(f_lin, 0.0, 1.0)
-  else:
-    f_lin = u[:, 2]
-  z_vol = zlo + f_lin * (zhi - zlo)
-  z = jnp.where(is_vol, z_vol, geom.z_faces[0])         # surface emits at z_sfc
-  pos0 = jnp.stack([x, y, z], axis=1)
-
-  # Directions: isotropic for volume emission, cosine-up for surface emission.
-  dkeys = jax.random.split(k_dir, n_total)
-  def _dir(dk, vol):
-    return jnp.where(vol, sampling.isotropic_direction(dk, dtype),
-                     sampling.lambertian_reflect(dk, dtype))
-  dir0 = jax.vmap(_dir)(dkeys, is_vol)
+  # Sub-batch the photons (lax.scan over n_batches) so peak memory is one
+  # batch's per-photon arrays, not the full n_total -- mirrors
+  # solve_sw_monochromatic. Photons are i.i.d. draws from the global emission
+  # categorical ``prob``; ``eps`` (= e_tot/n_total) is global, so the
+  # accumulated integer counts give the same estimator as one big batch.
+  nb = int(config.n_batches)
+  if n_total % nb != 0:
+    raise ValueError(
+        f"n_batches={nb} must divide total photons N={n_total} "
+        f"(nx*ny*photons_per_pixel)."
+    )
+  batch_size = n_total // nb
 
   ssa0 = jnp.zeros_like(k_abs)                          # no LW scattering
   g0 = jnp.zeros_like(k_abs)
@@ -168,26 +131,82 @@ def solve_lw_monochromatic(
       coarsen_xy=int(config.knull_coarsen_xy),
       coarsen_z=int(config.knull_coarsen_z))
   albedo_lw = 1.0 - emissivity
-  walk_keys = jax.random.split(k_walk, n_total)
-  states = photon_walk.trace_batch(
-      walk_keys, pos0, dir0, k_abs, ssa0, g0, maj, albedo_lw, geom,
-      int(config.max_iterations))
-
   count_dt = jnp.int64 if jax.config.jax_enable_x64 else jnp.int32
-  ones = jnp.ones((n_total,), count_dt)
-  # Emitted-per-cell (volume) histogram from origins.
-  emit_ids = jnp.where(is_vol, v, -1)
-  emit_cnt = jax.ops.segment_sum(ones, emit_ids, num_segments=ncells)
-  emit_sfc_ids = jnp.where(~is_vol, s, -1)
-  emit_sfc_cnt = jax.ops.segment_sum(ones, emit_sfc_ids, num_segments=ncols)
-  # Absorbed-per-cell histograms from the walk.
-  st = states.status
-  abs_ids = jnp.where(st == STATUS_VOL_ABS, states.vol_idx, -1)
-  abs_cnt = jax.ops.segment_sum(ones, abs_ids, num_segments=ncells)
-  abs_sfc_ids = jnp.where(st == STATUS_SFC_ABS, states.sfc_idx, -1)
-  abs_sfc_cnt = jax.ops.segment_sum(ones, abs_sfc_ids, num_segments=ncols)
-  escaped = jnp.sum(st == STATUS_TOD_UP).astype(count_dt)
-  maxiter = jnp.sum(st == photon_walk.STATUS_MAXITER).astype(count_dt)
+  ones = jnp.ones((batch_size,), count_dt)
+
+  def batch_step(carry, bkey):
+    emit_c, emit_s, abs_c, abs_s, esc_c, max_c = carry
+    k_choose, k_pos, k_dir, k_walk, k_lin = jax.random.split(bkey, 5)
+    origin = jax.random.choice(
+        k_choose, ncells + ncols, shape=(batch_size,), p=prob)
+    is_vol = origin < ncells
+    # Decode volume origin -> (ix,iy,iz); surface origin -> (ix,iy).
+    v = jnp.clip(origin, 0, ncells - 1)
+    vix = v // (ny * nz)
+    vrem = v % (ny * nz)
+    viy = vrem // nz
+    viz = vrem % nz
+    s = jnp.clip(origin - ncells, 0, ncols - 1)
+    six = s // ny
+    siy = s % ny
+    ix = jnp.where(is_vol, vix, six)
+    iy = jnp.where(is_vol, viy, siy)
+
+    u = jax.random.uniform(k_pos, (batch_size, 3), dtype=dtype)
+    x = (ix.astype(dtype) + u[:, 0]) * geom.dx
+    y = (iy.astype(dtype) + u[:, 1]) * geom.dy
+    zlo = geom.z_faces[viz]
+    zhi = geom.z_faces[jnp.minimum(viz + 1, nz)]
+    if linear_emission:
+      # In-cell emission depth ~ linear Planck profile via the inverse CDF of
+      # p(f) ∝ (1-f) B_lo + f B_hi on f in [0,1].
+      b_lo = planck_lower[vix, viy, viz]
+      b_hi = planck_upper[vix, viy, viz]
+      uf = jax.random.uniform(k_lin, (batch_size,), dtype=dtype)
+      mean_b = 0.5 * (b_lo + b_hi)
+      diff = b_hi - b_lo
+      disc = jnp.maximum(b_lo * b_lo + 2.0 * diff * uf * mean_b, 0.0)
+      safe_diff = jnp.where(jnp.abs(diff) > 1e-30, diff, 1.0)
+      f_lin = jnp.where(jnp.abs(diff) > 1e-30,
+                        (jnp.sqrt(disc) - b_lo) / safe_diff, uf)
+      f_lin = jnp.clip(f_lin, 0.0, 1.0)
+    else:
+      f_lin = u[:, 2]
+    z_vol = zlo + f_lin * (zhi - zlo)
+    z = jnp.where(is_vol, z_vol, geom.z_faces[0])        # surface emits at z_sfc
+    pos0 = jnp.stack([x, y, z], axis=1)
+
+    # Directions: isotropic for volume emission, cosine-up for surface.
+    dkeys = jax.random.split(k_dir, batch_size)
+    def _dir(dk, vol):
+      return jnp.where(vol, sampling.isotropic_direction(dk, dtype),
+                       sampling.lambertian_reflect(dk, dtype))
+    dir0 = jax.vmap(_dir)(dkeys, is_vol)
+
+    walk_keys = jax.random.split(k_walk, batch_size)
+    states = photon_walk.trace_batch(
+        walk_keys, pos0, dir0, k_abs, ssa0, g0, maj, albedo_lw, geom,
+        int(config.max_iterations))
+    st = states.status
+    emit_ids = jnp.where(is_vol, v, -1)
+    emit_c = emit_c + jax.ops.segment_sum(ones, emit_ids, num_segments=ncells)
+    emit_sfc_ids = jnp.where(~is_vol, s, -1)
+    emit_s = emit_s + jax.ops.segment_sum(
+        ones, emit_sfc_ids, num_segments=ncols)
+    abs_ids = jnp.where(st == STATUS_VOL_ABS, states.vol_idx, -1)
+    abs_c = abs_c + jax.ops.segment_sum(ones, abs_ids, num_segments=ncells)
+    abs_sfc_ids = jnp.where(st == STATUS_SFC_ABS, states.sfc_idx, -1)
+    abs_s = abs_s + jax.ops.segment_sum(
+        ones, abs_sfc_ids, num_segments=ncols)
+    esc_c = esc_c + jnp.sum(st == STATUS_TOD_UP).astype(count_dt)
+    max_c = max_c + jnp.sum(st == photon_walk.STATUS_MAXITER).astype(count_dt)
+    return (emit_c, emit_s, abs_c, abs_s, esc_c, max_c), None
+
+  init = (jnp.zeros((ncells,), count_dt), jnp.zeros((ncols,), count_dt),
+          jnp.zeros((ncells,), count_dt), jnp.zeros((ncols,), count_dt),
+          jnp.zeros((), count_dt), jnp.zeros((), count_dt))
+  (emit_cnt, emit_sfc_cnt, abs_cnt, abs_sfc_cnt, escaped, maxiter), _ = (
+      jax.lax.scan(batch_step, init, jax.random.split(key, nb)))
 
   net = (abs_cnt - emit_cnt).astype(dtype) * eps        # [W] per cell
   net_flux = net.reshape(nx, ny, nz) / area_cell        # [W/m^2] per ground area

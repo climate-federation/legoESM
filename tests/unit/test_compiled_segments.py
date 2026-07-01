@@ -136,7 +136,7 @@ def _mock_step_unified(
 # carries — skipped by the field-by-field equivalence comparisons below.
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
-    "tke", "qke", "gwd_spectrum", "land_ml", "w_land",
+    "tke", "qke", "gwd_spectrum", "land_ml", "w_land", "snow",
 )
 
 

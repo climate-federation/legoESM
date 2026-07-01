@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
-from legoesm.land.tridiag import thomas_solve_batch
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 __param_spec__ = {
     "SoilThermalConfig": {
@@ -258,5 +258,5 @@ def solve_soil_thermal(
     a = jnp.pad(sub, ((0, 0), (1, 0)))
     c = jnp.pad(sup, ((0, 0), (0, 1)))
 
-    T_new = thomas_solve_batch(a, diag, c, rhs)
+    T_new = thomas_solve(a, diag, c, rhs)
     return T_new

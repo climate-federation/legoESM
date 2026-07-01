@@ -19,7 +19,7 @@ def test_canonical_config_builds_a_valid_model():
     r = bg.build_baroclinic_gyre_recipe()        # reuse a real EOS + physics block
     c = r.config
     cfg = mitgcm_canonical_ocean_config(
-        A_h=c.flat_get("A_h"), K_h=c.flat_get("K_h"), A_v=c.A_v, K_v=c.K_v,  # #501: A_h/K_h nested
+        A_h=c.flat_get("A_h"), K_h=c.K_h, A_v=c.A_v, K_v=c.K_v,  # #501: A_h nested
         eos_linear=c.eos_linear, physics=c.physics,
     )
     # canonical card pins MITgcm's actual algorithm
@@ -68,7 +68,7 @@ def test_card_choices_match_the_actual_recipes():
     r = bg.build_baroclinic_gyre_recipe()
     c = r.config
     card = mitgcm_canonical_ocean_config(
-        A_h=c.flat_get("A_h"), K_h=c.flat_get("K_h"), A_v=c.A_v, K_v=c.K_v,  # #501: A_h/K_h nested
+        A_h=c.flat_get("A_h"), K_h=c.K_h, A_v=c.A_v, K_v=c.K_v,  # #501: A_h nested
         eos_linear=c.eos_linear, physics=c.physics,
     )
     for f in ("barotropic_solver", "momentum_advection", "momentum_flux_scheme",

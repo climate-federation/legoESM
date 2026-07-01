@@ -197,8 +197,8 @@ def main():
         config.C_LEITH_OVERRIDE = args.C_leith
     if args.C_leith_modified:
         config.C_LEITH_MODIFIED_OVERRIDE = True
-    if args.barotropic.barotropic_div_damp is not None:
-        config.BAROTROPIC_DIV_DAMP_OVERRIDE = args.barotropic.barotropic_div_damp
+    if args.barotropic_div_damp is not None:
+        config.BAROTROPIC_DIV_DAMP_OVERRIDE = args.barotropic_div_damp
     if args.momentum_advection is not None:
         config.MOMENTUM_ADVECTION_OVERRIDE = args.momentum_advection
     if args.no_weno_d_term:

@@ -53,7 +53,9 @@ def test_from_yaml_deep_merges_onto_defaults(tmp_path):
     # ...and defaults that were not overridden are retained.
     assert cfg.get("grid.n_lon") == DEFAULT_OCEAN_CONFIG["grid"]["n_lon"]
     rt = cfg.to_ocean_config()
-    assert rt.A_h == 30000.0
+    # #501: A_h moved into the nested LateralViscosityConfig; the flat YAML key
+    # ocean.A_h still routes here via flat_fields + from_flat.
+    assert rt.lateral_viscosity.A_h == 30000.0
     assert rt.eos == "wright"
 
 

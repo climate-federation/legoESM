@@ -121,11 +121,15 @@ class TestDINOConfig:
         assert vm_kpp.kpp.K_bg == pytest.approx(cfg.K_v_bg)
         # The paper-faithful TKE config maps the paper background + ceiling, and
         # prandtl_mode="constant" is required or kappaH_min/kappaM_max are dead.
-        vm = dino._dino_vertical_mixing_config(
-            dataclasses.replace(cfg, vmix_scheme="tke"))
+        cfg_tke = dataclasses.replace(cfg, vmix_scheme="tke")
+        vm = dino._dino_vertical_mixing_config(cfg_tke)
         assert vm.scheme == "tke"
         assert vm.tke.prandtl_mode == "constant"
-        assert vm.tke.kappaM_min == pytest.approx(cfg.A_v_bg)
+        # MOMENTUM floor = the EFFECTIVE A_v (the SW-corner stabilizer = 5e-4, 4×
+        # the paper) so TKE is runnable; the TRACER floor stays at the paper
+        # K_v_bg, so the thermocline mixing is unchanged (see A_v_bg_effective).
+        assert vm.tke.kappaM_min == pytest.approx(cfg_tke.A_v_bg_effective)
+        assert cfg_tke.A_v_bg_effective == pytest.approx(5.0e-4)
         assert vm.tke.kappaH_min == pytest.approx(cfg.K_v_bg)
         assert vm.tke.kappaM_max == pytest.approx(cfg.K_conv)
         assert vm.tke.bg_diff_scale == pytest.approx(0.0)  # constant bg (no Bryan-Lewis)

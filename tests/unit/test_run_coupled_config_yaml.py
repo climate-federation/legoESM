@@ -111,6 +111,33 @@ def test_load_yaml_config_coerces_quoted_scalar(tmp_path):
         load_yaml_config(str(bad), mod.build_parser())
 
 
+def test_orbital_insolation_flag_and_yaml_roundtrip(tmp_path):
+    """Coupled CMIP runs can enable Berger-1978 orbital insolation through the
+    run interface (codex adversarial review): the --orbital-insolation flag
+    parses, and a coupled YAML carrying ``orbital_insolation: true`` is a valid
+    key (NOT rejected as unknown) that sets the default; CLI still overrides."""
+    # The dest must exist or load_yaml_config rejects the YAML key as unknown.
+    assert "orbital_insolation" in _dests()
+    parser = mod.build_parser()
+    assert parser.parse_args([]).orbital_insolation is False
+    assert parser.parse_args(["--orbital-insolation"]).orbital_insolation is True
+    # The coupled ExperimentConfig actually carries the field that main()
+    # forwards args.orbital_insolation into.
+    from legoesm.driver.config import ExperimentConfig
+    assert "orbital_insolation" in ExperimentConfig._fields
+
+    p = tmp_path / "orb.yaml"
+    p.write_text("orbital_insolation: true\nradiation: rrtmgp\n")
+    loaded = load_yaml_config(str(p), mod.build_parser())
+    assert loaded["orbital_insolation"] is True
+    parser2 = mod.build_parser()
+    parser2.set_defaults(**loaded)
+    assert parser2.parse_args([]).orbital_insolation is True            # YAML default
+    assert parser2.parse_args([]).orbital_insolation is True
+    # An explicit on-flag is idempotent; the YAML cannot silently disable it.
+    assert parser2.parse_args(["--orbital-insolation"]).orbital_insolation is True
+
+
 def test_config_sets_defaults_cli_overrides():
     """--config supplies defaults; an explicit CLI flag still wins (precedence
     CLI > config-file > included base > parser default)."""

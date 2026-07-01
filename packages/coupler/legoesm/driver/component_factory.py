@@ -761,8 +761,19 @@ def create_ocean_component(
         # Guard the grid family with a clear message instead of an AttributeError
         # deep inside cdgrid construction (mirrors the resolve_model_complexity guard).
         from legoesm.driver.config import normalize_grid_type
-        _gt = normalize_grid_type(config.grid.grid_type)
-        if _gt not in _FULL_OCEAN_GRID_TYPES:
+        from legoesm.grids.cubed_sphere import CubedSphereGrid
+        # full_3d OceanModel is cubed-sphere-only (it calls
+        # create_cubed_sphere_cdgrid).  Detect the family from the GRID OBJECT,
+        # not ``config.grid`` — ``config`` is logging-only here and is legitimately
+        # ``None`` on the complexity-builder path (test_component_complexity passes
+        # config=None with a real grid).  Mirrors the isinstance(grid,
+        # CubedSphereGrid) convention used throughout ocean/atmosphere physics.
+        if not isinstance(grid, CubedSphereGrid):
+            _gt = (
+                normalize_grid_type(config.grid.grid_type)
+                if config is not None and getattr(config, "grid", None) is not None
+                else type(grid).__name__
+            )
             raise ValueError(
                 f"full_3d (OceanConfig) ocean is implemented only for grid_type in "
                 f"{sorted(_FULL_OCEAN_GRID_TYPES)} (the cubed-sphere OceanModel); got "

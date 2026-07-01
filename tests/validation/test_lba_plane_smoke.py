@@ -23,11 +23,16 @@ if str(_SCRIPTS) not in sys.path:
 
 import run_lba_plane  # noqa: E402
 
-_GSAM_LBA = "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7/CASES/LBA"
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+
+# Repo-local cache (scripts/data/fetch_les_forcing.py) or external
+# LEGOESM_GSAM_ROOT; skip if neither has the deck.
+_GSAM_LBA = resolve_sam_case_dir("LBA")
 
 
 @pytest.mark.skipif(not os.path.isdir(_GSAM_LBA),
-                    reason="gSAM CASES/LBA not present")
+                    reason="LBA deck not present "
+                           "(run scripts/data/fetch_les_forcing.py)")
 def test_lba_runs_stable_and_conserving():
     # nlev=64 + dt=2s for the SAM-faithful stretched grid (dz_sfc=50 m, VGRID).
     out = run_lba_plane.run_lba(

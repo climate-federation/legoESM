@@ -27,6 +27,19 @@ replaced by smooth sigmoid blends whose sharpnesses live in
 ``vmap`` safe and smooth everywhere while reproducing the oracle within a
 stated tolerance.
 
+Conserved heat variable — deviation from the oracle.  The E3SM ``hb_diff``
+oracle diffuses the DRY STATIC ENERGY ``s = c_p T + g z`` in flux form,
+which conserves the column enthalpy ``Σ ρ dz c_p T`` exactly.  THIS port
+instead diffuses potential temperature θ (see
+:func:`diffuse_theta_with_countergradient` and the shared
+:func:`legoesm.atmosphere.physics.turbulence.vertical_diffusion.implicit_vertical_diffusion_theta`).
+Diffusing θ conserves the mass-weighted column θ, ``Σ ρ dz θ``, but NOT the
+column enthalpy, because the Exner function π = (p/p_ref)^κ (T = π θ) varies
+with height.  The scheme is therefore faithful to the oracle's K-profile,
+PBL-height, and nonlocal-countergradient STRUCTURE, but deviates in the
+conserved heat variable (an accepted approximation; switching the diffused
+variable to DSE is a validated follow-up).
+
 References
 ----------
 - Holtslag, A. A. M., & Boville, B. A. (1993). Local versus nonlocal
@@ -596,6 +609,20 @@ def diffuse_theta_with_countergradient(
     theta diffusion of the local gradient with the surface flux, and convert
     back.  This keeps the implicit part identical to the no-cg path while
     adding the nonlocal term consistently with the oracle.
+
+    Conserved-variable caveat.  The E3SM oracle diffuses dry static energy
+    s = c_p T + g z (enthalpy-conserving in flux form); this routine diffuses
+    θ instead, so it reproduces the oracle's K-profile and countergradient
+    structure but conserves mass-weighted θ (``Σ ρ dz θ``) rather than column
+    enthalpy (``Σ ρ dz c_p T``), since the Exner π = (p/p_ref)^κ varies with
+    height.  An energy-conserving variant would diffuse s; this is an accepted
+    approximation and a validated follow-up.
+
+    Surface-Exner proxy.  ``exner_sfc`` below uses the lowest FULL-level Exner
+    (exner[:, -1]) as a surface-Exner stand-in.  Since p_low < p_surface this
+    proxy is biased low, so the injected surface θ-flux F_θ_sfc =
+    F_T_sfc / exner_sfc is biased slightly HIGH; threading a true p_surface
+    and using (p_sfc/p_ref)^κ would remove the bias.
     """
     p_safe = jnp.clip(p_full, 1.0, None)
     exner = (p_safe / constants.p_ref) ** constants.kappa
