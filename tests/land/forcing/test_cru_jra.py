@@ -97,6 +97,37 @@ def test_read_clm_fixture(tmp_path):
                       cru_jra.CRUJRA_FREQ_HOURS * 3600.0)
 
 
+def test_read_with_year_suffix(tmp_path):
+    # TRENDY glade files are named <prefix>.<stream>.<year>_cdf5.nc
+    prefix = "clmforc.TRENDY.c2023_0.5x0.5"
+    lat = np.linspace(-87.5, 87.5, _NLAT); lon = np.linspace(0.0, 360.0, _NLON, endpoint=False)
+    units = "days since 2022-01-01"
+    t_solar = np.array([0.0, 0.25, 0.5, 0.75]); t_state = t_solar + 0.125
+    shape = (_NT, _NLAT, _NLON)
+
+    def _da(vals, t):
+        return xr.DataArray(vals, dims=("time", "lat", "lon"),
+                            coords={"time": ("time", t, {"units": units}), "lat": lat, "lon": lon})
+    xr.Dataset({"FSDS": _da(np.ones(shape), t_solar)}).to_netcdf(
+        tmp_path / f"{prefix}.Solr.2022_cdf5.nc")
+    xr.Dataset({"PRECTmms": _da(np.zeros(shape), t_state)}).to_netcdf(
+        tmp_path / f"{prefix}.Prec.2022_cdf5.nc")
+    xr.Dataset({"TBOT": _da(np.full(shape, 280.0), t_state),
+                "PSRF": _da(np.full(shape, 1e5, dtype=float), t_state),
+                "QBOT": _da(np.full(shape, 5e-3), t_state),
+                "WIND": _da(np.full(shape, 3.0), t_state),
+                "FLDS": _da(np.full(shape, 300.0), t_state)}).to_netcdf(
+        tmp_path / f"{prefix}.TPQWL.2022_cdf5.nc")
+
+    f = cru_jra.read_crujra_year(tmp_path, 2022, prefix=prefix, suffix="_cdf5")
+    assert f.tbot.shape == (_NT, _NLAT, _NLON)
+    assert np.allclose(f.tbot, 280.0)
+    # load_cru_jra + stage_forcing also honour the suffix (no synthetic fallback)
+    g = cru_jra.load_cru_jra(2022, data_dir=tmp_path, prefix=prefix, suffix="_cdf5",
+                             allow_synthetic=False)
+    assert np.allclose(g.wind, 3.0)
+
+
 def test_read_time_subset(tmp_path):
     year = _write_clm_fixture(tmp_path)
     f = cru_jra.read_crujra_year(tmp_path, year, time_indices=[0, 2])

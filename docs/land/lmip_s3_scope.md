@@ -256,14 +256,27 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
 Inputs live under the gitignored `data/` and are staged by
 `scripts/data/download_lmip_data.sh` (modelled on `download_omip_data.sh`):
 
-- **CRU-JRA forcing** → `data/crujra/` — **symlinked** from an existing glade
-  copy (`--crujra-src` / `$LEGOESM_CRUJRA_SRC`); large, no copy/download.
-- **Surfdata** (`legoesm_surfdata_c250617.nc`) → `data/` — **downloaded** from a
-  hosted URL (`--surfdata-url` / `$LEGOESM_SURFDATA_URL`); a 31 MB build product,
-  not in git (full regen needs HWSD2 + CLM5 via `build_legoesm_surfdata.py`).
+- **CRU-JRA forcing** → `data/crujra/` — **symlinked** from the glade copy
+  `/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c2023/TRENDY_cdf5`.
+  Files are named `clmforc.TRENDY.c2023_0.5x0.5.<stream>.<year>_cdf5.nc` — note
+  the **`TRENDY` prefix** and the **`_cdf5` suffix** after the year (the reader
+  takes `prefix=`/`suffix=`; driver flags `--prefix`/`--suffix`, defaults set to
+  these). Available year: 2022.
+- **Soil intermediate** (`legoesm_surfdata_soil_0p25.nc`, 0.25°, soil-only) →
+  `data/` — **downloaded from Zenodo** (record 21087689). This is NOT the full
+  surfdata; it lacks PFT/LAI/cover.
 
-`run_lmip_biophys.py` defaults point at this layout (`--surfdata
-data/legoesm_surfdata_c250617.nc`, `--forcing-dir data/crujra`).
+**"Regrid" step (build the full surfdata):** combine the 0.25° soil with a CLM5
+surfdata (PFT/LAI/cover) — no HWSD raster needed:
+```
+python scripts/data/build_legoesm_surfdata.py --skip-hwsd \
+    --intermediate data/legoesm_surfdata_soil_0p25.nc \
+    --clm-surfdata /glade/.../surfdata_*.nc \
+    --out data/legoesm_surfdata.nc
+```
+`run_lmip_biophys.py` defaults point at the result (`--surfdata
+data/legoesm_surfdata.nc`, `--forcing-dir data/crujra`, `--prefix
+clmforc.TRENDY.c2023_0.5x0.5 --suffix _cdf5 --year 2022`).
 
 ## 8. Open items / inputs needed
 

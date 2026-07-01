@@ -145,8 +145,15 @@ class LandForcingColumns(NamedTuple):
     year: int = 0
 
 
-def _stream_path(data_dir: Path, stream: str, year: int, prefix: str) -> Path:
-    return data_dir / f"{prefix}.{stream}.{year}.nc"
+def _stream_path(data_dir: Path, stream: str, year: int, prefix: str,
+                 suffix: str = "") -> Path:
+    """CLM datm stream path ``<prefix>.<stream>.<year><suffix>.nc``.
+
+    ``suffix`` covers naming variants after the year, e.g. the TRENDY glade files
+    ``clmforc.TRENDY.c2023_0.5x0.5.Solr.2022_cdf5.nc`` (``suffix="_cdf5"``); the
+    UEA-style example files use ``suffix=""``.
+    """
+    return data_dir / f"{prefix}.{stream}.{year}{suffix}.nc"
 
 
 def _time_seconds(ds, *, allow_units: str) -> np.ndarray:
@@ -170,6 +177,7 @@ def read_crujra_year(
     year: int,
     *,
     prefix: str = CRUJRA_FILE_PREFIX,
+    suffix: str = "",
     time_indices: Optional[Sequence[int]] = None,
 ) -> LandForcing:
     """Read one CRU-JRA year from the three CLM datm NetCDF streams.
@@ -205,7 +213,7 @@ def read_crujra_year(
 
     def _open(stream):
         return xr.open_dataset(
-            _stream_path(data_dir, stream, year, prefix), decode_times=False
+            _stream_path(data_dir, stream, year, prefix, suffix), decode_times=False
         )
 
     def _read(ds, var):
@@ -294,6 +302,7 @@ def load_cru_jra(
     *,
     data_dir=None,
     prefix: str = CRUJRA_FILE_PREFIX,
+    suffix: str = "",
     time_indices: Optional[Sequence[int]] = None,
     allow_synthetic: bool = True,
 ) -> LandForcing:
@@ -304,15 +313,16 @@ def load_cru_jra(
     """
     if data_dir is not None:
         data_dir = Path(data_dir)
-        solr = _stream_path(data_dir, _STREAM_SOLAR, year, prefix)
+        solr = _stream_path(data_dir, _STREAM_SOLAR, year, prefix, suffix)
         if solr.exists():
             return read_crujra_year(
-                data_dir, year, prefix=prefix, time_indices=time_indices
+                data_dir, year, prefix=prefix, suffix=suffix,
+                time_indices=time_indices,
             )
     if not allow_synthetic:
         raise FileNotFoundError(
             f"CRU-JRA streams not found in {data_dir!r} for year {year}; "
-            f"expected e.g. {prefix}.{_STREAM_SOLAR}.{year}.nc"
+            f"expected e.g. {prefix}.{_STREAM_SOLAR}.{year}{suffix}.nc"
         )
     n_time = 4 if time_indices is None else len(time_indices)
     return synthetic_land_forcing(year, n_time=n_time)
@@ -593,6 +603,7 @@ def stage_forcing(
     year: int,
     data_dir=None,
     prefix: str = CRUJRA_FILE_PREFIX,
+    suffix: str = "",
     k_neighbors: int = 4,
     co2_ppmv: float = _DEFAULT_CO2_PPMV,
     snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
@@ -617,7 +628,7 @@ def stage_forcing(
     i_hi = min(_CRUJRA_STEPS_PER_YEAR - 1, int(np.floor(tq.max() / step_s)) + 2)
     idx = np.arange(i_lo, i_hi + 1)
     forcing = load_cru_jra(
-        year, data_dir=data_dir, prefix=prefix,
+        year, data_dir=data_dir, prefix=prefix, suffix=suffix,
         time_indices=idx, allow_synthetic=allow_synthetic,
     )
     weights = build_forcing_weights(forcing, lat_rad, lon_rad, k_neighbors=k_neighbors)
