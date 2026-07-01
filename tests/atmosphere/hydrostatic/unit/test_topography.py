@@ -18,6 +18,8 @@ from legoesm.grids.topography import (
     _derive_land_fraction,
     _laplacian_smooth_cubed_sphere,
     _laplacian_smooth_gaussian,
+    _laplacian_smooth_voronoi,
+    smooth_phis_voronoi,
     gaussian_mountain,
     phis_from_topography,
     land_mask_from_topography,

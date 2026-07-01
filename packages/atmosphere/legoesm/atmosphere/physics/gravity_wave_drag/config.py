@@ -155,7 +155,7 @@ __param_spec__ = {
             "crit_level_floor": "wind magnitude at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
-            "softmin_sharpness": "log-sum-exp sharpness of the saturation cap; a differentiability/smoothing width, not a closure",
+            "softmin_sharpness": "sigmoid sharpness of the saturation-cap blend; a differentiability/smoothing width, not a closure",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -233,7 +233,10 @@ class LindzenConfig(NamedTuple):
     k_wave : float
         Horizontal wavenumber [1/m] (default 2*pi/100e3).
     N_ref : float
-        Reference Brunt-Väisälä frequency [1/s] (default 0.01).
+        RESERVED / currently unused (default 0.01) — N is diagnosed from the
+        local stratification (theta gradient via ``brunt_vaisala_n_full``), not
+        from this field, so setting it does NOT change the launch/saturation
+        stress.
     critical_Fr : float
         Critical Froude number threshold (default 1.0).
     Fr_sharpness : float
@@ -304,9 +307,10 @@ class McFarlaneConfig(NamedTuple):
         Sigmoid sharpness for the smooth ``U > min_wind`` activation
         (default 20.0).  Higher values approach a hard step.
     softmin_sharpness : float
-        Log-sum-exp softmin sharpness used by the saturation cap
-        ``min(tau_carry, tau_sat)`` (default 50.0).  Higher values give
-        a sharper cap at the cost of larger gradients near the kink.
+        Sigmoid sharpness of the saturation-cap blend (default 50.0).  Feeds
+        ``jax.nn.sigmoid(sat_sharpness*excess)`` to blend toward ``tau_sat``
+        when ``tau_carry`` exceeds it; higher values give a sharper cap at the
+        cost of larger gradients near the kink.
     tau_max : float
         Upper clip on launch stress [Pa] (default 10.0).  Operationally
         protects against runaway stress in pathological columns.

@@ -153,7 +153,13 @@ def zhang_mcfarlane_convection(
     cape_weight = cape_trigger(
         cape, config.cape_threshold, config.cape_sharpness,
     )
-    # Dimensionally-correct CAPE-relaxation closure (Kain 2004 §3):
+    # Generic first-order CAPE-relaxation SURROGATE (NOT a published
+    # closure).  This is *not* the Zhang-McFarlane (1995) closure, which
+    # consumes CAPE at a rate set by a cloud-work-function / quasi-equilibrium
+    # sensitivity, and it is *not* a Kain (2004) formula (Kain 2004 has no
+    # closed-form M_b — it iterates M_b to remove CAPE over TIMEC).  Here the
+    # ``g / rho_BL`` factor is a dimensional stand-in for that CAPE-consumption
+    # sensitivity, giving a kg/m^2/s mass flux:
     #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
     # The earlier formula ``(CAPE - threshold)+ / tau`` had units
     # ``m^2/s^3`` — wrong by a factor of ``rho_BL/g``.  At sea level

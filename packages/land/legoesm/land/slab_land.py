@@ -26,6 +26,7 @@ from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
+from legoesm.land.bucket_hydrology import partition_bucket_runoff
 from legoesm.land.config import LandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
@@ -81,6 +82,8 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
+    K_infiltration = _get(lp, "K_infiltration", config.K_infiltration)
+    infil_suction_boost = _get(lp, "infil_suction_boost", config.infil_suction_boost)
 
     # Account for fresh snowfall that will survive this step when the
     # surface is below freezing.  Used both by the albedo block here
@@ -224,22 +227,25 @@ def step_land(
     snow_new = snow_new - sublim_actual * dt  # sublimation removes, deposition adds
     snow_new = jnp.maximum(snow_new, 0.0)
 
-    # --- Bucket hydrology ---
-    # Over bare soil: evaporation removes from bucket.
-    # Over snow: bucket is not involved in latent exchange.
+    # --- Bucket hydrology: Green-Ampt-style infiltration excess + saturation excess
+    # Over bare soil: evaporation removes from the bucket.  Over snow: the bucket is
+    # not the latent source (snow sublimation handles it), so soil_evap is the bare-
+    # soil demand only.  partition_bucket_runoff caps infiltration (Hortonian runoff
+    # for the rejected rain) and spills the overfilled bucket (saturation-excess
+    # runoff).  limit_evaporation=True throttles soil_evap to the available water and
+    # returns soil_evap_actual, which is then used for the latent heat flux below so
+    # energy and water stay consistent: precip + melt == dW/dt + E + runoff exactly.
     soil_evap = jnp.where(has_snow, 0.0, evap_rate)
-    max_soil_evap = jnp.maximum(W / dt + precip_rain + melt_rate, 0.0)
-    soil_evap_actual = jnp.minimum(soil_evap, max_soil_evap)
+    P_input = precip_rain + melt_rate
+    W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
+        W, P_input, soil_evap, dt, W_max,
+        K_infiltration, infil_suction_boost,
+        infiltration_excess=config.infiltration_excess,
+    )
 
     # Total actual mass flux and excess energy
     evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
     evap_excess_energy = (evap_rate - evap_rate_actual) * L_eff  # W/m2
-
-    dW_dt = precip_rain + melt_rate - soil_evap_actual
-    W_unclamped = W + dt * dW_dt
-    # Overflow becomes surface runoff rather than being silently discarded
-    runoff = jnp.maximum(W_unclamped - W_max, 0.0) / dt  # kg/m2/s
-    W_new = jnp.clip(W_unclamped, 0.0, W_max)
     # Actual lhflx consistent with water-limited evaporation/sublimation
     lhflx_actual = evap_rate_actual * L_eff
 

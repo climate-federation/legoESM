@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.atmosphere.dynamics import compressible_euler_plane as cep
 from legoesm.atmosphere.dynamics import plane_operators as ops
 from legoesm.atmosphere.dynamics import plane_operators_halo as ops_h
 from legoesm.grids.plane import create_plane_grid
@@ -51,6 +52,17 @@ def _eq(out_halo, out_orig):
     )
 
 
+def _vlast_ref(fn, *arrs_zyx, grid):
+    """Non-halo reference via the (ny, nx, nlev) vlast op.
+
+    The base zyx interp helpers moved to ``compressible_euler_plane`` in
+    vertical-last (ny, nx, nlev) layout. Bridge the test's zyx
+    (nlev, ny, nx) arrays through it: zyx -> yxz -> op -> zyx.
+    """
+    yxz = [jnp.moveaxis(a, 0, -1) for a in arrs_zyx]
+    return jnp.moveaxis(fn(*yxz, grid), -1, 0)
+
+
 def test_grad_x_equiv(grid, random_scalar):
     _eq(
         ops_h.grad_x_3d_halo(_pad(random_scalar), grid),
@@ -83,28 +95,28 @@ def test_laplacian_equiv(grid, random_scalar):
 def test_interp_cell_to_xface_equiv(grid, random_scalar):
     _eq(
         ops_h.interp_cell_to_xface_halo(_pad(random_scalar), grid),
-        ops.interp_cell_to_xface(random_scalar, grid),
+        _vlast_ref(cep.interp_cell_to_xface_vlast, random_scalar, grid=grid),
     )
 
 
 def test_interp_cell_to_yface_equiv(grid, random_scalar):
     _eq(
         ops_h.interp_cell_to_yface_halo(_pad(random_scalar), grid),
-        ops.interp_cell_to_yface(random_scalar, grid),
+        _vlast_ref(cep.interp_cell_to_yface_vlast, random_scalar, grid=grid),
     )
 
 
 def test_interp_xface_to_cell_equiv(grid, random_scalar):
     _eq(
         ops_h.interp_xface_to_cell_halo(_pad(random_scalar), grid),
-        ops.interp_xface_to_cell(random_scalar, grid),
+        _vlast_ref(cep.interp_xface_to_cell_vlast, random_scalar, grid=grid),
     )
 
 
 def test_interp_yface_to_cell_equiv(grid, random_scalar):
     _eq(
         ops_h.interp_yface_to_cell_halo(_pad(random_scalar), grid),
-        ops.interp_yface_to_cell(random_scalar, grid),
+        _vlast_ref(cep.interp_yface_to_cell_vlast, random_scalar, grid=grid),
     )
 
 
@@ -112,7 +124,7 @@ def test_interp_yface_to_xface_equiv(grid, random_vector):
     _, v = random_vector
     _eq(
         ops_h.interp_yface_to_xface_halo(_pad(v), grid),
-        ops.interp_yface_to_xface(v, grid),
+        _vlast_ref(cep.interp_yface_to_xface_vlast, v, grid=grid),
     )
 
 
@@ -120,7 +132,7 @@ def test_interp_xface_to_yface_equiv(grid, random_vector):
     u, _ = random_vector
     _eq(
         ops_h.interp_xface_to_yface_halo(_pad(u), grid),
-        ops.interp_xface_to_yface(u, grid),
+        _vlast_ref(cep.interp_xface_to_yface_vlast, u, grid=grid),
     )
 
 

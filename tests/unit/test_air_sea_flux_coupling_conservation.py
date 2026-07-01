@@ -463,17 +463,17 @@ class TestJittedStepUnifiedThreadsFluxOverride:
                 T_land=None, **extra,
             )
 
-        base, _, _ = _run()
+        base, _, _, _ = _run()  # step_unified returns 4 (PR #650 land_ml)
         sh = jnp.full(shape_2d, 40.0)
         lh = jnp.full(shape_2d, 120.0)
-        ovr, _, _ = _run(sfc_shflx_override=sh, sfc_lhflx_override=lh)
+        ovr, _, _, _ = _run(sfc_shflx_override=sh, sfc_lhflx_override=lh)
         # Override-on diagnostics equal the coupler flux.
         assert jnp.allclose(ovr.shflx, sh)
         assert jnp.allclose(ovr.lhflx, lh)
         # Bottom-level tendency differs from the self-flux baseline.
         assert not jnp.allclose(base.dT_dt[..., -1], ovr.dT_dt[..., -1])
         # Override = None reproduces the baseline exactly.
-        none, _, _ = _run(sfc_shflx_override=None, sfc_lhflx_override=None)
+        none, _, _, _ = _run(sfc_shflx_override=None, sfc_lhflx_override=None)
         assert jnp.array_equal(base.dT_dt, none.dT_dt)
         assert jnp.array_equal(base.dq_v_dt, none.dq_v_dt)
 

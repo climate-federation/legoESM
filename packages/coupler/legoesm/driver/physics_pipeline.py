@@ -165,6 +165,13 @@ class PhysicsPipeline:
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
+        # Optional PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI) for the
+        # multilayer tile.  None (default) ⇒ no carbon coupling (Jarvis stomata /
+        # byte-identical).  When set (+ land_ml_cfg.stomata.enabled +
+        # carbon="differland") the Farquhar photosynthesis-stomata path activates,
+        # making Vc_max25 / g1 / LCMA affect the surface flux — i.e. TRAINABLE in the
+        # coupled calibration — without paying a multi-decade carbon-pool spin-up.
+        self.land_ml_carbon = None     # CarbonState (prescribed) or None
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -194,6 +201,12 @@ class PhysicsPipeline:
         self.land_bucket_w_max = 150.0     # bucket capacity [kg/m^2]
         self.land_beta_min = 0.1           # min moisture availability (dry soil)
         self.land_bucket_w_init_frac = 0.5  # initial fill fraction of W_max
+        # Bucket runoff partition (Green-Ampt infiltration excess + saturation
+        # excess), shared with legoesm.land.slab_land via partition_bucket_runoff.
+        # Set post-construction by the driver from ExperimentConfig.
+        self.land_K_infiltration = 1.0e-5    # saturated infiltration capacity [m/s]
+        self.land_infil_suction_boost = 2.0  # Green-Ampt suction enhancement [-]
+        self.land_infiltration_excess = True  # enable Hortonian infiltration excess
         # ``land_stomatal_beta``: route the soil-water availability through the
         # SHARED land stomatal model (Jarvis 1976) instead of the bare bucket
         # ramp — the soil beta becomes ``min(beta_soil, beta_canopy)`` where
@@ -205,6 +218,15 @@ class PhysicsPipeline:
         # bucket supplies ``beta_soil``).
         self.land_stomatal_beta = False
         self.stomata_config = None
+        # Prognostic snow + snow-albedo feedback on the slab-land tile.  ``snow``
+        # (SWE [kg/m^2]) + ``snow_age`` [s] are prognostic carries threaded like
+        # ``w_land``; when ``snow_albedo_feedback`` is on the land albedo is
+        # brightened by the snow cover (``legoesm.surface_albedo.land_albedo``).
+        # Set by the driver from ExperimentConfig.  Off → static vegetation
+        # albedo (byte-identical).
+        self.snow_albedo_feedback = False
+        from legoesm.surface_albedo import LandAlbedoConfig
+        self.land_albedo_config = LandAlbedoConfig()
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         # ``dynamic_albedo``: zenith-angle-dependent ocean albedo
@@ -214,6 +236,11 @@ class PhysicsPipeline:
         # the daytime-effective daily-mean cosine — matching the zenith
         # convention the radiation solver itself uses.
         self.dynamic_albedo = dynamic_albedo
+        # Realistic Earth orbit (Berger 1978) for AMIP-II/CMIP insolation;
+        # None ⇒ circular orbit.  Set by ``build_physics_pipeline`` from
+        # ``ExperimentConfig.orbital_insolation``; used by the radiation
+        # builders (closed over ``config``) and the diagnostics below.
+        self.orbit = None
         self.diurnal_cycle = diurnal_cycle
         self.turbulence_fn = turbulence_fn
         self.turbulence_config = turbulence_config
@@ -318,31 +345,65 @@ class PhysicsPipeline:
 
     def _bucket_update(self, w_land, precip_total, beta_land,
                        T_land, T_low, q_air, u_low, v_low, p_s, dt):
-        """Advance the Manabe (1969) soil-water bucket one physics step.
+        """Advance the Manabe (1969) soil-water bucket one physics step, adding the
+        Green-Ampt-style infiltration-excess + saturation-excess runoff partition.
 
-            dW/dt = P - E,   W clipped to [0, W_max]   (overflow -> runoff).
+            infiltration = min(P, K_s*rho*(1 + B*(1 - W/W_max)))   (Hortonian cap)
+            dW/dt = infiltration - E,   W in [0, W_max]
+            runoff = (P - infiltration)  +  max(W - W_max, 0)/dt   (Hortonian + Dunne)
 
-        ``P`` (``precip_total``) is total surface precip over land
-        [kg/m^2/s]; ``E`` is the ``beta``-limited land evaporation
-        [kg/m^2/s] = the SAME ``beta``-scaled bulk latent flux (/L_v) that
-        cools ``T_land`` in :meth:`_step_slab_land`.  Capacity ``W_max`` and
-        the clip-to-``[0, W_max]`` (overflow = surface runoff, leaves the
-        column) mirror ``legoesm.land.slab_land``.  Returns ``w_land``
-        unchanged when the bucket is inactive.
+        ``P`` (``precip_total``) is total surface precip over land [kg/m^2/s]; ``E``
+        is the ``beta``-limited land evaporation — the SAME ``beta``-scaled bulk
+        latent flux /L_v that cools ``T_land`` in :meth:`_step_slab_land` and
+        moistens the BL upstream.  The bucket consumes that SAME ``E``
+        (``limit_evaporation=False``) so it stays consistent with the already-
+        applied energy/moisture flux rather than re-limiting in isolation (which
+        would desync the bucket water from the BL — only the standalone
+        ``slab_land.step_land`` tile, which recomputes its own latent flux from the
+        water-limited evaporation, may water-limit).  This adds the runoff
+        diagnostic (previously the overflow was silently clipped away and lost); the
+        bucket can still clip at 0 under the beta-floor over-evaporation exactly as
+        the prior code did.  Partition shared with ``legoesm.land.slab_land`` via
+        ``partition_bucket_runoff`` (no re-derived bucket numerics).  Returns
+        ``(w_land, None)`` unchanged when the bucket is inactive.
         """
         if not self.land_soil_bucket or w_land is None:
-            return w_land
+            return w_land, None
         beta = 1.0 if beta_land is None else beta_land
         rho_low, wind_speed = self._land_surface_bulk(T_low, u_low, v_low, p_s)
         q_sat_land = saturation_specific_humidity(T_land, p_s)
         # beta-limited land evaporation mass flux [kg/m^2/s] (negative = dew
-        # onto soil, a source); consistent with the SEB latent flux.
+        # onto soil, a source); the SAME flux applied to the SEB / BL upstream.
         evap = beta * rho_low * self.C_E * wind_speed * (q_sat_land - q_air)
-        w_unclamped = w_land + dt * (precip_total - evap)
-        return jnp.clip(w_unclamped, 0.0, self.land_bucket_w_max)
+        from legoesm.land.bucket_hydrology import partition_bucket_runoff
+        w_new, _evap_act, runoff, _ri, _rs = partition_bucket_runoff(
+            w_land, precip_total, evap, dt, self.land_bucket_w_max,
+            self.land_K_infiltration, self.land_infil_suction_boost,
+            infiltration_excess=self.land_infiltration_excess,
+            limit_evaporation=False,
+        )
+        return w_new, runoff
+
+    def _land_albedo_eff(self, lat, snow):
+        """Snow-brightened land albedo via ``legoesm.surface_albedo.land_albedo``
+        when snow-albedo feedback is active; else the static vegetation albedo.
+
+        ``snow_age`` is fixed at 0 (fresh-snow albedo) — SWE-only snow.  The
+        gate is a compile-time Python ``if`` (off ⇒ returns ``self.albedo_land``
+        unchanged, byte-identical); the snow-cover blend inside ``land_albedo``
+        is ``jnp.where`` (traced, per cell).
+        """
+        if not self.snow_albedo_feedback or snow is None or lat is None:
+            return self.albedo_land
+        from legoesm.surface_albedo import land_albedo
+        base = (jnp.broadcast_to(self.albedo_land, snow.shape)
+                if self.albedo_land is not None else None)
+        return land_albedo(lat, snow, jnp.zeros_like(snow),
+                           self.land_albedo_config, base_albedo=base)
 
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
-                        T, p_s, q_v, u, v, dt, beta_land=None):
+                        T, p_s, q_v, u, v, dt, beta_land=None,
+                        albedo_land=None):
         """Advance the slab-land skin temperature by one radiation step.
 
         Semi-implicit surface energy balance::
@@ -371,8 +432,11 @@ class PhysicsPipeline:
         eps = self.emissivity_land
         sb = constants.sigma_sb
 
+        # Snow-brightened albedo when supplied by the caller (snow-albedo
+        # feedback); else the static vegetation albedo (byte-identical).
+        _alb = self.albedo_land if albedo_land is None else albedo_land
         q_sat_land = saturation_specific_humidity(T_land, p_s)
-        sw_net = sw_down_sfc * (1.0 - self.albedo_land)
+        sw_net = sw_down_sfc * (1.0 - _alb)
         lw_net = eps * lw_down_sfc - eps * sb * T_land ** 4
         shflx = sh_coef * (T_land - T_air)
         lhflx = beta * lh_coef * (q_sat_land - q_air)
@@ -415,10 +479,13 @@ class PhysicsPipeline:
             cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
+        # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
+        # carbon pools are discarded so the prescribed leaf carbon is reused every
+        # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=self.land_ml_params)
+            land_params=self.land_ml_params, carbon_state=self.land_ml_carbon)
         return land_new, resp.T_sfc, resp.albedo
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
@@ -506,7 +573,7 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
-                            w_land=None):
+                            w_land=None, snow=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -555,7 +622,12 @@ class PhysicsPipeline:
         # subtraction, NOT dead-code-eliminated), so guard it; beta stays None
         # (=1, wet surface) with no land albedo.
         if self.albedo_land is not None:
-            _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - self.albedo_land, 1e-3)
+            # Snow brightens the land albedo when the feedback is active (else
+            # the static vegetation albedo, byte-identical).
+            _alb_par = (self._land_albedo_eff(lat, snow)
+                        if (self.snow_albedo_feedback and snow is not None)
+                        else self.albedo_land)
+            _sw_down_sfc = sw_net_sfc / jnp.maximum(1.0 - _alb_par, 1e-3)
             beta_land = self._land_beta(
                 w_land, T_land=T_land, sw_down_sfc=_sw_down_sfc,
                 q_air=q_v[..., -1], p_s=p_s,
@@ -1241,12 +1313,28 @@ class PhysicsPipeline:
 
         # Advance the prognostic soil-water bucket (no-op / w_land unchanged
         # when the bucket is inactive).  Total surface precip is the source;
-        # the beta-limited land evaporation is the sink.
-        w_land_new = self._bucket_update(
+        # the beta-limited land evaporation is the sink.  ``land_runoff`` is the
+        # diagnosed Hortonian + saturation-excess runoff leaving the column.
+        w_land_new, land_runoff = self._bucket_update(
             w_land, precip + precip_micro, beta_land,
             T_land, T[..., -1], q_v[..., -1],
             u[..., -1], v[..., -1], p_s, dt,
         )
+
+        # Advance the prognostic snow water equivalent (snow-albedo feedback):
+        # snowfall (precip when the lowest-level air is below freezing) minus
+        # degree-day melt.  No-op / snow unchanged when the feedback is off.
+        if self.snow_albedo_feedback and snow is not None:
+            from legoesm.land.snow_budget import update_snow
+            precip_snow_diag = jnp.where(
+                T[..., -1] < constants.T_freeze, precip + precip_micro, 0.0,
+            )
+            snow_new, _, _ = update_snow(
+                snow, jnp.zeros_like(snow), T_land, precip_snow_diag, dt,
+                Q_net=None,
+            )
+        else:
+            snow_new = snow
 
         return PhysicsOutput(
             dT_dt=dT_dt,
@@ -1281,6 +1369,8 @@ class PhysicsPipeline:
             qke=_pin_carry_dtype(qke_out, qke),
             gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
             w_land=_pin_carry_dtype(w_land_new, w_land),
+            snow=_pin_carry_dtype(snow_new, snow),
+            land_runoff=land_runoff,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -1307,12 +1397,16 @@ class PhysicsPipeline:
         from legoesm.atmosphere.physics.radiation.solar import (
             cos_zenith_angle,
             daily_mean_insolation,
+            earth_sun_distance_factor,
         )
+        orbit = getattr(self, "orbit", None)
+        eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                if orbit is not None else 1.0)
         if self.diurnal_cycle:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour)
-            return s_0 * jnp.maximum(cos_sza, 0.0)
-        return daily_mean_insolation(lat, day_of_year, s_0)
+            cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, orbit=orbit)
+            return s_0 * eccf * jnp.maximum(cos_sza, 0.0)
+        return daily_mean_insolation(lat, day_of_year, s_0, orbit=orbit)
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
@@ -1328,7 +1422,8 @@ class PhysicsPipeline:
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
                                sfc_T_override=None,
-                               conv_precip=None, land_ml=None, w_land=None):
+                               conv_precip=None, land_ml=None, w_land=None,
+                               snow=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1365,15 +1460,23 @@ class PhysicsPipeline:
             )
             from legoesm.atmosphere.physics.radiation.solar import (
                 cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+                earth_sun_distance_factor,
             )
+            _orbit = getattr(self, "orbit", None)
             if self.diurnal_cycle:
                 _hour = seconds_of_day / 3600.0
                 _mu = jnp.maximum(
-                    cos_zenith_angle(lat, lon, day_of_year, _hour), 0.0,
+                    cos_zenith_angle(lat, lon, day_of_year, _hour,
+                                     orbit=_orbit), 0.0,
                 )
             else:
-                _q_day = daily_mean_insolation(lat, day_of_year, s_0)
-                _f_day = daylight_fraction(lat, day_of_year)
+                # mu is the optical-path cosine (geometry): use the orbital
+                # declination but NOT the (a/r)^2 flux factor (divide it out).
+                _eccf = (earth_sun_distance_factor(day_of_year, _orbit)
+                         if _orbit is not None else 1.0)
+                _q_day = daily_mean_insolation(lat, day_of_year, s_0,
+                                               orbit=_orbit) / _eccf
+                _f_day = daylight_fraction(lat, day_of_year, orbit=_orbit)
                 _mu = jnp.clip(
                     _q_day / (s_0 * jnp.maximum(_f_day, 1.0e-6)), 0.0, 1.0,
                 )
@@ -1397,8 +1500,14 @@ class PhysicsPipeline:
                 alb_land = ad.unflatten_2d(self.land_ml_params.albedo_veg)
                 emis_land = ad.unflatten_2d(self.land_ml_params.emissivity)
             else:
+                # Snow-brightened land albedo (snow-albedo feedback); the
+                # static vegetation albedo when off (byte-identical).
+                _alb_land_eff = (
+                    self._land_albedo_eff(lat, snow)
+                    if (self.snow_albedo_feedback and snow is not None)
+                    else self.albedo_land)
                 T_land_grid, alb_land, emis_land = (
-                    T_land, self.albedo_land, self.emissivity_land)
+                    T_land, _alb_land_eff, self.emissivity_land)
             T_sfc = self._blend_land(T_sfc, T_land_grid)
             albedo = self._blend_land(albedo, alb_land)
             emissivity = self._blend_land(emissivity, emis_land)
@@ -1619,12 +1728,18 @@ class PhysicsPipeline:
         # physics_step_no_rad (where total precip is available).
         elif _land_active and self.slab_land_active:
             lw_down_sfc = ad.unflatten_2d(rad_out.lw_flux_down[:, -1])
+            # Snow-brightened land albedo for the SEB net SW (feedback on);
+            # static vegetation albedo when off (byte-identical).
+            _alb_seb = (self._land_albedo_eff(lat, snow)
+                        if (self.snow_albedo_feedback and snow is not None)
+                        else None)
             T_land_new = self._step_slab_land(
                 T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
                 beta_land=self._land_beta(
                     w_land, T_land=T_land, sw_down_sfc=sw_down_sfc,
                     q_air=q_v[..., -1], p_s=p_s,
                 ),
+                albedo_land=_alb_seb,
             )
             land_ml_new = land_ml
         else:
@@ -1634,18 +1749,33 @@ class PhysicsPipeline:
         return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
                 sw_down_toa, T_land_new, land_ml_new)
 
-    def build_step_unified(self, static_need_rad: bool | None = None):
+    def build_step_unified(self, static_need_rad: bool | None = None,
+                           jit: bool = True):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
+
+        ``jit`` (default True) wraps the step in ``jax.jit`` — the production path.
+        Pass ``jit=False`` for differentiable parameter calibration that feeds a
+        TRACED value into the pipeline via an attribute the step reads (e.g.
+        ``land_ml_params`` in the coupled land calibrator): a jitted step would
+        capture that tracer as a closure constant and leak it across
+        ``value_and_grad`` calls (``UnexpectedTracerError``).  The un-jitted step
+        is inlined into the caller's ``lax.scan`` trace, so there is no separate
+        compiled artefact to capture the tracer.
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
-        solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
-        (PhysicsOutput, held tuple, T_land_new)``.
+        solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land, land_ml) ->
+        (PhysicsOutput, held tuple, T_land_new, land_ml_new)``.
 
         ``T_land`` is the slab-land skin temperature carried through the
         radiation sub-cycle; it is advanced on radiation steps and held
         constant otherwise.  Pass ``None`` (the default) for ocean-only
-        runs — the land tile is then inert.
+        runs — the land tile is then inert.  ``land_ml`` is the prognostic
+        multilayer (Richards) land state pytree carried alongside the slab
+        ``T_land`` (``None`` for the slab/ocean-only path) and returned as
+        the 4th value ``land_ml_new``.  Every consumer MUST unpack all four
+        returns — see ``compiled_segments`` (length-aware) and the per-step
+        loop in ``model_driver``.
 
         Parameters
         ----------
@@ -1666,7 +1796,6 @@ class PhysicsPipeline:
         """
         pipeline = self
 
-        @jax.jit
         def step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                          sst, sic, lat, lon,
                          day_of_year, seconds_of_day, dt,
@@ -1689,7 +1818,8 @@ class PhysicsPipeline:
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
-                         conv_precip=None, land_ml=None, w_land=None):
+                         conv_precip=None, land_ml=None, w_land=None,
+                         snow=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1703,7 +1833,8 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                 snow) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -1721,6 +1852,7 @@ class PhysicsPipeline:
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
+                        snow=snow,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1734,7 +1866,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land,
+                    w_land=w_land, snow=snow,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -1750,11 +1882,13 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum, physics_out.w_land)
+                            physics_out.gwd_spectrum, physics_out.w_land,
+                            physics_out.snow)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
+                    snow=_carries[4],
                 )
                 return physics_out, new_held, _cast(T_land_new), land_ml_new
 
@@ -1770,7 +1904,8 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land) = args
+                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                 snow) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1784,7 +1919,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land,
+                    w_land=w_land, snow=snow,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -1797,11 +1932,13 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ))
                 _carries = (physics_out.tke, physics_out.qke,
-                            physics_out.gwd_spectrum, physics_out.w_land)
+                            physics_out.gwd_spectrum, physics_out.w_land,
+                            physics_out.snow)
                 physics_out = jax.tree.map(_cast, physics_out)
                 physics_out = physics_out._replace(
                     tke=_carries[0], qke=_carries[1],
                     gwd_spectrum=_carries[2], w_land=_carries[3],
+                    snow=_carries[4],
                 )
                 # multilayer land state (if any) rides through the no-rad sub-steps
                 # unchanged — it advances only on radiation steps (like the slab).
@@ -1818,7 +1955,8 @@ class PhysicsPipeline:
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override,
                     sfc_shflx_override, sfc_lhflx_override,
-                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land)
+                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
+                    snow)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -1832,7 +1970,7 @@ class PhysicsPipeline:
                 return _no_rad_branch(args)
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
-        return step_unified
+        return jax.jit(step_unified) if jit else step_unified
 
 
 # ---------------------------------------------------------------------------
@@ -1881,6 +2019,7 @@ def _build_gray_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
+        earth_orbit, earth_sun_distance_factor,
     )
     from legoesm.driver.kernel_registry import (
         RADIATION_REGISTRY, resolve_kernel,
@@ -1889,6 +2028,9 @@ def _build_gray_radiation_fn(config):
     gray_radiation = resolve_kernel(RADIATION_REGISTRY, "gray")
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
+    # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
+    # so idealized runs are bit-for-bit unchanged.
+    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
 
     gray_config = GrayRadiationConfig(
         tau_equator=config.tau_equator,
@@ -1921,10 +2063,16 @@ def _build_gray_radiation_fn(config):
 
         if diurnal:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
-            insol = s_0 * jnp.maximum(cos_sza, 0.0)
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour,
+                                       orbit=orbit)
+            # Eccentricity scales the incident flux by (a/r)^2 (1.0 when
+            # circular); the cosine carries geometry only.
+            eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                    if orbit is not None else 1.0)
+            insol = s_0 * eccf * jnp.maximum(cos_sza, 0.0)
         else:
-            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0,
+                                          orbit=orbit)
         # Thread the pipeline's blended (ice/ocean/land, plus coupler
         # overrides) surface albedo into the gray SW reflection so the
         # solver sees the same surface as the energy budget — previously
@@ -1946,11 +2094,15 @@ def _build_rrtmgp_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+        earth_orbit, earth_sun_distance_factor,
     )
     from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
+    # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
+    # so idealized runs are bit-for-bit unchanged.
+    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
 
     # Issue #273 GPU tuning: defer the scan-vs-unroll choice to
     # ``rte_utils.recurrent_op_with_halos`` when the experiment
@@ -1988,24 +2140,50 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
+        # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
+        # declination enters the geometry (cos_zenith).  1.0 ⇒ circular orbit.
+        eccf = (earth_sun_distance_factor(day_of_year, orbit)
+                if orbit is not None else 1.0)
+        # Per-step incident irradiance relative to the solver's baked-in S_0.
+        # The RRTMGP solver is built ONCE with the static config S_0, so the
+        # actual irradiance reaching the SW fluxes must be applied as an output
+        # scale: this captures BOTH time-varying TSI (solar_source=file passes
+        # s_0 = TSI(t)) AND the (a/r)^2 distance factor.  Without it, the rsdt
+        # diagnostic (built from s_0 below) would move while the solved SW
+        # fluxes/heating silently stayed at the static S_0 — a hidden TOA
+        # energy-budget inconsistency.  s_0 == S_0 and a circular orbit ⇒ 1.0
+        # (bit-identical output to the legacy path).
+        _irr_scale = (s_0 / S_0) * eccf
         if diurnal:
             hour = seconds_of_day / 3600.0
-            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour,
+                                       orbit=orbit)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
-            # Prescribed TOA incident SW = S_0·max(cosθ,0) for the rsdt
+            # Prescribed TOA incident SW = s_0·(a/r)^2·max(cosθ,0) for the rsdt
             # diagnostic (#620); matches _compute_insolation's diurnal return.
-            insol = s_0 * cos_zenith
+            insol = s_0 * eccf * cos_zenith
+            # cos_zenith stays geometric; the irradiance (TSI x distance vs the
+            # solver's S_0) scales the SW flux.
+            _sw_scale = jnp.full((cos_zenith.shape[0],), _irr_scale,
+                                 dtype=cos_zenith.dtype)
         else:
             # Daytime-effective cos(SZA): use daylight fraction so the solver
             # sees the correct optical path during sunlit hours.  SW fluxes
             # are then rescaled by f_day to recover daily-mean energy.
-            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
-            f_day = daylight_fraction(lat_col, day_of_year)
+            # daily_mean_insolation already includes the (a/r)^2 factor when
+            # ``orbit`` is set; divide it out for the geometric cosine.
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0,
+                                          orbit=orbit)
+            f_day = daylight_fraction(lat_col, day_of_year, orbit=orbit)
             f_day_safe = jnp.maximum(f_day, 1.0e-6)
+            # insol ∝ s_0·eccf; dividing by (s_0·f_day) leaves a geometric
+            # cos_zenith (both s_0 and eccf cancel) — the optical path stays
+            # <= 1 and irradiance-independent.
+            insol_geom = insol / eccf
             cos_zenith = jnp.clip(
-                insol / (s_0 * f_day_safe), 0.0, 1.0,
+                insol_geom / (s_0 * f_day_safe), 0.0, 1.0,
             )
-            _sw_scale = f_day
+            _sw_scale = f_day * _irr_scale
 
         # Water-vapor unit convention: the upstream pipeline passes
         # ``q_v`` as **mixing ratio** r = m_v / m_d.  RRTMGP's internal
@@ -2559,6 +2737,9 @@ def build_physics_pipeline(grid, sigma, config):
         physics_parameterization=physics_parameterization,
         column_mesh=column_mesh,
     )
+    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+    pipeline.orbit = (earth_orbit()
+                      if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)

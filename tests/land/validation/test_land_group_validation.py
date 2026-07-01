@@ -229,8 +229,8 @@ def _fd_jacobian(fn, x, eps):
 def test_soil_thermal_jacobian_matches_finite_difference() -> None:
     """jacrev of the single-column soil heat solve vs centered FD (rtol 1e-4).
 
-    Exercises reverse-mode AD through the lax.scan in thomas_solve_batch and
-    the moisture-dependent k_eff / C_eff property functions.
+    Exercises reverse-mode AD through the shared tridiagonal solve (thomas_solve)
+    and the moisture-dependent k_eff / C_eff property functions.
     """
     grid = make_soil_grid(SoilGridConfig(n_layers=5))
     hc = SoilHydraulicsConfig()

@@ -491,7 +491,9 @@ class TestHaloDispatch:
 
     def test_mpi_requires_topology(self):
         """MPI backend without topology raises ValueError."""
-        with pytest.raises(ValueError, match="CommTopology is required"):
+        # The message was reworded to cover both cubed-sphere
+        # (CommTopology) and lat-lon (LatLonBandLayout) topologies.
+        with pytest.raises(ValueError, match="requires a topology"):
             set_halo_backend("mpi")
 
     def test_pad_halo_local_matches(self):

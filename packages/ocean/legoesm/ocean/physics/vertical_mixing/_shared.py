@@ -16,7 +16,15 @@ from legoesm import constants
 from legoesm.ocean.eos import (
     thermal_expansion_coeff,
     haline_contraction_coeff,
+    eos_density_derivatives,
 )
+
+# EOS salinity floor [PSU] for the generic-EOS surface α/β autodiff path.
+# sqrt(S)/S^1.5 EOS terms (veros_gsw, unesco80) have an INFINITE ∂ρ/∂S at S=0
+# (land/edge fill cells), which a later 0·mask multiply would poison; floor S
+# before differentiating.  Matches tke.compute_surface_buoyancy_P_diss_v.  Ocean
+# S ≫ floor, so this is a no-op on wet cells.
+_EOS_SALINITY_FLOOR = 1.0e-3
 
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -166,6 +174,7 @@ def surface_buoyancy_flux(
     rho_0: float,
     c_sw: float,
     real_salt_in_qs: bool,
+    eos_fn=None,
 ):
     """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the kinematic
     surface heat / salt fluxes for the KPP / CATKE boundary-layer closures.
@@ -217,16 +226,42 @@ def surface_buoyancy_flux(
     """
     p_sfc = jnp.zeros_like(T_sfc)
 
+    # Surface α/β from the MODEL-selected EOS (``eos_fn``).  ``None`` ⇒ the
+    # Wright-specific helpers (bit-identical legacy: those helpers ARE autodiff
+    # of ``wright_eos``, verified == ``eos_density_derivatives(wright_eos)`` to
+    # the bit).  A non-Wright EOS — e.g. the thermobaric ``nemo_seos`` — has
+    # different surface α/β, so the KPP/CATKE surface buoyancy forcing must use
+    # it (else the boundary layer mixes against Wright while the interior
+    # ρ/N²/Ri use S-EOS — a half-applied closure).
+    if eos_fn is None:
+        def _alpha_sfc():
+            return thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
+
+        def _beta_sfc():
+            return haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
+    else:
+        # Floor salinity before the EOS-generic autodiff (sqrt(S) EOSes diverge
+        # at S=0 land cells; later masking is a multiply ⇒ 0·NaN unsafe).
+        S_eval = jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR)
+
+        def _alpha_sfc():
+            drho_dT, _ = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)
+            return -drho_dT / eos_fn(T_sfc, S_eval, p_sfc)
+
+        def _beta_sfc():
+            _, drho_dS = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)
+            return drho_dS / eos_fn(T_sfc, S_eval, p_sfc)
+
     Q_sfc_T = None
     B_f = None
     if q_net is not None:
         Q_sfc_T = q_net / (rho_0 * c_sw)
-        alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
+        alpha = _alpha_sfc()
         B_f = -g * alpha * Q_sfc_T
 
     Q_sfc_S = None
     if fw is not None or salt is not None:
-        beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
+        beta = _beta_sfc()
         Q_sfc_S = jnp.zeros_like(S_sfc)
         if real_salt_in_qs:
             # Lat-lon: freshwater dilution PLUS real salt both accumulate into

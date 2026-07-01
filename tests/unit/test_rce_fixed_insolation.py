@@ -37,7 +37,7 @@ def test_fixed_zenith_uniform_insolation_and_cos_sza():
         rce_fixed_cos_zenith=0.620,
     )
     lat = jnp.array([0.0, 0.6, -0.4, 1.2])
-    insol, cos_sza, f_day = _compute_insolation(lat, cfg)
+    insol, cos_sza, f_day, _ = _compute_insolation(lat, cfg)
     assert np.allclose(np.asarray(insol), 685.0 * 0.620)   # 424.7 uniform
     assert cos_sza is not None
     assert np.allclose(np.asarray(cos_sza), 0.620)         # fixed optical path
@@ -48,7 +48,7 @@ def test_off_keeps_latitude_daily_mean_path():
     """Default (None) keeps the legacy latitude-based path: cos_sza derived
     downstream (None here) and f_day set, full S_0."""
     cfg = RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig())
-    _, cos_sza, f_day = _compute_insolation(jnp.array([0.0]), cfg)
+    _, cos_sza, f_day, _ = _compute_insolation(jnp.array([0.0]), cfg)
     assert cos_sza is None
     assert f_day is not None
 
@@ -68,12 +68,12 @@ def test_driver_presets_sam_and_rcemip():
     sam = _build_radiation_config("rrtmgp", insolation="sam")
     assert sam.rrtmgp.S_0 == 685.0
     assert sam.rce_fixed_cos_zenith == pytest.approx(0.620)
-    insol, _, _ = _compute_insolation(jnp.array([0.0]), sam)
+    insol, _, _, _ = _compute_insolation(jnp.array([0.0]), sam)
     assert float(insol[0]) == pytest.approx(425.0, abs=1.0)
 
     rce = _build_radiation_config("rrtmgp", insolation="rcemip")
     assert rce.rrtmgp.S_0 == pytest.approx(551.58)
-    i2, _, _ = _compute_insolation(jnp.array([0.0]), rce)
+    i2, _, _, _ = _compute_insolation(jnp.array([0.0]), rce)
     assert float(i2[0]) == pytest.approx(409.6, abs=1.0)
 
     off = _build_radiation_config("rrtmgp", insolation="off")

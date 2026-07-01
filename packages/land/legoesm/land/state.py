@@ -34,3 +34,7 @@ class MultiLayerLandState(NamedTuple):
     runoff_subsurface: jax.Array  # Subsurface runoff [kg/m2/s], (ncol,)
     snow_depth: jax.Array      # Snow water equivalent [kg/m2], (ncol,)
     snow_age: jax.Array        # Time since last snowfall [s], (ncol,)
+    # Surface ponding depth [m], (ncol,) — a coupled surface cell (ParFlow/CliMA
+    # overland store): excess precip ponds, infiltrates on later steps, and
+    # overflows to runoff above ``pond_max``.  ``None`` (legacy) is zero ponding.
+    surface_water: jax.Array = None

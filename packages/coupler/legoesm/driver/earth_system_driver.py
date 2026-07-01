@@ -184,10 +184,22 @@ class EarthSystemDriver:
         doy, _ = day_to_calendar(day)
         lat = self._atm._grid_lat
         if lat is not None:
-            from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+            from legoesm.atmosphere.physics.radiation.solar import (
+                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+            )
             S_0 = cfg.S_0
-            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
-            cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
+            # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
+            _orbit = (earth_orbit()
+                      if getattr(cfg, "orbital_insolation", False) else None)
+            _eccf = (earth_sun_distance_factor(float(doy), _orbit)
+                     if _orbit is not None else 1.0)
+            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
+                                            orbit=_orbit)
+            # cos_zen is a geometric optical-path cosine: use the orbital
+            # declination but divide out the (a/r)^2 flux factor so it stays
+            # <= 1 (eccf scales flux, not the sun angle).  _eccf == 1.0 on the
+            # circular orbit ⇒ bit-identical to the legacy path.
+            cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 

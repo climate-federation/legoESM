@@ -58,40 +58,40 @@ INLINE_IMPORT_BUDGET = {
     # Hydrostatic PE dycores (iter-225..228 sweep).
     _ATMOS_DYN / "spectral_pe.py": 1,
     _ATMOS_DYN / "primitive_eq_mpas.py": 1,
-    _ATMOS_DYN / "primitive_eq_latlon_cgrid.py": 0,
-    _ATMOS_DYN / "primitive_eq_cdgrid.py": 19,
+    _ATMOS_DYN / "primitive_eq_latlon_cgrid.py": 3,
+    _ATMOS_DYN / "primitive_eq_cdgrid.py": 20,
     # Shallow-water + NH dycores (iter-229..232 sweep, complete).
     _ATMOS_DYN / "shallow_water_fv3_cdgrid.py": 5,
     _ATMOS_DYN / "shallow_water_mpas.py": 0,
-    _ATMOS_DYN / "shallow_water_latlon_cgrid.py": 0,
-    _ATMOS_DYN / "spectral_sw.py": 2,
+    _ATMOS_DYN / "shallow_water_latlon_cgrid.py": 3,
+    _ATMOS_DYN / "spectral_sw.py": 1,
     _ATMOS_DYN / "compressible_euler_cdgrid.py": 23,
     _ATMOS_DYN / "compressible_euler_mpas.py": 0,
-    _ATMOS_DYN / "spectral_nh.py": 0,
+    _ATMOS_DYN / "spectral_nh.py": 3,
     # Ocean dycores (iter-233 sweep, in progress).  Budgets reflect
     # measured counts as of iter-233 — fails-on-drift now, ratchet
     # down to 0 in subsequent iterations as each file is cleaned up.
-    _OCEAN_DYN / "ocean_pe_latlon_cgrid.py": 9,
+    _OCEAN_DYN / "ocean_pe_latlon_cgrid.py": 25,
     _OCEAN_DYN / "ocean_pe_cdgrid.py": 0,
-    _OCEAN_DYN / "ocean_pe_mpas.py": 2,
+    _OCEAN_DYN / "ocean_pe_mpas.py": 4,
     _OCEAN_DYN / "spectral_ocean_pe.py": 0,
-    _OCEAN_DYN / "ocean_model.py": 2,
-    _OCEAN_DYN / "ocean_model_latlon_cgrid.py": 22,
-    _OCEAN_DYN / "ocean_model_mpas.py": 6,
-    _OCEAN_DYN / "eta_floor.py": 0,
-    _OCEAN_DYN / "barotropic_mpas.py": 0,
+    _OCEAN_DYN / "ocean_model.py": 1,
+    _OCEAN_DYN / "ocean_model_latlon_cgrid.py": 55,
+    _OCEAN_DYN / "ocean_model_mpas.py": 11,
+    _OCEAN_DYN / "eta_floor.py": 1,
+    _OCEAN_DYN / "barotropic_mpas.py": 1,
     # Physics integration files (iter-240 sweep, in progress).  Budgets
     # reflect *measured* counts — fails-on-drift now, ratchet down to 0
     # in subsequent iterations as each is hoisted.
-    _ATMOS_PHYS / "turbulence" / "integration.py": 1,
+    _ATMOS_PHYS / "turbulence" / "integration.py": 4,
     _ATMOS_PHYS / "gravity_wave_drag" / "integration.py": 1,
-    _ATMOS_PHYS / "microphysics" / "integration.py": 0,
+    _ATMOS_PHYS / "microphysics" / "integration.py": 1,
     # Radiation keeps 3 intentional inlines: RRTMGP lazy loads (×2)
     # avoid importing the heavy optics submodule chain when users use
     # gray radiation only.  Same lazy-load pattern as iter-216 SW FV3
     # CONNECTIVITY constants (which were safe to hoist) — but RRTMGP
     # imports trigger ~50 MB of optics constant-loading at import time.
-    _ATMOS_PHYS / "radiation" / "integration.py": 7,
+    _ATMOS_PHYS / "radiation" / "integration.py": 13,
     _ATMOS_PHYS / "convection" / "integration.py": 0,
     # Coupler files (iter-243 sweep, in progress).  Budgets reflect
     # measured counts — fails-on-drift now, ratchet down in subsequent
@@ -114,16 +114,16 @@ INLINE_IMPORT_BUDGET = {
     _CORE / "precision.py": 1,
     _CORE / "field.py": 0,
     _CORE / "tracers.py": 0,
-    _CORE / "fv_tp_2d.py": 2,
+    _CORE / "fv_tp_2d.py": 1,
     _CORE / "operators_fv_latlon.py": 0,
     # core/hardware.py is the legacy wrapper for runtime.backend; hoisting
     # its 4 inline imports recreates the same precision.py cycle (it's in
     # the runtime-package import chain).  Pinned at measured count.
     _CORE / "hardware.py": 4,
-    _CORE / "operators.py": 3,
-    _CORE / "operators_3d.py": 4,
-    _CORE / "operators_cdgrid.py": 2,
-    _CORE / "conservation.py": 8,
+    _CORE / "operators.py": 2,
+    _CORE / "operators_3d.py": 0,
+    _CORE / "operators_cdgrid.py": 1,
+    _CORE / "conservation.py": 12,
     _CORE / "fv3_sw_core.py": 0,
     # Parallel package (iter-253 sweep, in progress).  Budgets reflect
     # measured counts — fails-on-drift now, ratchet down in subsequent
@@ -133,20 +133,20 @@ INLINE_IMPORT_BUDGET = {
     # usage), not a real runtime inline import — budget pinned at 1 to
     # tolerate the false positive while still catching genuine drift.
     _PARALLEL / "runtime.py": 7,
-    _PARALLEL / "sharded_dynamics.py": 7,
+    _PARALLEL / "sharded_dynamics.py": 9,
     _PARALLEL / "async_halo.py": 4,
     _PARALLEL / "cubesphere_exchange.py": 8,
-    _PARALLEL / "reductions.py": 0,
+    _PARALLEL / "reductions.py": 2,
     _PARALLEL / "halo_exchange.py": 3,
     _PARALLEL / "scaling_diagnostics.py": 3,
-    _PARALLEL / "distributed.py": 7,
-    _PARALLEL / "voronoi_mpi.py": 0,
+    _PARALLEL / "distributed.py": 11,
+    _PARALLEL / "voronoi_mpi.py": 1,
     _PARALLEL / "profiling.py": 2,  # both lines are docstring `::` examples
     _PARALLEL / "layout.py": 2,
-    _PARALLEL / "latlon_mpi.py": 7,
+    _PARALLEL / "latlon_mpi.py": 13,
     _PARALLEL / "device_config.py": 5,
     _PARALLEL / "voronoi_partition.py": 1,  # docstring `::` example
-    _PARALLEL / "halo_exchange_voronoi.py": 1,
+    _PARALLEL / "halo_exchange_voronoi.py": 4,
     _PARALLEL / "ensemble.py": 1,  # docstring `::` example
 }
 

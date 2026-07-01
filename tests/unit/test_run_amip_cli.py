@@ -37,6 +37,30 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_snow_albedo_feedback_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.snow_albedo_feedback is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--snow-albedo-feedback",
+    ]), parser))
+    assert cfg_on.snow_albedo_feedback is True
+
+
+def test_orbital_insolation_flag_flows_to_config():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.orbital_insolation is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--orbital-insolation",
+    ]), parser))
+    assert cfg_on.orbital_insolation is True
+
+
 def test_build_config_includes_joint_physics_parameterization_flags():
     parser = build_arg_parser()
     args = parser.parse_args([
@@ -298,6 +322,9 @@ def test_soil_bucket_flags_flow_to_config():
         "--land-bucket-w-max", "120.0",
         "--land-beta-min", "0.2",
         "--land-bucket-w-init-frac", "0.4",
+        "--land-k-infiltration", "3.3e-6",
+        "--land-infil-suction-boost", "1.5",
+        "--no-land-infiltration-excess",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -306,7 +333,27 @@ def test_soil_bucket_flags_flow_to_config():
     assert cfg.land_bucket_w_max == 120.0
     assert cfg.land_beta_min == 0.2
     assert cfg.land_bucket_w_init_frac == 0.4
+    assert cfg.land_K_infiltration == 3.3e-6
+    assert cfg.land_infil_suction_boost == 1.5
+    assert cfg.land_infiltration_excess is False
     assert cfg.validate_strict() is None
+
+
+def test_infiltration_params_reject_nan_and_negative():
+    """NaN/negative infiltration params fail strict validation (NaN-safe guards:
+    a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        parser)
+    base = build_config_from_args(args)
+    assert base.validate_strict() is None          # baseline is valid
+    for bad in (float("nan"), -1.0, 0.0):
+        with pytest.raises(ValueError, match="land_K_infiltration"):
+            base._replace(land_K_infiltration=bad).validate_strict()
+    for bad in (float("nan"), -0.5):
+        with pytest.raises(ValueError, match="land_infil_suction_boost"):
+            base._replace(land_infil_suction_boost=bad).validate_strict()
 
 
 def test_soil_bucket_defaults_off():
@@ -1014,3 +1061,111 @@ def test_config_yaml_explicit_cli_flag_overrides_file():
         parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"
+
+
+def test_aimip_louis_preserves_resolved_surface_scheme():
+    """The AIMIP Louis injection must KEEP the run-resolved surface bulk_scheme +
+    gustiness (coare3/300) rather than reverting to to_louis_config's default
+    constant surface — the clobber that silently made --surface-bulk-scheme a
+    no-op on every AIMIP run (anemic evaporation, hfls ~6 vs ~88)."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, SurfaceLayerConfig)
+    from scripts.run.run_amip import _louis_with_preserved_surface
+    # trained Louis carries a DEFAULT (constant) surface, exactly as
+    # to_louis_config() builds it from the trained Cd/Ch/z0:
+    trained = LouisConfig(surface=SurfaceLayerConfig(Cd_neutral=1.5e-3))
+    assert trained.surface.bulk_scheme == "constant"
+    # _resolve_turbulence had already applied coare3 + gustiness 300:
+    resolved = LouisConfig(surface=SurfaceLayerConfig(
+        bulk_scheme="coare3", gustiness_w_zi=300.0))
+    out = _louis_with_preserved_surface(trained, resolved)
+    assert out.surface.bulk_scheme == "coare3"        # preserved, not clobbered
+    assert out.surface.gustiness_w_zi == 300.0
+    assert out.surface.Cd_neutral == 1.5e-3           # trained Cd/Ch/z0 kept
+
+
+def test_aimip_louis_preserve_surface_noop_without_prev():
+    """No prior turbulence config (e.g. turbulence was none) -> trained Louis
+    returned unchanged."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, SurfaceLayerConfig)
+    from scripts.run.run_amip import _louis_with_preserved_surface
+    trained = LouisConfig(surface=SurfaceLayerConfig())
+    assert _louis_with_preserved_surface(trained, None) is trained
+
+
+def test_sundqvist_tuning_flags_round_trip_and_override():
+    """--sundqvist-{qc-crit,rh-crit,auto-rate} parse and override a
+    SundqvistConfig with final precedence; unset knobs stay at the base."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert (d.sundqvist_qc_crit, d.sundqvist_rh_crit, d.sundqvist_auto_rate) == (
+        None, None, None)
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--sundqvist-qc-crit", "1e-4",
+                              "--sundqvist-rh-crit", "0.6"])
+    base = SundqvistConfig()                       # qc_crit 5e-4, rh_crit 0.8
+    out = _apply_sundqvist_overrides(base, args)
+    assert out.qc_crit == 1e-4 and out.rh_crit == 0.6
+    assert out.auto_rate == base.auto_rate         # untouched knob unchanged
+
+
+def test_sundqvist_overrides_noop_without_flags():
+    """No override flags -> the SAME config object (identity)."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    base = SundqvistConfig()
+    assert _apply_sundqvist_overrides(base, args) is base
+
+
+def test_sundqvist_overrides_noop_for_non_sundqvist_micro():
+    """A sundqvist override is ignored when microphysics != sundqvist."""
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from scripts.run.run_amip import _apply_sundqvist_overrides
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--microphysics", "morrison",
+                              "--sundqvist-qc-crit", "1e-4"])
+    base = SundqvistConfig()
+    assert _apply_sundqvist_overrides(base, args) is base
+
+
+def test_sundqvist_flags_reject_out_of_bounds():
+    """Out-of-range tunables fail LOUDLY (argparse accepts any float)."""
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    # (positive values only — argparse parses a leading '-' as a flag)
+    for flag, bad in [("--sundqvist-qc-crit", "1.0"),      # >> 1.5e-3
+                      ("--sundqvist-rh-crit", "0.2"),       # < 0.5
+                      ("--sundqvist-auto-rate", "1e-5")]:   # < 1e-4 floor
+        args = parser.parse_args(["--dataset", "analytical", flag, bad])
+        with pytest.raises(SystemExit):
+            _validate_sundqvist_flags(args, parser)
+
+
+def test_sundqvist_flags_in_bounds_ok():
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical",
+                              "--sundqvist-qc-crit", "1e-4",
+                              "--sundqvist-rh-crit", "0.6",
+                              "--sundqvist-auto-rate", "5e-3"])
+    _validate_sundqvist_flags(args, parser)   # no raise
+
+
+def test_sundqvist_flags_rejected_on_mpas_spectral():
+    """The overrides are refused on backends that rebuild MicrophysicsConfig at
+    run() (MPAS/spectral) and would silently ignore them."""
+    from scripts.run.run_amip import _validate_sundqvist_flags
+    parser = build_arg_parser()
+    mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+                              "--sundqvist-qc-crit", "1e-4"])
+    with pytest.raises(SystemExit):
+        _validate_sundqvist_flags(mpas, parser)
+    # but no override flags -> no raise even on MPAS
+    bare = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"])
+    _validate_sundqvist_flags(bare, parser)

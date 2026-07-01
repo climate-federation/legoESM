@@ -215,11 +215,16 @@ def compute_vertical_K_profiles(
 # ---------------------------------------------------------------------------
 
 
-def _surface_buoyancy_flux(surface_forcing, state, constants_config):
+def _surface_buoyancy_flux(surface_forcing, state, constants_config,
+                           eos_fn=None):
     """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the
     kinematic surface T / S fluxes, from the surface heat (``q_net``) +
     freshwater / salt forcing and the EOS thermal-expansion / haline-contraction
     coefficients.
+
+    ``eos_fn`` (``None`` ⇒ Wright, bit-identical) sets the surface α/β so a
+    non-Wright EOS (e.g. ``nemo_seos``) drives the boundary-layer buoyancy
+    forcing consistently with the interior ρ/N² used by KPP/CATKE.
 
     Shared by the KPP boundary-layer diagnosis and the CATKE convective length
     so the surface buoyancy forcing lives in ONE place (same sign convention:
@@ -243,6 +248,7 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config):
         rho_0=constants_config.rho_0,
         c_sw=constants_config.c_sw,
         real_salt_in_qs=True,
+        eos_fn=eos_fn,
     )
 
 
@@ -469,7 +475,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         hab_iface = jnp.maximum(H_col[..., jnp.newaxis] - depth_iface, 0.0)
         # Surface buoyancy flux Jb (shared helper) + friction velocity u_star.
         Jb, _, _ = _surface_buoyancy_flux(
-            surface_forcing, state, constants_config)
+            surface_forcing, state, constants_config, eos_fn=eos_fn)
         if Jb is None:
             Jb = jnp.zeros(T_data.shape[:-1], dtype=T_data.dtype)
         tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
@@ -507,14 +513,14 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         # Surface buoyancy flux + kinematic T/S fluxes (shared with CATKE).
         B_f, Q_sfc_T, Q_sfc_S = _surface_buoyancy_flux(
-            surface_forcing, state, constants_config)
+            surface_forcing, state, constants_config, eos_fn=eos_fn)
 
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False,
+            apply_diffusion=False, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 

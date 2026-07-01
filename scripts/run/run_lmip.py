@@ -448,6 +448,9 @@ def _save_restart(
         "psi_soil": np.asarray(state.psi_soil),
         "snow_depth": np.asarray(state.snow_depth),
         "snow_age": np.asarray(state.snow_age),
+        "surface_water": np.asarray(
+            state.surface_water if state.surface_water is not None
+            else np.zeros_like(np.asarray(state.snow_depth))),
     }
     if carbon_state is not None:
         for field in carbon_state._fields:
@@ -469,6 +472,9 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         runoff_subsurface=jnp.zeros(1),
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
+        # Backward-compat: old checkpoints predate surface ponding -> start dry.
+        surface_water=jnp.asarray(data["surface_water"]) if "surface_water" in data
+        else jnp.zeros_like(jnp.asarray(data["snow_depth"])),
     )
     start_step = int(data["step"])
     start_day = float(data["day"])

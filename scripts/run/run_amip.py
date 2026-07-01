@@ -341,6 +341,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument(
+        "--orbital-insolation", action="store_true", default=False,
+        dest="orbital_insolation",
+        help="Use realistic (Berger 1978) orbital insolation for AMIP-II: "
+             "present-day orbital declination + Earth-Sun distance factor "
+             "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
+             "circular orbit (idealized).",
+    )
     parser.add_argument("--dynamic-albedo", action="store_true", default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
@@ -527,6 +535,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
                                  "p3", "sdm", "fast_sbm"])
+    # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
+    # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
+    # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
+    # for q_c >~ qc_crit; the default 5e-4 suppresses drizzle from thin clouds),
+    # auto_rate the autoconversion rate, rh_crit the condensation onset RH.
+    parser.add_argument("--sundqvist-qc-crit", dest="sundqvist_qc_crit",
+                        type=float, default=None,
+                        help="Sundqvist autoconversion cloud-water threshold "
+                             "[kg/kg] (None=scheme/trained default 5e-4; bounds "
+                             "1e-4..1.5e-3). Lower it to rain out thin clouds.")
+    parser.add_argument("--sundqvist-rh-crit", dest="sundqvist_rh_crit",
+                        type=float, default=None,
+                        help="Sundqvist condensation-onset critical RH [0-1] "
+                             "(None=default 0.8; bounds 0.5..1.0).")
+    parser.add_argument("--sundqvist-auto-rate", dest="sundqvist_auto_rate",
+                        type=float, default=None,
+                        help="Sundqvist autoconversion rate c_0 [1/s] (None="
+                             "default 1e-3; bounds 1e-4..1e-2).")
     parser.add_argument("--aerosol-ccn", action="store_true", default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "
@@ -638,6 +664,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Initial soil water as a fraction of W_max (only with "
                              "--land-soil-bucket). Default "
                              f"{_EXPERIMENT_DEFAULTS.land_bucket_w_init_frac}.")
+    parser.add_argument("--land-k-infiltration", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_K_infiltration,
+                        dest="land_K_infiltration",
+                        help="Saturated infiltration capacity K_s [m/s] for the "
+                             "Green-Ampt infiltration-excess (Hortonian) runoff on "
+                             "the soil-water bucket (only with --land-soil-bucket). "
+                             f"Default {_EXPERIMENT_DEFAULTS.land_K_infiltration}.")
+    parser.add_argument("--land-infil-suction-boost", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_infil_suction_boost,
+                        dest="land_infil_suction_boost",
+                        help="Green-Ampt suction enhancement psi_f/L_f [-]: dry-soil "
+                             "infiltration capacity = K_s*(1+boost) (only with "
+                             "--land-soil-bucket). Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_infil_suction_boost}.")
+    parser.add_argument("--no-land-infiltration-excess", action="store_false",
+                        default=_EXPERIMENT_DEFAULTS.land_infiltration_excess,
+                        dest="land_infiltration_excess",
+                        help="Disable Hortonian infiltration-excess runoff on the "
+                             "bucket (keep saturation excess only; all rain "
+                             "infiltrates up to capacity). Default: enabled.")
     parser.add_argument("--land-stomatal-beta", action="store_true", default=False,
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
@@ -646,6 +692,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--snow-albedo-feedback", action="store_true",
+                        default=False, dest="snow_albedo_feedback",
+                        help="Prognostic snow + snow-albedo feedback on the "
+                             "slab-land tile: snow water (SWE) accumulates from "
+                             "snowfall and melts (degree-day), brightening the "
+                             "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
+                             "Requires an active land tile (--slab-land-active).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -823,6 +876,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         diurnal_cycle=args.diurnal_cycle,
+        orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
         n2o_ppbv=args.n2o_ppbv,
@@ -881,7 +935,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_bucket_w_max=args.land_bucket_w_max,
         land_beta_min=args.land_beta_min,
         land_bucket_w_init_frac=args.land_bucket_w_init_frac,
+        land_K_infiltration=args.land_K_infiltration,
+        land_infil_suction_boost=args.land_infil_suction_boost,
+        land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
+        snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
@@ -1208,6 +1266,88 @@ _AMIP_REQUIRED_PHYSICS = (
 )
 
 
+def _louis_with_preserved_surface(louis_config, prev_turb_config):
+    """Re-apply the run-resolved surface bulk-flux scheme onto a trained Louis.
+
+    The AIMIP-classical ``to_louis_config()`` rebuilds its ``SurfaceLayerConfig``
+    from the trained Cd/Ch/z0 at the field DEFAULTS for everything else —
+    including ``bulk_scheme="constant"`` and ``gustiness_w_zi=0``.  Assigning it
+    straight onto ``driver.physics.turbulence_config`` therefore CLOBBERS the
+    ``--surface-bulk-scheme`` (e.g. coare3) + ``--gustiness-zi`` that
+    ``_resolve_turbulence`` had already propagated into the built pipeline,
+    silently reverting every AIMIP run to the constant neutral-coefficient
+    surface (anemic evaporation over a calm warm ocean).
+
+    This re-applies the previously-resolved surface ``bulk_scheme`` +
+    ``gustiness_w_zi`` onto the trained Louis config, keeping the trained
+    ``Cd_neutral``/``Ch_neutral``/``z0`` (the MOST/COARE schemes ignore the
+    neutral ``Cd``/``Ch`` but DO use ``z0``, so preserving all three is
+    correct).  No-op when there is no prior turbulence config / surface.
+    """
+    prev_surf = getattr(prev_turb_config, "surface", None)
+    if prev_surf is None or getattr(louis_config, "surface", None) is None:
+        return louis_config
+    return louis_config._replace(
+        surface=louis_config.surface._replace(
+            bulk_scheme=prev_surf.bulk_scheme,
+            gustiness_w_zi=prev_surf.gustiness_w_zi))
+
+
+def _apply_sundqvist_overrides(micro_config, args):
+    """Apply explicit --sundqvist-{qc-crit,rh-crit,auto-rate} overrides.
+
+    Final precedence over both the SundqvistConfig default AND the AIMIP-trained
+    leaves (so a tuning run can force the precipitation knobs).  No-op for a
+    non-sundqvist microphysics, a missing config, or when no override flag is
+    set — returns the SAME object so callers can detect a change by identity.
+    """
+    if micro_config is None or getattr(args, "microphysics", None) != "sundqvist":
+        return micro_config
+    overrides = {}
+    if getattr(args, "sundqvist_qc_crit", None) is not None:
+        overrides["qc_crit"] = args.sundqvist_qc_crit
+    if getattr(args, "sundqvist_rh_crit", None) is not None:
+        overrides["rh_crit"] = args.sundqvist_rh_crit
+    if getattr(args, "sundqvist_auto_rate", None) is not None:
+        overrides["auto_rate"] = args.sundqvist_auto_rate
+    if not overrides:
+        return micro_config
+    return micro_config._replace(**overrides)
+
+
+def _validate_sundqvist_flags(args, parser) -> None:
+    """Bound-check the --sundqvist-* tunables + refuse them on backends that
+    ignore the post-setup micro_config override.
+
+    The override mutates ``driver.physics.micro_config`` (the finite-volume
+    PhysicsPipeline).  MPAS and spectral rebuild ``MicrophysicsConfig`` from
+    ``cfg.microphysics`` at ``run()`` and never read it, so the flags would be
+    silently ignored there — refuse loudly instead.  Out-of-range values would
+    silently enter the scheme (a typo like ``--sundqvist-qc-crit 1`` makes the
+    tuning meaningless/unstable), so bound-check against the __param_spec__ ranges.
+    """
+    bounds = {"sundqvist_qc_crit": (1.0e-4, 1.5e-3),
+              "sundqvist_rh_crit": (0.5, 1.0),
+              "sundqvist_auto_rate": (1.0e-4, 1.0e-2)}
+    set_flags = [k for k in bounds if getattr(args, k, None) is not None]
+    if not set_flags:
+        return
+    for k in set_flags:
+        lo, hi = bounds[k]
+        v = getattr(args, k)
+        if not (lo <= v <= hi):
+            parser.error(
+                f"--{k.replace('_', '-')} must be in [{lo}, {hi}], got {v}")
+    disc = getattr(args, "discretization", "centered")
+    grid = getattr(args, "grid_type", "")
+    if disc in ("mpas", "spectral") or grid in (
+            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        parser.error(
+            "--sundqvist-* overrides apply only on the finite-volume "
+            "PhysicsPipeline (cubed_sphere / latlon); the MPAS and spectral "
+            "backends rebuild MicrophysicsConfig at run() and would ignore them.")
+
+
 def _require_full_physics_for_amip(args, parser) -> None:
     """Refuse an AMIP run with any parameterization slot set to ``none``.
 
@@ -1275,6 +1415,8 @@ def main(argv: list[str] | None = None):
     # Enforce the full-physics policy on the FINAL resolved schemes (after the
     # AIMIP override may have promoted microphysics none -> sundqvist).
     _require_full_physics_for_amip(args, parser)
+    # Bound-check the --sundqvist-* tunables + refuse them on MPAS/spectral.
+    _validate_sundqvist_flags(args, parser)
 
     # --dt-auto: replace --dt with the ladder-validated value for this
     # (grid, resolution).  Single source of truth = the same
@@ -1332,7 +1474,14 @@ def main(argv: list[str] | None = None):
     if getattr(args, "_aimip_params", None) is not None:
         _p = args._aimip_params
         driver.physics.convection_config = _p.to_tiedtke_config()
-        driver.physics.turbulence_config = _p.to_louis_config()
+        # to_louis_config() rebuilds SurfaceLayerConfig at the DEFAULTS
+        # (bulk_scheme="constant", gustiness_w_zi=0), so a naive assignment
+        # clobbers the run-resolved --surface-bulk-scheme (e.g. coare3) +
+        # --gustiness-zi that _resolve_turbulence applied to the built pipeline.
+        # Preserve them so an AIMIP run honours --surface-bulk-scheme.
+        driver.physics.turbulence_config = _louis_with_preserved_surface(
+            _p.to_louis_config(),
+            getattr(driver.physics, "turbulence_config", None))
         driver.physics.gwd_config = _p.to_mcfarlane_config()
         # Inject the trained Sundqvist microphysics leaves ONLY when the
         # resolved scheme is sundqvist (it was forced on above unless the user
@@ -1350,6 +1499,17 @@ def main(argv: list[str] | None = None):
             print("AIMIP-classical trained configs injected: tiedtke (convection), "
                   "louis (turbulence), mcfarlane (GWD), " + _micro_msg +
                   "cloud via flat fields.")
+
+    # Explicit Sundqvist precip-tunable overrides — applied LAST so they win over
+    # both the scheme default and any AIMIP-trained leaves.
+    if getattr(driver.physics, "micro_config", None) is not None:
+        _new_micro = _apply_sundqvist_overrides(driver.physics.micro_config, args)
+        if _new_micro is not driver.physics.micro_config:
+            driver.physics.micro_config = _new_micro
+            if _is_root:
+                print(f"Sundqvist overrides: qc_crit={args.sundqvist_qc_crit} "
+                      f"rh_crit={args.sundqvist_rh_crit} "
+                      f"auto_rate={args.sundqvist_auto_rate}")
 
     if _is_root:
         _print_forcing_activity(args)

@@ -279,6 +279,10 @@ def test_floor_indices_and_alpha_rejects_negative():
 @pytest.fixture
 def synthetic_cache(tmp_path: Path):
     """Build a 1958–1958 noleap cache from a synthetic 6-hourly Zarr."""
+    # ``build_jra55_cache`` writes the cache via ``cache_ds.chunk(...).to_zarr``,
+    # which requires the optional ``dask`` chunk manager. Skip (don't error)
+    # when dask is absent so the rest of the module still runs.
+    pytest.importorskip("dask")
     src_path = tmp_path / "synthetic_jra55.zarr"
     _make_synthetic_jra55_zarr(
         src_path, year_start=1958, year_end=1958,
@@ -439,6 +443,7 @@ def test_load_slice_returns_jax_arrays(synthetic_cache):
 def test_cache_drops_feb_29_from_2016_window(tmp_path):
     """Sanity: build a 1958–2016 cache (3 years incl. one leap year)
     and verify the cache length excludes Feb 29 from 2016."""
+    pytest.importorskip("dask")  # cache write requires the dask chunk manager
     src_path = tmp_path / "leap_window.zarr"
     _make_synthetic_jra55_zarr(
         src_path, year_start=2014, year_end=2016,
@@ -461,6 +466,7 @@ def test_cache_drops_feb_29_from_2016_window(tmp_path):
 def test_cache_conservation_for_constant_field(tmp_path):
     """A spatially constant source field must regrid to the same constant
     on the model grid, end-to-end through the cache builder."""
+    pytest.importorskip("dask")  # cache write requires the dask chunk manager
     src_path = tmp_path / "constant_jra55.zarr"
     n_lat, n_lon = 8, 16
     n_t = 8  # one day at 3-hourly cadence
