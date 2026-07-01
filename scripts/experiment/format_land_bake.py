@@ -31,6 +31,8 @@ def main():
     print(f"TUNED_SNOW_ALBEDO_MIN_MULTILAYER = {cal['snow_min']:.4f}")
     print(f"TUNED_SNOW_DCRIT_MULTILAYER = {cal['snow_dcrit']:.4f}       # kg/m2 for full snow cover")
     print(f"TUNED_SNOW_TAU_DAYS_MULTILAYER = {cal['snow_tau_days']:.4f}   # snow-albedo age e-folding [days]")
+    if "soil_dry_boost" in cal:
+        print(f"TUNED_SOIL_DRY_BOOST_MULTILAYER = {cal['soil_dry_boost']:.4f}   # CLM dry-soil albedo brightening")
     print(f"TUNED_GLACIER_CBOOST_MULTILAYER = {cal['th_glacier_cboost']:.4f}")
 
 

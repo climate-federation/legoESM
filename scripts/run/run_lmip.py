@@ -156,7 +156,8 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
             alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
             snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
-            tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0)
+            tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0,
+            soil_dry_albedo_boost=_csm.TUNED_SOIL_DRY_BOOST_MULTILAYER)
     else:
         from legoesm.surface_albedo import LandAlbedoConfig
         _land_albedo = LandAlbedoConfig()
