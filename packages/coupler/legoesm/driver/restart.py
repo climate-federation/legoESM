@@ -676,8 +676,17 @@ def save_restart(
             f"Unknown checkpoint backend {backend!r}; expected 'npz' or 'zarr'."
         )
 
-    # 2. Compute integrity hashes
-    state_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    # 2. Compute integrity hashes.
+    # Cast to storage_dtype before hashing so the digest matches what
+    # load_checkpoint produces (it casts every array to storage_dtype on
+    # reload, so a mixed-precision state would otherwise produce a
+    # different hash on save vs load).
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
+    state_arrays = {
+        k: np.asarray(v, dtype=_sd)
+        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
+    }
     digest = compute_state_digest(state_arrays)
     cfg_hash = compute_config_hash(config)
 
@@ -821,8 +830,13 @@ def _validate_metadata(
             f"{metadata.nlev} but loaded state has nlev={loaded_nlev}."
         )
 
-    # State digest verification
-    state_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    # State digest verification. Cast to storage_dtype to match save_restart.
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
+    state_arrays = {
+        k: np.asarray(v, dtype=_sd)
+        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
+    }
     current_digest = compute_state_digest(state_arrays)
     if current_digest != metadata.state_digest:
         raise ValueError(

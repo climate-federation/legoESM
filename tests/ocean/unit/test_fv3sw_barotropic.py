@@ -74,12 +74,18 @@ def test_sw_core_barotropic_keeps_zonal_eta_zonal():
 
 def test_cube_ocean_barotropic_is_fv3sw_never_a_grid():
     """Source guard: the ocean test matrix must configure the cube ocean with the
-    FV3-faithful ``fv3sw`` barotropic, never the A-grid solver."""
+    FV3-faithful ``fv3sw`` barotropic, never the A-grid solver.
+
+    The cube ocean config now lives in the shared
+    ``scripts/matrix/ocean_test_matrix/setup.py`` block
+    (``cube_matrix_ocean_config_kwargs``) which ``run_ocean_test_matrix.py``
+    calls — so the single source of truth for the cube barotropic staggering is
+    that module."""
     src = (
         Path(__file__).resolve().parents[3]
-        / "scripts" / "matrix" / "run_ocean_test_matrix.py"
+        / "scripts" / "matrix" / "ocean_test_matrix" / "setup.py"
     ).read_text()
-    # The cubed-sphere branch must request fv3sw.
+    # The cube ocean config block must request fv3sw.
     assert 'barotropic_staggering="fv3sw"' in src, (
         "the cube ocean must use barotropic_staggering='fv3sw' (FV3 SW core)."
     )

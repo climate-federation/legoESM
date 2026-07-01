@@ -156,6 +156,10 @@ def test_moist_buoyancy_flag_off_zeroes_contribution():
         sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
         hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False,
         use_coriolis=False, fix_mass=False, smagorinsky_cs=0.0,
+        # The default ``acoustic_moist_buoyancy=True`` carries the moist
+        # buoyancy INSIDE the acoustic substeps (fixes the updraft runaway);
+        # the slow-tendency path under test only adds it when that is off.
+        acoustic_moist_buoyancy=False,
     )
     cfg_on = CompressibleEulerConfig(moist_buoyancy=True, **base)
     cfg_off = CompressibleEulerConfig(moist_buoyancy=False, **base)

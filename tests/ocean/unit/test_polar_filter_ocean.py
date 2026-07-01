@@ -59,8 +59,8 @@ def test_default_filter_off():
     """Off by default -> bit-exact for legacy/tripole configs."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
     cfg = LatLonCGridOceanConfig.from_flat()
-    assert cfg.use_polar_filter is False
-    assert cfg.polar_filter_cutoff_lat_deg == pytest.approx(60.0)
+    assert cfg.polar_filter.use_polar_filter is False
+    assert cfg.polar_filter.polar_filter_cutoff_lat_deg == pytest.approx(60.0)
 
 
 def _set_T(state, arr):

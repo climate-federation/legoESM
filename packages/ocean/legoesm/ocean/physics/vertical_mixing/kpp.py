@@ -103,6 +103,8 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
 
 def _boundary_layer_depth(
     rho: jnp.ndarray,
+    T: jnp.ndarray,
+    S: jnp.ndarray,
     u: jnp.ndarray,
     v: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
@@ -112,6 +114,7 @@ def _boundary_layer_depth(
     cfg: KPPConfig,
     g: float = constants.g,
     h_bl_prev: jnp.ndarray | None = None,
+    eos_fn=None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -126,8 +129,25 @@ def _boundary_layer_depth(
     # Depth of cell centers below surface (positive downward)
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
 
-    # Density and velocity differences from surface
-    delta_rho = rho - rho[..., :1]
+    # Buoyancy (density) and velocity differences from the surface for the
+    # bulk Richardson number.  LMD94 Eq. 21 requires density referenced to a
+    # COMMON pressure: the previous ``rho - rho[..., :1]`` differenced two
+    # IN-SITU densities rho(T,S,p_hydro) evaluated at DIFFERENT hydrostatic
+    # pressures, so in warm/deep/stratified columns the compressibility +
+    # thermobaric contribution inflated delta_rho and the boundary layer was
+    # diagnosed too shallow (the documented low-latitude MLD-too-shallow
+    # bias).  Reference every level to the SURFACE pressure (p = 0 Pa =>
+    # potential density) before differencing, removing the spurious pressure
+    # term (CVMix / MOM6 KPP convention).  ``eos_fn`` defaults to
+    # ``wright_eos`` so the reference density matches how the in-situ ``rho``
+    # was built when the caller does not thread an explicit EOS.  (N^2 / V_t^2
+    # below still use the in-situ ``rho`` gradient — a smaller secondary
+    # effect, left unchanged so this fix stays surgical.)
+    if eos_fn is None:
+        from legoesm.ocean.eos import wright_eos
+        eos_fn = wright_eos
+    rho_surf_ref = eos_fn(T, S, jnp.zeros_like(T))
+    delta_rho = rho_surf_ref - rho_surf_ref[..., :1]
     delta_u = u - u[..., :1]
     delta_v = v - v[..., :1]
     delta_V2 = delta_u**2 + delta_v**2
@@ -236,6 +256,7 @@ def kpp_vertical_mixing(
     h_bl_prev: jnp.ndarray | None = None,
     apply_diffusion: bool = True,
     dt: float | None = None,
+    eos_fn=None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -269,7 +290,6 @@ def kpp_vertical_mixing(
     VerticalMixingOutput
     """
     eps = _EPS
-    u.shape[-1]
 
     # --- Friction velocity ---
     if tau_x is not None and tau_y is not None:
@@ -283,7 +303,6 @@ def kpp_vertical_mixing(
 
     # --- Surface buoyancy flux ---
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
     if B_f is None:
         # When the caller does not supply a surface buoyancy flux, set
         # B_f = 0 (no convective non-local transport).  The previous
@@ -299,8 +318,8 @@ def kpp_vertical_mixing(
 
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
-        rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
-        h_bl_prev=h_bl_prev,
+        rho, T, S, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
+        h_bl_prev=h_bl_prev, eos_fn=eos_fn,
     )
 
     # --- Depth coordinate ---
@@ -308,6 +327,13 @@ def kpp_vertical_mixing(
     sigma = z_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
 
     # --- Shape function G(sigma) = sigma * (1 - sigma)^2 ---
+    # NOTE: this is the REDUCED non-matching KPP cubic.  The full LMD94
+    # (App. B / Eq. D) matches both the boundary-layer diffusivity AND its
+    # vertical derivative to the interior K at sigma = 1 via
+    # G(sigma) = sigma * (1 + a2*sigma + a3*sigma^2) with a2, a3 set by that
+    # matching; here K_bl and dK_bl/dz both vanish at the BL base, so
+    # entrainment at the base is under-represented.  Documented faithfulness
+    # gap (interior-matching not yet implemented); see KPP audit.
     sigma_clip = jnp.clip(sigma, 0.0, 1.0)
     G = sigma_clip * (1.0 - sigma_clip) ** 2
 

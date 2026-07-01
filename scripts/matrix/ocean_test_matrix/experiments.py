@@ -1832,8 +1832,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
                 T_ref=eu_config.T_ref_C,
                 S_ref=eu_config.S_uniform,
             ),
-            barotropic_diffusion_alpha=eu_config.barotropic.barotropic_diffusion_alpha,
-            barotropic_div_damp=eu_config.barotropic.barotropic_div_damp,
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
             tracer_advection=eu_config.tracer_advection,
             pv_scheme=config.PV_SCHEME_OVERRIDE,
             apvm_dt=config.APVM_DT_OVERRIDE,
@@ -2078,8 +2078,8 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
                     else {}
                 ),
             ),
-            barotropic_diffusion_alpha=eu_config.barotropic.barotropic_diffusion_alpha,
-            barotropic_div_damp=eu_config.barotropic.barotropic_div_damp,
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
             tracer_advection=eu_config.tracer_advection,
             gm_redi=gm_cfg,
         ))
@@ -2225,8 +2225,8 @@ def run_acc_channel(tc: TestCase, output_dir: Path, days: float
                 T_ref=acc_config.T_ref_C,
                 S_ref=acc_config.S_uniform,
             ),
-            barotropic_diffusion_alpha=acc_config.barotropic.barotropic_diffusion_alpha,
-            barotropic_div_damp=acc_config.barotropic.barotropic_div_damp,
+            barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
         ))
 
     state = acc_ic(tc.grid_type, grid, z_coord, acc_config)
@@ -2337,8 +2337,8 @@ def run_acc_channel_rest(tc: TestCase, output_dir: Path, days: float
                 T_ref=acc_config.T_ref_C,
                 S_ref=acc_config.S_uniform,
             ),
-            barotropic_diffusion_alpha=acc_config.barotropic.barotropic_diffusion_alpha,
-            barotropic_div_damp=acc_config.barotropic.barotropic_div_damp,
+            barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
         ))
 
     state = acc_ic(tc.grid_type, grid, z_coord, acc_config)

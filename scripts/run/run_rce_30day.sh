@@ -213,7 +213,7 @@ echo "RCE run: $DAYS days, ${NY}x${NX} grid, $RANKS ranks, dt=$DT s"
 echo "Output:  $OUTPUT"
 echo "Logs:    $LOGFILE"
 
-# JAX_PLATFORMS=cpu forces CPU (default in driver). Set to metal for GPU/Metal.
+# JAX_PLATFORMS=cpu forces CPU (default in driver). Set to mps for the Apple GPU.
 # iter-99: dropped the leading ``exec`` so the post-run trajectory
 # summarizer below actually executes (``exec`` replaces the shell
 # process with mpirun and skips every later line). ``set -o

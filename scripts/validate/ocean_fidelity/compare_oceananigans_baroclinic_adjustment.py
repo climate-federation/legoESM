@@ -91,7 +91,12 @@ def build_setup():
         # = VelocityStencil; standard divergence = OnlySelfUpwinding.
         coriolis_scheme=os.environ.get("CORIOLIS_SCHEME", "matsuno_split"),
         bottom_drag_r=0.0, tracer_advection="weno7",
-        weno_smoothness=os.environ.get("WENO_SMOOTH", "split"))
+        weno_smoothness=os.environ.get("WENO_SMOOTH", "split"),
+        # Faithful no-backstop eddy stack knobs (default = recipe behaviour). With
+        # BARO_SOLVER=explicit_substep these route via from_flat into BarotropicConfig.
+        barotropic_slow_forcing_ab2=os.environ.get("BARO_SLOW_AB2", "0") == "1",
+        barotropic_diffusion_alpha=float(os.environ.get("BARO_ALPHA", "0.05")),
+        barotropic_time_filter=(os.environ.get("BARO_FILTER") or None))
     cfg = cfg._replace(
         barotropic=cfg.barotropic._replace(barotropic_implicit_theta_eta=1.0, barotropic_implicit_theta_pgf=1.0),
         weno_divergence_smoothness=os.environ.get("WENO_DIV_SMOOTH", "standard") or None,

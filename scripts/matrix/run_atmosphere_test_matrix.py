@@ -49,9 +49,6 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 import jax.numpy as jnp
 import numpy as np
 from scipy.spatial import cKDTree

@@ -78,6 +78,16 @@ def clamp_coupling_diag_days(ocean: str, diag_days: int) -> int:
     return diag_days
 
 
+# The --config YAML loader is the shared single source of truth
+# (legoesm.driver.run_config_yaml) reused by run_amip.py — see main(), which
+# imports it deferred.  run_coupled-specific example dests for the unknown-key
+# error hint:
+_COUPLED_EXAMPLE_KEYS = (
+    "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
+    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+)
+
+
 def _find_latest_checkpoint(output_dir):
     """Return ``(atm_checkpoint_path, day_token)`` for the highest-day
     ``checkpoint_day_NNNN.npz`` in ``output_dir``, or ``(None, None)`` if none
@@ -146,6 +156,14 @@ def build_parser():
              "Default ON (needed to make the rrtmgp default compile in minutes; "
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
+    )
+    parser.add_argument(
+        "--orbital-insolation", action="store_true", default=False,
+        dest="orbital_insolation",
+        help="Use realistic (Berger 1978) orbital insolation: present-day "
+             "orbital declination + Earth-Sun distance factor (a/r)^2 "
+             "eccentricity asymmetry (~+/-3.4%%). Default off = circular "
+             "orbit. Recommended for CMIP historical/abrupt-4xCO2/1pctCO2.",
     )
     # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
     # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
@@ -445,8 +463,9 @@ def build_parser():
     parser.add_argument(
         "--experiment", default="",
         help="CMIP6 experiment id (e.g. historical, ssp585, piControl, "
-             "1pctCO2). Selects the transient external-forcing trajectory "
-             "(GHG/ozone/aerosol/solar). Empty = idealized/constant (default).",
+             "1pctCO2, abrupt-4xCO2). Selects the transient external-forcing "
+             "trajectory (GHG/ozone/aerosol/solar). Empty = idealized/constant "
+             "(default).",
     )
     parser.add_argument(
         "--start-year", type=int, default=1979,
@@ -471,6 +490,12 @@ def build_parser():
     # Output
     parser.add_argument("--output", "-o", default="results/coupled",
                         help="Output directory")
+    parser.add_argument("--config", default=None,
+                        help="YAML run-config file (e.g. config/cmip/"
+                             "cmip_ocean_slab.yaml): its keys set argument "
+                             "DEFAULTS, so any explicit CLI flag still overrides "
+                             "it. Keys are run_coupled argument dests; an unknown "
+                             "key is a hard error (no silent typo'd override).")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from the latest checkpoint in --output "
                              "(atm checkpoint_day_NNNN.npz + coupled "
@@ -494,7 +519,17 @@ def build_parser():
 
 
 def main():
-    args = build_parser().parse_args()
+    parser = build_parser()
+
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    pre, _ = parser.parse_known_args()
+    if pre.config is not None:
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        parser.set_defaults(**load_yaml_config(
+            pre.config, parser, example_keys=_COUPLED_EXAMPLE_KEYS))
+
+    args = parser.parse_args()
 
     # --minimal-physics: collapse the full-physics defaults to a cheap
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
@@ -624,6 +659,7 @@ def main():
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
+        orbital_insolation=args.orbital_insolation,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         ic=args.ic,

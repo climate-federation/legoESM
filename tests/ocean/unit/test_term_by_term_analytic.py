@@ -846,7 +846,10 @@ class TestWaveConvergence:
             )
             # Tighten PCG tolerance so it doesn't floor the
             # convergence rate at fine resolution.
-            config = config._replace(
+            # #501: the implicit-PCG knobs moved into the nested BarotropicConfig;
+            # replace_flat routes these flat names into it (plain _replace would
+            # reject them as unknown top-level fields).
+            config = config.replace_flat(
                 barotropic_implicit_pcg_tol=1.0e-13,
                 barotropic_implicit_pcg_maxiter=400,
             )

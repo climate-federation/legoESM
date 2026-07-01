@@ -56,17 +56,46 @@ from legoesm.grids.vertical import create_height_coordinate
 from legoesm.parallel.metal import is_metal_backend, to_cpu, to_metal
 
 
-_ACCELERATOR_PLATFORMS = ("gpu", "cuda", "rocm", "metal")
+@pytest.fixture(autouse=True)
+def _pin_float32_precision():
+    """Pin x64-OFF / fp32 policy for every test in this module.
+
+    Each test here is float32 / Metal-oriented and asserts float32 dtype
+    preservation.  When another module that flips ``jax_enable_x64`` ON at
+    import shares the same xdist worker, the leaked global x64 flag would
+    silently promote these helpers' outputs to float64 (e.g. a Python-float
+    constant inside ``column_water_vapor_plane`` becomes float64), false-
+    failing the dtype assertions.  Snapshot the global precision state,
+    force the float32 policy with x64 off for the test body, and restore the
+    snapshot at teardown.  In a fresh isolated process this is a no-op (the
+    default is already x64-off / fp32).
+    """
+    from legoesm.core.precision import (
+        PrecisionPolicy, get_policy, set_policy,
+    )
+
+    x64_before = jax.config.jax_enable_x64
+    policy_before = get_policy()
+    jax.config.update("jax_enable_x64", False)
+    set_policy(PrecisionPolicy.fp32())
+    try:
+        yield
+    finally:
+        set_policy(policy_before)
+        jax.config.update("jax_enable_x64", x64_before)
+
+
+_ACCELERATOR_PLATFORMS = ("gpu", "cuda", "rocm", "mps")
 
 
 def _accelerator_device():
     """Return the first functional accelerator device, or None."""
     if is_metal_backend():
-        # On Metal-as-default-and-functional, devices() returns the
-        # Metal device.
+        # On the Apple GPU (mps) backend, devices() returns the
+        # MpsDevice.
         try:
             for d in jax.devices():
-                if d.platform == "metal":
+                if d.platform == "mps":
                     return d
         except Exception:
             return None

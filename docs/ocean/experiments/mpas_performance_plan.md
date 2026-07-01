@@ -242,7 +242,7 @@ converges) but degrades performance.
 ## Out of scope
 
 - **GPU port (CUDA / Metal)**: would benefit MPAS more than lat-lon,
-  but requires JAX-Metal maturity or moving compute off Apple
+  but requires jax-mps / MLX maturity or moving compute off Apple
   Silicon.  Track separately.
 - **Custom kernels** (Triton, pallas) for hot ops: way more
   engineering than legoESM's research scope justifies before mesh

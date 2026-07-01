@@ -125,7 +125,10 @@ def test_recipe_shares_dycore_options_with_acc():
               "momentum_flux_scheme", "vertical_momentum_scheme",
               "tracer_advection", "implicit_vertical_mixing", "K_v",
               "A_h_lat_scaling", "A_h_cos_power", "bottom_drag_r", "A_h"):
-        assert getattr(b, f) == getattr(a, f), f
+        # #501: A_h*/bottom_drag_r are flat members of nested sub-configs now;
+        # flat_get is the read-side inverse that resolves both top-level and
+        # nested-flat names.
+        assert b.flat_get(f) == a.flat_get(f), f
 
 
 def test_acc_basic_recipe_no_eke_field_seeded():
@@ -190,7 +193,10 @@ def test_recipe_validates_and_steps_once_finite():
     )
 
     recipe = build_acc_basic_recipe(with_surface_forcing=True)
-    cfg = recipe.model_config._replace(
+    # #501: barotropic_solver moved into the nested BarotropicConfig; replace_flat
+    # distributes flat overrides into their sub-configs (plain _replace would
+    # reject barotropic_solver as an unknown top-level field).
+    cfg = recipe.model_config.replace_flat(
         outer_integrator="ab2",
         barotropic_solver="rigid_lid",
         dt_mom_ratio=9.0,

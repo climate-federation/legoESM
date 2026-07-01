@@ -239,7 +239,7 @@ def test_block_path_matches_per_step_path(tmp_path):
         args, grid, "latlon", z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
     )
     out = tmp_path / "blockout"
-    state_b, diag_b, wall_b, ok_b = run_omip._run_omip_loop(
+    state_b, diag_b, wall_b, ok_b, _ = run_omip._run_omip_loop(  # +blowup_info (5-tuple)
         model, state_b, "latlon", grid, z_coord,
         dt=300.0, n_steps=8, diag_every=4,   # 2 blocks of 4 steps each
         jra55_state=js,

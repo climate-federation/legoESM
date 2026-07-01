@@ -104,6 +104,15 @@ kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 20
 sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 
+# Present-day (≈ year 2000) Earth orbital elements for the realistic
+# (AMIP-II / CMIP) insolation.  Berger (1978) convention as used by CESM
+# ``shr_orb_mod`` / climlab: the longitude of perihelion is measured from
+# the moving vernal equinox.  Used only when orbital insolation is enabled;
+# the idealized default keeps a circular orbit (eccentricity = 0).
+orbital_eccentricity = 0.016704         # [-] orbital eccentricity (year ~2000)
+orbital_obliquity_deg = 23.439          # [deg] obliquity of the ecliptic
+orbital_long_perihelion_deg = 282.895   # [deg] longitude of perihelion from VE
+
 # Broadband longwave emissivities (used as defaults when a tile config
 # does not specify its own).  Sea-water and most ice surfaces are
 # near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.

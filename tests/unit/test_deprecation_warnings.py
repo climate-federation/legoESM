@@ -255,8 +255,9 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 15 atmosphere + 5 ocean = 20 genuinely distinct implementations
-        assert len(ATMOSPHERE_MATRIX) == 15
+        # 17 atmosphere + 5 ocean = 22 genuinely distinct implementations
+        # (atmosphere grew by tracer_transport_mpas + tracer_transport_latlon)
+        assert len(ATMOSPHERE_MATRIX) == 17
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):

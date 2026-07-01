@@ -22,13 +22,34 @@ import numpy as np
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.silvestri_baroclinic_jet import (
     SilvestriJetConfig, build_silvestri_baroclinic_jet_setup)
 from legoesm.ocean.vertical import compute_layer_thickness
 
-set_policy(PrecisionPolicy.fp64())
+
+@pytest.fixture(autouse=True)
+def _fp64_precision_policy():
+    """Pin the legoESM precision policy to fp64 for the duration of each test.
+
+    JAX ``jax_enable_x64`` (the suite enables it) is NOT sufficient on its own:
+    the legoESM precision policy is a separate process-global that still defaults
+    to fp32, so the ocean state/Fields come back fp32 while the AB2 ``F_slow``
+    prev carry (seeded here from fp64 zeros / x64-enabled construction) stays
+    fp64 — ``jax.lax.scan`` then (correctly) rejects the fp64->fp32 carry
+    narrowing.  A module-level ``set_policy`` runs ONCE at import and both (a)
+    leaks fp64 into sibling test modules sharing the xdist worker and (b) is
+    itself clobbered by any sibling that later sets fp32, so the policy seen by
+    these tests is whatever ran last.  Pin fp64 per-test and RESTORE the prior
+    policy on teardown so neither direction of cross-test contamination occurs.
+    """
+    _prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(_prev)
 
 
 def _setup(ab2_fslow):

@@ -47,8 +47,8 @@ def _run_driver(output_dir):
     """
     env = os.environ.copy()
     # FORCE JAX_PLATFORMS=cpu (override any exported value). iter-7
-    # found that JAX_PLATFORMS=metal triggers MLIR legalisation
-    # crashes on spectral / voronoi / latlon-cgrid paths; the same
+    # found that the Apple GPU backend (JAX_PLATFORMS=mps) triggers MLIR
+    # legalisation crashes on spectral / voronoi / latlon-cgrid paths; the same
     # backend can also break the plane CRM in subtle ways. Tests must
     # always run on CPU regardless of the developer's shell env.
     env["JAX_PLATFORMS"] = "cpu"

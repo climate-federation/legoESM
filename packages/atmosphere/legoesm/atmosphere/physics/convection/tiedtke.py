@@ -214,8 +214,13 @@ def tiedtke_convection(
     # Cloud-base mass flux (per class, then blended).
     # ``M_b_deep`` is driven by column moisture convergence (kg/m^2/s units
     # — already dimensionally correct) and stays as-is.
-    # ``M_b_shallow`` and ``M_b_midlevel`` use the dimensionally-correct
-    # CAPE-relaxation closure (Kain 2004 §3 form):
+    # ``M_b_shallow`` and ``M_b_midlevel`` use a generic first-order
+    # CAPE-relaxation SURROGATE (NOT a published closure).  This is *not* the
+    # Zhang-McFarlane (1995) closure (CAPE consumed at a cloud-work-function /
+    # quasi-equilibrium rate) and *not* a Kain (2004) formula (Kain 2004 has no
+    # closed-form M_b — it iterates M_b to remove CAPE over TIMEC).  The
+    # ``g / rho_BL`` factor is a dimensional stand-in for that CAPE-consumption
+    # sensitivity, giving a kg/m^2/s mass flux:
     #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.

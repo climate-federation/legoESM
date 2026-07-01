@@ -182,6 +182,25 @@ class SegmentCarry(NamedTuple):
     # diagnosis.  ``None`` (warm-rain / convective_cloud off) ⇒ byte-identical
     # legacy carry; pack_carry seeds a zeros array for production runs so the
     # feature can read it when ``PhysicsPipeline._cloud_convective`` is set.
+    land_ml: object = None
+    # Optional MULTILAYER (Richards) land state (a MultiLayerLandState pytree) when
+    # the differentiable forward runs the multilayer coupler tile instead of the
+    # embedded slab.  ``None`` (the default) ⇒ slab path, byte-identical legacy carry;
+    # when present it is advanced in place of the scalar ``T_land`` and supplies the
+    # land surface temperature (``T_soil[:, 0]``) to the surface blend.
+    w_land: jax.Array = None
+    # Prognostic slab-land soil water [kg/m²] (Manabe bucket).  ``None``
+    # unless the soil-water bucket is active (``PhysicsPipeline.
+    # land_soil_bucket``) ⇒ byte-identical legacy carry.  Advanced each
+    # physics step in ``physics_step_no_rad`` (precip source, beta-limited
+    # land evaporation sink); sets the land evaporation efficiency beta that
+    # limits land latent heat.  Threaded exactly like ``T_land``.
+    snow: jax.Array = None
+    # Prognostic slab-land snow water equivalent [kg/m²].  ``None`` unless
+    # snow-albedo feedback is active (``PhysicsPipeline.snow_albedo_feedback``)
+    # ⇒ byte-identical legacy carry.  Advanced each physics step in
+    # ``physics_step_no_rad`` (snowfall source, degree-day melt); brightens the
+    # land albedo.  Threaded exactly like ``w_land``.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -195,6 +214,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
                conv_precip_prev=None,
+               land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -290,6 +310,13 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
+        land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
+        # Soil-water bucket: None unless the bucket is active (identical
+        # legacy carry); the land tile reads it only when active.
+        w_land=None if w_land is None else _promote(w_land, storage),
+        # Snow water equiv.: None unless snow-albedo feedback is active
+        # (identical legacy carry).
+        snow=None if snow is None else _promote(snow, storage),
     )
 
 
@@ -876,6 +903,10 @@ def build_segment_fn(
                 _ofi = owned_face_ids
                 _T_land_in = (carry.T_land[_ofi]
                               if carry.T_land is not None else None)
+                _w_land_in = (carry.w_land[_ofi]
+                              if carry.w_land is not None else None)
+                _snow_in = (carry.snow[_ofi]
+                            if carry.snow is not None else None)
                 # Double-moment tracers (None for warm-rain) → number-aware
                 # radiation r_eff. Passed by KEYWORD so the neural/SFNO
                 # step_unified wrappers (which parse the positional tail by
@@ -917,8 +948,9 @@ def build_segment_fn(
                     sfc_T_override=forcing.sfc_T_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
-                    T_land=_T_land_in,
+                    T_land=_T_land_in, land_ml=carry.land_ml,
                     conv_precip=carry.conv_precip_prev[_ofi],
+                    w_land=_w_land_in, snow=_snow_in,
                     **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
@@ -994,6 +1026,27 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
+                # multilayer land tile is single-rank only (calibration) -> carry the
+                # state through unchanged on the MPI/owned-face path.
+                land_ml_new = carry.land_ml
+                # Soil-water bucket: w_land_new rides PhysicsOutput
+                # (advanced in physics_step_no_rad), scattered at owned
+                # indices.  Carried through unchanged for legacy wrappers
+                # that don't populate it.
+                w_land_new = (
+                    carry.w_land.at[_ofi].set(phys_out.w_land)
+                    if (carry.w_land is not None
+                        and phys_out.w_land is not None)
+                    else carry.w_land
+                )
+                # Snow water equiv.: rides PhysicsOutput, scattered at owned
+                # indices (mirror w_land).
+                snow_new = (
+                    carry.snow.at[_ofi].set(phys_out.snow)
+                    if (carry.snow is not None
+                        and phys_out.snow is not None)
+                    else carry.snow
+                )
             else:
                 _dm_in = {}
                 for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
@@ -1022,8 +1075,9 @@ def build_segment_fn(
                     sfc_T_override=forcing.sfc_T_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
-                    T_land=carry.T_land,
+                    T_land=carry.T_land, land_ml=carry.land_ml,
                     conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land, snow=carry.snow,
                     **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
@@ -1032,6 +1086,17 @@ def build_segment_fn(
                 # 2-tuple wrappers (neural / SFNO training) leave the land
                 # tile inert by carrying ``T_land`` through unchanged.
                 T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
+                # optional 4th value: the advanced MULTILAYER land state (when the
+                # multilayer tile is active); else carry the (None / unused) state on.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
+                # Soil-water bucket rides PhysicsOutput (advanced in
+                # physics_step_no_rad); carried through for legacy wrappers.
+                w_land_new = (phys_out.w_land
+                              if phys_out.w_land is not None
+                              else carry.w_land)
+                snow_new = (phys_out.snow
+                            if phys_out.snow is not None
+                            else carry.snow)
 
                 # --- State update ---
                 _phys_dT_dt = phys_out.dT_dt
@@ -1173,6 +1238,11 @@ def build_segment_fn(
                                   carry.gwd_spectrum)),
                 conv_precip_prev=_match_dtype(
                     conv_precip_prev_new, carry.conv_precip_prev),
+                land_ml=land_ml_new,
+                w_land=(None if carry.w_land is None
+                        else _match_dtype(w_land_new, carry.w_land)),
+                snow=(None if carry.snow is None
+                      else _match_dtype(snow_new, carry.snow)),
             )
             return new_carry, None
         return _single_step
@@ -1298,12 +1368,19 @@ def build_segment_fn(
             _ofi = owned_face_ids
             _T_land_in = (carry.T_land[_ofi]
                           if carry.T_land is not None else None)
+            _w_land_in = (carry.w_land[_ofi]
+                          if carry.w_land is not None else None)
+            _snow_in = (carry.snow[_ofi]
+                        if carry.snow is not None else None)
 
             def _own(fld):
                 return None if fld is None else fld[_ofi]
 
+            # 8th return (multilayer land state) is unused on the MPI owned-face
+            # path: multilayer land is single-rank only, so land_ml_new is carried
+            # separately (= carry.land_ml) above; discard the radiation-core value.
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local, _) = \
                 pipeline.compute_radiation_core(
                     carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -1318,10 +1395,11 @@ def build_segment_fn(
                     N_c=_own(carry.N_c), N_i=_own(carry.N_i),
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
-                    T_land=_T_land_in,
+                    T_land=_T_land_in, land_ml=carry.land_ml,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=_own(carry.conv_precip_prev),
+                    w_land=_w_land_in, snow=_snow_in,
                 )
             held_new = (
                 carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
@@ -1336,8 +1414,10 @@ def build_segment_fn(
                 if carry.T_land is not None else None
             )
         else:
+            # 8th return (multilayer land state) unused on this MPI path — land_ml
+            # is single-rank only and carried separately (see land_ml_new above).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, _) = \
                 pipeline.compute_radiation_core(
                     carry.T, carry.p_s, carry.q_v,
                     forcing.sst, forcing.sic, lat, lon,
@@ -1352,10 +1432,11 @@ def build_segment_fn(
                     N_c=carry.N_c, N_i=carry.N_i,
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u, v=carry.v, dt=_dt,
-                    T_land=carry.T_land,
+                    T_land=carry.T_land, land_ml=carry.land_ml,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land, snow=carry.snow,
                 )
             held_new = (
                 dT_dt_rad, sw_net_sfc, lw_net_sfc,

@@ -130,6 +130,23 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics_utils.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/rte_utils.py",
+        # mc3d: 3D Monte-Carlo ray tracer is a SPATIAL SOLVER (like the rte/
+        # two-stream tree above), not a single-tendency parameterization. Its
+        # energy-conservation invariant is gated analytically in
+        # tests/unit/test_mc3d_raytracer.py, not via __physics_contract__.
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/__init__.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/config.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/emulator.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/knull_grid.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/mie.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/parallel.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/photon_walk.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/plane_adapter.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/qrng.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_lw.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_sw.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/sampling.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/tally.py",
         "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",

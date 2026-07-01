@@ -37,21 +37,19 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     xu_randall_cloud_fraction,
 )
 from legoesm import constants
-from legoesm.runtime.backend import metal_fell_back_to_cpu
+from legoesm.runtime.backend import get_backend
 
 
 # Skip marker for tests that exercise jax.device_put with a shard Mesh.
-# On Apple Silicon with JAX-Metal installed but non-functional (jax-metal /
-# JAX version mismatch), the runtime falls back to CPU for compute but the
-# Metal platform stays registered, and ``batched_copy_array_to_devices_with_sharding``
-# raises ``UNIMPLEMENTED: default_memory_space is not supported``.  Skip on
-# this exact environment; the tests still run on CI Linux/CUDA where the
-# Metal platform is absent.
+# The Apple GPU backend ``mps`` (jax-mps / MLX) exposes a single device, so
+# ``batched_copy_array_to_devices_with_sharding`` cannot build a multi-device
+# shard Mesh there.  Skip on that backend; the tests still run on CI
+# Linux/CUDA where multi-device sharding is available.
 _skip_if_metal_broken = pytest.mark.skipif(
-    metal_fell_back_to_cpu(),
+    get_backend() == "mps",
     reason=(
-        "JAX-Metal/CPU fallback env: device_put with shard Mesh hits "
-        "UNIMPLEMENTED default_memory_space.  CI Linux/CUDA runs this."
+        "Apple GPU (mps) is single-device: device_put with a shard Mesh is "
+        "unsupported.  CI Linux/CUDA runs this."
     ),
 )
 

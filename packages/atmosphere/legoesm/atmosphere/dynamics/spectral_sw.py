@@ -39,6 +39,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv,
     spectral_hyperdiffusion_3d,
+    dealiasing_mask,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
@@ -73,6 +74,17 @@ class SpectralSWConfig(NamedTuple):
                                       # Recommended: 8 for runs with topography
     spectral_filter_cutoff: float = 0.65  # Filter value at n_max
     time_integrator: str = "ssp_rk3"  # Any integrator from dispatch
+    # Orszag 2/3-rule de-aliasing of the quadratic nonlinear tendencies.
+    # The shallow-water vorticity/divergence/mass tendencies are
+    # quadratic in the prognostic fields ((zeta+f)*v, Phi*v, |v|^2), so
+    # without this truncation the products fold aliased power back into
+    # the resolved spectrum and drive grid-scale instability.  Default
+    # 2/3 (Orszag 1971) is standard practice; 0.0 disables (e.g. for
+    # exact rest-state / single-mode tendency tests).  Only the upper
+    # 1 - fraction of wavenumbers (spurious aliasing band) is removed,
+    # so well-resolved fields are unchanged.  See
+    # ``grids.gaussian.dealiasing_mask``.
+    dealiasing_fraction: float = 0.667
 
 
 # =============================================================================
@@ -202,6 +214,21 @@ def spectral_sw_tendencies(
         dvor_hat = dvor_hat + _hd_pair[..., 0]
         ddiv_hat = ddiv_hat + _hd_pair[..., 1]
 
+    # --- 7. Orszag 2/3-rule de-aliasing of the nonlinear tendencies ---
+    # Zero every spectral coefficient with total wavenumber n above
+    # ``floor(dealiasing_fraction * n_max)``.  The vor/div/phi tendencies
+    # above were built from quadratic products ((zeta+f)*v, Phi*v, |v|^2)
+    # whose transform spreads aliased power across the whole spectrum; the
+    # mask removes the upper (spurious) band so it cannot fold back and
+    # destabilise the run.  Applied LAST (after hyperdiffusion) so the
+    # masked modes are held identically at zero — matching spectral_pe.
+    # The n=0 mass mode (n << n_cut) is always retained, so the global
+    # mass integral d/dt(phi_00) is untouched (mass conservation safe).
+    _dealias = dealiasing_mask(grid, config.dealiasing_fraction)
+    dvor_hat = dvor_hat * _dealias
+    ddiv_hat = ddiv_hat * _dealias
+    dphi_hat = dphi_hat * _dealias
+
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
@@ -269,6 +296,17 @@ class SpectralShallowWaterModel:
             )
         else:
             self._spectral_filter = None
+
+        # Warn if de-aliasing is off — the SW nonlinear tendencies are
+        # quadratic and alias without the Orszag 2/3 truncation.
+        if self.config.dealiasing_fraction == 0.0:
+            import warnings
+            warnings.warn(
+                "dealiasing_fraction=0.0: spectral aliasing from the "
+                "quadratic shallow-water nonlinearities is not suppressed. "
+                "Set dealiasing_fraction=0.667 for production runs.",
+                stacklevel=2,
+            )
 
     def compute_mass(self, state: SpectralSWState) -> jax.Array:
         """Global ``∫ h dA = (1/g) ∫ phi dA`` (fp64).

@@ -520,7 +520,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False,
+            apply_diffusion=False, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 

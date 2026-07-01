@@ -1674,7 +1674,7 @@ def _uninstrumented_active_blocks(config, freshwater) -> list[str]:
             "freshwater virtual-salt block (~:1617-1665; this bench passes "
             "freshwater=None, so normally inactive)"
         )
-    if getattr(config, "use_polar_filter", False):
+    if config.polar_filter.use_polar_filter:
         active.append("use_polar_filter (post-step Fourier filter)")
     if getattr(config, "freeze_floor", False):
         active.append("freeze_floor (post-step SST clamp)")
