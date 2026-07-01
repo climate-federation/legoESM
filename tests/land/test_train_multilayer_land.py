@@ -12,7 +12,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from scripts.run.train_land_params_era5 import _N_PFT
 from scripts.run.train_multilayer_land_era5 import (
     forward_ml, loss_ml, constrain_ext, init_ext_params, BOUNDS_EXT,
-    build_multilayer_cfg)
+    build_multilayer_cfg, _split_cells)
 
 
 def _synthetic_data(ncol=12):
@@ -83,6 +83,41 @@ def test_loss_is_differentiable():
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
     # the soil-moisture target makes the porosity scale (theta_sat) trainable
     assert float(jnp.max(jnp.abs(g["pft_smscale"]))) > 0.0, "pft_smscale has zero gradient"
+
+
+def test_snow_albedo_params_trainable():
+    """With snow present (cold air + snowfall) the exposed snow-albedo params carry a
+    non-zero gradient -> they actually drive the surface albedo (snow cover fraction +
+    snow brightness), not inert LandAlbedoConfig defaults."""
+    data = dict(_synthetic_data())
+    cold = 250.0                                   # below freezing -> snow accumulates
+    data["skt"] = jnp.full_like(data["skt"], cold)
+    data["t0"] = jnp.full_like(data["t0"], cold)
+    data["forc"] = [f._replace(
+        T_lowest=jnp.full_like(f.T_lowest, cold),
+        precip_snow=jnp.full_like(f.precip_snow, 2e-5),
+        precip_total=jnp.full_like(f.precip_total, 2e-5)) for f in data["forc"]]
+    g = jax.grad(lambda p: loss_ml(p, data)[0])(init_ext_params())
+    for k in ("snow_max", "snow_min", "snow_dcrit", "snow_tau_days"):
+        assert jnp.all(jnp.isfinite(g[k])), f"{k} non-finite gradient"
+    # With continuously-FRESH snow (snow_age~0) the fresh-snow albedo and the snow-cover
+    # threshold drive the loss; snow_min / tau only engage once snow AGES (snow_age>0),
+    # so they are legitimately inert here (both are non-zero on real 24-h data, where
+    # snow ages between events).
+    for k in ("snow_max", "snow_dcrit"):
+        assert float(jnp.abs(g[k])) > 0.0, f"{k} inert (no fresh-snow-albedo gradient)"
+
+
+def test_split_cells_disjoint_and_complete():
+    """The 80/20 train/test split partitions the cells: disjoint and covering."""
+    data = _synthetic_data(ncol=20)
+    train, test = _split_cells(data, 0.2, seed=0)
+    assert int(test["lat"].shape[0]) == 4 and int(train["lat"].shape[0]) == 16
+    orig = set(np.asarray(data["lat"]).round(9).tolist())
+    tr = set(np.asarray(train["lat"]).round(9).tolist())
+    te = set(np.asarray(test["lat"]).round(9).tolist())
+    assert tr.isdisjoint(te), "train/test overlap -> leakage"
+    assert (tr | te) == orig, "split drops or duplicates cells"
 
 
 def test_lam_sm_zero_is_true_noop():

@@ -172,7 +172,17 @@ BOUNDS_EXT = dict(
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
     th_glacier_cboost=(1.0, 15.0),                     # deep-ice inertia boost (glacier)
-    glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85))
+    glac_alb=(0.45, 0.75),
+    # Snow albedo (global scalars, blended over the snow-cover fraction f_snow =
+    # min(1, snow_depth/snow_depth_crit)).  The offline model is too DARK over the
+    # snowy high-latitude cells (negative albedo bias) -> expose the snow-cover and
+    # snow-brightness knobs, not just fresh-snow albedo: a LOWER snow_dcrit makes a
+    # given snow water equivalent cover more of the cell (raising f_snow toward 1),
+    # snow_min lifts the aged-snow floor, snow_tau_days slows the age decay.
+    snow_max=(0.60, 0.90),          # fresh-snow albedo (widened HI: fresh snow ~0.85-0.9)
+    snow_min=(0.35, 0.70),          # aged/melting-snow albedo floor
+    snow_dcrit=(5.0, 60.0),         # snow water equiv [kg/m2] for full cover (LOWER=brighter)
+    snow_tau_days=(1.0, 20.0))      # snow-albedo age e-folding [days]
 
 
 def constrain_ext(p: dict) -> dict:
@@ -211,6 +221,9 @@ def init_ext_params() -> dict:
         pft_cscale=_inv_ext(full(0.9), "pft_cscale"),
         th_glacier_cboost=jnp.asarray(_inv_ext(5.0, "th_glacier_cboost")),
         glac_alb=_inv_ext(0.55, "glac_alb"), snow_max=_inv_ext(0.80, "snow_max"),
+        snow_min=_inv_ext(0.50, "snow_min"),          # LandAlbedoConfig defaults:
+        snow_dcrit=_inv_ext(50.0, "snow_dcrit"),      # alpha_snow_min=0.50, crit=50 kg/m2,
+        snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # tau_snow_decay=5 days
     ).items()}
 
 
@@ -270,7 +283,10 @@ def build_multilayer_cfg(cp, data):
         stomata=StomataConfig(enabled=_STOMATA_ON),  # Farquhar -> Vc_max25/g1/LCMA active
         carbon=CarbonConfig(scheme="differland" if _STOMATA_ON else "none"),
         snow_albedo_feedback=True,
-        land_albedo=LandAlbedoConfig(alpha_snow_max=cp["snow_max"]))
+        land_albedo=LandAlbedoConfig(
+            alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
+            snow_depth_crit=cp["snow_dcrit"],
+            tau_snow_decay=cp["snow_tau_days"] * 86400.0))   # days -> seconds
     # Carbon state is PRESCRIBED (fixed climatological leaf carbon -> fixed LAI), the
     # same decoupling as the soil-moisture trick: it activates the photosynthesis /
     # stomatal-conductance parameters (Vc_max25, g1, LCMA via LAI = C_fol/LCMA) so they
@@ -462,11 +478,48 @@ def _drop_nan_grad_cells(data: dict, p: dict) -> np.ndarray:
     return np.asarray(keep, dtype=int)
 
 
-def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0):
+def _split_cells(data: dict, frac: float, seed: int):
+    """Random train/test split of the sampled cells -> (train_data, test_data).  Uses
+    seed+1 so the split is independent of the cell-sampling RNG (seed)."""
+    n = int(data["lat"].shape[0])
+    idx = np.random.default_rng(seed + 1).permutation(n)
+    ntest = max(1, int(round(frac * n)))
+    return _select_cells(data, idx[ntest:]), _select_cells(data, idx[:ntest])
+
+
+def _metrics(cp: dict, data: dict):
+    """Area-weighted skin-T / albedo RMSE + bias for a constrained param set."""
+    T, A, _ = forward_ml(cp, data)
+    w = data["w"]; sw = float(jnp.sum(w))
+    tr = float(jnp.sqrt(jnp.sum(w[None] * (T - data["skt"]) ** 2) / sw / 12))
+    tb = float(jnp.sum(w[None] * (T - data["skt"])) / sw / 12)
+    ar = float(jnp.sqrt(jnp.sum(w[None] * (A - data["alb"]) ** 2) / sw / 12))
+    ab = float(jnp.sum(w[None] * (A - data["alb"])) / sw / 12)
+    return tr, tb, ar, ab
+
+
+def _report_test(tuned: dict, test_data: dict):
+    """Held-out generalisation: initial (CLM5) vs trained, on cells NEVER trained on."""
+    ti, tbi, ai, abi = _metrics(constrain_ext(init_ext_params()), test_data)
+    tc, tbc, ac, abc = _metrics({k: jnp.asarray(v) for k, v in tuned.items()}, test_data)
+    print(f"# HELD-OUT TEST ({int(test_data['lat'].shape[0])} cells, never trained):",
+          flush=True)
+    print(f"#   skin-T RMSE {ti:.3f} -> {tc:.3f} K   bias {tbi:+.3f} -> {tbc:+.3f} K",
+          flush=True)
+    print(f"#   albedo RMSE {ai:.4f} -> {ac:.4f}   bias {abi:+.4f} -> {abc:+.4f}", flush=True)
+
+
+def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
+          prefilter=True):
     p = init_ext_params()
-    keep = _drop_nan_grad_cells(data, p)        # exclude NaN-backward cells (logged)
-    if keep.size < int(data["lat"].shape[0]):
-        data = _select_cells(data, keep)
+    # The per-cell pre-filter is O(ncol) single-cell gradients — cheap at n_sub~200 but
+    # the bottleneck at full-grid (~5.5k cells).  On the AD-stable 24-h forcing almost
+    # no cell is pathological, so --no-prefilter skips it and leans on the per-step
+    # gradient sanitisation + best-checkpoint instead.
+    if prefilter:
+        keep = _drop_nan_grad_cells(data, p)    # exclude NaN-backward cells (logged)
+        if keep.size < int(data["lat"].shape[0]):
+            data = _select_cells(data, keep)
     vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
     # Gradient clipping: the initial loss is large (extreme high-latitude / desert /
     # ice cells contribute a huge skin-T error + seasonal-amplitude term), so unclipped
@@ -649,6 +702,18 @@ def main():
                     help="enable Farquhar stomata (makes Vc_max25/g1/LCMA trainable; "
                          "degrades the offline fit — needs the coupled model)")
     ap.add_argument("--out", default="results/land_tuned_multilayer.json")
+    ap.add_argument("--holdout", type=float, default=0.0,
+                    help="fraction of sampled cells held OUT of training to report a "
+                         "generalisation test RMSE (0.2 = 80/20 train/test; 0 = off)")
+    ap.add_argument("--no-prefilter", action="store_true",
+                    help="skip the O(ncol) per-cell NaN-gradient pre-filter (the "
+                         "bottleneck at full-grid; safe on the AD-stable 24-h forcing "
+                         "where the per-step sanitisation catches the rare bad cell)")
+    ap.add_argument("--keep-file", default=None,
+                    help="cache the pre-filter keep-indices (.npy): computed+saved on the "
+                         "first run (do it on CPU — the per-cell filter is slow on GPU), "
+                         "loaded on later runs so a GPU full-grid run gets the CLEAN "
+                         "pre-filtered gradient without paying the per-cell scan")
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     _LAM_AMP = args.lam_amp
@@ -656,12 +721,35 @@ def main():
     _LAM_PFT = args.lam_pft
     _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
+    # Pre-filter, cached: compute the per-cell NaN-gradient keep-set once (on CPU) and
+    # reuse it so a GPU full-grid run trains on the CLEAN set without the slow per-cell
+    # scan.  Filtering happens BEFORE the train/test split so both partitions are clean.
+    prefilter = not args.no_prefilter
+    if args.keep_file and os.path.exists(args.keep_file):
+        keep = np.load(args.keep_file)
+        data = _select_cells(data, keep); prefilter = False
+        print(f"# loaded {keep.size} keep-cells from {args.keep_file} (skip per-cell filter)",
+              flush=True)
+    elif args.keep_file:
+        keep = _drop_nan_grad_cells(data, init_ext_params())
+        np.save(args.keep_file, keep)
+        data = _select_cells(data, keep); prefilter = False
+        print(f"# computed + saved {keep.size}/{args.n_sub} keep-cells -> {args.keep_file}",
+              flush=True)
+    test_data = None
+    if args.holdout > 0.0:
+        data, test_data = _split_cells(data, args.holdout, args.seed)
+        print(f"# train/test split: {int(data['lat'].shape[0])} train / "
+              f"{int(test_data['lat'].shape[0])} test (holdout {args.holdout:.0%}, "
+              f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip)
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
+                  prefilter=prefilter)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)
     print(f"# recommended tuned params -> {args.out} (does NOT mutate production defaults)")
+    if test_data is not None:
+        _report_test(tuned, test_data)
 
 
 if __name__ == "__main__":
