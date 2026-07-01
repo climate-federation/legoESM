@@ -125,7 +125,7 @@ def main():
     from legoesm.forcing.surface_utils import blend_surface_temperature
     from legoesm.training.aimip_amip_forcing import (
         DEFAULT_AIMIP_FORCING, ghg_vmr_at_year, interp_forcing_at,
-        regrid_monthly_forcing_to_gaussian,
+        open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
@@ -167,6 +167,9 @@ def main():
     ic_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
     state = carry_to_spectral_state(ic_carry, grid)
     land_mask = land_mask_from_phis(jnp.asarray(ic_carry.phis), smooth=True)
+    ic_p_s = np.asarray(ic_carry.p_s)  # for the ozone plev->sigma interp
+    ds_o3 = open_arco_era5()           # historical ERA5 ozone (ARCO)
+    sigma_full_np = np.asarray(sigma.sigma_full)
 
     # --- trained classical model (spatial_surface=True per ace2 config) ---
     template = AIMIPClassicalParams.from_defaults(spatial_surface=True)
@@ -200,12 +203,12 @@ def main():
                                      cutoff_fraction=pe.spectral_filter_strength)
              if pe.spectral_filter_strength > 0 else None)
 
-    seg = jax.jit(lambda st, sst_col, doy, ghg: spectral_amip_rollout(
+    seg = jax.jit(lambda st, sst_col, doy, ghg, o3: spectral_amip_rollout(
         st, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps_day,
         sst_col=sst_col, sizing_phys_state=sizing_ps,
         day_of_year_base=doy, seconds_offset=0.0,
         rad_update_interval=args.rad_update_interval,
-        sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg,
+        sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg, o3_vmr=o3,
     ))
     T_ice = float(constants.T_freeze_ocean)
 
@@ -217,6 +220,7 @@ def main():
     end = _date(args.end)
     record_from = _date(args.record_from)
     monthly: dict[tuple[int, int], list[float]] = {}
+    _o3_cache: dict[tuple[int, int], jnp.ndarray] = {}  # current-month ozone
     day = start
     stop = False
     while day < end and not stop:
@@ -233,8 +237,17 @@ def main():
         # Transient historical GHG for this year (physical RRTMGP needs it to
         # produce the warming trend; traced scalars -> no retrace).
         ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(day.year).items()}
+        # Transient historical ozone, refreshed monthly (ARCO read + regrid is
+        # the cost; ozone is a monthly field so once/month suffices).
+        key = (day.year, day.month)
+        if key not in _o3_cache:
+            _o3_cache.clear()  # keep only the current month
+            _o3_cache[key] = jnp.asarray(
+                ozone_vmr_at_date(ds_o3, day, grid, sigma_full_np, ic_p_s)
+            )
         state = seg(state, jnp.asarray(override),
-                    jnp.asarray(float(day.timetuple().tm_yday)), ghg)
+                    jnp.asarray(float(day.timetuple().tm_yday)), ghg,
+                    _o3_cache[key])
         if day >= record_from:
             st = _surf_T(state)
             monthly.setdefault((day.year, day.month), []).append(st)

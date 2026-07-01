@@ -108,7 +108,7 @@ def main():
     from legoesm import constants
     from legoesm.training.aimip_amip_forcing import (
         DEFAULT_AIMIP_FORCING, ghg_vmr_at_year, interp_forcing_at,
-        regrid_monthly_forcing_to_gaussian,
+        open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
@@ -150,6 +150,7 @@ def main():
     ocean = land < 0.5
     T_ice = float(constants.T_freeze_ocean)
     wb2 = TrainingERA5Config().zarr_store
+    ds_o3 = open_arco_era5()  # historical ERA5 ozone (ARCO)
 
     def _override_at(date: _dt.date):
         ns = np.datetime64(date).astype("datetime64[ns]").astype(np.int64)
@@ -171,11 +172,16 @@ def main():
             # Transient historical GHG for this sample's year (traced scalars ->
             # no retrace across samples/years). Physical RRTMGP needs it.
             ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(d0.year).items()}
+            # Transient historical ozone at this sample's date (ncol, nlev),
+            # interpolated to sigma with the sample's own surface pressure.
+            o3 = jnp.asarray(ozone_vmr_at_date(
+                ds_o3, d0, grid, sigma_full, np.asarray(ic_carry.p_s),
+            ))
             out.append((
                 carry_to_spectral_state(ic_carry, grid), tgt_carry,
                 jnp.asarray(_override_at(mid)),
                 jnp.asarray(float(d0.timetuple().tm_yday)),
-                ghg,
+                ghg, o3,
             ))
             if phis is None:
                 phis = jnp.asarray(ic_carry.phis)
@@ -226,13 +232,13 @@ def main():
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
             land_mask=land_mask, split_rad=True,
         )
-        ic_state, tgt_carry, sst_col, doy, ghg = sample
+        ic_state, tgt_carry, sst_col, doy, ghg, o3 = sample
         pred = spectral_amip_rollout(
             ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
             sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
             rad_update_interval=args.rad_update_interval,
             sponge_factor=sponge, spectral_filter=sfilt,
-            ghg_vmr=ghg, use_checkpoint=True,
+            ghg_vmr=ghg, o3_vmr=o3, use_checkpoint=True,
         )
         state_loss = spectral_state_vs_carry_loss(
             pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,

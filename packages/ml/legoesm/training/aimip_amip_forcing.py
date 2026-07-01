@@ -139,3 +139,63 @@ def ghg_vmr_at_year(year, experiment: str = "amip") -> dict:
         "cfc11_pptv": _c.cfc11_pptv,
         "cfc12_pptv": _c.cfc12_pptv,
     })
+
+
+# --- historical ozone (ERA5 ARCO) -------------------------------------------
+# WB2 has no ozone; ARCO-ERA5 (full 37-level store) carries the transient
+# historical ozone (stratospheric depletion + recovery) RRTMGP needs.
+_ARCO_ERA5_STORE = (
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
+_ARCO_O3_VARS = ("ozone_mass_mixing_ratio", "o3")
+
+
+def open_arco_era5():
+    """Open the public ARCO-ERA5 store (anon GCS) for historical ozone."""
+    import xarray as xr
+    return xr.open_zarr(
+        _ARCO_ERA5_STORE, chunks=None, storage_options={"token": "anon"},
+    )
+
+
+def ozone_vmr_at_date(ds_arco, date, grid, sigma_full, p_s_col):
+    """Historical ERA5 ozone (ARCO) at ``date`` -> O3 VMR on the model sigma grid.
+
+    Loads ozone mass mixing ratio (plev, lat, lon) nearest ``date``, regrids each
+    pressure level to the Gaussian grid, interpolates plev->sigma with the model
+    surface pressure ``p_s_col`` (ncol,), and converts mass->volume mixing ratio
+    (x M_dry/M_o3). Returns (ncol, nlev) for ``forcing['o3_vmr']`` — the
+    transient historical ozone a physical RRTMGP run needs.
+    """
+    import jax.numpy as jnp
+    import pandas as pd
+
+    from legoesm import constants
+    from legoesm.training.vertical_interp import interp_pressure_to_sigma
+
+    var = next((v for v in _ARCO_O3_VARS if v in ds_arco), None)
+    if var is None:
+        raise KeyError(f"no ozone var {_ARCO_O3_VARS} in ARCO store")
+    times = pd.DatetimeIndex(ds_arco.time.values)
+    target = pd.Timestamp(year=date.year, month=date.month, day=date.day)
+    if target < times[0] or target > times[-1]:
+        raise ValueError(f"{date} outside ARCO ozone range")
+    da = ds_arco[var].sel(time=target, method="nearest")  # (level, lat, lon)
+    o3 = np.asarray(da.values, dtype=np.float64)
+    lev_hpa = np.asarray(da.level.values, dtype=np.float64)
+    lat = np.asarray(ds_arco.latitude.values, dtype=np.float64)
+    lon = np.asarray(ds_arco.longitude.values, dtype=np.float64)
+    # Regrid each pressure level to the Gaussian grid -> (ncol, n_plev).
+    o3_g = np.stack(
+        [_regrid_field_2d(o3[k], lat, lon, grid).reshape(-1) for k in range(o3.shape[0])],
+        axis=-1,
+    )
+    plev_pa = lev_hpa * 100.0
+    order = np.argsort(plev_pa)  # interp expects ascending pressure
+    plev_pa, o3_g = plev_pa[order], o3_g[:, order]
+    o3_sigma = np.asarray(interp_pressure_to_sigma(
+        jnp.asarray(o3_g), jnp.asarray(plev_pa),
+        jnp.asarray(np.asarray(p_s_col).reshape(-1)), jnp.asarray(sigma_full),
+    ))
+    # mass mixing ratio [kg/kg] -> volume mixing ratio [mol/mol].
+    return (o3_sigma * (float(constants.M_dry) / float(constants.M_o3))).astype(np.float64)
