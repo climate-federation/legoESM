@@ -583,6 +583,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     cdgrid_div_damp_cube as _div_damp_cube,
     cdgrid_hyperdiff_cube as _hyperdiff_cube,
 )
+from legoesm.experiments.matrix.namelist import write_case_namelist
 
 
 def _hyperdiff_ico(mesh) -> float:
@@ -7695,6 +7696,14 @@ def main():
         else:
             days = tc.duration_days
         out_dir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            out_dir, tc,
+            title=f"atmosphere test-case namelist: {tc.output_path}",
+            extra={"radiation": args.radiation, "days_run": days,
+                   "quick": bool(args.quick)},
+        )
 
         label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"
         print(f"\n[{i}/{len(tests)}] {label} ({tc.resolution}, "

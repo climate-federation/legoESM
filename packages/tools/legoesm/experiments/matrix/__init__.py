@@ -32,6 +32,10 @@ from legoesm.experiments.matrix.gates import (
     moisture_gate,
     salt_gate,
 )
+from legoesm.experiments.matrix.namelist import (
+    build_namelist,
+    write_case_namelist,
+)
 from legoesm.experiments.matrix.registry import MatrixRunner
 from legoesm.experiments.matrix.report import (
     detect_regressions,
@@ -57,6 +61,8 @@ __all__ = [
     "moisture_gate",
     "salt_gate",
     "MatrixRunner",
+    "build_namelist",
+    "write_case_namelist",
     "detect_regressions",
     "write_summary",
 ]
