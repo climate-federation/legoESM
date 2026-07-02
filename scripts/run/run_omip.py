@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -2365,8 +2367,27 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
+# Single in-flight background restart writer (see _save_restart).
+_RESTART_WRITER: dict = {"thread": None}
+
+
+def _join_restart_writer():
+    """Block until the in-flight background restart write (if any) completes.
+
+    For consumers that must READ the restart file right after
+    :func:`_save_restart` returns (snapshot plotter, tests)."""
+    t = _RESTART_WRITER.get("thread")
+    if t is not None:
+        t.join()
+
+
 def _save_restart(state, day, step, output_dir, ice_state=None):
     """Save a state restart in the global-overturning npz format.
+
+    The write is ASYNCHRONOUS (background thread, atomic tmp+rename) —
+    the returned path may not exist for a few seconds; the previous
+    write is always joined before a new one starts, and the interpreter
+    joins the final write at exit.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
     so the same plotting helpers consume both runs without
@@ -2404,7 +2425,29 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
                 continue
             payload[f"ice_{f}"] = np.asarray(obj.data)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
-    np.savez_compressed(fname, **payload)
+    # Async + atomic write.  The device->host pulls above are synchronous
+    # (they snapshot the state), but the gzip+disk write (seconds to
+    # minutes at eORCA-class sizes) runs on a background thread so the
+    # step loop resumes immediately.  Single-writer: join the previous
+    # in-flight write first (never two concurrent writes; bounds host
+    # memory to one extra payload).  Atomic: write ``<name>.npz.tmp``
+    # then ``os.replace`` — a walltime kill mid-write can never leave a
+    # truncated file that resume/chain launchers (glob ``restart_day*.npz``)
+    # would mistake for a valid restart.  Non-daemon thread: interpreter
+    # exit joins the final write, so the last checkpoint always completes.
+    prev = _RESTART_WRITER.get("thread")
+    if prev is not None:
+        prev.join()
+
+    def _write(fname=fname, payload=payload):
+        tmp = fname.with_name(fname.name + ".tmp")
+        np.savez_compressed(tmp, **payload)
+        os.replace(tmp, fname)
+
+    t = threading.Thread(target=_write, name="omip-restart-writer",
+                         daemon=False)
+    t.start()
+    _RESTART_WRITER["thread"] = t
     return fname
 
 
@@ -3891,6 +3934,10 @@ def run_omip_single(grid_type: str, args) -> dict:
                 Uses a lock to serialize matplotlib calls (not thread-safe).
                 """
                 def _render():
+                    # The restart write is itself async (atomic tmp+rename,
+                    # see _save_restart): join the in-flight writer so the
+                    # npz exists before the plotter reads it.
+                    _join_restart_writer()
                     with _snap_lock:
                         try:
                             _plot_snap(restart_path, _snap_mesh, _snap_z)

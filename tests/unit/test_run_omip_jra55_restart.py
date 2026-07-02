@@ -47,8 +47,12 @@ def test_save_restart_writes_expected_npz(tmp_path):
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
     out = tmp_path / "out"
     fname = run_omip._save_restart(state, day=10.0, step=2880, output_dir=out)
+    # The write is async (background thread + atomic tmp/rename): join it
+    # before reading, and assert no .tmp residue survives the rename.
+    run_omip._join_restart_writer()
     assert fname.exists()
     assert fname.name == "restart_day000010.npz"
+    assert not list(out.glob("*.tmp")), "atomic rename left a .tmp file"
 
     data = np.load(fname, allow_pickle=False)
     # Required scalar metadata
@@ -64,7 +68,9 @@ def test_save_restart_filename_zero_pads_to_six_digits(tmp_path):
     grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
     fname = run_omip._save_restart(state, day=5.0, step=1, output_dir=tmp_path)
+    run_omip._join_restart_writer()
     assert fname.name == "restart_day000005.npz"
+    assert fname.exists()
 
 
 # ============================================================================
@@ -110,6 +116,7 @@ def test_run_omip_loop_writes_restarts_at_cadence(tmp_path):
         checkpoint_days=0.125,
         checkpoint_dir=out,
     )
+    run_omip._join_restart_writer()   # async writer: join before globbing
     files = sorted(out.glob("restart_day*.npz"))
     assert len(files) >= 1, f"no restarts written; got {files}"
     # Final step should always trigger a save.
