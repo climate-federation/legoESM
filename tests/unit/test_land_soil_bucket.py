@@ -374,3 +374,67 @@ class TestCompiledStepIntegration:
         out_off, _, _, _ = _run(pipe_off, None)
         assert out_off.w_land is None
         assert not jnp.allclose(phys_out.dq_v_dt, out_off.dq_v_dt)
+
+
+def test_land_stomatal_beta_allowed_with_multilayer_land():
+    """land_stomatal_beta needs the slab bucket ONLY when the slab land is active.
+    use_multilayer_land supplies the root-zone moisture availability from the
+    Richards column instead (#715 threads the stomata into MultiLayerLandConfig),
+    so validate_strict must WAIVE the bucket requirement — else the SOTA multilayer
+    + stomata AMIP config (config/amip/amip_sota.yaml) fails validation."""
+    # multilayer + stomata, no slab bucket => the bucket rule must NOT fire
+    ml = ExperimentConfig(use_multilayer_land=True, land_stomatal_beta=True,
+                          land_soil_bucket=False)
+    try:
+        ml.validate_strict()
+        waived = True
+    except ValueError as exc:
+        waived = "land_stomatal_beta=True requires land_soil_bucket" not in str(exc)
+    assert waived, "multilayer land must waive the slab-bucket requirement for stomata"
+
+    # slab land + stomata + no bucket => the rule STILL fires (guard not weakened)
+    slab = ExperimentConfig(use_multilayer_land=False, land_stomatal_beta=True,
+                            land_soil_bucket=False)
+    try:
+        slab.validate_strict()
+        fired = False
+    except ValueError as exc:
+        fired = "land_stomatal_beta=True requires land_soil_bucket" in str(exc)
+    assert fired, "slab land must still require the bucket for stomata"
+
+
+def test_surface_tiled_allowed_with_multilayer_land_no_mask():
+    """surface_tiled needs an active land tile; use_multilayer_land IS one (its land
+    fraction comes from --topography elevation-derived f_land when no mask is given),
+    so validate_strict must accept surface_tiled + multilayer WITHOUT a land-mask
+    file or slab activation — else the SOTA config (config/amip/amip_sota.yaml) could
+    only run with a redundant explicit mask."""
+    # multilayer + tiled + REAL topography (gaussian -> f_land>0), no mask, no slab
+    # => validates cleanly (NOT rejected by the active-tile rule NOR the flat guard).
+    ml = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                          use_multilayer_land=True, slab_land_active=False,
+                          land_mask_path="", topography="gaussian")
+    ml.validate_strict()  # raises if the mask-free multilayer combo is rejected
+
+    # multilayer + tiled + FLAT topography + no mask => f_land==0 everywhere, so the
+    # flat guard must reject it (a real land tile was requested but there is no land).
+    flat = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                            use_multilayer_land=True, slab_land_active=False,
+                            land_mask_path="", topography="flat")
+    try:
+        flat.validate_strict()
+        flat_fired = False
+    except ValueError as exc:
+        flat_fired = "topography='flat'" in str(exc)
+    assert flat_fired, "multilayer + tiled + flat topo + no mask must be rejected"
+
+    # tiled + no land tile at all (no slab, no mask, no multilayer) => STILL fires
+    none_tile = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                                 use_multilayer_land=False, slab_land_active=False,
+                                 land_mask_path="")
+    try:
+        none_tile.validate_strict()
+        fired = False
+    except ValueError as exc:
+        fired = "surface_tiled=True requires an active land tile" in str(exc)
+    assert fired, "tiled surface with NO land tile must still be rejected"

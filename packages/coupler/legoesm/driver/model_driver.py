@@ -1205,20 +1205,28 @@ class ModelDriver:
                 self.physics.albedo_land = (
                     land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
                 )
+            # Tiled (mosaic) surface fluxes + the radiation cadence apply to ANY
+            # active land tile — slab OR multilayer (Richards).  Thread them at the
+            # _has_land level so use_multilayer_land (topography-derived f_land, no
+            # slab, no mask) actually runs the tiled turbulent-flux path: the flux
+            # injection in physics_pipeline is gated on physics.surface_tiled, which
+            # was previously only set inside the slab/mask branch below -> multilayer
+            # validated but silently no-op'd the tiled surface.  Slab-specific bucket/
+            # stomata/snow stay in the slab-activation branch.
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            # ocean bulk scheme on the ocean tile, land Monin-Obukhov on the land
+            # tile (validate_strict requires louis + an active land tile).
+            self.physics.surface_tiled = bool(
+                getattr(self.config, "surface_tiled", False)
+            )
+            self.physics.surface_z0_land = float(
+                getattr(self.config, "surface_z0_land", 0.1)
+            )
             _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
                 getattr(self.config, "slab_land_active", False)
             )
             if _activate:
                 self.physics.slab_land_active = True
-                self.physics.rad_update_steps = self.config.rad_update_steps
-                # Tiled (mosaic) surface fluxes: ocean bulk scheme on the
-                # ocean tile, land Monin-Obukhov on the land tile (validated
-                # to require louis + an active land tile in validate_strict).
-                _tiled = bool(getattr(self.config, "surface_tiled", False))
-                self.physics.surface_tiled = _tiled
-                self.physics.surface_z0_land = float(
-                    getattr(self.config, "surface_z0_land", 0.1)
-                )
                 # Prognostic soil-water bucket: soil-moisture-limited land
                 # evaporation (beta) instead of a saturated wet surface.
                 _bucket = bool(getattr(self.config, "land_soil_bucket", False))
@@ -1256,8 +1264,9 @@ class ModelDriver:
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
                     f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
-                    f"tiled_surface={_tiled}"
-                    + (f", z0_land={self.physics.surface_z0_land:g}m" if _tiled else "")
+                    f"tiled_surface={self.physics.surface_tiled}"
+                    + (f", z0_land={self.physics.surface_z0_land:g}m"
+                       if self.physics.surface_tiled else "")
                     + (f", soil_bucket(W_max={self.physics.land_bucket_w_max:g}"
                        f" kg/m2, beta_min={self.physics.land_beta_min:g})"
                        if _bucket else "")
@@ -1299,6 +1308,7 @@ class ModelDriver:
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
+        from legoesm.land.carbon.stomata import StomataConfig
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.soil_grid import SoilGridConfig
 
@@ -1311,16 +1321,43 @@ class ModelDriver:
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
-        # the CLM reference surfdata onto the model columns.
-        surface_map = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+        # the CLM reference surfdata onto the model columns.  A pre-staged path
+        # (``clm_surfdata_path``) is required on compute nodes with no outbound
+        # internet (the default fetches from UCAR, which fails on such nodes).
+        surfdata_path = self.config.clm_surfdata_path
+        if surfdata_path:
+            # A staged path is set: use it, and FAIL LOUDLY if absent rather than
+            # attempting a (compute-node-blocked) network fetch to that exact path.
+            if not os.path.exists(surfdata_path):
+                raise FileNotFoundError(
+                    f"clm_surfdata_path={surfdata_path!r} does not exist; stage the "
+                    "CLM surfdata NetCDF there (compute nodes have no outbound "
+                    "internet to download it).")
+            surfdata_file = surfdata_path
+        else:
+            surfdata_file = download_clm_surfdata()
+        surface_map = load_clm_surface(surfdata_file, lat_deg, lon_deg)
 
-        # Non-spatial defaults (soil grid depth/layers, Richards, carbon, stomata)
-        # from the config; clm_multilayer_setup overwrites only hydraulics/thermal.
+        # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
+        # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
+        # slab land already uses (snow_albedo_feedback, land_stomatal_beta) so
+        # ``use_multilayer_land`` is a strict UPGRADE (adds Richards multilayer soil
+        # + CLM texture/PFT maps) rather than a partial regression to a
+        # no-snow-albedo / no-stomata surface.  The soil SEB uses land MOST (with
+        # the CLM per-cell z0) to MATCH the atmospheric tiled LAND tile, which
+        # hard-codes land "most"; surface_bulk_scheme (coare3/large_yeager) is the
+        # OCEAN surface-layer scheme and must NOT drive the land skin-T (it would
+        # evolve T_sfc with ocean-roughness logic, inconsistent with the atmosphere
+        # land-flux exchange law — the T_sfc now feeds T_land, so consistency here
+        # matters).
         base = MultiLayerLandConfig(
             soil_grid=SoilGridConfig(
                 n_layers=self.config.multilayer_n_layers,
                 total_depth=self.config.multilayer_soil_depth,
             ),
+            bulk_scheme="most",
+            snow_albedo_feedback=self.config.snow_albedo_feedback,
+            stomata=StomataConfig(enabled=self.config.land_stomatal_beta),
         )
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
@@ -1786,6 +1823,7 @@ class ModelDriver:
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                        't_low_mean',
                     ):
                         if kwargs.get(_tname) is not None:
                             kwargs[_tname] = _g(kwargs[_tname])
@@ -1822,6 +1860,19 @@ class ModelDriver:
 
                     # Gather tracers (all ranks participate)
                     for tname in ('q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g'):
+                        arr = kwargs.get(tname)
+                        if arr is not None:
+                            kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
+
+                    # Gather the segment-accumulated 2-D diagnostics too:
+                    # these are accumulated at OWNED faces only
+                    # (``.at[_ofi].add`` in the segment scan), so without
+                    # this gather rank 0 would write zeros / stale values
+                    # on its five non-owned faces into the timeseries and
+                    # CMOR output.  All ranks must participate (collective).
+                    for tname in ('precip_total', 'shflx', 'lhflx',
+                                  'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
+                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -5974,6 +6025,20 @@ class ModelDriver:
                 "forcing_update_days or enable diagnostics for a finer "
                 "cadence.", cfg.dataset, _fb_days,
             )
+        if cfg.output.cmip_output and cfg.output.diag_days > 1:
+            # Amon monthly means are safe at any cadence (fluxes/T_low are
+            # time-integrated inside the segment scan), but the CMIP ``day``
+            # table is fed one sample per diagnostic interval: at
+            # diag_days=N>1 each written "day" is really an N-day-apart
+            # sample and tasmin/tasmax degenerate to that sample.
+            logger.warning(
+                "CMIP day-table output with diag_days=%.3g > 1: daily "
+                "fields are sampled every %.3g days and tasmin/tasmax are "
+                "NOT true daily extremes.  Amon monthly means are "
+                "unaffected (segment-accumulated).  Set diag_days=1 for "
+                "meaningful day-table output.",
+                cfg.output.diag_days, cfg.output.diag_days,
+            )
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
@@ -6225,6 +6290,14 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Segment-mean flux / T_low accumulators (CMOR diurnal-alias
+                # fix): reset to zero at every segment start like precip.
+                sw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                sw_down_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                t_low_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 # Persist the lagged convective-cloud precip ACROSS segment
                 # boundaries (radiation runs before convection; without this the
                 # lag would reset to zeros at step 0 of every segment).  Only the
@@ -6468,6 +6541,20 @@ class ModelDriver:
                 seg_precip_rate = seg_precip / _seg_dur
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
+                # Segment-MEAN radiative fluxes / T_low (time integrals from
+                # the carry / segment duration) instead of the segment-end
+                # instantaneous held_* values: the held snapshots put a full
+                # day/night diurnal alias into every CMOR Amon "monthly mean"
+                # (fixed-UTC sampling) and mixed instantaneous fluxes into
+                # the energy budget. _dm_carry = ensemble mean under
+                # ensembles, the plain carry otherwise (accums averaged
+                # member-wise, consistent with seg_precip).
+                seg_sw_up_toa = _dm_carry.sw_up_toa_accum / _seg_dur
+                seg_lw_up_toa = _dm_carry.lw_up_toa_accum / _seg_dur
+                seg_sw_down_toa = _dm_carry.sw_down_toa_accum / _seg_dur
+                seg_sw_net_sfc = _dm_carry.sw_net_sfc_accum / _seg_dur
+                seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
+                seg_t_low_mean = _dm_carry.t_low_accum / _seg_dur
 
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
@@ -6480,15 +6567,16 @@ class ModelDriver:
                     sst=sst,
                     sic=sic,
                     precip_total=seg_precip_rate,
-                    sw_up_toa=held_sw_up_toa,
-                    lw_up_toa=held_lw_up_toa,
-                    sw_net_sfc=held_sw_net_sfc,
-                    lw_net_sfc=held_lw_net_sfc,
-                    sw_down_toa=held_sw_down_toa,
+                    sw_up_toa=seg_sw_up_toa,
+                    lw_up_toa=seg_lw_up_toa,
+                    sw_net_sfc=seg_sw_net_sfc,
+                    lw_net_sfc=seg_lw_net_sfc,
+                    sw_down_toa=seg_sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    t_low_mean=seg_t_low_mean,
                     q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
                     q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )

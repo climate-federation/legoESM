@@ -165,6 +165,12 @@ def parse_args(argv: list[str] | None = None):
                    help="Strict mode: fail unless a --config file is given, so "
                         "the run is fully specified by a committed config (no "
                         "hidden parser defaults). (issue #691)")
+    p.add_argument("--params", type=str, default=None,
+                   help="YAML calibration file of tuned parameters keyed by "
+                        "param_collector qualified name 'scheme_key.field', "
+                        "validated against each scheme's __param_spec__ bounds "
+                        "and spliced into the nested *Config (here the vertical-"
+                        "mixing configs, e.g. KPPConfig). (issue #691)")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -3249,6 +3255,15 @@ def run_omip_single(grid_type: str, args) -> dict:
     # longer force-applies fp64 at import (codex 2026-06-21).
     apply_run_precision(args)
     run_config = build_config_from_args(args)
+    # Apply the --params calibration layer (tuned scheme parameters) into the
+    # built config's nested *Config NamedTuples (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            load_params_config,
+        )
+        run_config = apply_params_to_config(
+            run_config, load_params_config(args.params), driver="run_omip")
     # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
     # ``--resolution 16`` was applied verbatim to every grid
     # type.  Cube/spectral parsed it (silently wrong: cube

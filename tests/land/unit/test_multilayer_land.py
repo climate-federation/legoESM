@@ -646,6 +646,40 @@ class TestMultilayerLandStep(unittest.TestCase):
         self.assertEqual(response.T_sfc.shape, (ncol,))
         self.assertEqual(response.shflx.shape, (ncol,))
 
+    def test_state_dtype_stable_under_x64(self):
+        """Under JAX_ENABLE_X64 the soil-thermal / Richards solves promote to
+        float64, but the returned state must be cast back to the INPUT (storage)
+        dtype so a lax.scan carry has matching input/output dtypes.  The SOTA AMIP
+        run (JAX_ENABLE_X64=1) crashed here: carry land_ml.T_soil was float32 in
+        but float64 out.  Runs under x64 to reproduce the promotion."""
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.multilayer_land import (
+            step_multilayer_land, init_multilayer_land_state,
+        )
+        _was = getattr(jax.config, "jax_enable_x64", False)
+        jax.config.update("jax_enable_x64", True)
+        try:
+            config = MultiLayerLandConfig()
+            ncol = 8
+            # storage-dtype (float32) state, as ModelDriver seeds the carry
+            state = init_multilayer_land_state(
+                ncol, config, T_init=jnp.full(ncol, 280.0, dtype=jnp.float32))
+            self.assertEqual(state.T_soil.dtype, jnp.float32)
+            forcing = self._make_forcing(ncol)
+            new_state, _resp, _ = step_multilayer_land(
+                state, forcing, config, U_min=1.0, dt=600.0)
+            mismatched = [
+                f for f in state._fields
+                if hasattr(getattr(state, f), "dtype")
+                and getattr(new_state, f).dtype != getattr(state, f).dtype
+            ]
+            self.assertEqual(
+                mismatched, [],
+                f"state leaves changed dtype under x64 (scan-carry unsafe): "
+                f"{mismatched}")
+        finally:
+            jax.config.update("jax_enable_x64", _was)
+
     def test_surface_temperature_responds(self):
         """Surface temperature should change after a step."""
         from legoesm.land.config import MultiLayerLandConfig

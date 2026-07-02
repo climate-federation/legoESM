@@ -1,0 +1,18 @@
+# Example OMIP calibration params (issue #691) — the CALIBRATION layer.
+#
+#   run_omip.py --config config/omip/omip_example.yaml \
+#               --params config/omip/params_example.yaml
+#
+# FORMAT: param_collector qualified name "scheme_key.field": value (the SAME
+# keying the registry + the training output use, e.g. train_scm_rce_params).
+# Every key is validated against that scheme's __param_spec__ (existence +
+# bounds) and spliced into the matching nested *Config; a typo'd / out-of-bounds
+# / not-in-this-run parameter is a hard error.  Applied AFTER --config/CLI so a
+# trained recommended_defaults drops in unchanged.
+#
+# Scope: run_omip's config tree exposes the vertical-mixing configs (KPPConfig,
+# VerticalMixingConfig); other ocean schemes are built inside run_omip_single
+# and are not reachable via --params yet.
+
+# --- KPP background diffusivity (interior mixing floor) ---
+ocean.vm.kpp.K_bg: 1.0e-5

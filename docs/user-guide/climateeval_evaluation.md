@@ -83,35 +83,68 @@ fail the AMIP run — only the upfront path validation is fail-fast.
 
 ## Suites
 
-`--evaluation-suite` takes one or more of ClimateEval's own bundled
-suites (reusing its existing suite abstraction rather than re-deriving a
-variable/reference pick-list), all rendered into a **single combined
-report**. The default is two complementary suites:
+**By default `--evaluate` runs ALL of ClimateEval's bundled suites** —
+every tier — and renders them into a **single combined report**. A suite
+whose reference or model data is missing/inapplicable (e.g. the ECS suite
+needs abrupt-4xCO2 + piControl, the sub-daily suite needs sub-daily
+output) is **skipped and reported**, not fatal, so the report always
+contains whatever could actually be scored. Which suites score depends on
+what the run emits:
 
-- **`Tier1_sanity_checks`** — global-mean values range-checked against
-  literature "reasonable" bounds (needs no reference data).
-- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill diagnostics (Map,
-  ZonalLine, ZonalProfile + a metrics leaderboard).
+- **`Tier1_sanity_checks`** — global-mean values vs literature ranges
+  (no reference data needed).
+- **`Tier1_consistency_checks`** — mass/water conservation (annual; needs
+  a multi-year run to be meaningful).
+- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill (Map, ZonalLine,
+  ZonalProfile + leaderboard).
+- **`Tier2_ocean_monthly` / `Tier2_sea_ice_monthly`** — need `Omon` /
+  `SImon` output (the runner loads the full `cmor/` tree so these score).
+- **`Tier3_*`** (subdaily / dynamics / ecs) — usually skipped for a short
+  AMIP run (need sub-daily output, long integrations, or extra experiments).
 
 The runner forces every variable in each suite to reference ERA5
 specifically (stripping any other-model/other-reference entries), since
-the point of `--evaluate` here is "how far off is legoESM from ERA5," not
-a multi-model intercomparison. Override with e.g.
-`--evaluation-suite Tier2_atmosphere_monthly` for a single suite, or add
-more (`Tier1_consistency_checks` etc.) — note the consistency/ECS suites
-need multi-year output, so they are not in the default.
+the point of `--evaluate` is "how far off is legoESM from ERA5," not a
+multi-model intercomparison. Restrict with e.g.
+`--evaluation-suite Tier2_atmosphere_monthly` for a single suite.
 
 ## Standalone use
 
 The runner script doubles as a standalone CLI for scoring an *existing*
-CMOR output tree without re-running the model. It takes one or more
-`--suite` names and writes the per-suite `.ddb`s plus one combined
+CMOR output tree without re-running the model. Point `--cmor-dir` at the
+`cmor/` root (so ocean/sea-ice tables load); with no `--suite` it runs all
+bundled suites and writes the per-suite `.ddb`s plus one combined
 `climateeval_report.html` into `--output-dir`:
 
 ```bash
 $LEGOESM_CLIMATEEVAL_PYTHON scripts/validate/run_amip_climateeval.py \
-    --cmor-dir /scratch/you/amip_run/cmor/Amon \
-    --suite Tier1_sanity_checks Tier2_atmosphere_monthly \
+    --cmor-dir /scratch/you/amip_run/cmor \
     --data-root-dir "$LEGOESM_CLIMATEEVAL_DATA_ROOT" \
     --output-dir /scratch/you/amip_run
 ```
+
+## CMOR output sampling semantics (what the monthly means actually are)
+
+Diagnostics are collected once per `diag_days` at the segment boundary
+(a fixed UTC time of day). What each CMOR field is made of:
+
+- **True time means** (accumulated every model step inside the compiled
+  segment, immune to the diagnostic cadence): `pr`, `hfss`, `hfls`,
+  `rsdt`, `rsut`, `rlut`, and `tas` (segment-mean lowest-level T with the
+  instantaneous MOST 2 m stability offset). Before this fix the radiation
+  fields and `tas` were fixed-UTC snapshots — January `rsdt` had the
+  night hemisphere at exactly 0 and a ~1400 W/m² noon peak, so per-pixel
+  monthly radiation maps carried a full diurnal alias. Zonal and global
+  means were unaffected (longitude sampling averages local time), which
+  is why the defect passed budget checks.
+- **Snapshot samples at the diagnostic cadence** (documented limitation):
+  `psl`, `prw`, `ta`, `ua`, `va`, `hus`, `clt`, `clivi`, `clwvi`, `tos`,
+  `siconc`, and the clear-sky fluxes. At `diag_days=5` a monthly mean is
+  ~6 fixed-UTC samples — no first-order diurnal alias for most of these,
+  but expect weather-sampling noise (and mild alias for the cloud
+  fields). Accumulating the 3-D fields per step would grow the scan carry
+  by `nlev`× per field and is deferred until a use case needs it.
+- **The CMIP `day` table degenerates whenever `diag_days > 1`**: each
+  written "day" is really one sample every `diag_days` days and
+  `tasmin`/`tasmax` are not daily extremes. The driver logs a warning;
+  set `diag_days=1` if you need day-table output.

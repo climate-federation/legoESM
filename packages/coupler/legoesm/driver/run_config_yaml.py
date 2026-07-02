@@ -130,3 +130,214 @@ def require_config(config_value, *, driver: str = "run") -> None:
             "committed configuration (no hidden parser defaults)."
         )
 
+
+# ---------------------------------------------------------------------------
+# --params : calibration (tuned parameter) loader (issue #691, format #690)
+# ---------------------------------------------------------------------------
+# A ``--params FILE`` supplies the CALIBRATION layer: converged scheme-parameter
+# values, keyed by the ``param_collector`` qualified name ``scheme_key.field``
+# (the SAME keying the registry and the SCM-RCE / AIMIP training output use, e.g.
+# ``atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4``).  Applied to the built
+# config AFTER ``--config``/CLI so a trained ``recommended_defaults`` drops in
+# unchanged.  Every key is validated against the scheme's ``__param_spec__``
+# (existence + bounds) and routed to the matching nested ``*Config`` NamedTuple
+# by class name — a typo'd / out-of-bounds / absent-in-this-run parameter is a
+# hard error, never a silent mis-set of physics.
+
+
+def load_params_config(path) -> dict:
+    """Load a calibration params YAML (``{qualified_name: value}``) → dict.
+
+    Supports the same ``include:`` base merge as ``--config``.  Returns the raw
+    ``{qualified_name: value}`` mapping; validation + routing happen in
+    :func:`apply_params_to_config` (which needs the run's config object).
+    """
+    doc = read_yaml_with_includes(path)
+    if not isinstance(doc, dict):
+        raise SystemExit(f"--params {path}: top level must be a mapping of "
+                         "'scheme_key.field: value' entries.")
+    return dict(doc)
+
+
+# The atmosphere ExperimentConfig FLATTENS its (curated) tunable scheme
+# parameters to scalar fields named ``<prefix>_<field>`` (e.g.
+# ``cloud_q_c_diagnostic`` <- CloudConfig.q_c_diagnostic) instead of nesting the
+# scheme ``*Config`` NamedTuples, so the class-router below cannot reach them.
+# This maps each scheme config class to its ExperimentConfig scalar prefix; the
+# qualified_name -> ExperimentConfig-field map is then auto-derived + validated
+# (only params whose ``<prefix>_<field>`` is a real ExperimentConfig field are
+# included), so a calibration file keyed by the registry's qualified name still
+# drops into run_amip / run_coupled unchanged (issue #691).
+_ATM_PARAM_PREFIX: dict[str, str] = {
+    "CloudConfig": "cloud",
+    "LouisConfig": "louis",
+    "McFarlaneConfig": "mcfarlane",
+    "MorrisonConfig": "morrison",
+    "SBMConfig": "sbm",
+    "BechtoldConfig": "bechtold",
+    "KuoConfig": "kuo",
+    "YSUConfig": "ysu",
+    "ThompsonConfig": "thompson",
+}
+
+
+def build_atm_scalar_param_map() -> dict[str, str]:
+    """Return ``{registry qualified_name: ExperimentConfig scalar field}`` for
+    the curated atmosphere tunable parameters ExperimentConfig exposes as flat
+    scalars (issue #691).
+
+    Auto-derived from :data:`_ATM_PARAM_PREFIX` + the live parameter registry +
+    the live ExperimentConfig fields, so a newly-exposed ``<prefix>_<field>``
+    scalar is picked up automatically.  Only pairs whose ExperimentConfig field
+    actually exists are included (a scheme param with no exposed scalar stays
+    unreachable via ``--params`` for atmosphere, by design)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.training.param_collector import build_registry
+    ec_fields = set(ExperimentConfig._fields)
+    # Case-insensitive index, restricted to UNAMBIGUOUS lowercase keys, so the
+    # fallback below cannot cross-map two distinct fields.  Lets the convention
+    # tolerate an ExperimentConfig scalar that capitalises a symbol in the
+    # scheme field name (e.g. SBMConfig.rh_ref -> ``sbm_RH_ref``).
+    _lower_counts: dict[str, int] = {}
+    for f in ec_fields:
+        _lower_counts[f.lower()] = _lower_counts.get(f.lower(), 0) + 1
+    ec_ci = {f.lower(): f for f in ec_fields if _lower_counts[f.lower()] == 1}
+    out: dict[str, str] = {}
+    for meta in build_registry():
+        prefix = _ATM_PARAM_PREFIX.get(meta.config_class)
+        if prefix is None or not meta.module.startswith("legoesm.atmosphere"):
+            continue
+        candidate = f"{prefix}_{meta.field}"
+        if candidate in ec_fields:
+            out[meta.qualified_name] = candidate
+        elif candidate.lower() in ec_ci:
+            out[meta.qualified_name] = ec_ci[candidate.lower()]
+    return out
+
+
+def _route_overrides_by_class(node, by_key: dict, *, applied: set):
+    """Recursively splice ``{(module, class_name): {field: value}}`` into a
+    config NamedTuple tree (depth-first; child configs updated before parent).
+
+    Keyed on the FULL ``(defining module, class name)`` — not the bare class
+    name — so same-named configs in different components (e.g. the ocean
+    vertical-mixing ``TKEConfig`` vs the atmosphere turbulence ``TKEConfig``)
+    never cross-route.  Records each applied key in ``applied`` so the caller can
+    detect a target config that is ABSENT (never applied) or AMBIGUOUS (two
+    instances of the same class in the tree)."""
+    fields = getattr(node, "_fields", None)
+    if fields is None or not isinstance(node, tuple):
+        return node  # not a NamedTuple leaf
+    replacements = {}
+    for f in fields:
+        child = getattr(node, f)
+        new_child = _route_overrides_by_class(child, by_key, applied=applied)
+        if new_child is not child:
+            replacements[f] = new_child
+    if replacements:
+        node = node._replace(**replacements)
+    key = (type(node).__module__, type(node).__name__)
+    if key in by_key:
+        if key in applied:
+            raise SystemExit(
+                f"--params: config {key[1]!r} ({key[0]}) appears more than once "
+                "in the run config tree — cannot route the override unambiguously."
+            )
+        applied.add(key)
+        # apply_param_overrides validates every field is on the NamedTuple.
+        from legoesm.training.param_collector import apply_param_overrides
+        node = apply_param_overrides(node, by_key[key])
+    return node
+
+
+def apply_params_to_config(config, params: dict, *, driver: str = "run",
+                           scalar_param_map: dict | None = None):
+    """Return ``config`` with calibration ``params`` (qualified_name: value)
+    spliced into the matching nested ``*Config`` NamedTuples.
+
+    ``scalar_param_map`` (``{qualified_name: config_field}``) handles configs
+    that FLATTEN their tunable scheme params to top-level scalar fields instead
+    of nesting the ``*Config`` — the atmosphere ExperimentConfig (see
+    :func:`build_atm_scalar_param_map`).  A mapped parameter is applied to the
+    top ``config`` via ``_replace`` (validated + bounds-checked identically);
+    unmapped parameters use the nested class-router below.
+
+    Each key is validated against ``param_collector.build_registry`` (must be a
+    known parameter and, for scalar params, within its ``__param_spec__``
+    bounds) and routed to the config of its declared ``(module, config_class)``.
+    Raises ``SystemExit`` on an unknown parameter, a non-numeric or out-of-bounds
+    value, or a target config that is absent from / ambiguous in this run's
+    config tree — a ``--params`` file can never silently mis-set physics.  A
+    no-op for empty ``params``.
+
+    Note (soft limitation): a union config that holds ALL of a family's scheme
+    sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
+    ``MultiLayerLandConfig`` carries carbon/stomata) is always "present", so an
+    override for a scheme that is not the *selected* one is applied to that
+    (inert) sub-config rather than raising — it simply has no effect on the run.
+    The strict absent-raise still catches wrong-component params (e.g. an
+    atmosphere param in an ocean-only run).
+    """
+    if not params:
+        return config
+    from legoesm.training.param_collector import build_registry
+    registry = {m.qualified_name: m for m in build_registry()}
+    scalar_param_map = scalar_param_map or {}
+    by_key: dict[tuple, dict[str, float]] = {}
+    key_to_qname: dict[tuple, str] = {}
+    flat: dict[str, float] = {}
+    for qname, value in params.items():
+        meta = registry.get(qname)
+        if meta is None:
+            raise SystemExit(
+                f"{driver} --params: unknown parameter {qname!r} (not in the "
+                "parameter registry).  Keys must be a param_collector qualified "
+                "name 'scheme_key.field' (see config/cmip/params_tuned.yaml)."
+            )
+        # Scalar params (shape_key None) are numeric — coerce (YAML may quote
+        # the value) and range-check against __param_spec__ bounds.  Array params
+        # keep their list value (per-element tuple bounds are not range-checked).
+        if meta.shape_key is None:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise SystemExit(
+                    f"{driver} --params: {qname} value {value!r} is not numeric."
+                )
+            lo, hi = meta.bounds
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                if not (lo <= value <= hi):
+                    raise SystemExit(
+                        f"{driver} --params: {qname}={value} is outside its "
+                        f"__param_spec__ bounds [{lo}, {hi}]."
+                    )
+        ec_field = scalar_param_map.get(qname)
+        if ec_field is not None:
+            flat[ec_field] = value  # flattened scalar on the top config
+        else:
+            key = (meta.module, meta.config_class)
+            by_key.setdefault(key, {})[meta.field] = value
+            key_to_qname[key] = qname
+    if flat:
+        top_fields = getattr(config, "_fields", ())
+        bad = [f for f in flat if f not in top_fields]
+        if bad:
+            raise SystemExit(
+                f"{driver} --params: mapped scalar field(s) {bad} are not on "
+                f"{type(config).__name__} — the atmosphere scalar-param map does "
+                "not match this driver's config."
+            )
+        config = config._replace(**flat)
+    applied: set = set()
+    config = _route_overrides_by_class(config, by_key, applied=applied)
+    missing = set(by_key) - applied
+    if missing:
+        examples = ", ".join(sorted(key_to_qname[k] for k in missing))
+        raise SystemExit(
+            f"{driver} --params: parameter(s) {examples} target config "
+            f"class(es) {sorted(k[1] for k in missing)} that are not present in "
+            "this run's config (the scheme is not built into this driver's "
+            "config object).  Remove them or enable the scheme."
+        )
+    return config
+

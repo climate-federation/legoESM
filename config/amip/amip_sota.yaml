@@ -1,0 +1,87 @@
+# =============================================================================
+# legoESM AMIP — STATE-OF-THE-ART configuration
+# =============================================================================
+# Extends the validated realism config (config/amip/amip_production.yaml) with the
+# SOTA upgrades identified 2026-07-01:
+#   1. LATEST LAND MODEL — multilayer Richards soil + CLM PFT/texture surface map
+#      + prognostic snow + Jarvis stomata (use_multilayer_land, PR #715 made this a
+#      functional upgrade: land skin-T now drives the atmospheric BL, land MOST +
+#      CLM per-cell z0, snow-albedo + stomata threaded).  Replaces the Manabe slab
+#      bucket.  Needs the CLM surfdata staged (--clm-surfdata-path; compute nodes
+#      have no internet).  NOTE: deep 3 m / 10-layer soil needs a multi-year cold
+#      spin-up before its T/moisture fields are trustworthy.
+#   2. AEROSOL-CLOUD INTERACTION (aerosol_ccn) — the 1st (Twomey) + 2nd (lifetime)
+#      indirect effects via Andreae-2009 AOT->CCN->Nc feeding morrison r_eff +
+#      KK2000 autoconversion.  A whole SOTA process that was OFF; prereqs (morrison
+#      + external aerosol) are already in the production config.
+#   3. convective_cloud OFF — AMIP-optimal (PR #709): under prescribed SST
+#      conv-cloud is an inert SST-drift compensator that only adds planetary albedo.
+#
+# Run (Ginsburg): source config/amip/amip_production.ginsburg.sh for the data
+# paths, then:
+#   run_amip.py --config config/amip/amip_sota.yaml "${AMIP_PATH_FLAGS[@]}" \
+#       --clm-surfdata-path data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc \
+#       --land-mask-file <lsm.nc> --days N --output DIR
+# Machine PATHS are NOT pinned here (see amip_production.sh) — pass at runtime.
+# Tracking: GitHub issue #636.
+# =============================================================================
+
+# --- Grid + dycore: cubed-sphere C48 / L40, cd-grid, dt 150 s -----------------
+grid_type: cubed_sphere
+resolution: 48
+nlev: 40
+discretization: cdgrid
+dt: 150.0
+
+# --- Atmospheric physics (validated realism stack) ----------------------------
+radiation: rrtmg            # true CMIP6 correlated-k RT
+rad_update_steps: 12
+clouds: sundqvist
+microphysics: morrison      # two-moment (predicts Nc) — REQUIRED for aerosol_ccn
+convection: sbm             # the structural-bias fix (albedo+precip)
+turbulence: louis
+gravity_wave_drag: hines
+diurnal_cycle: true
+orbital_insolation: true
+
+# --- SOTA lever 2: aerosol-cloud interaction (1st + 2nd indirect effect) -------
+aerosol_ccn: true
+
+# --- Cloud tuning -------------------------------------------------------------
+cloud_q_c_diagnostic: 3.0e-4
+convective_cloud: false     # SOTA lever 3: AMIP-optimal (prescribed-SST) — #709
+
+# --- SOTA lever 1: latest land model (multilayer Richards + CLM) --------------
+use_multilayer_land: true
+multilayer_n_layers: 10
+multilayer_soil_depth: 3.0
+# clm_surfdata_path is a machine path — pass --clm-surfdata-path at runtime.
+snow_albedo_feedback: true  # threaded into the multilayer land (#715)
+land_stomatal_beta: true    # Jarvis stomata, threaded into the multilayer land (#715)
+
+# --- Tiled surface + interactive land -----------------------------------------
+surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
+surface_gustiness_zi: 300.0
+surface_tiled: true
+surface_z0_land: 0.1
+
+# --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
+ic: era5
+dataset: custom
+sst_var: tosbcs
+sst_offset: 0.0
+sic_var: siconcbcs
+sic_scale: 0.01
+solar_source: file
+solar_tsi_var: TSI
+ozone_forcing: external
+ghg_forcing: external
+aerosol_forcing: external   # REQUIRED for aerosol_ccn
+start_year: 1979
+
+# --- Diagnostics / output (CMIP6-protocol CMOR) -------------------------------
+diag_days: 5
+checkpoint_days: 30
+monthly_means: true
+cmip_output: true
+clear_sky_diag: true
