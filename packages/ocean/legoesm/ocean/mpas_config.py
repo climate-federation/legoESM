@@ -112,6 +112,16 @@ class MPASOceanConfig(NamedTuple):
                                            # Typical: u_bg = 0.1 m/s with
                                            # r = 1e-3 gives Cd = 0.01.
                                            # 0 = legacy linear drag (bit-exact).
+    # NEMO zdfdrg drag laws (mirror of the lat-lon DynBottomDragConfig):
+    # "legacy" keeps the r/bg_velocity path bit-exact; "nemo_quadratic" /
+    # "nemo_loglayer" compute r = Cd·√(2·KE_bot + ke0) from the bottom-cell
+    # Ringler KE averaged to edges (loglayer: Cd from the edge bottom
+    # thickness, clip((κ/ln(½h/z0))², cd0, cdmax)).
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-]
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3

@@ -138,6 +138,15 @@ def _parse_args():
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
     )
     p.add_argument(
+        "--bottom-drag-scheme",
+        choices=("legacy", "nemo_quadratic", "nemo_loglayer"), default=None,
+        help="Bottom-drag law (DINOConfig.bottom_drag_scheme): 'legacy' = "
+             "historical MOM6 quadratic-with-floor; 'nemo_quadratic' = "
+             "zdfdrg np_non_lin, the DINO reference's namdrg selection "
+             "(Cd0*sqrt(u^2+v^2+ke0), Cd0=C_d_bottom); 'nemo_loglayer' = "
+             "zdfdrg np_loglayer.",
+    )
+    p.add_argument(
         "--treguier-aei0", type=float, default=None,
         help="Treguier kappa cap aei0 [m2/s] (DINOConfig.treguier_aei0, "
              "default 3000 = the DINO namelist rn_Ue*rn_Le). Ignored unless "
@@ -346,6 +355,9 @@ def main():
             cfg, evd_on_momentum=(args.evd_momentum == "on"))
     if args.gm_kappa_scheme is not None:
         cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
+    if args.bottom_drag_scheme is not None:
+        cfg = dataclasses.replace(
+            cfg, bottom_drag_scheme=args.bottom_drag_scheme)
     if args.treguier_aei0 is not None:
         cfg = dataclasses.replace(cfg, treguier_aei0=args.treguier_aei0)
     if args.mpas_eq_visc_boost is not None:

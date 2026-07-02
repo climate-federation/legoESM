@@ -61,6 +61,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.lateral_mixing.mle",
     "legoesm.ocean.physics.surface_forcing.config",
     "legoesm.ocean.physics.vertical_mixing.config",
+    "legoesm.ocean.physics.vertical_mixing.internal_wave_mixing",
     "legoesm.ocean.physics.vertical_mixing.tidal",
     # --- atmosphere physics (Phase 4 spec migration) ---
     "legoesm.atmosphere.physics.gravity_wave_drag.config",

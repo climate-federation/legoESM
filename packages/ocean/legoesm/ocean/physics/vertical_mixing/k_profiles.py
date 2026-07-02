@@ -53,6 +53,7 @@ def compute_vertical_K_profiles(
     tke_source=None,
     return_tke: bool = False,
     lat_deg=None,
+    iwm_fields=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -193,6 +194,32 @@ def compute_vertical_K_profiles(
         K_max = vmix.kpp.K_max
         K_v_total = jnp.minimum(K_v_total, K_max)
         A_v_total = jnp.minimum(A_v_total, K_max)
+
+    # Internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) —
+    # ADDITIVE on top of the closure, AFTER the KPP saturation clip so the
+    # wave contribution keeps its own [k_min, k_max] bounds (NEMO's
+    # zdfphy order: the closure runs first, zdf_iwm then ADDS onto
+    # avt/avs/avm with no combined cap).  Contributes to BOTH tracer
+    # diffusivity and momentum viscosity.  The wet-interface mask below
+    # zeroes it at the seafloor (NEMO's wmask factor).
+    iwm_cfg = getattr(vmix, "iwm", None)
+    if iwm_cfg is not None and iwm_cfg.enabled:
+        if iwm_cfg.tsdiff:
+            # avs = avt * ratio needs a SEPARATE salinity diffusivity
+            # channel through the implicit tracer solve; the lat-lon
+            # solve shares one K between T and S.  Fail loud rather than
+            # silently ignoring the requested differential mixing.  (The
+            # ORCA1 oracle runs ln_tsdiff = .false., so the faithful
+            # comparison path is unaffected.)
+            raise ValueError(
+                "IWMConfig.tsdiff=True (differential T/S wave-driven "
+                "mixing) is not supported on the shared-K implicit tracer "
+                "solve; set tsdiff=False (the ORCA1 oracle value).")
+        K_iwm = _iwm_K_profile(
+            state, z_coord, physics_config, iwm_cfg,
+            eos_fn=eos_fn, iwm_fields=iwm_fields)
+        K_v_total = K_v_total + K_iwm
+        A_v_total = A_v_total + K_iwm
 
     # Zero K/A (and the prognostic TKE) at non-wet interfaces (partial-cell
     # coords only; see the dry-cell guard above).  The implicit solve then
@@ -575,3 +602,69 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     # path: ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
     K, A, _ = convective_K_A_flag(rho, z_coord.dz_ref, J, cfg)
     return K, A
+
+
+def _iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
+                   eos_fn=None, iwm_fields=None):
+    """Internal wave-driven diffusivity at interior interfaces (zdfiwm).
+
+    Assembles the column geometry (NEMO gdept / e3w / ht analogues) and
+    the interface N², then delegates the physics to
+    :func:`..internal_wave_mixing.compute_iwm_diffusivity` (single-owner
+    numerics).  ``iwm_fields`` is an :class:`..internal_wave_mixing.
+    IWMForcing` of static 2-D maps (the de Lavergne product regridded to
+    the model grid); ``None`` falls back to the uniform constant-power
+    maps built from the config scalars.
+
+    Geometry note: on an :class:`OceanPartialCellCoordinate` the depths
+    and spacings come from the partial thicknesses (``h_partial·J`` —
+    exactly NEMO's partial-aware e3t/gdept construction); on a pure
+    z-star coordinate they are the reference geometry stretched by the
+    Jacobian.  ``N²`` uses the shared ``compute_N2`` in-situ mode
+    (clipped >= 0) — the same construction as NEMO's ``MAX(0, rn2)``
+    usage in every zdfiwm structure function.
+    """
+    from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        compute_iwm_diffusivity, uniform_iwm_forcing,
+    )
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+
+    constants_config = physics_config.constants
+    T = state.T.data
+    dtype = T.dtype
+    J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # Partial-aware geometry: actual per-cell thickness (0 below the
+        # seafloor), centre depths from its cumsum (NEMO gdept), column
+        # depth = wet-column sum (NEMO ht).
+        h_act = z_coord.h_partial * J[..., jnp.newaxis]
+        depth_cell = jnp.cumsum(h_act, axis=-1) - 0.5 * h_act
+        H_col = jnp.sum(h_act, axis=-1)
+        dz_w = 0.5 * (h_act[..., :-1] + h_act[..., 1:])
+    else:
+        depth_cell = -z_coord.z_full_ref * J[..., jnp.newaxis]
+        H_col = -z_coord.z_half_ref[-1] * J
+        dz_w = z_coord.dz_half_ref * J[..., jnp.newaxis]
+    depth_cell = depth_cell.astype(dtype)
+    dz_w = dz_w.astype(dtype)
+
+    N2 = compute_N2(
+        rho, dz_w, constants_config.rho_0, g=constants_config.g,
+        n2_mode="insitu",
+    )
+
+    if iwm_fields is None:
+        iwm_fields = uniform_iwm_forcing(iwm_cfg, H_col.shape, dtype=dtype)
+
+    K_iwm, _ratio = compute_iwm_diffusivity(
+        iwm_fields, depth_cell, dz_w, H_col, N2,
+        cfg=iwm_cfg, rho_0=constants_config.rho_0,
+    )
+    # NEMO applies wmask inside zdf_iwm; here the caller's wet-interface
+    # guard (compute_vertical_K_profiles tail) zeroes non-wet interfaces,
+    # and dry COLUMNS (H = 0) already produce the k_min floor which the
+    # land mask removes in the tracer/momentum solves.
+    return K_iwm.astype(dtype)
