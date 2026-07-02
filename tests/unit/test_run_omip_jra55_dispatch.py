@@ -1075,3 +1075,298 @@ def test_jra55_step_runs_with_features_disabled(tmp_path):
     # And they should differ — the closure features do something
     assert not np.array_equal(np.asarray(s_full.T.data),
                                np.asarray(s_off.T.data))
+
+
+# ============================================================================
+# FIX 1 (zenithfix): cycled JRA55 insolation clock must follow the FORCING
+# clock, not the raw sim day.
+#
+# In ``_build_jra55_block_fn_interp`` the recent forcing-clock fix split
+# ``day`` (RAW sim day) from ``day_f`` (CYCLED forcing clock).  The solar
+# zenith's ``doy``/``hour`` must be locked to the repeated forcing (``day_f``)
+# when cycling, otherwise the seasonal (and, for a non-integer cache length,
+# diurnal) solar phase drifts relative to the prescribed rsds whenever the
+# repeat-year cache length is not a whole multiple of 365 days.
+#
+# Observable probe: monkeypatch ``ocean_tile_response`` to route the block's
+# real computed ``cos_zenith`` into ``tile.tau_x`` (all other tile fields
+# zero); a probe ``_step_impl`` encodes ``surface_forcing.tau_x`` into the
+# carried state, so the block's final state exposes the LAST step's zenith.
+# ``T_ramp_seconds=0`` fixes the spinup ramp at 1 so ``tau_x == cos_zenith``.
+# ============================================================================
+
+_JRA55_RAW_VARS = ("uas", "vas", "tas", "huss", "psl",
+                   "rsds", "rlds", "prra", "prsn")
+
+
+class _ZenithProbeField(NamedTuple):
+    data: jnp.ndarray
+
+
+class _ZenithProbeState(NamedTuple):
+    T: _ZenithProbeField
+
+
+def _make_zenith_probe_model():
+    """Ocean-model stand-in that surfaces the block's solar zenith.
+
+    The fake ``ocean_tile_response`` routes ``cos_zenith`` into ``tau_x``;
+    with the spinup ramp fixed at 1, ``surface_forcing.tau_x`` equals the
+    step's ``cos_zenith``.  ``_step_impl`` copies it into the carried state.
+    """
+    import types
+
+    def _step_impl(state_in, dt, freshwater=None, surface_forcing=None,
+                   sponge=None):
+        probe = surface_forcing.tau_x[..., None]
+        return _ZenithProbeState(
+            T=_ZenithProbeField(
+                data=jnp.broadcast_to(probe, state_in.T.data.shape)))
+
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            barotropic=types.SimpleNamespace(maxvel_barotropic=0.0)),
+        _step_impl=_step_impl,
+    )
+
+
+def _install_cos_zenith_tile_probe(monkeypatch):
+    """Patch ``ocean_tile_response`` to expose the block's ``cos_zenith``.
+
+    Must run BEFORE ``_build_jra55_block_fn_interp`` is called — the builder
+    does a function-scope ``from legoesm.coupler.coupler import
+    ocean_tile_response`` that binds this module attribute at call time.
+    """
+    import types
+    import legoesm.coupler.coupler as _cc
+
+    def _fake_tile(forcing, sst, u, v, config):
+        cos_z = forcing.cos_zenith
+        zeros = jnp.zeros_like(cos_z)
+        return types.SimpleNamespace(
+            albedo=zeros, lw_up=zeros, shflx=zeros, lhflx=zeros,
+            tau_x=cos_z, tau_y=zeros)
+
+    monkeypatch.setattr(_cc, "ocean_tile_response", _fake_tile)
+
+
+def _zenith_js(tmp_path, n_lat=4, n_lon=8, cycle=True):
+    """Build a real JRA55 forcing state, then neutralise everything except
+    the solar-zenith clock (ramp off, freeze-cap off)."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=n_lat, n_lon=n_lon)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=cycle)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["T_ramp_seconds"] = 0.0        # ramp == 1 -> tau_x == cos_zenith
+    js["enable_freeze_cap"] = False    # probe state carries no land mask
+    return js
+
+
+def _mini_raw_stack(day_f, n_lat=4, n_lon=8):
+    """Three JRA55 records on the 1/8-day grid bracketing ``day_f``.
+
+    Forcing values are irrelevant (the tile is faked) — only the record
+    days matter for the block's interpolation window.
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+    i0 = int(np.floor(day_f * RECORDS_PER_DAY))
+    record_days = jnp.asarray(
+        [(i0 + k) / RECORDS_PER_DAY for k in range(3)], dtype=jnp.float64)
+    vals = {"uas": 1.0, "vas": 1.0, "tas": 290.0, "huss": 0.01,
+            "psl": 101325.0, "rsds": 300.0, "rlds": 350.0,
+            "prra": 0.0, "prsn": 0.0}
+    raw_stack = {v: jnp.full((3, n_lat, n_lon), val, dtype=jnp.float64)
+                 for v, val in vals.items()}
+    runoff = jnp.zeros((3, n_lat, n_lon), dtype=jnp.float64)
+    return raw_stack, runoff, record_days
+
+
+def _run_zenith_block(js, block_start_day, block_start_day_forcing,
+                      monkeypatch, n_lat=4, n_lon=8):
+    """Drive one production block step and return its selected cos_zenith."""
+    _install_cos_zenith_tile_probe(monkeypatch)
+    probe_model = _make_zenith_probe_model()
+    get_bfn = run_omip._build_jra55_block_fn_interp(probe_model, js, dt=5400.0)
+    raw_stack, runoff, record_days = _mini_raw_stack(
+        block_start_day_forcing, n_lat, n_lon)
+    state0 = _ZenithProbeState(
+        T=_ZenithProbeField(data=jnp.zeros((n_lat, n_lon, 1))))
+    final = get_bfn(1)(
+        state0, raw_stack, runoff, record_days,
+        jnp.float64(block_start_day),
+        jnp.float64(block_start_day_forcing))
+    return np.asarray(final.T.data[..., 0])
+
+
+def _expected_cos_zenith(js, day):
+    """Reference cos_zenith from a given clock day (same helper the block
+    uses internally)."""
+    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+    doy = np.mod(day, 365.0) + 1.0
+    hour = np.mod(day, 1.0) * 24.0
+    return np.asarray(cos_zenith_angle(js["lat_2d"], js["lon_2d"], doy, hour))
+
+
+def test_zenithfix_second_cycle_uses_forcing_clock_not_raw_day(
+        tmp_path, monkeypatch):
+    """FIX 1 (RED before fix): in the SECOND repeat-year cycle of a cache
+    whose length is NOT a whole multiple of 365 days, the solar-zenith
+    ``doy``/``hour`` must come from the CYCLED forcing clock (``day_f``),
+    NOT the raw sim day.
+
+    Proxy for a 366-day (leap-year) RYF cache: a 2.125-day cache (17
+    records at 8/day).  In the second cycle raw day 2.5625 maps to forcing
+    day 0.4375; the 2.125-day offset shifts BOTH the seasonal doy (by 2.125
+    days) and the diurnal hour (by 0.125*24 = 3 h).  Before the fix the raw
+    day drove the zenith, drifting it away from the prescribed forcing.
+    """
+    js = _zenith_js(tmp_path, cycle=True)
+    raw_day = 2.5625
+    forcing_day = 0.4375   # 2.5625 mod 2.125
+    probed = _run_zenith_block(js, raw_day, forcing_day, monkeypatch)
+
+    expected_forcing = _expected_cos_zenith(js, forcing_day)
+    expected_raw = _expected_cos_zenith(js, raw_day)
+    # Guard against a vacuous test: the two clocks must be observably apart.
+    assert not np.allclose(expected_forcing, expected_raw, atol=1e-6), (
+        "raw and forcing clocks coincide — test would be vacuous")
+    # The fix: zenith is locked to the forcing clock ...
+    np.testing.assert_allclose(probed, expected_forcing, rtol=0, atol=1e-12)
+    # ... and no longer drifts with the raw sim day.
+    assert not np.allclose(probed, expected_raw, atol=1e-6)
+
+
+def test_zenithfix_noncycle_byte_identical_to_raw_clock(tmp_path, monkeypatch):
+    """FIX 1 byte-identity (non-cycled path): with cycle=False the insolation
+    clock is the raw day (``block_start_day_forcing == block_start_day``,
+    proven by ``test_preload_raw_records_noncycle_exact_last_record_ok``),
+    exactly as before the fix.
+
+    The cycle gate is a BIT-EXACT no-op whenever the forcing clock coincides
+    with the raw day: a cycle=True block driven with forcing==raw and a
+    cycle=False block produce identical cos_zenith (both through the same
+    fused graph).  Both also match the raw-day reference to machine precision
+    (the ~1e-15 residual is jit-vs-eager transcendental rounding in the
+    reference, NOT a change introduced by the fix — the cycle=False branch is
+    the identical ``jnp.mod(day, ...)`` expression the original code used)."""
+    day = 1.7
+    js = _zenith_js(tmp_path, cycle=False)
+    probed_off = _run_zenith_block(js, day, day, monkeypatch)
+    js_on = dict(js)
+    js_on["cycle"] = True
+    probed_on = _run_zenith_block(js_on, day, day, monkeypatch)
+    # EXACT: the cycle gate changes nothing when day_f == day.
+    np.testing.assert_array_equal(probed_on, probed_off)
+    # Physical: the non-cycled zenith IS the raw-day zenith (machine precision).
+    expected_raw = _expected_cos_zenith(js, day)
+    np.testing.assert_allclose(probed_off, expected_raw, rtol=0, atol=1e-12)
+
+
+def test_zenithfix_365day_ryf_preserves_seasonal_phase(tmp_path, monkeypatch):
+    """FIX 1: the standard 365-day RYF cache is NOT perturbed.  ``day_f =
+    day mod 365`` differs from the raw day by an exact multiple of 365, so
+    the seasonal doy and diurnal hour are identical — the second-cycle
+    zenith matches the raw-day zenith to machine precision (the reduced
+    magnitude of ``day_f`` is, if anything, more accurate)."""
+    js = _zenith_js(tmp_path, cycle=True)
+    raw_day = 365.5        # second cycle of a 365-day cache
+    forcing_day = 0.5      # 365.5 mod 365
+    probed = _run_zenith_block(js, raw_day, forcing_day, monkeypatch)
+    expected_raw = _expected_cos_zenith(js, raw_day)
+    np.testing.assert_allclose(probed, expected_raw, rtol=0, atol=1e-12)
+
+
+# ============================================================================
+# GAP 1 — MPAS/tripole regrid branch of the raw-record preloader
+#
+# ``_preload_jra55_raw_records`` has an ``if "regrid_weights" in jra55_state:``
+# branch (regrid each lat-lon record onto the unstructured target cells) that
+# every existing dispatch test misses because they all use --grid latlon (no
+# regrid weights).  Put a REAL lat-lon -> unstructured RegridWeights (the same
+# object the MPAS/tripole setup builds via compute_latlon_to_voronoi_weights)
+# into jra55_state and confirm the block preloader regrids each raw record to
+# (n_window_records, nCells) and stays finite.
+# ============================================================================
+
+def _make_regrid_weights_from_cache(cache_path, n_cells=5):
+    """Build a real lat-lon -> unstructured (MPAS-cell-like) ``RegridWeights``
+    whose SOURCE grid matches the synthetic cache, targeting a few scattered
+    points — the smallest valid weights object the regrid branch accepts."""
+    from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+    src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+    ds.close()
+    rng = np.random.default_rng(1)
+    tgt_lat_rad = np.deg2rad(rng.uniform(-80.0, 80.0, n_cells))
+    tgt_lon_rad = np.deg2rad(rng.uniform(0.0, 360.0, n_cells))
+    return compute_latlon_to_voronoi_weights(
+        src_lat_rad, src_lon_rad, tgt_lat_rad, tgt_lon_rad,
+    )
+
+
+def test_preload_raw_records_regrids_to_unstructured_cells(tmp_path):
+    """GAP 1: the regrid branch maps each raw lat-lon record onto the target
+    cells → (n_window_records, nCells), all finite (winds, T, q, radiation,
+    precip AND the friver runoff channel)."""
+    from legoesm.forcing.jra55_do import JRA55_VARIABLES
+
+    n_lat, n_lon, n_cells = 8, 16, 5
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=8)
+    rw = _make_regrid_weights_from_cache(cache, n_cells=n_cells)
+    assert rw.target_shape == (n_cells,)
+    js = {
+        "cache_path": str(cache),
+        "ref_year": 1958,
+        "cycle": False,
+        "regrid_weights": rw,
+    }
+    # start_step_idx=0, n_steps=4, dt=3 h → window records [0..4] (5 records).
+    raw_stack, runoff_stack, meta = run_omip._preload_jra55_raw_records(
+        0, 4, 10800.0, js)
+
+    n_window = len(np.asarray(meta["record_days"]))
+    assert n_window >= 2
+
+    for var in JRA55_VARIABLES:
+        arr = np.asarray(raw_stack[var])
+        assert arr.shape == (n_window, n_cells), (var, arr.shape)
+        assert np.all(np.isfinite(arr)), var
+
+    runoff = np.asarray(runoff_stack)
+    assert runoff.shape == (n_window, n_cells)
+    assert np.all(np.isfinite(runoff))
+
+
+# ============================================================================
+# GAP 4 — _jra55_block_record_window ValueError guard paths
+#
+# Neither the "block spans >= a full cache cycle" nor the "wraps more than
+# once" ValueError was covered.  Call the window helper directly (it takes
+# n_cache_records as an int, so no cache file is needed) with args that trip
+# each guard.  Both fire only in cycle=True mode.
+# ============================================================================
+
+def test_block_window_raises_when_span_exceeds_full_cache_cycle():
+    """GAP 4a: a cycle=True block whose duration reaches the full cache length
+    cannot define a monotone forcing clock → ValueError before any wrap logic.
+
+    1-day cache (n_cache_records=8); dt=3 h, n_steps=9 → span = 8·0.125 =
+    1.0 day == cache length → raise."""
+    with pytest.raises(ValueError, match="full cache cycle"):
+        run_omip._jra55_block_record_window(
+            0, 9, 10800.0, 8, True)
+
+
+def test_block_window_raises_when_block_wraps_more_than_once():
+    """GAP 4b: a cycle=True block that would wrap the repeat-year boundary
+    twice (upper bracket lands a full cache past the start) → ValueError.
+
+    2-record cache (0.25-day cycle); start_step_idx=3, n_steps=4, dt=1.5 h.
+    span = 3·0.0625 = 0.1875 day < 0.25 (clears the span guard); start_day_f =
+    0.1875, end_day_f = 0.375 → i_last = 4 = 2·n_cache_records → wraps twice."""
+    with pytest.raises(ValueError, match="more than once"):
+        run_omip._jra55_block_record_window(
+            3, 4, 5400.0, 2, True)

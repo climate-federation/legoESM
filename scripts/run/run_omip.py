@@ -2135,6 +2135,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
     _rpd = float(RECORDS_PER_DAY)
+    # Static (compile-time) repeat-year-forcing flag.  Selects which clock
+    # drives the solar-zenith insolation geometry (see the scan body).
+    cycle = bool(jra55_state.get("cycle", False))
 
     def _make_block_fn(n_steps_block):
         """Create a JIT-compiled block function for a fixed block size."""
@@ -2149,13 +2152,17 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     state_in, ice_in = carry
                 else:
                     state_in = carry
-                # Two clocks:
-                # - ``day``: RAW simulation day — drives solar zenith
-                #   (doy/hour) and the spinup ramp.
+                # Two clocks (see the insolation + ramp notes below):
+                # - ``day``: RAW simulation day (elapsed run time).  Always
+                #   drives the spinup ramp; drives the solar-zenith clock only
+                #   when NOT cycling (cycle=False ⇒ day_f == day).
                 # - ``day_f``: forcing clock — the CYCLED block-start day
                 #   (aligned with ``record_days``, which the preloaders
-                #   unwrap across the repeat-year cache boundary).  Using
-                #   the raw day here broke every cycle after the first:
+                #   unwrap across the repeat-year cache boundary).  Drives the
+                #   JRA55 record interpolation, and — when cycle=True — the
+                #   solar-zenith insolation clock, so the prescribed rsds and
+                #   the computed zenith stay phase-locked.  Using the raw day
+                #   for interpolation broke every cycle after the first:
                 #   ``day - record_days[0]`` was off by k*cache_length,
                 #   i_lo clipped to the last slice record, and each step
                 #   read one stale record.
@@ -2197,8 +2204,25 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 # match jra55_to_atm_surface / _shared.virtual_temperature.
                 T_v = tas * (1.0 + (1.0 / _const.epsilon - 1.0) * huss)
                 rho_a = psl / (_const.R_d * T_v)
-                doy = jnp.mod(day, 365.0) + 1.0
-                hour = jnp.mod(day, 1.0) * 24.0
+                # Insolation clock (day-of-year + diurnal hour), which sets the
+                # solar zenith and hence zenith-dependent surface albedo:
+                #   - cycle=True (repeat-year forcing): use the CYCLED forcing
+                #     clock ``day_f`` so the solar geometry stays phase-locked
+                #     to the repeated rsds/rlds records.  Using the RAW ``day``
+                #     drifts the seasonal doy (and, for a non-integer cache
+                #     length, the diurnal hour) whenever the cache length is
+                #     not a whole multiple of 365 days (e.g. a 366-day
+                #     leap-year RYF cache), biasing the surface albedo.
+                #   - cycle=False: ``day_f == day`` (no wrap), so this is
+                #     byte-identical to the raw-day clock — the common
+                #     non-cycled path is unchanged.
+                # The SPINUP RAMP (below) intentionally stays on the RAW
+                # ``day``: it is a function of elapsed run time, not forcing
+                # time.  ``cycle`` is a static Python bool (compile-time
+                # feature gate), so this branch is resolved at trace time.
+                day_insol = day_f if cycle else day
+                doy = jnp.mod(day_insol, 365.0) + 1.0
+                hour = jnp.mod(day_insol, 1.0) * 24.0
                 cos_z = cos_zenith_angle(lat_2d, lon_2d, doy, hour)
 
                 atm = AtmToSurface(
@@ -2479,10 +2503,13 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         (default, no sea ice) writes the legacy ocean-only restart unchanged.
     grid_type : str
         The run's grid selection (one of ``GRID_TYPES``), stored in the npz
-        for provenance only — ``_load_restart`` reconstructs the pytree from
-        a template state and never reads it.  Historically this was
-        hardcoded to ``"latlon"``, mislabeling MPAS/tripole checkpoints;
-        ``_run_omip_loop`` now threads the actual grid type.
+        for provenance AND validated on load: ``_load_restart`` compares it
+        against the resuming run's grid_type and refuses a cross-grid restart
+        (an MPAS checkpoint reconstructed from a latlon template can pass
+        shape checks by coincidence yet be physically meaningless).
+        Historically this was hardcoded to ``"latlon"``, mislabeling
+        MPAS/tripole checkpoints; ``_run_omip_loop`` now threads the actual
+        grid type.
     """
     if grid_type not in GRID_TYPES:
         raise ValueError(
@@ -2536,7 +2563,7 @@ def _load_ice_restart(restart_path, ice_template):
     return ice_template._replace(**replacements)
 
 
-def _load_restart(restart_path, template_state):
+def _load_restart(restart_path, template_state, grid_type=None):
     """Load a restart npz and populate the state from a template.
 
     The template state (from ``_init_rest_state``) provides the pytree
@@ -2551,6 +2578,15 @@ def _load_restart(restart_path, template_state):
     template_state : ocean state
         A freshly initialized state with correct grid, masks, and
         z-coordinate.
+    grid_type : str or None
+        The resuming run's grid selection.  When supplied (not ``None``) and
+        the restart npz carries a ``grid_type`` key, a mismatch is a hard
+        error — reconstructing an MPAS restart from a latlon template (or
+        vice-versa) can pass per-field shape checks by coincidence yet be
+        physically meaningless.  Legacy restarts written before the
+        ``grid_type`` key existed lack it and keep the prior best-effort
+        behavior (no check).  ``None`` (a bare positional call) skips the
+        guard entirely.
 
     Returns
     -------
@@ -2564,6 +2600,20 @@ def _load_restart(restart_path, template_state):
     data = np.load(restart_path)
     restart_day = float(data["time_days"])
     restart_step = int(data["step"])
+
+    # Provenance guard: refuse a cross-grid restart.  Only enforced when the
+    # caller supplies the run's grid_type AND the npz records one (legacy
+    # restarts predate the key and fall through unchanged).
+    if grid_type is not None and "grid_type" in data:
+        saved_grid_type = str(data["grid_type"])
+        if saved_grid_type != grid_type:
+            raise ValueError(
+                f"Restart grid_type {saved_grid_type!r} does not match the "
+                f"run's grid_type {grid_type!r} ({restart_path}); loading a "
+                "restart across grids reconstructs the pytree from the wrong "
+                "template.  Re-run on the matching grid or regenerate the "
+                "restart."
+            )
 
     replacements = {}
     for f in template_state._fields:
@@ -3836,7 +3886,7 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
-            args.restart, state,
+            args.restart, state, grid_type=grid_type,
         )
         start_step = restart_step
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
