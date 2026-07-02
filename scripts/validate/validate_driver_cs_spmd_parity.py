@@ -86,6 +86,12 @@ def main(argv=None) -> int:
     p.add_argument("--ref", default=None,
                    help="serial-reference npz to compare against (spmd mode).")
     p.add_argument("--workdir", default="/tmp/cs_spmd_parity")
+    p.add_argument("--days", type=float, default=1.0,
+                   help="Run length [days]; fractional values bisect the "
+                        "trajectory (0.00695 ~= one 600 s step).")
+    p.add_argument("--radiation", default="gray",
+                   help="Radiation scheme (bisect lever: 'none' isolates "
+                        "the dry dycore from the physics path).")
     p.add_argument("--rtol", type=float, default=1e-9)
     p.add_argument("--atol", type=float, default=1e-9)
     args = p.parse_args(argv)
@@ -111,6 +117,7 @@ def main(argv=None) -> int:
 
     workdir = f"{args.workdir}/{args.mode}"
     cfg = _build_config(workdir)
+    cfg = cfg._replace(days=args.days, radiation=args.radiation)
     if args.mode == "spmd":
         if n_procs < 2:
             print("ERROR: --mode spmd needs a multi-process launch "
@@ -148,8 +155,13 @@ def main(argv=None) -> int:
             if a.size == 0:
                 continue
             close = np.allclose(a, b, rtol=args.rtol, atol=args.atol)
-            max_abs = float(np.max(np.abs(a - b))) if a.size else 0.0
-            print(f"  {name}: max|Δ|={max_abs:.3e} "
+            diff = np.abs(a - b)
+            max_abs = float(np.max(diff)) if a.size else 0.0
+            loc = np.unravel_index(int(np.argmax(diff)), a.shape)
+            n_bad = int(np.sum(~np.isclose(a, b, rtol=args.rtol,
+                                           atol=args.atol)))
+            print(f"  {name}: max|Δ|={max_abs:.3e} at {loc} "
+                  f"({n_bad}/{a.size} pts differ) "
                   f"{'OK' if close else 'FAIL'}")
             if not close:
                 rc = 1
