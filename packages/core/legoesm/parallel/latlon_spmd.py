@@ -91,6 +91,33 @@ def to_vface_lower(v_full):
     return v_full[:-1]
 
 
+def replicate_leaf(arr, rep, *, multiprocess: bool):
+    """Replicate one (possibly lat-sharded) leaf onto every device of ``rep``'s
+    mesh — the gather primitive shared by the atm and ocean lat-band SPMD steps
+    (``gather_state_atm_latlon`` / ``gather_state_latlon``).
+
+    Single-process: plain ``jax.device_put`` (the historical path, unchanged).
+    Multi-controller (``jax.process_count() > 1``, route-B ``jax.distributed``):
+    a top-level ``device_put`` cannot reshard an array whose shards live on
+    other processes' devices, so the replication runs as a jit-compiled
+    identity with replicated ``out_shardings`` — the supported cross-process
+    collective path (every process executes the same program; XLA inserts the
+    all-gather). The fresh ``jax.jit`` per call recompiles per gather —
+    acceptable at the segment/run output boundary where gathers happen (never
+    in the step hot loop).
+
+    Parameters
+    ----------
+    arr : jax.Array (any sharding on ``rep``'s mesh)
+    rep : NamedSharding — the replicated ``P()`` sharding of the target mesh.
+    multiprocess : pass ``jax.process_count() > 1`` (keyword-only so the
+        branch is explicit at every call site).
+    """
+    if multiprocess:
+        return jax.jit(lambda a: a, out_shardings=rep)(arr)
+    return jax.device_put(arr, rep)
+
+
 def _pole_fold(rows, negate: bool):
     """Serial pole fold of ``rows`` (lat-mirror + 180 deg lon roll [+ sign]).
 

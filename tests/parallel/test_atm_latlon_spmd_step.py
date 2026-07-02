@@ -57,8 +57,8 @@ from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
     _build_band_grids_atm,
     _atm_grid_array_field_names,
     _lat_spec,
-    _replicate_leaf,
 )
+from legoesm.parallel.latlon_spmd import replicate_leaf
 from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     cgrid_to_hydrostatic,
 )
@@ -278,7 +278,9 @@ def test_replicate_leaf_multiprocess_branch_matches_device_put():
     single-process device_put branch — on values, sharding, and for both a
     lat-sharded and an already-replicated input. This exercises the
     ``multiprocess=True`` code path for real on a single process (where both
-    mechanisms are legal), so the route-B gather cannot silently diverge."""
+    mechanisms are legal), so the route-B gather cannot silently diverge.
+    Covers the primitive SHARED by the atm and ocean gathers
+    (``legoesm.parallel.latlon_spmd.replicate_leaf``)."""
     from jax.sharding import NamedSharding, PartitionSpec as P
     mesh = _mesh()
     rep = NamedSharding(mesh, P())
@@ -287,8 +289,8 @@ def test_replicate_leaf_multiprocess_branch_matches_device_put():
     sharded = jax.device_put(full, NamedSharding(mesh, P("lat", None, None)))
 
     for arr in (sharded, jax.device_put(full, rep)):
-        a = _replicate_leaf(arr, rep, multiprocess=False)
-        b = _replicate_leaf(arr, rep, multiprocess=True)
+        a = replicate_leaf(arr, rep, multiprocess=False)
+        b = replicate_leaf(arr, rep, multiprocess=True)
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
         np.testing.assert_array_equal(np.asarray(a), np.asarray(full))
         assert b.sharding.is_fully_replicated, (

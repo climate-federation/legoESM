@@ -68,24 +68,6 @@ def shard_state_atm_latlon(
     )
 
 
-def _replicate_leaf(arr, rep, *, multiprocess: bool):
-    """Replicate one (possibly lat-sharded) leaf onto every device of ``rep``'s
-    mesh.
-
-    Single-process: plain ``jax.device_put`` (the historical path, unchanged).
-    Multi-controller (``jax.process_count() > 1``): a top-level ``device_put``
-    cannot reshard an array whose shards live on other processes' devices, so
-    the replication runs as a jit-compiled identity with replicated
-    ``out_shardings`` — the supported cross-process collective path (every
-    process executes the same program; XLA inserts the all-gather). The fresh
-    ``jax.jit`` per call recompiles per gather — acceptable at the segment/run
-    output boundary where gathers happen (never in the step hot loop).
-    """
-    if multiprocess:
-        return jax.jit(lambda a: a, out_shardings=rep)(arr)
-    return jax.device_put(arr, rep)
-
-
 def gather_state_atm_latlon(
     state: CGridLatLonHydrostaticState, mesh,
 ) -> CGridLatLonHydrostaticState:
@@ -96,13 +78,16 @@ def gather_state_atm_latlon(
 
     Multi-controller (route-B ``jax.distributed``, mesh spanning processes):
     replication routes through a jit-compiled identity instead of
-    ``device_put`` (see :func:`_replicate_leaf`); the single-process path is
+    ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
+    the primitive shared with the ocean gather); the single-process path is
     byte-unchanged."""
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
     rep = NamedSharding(mesh, P())
     _mp = jax.process_count() > 1
 
     def _get(arr):
-        return _replicate_leaf(arr, rep, multiprocess=_mp)
+        return replicate_leaf(arr, rep, multiprocess=_mp)
 
     v_lower = _get(state.v)
     v_full = jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], axis=0)

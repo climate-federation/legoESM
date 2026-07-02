@@ -98,8 +98,9 @@ def test_multicontroller_step_matches_serial():
     """The integrated Stage-5 gate, multi-process: N global bands across >= 2
     processes must reproduce the per-process serial reference (identical host
     ICs on every process) at the FV-PPM cut-truncation bound, and the gather
-    (the multiprocess ``_replicate_leaf`` branch, exercised FOR REAL here) must
-    return the full global state on every process."""
+    (the multiprocess ``legoesm.parallel.latlon_spmd.replicate_leaf`` branch,
+    exercised FOR REAL here) must return the full global state on every
+    process."""
     mesh = _global_mesh()
     n_dev = mesh.devices.size
     model, state = _model_and_state(use_polar_filter=False)

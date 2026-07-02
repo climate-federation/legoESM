@@ -296,11 +296,20 @@ def gather_state_latlon(state, mesh):
     The appended row is the north pole wall (``v == 0`` there on the regular
     grid), which is exactly what the single-device rest/forced state carries, so
     the gathered state is bit-comparable to the single-device reference.
+
+    Multi-controller (route-B ``jax.distributed``, mesh spanning processes):
+    replication routes through a jit-compiled identity instead of
+    ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
+    the primitive shared with the atm gather); the single-process path is
+    byte-unchanged.
     """
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
     rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
 
     def _gather_arr(a):
-        return jax.device_put(a, rep)
+        return replicate_leaf(a, rep, multiprocess=_mp)
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
