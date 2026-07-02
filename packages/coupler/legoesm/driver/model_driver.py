@@ -1310,11 +1310,25 @@ class ModelDriver:
         from legoesm.land.soil_grid import SoilGridConfig
 
         ad = self.physics.adapter
-        # column-order latitude / longitude.  grid.lat is geographic latitude in
-        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
-        # regrids onto DEGREE coordinates; the land tile consumes radians.
-        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
-        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        # column-order latitude / longitude in RADIANS.  The CLM map regrids onto
+        # DEGREE coordinates; the land tile consumes radians.
+        #   - cubed-sphere / 2-D-per-cell grids: grid.lat/lon are already per-cell
+        #     (6,n,n) → flatten_2d gives (ncol,).
+        #   - lat-lon / Gaussian: grid.lat is 1-D (n_lat,) and grid.lon is 1-D
+        #     (n_lon,); broadcast to the (n_lat, n_lon) per-cell field and flatten
+        #     C-order, EXACTLY matching how the atm state is columnised
+        #     (model_driver.py:4746 lat_2d = broadcast(lat[:,None]); reshape(-1)),
+        #     so land column k aligns with atm column k.  flatten_2d(grid.lat) here
+        #     would try to reshape the (n_lat,) row vector into ncol and raise.
+        _lat = _np.asarray(self.grid.lat)
+        _lon = _np.asarray(self.grid.lon)
+        if _lat.ndim == 1:
+            n_lat, n_lon = _lat.shape[0], _lon.shape[0]
+            lat_rad = _np.broadcast_to(_lat[:, None], (n_lat, n_lon)).reshape(-1)
+            lon_rad = _np.broadcast_to(_lon[None, :], (n_lat, n_lon)).reshape(-1)
+        else:
+            lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
+            lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids

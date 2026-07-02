@@ -86,6 +86,62 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def _latlon_cfg():
+    """Lat-lon (res8 -> 8x16=128 cols) twin of _small_cfg. Exercises the
+    1-D-lat column construction in _setup_multilayer_land (the cubed-sphere
+    path assumes a 2-D per-cell grid.lat; lat-lon grid.lat is 1-D)."""
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="latlon_cgrid"),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical",
+        radiation="gray",
+        land_mask_path="synthetic.nc",
+        use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+    )
+
+
+def _patch_land_loaders_latlon(monkeypatch):
+    """Like _patch_land_loaders but the land-fraction field is the lat-lon
+    per-cell shape (n_lat, n_lon), not grid.lat.shape (which is 1-D here)."""
+    import legoesm.land.clm_surface_map as clm
+    import legoesm.grids.topography as topo
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.full(grid.grid_shape_2d, 0.5))
+
+
+def test_setup_multilayer_land_latlon(monkeypatch, tmp_path):
+    """Regression: _setup_multilayer_land works on a lat-lon grid (1-D grid.lat).
+
+    Previously ``flatten_2d(grid.lat)`` tried to reshape the (n_lat,) row vector
+    into ncol and raised ``cannot reshape array of shape (24,) into shape 1152``.
+    The per-column lat/lon must be the broadcast (n_lat, n_lon) meshgrid, flat
+    C-order, so land column k aligns with atm column k."""
+    _patch_land_loaders_latlon(monkeypatch)
+    driver = ModelDriver(_latlon_cfg(), output_dir=tmp_path)
+    driver.setup()  # must not raise the reshape TypeError
+
+    n_lat, n_lon = 8, 16
+    ncol = n_lat * n_lon
+    assert driver.physics.land_ml_lat is not None
+    assert driver.physics.land_ml_lat.shape == (ncol,)
+    assert driver._land_ml_state.T_soil.shape == (ncol, 6)
+    # Column ordering: lat repeats n_lon times (lat-major, lon fastest), matching
+    # the atm state's flatten of a (n_lat, n_lon) field — land col k == atm col k.
+    lat1d = np.asarray(driver.grid.lat)
+    lon1d = np.asarray(driver.grid.lon)
+    np.testing.assert_allclose(
+        np.asarray(driver.physics.land_ml_lat), np.repeat(lat1d, n_lon), rtol=1e-6)
+    # (lon tiled across lat bands is the companion ordering)
+    assert np.allclose(
+        np.asarray(driver.physics.land_ml_lat)[:n_lon], lat1d[0])  # first band = lat[0]
+    del lon1d
+
+
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     """A 1-day AMIP run completes and the prognostic soil column advances."""
     _patch_land_loaders(monkeypatch)
