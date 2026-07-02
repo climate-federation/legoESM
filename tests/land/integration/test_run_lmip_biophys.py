@@ -64,13 +64,13 @@ def _write_smoke_config(tmp_path, sd_path, extra_overrides=None):
 
 
 def _run_config(mod, cfg_path, out_dir, restart_from=""):
-    args = mod.build_parser().parse_args([
+    """Drive the run through the public main(argv) entry point — no reaching
+    into private helpers.  Returns the driver's integer exit code."""
+    return mod.main([
         "--config", str(cfg_path),
         "--output-dir", str(out_dir),
         "--restart-from", restart_from,
     ])
-    from legoesm.land.lmip_config import load_config
-    return mod.run(mod._args_from_config(load_config(cfg_path), args))
 
 
 def test_biophys_driver_synthetic_smoke(tmp_path):

@@ -499,12 +499,21 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main() -> None:
+def main(argv=None) -> int:
+    """Public driver entry point.
+
+    Parses ``argv`` (or ``sys.argv[1:]`` if None), loads the config, and
+    returns the driver's integer exit code.  Callers who want the classic
+    "sys.exit on failure" behaviour should wrap: ``sys.exit(main())``.
+
+    Suitable for direct use from tests — no need to reach into
+    ``_args_from_config`` or ``run`` privately.
+    """
     from legoesm.land.lmip_config import load_config
-    cli_args = build_parser().parse_args()
+    cli_args = build_parser().parse_args(argv)
     cfg = load_config(cli_args.config)
-    sys.exit(run(_args_from_config(cfg, cli_args)))
+    return run(_args_from_config(cfg, cli_args))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
