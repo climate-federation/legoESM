@@ -135,6 +135,39 @@ def test_machine_derecho_emits_pbs_headers_but_no_account(tmp_path):
     assert tag["machine"]["profile"] == "derecho"
 
 
+def test_machine_derecho_gpu_emits_gpu_select_and_jax_env(tmp_path):
+    """--machine derecho_gpu requests 1 A100 in the PBS select clause AND sets
+    JAX GPU environment variables; still no project account."""
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "gpu_run",
+        "--output-dir", str(out),
+        "--machine", "derecho_gpu",
+        "-o", f"surfdata.path={sd}",
+    ])
+    run_sh = (out / "run.sh").read_text()
+
+    # PBS resource request includes a GPU
+    assert "#PBS -l select=" in run_sh and "ngpus=1" in run_sh
+    assert "#PBS -N lmip_gpu" in run_sh
+
+    # JAX GPU env — the whole point of a GPU profile
+    assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in run_sh
+    assert "JAX_PLATFORM_NAME=gpu" in run_sh
+    assert "legoesm-gpu" in run_sh                    # default env name
+
+    # Project account still NEVER emitted
+    assert "#PBS -A" not in run_sh
+    assert "-A UYAL" not in run_sh
+
+    # Provenance
+    tag = configparser.ConfigParser()
+    tag.read(out / "experiment.tag")
+    assert tag["machine"]["profile"] == "derecho_gpu"
+
+
 def test_no_machine_flag_keeps_run_sh_plain(tmp_path):
     """No --machine → NO PBS headers, NO env_setup — pure bash wrapper."""
     sd = _write_smoke_surfdata(tmp_path)
