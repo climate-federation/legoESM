@@ -178,6 +178,26 @@ def _nearest_regrid(src_lat, src_lon, field, tgt_lat_deg, tgt_lon_deg):
     return np.asarray(field)[..., jlat, jlon]      # (..., ncol)
 
 
+# --- CLM soil-colour broadband albedo (Oleson et al. 2013, CLM Tech Note, Table 3.3) ---
+# 20 soil-colour classes.  CLM sets the soil colour so the resulting soil albedo matches
+# the SATELLITE-OBSERVED (MODIS) albedo, which is why real CLM nails bright deserts.  We
+# adopt the same per-cell SATURATED broadband albedo as the model's bare-soil base (the
+# spatial pattern); the wet<->dry range is added on top by the moisture-dependent
+# dry-soil brightening.  Broadband = 0.5*(visible + near-infrared).
+_SOIL_ALBSAT_VIS = np.array([.25,.23,.21,.20,.19,.18,.17,.16,.15,.14,.13,.12,.11,.10,.09,.08,.07,.06,.05,.04])
+_SOIL_ALBSAT_NIR = np.array([.50,.46,.42,.40,.38,.36,.34,.32,.30,.28,.26,.24,.22,.20,.18,.16,.14,.12,.10,.08])
+_SOIL_ALB_SAT = 0.5 * (_SOIL_ALBSAT_VIS + _SOIL_ALBSAT_NIR)   # per class (index 0..19)
+
+
+def soil_color_albedo(color_class):
+    """Per-cell snow-free bare-soil broadband albedo from the CLM soil-colour class
+    (1..20) — the spatially-varying 'dark forest soil vs bright desert soil' pattern that
+    a single per-PFT bare-soil albedo cannot represent.  Returns the SATURATED value; the
+    dynamic dry brightening is applied separately (see surface_albedo.dry_soil_brightening)."""
+    idx = np.clip(np.asarray(color_class).astype(int), 1, 20) - 1
+    return _SOIL_ALB_SAT[idx]
+
+
 def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     """Map a CLM surfdata file to the target columns.
 
@@ -205,6 +225,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     # root-zone mean sand/clay (top layers)
     sand = ds["PCT_SAND"].values[:_ROOTZONE_LAYERS].mean(0)   # (nlat, nlon)
     clay = ds["PCT_CLAY"].values[:_ROOTZONE_LAYERS].mean(0)
+    soil_color = ds["SOIL_COLOR"].values if "SOIL_COLOR" in ds.variables else None
 
     # regrid to target columns
     pct_nat_c = _nearest_regrid(slat, slon, pct_nat, tgt_lat_deg, tgt_lon_deg)  # (n_nat, ncol)
@@ -214,6 +235,11 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     sand_c = _nearest_regrid(slat, slon, sand, tgt_lat_deg, tgt_lon_deg)
     clay_c = _nearest_regrid(slat, slon, clay, tgt_lat_deg, tgt_lon_deg)
     ncol = natveg_c.shape[0]
+    # per-cell CLM soil-colour bare-soil albedo (fallback to a mid class if the surfdata
+    # predates SOIL_COLOR, e.g. a synthetic test map).
+    soil_alb_c = (soil_color_albedo(_nearest_regrid(slat, slon, soil_color,
+                                                    tgt_lat_deg, tgt_lon_deg))
+                  if soil_color is not None else np.full(ncol, float(_SOIL_ALB_SAT[14])))
 
     # PFT fractions over the 17 CLM5 classes: natural PFTs 0..n_nat-1 weighted by
     # the gridcell natural-veg fraction; crops -> crop_c3 slot.
@@ -232,6 +258,8 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
                 glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
                 # per-cell %sand/%clay (root-zone mean) -> per-cell soil thermal props
                 pct_sand=jnp.asarray(sand_c), pct_clay=jnp.asarray(clay_c),
+                # per-cell CLM soil-colour bare-soil albedo (spatial 'bright desert' map)
+                soil_albedo=jnp.asarray(soil_alb_c),
                 theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
 
 

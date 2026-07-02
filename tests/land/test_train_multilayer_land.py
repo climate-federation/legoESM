@@ -35,6 +35,7 @@ def _synthetic_data(ncol=12):
                 pct_clay=jnp.asarray(rng.uniform(5, 40, ncol)),
                 skt=jnp.broadcast_to(jnp.asarray(Tair), (12, ncol)),
                 alb=jnp.full((12, ncol), 0.2), t0=jnp.asarray(Tair),
+                soil_albedo=jnp.asarray(rng.uniform(0.08, 0.30, ncol)),   # CLM soil-colour
                 dom_onehot=jnp.asarray(oh), w=jnp.cos(jnp.asarray(lat)))
     # per-column van-Genuchten soil (loam-ish, physical)
     for k, v in dict(theta_r=0.05, theta_sat=0.43, alpha_vg=3.6, n_vg=1.56,

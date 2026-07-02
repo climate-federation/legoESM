@@ -191,7 +191,8 @@ BOUNDS_EXT = dict(
     snow_min=(0.45, 0.75),          # aged/melting-snow albedo floor (raised: was too dark)
     snow_dcrit=(3.0, 40.0),         # SWE [kg/m2] half-cover scale (tanh; LOWER=brighter)
     snow_tau_days=(1.0, 20.0),      # snow-albedo age e-folding [days]
-    soil_dry_boost=(0.0, 0.16))     # CLM dry-soil albedo brightening (deserts); 0=off
+    soil_dry_boost=(0.0, 0.16),     # CLM dry-soil albedo brightening (deserts); 0=off
+    soil_alb_scale=(0.6, 1.5))      # scale on the per-cell CLM soil-colour bare-soil albedo
 
 
 def constrain_ext(p: dict) -> dict:
@@ -234,6 +235,7 @@ def init_ext_params() -> dict:
         snow_dcrit=_inv_ext(15.0, "snow_dcrit"),      # tanh SWE half-cover scale [kg/m2]
         snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # snow-albedo age e-folding [days]
         soil_dry_boost=_inv_ext(0.11, "soil_dry_boost"),  # CLM dry-soil brightening
+        soil_alb_scale=_inv_ext(1.0, "soil_alb_scale"),   # start at the raw CLM soil colour
     ).items()}
 
 
@@ -246,7 +248,14 @@ def _ml_land_params(cp, data):
     NOT the soil retention; W_max is unused by the Richards forward (kept as the CLM5
     value for completeness)."""
     pw = lambda k: data["pft"] @ cp[k]                  # PFT-weighted per cell
-    alb = (1 - data["fg"]) * pw("pft_alb") + data["fg"] * cp["glac_alb"]
+    # Bare-soil (PFT 0) uses the per-cell CLM soil-COLOUR albedo (spatially-varying
+    # desert/soil pattern) x a trainable scale, instead of one global bare-soil value;
+    # vegetated PFTs keep their per-PFT albedo.  This is what gives our model CLM's
+    # bright-desert skill (CLM's soil colour is calibrated to observed/MODIS albedo).
+    bare = data["pft"][:, 0]
+    veg_alb = pw("pft_alb") - bare * cp["pft_alb"][0]
+    alb = (1 - data["fg"]) * (veg_alb + bare * data["soil_albedo"] * cp["soil_alb_scale"]) \
+        + data["fg"] * cp["glac_alb"]
     wp = pw("pft_wp"); fc = wp + pw("pft_fcgap")
     n = data["lat"].shape[0]
     cst = lambda name: jnp.full(n, float(_TBL[:, _PI[name]].mean()))  # unused slab cols
@@ -688,6 +697,8 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
                 fc=jnp.asarray(np.asarray(cmap["theta_fc"])[sub]),
                 pct_sand=jnp.asarray(np.asarray(cmap["pct_sand"])[sub]),
                 pct_clay=jnp.asarray(np.asarray(cmap["pct_clay"])[sub]),
+                # per-cell CLM soil-colour bare-soil albedo (spatial desert/soil pattern)
+                soil_albedo=jnp.asarray(np.asarray(cmap["soil_albedo"])[sub]),
                 skt=jnp.asarray(skt), alb=jnp.asarray(alb),
                 # init the whole soil column at the ERA5 annual-mean skin T
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),
